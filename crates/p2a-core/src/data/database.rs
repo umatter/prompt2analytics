@@ -3,6 +3,7 @@
 //! Provides functions to execute SQL queries and load results as Polars DataFrames.
 
 use polars::prelude::*;
+use std::borrow::Cow;
 use std::path::Path;
 use thiserror::Error;
 
@@ -58,12 +59,7 @@ pub enum DatabaseError {
 pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
     const ALLOWED: &[&str] = &["select", "with", "explain", "pragma", "describe", "show"];
 
-    let cleaned = strip_leading_comments(query);
-    let first_token: String = cleaned
-        .chars()
-        .take_while(|c| c.is_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase();
+    let first_token = first_keyword(query);
 
     if first_token.is_empty() {
         return Err(DatabaseError::Forbidden("empty SQL statement".to_string()));
@@ -76,6 +72,16 @@ pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
         )));
     }
     Ok(())
+}
+
+/// The first keyword of `query` after leading comments, lowercased (empty if
+/// the statement does not start with a word).
+fn first_keyword(query: &str) -> String {
+    strip_leading_comments(query)
+        .chars()
+        .take_while(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 /// Refuse any input that is not exactly one SQL statement.
@@ -335,6 +341,98 @@ impl std::fmt::Display for QueryResult {
     }
 }
 
+/// The result of a bounded query (`query_*_with`).
+#[derive(Debug)]
+pub struct QueryOutcome {
+    /// The rows that were kept.
+    pub result: QueryResult,
+    /// `true` when at least one further row existed, or a row did not fit the
+    /// byte budget, so `result` holds only the first rows.
+    pub truncated: bool,
+    /// Number of rows kept (equal to `result.rows`).
+    pub rows_returned: usize,
+}
+
+/// Rows collected column by column, stopping at the row and byte budgets.
+struct RowCollector<V> {
+    columns: Vec<Vec<V>>,
+    rows: usize,
+    bytes: u64,
+    max_rows: Option<usize>,
+    max_bytes: Option<u64>,
+    truncated: bool,
+}
+
+impl<V> RowCollector<V> {
+    fn new(n_columns: usize, opts: &QueryOptions) -> Self {
+        Self {
+            columns: (0..n_columns).map(|_| Vec::new()).collect(),
+            rows: 0,
+            bytes: 0,
+            max_rows: opts.max_rows,
+            max_bytes: opts.max_bytes,
+            truncated: false,
+        }
+    }
+
+    /// Called when the engine produced one more row, before it is read:
+    /// `false` (and the result marked truncated) when the row budget is used up.
+    fn wants_row(&mut self) -> bool {
+        if self.max_rows.is_some_and(|max| self.rows >= max) {
+            self.truncated = true;
+            return false;
+        }
+        true
+    }
+
+    /// Keep the values in `row` (one per column, estimated at `row_bytes`),
+    /// draining it. `false` (and the result marked truncated) when the row
+    /// would exceed the byte budget; it is then not kept.
+    fn push(&mut self, row: &mut Vec<V>, row_bytes: u64) -> bool {
+        let total = self.bytes.saturating_add(row_bytes);
+        if self.max_bytes.is_some_and(|max| total > max) {
+            self.truncated = true;
+            return false;
+        }
+        for (column, value) in self.columns.iter_mut().zip(row.drain(..)) {
+            column.push(value);
+        }
+        self.bytes = total;
+        self.rows += 1;
+        true
+    }
+}
+
+/// Assemble the collected columns into a [`QueryOutcome`], converting each
+/// column by consuming it (peak memory: the values plus one converted column).
+fn finish_outcome<V>(
+    collector: RowCollector<V>,
+    column_names: Vec<String>,
+    to_series: impl Fn(&str, Vec<V>) -> Series,
+) -> Result<QueryOutcome, DatabaseError> {
+    let RowCollector {
+        columns,
+        rows,
+        truncated,
+        ..
+    } = collector;
+    let columns_vec: Vec<Column> = column_names
+        .iter()
+        .zip(columns)
+        .map(|(name, values)| to_series(name, values).into())
+        .collect();
+    let dataframe = DataFrame::new(columns_vec)?;
+    Ok(QueryOutcome {
+        result: QueryResult {
+            dataframe,
+            rows,
+            columns: column_names,
+        },
+        truncated,
+        rows_returned: rows,
+    })
+}
+
 // ============================================================================
 // SQLite Support
 // ============================================================================
@@ -369,8 +467,20 @@ fn open_sqlite_locked(
 /// # Returns
 /// QueryResult containing the DataFrame and metadata
 pub fn query_sqlite(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResult, DatabaseError> {
-    let query = single_statement_body(query)?;
-    validate_read_only_query(query)?;
+    query_sqlite_with(db_path, query, &QueryOptions::default()).map(|o| o.result)
+}
+
+/// [`query_sqlite`] with bounds: rows are streamed and collection stops at
+/// `opts.max_rows` or the estimated `opts.max_bytes` (`truncated` is then set);
+/// no single value may exceed `opts.max_bytes`. `memory_limit_mb` and
+/// `threads` apply to DuckDB only.
+pub fn query_sqlite_with(
+    db_path: impl AsRef<Path>,
+    query: &str,
+    opts: &QueryOptions,
+) -> Result<QueryOutcome, DatabaseError> {
+    let body = single_statement_body(query)?;
+    validate_read_only_query(body)?;
     let path = db_path.as_ref();
 
     if !path.exists() {
@@ -379,8 +489,8 @@ pub fn query_sqlite(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResul
 
     // Read-only, query_only, no ATTACH. rusqlite's prepare compiles only the
     // first statement; the lexer above already refused any second one.
-    let conn = open_sqlite_locked(path, &QueryOptions::default())?;
-    let mut stmt = conn.prepare(query)?;
+    let conn = open_sqlite_locked(path, opts)?;
+    let mut stmt = conn.prepare(body)?;
     if !stmt.readonly() {
         return Err(DatabaseError::Forbidden(
             "the statement would modify the database; only read-only queries are allowed"
@@ -388,96 +498,95 @@ pub fn query_sqlite(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResul
         ));
     }
 
-    // Get column information
     let column_count = stmt.column_count();
     let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
-    // Collect all rows first to determine types
-    let mut rows_data: Vec<Vec<rusqlite::types::Value>> = Vec::new();
+    // SQLite streams: each `next` steps the statement once.
+    let mut collector = RowCollector::new(column_count, opts);
+    let mut row_values = Vec::with_capacity(column_count);
     let mut rows = stmt.query([])?;
-
     while let Some(row) = rows.next()? {
-        let mut row_values = Vec::with_capacity(column_count);
+        if !collector.wants_row() {
+            break;
+        }
+        let mut row_bytes = 0u64;
         for i in 0..column_count {
             let value: rusqlite::types::Value = row.get_ref(i)?.into();
+            row_bytes = row_bytes.saturating_add(sqlite_value_bytes(&value));
             row_values.push(value);
         }
-        rows_data.push(row_values);
+        if !collector.push(&mut row_values, row_bytes) {
+            break;
+        }
     }
+    drop(rows);
 
-    let n_rows = rows_data.len();
+    finish_outcome(collector, column_names, sqlite_column_to_series)
+}
 
-    // Build columns for DataFrame
-    let mut columns_vec: Vec<Column> = Vec::with_capacity(column_count);
-
-    for col_idx in 0..column_count {
-        let col_name = &column_names[col_idx];
-
-        // Determine column type from first non-null value
-        let col_type = rows_data
-            .iter()
-            .find_map(|row| match &row[col_idx] {
-                rusqlite::types::Value::Null => None,
-                v => Some(v.data_type()),
-            })
-            .unwrap_or(rusqlite::types::Type::Text);
-
-        let series = match col_type {
-            rusqlite::types::Type::Integer => {
-                let values: Vec<Option<i64>> = rows_data
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        rusqlite::types::Value::Integer(i) => Some(*i),
-                        rusqlite::types::Value::Null => None,
-                        _ => None,
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-            rusqlite::types::Type::Real => {
-                let values: Vec<Option<f64>> = rows_data
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        rusqlite::types::Value::Real(f) => Some(*f),
-                        rusqlite::types::Value::Integer(i) => Some(*i as f64),
-                        rusqlite::types::Value::Null => None,
-                        _ => None,
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-            rusqlite::types::Type::Text | rusqlite::types::Type::Blob => {
-                let values: Vec<Option<String>> = rows_data
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        rusqlite::types::Value::Text(s) => Some(s.clone()),
-                        rusqlite::types::Value::Blob(b) => {
-                            Some(String::from_utf8_lossy(b).to_string())
-                        }
-                        rusqlite::types::Value::Null => None,
-                        rusqlite::types::Value::Integer(i) => Some(i.to_string()),
-                        rusqlite::types::Value::Real(f) => Some(f.to_string()),
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-            rusqlite::types::Type::Null => {
-                // All nulls - default to string
-                let values: Vec<Option<String>> = vec![None; n_rows];
-                Series::new(col_name.as_str().into(), values)
-            }
-        };
-
-        columns_vec.push(series.into());
+/// Estimated size of one SQLite value: numbers 8 bytes, text and blobs their length.
+fn sqlite_value_bytes(value: &rusqlite::types::Value) -> u64 {
+    use rusqlite::types::Value;
+    match value {
+        Value::Null => 0,
+        Value::Integer(_) | Value::Real(_) => 8,
+        Value::Text(s) => s.len() as u64,
+        Value::Blob(b) => b.len() as u64,
     }
+}
 
-    let df = DataFrame::new(columns_vec)?;
+/// One SQLite result column as a Series, typed by its first non-null value.
+fn sqlite_column_to_series(name: &str, values: Vec<rusqlite::types::Value>) -> Series {
+    use rusqlite::types::{Type, Value};
+    let col_type = values
+        .iter()
+        .find_map(|v| match v {
+            Value::Null => None,
+            v => Some(v.data_type()),
+        })
+        .unwrap_or(Type::Text);
 
-    Ok(QueryResult {
-        dataframe: df,
-        rows: n_rows,
-        columns: column_names,
-    })
+    match col_type {
+        Type::Integer => {
+            let values: Vec<Option<i64>> = values
+                .into_iter()
+                .map(|v| match v {
+                    Value::Integer(i) => Some(i),
+                    _ => None,
+                })
+                .collect();
+            Series::new(name.into(), values)
+        }
+        Type::Real => {
+            let values: Vec<Option<f64>> = values
+                .into_iter()
+                .map(|v| match v {
+                    Value::Real(f) => Some(f),
+                    Value::Integer(i) => Some(i as f64),
+                    _ => None,
+                })
+                .collect();
+            Series::new(name.into(), values)
+        }
+        Type::Text | Type::Blob => {
+            let values: Vec<Option<String>> = values
+                .into_iter()
+                .map(|v| match v {
+                    Value::Text(s) => Some(s),
+                    Value::Blob(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+                    Value::Null => None,
+                    Value::Integer(i) => Some(i.to_string()),
+                    Value::Real(f) => Some(f.to_string()),
+                })
+                .collect();
+            Series::new(name.into(), values)
+        }
+        Type::Null => {
+            // All nulls - default to string
+            let values: Vec<Option<String>> = vec![None; values.len()];
+            Series::new(name.into(), values)
+        }
+    }
 }
 
 /// List all tables in a SQLite database.
@@ -619,8 +728,20 @@ fn open_file_query_connection(
 /// # Returns
 /// QueryResult containing the DataFrame and metadata
 pub fn query_duckdb(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResult, DatabaseError> {
-    let query = single_statement_body(query)?;
-    validate_read_only_query(query)?;
+    query_duckdb_with(db_path, query, &QueryOptions::default()).map(|o| o.result)
+}
+
+/// [`query_duckdb`] with bounds. A `SELECT`/`WITH` statement is wrapped in
+/// `LIMIT max_rows + 1` so DuckDB itself stops producing rows; collection stops
+/// at `opts.max_rows` or the estimated `opts.max_bytes` (`truncated` is then
+/// set). `memory_limit_mb` and `threads` configure the engine.
+pub fn query_duckdb_with(
+    db_path: impl AsRef<Path>,
+    query: &str,
+    opts: &QueryOptions,
+) -> Result<QueryOutcome, DatabaseError> {
+    let body = single_statement_body(query)?;
+    validate_read_only_query(body)?;
     let path = db_path.as_ref();
     let path_str = path.to_string_lossy();
 
@@ -631,124 +752,8 @@ pub fn query_duckdb(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResul
 
     // Locked by the engine: no file access, no extensions, no reconfiguration;
     // file databases are also read-only.
-    let conn = open_duckdb_locked(path, &QueryOptions::default())?;
-    let mut stmt = conn.prepare(query)?;
-
-    // Execute query first - DuckDB requires this before accessing column info
-    let mut rows = stmt.query([])?;
-
-    // Get column information after execution
-    let column_count = rows.as_ref().map(|r| r.column_count()).unwrap_or(0);
-    let column_names: Vec<String> = rows
-        .as_ref()
-        .map(|r| r.column_names().iter().map(|s| s.to_string()).collect())
-        .unwrap_or_default();
-
-    // DuckDB Arrow integration would be ideal, but for simplicity use row-by-row
-    let mut all_rows: Vec<Vec<duckdb::types::Value>> = Vec::new();
-
-    while let Some(row) = rows.next()? {
-        let mut row_values = Vec::with_capacity(column_count);
-        for i in 0..column_count {
-            let value: duckdb::types::Value = row.get(i)?;
-            row_values.push(value);
-        }
-        all_rows.push(row_values);
-    }
-
-    let n_rows = all_rows.len();
-
-    // Build columns for DataFrame
-    let mut columns_vec: Vec<Column> = Vec::with_capacity(column_count);
-
-    for col_idx in 0..column_count {
-        let col_name = &column_names[col_idx];
-
-        // Determine column type from first non-null value
-        let first_non_null = all_rows.iter().find_map(|row| match &row[col_idx] {
-            duckdb::types::Value::Null => None,
-            v => Some(v.clone()),
-        });
-
-        let series = match first_non_null {
-            Some(duckdb::types::Value::Boolean(_)) => {
-                let values: Vec<Option<bool>> = all_rows
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        duckdb::types::Value::Boolean(b) => Some(*b),
-                        duckdb::types::Value::Null => None,
-                        _ => None,
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-            Some(duckdb::types::Value::TinyInt(_))
-            | Some(duckdb::types::Value::SmallInt(_))
-            | Some(duckdb::types::Value::Int(_))
-            | Some(duckdb::types::Value::BigInt(_)) => {
-                let values: Vec<Option<i64>> = all_rows
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        duckdb::types::Value::TinyInt(i) => Some(*i as i64),
-                        duckdb::types::Value::SmallInt(i) => Some(*i as i64),
-                        duckdb::types::Value::Int(i) => Some(*i as i64),
-                        duckdb::types::Value::BigInt(i) => Some(*i),
-                        duckdb::types::Value::Null => None,
-                        _ => None,
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-            Some(duckdb::types::Value::Float(_)) | Some(duckdb::types::Value::Double(_)) => {
-                let values: Vec<Option<f64>> = all_rows
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        duckdb::types::Value::Float(f) => Some(*f as f64),
-                        duckdb::types::Value::Double(f) => Some(*f),
-                        duckdb::types::Value::TinyInt(i) => Some(*i as f64),
-                        duckdb::types::Value::SmallInt(i) => Some(*i as f64),
-                        duckdb::types::Value::Int(i) => Some(*i as f64),
-                        duckdb::types::Value::BigInt(i) => Some(*i as f64),
-                        duckdb::types::Value::Null => None,
-                        _ => None,
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-            _ => {
-                // Default to string for text, blob, and unknown types
-                let values: Vec<Option<String>> = all_rows
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        duckdb::types::Value::Text(s) => Some(s.clone()),
-                        duckdb::types::Value::Blob(b) => {
-                            Some(String::from_utf8_lossy(b).to_string())
-                        }
-                        duckdb::types::Value::Null => None,
-                        duckdb::types::Value::Boolean(b) => Some(b.to_string()),
-                        duckdb::types::Value::TinyInt(i) => Some(i.to_string()),
-                        duckdb::types::Value::SmallInt(i) => Some(i.to_string()),
-                        duckdb::types::Value::Int(i) => Some(i.to_string()),
-                        duckdb::types::Value::BigInt(i) => Some(i.to_string()),
-                        duckdb::types::Value::Float(f) => Some(f.to_string()),
-                        duckdb::types::Value::Double(f) => Some(f.to_string()),
-                        _ => Some("".to_string()),
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-        };
-
-        columns_vec.push(series.into());
-    }
-
-    let df = DataFrame::new(columns_vec)?;
-
-    Ok(QueryResult {
-        dataframe: df,
-        rows: n_rows,
-        columns: column_names,
-    })
+    let conn = open_duckdb_locked(path, opts)?;
+    run_duckdb_query(&conn, body, opts)
 }
 
 /// List all tables in a DuckDB database.
@@ -809,33 +814,63 @@ pub fn query_file_with_duckdb(
     file_path: impl AsRef<Path>,
     query: &str,
 ) -> Result<QueryResult, DatabaseError> {
-    let path = file_path.as_ref();
+    query_file_with_duckdb_with(file_path.as_ref(), query, &QueryOptions::default())
+        .map(|o| o.result)
+}
 
+/// [`query_file_with_duckdb`] with the bounds of [`query_duckdb_with`]. The
+/// query can read `file` (as `{file}`) and no other path.
+pub fn query_file_with_duckdb_with(
+    file: &Path,
+    query: &str,
+    opts: &QueryOptions,
+) -> Result<QueryOutcome, DatabaseError> {
     // Replace the placeholder with the file path as a quoted literal (`'` doubled).
     // The path cannot open a second statement from inside the literal; the lexer
     // checks the substituted text.
-    let literal = quoted_file_literal(path)?;
+    let literal = quoted_file_literal(file)?;
     let full_query = query.replace("{file}", &literal);
     let body = single_statement_body(&full_query)?;
     validate_read_only_query(body)?;
 
-    if !path.exists() {
-        return Err(DatabaseError::FileNotFound(path.display().to_string()));
+    if !file.exists() {
+        return Err(DatabaseError::FileNotFound(file.display().to_string()));
     }
 
     // In-memory DuckDB that can read exactly this file (allowed_paths), with
     // external access otherwise disabled and the configuration locked.
-    let conn = open_file_query_connection(path, &QueryOptions::default())?;
-
-    query_duckdb_connection(&conn, body)
+    let conn = open_file_query_connection(file, opts)?;
+    run_duckdb_query(&conn, body, opts)
 }
 
-/// Internal helper to query an existing DuckDB connection.
-fn query_duckdb_connection(
+/// The SQL actually sent to DuckDB. duckdb-rs materialises a whole result
+/// before the first row can be read, so stopping the row loop early bounds
+/// nothing inside the engine: with a row budget a `SELECT`/`WITH` statement is
+/// wrapped in `LIMIT max_rows + 1` (the extra row tells whether more existed).
+/// Other statements (`EXPLAIN`, `PRAGMA`, `DESCRIBE`, `SHOW`) cannot be
+/// wrapped and are sent unchanged. The newline before `)` keeps a trailing
+/// line comment in `body` harmless.
+fn bounded_duckdb_sql<'a>(body: &'a str, opts: &QueryOptions) -> Cow<'a, str> {
+    match opts.max_rows {
+        Some(n) if matches!(first_keyword(body).as_str(), "select" | "with") => {
+            Cow::Owned(format!(
+                "SELECT * FROM (\n{body}\n) AS p2a_bounded LIMIT {}",
+                n.saturating_add(1)
+            ))
+        }
+        _ => Cow::Borrowed(body),
+    }
+}
+
+/// Run one (already validated) statement on a locked DuckDB connection and
+/// collect its rows within the bounds of `opts`.
+fn run_duckdb_query(
     conn: &duckdb::Connection,
-    query: &str,
-) -> Result<QueryResult, DatabaseError> {
-    let mut stmt = conn.prepare(query)?;
+    body: &str,
+    opts: &QueryOptions,
+) -> Result<QueryOutcome, DatabaseError> {
+    let sql = bounded_duckdb_sql(body, opts);
+    let mut stmt = conn.prepare(&sql)?;
 
     // Execute query first - DuckDB requires this before accessing column info
     let mut rows = stmt.query([])?;
@@ -847,106 +882,144 @@ fn query_duckdb_connection(
         .map(|r| r.column_names().iter().map(|s| s.to_string()).collect())
         .unwrap_or_default();
 
-    let mut all_rows: Vec<Vec<duckdb::types::Value>> = Vec::new();
-
+    let mut collector = RowCollector::new(column_count, opts);
+    let mut row_values = Vec::with_capacity(column_count);
     while let Some(row) = rows.next()? {
-        let mut row_values = Vec::with_capacity(column_count);
+        if !collector.wants_row() {
+            break;
+        }
+        let mut row_bytes = 0u64;
         for i in 0..column_count {
             let value: duckdb::types::Value = row.get(i)?;
+            row_bytes = row_bytes.saturating_add(duckdb_value_bytes(&value));
             row_values.push(value);
         }
-        all_rows.push(row_values);
+        if !collector.push(&mut row_values, row_bytes) {
+            break;
+        }
     }
+    drop(rows);
 
-    let n_rows = all_rows.len();
-    let mut columns_vec: Vec<Column> = Vec::with_capacity(column_count);
+    finish_outcome(collector, column_names, duckdb_column_to_series)
+}
 
-    for col_idx in 0..column_count {
-        let col_name = &column_names[col_idx];
-
-        let first_non_null = all_rows.iter().find_map(|row| match &row[col_idx] {
-            duckdb::types::Value::Null => None,
-            v => Some(v.clone()),
-        });
-
-        let series = match first_non_null {
-            Some(duckdb::types::Value::Boolean(_)) => {
-                let values: Vec<Option<bool>> = all_rows
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        duckdb::types::Value::Boolean(b) => Some(*b),
-                        _ => None,
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-            Some(duckdb::types::Value::TinyInt(_))
-            | Some(duckdb::types::Value::SmallInt(_))
-            | Some(duckdb::types::Value::Int(_))
-            | Some(duckdb::types::Value::BigInt(_)) => {
-                let values: Vec<Option<i64>> = all_rows
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        duckdb::types::Value::TinyInt(i) => Some(*i as i64),
-                        duckdb::types::Value::SmallInt(i) => Some(*i as i64),
-                        duckdb::types::Value::Int(i) => Some(*i as i64),
-                        duckdb::types::Value::BigInt(i) => Some(*i),
-                        _ => None,
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-            Some(duckdb::types::Value::Float(_)) | Some(duckdb::types::Value::Double(_)) => {
-                let values: Vec<Option<f64>> = all_rows
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        duckdb::types::Value::Float(f) => Some(*f as f64),
-                        duckdb::types::Value::Double(f) => Some(*f),
-                        duckdb::types::Value::TinyInt(i) => Some(*i as f64),
-                        duckdb::types::Value::SmallInt(i) => Some(*i as f64),
-                        duckdb::types::Value::Int(i) => Some(*i as f64),
-                        duckdb::types::Value::BigInt(i) => Some(*i as f64),
-                        _ => None,
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-            _ => {
-                let values: Vec<Option<String>> = all_rows
-                    .iter()
-                    .map(|row| match &row[col_idx] {
-                        duckdb::types::Value::Text(s) => Some(s.clone()),
-                        duckdb::types::Value::Null => None,
-                        duckdb::types::Value::Boolean(b) => Some(b.to_string()),
-                        duckdb::types::Value::TinyInt(i) => Some(i.to_string()),
-                        duckdb::types::Value::SmallInt(i) => Some(i.to_string()),
-                        duckdb::types::Value::Int(i) => Some(i.to_string()),
-                        duckdb::types::Value::BigInt(i) => Some(i.to_string()),
-                        duckdb::types::Value::Float(f) => Some(f.to_string()),
-                        duckdb::types::Value::Double(f) => Some(f.to_string()),
-                        _ => Some("".to_string()),
-                    })
-                    .collect();
-                Series::new(col_name.as_str().into(), values)
-            }
-        };
-
-        columns_vec.push(series.into());
+/// Estimated size of one DuckDB value: booleans and numbers 8 bytes, text and
+/// binary values their length, anything else 16.
+fn duckdb_value_bytes(value: &duckdb::types::Value) -> u64 {
+    use duckdb::types::Value;
+    match value {
+        Value::Null => 0,
+        Value::Boolean(_)
+        | Value::TinyInt(_)
+        | Value::SmallInt(_)
+        | Value::Int(_)
+        | Value::BigInt(_)
+        | Value::HugeInt(_)
+        | Value::UHugeInt(_)
+        | Value::UTinyInt(_)
+        | Value::USmallInt(_)
+        | Value::UInt(_)
+        | Value::UBigInt(_)
+        | Value::Float(_)
+        | Value::Double(_) => 8,
+        Value::Text(s) => s.len() as u64,
+        Value::Blob(b) | Value::Geometry(b) => b.len() as u64,
+        _ => 16,
     }
+}
 
-    let df = DataFrame::new(columns_vec)?;
+/// One DuckDB result column as a Series, typed by its first non-null value.
+/// Booleans, the four signed integer types and the two float types keep their
+/// type; everything else becomes text (blobs lossily, other types as "").
+fn duckdb_column_to_series(name: &str, values: Vec<duckdb::types::Value>) -> Series {
+    use duckdb::types::Value;
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Bool,
+        Int,
+        Float,
+        Text,
+    }
+    let kind = values
+        .iter()
+        .find_map(|v| match v {
+            Value::Null => None,
+            Value::Boolean(_) => Some(Kind::Bool),
+            Value::TinyInt(_) | Value::SmallInt(_) | Value::Int(_) | Value::BigInt(_) => {
+                Some(Kind::Int)
+            }
+            Value::Float(_) | Value::Double(_) => Some(Kind::Float),
+            _ => Some(Kind::Text),
+        })
+        .unwrap_or(Kind::Text);
 
-    Ok(QueryResult {
-        dataframe: df,
-        rows: n_rows,
-        columns: column_names,
-    })
+    match kind {
+        Kind::Bool => {
+            let values: Vec<Option<bool>> = values
+                .into_iter()
+                .map(|v| match v {
+                    Value::Boolean(b) => Some(b),
+                    _ => None,
+                })
+                .collect();
+            Series::new(name.into(), values)
+        }
+        Kind::Int => {
+            let values: Vec<Option<i64>> = values
+                .into_iter()
+                .map(|v| match v {
+                    Value::TinyInt(i) => Some(i64::from(i)),
+                    Value::SmallInt(i) => Some(i64::from(i)),
+                    Value::Int(i) => Some(i64::from(i)),
+                    Value::BigInt(i) => Some(i),
+                    _ => None,
+                })
+                .collect();
+            Series::new(name.into(), values)
+        }
+        Kind::Float => {
+            let values: Vec<Option<f64>> = values
+                .into_iter()
+                .map(|v| match v {
+                    Value::Float(f) => Some(f64::from(f)),
+                    Value::Double(f) => Some(f),
+                    Value::TinyInt(i) => Some(f64::from(i)),
+                    Value::SmallInt(i) => Some(f64::from(i)),
+                    Value::Int(i) => Some(f64::from(i)),
+                    Value::BigInt(i) => Some(i as f64),
+                    _ => None,
+                })
+                .collect();
+            Series::new(name.into(), values)
+        }
+        Kind::Text => {
+            // Default to string for text, blob, and unknown types
+            let values: Vec<Option<String>> = values
+                .into_iter()
+                .map(|v| match v {
+                    Value::Text(s) => Some(s),
+                    Value::Blob(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+                    Value::Null => None,
+                    Value::Boolean(b) => Some(b.to_string()),
+                    Value::TinyInt(i) => Some(i.to_string()),
+                    Value::SmallInt(i) => Some(i.to_string()),
+                    Value::Int(i) => Some(i.to_string()),
+                    Value::BigInt(i) => Some(i.to_string()),
+                    Value::Float(f) => Some(f.to_string()),
+                    Value::Double(f) => Some(f.to_string()),
+                    _ => Some(String::new()),
+                })
+                .collect();
+            Series::new(name.into(), values)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     fn write_file(dir: &Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);
@@ -1305,6 +1378,145 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // Bounded results (LLM-2)
+    // ------------------------------------------------------------------
+
+    fn rows(max: usize) -> QueryOptions {
+        QueryOptions {
+            max_rows: Some(max),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn duckdb_row_limit_truncates_in_query_order() {
+        let o = query_duckdb_with(
+            ":memory:",
+            "SELECT range AS x FROM range(1000) ORDER BY x DESC",
+            &rows(100),
+        )
+        .unwrap();
+        assert!(o.truncated);
+        assert_eq!(o.rows_returned, 100);
+        assert_eq!(o.result.dataframe.height(), 100);
+        let x = i64_col(&o.result.dataframe, "x");
+        assert_eq!((x[0], x[99]), (Some(999), Some(900)));
+    }
+
+    #[test]
+    fn duckdb_row_limit_stops_the_engine_not_just_the_copy() {
+        // Without the engine-side LIMIT this materialises 10^13 rows inside DuckDB;
+        // the timeout is a backstop so a broken wrapper fails instead of exhausting memory.
+        let opts = QueryOptions {
+            max_rows: Some(5),
+            timeout: Some(Duration::from_secs(30)),
+            ..Default::default()
+        };
+        let o = query_duckdb_with(
+            ":memory:",
+            "SELECT range AS x FROM range(10000000000000)",
+            &opts,
+        )
+        .unwrap();
+        assert!(o.truncated);
+        assert_eq!(
+            i64_col(&o.result.dataframe, "x"),
+            vec![Some(0), Some(1), Some(2), Some(3), Some(4)]
+        );
+    }
+
+    #[test]
+    fn duckdb_exact_fit_is_not_truncated() {
+        let o = query_duckdb_with(":memory:", "SELECT range AS x FROM range(100);", &rows(100))
+            .unwrap();
+        assert!(!o.truncated);
+        assert_eq!(o.rows_returned, 100);
+    }
+
+    #[test]
+    fn duckdb_byte_limit_truncates() {
+        // estimate: 1000 bytes per VARCHAR value of length 1000 -> exactly 50 rows fit in 50_000
+        let opts = QueryOptions {
+            max_bytes: Some(50_000),
+            ..Default::default()
+        };
+        let o = query_duckdb_with(
+            ":memory:",
+            "SELECT repeat('x', 1000) AS s FROM range(1000)",
+            &opts,
+        )
+        .unwrap();
+        assert!(o.truncated);
+        assert_eq!(o.rows_returned, 50);
+    }
+
+    #[test]
+    fn duckdb_unbounded_default_returns_everything() {
+        let r = query_duckdb(":memory:", "SELECT range AS x FROM range(5000)").unwrap();
+        assert_eq!(r.rows, 5000);
+    }
+
+    #[test]
+    fn duckdb_bounded_metadata_statements_still_work() {
+        for q in [
+            "EXPLAIN SELECT 1",
+            "PRAGMA database_list",
+            "DESCRIBE SELECT 1 AS a",
+            "SHOW TABLES",
+            "SELECT 1 -- trailing comment",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 50) SELECT n FROM r",
+        ] {
+            assert!(query_duckdb_with(":memory:", q, &rows(10)).is_ok(), "{q}");
+        }
+    }
+
+    #[test]
+    fn file_query_row_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = std::iter::once("a\n".to_string())
+            .chain((0..1000).map(|i| format!("{i}\n")))
+            .collect();
+        let csv = write_file(dir.path(), "big.csv", &body);
+        let o = query_file_with_duckdb_with(&csv, "SELECT * FROM {file}", &rows(10)).unwrap();
+        assert!(o.truncated);
+        assert_eq!(o.rows_returned, 10);
+    }
+
+    #[test]
+    fn sqlite_row_and_byte_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sqlite_fixture(dir.path());
+        let o = query_sqlite_with(&db, "SELECT x FROM t ORDER BY x", &rows(10)).unwrap();
+        assert!(o.truncated);
+        assert_eq!(i64_col(&o.result.dataframe, "x")[9], Some(9));
+        let o = query_sqlite_with(&db, "SELECT x FROM t", &rows(1000)).unwrap();
+        assert!(!o.truncated);
+        assert_eq!(o.rows_returned, 1000);
+        // 8 bytes per INTEGER -> 100 rows fit in 800 bytes
+        let o = query_sqlite_with(
+            &db,
+            "SELECT x FROM t",
+            &QueryOptions {
+                max_bytes: Some(800),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(o.truncated);
+        assert_eq!(o.rows_returned, 100);
+        let err = query_sqlite_with(
+            &db,
+            "SELECT randomblob(20000) AS b",
+            &QueryOptions {
+                max_bytes: Some(10_000),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("too big"), "{err}");
+    }
+
     #[test]
     fn test_validate_read_only_allows_select() {
         assert!(validate_read_only_query("SELECT * FROM t").is_ok());
@@ -1381,8 +1593,10 @@ mod tests {
         conn.execute("INSERT INTO test VALUES (2, 'Bob', 20.3)", [])
             .unwrap();
 
-        let result = query_duckdb_connection(&conn, "SELECT * FROM test").unwrap();
-        assert_eq!(result.rows, 2);
-        assert_eq!(result.columns.len(), 3);
+        let outcome =
+            run_duckdb_query(&conn, "SELECT * FROM test", &QueryOptions::default()).unwrap();
+        assert!(!outcome.truncated);
+        assert_eq!(outcome.result.rows, 2);
+        assert_eq!(outcome.result.columns.len(), 3);
     }
 }

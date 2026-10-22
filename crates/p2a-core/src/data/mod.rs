@@ -16,6 +16,11 @@
 //! | **SQLite** | [`query_sqlite`] | SQLite queries (feature: `database`) |
 //! | **DuckDB** | [`query_duckdb`] | DuckDB queries (feature: `database`) |
 //!
+//! The SQL functions run exactly one read-only statement on a connection the
+//! engine itself locks (no file access beyond the named database or file, no
+//! extensions, no reconfiguration); the `*_with` variants also take
+//! `QueryOptions` bounds on rows, bytes, time, DuckDB memory and threads.
+//!
 //! ## Data Manipulation ([`munging`])
 //!
 //! | Operation | Function | Description |
@@ -170,8 +175,10 @@ pub use cleaning_session::{
 };
 #[cfg(feature = "database")]
 pub use database::{
-    DatabaseError, QueryResult, duckdb_table_schema, ensure_single_statement, list_duckdb_tables,
-    list_sqlite_tables, query_duckdb, query_file_with_duckdb, query_sqlite, sqlite_table_schema,
+    DatabaseError, QueryOptions, QueryOutcome, QueryResult, duckdb_table_schema,
+    ensure_single_statement, list_duckdb_tables, list_sqlite_tables, query_duckdb,
+    query_duckdb_with, query_file_with_duckdb, query_file_with_duckdb_with, query_sqlite,
+    query_sqlite_with, sqlite_table_schema,
 };
 pub use quality::{
     ColumnProfile, DataIssue, DataQualityProfile, NumericStats, StringStats,
