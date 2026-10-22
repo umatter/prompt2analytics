@@ -5169,13 +5169,15 @@ pub fn clara(
         let sample_data =
             Array2::from_shape_fn((samp_size, d), |(i, j)| data[[sample_indices[i], j]]);
 
-        // Run PAM on sample
+        // Run PAM on sample; its samp_size x samp_size distance matrix is sized
+        // by sample_size, so an error names that parameter
         let pam_result = kmedoids(
             sample_data.view(),
             k,
             Some(max_iterations),
             Some(rng.r#gen()),
-        )?;
+        )
+        .map_err(|e| format!("CLARA sample of {samp_size} rows (sample_size): {e}"))?;
 
         // Map sample medoid indices back to original data indices
         let medoids: Vec<usize> = pam_result
@@ -8691,19 +8693,17 @@ mod tests {
         let au: Vec<u64> = r.au_pvalues[..5].iter().map(|v| v.to_bits()).collect();
         let msg = format!("got sums {sums:?}, labels {:?}, au {au:?}", r.labels);
         // Exact bits only where the constants were captured (x86_64 glibc
-        // Linux with FMA): the AU p-values go through libm's ln and exp, which
-        // can differ in the last ulp elsewhere. One- and two-ulp changes of
-        // the scale ratios moved them by at most 1.2e-13 relative here (and
-        // by 2.5e-11 over 2,000 random count vectors), while a changed
-        // bootstrap count moves them by far more than the 1e-9 used elsewhere.
-        // The labels and the BP sum (counts / n_boot) are exact everywhere.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        let exact = std::arch::is_x86_feature_detected!("fma");
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
-        let exact = false;
+        // Linux with AVX2+FMA, crate::ml::golden_bits_platform): the AU
+        // p-values go through libm's ln and exp, which can differ in the last
+        // ulp elsewhere. One- and two-ulp changes of the scale ratios moved
+        // them by at most 1.2e-13 relative here (and by 2.5e-11 over 2,000
+        // random count vectors), while a changed bootstrap count moves them
+        // by far more than the 1e-9 tolerance used off the reference
+        // platform. The labels and the BP sum (counts / n_boot) are exact
+        // everywhere.
         assert_eq!(&r.labels[..], &GOLDEN_LABELS[..], "{msg}");
         assert_eq!(sums[1], GOLDEN_SUMS[1], "{msg}");
-        if exact {
+        if crate::ml::golden_bits_platform() {
             assert_eq!(
                 (sums[0], &au[..]),
                 (GOLDEN_SUMS[0], &GOLDEN_AU[..]),
@@ -8796,7 +8796,10 @@ mod tests {
             clara(data.view(), 3, Some(1), Some(100), Some(10), Some(1))
         })
         .unwrap_err();
-        assert!(e.contains("k-medoids"), "{e}");
+        assert!(
+            e.contains("k-medoids") && e.contains("CLARA") && e.contains("sample_size"),
+            "{e}"
+        );
         assert!(kmedoids(data.view(), 3, Some(10), Some(1)).is_ok());
     }
 

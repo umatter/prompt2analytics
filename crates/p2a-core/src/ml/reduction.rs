@@ -894,35 +894,38 @@ fn cmdscale_dims(k: Option<usize>, n: usize) -> Result<usize, String> {
 /// matrix in descending order, as `stats::cmdscale` orders them.
 ///
 /// Builds `B = -1/2 H D^2 H` directly from `d` (no separate `D^2` matrix)
-/// and decomposes it with faer's self-adjoint eigensolver. Before `B` is
-/// built, the `n x n` matrices (`B` and the eigenvectors) and the
-/// eigensolver's workspace, which faer allocates as one buffer the size of a
-/// few `n x n` matrices, are pre-flighted against the allocation ceiling.
+/// and decomposes it with faer's self-adjoint eigensolver
+/// (`faer::linalg::evd::self_adjoint_evd`, the routine and arguments
+/// `Mat::self_adjoint_eigen` uses). Before `B` is built, the `n x n`
+/// matrices (`B` and the eigenvectors) and the eigensolver's workspace, one
+/// buffer the size of a few `n x n` matrices, are pre-flighted against the
+/// allocation ceiling; the workspace is then allocated fallibly from the same
+/// requirement that was checked.
 fn cmdscale_core(
     n: usize,
     d: impl Fn(usize, usize) -> f64,
     k: usize,
 ) -> Result<(Vec<Vec<f64>>, Vec<f64>), String> {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd, self_adjoint_evd_scratch};
+
     let to_string = |e: EconError| e.to_string();
     checkpoint().map_err(to_string)?;
     let what = "cmdscale matrix";
     check_alloc::<f64>(checked_len(&[n, n], what).map_err(to_string)?, what).map_err(to_string)?;
-    // The workspace `Mat::self_adjoint_eigen` requests (same dimension,
-    // parallelism and default parameters)
-    let what = "cmdscale eigensolver workspace";
-    let scratch = faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
-        n,
-        faer::linalg::evd::ComputeEigenvectors::Yes,
-        faer::get_global_parallelism(),
-        Default::default(),
-    );
+    // The eigensolver's workspace: checked here, and allocated below from this
+    // same requirement, so the two cannot drift apart
+    let ws = "cmdscale eigensolver workspace";
+    let par = faer::get_global_parallelism();
+    let scratch =
+        self_adjoint_evd_scratch::<f64>(n, ComputeEigenvectors::Yes, par, Default::default());
     if scratch.layout().is_err() {
         return Err(EconError::ResourceLimit(format!(
-            "{what} is too large: the requested size overflows"
+            "{ws} is too large: the requested size overflows"
         ))
         .to_string());
     }
-    check_alloc::<u8>(scratch.size_bytes(), what).map_err(to_string)?;
+    check_alloc::<u8>(scratch.size_bytes(), ws).map_err(to_string)?;
 
     // Row and column means of D^2, and its grand mean
     let mut row_means = vec![0.0f64; n];
@@ -964,11 +967,26 @@ fn cmdscale_core(
     }
 
     checkpoint().map_err(to_string)?;
-    let evd = b
-        .self_adjoint_eigen(faer::Side::Lower)
-        .map_err(|_| "cmdscale eigendecomposition failed".to_string())?;
-    let values = evd.S().column_vector();
-    let vectors = evd.U();
+    let mut buf = MemBuffer::try_new(scratch).map_err(|_| {
+        EconError::ResourceLimit(format!(
+            "{ws} would need {}, which could not be allocated; use a smaller input",
+            crate::memory::format_bytes(scratch.size_bytes())
+        ))
+        .to_string()
+    })?;
+    let mut vectors = Mat::<f64>::zeros(n, n);
+    let mut s = faer::diag::Diag::<f64>::zeros(n);
+    self_adjoint_evd(
+        b.as_ref(),
+        s.as_mut(),
+        Some(vectors.as_mut()),
+        par,
+        MemStack::new(&mut buf),
+        Default::default(),
+    )
+    .map_err(|_| "cmdscale eigendecomposition failed".to_string())?;
+    drop(buf);
+    let values = s.column_vector();
 
     // Descending algebraic order (faer's own order is not relied on)
     let mut order: Vec<usize> = (0..n).collect();
@@ -1146,8 +1164,9 @@ mod tests {
     /// memory refactor (row-wise P, scalar exaggeration, reused Q); every
     /// floating-point operation is preserved, so the bits must not change.
     ///
-    /// The constants were captured on x86_64 Linux (glibc, FMA kernels), and
-    /// only there are the bits compared. Elsewhere libm's `exp`/`ln` (the
+    /// The constants were captured on x86_64 Linux (glibc, AVX2+FMA
+    /// kernels), and only there are the bits compared
+    /// (`crate::ml::golden_bits_platform`). Elsewhere libm's `exp`/`ln` (the
     /// perplexity search) and the kernels behind the PCA start can differ in
     /// the last ulp, and the gain updates, which branch on gradient signs,
     /// amplify that: moving inputs by one to three ulps (496 runs: single
@@ -1196,11 +1215,7 @@ mod tests {
             r.kl_divergence,
         ];
         let bits = got.map(f64::to_bits);
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        let exact = std::arch::is_x86_feature_detected!("fma");
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
-        let exact = false;
-        if exact {
+        if crate::ml::golden_bits_platform() {
             assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
         } else {
             for (g, want) in got.iter().zip(GOLDEN.map(f64::from_bits)) {

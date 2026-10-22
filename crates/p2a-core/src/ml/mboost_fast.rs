@@ -146,8 +146,14 @@ impl std::fmt::Display for FastMboostResult {
 
 /// Train a fast MBoost model.
 ///
-/// Refuses (`InvalidSpecification`) fewer than 2 rows, a design without
-/// predictor columns, and non-finite values in `x` or `y`.
+/// # Errors
+///
+/// - [`EconError::InsufficientData`] when `y.len() != x.nrows()`.
+/// - [`EconError::InvalidSpecification`] for fewer than 2 rows, no predictor
+///   columns, or non-finite values in `x` or `y`.
+/// - [`EconError::ResourceLimit`] / [`EconError::Cancelled`] from the
+///   resource guards: the `m_stop`-sized buffers exceed the allocation
+///   ceiling, or the budget is cancelled or expires.
 pub fn fast_mboost(
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
