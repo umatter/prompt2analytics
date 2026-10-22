@@ -123,6 +123,9 @@ impl DbConnection {
 
     /// Delete a session and all associated data
     pub async fn delete_session(&self, id: &str) -> Result<(), DbError> {
+        // The byte counter goes with the session: dropping it first spares
+        // each conversation delete below from summing what it releases.
+        self.forget_session_bytes(id);
         // Get all conversations for this session
         let conversations = self.list_conversations(id).await?;
 
@@ -182,7 +185,30 @@ impl DbConnection {
     /// and tool-call arguments, results and errors, as UTF-8 bytes (summed
     /// here; SurrealQL's `string::len` counts characters). Seeds the
     /// `session_db_bytes` counter.
+    ///
+    /// It reads every stored message once, one conversation at a time (each
+    /// through its index); a deleted or cleared conversation releases its
+    /// own bytes instead, so this runs only when a counter is first seeded.
     pub async fn session_stored_bytes(&self, session_id: &str) -> Result<u64, DbError> {
+        let conversations = self.list_conversations(session_id).await?;
+        let mut total = conversations
+            .iter()
+            .map(|c| c.title.len() as u64)
+            .fold(0u64, u64::saturating_add);
+        for conv in &conversations {
+            let text = self.conversation_text_bytes(&conv.id_string()).await?;
+            total = total.saturating_add(text);
+        }
+        Ok(total)
+    }
+
+    /// Bytes the messages and tool calls of conversation `conversation_id`
+    /// store (contents, arguments, results and errors; the title not
+    /// included), as UTF-8 bytes.
+    pub(crate) async fn conversation_text_bytes(
+        &self,
+        conversation_id: &str,
+    ) -> Result<u64, DbError> {
         #[derive(serde::Deserialize)]
         struct Content {
             content: String,
@@ -195,38 +221,26 @@ impl DbConnection {
         }
         let len = |s: &str| s.len() as u64;
 
-        let conversations = self.list_conversations(session_id).await?;
-        let ids: Vec<String> = conversations.iter().map(|c| c.id_string()).collect();
-        let mut total = conversations
-            .iter()
-            .map(|c| len(&c.title))
-            .fold(0u64, u64::saturating_add);
-        if ids.is_empty() {
-            return Ok(total);
-        }
         let mut result = self
             .db()
-            .query("SELECT content FROM messages WHERE conversation_id INSIDE $ids")
-            .query(
-                "SELECT arguments, result, error FROM tool_calls WHERE conversation_id INSIDE $ids",
-            )
-            .bind(("ids", ids))
+            .query("SELECT content FROM messages WHERE conversation_id = $id")
+            .query("SELECT arguments, result, error FROM tool_calls WHERE conversation_id = $id")
+            .bind(("id", conversation_id.to_string()))
             .await?;
         let contents: Vec<Content> = result.take(0)?;
         let tool_texts: Vec<ToolText> = result.take(1)?;
-        total = contents
+        let total = contents
             .iter()
             .map(|m| len(&m.content))
-            .fold(total, u64::saturating_add);
-        total = tool_texts
+            .fold(0u64, u64::saturating_add);
+        Ok(tool_texts
             .iter()
             .map(|t| {
                 len(&t.arguments)
                     .saturating_add(t.result.as_deref().map_or(0, len))
                     .saturating_add(t.error.as_deref().map_or(0, len))
             })
-            .fold(total, u64::saturating_add);
-        Ok(total)
+            .fold(total, u64::saturating_add))
     }
 
     /// Delete the rows that no session or conversation owns any more:
@@ -260,12 +274,13 @@ impl DbConnection {
             .iter()
             .filter(|c| !session_ids.contains(&c.session_id))
         {
+            // The session has no row any more; its counter goes too.
+            self.forget_session_bytes(&conv.session_id);
             match self.delete_conversation(&conv.id_string()).await {
                 Ok(()) => deleted += 1,
                 Err(DbError::NotFound(_)) => {}
                 Err(e) => return Err(e),
             }
-            self.forget_session_bytes(&conv.session_id);
         }
 
         let known: Vec<String> = session_ids.into_iter().collect();

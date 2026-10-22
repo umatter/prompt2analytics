@@ -87,9 +87,10 @@ pub struct DbConnection {
     limits: PersistenceLimits,
     /// Bytes each session's conversation history stores, as counted by the
     /// `session_db_bytes` budget. An entry is seeded from the store on first
-    /// use and dropped when the session's conversations are deleted or
-    /// cleared, so the next write re-seeds it. Only touched when the budget
-    /// is set; shared by clones.
+    /// use (a read of every stored message of the session), lowered by what
+    /// a deleted or cleared conversation held, and dropped when the
+    /// session's rows are deleted. Only touched when the budget is set;
+    /// shared by clones.
     session_bytes: Arc<Mutex<HashMap<String, u64>>>,
 }
 
@@ -295,17 +296,38 @@ impl DbConnection {
         .await
     }
 
-    /// Drop the session's byte counter (its conversations were deleted or
-    /// cleared); the next write re-seeds it from the store.
+    /// Drop the session's byte counter (its rows were deleted); a later
+    /// write re-seeds it from the store.
     pub(crate) fn forget_session_bytes(&self, session_id: &str) {
         if self.limits.session_db_bytes.is_some() {
             self.session_bytes_map().remove(session_id);
         }
     }
 
+    /// Whether the session's byte counter is seeded.
+    pub(crate) fn has_session_bytes(&self, session_id: &str) -> bool {
+        self.limits.session_db_bytes.is_some() && self.session_bytes_map().contains_key(session_id)
+    }
+
+    /// Subtract `n` deleted bytes from the session's counter, if it is
+    /// seeded (an unseeded counter reads the store when it is seeded).
+    pub(crate) fn release_session_bytes(&self, session_id: &str, n: u64) {
+        if self.limits.session_db_bytes.is_some()
+            && let Some(used) = self.session_bytes_map().get_mut(session_id)
+        {
+            *used = used.saturating_sub(n);
+        }
+    }
+
     /// Whether the `session_db_bytes` budget is set.
     pub(crate) fn tracks_session_bytes(&self) -> bool {
         self.limits.session_db_bytes.is_some()
+    }
+
+    /// The session's byte counter as it stands (`None` when not seeded).
+    #[cfg(test)]
+    pub(crate) fn session_bytes_entry(&self, session_id: &str) -> Option<u64> {
+        self.session_bytes_map().get(session_id).copied()
     }
 
     /// Initialize database schema

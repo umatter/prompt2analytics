@@ -317,6 +317,54 @@ async fn session_db_bytes_bounds_the_session_total() {
         .unwrap();
 }
 
+/// Deleting or clearing a conversation subtracts its bytes from the
+/// session's counter instead of dropping the counter, so the next write does
+/// not re-read the whole session (which costs one row read per stored
+/// message).
+#[tokio::test]
+async fn deleting_a_conversation_releases_its_bytes_without_a_reseed() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1000),
+        ..Default::default()
+    })
+    .await;
+    let keep = db.create_conversation("s1", "keep").await.unwrap(); // 4
+    db.add_message(&keep.id_string(), "user", &"a".repeat(100))
+        .await
+        .unwrap(); // 104
+    let gone = db.create_conversation("s1", "gone").await.unwrap(); // 108
+    let m = db
+        .add_message(&gone.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let call = ToolCall::new(
+        m.id_string(),
+        gone.id_string(),
+        "regression_ols".into(),
+        "y".repeat(50),
+    );
+    db.create_tool_call(&call).await.unwrap(); // 158
+    db.add_message(&gone.id_string(), "user", &"b".repeat(200))
+        .await
+        .unwrap(); // 358
+    assert_eq!(db.session_bytes_entry("s1"), Some(358));
+
+    db.delete_conversation(&gone.id_string()).await.unwrap();
+    assert_eq!(db.session_bytes_entry("s1"), Some(104));
+
+    let c = db.create_conversation("s1", "c").await.unwrap(); // 105
+    db.add_message(&c.id_string(), "user", &"c".repeat(10))
+        .await
+        .unwrap(); // 115
+    db.clear_messages(&c.id_string()).await.unwrap();
+    assert_eq!(db.session_bytes_entry("s1"), Some(105));
+    assert_eq!(db.session_stored_bytes("s1").await.unwrap(), 105);
+
+    // Deleting the session's rows drops the counter.
+    db.delete_session("s1").await.unwrap();
+    assert_eq!(db.session_bytes_entry("s1"), None);
+}
+
 #[tokio::test]
 async fn session_rows_by_last_access() {
     let db = test_db().await;

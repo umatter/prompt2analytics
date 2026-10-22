@@ -124,10 +124,9 @@ impl DbConnection {
     }
 
     /// Delete a conversation and all its messages. With a `session_db_bytes`
-    /// budget, the session's byte counter is dropped, so its next write
-    /// re-seeds it from what is left.
+    /// budget, the bytes they held are released from the session's counter.
     pub async fn delete_conversation(&self, id: &str) -> Result<(), DbError> {
-        let owner = self.budget_owner(id).await?;
+        let release = self.bytes_to_release(id, true).await?;
         let id_owned = id.to_string();
 
         // Delete tool calls first
@@ -144,8 +143,8 @@ impl DbConnection {
 
         // Delete conversation
         let deleted: Option<Conversation> = self.db().delete(("conversations", id)).await?;
-        if let Some(session_id) = owner {
-            self.forget_session_bytes(&session_id);
+        if let Some((session_id, bytes)) = release {
+            self.release_session_bytes(&session_id, bytes);
         }
 
         if deleted.is_some() {
@@ -155,18 +154,32 @@ impl DbConnection {
         }
     }
 
-    /// The session whose `session_db_bytes` counter a change to conversation
-    /// `id` affects: `None` without the budget or when the conversation does
-    /// not exist.
-    async fn budget_owner(&self, id: &str) -> Result<Option<String>, DbError> {
+    /// The session whose `session_db_bytes` counter deleting conversation
+    /// `id`'s messages and tool calls (and its title, with `with_title`)
+    /// lowers, and by how much. `None` without the budget, when the
+    /// conversation does not exist, or when the session's counter is not
+    /// seeded (seeding then reads what is left).
+    async fn bytes_to_release(
+        &self,
+        id: &str,
+        with_title: bool,
+    ) -> Result<Option<(String, u64)>, DbError> {
         if !self.tracks_session_bytes() {
             return Ok(None);
         }
-        match self.get_conversation(id).await {
-            Ok(conv) => Ok(Some(conv.session_id)),
-            Err(DbError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
+        let conv = match self.get_conversation(id).await {
+            Ok(conv) => conv,
+            Err(DbError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if !self.has_session_bytes(&conv.session_id) {
+            return Ok(None);
         }
+        let mut bytes = self.conversation_text_bytes(id).await?;
+        if with_title {
+            bytes = bytes.saturating_add(conv.title.len() as u64);
+        }
+        Ok(Some((conv.session_id, bytes)))
     }
 
     /// The conversation a client-posted message of `content_len` bytes goes
@@ -358,10 +371,9 @@ impl DbConnection {
     }
 
     /// Delete all messages in a conversation. With a `session_db_bytes`
-    /// budget, the session's byte counter is dropped and re-seeded on its
-    /// next write.
+    /// budget, the bytes they held are released from the session's counter.
     pub async fn clear_messages(&self, conversation_id: &str) -> Result<u32, DbError> {
-        let owner = self.budget_owner(conversation_id).await?;
+        let release = self.bytes_to_release(conversation_id, false).await?;
         let conv_id_owned = conversation_id.to_string();
 
         // Delete tool calls first
@@ -397,8 +409,8 @@ impl DbConnection {
             .query("UPDATE conversations SET message_count = 0, last_message_preview = NONE, updated_at = time::now() WHERE id = $id")
             .bind(("id", RecordId::from(("conversations", conv_id.as_str()))))
             .await?;
-        if let Some(session_id) = owner {
-            self.forget_session_bytes(&session_id);
+        if let Some((session_id, bytes)) = release {
+            self.release_session_bytes(&session_id, bytes);
         }
 
         Ok(deleted_count)
