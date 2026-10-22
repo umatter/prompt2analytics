@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::DesignMatrix;
+use crate::resource;
 use polars::prelude::*;
 
 /// Family type for GLM
@@ -216,7 +217,7 @@ fn coordinate_descent_gaussian(
     beta: &mut Array1<f64>,
     max_iter: usize,
     thresh: f64,
-) -> usize {
+) -> EconResult<usize> {
     let n = x.nrows() as f64;
     let p = x.ncols();
 
@@ -233,6 +234,7 @@ fn coordinate_descent_gaussian(
     let mut ever_active = vec![false; p];
 
     for iter in 0..max_iter {
+        resource::checkpoint()?;
         let mut max_change = 0.0f64;
 
         // First pass: cycle through active set
@@ -265,7 +267,7 @@ fn coordinate_descent_gaussian(
 
         // Convergence check
         if max_change < thresh {
-            return iter + 1;
+            return Ok(iter + 1);
         }
 
         // Update active set every 10 iterations or when converging
@@ -282,7 +284,7 @@ fn coordinate_descent_gaussian(
         }
     }
 
-    max_iter
+    Ok(max_iter)
 }
 
 /// Coordinate descent for Binomial family (logistic regression)
@@ -295,11 +297,12 @@ fn coordinate_descent_binomial(
     intercept: &mut f64,
     max_iter: usize,
     thresh: f64,
-) -> usize {
+) -> EconResult<usize> {
     let n = x.nrows() as f64;
     let p = x.ncols();
 
     for iter in 0..max_iter {
+        resource::checkpoint()?;
         let mut max_change = 0.0f64;
 
         // Compute probabilities: p = 1 / (1 + exp(-eta))
@@ -340,11 +343,11 @@ fn coordinate_descent_binomial(
         }
 
         if max_change < thresh {
-            return iter + 1;
+            return Ok(iter + 1);
         }
     }
 
-    max_iter
+    Ok(max_iter)
 }
 
 /// Compute deviance for Gaussian family
@@ -363,12 +366,39 @@ fn deviance_binomial(y: &ArrayView1<f64>, prob: &Array1<f64>) -> f64 {
     dev
 }
 
+/// Check the path and iteration controls of a glmnet configuration.
+///
+/// `nlambda = 1` (which generates a NaN lambda) and an empty user lambda
+/// sequence are not handled here (REG-42).
+fn validate_glmnet_config(config: &GlmnetConfig) -> EconResult<()> {
+    if !(config.thresh.is_finite() && config.thresh > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "thresh must be a positive finite number (got {})",
+                config.thresh
+            ),
+        });
+    }
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1".to_string(),
+        });
+    }
+    if config.lambda.is_none() && config.nlambda == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "nlambda must be at least 1 when no lambda sequence is given".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Fit glmnet model
 pub fn glmnet(
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
     config: &GlmnetConfig,
 ) -> EconResult<GlmnetResult> {
+    validate_glmnet_config(config)?;
     let n = x.nrows();
     let p = x.ncols();
 
@@ -435,20 +465,27 @@ pub fn glmnet(
     } else {
         let log_max = lambda_max.ln();
         let log_min = lambda_min.ln();
-        (0..config.nlambda)
-            .map(|i| {
-                let t = i as f64 / (config.nlambda - 1) as f64;
-                (log_max + t * (log_min - log_max)).exp()
-            })
-            .collect()
+        let mut seq = resource::try_with_capacity::<f64>(config.nlambda, "glmnet lambda path")?;
+        seq.extend((0..config.nlambda).map(|i| {
+            let t = i as f64 / (config.nlambda - 1) as f64;
+            (log_max + t * (log_min - log_max)).exp()
+        }));
+        seq
     };
 
-    // Fit along the path with warm starts
-    let mut fits = Vec::with_capacity(lambda_seq.len());
+    // Fit along the path with warm starts. Each fit holds p coefficients plus
+    // seven words (lambda, intercept, the coefficient Vec header, df, dev_ratio).
+    let what = "glmnet coefficient path";
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[lambda_seq.len(), p.saturating_add(7)], what)?,
+        what,
+    )?;
+    let mut fits = resource::try_with_capacity(lambda_seq.len(), what)?;
     let mut beta = Array1::zeros(p);
     let mut intercept_val = 0.0;
 
     for &lambda in &lambda_seq {
+        resource::checkpoint()?;
         // Coordinate descent
         match config.family {
             GlmnetFamily::Gaussian => {
@@ -460,7 +497,7 @@ pub fn glmnet(
                     &mut beta,
                     config.max_iter,
                     config.thresh,
-                );
+                )?;
             }
             GlmnetFamily::Binomial => {
                 coordinate_descent_binomial(
@@ -472,7 +509,7 @@ pub fn glmnet(
                     &mut intercept_val,
                     config.max_iter,
                     config.thresh,
-                );
+                )?;
             }
         }
 
@@ -642,6 +679,7 @@ pub fn cv_glmnet(
     let mut cv_errors: Vec<Vec<f64>> = vec![Vec::with_capacity(nlambda); nfolds];
 
     for fold in 0..nfolds {
+        resource::checkpoint()?;
         // Create train/test split
         let train_idx: Vec<usize> = (0..n).filter(|&i| fold_ids[i] != fold).collect();
         let test_idx: Vec<usize> = (0..n).filter(|&i| fold_ids[i] == fold).collect();
@@ -946,6 +984,7 @@ impl std::fmt::Display for GlmnetCvResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use approx::assert_relative_eq;
     use ndarray::array;
 
@@ -1063,6 +1102,110 @@ mod tests {
         // CV errors should be computed
         assert_eq!(cv_result.cvm.len(), cv_result.lambda.len());
         assert_eq!(cv_result.cvsd.len(), cv_result.lambda.len());
+    }
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// The `x`/`y` data of `test_lambda_path`.
+    fn lambda_path_data() -> (Array2<f64>, Array1<f64>) {
+        (
+            array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0], [5.0, 6.0]],
+            array![2.0, 4.0, 5.0, 7.0, 9.0],
+        )
+    }
+
+    #[test]
+    fn test_glmnet_rejects_invalid_controls() {
+        let (x, y) = lambda_path_data();
+        for (cfg, field) in [
+            (
+                GlmnetConfig {
+                    nlambda: 0,
+                    ..Default::default()
+                },
+                "nlambda",
+            ),
+            (
+                GlmnetConfig {
+                    thresh: 0.0,
+                    ..Default::default()
+                },
+                "thresh",
+            ),
+            (
+                GlmnetConfig {
+                    thresh: f64::NAN,
+                    ..Default::default()
+                },
+                "thresh",
+            ),
+            (
+                GlmnetConfig {
+                    max_iter: 0,
+                    ..Default::default()
+                },
+                "max_iter",
+            ),
+        ] {
+            match glmnet(x.view(), y.view(), &cfg).unwrap_err() {
+                EconError::InvalidSpecification { message } => {
+                    assert!(message.contains(field), "{message}")
+                }
+                e => panic!("{field}: {e:?}"),
+            }
+        }
+        // a user lambda sequence makes nlambda irrelevant (test_ridge_closed_form relies on this)
+        let cfg = GlmnetConfig {
+            lambda: Some(vec![0.1]),
+            nlambda: 0,
+            ..Default::default()
+        };
+        assert!(glmnet(x.view(), y.view(), &cfg).is_ok());
+    }
+
+    #[test]
+    fn test_glmnet_impossible_nlambda_is_an_error() {
+        let (x, y) = lambda_path_data();
+        let cfg = GlmnetConfig {
+            nlambda: 1usize << 61,
+            ..Default::default()
+        };
+        let e = glmnet(x.view(), y.view(), &cfg).unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_glmnet_path_respects_alloc_ceiling() {
+        let (x, y) = lambda_path_data();
+        let cfg = GlmnetConfig {
+            nlambda: 100_000,
+            ..Default::default()
+        };
+        // 100_000 lambdas * 8 bytes = 800 KB
+        let e = resource::with_alloc_ceiling(Some(64 << 10), || glmnet(x.view(), y.view(), &cfg))
+            .unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_glmnet_and_cv_stop_when_cancelled() {
+        let (x, y) = lambda_path_data();
+        let cfg = GlmnetConfig {
+            nlambda: 20,
+            ..Default::default()
+        };
+        let e =
+            resource::with_budget(cancelled(), || glmnet(x.view(), y.view(), &cfg)).unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+        let e = resource::with_budget(cancelled(), || {
+            cv_glmnet(x.view(), y.view(), &cfg, 2, Some(1))
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
     }
 
     /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
