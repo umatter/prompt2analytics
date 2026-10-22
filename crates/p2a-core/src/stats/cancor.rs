@@ -144,6 +144,16 @@ impl CancorResult {
 ///
 /// A `CancorResult` containing canonical correlations and coefficients.
 ///
+/// # Errors
+///
+/// - X and Y have different row counts, fewer than 2 rows, or no columns.
+/// - Rank bound: X (and likewise Y) has more columns than its rows can make linearly
+///   independent, that is more than `n - 1` columns when it is centred and more than `n` when it
+///   is not. R returns degenerate correlations of 1 up to that bound, so it is not tightened to
+///   `p + q < n`.
+/// - A matrix too large to allocate, a singular covariance matrix, or cancellation through
+///   [`resource::checkpoint`].
+///
 /// # Example
 ///
 /// ```ignore
@@ -350,6 +360,14 @@ pub fn cancor(
 /// # Returns
 ///
 /// A `CancorResult` with variable names populated.
+///
+/// # Errors
+///
+/// - An empty X or Y column list.
+/// - A column listed twice within X, or twice within Y (that set's covariance would be
+///   singular). A column shared by X and Y is allowed; R gives a canonical correlation of 1.
+/// - A missing or non-numeric column.
+/// - Everything [`cancor`] refuses, the rank bound included.
 pub fn run_cancor(
     dataset: &Dataset,
     x_cols: &[&str],
@@ -399,8 +417,9 @@ pub fn run_cancor(
         let values = col.f64().map_err(|_| EconError::NonNumericColumn {
             column: col_name.to_string(),
         })?;
-        for i in 0..n {
-            x_data[[i, j]] = values.get(i).unwrap_or(f64::NAN);
+        // Chunk-aware iteration: `get(i)` scans the chunk list of a stacked frame per call
+        for (cell, v) in x_data.column_mut(j).iter_mut().zip(values) {
+            *cell = v.unwrap_or(f64::NAN);
         }
     }
 
@@ -414,8 +433,8 @@ pub fn run_cancor(
         let values = col.f64().map_err(|_| EconError::NonNumericColumn {
             column: col_name.to_string(),
         })?;
-        for i in 0..n {
-            y_data[[i, j]] = values.get(i).unwrap_or(f64::NAN);
+        for (cell, v) in y_data.column_mut(j).iter_mut().zip(values) {
+            *cell = v.unwrap_or(f64::NAN);
         }
     }
 
@@ -544,6 +563,22 @@ mod tests {
                 "rank guard must not fire uncentred: {e}"
             );
         }
+    }
+
+    #[test]
+    fn test_run_cancor_on_multi_chunk_frame_matches_single_chunk() {
+        // A stacked frame keeps one chunk per part; the matrices must not depend on the layout
+        let whole = xy_dataset(40).df().clone();
+        let mut stacked = whole.slice(0, 11);
+        for (offset, len) in [(11, 3), (14, 20), (34, 6)] {
+            stacked.vstack_mut(&whole.slice(offset, len)).unwrap();
+        }
+        assert!(stacked.column("x1").unwrap().n_chunks() > 1);
+        let a = run_cancor(&Dataset::new(whole), &["x1", "x2"], &["y1"], true, true).unwrap();
+        let b = run_cancor(&Dataset::new(stacked), &["x1", "x2"], &["y1"], true, true).unwrap();
+        assert_eq!(a.cor, b.cor);
+        assert_eq!(a.xcoef, b.xcoef);
+        assert_eq!(a.ycoef, b.ycoef);
     }
 
     #[test]
