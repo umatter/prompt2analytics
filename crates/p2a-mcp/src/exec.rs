@@ -14,7 +14,14 @@
 //!    the client disconnects and the handler future is dropped);
 //! 5. a wall-clock deadline (504) and panic isolation (500, session intact);
 //! 6. per-session and total dataset-byte quotas that undo the call that
-//!    crossed them.
+//!    crossed them;
+//! 7. one audit entry per call (when auditing is configured), with the call's
+//!    origin and outcome, written where the work ends; refusals before the
+//!    work starts (memory, session or server busy) are recorded too.
+//!
+//! The request limits in force when the call is made travel with it onto the
+//! blocking thread, where `AnalyticsServer::call_tool_with_session` checks
+//! them before dispatch.
 //!
 //! The streaming chat (`POST /api/llm/chat/stream`) runs its tool loop in a
 //! detached task that is not aborted when the SSE client disconnects, so the
@@ -30,6 +37,7 @@
 //! overdue work, [`ToolGovernor::health`] reports the server unhealthy.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -44,8 +52,10 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 use tracing::Instrument;
 
+use crate::audit::{AuditEntry, AuditLogger, ResultSummary, sanitize_arguments};
 use crate::config::{
-    DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting, available_cpus,
+    AuditConfig, DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting,
+    available_cpus,
 };
 use crate::server::AnalyticsServer;
 use crate::session::{Session, SessionManager, datasets_bytes};
@@ -86,6 +96,9 @@ pub struct ExecConfig {
     /// Leave the process memory and the in-flight count out of `/health`
     /// (open public mode, where `/health` is unauthenticated).
     pub redact_health: bool,
+    /// Where the governor writes one audit entry per call (`None`: no
+    /// audit). The governor shares the process's writer for that file.
+    pub audit: Option<AuditConfig>,
 }
 
 const MIB: u64 = 1 << 20;
@@ -107,6 +120,7 @@ impl Default for ExecConfig {
             alloc_ceiling_bytes: None,
             session_dirs: false,
             redact_health: false,
+            audit: None,
         }
     }
 }
@@ -157,6 +171,7 @@ impl ExecConfig {
                 SessionDirsSetting::Off => false,
             },
             redact_health: cfg.deployment_mode() == DeploymentMode::OpenPublic,
+            audit: cfg.audit.enabled.then(|| cfg.audit.clone()),
         }
     }
 
@@ -187,6 +202,18 @@ pub enum CallOrigin {
     LlmTool,
     /// A websocket `Tool` message.
     WebSocket,
+}
+
+impl CallOrigin {
+    /// The origin as the audit log records it: `http`, `llm_tool` or
+    /// `websocket`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::LlmTool => "llm_tool",
+            Self::WebSocket => "websocket",
+        }
+    }
 }
 
 /// A snapshot of the governor's state, reported by `/health`.
@@ -413,6 +440,8 @@ pub struct ToolGovernor {
     capacity: usize,
     in_flight: InFlight,
     next_id: AtomicU64,
+    /// One entry per call (disabled unless `cfg.audit` is set).
+    audit: Arc<AuditLogger>,
 }
 
 /// Wait for a permit of `slots` until `give_up` (`None` = no limit).
@@ -477,7 +506,15 @@ impl ToolGovernor {
     /// (at least 1, at most `Semaphore::MAX_PERMITS`).
     pub fn new(cfg: ExecConfig, sessions: Arc<SessionManager>) -> Self {
         let capacity = cfg.concurrency.clamp(1, Semaphore::MAX_PERMITS);
+        let audit = Arc::new(match &cfg.audit {
+            Some(audit) => AuditLogger::new(audit).unwrap_or_else(|e| {
+                tracing::warn!("Failed to initialize the governor's audit logger: {}", e);
+                AuditLogger::disabled()
+            }),
+            None => AuditLogger::disabled(),
+        });
         Self {
+            audit,
             cfg,
             sessions,
             global: Arc::new(Semaphore::new(capacity)),
@@ -559,9 +596,20 @@ impl ToolGovernor {
             let limit_secs = self.cfg.deadline_secs();
             let tool_name = tool.to_string();
             let s = Arc::clone(&session);
-            self.run_blocking(&session, tool, move |budget| {
+            // Sanitised before the arguments move into the call, and only when
+            // auditing. One copy is for a refusal before the work starts.
+            let audit = self
+                .audit
+                .is_enabled()
+                .then(|| (Arc::clone(&self.audit), sanitize_arguments(&args)));
+            let refusal_arguments = audit.as_ref().map(|(_, arguments)| arguments.clone());
+            let outcome = self.run_blocking(&session, tool, move |budget| {
                 let budget = budget.clone();
-                handle.block_on(async move {
+                let started = Instant::now();
+                // The entry is written where the work ends, also when the
+                // deadline answer was already sent or the work panicked.
+                let ran = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    handle.block_on(async {
                     let snapshot = if quotas.any() {
                         Some(s.datasets.read().await.clone())
                     } else {
@@ -588,9 +636,55 @@ impl ToolGovernor {
                     }
                     s.touch().await;
                     Ok(result)
-                })
+                    })
+                }));
+                if let Some((audit, arguments)) = audit {
+                    let (outcome, summary) = match &ran {
+                        Ok(Ok(result)) => (
+                            result_outcome(result, &budget),
+                            ResultSummary::of_tool_result(result),
+                        ),
+                        Ok(Err(e)) => (e.code(), ResultSummary::default()),
+                        Err(_) => ("internal", ResultSummary::default()),
+                    };
+                    let entry = AuditEntry::new(
+                        &s.id,
+                        origin.as_str(),
+                        &tool_name,
+                        arguments,
+                        outcome,
+                        elapsed_ms(started),
+                        summary,
+                    );
+                    handle.block_on(audit.log(entry));
+                }
+                match ran {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
             })
-            .await
+            .await;
+            // Refusals before the work started never reached the closure.
+            if let (Err(e), Some(arguments)) = (&outcome, refusal_arguments)
+                && matches!(
+                    e,
+                    ToolCallError::MemoryPressure { .. }
+                        | ToolCallError::SessionBusy { .. }
+                        | ToolCallError::ServerBusy { .. }
+                )
+            {
+                let entry = AuditEntry::new(
+                    &session.id,
+                    origin.as_str(),
+                    tool,
+                    arguments,
+                    e.code(),
+                    0,
+                    ResultSummary::default(),
+                );
+                self.audit.log(entry).await;
+            }
+            outcome
         }
         .instrument(span)
         .await
@@ -705,6 +799,29 @@ impl ToolGovernor {
             }
         }
     }
+}
+
+/// The audit outcome of a call that returned a tool result: `ok`, or for a
+/// failed result `deadline_exceeded`/`cancelled` when its budget had run out
+/// (the budget has no getter for its token, so a spent budget before the
+/// deadline means cancellation), else `tool_error`.
+fn result_outcome(result: &ToolResult, budget: &Budget) -> &'static str {
+    if result.success {
+        "ok"
+    } else if budget.check().is_err() {
+        if budget.deadline().is_some_and(|d| Instant::now() >= d) {
+            "deadline_exceeded"
+        } else {
+            "cancelled"
+        }
+    } else {
+        "tool_error"
+    }
+}
+
+/// Milliseconds since `started`, saturating.
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The dataset-byte quotas of one call.
@@ -1126,6 +1243,25 @@ mod tests {
             assert!(!c.session_dirs);
             assert!(!c.redact_health);
         }
+    }
+
+    #[test]
+    fn exec_config_carries_the_audit_config() {
+        let mut c = http_cfg("127.0.0.1:8080", None, false);
+        assert!(ExecConfig::from_config(&c).audit.is_none());
+        assert!(ExecConfig::default().audit.is_none());
+        c.audit.enabled = true;
+        c.audit.path = "audit-test.log".into();
+        let audit = ExecConfig::from_config(&c).audit.unwrap();
+        assert!(audit.enabled);
+        assert_eq!(audit.path, "audit-test.log");
+    }
+
+    #[test]
+    fn call_origin_names() {
+        assert_eq!(CallOrigin::Http.as_str(), "http");
+        assert_eq!(CallOrigin::LlmTool.as_str(), "llm_tool");
+        assert_eq!(CallOrigin::WebSocket.as_str(), "websocket");
     }
 
     #[test]

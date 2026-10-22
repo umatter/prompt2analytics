@@ -85,7 +85,13 @@ async fn start_stdio_transport(config: &ServerConfig) -> TransportResult<()> {
 
     tracing::info!("Starting stdio transport...");
 
-    let server = AnalyticsServer::new();
+    let audit = std::sync::Arc::new(
+        crate::audit::AuditLogger::new(&config.audit).unwrap_or_else(|e| {
+            tracing::warn!("Failed to initialize audit logger: {}", e);
+            crate::audit::AuditLogger::disabled()
+        }),
+    );
+    let server = AnalyticsServer::new().with_audit_logger(audit.clone());
     let service = server
         .serve(stdio())
         .await
@@ -93,10 +99,13 @@ async fn start_stdio_transport(config: &ServerConfig) -> TransportResult<()> {
 
     tracing::info!("MCP server running on stdio, waiting for requests...");
 
-    service
+    let waited = service
         .waiting()
         .await
-        .map_err(|e| TransportError::Server(format!("Stdio transport error: {}", e)))?;
+        .map_err(|e| TransportError::Server(format!("Stdio transport error: {}", e)));
+    // Write out the queued audit entries before the process exits.
+    audit.flush().await;
+    waited?;
 
     Ok(())
 }

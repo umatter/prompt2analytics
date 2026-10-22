@@ -9,8 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::http::{ApiResponse, AppState, ContentItem};
-use crate::audit::{AuditEntry, ResultSummary, sanitize_arguments};
+use super::http::{ApiResponse, AppState};
 use crate::exec::CallOrigin;
 use crate::session::SessionError;
 
@@ -31,7 +30,8 @@ pub(crate) async fn list_tools(State(state): State<AppState>) -> impl IntoRespon
 }
 
 /// Call a tool. The call runs under the tool governor; its refusals and
-/// failures answer with their own status, code and `Retry-After`.
+/// failures answer with their own status, code and `Retry-After`. The
+/// governor writes the audit entry (origin `http`).
 pub(crate) async fn call_tool(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -63,8 +63,6 @@ pub(crate) async fn call_tool(
         }
     };
 
-    // Execute the tool with session context and timing
-    let start = std::time::Instant::now();
     let tool_result = state
         .governor
         .call(
@@ -75,41 +73,24 @@ pub(crate) async fn call_tool(
             CallOrigin::Http,
         )
         .await;
-    let duration_ms = start.elapsed().as_millis() as u64;
 
     match tool_result {
         Ok(result) => {
-            // Extract text content from result for logging
-            let result_text: String = result
-                .content
-                .iter()
-                .filter_map(|item| match item {
-                    ContentItem::Text { text } => Some(text.clone()),
-                    ContentItem::Image { .. } => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            // Audit logging (if enabled)
-            if state.audit_logger.is_enabled() {
-                let entry = AuditEntry::new(
-                    &request.session_id,
-                    "http",
-                    &name,
-                    sanitize_arguments(&request.arguments),
-                    if result.success { "ok" } else { "tool_error" },
-                    duration_ms,
-                    ResultSummary::of_tool_result(&result),
-                );
-                state.audit_logger.log(entry).await;
-            }
-
             // Capture dataset metadata for load_dataset, upload_dataset, and create_dataset
             #[cfg(feature = "db")]
             if (name == "load_dataset" || name == "upload_dataset" || name == "create_dataset")
                 && result.success
             {
                 if let Some(ref persistent_manager) = state.persistent_manager {
+                    let result_text: String = result
+                        .content
+                        .iter()
+                        .filter_map(|item| match item {
+                            super::http::ContentItem::Text { text } => Some(text.clone()),
+                            super::http::ContentItem::Image { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     tracing::info!(
                         tool = %name,
                         session_id = %request.session_id,
@@ -132,22 +113,6 @@ pub(crate) async fn call_tool(
 
             (StatusCode::OK, Json(ApiResponse::success(result))).into_response()
         }
-        Err(e) => {
-            // Audit log for failures
-            if state.audit_logger.is_enabled() {
-                let entry = AuditEntry::new(
-                    &request.session_id,
-                    "http",
-                    &name,
-                    sanitize_arguments(&request.arguments),
-                    e.code(),
-                    duration_ms,
-                    ResultSummary::default(),
-                );
-                state.audit_logger.log(entry).await;
-            }
-
-            e.into_response()
-        }
+        Err(e) => e.into_response(),
     }
 }

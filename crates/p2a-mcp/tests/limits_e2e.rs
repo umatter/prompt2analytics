@@ -23,6 +23,26 @@ fn run<F: std::future::Future>(l: Limits, f: F) -> F::Output {
     })
 }
 
+/// An enabled audit configuration writing to `dir/audit.log`.
+fn audit_cfg(dir: &tempfile::TempDir) -> p2a_mcp::config::AuditConfig {
+    p2a_mcp::config::AuditConfig {
+        enabled: true,
+        path: dir.path().join("audit.log").to_string_lossy().into_owned(),
+    }
+}
+
+/// Every line of the audit log at `cfg.path`, read after flushing the
+/// process's one writer for that file (`AuditLogger::new` returns it while
+/// another handle keeps it alive).
+async fn audit_lines(cfg: &p2a_mcp::config::AuditConfig) -> Vec<serde_json::Value> {
+    p2a_mcp::audit::AuditLogger::new(cfg).unwrap().flush().await;
+    std::fs::read_to_string(&cfg.path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
 #[cfg(feature = "http")]
 mod http_paths {
     use super::*;
@@ -443,6 +463,130 @@ mod http_paths {
         });
     }
 
+    /// `cfg` with auditing enabled into `dir/audit.log`.
+    fn with_audit(mut cfg: ServerConfig, dir: &tempfile::TempDir) -> ServerConfig {
+        cfg.audit = super::audit_cfg(dir);
+        cfg
+    }
+
+    #[test]
+    fn audit_records_every_origin_once() {
+        use p2a_mcp::exec::CallOrigin;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = with_audit(local_config(), &dir);
+        let (lines, sid) = run(Limits::off(), async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let (status, body) = post_tool(&app, &sid, "list_datasets", json!({})).await;
+            assert_eq!(status, 200, "{body}");
+            let session = state.session_manager.get_session(&sid).await.unwrap();
+            for origin in [CallOrigin::LlmTool, CallOrigin::WebSocket] {
+                state
+                    .governor
+                    .call(
+                        state.server.clone(),
+                        session.clone(),
+                        "list_datasets",
+                        json!({}),
+                        origin,
+                    )
+                    .await
+                    .unwrap();
+            }
+            (super::audit_lines(&cfg.audit).await, sid)
+        });
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        let origins: Vec<&str> = lines.iter().map(|l| l["origin"].as_str().unwrap()).collect();
+        assert_eq!(origins, ["http", "llm_tool", "websocket"]);
+        for line in &lines {
+            assert_eq!(line["tool_name"], "list_datasets", "{line}");
+            assert_eq!(line["outcome"], "ok", "{line}");
+            assert_eq!(line["success"], true, "{line}");
+            assert_eq!(line["session_id"], sid.as_str(), "{line}");
+        }
+    }
+
+    #[test]
+    fn audit_contains_no_data_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = with_audit(local_config(), &dir);
+        run(Limits::off(), async {
+            let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let csv = "email,income\nalice@example.org,51000\nbob@example.org,73000\n";
+            let (status, body) = post_tool(
+                &app,
+                &sid,
+                "create_dataset",
+                json!({"name": "pii", "csv_content": csv}),
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            let (status, body) =
+                post_tool(&app, &sid, "head_dataset", json!({"dataset": "pii"})).await;
+            assert_eq!(status, 200, "{body}");
+            assert!(body.to_string().contains("alice@example.org"), "{body}");
+            super::audit_lines(&cfg.audit).await;
+        });
+        let text = std::fs::read_to_string(&cfg.audit.path).unwrap();
+        assert!(!text.contains("alice@example.org"), "{text}");
+        assert!(!text.contains("51000"), "{text}");
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert_eq!(lines[0]["tool_name"], "create_dataset");
+        assert_eq!(lines[0]["arguments"]["csv_content"], "[redacted: 59 bytes]");
+        assert_eq!(lines[1]["tool_name"], "head_dataset");
+        assert!(lines[1]["result"]["text_bytes"].as_u64().unwrap() > 0, "{text}");
+    }
+
+    #[test]
+    fn audit_records_limit_refusals() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = with_audit(open_public_config(), &dir);
+        let lines = run(limits::resolve(&cfg).unwrap(), async {
+            let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let (status, body) =
+                post_tool(&app, &sid, "timeseries_arma_to_ma", json!({"lag_max": ABSURD})).await;
+            assert_eq!(status, 422, "{body}");
+            super::audit_lines(&cfg.audit).await
+        });
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        let line = &lines[0];
+        assert_eq!(line["origin"], "http");
+        assert_eq!(line["outcome"], "limit_exceeded");
+        assert_eq!(line["success"], false);
+        assert_eq!(line["arguments"]["lag_max"], ABSURD);
+    }
+
+    /// A refusal before the work starts (memory admission; Linux reports the
+    /// process memory) is written once, by the governor's async side.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn audit_records_admission_refusals_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = with_audit(local_config(), &dir);
+        let lines = run(Limits::off(), async {
+            let mut exec = p2a_mcp::exec::ExecConfig::from_config(&cfg);
+            exec.rss_soft_limit_bytes = Some(1);
+            let (app, _state) = p2a_mcp::transport::http::build_app_with(&cfg, exec)
+                .await
+                .unwrap();
+            let sid = new_session(&app).await;
+            let (status, body) = post_tool(&app, &sid, "list_datasets", json!({})).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            assert_eq!(body["code"], "memory_pressure", "{body}");
+            super::audit_lines(&cfg.audit).await
+        });
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert_eq!(lines[0]["outcome"], "memory_pressure");
+        assert_eq!(lines[0]["success"], false);
+        assert_eq!(lines[0]["duration_ms"], 0);
+    }
+
     #[test]
     fn x1_local_mode_is_unlimited() {
         // The local default (limits off) runs a value above the hosted cap.
@@ -594,6 +738,62 @@ mod stdio_path {
         assert_eq!(msg["error"]["data"]["code"], "limit_exceeded", "{msg}");
         assert_eq!(msg["error"]["data"]["parameter"], "response_bytes", "{msg}");
         assert_eq!(msg["error"]["data"]["limit"], "100", "{msg}");
+    }
+
+    #[test]
+    fn stdio_calls_are_audited() {
+        use p2a_mcp::audit::AuditLogger;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = audit_cfg(&dir);
+        // This handle keeps the writer alive until the log is read.
+        let logger = Arc::new(AuditLogger::new(&cfg).unwrap());
+        let server = AnalyticsServer::new().with_audit_logger(logger.clone());
+        let msg = run(
+            Limits::off(),
+            stdio_call(
+                server,
+                "timeseries_arma_to_ma",
+                json!({"lag_max": 10, "ar": [0.5]}),
+            ),
+        );
+        assert!(msg.get("error").is_none(), "{msg}");
+        let lines = run(Limits::off(), audit_lines(&cfg));
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        let line = &lines[0];
+        assert_eq!(line["origin"], "stdio");
+        assert_eq!(line["session_id"], "stdio");
+        assert_eq!(line["tool_name"], "timeseries_arma_to_ma");
+        assert_eq!(line["outcome"], "ok");
+        assert!(line["result"]["text_bytes"].as_u64().unwrap() > 0, "{line}");
+        drop(logger);
+    }
+
+    #[test]
+    fn stdio_audits_refusals_and_unknown_tools() {
+        use p2a_mcp::audit::AuditLogger;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = audit_cfg(&dir);
+        let logger = Arc::new(AuditLogger::new(&cfg).unwrap());
+        let calls = [
+            ("timeseries_arma_to_ma", json!({"lag_max": 2000, "ar": [0.5]})),
+            ("no_such_tool", json!({})),
+            ("timeseries_arma_to_ma", json!({"lag_max": "ten"})),
+        ];
+        for (tool, args) in calls {
+            let server = AnalyticsServer::new().with_audit_logger(logger.clone());
+            let msg = run(Limits::hosted(), stdio_call(server, tool, args));
+            assert!(msg.get("error").is_some(), "{msg}");
+        }
+        let lines = run(Limits::off(), audit_lines(&cfg));
+        let outcomes: Vec<&str> = lines.iter().map(|l| l["outcome"].as_str().unwrap()).collect();
+        assert_eq!(
+            outcomes,
+            ["limit_exceeded", "unknown_tool", "invalid_arguments"]
+        );
+        assert!(lines.iter().all(|l| l["success"] == false));
+        drop(logger);
     }
 
     #[test]

@@ -540,6 +540,9 @@ pub struct AnalyticsServer {
     pub(crate) memory_profiler: Arc<RwLock<p2a_core::MemoryProfiler>>,
     /// Tool router for handling tool calls
     tool_router: ToolRouter<Self>,
+    /// Audit log for the stdio transport's tool calls (`None`: not audited
+    /// here; governed HTTP-side calls are audited by the governor).
+    audit: Option<Arc<crate::audit::AuditLogger>>,
 }
 
 // ============================================================================
@@ -577,7 +580,15 @@ impl AnalyticsServer {
             global_seed: Arc::new(RwLock::new(None)),
             memory_profiler: Arc::new(RwLock::new(p2a_core::MemoryProfiler::new())),
             tool_router,
+            audit: None,
         }
+    }
+
+    /// Audit this server's MCP tool calls (the stdio transport) to `logger`:
+    /// one entry per call with origin and session id `stdio`.
+    pub fn with_audit_logger(mut self, logger: Arc<crate::audit::AuditLogger>) -> Self {
+        self.audit = Some(logger);
+        self
     }
 
     /// Create a new AnalyticsServer with existing dataset storage.
@@ -611,6 +622,7 @@ impl AnalyticsServer {
             global_seed: session.global_seed.clone(),
             memory_profiler: Arc::new(RwLock::new(p2a_core::MemoryProfiler::new())),
             tool_router,
+            audit: None,
         }
     }
 
@@ -1430,7 +1442,9 @@ fn log_and_convert(v: LimitViolation) -> crate::exec::ToolCallError {
 /// The MCP handler of the stdio transport. Tool calls run the same request
 /// limits as the governed HTTP-side path (arguments, dataset rows of this
 /// server's own datasets, response size) before and after delegating to the
-/// tool router. Deadlines and dataset quotas are HTTP-only.
+/// tool router, and with `with_audit_logger` each call leaves one audit entry
+/// (origin and session id `stdio`). Deadlines and dataset quotas are
+/// HTTP-only.
 impl ServerHandler for AnalyticsServer {
     async fn list_tools(
         &self,
@@ -1445,32 +1459,78 @@ impl ServerHandler for AnalyticsServer {
         mut request: CallToolRequestParam,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        if !self.tool_router.has_route(&request.name) {
-            // The router answers an unknown name with its own error.
-            return self
-                .tool_router
-                .call(ToolCallContext::new(self, request, context))
-                .await;
-        }
+        let started = std::time::Instant::now();
         let tool = request.name.to_string();
+        let known = self.tool_router.has_route(&tool);
         let limits = crate::tools::limits::current();
 
-        // Check the arguments as a JSON object without copying them, then
-        // hand them back to the request unchanged.
+        // Look at the arguments as a JSON object without copying them (for
+        // the limit check and the audit entry), then hand them back to the
+        // request unchanged.
         let had_arguments = request.arguments.is_some();
         let args = serde_json::Value::Object(request.arguments.take().unwrap_or_default());
-        let checked = enforce_request_limits(&limits, &tool, &args, &self.datasets).await;
+        let audit = self
+            .audit
+            .as_deref()
+            .filter(|a| a.is_enabled())
+            .map(|a| (a, crate::audit::sanitize_arguments(&args)));
+        let checked = if known {
+            enforce_request_limits(&limits, &tool, &args, &self.datasets).await
+        } else {
+            Ok(())
+        };
         if let (true, serde_json::Value::Object(map)) = (had_arguments, args) {
             request.arguments = Some(map);
         }
-        checked.map_err(limit_error)?;
 
-        let result = self
-            .tool_router
-            .call(ToolCallContext::new(self, request, context))
-            .await?;
-        check_response_size(&limits, &tool, call_result_bytes(&result)).map_err(limit_error)?;
-        Ok(result)
+        // The error is paired with its audit outcome.
+        let outcome: Result<CallToolResult, (McpError, &'static str)> = async {
+            checked.map_err(|v| (limit_error(v), "limit_exceeded"))?;
+            // An unknown name gets the router's own error.
+            let result = self
+                .tool_router
+                .call(ToolCallContext::new(self, request, context))
+                .await
+                .map_err(|e| {
+                    let code = if !known {
+                        "unknown_tool"
+                    } else if e.code == ErrorCode::INVALID_PARAMS
+                        || e.code == ErrorCode::INVALID_REQUEST
+                    {
+                        "invalid_arguments"
+                    } else {
+                        "internal"
+                    };
+                    (e, code)
+                })?;
+            check_response_size(&limits, &tool, call_result_bytes(&result))
+                .map_err(|v| (limit_error(v), "limit_exceeded"))?;
+            Ok(result)
+        }
+        .await;
+
+        if let Some((audit, arguments)) = audit {
+            let (code, summary) = match &outcome {
+                Ok(result) if result.is_error == Some(true) => {
+                    ("tool_error", crate::audit::ResultSummary::of_call_result(result))
+                }
+                Ok(result) => ("ok", crate::audit::ResultSummary::of_call_result(result)),
+                Err((_, code)) => (*code, crate::audit::ResultSummary::default()),
+            };
+            let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            audit
+                .log(crate::audit::AuditEntry::new(
+                    "stdio",
+                    "stdio",
+                    &tool,
+                    arguments,
+                    code,
+                    duration_ms,
+                    summary,
+                ))
+                .await;
+        }
+        outcome.map_err(|(e, _)| e)
     }
 
     fn get_info(&self) -> ServerInfo {
