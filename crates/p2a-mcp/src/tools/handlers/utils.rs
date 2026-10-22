@@ -364,12 +364,46 @@ macro_rules! non_map_values_are {
     };
 }
 
-/// Insert `(key, value)`, replacing an earlier entry with the same key in
-/// place (a JSON object's last duplicate wins, as in `serde_json::Map`).
-fn upsert<V>(entries: &mut Vec<(String, V)>, key: String, value: V) {
-    match entries.iter_mut().find(|(k, _)| *k == key) {
-        Some(entry) => entry.1 = value,
-        None => entries.push((key, value)),
+/// A JSON object's entries in file order, where a later duplicate key
+/// replaces the earlier value in place (the last duplicate wins, as in
+/// `serde_json::Map`). The index makes each insert O(1), so a file with many
+/// keys parses in linear time.
+struct ObjectEntries<V> {
+    entries: Vec<(String, V)>,
+    index: HashMap<String, usize>,
+}
+
+impl<V> ObjectEntries<V> {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            index: HashMap::new(),
+        }
+    }
+
+    /// Insert `(key, value)`. A new key is charged against `state` for its
+    /// second copy (in the index) and both entries; the first copy was
+    /// charged when the key was read.
+    fn insert<E: serde::de::Error>(
+        &mut self,
+        key: String,
+        value: V,
+        state: &ImportState,
+    ) -> Result<(), E> {
+        if let Some(entry) = self.index.get(&key).and_then(|&i| self.entries.get_mut(i)) {
+            entry.1 = value;
+            return Ok(());
+        }
+        let entry_bytes =
+            std::mem::size_of::<(String, V)>() + std::mem::size_of::<(String, usize)>();
+        state.charge((key.len() + entry_bytes) as u64)?;
+        self.index.insert(key.clone(), self.entries.len());
+        self.entries.push((key, value));
+        Ok(())
+    }
+
+    fn into_vec(self) -> Vec<(String, V)> {
+        self.entries
     }
 }
 
@@ -420,13 +454,14 @@ impl<'de> serde::de::Visitor<'de> for DatasetsSeed<'_> {
     }
     non_map_values_are!(None);
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut out = Vec::new();
+        let mut out = ObjectEntries::new();
         while let Some(name) = map.next_key::<String>()? {
+            self.0.checkpoint()?;
             self.0.charge(name.len() as u64)?;
             let dataset = map.next_value_seed(DatasetSeed(self.0))?;
-            upsert(&mut out, name, dataset);
+            out.insert(name, dataset, self.0)?;
         }
-        Ok(Some(out))
+        Ok(Some(out.into_vec()))
     }
 }
 
@@ -476,14 +511,14 @@ impl<'de> serde::de::Visitor<'de> for DataSeed<'_> {
     }
     non_map_values_are!(None);
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut columns = Vec::new();
+        let mut columns = ObjectEntries::new();
         while let Some(name) = map.next_key::<String>()? {
             self.0.checkpoint()?;
             self.0.charge(name.len() as u64)?;
             let column = map.next_value_seed(ColumnSeed(self.0))?;
-            upsert(&mut columns, name, column);
+            columns.insert(name, column, self.0)?;
         }
-        Ok(Some(columns))
+        Ok(Some(columns.into_vec()))
     }
 }
 
@@ -1844,6 +1879,56 @@ mod tests {
         assert!(err.contains("import limit"), "{err}");
         // The same file passes with room to spare.
         assert!(parse_session_json(json.as_bytes(), Some(10_000_000)).is_ok());
+    }
+
+    #[test]
+    fn streaming_import_keeps_file_order_and_the_last_duplicate() {
+        let json =
+            r#"{"datasets":{"a":1,"b":{"data":{"x":[1],"y":[2],"x":[3]}},"a":{"data":{"z":[4]}}}}"#;
+        let parsed = parse_session_json(json.as_bytes(), None).unwrap();
+        let names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        let columns = |d: &ParsedDataset| match d {
+            ParsedDataset::Columns(c) => c
+                .iter()
+                .map(|(n, c)| (n.clone(), format!("{c:?}")))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            columns(&parsed[0].1),
+            [("z".into(), "I64([Some(4)])".into())]
+        );
+        assert_eq!(
+            columns(&parsed[1].1),
+            [
+                ("x".to_string(), "I64([Some(3)])".to_string()),
+                ("y".to_string(), "I64([Some(2)])".to_string())
+            ]
+        );
+    }
+
+    /// Many dataset keys whose values are scalars never reach the per-column
+    /// checkpoint; the per-dataset one must still stop the parse.
+    #[test]
+    fn streaming_import_of_many_dataset_keys_can_be_cancelled() {
+        use p2a_core::resource::{Budget, CancelToken, with_budget};
+        let keys: Vec<String> = (0..50_000).map(|i| format!(r#""d{i}":{i}"#)).collect();
+        let json = format!(r#"{{"datasets":{{{}}}}}"#, keys.join(","));
+        let token = CancelToken::new();
+        token.cancel();
+        let err = with_budget(Budget::new(None, token), || {
+            parse_session_json(json.as_bytes(), None)
+        })
+        .unwrap_err();
+        assert!(err.contains("stopped"), "{err}");
+        assert!(!err.starts_with("Invalid session file"), "{err}");
+        // Without a cancellation the same file parses, in file order.
+        let parsed = parse_session_json(json.as_bytes(), None).unwrap();
+        assert_eq!(parsed.len(), 50_000);
+        assert_eq!(parsed[0].0, "d0");
+        assert_eq!(parsed[49_999].0, "d49999");
+        assert!(matches!(parsed[7].1, ParsedDataset::Invalid));
     }
 
     /// A path guaranteed to sit outside the jail root, whatever it resolves to:
