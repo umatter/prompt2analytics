@@ -271,6 +271,65 @@ fn transform_draw(z: f64, mean: f64, std_dev: f64, dist: RandomDistribution) -> 
     }
 }
 
+/// One choice situation: the attribute rows of its alternatives and the index
+/// of the chosen one.
+#[derive(Clone)]
+struct ChoiceSituation {
+    x: Vec<Vec<f64>>,
+    chosen_idx: usize,
+}
+
+/// Draw-alternative evaluations in the simulated likelihood between two
+/// cancellation checks (the draw-generation loops check every 65,536 draws).
+const SIM_WORK_PER_CHECKPOINT: usize = 65_536;
+
+/// Simulated probability of the chosen alternative of `sit`: the logit
+/// probability averaged over the first `n_draws` draws.
+///
+/// `work` counts the draw-alternative evaluations since the last cancellation
+/// check, carried across situations; the budget is checked whenever it reaches
+/// [`SIM_WORK_PER_CHECKPOINT`], so a situation with a large `n_draws` cannot
+/// run unchecked.
+fn simulated_choice_probability(
+    sit: &ChoiceSituation,
+    draws: &[Vec<f64>],
+    n_draws: usize,
+    means: &[f64],
+    std_devs: &[f64],
+    distributions: &[RandomDistribution],
+    work: &mut usize,
+) -> EconResult<f64> {
+    let n_vars = means.len();
+    let mut sim_prob = 0.0;
+
+    for r in 0..n_draws {
+        *work += sit.x.len().max(1);
+        if *work >= SIM_WORK_PER_CHECKPOINT {
+            *work = 0;
+            resource::checkpoint()?;
+        }
+        let beta: Vec<f64> = (0..n_vars)
+            .map(|j| transform_draw(draws[j][r], means[j], std_devs[j], distributions[j]))
+            .collect();
+
+        let utils: Vec<f64> = sit
+            .x
+            .iter()
+            .map(|x_alt| x_alt.iter().zip(&beta).map(|(x, b)| x * b).sum::<f64>())
+            .collect();
+
+        let max_util = utils.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_utils: Vec<f64> = utils.iter().map(|u| (u - max_util).exp()).collect();
+        let sum_exp: f64 = exp_utils.iter().sum();
+
+        let prob = exp_utils[sit.chosen_idx] / sum_exp;
+        sim_prob += prob;
+    }
+
+    sim_prob /= n_draws as f64;
+    Ok(sim_prob)
+}
+
 /// Helper to extract column as strings.
 fn extract_string_or_int_column(
     df: &polars::prelude::DataFrame,
@@ -404,12 +463,6 @@ pub fn run_mixed_logit(
     let n_alternatives = alternatives.len();
 
     // Build choice situation data structure
-    #[derive(Clone)]
-    struct ChoiceSituation {
-        x: Vec<Vec<f64>>,
-        chosen_idx: usize,
-    }
-
     let mut choice_id_to_idx: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for (i, cid) in unique_choice_ids.iter().enumerate() {
@@ -519,34 +572,18 @@ pub fn run_mixed_logit(
         }
 
         let mut total_ll = 0.0;
+        let mut work = 0;
 
-        for (s_idx, sit) in situations.iter().enumerate() {
-            if s_idx % 256 == 0 {
-                resource::checkpoint()?;
-            }
-            let _n_alts = sit.x.len();
-            let mut sim_prob = 0.0;
-
-            for r in 0..n_draws {
-                let beta: Vec<f64> = (0..n_vars)
-                    .map(|j| transform_draw(draws[j][r], means[j], std_devs[j], distributions[j]))
-                    .collect();
-
-                let utils: Vec<f64> = sit
-                    .x
-                    .iter()
-                    .map(|x_alt| x_alt.iter().zip(&beta).map(|(x, b)| x * b).sum::<f64>())
-                    .collect();
-
-                let max_util = utils.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let exp_utils: Vec<f64> = utils.iter().map(|u| (u - max_util).exp()).collect();
-                let sum_exp: f64 = exp_utils.iter().sum();
-
-                let prob = exp_utils[sit.chosen_idx] / sum_exp;
-                sim_prob += prob;
-            }
-
-            sim_prob /= n_draws as f64;
+        for sit in &situations {
+            let sim_prob = simulated_choice_probability(
+                sit,
+                &draws,
+                n_draws,
+                &means,
+                &std_devs,
+                &distributions,
+                &mut work,
+            )?;
             total_ll += sim_prob.max(1e-300).ln();
         }
 
@@ -911,6 +948,31 @@ mod tests {
     fn test_mixed_logit_impossible_draw_count_is_an_error() {
         let e = ml_run(ml_config(1usize << 60, 50, 1e-4)).unwrap_err();
         assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    /// One situation with 2 alternatives and 100,000 draws is 200,000
+    /// draw-alternative evaluations: the budget must be checked inside it.
+    #[test]
+    fn test_simulated_probability_checks_cancellation_within_a_situation() {
+        let sit = ChoiceSituation {
+            x: vec![vec![1.0], vec![0.5]],
+            chosen_idx: 0,
+        };
+        let n_draws = 100_000;
+        let draws = vec![
+            (0..n_draws)
+                .map(|r| ((r * 7919) % 1009) as f64 / 1009.0 - 0.5)
+                .collect::<Vec<f64>>(),
+        ];
+        let dists = [RandomDistribution::Normal];
+        let run = || {
+            let mut work = 0;
+            simulated_choice_probability(&sit, &draws, n_draws, &[0.3], &[0.2], &dists, &mut work)
+        };
+        let p = run().unwrap();
+        assert!(p > 0.5 && p < 1.0, "{p}");
+        let e = resource::with_budget(cancelled(), run).unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
     }
 
     #[test]
