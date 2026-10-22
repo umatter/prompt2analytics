@@ -20,9 +20,19 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 use super::utils::demean_by_entity;
+
+/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
+/// SVD fallback). Check the working set against the allocation ceiling before building it.
+const DENSE_INVERSE_COPIES: usize = 6;
+
+fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
+    let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
+    resource::check_alloc::<f64>(cells, what)
+}
 
 /// Panel GLS model type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -298,12 +308,28 @@ pub fn run_panel_gls(
 
     let n = y.len();
 
-    // Check data requirements: need N >> T for consistent estimation
-    if n_groups < n_periods {
-        warnings.push(format!(
-            "Panel GLS requires N >> T. Found N={}, T={}. Estimates may be inconsistent.",
-            n_groups, n_periods
-        ));
+    // The unrestricted T x T error covariance is estimated from N residual
+    // vectors, so its rank is at most N: with T > N it has no inverse.
+    if n_periods > n_groups {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Panel GLS estimates an unrestricted T x T error covariance from the \
+                 residuals of N entities and needs N >= T; found N = {n_groups} entities and \
+                 T = {n_periods} distinct values of '{time_col}'. Use a coarser time variable, \
+                 or a fixed- or random-effects model."
+            ),
+        });
+    }
+
+    // Rows of each entity (in row order) and each row's time index, built once
+    let mut time_idx_map: HashMap<i64, usize> = HashMap::new();
+    for (idx, &t) in unique_times.iter().enumerate() {
+        time_idx_map.insert(t, idx);
+    }
+    let row_time_idx: Vec<usize> = time_values.iter().map(|t| time_idx_map[t]).collect();
+    let mut rows_by_entity: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
+    for (i, &entity_id) in entity_ids.iter().enumerate() {
+        rows_by_entity[entity_id].push(i);
     }
 
     // Build design matrix (includes intercept for non-FE models)
@@ -418,38 +444,32 @@ pub fn run_panel_gls(
     // We estimate a T x T covariance matrix from cross-sectional residuals
     // Omega[s,t] = (1/N) * sum_i(e_is * e_it)
 
-    // Group residuals by entity
-    let mut entity_resids: Vec<Vec<f64>> = vec![Vec::new(); n_groups];
-    let mut entity_times: Vec<Vec<i64>> = vec![Vec::new(); n_groups];
-
-    // Create time index mapping
-    let mut time_idx_map: HashMap<i64, usize> = HashMap::new();
-    for (idx, &t) in unique_times.iter().enumerate() {
-        time_idx_map.insert(t, idx);
-    }
-
-    for (i, (&entity_id, &resid)) in entity_ids.iter().zip(initial_resid.iter()).enumerate() {
-        entity_resids[entity_id].push(resid);
-        entity_times[entity_id].push(time_values[i]);
-    }
-
     // Build T x T omega matrix
     let t_dim = n_periods;
-    let mut omega = Array2::<f64>::zeros((t_dim, t_dim));
-    let mut omega_counts = Array2::<usize>::zeros((t_dim, t_dim));
+    let omega_what = "panel GLS T x T error covariance";
+    ensure_dense_inverse_fits(t_dim, omega_what)?;
+    let mut omega = resource::try_zeros2(t_dim, t_dim, omega_what)?;
+    let mut omega_counts: Vec<usize> = resource::try_vec(
+        resource::checked_len(&[t_dim, t_dim], omega_what)?,
+        0,
+        omega_what,
+    )?;
 
-    for entity_id in 0..n_groups {
-        let resids = &entity_resids[entity_id];
-        let times = &entity_times[entity_id];
+    for rows in &rows_by_entity {
+        resource::checkpoint()?;
+        // Rows past the end of the residuals are skipped (the first-difference
+        // residuals are shorter than the data)
+        let rows = &rows[..rows.partition_point(|&i| i < initial_resid.len())];
 
-        for (s, &ts) in times.iter().enumerate() {
-            for (t_idx, &tt) in times.iter().enumerate() {
-                if let (Some(&s_idx), Some(&t_idx_val)) =
-                    (time_idx_map.get(&ts), time_idx_map.get(&tt))
-                {
-                    omega[[s_idx, t_idx_val]] += resids[s] * resids[t_idx];
-                    omega_counts[[s_idx, t_idx_val]] += 1;
-                }
+        for (a, &i) in rows.iter().enumerate() {
+            if a % 256 == 255 {
+                resource::checkpoint()?;
+            }
+            let s_idx = row_time_idx[i];
+            for &j in rows {
+                let t_idx = row_time_idx[j];
+                omega[[s_idx, t_idx]] += initial_resid[i] * initial_resid[j];
+                omega_counts[s_idx * t_dim + t_idx] += 1;
             }
         }
     }
@@ -457,8 +477,9 @@ pub fn run_panel_gls(
     // Average the covariance estimates
     for s in 0..t_dim {
         for t in 0..t_dim {
-            if omega_counts[[s, t]] > 0 {
-                omega[[s, t]] /= omega_counts[[s, t]] as f64;
+            let count = omega_counts[s * t_dim + t];
+            if count > 0 {
+                omega[[s, t]] /= count as f64;
             }
         }
     }
@@ -491,20 +512,8 @@ pub fn run_panel_gls(
     let mut xtox = Array2::<f64>::zeros((k, k));
     let mut xtoy = Array1::<f64>::zeros(k);
 
-    for entity_id in 0..n_groups {
-        // Get indices for this entity
-        let mut entity_indices: Vec<usize> = Vec::new();
-        let mut entity_time_indices: Vec<usize> = Vec::new();
-
-        for (i, &eid) in entity_ids.iter().enumerate() {
-            if eid == entity_id {
-                entity_indices.push(i);
-                if let Some(&t_idx) = time_idx_map.get(&time_values[i]) {
-                    entity_time_indices.push(t_idx);
-                }
-            }
-        }
-
+    for entity_indices in &rows_by_entity {
+        resource::checkpoint()?;
         let ti = entity_indices.len();
         if ti == 0 {
             continue;
@@ -522,10 +531,11 @@ pub fn run_panel_gls(
         }
 
         // Extract relevant part of Omega^{-1} for this entity's time periods
-        let mut omega_inv_i = Array2::<f64>::zeros((ti, ti));
-        for (s, &s_idx) in entity_time_indices.iter().enumerate() {
-            for (t, &t_idx) in entity_time_indices.iter().enumerate() {
-                omega_inv_i[[s, t]] = omega_inv[[s_idx, t_idx]];
+        let mut omega_inv_i = resource::try_zeros2(ti, ti, "panel GLS per-entity covariance")?;
+        for (s, &row_s) in entity_indices.iter().enumerate() {
+            let s_idx = row_time_idx[row_s];
+            for (t, &row_t) in entity_indices.iter().enumerate() {
+                omega_inv_i[[s, t]] = omega_inv[[s_idx, row_time_idx[row_t]]];
             }
         }
 
@@ -554,13 +564,9 @@ pub fn run_panel_gls(
     let residuals = &y_arr - &fitted;
 
     let rss: f64 = residuals.iter().map(|r| r * r).sum();
-    let tss: f64 = y_arr
-        .iter()
-        .map(|yi| {
-            let y_mean = y_arr.mean().unwrap_or(0.0);
-            (yi - y_mean).powi(2)
-        })
-        .sum();
+    // The mean once, not once per observation (that made this loop O(n^2))
+    let y_mean = y_arr.mean().unwrap_or(0.0);
+    let tss: f64 = y_arr.iter().map(|yi| (yi - y_mean).powi(2)).sum();
 
     let r_squared = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
 
@@ -672,6 +678,7 @@ pub fn run_pooled_gls(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
 
     const GRUNFELD_CSV: &str = include_str!("../../../../../validation/datasets/grunfeld.csv");
 
@@ -704,6 +711,159 @@ mod tests {
             assert!(
                 (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
                 "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// A balanced synthetic panel of `n_ent` entities and `n_t` periods.
+    fn synthetic_panel(n_ent: usize, n_t: usize) -> Dataset {
+        let n = n_ent * n_t;
+        let entity: Vec<i64> = (0..n).map(|i| (i / n_t) as i64).collect();
+        let time: Vec<i64> = (0..n).map(|i| (i % n_t) as i64 + 2000).collect();
+        let x: Vec<f64> = (0..n).map(|i| ((i * 37) % 101) as f64 / 10.0).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + 0.5 * x[i]
+                    + ((i / n_t) % 17) as f64 * 0.1
+                    + ((i * 7919) % 1009) as f64 / 1009.0
+                    - 0.5
+            })
+            .collect();
+        Dataset::new(
+            polars::prelude::df! { "entity" => entity, "time" => time, "x" => x, "y" => y }
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_panel_gls_refuses_more_periods_than_entities() {
+        let e = run_panel_gls(
+            &synthetic_panel(3, 6),
+            "y",
+            &["x"],
+            "entity",
+            "time",
+            Some(PanelGlsModel::Pooling),
+        )
+        .unwrap_err();
+        match e {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains("N = 3") && message.contains("T = 6"),
+                    "{message}"
+                )
+            }
+            e => panic!("{e:?}"),
+        }
+        // full Grunfeld has N = 10 firms and T = 20 years
+        let e = run_fegls(
+            &grunfeld_until(1954),
+            "inv",
+            &["value", "capital"],
+            "firm",
+            "year",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("T = 20")),
+            "{e:?}"
+        );
+        assert!(
+            run_panel_gls(
+                &synthetic_panel(5, 5),
+                "y",
+                &["x"],
+                "entity",
+                "time",
+                Some(PanelGlsModel::Pooling)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_panel_gls_covariance_respects_alloc_ceiling() {
+        // T = 60: 60*60*6*8 = 172,800 bytes > 64 KiB
+        let ds = synthetic_panel(60, 60);
+        let e = resource::with_alloc_ceiling(Some(64 << 10), || {
+            run_panel_gls(
+                &ds,
+                "y",
+                &["x"],
+                "entity",
+                "time",
+                Some(PanelGlsModel::Pooling),
+            )
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_panel_gls_stops_when_cancelled() {
+        let ds = synthetic_panel(10, 4);
+        let e = resource::with_budget(cancelled(), || {
+            run_panel_gls(&ds, "y", &["x"], "entity", "time", None)
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_panel_gls_scaling_many_entities() {
+        if cfg!(debug_assertions) {
+            return; // timing is checked only in release builds
+        }
+        let ds = synthetic_panel(100_000, 5);
+        let t0 = std::time::Instant::now();
+        let r = run_panel_gls(
+            &ds,
+            "y",
+            &["x"],
+            "entity",
+            "time",
+            Some(PanelGlsModel::Pooling),
+        )
+        .unwrap();
+        assert_eq!(r.n_groups, 100_000);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}: per-entity work must be linear",
+            t0.elapsed()
+        );
+    }
+
+    /// Pooled GLS on Grunfeld 1935-1944 (N = T = 10) vs `plm::pggls`
+    /// (plm 2.6.7), which agrees with the pre-T0-WP14 code to all printed digits:
+    ///
+    /// ```r
+    /// g <- read.csv("validation/datasets/grunfeld.csv")
+    /// d <- pdata.frame(subset(g, year <= 1944), index = c("firm", "year"))
+    /// coef(pggls(inv ~ value + capital, data = d, model = "pooling"))
+    /// # -13.7465321982 0.0959140825 0.1596389388
+    /// ```
+    #[test]
+    fn test_validate_pooled_gls_square_grunfeld_vs_plm() {
+        let r = run_pooled_gls(
+            &grunfeld_until(1944),
+            "inv",
+            &["value", "capital"],
+            "firm",
+            "year",
+        )
+        .unwrap();
+        let plm = [-13.7465321982, 0.0959140825, 0.1596389388];
+        for (got, want) in r.coefficients.iter().zip(plm) {
+            assert!(
+                (got - want).abs() < 1e-8,
+                "{:?} vs plm {plm:?}",
+                r.coefficients
             );
         }
     }

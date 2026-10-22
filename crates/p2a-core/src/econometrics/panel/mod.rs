@@ -299,7 +299,9 @@ mod tests {
                    0.7, 1.9, 2.7, 3.8, 4.8, 5.7]    // E: alpha=-1
         }
         .unwrap();
-        Dataset::new(df)
+        // Panel GLS needs T <= N: keep periods 1-5 of the 5 entities
+        let keep = df.column("time").unwrap().i64().unwrap().lt_eq(5);
+        Dataset::new(df.filter(&keep).unwrap())
     }
 
     #[test]
@@ -322,9 +324,9 @@ mod tests {
         let result = result.unwrap();
 
         assert_eq!(result.model, PanelGlsModel::FixedEffects);
-        assert_eq!(result.n_obs, 30);
+        assert_eq!(result.n_obs, 25);
         assert_eq!(result.n_groups, 5);
-        assert_eq!(result.n_periods, 6);
+        assert_eq!(result.n_periods, 5);
 
         // Coefficient should be close to 2.0
         assert!(!result.coefficients.is_empty());
@@ -1102,99 +1104,39 @@ mod tests {
         // This matches R's result where p = 0.31
     }
 
-    /// Validation test: Panel GLS with fixed effects (FEGLS/pggls)
-    /// R reference: pggls(inv ~ value + capital, data = pdata, model = "within")
-    /// Expected: value = 0.1097, capital = 0.3087
+    /// Panel GLS on full Grunfeld (N = 10 firms, T = 20 years) is refused.
+    ///
+    /// R's `pggls(inv ~ value + capital, data = pdata, model = "within")` (plm
+    /// 2.6.7) returns a generalised-inverse fit here (value = 0.1096888,
+    /// capital = 0.3086506): the 20 x 20 error covariance is estimated from 10
+    /// residual vectors, so its rank is at most 10 and it has no inverse. p2a
+    /// refuses T > N instead (T0-WP14); the square N = T = 10 panel is pinned
+    /// against plm in `gls_models.rs`.
     #[test]
-    fn test_validate_panel_gls_fe_full_grunfeld() {
+    fn test_panel_gls_fe_full_grunfeld_is_refused() {
         let dataset = create_full_grunfeld_dataset();
-        let result = run_fegls(&dataset, "inv", &["value", "capital"], "firm", "year").unwrap();
-
-        // R reference values
-        let r_value_coef = 0.1096888;
-        let r_capital_coef = 0.3086506;
-
-        // Structure validation
-        assert_eq!(result.model, PanelGlsModel::FixedEffects);
-        assert_eq!(result.n_obs, 200);
-        assert_eq!(result.n_groups, 10);
-
-        // Find variable indices
-        let value_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "value")
-            .expect("value should be in variables");
-        let capital_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "capital")
-            .expect("capital should be in variables");
-
-        // Validate coefficients (tolerance: 0.02 for GLS)
+        let err = run_fegls(&dataset, "inv", &["value", "capital"], "firm", "year").unwrap_err();
         assert!(
-            (result.coefficients[value_idx] - r_value_coef).abs() < 0.02,
-            "FEGLS value coef: Rust={:.6}, R={:.6}",
-            result.coefficients[value_idx],
-            r_value_coef
-        );
-        assert!(
-            (result.coefficients[capital_idx] - r_capital_coef).abs() < 0.02,
-            "FEGLS capital coef: Rust={:.6}, R={:.6}",
-            result.coefficients[capital_idx],
-            r_capital_coef
+            matches!(&err, crate::errors::EconError::InvalidSpecification { message }
+                if message.contains("N = 10") && message.contains("T = 20")),
+            "{err:?}"
         );
     }
 
-    /// Validation test: Pooled GLS (pggls pooling)
-    /// R reference: pggls(inv ~ value + capital, data = pdata, model = "pooling")
-    /// Expected: intercept = -40.32, value = 0.1154, capital = 0.2310
+    /// Pooled panel GLS on full Grunfeld (N = 10, T = 20) is refused.
+    ///
+    /// R's `pggls(..., model = "pooling")` returns the generalised-inverse fit
+    /// intercept = -40.3208704, value = 0.1153958, capital = 0.2310418 here; see
+    /// `test_panel_gls_fe_full_grunfeld_is_refused`.
     #[test]
-    fn test_validate_pooled_gls_full_grunfeld() {
+    fn test_pooled_gls_full_grunfeld_is_refused() {
         let dataset = create_full_grunfeld_dataset();
-        let result =
-            run_pooled_gls(&dataset, "inv", &["value", "capital"], "firm", "year").unwrap();
-
-        // R reference values
-        let r_intercept = -40.3208704;
-        let r_value_coef = 0.1153958;
-        let r_capital_coef = 0.2310418;
-
-        // Structure validation
-        assert_eq!(result.model, PanelGlsModel::Pooling);
-        assert!(result.variables.contains(&"(Intercept)".to_string()));
-
-        // Find indices
-        let intercept_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "(Intercept)")
-            .unwrap();
-        let value_idx = result.variables.iter().position(|v| v == "value").unwrap();
-        let capital_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "capital")
-            .unwrap();
-
-        // Validate coefficients (tolerance: 0.05 for pooled GLS)
+        let err =
+            run_pooled_gls(&dataset, "inv", &["value", "capital"], "firm", "year").unwrap_err();
         assert!(
-            (result.coefficients[intercept_idx] - r_intercept).abs() < 20.0,
-            "Pooled GLS intercept: Rust={:.4}, R={:.4}",
-            result.coefficients[intercept_idx],
-            r_intercept
-        );
-        assert!(
-            (result.coefficients[value_idx] - r_value_coef).abs() < 0.05,
-            "Pooled GLS value: Rust={:.6}, R={:.6}",
-            result.coefficients[value_idx],
-            r_value_coef
-        );
-        assert!(
-            (result.coefficients[capital_idx] - r_capital_coef).abs() < 0.1,
-            "Pooled GLS capital: Rust={:.6}, R={:.6}",
-            result.coefficients[capital_idx],
-            r_capital_coef
+            matches!(&err, crate::errors::EconError::InvalidSpecification { message }
+                if message.contains("N = 10") && message.contains("T = 20")),
+            "{err:?}"
         );
     }
 
