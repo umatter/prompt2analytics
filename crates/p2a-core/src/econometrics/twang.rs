@@ -52,6 +52,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::resource;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -132,13 +133,15 @@ impl fmt::Display for TwangEstimand {
 /// Configuration for twang propensity score estimation.
 #[derive(Debug, Clone)]
 pub struct TwangConfig {
-    /// Maximum number of boosting iterations (default: 3000)
+    /// Maximum number of boosting iterations (default: 3000). Must be at least 1; a
+    /// count whose tree buffer cannot be allocated is refused with
+    /// `EconError::ResourceLimit`.
     pub n_trees: usize,
 
     /// Learning rate / shrinkage (default: 0.01)
     ///
     /// Smaller values require more iterations but often give better results.
-    /// Typical values: 0.001 to 0.1
+    /// Typical values: 0.001 to 0.1. Must be finite and in (0, 1].
     pub shrinkage: f64,
 
     /// Stopping rule for selecting optimal iterations (default: ESMean)
@@ -149,7 +152,8 @@ pub struct TwangConfig {
 
     /// Balance threshold for early stopping (default: 0.1)
     ///
-    /// If the balance metric falls below this threshold, stop early.
+    /// If the balance metric falls below this threshold, stop early. Must be finite
+    /// and >= 0; 0 disables early stopping.
     pub balance_threshold: f64,
 
     /// Minimum number of iterations before early stopping (default: 100)
@@ -576,6 +580,24 @@ pub fn run_twang(
     let x = design.data;
     let covariate_names = design.column_names.clone();
 
+    validate_twang_config(&config)?;
+    if t.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "treatment '{treatment_col}' contains NaN or infinite values; twang needs a finite 0/1 treatment"
+            ),
+        });
+    }
+    for (j, name) in covariate_names.iter().enumerate() {
+        if x.column(j).iter().any(|v| !v.is_finite()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "covariate '{name}' contains NaN or infinite values; twang needs finite covariates"
+                ),
+            });
+        }
+    }
+
     // Run GBM boosting
     let (stumps, f0, balance_history, optimal_iter, propensity_scores) =
         run_gbm_boosting(&x, &t, &config)?;
@@ -648,6 +670,32 @@ pub fn twang(
     )
 }
 
+/// Checks the boosting parameters before any work.
+fn validate_twang_config(config: &TwangConfig) -> EconResult<()> {
+    if config.n_trees == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_trees must be at least 1; got 0".to_string(),
+        });
+    }
+    if !(config.shrinkage.is_finite() && config.shrinkage > 0.0 && config.shrinkage <= 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "shrinkage must be a finite learning rate in (0, 1]; got {}",
+                config.shrinkage
+            ),
+        });
+    }
+    if !(config.balance_threshold.is_finite() && config.balance_threshold >= 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "balance_threshold must be finite and >= 0 (0 disables early stopping); got {}",
+                config.balance_threshold
+            ),
+        });
+    }
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // GBM Boosting Implementation
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -674,10 +722,16 @@ fn run_gbm_boosting(
     let mut f_values = Array1::from_elem(n, f0);
 
     // Store stumps
-    let mut stumps: Vec<DecisionStump> = Vec::with_capacity(config.n_trees);
+    let mut stumps =
+        resource::try_with_capacity::<DecisionStump>(config.n_trees, "boosting trees (n_trees)")?;
 
     // Track balance at each iteration
-    let mut balance_history: Vec<f64> = Vec::with_capacity(config.n_trees + 1);
+    let history_len = config
+        .n_trees
+        .checked_add(1)
+        .ok_or_else(|| EconError::ResourceLimit("n_trees is too large".to_string()))?;
+    let mut balance_history =
+        resource::try_with_capacity::<f64>(history_len, "balance history (n_trees + 1)")?;
 
     // Initial balance (iteration 0)
     let initial_ps = f_values.mapv(sigmoid);
@@ -691,6 +745,8 @@ fn run_gbm_boosting(
 
     // Gradient boosting iterations
     for m in 0..config.n_trees {
+        resource::checkpoint()?;
+
         // Compute current probabilities
         let p: Array1<f64> = f_values.mapv(sigmoid);
 
@@ -1174,7 +1230,128 @@ fn compute_twang_ess(weights: &[f64], t: &Array1<f64>) -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
+
+    fn expect_invalid_spec(err: EconError, needle: &str) {
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains(needle),
+                    "message `{message}` does not mention `{needle}`"
+                )
+            }
+            other => panic!("expected InvalidSpecification mentioning `{needle}`, got {other:?}"),
+        }
+    }
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// `create_test_dataset()` with `x1[3] = NaN`.
+    fn dataset_with_nan_x1() -> Dataset {
+        let ds = create_test_dataset();
+        let mut x1: Vec<f64> = ds
+            .df()
+            .column("x1")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        x1[3] = f64::NAN;
+        let mut df = ds.df().clone();
+        df.with_column(Series::new("x1".into(), x1)).unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_twang_n_trees_is_an_error_not_an_abort() {
+        let cfg = TwangConfig {
+            n_trees: usize::MAX,
+            ..Default::default()
+        };
+        let err = run_twang(
+            &create_test_dataset(),
+            "treatment",
+            &["x1", "x2"],
+            Some(cfg),
+        )
+        .unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn test_twang_rejects_invalid_parameters() {
+        let d = TwangConfig::default;
+        let cases = [
+            (TwangConfig { n_trees: 0, ..d() }, "n_trees"),
+            (
+                TwangConfig {
+                    shrinkage: 0.0,
+                    ..d()
+                },
+                "shrinkage",
+            ),
+            (
+                TwangConfig {
+                    shrinkage: f64::NAN,
+                    ..d()
+                },
+                "shrinkage",
+            ),
+            (
+                TwangConfig {
+                    shrinkage: 1.5,
+                    ..d()
+                },
+                "shrinkage",
+            ),
+            (
+                TwangConfig {
+                    balance_threshold: f64::NAN,
+                    ..d()
+                },
+                "balance_threshold",
+            ),
+            (
+                TwangConfig {
+                    balance_threshold: -0.1,
+                    ..d()
+                },
+                "balance_threshold",
+            ),
+        ];
+        for (cfg, needle) in cases {
+            expect_invalid_spec(
+                run_twang(
+                    &create_test_dataset(),
+                    "treatment",
+                    &["x1", "x2"],
+                    Some(cfg),
+                )
+                .unwrap_err(),
+                needle,
+            );
+        }
+    }
+
+    #[test]
+    fn test_twang_rejects_non_finite_covariates() {
+        let err = run_twang(&dataset_with_nan_x1(), "treatment", &["x1", "x2"], None).unwrap_err();
+        expect_invalid_spec(err, "x1");
+    }
+
+    #[test]
+    fn test_twang_honours_cancellation() {
+        let r = resource::with_budget(cancelled_budget(), || {
+            run_twang(&create_test_dataset(), "treatment", &["x1", "x2"], None)
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+    }
 
     /// Create test dataset with known imbalance.
     fn create_test_dataset() -> Dataset {
