@@ -136,6 +136,7 @@ impl fmt::Display for EffectEstimationMethod {
 #[derive(Debug, Clone)]
 pub struct HetTxConfig {
     /// Number of permutations for Fisherian inference (default: 1000)
+    /// Must be at least 1.
     pub n_permutations: usize,
     /// Test statistic to use (default: Variance)
     pub test_statistic: HetTestStat,
@@ -144,6 +145,7 @@ pub struct HetTxConfig {
     /// Method for estimating individual effects (default: Matching)
     pub effect_method: EffectEstimationMethod,
     /// Number of nearest neighbors for matching (default: 3)
+    /// Must be at least 1 with [`EffectEstimationMethod::Matching`].
     pub n_neighbors: usize,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
@@ -1321,7 +1323,15 @@ mod tests {
         run_hettx(&y.view(), &treatment.view(), Some(&x.view()), config).unwrap()
     }
 
-    /// Seeded permutation p-values captured from the current implementation.
+    /// Seeded hettx output, pinned so a change to the permutation stream or the
+    /// statistics shows up.
+    ///
+    /// The three p-values sit at their extremes (no null statistic or every one
+    /// beats the observed one), so nearly any stream reproduces them. The
+    /// observed statistic, the ATE, the first null draws and their sum depend on
+    /// the matching and on every permutation. They were printed with `{:?}` from
+    /// the code before T0-WP13's hettx change (f59362c) and from 63801c5, which
+    /// agreed bit for bit on all 200 null draws.
     #[test]
     fn test_hettx_pinned_seed42() {
         let r = pinned_hettx_result();
@@ -1330,6 +1340,34 @@ mod tests {
         assert_eq!(r.null_distribution.len(), 200);
         assert_eq!(d.systematic_p_value, 0.004975124378109453);
         assert_eq!(d.idiosyncratic_p_value, 1.0);
+
+        let close = |got: f64, want: f64, what: &str| {
+            assert!(
+                (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "{what}: got {got:?}, pinned {want:?}"
+            );
+        };
+        close(r.test_statistic, 0.03221458731701996, "test_statistic");
+        close(r.ate, 0.4722925845235114, "ate");
+        let first = [
+            0.09586383625957136,
+            0.09163405198687313,
+            0.09569981139876316,
+            0.10627286156951905,
+            0.10058848618110935,
+        ];
+        for (i, want) in first.into_iter().enumerate() {
+            close(
+                r.null_distribution[i],
+                want,
+                &format!("null_distribution[{i}]"),
+            );
+        }
+        close(
+            r.null_distribution.iter().sum::<f64>(),
+            19.394879532402783,
+            "null_distribution sum",
+        );
     }
 
     #[test]
@@ -1732,5 +1770,48 @@ mod tests {
                 },
             )
         }));
+    }
+
+    /// Regression imputation has no checkpoint of its own, so a cancelled budget
+    /// is first seen at the top of the permutation loop. Without the
+    /// decomposition, whose loop has its own checkpoint, nothing else would stop
+    /// the run.
+    #[test]
+    fn test_hettx_permutation_loop_stops_when_cancelled() {
+        let (y, tr, x) = create_hettx_test_data();
+        let config = HetTxConfig {
+            effect_method: EffectEstimationMethod::Regression,
+            n_permutations: 20,
+            decompose: false,
+            seed: Some(1),
+            ..Default::default()
+        };
+        expect_cancelled(with_budget(cancelled(), || {
+            run_hettx(&y.view(), &tr.view(), Some(&x.view()), config)
+        }));
+    }
+
+    /// The decomposition's permutation loop checks the budget once per draw.
+    #[test]
+    fn test_hettx_decomposition_stops_when_cancelled() {
+        let (_, _, x) = create_hettx_test_data();
+        let tau = Array1::from_vec(
+            (0..x.nrows())
+                .map(|i| 0.5 + 0.3 * x[[i, 0]] + 0.01 * ((i * 7) % 5) as f64)
+                .collect(),
+        );
+        let names = vec!["x1".to_string(), "x2".to_string()];
+        let decompose = || {
+            compute_heterogeneity_decomposition(
+                &tau,
+                &x.view(),
+                &names,
+                20,
+                &mut ChaCha8Rng::seed_from_u64(1),
+                false,
+            )
+        };
+        assert!(decompose().is_ok());
+        expect_cancelled(with_budget(cancelled(), decompose));
     }
 }
