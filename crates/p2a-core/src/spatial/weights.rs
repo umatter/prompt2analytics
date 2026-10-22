@@ -3,6 +3,8 @@
 //! Provides spatial weights structures that combine neighbor definitions with
 //! weighting schemes, equivalent to R's `listw` class from spdep.
 
+use std::sync::Arc;
+
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
@@ -27,9 +29,12 @@ pub enum WeightStyle {
 }
 
 /// Sparse representation of spatial weights for a single observation.
+///
+/// For every weights object this crate builds, `indices` is strictly increasing (the
+/// neighbour lists are sorted and free of duplicates); lookups rely on that.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SparseWeights {
-    /// Indices of neighbors
+    /// Indices of neighbors (strictly increasing)
     pub indices: Vec<usize>,
     /// Weights corresponding to each neighbor
     pub weights: Vec<f64>,
@@ -57,19 +62,34 @@ pub struct SparseWeights {
 /// let y = array![1.0, 2.0, 1.5, 2.5];
 /// let wy = listw.lag(&y);
 /// ```
+///
+/// The neighbour lists, the weight lists and the eigenvalue cache are shared, so `clone()`
+/// is O(1); [`SpatialWeights::same_weights`] tells whether two objects are clones.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpatialWeights {
     /// Underlying neighbors structure
     neighbors: Neighbors,
     /// Sparse weights for each observation
-    weights: Vec<SparseWeights>,
+    #[serde(with = "super::neighbors::arc_serde")]
+    weights: Arc<Vec<SparseWeights>>,
     /// Style of weights
     style: WeightStyle,
     /// Number of observations
     n: usize,
-    /// Cached eigenvalues of W (computed on demand)
+    /// Cached eigen decomposition of W (computed on demand)
     #[serde(skip)]
-    eigenvalues: Option<Array1<f64>>,
+    spectrum: Option<Arc<Spectrum>>,
+}
+
+/// The eigenvalues of W, as the dense eigen decomposition returned them.
+#[derive(Debug)]
+struct Spectrum {
+    /// Real parts, sorted ascending (what [`SpatialWeights::eigenvalues`] returns).
+    real_sorted: Array1<f64>,
+    /// All eigenvalues as (real, imaginary) pairs; empty when the decomposition failed.
+    values: Vec<(f64, f64)>,
+    /// False when the decomposition failed and `real_sorted` is the legacy zero fallback.
+    ok: bool,
 }
 
 impl SpatialWeights {
@@ -181,11 +201,12 @@ impl SpatialWeights {
         }
 
         SpatialWeights {
+            // O(1): the neighbour lists are shared, not copied
             neighbors: nb.clone(),
-            weights,
+            weights: Arc::new(weights),
             style,
             n,
-            eigenvalues: None,
+            spectrum: None,
         }
     }
 
@@ -243,11 +264,12 @@ impl SpatialWeights {
         };
 
         SpatialWeights {
+            // O(1): the neighbour lists are shared, not copied
             neighbors: nb.clone(),
-            weights: weights_list,
+            weights: Arc::new(weights_list),
             style,
             n,
-            eigenvalues: None,
+            spectrum: None,
         }
     }
 
@@ -318,18 +340,23 @@ impl SpatialWeights {
     ///
     /// This uses dense matrix operations so is only suitable for moderate n.
     pub fn eigenvalues(&mut self) -> &Array1<f64> {
-        if self.eigenvalues.is_none() {
-            let w = self.to_dense();
+        let spectrum = match self.spectrum.take() {
+            Some(s) => s,
             // Use faer for eigenvalue computation
-            let eigs = compute_eigenvalues(&w);
-            self.eigenvalues = Some(eigs);
-        }
-        self.eigenvalues.as_ref().unwrap()
+            None => Arc::new(compute_spectrum(&self.to_dense())),
+        };
+        &self.spectrum.insert(spectrum).real_sorted
     }
 
     /// Get cached eigenvalues if available.
     pub fn get_eigenvalues(&self) -> Option<&Array1<f64>> {
-        self.eigenvalues.as_ref()
+        self.spectrum.as_ref().map(|s| &s.real_sorted)
+    }
+
+    /// Whether `other` is a clone of `self` (they share their weight lists). Weights built
+    /// separately are never the same, even when they are equal.
+    pub fn same_weights(&self, other: &SpatialWeights) -> bool {
+        Arc::ptr_eq(&self.weights, &other.weights)
     }
 
     /// Compute log|I - ρW| using eigenvalues.
@@ -428,16 +455,15 @@ impl SpatialWeights {
             for (idx, &j) in sw_i.indices.iter().enumerate() {
                 let w_ij = sw_i.weights[idx];
 
-                // Find w_ji
+                // Find w_ji (indices are sorted)
                 let sw_j = &self.weights[j];
-                let pos = sw_j.indices.iter().position(|&x| x == i);
-                match pos {
-                    Some(jdx) => {
+                match sw_j.indices.binary_search(&i) {
+                    Ok(jdx) => {
                         if (sw_j.weights[jdx] - w_ij).abs() > 1e-10 {
                             return false;
                         }
                     }
-                    None => return false,
+                    Err(_) => return false,
                 }
             }
         }
@@ -456,16 +482,16 @@ impl SpatialWeights {
     ///
     /// trace(W²) = Σᵢ (W²)ᵢᵢ = Σᵢ Σⱼ Wᵢⱼ * Wⱼᵢ
     ///
-    /// This is O(m) where m is the number of non-zero entries, not O(n³).
+    /// This is O(m log d) for m non-zero entries and at most d per row, not O(n³).
     pub fn trace_w2(&self) -> f64 {
         let mut trace = 0.0;
         for i in 0..self.n {
             let sw_i = &self.weights[i];
             for (idx, &j) in sw_i.indices.iter().enumerate() {
                 let w_ij = sw_i.weights[idx];
-                // Find w_ji in sparse representation
+                // Find w_ji in sparse representation (indices are sorted)
                 let sw_j = &self.weights[j];
-                if let Some(jdx) = sw_j.indices.iter().position(|&x| x == i) {
+                if let Ok(jdx) = sw_j.indices.binary_search(&i) {
                     let w_ji = sw_j.weights[jdx];
                     trace += w_ij * w_ji;
                 }
@@ -533,8 +559,8 @@ pub struct WeightsSummary {
     pub style: WeightStyle,
 }
 
-/// Compute eigenvalues of a matrix using faer.
-fn compute_eigenvalues(m: &Array2<f64>) -> Array1<f64> {
+/// Compute the eigenvalues of a matrix using faer.
+fn compute_spectrum(m: &Array2<f64>) -> Spectrum {
     use crate::linalg::matrix_ops::ndarray_to_faer;
 
     let n = m.nrows();
@@ -545,18 +571,26 @@ fn compute_eigenvalues(m: &Array2<f64>) -> Array1<f64> {
     let eigenvalues = mat.eigenvalues();
 
     // Extract real parts from the Result
-    let mut eigs_vec: Vec<f64> = match eigenvalues {
-        Ok(evs) => evs.iter().map(|ev| ev.re).collect(),
+    let (mut eigs_vec, values, ok): (Vec<f64>, Vec<(f64, f64)>, bool) = match eigenvalues {
+        Ok(evs) => (
+            evs.iter().map(|ev| ev.re).collect(),
+            evs.iter().map(|ev| (ev.re, ev.im)).collect(),
+            true,
+        ),
         Err(_) => {
             // Fallback: return zeros if eigenvalue computation fails
-            vec![0.0; n]
+            (vec![0.0; n], Vec::new(), false)
         }
     };
 
     // Sort eigenvalues
     eigs_vec.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    Array1::from_vec(eigs_vec)
+    Spectrum {
+        real_sorted: Array1::from_vec(eigs_vec),
+        values,
+        ok,
+    }
 }
 
 #[cfg(test)]
@@ -669,6 +703,54 @@ mod tests {
         // For row-standardized weights, maximum eigenvalue is 1
         let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!((max_eig - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn from_neighbors_shares_the_neighbour_lists() {
+        let nb = simple_neighbors();
+        let w = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        assert!(std::ptr::eq(w.neighbors().as_slice(), nb.as_slice()));
+    }
+
+    #[test]
+    fn clone_shares_weight_lists_and_eigen_cache() {
+        let mut w = SpatialWeights::from_neighbors(&simple_neighbors(), WeightStyle::RowStd);
+        let _ = w.eigenvalues();
+        let c = w.clone();
+        assert!(c.same_weights(&w));
+        assert!(std::ptr::eq(c.get_weights(0), w.get_weights(0)));
+        assert!(c.get_eigenvalues().is_some());
+        assert!(
+            !SpatialWeights::from_neighbors(&simple_neighbors(), WeightStyle::RowStd)
+                .same_weights(&w)
+        );
+    }
+
+    #[test]
+    fn serialized_shape_is_unchanged() {
+        let w = SpatialWeights::from_neighbors(&simple_neighbors(), WeightStyle::Binary);
+        let v = serde_json::to_value(&w).unwrap();
+        assert_eq!(v["neighbors"]["neighbors"][0], serde_json::json!([1, 2]));
+        assert_eq!(v["weights"][0]["indices"], serde_json::json!([1, 2]));
+        assert_eq!(v["n"], serde_json::json!(4));
+        let back: SpatialWeights = serde_json::from_value(v).unwrap();
+        assert_eq!(back.n(), 4);
+        assert!(back.get_eigenvalues().is_none());
+    }
+
+    #[test]
+    fn sparse_traces_and_symmetry_match_dense_on_wide_rows() {
+        // fully connected, 199 links per row: the old position() scans were O(m * degree)
+        for style in [WeightStyle::Binary, WeightStyle::RowStd] {
+            let w = SpatialWeights::from_neighbors(&Neighbors::fully_connected(200), style);
+            let d = w.to_dense();
+            let tr_w2: f64 = d.dot(&d).diag().sum();
+            let tr_wtw: f64 = d.iter().map(|v| v * v).sum();
+            assert!((w.trace_w2() - tr_w2).abs() <= 1e-12 * tr_w2.abs().max(1.0));
+            assert!((w.trace_wtw() - tr_wtw).abs() <= 1e-12 * tr_wtw.abs().max(1.0));
+            assert!(w.is_symmetric());
+        }
+        assert!(!crate::spatial::test_fixtures::knn3(WeightStyle::Binary).is_symmetric());
     }
 
     #[test]

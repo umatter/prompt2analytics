@@ -11,6 +11,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,11 +48,14 @@ pub enum NeighborMethod {
 /// // Check neighbors
 /// assert!(nb.are_neighbors(0, 1)); // 0 and 1 are neighbors
 /// ```
+///
+/// The neighbour lists are shared, so `clone()` is O(1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Neighbors {
     /// For each observation i, sorted vector of neighbor indices (0-indexed)
     /// Empty vector means no neighbors
-    neighbors: Vec<Vec<usize>>,
+    #[serde(with = "arc_serde")]
+    neighbors: Arc<Vec<Vec<usize>>>,
     /// Number of observations
     n: usize,
     /// Region identifiers (optional)
@@ -96,7 +100,7 @@ impl Neighbors {
         let symmetric = Self::check_symmetry(&sorted_neighbors);
 
         Neighbors {
-            neighbors: sorted_neighbors,
+            neighbors: Arc::new(sorted_neighbors),
             n,
             region_ids: None,
             symmetric,
@@ -305,7 +309,7 @@ impl Neighbors {
         let symmetric = symmetric.unwrap_or_else(|| Self::check_symmetry(&lists));
         Neighbors {
             n: lists.len(),
-            neighbors: lists,
+            neighbors: Arc::new(lists),
             region_ids: None,
             symmetric,
             method,
@@ -326,7 +330,7 @@ impl Neighbors {
             .collect();
 
         Neighbors {
-            neighbors,
+            neighbors: Arc::new(neighbors),
             n,
             region_ids: None,
             symmetric: true,
@@ -379,29 +383,29 @@ impl Neighbors {
 
     /// Make the neighbor structure symmetric.
     ///
-    /// If i is a neighbor of j, makes j a neighbor of i.
+    /// If i is a neighbor of j, makes j a neighbor of i. Costs O(m log d) for m links and
+    /// at most d neighbours per observation.
     pub fn make_symmetric(&mut self) {
         if self.symmetric {
             return;
         }
 
-        let mut new_neighbors = self.neighbors.clone();
+        let mut new_neighbors: Vec<Vec<usize>> = (*self.neighbors).clone();
 
-        for i in 0..self.n {
-            for &j in &self.neighbors[i] {
-                // Add i as neighbor of j if not already
-                if !new_neighbors[j].contains(&i) {
-                    new_neighbors[j].push(i);
-                }
+        // Add i as neighbor of j; duplicates are removed below
+        for (i, row) in self.neighbors.iter().enumerate() {
+            for &j in row {
+                new_neighbors[j].push(i);
             }
         }
 
         // Sort all neighbor lists
         for nb in &mut new_neighbors {
             nb.sort_unstable();
+            nb.dedup();
         }
 
-        self.neighbors = new_neighbors;
+        self.neighbors = Arc::new(new_neighbors);
         self.symmetric = true;
     }
 
@@ -439,7 +443,7 @@ impl Neighbors {
 
     /// Get the raw neighbor list.
     pub fn as_slice(&self) -> &[Vec<usize>] {
-        &self.neighbors
+        self.neighbors.as_slice()
     }
 
     /// Check symmetry of a neighbor list.
@@ -476,6 +480,24 @@ fn haversine_distance(p1: (f64, f64), p2: (f64, f64)) -> f64 {
     let c = 2.0 * a.sqrt().asin();
 
     EARTH_RADIUS_KM * c
+}
+
+/// Serde adapter for `Arc<T>` fields: serializes the shared value as `T` itself, so the
+/// JSON shape is the one an unshared field had (serde's `rc` feature is not needed).
+pub(super) mod arc_serde {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<T: Serialize, S: Serializer>(v: &Arc<T>, s: S) -> Result<S::Ok, S::Error> {
+        T::serialize(&**v, s)
+    }
+
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Arc<T>, D::Error> {
+        T::deserialize(d).map(Arc::new)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
