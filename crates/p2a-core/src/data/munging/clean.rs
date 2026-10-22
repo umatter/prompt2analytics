@@ -4,6 +4,7 @@ use polars::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use super::CHECKPOINT_EVERY;
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 
@@ -950,9 +951,6 @@ pub fn str_split(
 
     Ok(Dataset::new(result_df))
 }
-
-/// Loop iterations between two cooperative-cancellation checkpoints.
-const CHECKPOINT_EVERY: usize = 65_536;
 
 /// The parts of `s` split on `re`: at most `max_splits + 1` parts when
 /// `max_splits` is given (saturating), otherwise split on every match.

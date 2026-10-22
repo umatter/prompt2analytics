@@ -23,6 +23,7 @@
 //! let standardized = standardize(&data, &["x1", "x2"])?;
 //! ```
 
+use super::CHECKPOINT_EVERY;
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
@@ -477,9 +478,6 @@ pub fn bin(
     Ok(Dataset::new(result))
 }
 
-/// Loop iterations between two cooperative-cancellation checkpoints.
-const CHECKPOINT_EVERY: usize = 65_536;
-
 fn feature_err(e: crate::errors::EconError) -> MungeError {
     MungeError::FeatureError(e.to_string())
 }
@@ -588,8 +586,6 @@ pub fn one_hot_encode(dataset: &Dataset, column: &str, drop_first: bool) -> Mung
                 .unwrap_or_else(|_| "null".to_string())
         })
         .collect();
-
-    let feature_err = |e: crate::errors::EconError| MungeError::FeatureError(e.to_string());
 
     // Skip first category if drop_first is true
     let start_idx = if drop_first { 1 } else { 0 };
