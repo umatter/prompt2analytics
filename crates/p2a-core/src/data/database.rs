@@ -72,7 +72,12 @@ pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
 
     let first_token = match SqlLexer::new(query).next_token()? {
         Some((_, SqlToken::Word(w))) => w.to_ascii_lowercase(),
-        Some(_) => String::new(),
+        Some(_) => {
+            return Err(DatabaseError::Forbidden(
+                "the statement must start with SELECT, WITH, EXPLAIN, PRAGMA, DESCRIBE or SHOW"
+                    .to_string(),
+            ));
+        }
         None => return Err(DatabaseError::Forbidden("empty SQL statement".to_string())),
     };
     if !ALLOWED.contains(&first_token.as_str()) {
@@ -180,6 +185,10 @@ fn single_statement_body(query: &str) -> Result<&str, DatabaseError> {
     let n = bytes.len();
     let mut j = end + 1;
     while j < n {
+        if let Some(len) = duckdb_unicode_space_len(&bytes[j..]) {
+            j += len;
+            continue;
+        }
         let b = bytes[j];
         let next = bytes.get(j + 1).copied();
         match b {
@@ -292,10 +301,27 @@ enum SqlToken<'a> {
     Byte(u8),
 }
 
+/// Length of the Unicode space at the start of `s`, if it is one of the
+/// characters DuckDB replaces with an ASCII space before it parses a query
+/// (`Parser::StripUnicodeSpaces`, src/parser/parser.cpp): U+00A0, U+2000 to
+/// U+200B, U+202F, U+205F, U+2060, U+3000 and U+FEFF. Without this they would
+/// be identifier bytes here but word separators in the engine.
+fn duckdb_unicode_space_len(s: &[u8]) -> Option<usize> {
+    match s {
+        [0xC2, 0xA0, ..] => Some(2),
+        [0xE2, 0x80, 0x80..=0x8B | 0xAF, ..]
+        | [0xE2, 0x81, 0x9F | 0xA0, ..]
+        | [0xE3, 0x80, 0x80, ..]
+        | [0xEF, 0xBB, 0xBF, ..] => Some(3),
+        _ => None,
+    }
+}
+
 /// Splits SQL text into [`SqlToken`]s with DuckDB's lexical rules, skipping
-/// whitespace and comments (`--` up to an LF or CR, nested `/* */`). Every
-/// check that looks at the code of a query goes through it, so a comment hides
-/// the same text from the checks as from the engine.
+/// whitespace (ASCII, and the Unicode spaces of [`duckdb_unicode_space_len`])
+/// and comments (`--` up to an LF or CR, nested `/* */`). Every check that
+/// looks at the code of a query goes through it, so the checks split words and
+/// hide comments the way the engine does.
 struct SqlLexer<'a> {
     query: &'a str,
     i: usize,
@@ -314,6 +340,10 @@ impl<'a> SqlLexer<'a> {
         let unterminated = || DatabaseError::Forbidden(UNTERMINATED.to_string());
         while self.i < bytes.len() {
             let i = self.i;
+            if let Some(len) = duckdb_unicode_space_len(&bytes[i..]) {
+                self.i += len;
+                continue;
+            }
             let b = bytes[i];
             let next = bytes.get(i + 1).copied();
             let token = match b {
@@ -374,11 +404,18 @@ impl<'a> SqlLexer<'a> {
                     }
                 },
                 b if is_ident_byte(b) => {
-                    // Every non-ASCII byte is an identifier byte, so a word
-                    // never starts or ends inside a UTF-8 sequence.
-                    let len = bytes[i..].iter().take_while(|&&c| is_ident_byte(c)).count();
-                    self.i = i + len;
-                    SqlToken::Word(&self.query[i..i + len])
+                    // Every non-ASCII byte is an identifier byte and a Unicode
+                    // space starts with a lead byte, so a word never starts or
+                    // ends inside a UTF-8 sequence.
+                    let mut end = i + 1;
+                    while end < bytes.len()
+                        && is_ident_byte(bytes[end])
+                        && duckdb_unicode_space_len(&bytes[end..]).is_none()
+                    {
+                        end += 1;
+                    }
+                    self.i = end;
+                    SqlToken::Word(&self.query[i..end])
                 }
                 _ => {
                     self.i += 1;
@@ -1637,6 +1674,12 @@ mod tests {
             format!("EXPLAIN ANALYSE {write}"),
             format!("EXPLAIN (ANALYZE) {write}"),
             format!("EXPLAIN /* x */ ANALYZE {write}"),
+            // DuckDB turns these Unicode spaces into ASCII spaces before
+            // parsing (Parser::StripUnicodeSpaces), so they separate words.
+            format!("EXPLAIN \u{a0}ANALYZE\u{a0}{write}"),
+            format!("EXPLAIN \u{a0}ANALYSE\u{a0}{write}"),
+            format!("EXPLAIN \u{feff}ANALYZE\u{feff}{write}"),
+            format!("EXPLAIN \u{3000}ANALYZE\u{3000}{write}"),
         ];
         let dir = tempfile::tempdir().unwrap();
         let original = b"a,b\n1,2\n3,4\n";
@@ -1667,6 +1710,9 @@ mod tests {
             assert!(matches!(err, DatabaseError::Forbidden(_)), "{q}: {err}");
         }
         assert!(query_duckdb(":memory:", "EXPLAIN SELECT 1").is_ok());
+        // Non-ASCII identifiers are still words, not spaces.
+        let r = query_duckdb(":memory:", "SELECT 1 AS größe, 2 AS 列").unwrap();
+        assert_eq!(r.columns, vec!["größe".to_string(), "列".to_string()]);
     }
 
     // ------------------------------------------------------------------
@@ -2271,6 +2317,14 @@ mod tests {
         assert_eq!(first_keyword("-- c\rshow tables"), "show");
         // block comments nest, as in DuckDB's scanner
         assert_eq!(first_keyword("/* a /* b */ c */ show tables"), "show");
+        // DuckDB's Unicode spaces separate words
+        assert_eq!(first_keyword("\u{a0}show tables"), "show");
+        assert_eq!(first_keyword("\u{feff}select 1"), "select");
+        // a statement that does not start with a word says what is required
+        let err = validate_read_only_query("(SELECT 1)")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must start with SELECT"), "{err}");
         assert!(validate_read_only_query("/* /* */ SELECT */ DROP TABLE t").is_err());
         assert!(matches!(
             bounded_duckdb_sql("/* /* */ x */ SELECT 1", &rows(10)),
