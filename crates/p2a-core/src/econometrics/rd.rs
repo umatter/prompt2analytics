@@ -719,6 +719,38 @@ fn weighted_least_squares(
 
 /// Compute nearest-neighbor variance estimator.
 /// For each observation, estimates σ²ᵢ using J nearest neighbors.
+///
+/// The neighbours of an active row i (weight > 0) are the J other active rows
+/// nearest in `|x_k - x_i|`, ties broken by the lower row index, and the
+/// squared differences are summed in (distance, row) order. That is exactly
+/// what sorting every other active row by distance did before; the estimate
+/// is unchanged bit for bit, but it now costs O(m log m + m J) per side
+/// instead of O(m^2 log m), with m the number of active rows:
+///
+/// 1. The active rows are sorted once by (x, row), with -0.0 and 0.0 as one
+///    value, and the bounds of each run of equal x (a mass point) are
+///    precomputed.
+/// 2. For each row, a window around its sorted position grows by J steps,
+///    always taking the nearer side. Distances only grow outwards, so the
+///    J taken rows are J nearest ones, `d_j` (the last distance taken) is
+///    the J-th smallest distance, and every row outside the window is at
+///    least `d_j` away.
+/// 3. If `d_j == 0`, all candidates lie in the row's own mass point, which is
+///    sorted by row: the neighbours are its first J rows other than i, O(J).
+///    Otherwise the neighbours are the window rows closer than `d_j` plus the
+///    lowest-index rows among those exactly `d_j` away, which may extend past
+///    the window. Such a tie run is scanned only by rows within J sorted
+///    positions of it (a row farther away has J nearer rows), so the scans
+///    add O(m J) in total.
+///
+/// CAUS-1 will switch to rdrobust's rule (all ties at the J-th distance are
+/// kept); that changes only step 3.
+///
+/// `run_rd` gives a finite x to every active row whenever the bandwidth is
+/// finite. A non-finite x on an active row (possible only when a missing
+/// outcome makes the automatic bandwidth NaN, and then every estimate is NaN)
+/// still terminates without panicking, with deterministic but unspecified
+/// neighbours.
 fn nn_variance_estimator(
     y: &Array1<f64>,
     x: &Array1<f64>,
@@ -731,26 +763,110 @@ fn nn_variance_estimator(
     // Get indices of observations with positive weights
     let active: Vec<usize> = (0..n).filter(|&i| w[i] > 0.0).collect();
 
-    if active.len() <= j {
+    if j == 0 || active.len() <= j {
         // Not enough observations for NN estimation
         return sigma2;
     }
 
-    for &i in &active {
-        // Find J nearest neighbors by x value
-        let mut distances: Vec<(usize, f64)> = active
-            .iter()
-            .filter(|&&idx| idx != i)
-            .map(|&idx| (idx, (x[idx] - x[i]).abs()))
-            .collect();
+    let m = active.len();
+    let key = |r: usize| if x[r] == 0.0 { 0.0 } else { x[r] };
+    let mut order = active;
+    order.sort_by(|&a, &b| key(a).total_cmp(&key(b)).then(a.cmp(&b)));
 
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Bounds of the run of equal x around each sorted position.
+    let mut block_start = vec![0usize; m];
+    let mut block_end = vec![m; m];
+    for p in 1..m {
+        if key(order[p]) == key(order[p - 1]) {
+            block_start[p] = block_start[p - 1];
+        } else {
+            block_start[p] = p;
+        }
+    }
+    for p in (0..m - 1).rev() {
+        if key(order[p]) == key(order[p + 1]) {
+            block_end[p] = block_end[p + 1];
+        } else {
+            block_end[p] = p + 1;
+        }
+    }
 
-        let neighbors: Vec<usize> = distances.iter().take(j).map(|&(idx, _)| idx).collect();
+    let mut neighbors: Vec<usize> = Vec::with_capacity(j);
+    let mut ties: Vec<usize> = Vec::new();
+
+    for pos in 0..m {
+        let i = order[pos];
+        let xi = x[i];
+        let dist = |r: usize| (x[r] - xi).abs();
+
+        // Grow the window order[lo..hi] (which holds pos) by exactly j rows.
+        let (mut lo, mut hi) = (pos, pos + 1);
+        let mut d_j = 0.0_f64;
+        for _ in 0..j {
+            let take_left = match (lo > 0, hi < m) {
+                (true, true) => dist(order[lo - 1]) <= dist(order[hi]),
+                (true, false) => true,
+                (false, true) => false,
+                (false, false) => break,
+            };
+            if take_left {
+                lo -= 1;
+                d_j = dist(order[lo]);
+            } else {
+                d_j = dist(order[hi]);
+                hi += 1;
+            }
+        }
+
+        neighbors.clear();
+        if d_j == 0.0 {
+            // Every candidate ties at distance 0 inside this mass point.
+            for &r in &order[block_start[pos]..block_end[pos]] {
+                if neighbors.len() == j {
+                    break;
+                }
+                if r != i {
+                    neighbors.push(r);
+                }
+            }
+        } else {
+            ties.clear();
+            for &r in &order[lo..hi] {
+                if r == i {
+                    continue;
+                }
+                let d = dist(r);
+                if d < d_j {
+                    neighbors.push(r);
+                } else if d == d_j {
+                    ties.push(r);
+                }
+            }
+            let mut k = lo;
+            while k > 0 && dist(order[k - 1]) == d_j {
+                ties.push(order[k - 1]);
+                k -= 1;
+            }
+            let mut k = hi;
+            while k < m && dist(order[k]) == d_j {
+                ties.push(order[k]);
+                k += 1;
+            }
+            // Keep the lowest-index ties needed to reach j neighbours.
+            let need = j.saturating_sub(neighbors.len());
+            if ties.len() > need {
+                if need > 0 {
+                    ties.select_nth_unstable(need - 1);
+                }
+                ties.truncate(need);
+            }
+            neighbors.extend_from_slice(&ties);
+        }
 
         if neighbors.is_empty() {
             continue;
         }
+        neighbors.sort_by(|&a, &b| dist(a).total_cmp(&dist(b)).then(a.cmp(&b)));
 
         // Compute variance estimate: (J/(J+1)) × (1/J) × Σⱼ (yᵢ - yⱼ)²
         let yi = y[i];
@@ -2261,6 +2377,162 @@ mod tests {
             "{:?}",
             r.map(|r| r.tau_conventional)
         );
+    }
+
+    // =========================================================================
+    // Nearest-neighbour variance: fast path against the previous algorithm
+    // =========================================================================
+
+    /// Verbatim copy of the previous `nn_variance_estimator` (O(m^2 log m)),
+    /// kept as the reference the sorted-window implementation is held to.
+    fn nn_variance_naive(
+        y: &Array1<f64>,
+        x: &Array1<f64>,
+        w: &Array1<f64>,
+        j: usize,
+    ) -> Array1<f64> {
+        let n = y.len();
+        let mut sigma2 = Array1::zeros(n);
+
+        // Get indices of observations with positive weights
+        let active: Vec<usize> = (0..n).filter(|&i| w[i] > 0.0).collect();
+
+        if active.len() < j + 1 {
+            // Not enough observations for NN estimation
+            return sigma2;
+        }
+
+        for &i in &active {
+            // Find J nearest neighbors by x value
+            let mut distances: Vec<(usize, f64)> = active
+                .iter()
+                .filter(|&&idx| idx != i)
+                .map(|&idx| (idx, (x[idx] - x[i]).abs()))
+                .collect();
+
+            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            let neighbors: Vec<usize> = distances.iter().take(j).map(|&(idx, _)| idx).collect();
+
+            if neighbors.is_empty() {
+                continue;
+            }
+
+            // Compute variance estimate: (J/(J+1)) × (1/J) × Σⱼ (yᵢ - yⱼ)²
+            let yi = y[i];
+            let sum_sq: f64 = neighbors.iter().map(|&idx| (yi - y[idx]).powi(2)).sum();
+            let j_actual = neighbors.len() as f64;
+
+            sigma2[i] = (j_actual / (j_actual + 1.0)) * (sum_sq / j_actual);
+        }
+
+        sigma2
+    }
+
+    fn lcg(s: &mut u64) -> f64 {
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*s >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn same(a: &Array1<f64>, b: &Array1<f64>) {
+        assert_eq!(a.len(), b.len());
+        for (k, (p, q)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                p.to_bits() == q.to_bits() || (p.is_nan() && q.is_nan()),
+                "row {k}: {p} vs {q}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_nn_variance_fast_matches_reference() {
+        let mut s = 2026u64;
+        let n = 600;
+        let tri = |x: &Array1<f64>, h: f64| {
+            x.mapv(|v| {
+                if v < 0.0 {
+                    KernelType::Triangular.evaluate((v / h).abs())
+                } else {
+                    0.0
+                }
+            })
+        };
+        // (a) continuous x, noisy y
+        let x = Array1::from_iter((0..n).map(|_| -1.0 + 2.0 * lcg(&mut s)));
+        let y = x.mapv(|v| 1.0 + 0.5 * v) + Array1::from_iter((0..n).map(|_| lcg(&mut s) - 0.5));
+        let all = Array1::from_elem(n, 1.0);
+        for j in [1, 3, 5] {
+            same(
+                &nn_variance_estimator(&y, &x, &tri(&x, 0.6), j),
+                &nn_variance_naive(&y, &x, &tri(&x, 0.6), j),
+            );
+            same(
+                &nn_variance_estimator(&y, &x, &all, j),
+                &nn_variance_naive(&y, &x, &all, j),
+            );
+        }
+        // (b) heavy mass points (21 distinct values) and symmetric distance ties
+        let xm = x.mapv(|v| (v * 10.0).round() / 10.0);
+        for j in [1, 3, 7, 40] {
+            same(
+                &nn_variance_estimator(&y, &xm, &all, j),
+                &nn_variance_naive(&y, &xm, &all, j),
+            );
+        }
+        // mass points under a kernel window (inactive rows interleaved)
+        same(
+            &nn_variance_estimator(&y, &xm, &tri(&xm, 0.55), 4),
+            &nn_variance_naive(&y, &xm, &tri(&xm, 0.55), 4),
+        );
+        // (c) integer grid with signed zeros
+        let xg = Array1::from_iter((0..n).map(|i| match i % 9 {
+            0 => -0.0,
+            1 => 0.0,
+            k => k as f64 - 4.0,
+        }));
+        for j in [1, 3, 70, 150] {
+            same(
+                &nn_variance_estimator(&y, &xg, &all, j),
+                &nn_variance_naive(&y, &xg, &all, j),
+            );
+        }
+        // (d) tiny active sets: m == j (all zero), m == j + 1, j == 0
+        let mut w = Array1::zeros(n);
+        for k in 0..4 {
+            w[k] = 1.0;
+        }
+        for j in [0, 3, 4] {
+            same(
+                &nn_variance_estimator(&y, &x, &w, j),
+                &nn_variance_naive(&y, &x, &w, j),
+            );
+        }
+        // (e) NaN in y propagates in the same places
+        let mut yn = y.clone();
+        yn[5] = f64::NAN;
+        same(
+            &nn_variance_estimator(&yn, &xm, &all, 3),
+            &nn_variance_naive(&yn, &xm, &all, 3),
+        );
+        // (f) many small random cases: few distinct x values (heavy ties on
+        // both sides), random inactive rows, every j up to the active count
+        for case in 0..300 {
+            let m = 2 + case % 40;
+            let levels = 1 + (case / 7) % 9;
+            let xs = Array1::from_iter(
+                (0..m).map(|_| ((lcg(&mut s) * levels as f64).floor() - 2.0) * 0.5),
+            );
+            let ys = Array1::from_iter((0..m).map(|_| lcg(&mut s)));
+            let ws = Array1::from_iter((0..m).map(|_| if lcg(&mut s) < 0.8 { 1.0 } else { 0.0 }));
+            for j in 1..=m {
+                same(
+                    &nn_variance_estimator(&ys, &xs, &ws, j),
+                    &nn_variance_naive(&ys, &xs, &ws, j),
+                );
+            }
+        }
     }
 
     #[test]
