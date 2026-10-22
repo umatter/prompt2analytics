@@ -60,6 +60,7 @@ use std::sync::Arc;
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource::{self, Budget};
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -138,7 +139,8 @@ impl fmt::Display for GFormulaOutcomeType {
 /// Configuration for the parametric g-formula.
 #[derive(Debug, Clone)]
 pub struct GFormulaConfig {
-    /// Number of Monte Carlo simulations
+    /// Number of Monte Carlo simulations (at least 1; a count whose outcome buffer
+    /// cannot be allocated is refused with `EconError::ResourceLimit`)
     pub n_simulations: usize,
     /// Number of time points in the analysis
     pub time_points: usize,
@@ -146,15 +148,17 @@ pub struct GFormulaConfig {
     pub intervention: GFormulaIntervention,
     /// Type of outcome variable
     pub outcome_type: GFormulaOutcomeType,
-    /// Number of bootstrap samples for standard errors
+    /// Number of bootstrap samples for standard errors: 0 (no bootstrap; the standard
+    /// errors are NaN) or at least 2. A count whose result buffer cannot be allocated is
+    /// refused with `EconError::ResourceLimit`.
     pub n_bootstrap: usize,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
     /// Confidence level for intervals (default: 0.95)
     pub confidence_level: f64,
-    /// Maximum iterations for logistic regression
+    /// Maximum iterations for logistic regression (at least 1)
     pub max_iter: usize,
-    /// Convergence tolerance
+    /// Convergence tolerance (finite and > 0)
     pub tolerance: f64,
 }
 
@@ -544,6 +548,21 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
     if config.n_simulations == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Number of simulations must be at least 1".to_string(),
+        });
+    }
+    if config.n_bootstrap == 1 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_bootstrap must be 0 (no bootstrap) or at least 2; got 1".to_string(),
+        });
+    }
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1; got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("tolerance must be finite and > 0; got {}", config.tolerance),
         });
     }
 
@@ -957,6 +976,9 @@ fn fit_outcome_model(data: &GFormulaData, config: &GFormulaConfig) -> EconResult
 // Monte Carlo Simulation
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Simulated subjects between two cancellation checks.
+const SIMULATION_CHECK_EVERY: usize = 256;
+
 /// Simulate outcomes under a given intervention.
 #[allow(clippy::too_many_arguments)]
 fn simulate_gformula<R: Rng>(
@@ -974,9 +996,14 @@ fn simulate_gformula<R: Rng>(
     let n_baseline = data.n_baseline_covars();
     let n_tv = data.n_time_varying_covars();
 
-    let mut outcomes = Vec::with_capacity(n_sim);
+    let mut outcomes =
+        resource::try_with_capacity::<f64>(n_sim, "Monte Carlo simulations (n_simulations)")?;
 
-    for _ in 0..n_sim {
+    for s in 0..n_sim {
+        if s % SIMULATION_CHECK_EVERY == 0 {
+            resource::checkpoint()?;
+        }
+
         // Sample a subject with replacement
         let subject_idx = rng.gen_range(0..n);
 
@@ -1125,8 +1152,26 @@ fn simulate_gformula<R: Rng>(
 // Bootstrap
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Bootstrap replicates evaluated in parallel per chunk; the cancellation budget is checked
+/// between chunks and inside every replicate.
+const BOOTSTRAP_CHUNK: usize = 64;
+
+/// Runs `f` with `budget` installed on the current thread (a rayon worker does not inherit
+/// the caller's thread-local budget), or plainly when there is none.
+fn with_optional_budget<R>(budget: &Option<Budget>, f: impl FnOnce() -> R) -> R {
+    match budget {
+        Some(b) => resource::with_budget(b.clone(), f),
+        None => f(),
+    }
+}
+
 /// Bootstrap the g-formula to obtain standard errors.
 /// Returns Vec of (risk_difference, risk_intervention, risk_natural) tuples.
+///
+/// Replicates run in parallel in chunks of [`BOOTSTRAP_CHUNK`], each worker running under
+/// the caller's cooperative-cancellation budget. Replicate `b` is seeded with
+/// `seed + 1000 b` (wrapping), so results do not depend on the chunking. A failed replicate
+/// is dropped; a cancellation or resource-limit error stops the bootstrap.
 fn bootstrap_gformula(
     data: &GFormulaData,
     config: &GFormulaConfig,
@@ -1135,70 +1180,83 @@ fn bootstrap_gformula(
 ) -> EconResult<Vec<(f64, f64, f64)>> {
     let n = data.n_subjects();
 
+    let mut successful_results =
+        resource::try_with_capacity::<(f64, f64, f64)>(n_bootstrap, "bootstrap replications")?;
+    let budget = resource::current_budget();
+
     // Wrap data and config in Arc for sharing across threads
     let data_arc = Arc::new(data.clone());
     let config_arc = Arc::new(config.clone());
 
-    // Run bootstrap in parallel
-    let results: Vec<EconResult<(f64, f64, f64)>> = (0..n_bootstrap)
-        .into_par_iter()
-        .map(|b| {
-            let data = Arc::clone(&data_arc);
-            let config = Arc::clone(&config_arc);
+    let replicate = |b: usize| -> EconResult<(f64, f64, f64)> {
+        let data = Arc::clone(&data_arc);
+        let config = Arc::clone(&config_arc);
 
-            // Seed for this bootstrap sample
-            let boot_seed = seed.wrapping_add(b as u64 * 1000);
-            let mut rng = ChaCha8Rng::seed_from_u64(boot_seed);
+        // Seed for this bootstrap sample
+        let boot_seed = seed.wrapping_add((b as u64).wrapping_mul(1000));
+        let mut rng = ChaCha8Rng::seed_from_u64(boot_seed);
 
-            // Resample subjects with replacement
-            let boot_indices: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
+        // Resample subjects with replacement
+        let boot_indices: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
 
-            // Create bootstrap sample
-            let boot_data = resample_data(&data, &boot_indices)?;
+        // Create bootstrap sample
+        let boot_data = resample_data(&data, &boot_indices)?;
 
-            // Fit models on bootstrap sample
-            let cov_models = fit_covariate_models(&boot_data, &config)?;
-            let trt_models = fit_treatment_models(&boot_data, &config)?;
-            let out_model = fit_outcome_model(&boot_data, &config)?;
+        // Fit models on bootstrap sample
+        let cov_models = fit_covariate_models(&boot_data, &config)?;
+        let trt_models = fit_treatment_models(&boot_data, &config)?;
+        let out_model = fit_outcome_model(&boot_data, &config)?;
 
-            // Number of simulations for bootstrap (fewer for speed)
-            let n_sim = (config.n_simulations / 2).max(100);
+        // Number of simulations for bootstrap (fewer for speed)
+        let n_sim = (config.n_simulations / 2).max(100);
 
-            // Simulate
-            let out_nat = simulate_gformula(
-                &boot_data,
-                &cov_models,
-                &trt_models,
-                &out_model,
-                &GFormulaIntervention::NaturalCourse,
-                n_sim,
-                &config,
-                &mut rng,
-            )?;
+        // Simulate
+        let out_nat = simulate_gformula(
+            &boot_data,
+            &cov_models,
+            &trt_models,
+            &out_model,
+            &GFormulaIntervention::NaturalCourse,
+            n_sim,
+            &config,
+            &mut rng,
+        )?;
 
-            let out_int = simulate_gformula(
-                &boot_data,
-                &cov_models,
-                &trt_models,
-                &out_model,
-                &config.intervention,
-                n_sim,
-                &config,
-                &mut rng,
-            )?;
+        let out_int = simulate_gformula(
+            &boot_data,
+            &cov_models,
+            &trt_models,
+            &out_model,
+            &config.intervention,
+            n_sim,
+            &config,
+            &mut rng,
+        )?;
 
-            let risk_nat: f64 = out_nat.iter().sum::<f64>() / out_nat.len() as f64;
-            let risk_int: f64 = out_int.iter().sum::<f64>() / out_int.len() as f64;
-            let rd = risk_int - risk_nat;
+        let risk_nat: f64 = out_nat.iter().sum::<f64>() / out_nat.len() as f64;
+        let risk_int: f64 = out_int.iter().sum::<f64>() / out_int.len() as f64;
+        let rd = risk_int - risk_nat;
 
-            Ok((rd, risk_int, risk_nat))
-        })
-        .collect();
+        Ok((rd, risk_int, risk_nat))
+    };
 
-    // Collect successful results
-    let mut successful_results = Vec::with_capacity(n_bootstrap);
-    for res in results.into_iter().flatten() {
-        successful_results.push(res);
+    // Run bootstrap in parallel, one bounded chunk at a time
+    for b0 in (0..n_bootstrap).step_by(BOOTSTRAP_CHUNK) {
+        resource::checkpoint()?;
+        let b1 = b0.saturating_add(BOOTSTRAP_CHUNK).min(n_bootstrap);
+        let results: Vec<EconResult<(f64, f64, f64)>> = (b0..b1)
+            .into_par_iter()
+            .map(|b| with_optional_budget(&budget, || replicate(b)))
+            .collect();
+
+        // Collect successful results in replicate order
+        for res in results {
+            match res {
+                Ok(r) => successful_results.push(r),
+                Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+                Err(_) => {}
+            }
+        }
     }
 
     if successful_results.len() < n_bootstrap / 2 {
@@ -1366,6 +1424,7 @@ fn fit_logistic(
     let mut iterations = 0;
 
     for iter in 0..max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // Linear predictor
@@ -1434,6 +1493,119 @@ fn fit_logistic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
+
+    fn expect_invalid_spec(err: EconError, needle: &str) {
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains(needle),
+                    "message `{message}` does not mention `{needle}`"
+                )
+            }
+            other => panic!("expected InvalidSpecification mentioning `{needle}`, got {other:?}"),
+        }
+    }
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn base_config() -> GFormulaConfig {
+        GFormulaConfig {
+            n_simulations: 200,
+            n_bootstrap: 20,
+            seed: Some(42),
+            outcome_type: GFormulaOutcomeType::Continuous,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_gformula_counts_are_errors_not_aborts() {
+        for cfg in [
+            GFormulaConfig {
+                n_simulations: usize::MAX,
+                ..base_config()
+            },
+            GFormulaConfig {
+                n_bootstrap: usize::MAX,
+                ..base_config()
+            },
+        ] {
+            let err = run_gformula(&create_test_data(), cfg).unwrap_err();
+            assert!(matches!(err, EconError::ResourceLimit(_)), "got {err:?}");
+        }
+    }
+
+    #[test]
+    fn test_gformula_rejects_bad_controls() {
+        let data = create_test_data();
+        let run = |cfg| run_gformula(&data, cfg);
+        expect_invalid_spec(
+            run(GFormulaConfig {
+                n_bootstrap: 1,
+                ..base_config()
+            })
+            .unwrap_err(),
+            "n_bootstrap",
+        );
+        expect_invalid_spec(
+            run(GFormulaConfig {
+                max_iter: 0,
+                ..base_config()
+            })
+            .unwrap_err(),
+            "max_iter",
+        );
+        expect_invalid_spec(
+            run(GFormulaConfig {
+                tolerance: f64::NAN,
+                ..base_config()
+            })
+            .unwrap_err(),
+            "tolerance",
+        );
+        // 0 = no bootstrap, as before
+        assert!(
+            run(GFormulaConfig {
+                n_bootstrap: 0,
+                ..base_config()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_gformula_honours_cancellation() {
+        let r = resource::with_budget(cancelled_budget(), || {
+            run_gformula(
+                &create_test_data(),
+                GFormulaConfig {
+                    n_simulations: 200,
+                    n_bootstrap: 20,
+                    outcome_type: GFormulaOutcomeType::Continuous,
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+    }
+
+    #[test]
+    fn test_budget_reaches_rayon_workers() {
+        let budget = Some(cancelled_budget());
+        let out: Vec<EconResult<()>> = (0..8)
+            .into_par_iter()
+            .map(|_| with_optional_budget(&budget, resource::checkpoint))
+            .collect();
+        assert!(
+            out.iter()
+                .all(|r| matches!(r, Err(EconError::Cancelled(_))))
+        );
+    }
 
     /// Create a simple test dataset with known treatment effect.
     fn create_test_data() -> GFormulaData {
@@ -1495,6 +1667,26 @@ mod tests {
         assert!(result.risk_intervention >= 0.0 && result.risk_intervention <= 1.0);
         assert!(result.risk_ratio > 0.0);
         assert!(result.se_risk_difference > 0.0 && result.se_risk_difference.is_finite());
+    }
+
+    #[test]
+    fn test_gformula_bootstrap_unchanged_by_chunking() {
+        // Pinned at 1fdb22f; per-replicate seeds are seed + 1000 b, unchanged.
+        // 130 replicates cross the 64-replicate chunk boundary twice.
+        const SE_RD: [(usize, f64); 2] = [(20, 36.45400422031243), (130, 46.5715124639952)];
+        for (b, se_rd) in SE_RD {
+            let cfg = GFormulaConfig {
+                n_simulations: 200,
+                time_points: 2,
+                intervention: GFormulaIntervention::Static { treat_all: true },
+                outcome_type: GFormulaOutcomeType::Continuous,
+                n_bootstrap: b,
+                seed: Some(42),
+                ..Default::default()
+            };
+            let r = run_gformula(&create_test_data(), cfg).unwrap();
+            assert_eq!(r.se_risk_difference, se_rd, "n_bootstrap {b}");
+        }
     }
 
     #[test]

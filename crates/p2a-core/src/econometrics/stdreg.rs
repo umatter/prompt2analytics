@@ -98,6 +98,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -185,15 +186,17 @@ pub struct StdRegConfig {
     pub estimand: StdRegEstimand,
     /// Method for computing standard errors
     pub se_method: SEMethod,
-    /// Number of bootstrap replications (if using bootstrap SE)
+    /// Number of bootstrap replications (if using bootstrap SE). Must be at least 2
+    /// for bootstrap standard errors; a count whose result buffers cannot be allocated
+    /// is refused with `EconError::ResourceLimit`.
     pub n_bootstrap: usize,
     /// Confidence level for intervals (default: 0.95)
     pub confidence_level: f64,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
-    /// Maximum iterations for MLE estimation (logistic/Poisson)
+    /// Maximum iterations for MLE estimation (logistic/Poisson); at least 1
     pub max_iter: usize,
-    /// Convergence tolerance
+    /// Convergence tolerance; finite and > 0
     pub tolerance: f64,
     /// Whether to include treatment-covariate interactions in outcome model
     pub include_interactions: bool,
@@ -499,6 +502,8 @@ pub fn run_stdreg(
     config: StdRegConfig,
 ) -> EconResult<StdRegResult> {
     let mut warnings = Vec::new();
+
+    validate_stdreg_config(&config)?;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Extract Data
@@ -909,6 +914,8 @@ fn fit_logistic_model(
     let mut beta = Array1::zeros(k);
 
     for _ in 0..max_iter {
+        resource::checkpoint()?;
+
         // Linear predictor
         let z: Array1<f64> = x.dot(&beta);
         let p: Array1<f64> = z.mapv(logistic_cdf);
@@ -980,6 +987,8 @@ fn fit_poisson_model(
     let mut beta = Array1::zeros(k);
 
     for _ in 0..max_iter {
+        resource::checkpoint()?;
+
         // Linear predictor
         let z: Array1<f64> = x.dot(&beta);
         // mu = exp(z)
@@ -1096,6 +1105,29 @@ fn compute_estimand(
     }
 }
 
+/// Checks the replication count and iteration controls before any work.
+fn validate_stdreg_config(config: &StdRegConfig) -> EconResult<()> {
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1; got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("tolerance must be finite and > 0; got {}", config.tolerance),
+        });
+    }
+    if config.se_method == SEMethod::Bootstrap && config.n_bootstrap < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "n_bootstrap must be at least 2 for bootstrap standard errors; got {}",
+                config.n_bootstrap
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Compute bootstrap standard errors.
 #[allow(clippy::too_many_arguments)]
 fn compute_bootstrap_se(
@@ -1118,11 +1150,14 @@ fn compute_bootstrap_se(
         None => rand::rngs::StdRng::from_entropy(),
     };
 
-    let mut boot_ates: Vec<f64> = Vec::with_capacity(n_bootstrap);
-    let mut boot_ey1s: Vec<f64> = Vec::with_capacity(n_bootstrap);
-    let mut boot_ey0s: Vec<f64> = Vec::with_capacity(n_bootstrap);
+    let what = "bootstrap replications (n_bootstrap)";
+    let mut boot_ates = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
+    let mut boot_ey1s = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
+    let mut boot_ey0s = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
 
     for _ in 0..n_bootstrap {
+        resource::checkpoint()?;
+
         // Resample with replacement
         let indices: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
 
@@ -1148,6 +1183,7 @@ fn compute_bootstrap_se(
         let beta_boot =
             match fit_outcome_model(&x_boot, &y_boot, &a_boot, model_type, max_iter, tolerance) {
                 Ok((b, _, _)) => b,
+                Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
                 Err(_) => continue,
             };
 
@@ -1446,7 +1482,129 @@ fn normal_quantile(p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
+
+    fn expect_invalid_spec(err: EconError, needle: &str) {
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains(needle),
+                    "message `{message}` does not mention `{needle}`"
+                )
+            }
+            other => panic!("expected InvalidSpecification mentioning `{needle}`, got {other:?}"),
+        }
+    }
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn run_test_stdreg(config: StdRegConfig) -> EconResult<StdRegResult> {
+        run_stdreg(
+            &create_stdreg_test_dataset(),
+            "y",
+            "treatment",
+            &["x1", "x2"],
+            config,
+        )
+    }
+
+    #[test]
+    fn test_stdreg_bootstrap_count_is_an_error_not_an_abort() {
+        let err = run_test_stdreg(StdRegConfig {
+            se_method: SEMethod::Bootstrap,
+            n_bootstrap: usize::MAX,
+            seed: Some(42),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn test_stdreg_needs_two_replicates() {
+        let err = run_test_stdreg(StdRegConfig {
+            se_method: SEMethod::Bootstrap,
+            n_bootstrap: 1,
+            seed: Some(42),
+            ..Default::default()
+        })
+        .unwrap_err();
+        expect_invalid_spec(err, "n_bootstrap");
+        assert!(
+            run_test_stdreg(StdRegConfig {
+                se_method: SEMethod::Delta,
+                n_bootstrap: 0,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_stdreg_rejects_bad_iteration_controls() {
+        let base = || StdRegConfig {
+            se_method: SEMethod::Delta,
+            ..Default::default()
+        };
+        expect_invalid_spec(
+            run_test_stdreg(StdRegConfig {
+                max_iter: 0,
+                ..base()
+            })
+            .unwrap_err(),
+            "max_iter",
+        );
+        expect_invalid_spec(
+            run_test_stdreg(StdRegConfig {
+                tolerance: f64::NAN,
+                ..base()
+            })
+            .unwrap_err(),
+            "tolerance",
+        );
+        expect_invalid_spec(
+            run_test_stdreg(StdRegConfig {
+                tolerance: 0.0,
+                ..base()
+            })
+            .unwrap_err(),
+            "tolerance",
+        );
+    }
+
+    #[test]
+    fn test_stdreg_honours_cancellation() {
+        let r = resource::with_budget(cancelled_budget(), || {
+            run_test_stdreg(StdRegConfig {
+                model_type: StdRegModel::Linear,
+                se_method: SEMethod::Bootstrap,
+                n_bootstrap: 20,
+                seed: Some(42),
+                ..Default::default()
+            })
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+        // the IRLS loop of the logistic fit is a checkpoint too (no bootstrap here)
+        let r = resource::with_budget(cancelled_budget(), || {
+            run_stdreg(
+                &create_binary_outcome_dataset(),
+                "y",
+                "treatment",
+                &["x1"],
+                StdRegConfig {
+                    model_type: StdRegModel::Logistic,
+                    se_method: SEMethod::Delta,
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+    }
 
     /// Create a test dataset with known treatment effect.
     ///
