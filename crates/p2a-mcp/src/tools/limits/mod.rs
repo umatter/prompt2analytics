@@ -706,7 +706,9 @@ pub struct LimitViolation {
 const ECHO_CHARS: usize = 64;
 
 /// Cuts a caller string to [`ECHO_CHARS`] characters (at a char boundary, never mid-character).
-fn echo(s: &str) -> String {
+///
+/// Handlers use it for every caller-supplied name they echo in a refusal.
+pub(crate) fn echo(s: &str) -> String {
     match s.char_indices().nth(ECHO_CHARS) {
         Some((end, _)) => s[..end].to_string(),
         None => s.to_string(),

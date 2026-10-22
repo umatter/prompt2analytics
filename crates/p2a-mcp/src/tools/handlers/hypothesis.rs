@@ -13,6 +13,7 @@
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::check_named_budget;
+use crate::tools::limits::echo;
 use crate::tools::requests::hypothesis::*;
 use p2a_core::stats::{
     Alternative, CmhAlternative, PValueAdjustMethod, PoissonAlternative, mcnemar_test, mood_test,
@@ -144,33 +145,46 @@ impl AnalyticsServer {
 
         let correct = request.correct.unwrap_or(true);
 
-        // Size the table before any work: both counts include null as a level, as the core's
-        // `unique()` does. A missing column is left to the core to report.
+        // Size the table before any work, when a budget depends on its size: both counts include
+        // null as a level, as the core's `unique()` does. A missing column is left to the core
+        // to report; a count that fails is a refusal, since the budget could not be checked.
         let limits = crate::tools::limits::current();
-        let df = dataset.df();
-        let levels = |name: &str| df.column(name).ok().and_then(|c| c.n_unique().ok());
         let mut cells: Option<usize> = None;
-        if let (Some(r), Some(c)) = (levels(&request.row_var), levels(&request.col_var)) {
-            let Some(n) = r.checked_mul(c) else {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Chi-squared test of independence refused: `{}` has {r} levels and `{}` has \
-                     {c}, a table that is too large to count.",
-                    request.row_var, request.col_var
-                ))]));
-            };
-            if let Err(msg) = check_named_budget(
-                "hypothesis_chisq_independence",
-                "table_cells",
-                n as u64,
-                limits.table_cells,
+        if limits.table_cells.is_some() || limits.response_bytes.is_some() {
+            let df = dataset.df();
+            let (r, c) = match (
+                budget_level_count(df, &request.row_var),
+                budget_level_count(df, &request.col_var),
             ) {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Chi-squared test of independence refused: `{}` has {r} levels and `{}` has \
-                     {c}, a table of {n} cells. {msg} Use columns with fewer distinct values.",
-                    request.row_var, request.col_var
-                ))]));
+                (Ok(r), Ok(c)) => (r, c),
+                (Err(msg), _) | (_, Err(msg)) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Chi-squared test of independence refused: {msg}"
+                    ))]));
+                }
+            };
+            if let (Some(r), Some(c)) = (r, c) {
+                let (row_var, col_var) = (echo(&request.row_var), echo(&request.col_var));
+                let Some(n) = r.checked_mul(c) else {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Chi-squared test of independence refused: `{row_var}` has {r} levels \
+                         and `{col_var}` has {c}, a table that is too large to count."
+                    ))]));
+                };
+                if let Err(msg) = check_named_budget(
+                    "hypothesis_chisq_independence",
+                    "table_cells",
+                    n as u64,
+                    limits.table_cells,
+                ) {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Chi-squared test of independence refused: `{row_var}` has {r} levels \
+                         and `{col_var}` has {c}, a table of {n} cells. {msg} Use columns with \
+                         fewer distinct values."
+                    ))]));
+                }
+                cells = Some(n);
             }
-            cells = Some(n);
         }
 
         match run_chisq_independence(dataset, &request.row_var, &request.col_var, correct) {
@@ -1698,28 +1712,57 @@ impl AnalyticsServer {
 /// of the k(k-1)/2 tests run.
 ///
 /// The count is the factor's distinct values minus one for null, an upper bound on the core's k
-/// (the core also drops rows whose response is missing). A missing column is left to the core to
-/// report.
+/// (the core also drops rows whose response is missing). Nothing is counted when `max_groups` is
+/// off. A missing column is left to the core to report; a count that fails is a refusal.
 fn check_pairwise_groups(
     dataset: &p2a_core::data::Dataset,
     tool: &str,
     label: &str,
     factor: &str,
 ) -> Result<(), String> {
+    let Some(max_groups) = crate::tools::limits::current().max_groups else {
+        return Ok(());
+    };
     let Ok(col) = dataset.df().column(factor) else {
         return Ok(());
     };
-    let Ok(n_unique) = col.n_unique() else {
-        return Ok(());
-    };
+    let n_unique = level_count_or_refusal(factor, col.n_unique())
+        .map_err(|msg| format!("Pairwise {label} refused: {msg}"))?;
     let k = n_unique.saturating_sub(usize::from(col.null_count() > 0)) as u64;
-    let limits = crate::tools::limits::current();
-    check_named_budget(tool, "max_groups", k, limits.max_groups.map(|v| v as u64)).map_err(|msg| {
+    check_named_budget(tool, "max_groups", k, Some(max_groups as u64)).map_err(|msg| {
         let comparisons = k.saturating_mul(k.saturating_sub(1)) / 2;
         format!(
-            "Pairwise {label} refused: factor `{factor}` has {k} groups, which needs \
+            "Pairwise {label} refused: factor `{}` has {k} groups, which needs \
              {comparisons} comparisons. {msg} Use a factor with fewer levels or filter the data \
-             first."
+             first.",
+            echo(factor)
+        )
+    })
+}
+
+/// The distinct values of column `name` (null counted as one, as the core's `unique()` does) for
+/// a size budget: `Ok(None)` when the column is missing, which the core reports itself.
+fn budget_level_count(
+    df: &p2a_core::polars::prelude::DataFrame,
+    name: &str,
+) -> Result<Option<usize>, String> {
+    let Ok(col) = df.column(name) else {
+        return Ok(None);
+    };
+    level_count_or_refusal(name, col.n_unique()).map(Some)
+}
+
+/// A distinct-value count a budget depends on, or the refusal when it could not be taken (the
+/// budget cannot be checked, so the request must not run unbounded).
+fn level_count_or_refusal(
+    name: &str,
+    count: p2a_core::polars::prelude::PolarsResult<usize>,
+) -> Result<usize, String> {
+    count.map_err(|e| {
+        format!(
+            "the distinct values of `{}` could not be counted to check this server's limits \
+             ({e}).",
+            echo(name)
         )
     })
 }
@@ -1779,6 +1822,60 @@ mod tests {
         assert_eq!(r.is_error, Some(true));
         let t = text(&r);
         assert!(t.contains("1002001") && t.contains("table_cells"), "{t}");
+    }
+
+    #[test]
+    fn chisq_independence_refusal_bounds_the_names_it_echoes() {
+        let (row, col) = ("r".repeat(300), "c".repeat(300));
+        let mut df = pair_ids(1001);
+        df.rename("id1", row.as_str().into()).unwrap();
+        df.rename("id2", col.as_str().into()).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req(&row, &col))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("table_cells") && t.contains(&"r".repeat(64)),
+            "{t}"
+        );
+        assert!(
+            !t.contains(&"r".repeat(65)) && !t.contains(&"c".repeat(65)),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn chisq_independence_with_limits_off_returns_every_array() {
+        // No budget: no level pre-count, and the per-cell arrays are always returned
+        let (rt, server) = server_with(vec![("d", pair_ids(50))]);
+        let r = limits::with_limits(Limits::off(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req("id1", "id2"))))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let v: serde_json::Value = serde_json::from_str(&text(&r)).unwrap();
+        assert_eq!(v["observed"].as_array().map(Vec::len), Some(2500));
+        assert_eq!(v["std_residuals"].as_array().map(Vec::len), Some(2500));
+    }
+
+    #[test]
+    fn level_count_failure_is_a_refusal_naming_the_column() {
+        // Pre-fix a failed n_unique() skipped the budget check and the core ran unbounded
+        let long = "g".repeat(100);
+        let e = level_count_or_refusal(&long, Err(PolarsError::ComputeError("boom".into())))
+            .unwrap_err();
+        assert!(
+            e.contains(&"g".repeat(64)) && !e.contains(&"g".repeat(65)),
+            "{e}"
+        );
+        assert!(
+            e.contains("could not be counted") && e.contains("boom"),
+            "{e}"
+        );
+        assert_eq!(level_count_or_refusal("g", Ok(7)), Ok(7));
     }
 
     #[test]
@@ -1871,6 +1968,29 @@ mod tests {
         .unwrap();
         assert_eq!(r.is_error, Some(true));
         assert!(text(&r).contains("max_groups"), "{}", text(&r));
+    }
+
+    #[test]
+    fn pairwise_refusal_bounds_the_factor_name_it_echoes() {
+        let long = "f".repeat(300);
+        let mut df = grouped(202, 2); // 101 groups > 100
+        df.rename("g", long.as_str().into()).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let req = PairwiseTTestRequest {
+            factor: long.clone(),
+            ..ttest_req()
+        };
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_pairwise_t_test(Parameters(req)))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("max_groups") && t.contains(&"f".repeat(64)),
+            "{t}"
+        );
+        assert!(!t.contains(&"f".repeat(65)), "{t}");
     }
 
     #[test]

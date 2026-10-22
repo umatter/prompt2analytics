@@ -22,7 +22,9 @@ use rmcp::{
 const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{check_named_budget, extract_column_f64, extract_numeric_matrix};
+use crate::tools::common::{
+    REFUSAL_NAMES, check_named_budget, echo_list, extract_column_f64, extract_numeric_matrix,
+};
 use crate::tools::requests::stats::{
     ApproxRequest, CancorRequest, CorrelationRequest, CovWtRequest, DensityRequest, EcdfRequest,
     FactorAnalysisRequest, FivenumRequest, IqrRequest, IsoregRequest, LoglinRequest, MadRequest,
@@ -178,15 +180,12 @@ impl AnalyticsServer {
             n_cells as u64,
             limits.table_cells,
         ) {
-            let dims = dimensions
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>()
-                .join(" x ");
+            let dims: Vec<String> = dimensions.iter().map(|d| d.to_string()).collect();
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Log-linear model refused: the contingency table of {} would have {n_cells} cells \
-                 ({dims}). {msg} Use factor columns with fewer distinct values.",
-                request.factor_columns.join(", ")
+                 ({}). {msg} Use factor columns with fewer distinct values.",
+                echo_list(&request.factor_columns, ", ", REFUSAL_NAMES),
+                echo_list(&dims, " x ", REFUSAL_NAMES)
             ))]));
         }
 
@@ -204,9 +203,8 @@ impl AnalyticsServer {
             if i % 65_536 == 0
                 && let Err(e) = p2a_core::resource::checkpoint()
             {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Log-linear model fitting stopped: {e}"
-                ))]));
+                // "Computation stopped: ...", raised while the table is being counted
+                return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
             }
             // Compute cell index from factor indices
             let mut cell_idx = 0;
@@ -2232,6 +2230,46 @@ mod tests {
         let t = text(&r);
         assert!(
             t.contains("1728000") && t.contains("table_cells") && t.contains("1000000"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn loglin_refusal_bounds_the_names_it_echoes() {
+        // 7 factors of 10 levels: 10^7 cells > 1,000,000. Pre-fix the refusal listed every
+        // factor name in full.
+        let names: Vec<String> = (0..7).map(|i| format!("{}{i}", "f".repeat(200))).collect();
+        let cols: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let (rt, server) = server_with(vec![("d", ids(10, &cols))]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.stats_loglin(Parameters(loglin_req(&cols))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("table_cells") && t.contains("(and 2 more)"),
+            "{t}"
+        );
+        assert!(!t.contains(&"f".repeat(65)), "{t}");
+    }
+
+    #[test]
+    fn loglin_cancelled_while_counting_says_so_once() {
+        // Pre-fix: "Log-linear model fitting stopped: Computation stopped: ...", raised while the
+        // table was still being counted
+        let (rt, server) = server_with(vec![("d", ids(4, &["a", "b"]))]);
+        let token = p2a_core::resource::CancelToken::new();
+        token.cancel();
+        let r =
+            p2a_core::resource::with_budget(p2a_core::resource::Budget::new(None, token), || {
+                rt.block_on(server.stats_loglin(Parameters(loglin_req(&["a", "b"]))))
+            })
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.starts_with("Computation stopped") && t.matches("stopped").count() == 1,
             "{t}"
         );
     }

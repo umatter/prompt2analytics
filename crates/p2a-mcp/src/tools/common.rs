@@ -211,6 +211,24 @@ pub fn check_named_budget(
         })
 }
 
+/// How many caller-supplied names a refusal lists before "(and N more)".
+pub(crate) const REFUSAL_NAMES: usize = 5;
+
+/// Caller-supplied names for a refusal, joined by `sep`: each cut by
+/// [`crate::tools::limits::echo`], at most `max` of them, then "(and N more)".
+pub(crate) fn echo_list<S: AsRef<str>>(items: &[S], sep: &str, max: usize) -> String {
+    let mut out = items
+        .iter()
+        .take(max)
+        .map(|s| crate::tools::limits::echo(s.as_ref()))
+        .collect::<Vec<_>>()
+        .join(sep);
+    if items.len() > max {
+        out.push_str(&format!(" (and {} more)", items.len() - max));
+    }
+    out
+}
+
 /// Shared helpers for handler unit tests.
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -267,6 +285,17 @@ mod tests {
             "{e}"
         );
         assert!(check_named_budget("stats_loglin", "table_cells", u64::MAX, None).is_ok());
+    }
+
+    #[test]
+    fn echo_list_cuts_each_name_and_the_list() {
+        let long = "n".repeat(200);
+        let names: Vec<String> = (0..7).map(|i| format!("{long}{i}")).collect();
+        let s = echo_list(&names, ", ", 3);
+        assert!(s.ends_with(" (and 4 more)"), "{s}");
+        assert_eq!(s.matches(&"n".repeat(64)).count(), 3, "{s}");
+        assert!(!s.contains(&"n".repeat(65)), "{s}");
+        assert_eq!(echo_list(&["a", "b"], " x ", 3), "a x b");
     }
 
     #[test]
