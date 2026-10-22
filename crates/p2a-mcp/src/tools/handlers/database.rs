@@ -376,7 +376,7 @@ impl AnalyticsServer {
 
     /// Query a DuckDB database and load results as a dataset.
     #[tool(
-        description = "Execute exactly one read-only SQL statement (SELECT, WITH, EXPLAIN, PRAGMA, DESCRIBE or SHOW) against a DuckDB database and load the results as a dataset. DuckDB supports advanced analytics SQL including window functions, CTEs, and more. ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused, and the query cannot read files: ':memory:' starts empty, so to query a CSV or Parquet file use db_query_file with {file}. The server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
+        description = "Execute exactly one read-only SQL statement (SELECT, WITH, EXPLAIN without ANALYZE, PRAGMA, DESCRIBE or SHOW) against a DuckDB database and load the results as a dataset. DuckDB supports advanced analytics SQL including window functions, CTEs, and more. EXPLAIN ANALYZE, ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused, and the query cannot read files: ':memory:' starts empty, so to query a CSV or Parquet file use db_query_file with {file}. The server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
     )]
     pub async fn db_duckdb_query(
         &self,
@@ -516,7 +516,7 @@ impl AnalyticsServer {
 
     /// Query a Parquet or CSV file directly using DuckDB SQL.
     #[tool(
-        description = "Execute exactly one read-only SQL statement directly on a Parquet or CSV file using DuckDB. This is powerful for filtering, aggregating, or joining large files before loading them as datasets. Refer to the file as {file}, also inside reader functions, for example SELECT * FROM {file} or read_csv_auto({file}, header = true); the query can read file_path and no other file. ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused. The server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
+        description = "Execute exactly one read-only SQL statement directly on a Parquet or CSV file using DuckDB. This is powerful for filtering, aggregating, or joining large files before loading them as datasets. Refer to the file as {file}, also inside reader functions, for example SELECT * FROM {file} or read_csv_auto({file}, header = true); the query can read file_path and no other file. EXPLAIN ANALYZE, ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused. The server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
     )]
     pub async fn db_query_file(
         &self,

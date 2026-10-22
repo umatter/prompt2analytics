@@ -62,7 +62,7 @@ pub struct DuckDBQueryRequest {
 
     /// SQL query to execute
     #[schemars(
-        description = "Exactly one read-only SQL statement (SELECT, WITH, EXPLAIN, PRAGMA, DESCRIBE or SHOW). DuckDB supports advanced analytics SQL. ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused. The server may cap the rows returned."
+        description = "Exactly one read-only SQL statement (SELECT, WITH, EXPLAIN without ANALYZE, PRAGMA, DESCRIBE or SHOW). DuckDB supports advanced analytics SQL. EXPLAIN ANALYZE, ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused. The server may cap the rows returned."
     )]
     pub query: String,
 
