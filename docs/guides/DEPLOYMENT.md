@@ -290,7 +290,8 @@ HTTP), and they never depend on the resource profile:
   finds the statement boundary and the first keyword, which must be `SELECT`,
   `WITH`, `EXPLAIN`, `PRAGMA`, `DESCRIBE` or `SHOW`. DuckDB statements also may
   not use `EXPLAIN ANALYZE` (or `EXPLAIN` with an option list), which executes
-  the statement, or a `COPY` keyword anywhere.
+  the statement, or a `COPY` keyword anywhere outside strings, quoted
+  identifiers and comments.
 - **Engine lockdown.** DuckDB database files open read-only, and every DuckDB
   connection has external file access, extension installation and loading,
   community extensions and configuration changes disabled (parquet support is
