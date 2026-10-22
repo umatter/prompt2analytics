@@ -136,7 +136,13 @@ fn zero_is_none(explicit: Option<u64>, default: Option<u64>) -> Option<u64> {
 impl ExecConfig {
     /// Resolve the governor settings from the configured knobs and the
     /// resource profile. Explicit knobs override the profile default.
+    ///
+    /// `cfg` is read as an HTTP configuration whatever its `transport` says
+    /// (`ServerConfig::as_http`), like the router built from it, so the
+    /// deployment mode and resource profile here are the ones the router
+    /// serves.
     pub fn from_config(cfg: &ServerConfig) -> Self {
+        let cfg = &cfg.as_http();
         let hosted = cfg.resource_profile() == ResourceProfile::Hosted;
         let cpus = available_cpus();
         let exec = &cfg.exec;
@@ -1245,6 +1251,20 @@ mod tests {
             assert!(!c.session_dirs);
             assert!(!c.redact_health);
         }
+    }
+
+    #[test]
+    fn exec_config_reads_the_config_as_http() {
+        // The default transport is stdio, which on its own reads as local
+        // mode; the governor resolves the HTTP deployment mode, as the router
+        // built from the same config does.
+        let mut c = ServerConfig::default();
+        c.http.addr = "0.0.0.0:8080".parse().unwrap();
+        c.http.allow_unauthenticated = true;
+        let e = ExecConfig::from_config(&c);
+        assert_eq!(e.deadline, Some(Duration::from_secs(60)));
+        assert_eq!(e.session_data_bytes, Some(200 << 20));
+        assert!(e.redact_health);
     }
 
     #[test]

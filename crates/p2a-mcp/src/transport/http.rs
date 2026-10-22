@@ -53,24 +53,12 @@ pub struct AppState {
     pub governor: Arc<ToolGovernor>,
 }
 
-/// `config` with its transport set to HTTP. Everything in this module serves
-/// HTTP, and `ServerConfig`'s default transport is stdio, which reads as
-/// local mode with no bind guard; so `bind`, `serve` and the app builders
-/// derive the deployment mode, resource profile and bind guard from the HTTP
-/// settings whatever `config.transport` says.
-fn as_http(config: &ServerConfig) -> ServerConfig {
-    ServerConfig {
-        transport: TransportType::Http,
-        ..config.clone()
-    }
-}
-
 /// Build the shared state and the router for `config`, with the governor
 /// settings resolved from it (`ExecConfig::from_config`). The configuration
-/// is read as an HTTP one whatever its `transport` field says.
+/// is read as an HTTP one whatever its `transport` field says
+/// (`ServerConfig::as_http`).
 pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), TransportError> {
-    let config = as_http(config);
-    build_app_with(&config, ExecConfig::from_config(&config)).await
+    build_app_with(config, ExecConfig::from_config(config)).await
 }
 
 /// Build the shared state and the router for `config` with explicit governor
@@ -87,7 +75,7 @@ pub async fn build_app_with(
     config: &ServerConfig,
     exec: ExecConfig,
 ) -> Result<(Router, AppState), TransportError> {
-    let config = &as_http(config);
+    let config = &config.as_http();
     // Resolved before anything is spawned, so a bad override refuses the
     // start without leaving tasks behind.
     #[cfg(feature = "db")]
@@ -241,7 +229,8 @@ async fn init_persistence(
 /// `config.transport` says, including the stdio default of
 /// `ServerConfig::default()`.
 pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListener> {
-    as_http(config)
+    config
+        .as_http()
         .validate()
         .map_err(|e| TransportError::Config(e.to_string()))?;
     let addr = config.http.addr;
@@ -369,7 +358,7 @@ fn spawn_stuck_watchdog(governor: Arc<ToolGovernor>, limit: Duration) {
 /// `state.persistent_manager` is set. The routes and middleware follow the
 /// HTTP deployment mode of `config` whatever its `transport` field says.
 pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
-    let config = &as_http(config);
+    let config = &config.as_http();
     #[cfg(feature = "db")]
     let persistent_manager = state.persistent_manager.clone();
     let governor = Arc::clone(&state.governor);

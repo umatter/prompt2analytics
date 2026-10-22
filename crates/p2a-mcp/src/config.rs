@@ -485,6 +485,21 @@ impl ServerConfig {
         Ok(config)
     }
 
+    /// This configuration with its transport set to HTTP. `ServerConfig`'s
+    /// default transport is stdio, which reads as local mode with no bind
+    /// guard; so the HTTP start paths (`transport::http::bind`, `serve`, the
+    /// app builders and `create_router`) and the governor resolver
+    /// (`exec::ExecConfig::from_config`) derive the deployment mode, resource
+    /// profile and bind guard from the HTTP settings whatever `transport`
+    /// says.
+    #[cfg(feature = "http")]
+    pub(crate) fn as_http(&self) -> ServerConfig {
+        ServerConfig {
+            transport: TransportType::Http,
+            ..self.clone()
+        }
+    }
+
     /// The deployment mode: stdio (or a build without the `http` feature) is
     /// always [`DeploymentMode::Local`]; HTTP follows
     /// `HttpConfig::deployment_mode`.
