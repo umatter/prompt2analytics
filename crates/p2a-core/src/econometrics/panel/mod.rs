@@ -276,8 +276,8 @@ mod tests {
     // =====================================================================
 
     fn create_gls_panel_dataset() -> Dataset {
-        // Panel with serial correlation in errors
-        // 5 entities, 6 time periods
+        // Panel with serial correlation in errors: 5 entities, 6 time periods,
+        // of which period 6 is dropped below (panel GLS needs T <= N)
         let df = df! {
             "entity" => ["A", "A", "A", "A", "A", "A",
                         "B", "B", "B", "B", "B", "B",
@@ -1110,8 +1110,9 @@ mod tests {
     /// 2.6.7) returns a generalised-inverse fit here (value = 0.1096888,
     /// capital = 0.3086506): the 20 x 20 error covariance is estimated from 10
     /// residual vectors, so its rank is at most 10 and it has no inverse. p2a
-    /// refuses T > N instead (T0-WP14); the square N = T = 10 panel is pinned
-    /// against plm in `gls_models.rs`.
+    /// refuses T > N instead (T0-WP14). The pooled fit on the square N = T = 10
+    /// panel is pinned against plm in `gls_models.rs`; FE panel GLS has no R
+    /// validation until ECON-33 (Tier 4).
     #[test]
     fn test_panel_gls_fe_full_grunfeld_is_refused() {
         let dataset = create_full_grunfeld_dataset();

@@ -704,6 +704,17 @@ mod tests {
 
     /// Characterisation test recorded from the code before the T0-WP14 resource
     /// bounds; the refactor must not move these numbers.
+    ///
+    /// None of the three fits converges: each stops at max_iter = 100, so these
+    /// are characterisations of a non-converged, step-clamped Newton iterate,
+    /// not of an MLE. The 10-row `create_ordered_dataset()` is separated by x
+    /// (and its labels sort as High < Low < Medium, ECON-19). The 60-row noisy
+    /// fit has overlapping categories, but does not converge either, because
+    /// the beta score has the wrong sign and the outer-product Hessian divides
+    /// by p_i twice (ECON-4, Tier 2); fixing that will move these numbers. The
+    /// 1e-6 ridge keeps the iterate well conditioned: raising every third x
+    /// value by one ulp (each of the three offsets in turn) moves no pinned
+    /// value by more than 3e-14 relative.
     #[test]
     fn test_pinned_ordered_outputs() {
         let ds = create_ordered_dataset();

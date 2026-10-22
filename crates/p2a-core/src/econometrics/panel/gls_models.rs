@@ -868,33 +868,51 @@ mod tests {
         }
     }
 
-    /// Characterisation test recorded from the code before the T0-WP14 resource
-    /// bounds (Grunfeld 1935-1944, N = T = 10); the refactor must not move these
-    /// numbers.
+    /// Characterisation test: the code before the T0-WP14 resource bounds gives
+    /// the same numbers, and later refactors must not move them. Each fit uses a
+    /// panel whose T x T Omega has full rank, so the pinned values do not depend
+    /// on rounding-level pivots inside `safe_inverse`.
+    ///
+    /// FixedEffects is not pinned: under the current algorithm its Omega is
+    /// singular along the vector of ones (the within residuals sum to zero in
+    /// every entity), so its SEs are rounding noise of order 1e-9 (ECON-33,
+    /// Tier 4).
     #[test]
     fn test_pinned_panel_gls_outputs() {
-        let ds = grunfeld_until(1944);
-        let mut v = Vec::new();
-        for model in [
-            PanelGlsModel::Pooling,
-            PanelGlsModel::FixedEffects,
-            PanelGlsModel::FirstDifference,
-        ] {
-            let r = run_panel_gls(
-                &ds,
+        let fit = |ds: &Dataset, model| {
+            run_panel_gls(
+                ds,
                 "inv",
                 &["value", "capital"],
                 "firm",
                 "year",
                 Some(model),
             )
-            .unwrap();
-            assert_eq!((r.n_groups, r.n_periods), (10, 10));
+            .unwrap()
+        };
+        let mut v = Vec::new();
+        let mut push = |r: &PanelGlsResult| {
             v.extend(&r.coefficients);
             v.extend(&r.std_errors);
             v.push(r.rss);
             v.push(r.r_squared);
-        }
+        };
+
+        // Pooling on Grunfeld 1935-1944 (N = T = 10): well conditioned, and
+        // its coefficients match plm (see the test above).
+        let r = fit(&grunfeld_until(1944), PanelGlsModel::Pooling);
+        assert_eq!((r.n_groups, r.n_periods), (10, 10));
+        push(&r);
+
+        // FirstDifference on Grunfeld 1935-1939 (N = 10, T = 5). The 40
+        // differenced residuals are matched to the first 40 data rows, so they
+        // cover 8 of the 10 firms (the residual-truncation path); the 5 x 5
+        // Omega still has full rank (smallest eigenvalue about 56, condition
+        // number about 50).
+        let r = fit(&grunfeld_until(1939), PanelGlsModel::FirstDifference);
+        assert_eq!((r.n_groups, r.n_periods), (10, 5));
+        push(&r);
+
         assert_pinned(
             "panel GLS",
             &v,
@@ -907,20 +925,14 @@ mod tests {
                 0.32641053705590134,
                 498646.34093838633,
                 0.7644231283694306,
-                0.09607722792206687,
-                0.09128252097477796,
-                1.0075131531233855e-9,
-                8.925756228872445e-9,
-                507404.47605919285,
-                0.7602854983425167,
-                -25.192548642621333,
-                0.09050252616477833,
-                0.28254346945169106,
-                125.19568572838462,
-                0.08611173202631575,
-                0.6826921128016088,
-                522284.18158618984,
-                0.7532558378576177,
+                15.81979032586473,
+                0.07743052040539032,
+                -0.04783883473444184,
+                446.5929154806963,
+                0.18013711466451304,
+                2.881466704862209,
+                228999.72960693543,
+                0.6970403766260955,
             ],
         );
     }

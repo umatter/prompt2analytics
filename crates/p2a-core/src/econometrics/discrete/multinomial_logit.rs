@@ -588,29 +588,89 @@ mod tests {
         }
     }
 
-    /// Characterisation test recorded from the code before the T0-WP14 resource
-    /// bounds; the refactor must not move these numbers.
+    /// 60 noisy rows with three overlapping outcome classes (20 A, 13 B, 27 C),
+    /// so the MLE exists: A covers x in [0, 3], B [1.25, 4] and C [2, 5.5].
+    fn create_multinomial_dataset_60() -> Dataset {
+        let mut y: Vec<&str> = Vec::with_capacity(60);
+        let mut x: Vec<f64> = Vec::with_capacity(60);
+        for i in 0..60usize {
+            let xi = ((i * 37) % 23) as f64 / 4.0;
+            let u = ((i * 7919) % 101) as f64 / 101.0;
+            let z = 0.8 * xi + 3.0 * (u - 0.5);
+            y.push(if z < 1.2 {
+                "A"
+            } else if z < 2.6 {
+                "B"
+            } else {
+                "C"
+            });
+            x.push(xi);
+        }
+        Dataset::new(df! { "y" => y, "x" => x }.unwrap())
+    }
+
+    /// Characterisation test: the code before the T0-WP14 resource bounds gives
+    /// the same numbers, and later refactors must not move them.
+    ///
+    /// It uses overlapping classes so that Newton converges to the MLE (the
+    /// largest step is 4e-6 at iteration 7 and 6e-12 at iteration 8, far from
+    /// the 1e-8 tolerance on either side). `create_multinomial_dataset()` is
+    /// separated by x, so its fit never converges and its coefficients and SEs
+    /// are rounding-determined; it serves only the cancellation and
+    /// allocation-ceiling tests.
+    ///
+    /// R (nnet 7.3.19), on the same data:
+    ///
+    /// ```r
+    /// i <- 0:59; x <- ((i * 37) %% 23) / 4; u <- ((i * 7919) %% 101) / 101
+    /// z <- 0.8 * x + 3 * (u - 0.5)
+    /// y <- ifelse(z < 1.2, "A", ifelse(z < 2.6, "B", "C"))
+    /// fit <- multinom(factor(y) ~ x, reltol = 1e-14, maxit = 1000)
+    /// coef(fit)                   # B: -3.69511772941 1.95653049214
+    ///                             # C: -7.40054970907 3.27832909639
+    /// summary(fit)$standard.errors  # B: 1.20900782158 0.65621014984
+    ///                             # C: 1.81997955534 0.78618046886
+    /// logLik(fit)                 # -32.172315334772
+    /// ```
     #[test]
     fn test_pinned_multinom_outputs() {
-        let r = run_multinom(&create_multinomial_dataset(), "y", &["x"], None).unwrap();
+        let r = run_multinom(&create_multinomial_dataset_60(), "y", &["x"], None).unwrap();
+        assert!(r.converged && r.iterations < 50, "{r}");
         let mut v: Vec<f64> = r.coefficients.iter().flatten().copied().collect();
         v.extend(r.std_errors.iter().flatten().copied());
         v.push(r.log_likelihood);
+        let nnet = [
+            -3.69511772941,
+            1.95653049214,
+            -7.40054970907,
+            3.27832909639,
+            1.20900782158,
+            0.65621014984,
+            1.81997955534,
+            0.78618046886,
+            -32.172315334772,
+        ];
+        for (i, (got, want)) in v.iter().zip(nnet).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6 * want.abs(),
+                "[{i}] {got} vs nnet {want}; all: {v:?}"
+            );
+        }
         v.push(r.iterations as f64);
         assert_pinned(
             "multinom",
             &v,
             &[
-                -100.48495558501233,
-                31.245875144862595,
-                -414.0551734919908,
-                80.36245457923923,
-                93622.81655799173,
-                17141.214740327898,
-                93622.81671314879,
-                17141.21475376697,
-                -3.4657359035423543,
-                50.0,
+                -3.695117715270053,
+                1.9565304881927836,
+                -7.400549687067565,
+                3.2783290835102505,
+                1.2090078159764222,
+                0.6562101468219043,
+                1.8199795473885245,
+                0.7861804646938978,
+                -32.17231533477236,
+                8.0,
             ],
         );
     }
