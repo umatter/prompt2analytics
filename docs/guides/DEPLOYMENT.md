@@ -64,7 +64,7 @@ mode comes from explicit configuration, never from the bind address alone.
 | Host check | 421 `misdirected` unless the Host is `localhost` or a loopback IP (any port); a request without a Host header passes | off | off |
 | `/ws` (feature `websocket`) | on | on | off unless `P2A_ENABLE_WS` (`--enable-ws`) |
 | Per-session data directories (`P2A_SESSION_DIRS=auto`) | off | off | on |
-| Server-held LLM keys | only for the provider's default endpoint, and never with the hosted profile | same | never |
+| Server-held LLM keys | only for the provider's default endpoint, and not with the hosted profile unless `llm_server_keys=true` | same | not unless `llm_server_keys=true` (false in the hosted profile), and then only for the provider's default endpoint |
 
 **Threat model.** There are no user accounts. A session id is a random UUID
 that `POST /api/sessions` returns, and it works as a capability: whoever holds
@@ -120,9 +120,9 @@ websocket `tool` messages runs through one governor
 (`crates/p2a-mcp/src/exec.rs`).
 
 - **Off the async runtime.** Tool work runs on the blocking thread pool, and the
-  runtime has at least two worker threads (`P2A_WORKER_THREADS`), so `/health`,
-  admission and SSE keep-alives stay responsive on a one-vCPU machine while a
-  tool computes.
+  runtime has by default max(2, CPUs) worker threads (`P2A_WORKER_THREADS`), so
+  `/health`, admission and SSE keep-alives stay responsive on a one-vCPU machine
+  while a tool computes.
 - **Slots.** A call needs a slot of its session (`P2A_SESSION_CONCURRENCY`,
   hosted 1) and a global slot (`P2A_TOOL_CONCURRENCY`, default one per CPU). It
   waits at most `P2A_TOOL_QUEUE_WAIT_SECS` (hosted 10 s) for both, and is then
@@ -322,9 +322,12 @@ not.
 
 - **Allowlist.** The LLM routes connect only to hosts in
   `P2A_LLM_ALLOWED_HOSTS` (bare hostnames, matched exactly and
-  case-insensitively). In the hosted profile the list defaults, when the
-  variable is unset, to api.openai.com, api.anthropic.com, openrouter.ai. With
-  the Off profile and no variable, any public https host is allowed.
+  case-insensitively). When the variable is unset and `llm_allow_loopback` is
+  false (the hosted default), the list defaults to api.openai.com,
+  api.anthropic.com, openrouter.ai. When the variable is unset and
+  `llm_allow_loopback` is true (the Off default, or a hosted server that sets
+  `llm_allow_loopback=true` to reach a same-host Ollama), there is no default
+  list and any public https host is allowed.
 - **Scheme.** `https` only; `http` is accepted for a loopback Ollama endpoint
   and only when `llm_allow_loopback` is true (Off profile).
 - **Resolve, check, pin.** Host names are resolved by the client's own
@@ -384,8 +387,10 @@ not.
 
 Every knob is a command-line flag with an environment variable, except the
 ones marked "env only". "Off" and "Hosted" are the defaults under each resource
-profile. For the timeout, watchdog, byte and eviction knobs an explicit `0`
-means none or off.
+profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
+(`--tool-timeout-secs`, `--stuck-exit-secs`, `--memory-soft-limit-mb`,
+`--session-data-mb`, `--total-data-mb`, `--max-alloc-mb`,
+`--session-evict-idle-minutes`) an explicit `0` means none or off.
 
 | Flag | Env | Off | Hosted | Notes |
 |---|---|---|---|---|
@@ -404,10 +409,10 @@ means none or off.
 | `--db-path` | `P2A_DB_PATH` | none (in-memory store) | same | feature `db`; must lie outside `P2A_DATA_ROOT` outside Local mode |
 | `--audit-log` | `P2A_AUDIT_LOG` | false | false | the env accepts only `true`/`false` |
 | `--audit-path` | `P2A_AUDIT_PATH` | `p2a-audit.log` in the working directory | same | |
-| `--limits` | `P2A_LIMITS` | none (the mode decides) | | `hosted` or `off`; `off` is refused in OpenPublic |
+| `--limits` | `P2A_LIMITS` | none (the mode decides) | same | `hosted` or `off`; `off` is refused in OpenPublic |
 | `--limit-override` | `P2A_LIMIT_OVERRIDES` | none | none | `key=value` list, see the next table |
 | `--worker-threads` | `P2A_WORKER_THREADS` | max(2, CPUs) | max(2, CPUs) | async runtime workers |
-| `--tool-concurrency` | `P2A_TOOL_CONCURRENCY` | CPUs | max(1, CPUs) | tool calls at once, server-wide |
+| `--tool-concurrency` | `P2A_TOOL_CONCURRENCY` | CPUs | CPUs | tool calls at once, server-wide |
 | `--session-concurrency` | `P2A_SESSION_CONCURRENCY` | CPUs | 1 | tool calls at once per session |
 | `--tool-queue-wait-secs` | `P2A_TOOL_QUEUE_WAIT_SECS` | 300 | 10 | wait for a slot before 429/503 |
 | `--tool-timeout-secs` | `P2A_TOOL_TIMEOUT_SECS` | none | 60 | per-call deadline |
@@ -419,7 +424,7 @@ means none or off.
 | `--session-evict-idle-minutes` | `P2A_SESSION_EVICT_IDLE_MINUTES` | never | 10 | eviction when the table is full |
 | `--auth-enabled` | `P2A_AUTH_ENABLED` | | | deprecated, no effect (feature `auth`) |
 | `--jwt-secret` | `P2A_JWT_SECRET` | | | deprecated, no effect (feature `auth`) |
-| env only | `P2A_MAX_HTTP_BODY_MB` | 32 | 32 | request bodies and websocket messages, MiB |
+| env only | `P2A_MAX_HTTP_BODY_MB` | 32 | 32 | request bodies and websocket messages, MiB; must be a positive whole number; `0` or an invalid value means the default 32 (there is no unlimited setting) |
 | env only | `P2A_DATA_ROOT` | working directory | same | must exist; resolved once, on first use |
 | env only | `P2A_LLM_ALLOWED_HOSTS` | none (any public host) | api.openai.com, api.anthropic.com, openrouter.ai | comma-separated bare hostnames |
 | env only | `P2A_AUDIT_MAX_MB` | 50 | 50 | audit log rotation size; `0` = never rotate; keeps 3 old files |
@@ -510,7 +515,7 @@ Named budgets:
 | `llm_history_bytes` | conversation history sent to the model | 131,072 | 524,288 |
 | `llm_streams_per_session` | chat requests one session runs at once | 1 | none |
 | `llm_server_keys` | whether server-held provider keys may be used | `false` | `true` |
-| `llm_allow_loopback` | whether a loopback Ollama endpoint may be used | `false` | `true` |
+| `llm_allow_loopback` | whether a loopback Ollama endpoint may be used; `true` also drops the default host allowlist when `P2A_LLM_ALLOWED_HOSTS` is unset | `false` | `true` |
 
 ## Must-do checklist
 
@@ -526,8 +531,9 @@ Named budgets:
 2. **Pin the LLM egress allowlist (`P2A_LLM_ALLOWED_HOSTS`).**
    Set `P2A_LLM_ALLOWED_HOSTS=api.openai.com,api.anthropic.com,openrouter.ai`
    (bare hostnames, matched exactly and case-insensitively against the URL
-   host). The hosted profile uses this list when the variable is unset; set it
-   explicitly anyway, so the policy does not depend on the profile. An
+   host). The hosted profile uses this list when the variable is unset, but only
+   while `llm_allow_loopback` stays false; set it explicitly anyway, so the
+   policy depends on neither the profile nor that flag. An
    Authenticated or Local server without it can reach any public https host a
    caller names, carrying whatever key the caller supplied. With or without the
    list, every resolved address is still checked and internal addresses are

@@ -5,7 +5,7 @@
 # and docs/guides/DEPLOYMENT.md (DEPLOYMENT.md, "Release and redeploy", lists
 # the steps).
 #
-# Deploy:   fly config validate -c deploy/fly.toml && fly deploy -c deploy/fly.toml
+# Deploy:   fly config validate --strict -c deploy/fly.toml && fly deploy -c deploy/fly.toml
 # Cert:     fly certs add p2a-api.qamelab.org -a p2a-qamelab-backend
 #
 # Prereqs:
@@ -32,7 +32,8 @@ primary_region = "fra"          # Frankfurt — EU
   P2A_HOST = "0.0.0.0"
   P2A_PORT = "8080"
   P2A_CORS_ORIGINS = "https://p2a.qamelab.org"
-  # Request-body cap in MiB; it also caps websocket messages and frames.
+  # Request-body cap in MiB; it also caps websocket messages and frames. It
+  # must be a positive whole number: 0 or an invalid value means the default 32.
   P2A_MAX_HTTP_BODY_MB = "32"
 
   # The only hosts the LLM routes may contact (bare hostnames, matched exactly
@@ -47,10 +48,12 @@ primary_region = "fra"          # Frankfurt — EU
   # Open public mode: no login, and isolation rests on unguessable session
   # IDs. In this mode there are no session-list or file-browser routes, /ws is
   # off, each session gets its own data directory, conversations answer only
-  # to the session that owns them, and server-held LLM keys are never used.
-  # Requires the hardened image (v0.1.2 or newer); do NOT set this on an older
-  # image. Everything else in this file needs the release that carries the
-  # in-process limits.
+  # to the session that owns them, and the hosted profile does not use
+  # server-held LLM keys (llm_server_keys=false). Requires the hardened image
+  # (v0.1.2 or newer); do NOT set this on an older image. The rest of this list
+  # (per-session directories, /ws off, conversation ownership, no server-held
+  # keys), P2A_LIMITS below and the stuck-worker watchdog need the release that
+  # carries the in-process limits.
   P2A_ALLOW_UNAUTHENTICATED = "1"
 
   # The hosted resource profile: each tool call is stopped after
@@ -67,7 +70,8 @@ primary_region = "fra"          # Frankfurt — EU
   P2A_LIMITS = "hosted"
 
   # The path jail. In open mode each session works in /data/sessions/<id>/
-  # (mode 0700), which is deleted with the session and purged at startup.
+  # (mode 0700), which is deleted with the session; directories left by an
+  # earlier process are purged at the first file access after a restart.
   # There is no volume, so these files sit on the machine's ephemeral root
   # filesystem, and all of it is lost on restart.
   P2A_DATA_ROOT = "/data"

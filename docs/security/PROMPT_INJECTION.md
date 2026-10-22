@@ -60,10 +60,10 @@ A steered model (or any caller) can ask for very expensive work: a huge replicat
 
 Callers choose the provider's `base_url`, so a steered or hostile client could point the server at an internal address. The LLM client:
 
-- connects only to hosts on the allowlist (`P2A_LLM_ALLOWED_HOSTS`; in the hosted profile api.openai.com, api.anthropic.com and openrouter.ai by default);
+- connects only to hosts on the allowlist (`P2A_LLM_ALLOWED_HOSTS`; when it is unset and `llm_allow_loopback` is false, as in the hosted profile, api.openai.com, api.anthropic.com and openrouter.ai);
 - resolves each host itself and refuses it if any address is private, loopback, link-local or otherwise internal, then connects only to the addresses it checked;
 - never follows redirects and ignores system proxies;
-- never sends a server-held API key to a host the caller picked, and in the hosted profile never uses server-held keys at all.
+- never sends a server-held API key to a host the caller picked, and uses no server-held key at all while `llm_server_keys` is false (the hosted default).
 
 ### 6. Access to another session's objects
 
@@ -84,8 +84,8 @@ Some layers are always on; others follow the resource profile, which is Hosted i
 | Concurrency slots and panic isolation (HTTP) | on | on | on |
 | Core invariants | on | on | on |
 | LLM egress: internal addresses refused | on | on | on |
-| LLM host allowlist | when `P2A_LLM_ALLOWED_HOSTS` is set or the profile is Hosted | same | on |
-| Server-held LLM keys | default endpoint only, never with the hosted profile | same | never |
+| LLM host allowlist | when `P2A_LLM_ALLOWED_HOSTS` is set, or the profile is Hosted and `llm_allow_loopback` is false | same | on unless `llm_allow_loopback=true` and `P2A_LLM_ALLOWED_HOSTS` is unset |
+| Server-held LLM keys | default endpoint only, and not with the hosted profile unless `llm_server_keys=true` | same | not unless `llm_server_keys=true` (false in the hosted profile), and then default endpoint only |
 | Ownership checks on conversation routes | on | on | on |
 | Session-list and file-browser routes | only with `--expose-enumeration` | on | absent |
 
