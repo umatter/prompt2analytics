@@ -553,6 +553,79 @@ impl fmt::Display for FuzzyRdResult {
 }
 
 // ============================================================================
+// Parameter validation
+// ============================================================================
+
+/// Largest local-polynomial order `p` accepted by the RD estimators.
+///
+/// This is a method-level cap (Tier 0 design 3.1) and holds in every mode,
+/// not only on the hosted server. rdrobust allows orders 0..=20, but with the
+/// uncentred polynomial design used here orders above 4 are already
+/// numerically meaningless; 10 leaves ample room while keeping every design
+/// matrix and the pilot fit (order at most 12) small. The bias-correction
+/// order `q` may be at most `MAX_RD_ORDER + 1`.
+pub(crate) const MAX_RD_ORDER: usize = 10;
+
+/// Check the parameters of an [`RdConfig`] that do not depend on the data.
+///
+/// The checks run in this order: the polynomial order `p`, the bias order `q`
+/// (only after `p`, so `p + 1` cannot overflow), the bandwidths `h` and `b`
+/// when given, `rho`, the confidence `level` and `nnmatch`. `q <= p` is
+/// accepted (it means no bias correction). Every failure is an
+/// `EconError::InvalidSpecification` naming the parameter, the value and the
+/// bound.
+pub(crate) fn validate_rd_config(config: &RdConfig) -> EconResult<()> {
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    let p = config.p;
+    if p > MAX_RD_ORDER {
+        return spec(format!(
+            "Polynomial order p = {p} is too large: local polynomial RD supports p from 0 to \
+             {MAX_RD_ORDER} (p = 1, local linear, is the standard choice)."
+        ));
+    }
+    let q = config.q.unwrap_or(p + 1);
+    if q > MAX_RD_ORDER + 1 {
+        return spec(format!(
+            "Bias-correction order q = {q} is too large: q can be at most {} (the default is p + 1).",
+            MAX_RD_ORDER + 1
+        ));
+    }
+    if let Some(h) = config.h {
+        if !(h.is_finite() && h > 0.0) {
+            return spec(format!(
+                "Main bandwidth h must be a finite number greater than 0 (got {h})."
+            ));
+        }
+    }
+    if let Some(b) = config.b {
+        if !(b.is_finite() && b > 0.0) {
+            return spec(format!(
+                "Bias bandwidth b must be a finite number greater than 0 (got {b})."
+            ));
+        }
+    }
+    let rho = config.rho;
+    if !(rho.is_finite() && rho > 0.0) {
+        return spec(format!(
+            "rho (the ratio b/h) must be a finite number greater than 0 (got {rho})."
+        ));
+    }
+    let level = config.level;
+    if !(level.is_finite() && level > 0.0 && level < 1.0) {
+        return spec(format!(
+            "Confidence level must be strictly between 0 and 1 (got {level}); use 0.95 for a 95% \
+             interval."
+        ));
+    }
+    if config.nnmatch == 0 {
+        return spec(
+            "nnmatch (nearest neighbours for the variance) must be at least 1 (got 0).".to_string(),
+        );
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -566,9 +639,14 @@ fn compute_kernel_weights(x: &Array1<f64>, cutoff: f64, h: f64, kernel: KernelTy
 
 /// Build polynomial design matrix of order p centered at cutoff.
 /// Returns matrix with columns [1, (x-c), (x-c)^2, ..., (x-c)^p].
-fn build_polynomial_matrix(x: &Array1<f64>, cutoff: f64, p: usize) -> Array2<f64> {
+///
+/// The `n x (p + 1)` matrix is allocated through `resource::try_zeros2`, so a
+/// size above the allocation ceiling is a `ResourceLimit` error.
+fn build_polynomial_matrix(x: &Array1<f64>, cutoff: f64, p: usize) -> EconResult<Array2<f64>> {
     let n = x.len();
-    let mut matrix = Array2::zeros((n, p + 1));
+    // A saturated column count cannot be allocated, so try_zeros2 reports it.
+    let mut matrix =
+        crate::resource::try_zeros2(n, p.saturating_add(1), "RD polynomial design matrix")?;
 
     for i in 0..n {
         let dx = x[i] - cutoff;
@@ -579,7 +657,7 @@ fn build_polynomial_matrix(x: &Array1<f64>, cutoff: f64, p: usize) -> Array2<f64
         }
     }
 
-    matrix
+    Ok(matrix)
 }
 
 /// Perform weighted least squares regression.
@@ -653,7 +731,7 @@ fn nn_variance_estimator(
     // Get indices of observations with positive weights
     let active: Vec<usize> = (0..n).filter(|&i| w[i] > 0.0).collect();
 
-    if active.len() < j + 1 {
+    if active.len() <= j {
         // Not enough observations for NN estimation
         return sigma2;
     }
@@ -791,6 +869,9 @@ fn hc_variance_estimator(
 }
 
 /// Compute MSE-optimal bandwidth using Imbens-Kalyanaraman (2012) method.
+///
+/// Allocation errors of the pilot design matrices propagate; a failed pilot
+/// *fit* still falls back to the rule-of-thumb bandwidth.
 fn compute_mse_bandwidth(
     y: &Array1<f64>,
     x: &Array1<f64>,
@@ -798,7 +879,7 @@ fn compute_mse_bandwidth(
     p: usize,
     kernel: KernelType,
     separate: bool,
-) -> (f64, f64) {
+) -> EconResult<(f64, f64)> {
     let n = y.len();
 
     // Split data at cutoff
@@ -824,15 +905,18 @@ fn compute_mse_bandwidth(
         let x_range = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
             - x.iter().cloned().fold(f64::INFINITY, f64::min);
         let h_rot = x_range / ((n as f64).powf(0.2));
-        return (h_rot, h_rot);
+        return Ok((h_rot, h_rot));
     }
 
     // Estimate second derivative (curvature) using global polynomial
-    // Fit order-4 polynomial to estimate m''(c)
+    // Fit order-4 polynomial to estimate m''(c).
+    // With p <= MAX_RD_ORDER (validated by the callers) the pilot order is at
+    // most 12, and the pilot only runs with at least 10 points on each side
+    // (n >= 20), so the pilot order stays below n without a separate check.
     let pilot_order = 4.max(p + 2);
     let x_arr = Array1::from_vec(x.to_vec());
     let y_arr = y.clone();
-    let x_design = build_polynomial_matrix(&x_arr, cutoff, pilot_order);
+    let x_design = build_polynomial_matrix(&x_arr, cutoff, pilot_order)?;
 
     // Equal weights for pilot
     let pilot_weights = Array1::from_elem(n, 1.0 / n as f64);
@@ -844,7 +928,7 @@ fn compute_mse_bandwidth(
             let x_range = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
                 - x.iter().cloned().fold(f64::INFINITY, f64::min);
             let h_rot = x_range / ((n as f64).powf(0.2));
-            return (h_rot, h_rot);
+            return Ok((h_rot, h_rot));
         }
     };
 
@@ -862,7 +946,7 @@ fn compute_mse_bandwidth(
     let h_pilot = x_range / 2.0;
 
     let pilot_kernel_weights = compute_kernel_weights(&x_arr, cutoff, h_pilot, kernel);
-    let x_linear = build_polynomial_matrix(&x_arr, cutoff, 1);
+    let x_linear = build_polynomial_matrix(&x_arr, cutoff, 1)?;
 
     let sigma2_est = match weighted_least_squares(&x_linear, &y_arr, &pilot_kernel_weights) {
         Ok((_, resid)) => {
@@ -912,9 +996,9 @@ fn compute_mse_bandwidth(
         // Using asymmetric pilot estimates (simplified version)
         let h_left = h_opt * ((n_right as f64) / (n_left as f64)).powf(0.1);
         let h_right = h_opt * ((n_left as f64) / (n_right as f64)).powf(0.1);
-        (h_left.clamp(h_min, h_max), h_right.clamp(h_min, h_max))
+        Ok((h_left.clamp(h_min, h_max), h_right.clamp(h_min, h_max)))
     } else {
-        (h_opt, h_opt)
+        Ok((h_opt, h_opt))
     }
 }
 
@@ -946,7 +1030,9 @@ pub fn run_rd(
     cutoff: f64,
     config: RdConfig,
 ) -> EconResult<RdResult> {
-    let mut warnings = Vec::new();
+    validate_rd_config(&config)?;
+
+    let warnings = Vec::new();
 
     // Extract data
     let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
@@ -984,7 +1070,7 @@ pub fn run_rd(
         });
     }
 
-    // Determine polynomial orders
+    // Determine polynomial orders (validated: p <= MAX_RD_ORDER, q <= MAX_RD_ORDER + 1)
     let p = config.p;
     let q = config.q.unwrap_or(p + 1);
 
@@ -999,7 +1085,7 @@ pub fn run_rd(
             p,
             config.kernel,
             config.bwselect.is_separate(),
-        )
+        )?
     };
 
     let (b_left, b_right) = if let Some(b) = config.b {
@@ -1031,18 +1117,24 @@ pub fn run_rd(
     let n_eff_left = weights_left_h.iter().filter(|&&w| w > 0.0).count();
     let n_eff_right = weights_right_h.iter().filter(|&&w| w > 0.0).count();
 
-    if n_eff_left < p + 2 || n_eff_right < p + 2 {
-        warnings.push(format!(
-            "Small effective sample size: {} left, {} right (need {} for p={})",
-            n_eff_left,
-            n_eff_right,
-            p + 2,
-            p
-        ));
+    // A local polynomial of order p needs at least p + 2 points with positive
+    // kernel weight on each side; fewer gives a degenerate (exact or singular)
+    // fit, so this is an error rather than a warning.
+    for (side, n_eff) in [("left", n_eff_left), ("right", n_eff_right)] {
+        if n_eff < p + 2 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Too few observations inside the bandwidth for polynomial order p = {p}: \
+                     {n_eff} on the {side} side of the cutoff, at least {} are needed. Use a \
+                     larger bandwidth h or a lower order p.",
+                    p + 2
+                ),
+            });
+        }
     }
 
     // Build polynomial design matrices (order p)
-    let x_poly = build_polynomial_matrix(&x, cutoff, p);
+    let x_poly = build_polynomial_matrix(&x, cutoff, p)?;
 
     // ========================================================================
     // Step 1: Conventional local polynomial estimation
@@ -1080,8 +1172,23 @@ pub fn run_rd(
         }
     });
 
+    // The bias fit of order q needs at least q + 1 points inside b on each side.
+    for (side, w) in [("left", &weights_left_b), ("right", &weights_right_b)] {
+        let n_b = w.iter().filter(|&&wi| wi > 0.0).count();
+        if n_b < q + 1 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Too few observations inside the bias bandwidth b for the bias-correction \
+                     polynomial of order q = {q}: {n_b} on the {side} side, at least {} are \
+                     needed. Use a larger b (or rho).",
+                    q + 1
+                ),
+            });
+        }
+    }
+
     // Build polynomial design matrices (order q) for bias estimation
-    let x_poly_q = build_polynomial_matrix(&x, cutoff, q);
+    let x_poly_q = build_polynomial_matrix(&x, cutoff, q)?;
 
     // Estimate higher-order polynomial on each side
     let (coef_left_q, _) = weighted_least_squares(&x_poly_q, &y, &weights_left_b)?;
@@ -1276,6 +1383,11 @@ pub fn rd_bandwidth(
     kernel: KernelType,
     bwselect: BandwidthMethod,
 ) -> EconResult<RdBandwidth> {
+    validate_rd_config(&RdConfig {
+        p,
+        ..Default::default()
+    })?;
+
     // Extract data
     let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
         EconError::ColumnNotFound {
@@ -1296,7 +1408,7 @@ pub fn rd_bandwidth(
 
     // Compute MSE-optimal bandwidth
     let (h_left, h_right) =
-        compute_mse_bandwidth(&y, &x, cutoff, p, kernel, bwselect.is_separate());
+        compute_mse_bandwidth(&y, &x, cutoff, p, kernel, bwselect.is_separate())?;
 
     // Bias bandwidth (default: same as h)
     let b_left = h_left;
@@ -1517,7 +1629,7 @@ mod tests {
         let x = Array1::from_vec(vec![0.0, 1.0, 2.0]);
         let cutoff = 1.0;
 
-        let mat = build_polynomial_matrix(&x, cutoff, 2);
+        let mat = build_polynomial_matrix(&x, cutoff, 2).unwrap();
 
         // Row 0: x=0, (x-c) = -1
         // [1, -1, 1]
@@ -1940,6 +2052,215 @@ mod tests {
                 result.p_robust
             );
         }
+    }
+
+    // =========================================================================
+    // Parameter validation and resource guards (T0-WP11)
+    // =========================================================================
+
+    fn spec_msg(r: EconResult<RdResult>) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!(
+                "expected InvalidSpecification, got {:?}",
+                other.map(|r| r.tau_conventional)
+            ),
+        }
+    }
+
+    #[test]
+    fn test_rd_rejects_polynomial_order_above_cap() {
+        let ds = create_sharp_rd_dataset();
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                p: 11,
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("p = 11") && m.contains("10"), "{m}");
+        // overflow-sized order: before the fix this panics on `p + 1` / `p + 2`
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                p: usize::MAX,
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("Polynomial order"), "{m}");
+        let r = run_fuzzy_rd(
+            &create_fuzzy_rd_dataset(),
+            "outcome",
+            "running",
+            "treatment",
+            0.0,
+            RdConfig {
+                p: 11,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(r, Err(EconError::InvalidSpecification { .. })));
+        let r = rd_bandwidth(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            11,
+            KernelType::Triangular,
+            BandwidthMethod::MseRd,
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("p = 11"))
+        );
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                q: Some(12),
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("q = 12"), "{m}");
+    }
+
+    #[test]
+    fn test_rd_rejects_invalid_bandwidth_level_and_nnmatch() {
+        let ds = create_sharp_rd_dataset();
+        for h in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let m = spec_msg(run_rd(
+                &ds,
+                "outcome",
+                "running",
+                0.0,
+                RdConfig {
+                    h: Some(h),
+                    ..Default::default()
+                },
+            ));
+            assert!(m.contains("bandwidth h"), "{m}");
+        }
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                b: Some(0.0),
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("bandwidth b"), "{m}");
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                rho: 0.0,
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("rho"), "{m}");
+        // level = 95 panics inside statrs before the fix
+        for level in [95.0, 0.0, 1.0, f64::NAN] {
+            let m = spec_msg(run_rd(
+                &ds,
+                "outcome",
+                "running",
+                0.0,
+                RdConfig {
+                    level,
+                    ..Default::default()
+                },
+            ));
+            assert!(m.contains("level"), "{m}");
+        }
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                nnmatch: 0,
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("nnmatch"), "{m}");
+    }
+
+    #[test]
+    fn test_rd_requires_enough_observations_inside_bandwidth() {
+        let ds = create_sharp_rd_dataset();
+        // h = 0.1 leaves 2 left-side points (x = -0.08, -0.04) with positive weight: p = 1 needs 3
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                h: Some(0.1),
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("bandwidth") && m.contains("left"), "{m}");
+        // h wide enough, but the bias bandwidth b = 0.1 is too narrow for q = 2 (needs 3)
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                h: Some(1.0),
+                b: Some(0.1),
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("bias bandwidth b"), "{m}");
+        // the order cap itself does not reject p = 10 (all 100 points in the window)
+        if let Err(EconError::InvalidSpecification { message }) = run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                p: 10,
+                h: Some(2.5),
+                ..Default::default()
+            },
+        ) {
+            assert!(!message.contains("Polynomial order"), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_rd_design_matrix_respects_allocation_ceiling() {
+        let ds = create_sharp_rd_dataset();
+        // 100 x 2 design = 1600 bytes > 64
+        let r = crate::resource::with_alloc_ceiling(Some(64), || {
+            run_rd(
+                &ds,
+                "outcome",
+                "running",
+                0.0,
+                RdConfig {
+                    h: Some(1.0),
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(_))),
+            "{:?}",
+            r.map(|r| r.tau_conventional)
+        );
     }
 
     #[test]

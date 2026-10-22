@@ -24,7 +24,9 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::traits::estimator::SignificanceLevel;
 
-use super::rd::{BandwidthMethod, KernelType, RdConfig, RdResult, VceType, run_rd};
+use super::rd::{
+    BandwidthMethod, KernelType, RdConfig, RdResult, VceType, run_rd, validate_rd_config,
+};
 
 /// Bandwidth selection strategy for multiple cutoffs.
 ///
@@ -409,6 +411,8 @@ pub fn run_rd_multi(
     cutoff_assignment: &ArrayView1<usize>,
     config: RdMultiConfig,
 ) -> EconResult<RdMultiResult> {
+    validate_rd_multi_config(&config)?;
+
     let n = y.len();
     let j = config.cutoffs.len();
     let mut warnings = Vec::new();
@@ -463,28 +467,25 @@ pub fn run_rd_multi(
         RdMultiBandwidth::PerCutoffOptimal => vec![None; j], // Let each cutoff compute its own
     };
 
+    // Row lists per cutoff, built in one pass; rows stay in ascending order.
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); j];
+    for (i, &c) in cutoff_assignment.iter().enumerate() {
+        if let Some(bucket) = buckets.get_mut(c) {
+            bucket.push(i);
+        }
+    }
+
     // Run RD estimation for each cutoff
     let mut cutoff_results: Vec<CutoffResult> = Vec::with_capacity(j);
     let mut full_rd_results: Vec<RdResult> = Vec::with_capacity(j);
 
-    for (cutoff_idx, cutoff) in config.cutoffs.iter().enumerate() {
+    for (cutoff_idx, (cutoff, rows)) in config.cutoffs.iter().zip(buckets.iter()).enumerate() {
+        crate::resource::checkpoint()?;
+
         let cutoff = *cutoff;
         // Select observations for this cutoff
-        let mask: Vec<bool> = cutoff_assignment.iter().map(|c| *c == cutoff_idx).collect();
-
-        let y_subset: Vec<f64> = y
-            .iter()
-            .zip(mask.iter())
-            .filter(|(_, m)| **m)
-            .map(|(yi, _)| *yi)
-            .collect();
-
-        let x_subset: Vec<f64> = x
-            .iter()
-            .zip(mask.iter())
-            .filter(|(_, m)| **m)
-            .map(|(xi, _)| *xi)
-            .collect();
+        let y_subset: Vec<f64> = rows.iter().map(|&i| y[i]).collect();
+        let x_subset: Vec<f64> = rows.iter().map(|&i| x[i]).collect();
 
         if y_subset.len() < 20 {
             warnings.push(format!(
@@ -506,19 +507,7 @@ pub fn run_rd_multi(
         let temp_dataset = Dataset::new(df);
 
         // Configure RD for this cutoff
-        let rd_config = RdConfig {
-            p: config.p,
-            q: config.q,
-            h: bandwidths[cutoff_idx],
-            b: None,
-            rho: 1.0,
-            kernel: config.kernel,
-            bwselect: config.bwselect,
-            vce: config.vce,
-            nnmatch: 3,
-            level: config.level,
-            scaleregul: 1.0,
-        };
+        let rd_config = per_cutoff_rd_config(&config, bandwidths[cutoff_idx]);
 
         // Run RD estimation
         match run_rd(&temp_dataset, "__y__", "__x__", cutoff, rd_config) {
@@ -543,6 +532,9 @@ pub fn run_rd_multi(
                 cutoff_results.push(cr);
                 full_rd_results.push(rd_result);
             }
+            // A stopped budget or an allocation over the ceiling ends the whole
+            // estimation instead of becoming a per-cutoff warning.
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
             Err(e) => {
                 warnings.push(format!(
                     "Cutoff {} (c={:.4}): Estimation failed: {}",
@@ -650,6 +642,9 @@ pub fn run_rd_multi_dataset(
     cutoff_col: Option<&str>,
     config: RdMultiConfig,
 ) -> EconResult<RdMultiResult> {
+    // Validate before the cutoffs are used to assign rows.
+    validate_rd_multi_config(&config)?;
+
     // Extract data
     let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
         EconError::ColumnNotFound {
@@ -695,6 +690,61 @@ pub fn run_rd_multi_dataset(
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// The single-cutoff RD configuration used for every cutoff.
+fn per_cutoff_rd_config(config: &RdMultiConfig, h: Option<f64>) -> RdConfig {
+    RdConfig {
+        p: config.p,
+        q: config.q,
+        h,
+        b: None,
+        rho: 1.0,
+        kernel: config.kernel,
+        bwselect: config.bwselect,
+        vce: config.vce,
+        nnmatch: 3,
+        level: config.level,
+        scaleregul: 1.0,
+    }
+}
+
+/// Check the cutoffs, the bandwidths and the per-cutoff RD parameters before
+/// any row is assigned or estimated.
+fn validate_rd_multi_config(config: &RdMultiConfig) -> EconResult<()> {
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    if config.cutoffs.is_empty() {
+        return spec("At least one cutoff must be specified".to_string());
+    }
+    for (i, &c) in config.cutoffs.iter().enumerate() {
+        if !c.is_finite() {
+            return spec(format!(
+                "Cutoff {} is not a finite number ({c}); every cutoff must be finite.",
+                i + 1
+            ));
+        }
+    }
+    match &config.bandwidth {
+        RdMultiBandwidth::Global(h) if !(h.is_finite() && *h > 0.0) => {
+            return spec(format!(
+                "The global bandwidth must be a finite number greater than 0 (got {h})."
+            ));
+        }
+        RdMultiBandwidth::PerCutoff(hs) => {
+            if let Some((i, h)) = hs
+                .iter()
+                .enumerate()
+                .find(|(_, h)| !(h.is_finite() && **h > 0.0))
+            {
+                return spec(format!(
+                    "The bandwidth for cutoff {} must be a finite number greater than 0 (got {h}).",
+                    i + 1
+                ));
+            }
+        }
+        _ => {}
+    }
+    validate_rd_config(&per_cutoff_rd_config(config, None))
+}
 
 /// Compute pooling weights based on the specified weighting scheme.
 fn compute_pooling_weights(results: &[CutoffResult], scheme: PoolingWeights) -> Vec<f64> {
@@ -802,15 +852,56 @@ fn compute_heterogeneity_test(results: &[CutoffResult]) -> HeterogeneityTest {
 ///
 /// For observation i with running variable x_i:
 /// - Find the cutoff c_j that minimizes |x_i - c_j|
-/// - Assign observation to cutoff j
+/// - Assign observation to cutoff j; on a tie the lowest index wins
+///
+/// The cutoffs are sorted once by (value, index), and each x_i is placed by
+/// binary search, so the cost is O((n + J) log J) instead of O(n J). Only the
+/// nearest cutoff on each side can be the closest one: the left candidate is
+/// the lowest-index cutoff of the run of equal values just at or below x_i,
+/// the right one the first cutoff above it. This equals the linear scan
+/// whenever the rounded distances are ordered as the cutoff values are; they
+/// can differ only when |x_i| exceeds the cutoff spacing by about 2^52 and two
+/// distinct cutoffs round to the same distance. A non-finite x_i maps to
+/// cutoff 0: for ±inf every distance is inf and the first index wins, as in
+/// the linear scan, and NaN (which used to panic) is treated the same way.
+/// The callers validate the cutoffs as finite; -0.0 and 0.0 are one value.
 fn assign_to_nearest_cutoff(x: &Array1<f64>, cutoffs: &[f64]) -> Array1<usize> {
+    let j = cutoffs.len();
+    if j == 0 {
+        return Array1::zeros(x.len());
+    }
+    let key = |k: usize| {
+        let c = cutoffs[k];
+        if c == 0.0 { 0.0 } else { c }
+    };
+    let mut order: Vec<usize> = (0..j).collect();
+    order.sort_by(|&a, &b| key(a).total_cmp(&key(b)).then(a.cmp(&b)));
+    // run_start[q]: first sorted position of the run of equal values holding q
+    let mut run_start = vec![0usize; j];
+    for q in 1..j {
+        run_start[q] = if key(order[q]) == key(order[q - 1]) {
+            run_start[q - 1]
+        } else {
+            q
+        };
+    }
+
     x.mapv(|xi| {
-        cutoffs
-            .iter()
-            .enumerate()
-            .min_by(|(_, c1), (_, c2)| (xi - *c1).abs().partial_cmp(&(xi - *c2).abs()).unwrap())
-            .map(|(idx, _)| idx)
-            .unwrap_or(0)
+        if !xi.is_finite() {
+            return 0;
+        }
+        let pos = order.partition_point(|&k| key(k) <= xi);
+        let left = (pos > 0).then(|| order[run_start[pos - 1]]);
+        let right = (pos < j).then(|| order[pos]);
+        match (left, right) {
+            (Some(l), Some(r)) => {
+                let (dl, dr) = ((xi - cutoffs[l]).abs(), (xi - cutoffs[r]).abs());
+                if dl < dr || (dl == dr && l < r) { l } else { r }
+            }
+            (Some(l), None) => l,
+            (None, Some(r)) => r,
+            (None, None) => 0,
+        }
     })
 }
 
@@ -1309,6 +1400,135 @@ mod tests {
                 assert!((cr.h_left - 0.5).abs() < 0.1 || cr.h_left > 0.0);
             }
         }
+    }
+
+    // =========================================================================
+    // Parameter validation, nearest-cutoff assignment, cancellation (T0-WP11)
+    // =========================================================================
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        with_budget(Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn test_rd_multi_validates_parameters_up_front() {
+        let (ds, config) = create_multi_cutoff_dataset();
+        let r = run_rd_multi_dataset(
+            &ds,
+            "outcome",
+            "running",
+            Some("cutoff_group"),
+            RdMultiConfig {
+                p: 11,
+                ..config.clone()
+            },
+        );
+        // before the fix this degrades to per-cutoff warnings and "No cutoffs could be estimated"
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("p = 11"))
+        );
+        let r = run_rd_multi_dataset(
+            &ds,
+            "outcome",
+            "running",
+            Some("cutoff_group"),
+            RdMultiConfig {
+                level: 95.0,
+                ..config.clone()
+            },
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("level"))
+        );
+        let r = run_rd_multi_dataset(
+            &ds,
+            "outcome",
+            "running",
+            Some("cutoff_group"),
+            RdMultiConfig {
+                bandwidth: RdMultiBandwidth::Global(-0.5),
+                ..config.clone()
+            },
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("bandwidth"))
+        );
+        let r = run_rd_multi_dataset(
+            &ds,
+            "outcome",
+            "running",
+            None,
+            RdMultiConfig {
+                cutoffs: vec![0.0, f64::NAN],
+                ..config
+            },
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("cutoff"))
+        );
+    }
+
+    #[test]
+    fn test_assign_to_nearest_cutoff_handles_non_finite_running_variable() {
+        // NaN panicked in partial_cmp().unwrap() before the fix
+        let x = array![f64::NAN, 0.4, f64::INFINITY, f64::NEG_INFINITY, 0.6];
+        assert_eq!(
+            assign_to_nearest_cutoff(&x, &[0.0, 1.0]).to_vec(),
+            vec![0, 0, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn test_assign_to_nearest_cutoff_matches_linear_scan() {
+        // naive reference = the previous implementation (finite input only)
+        fn naive(x: &Array1<f64>, cutoffs: &[f64]) -> Vec<usize> {
+            x.mapv(|xi| {
+                cutoffs
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, c1), (_, c2)| {
+                        (xi - *c1).abs().partial_cmp(&(xi - *c2).abs()).unwrap()
+                    })
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0)
+            })
+            .to_vec()
+        }
+        let mut s: u64 = 7;
+        let mut u = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // unsorted cutoffs with a duplicate; x includes exact midpoints and exact cutoff values
+        let cutoffs = vec![2.0, -1.0, 0.5, 2.0, -3.0];
+        let mut xs: Vec<f64> = (0..2000).map(|_| -5.0 + 10.0 * u()).collect();
+        xs.extend([-2.0, -0.25, 0.5, 1.25, 2.0, -1.0, 2.75]);
+        let x = Array1::from_vec(xs);
+        assert_eq!(
+            assign_to_nearest_cutoff(&x, &cutoffs).to_vec(),
+            naive(&x, &cutoffs)
+        );
+        // signed zeros among the cutoffs and in x
+        let cutoffs = vec![0.0, -0.0, 1.0];
+        let x = array![-0.0, 0.0, 0.5, -0.5, 0.25];
+        assert_eq!(
+            assign_to_nearest_cutoff(&x, &cutoffs).to_vec(),
+            naive(&x, &cutoffs)
+        );
+    }
+
+    #[test]
+    fn test_rd_multi_stops_when_cancelled() {
+        let (ds, config) = create_multi_cutoff_dataset();
+        let r = cancelled(|| {
+            run_rd_multi_dataset(&ds, "outcome", "running", Some("cutoff_group"), config)
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
     }
 
     #[test]
