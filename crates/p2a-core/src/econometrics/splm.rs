@@ -592,6 +592,7 @@ pub fn run_spml(
     listw: &mut SpatialWeights,
     config: SpmlConfig,
 ) -> EconResult<SpmlResult> {
+    validate_optimizer(config.tol, config.max_iter)?;
     let df = dataset.df();
     let _n_total = df.height();
 
@@ -687,6 +688,7 @@ pub fn run_spgm(
     listw: &mut SpatialWeights,
     config: SpgmConfig,
 ) -> EconResult<SpgmResult> {
+    validate_optimizer(config.tol, config.max_iter)?;
     let (y, x, entity_ids, time_ids, n_entities, n_time) =
         extract_panel_data(dataset, y_col, x_cols, entity_col, time_col)?;
 
@@ -749,6 +751,21 @@ pub fn run_spgm(
 // ============================================================================
 // Internal Helper Functions
 // ============================================================================
+
+/// Reject optimiser settings that make the line searches meaningless.
+fn validate_optimizer(tol: f64, max_iter: usize) -> EconResult<()> {
+    if !(tol.is_finite() && tol > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("tol must be a finite positive number, got {tol}"),
+        });
+    }
+    if max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1".to_string(),
+        });
+    }
+    Ok(())
+}
 
 /// Extract and organize panel data from dataset.
 fn extract_panel_data(
@@ -1032,7 +1049,7 @@ fn run_spml_within(
         let wy_within = demean_by_entity(&wy, entity_ids, n_entities);
 
         // Optimize over rho using concentrated likelihood
-        let (rho_min, rho_max) = listw.rho_range();
+        let (rho_min, rho_max) = listw.try_rho_range()?;
         let rho_min = rho_min.max(-0.99);
         let rho_max = rho_max.min(0.99);
 
@@ -1183,12 +1200,12 @@ fn run_spml_within_sem(
     let k = x_fe.ncols();
 
     // Get valid lambda range
-    let (lambda_min, lambda_max) = listw.rho_range();
+    let (lambda_min, lambda_max) = listw.try_rho_range()?;
     let lambda_min = lambda_min.max(-0.99);
     let lambda_max = lambda_max.min(0.99);
 
     // Optimize lambda for spatial error
-    let eigenvalues = listw.eigenvalues().clone();
+    let eigenvalues = listw.try_eigenvalues()?.clone();
 
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
     let mut a = lambda_min;
@@ -1269,6 +1286,7 @@ fn run_spml_within_sem(
     let mut d = a + (b - a) / phi;
 
     for _ in 0..config.max_iter {
+        crate::resource::checkpoint()?;
         if (b - a).abs() < config.tol {
             break;
         }
@@ -1354,7 +1372,7 @@ fn optimize_rho_panel(
 ) -> EconResult<(f64, f64)> {
     let n = y_within.len();
     let _k = x_fe.ncols();
-    let eigenvalues = listw.eigenvalues().clone();
+    let eigenvalues = listw.try_eigenvalues()?.clone();
 
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
 
@@ -1390,6 +1408,7 @@ fn optimize_rho_panel(
     let mut d = a + (b - a) / phi;
 
     for _ in 0..max_iter {
+        crate::resource::checkpoint()?;
         if (b - a).abs() < tol {
             break;
         }
@@ -1488,7 +1507,7 @@ fn run_spml_random(
             wy_quasi[i] = wy[i] - theta * wy_means[eid];
         }
 
-        let (rho_min, rho_max) = listw.rho_range();
+        let (rho_min, rho_max) = listw.try_rho_range()?;
         let (rho_opt, ll_opt) = optimize_rho_panel(
             &y_quasi,
             &wy_quasi,
@@ -1623,7 +1642,7 @@ fn run_spml_pooling(
     let (beta, rho_opt, sigma2, ll) = if config.lag {
         let wy = spatial_lag_panel(y, entity_ids, time_ids, n_entities, n_time, listw);
 
-        let (rho_min, rho_max) = listw.rho_range();
+        let (rho_min, rho_max) = listw.try_rho_range()?;
         let (rho_opt, ll_opt) = optimize_rho_panel(
             y,
             &wy,
@@ -1790,7 +1809,6 @@ fn run_spgm_within(
         // 2SLS for spatial lag
         let ztz = xtx(&z.view());
         let ztz_inv = matrix_inverse(&ztz.view())?;
-        let pz = z.dot(&ztz_inv).dot(&z.t());
 
         // Augmented X with Wy
         let mut x_aug = Array2::zeros((n, k_fe + 1));
@@ -1799,7 +1817,8 @@ fn run_spgm_within(
         }
         x_aug.column_mut(k_fe).assign(&wy_within);
 
-        let x_proj = pz.dot(&x_aug);
+        // P_Z X = Z ((Z'Z)^-1 (Z'X)): O(NT k) memory instead of the NT x NT projection
+        let x_proj = z.dot(&ztz_inv.dot(&z.t().dot(&x_aug)));
         let xtpx = x_aug.t().dot(&x_proj);
         let xtpx_inv = matrix_inverse(&xtpx.view())?;
         let xtpy = x_proj.t().dot(&y_within);
@@ -2237,5 +2256,97 @@ mod tests {
 
         assert_eq!(result.model, SpatialPanelModel::Pooling);
         assert_eq!(result.coefficients.len(), 3); // intercept + x1 + x2
+    }
+
+    /// N = 30 entities on the shared fixture's kNN-3 weights, T = 4 periods.
+    fn panel_from_fixture() -> (Dataset, SpatialWeights) {
+        use crate::spatial::test_fixtures::{CY, X1, Y, knn3};
+        let (mut entity, mut time, mut y, mut x1, mut x2) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for t in 0..4 {
+            for i in 0..30 {
+                let (fi, ft) = (i as f64, t as f64);
+                let v1 = X1[i] + 0.1 * ft + 0.05 * (fi * ft).sin();
+                let v2 = CY[i] / 10.0 + 0.2 * (1.3 * fi + ft).cos();
+                entity.push(i as i64);
+                time.push(t as i64);
+                x1.push(v1);
+                x2.push(v2);
+                y.push(Y[i] / 4.0 + 0.6 * v1 - 0.4 * v2 + 0.15 * (2.1 * fi + 0.7 * ft).sin());
+            }
+        }
+        let df = df! {
+            "entity" => &entity,
+            "time" => &time,
+            "y" => &y,
+            "x1" => &x1,
+            "x2" => &x2,
+        }
+        .unwrap();
+        (Dataset::new(df), knn3(WeightStyle::RowStd))
+    }
+
+    fn assert_rel(a: f64, b: f64, tol: f64) {
+        assert!(
+            (a - b).abs() <= tol * b.abs().max(1.0),
+            "{a:.17e} vs {b:.17e}"
+        );
+    }
+
+    #[test]
+    fn spgm_lag_results_are_unchanged() {
+        let (d, mut w) = panel_from_fixture();
+        let config = SpgmConfig {
+            method: SpgmMethod::W2sls,
+            lag: true,
+            spatial_error: false,
+            ..Default::default()
+        };
+        let r = run_spgm(&d, "y", &["x1", "x2"], "entity", "time", &mut w, config).unwrap();
+        // Values printed by the code that formed the dense NT x NT projection P_Z.
+        assert_rel(r.rho.unwrap(), -1.88081326776697644e-1, 1e-10);
+        let coefficients = [6.77819816100274863e-1, -3.66417317278429022e-1];
+        let std_errors = [6.93026770814074711e-2, 6.31177888519705993e-2];
+        for j in 0..2 {
+            assert_rel(r.coefficients[j], coefficients[j], 1e-10);
+            assert_rel(r.std_errors[j], std_errors[j], 1e-10);
+        }
+        assert_rel(r.sigma2, 7.53118009560483671e-3, 1e-10);
+        assert_rel(r.sargan_stat.unwrap(), 2.35585157146568891e0, 1e-10);
+        assert_eq!((r.n_instruments, r.sargan_df), (4, Some(1)));
+    }
+
+    #[test]
+    fn panel_estimators_reject_bad_tolerance_and_honour_cancellation() {
+        let (d, mut w) = panel_from_fixture();
+        let invalid = |e: EconError| matches!(e, EconError::InvalidSpecification { .. });
+        for (tol, max_iter) in [(0.0, 100), (-1e-8, 100), (f64::NAN, 100), (1e-8, 0)] {
+            let c = SpmlConfig {
+                lag: true,
+                tol,
+                max_iter,
+                ..Default::default()
+            };
+            let e = run_spml(&d, "y", &["x1", "x2"], "entity", "time", &mut w, c).unwrap_err();
+            assert!(invalid(e), "spml tol={tol} max_iter={max_iter}");
+            let c = SpgmConfig {
+                lag: true,
+                tol,
+                max_iter,
+                ..Default::default()
+            };
+            let e = run_spgm(&d, "y", &["x1", "x2"], "entity", "time", &mut w, c).unwrap_err();
+            assert!(invalid(e), "spgm tol={tol} max_iter={max_iter}");
+        }
+        let t = crate::resource::CancelToken::new();
+        t.cancel();
+        let c = SpmlConfig {
+            lag: true,
+            ..Default::default()
+        };
+        let r = crate::resource::with_budget(crate::resource::Budget::new(None, t), || {
+            run_spml(&d, "y", &["x1", "x2"], "entity", "time", &mut w, c)
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{r:?}");
     }
 }
