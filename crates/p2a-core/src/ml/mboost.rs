@@ -62,6 +62,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource::{checked_len, checkpoint, try_vec, try_with_capacity, try_zeros2};
 
 /// Loss function family for mboost.
 ///
@@ -495,21 +496,25 @@ fn fit_linear_base_learner(
 
 /// Fit tree stump (depth-1 tree) base learner to one variable.
 ///
-/// Finds the best split point that minimizes RSS.
+/// Finds the best split point that minimizes RSS. `order` is the stable
+/// ascending sort order of `x_col` (see [`feature_orders`]). The candidates
+/// are swept once with running sums: minimising the RSS of a split is
+/// maximising `left_sum^2 / left_n + right_sum^2 / right_n`, so the scan is
+/// O(n). The RSS of the chosen split is then recomputed with the two-pass
+/// sums of squares the full search used, so the returned fit is bit-identical
+/// to the quadratic search it replaces.
 fn fit_tree_base_learner(
     x_col: &ArrayView1<f64>,
     residuals: &ArrayView1<f64>,
+    order: &[usize],
     min_samples: usize,
 ) -> BaseLearnerFit {
     let n = x_col.len();
 
-    // Sort by x value
-    let mut sorted: Vec<(usize, f64)> = x_col.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-    sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Try all possible split points
-    let mut best_rss = f64::INFINITY;
-    let mut best_threshold = sorted[0].1;
+    // Best candidate: position in `order` of the last observation on the left
+    let mut best_pos: Option<usize> = None;
+    let mut best_gain = f64::NEG_INFINITY;
+    let mut best_threshold = 0.0;
     let mut best_left_mean = 0.0;
     let mut best_right_mean = 0.0;
 
@@ -517,10 +522,10 @@ fn fit_tree_base_learner(
     let mut left_sum = 0.0;
     let mut left_n = 0usize;
     let total_sum: f64 = residuals.iter().sum();
-    let total_ss: f64 = residuals.iter().map(|&r| r * r).sum();
 
-    for i in 0..n - 1 {
-        let (idx, x_val) = sorted[i];
+    for i in 0..n.saturating_sub(1) {
+        let idx = order[i];
+        let x_val = x_col[idx];
         left_sum += residuals[idx];
         left_n += 1;
 
@@ -532,50 +537,25 @@ fn fit_tree_base_learner(
         }
 
         // Check if next value is different (valid split point)
-        let next_x = sorted[i + 1].1;
+        let next_x = x_col[order[i + 1]];
         if (next_x - x_val).abs() < 1e-10 {
             continue;
         }
 
-        // Compute RSS for this split
-        let left_mean = left_sum / left_n as f64;
         let right_sum = total_sum - left_sum;
-        let right_mean = right_sum / right_n as f64;
+        let gain = left_sum * left_sum / left_n as f64 + right_sum * right_sum / right_n as f64;
 
-        // RSS = sum((y - mean)^2) = sum(y^2) - n*mean^2
-        // For left: sum_left(y^2) - left_n * left_mean^2
-        // We need to compute sum of squared residuals for left and right
-
-        // Incremental RSS computation
-        let left_ss = {
-            let mut ss = 0.0;
-            for j in 0..=i {
-                let r = residuals[sorted[j].0];
-                ss += (r - left_mean).powi(2);
-            }
-            ss
-        };
-        let right_ss = {
-            let mut ss = 0.0;
-            for j in (i + 1)..n {
-                let r = residuals[sorted[j].0];
-                ss += (r - right_mean).powi(2);
-            }
-            ss
-        };
-
-        let rss = left_ss + right_ss;
-
-        if rss < best_rss {
-            best_rss = rss;
+        if gain > best_gain {
+            best_gain = gain;
+            best_pos = Some(i);
             best_threshold = (x_val + next_x) / 2.0;
-            best_left_mean = left_mean;
-            best_right_mean = right_mean;
+            best_left_mean = left_sum / left_n as f64;
+            best_right_mean = right_sum / right_n as f64;
         }
     }
 
     // If no valid split found, use mean
-    if best_rss.is_infinite() {
+    let Some(best_pos) = best_pos else {
         let mean = residuals.iter().sum::<f64>() / n as f64;
         let rss: f64 = residuals.iter().map(|&r| (r - mean).powi(2)).sum();
         return BaseLearnerFit {
@@ -585,7 +565,15 @@ fn fit_tree_base_learner(
             go_left: true,
             rss,
         };
-    }
+    };
+
+    // RSS of the chosen split, summed in sort order around each child's mean
+    let left_ss = order[..=best_pos]
+        .iter()
+        .fold(0.0, |ss, &k| ss + (residuals[k] - best_left_mean).powi(2));
+    let right_ss = order[best_pos + 1..]
+        .iter()
+        .fold(0.0, |ss, &k| ss + (residuals[k] - best_right_mean).powi(2));
 
     // Return stump parameters
     // coefficient stores the difference (right - left)
@@ -595,8 +583,66 @@ fn fit_tree_base_learner(
         intercept: best_left_mean,
         threshold: Some(best_threshold),
         go_left: true,
-        rss: best_rss,
+        rss: left_ss + right_ss,
     }
+}
+
+/// Column-major stable sort orders of every column of `x`: entries
+/// `j * n .. (j + 1) * n` are the row indices of column `j` in ascending
+/// order (ties keep their row order). `x` must be finite.
+fn feature_orders(x: &ArrayView2<f64>) -> EconResult<Vec<usize>> {
+    let (n, p) = x.dim();
+    let what = "mboost feature sort orders";
+    let mut orders = try_vec(checked_len(&[n, p], what)?, 0usize, what)?;
+    if n == 0 {
+        return Ok(orders);
+    }
+    for (j, order) in orders.chunks_mut(n).enumerate() {
+        let col = x.column(j);
+        for (i, o) in order.iter_mut().enumerate() {
+            *o = i;
+        }
+        order.sort_by(|&a, &b| col[a].total_cmp(&col[b]));
+    }
+    Ok(orders)
+}
+
+/// Shared input checks of [`mboost`] and [`mboost_cv`].
+fn check_mboost_inputs(x: &ArrayView2<f64>, y: &ArrayView1<f64>) -> EconResult<()> {
+    let n_samples = x.nrows();
+    if n_samples < 2 {
+        return Err(EconError::Computation(
+            "Need at least 2 samples for mboost".to_string(),
+        ));
+    }
+    if x.ncols() == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "x must have at least one predictor column".to_string(),
+        });
+    }
+    if n_samples != y.len() {
+        return Err(EconError::Computation(
+            "X and y must have same number of samples".to_string(),
+        ));
+    }
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+    if let Some((i, v)) = y.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("y must contain only finite values (row {i} is {v})"),
+        });
+    }
+    Ok(())
+}
+
+/// `mstop + 1`, the length of the loss and CV-error paths.
+fn mstop_plus_one(mstop: usize) -> EconResult<usize> {
+    mstop.checked_add(1).ok_or_else(|| {
+        EconError::ResourceLimit("mstop is too large: the iteration count overflows".to_string())
+    })
 }
 
 /// Predict using a tree stump for one variable.
@@ -634,19 +680,10 @@ pub fn mboost(
     y: ArrayView1<f64>,
     config: &MboostConfig,
 ) -> EconResult<MboostResult> {
+    check_mboost_inputs(&x, &y)?;
     let n_samples = x.nrows();
     let n_features = x.ncols();
-
-    if n_samples < 2 {
-        return Err(EconError::Computation(
-            "Need at least 2 samples for mboost".to_string(),
-        ));
-    }
-    if n_samples != y.len() {
-        return Err(EconError::Computation(
-            "X and y must have same number of samples".to_string(),
-        ));
-    }
+    let iters_plus_one = mstop_plus_one(config.mstop)?;
 
     // Validate binary targets for classification
     if config.family == MboostFamily::Binomial {
@@ -683,17 +720,30 @@ pub fn mboost(
     let mut coefficients = vec![0.0; n_features];
     let mut intercept = init_pred;
     let mut selection_frequency = vec![0usize; n_features];
-    let mut loss_history = Vec::with_capacity(config.mstop + 1);
+    let mut loss_history = try_with_capacity::<f64>(iters_plus_one, "mboost loss history")?;
     let mut coefficient_path = Vec::new();
 
     // Initial loss
     loss_history.push(compute_loss(&y, &predictions, config.family));
 
-    // Store base learner fits for predictions
-    let mut base_learner_fits: Vec<(usize, BaseLearnerFit)> = Vec::with_capacity(config.mstop);
+    // Store base learner fits for predictions (only the tree learner keeps them)
+    let is_tree = config.base_learner == MboostBaseLearner::Tree;
+    let mut base_learner_fits: Vec<(usize, BaseLearnerFit)> = try_with_capacity(
+        if is_tree { config.mstop } else { 0 },
+        "mboost base learners",
+    )?;
+
+    // Per-feature sort orders for the tree stump, computed once per fit
+    let orders = if is_tree {
+        feature_orders(&x)?
+    } else {
+        Vec::new()
+    };
 
     // Boosting iterations
     for m in 0..config.mstop {
+        checkpoint()?;
+
         // Compute negative gradient (pseudo-residuals)
         let residuals = compute_negative_gradient(&y, &predictions, config.family);
 
@@ -716,9 +766,12 @@ pub fn mboost(
                 MboostBaseLearner::Linear => {
                     fit_linear_base_learner(&x_col, &residuals.view(), x_mean)
                 }
-                MboostBaseLearner::Tree => {
-                    fit_tree_base_learner(&x_col, &residuals.view(), config.min_samples_split)
-                }
+                MboostBaseLearner::Tree => fit_tree_base_learner(
+                    &x_col,
+                    &residuals.view(),
+                    &orders[j * n_samples..(j + 1) * n_samples],
+                    config.min_samples_split,
+                ),
             };
 
             if fit.rss < best_rss {
@@ -831,19 +884,19 @@ pub fn mboost_cv(
     y: ArrayView1<f64>,
     config: &MboostConfig,
 ) -> EconResult<MboostResult> {
+    check_mboost_inputs(&x, &y)?;
     let n_folds = config.cv_folds.unwrap_or(5);
     let n_samples = x.nrows();
 
-    if n_folds < 2 {
-        return Err(EconError::Computation(
-            "Cross-validation requires at least 2 folds".to_string(),
-        ));
+    if n_folds < 2 || n_folds > n_samples {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "cv_folds must be between 2 and the number of observations \
+                 (got {n_folds}, n = {n_samples})"
+            ),
+        });
     }
-    if n_folds > n_samples {
-        return Err(EconError::Computation(
-            "More folds than samples".to_string(),
-        ));
-    }
+    let iters_plus_one = mstop_plus_one(config.mstop)?;
 
     let mut rng_state = config.seed.unwrap_or(42);
 
@@ -855,10 +908,12 @@ pub fn mboost_cv(
     }
 
     // Initialize CV error matrix: mstop x n_folds
-    let mut cv_errors = Array2::zeros((config.mstop + 1, n_folds));
+    let mut cv_errors = try_zeros2(iters_plus_one, n_folds, "mboost cross-validation errors")?;
 
     // Run CV for each fold
     for fold in 0..n_folds {
+        checkpoint()?;
+
         // Split data
         let train_idx: Vec<usize> = (0..n_samples).filter(|&i| fold_ids[i] != fold).collect();
         let test_idx: Vec<usize> = (0..n_samples).filter(|&i| fold_ids[i] == fold).collect();
@@ -890,8 +945,17 @@ pub fn mboost_cv(
         // Initial CV error
         cv_errors[[0, fold]] = compute_loss(&y_test.view(), &test_preds, config.family);
 
+        // Per-feature sort orders of this fold's training rows
+        let orders = if config.base_learner == MboostBaseLearner::Tree {
+            feature_orders(&x_train.view())?
+        } else {
+            Vec::new()
+        };
+
         // Boosting iterations
         for m in 0..config.mstop {
+            checkpoint()?;
+
             let residuals = compute_negative_gradient(&y_train.view(), &train_preds, config.family);
 
             // Find best component
@@ -913,9 +977,12 @@ pub fn mboost_cv(
                     MboostBaseLearner::Linear => {
                         fit_linear_base_learner(&x_col, &residuals.view(), x_mean)
                     }
-                    MboostBaseLearner::Tree => {
-                        fit_tree_base_learner(&x_col, &residuals.view(), config.min_samples_split)
-                    }
+                    MboostBaseLearner::Tree => fit_tree_base_learner(
+                        &x_col,
+                        &residuals.view(),
+                        &orders[j * n_train..(j + 1) * n_train],
+                        config.min_samples_split,
+                    ),
                 };
 
                 if fit.rss < best_rss {
@@ -1123,7 +1190,284 @@ pub fn run_mboost_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// x on a 0.001 grid in [0, 1) (ties exist), y = 2 x0 - x_{p-1} + noise.
+    fn noisy_data(n: usize, p: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut s = seed;
+        let x = Array2::from_shape_fn((n, p), |_| (lcg_random(&mut s) % 1000) as f64 / 1000.0);
+        let y = Array1::from_shape_fn(n, |i| {
+            2.0 * x[[i, 0]] - x[[i, p - 1]]
+                + ((lcg_random(&mut s) % 1000) as f64 / 1000.0 - 0.5) * 0.3
+        });
+        (x, y)
+    }
+
+    #[test]
+    fn mboost_huge_mstop_is_an_error_not_an_abort() {
+        let (x, y) = noisy_data(40, 3, 7);
+        for base_learner in [MboostBaseLearner::Linear, MboostBaseLearner::Tree] {
+            let cfg = MboostConfig {
+                mstop: 1usize << 44,
+                base_learner,
+                ..Default::default()
+            };
+            let r = with_alloc_ceiling(Some(1 << 30), || mboost(x.view(), y.view(), &cfg));
+            assert!(
+                matches!(r, Err(EconError::ResourceLimit(_))),
+                "{:?}",
+                r.err()
+            );
+            let cv = MboostConfig {
+                cv_folds: Some(3),
+                ..cfg.clone()
+            };
+            let r = with_alloc_ceiling(Some(1 << 30), || mboost_cv(x.view(), y.view(), &cv));
+            assert!(
+                matches!(r, Err(EconError::ResourceLimit(_))),
+                "{:?}",
+                r.err()
+            );
+        }
+        let max = MboostConfig {
+            mstop: usize::MAX,
+            ..Default::default()
+        };
+        assert!(matches!(
+            mboost(x.view(), y.view(), &max),
+            Err(EconError::ResourceLimit(_))
+        ));
+        let max_cv = MboostConfig {
+            cv_folds: Some(3),
+            ..max
+        };
+        assert!(matches!(
+            mboost_cv(x.view(), y.view(), &max_cv),
+            Err(EconError::ResourceLimit(_))
+        ));
+    }
+
+    #[test]
+    fn mboost_honours_cancellation() {
+        let (x, y) = noisy_data(40, 3, 8);
+        let cfg = MboostConfig {
+            mstop: 50,
+            ..Default::default()
+        };
+        let r = with_budget(cancelled(), || mboost(x.view(), y.view(), &cfg));
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{:?}", r.err());
+        let cv = MboostConfig {
+            cv_folds: Some(3),
+            ..cfg
+        };
+        let r = with_budget(cancelled(), || mboost_cv(x.view(), y.view(), &cv));
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{:?}", r.err());
+    }
+
+    #[test]
+    fn mboost_rejects_empty_and_non_finite_designs() {
+        let (mut x, y) = noisy_data(30, 2, 9);
+        let empty = Array2::<f64>::zeros((30, 0));
+        let e = mboost(empty.view(), y.view(), &MboostConfig::default()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("predictor")),
+            "{e}"
+        );
+        x[[4, 1]] = f64::NAN;
+        let tree = MboostConfig {
+            base_learner: MboostBaseLearner::Tree,
+            ..Default::default()
+        };
+        let e = mboost(x.view(), y.view(), &tree).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("finite")),
+            "{e}"
+        );
+    }
+
+    /// Golden (characterization) test: captured on the code before the
+    /// stump sweep; it must pass before and after that change.
+    #[test]
+    fn mboost_tree_and_cv_unchanged_by_the_sweep() {
+        const GOLDEN: [u64; 5] = [
+            4579613898877180506,
+            13819135778981659199,
+            13819135778981659199,
+            4579613898877180506,
+            4589712189898099312,
+        ];
+        const GOLDEN_MSTOP: usize = 60;
+        let (x, y) = noisy_data(150, 4, 3);
+        let cfg = MboostConfig {
+            mstop: 60,
+            base_learner: MboostBaseLearner::Tree,
+            min_samples_split: 5,
+            ..Default::default()
+        };
+        let r = mboost(x.view(), y.view(), &cfg).unwrap();
+        let cv_cfg = MboostConfig {
+            cv_folds: Some(3),
+            seed: Some(9),
+            ..cfg
+        };
+        let cv = mboost_cv(x.view(), y.view(), &cv_cfg).unwrap();
+        let got = [
+            r.final_loss,
+            r.predictions[0],
+            r.predictions[149],
+            cv.final_loss,
+            cv.cv_error.as_ref().unwrap()[30],
+        ];
+        let bits = got.map(f64::to_bits);
+        assert_eq!(
+            (bits, cv.cv_optimal_mstop),
+            (GOLDEN, Some(GOLDEN_MSTOP)),
+            "got {bits:?} = {got:?}, mstop {:?}",
+            cv.cv_optimal_mstop
+        );
+    }
+
+    /// Reference guard: the sweep must pick the same split and return the
+    /// same bits as the quadratic search it replaced.
+    #[test]
+    fn stump_sweep_matches_naive_reference() {
+        let mut s = 11u64;
+        for n in [7usize, 20, 57, 200] {
+            for min_samples in [1usize, 2, 5] {
+                for rep in 0..20 {
+                    // x on a 0.1 grid (many ties), residuals continuous
+                    let x: Array1<f64> = (0..n)
+                        .map(|_| (lcg_random(&mut s) % 50) as f64 / 10.0)
+                        .collect();
+                    let r: Array1<f64> = (0..n)
+                        .map(|_| (lcg_random(&mut s) % 100_000) as f64 / 50_000.0 - 1.0)
+                        .collect();
+                    let mut order: Vec<usize> = (0..n).collect();
+                    order.sort_by(|&a, &b| x[a].total_cmp(&x[b])); // stable: ties keep index order
+                    let new = fit_tree_base_learner(&x.view(), &r.view(), &order, min_samples);
+                    let old = naive_fit_tree_base_learner(&x.view(), &r.view(), min_samples);
+                    let ctx = format!("n={n} min_samples={min_samples} rep={rep}");
+                    assert_eq!(
+                        new.threshold.map(f64::to_bits),
+                        old.threshold.map(f64::to_bits),
+                        "{ctx}"
+                    );
+                    assert_eq!(
+                        new.coefficient.to_bits(),
+                        old.coefficient.to_bits(),
+                        "{ctx}"
+                    );
+                    assert_eq!(new.intercept.to_bits(), old.intercept.to_bits(), "{ctx}");
+                    assert_eq!(new.rss.to_bits(), old.rss.to_bits(), "{ctx}");
+                }
+            }
+        }
+    }
+
+    /// Verbatim copy of the stump search before the O(n) sweep, kept as the
+    /// reference for `stump_sweep_matches_naive_reference`.
+    fn naive_fit_tree_base_learner(
+        x_col: &ArrayView1<f64>,
+        residuals: &ArrayView1<f64>,
+        min_samples: usize,
+    ) -> BaseLearnerFit {
+        let n = x_col.len();
+
+        // Sort by x value
+        let mut sorted: Vec<(usize, f64)> =
+            x_col.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Try all possible split points
+        let mut best_rss = f64::INFINITY;
+        let mut best_threshold = sorted[0].1;
+        let mut best_left_mean = 0.0;
+        let mut best_right_mean = 0.0;
+
+        // Running sums for left partition
+        let mut left_sum = 0.0;
+        let mut left_n = 0usize;
+        let total_sum: f64 = residuals.iter().sum();
+        let _total_ss: f64 = residuals.iter().map(|&r| r * r).sum();
+
+        for i in 0..n - 1 {
+            let (idx, x_val) = sorted[i];
+            left_sum += residuals[idx];
+            left_n += 1;
+
+            let right_n = n - left_n;
+
+            // Check minimum samples
+            if left_n < min_samples || right_n < min_samples {
+                continue;
+            }
+
+            // Check if next value is different (valid split point)
+            let next_x = sorted[i + 1].1;
+            if (next_x - x_val).abs() < 1e-10 {
+                continue;
+            }
+
+            // Compute RSS for this split
+            let left_mean = left_sum / left_n as f64;
+            let right_sum = total_sum - left_sum;
+            let right_mean = right_sum / right_n as f64;
+
+            let left_ss = {
+                let mut ss = 0.0;
+                for j in 0..=i {
+                    let r = residuals[sorted[j].0];
+                    ss += (r - left_mean).powi(2);
+                }
+                ss
+            };
+            let right_ss = {
+                let mut ss = 0.0;
+                for j in (i + 1)..n {
+                    let r = residuals[sorted[j].0];
+                    ss += (r - right_mean).powi(2);
+                }
+                ss
+            };
+
+            let rss = left_ss + right_ss;
+
+            if rss < best_rss {
+                best_rss = rss;
+                best_threshold = (x_val + next_x) / 2.0;
+                best_left_mean = left_mean;
+                best_right_mean = right_mean;
+            }
+        }
+
+        // If no valid split found, use mean
+        if best_rss.is_infinite() {
+            let mean = residuals.iter().sum::<f64>() / n as f64;
+            let rss: f64 = residuals.iter().map(|&r| (r - mean).powi(2)).sum();
+            return BaseLearnerFit {
+                coefficient: mean,
+                intercept: 0.0,
+                threshold: None,
+                go_left: true,
+                rss,
+            };
+        }
+
+        BaseLearnerFit {
+            coefficient: best_right_mean - best_left_mean,
+            intercept: best_left_mean,
+            threshold: Some(best_threshold),
+            go_left: true,
+            rss: best_rss,
+        }
+    }
 
     #[test]
     fn test_mboost_gaussian_basic() {
@@ -1381,7 +1725,8 @@ mod tests {
         let x = array![1.0, 2.0, 3.0, 7.0, 8.0, 9.0];
         let residuals = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
-        let fit = fit_tree_base_learner(&x.view(), &residuals.view(), 2);
+        let order: Vec<usize> = (0..x.len()).collect();
+        let fit = fit_tree_base_learner(&x.view(), &residuals.view(), &order, 2);
 
         // Should find a split around 5
         assert!(fit.threshold.is_some());
