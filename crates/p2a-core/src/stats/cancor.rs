@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{faer_ref_to_ndarray, faer_to_ndarray, matmul, ndarray_to_faer};
+use crate::resource;
 use faer::linalg::solvers::Solve;
 use faer::prelude::*;
 
@@ -188,6 +189,32 @@ pub fn cancor(
         });
     }
 
+    // Rank bound: more columns than the rows can make linearly independent (n - 1 when
+    // centring) make the Cholesky step below fail, so refuse before any p x p work.
+    for (name, cols, centred) in [("X", p, xcenter), ("Y", q, ycenter)] {
+        let cap = if centred { n - 1 } else { n };
+        if cols > cap {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "{name} has {cols} columns, but {n} rows allow at most {cap} linearly \
+                     independent {}columns; use fewer columns or more rows",
+                    if centred { "centred " } else { "" }
+                ),
+            });
+        }
+    }
+
+    // faer panics on allocation failure, so check every buffer it will size first
+    for (rows, cols, what) in [
+        (n, p, "X data matrix"),
+        (n, q, "Y data matrix"),
+        (p, p, "X covariance matrix"),
+        (q, q, "Y covariance matrix"),
+        (p, q, "cross-covariance matrix"),
+    ] {
+        resource::check_alloc::<f64>(resource::checked_len(&[rows, cols], what)?, what)?;
+    }
+
     // Number of canonical correlations
     let r = p.min(q);
 
@@ -207,6 +234,7 @@ pub fn cancor(
     } else {
         (y_faer.clone(), Array1::zeros(q))
     };
+    resource::checkpoint()?;
 
     // Compute covariance matrices (using n-1 for unbiased estimate)
     let scale = 1.0 / (n as f64 - 1.0);
@@ -221,6 +249,7 @@ pub fn cancor(
     // Make covariance matrices symmetric (numerical stability)
     let cov_xx_faer = symmetrize_faer(&cov_xx_faer);
     let cov_yy_faer = symmetrize_faer(&cov_yy_faer);
+    resource::checkpoint()?;
 
     // Cholesky decomposition using faer's optimized implementation
     let chol_xx = cov_xx_faer.llt(faer::Side::Lower).map_err(|_| {
@@ -276,6 +305,7 @@ pub fn cancor(
     // SVD of M
     let m = faer_to_ndarray(&m_faer);
     let (u, s, vt) = svd(&m)?;
+    resource::checkpoint()?;
 
     // Canonical correlations are the singular values (clamped to [0, 1])
     let cor = s.mapv(|v| v.clamp(0.0, 1.0));
@@ -338,6 +368,17 @@ pub fn run_cancor(
         });
     }
 
+    // A column listed twice within a set makes that set's covariance singular. A column shared
+    // by X and Y is allowed (R gives a canonical correlation of 1).
+    for (set, cols) in [("X", x_cols), ("Y", y_cols)] {
+        let mut seen = std::collections::HashSet::with_capacity(cols.len());
+        if let Some(c) = cols.iter().find(|c| !seen.insert(**c)) {
+            return Err(EconError::InvalidSpecification {
+                message: format!("column `{c}` is listed more than once in the {set} columns"),
+            });
+        }
+    }
+
     let df = dataset.df();
     let n = df.height();
 
@@ -349,7 +390,7 @@ pub fn run_cancor(
         .collect();
 
     // Extract X matrix
-    let mut x_data = Array2::<f64>::zeros((n, x_cols.len()));
+    let mut x_data = resource::try_zeros2(n, x_cols.len(), "X data matrix")?;
     for (j, col_name) in x_cols.iter().enumerate() {
         let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
             column: col_name.to_string(),
@@ -364,7 +405,7 @@ pub fn run_cancor(
     }
 
     // Extract Y matrix
-    let mut y_data = Array2::<f64>::zeros((n, y_cols.len()));
+    let mut y_data = resource::try_zeros2(n, y_cols.len(), "Y data matrix")?;
     for (j, col_name) in y_cols.iter().enumerate() {
         let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
             column: col_name.to_string(),
@@ -465,7 +506,54 @@ fn svd(m: &Array2<f64>) -> EconResult<(Array2<f64>, Array1<f64>, Array2<f64>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource;
     use ndarray::array;
+    use polars::prelude::*;
+
+    fn xy_dataset(n: usize) -> Dataset {
+        let f = |k: f64| {
+            (0..n)
+                .map(|i| (i as f64 * k).sin() + i as f64 * 0.01)
+                .collect::<Vec<f64>>()
+        };
+        Dataset::new(df!("x1" => f(0.37), "x2" => f(1.13), "y1" => f(0.71)).unwrap())
+    }
+
+    #[test]
+    fn test_run_cancor_rejects_duplicate_columns() {
+        // pre-fix: fails later with "Cholesky decomposition of Σxx failed"
+        let e = run_cancor(&xy_dataset(30), &["x1", "x1"], &["y1"], true, true).unwrap_err();
+        assert!(e.to_string().contains("more than once"), "{e}");
+    }
+
+    #[test]
+    fn test_cancor_rejects_more_columns_than_rank() {
+        let x = Array2::from_shape_fn((5, 5), |(i, j)| {
+            ((i * 5 + j) as f64 * 0.731).sin() + i as f64 * 0.1 * (j as f64 + 1.0)
+        });
+        let y = Array2::from_shape_fn((5, 1), |(i, _)| (i as f64 * 1.3).cos());
+        let e = cancor(&x.view(), &y.view(), true, true).unwrap_err(); // centred: rank <= 4 < 5 columns
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("rows")),
+            "{e}"
+        );
+        if let Err(e) = cancor(&x.view(), &y.view(), false, false) {
+            // uncentred: 5 <= 5 is allowed
+            assert!(
+                !e.to_string().contains("rows"),
+                "rank guard must not fire uncentred: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_cancor_respects_allocation_ceiling() {
+        // 200 x 1 data matrix = 1600 bytes > 1024
+        let r = resource::with_alloc_ceiling(Some(1024), || {
+            run_cancor(&xy_dataset(200), &["x1"], &["y1"], true, true)
+        });
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))));
+    }
 
     #[test]
     fn test_cancor_basic() {

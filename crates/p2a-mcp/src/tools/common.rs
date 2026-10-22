@@ -161,24 +161,24 @@ pub fn extract_numeric_matrix(
         return Err("At least one column must be specified".to_string());
     }
 
-    let mut data = ndarray::Array2::zeros((n_rows, n_cols));
+    // Fallible, so an n x p request above the allocation ceiling is an error, not an abort
+    let mut data = p2a_core::resource::try_zeros2(n_rows, n_cols, "numeric matrix")
+        .map_err(|e| e.to_string())?;
 
     for (j, col_name) in columns.iter().enumerate() {
         let col = df
             .column(col_name)
             .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
 
-        let values: Vec<f64> = col
+        let cast = col
             .cast(&DataType::Float64)
-            .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", col_name, e))?
+            .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", col_name, e))?;
+        let values = cast
             .f64()
-            .map_err(|e| format!("Column '{}' is not numeric: {}", col_name, e))?
-            .into_iter()
-            .map(|v: Option<f64>| v.unwrap_or(f64::NAN))
-            .collect();
+            .map_err(|e| format!("Column '{}' is not numeric: {}", col_name, e))?;
 
-        for (i, &val) in values.iter().enumerate() {
-            data[[i, j]] = val;
+        for (cell, v) in data.column_mut(j).iter_mut().zip(values) {
+            *cell = v.unwrap_or(f64::NAN);
         }
     }
 
@@ -267,5 +267,25 @@ mod tests {
             "{e}"
         );
         assert!(check_named_budget("stats_loglin", "table_cells", u64::MAX, None).is_ok());
+    }
+
+    #[test]
+    fn extract_numeric_matrix_allocation_is_fallible() {
+        use p2a_core::polars::prelude::*;
+        let ds = p2a_core::data::Dataset::new(
+            df!("x" => (0..200).map(|i| i as f64 * 0.5).collect::<Vec<_>>()).unwrap(),
+        );
+        let e = p2a_core::resource::with_alloc_ceiling(Some(1024), || {
+            extract_numeric_matrix(&ds, &["x".to_string()])
+        })
+        .unwrap_err();
+        assert!(e.contains("limit"), "{e}"); // 200 x 1 x 8 = 1600 bytes > 1024
+        // repeated names are still allowed
+        assert_eq!(
+            extract_numeric_matrix(&ds, &["x".to_string(), "x".to_string()])
+                .unwrap()
+                .dim(),
+            (200, 2)
+        );
     }
 }
