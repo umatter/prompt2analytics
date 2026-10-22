@@ -5,6 +5,9 @@
 //! PCA uses SVD via faer for O(nm²) complexity instead of power iteration.
 
 use crate::errors::{EconError, EconResult};
+use crate::resource::{
+    check_alloc, checked_len, checkpoint, try_vec, try_with_capacity, try_zeros2,
+};
 use faer::Mat;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
@@ -251,93 +254,6 @@ fn pca_via_cov_eigen(
     Ok((sorted_eigenvalues, sorted_eigenvectors))
 }
 
-/// Symmetric eigendecomposition using power iteration with deflation.
-/// Returns eigenvalues (sorted descending) and eigenvectors (as columns).
-fn symmetric_eigen(
-    matrix: &Array2<f64>,
-    n_components: usize,
-) -> Result<(Array1<f64>, Array2<f64>), String> {
-    let n = matrix.nrows();
-    let mut eigenvalues = Array1::zeros(n_components);
-    let mut eigenvectors = Array2::zeros((n, n_components));
-
-    // Work with a copy for deflation
-    let mut a = matrix.clone();
-
-    for i in 0..n_components {
-        // Power iteration to find dominant eigenpair
-        let (eigenvalue, eigenvector) = power_iteration(&a, 1000, 1e-10)?;
-
-        eigenvalues[i] = eigenvalue;
-        eigenvectors.column_mut(i).assign(&eigenvector);
-
-        // Deflate: A = A - λ * v * v^T
-        let outer = outer_product(&eigenvector.view(), &eigenvector.view());
-        a = a - eigenvalue * outer;
-    }
-
-    Ok((eigenvalues, eigenvectors))
-}
-
-/// Power iteration to find dominant eigenpair.
-fn power_iteration(
-    matrix: &Array2<f64>,
-    max_iter: usize,
-    tol: f64,
-) -> Result<(f64, Array1<f64>), String> {
-    let n = matrix.nrows();
-
-    // Initialize with random-ish vector
-    let mut v = Array1::from_elem(n, 1.0 / (n as f64).sqrt());
-    v[0] += 0.1; // Break symmetry
-    normalize(&mut v);
-
-    let mut eigenvalue = 0.0;
-
-    for _ in 0..max_iter {
-        // Multiply by matrix
-        let av = matrix.dot(&v);
-
-        // Compute Rayleigh quotient (eigenvalue estimate)
-        let new_eigenvalue = v.dot(&av);
-
-        // Normalize
-        let mut new_v = av;
-        normalize(&mut new_v);
-
-        // Check convergence
-        if (new_eigenvalue - eigenvalue).abs() < tol {
-            return Ok((new_eigenvalue, new_v));
-        }
-
-        eigenvalue = new_eigenvalue;
-        v = new_v;
-    }
-
-    Ok((eigenvalue, v))
-}
-
-/// Normalize a vector to unit length.
-fn normalize(v: &mut Array1<f64>) {
-    let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-    if norm > 1e-10 {
-        *v /= norm;
-    }
-}
-
-/// Compute outer product of two vectors.
-fn outer_product(a: &ndarray::ArrayView1<f64>, b: &ndarray::ArrayView1<f64>) -> Array2<f64> {
-    let n = a.len();
-    let m = b.len();
-    let mut result = Array2::zeros((n, m));
-    for i in 0..n {
-        for j in 0..m {
-            result[[i, j]] = a[i] * b[j];
-        }
-    }
-    result
-}
-
 /// Project new data onto principal components.
 pub fn pca_transform(data: ArrayView2<f64>, pca_result: &PCAResult) -> EconResult<Array2<f64>> {
     let n_features = data.ncols();
@@ -462,6 +378,27 @@ pub fn tsne(
     if n_samples < 4 {
         return Err("Need at least 4 samples for t-SNE".to_string());
     }
+    if max_iter == 0 {
+        return Err("max_iterations must be at least 1 (got 0)".to_string());
+    }
+    if n_comp == 0 {
+        return Err("n_components must be at least 1 (got 0)".to_string());
+    }
+    if !(perp.is_finite() && perp > 0.0) {
+        return Err(format!(
+            "perplexity must be finite and positive (got {perp})"
+        ));
+    }
+    if !(lr.is_finite() && lr > 0.0) {
+        return Err(format!(
+            "learning_rate must be finite and positive (got {lr})"
+        ));
+    }
+    if let Some(((i, j), v)) = data.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(format!(
+            "data must contain only finite values (row {i}, column {j} is {v})"
+        ));
+    }
     if perp >= (n_samples as f64) / 3.0 {
         return Err(format!(
             "Perplexity ({}) must be less than n_samples / 3 ({})",
@@ -470,14 +407,14 @@ pub fn tsne(
         ));
     }
 
-    // Compute pairwise squared distances in high-dimensional space
-    let distances = pairwise_squared_distances(&data);
+    let to_string = |e: EconError| e.to_string();
 
-    // Compute joint probabilities P_ij using Gaussian kernel
-    let p = compute_joint_probabilities(&distances, perp)?;
+    // Compute joint probabilities P_ij using Gaussian kernel (row by row; no
+    // distance matrix is kept)
+    let p = compute_joint_probabilities(&data, perp)?;
 
     // Initialize low-dimensional embedding using PCA or random
-    let mut y = initialize_embedding(data.view(), n_comp, seed);
+    let mut y = initialize_embedding(data.view(), n_comp, seed)?;
 
     // Gradient descent parameters
     let momentum = 0.5;
@@ -486,19 +423,24 @@ pub fn tsne(
     let early_exaggeration = 4.0;
     let early_exaggeration_iter = 100;
 
-    let mut y_velocity: Array2<f64> = Array2::zeros((n_samples, n_comp));
-    let mut gains: Array2<f64> = Array2::from_elem((n_samples, n_comp), 1.0);
+    let mut y_velocity = try_zeros2(n_samples, n_comp, "t-SNE velocity").map_err(to_string)?;
+    let mut gains = try_zeros2(n_samples, n_comp, "t-SNE gains").map_err(to_string)?;
+    gains.fill(1.0);
 
-    // Exaggerate P for early iterations
-    let mut p_current = &p * early_exaggeration;
+    // Student-t similarities, overwritten every iteration
+    let mut q = try_zeros2(n_samples, n_samples, "t-SNE similarity matrix").map_err(to_string)?;
 
     let mut kl_div = 0.0;
 
     for iter in 0..max_iter {
-        // Stop early exaggeration
-        if iter == early_exaggeration_iter {
-            p_current = p.clone();
-        }
+        checkpoint().map_err(to_string)?;
+
+        // Early exaggeration multiplies P for the first iterations
+        let exaggeration = if iter < early_exaggeration_iter {
+            early_exaggeration
+        } else {
+            1.0
+        };
 
         // Switch to final momentum
         let current_momentum = if iter < momentum_switch_iter {
@@ -508,10 +450,10 @@ pub fn tsne(
         };
 
         // Compute Q distribution (Student-t with 1 DOF)
-        let (q, sum_q) = compute_q_distribution(&y.view());
+        let sum_q = fill_q_distribution(&y.view(), &mut q);
 
         // Compute gradient
-        let gradient = compute_gradient(&p_current.view(), &q.view(), &y.view(), sum_q);
+        let gradient = compute_gradient(&p.view(), exaggeration, &q.view(), &y.view(), sum_q);
 
         // Update gains for adaptive learning rate
         for i in 0..n_samples {
@@ -537,7 +479,7 @@ pub fn tsne(
 
         // Compute KL divergence every 50 iterations
         if iter % 50 == 0 || iter == max_iter - 1 {
-            kl_div = compute_kl_divergence(&p_current.view(), &q.view(), sum_q);
+            kl_div = compute_kl_divergence(&p.view(), exaggeration, &q.view(), sum_q);
         }
     }
 
@@ -550,51 +492,58 @@ pub fn tsne(
     })
 }
 
-/// Compute pairwise squared Euclidean distances.
-fn pairwise_squared_distances(data: &ArrayView2<f64>) -> Array2<f64> {
-    let n = data.nrows();
-    let mut distances = Array2::zeros((n, n));
-
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let mut dist_sq = 0.0;
-            for k in 0..data.ncols() {
-                let diff = data[[i, k]] - data[[j, k]];
-                dist_sq += diff * diff;
-            }
-            distances[[i, j]] = dist_sq;
-            distances[[j, i]] = dist_sq;
-        }
-    }
-
-    distances
-}
-
 /// Compute joint probability matrix P using Gaussian kernel.
 /// Uses binary search to find sigma for each point to achieve target perplexity.
+///
+/// Row `i`'s squared distances are computed into a reusable buffer (pair
+/// `(min(i, j), max(i, j))`, the order a full distance matrix used), its
+/// conditional probabilities are written into row `i` of `P`, and `P` is then
+/// symmetrised in place. Only the `n x n` matrix `P` is allocated.
 fn compute_joint_probabilities(
-    distances: &Array2<f64>,
+    data: &ArrayView2<f64>,
     perplexity: f64,
 ) -> Result<Array2<f64>, String> {
-    let n = distances.nrows();
+    let to_string = |e: EconError| e.to_string();
+    let n = data.nrows();
+    let n_features = data.ncols();
     let target_entropy = perplexity.ln();
 
-    let mut p = Array2::zeros((n, n));
+    let mut p = try_zeros2(n, n, "t-SNE affinity matrix").map_err(to_string)?;
+    let mut distances = try_vec(n, 0.0f64, "t-SNE distance row").map_err(to_string)?;
+    let mut p_i = Array1::zeros(n);
 
     for i in 0..n {
+        checkpoint().map_err(to_string)?;
+
+        for (j, dist) in distances.iter_mut().enumerate() {
+            *dist = if i == j {
+                0.0
+            } else {
+                let (a, b) = if i < j { (i, j) } else { (j, i) };
+                let mut dist_sq = 0.0;
+                for k in 0..n_features {
+                    let diff = data[[a, k]] - data[[b, k]];
+                    dist_sq += diff * diff;
+                }
+                dist_sq
+            };
+        }
+
+        // The buffer is reused across rows: entry i must start at 0
+        p_i[i] = 0.0;
+
         // Binary search for sigma_i
         let mut sigma_min = 1e-10;
         let mut sigma_max = 1e10;
         let mut sigma = 1.0;
 
         for _ in 0..50 {
-            // Compute conditional probability P_j|i
-            let mut p_i = Array1::zeros(n);
+            // Compute conditional probability P_j|i (p_i[i] stays 0)
             let mut sum_exp = 0.0;
 
             for j in 0..n {
                 if i != j {
-                    let exp_val = (-distances[[i, j]] / (2.0 * sigma * sigma)).exp();
+                    let exp_val = (-distances[j] / (2.0 * sigma * sigma)).exp();
                     p_i[j] = exp_val;
                     sum_exp += exp_val;
                 }
@@ -637,19 +586,18 @@ fn compute_joint_probabilities(
         }
     }
 
-    // Symmetrize: P_ij = (P_j|i + P_i|j) / 2n
-    let mut p_sym = Array2::zeros((n, n));
+    // Symmetrize in place: P_ij = (P_j|i + P_i|j) / 2n; the diagonal stays 0
     for i in 0..n {
         for j in (i + 1)..n {
             let val = (p[[i, j]] + p[[j, i]]) / (2.0 * n as f64);
             // Ensure minimum probability for numerical stability
             let val = val.max(1e-12);
-            p_sym[[i, j]] = val;
-            p_sym[[j, i]] = val;
+            p[[i, j]] = val;
+            p[[j, i]] = val;
         }
     }
 
-    Ok(p_sym)
+    Ok(p)
 }
 
 /// Initialize low-dimensional embedding.
@@ -657,19 +605,20 @@ fn initialize_embedding(
     data: ArrayView2<f64>,
     n_components: usize,
     seed: Option<u64>,
-) -> Array2<f64> {
+) -> Result<Array2<f64>, String> {
     let n_samples = data.nrows();
 
     // Try PCA initialization first
     if let Ok(pca_result) = pca(data, Some(n_components), true) {
         if let Some(transformed) = pca_result.transformed {
             // Scale down for better optimization
-            return transformed * 0.0001;
+            return Ok(transformed * 0.0001);
         }
     }
 
     // Fallback to pseudo-random initialization using seed
-    let mut embedding = Array2::zeros((n_samples, n_components));
+    let mut embedding = try_zeros2(n_samples, n_components, "t-SNE initial embedding")
+        .map_err(|e| e.to_string())?;
     let seed = seed.unwrap_or(42);
 
     for i in 0..n_samples {
@@ -680,14 +629,14 @@ fn initialize_embedding(
         }
     }
 
-    embedding
+    Ok(embedding)
 }
 
 /// Compute Q distribution (Student-t with 1 degree of freedom).
-/// Returns Q matrix and sum of all Q values.
-fn compute_q_distribution(y: &ArrayView2<f64>) -> (Array2<f64>, f64) {
+/// Overwrites every off-diagonal cell of `q` (the diagonal is left as is)
+/// and returns the sum of all Q values.
+fn fill_q_distribution(y: &ArrayView2<f64>, q: &mut Array2<f64>) -> f64 {
     let n = y.nrows();
-    let mut q = Array2::zeros((n, n));
     let mut sum_q = 0.0;
 
     for i in 0..n {
@@ -707,12 +656,13 @@ fn compute_q_distribution(y: &ArrayView2<f64>) -> (Array2<f64>, f64) {
         }
     }
 
-    (q, sum_q)
+    sum_q
 }
 
-/// Compute gradient of KL divergence.
+/// Compute gradient of KL divergence for `P * exaggeration`.
 fn compute_gradient(
     p: &ArrayView2<f64>,
+    exaggeration: f64,
     q: &ArrayView2<f64>,
     y: &ArrayView2<f64>,
     sum_q: f64,
@@ -726,7 +676,7 @@ fn compute_gradient(
             if i != j {
                 let q_ij = q[[i, j]] / sum_q;
                 // Factor: 4 * (p_ij - q_ij) * (1 + ||y_i - y_j||^2)^(-1)
-                let factor = 4.0 * (p[[i, j]] - q_ij) * q[[i, j]];
+                let factor = 4.0 * (p[[i, j]] * exaggeration - q_ij) * q[[i, j]];
 
                 for k in 0..n_comp {
                     gradient[[i, k]] += factor * (y[[i, k]] - y[[j, k]]);
@@ -738,16 +688,22 @@ fn compute_gradient(
     gradient
 }
 
-/// Compute KL divergence between P and Q.
-fn compute_kl_divergence(p: &ArrayView2<f64>, q: &ArrayView2<f64>, sum_q: f64) -> f64 {
+/// Compute KL divergence between `P * exaggeration` and Q.
+fn compute_kl_divergence(
+    p: &ArrayView2<f64>,
+    exaggeration: f64,
+    q: &ArrayView2<f64>,
+    sum_q: f64,
+) -> f64 {
     let n = p.nrows();
     let mut kl = 0.0;
 
     for i in 0..n {
         for j in 0..n {
-            if i != j && p[[i, j]] > 1e-12 {
+            let p_ij = p[[i, j]] * exaggeration;
+            if i != j && p_ij > 1e-12 {
                 let q_ij = (q[[i, j]] / sum_q).max(1e-12);
-                kl += p[[i, j]] * (p[[i, j]] / q_ij).ln();
+                kl += p_ij * (p_ij / q_ij).ln();
             }
         }
     }
@@ -880,6 +836,16 @@ pub fn cmdscale(
         }
     }
 
+    // Non-finite entries would pass the symmetry checks below
+    for (i, row) in d.iter().enumerate() {
+        if let Some(j) = row.iter().position(|v| !v.is_finite()) {
+            return Err(format!(
+                "Distance matrix must contain only finite values (d[{i},{j}] = {})",
+                row[j]
+            ));
+        }
+    }
+
     // Check symmetry and non-negative distances
     for i in 0..n {
         if d[i][i].abs() > 1e-10 {
@@ -904,57 +870,115 @@ pub fn cmdscale(
         }
     }
 
-    let k = k.unwrap_or(2).min(n - 1);
-    let return_all_eig = eig.unwrap_or(false);
-    let use_add = add.unwrap_or(false);
+    let k = cmdscale_dims(k, n)?;
+    // All n eigenvalues are always returned; `eig` and `add` are kept for
+    // API compatibility (ML-98 revisits them).
+    let _ = (eig, add);
 
-    // Convert to Array2 for matrix operations
-    let mut d_sq = Array2::zeros((n, n));
+    let (points, eig_vec) = cmdscale_core(n, |i, j| d[i][j], k)?;
+    Ok(cmdscale_result(points, eig_vec, k, n, true))
+}
+
+/// The output dimension: `k` (default 2) clamped to `n - 1`; `k = 0` is refused.
+fn cmdscale_dims(k: Option<usize>, n: usize) -> Result<usize, String> {
+    match k.unwrap_or(2) {
+        0 => Err("k must be at least 1 (got 0)".to_string()),
+        k => Ok(k.min(n - 1)),
+    }
+}
+
+/// Classical MDS on the distances `d(i, j)` of `n` points: returns the
+/// `n x k` configuration and all `n` eigenvalues of the double-centred
+/// matrix in descending order, as `stats::cmdscale` orders them.
+///
+/// Builds `B = -1/2 H D^2 H` directly from `d` (no separate `D^2` matrix)
+/// and decomposes it with faer's self-adjoint eigensolver. The `n x n`
+/// buffers, including those the eigensolver allocates internally, are
+/// pre-flighted against the allocation ceiling.
+fn cmdscale_core(
+    n: usize,
+    d: impl Fn(usize, usize) -> f64,
+    k: usize,
+) -> Result<(Vec<Vec<f64>>, Vec<f64>), String> {
+    let to_string = |e: EconError| e.to_string();
+    checkpoint().map_err(to_string)?;
+    let what = "cmdscale matrix";
+    check_alloc::<f64>(checked_len(&[n, n], what).map_err(to_string)?, what).map_err(to_string)?;
+
+    // Row and column means of D^2, and its grand mean
+    let mut row_means = vec![0.0f64; n];
+    let mut col_means = vec![0.0f64; n];
+    let mut total = 0.0f64;
     for i in 0..n {
+        checkpoint().map_err(to_string)?;
         for j in 0..n {
-            d_sq[[i, j]] = d[i][j] * d[i][j];
+            let d_ij = d(i, j);
+            let sq = d_ij * d_ij;
+            row_means[i] += sq;
+            col_means[j] += sq;
+            total += sq;
         }
     }
-
-    // Apply additive constant if requested (Cailliez method approximation)
-    // This helps when distances are not perfectly Euclidean
-    if use_add {
-        // Simple additive constant: add c to all off-diagonal elements of D
-        // where c makes the smallest eigenvalue non-negative
-        // For simplicity, we'll compute after eigendecomposition and re-run if needed
-    }
-
-    // Double centering: B = -0.5 * H * D² * H
-    // where H = I - (1/n) * 1 * 1'
-    // This is equivalent to: B[i,j] = -0.5 * (D²[i,j] - row_mean[i] - col_mean[j] + grand_mean)
-    let row_means: Vec<f64> = (0..n).map(|i| d_sq.row(i).sum() / n as f64).collect();
-    let col_means: Vec<f64> = (0..n).map(|j| d_sq.column(j).sum() / n as f64).collect();
-    let grand_mean: f64 = d_sq.sum() / (n * n) as f64;
-
-    let mut b = Array2::zeros((n, n));
     for i in 0..n {
+        row_means[i] /= n as f64;
+        col_means[i] /= n as f64;
+    }
+    let grand_mean = total / (n as f64 * n as f64);
+
+    // Double centering: B[i,j] = -0.5 * (D²[i,j] - row_mean[i] - col_mean[j] + grand_mean)
+    let mut b = Mat::<f64>::zeros(n, n);
+    for i in 0..n {
+        checkpoint().map_err(to_string)?;
         for j in 0..n {
-            b[[i, j]] = -0.5 * (d_sq[[i, j]] - row_means[i] - col_means[j] + grand_mean);
+            let d_ij = d(i, j);
+            b[(i, j)] = -0.5 * (d_ij * d_ij - row_means[i] - col_means[j] + grand_mean);
         }
     }
 
     // Make B exactly symmetric (numerical stability)
     for i in 0..n {
         for j in (i + 1)..n {
-            let avg = (b[[i, j]] + b[[j, i]]) / 2.0;
-            b[[i, j]] = avg;
-            b[[j, i]] = avg;
+            let avg = (b[(i, j)] + b[(j, i)]) / 2.0;
+            b[(i, j)] = avg;
+            b[(j, i)] = avg;
         }
     }
 
-    // Eigendecomposition of B
-    // We need ALL eigenvalues for GOF calculation, but only k eigenvectors
-    let n_eig = if return_all_eig { n } else { n };
-    let (eigenvalues, eigenvectors) = symmetric_eigen(&b, n_eig)?;
+    checkpoint().map_err(to_string)?;
+    let evd = b
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| "cmdscale eigendecomposition failed".to_string())?;
+    let values = evd.S().column_vector();
+    let vectors = evd.U();
 
-    // Convert eigenvalues to Vec
-    let eig_vec: Vec<f64> = eigenvalues.to_vec();
+    // Descending algebraic order (faer's own order is not relied on)
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| values[b].total_cmp(&values[a]));
+    let eig: Vec<f64> = order.iter().map(|&j| values[j]).collect();
 
+    // points[i, j] = eigenvectors[i, j] * sqrt(max(eigenvalues[j], 0))
+    let what = "cmdscale configuration";
+    checked_len(&[n, k], what).map_err(to_string)?;
+    let mut points = try_with_capacity::<Vec<f64>>(n, what).map_err(to_string)?;
+    for i in 0..n {
+        let mut row = try_vec(k, 0.0f64, what).map_err(to_string)?;
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = vectors[(i, order[j])] * eig[j].max(0.0).sqrt();
+        }
+        points.push(row);
+    }
+
+    Ok((points, eig))
+}
+
+/// Assemble a [`CmdscaleResult`], computing the goodness-of-fit measures.
+fn cmdscale_result(
+    points: Vec<Vec<f64>>,
+    eig_vec: Vec<f64>,
+    k: usize,
+    n: usize,
+    is_distance_matrix: bool,
+) -> CmdscaleResult {
     // Compute GOF measures
     let sum_abs: f64 = eig_vec.iter().map(|&x| x.abs()).sum();
     let sum_pos: f64 = eig_vec.iter().filter(|&&x| x > 0.0).sum();
@@ -966,24 +990,14 @@ pub fn cmdscale(
         [1.0, 1.0]
     };
 
-    // Construct configuration points
-    // points[i, j] = eigenvectors[i, j] * sqrt(max(eigenvalues[j], 0))
-    let mut points = vec![vec![0.0; k]; n];
-    for i in 0..n {
-        for j in 0..k {
-            let ev = eigenvalues[j].max(0.0);
-            points[i][j] = eigenvectors[[i, j]] * ev.sqrt();
-        }
-    }
-
-    Ok(CmdscaleResult {
+    CmdscaleResult {
         points,
         eig: eig_vec,
         gof,
         k,
         n,
-        is_distance_matrix: true,
-    })
+        is_distance_matrix,
+    }
 }
 
 /// Classical MDS from a data matrix (computes Euclidean distances first).
@@ -1000,24 +1014,32 @@ pub fn cmdscale_from_data(
 ) -> Result<CmdscaleResult, String> {
     let n = data.nrows();
 
-    // Compute Euclidean distance matrix
-    let mut dist = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let mut d_sq = 0.0;
-            for col in 0..data.ncols() {
-                let diff = data[[i, col]] - data[[j, col]];
-                d_sq += diff * diff;
-            }
-            let d = d_sq.sqrt();
-            dist[i][j] = d;
-            dist[j][i] = d;
-        }
+    if n < 2 {
+        return Err("Need at least 2 points for MDS".to_string());
     }
+    if let Some(((i, j), v)) = data.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(format!(
+            "data must contain only finite values (row {i}, column {j} is {v})"
+        ));
+    }
+    let k = cmdscale_dims(k, n)?;
 
-    let mut result = cmdscale(&dist, k, Some(true), None)?;
-    result.is_distance_matrix = false;
-    Ok(result)
+    // Euclidean distances computed on the fly (as R's dist), never stored
+    let dist = |i: usize, j: usize| {
+        if i == j {
+            return 0.0;
+        }
+        let (a, b) = if i < j { (i, j) } else { (j, i) };
+        let mut d_sq = 0.0;
+        for col in 0..data.ncols() {
+            let diff = data[[a, col]] - data[[b, col]];
+            d_sq += diff * diff;
+        }
+        d_sq.sqrt()
+    };
+
+    let (points, eig_vec) = cmdscale_core(n, dist, k)?;
+    Ok(cmdscale_result(points, eig_vec, k, n, false))
 }
 
 /// Run classical MDS (convenience wrapper).
@@ -1033,7 +1055,230 @@ pub fn run_cmdscale(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn blobs(n: usize, d: usize, seed: u64) -> Array2<f64> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        Array2::from_shape_fn((n, d), |(i, _)| (i % 3) as f64 * 3.0 + rng.r#gen::<f64>())
+    }
+
+    #[test]
+    fn tsne_affinity_matrix_is_fallible() {
+        let data = blobs(100, 3, 1);
+        let e = with_alloc_ceiling(Some(8 * 100 * 100 - 8), || {
+            tsne(data.view(), Some(2), Some(5.0), Some(1), None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("limit"), "{e}");
+    }
+
+    #[test]
+    fn tsne_validates_parameters_data_and_cancellation() {
+        let data = blobs(40, 3, 2);
+        for ((c, p, it, lr), param) in [
+            ((Some(2), Some(5.0), Some(0), Some(200.0)), "max_iterations"),
+            ((Some(0), Some(5.0), Some(10), Some(200.0)), "n_components"),
+            ((Some(2), Some(-1.0), Some(10), Some(200.0)), "perplexity"),
+            (
+                (Some(2), Some(f64::NAN), Some(10), Some(200.0)),
+                "perplexity",
+            ),
+            ((Some(2), Some(5.0), Some(10), Some(0.0)), "learning_rate"),
+        ] {
+            let e = tsne(data.view(), c, p, it, lr, Some(1)).unwrap_err();
+            assert!(e.starts_with(param), "{e}");
+        }
+        let mut bad = data.clone();
+        bad[[3, 1]] = f64::INFINITY;
+        assert!(
+            tsne(bad.view(), Some(2), Some(5.0), Some(10), None, Some(1))
+                .unwrap_err()
+                .contains("finite")
+        );
+        let e = with_budget(cancelled(), || {
+            tsne(data.view(), Some(2), Some(5.0), Some(10), None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+    }
+
+    /// Golden (characterization) test: captured on the code before the
+    /// memory refactor (row-wise P, scalar exaggeration, reused Q); every
+    /// floating-point operation is preserved, so the bits must not change.
+    #[test]
+    fn tsne_memory_refactor_is_bit_identical() {
+        const GOLDEN: [u64; 4] = [
+            13867541354597143110,
+            13857677031516769935,
+            4647298372589536596,
+            4612250860452238985,
+        ];
+        let data = array![
+            [0.0, 0.0, 0.0],
+            [0.1, 0.1, 0.1],
+            [0.2, 0.0, 0.1],
+            [0.0, 0.2, 0.1],
+            [0.1, 0.1, 0.2],
+            [5.0, 5.0, 5.0],
+            [5.1, 5.0, 5.1],
+            [5.0, 5.2, 5.0],
+            [5.2, 5.1, 5.1],
+            [5.0, 5.1, 5.2],
+            [10.0, 0.0, 5.0],
+            [10.1, 0.1, 5.1],
+            [10.0, 0.2, 5.0],
+            [10.2, 0.0, 5.2],
+            [10.1, 0.1, 5.0],
+        ];
+        // 120 iterations cross the early-exaggeration switch at 100
+        let r = tsne(
+            data.view(),
+            Some(2),
+            Some(4.0),
+            Some(120),
+            Some(200.0),
+            Some(42),
+        )
+        .unwrap();
+        let got = [
+            r.embedding[[0, 0]],
+            r.embedding[[7, 1]],
+            r.embedding[[14, 0]],
+            r.kl_divergence,
+        ];
+        let bits = got.map(f64::to_bits);
+        assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
+    }
+
+    /// R 4.3.3:
+    /// x <- matrix(c(0.12,1.05,2.31, 0.48,0.31,1.74, 2.91,3.17,0.52, 3.36,2.62,1.18,
+    ///               1.07,0.74,2.95, 5.21,0.43,0.66, 4.83,1.12,1.41, 0.71,2.38,3.27), ncol=3, byrow=TRUE)
+    /// cmdscale(dist(x), k=2, eig=TRUE); cmdscale(dist(x, "manhattan"), k=2, eig=TRUE)
+    #[test]
+    fn test_validate_cmdscale_matches_r() {
+        let x = array![
+            [0.12, 1.05, 2.31],
+            [0.48, 0.31, 1.74],
+            [2.91, 3.17, 0.52],
+            [3.36, 2.62, 1.18],
+            [1.07, 0.74, 2.95],
+            [5.21, 0.43, 0.66],
+            [4.83, 1.12, 1.41],
+            [0.71, 2.38, 3.27]
+        ];
+        fn match_up_to_sign(got: &[Vec<f64>], want: &[[f64; 2]]) {
+            for j in 0..2 {
+                let dot: f64 = (0..want.len()).map(|i| got[i][j] * want[i][j]).sum();
+                let s = if dot >= 0.0 { 1.0 } else { -1.0 };
+                for i in 0..want.len() {
+                    assert!(
+                        (got[i][j] - s * want[i][j]).abs() < 1e-9,
+                        "point {i} dim {j}: {} vs {}",
+                        got[i][j],
+                        s * want[i][j]
+                    );
+                }
+            }
+        }
+        let e = cmdscale_from_data(x.view(), Some(2)).unwrap();
+        match_up_to_sign(
+            &e.points,
+            &[
+                [-2.279060593438, 0.262854553433],
+                [-1.766554460130, 0.963788061328],
+                [1.083580183186, -1.758390545875],
+                [1.220858628800, -1.092317721778],
+                [-1.660497422080, 0.740094188594],
+                [3.018416293670, 1.197864000051],
+                [2.416501971425, 0.565340104362],
+                [-2.033244601432, -0.879232640115],
+            ],
+        );
+        let r_eig = [
+            3.282112765185e+01,
+            8.358352300206e+00,
+            2.785057547942e+00,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        for (a, b) in e.eig.iter().zip(r_eig) {
+            assert!((a - b).abs() < 1e-9, "{a} vs {b}");
+        }
+
+        let d: Vec<Vec<f64>> = (0..8)
+            .map(|i| {
+                (0..8)
+                    .map(|j| (0..3).map(|c| (x[[i, c]] - x[[j, c]]).abs()).sum())
+                    .collect()
+            })
+            .collect();
+        let m = cmdscale(&d, Some(2), Some(true), None).unwrap();
+        match_up_to_sign(
+            &m.points,
+            &[
+                [-2.941543784550, 1.005679440080],
+                [-2.024496365738, 1.764954247587],
+                [2.297951533599, -3.012785552745],
+                [2.003948448025, -2.159470877549],
+                [-2.712879429698, 1.158170137280],
+                [4.246989775681, 2.168300401165],
+                [2.827611433079, 1.271322259857],
+                [-3.697581610398, -2.196170055674],
+            ],
+        );
+        // R orders eigenvalues algebraically: the negative ones come last
+        let r_eig_m = [
+            6.911178914128e+01,
+            3.034895378852e+01,
+            5.192720774500e+00,
+            2.741845069069e+00,
+            8.437653216063e-01,
+            0.0,
+            -2.671490215896e+00,
+            -7.475446379076e+00,
+        ];
+        for (a, b) in m.eig.iter().zip(r_eig_m) {
+            assert!((a - b).abs() < 1e-9, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn cmdscale_buffers_are_fallible_and_inputs_validated() {
+        let data = blobs(40, 3, 3);
+        let e = with_alloc_ceiling(Some(4096), || cmdscale_from_data(data.view(), Some(2)))
+            .unwrap_err();
+        assert!(e.contains("limit"), "{e}");
+        assert!(
+            cmdscale_from_data(data.view(), Some(0))
+                .unwrap_err()
+                .starts_with("k ")
+        );
+        let e = with_budget(cancelled(), || cmdscale_from_data(data.view(), Some(2))).unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+        let mut d = vec![
+            vec![0.0, 1.0, 2.0],
+            vec![1.0, 0.0, 1.0],
+            vec![2.0, 1.0, 0.0],
+        ];
+        d[0][2] = f64::NAN;
+        d[2][0] = f64::NAN;
+        assert!(
+            cmdscale(&d, Some(1), None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
+    }
 
     #[test]
     fn test_pca_basic() {
