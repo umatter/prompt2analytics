@@ -110,7 +110,7 @@ impl EgressPolicy {
             None => true,
             Some(list) => {
                 let host = normalize_host(host);
-                list.iter().any(|h| *h == host)
+                list.contains(&host)
             }
         }
     }

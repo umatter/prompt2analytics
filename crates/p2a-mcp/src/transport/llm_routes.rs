@@ -311,7 +311,7 @@ pub async fn llm_chat(
     let settings = LlmSettings::current();
     let _slot = match acquire_chat_slot_or_busy(&request.session_id, settings.streams_per_session) {
         Ok(slot) => slot,
-        Err(busy) => return busy,
+        Err(busy) => return *busy,
     };
 
     // Resolve the provider (egress policy, key policy, iteration clamp)
@@ -1189,7 +1189,10 @@ impl ToolExecutor for StreamingToolExecutor {
 
 /// Take a chat slot of the session, or the 429 `session_busy` answer when
 /// `limit` chat requests are already running for it.
-fn acquire_chat_slot_or_busy(session_id: &str, limit: Option<usize>) -> Result<ChatSlot, Response> {
+fn acquire_chat_slot_or_busy(
+    session_id: &str,
+    limit: Option<usize>,
+) -> Result<ChatSlot, Box<Response>> {
     try_acquire_chat_slot(session_id, limit).ok_or_else(|| {
         let mut busy = (
             StatusCode::TOO_MANY_REQUESTS,
@@ -1204,7 +1207,7 @@ fn acquire_chat_slot_or_busy(session_id: &str, limit: Option<usize>) -> Result<C
             axum::http::header::RETRY_AFTER,
             axum::http::HeaderValue::from_static("2"),
         );
-        busy
+        Box::new(busy)
     })
 }
 
@@ -1236,7 +1239,7 @@ pub async fn llm_chat_stream(
     let settings = LlmSettings::current();
     let slot = match acquire_chat_slot_or_busy(&request.session_id, settings.streams_per_session) {
         Ok(slot) => slot,
-        Err(busy) => return busy,
+        Err(busy) => return *busy,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(100);
