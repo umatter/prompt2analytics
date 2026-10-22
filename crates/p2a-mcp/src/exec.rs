@@ -1133,7 +1133,13 @@ mod tests {
         // The session permit frees after half the wait; the global one only
         // after the whole wait. With one shared deadline the call is refused;
         // with a fresh wait per permit it would have got the global permit.
-        let wait = Duration::from_secs(2);
+        //
+        // The margins are deliberate. Shared deadline at 4 s, global release
+        // at 5 s, fresh per-permit deadline at 6 s: a runtime stalled for up
+        // to a second (a loaded CI runner) cannot let the 4 s timeout and the
+        // 5 s release fire in one timer tick, where tokio's Timeout would
+        // poll the acquire first and get the permit.
+        let wait = Duration::from_secs(4);
         let session_slots = Arc::new(Semaphore::new(1));
         let global = Arc::new(Semaphore::new(1));
         let session_held = Arc::clone(&session_slots).acquire_owned().await.unwrap();
