@@ -43,6 +43,7 @@ use crate::linalg::DesignMatrix;
 use crate::linalg::design::get_column_names;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::regression::CovarianceType;
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, f_test_p_value, t_test_p_value};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -237,16 +238,17 @@ fn map_step_inplace(data: &mut [f64], factors: &[FactorInfo], sums_bufs: &mut [V
 /// * `accelerate` - Whether to use Gearhart-Koshy acceleration
 ///
 /// # Returns
-/// A tuple of (demeaned_data, iterations, final_change, converged)
+/// A tuple of (demeaned_data, iterations, final_change, converged), or
+/// `EconError::Cancelled` when the current budget runs out between sweeps.
 fn demean_map(
     data: &Array1<f64>,
     factors: &[FactorInfo],
     tolerance: f64,
     max_iter: usize,
     accelerate: bool,
-) -> (Array1<f64>, usize, f64, bool) {
+) -> EconResult<(Array1<f64>, usize, f64, bool)> {
     if factors.is_empty() {
-        return (data.clone(), 0, 0.0, true);
+        return Ok((data.clone(), 0, 0.0, true));
     }
 
     let n = data.len();
@@ -258,7 +260,7 @@ fn demean_map(
     if factors.len() == 1 {
         let mut result = data.to_vec();
         demean_by_factor_inplace(&mut result, &factors[0], &mut sums_bufs[0]);
-        return (Array1::from_vec(result), 1, 0.0, true);
+        return Ok((Array1::from_vec(result), 1, 0.0, true));
     }
 
     // Working buffers — avoid repeated allocations
@@ -269,6 +271,8 @@ fn demean_map(
     let mut final_change = f64::MAX;
 
     for iter in 1..=max_iter {
+        resource::checkpoint()?;
+
         // Rotate buffers: prev_prev <- prev, prev <- current (memcpy, no allocation)
         if iter > 1 {
             prev_prev.copy_from_slice(&prev);
@@ -289,7 +293,7 @@ fn demean_map(
         // Check convergence
         if final_change < tolerance {
             converged = true;
-            return (Array1::from_vec(current), iter, final_change, converged);
+            return Ok((Array1::from_vec(current), iter, final_change, converged));
         }
 
         // Gearhart-Koshy acceleration (after at least 2 iterations)
@@ -317,24 +321,29 @@ fn demean_map(
         }
     }
 
-    (Array1::from_vec(current), max_iter, final_change, converged)
+    Ok((Array1::from_vec(current), max_iter, final_change, converged))
 }
 
 /// Demean a matrix column-wise using the Method of Alternating Projections.
 ///
 /// Columns are independent under the alternating-projections algorithm, so
 /// we process them in parallel via `rayon` and reduce their per-column
-/// convergence statistics at the end.
+/// convergence statistics at the end. The caller's budget is installed on each
+/// worker, so every sweep honours it.
 fn demean_matrix_map(
     x: &Array2<f64>,
     factors: &[FactorInfo],
     tolerance: f64,
     max_iter: usize,
     accelerate: bool,
-) -> (Array2<f64>, usize, f64, bool) {
+) -> EconResult<(Array2<f64>, usize, f64, bool)> {
     use rayon::prelude::*;
 
     let (n, k) = x.dim();
+
+    // Rayon workers do not see the caller's thread-local budget: capture it
+    // here and install it inside each closure.
+    let budget = resource::current_budget();
 
     // Fan the columns out, demean each one independently, and collect the
     // per-column results. Each call to `demean_map` allocates its own scratch
@@ -343,9 +352,14 @@ fn demean_matrix_map(
         .into_par_iter()
         .map(|j| {
             let col = x.column(j).to_owned();
-            demean_map(&col, factors, tolerance, max_iter, accelerate)
+            match &budget {
+                Some(b) => resource::with_budget(b.clone(), || {
+                    demean_map(&col, factors, tolerance, max_iter, accelerate)
+                }),
+                None => demean_map(&col, factors, tolerance, max_iter, accelerate),
+            }
         })
-        .collect();
+        .collect::<EconResult<Vec<_>>>()?;
 
     let mut x_demeaned = Array2::<f64>::zeros((n, k));
     let mut max_iterations: usize = 0;
@@ -358,7 +372,43 @@ fn demean_matrix_map(
         all_converged = all_converged && converged;
     }
 
-    (x_demeaned, max_iterations, max_change, all_converged)
+    Ok((x_demeaned, max_iterations, max_change, all_converged))
+}
+
+/// Check the MAP controls: a tolerance of zero or less can never be met, and
+/// zero iterations cannot demean anything.
+fn validate_config(config: &HdfeConfig) -> EconResult<()> {
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be a finite number greater than 0 (got {})",
+                config.tolerance
+            ),
+        });
+    }
+    if config.max_iterations == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iterations must be at least 1 (got 0)".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a column with NaN or infinite values, naming it and the count.
+fn reject_non_finite<'a>(values: impl Iterator<Item = &'a f64>, what: &str) -> EconResult<()> {
+    let bad = values.filter(|v| !v.is_finite()).count();
+    if bad == 0 {
+        return Ok(());
+    }
+    Err(EconError::InvalidSpecification {
+        message: format!(
+            "{} contains {} non-finite value{} (NaN or infinite); remove or impute {} first",
+            what,
+            bad,
+            if bad == 1 { "" } else { "s" },
+            if bad == 1 { "it" } else { "them" }
+        ),
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -659,6 +709,7 @@ pub fn run_hdfe(
     cov_type: CovarianceType,
 ) -> EconResult<HdfeResult> {
     let config = config.unwrap_or_default();
+    validate_config(&config)?;
 
     // Validate inputs
     if fe_cols.is_empty() {
@@ -680,11 +731,15 @@ pub fn run_hdfe(
             available: get_column_names(dataset.df()),
         }
     })?;
+    reject_non_finite(y.iter(), &format!("Dependent variable '{}'", y_col))?;
 
     // Build design matrix WITHOUT intercept (FE absorbs the constant)
     let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
     let x = design.data;
     let var_names = design.column_names;
+    for (j, name) in var_names.iter().enumerate() {
+        reject_non_finite(x.column(j).iter(), &format!("Regressor '{}'", name))?;
+    }
     let n = y.len();
     let k = x.ncols();
 
@@ -714,7 +769,7 @@ pub fn run_hdfe(
         config.tolerance,
         config.max_iterations,
         config.accelerate,
-    );
+    )?;
 
     // Demean X using MAP
     let (x_demeaned, x_iters, x_change, x_converged) = demean_matrix_map(
@@ -723,7 +778,7 @@ pub fn run_hdfe(
         config.tolerance,
         config.max_iterations,
         config.accelerate,
-    );
+    )?;
 
     let iterations = y_iters.max(x_iters);
     let convergence = y_change.max(x_change);
@@ -927,7 +982,35 @@ fn compute_hc_vcov(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use polars::df;
+
+    fn cancelled() -> Budget {
+        let token = CancelToken::new();
+        token.cancel();
+        Budget::new(None, token)
+    }
+
+    fn expect_invalid<T>(res: EconResult<T>, needle: &str) {
+        match res {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains(needle),
+                    "message {message:?} should name `{needle}`"
+                )
+            }
+            Err(e) => panic!("expected InvalidSpecification naming `{needle}`, got: {e}"),
+            Ok(_) => panic!("expected InvalidSpecification naming `{needle}`, got Ok"),
+        }
+    }
+
+    fn expect_cancelled<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::Cancelled(_)) => {}
+            Err(e) => panic!("expected Cancelled, got: {e}"),
+            Ok(_) => panic!("expected Cancelled, got Ok"),
+        }
+    }
 
     fn create_balanced_panel() -> Dataset {
         // 3 firms, 4 years each = 12 observations
@@ -1027,7 +1110,8 @@ mod tests {
             counts: vec![3, 3],
         };
 
-        let (demeaned, iters, _change, converged) = demean_map(&data, &[factor], 1e-8, 1000, false);
+        let (demeaned, iters, _change, converged) =
+            demean_map(&data, &[factor], 1e-8, 1000, false).unwrap();
 
         assert!(converged);
         assert_eq!(iters, 1); // Single factor converges in one pass
@@ -1051,7 +1135,7 @@ mod tests {
         };
 
         let (_demeaned, iters, change, converged) =
-            demean_map(&data, &[factor1, factor2], 1e-8, 1000, false);
+            demean_map(&data, &[factor1, factor2], 1e-8, 1000, false).unwrap();
 
         assert!(converged);
         assert!(iters < 100); // Should converge reasonably fast
@@ -2016,5 +2100,110 @@ mod tests {
             result.coefficients[1],
             expected_capital
         );
+    }
+
+    #[test]
+    fn test_hdfe_rejects_invalid_iteration_controls() {
+        let ds = create_balanced_panel();
+        let run = |config: HdfeConfig| {
+            run_hdfe(
+                &ds,
+                "y",
+                &["x"],
+                &["firm", "year"],
+                Some(config),
+                CovarianceType::HC1,
+            )
+        };
+        for tolerance in [0.0, -1e-8, f64::NAN, f64::INFINITY] {
+            expect_invalid(
+                run(HdfeConfig {
+                    tolerance,
+                    ..Default::default()
+                }),
+                "tolerance",
+            );
+        }
+        expect_invalid(
+            run(HdfeConfig {
+                max_iterations: 0,
+                ..Default::default()
+            }),
+            "max_iterations",
+        );
+    }
+
+    #[test]
+    fn test_hdfe_rejects_non_finite_data() {
+        // create_balanced_panel's columns with y[0] = NaN
+        let ds_nan = Dataset::new(
+            df! {
+                "firm" => ["A", "A", "A", "A", "B", "B", "B", "B", "C", "C", "C", "C"],
+                "year" => [2020i64, 2021, 2022, 2023, 2020, 2021, 2022, 2023, 2020, 2021, 2022, 2023],
+                "x" => [1.0, 3.0, 2.0, 5.0, 2.0, 1.0, 4.0, 3.0, 3.0, 4.0, 1.0, 2.0],
+                "y" => [
+                    f64::NAN,
+                    2.0 * 3.0 + 0.0 + 1.0 + 0.2,
+                    2.0 * 2.0 + 0.0 + 2.0 + 0.1,
+                    2.0 * 5.0 + 0.0 + 3.0 + 0.0,
+                    2.0 * 2.0 + 5.0 + 0.0 + 0.0,
+                    2.0 * 1.0 + 5.0 + 1.0 + 0.1,
+                    2.0 * 4.0 + 5.0 + 2.0 - 0.1,
+                    2.0 * 3.0 + 5.0 + 3.0 + 0.2,
+                    2.0 * 3.0 + 10.0 + 0.0 + 0.2,
+                    2.0 * 4.0 + 10.0 + 1.0 - 0.1,
+                    2.0 * 1.0 + 10.0 + 2.0 + 0.0,
+                    2.0 * 2.0 + 10.0 + 3.0 - 0.2
+                ],
+            }
+            .unwrap(),
+        );
+        expect_invalid(
+            run_hdfe(
+                &ds_nan,
+                "y",
+                &["x"],
+                &["firm", "year"],
+                None,
+                CovarianceType::HC1,
+            ),
+            "non-finite",
+        );
+    }
+
+    #[test]
+    fn test_hdfe_stops_when_cancelled() {
+        let ds = create_balanced_panel();
+        expect_cancelled(with_budget(cancelled(), || {
+            run_hdfe(
+                &ds,
+                "y",
+                &["x"],
+                &["firm", "year"],
+                None,
+                CovarianceType::HC1,
+            )
+        }));
+    }
+
+    #[test]
+    fn test_demean_matrix_map_carries_budget_into_rayon_workers() {
+        // factor1/factor2 exactly as in test_demean_map_two_factors
+        let factor1 = FactorInfo {
+            name: "entity".to_string(),
+            n_levels: 2,
+            ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
+        };
+        let factor2 = FactorInfo {
+            name: "time".to_string(),
+            n_levels: 3,
+            ids: vec![0, 1, 2, 0, 1, 2],
+            counts: vec![2, 2, 2],
+        };
+        let x = Array2::from_shape_fn((6, 2), |(i, j)| (i * (j + 2)) as f64 % 5.0 + 0.1 * j as f64);
+        expect_cancelled(with_budget(cancelled(), || {
+            demean_matrix_map(&x, &[factor1, factor2], 1e-8, 1000, true)
+        }));
     }
 }
