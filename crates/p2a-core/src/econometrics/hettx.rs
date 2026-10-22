@@ -135,7 +135,7 @@ impl fmt::Display for EffectEstimationMethod {
 /// Configuration for treatment effect heterogeneity test.
 #[derive(Debug, Clone)]
 pub struct HetTxConfig {
-    /// Number of permutations for Fisherian inference (default: 1000)
+    /// Number of permutations for Fisherian inference (default: 1000).
     /// Must be at least 1.
     pub n_permutations: usize,
     /// Test statistic to use (default: Variance)
@@ -144,7 +144,7 @@ pub struct HetTxConfig {
     pub decompose: bool,
     /// Method for estimating individual effects (default: Matching)
     pub effect_method: EffectEstimationMethod,
-    /// Number of nearest neighbors for matching (default: 3)
+    /// Number of nearest neighbors for matching (default: 3).
     /// Must be at least 1 with [`EffectEstimationMethod::Matching`].
     pub n_neighbors: usize,
     /// Random seed for reproducibility

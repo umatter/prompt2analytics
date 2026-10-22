@@ -94,14 +94,14 @@ pub struct GeneralGmmConfig {
     pub vcov: GmmVcov,
     /// HAC kernel for weighting matrix
     pub kernel: HacKernel,
-    /// HAC bandwidth (None for automatic)
+    /// HAC bandwidth (None for automatic).
     /// With HAC weighting and linear IV moments, must be less than the
     /// number of observations.
     pub bandwidth: Option<usize>,
-    /// Convergence tolerance
+    /// Convergence tolerance.
     /// With linear IV moments, must be finite and greater than 0.
     pub tolerance: f64,
-    /// Maximum iterations (for iterative/CUE)
+    /// Maximum iterations (for iterative/CUE).
     /// With linear IV moments, must be at least 1.
     pub max_iter: usize,
     /// Whether to prewhiten for HAC

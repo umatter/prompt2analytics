@@ -162,7 +162,7 @@ pub struct IVMTEConfig {
     /// Primary estimand to report
     pub estimand: MTEEstimand,
 
-    /// Number of grid points for MTE curve evaluation (default: 100)
+    /// Number of grid points for MTE curve evaluation (default: 100).
     /// Must be at least 1.
     pub n_grid: usize,
 
@@ -175,11 +175,11 @@ pub struct IVMTEConfig {
     /// Propensity score model for first stage
     pub propensity_model: PropensityModel,
 
-    /// Maximum iterations for propensity estimation (default: 100)
+    /// Maximum iterations for propensity estimation (default: 100).
     /// Must be at least 1.
     pub max_iter: usize,
 
-    /// Convergence tolerance for propensity estimation (default: 1e-8)
+    /// Convergence tolerance for propensity estimation (default: 1e-8).
     /// Must be finite and greater than 0.
     pub tolerance: f64,
 
@@ -1961,8 +1961,9 @@ mod tests {
         }));
     }
 
-    /// Every grid loop checks the budget once per grid point, so each one is
-    /// called directly: an end-to-end run stops at the first of them.
+    /// Each of these loops checks the budget once per outer iteration (per
+    /// grid point; per coefficient in compute_te_se), so each one is called
+    /// directly: an end-to-end run stops at the first of them.
     #[test]
     fn test_ivmte_grid_loops_stop_when_cancelled() {
         let coefs = [1.5, 0.5];
