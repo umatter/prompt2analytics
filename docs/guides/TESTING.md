@@ -45,12 +45,44 @@ Located in `tests/` directories. Run with:
 cargo test -p p2a-core --test '*'
 ```
 
+The p2a-core `tests/` directory includes `benchmark_ml_rust.rs` and `benchmark_fast_implementations.rs`,
+which are benchmarks and run for a long time in a debug build; use `--lib` or a named `--test` for a
+fast correctness loop. The p2a-mcp integration tests are listed in
+[p2a-mcp integration tests](#p2a-mcp-integration-tests).
+
 #### Validation Tests
 
 Compare Rust implementations against R reference results. Run with:
 ```bash
 cargo test -p p2a-core -- test_validate
 ```
+
+## p2a-mcp integration tests
+
+Each file in `crates/p2a-mcp/tests/` covers one topic. The servers are built in-process with
+`transport::http::build_app` and driven with `tower::ServiceExt::oneshot`, so almost nothing binds a
+socket.
+
+| File | What it covers | Compile gate | Command |
+|---|---|---|---|
+| `integration_tests.rs` | server construction, core methods through the server | none | any feature set |
+| `governor.rs` | the tool governor, deployment modes, Host check, CORS, embedded start, `/ws` routing | `#![cfg(feature = "http")]`; the `/ws` test needs `websocket`, a few tests need `llm` | the CI set, plus `--features full` for `/ws` |
+| `limits_e2e.rs` | request limits on the HTTP, LLM, websocket and stdio paths, the response-size cap, the audit trail | module `http_paths` needs `http`; module `stdio_path` is ungated | the CI set, and `cargo test -p p2a-mcp --no-default-features --test limits_e2e` for stdio only |
+| `sessions.rs` | the session registry, conversation ownership, persistence bounds, the DB-path rule | `#![cfg(all(feature = "http", feature = "db"))]` | `--no-default-features --features "http,llm,auth,db"` (not in CI) |
+| `llm_egress.rs` | egress guard, upstream errors and retries, the key rule, the tool allowlist, context budget, chat-loop bounds | `#![cfg(all(feature = "http", feature = "llm"))]`; the conversation test needs `db` | the CI set, plus `--features full` |
+| `isolation.rs` | per-session directories, symbolic links, the disk quota, session export and import, the stale-directory purge | `#![cfg(feature = "http")]` | the CI set |
+
+Commands for the feature sets CI does not build:
+
+```bash
+cargo test -p p2a-mcp --features full                                          # db + websocket + everything
+cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,db"      # sessions.rs without websocket
+cargo check -p p2a-mcp --no-default-features                                   # stdio-only build
+cargo test -p p2a-core --features database data::database                      # SQL lockdown (duckdb-sys)
+```
+
+`llm_egress.rs` relies on the Off defaults: run it with `P2A_LLM_ALLOWED_HOSTS`, `P2A_LIMITS` and
+`P2A_LIMIT_OVERRIDES` unset.
 
 ## Test Runtime Expectations
 
@@ -167,6 +199,28 @@ mod tests {
 }
 ```
 
+### Resource-governance tests
+
+Tests for the resource guards (core) and the server's limits follow these conventions:
+
+- **Abort-class regressions** call the core function with the absurd value (an overflowing size, a
+  count far beyond the data) and assert `Err`. Before the fix such a test aborts the test binary,
+  which is the failure it guards against.
+- **Loops that used to hang** are tested through the extracted guard (the range or parameter check),
+  never through the full path, so a regression cannot hang CI.
+- **No wall-clock assertions.** A timing assertion is gated with `if !cfg!(debug_assertions)` so it
+  runs only in release builds; prefer none at all.
+- **Governor tests** use synthetic closures that loop on `resource::checkpoint()` until a release
+  flag is set, with bounded polling and generous margins.
+- **Limits and allocation ceilings** are selected per test with the thread-local
+  `limits::with_limits` and `resource::with_alloc_ceiling`. Do not call `limits::install` or
+  `resource::set_alloc_ceiling_bytes` per test: they are process-wide, and the tests of one binary
+  run in parallel. The exceptions: a test binary whose tests all share one configuration installs
+  it once inside a `OnceLock` (`crates/p2a-mcp/tests/isolation.rs`), and p2a-core's
+  `global_ceiling_round_trips` sets only a harmless ceiling (`usize::MAX - 1`) and restores `None`.
+- **Complexity rewrites** need an equivalence test against a naive reference on noisy random data,
+  plus R-pinned values where R has the method.
+
 ## Validation Framework
 
 ### Structure
@@ -243,15 +297,24 @@ heaptrack ./target/release/deps/regression_benchmarks-*
 
 ## Continuous Integration
 
-CI runs automatically on pull requests:
+CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull requests, on the free GitHub
+runner, with feature sets chosen to keep it cheap:
 
-1. **Build check**: `cargo check --all-targets`
-2. **Lint**: `cargo clippy --all-targets --all-features`
-3. **Format**: `cargo fmt --check`
-4. **Tests**: `cargo test`
-5. **Coverage**: Uploaded to Codecov
+1. **Format**: `cargo fmt --all -- --check`
+2. **Tests** (`cargo test --tests`):
+   - `cargo test -p p2a-core --tests --no-default-features --features ci`
+   - `cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth"`
+   - `cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis`
+3. **Doctests**: p2a-core with `ci`, p2a-mcp with `http,llm,auth`
+4. **Clippy** on p2a-core (`ci`), p2a-mcp (`http,llm,auth`), p2a-cli (`spectral-analysis`) and
+   p2a-chat; it reports but does not gate
+5. **p2a-dioxus**: `cargo check --no-default-features --features web --target wasm32-unknown-unknown`,
+   plus the host tests with `web`
 
-See `.github/workflows/ci.yml` for the full CI configuration.
+CI does not build the `database` feature of p2a-core (duckdb-sys), the `db` and `websocket` features of
+p2a-mcp, `cuda`, release builds or the Dioxus desktop target; run those locally (commands above). A
+separate Security audit workflow (`.github/workflows/audit.yml`) runs `cargo audit` weekly and on
+every change to `Cargo.lock`, any `Cargo.toml` or the workflow itself.
 
 ## Troubleshooting
 
@@ -268,6 +331,11 @@ Use `approx` crate with appropriate tolerances instead of exact equality.
 
 **Polars schema errors**:
 Ensure test data types match expected schema. Use explicit casts if needed.
+
+**Link failures or doctests that "couldn't compile"**:
+A full disk and a distro `rustdoc` that does not match its `libLLVM` both look like broken code.
+`CLAUDE.md` ("Two traps on a dev box: disk and rustdoc") gives the checks and the workarounds; run
+`df -h /` first.
 
 ### Getting Help
 

@@ -2,53 +2,79 @@
 #
 # This deploys the PREBUILT image from GHCR — it does not build from source.
 # Pair with the GitHub Pages frontend (see ../.github/workflows/web-deploy.yml)
-# and docs/guides/DEPLOYMENT.md.
+# and docs/guides/DEPLOYMENT.md (DEPLOYMENT.md, "Release and redeploy", lists
+# the steps).
 #
-# Deploy:   fly deploy -c deploy/fly.toml
+# Deploy:   fly config validate --strict -c deploy/fly.toml && fly deploy -c deploy/fly.toml
 # Cert:     fly certs add p2a-api.qamelab.org -a p2a-qamelab-backend
 #
 # Prereqs:
 #   * The GHCR package ghcr.io/umatter/prompt2analytics/backend must be PUBLIC.
-#   * NEVER set OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY here —
-#     a shared key on this unauthenticated endpoint turns it into an open proxy
-#     billed to you. Unset = true BYOK.
+#   * NEVER set OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY here.
+#     The hosted profile below does not use server-held keys
+#     (llm_server_keys=false), but a key in this
+#     environment is still one configuration change (for example
+#     P2A_LIMIT_OVERRIDES=llm_server_keys=true) away from an open proxy billed
+#     to the account. Unset = true BYOK.
 
 app = "p2a-qamelab-backend"
 primary_region = "fra"          # Frankfurt — EU
 
 [build]
   # Pin an explicit version tag (not the mutable :latest) for reproducible
-  # deploys. Bump deliberately when shipping a new backend release.
+  # deploys. Bump deliberately when shipping a new backend release, and only to
+  # a tag GHCR already lists (DEPLOYMENT.md, "Release and redeploy"). The
+  # in-process limits described below exist only in images whose /health
+  # response has a "governor" object; older images ignore P2A_LIMITS and the
+  # other new variables and run without them.
   image = "ghcr.io/umatter/prompt2analytics/backend:0.1.3"
 
 [env]
   P2A_HOST = "0.0.0.0"
   P2A_PORT = "8080"
   P2A_CORS_ORIGINS = "https://p2a.qamelab.org"
+  # Request-body cap in MiB; it also caps websocket messages and frames. It
+  # must be a positive whole number: 0 or an invalid value means the default 32.
   P2A_MAX_HTTP_BODY_MB = "32"
 
-  # Outbound counterpart to P2A_CORS_ORIGINS above. Callers supply their own
-  # provider base_url, so without this the LLM routes will POST a caller-chosen
-  # body to any https host and relay the response back — an SSRF and open relay
-  # through this app's egress IP. Bare hostnames, matched exactly against the
-  # URL host (case-insensitive); a scheme or path here would never match.
-  # Also revokes the Ollama loopback exemption, which is what a remote caller
-  # would otherwise use to read this machine's own ports. Ollama is unreachable
-  # from a hosted backend anyway; desktop and self-host builds leave this unset.
+  # The only hosts the LLM routes may contact (bare hostnames, matched exactly
+  # and case-insensitively against the provider URL's host). Each name is
+  # resolved when a connection is made and refused if any of its addresses is
+  # private, loopback, link-local or otherwise internal; redirects are never
+  # followed. The default Ollama endpoint is refused because it is not listed.
+  # The hosted profile uses this same list when the variable is unset (and
+  # llm_allow_loopback stays false); it is set here so the policy is visible.
   P2A_LLM_ALLOWED_HOSTS = "api.openai.com,api.anthropic.com,openrouter.ai"
 
-  # Open-but-hardened bring-your-own-key demo: no login. Per-visitor isolation
-  # relies on unguessable, non-enumerable session IDs; the code hardening
-  # (base_url SSRF allowlist, SQL file-read guard, parser bounds) closes the
-  # server-exploitation vectors, and this flag drops the session-list and
-  # file-browser enumeration endpoints. Abuse/DoS control is expected from an
-  # edge rate-limiter in front of this app (see docs/guides/DEPLOYMENT.md).
-  # Requires the hardened image pinned above (v0.1.2 or newer); do NOT set
-  # this on an older image.
+  # Open public mode: no login, and isolation rests on unguessable session
+  # IDs. In this mode there are no session-list or file-browser routes, /ws is
+  # off, each session gets its own data directory, conversations answer only
+  # to the session that owns them, and the hosted profile does not use
+  # server-held LLM keys (llm_server_keys=false). Requires the hardened image
+  # (v0.1.2 or newer); do NOT set this on an older image. The rest of this list
+  # (per-session directories, /ws off, conversation ownership, no server-held
+  # keys), P2A_LIMITS below and the stuck-worker watchdog need the release that
+  # carries the in-process limits.
   P2A_ALLOW_UNAUTHENTICATED = "1"
 
-  # Confine any filesystem/DB tool access to a dedicated, empty directory
-  # rather than the container's home. This directory should exist in the image.
+  # The hosted resource profile: each tool call is stopped after
+  # P2A_TOOL_TIMEOUT_SECS (60 s); one tool call runs per vCPU and one per
+  # session; new calls are refused while RSS is above 700 MiB; datasets are
+  # capped at 200 MiB per session and 500 MiB in total; cost parameters
+  # (replications, trees, iterations, ...) are capped; SQL results, run time
+  # and engine memory are bounded and the free-form DuckDB tools are off
+  # (sql_freeform); idle sessions are evicted after 10 minutes when the
+  # session table is full. Open mode already implies this profile; it is set
+  # so the posture is explicit. P2A_LIMITS=off is refused in open mode. Raise
+  # single limits with P2A_LIMIT_OVERRIDES (keys in DEPLOYMENT.md,
+  # "Configuration reference").
+  P2A_LIMITS = "hosted"
+
+  # The path jail. In open mode each session works in /data/sessions/<id>/
+  # (mode 0700), which is deleted with the session; directories left by an
+  # earlier process are purged at the first file access after a restart.
+  # There is no volume, so these files sit on the machine's ephemeral root
+  # filesystem, and all of it is lost on restart.
   P2A_DATA_ROOT = "/data"
 
 [http_service]
@@ -59,9 +85,10 @@ primary_region = "fra"          # Frankfurt — EU
   # Deliberately 1, and not just to avoid cold starts. There is no [[mounts]]
   # block and P2A_DB_PATH is unset, so persistent_session.rs falls through to
   # connect_memory(): every session, uploaded dataset, and result lives only in
-  # this machine's RAM. Letting auto_stop_machines take it to zero would
-  # therefore discard a visitor's work whenever they idle long enough, and they
-  # would see "dataset not found" rather than anything explaining why.
+  # this machine's RAM and ephemeral disk. Letting auto_stop_machines take it to
+  # zero would therefore discard a visitor's work whenever they idle long
+  # enough, and they would see "dataset not found" rather than anything
+  # explaining why.
   #
   # ~$5/mo (shared-cpu-1x, 1gb) is worth that during a review window. Dropping
   # to 0 is reasonable once the demo is just a README link and nobody is
@@ -71,26 +98,39 @@ primary_region = "fra"          # Frankfurt — EU
   # it is a real decision rather than a config tweak.
   min_machines_running = 1
 
-  # Backstop only — this is a ceiling on in-flight requests, not a rate limit:
-  # it cannot tell one abusive caller from many reviewers. The real abuse control
-  # belongs at the edge (checklist step 5 in docs/guides/DEPLOYMENT.md). What it
-  # does buy is a bound on concurrent CPU-bound tool calls, which would otherwise
-  # be unbounded on a 1-vCPU machine and can OOM it.
+  # A proxy-side ceiling on in-flight requests. It bounds open connections, not
+  # work: one admitted request can still be expensive. SSE chat streams hold a
+  # slot for their whole life (minutes), which is why the numbers are high;
+  # requests past hard_limit get a 503 from the proxy.
   #
-  # Sized with SSE in mind: an /api/llm/chat/stream connection holds a slot for
-  # the life of the stream (minutes), so these have to clear the number of
-  # reviewers plausibly streaming at once by a wide margin. Requests past
-  # hard_limit get a 503.
+  # Tool work is bounded inside the process by the execution governor:
+  # P2A_TOOL_CONCURRENCY (default one call per vCPU) and one call per session
+  # in the hosted profile. A call that waits longer than
+  # P2A_TOOL_QUEUE_WAIT_SECS (10 s) for a slot gets 503 server_busy, or 429
+  # session_busy for a second call in the same session, both with Retry-After.
+  # Memory is guarded by RSS admission, the dataset quotas and a per-allocation
+  # ceiling. Neither this ceiling nor an edge rate limit stops one expensive
+  # request; the in-process limits do (DEPLOYMENT.md, "In-process controls").
   [http_service.concurrency]
     type = "requests"
     soft_limit = 25
     hard_limit = 50
 
+  # /health answers 503 with "status": "degraded" while every tool slot is held
+  # by work past its deadline. If that lasts P2A_STUCK_EXIT_SECS (300 s in the
+  # hosted profile), the process exits with code 70 and the restart policy
+  # below starts it again. A restart discards every in-memory session.
   [[http_service.checks]]
     path = "/health"
     interval = "15s"
     timeout = "5s"
     grace_period = "10s"
+
+# Restart the machine when the process exits with an error: the stuck-worker
+# watchdog (exit code 70) or an out-of-memory kill.
+[[restart]]
+  policy = "on-failure"
+  retries = 10
 
 [[vm]]
   size   = "shared-cpu-1x"
