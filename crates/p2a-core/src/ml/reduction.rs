@@ -731,7 +731,9 @@ use serde::{Deserialize, Serialize};
 pub struct CmdscaleResult {
     /// Configuration matrix (n x k). Each row is a point in k-dimensional space.
     pub points: Vec<Vec<f64>>,
-    /// Eigenvalues of the double-centered distance matrix (all n eigenvalues).
+    /// All n eigenvalues of the double-centred matrix B, in descending
+    /// algebraic order as `stats::cmdscale` returns them (negative
+    /// eigenvalues, from non-Euclidean input, come last).
     pub eig: Vec<f64>,
     /// Goodness of fit (GOF) measures.
     /// First value: sum of positive eigenvalues / sum of absolute eigenvalues.
@@ -892,9 +894,10 @@ fn cmdscale_dims(k: Option<usize>, n: usize) -> Result<usize, String> {
 /// matrix in descending order, as `stats::cmdscale` orders them.
 ///
 /// Builds `B = -1/2 H D^2 H` directly from `d` (no separate `D^2` matrix)
-/// and decomposes it with faer's self-adjoint eigensolver. The `n x n`
-/// buffers, including those the eigensolver allocates internally, are
-/// pre-flighted against the allocation ceiling.
+/// and decomposes it with faer's self-adjoint eigensolver. Before `B` is
+/// built, the `n x n` matrices (`B` and the eigenvectors) and the
+/// eigensolver's workspace, which faer allocates as one buffer the size of a
+/// few `n x n` matrices, are pre-flighted against the allocation ceiling.
 fn cmdscale_core(
     n: usize,
     d: impl Fn(usize, usize) -> f64,
@@ -904,6 +907,22 @@ fn cmdscale_core(
     checkpoint().map_err(to_string)?;
     let what = "cmdscale matrix";
     check_alloc::<f64>(checked_len(&[n, n], what).map_err(to_string)?, what).map_err(to_string)?;
+    // The workspace `Mat::self_adjoint_eigen` requests (same dimension,
+    // parallelism and default parameters)
+    let what = "cmdscale eigensolver workspace";
+    let scratch = faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
+        n,
+        faer::linalg::evd::ComputeEigenvectors::Yes,
+        faer::get_global_parallelism(),
+        Default::default(),
+    );
+    if scratch.layout().is_err() {
+        return Err(EconError::ResourceLimit(format!(
+            "{what} is too large: the requested size overflows"
+        ))
+        .to_string());
+    }
+    check_alloc::<u8>(scratch.size_bytes(), what).map_err(to_string)?;
 
     // Row and column means of D^2, and its grand mean
     let mut row_means = vec![0.0f64; n];
@@ -1110,9 +1129,31 @@ mod tests {
         assert!(e.contains("cancelled"), "{e}");
     }
 
+    #[test]
+    fn cmdscale_preflights_the_eigensolver_workspace() {
+        let data = blobs(60, 3, 3);
+        // B and the eigenvectors (60 x 60 f64 = 28,800 B each) fit under this
+        // ceiling; the eigensolver's single workspace buffer does not
+        let e = with_alloc_ceiling(Some(8 * 60 * 60), || {
+            cmdscale_from_data(data.view(), Some(2))
+        })
+        .unwrap_err();
+        assert!(e.contains("eigensolver") && e.contains("limit"), "{e}");
+        assert!(cmdscale_from_data(data.view(), Some(2)).is_ok());
+    }
+
     /// Golden (characterization) test: captured on the code before the
     /// memory refactor (row-wise P, scalar exaggeration, reused Q); every
     /// floating-point operation is preserved, so the bits must not change.
+    ///
+    /// The constants were captured on x86_64 Linux (glibc, FMA kernels), and
+    /// only there are the bits compared. Elsewhere libm's `exp`/`ln` (the
+    /// perplexity search) and the kernels behind the PCA start can differ in
+    /// the last ulp, and the gain updates, which branch on gradient signs,
+    /// amplify that: moving inputs by one to three ulps (496 runs: single
+    /// data entries, all of them, random subsets, the perplexity and the
+    /// learning rate) moved these values by up to 8.1e-4 relative. Other
+    /// targets therefore compare to a relative 1e-2.
     #[test]
     fn tsne_memory_refactor_is_bit_identical() {
         const GOLDEN: [u64; 4] = [
@@ -1155,7 +1196,20 @@ mod tests {
             r.kl_divergence,
         ];
         let bits = got.map(f64::to_bits);
-        assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let exact = std::arch::is_x86_feature_detected!("fma");
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let exact = false;
+        if exact {
+            assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
+        } else {
+            for (g, want) in got.iter().zip(GOLDEN.map(f64::from_bits)) {
+                assert!(
+                    (g - want).abs() <= 1e-2 * want.abs(),
+                    "got {bits:?} = {got:?}"
+                );
+            }
+        }
     }
 
     /// R 4.3.3:
