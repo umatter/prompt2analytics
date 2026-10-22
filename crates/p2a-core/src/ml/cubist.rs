@@ -72,7 +72,8 @@ use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 /// Configuration for Cubist regression trees.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CubistConfig {
-    /// Number of committee models (boosting-like ensemble). Default: 1.
+    /// Number of committee models (boosting-like ensemble), 1 to 100 (the limit
+    /// of R's Cubist). Default: 1.
     /// Each committee fits adjusted residuals from the previous iteration.
     pub committees: usize,
 
@@ -342,7 +343,7 @@ impl CubistTree {
         // Check stopping conditions
         if depth >= config.max_depth
             || n_samples < config.min_split
-            || n_samples <= 2 * config.min_bucket
+            || n_samples <= config.min_bucket.saturating_mul(2)
         {
             let (mean_response, std_response) = self.compute_stats(y, indices);
             return CubistNode::Leaf {
@@ -873,21 +874,45 @@ pub fn cubist(
             "X and y must have same number of samples".to_string(),
         ));
     }
-    if config.committees == 0 {
+    if !(1..=100).contains(&config.committees) {
         return Err(EconError::InvalidSpecification {
-            message: "committees must be at least 1".to_string(),
+            message: format!(
+                "committees must be between 1 and 100 (the limit of R's Cubist), got {}",
+                config.committees
+            ),
+        });
+    }
+    for (j, column) in x.axis_iter(Axis(1)).enumerate() {
+        let k = column.iter().filter(|v| !v.is_finite()).count();
+        if k > 0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "feature column {j} (0-based) has {k} non-finite values (NaN or infinite); \
+                     remove or impute them first"
+                ),
+            });
+        }
+    }
+    let k = y.iter().filter(|v| !v.is_finite()).count();
+    if k > 0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the target has {k} non-finite values (NaN or infinite); remove or impute them first"
+            ),
         });
     }
 
     let _rng_state = config.seed.unwrap_or(42);
 
     // Build committee models
-    let mut committee_trees = Vec::with_capacity(config.committees);
+    let mut committee_trees =
+        crate::resource::try_with_capacity(config.committees, "Cubist committees")?;
     let mut current_y = y.to_owned();
     let mut all_rules = Vec::new();
     let mut total_importance = Array1::zeros(n_features);
 
     for c in 0..config.committees {
+        crate::resource::checkpoint()?;
         let mut tree = CubistTree::new(n_features, None, config.smoothing_coefficient);
         tree.fit(&x, &current_y.view(), config);
 
@@ -929,6 +954,8 @@ pub fn cubist(
     // Compute final predictions (average of committees)
     let mut predictions = Vec::with_capacity(n_samples);
     for i in 0..n_samples {
+        // With neighbors > 0 this loop is O(n^2 p log n): check the budget per row.
+        crate::resource::checkpoint()?;
         let row = x.row(i);
         let pred_sum: f64 = committee_trees
             .iter()
@@ -1122,7 +1149,65 @@ pub fn run_cubist_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn cubist_data() -> (Array2<f64>, Array1<f64>) {
+        let x = Array2::from_shape_fn((40, 2), |(i, j)| {
+            ((i * (7 + 4 * j)) % 13) as f64 + 0.1 * j as f64
+        });
+        let y = Array1::from_shape_fn(40, |i| {
+            1.5 * ((i * 7) % 13) as f64 + ((i * 5) % 3) as f64 * 0.3
+        });
+        (x, y)
+    }
+
+    #[test]
+    fn test_cubist_committees_are_bounded() {
+        let (x, y) = cubist_data();
+        for committees in [0usize, 101, 10_000_000_000] {
+            let err = cubist(
+                x.view(),
+                y.view(),
+                &CubistConfig {
+                    committees,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("committees must be between 1 and 100"),
+                "{committees}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cubist_rejects_non_finite_and_honours_cancellation() {
+        let (x, y) = cubist_data();
+        let mut yb = y.clone();
+        yb[3] = f64::INFINITY;
+        assert!(
+            cubist(x.view(), yb.view(), &CubistConfig::default())
+                .unwrap_err()
+                .to_string()
+                .contains("non-finite")
+        );
+        let cfg = CubistConfig {
+            committees: 3,
+            neighbors: 2,
+            ..Default::default()
+        };
+        let err = with_budget(cancelled_budget(), || cubist(x.view(), y.view(), &cfg)).unwrap_err();
+        assert!(matches!(err, EconError::Cancelled(_)), "{err}");
+    }
 
     #[test]
     fn test_cubist_basic() {

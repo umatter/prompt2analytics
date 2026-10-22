@@ -53,8 +53,10 @@
 //!
 //! R equivalent: `stats::ppr()`
 
-use ndarray::ArrayView2;
+use ndarray::{ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
+
+use crate::resource;
 
 /// Result of projection pursuit regression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +186,22 @@ pub fn ppr(
     if config.nterms == 0 {
         return Err("nterms must be at least 1".to_string());
     }
+    for (j, column) in x.axis_iter(Axis(1)).enumerate() {
+        let k = column.iter().filter(|v| !v.is_finite()).count();
+        if k > 0 {
+            return Err(format!(
+                "PPR: feature column {j} (0-based) has {k} non-finite values (NaN or infinite); \
+                 remove or impute them first"
+            ));
+        }
+    }
+    let k = y.iter().filter(|v| !v.is_finite()).count();
+    if k > 0 {
+        return Err(format!(
+            "PPR: the response has {k} non-finite values (NaN or infinite); remove or impute \
+             them first"
+        ));
+    }
 
     // Create weights
     let w: Vec<f64> = match weights {
@@ -191,20 +209,32 @@ pub fn ppr(
             if wt.len() != n {
                 return Err("Weights must have same length as y".to_string());
             }
+            if wt.iter().any(|&v| !(v.is_finite() && v >= 0.0)) {
+                return Err("PPR: weights must be finite and non-negative".to_string());
+            }
             wt.to_vec()
         }
         None => vec![1.0; n],
     };
 
     let max_terms = config.max_terms.max(config.nterms);
+    if max_terms > n {
+        return Err(format!(
+            "the number of terms ({max_terms}; the larger of nterms and max_terms) must not \
+             exceed the number of observations ({n})"
+        ));
+    }
 
     // Initialize residuals
     let y_mean: f64 = weighted_mean(y, &w);
     let mut residuals: Vec<f64> = y.iter().map(|&yi| yi - y_mean).collect();
 
-    let mut alphas: Vec<Vec<f64>> = Vec::with_capacity(max_terms);
-    let mut betas: Vec<f64> = Vec::with_capacity(max_terms);
-    let mut gofn: Vec<f64> = Vec::with_capacity(max_terms);
+    let mut alphas: Vec<Vec<f64>> =
+        resource::try_with_capacity(max_terms, "PPR terms").map_err(|e| e.to_string())?;
+    let mut betas: Vec<f64> =
+        resource::try_with_capacity(max_terms, "PPR terms").map_err(|e| e.to_string())?;
+    let mut gofn: Vec<f64> =
+        resource::try_with_capacity(max_terms, "PPR terms").map_err(|e| e.to_string())?;
 
     // Pre-allocate buffers for the inner loop
     let mut projections = vec![0.0; n];
@@ -214,6 +244,7 @@ pub fn ppr(
 
     // Forward selection: add terms one at a time
     for term in 0..max_terms {
+        resource::checkpoint().map_err(|e| e.to_string())?;
         // Find optimal projection direction for current residuals
         let (alpha, ridge_values, beta) = find_projection_direction_fast(
             &x,
@@ -321,6 +352,7 @@ fn find_projection_direction_fast(
 
     // Iteratively refine direction
     for iter in 0..config.max_iter {
+        resource::checkpoint().map_err(|e| e.to_string())?;
         // Project data onto current direction
         compute_projections(x, &alpha, projections);
 
@@ -631,8 +663,62 @@ pub fn run_ppr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use approx::assert_relative_eq;
     use ndarray::Array2;
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn ppr_data(n: usize) -> (Array2<f64>, Vec<f64>) {
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| ((i * (3 + 4 * j)) % 17) as f64 / 4.0);
+        let y = (0..n)
+            .map(|i| x[[i, 0]].sin() + 0.5 * x[[i, 1]] + ((i * 7) % 5) as f64 * 0.05)
+            .collect();
+        (x, y)
+    }
+
+    #[test]
+    fn test_ppr_terms_are_bounded_by_observations() {
+        let (x, y) = ppr_data(20);
+        for (nterms, max_terms) in [(1usize, 21usize), (21, 1), (usize::MAX, usize::MAX)] {
+            let cfg = PprConfig {
+                nterms,
+                max_terms,
+                ..Default::default()
+            };
+            let err = ppr(x.view(), &y, None, cfg).unwrap_err();
+            assert!(
+                err.contains("must not exceed the number of observations (20)"),
+                "{nterms}/{max_terms}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ppr_rejects_bad_values_and_honours_cancellation() {
+        let (x, mut y) = ppr_data(20);
+        let w: Vec<f64> = (0..20).map(|i| if i == 4 { -1.0 } else { 1.0 }).collect();
+        assert!(
+            ppr(x.view(), &y, Some(&w), PprConfig::default())
+                .unwrap_err()
+                .contains("weights")
+        );
+        let err = with_budget(cancelled_budget(), || {
+            ppr(x.view(), &y, None, PprConfig::default())
+        })
+        .unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        y[2] = f64::NAN;
+        assert!(
+            ppr(x.view(), &y, None, PprConfig::default())
+                .unwrap_err()
+                .contains("non-finite")
+        );
+    }
 
     #[test]
     fn test_ppr_basic() {
