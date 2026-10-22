@@ -11,17 +11,7 @@ use rmcp::{
 
 use crate::path_jail;
 use crate::server::AnalyticsServer;
-
-/// Ceiling on `n_rows * columns.len()` for `generate_random_data`.
-///
-/// Cells rather than rows, because memory scales with the product: 5M rows is
-/// cheap at one column and ruinous at fifty. At 10M cells a f64 column set costs
-/// roughly 80 MB, which a 1 GB deployment survives; the unbounded `n_rows` this
-/// replaces let one anonymous request exhaust the machine, and since sessions
-/// are held in process memory that OOM took every other user's data with it.
-/// Deliberately lives here and not in p2a-core, so p2a-cli users running
-/// locally keep generating whatever size they like.
-const MAX_GENERATED_CELLS: usize = 10_000_000;
+use crate::tools::limits::{Family, LimitViolation};
 use crate::tools::requests::utils::{
     ColumnSpecInput, ExportSessionRequest, GenerateRandomDataRequest, GenerateReportRequest,
     GetSeedRequest, ImportSessionRequest, ReportContentInput, ReportSectionInput,
@@ -32,6 +22,110 @@ use p2a_core::{
     HtmlReport, ReportSection, ReportTable,
     simulation::{ColumnSpec, Distribution, generate_random_data},
 };
+
+/// A refusal by a named budget, as an in-band tool error (logged at `info`).
+fn budget_refusal(v: LimitViolation) -> CallToolResult {
+    tracing::info!(
+        tool = %v.tool,
+        override_key = v.override_key,
+        requested = %v.requested,
+        limit = %v.limit,
+        "request refused by a named budget"
+    );
+    CallToolResult::error(vec![Content::text(v.message)])
+}
+
+/// A refusal by a family cap (string length, array length), as an in-band
+/// tool error (logged at `info`).
+fn cap_refusal(
+    tool: &str,
+    knob: &'static str,
+    requested: usize,
+    limit: u64,
+    message: String,
+) -> CallToolResult {
+    tracing::info!(
+        tool,
+        override_key = knob,
+        requested,
+        limit,
+        "request refused by a family cap"
+    );
+    CallToolResult::error(vec![Content::text(message)])
+}
+
+/// Bytes one row of a generated column costs once materialised (exports,
+/// `describe`): 8 for every numeric distribution, a 16-byte view plus the
+/// text for string columns.
+fn generated_row_width(dist: &Distribution) -> u64 {
+    match dist {
+        Distribution::ConstantString { value } => 16u64.saturating_add(value.len() as u64),
+        Distribution::Categorical { categories, .. } => {
+            let longest = categories.iter().map(String::len).max().unwrap_or(0);
+            16u64.saturating_add(longest as u64)
+        }
+        _ => 8,
+    }
+}
+
+/// The hosted per-string and per-array caps for one generated column.
+fn check_generated_column(
+    name: &str,
+    dist: &Distribution,
+    string_cap: Option<u64>,
+    array_cap: Option<u64>,
+) -> Result<(), CallToolResult> {
+    const TOOL: &str = "generate_random_data";
+    if let Some(cap) = string_cap {
+        let mut strings: Vec<&str> = vec![name];
+        match dist {
+            Distribution::ConstantString { value } => strings.push(value),
+            Distribution::Categorical { categories, .. } => {
+                strings.extend(categories.iter().map(String::as_str))
+            }
+            _ => {}
+        }
+        if let Some(long) = strings.iter().find(|s| s.len() as u64 > cap) {
+            return Err(cap_refusal(
+                TOOL,
+                "string_bytes",
+                long.len(),
+                cap,
+                format!(
+                    "Column `{}`: a string of {} bytes exceeds this server's limit of {cap} \
+                     bytes per string. Use shorter text.",
+                    shown_name(name),
+                    long.len()
+                ),
+            ));
+        }
+    }
+    if let (Some(cap), Distribution::Categorical { categories, .. }) = (array_cap, dist) {
+        let k = categories.len();
+        if k as u64 > cap {
+            return Err(cap_refusal(
+                TOOL,
+                "array_length",
+                k,
+                cap,
+                format!(
+                    "Column `{}`: {k} categories exceed this server's limit of {cap}. \
+                     Use fewer categories.",
+                    shown_name(name)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A column name for a message: at most 64 characters, cut at a char boundary.
+fn shown_name(name: &str) -> String {
+    match name.char_indices().nth(64) {
+        Some((cut, _)) => format!("{}…", &name[..cut]),
+        None => name.to_string(),
+    }
+}
 
 #[tool_router(router = utils_router, vis = "pub")]
 impl AnalyticsServer {
@@ -223,19 +317,24 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<GenerateRandomDataRequest>,
     ) -> Result<CallToolResult, McpError> {
-        // Bound the allocation before doing any work. `saturating_mul` matters:
-        // a plain multiply would wrap for a large enough `n_rows` and land back
-        // under the cap.
-        let requested_cells = request.n_rows.saturating_mul(request.columns.len());
-        if requested_cells > MAX_GENERATED_CELLS {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Refused to generate {} rows x {} columns ({} cells): the limit is {} cells. \
-                 Reduce n_rows or the number of columns.",
-                request.n_rows,
-                request.columns.len(),
-                requested_cells,
-                MAX_GENERATED_CELLS
-            ))]));
+        // Bound the allocation before doing any work. Cells rather than rows,
+        // because memory scales with the product: 5M rows is cheap at one column
+        // and ruinous at fifty. Without a bound one anonymous request could
+        // exhaust a 1 GB deployment, and since sessions live in process memory
+        // that would take every other user's data with it. The budgets come from
+        // the resource profile (hosted: generated_cells, generated_bytes,
+        // string_bytes, array_length); without one (local, desktop, stdio)
+        // generation is unconstrained, as it is for the CLI. A product that
+        // overflows counts as u64::MAX, so it can never wrap back under a cap.
+        const TOOL: &str = "generate_random_data";
+        let limits = crate::tools::limits::current();
+        let cells = request
+            .n_rows
+            .checked_mul(request.columns.len())
+            .map_or(u64::MAX, |c| c as u64);
+        if let Err(v) = limits.check_budget(TOOL, "generated_cells", cells, limits.generated_cells)
+        {
+            return Ok(budget_refusal(v));
         }
 
         // Parse column specifications
@@ -266,6 +365,30 @@ impl AnalyticsServer {
             };
 
             columns.push(ColumnSpec::new(&col_input.name, dist));
+        }
+
+        // Per-string and per-array caps, then the materialised size in bytes
+        // (rows x per-column width, where string columns count their text).
+        let string_cap = limits.cap(Family::StringBytes);
+        let array_cap = limits.cap(Family::ArrayLength);
+        for col in &columns {
+            if let Err(refusal) =
+                check_generated_column(&col.name, &col.distribution, string_cap, array_cap)
+            {
+                return Ok(refusal);
+            }
+        }
+        let row_bytes = columns.iter().fold(0u64, |acc, c| {
+            acc.saturating_add(generated_row_width(&c.distribution))
+        });
+        let requested_bytes = (request.n_rows as u64).saturating_mul(row_bytes);
+        if let Err(v) = limits.check_budget(
+            TOOL,
+            "generated_bytes",
+            requested_bytes,
+            limits.generated_bytes,
+        ) {
+            return Ok(budget_refusal(v));
         }
 
         // Use per-tool seed if provided, otherwise fall back to global seed
@@ -687,6 +810,7 @@ impl AnalyticsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::limits::{self, Family, Limits};
 
     /// A path guaranteed to sit outside the jail root, whatever it resolves to:
     /// the root is either the process CWD (this crate's directory under the repo)
@@ -726,54 +850,125 @@ mod tests {
         }
     }
 
+    /// Runs `generate_random_data` under `limits`. The limits override is
+    /// thread-local, so the handler runs on a current-thread runtime built here.
+    fn generate_under(limits: Limits, request: GenerateRandomDataRequest) -> CallToolResult {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = AnalyticsServer::new();
+        limits::with_limits(limits, || {
+            rt.block_on(server.generate_random_data(Parameters(request)))
+        })
+        .expect("refusals are in-band tool errors")
+    }
+
+    /// The first content block's text.
+    fn text(r: &CallToolResult) -> String {
+        r.content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
+    }
+
+    fn constant_string(name: &str, len: usize) -> ColumnSpecInput {
+        ColumnSpecInput {
+            name: name.into(),
+            distribution: serde_json::json!({"type": "constant_string", "value": "s".repeat(len)}),
+        }
+    }
+
+    fn request(n_rows: usize, columns: Vec<ColumnSpecInput>) -> GenerateRandomDataRequest {
+        GenerateRandomDataRequest {
+            n_rows,
+            columns,
+            seed: Some(1),
+            name: None,
+        }
+    }
+
     /// `n_rows` is an unbounded `usize` on an endpoint anonymous callers can
-    /// reach, and p2a-core only rejects zero — so the ceiling has to live here.
+    /// reach, and p2a-core only rejects zero, so the hosted ceiling lives here.
     /// Sized just over the cap rather than absurdly high on purpose: an
     /// uncapped build has to be able to finish this allocation and return, or
     /// the test would hang instead of failing.
-    #[tokio::test]
-    async fn generate_random_data_refuses_oversized_request() {
-        let server = AnalyticsServer::new();
-
-        let result = server
-            .generate_random_data(Parameters(GenerateRandomDataRequest {
-                n_rows: MAX_GENERATED_CELLS / 2 + 1,
-                columns: vec![normal_column("a"), normal_column("b")],
-                seed: Some(1),
-                name: None,
-            }))
-            .await
-            .expect("handler should refuse in-band, not fail the call");
-
-        assert_eq!(
-            result.is_error,
-            Some(true),
-            "a request over the cell cap must be refused"
+    #[test]
+    fn generate_random_data_refuses_oversized_request() {
+        let cells = Limits::hosted().generated_cells.unwrap();
+        let r = generate_under(
+            Limits::hosted(),
+            request(
+                cells as usize / 2 + 1,
+                vec![normal_column("a"), normal_column("b")],
+            ),
         );
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains(&cells.to_string()), "{}", text(&r));
     }
 
-    /// Guards the cap from being tightened into uselessness. Unlike the test
-    /// above this one passes with or without the cap — it exists to fail if
-    /// someone later lowers `MAX_GENERATED_CELLS` below ordinary simulation use.
-    #[tokio::test]
-    async fn generate_random_data_allows_ordinary_request() {
-        let server = AnalyticsServer::new();
-
-        let result = server
-            .generate_random_data(Parameters(GenerateRandomDataRequest {
-                n_rows: 10_000,
-                columns: vec![normal_column("a"), normal_column("b")],
-                seed: Some(1),
-                name: Some("ordinary".to_string()),
-            }))
-            .await
-            .expect("handler should not fail the call");
-
-        assert_ne!(
-            result.is_error,
-            Some(true),
-            "an ordinary 10k x 2 request must still succeed"
+    #[test]
+    fn generate_refuses_string_longer_than_string_bytes() {
+        let cap = Limits::hosted().cap(Family::StringBytes).unwrap() as usize;
+        let r = generate_under(
+            Limits::hosted(),
+            request(10, vec![constant_string("s", cap + 1)]),
         );
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains(&cap.to_string()), "{}", text(&r));
+    }
+
+    #[test]
+    fn generate_budgets_bytes_not_cells() {
+        // 60,000 rows x (16 + 4,000) bytes = 240,960,000 > 200 MiB, but only 60,000 cells.
+        let limit = Limits::hosted().generated_bytes.unwrap();
+        let r = generate_under(
+            Limits::hosted(),
+            request(60_000, vec![constant_string("s", 4_000)]),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains(&limit.to_string()), "{}", text(&r));
+    }
+
+    #[test]
+    fn generate_refuses_too_many_categories() {
+        let cap = Limits::hosted().cap(Family::ArrayLength).unwrap() as usize;
+        let cats: Vec<String> = (0..=cap).map(|i| format!("c{i}")).collect();
+        let col = ColumnSpecInput {
+            name: "c".into(),
+            distribution: serde_json::json!({"type": "categorical", "categories": cats}),
+        };
+        let r = generate_under(Limits::hosted(), request(10, vec![col]));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains(&cap.to_string()), "{}", text(&r));
+    }
+
+    #[test]
+    fn generate_is_unconstrained_without_a_profile() {
+        let r = generate_under(
+            Limits::off(),
+            request(10, vec![constant_string("s", 10_000)]),
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+    }
+
+    /// Guards the caps from being tightened into uselessness: an ordinary
+    /// 10k x 2 simulation succeeds with and without the hosted profile.
+    #[test]
+    fn generate_random_data_allows_ordinary_request() {
+        for limits in [Limits::off(), Limits::hosted()] {
+            let r = generate_under(
+                limits,
+                request(10_000, vec![normal_column("a"), normal_column("b")]),
+            );
+            assert_ne!(
+                r.is_error,
+                Some(true),
+                "an ordinary 10k x 2 request must still succeed: {}",
+                text(&r)
+            );
+        }
     }
 
     #[tokio::test]
