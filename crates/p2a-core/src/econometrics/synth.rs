@@ -1887,23 +1887,7 @@ fn run_placebo_inference(
         treated_config,
     )?;
 
-    let treated_rmspe_post = if !treated_result.treatment_effects.is_empty() {
-        let mse: f64 = treated_result
-            .treatment_effects
-            .iter()
-            .map(|te| te.effect * te.effect)
-            .sum::<f64>()
-            / treated_result.treatment_effects.len() as f64;
-        mse.sqrt()
-    } else {
-        0.0
-    };
-
-    let treated_ratio = if treated_rmspe_pre > 1e-10 {
-        treated_rmspe_post / treated_rmspe_pre
-    } else {
-        f64::INFINITY
-    };
+    let treated_ratio = rmspe_ratio(treated_rmspe_pre, &treated_result.treatment_effects);
 
     // One placebo fit per donor unit, one after another on this thread. The
     // fits read the caller's budget (a thread-local) at their own checkpoints,
@@ -1972,24 +1956,30 @@ fn placebo_rmspe_ratio(
         Err(_) => return Ok(None),
     };
 
-    let rmspe_pre = placebo_result.pre_treatment_rmspe;
-    let rmspe_post = if !placebo_result.treatment_effects.is_empty() {
-        let mse: f64 = placebo_result
-            .treatment_effects
-            .iter()
-            .map(|te| te.effect * te.effect)
-            .sum::<f64>()
-            / placebo_result.treatment_effects.len() as f64;
+    Ok(Some(rmspe_ratio(
+        placebo_result.pre_treatment_rmspe,
+        &placebo_result.treatment_effects,
+    )))
+}
+
+/// Post- over pre-treatment RMSPE ratio, the statistic placebo inference ranks
+/// units by. The post-treatment RMSPE of no effects is 0; a pre-treatment
+/// RMSPE of at most 1e-10 gives an infinite ratio. The treated unit and every
+/// placebo go through this one function so that their ratios stay comparable.
+fn rmspe_ratio(pre_rmspe: f64, effects: &[TimeEffect]) -> f64 {
+    let post_rmspe = if !effects.is_empty() {
+        let mse: f64 =
+            effects.iter().map(|te| te.effect * te.effect).sum::<f64>() / effects.len() as f64;
         mse.sqrt()
     } else {
         0.0
     };
 
-    Ok(Some(if rmspe_pre > 1e-10 {
-        rmspe_post / rmspe_pre
+    if pre_rmspe > 1e-10 {
+        post_rmspe / pre_rmspe
     } else {
         f64::INFINITY
-    }))
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2234,11 +2224,31 @@ mod tests {
     // Tolerance, iteration bounds and cancellation (T0-WP11)
     // =========================================================================
 
-    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+    /// Runs `f` under a budget whose token is already cancelled. Shared with
+    /// `gsynth_tests`.
+    pub(super) fn cancelled<R>(f: impl FnOnce() -> R) -> R {
         use crate::resource::{Budget, CancelToken, with_budget};
         let token = CancelToken::new();
         token.cancel();
         with_budget(Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn test_rmspe_ratio_rule() {
+        // The treated unit and the placebos share this rule: post-RMSPE over
+        // pre-RMSPE, 0 for no effects, infinite for a pre-RMSPE at most 1e-10
+        let effect = |time, effect| TimeEffect {
+            time,
+            effect,
+            actual: 10.0 + effect,
+            synthetic: 10.0,
+        };
+        let effects = [effect(5, 3.1), effect(6, -3.9), effect(7, 0.4)];
+        let post = ((3.1f64 * 3.1 + 3.9 * 3.9 + 0.4 * 0.4) / 3.0).sqrt();
+        assert!((rmspe_ratio(0.7, &effects) - post / 0.7).abs() < 1e-12);
+        assert_eq!(rmspe_ratio(0.7, &[]), 0.0);
+        assert_eq!(rmspe_ratio(1e-10, &effects), f64::INFINITY);
+        assert_eq!(rmspe_ratio(0.0, &[]), f64::INFINITY);
     }
 
     fn synth_cfg() -> SynthConfig {
@@ -4167,12 +4177,7 @@ mod gsynth_tests {
         assert_eq!(res.n_factors, 1);
     }
 
-    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
-        use crate::resource::{Budget, CancelToken, with_budget};
-        let token = CancelToken::new();
-        token.cancel();
-        with_budget(Budget::new(None, token), f)
-    }
+    use super::tests::cancelled;
 
     #[test]
     fn test_gsynth_explicit_factor_count_stops_when_cancelled() {
