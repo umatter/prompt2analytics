@@ -1,7 +1,8 @@
 //! LLM chat routes (`/api/llm/*`) and the two tool executors the LLM tool
 //! loop uses. This was the `llm_handlers` module of `transport/http.rs`.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     Json,
@@ -14,9 +15,11 @@ use serde::{Deserialize, Serialize};
 use super::http::{ApiResponse, AppState, ContentItem};
 use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
 use crate::llm::{
-    AnthropicProvider, LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig,
-    ProviderType, ToolExecutor, build_enhanced_dataset_context, get_system_prompt_with_context,
-    validate_provider_config,
+    AnthropicProvider, ChatSlot, ContextManager, LlmError, LlmProvider, LlmSettings, Message,
+    OllamaProvider, OpenAIProvider, ProviderConfig, ProviderType, ToolDefinition, ToolExecutor,
+    build_dataset_context_bounded, check_llm_tool_call, get_system_prompt_with_context,
+    resolve_provider_config, server_key_availability, truncate_str, truncate_tool_result,
+    try_acquire_chat_slot,
 };
 use crate::session::Session;
 
@@ -91,6 +94,7 @@ impl SessionToolExecutor {
 #[async_trait::async_trait]
 impl ToolExecutor for SessionToolExecutor {
     async fn execute(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
+        refuse_unless_callable(&self.server, name)?;
         tracing::warn!(">>> SessionToolExecutor::execute called for tool: {}", name);
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
@@ -126,52 +130,90 @@ impl ToolExecutor for SessionToolExecutor {
     }
 }
 
-/// Create a provider from config (defaults to Ollama).
-/// If no API key is provided, checks for environment variables:
-/// - OPENAI_API_KEY for OpenAI
-/// - ANTHROPIC_API_KEY for Anthropic
-fn create_provider_with_iterations(
-    config: Option<ProviderConfig>,
-    max_tool_iterations: Option<usize>,
-) -> Box<dyn LlmProvider> {
-    let mut config = config.unwrap_or_default();
-    // Override max_tool_iterations if provided at request level
-    if max_tool_iterations.is_some() {
-        config.max_tool_iterations = max_tool_iterations;
-    }
+/// The names of every registered tool. The tool set is fixed per binary,
+/// so it is collected once.
+fn llm_callable_tools(server: &crate::server::AnalyticsServer) -> &'static HashSet<String> {
+    static TOOLS: OnceLock<HashSet<String>> = OnceLock::new();
+    TOOLS.get_or_init(|| server.list_tools().into_iter().map(|t| t.name).collect())
+}
 
-    // Fill in API key from environment variable if not provided
-    if config.api_key.is_none()
-        || config
-            .api_key
-            .as_ref()
-            .map(|k| k.is_empty())
-            .unwrap_or(false)
-    {
-        let env_key = match config.provider_type {
-            ProviderType::OpenAI => std::env::var("OPENAI_API_KEY").ok(),
-            ProviderType::Anthropic => std::env::var("ANTHROPIC_API_KEY").ok(),
-            ProviderType::Ollama => None, // Ollama doesn't need an API key
-        };
-        if env_key.is_some() {
-            tracing::info!(
-                provider = %config.provider_type,
-                "Using API key from environment variable"
-            );
-            config.api_key = env_key;
-        }
-    }
+/// Refuse a model-emitted tool name the assistant may not call: an internal
+/// tool, or one no handler registers. The refusal is the tool's error text.
+fn refuse_unless_callable(
+    server: &crate::server::AnalyticsServer,
+    name: &str,
+) -> Result<(), String> {
+    check_llm_tool_call(name, |n| llm_callable_tools(server).contains(n)).inspect_err(|_| {
+        tracing::warn!(
+            tool = %truncate_str(name, 64),
+            "Refused a tool call the assistant may not make"
+        );
+    })
+}
 
-    match config.provider_type {
-        ProviderType::Ollama => Box::new(OllamaProvider::new(config)),
-        ProviderType::OpenAI => Box::new(OpenAIProvider::new(config)),
-        ProviderType::Anthropic => Box::new(AnthropicProvider::new(config)),
+/// Read a server environment variable (the key lookup of
+/// `resolve_provider_config` and `server_key_availability`).
+fn server_env(var: &str) -> Option<String> {
+    std::env::var(var).ok()
+}
+
+/// Build the provider for a config that `resolve_provider_config` accepted:
+/// its endpoint passed the egress policy and its key follows the key policy.
+fn build_provider(cfg: ProviderConfig, settings: &LlmSettings) -> Box<dyn LlmProvider> {
+    match cfg.provider_type {
+        ProviderType::Ollama => Box::new(OllamaProvider::with_settings(cfg, settings)),
+        ProviderType::OpenAI => Box::new(OpenAIProvider::with_settings(cfg, settings)),
+        ProviderType::Anthropic => Box::new(AnthropicProvider::with_settings(cfg, settings)),
     }
 }
 
-/// Create a provider from config without extra iteration override.
-fn create_provider(config: Option<ProviderConfig>) -> Box<dyn LlmProvider> {
-    create_provider_with_iterations(config, None)
+/// The HTTP status of a failed LLM call: the provider's own failure is a
+/// 502, its silence a 504, a refused endpoint or key the caller's 400. The
+/// message is the error's text, which never carries an upstream body.
+fn llm_error_status(e: &LlmError) -> StatusCode {
+    match e {
+        LlmError::Upstream { .. } => StatusCode::BAD_GATEWAY,
+        LlmError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        LlmError::EgressDenied(_) | LlmError::InvalidApiKey => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// The prompt of a title request: the user's message (at most 2,000 bytes)
+/// and the assistant's reply (at most 500), cut on char boundaries.
+fn title_prompt(user: &str, assistant: Option<&str>) -> String {
+    let context = match assistant {
+        Some(a) => format!(
+            "User: {}\nAssistant: {}",
+            truncate_str(user, 2_000),
+            truncate_str(a, 500)
+        ),
+        None => format!("User: {}", truncate_str(user, 2_000)),
+    };
+    format!(
+        "Generate a very short title (3-6 words, no quotes) for this conversation:\n\n{context}\n\nTitle:"
+    )
+}
+
+/// The result preview of a `ToolEnd` event: at most 2,000 bytes plus "...".
+fn tool_end_preview(text: &str) -> String {
+    if text.len() > 2_000 {
+        format!("{}...", truncate_str(text, 2_000))
+    } else {
+        text.to_string()
+    }
+}
+
+/// The size of a dataset's source file for its stored metadata, read only
+/// through the path jail inside the session's scope: `None` for a path
+/// outside the data root or a file that cannot be read. Synchronous, so the
+/// scope is never held across an `.await`.
+#[cfg_attr(not(feature = "db"), allow(dead_code))]
+fn jailed_file_size(session_id: &str, path: &str) -> Option<i64> {
+    let _scope = crate::path_jail::enter_session_scope(session_id);
+    let checked = crate::path_jail::validate_data_path(path).ok()?;
+    let len = std::fs::metadata(checked).ok()?.len();
+    Some(i64::try_from(len).unwrap_or(i64::MAX))
 }
 
 /// Human-readable provider name for UI status messages. OpenRouter is
@@ -202,10 +244,12 @@ fn provider_display_name(config: Option<&ProviderConfig>) -> String {
 /// numeric ranges) is real work on a large session, and it runs before any
 /// provider or key is contacted. The datasets are cloned first (cheap: the
 /// columns are shared), so no dataset lock is held while it runs. A session
-/// without datasets needs no work and takes no permit.
+/// without datasets needs no work and takes no permit. The block is at most
+/// `context_bytes` long (`llm_context_bytes`).
 async fn governed_dataset_context(
     governor: &ToolGovernor,
     session: &Arc<Session>,
+    context_bytes: usize,
 ) -> Result<Option<String>, ToolCallError> {
     let datasets = session.datasets.read().await.clone();
     if datasets.is_empty() {
@@ -213,9 +257,48 @@ async fn governed_dataset_context(
     }
     governor
         .run_blocking(session, "llm_context", move |_budget| {
-            Ok(build_enhanced_dataset_context(&datasets))
+            Ok(build_dataset_context_bounded(&datasets, context_bytes))
         })
         .await
+}
+
+/// The messages of one chat request: the system prompt with the bounded
+/// dataset block, the history fitted by [`ContextManager`] to the byte cap
+/// (`llm_history_bytes`) and, for a model with a known window, its token
+/// budget, then the user's message, which is never compacted.
+async fn build_chat_messages(
+    governor: &ToolGovernor,
+    session: &Arc<Session>,
+    history: Vec<Message>,
+    user_message: String,
+    tools: &[ToolDefinition],
+    cfg: &ProviderConfig,
+    settings: &LlmSettings,
+) -> Result<Vec<Message>, ToolCallError> {
+    let dataset_context =
+        governed_dataset_context(governor, session, settings.context_bytes).await?;
+    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), tools);
+    let reserved_for_response = cfg.max_tokens.unwrap_or(4096) as usize;
+    let processed = ContextManager::for_request(
+        &cfg.model,
+        cfg.provider_type,
+        settings.history_bytes,
+        reserved_for_response,
+    )
+    .with_tools(tools)
+    .process_history(history, &system_prompt);
+    tracing::info!(
+        has_datasets = dataset_context.is_some(),
+        history_messages = processed.messages.len(),
+        turns_summarized = processed.turns_summarized,
+        "Built the chat context"
+    );
+
+    let mut messages = Vec::with_capacity(processed.messages.len() + 2);
+    messages.push(Message::system(system_prompt));
+    messages.extend(processed.messages);
+    messages.push(Message::user(user_message));
+    Ok(messages)
 }
 
 /// LLM chat endpoint.
@@ -223,6 +306,28 @@ pub async fn llm_chat(
     State(state): State<AppState>,
     Json(request): Json<LlmChatRequest>,
 ) -> Response {
+    // At most llm_streams_per_session chat requests run per session; the
+    // non-streaming chat runs the same tool loop, so it takes a slot too.
+    let settings = LlmSettings::current();
+    let _slot = match acquire_chat_slot_or_busy(&request.session_id, settings.streams_per_session) {
+        Ok(slot) => slot,
+        Err(busy) => return *busy,
+    };
+
+    // Resolve the provider (egress policy, key policy, iteration clamp)
+    // before anything else, so a refused config costs nothing.
+    let provider_config = match resolve_provider_config(
+        request.provider,
+        request.max_tool_iterations,
+        &settings,
+        &server_env,
+    ) {
+        Ok(cfg) => cfg,
+        Err(msg) => {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(msg))).into_response();
+        }
+    };
+
     // Get the session
     let session = match state.session_manager.get_session(&request.session_id).await {
         Ok(s) => s,
@@ -249,42 +354,34 @@ pub async fn llm_chat(
         }
     };
 
-    // Reject an SSRF-unsafe provider base_url before making any request.
-    if let Some(cfg) = &request.provider
-        && let Err(e) = validate_provider_config(cfg)
+    let tools = state.server.list_tools_for_llm();
+
+    // The bounded dataset block (built under the governor), the history
+    // fitted to the request's budget, and the user's message.
+    let messages = match build_chat_messages(
+        &state.governor,
+        &session,
+        request.history,
+        request.message,
+        &tools,
+        &provider_config,
+        &settings,
+    )
+    .await
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::<()>::error(format!(
-                "Rejected LLM provider base_url: {e}"
-            ))),
-        )
-            .into_response();
-    }
+        Ok(messages) => messages,
+        Err(e) => return e.into_response(),
+    };
 
     // Create provider and tool executor
-    let provider = create_provider_with_iterations(request.provider, request.max_tool_iterations);
+    let provider = build_provider(provider_config, &settings);
     let tool_executor = SessionToolExecutor::new(
         state.governor.clone(),
         state.server.clone(),
         session.clone(),
     );
-    let tools = state.server.list_tools_for_llm();
 
-    // Build enhanced dataset context from currently loaded datasets
-    // This includes data types, sample values, and basic statistics
-    let dataset_context = match governed_dataset_context(&state.governor, &session).await {
-        Ok(context) => context,
-        Err(e) => return e.into_response(),
-    };
-
-    tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), has_datasets = dataset_context.is_some(), "Starting LLM chat");
-
-    // Build message history with dataset context
-    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), &tools);
-    let mut messages = vec![Message::system(system_prompt)];
-    messages.extend(request.history);
-    messages.push(Message::user(request.message));
+    tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), "Starting LLM chat");
 
     // Execute chat
     let start = std::time::Instant::now();
@@ -305,7 +402,7 @@ pub async fn llm_chat(
         Err(e) => {
             tracing::error!(error = %e, elapsed_ms = %elapsed.as_millis(), "LLM chat failed");
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                llm_error_status(&e),
                 Json(ApiResponse::<()>::error(e.to_string())),
             )
                 .into_response()
@@ -315,7 +412,20 @@ pub async fn llm_chat(
 
 /// List available LLM models.
 pub async fn llm_list_models(State(_state): State<AppState>) -> impl IntoResponse {
-    let provider = create_provider(None);
+    // The model list comes from the default local Ollama endpoint, which the
+    // egress policy may not allow (hosted profile, explicit allowlist).
+    let settings = LlmSettings::current();
+    let config = ProviderConfig::default();
+    if settings.egress.check_provider_config(&config).is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiResponse::error(
+                "LLM provider not available: the default local Ollama endpoint is not enabled \
+                 on this server",
+            )),
+        );
+    }
+    let provider = build_provider(config, &settings);
 
     match provider.list_models().await {
         Ok(models) => (
@@ -342,14 +452,10 @@ pub struct EnvKeysResponse {
     pub anthropic: bool,
 }
 
-/// Check which API keys are available from environment variables.
+/// Report for which providers the server would supply its own API key:
+/// false for both when server keys are disabled (hosted profile).
 pub async fn llm_env_keys() -> impl IntoResponse {
-    let openai = std::env::var("OPENAI_API_KEY")
-        .map(|k| !k.is_empty())
-        .unwrap_or(false);
-    let anthropic = std::env::var("ANTHROPIC_API_KEY")
-        .map(|k| !k.is_empty())
-        .unwrap_or(false);
+    let (openai, anthropic) = server_key_availability(&LlmSettings::current(), &server_env);
 
     (
         StatusCode::OK,
@@ -378,40 +484,18 @@ pub struct GenerateTitleResponse {
 
 /// Generate a conversation title using the LLM.
 pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> impl IntoResponse {
-    // Reject an SSRF-unsafe provider base_url before making any request.
-    if let Some(cfg) = &request.provider
-        && let Err(e) = validate_provider_config(cfg)
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(format!(
-                "Rejected LLM provider base_url: {e}"
-            ))),
-        );
-    }
+    // Resolve the provider (egress policy, key policy) before any request.
+    let settings = LlmSettings::current();
+    let provider_config =
+        match resolve_provider_config(request.provider, None, &settings, &server_env) {
+            Ok(cfg) => cfg,
+            Err(msg) => return (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))),
+        };
 
-    let provider = create_provider(request.provider);
+    let provider = build_provider(provider_config, &settings);
 
     // Build a simple prompt for title generation
-    let context = if let Some(ref response) = request.assistant_response {
-        format!(
-            "User: {}\nAssistant: {}",
-            request.user_message,
-            // Truncate long responses
-            if response.len() > 500 {
-                &response[..500]
-            } else {
-                response
-            }
-        )
-    } else {
-        format!("User: {}", request.user_message)
-    };
-
-    let prompt = format!(
-        "Generate a very short title (3-6 words, no quotes) for this conversation:\n\n{}\n\nTitle:",
-        context
-    );
+    let prompt = title_prompt(&request.user_message, request.assistant_response.as_deref());
 
     let messages = vec![
         Message::system(
@@ -449,7 +533,7 @@ pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> im
         Err(e) => {
             tracing::error!(error = %e, "Failed to generate title");
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                llm_error_status(&e),
                 Json(ApiResponse::error(format!(
                     "Failed to generate title: {}",
                     e
@@ -618,7 +702,7 @@ impl StreamingToolExecutor {
         let result_preview = if result_text.len() > 2000 {
             format!(
                 "{}...[truncated, total {} bytes]",
-                &result_text[..2000],
+                truncate_str(result_text, 2_000),
                 result_text.len()
             )
         } else {
@@ -789,9 +873,8 @@ impl StreamingToolExecutor {
             .map(|s| s.to_string());
 
         let file_size_bytes = source_path
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len() as i64);
+            .as_deref()
+            .and_then(|p| jailed_file_size(session_id, p));
 
         // Determine source type
         let source_type = if tool_name == "upload_dataset" {
@@ -904,6 +987,8 @@ impl StreamingToolExecutor {
 #[async_trait::async_trait]
 impl ToolExecutor for StreamingToolExecutor {
     async fn execute(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
+        // Before any ToolStart event, DB tool-call row or governor call.
+        refuse_unless_callable(&self.server, name)?;
         tracing::warn!(
             ">>> StreamingToolExecutor::execute called for tool: {}",
             name
@@ -982,11 +1067,7 @@ impl ToolExecutor for StreamingToolExecutor {
                     .collect::<Vec<_>>()
                     .join("\n");
                 // Truncate for the event (keep it reasonable for SSE)
-                if text.len() > 2000 {
-                    Some(format!("{}...", &text[..2000]))
-                } else {
-                    Some(text)
-                }
+                Some(tool_end_preview(&text))
             }
             Err(e) => Some(format!("Error: {}", e)),
         };
@@ -1022,7 +1103,7 @@ impl ToolExecutor for StreamingToolExecutor {
                 if let (Some(db), Some(tc_id)) = (&self.db, &tool_call_id) {
                     // Truncate result if too long (max 10KB)
                     let truncated_result = if result_str.len() > 10240 {
-                        format!("{}...[truncated]", &result_str[..10240])
+                        format!("{}...[truncated]", truncate_str(&result_str, 10_240))
                     } else {
                         result_str.clone()
                     };
@@ -1106,380 +1187,78 @@ impl ToolExecutor for StreamingToolExecutor {
     }
 }
 
+/// Take a chat slot of the session, or the 429 `session_busy` answer when
+/// `limit` chat requests are already running for it.
+fn acquire_chat_slot_or_busy(
+    session_id: &str,
+    limit: Option<usize>,
+) -> Result<ChatSlot, Box<Response>> {
+    try_acquire_chat_slot(session_id, limit).ok_or_else(|| {
+        let mut busy = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiResponse::<()>::error_with_code(
+                "Another chat request is still running for this session; wait for it to finish.",
+                "session_busy",
+                None,
+            )),
+        )
+            .into_response();
+        busy.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("2"),
+        );
+        Box::new(busy)
+    })
+}
+
+/// Run `fut` for as long as the receiver of `tx` (the SSE stream) is alive.
+/// `None` when the receiver went away first: `fut` is then dropped, and with
+/// it everything it was awaiting.
+async fn run_until_client_gone<F: std::future::Future>(
+    tx: &tokio::sync::mpsc::Sender<ProgressEvent>,
+    fut: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        out = fut => Some(out),
+        () = tx.closed() => None,
+    }
+}
+
 /// Streaming LLM chat endpoint using Server-Sent Events.
+///
+/// The chat runs in its own task for as long as the client listens: when
+/// the SSE stream is dropped (the client disconnected), the chat future is
+/// dropped, and with it the provider request and any in-flight governed
+/// tool call, whose guard cancels the tool. The session's chat slot is held
+/// until the task ends.
 pub async fn llm_chat_stream(
     State(state): State<AppState>,
     Json(request): Json<LlmChatRequest>,
-) -> axum::response::sse::Sse<
-    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
-> {
-    use crate::llm::StreamChunk;
-    use tokio::sync::mpsc;
+) -> Response {
+    let settings = LlmSettings::current();
+    let slot = match acquire_chat_slot_or_busy(&request.session_id, settings.streams_per_session) {
+        Ok(slot) => slot,
+        Err(busy) => return *busy,
+    };
 
-    let (tx, mut rx) = mpsc::channel::<ProgressEvent>(100);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(100);
 
-    // Spawn the chat task
-    let state_clone = state.clone();
-    let tx_clone = tx.clone();
+    #[cfg(feature = "db")]
+    let db = state.persistent_manager.as_ref().map(|pm| pm.db().clone());
+    let placeholder: Arc<OnceLock<String>> = Arc::default();
     tokio::spawn(async move {
-        // Send initial status
-        let _ = tx_clone
-            .send(ProgressEvent::Status {
-                message: "Starting analysis...".to_string(),
-            })
-            .await;
-
-        tracing::info!(interpret = %request.interpret, conversation_id = ?request.conversation_id, "LLM chat request received");
-
-        // Get the session
-        let session = match state_clone
-            .session_manager
-            .get_session(&request.session_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(crate::session::SessionError::NotFound) => {
-                let _ = tx_clone
-                    .send(ProgressEvent::Error {
-                        error: "Session not found".to_string(),
-                    })
-                    .await;
-                return;
-            }
-            Err(e) => {
-                let _ = tx_clone
-                    .send(ProgressEvent::Error {
-                        error: e.to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
-
-        // Get database connection for persistence/tracking
-        #[cfg(feature = "db")]
-        let db_connection = state_clone
-            .persistent_manager
-            .as_ref()
-            .map(|pm| pm.db().clone());
-
-        // Normalize conversation_id: treat empty string as None
-        #[cfg(feature = "db")]
-        let effective_conversation_id = request
-            .conversation_id
-            .as_ref()
-            .filter(|id| !id.is_empty())
-            .cloned();
-
-        // Create placeholder assistant message if conversation persistence is enabled
-        #[cfg(feature = "db")]
-        let message_id = if let (Some(pm), Some(conv_id)) =
-            (&state_clone.persistent_manager, &effective_conversation_id)
-        {
-            // Create placeholder message
-            match pm.db().add_message(conv_id, "assistant", "").await {
-                Ok(msg) => {
-                    let msg_id = msg.id_string();
-                    tracing::debug!(message_id = %msg_id, "Created placeholder assistant message");
-                    Some(msg_id)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create placeholder message: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Build enhanced dataset context from currently loaded datasets
-        // This includes data types, sample values, and basic statistics
-        let dataset_context = match governed_dataset_context(&state_clone.governor, &session).await
-        {
-            Ok(context) => context,
-            Err(e) => {
-                let _ = tx_clone
-                    .send(ProgressEvent::Error {
-                        error: e.to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
-
-        // Reject an SSRF-unsafe provider base_url before making any request.
-        if let Some(cfg) = &request.provider
-            && let Err(e) = validate_provider_config(cfg)
-        {
-            let _ = tx_clone
-                .send(ProgressEvent::Error {
-                    error: format!("Rejected LLM provider base_url: {e}"),
-                })
-                .await;
-            return;
-        }
-
-        // Compute a human-readable provider name for the status message
-        // before `request.provider` is moved into the factory — OpenRouter
-        // is routed through the OpenAI client with a custom base_url, so
-        // "openai" alone would be misleading in the connecting banner.
-        let provider_display = provider_display_name(request.provider.as_ref());
-
-        // Create provider and streaming tool executor
-        let provider =
-            create_provider_with_iterations(request.provider, request.max_tool_iterations);
-        // Only the db build reconfigures the executor below.
-        #[cfg_attr(not(feature = "db"), allow(unused_mut))]
-        let mut tool_executor = StreamingToolExecutor::new(
-            state_clone.governor.clone(),
-            state_clone.server.clone(),
-            session,
-            tx_clone.clone(),
-        );
-
-        // Track whether we've set up the executor for persistence
-        #[cfg(feature = "db")]
-        let mut persistence_configured = false;
-
-        // Add full persistence context if conversation tracking is available
-        #[cfg(feature = "db")]
-        if let (Some(db), Some(conv_id), Some(msg_id)) =
-            (&db_connection, &effective_conversation_id, &message_id)
-        {
-            tool_executor = tool_executor.with_persistence(
-                db.clone(),
-                conv_id.clone(),
-                msg_id.clone(),
-                request.session_id.clone(),
-            );
-            persistence_configured = true;
-        }
-
-        // Fall back to dataset metadata tracking if full persistence wasn't configured
-        // This ensures we always capture dataset metadata when db is available
-        #[cfg(feature = "db")]
-        if !persistence_configured {
-            if let Some(db) = &db_connection {
-                tool_executor =
-                    tool_executor.with_dataset_tracking(db.clone(), request.session_id.clone());
-            }
-        }
-
-        let tools = state.server.list_tools_for_llm();
-
-        let _ = tx_clone
-            .send(ProgressEvent::Status {
-                message: format!("Connecting to {provider_display}..."),
-            })
-            .await;
-
-        tracing::info!(
-            has_datasets = dataset_context.is_some(),
-            "Building system prompt with dataset context"
-        );
-
-        // Auto-retrieve history from database if:
-        // 1. conversation_id is provided
-        // 2. history is empty
-        // 3. retrieve_history flag is true (default)
-        #[cfg(feature = "db")]
-        let retrieved_history: Vec<Message> = if request.retrieve_history
-            && request.history.is_empty()
-            && effective_conversation_id.is_some()
-        {
-            if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id) {
-                match db.get_messages(conv_id).await {
-                    Ok(db_messages) => {
-                        tracing::info!(
-                            conversation_id = %conv_id,
-                            message_count = db_messages.len(),
-                            "Retrieved conversation history from database"
-                        );
-                        // Convert DB messages to LLM messages, including tool calls
-                        let mut history = Vec::new();
-                        for db_msg in db_messages {
-                            // Get tool calls for this message
-                            let tool_calls_for_msg =
-                                db.get_tool_calls_for_message(&db_msg.id_string()).await;
-
-                            match db_msg.role {
-                                crate::db::MessageRole::User => {
-                                    if !db_msg.content.is_empty() {
-                                        history.push(Message::user(db_msg.content.clone()));
-                                    }
-                                }
-                                crate::db::MessageRole::Assistant => {
-                                    // Check if this message has completed tool calls
-                                    if let Ok(tool_calls) = &tool_calls_for_msg {
-                                        let completed_calls: Vec<_> = tool_calls
-                                            .iter()
-                                            .filter(|tc| {
-                                                tc.status == crate::db::ToolCallStatus::Success
-                                            })
-                                            .collect();
-
-                                        if !completed_calls.is_empty() {
-                                            // Create tool calls for the assistant message
-                                            let llm_tool_calls: Vec<crate::llm::ToolCall> =
-                                                completed_calls
-                                                    .iter()
-                                                    .map(|tc| crate::llm::ToolCall {
-                                                        id: tc.id_string(),
-                                                        name: tc.tool_name.clone(),
-                                                        arguments: serde_json::from_str(
-                                                            &tc.arguments,
-                                                        )
-                                                        .unwrap_or(serde_json::Value::Null),
-                                                    })
-                                                    .collect();
-
-                                            // Assistant message with tool calls
-                                            history.push(Message::assistant_with_tools(
-                                                db_msg.content.clone(),
-                                                llm_tool_calls,
-                                            ));
-
-                                            // Tool result message
-                                            let tool_results: Vec<crate::llm::ToolResult> =
-                                                completed_calls
-                                                    .iter()
-                                                    .map(|tc| {
-                                                        let result_content =
-                                                            tc.result.as_deref().unwrap_or("");
-                                                        // Truncate long results
-                                                        let truncated =
-                                                            if result_content.len() > 2000 {
-                                                                format!(
-                                                                    "{}...\n[Truncated]",
-                                                                    &result_content[..2000]
-                                                                )
-                                                            } else {
-                                                                result_content.to_string()
-                                                            };
-                                                        crate::llm::ToolResult {
-                                                            tool_call_id: tc.id_string(),
-                                                            content: truncated,
-                                                            is_error: false,
-                                                        }
-                                                    })
-                                                    .collect();
-
-                                            history.push(Message::tool_result(tool_results));
-                                        } else if !db_msg.content.is_empty() {
-                                            // No tool calls, just content
-                                            history
-                                                .push(Message::assistant(db_msg.content.clone()));
-                                        }
-                                    } else if !db_msg.content.is_empty() {
-                                        history.push(Message::assistant(db_msg.content.clone()));
-                                    }
-                                }
-                                crate::db::MessageRole::System => {
-                                    // Skip system messages in history retrieval
-                                }
-                            }
-                        }
-                        history
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            conversation_id = %conv_id,
-                            error = %e,
-                            "Failed to retrieve conversation history, using empty history"
-                        );
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        #[cfg(not(feature = "db"))]
-        let retrieved_history: Vec<Message> = Vec::new();
-
-        // Determine which history to use: client-provided takes precedence
-        let history_to_use = if request.history.is_empty() {
-            retrieved_history
-        } else {
-            request.history.clone()
-        };
-
-        // Build message history with dataset context
-        let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), &tools);
-        let mut messages = vec![Message::system(system_prompt)];
-        messages.extend(history_to_use);
-        messages.push(Message::user(request.message.clone()));
-
-        // Create streaming callback that forwards content chunks
-        let tx_for_callback = tx_clone.clone();
-        let stream_callback: Box<dyn Fn(StreamChunk) + Send + Sync> = Box::new(move |chunk| {
-            match chunk {
-                StreamChunk::Text { content } => {
-                    // Use try_send for non-blocking send from sync callback
-                    let _ = tx_for_callback.try_send(ProgressEvent::Content { text: content });
-                }
-                StreamChunk::Done => {
-                    // Done is handled separately after chat_stream returns
-                }
-                StreamChunk::Error { message } => {
-                    let _ = tx_for_callback.try_send(ProgressEvent::Error { error: message });
-                }
-                StreamChunk::ToolCall { .. } | StreamChunk::ToolResult { .. } => {
-                    // Tool events are handled by StreamingToolExecutor
-                }
-            }
-        });
-
-        // Execute streaming chat
-        match provider
-            .chat_stream(
-                &messages,
-                &tools,
-                &tool_executor,
-                request.interpret,
-                stream_callback,
-            )
-            .await
-        {
-            Ok(response) => {
-                // Update message content in database if persistence is enabled
-                #[cfg(feature = "db")]
-                if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
-                    if let Err(e) = db.update_message_content(msg_id, &response.content).await {
-                        tracing::warn!("Failed to update message content: {}", e);
-                    } else {
-                        tracing::debug!(message_id = %msg_id, "Updated assistant message content");
-                    }
-                }
-
-                // Debug: check if content has newlines
-                let has_newlines = response.content.contains('\n');
-                let content_preview: String = response.content.chars().take(300).collect();
-                tracing::info!(
-                    has_newlines = has_newlines,
-                    content_preview = %content_preview,
-                    "Sending Done event with message content"
-                );
-                let _ = tx_clone
-                    .send(ProgressEvent::Done { message: response })
-                    .await;
-            }
-            Err(e) => {
-                // Update message with error content if persistence is enabled
-                #[cfg(feature = "db")]
-                if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
-                    let error_content = format!("[Error: {}]", e);
-                    let _ = db.update_message_content(msg_id, &error_content).await;
-                }
-
-                let _ = tx_clone
-                    .send(ProgressEvent::Error {
-                        error: e.to_string(),
-                    })
-                    .await;
+        let _slot = slot;
+        let chat = run_chat_stream(state, request, settings, tx.clone(), placeholder.clone());
+        if run_until_client_gone(&tx, chat).await.is_none() {
+            tracing::info!("The chat stream's client disconnected; the chat was stopped");
+            #[cfg(feature = "db")]
+            if let (Some(db), Some(msg_id)) = (&db, placeholder.get())
+                && let Err(e) = db
+                    .update_message_content(msg_id, "[Stopped: the client disconnected]")
+                    .await
+            {
+                tracing::warn!("Failed to mark the stopped message: {}", e);
             }
         }
     });
@@ -1488,7 +1267,9 @@ pub async fn llm_chat_stream(
     let stream = async_stream::stream! {
         while let Some(event) = rx.recv().await {
             let data = serde_json::to_string(&event).unwrap_or_default();
-            yield Ok(axum::response::sse::Event::default().data(data));
+            yield Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default().data(data),
+            );
 
             // Stop after Done or Error
             if matches!(event, ProgressEvent::Done { .. } | ProgressEvent::Error { .. }) {
@@ -1497,7 +1278,397 @@ pub async fn llm_chat_stream(
         }
     };
 
-    axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+    axum::response::sse::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
+}
+
+/// The streaming chat: everything [`llm_chat_stream`] runs in its task,
+/// ending with a `Done` or an `Error` event on `tx`. `placeholder` receives
+/// the id of the assistant message it stores (db builds).
+async fn run_chat_stream(
+    state: AppState,
+    request: LlmChatRequest,
+    settings: LlmSettings,
+    tx: tokio::sync::mpsc::Sender<ProgressEvent>,
+    placeholder: Arc<OnceLock<String>>,
+) {
+    use crate::llm::StreamChunk;
+
+    // Send initial status
+    let _ = tx
+        .send(ProgressEvent::Status {
+            message: "Starting analysis...".to_string(),
+        })
+        .await;
+
+    tracing::info!(interpret = %request.interpret, conversation_id = ?request.conversation_id, "LLM chat request received");
+
+    // Get the session
+    let session = match state.session_manager.get_session(&request.session_id).await {
+        Ok(s) => s,
+        Err(crate::session::SessionError::NotFound) => {
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: "Session not found".to_string(),
+                })
+                .await;
+            return;
+        }
+        Err(e) => {
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: e.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+
+    // Compute a human-readable provider name for the status message
+    // before `request.provider` is moved into the resolver — OpenRouter
+    // is routed through the OpenAI client with a custom base_url, so
+    // "openai" alone would be misleading in the connecting banner.
+    let provider_display = provider_display_name(request.provider.as_ref());
+
+    // Resolve the provider (egress policy, key policy, iteration clamp)
+    // before any database write or provider request.
+    let provider_config = match resolve_provider_config(
+        request.provider.clone(),
+        request.max_tool_iterations,
+        &settings,
+        &server_env,
+    ) {
+        Ok(cfg) => cfg,
+        Err(msg) => {
+            let _ = tx.send(ProgressEvent::Error { error: msg }).await;
+            return;
+        }
+    };
+
+    // Get database connection for persistence/tracking
+    #[cfg(feature = "db")]
+    let db_connection = state.persistent_manager.as_ref().map(|pm| pm.db().clone());
+
+    // Normalize conversation_id: treat empty string as None
+    #[cfg(feature = "db")]
+    let effective_conversation_id = request
+        .conversation_id
+        .as_ref()
+        .filter(|id| !id.is_empty())
+        .cloned();
+
+    // A named conversation must belong to this session. A missing and a
+    // foreign conversation get the same answer, so the check is not an
+    // existence oracle; it runs before the placeholder is written, stored
+    // history is read or the provider is contacted.
+    #[cfg(feature = "db")]
+    if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id) {
+        let owned = matches!(
+            db.get_conversation(conv_id).await,
+            Ok(c) if c.session_id == request.session_id
+        );
+        if !owned {
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: "Conversation not found".to_string(),
+                })
+                .await;
+            return;
+        }
+    }
+
+    // Create placeholder assistant message if conversation persistence is enabled
+    #[cfg(feature = "db")]
+    let message_id = if let (Some(pm), Some(conv_id)) =
+        (&state.persistent_manager, &effective_conversation_id)
+    {
+        // Create placeholder message
+        match pm.db().add_message(conv_id, "assistant", "").await {
+            Ok(msg) => {
+                let msg_id = msg.id_string();
+                tracing::debug!(message_id = %msg_id, "Created placeholder assistant message");
+                Some(msg_id)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create placeholder message: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(feature = "db")]
+    if let Some(id) = &message_id {
+        let _ = placeholder.set(id.clone());
+    }
+    #[cfg(not(feature = "db"))]
+    let _ = placeholder;
+
+    // Create streaming tool executor (the provider is built once the
+    // messages are, below)
+    // Only the db build reconfigures the executor below.
+    #[cfg_attr(not(feature = "db"), allow(unused_mut))]
+    let mut tool_executor = StreamingToolExecutor::new(
+        state.governor.clone(),
+        state.server.clone(),
+        session.clone(),
+        tx.clone(),
+    );
+
+    // Track whether we've set up the executor for persistence
+    #[cfg(feature = "db")]
+    let mut persistence_configured = false;
+
+    // Add full persistence context if conversation tracking is available
+    #[cfg(feature = "db")]
+    if let (Some(db), Some(conv_id), Some(msg_id)) =
+        (&db_connection, &effective_conversation_id, &message_id)
+    {
+        tool_executor = tool_executor.with_persistence(
+            db.clone(),
+            conv_id.clone(),
+            msg_id.clone(),
+            request.session_id.clone(),
+        );
+        persistence_configured = true;
+    }
+
+    // Fall back to dataset metadata tracking if full persistence wasn't configured
+    // This ensures we always capture dataset metadata when db is available
+    #[cfg(feature = "db")]
+    if !persistence_configured {
+        if let Some(db) = &db_connection {
+            tool_executor =
+                tool_executor.with_dataset_tracking(db.clone(), request.session_id.clone());
+        }
+    }
+
+    let tools = state.server.list_tools_for_llm();
+
+    let _ = tx
+        .send(ProgressEvent::Status {
+            message: format!("Connecting to {provider_display}..."),
+        })
+        .await;
+
+    // Auto-retrieve history from database if:
+    // 1. conversation_id is provided
+    // 2. history is empty
+    // 3. retrieve_history flag is true (default)
+    #[cfg(feature = "db")]
+    let retrieved_history: Vec<Message> = if request.retrieve_history
+        && request.history.is_empty()
+        && effective_conversation_id.is_some()
+    {
+        if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id) {
+            match db.get_messages(conv_id).await {
+                Ok(db_messages) => {
+                    tracing::info!(
+                        conversation_id = %conv_id,
+                        message_count = db_messages.len(),
+                        "Retrieved conversation history from database"
+                    );
+                    // Convert DB messages to LLM messages, including tool calls
+                    let mut history = Vec::new();
+                    for db_msg in db_messages {
+                        // Get tool calls for this message
+                        let tool_calls_for_msg =
+                            db.get_tool_calls_for_message(&db_msg.id_string()).await;
+
+                        match db_msg.role {
+                            crate::db::MessageRole::User => {
+                                if !db_msg.content.is_empty() {
+                                    history.push(Message::user(db_msg.content.clone()));
+                                }
+                            }
+                            crate::db::MessageRole::Assistant => {
+                                // Check if this message has completed tool calls
+                                if let Ok(tool_calls) = &tool_calls_for_msg {
+                                    let completed_calls: Vec<_> = tool_calls
+                                        .iter()
+                                        .filter(|tc| {
+                                            tc.status == crate::db::ToolCallStatus::Success
+                                        })
+                                        .collect();
+
+                                    if !completed_calls.is_empty() {
+                                        // Create tool calls for the assistant message
+                                        let llm_tool_calls: Vec<crate::llm::ToolCall> =
+                                            completed_calls
+                                                .iter()
+                                                .map(|tc| crate::llm::ToolCall {
+                                                    id: tc.id_string(),
+                                                    name: tc.tool_name.clone(),
+                                                    arguments: serde_json::from_str(&tc.arguments)
+                                                        .unwrap_or(serde_json::Value::Null),
+                                                })
+                                                .collect();
+
+                                        // Assistant message with tool calls
+                                        history.push(Message::assistant_with_tools(
+                                            db_msg.content.clone(),
+                                            llm_tool_calls,
+                                        ));
+
+                                        // Tool result message
+                                        let tool_results: Vec<crate::llm::ToolResult> =
+                                            completed_calls
+                                                .iter()
+                                                .map(|tc| {
+                                                    let result_content =
+                                                        tc.result.as_deref().unwrap_or("");
+                                                    // Truncate long results
+                                                    let truncated =
+                                                        truncate_tool_result(result_content, 2_000);
+                                                    crate::llm::ToolResult {
+                                                        tool_call_id: tc.id_string(),
+                                                        content: truncated,
+                                                        is_error: false,
+                                                    }
+                                                })
+                                                .collect();
+
+                                        history.push(Message::tool_result(tool_results));
+                                    } else if !db_msg.content.is_empty() {
+                                        // No tool calls, just content
+                                        history.push(Message::assistant(db_msg.content.clone()));
+                                    }
+                                } else if !db_msg.content.is_empty() {
+                                    history.push(Message::assistant(db_msg.content.clone()));
+                                }
+                            }
+                            crate::db::MessageRole::System => {
+                                // Skip system messages in history retrieval
+                            }
+                        }
+                    }
+                    history
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        conversation_id = %conv_id,
+                        error = %e,
+                        "Failed to retrieve conversation history, using empty history"
+                    );
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    #[cfg(not(feature = "db"))]
+    let retrieved_history: Vec<Message> = Vec::new();
+
+    // Determine which history to use: client-provided takes precedence
+    let history_to_use = if request.history.is_empty() {
+        retrieved_history
+    } else {
+        request.history.clone()
+    };
+
+    // The bounded dataset block (built under the governor), the history
+    // fitted to the request's budget, and the user's message.
+    let messages = match build_chat_messages(
+        &state.governor,
+        &session,
+        history_to_use,
+        request.message.clone(),
+        &tools,
+        &provider_config,
+        &settings,
+    )
+    .await
+    {
+        Ok(messages) => messages,
+        Err(e) => {
+            #[cfg(feature = "db")]
+            if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
+                let _ = db
+                    .update_message_content(msg_id, &format!("[Error: {e}]"))
+                    .await;
+            }
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: e.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+    let provider = build_provider(provider_config, &settings);
+
+    // Create streaming callback that forwards content chunks
+    let tx_for_callback = tx.clone();
+    let stream_callback: Box<dyn Fn(StreamChunk) + Send + Sync> = Box::new(move |chunk| {
+        match chunk {
+            StreamChunk::Text { content } => {
+                // Use try_send for non-blocking send from sync callback
+                let _ = tx_for_callback.try_send(ProgressEvent::Content { text: content });
+            }
+            StreamChunk::Done => {
+                // Done is handled separately after chat_stream returns
+            }
+            StreamChunk::Error { message } => {
+                let _ = tx_for_callback.try_send(ProgressEvent::Error { error: message });
+            }
+            StreamChunk::ToolCall { .. } | StreamChunk::ToolResult { .. } => {
+                // Tool events are handled by StreamingToolExecutor
+            }
+        }
+    });
+
+    // Execute streaming chat
+    match provider
+        .chat_stream(
+            &messages,
+            &tools,
+            &tool_executor,
+            request.interpret,
+            stream_callback,
+        )
+        .await
+    {
+        Ok(response) => {
+            // Update message content in database if persistence is enabled
+            #[cfg(feature = "db")]
+            if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
+                if let Err(e) = db.update_message_content(msg_id, &response.content).await {
+                    tracing::warn!("Failed to update message content: {}", e);
+                } else {
+                    tracing::debug!(message_id = %msg_id, "Updated assistant message content");
+                }
+            }
+
+            // Debug: check if content has newlines
+            let has_newlines = response.content.contains('\n');
+            let content_preview: String = response.content.chars().take(300).collect();
+            tracing::info!(
+                has_newlines = has_newlines,
+                content_preview = %content_preview,
+                "Sending Done event with message content"
+            );
+            let _ = tx.send(ProgressEvent::Done { message: response }).await;
+        }
+        Err(e) => {
+            // Update message with error content if persistence is enabled
+            #[cfg(feature = "db")]
+            if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
+                let error_content = format!("[Error: {}]", e);
+                let _ = db.update_message_content(msg_id, &error_content).await;
+            }
+
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: e.to_string(),
+                })
+                .await;
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -1539,7 +1710,7 @@ mod tests {
         let (governor, _server, session) = governed_parts().await;
         // No datasets: nothing to summarize, no permit taken, no refusal.
         assert!(matches!(
-            governed_dataset_context(&governor, &session).await,
+            governed_dataset_context(&governor, &session, 65_536).await,
             Ok(None)
         ));
         let df = polars::prelude::df! {
@@ -1553,7 +1724,7 @@ mod tests {
             .await
             .insert("d".into(), p2a_core::data::Dataset::new(df));
         // The refusing governor's memory admission applies to the context.
-        let r = governed_dataset_context(&governor, &session).await;
+        let r = governed_dataset_context(&governor, &session, 65_536).await;
         assert!(
             matches!(r, Err(ToolCallError::MemoryPressure { .. })),
             "{r:?}"
@@ -1565,7 +1736,7 @@ mod tests {
             evict_idle_minutes: None,
         }));
         let admitting = ToolGovernor::new(ExecConfig::default(), sessions);
-        let context = governed_dataset_context(&admitting, &session)
+        let context = governed_dataset_context(&admitting, &session, 65_536)
             .await
             .unwrap()
             .expect("a context for one dataset");
@@ -1602,5 +1773,192 @@ mod tests {
         }
         let text = tool_end.expect("a ToolEnd event with a result");
         assert!(text.starts_with("Error:"), "{text}");
+    }
+}
+
+/// Tests that run on every platform (the governor tests above are
+/// Linux-only because they rely on RSS readings).
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+    use crate::config::SessionConfig;
+    use crate::exec::ExecConfig;
+    use crate::session::SessionManager;
+    use crate::tools::limits::Limits;
+
+    /// An admitting governor and one live session.
+    async fn admitting_parts() -> (Arc<ToolGovernor>, Arc<Session>) {
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let id = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&id).await.unwrap();
+        let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions));
+        (governor, session)
+    }
+
+    #[tokio::test]
+    async fn chat_messages_use_the_request_budgets() {
+        let (governor, session) = admitting_parts().await;
+        let cols: Vec<polars::prelude::Column> = (0..3000)
+            .map(|j| {
+                let v: Vec<f64> = (0..3).map(|i| i as f64 * 0.37 + j as f64 * 0.011).collect();
+                polars::prelude::Column::new(format!("c{j}").into(), v)
+            })
+            .collect();
+        let df = polars::prelude::DataFrame::new(cols).unwrap();
+        session
+            .datasets
+            .write()
+            .await
+            .insert("wide".into(), p2a_core::data::Dataset::new(df));
+        let settings = LlmSettings {
+            context_bytes: 4_096,
+            history_bytes: 20_000,
+            ..LlmSettings::from_limits(&Limits::off(), None)
+        };
+        let history: Vec<Message> = (0..30)
+            .flat_map(|i| {
+                [
+                    Message::user(format!("u{i:02}:{}", "x".repeat(996))),
+                    Message::assistant(format!("a{i:02}:{}", "y".repeat(996))),
+                ]
+            })
+            .collect();
+        let last = history.last().unwrap().content.clone();
+        // Ollama: only the byte cap applies to the history.
+        let cfg = ProviderConfig::default();
+        let msgs = build_chat_messages(
+            &governor,
+            &session,
+            history,
+            "now".to_string(),
+            &[],
+            &cfg,
+            &settings,
+        )
+        .await
+        .unwrap();
+
+        let sys = &msgs[0].content;
+        assert_eq!(msgs[0].role, crate::llm::MessageRole::System);
+        let block = &sys[sys.find("<<<DATASETS").unwrap()..sys.find("DATASETS>>>").unwrap()];
+        assert!(block.len() <= 4_096 + 32, "{}", block.len());
+        assert!(block.contains("\"c0\""));
+
+        let hist = &msgs[1..msgs.len() - 1];
+        let bytes: usize = hist.iter().map(|m| m.content.len()).sum();
+        assert!(bytes <= 20_000, "{bytes}");
+        assert!(
+            hist[0]
+                .content
+                .starts_with("[Conversation context from earlier in this session:]")
+        );
+        assert_eq!(hist.last().unwrap().content, last);
+        assert_eq!(msgs.last().unwrap().content, "now");
+    }
+
+    #[tokio::test]
+    async fn chat_future_is_dropped_when_receiver_closes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(1);
+        let dropped = Arc::new(AtomicBool::new(false));
+        struct SetOnDrop(Arc<AtomicBool>);
+        impl Drop for SetOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst)
+            }
+        }
+        let g = SetOnDrop(dropped.clone());
+        drop(rx);
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_until_client_gone(&tx, async move {
+                let _g = g;
+                std::future::pending::<()>().await
+            }),
+        )
+        .await
+        .expect("returns once the receiver is gone");
+        assert!(out.is_none());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn chat_future_completes_while_receiver_alive() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(1);
+        assert_eq!(run_until_client_gone(&tx, async { 7 }).await, Some(7));
+    }
+
+    #[tokio::test]
+    async fn second_chat_in_a_limited_session_is_busy() {
+        let held = acquire_chat_slot_or_busy("chat-busy-test", Some(1)).unwrap();
+        let busy = acquire_chat_slot_or_busy("chat-busy-test", Some(1)).unwrap_err();
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(busy.headers()[axum::http::header::RETRY_AFTER], "2");
+        let body = axum::body::to_bytes(busy.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "session_busy");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("Another chat request is still running")
+        );
+        // Unlimited sessions are never busy; a released slot is free again.
+        assert!(acquire_chat_slot_or_busy("chat-busy-test", None).is_ok());
+        drop(held);
+        assert!(acquire_chat_slot_or_busy("chat-busy-test", Some(1)).is_ok());
+    }
+
+    #[test]
+    fn title_prompt_truncates_on_char_boundary() {
+        // Byte 500 falls inside a char.
+        let resp = format!("a{}", "é".repeat(400));
+        let p = title_prompt(&format!("b{}", "ü".repeat(3000)), Some(&resp));
+        assert!(p.contains("Assistant: a") && p.len() < 4_000, "{}", p.len());
+        assert!(title_prompt("hi", None).contains("User: hi"));
+    }
+
+    #[test]
+    fn tool_end_preview_is_char_safe() {
+        let s = tool_end_preview(&format!("a{}", "é".repeat(1500)));
+        assert!(s.len() <= 2_003 && s.ends_with("..."));
+        assert_eq!(tool_end_preview("short"), "short");
+    }
+
+    #[test]
+    fn metadata_file_size_goes_through_the_jail() {
+        assert_eq!(
+            jailed_file_size("00000000-0000-4000-8000-000000000000", "/etc/passwd"),
+            None
+        );
+    }
+
+    #[test]
+    fn llm_errors_map_to_http_statuses() {
+        let cases = [
+            (
+                LlmError::Upstream {
+                    provider: "OpenAI",
+                    status: 401,
+                },
+                StatusCode::BAD_GATEWAY,
+            ),
+            (LlmError::Timeout, StatusCode::GATEWAY_TIMEOUT),
+            (LlmError::EgressDenied("no".into()), StatusCode::BAD_REQUEST),
+            (LlmError::InvalidApiKey, StatusCode::BAD_REQUEST),
+            (
+                LlmError::NetworkError("x".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (e, want) in cases {
+            assert_eq!(llm_error_status(&e), want, "{e}");
+        }
     }
 }

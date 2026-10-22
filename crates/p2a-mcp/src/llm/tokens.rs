@@ -20,12 +20,14 @@ const JSON_OVERHEAD: f64 = 1.15;
 
 /// Estimate token count for a string.
 pub fn estimate_tokens(text: &str) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-    // Simple character-based estimation
-    let char_count = text.chars().count();
-    (char_count as f64 / CHARS_PER_TOKEN).ceil() as usize
+    estimate_tokens_for_chars(text.chars().count())
+}
+
+/// The token estimate of a text of `chars` characters (the measure of
+/// [`estimate_tokens`], for callers that sum lengths without building the
+/// text).
+pub(crate) fn estimate_tokens_for_chars(chars: usize) -> usize {
+    (chars as f64 / CHARS_PER_TOKEN).ceil() as usize
 }
 
 /// Estimate token count for a JSON value.
@@ -175,38 +177,50 @@ impl ContextBudget {
     }
 }
 
-/// Get the context window size for a model.
+/// The input context window of a hosted model whose window is known, or
+/// `None`.
+///
+/// Any `provider/` prefix (OpenRouter style) is ignored, and case does not
+/// matter. GPT-5 is its input budget (400k total minus 128k output).
+pub fn known_model_context_size(model: &str) -> Option<usize> {
+    let lower = model.to_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    let o_series = |p: &str| name == p || name.starts_with(&format!("{p}-"));
+
+    if name.contains("claude-2") || name.contains("claude-instant") {
+        Some(100_000)
+    } else if name.contains("claude") {
+        Some(200_000)
+    } else if name.contains("gpt-5") {
+        Some(272_000)
+    } else if name.contains("gpt-4.1") {
+        Some(1_047_576)
+    } else if name.contains("gpt-4o") || name.contains("chatgpt-4o") {
+        Some(128_000)
+    } else if name.contains("gpt-4-turbo") || name.contains("gpt-4-1106") {
+        Some(128_000)
+    } else if name.contains("gpt-4-32k") {
+        Some(32_768)
+    } else if name.contains("gpt-4") {
+        Some(8_192)
+    } else if name.contains("gpt-3.5-turbo-16k") || name.contains("gpt-3.5") {
+        Some(16_385)
+    } else if name == "o1-mini" || name.starts_with("o1-preview") {
+        Some(128_000)
+    } else if o_series("o1") || o_series("o3") || o_series("o4") {
+        Some(200_000)
+    } else {
+        None
+    }
+}
+
+/// Get the context window size for a model: a known hosted model's window,
+/// a conservative size for common local models, else 8,192.
 pub fn get_model_context_size(model: &str) -> usize {
-    // Common model context sizes
+    if let Some(n) = known_model_context_size(model) {
+        return n;
+    }
     let model_lower = model.to_lowercase();
-
-    // Claude models
-    if model_lower.contains("claude-3") || model_lower.contains("claude-opus") {
-        return 200_000;
-    }
-    if model_lower.contains("claude-2") {
-        return 100_000;
-    }
-
-    // OpenAI models
-    if model_lower.contains("gpt-4o") {
-        return 128_000;
-    }
-    if model_lower.contains("gpt-4-turbo") || model_lower.contains("gpt-4-1106") {
-        return 128_000;
-    }
-    if model_lower.contains("gpt-4-32k") {
-        return 32_768;
-    }
-    if model_lower.contains("gpt-4") {
-        return 8_192;
-    }
-    if model_lower.contains("gpt-3.5-turbo-16k") {
-        return 16_384;
-    }
-    if model_lower.contains("gpt-3.5") {
-        return 4_096;
-    }
 
     // Ollama/local models (conservative default)
     if model_lower.contains("llama") {
@@ -257,9 +271,33 @@ mod tests {
 
     #[test]
     fn test_model_context_sizes() {
-        assert_eq!(get_model_context_size("gpt-4o"), 128_000);
-        assert_eq!(get_model_context_size("claude-3-opus"), 200_000);
-        assert_eq!(get_model_context_size("gpt-3.5-turbo"), 4_096);
-        assert_eq!(get_model_context_size("unknown-model"), 8_192);
+        for (m, n) in [
+            ("claude-sonnet-4-20250514", 200_000),
+            ("claude-opus-4-5-20251101", 200_000),
+            ("claude-3-5-haiku-20241022", 200_000),
+            ("anthropic/claude-3.5-sonnet", 200_000),
+            ("claude-2.1", 100_000),
+            ("gpt-4o-mini", 128_000),
+            ("openai/gpt-4o-mini", 128_000),
+            ("gpt-4.1-mini", 1_047_576),
+            ("gpt-5", 272_000),
+            ("gpt-5-mini", 272_000),
+            ("o3-mini", 200_000),
+            ("o4-mini", 200_000),
+            ("o1", 200_000),
+            ("o1-mini", 128_000),
+            ("gpt-4-turbo", 128_000),
+            ("gpt-4", 8_192),
+            ("gpt-3.5-turbo", 16_385),
+            ("unknown-model", 8_192),
+        ] {
+            assert_eq!(get_model_context_size(m), n, "{m}");
+        }
+        assert_eq!(known_model_context_size("llama3.2"), None);
+        assert_eq!(known_model_context_size("unknown-model"), None);
+        assert_eq!(
+            known_model_context_size("claude-sonnet-4-20250514"),
+            Some(200_000)
+        );
     }
 }
