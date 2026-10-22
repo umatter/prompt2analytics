@@ -5044,7 +5044,9 @@ pub struct ClaraResult {
     pub objective: f64,
     /// Best sample that was used
     pub best_sample: Vec<usize>,
-    /// Average silhouette width
+    /// Average silhouette width of the best sample (as R's
+    /// `clara()$silinfo$avg.width`): the final labels restricted to the
+    /// sample, with the sample's own dissimilarities
     pub average_silhouette: Option<f64>,
     /// Number of samples taken
     pub n_samples: usize,
@@ -5135,6 +5137,10 @@ pub fn clara(
     let samp_size = sample_size.unwrap_or(40 + 2 * k).min(n);
     let max_iterations = max_iter.unwrap_or(100);
 
+    if n_samples == 0 {
+        return Err("samples must be at least 1 (got 0)".to_string());
+    }
+
     if samp_size < k {
         return Err(format!("Sample size ({}) must be >= k ({})", samp_size, k));
     }
@@ -5151,6 +5157,8 @@ pub fn clara(
 
     // Try multiple samples
     for _ in 0..n_samples {
+        checkpoint().map_err(|e| e.to_string())?;
+
         // Draw random sample
         let mut indices: Vec<usize> = (0..n).collect();
         indices.shuffle(&mut rng);
@@ -5188,13 +5196,15 @@ pub fn clara(
     // Assign all points to nearest medoid
     let labels = assign_to_medoids_data(&data, &best_medoids);
 
-    // Compute silhouette (optional, can be expensive)
-    let avg_silhouette = if n <= 10000 {
-        let distances = compute_distance_matrix(&data);
-        Some(compute_silhouette_avg(&labels, &distances, k))
-    } else {
-        None
-    };
+    // Silhouette of the best sample, as cluster::clara reports it: the final
+    // labels restricted to the sample and the sample's own distances (an
+    // O(sample_size^2) computation, independent of n)
+    let sample_labels: Vec<usize> = best_sample.iter().map(|&i| labels[i]).collect();
+    let best_sample_data =
+        Array2::from_shape_fn((best_sample.len(), d), |(i, j)| data[[best_sample[i], j]]);
+    let sample_distances =
+        try_distance_matrix(&best_sample_data.view(), "CLARA sample distance matrix")?;
+    let avg_silhouette = Some(compute_silhouette_avg(&sample_labels, &sample_distances, k));
 
     Ok(ClaraResult {
         labels,
@@ -8678,6 +8688,65 @@ mod tests {
             "got sums {sums:?}, labels {:?}, au {au:?}",
             r.labels
         );
+    }
+
+    /// R 4.3.3: library(cluster); x <- <the 12 x 2 matrix of test_validate_agnes_heights_match_r>
+    /// lab <- c(1,1,2,2,1,3,3,1,2,3,1,2); mean(silhouette(lab, dist(x))[, "sil_width"])  # 0.617882355558917
+    #[test]
+    fn test_validate_clara_silhouette_helper_matches_r() {
+        let x = array![
+            [0.12, 1.05],
+            [0.48, 0.31],
+            [2.91, 3.17],
+            [3.36, 2.62],
+            [1.07, 0.74],
+            [5.21, 0.43],
+            [4.83, 1.12],
+            [0.71, 2.38],
+            [2.24, 2.85],
+            [5.66, 0.97],
+            [1.53, 1.36],
+            [3.95, 3.48]
+        ];
+        let labels = vec![0, 0, 1, 1, 0, 2, 2, 0, 1, 2, 0, 1];
+        let d = compute_distance_matrix(&x.view());
+        assert!((compute_silhouette_avg(&labels, &d, 3) - 0.617882355558917).abs() < 1e-12);
+    }
+
+    fn three_blobs(n: usize, seed: u64) -> Array2<f64> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        Array2::from_shape_fn((n, 2), |(i, j)| {
+            [[0.0, 0.0], [4.0, 4.0], [0.0, 5.0]][i % 3][j] + rng.r#gen::<f64>()
+        })
+    }
+
+    #[test]
+    fn clara_silhouette_is_computed_on_the_best_sample() {
+        let data = three_blobs(300, 8);
+        let r = clara(data.view(), 3, Some(5), Some(30), None, Some(42)).unwrap();
+        assert_eq!(r.best_sample.len(), 30);
+        let sample = Array2::from_shape_fn((30, 2), |(i, j)| data[[r.best_sample[i], j]]);
+        let sample_labels: Vec<usize> = r.best_sample.iter().map(|&i| r.labels[i]).collect();
+        let want =
+            compute_silhouette_avg(&sample_labels, &compute_distance_matrix(&sample.view()), 3);
+        assert_eq!(r.average_silhouette.map(f64::to_bits), Some(want.to_bits()));
+    }
+
+    #[test]
+    fn clara_reports_a_silhouette_for_large_n_and_validates_samples() {
+        let data = three_blobs(12_000, 9);
+        let r = clara(data.view(), 3, Some(2), Some(40), Some(20), Some(1)).unwrap();
+        assert!(r.average_silhouette.is_some()); // was None above 10,000
+        assert!(
+            clara(data.view(), 3, Some(0), None, None, Some(1))
+                .unwrap_err()
+                .starts_with("samples")
+        );
+        let e = with_budget(cancelled(), || {
+            clara(data.view(), 3, Some(2), Some(40), None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
     }
 
     #[test]
