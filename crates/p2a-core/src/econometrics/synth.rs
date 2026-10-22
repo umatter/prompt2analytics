@@ -430,6 +430,20 @@ pub fn run_synthetic_control(
         });
     }
 
+    // Nelder-Mead stops only on a spread below the tolerance, so a zero or
+    // negative tolerance would always run all max_iter iterations.
+    let tol = config.tolerance;
+    if !(tol.is_finite() && tol > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("tolerance must be a finite number greater than 0 (got {tol})"),
+        });
+    }
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1 (got 0)".to_string(),
+        });
+    }
+
     // Prepare data matrices
     let synth_data = prepare_synth_data(
         dataset,
@@ -541,6 +555,7 @@ pub fn run_synthetic_control(
             dataset, outcome, unit_col, time_col, predictors, &config, pre_rmspe,
         ) {
             Ok(results) => Some(results),
+            Err(e @ EconError::Cancelled(_)) => return Err(e),
             Err(e) => {
                 warnings.push(format!("Placebo tests failed: {}", e));
                 None
@@ -687,7 +702,11 @@ fn prepare_synth_data(
     let mut x0 = Array2::zeros((k, j));
     let mut predictor_names = Vec::with_capacity(k);
 
+    // Each get_outcome call filters the whole frame, so building these matrices
+    // is O(cells x n); the budget checks let a deadline stop it.
     for (p_idx, pred_spec) in predictors.iter().enumerate() {
+        crate::resource::checkpoint()?;
+
         let pred_times = match pred_spec.time_window {
             Some((start, end)) => pre_times
                 .iter()
@@ -720,6 +739,7 @@ fn prepare_synth_data(
 
         // Get donor unit predictor values
         for (d_idx, donor) in donor_units.iter().enumerate() {
+            crate::resource::checkpoint()?;
             x0[[p_idx, d_idx]] = aggregate_predictor(
                 df,
                 &pred_spec.column,
@@ -743,18 +763,22 @@ fn prepare_synth_data(
 
     // Pre-treatment outcomes
     for (t_idx, &time) in opt_times.iter().enumerate() {
+        crate::resource::checkpoint()?;
         z1[t_idx] = get_outcome(df, outcome, unit_col, time_col, treated_unit, time)?;
 
         for (d_idx, donor) in donor_units.iter().enumerate() {
+            crate::resource::checkpoint()?;
             z0[[t_idx, d_idx]] = get_outcome(df, outcome, unit_col, time_col, donor, time)?;
         }
     }
 
     // Post-treatment outcomes
     for (t_idx, &time) in post_times.iter().enumerate() {
+        crate::resource::checkpoint()?;
         y1_post[t_idx] = get_outcome(df, outcome, unit_col, time_col, treated_unit, time)?;
 
         for (d_idx, donor) in donor_units.iter().enumerate() {
+            crate::resource::checkpoint()?;
             y0_post[[t_idx, d_idx]] = get_outcome(df, outcome, unit_col, time_col, donor, time)?;
         }
     }
@@ -1079,7 +1103,7 @@ fn optimize_synth_weights(
     // (Nelder & Mead, 1965; same approach as R's optim(method="Nelder-Mead"))
     // The V-matrix dimension is typically small (2-10), ideal for Nelder-Mead.
     let (best_v_raw, best_loss, iterations) =
-        nelder_mead_optimize(v.as_slice().unwrap(), &evaluate_v, tolerance, max_iter);
+        nelder_mead_optimize(v.as_slice().unwrap(), &evaluate_v, tolerance, max_iter)?;
 
     // Recover best V (normalized) and best W
     let mut best_v_pos: Vec<f64> = best_v_raw.iter().map(|&x| x.max(1e-6)).collect();
@@ -1113,13 +1137,14 @@ fn optimize_synth_weights(
 /// * `max_iter` - Maximum number of iterations
 ///
 /// # Returns
-/// (best_point, best_value, iterations)
+/// (best_point, best_value, iterations); `Err(Cancelled)` when the resource
+/// budget stops the run (checked once per iteration).
 fn nelder_mead_optimize<F>(
     x0: &[f64],
     objective: &F,
     tol: f64,
     max_iter: usize,
-) -> (Vec<f64>, f64, usize)
+) -> EconResult<(Vec<f64>, f64, usize)>
 where
     F: Fn(&[f64]) -> (f64, Array1<f64>),
 {
@@ -1158,6 +1183,7 @@ where
     let mut iterations = 0;
 
     for iter in 0..max_iter {
+        crate::resource::checkpoint()?;
         iterations = iter + 1;
 
         // Sort vertices by function value (ascending)
@@ -1297,7 +1323,7 @@ where
         }
     }
 
-    (simplex[best_idx].clone(), values[best_idx], iterations)
+    Ok((simplex[best_idx].clone(), values[best_idx], iterations))
 }
 
 /// Calculate the V-loss (pre-treatment MSPE) for given W weights.
@@ -1854,51 +1880,68 @@ fn run_placebo_inference(
     };
 
     // Run placebo for each donor unit IN PARALLEL
-    // Each placebo test is independent, making this embarrassingly parallel
-    let donor_ratios: Vec<(String, f64)> = units
+    // Each placebo test is independent, making this embarrassingly parallel.
+    // The budget is a thread-local of the calling thread, so it is captured
+    // here and installed on the rayon worker for each placebo fit; a placebo
+    // that fails is skipped as before, a stopped budget ends the inference.
+    let budget = crate::resource::current_budget();
+    let placebo_fits: Vec<Option<(String, f64)>> = units
         .par_iter()
         .filter(|unit| *unit != &config.treated_unit)
-        .filter_map(|donor_unit| {
+        .map(|donor_unit| -> EconResult<Option<(String, f64)>> {
             // Run synth with this donor as treated
             let placebo_config = SynthConfig {
                 treated_unit: donor_unit.clone(),
                 run_placebos: false,
                 ..config.clone()
             };
+            let fit = || {
+                run_synthetic_control(
+                    dataset,
+                    outcome,
+                    unit_col,
+                    time_col,
+                    predictors,
+                    placebo_config,
+                )
+            };
+            let result = match &budget {
+                Some(b) => {
+                    b.check()?;
+                    crate::resource::with_budget(b.clone(), fit)
+                }
+                None => fit(),
+            };
 
-            run_synthetic_control(
-                dataset,
-                outcome,
-                unit_col,
-                time_col,
-                predictors,
-                placebo_config,
-            )
-            .ok()
-            .map(|placebo_result| {
-                let rmspe_pre = placebo_result.pre_treatment_rmspe;
-                let rmspe_post = if !placebo_result.treatment_effects.is_empty() {
-                    let mse: f64 = placebo_result
-                        .treatment_effects
-                        .iter()
-                        .map(|te| te.effect * te.effect)
-                        .sum::<f64>()
-                        / placebo_result.treatment_effects.len() as f64;
-                    mse.sqrt()
-                } else {
-                    0.0
-                };
+            let placebo_result = match result {
+                Ok(r) => r,
+                Err(e @ EconError::Cancelled(_)) => return Err(e),
+                Err(_) => return Ok(None),
+            };
 
-                let ratio = if rmspe_pre > 1e-10 {
-                    rmspe_post / rmspe_pre
-                } else {
-                    f64::INFINITY
-                };
+            let rmspe_pre = placebo_result.pre_treatment_rmspe;
+            let rmspe_post = if !placebo_result.treatment_effects.is_empty() {
+                let mse: f64 = placebo_result
+                    .treatment_effects
+                    .iter()
+                    .map(|te| te.effect * te.effect)
+                    .sum::<f64>()
+                    / placebo_result.treatment_effects.len() as f64;
+                mse.sqrt()
+            } else {
+                0.0
+            };
 
-                (donor_unit.clone(), ratio)
-            })
+            let ratio = if rmspe_pre > 1e-10 {
+                rmspe_post / rmspe_pre
+            } else {
+                f64::INFINITY
+            };
+
+            Ok(Some((donor_unit.clone(), ratio)))
         })
-        .collect();
+        .collect::<EconResult<Vec<_>>>()?;
+    let donor_ratios: Vec<(String, f64)> = placebo_fits.into_iter().flatten().collect();
 
     // Combine treated unit ratio with donor ratios
     let mut rmspe_ratios: Vec<(String, f64)> = vec![(config.treated_unit.clone(), treated_ratio)];
@@ -2163,6 +2206,111 @@ mod tests {
         assert!(output.contains("Synthetic Control"));
         assert!(output.contains("Treated Unit: A"));
         assert!(output.contains("PREDICTOR BALANCE"));
+    }
+
+    // =========================================================================
+    // Tolerance, iteration bounds and cancellation (T0-WP11)
+    // =========================================================================
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        with_budget(Budget::new(None, token), f)
+    }
+
+    fn synth_cfg() -> SynthConfig {
+        SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::DataDriven,
+            max_iter: 50,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_synth_rejects_non_positive_tolerance_and_zero_max_iter() {
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        for tol in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
+            let r = run_synthetic_control(
+                &ds,
+                "outcome",
+                "unit",
+                "time",
+                &preds,
+                SynthConfig {
+                    tolerance: tol,
+                    ..synth_cfg()
+                },
+            );
+            assert!(
+                matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("tolerance")),
+                "tol={tol}: ok={}",
+                r.is_ok()
+            );
+        }
+        let r = run_synthetic_control(
+            &ds,
+            "outcome",
+            "unit",
+            "time",
+            &preds,
+            SynthConfig {
+                max_iter: 0,
+                ..synth_cfg()
+            },
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("max_iter"))
+        );
+    }
+
+    #[test]
+    fn test_synth_stops_when_cancelled() {
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        let r = cancelled(|| {
+            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+        let r = cancelled(|| {
+            run_synthetic_control(
+                &ds,
+                "outcome",
+                "unit",
+                "time",
+                &preds,
+                SynthConfig {
+                    run_placebos: true,
+                    ..synth_cfg()
+                },
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn test_synth_placebos_propagate_cancellation() {
+        // Placebo fits run on rayon workers; the budget must reach them, and a
+        // cancelled placebo must not be dropped like a failed one.
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        let r = cancelled(|| {
+            run_placebo_inference(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), 1.0)
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn test_nelder_mead_stops_when_cancelled() {
+        let objective = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>(), Array1::zeros(1));
+        let r = cancelled(|| nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000));
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+        let (best, val, iters) =
+            nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000).unwrap();
+        assert!(val < 1e-6 && iters >= 1 && best.len() == 2);
     }
 
     // =========================================================================
@@ -2717,6 +2865,46 @@ pub fn run_gsynth(
     let n_pre_periods = first_treatment_idx;
     let n_post_periods = n_times - first_treatment_idx;
 
+    // min_pre_periods = 0 lets a panel treated from its first period through;
+    // the factor model needs at least one pre-treatment period.
+    if n_pre_periods == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "Need at least 1 pre-treatment period before the first treated period"
+                .to_string(),
+        });
+    }
+
+    // More factors than min(control units, pre-periods) cannot be estimated.
+    if config.n_factors > 0 {
+        let bound = n_control.min(n_pre_periods);
+        if config.n_factors > bound {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "n_factors = {} is more than the data can identify: at most {bound} (the \
+                     smaller of {n_control} control units and {n_pre_periods} pre-treatment \
+                     periods). Use fewer factors.",
+                    config.n_factors
+                ),
+            });
+        }
+    }
+
+    // Cross-validation needs two folds; folds beyond the number of control
+    // units were empty, so the fold count is clamped to it.
+    let cv_folds = if config.cross_validate && config.n_factors == 0 {
+        if config.cv_folds < 2 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "cv_folds must be at least 2 for cross-validation (got {})",
+                    config.cv_folds
+                ),
+            });
+        }
+        config.cv_folds.min(n_control)
+    } else {
+        config.cv_folds
+    };
+
     // Extract covariates if specified
     let (x_mat, covariate_names) = if !x_cols.is_empty() {
         let mut x_data: Vec<Array2<f64>> = Vec::new();
@@ -2742,7 +2930,7 @@ pub fn run_gsynth(
             &control_units,
             n_pre_periods,
             config.max_factors,
-            config.cv_folds,
+            cv_folds,
             &config,
         )?
     } else if config.n_factors > 0 {
@@ -2760,6 +2948,12 @@ pub fn run_gsynth(
         n_factors,
         &config,
     )?;
+
+    // Downstream code uses the factors actually estimated: the SVD caps the
+    // rank at min(control units, pre-periods), which a CV choice or the
+    // default of 2 can exceed. For an explicit n_factors (checked above) the
+    // two agree.
+    let n_factors = factors_pre.ncols();
 
     // Extend factors to all time periods using control units
     // For post-treatment periods, project control outcomes onto factor space
@@ -3036,6 +3230,8 @@ fn select_factors_cv(
         let mut fold_mspe: Vec<f64> = Vec::new();
 
         for fold in 0..n_folds {
+            crate::resource::checkpoint()?;
+
             let start = fold * fold_size;
             let end = if fold == n_folds - 1 {
                 control_units.len()
@@ -3057,6 +3253,7 @@ fn select_factors_cv(
             let (factors, _, _, _) = match estimate_ife(y_mat, None, &train_units, n_pre, r, config)
             {
                 Ok(res) => res,
+                Err(e @ EconError::Cancelled(_)) => return Err(e),
                 Err(_) => continue,
             };
 
@@ -3679,5 +3876,159 @@ mod gsynth_tests {
         assert!(result.n_factors <= 3);
         // CV results should be present
         assert!(!result.cv_mspe.is_empty() || result.n_factors == 0);
+    }
+
+    // =========================================================================
+    // Factor count and CV fold bounds (T0-WP11)
+    // =========================================================================
+
+    fn gs_cfg() -> GsynthConfig {
+        GsynthConfig {
+            n_factors: 1,
+            cross_validate: false,
+            min_pre_periods: 3,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_gsynth_rejects_more_factors_than_the_data_identify() {
+        let ds = create_gsynth_dataset();
+        // 4 > min(3 controls, 6 pre-periods): index panic at extend_factors_to_all_periods
+        // before the fix; usize::MAX: ndarray shape-overflow panic before the fix
+        for r in [4usize, usize::MAX] {
+            let res = run_gsynth(
+                &ds,
+                "outcome",
+                "treated",
+                "unit",
+                "time",
+                &[],
+                GsynthConfig {
+                    n_factors: r,
+                    ..gs_cfg()
+                },
+            );
+            assert!(
+                matches!(res, Err(EconError::InvalidSpecification { ref message })
+                    if message.contains("n_factors") && message.contains("at most 3")),
+                "r={r}"
+            );
+        }
+        let ok = run_gsynth(
+            &ds,
+            "outcome",
+            "treated",
+            "unit",
+            "time",
+            &[],
+            GsynthConfig {
+                n_factors: 3,
+                ..gs_cfg()
+            },
+        )
+        .unwrap();
+        assert_eq!(ok.n_factors, 3);
+    }
+
+    #[test]
+    fn test_gsynth_cv_folds_bounds() {
+        let ds = create_gsynth_dataset();
+        let cv = |k| GsynthConfig {
+            n_factors: 0,
+            cross_validate: true,
+            max_factors: 3,
+            cv_folds: k,
+            ..gs_cfg()
+        };
+        // 0 divided by zero before the fix
+        for k in [0usize, 1] {
+            let r = run_gsynth(&ds, "outcome", "treated", "unit", "time", &[], cv(k));
+            assert!(
+                matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("cv_folds")),
+                "k={k}"
+            );
+        }
+        // more folds than control units is clamped to the number of control units, not rejected
+        let r = run_gsynth(
+            &ds,
+            "outcome",
+            "treated",
+            "unit",
+            "time",
+            &[],
+            cv(1_000_000),
+        )
+        .unwrap();
+        assert!(r.n_factors <= 3);
+    }
+
+    #[test]
+    fn test_gsynth_requires_a_pre_treatment_period() {
+        // T1 treated from the first period: min_pre_periods = 0 used to reach
+        // `n_pre - 1` (underflow) in CV and an index panic in the default path
+        let df = df! {
+            "unit" => ["C1", "C1", "C1", "C2", "C2", "C2", "C3", "C3", "C3", "T1", "T1", "T1"],
+            "time" => [1i64, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3],
+            "outcome" => [1.0, 2.1, 2.9, 2.0, 3.2, 3.9, 0.5, 1.4, 2.6, 4.0, 5.1, 6.2],
+            "treated" => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        }
+        .unwrap();
+        let ds = Dataset::new(df);
+        for cross_validate in [false, true] {
+            let r = run_gsynth(
+                &ds,
+                "outcome",
+                "treated",
+                "unit",
+                "time",
+                &[],
+                GsynthConfig {
+                    n_factors: 0,
+                    cross_validate,
+                    min_pre_periods: 0,
+                    ..Default::default()
+                },
+            );
+            assert!(
+                matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("pre-treatment")),
+                "cross_validate={cross_validate}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gsynth_default_factor_count_capped_by_rank() {
+        // n_factors = 0 without CV defaults to 2 factors; with one pre-period the
+        // SVD returns one, and the requested 2 used to index past it
+        let df = df! {
+            "unit" => ["C1", "C1", "C1", "C2", "C2", "C2", "C3", "C3", "C3", "T1", "T1", "T1"],
+            "time" => [1i64, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3],
+            "outcome" => [1.0, 2.1, 2.9, 2.0, 3.2, 3.9, 0.5, 1.4, 2.6, 4.0, 7.1, 8.2],
+            "treated" => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0],
+        }
+        .unwrap();
+        let ds = Dataset::new(df);
+        let r = run_gsynth(
+            &ds,
+            "outcome",
+            "treated",
+            "unit",
+            "time",
+            &[],
+            GsynthConfig {
+                n_factors: 0,
+                cross_validate: false,
+                min_pre_periods: 1,
+                ..Default::default()
+            },
+        );
+        match r {
+            Ok(res) => assert!(res.n_factors <= 1, "{}", res.n_factors),
+            Err(e) => assert!(
+                !matches!(e, EconError::InvalidSpecification { .. }),
+                "unexpected parameter error: {e}"
+            ),
+        }
     }
 }
