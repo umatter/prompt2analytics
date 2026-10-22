@@ -77,6 +77,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, xtx, xty};
+use crate::resource::{try_zeros1, try_zeros2};
 use crate::spatial::SpatialWeights;
 use crate::traits::estimator::{normal_cdf, normal_pdf};
 
@@ -332,6 +333,9 @@ fn run_spatial_probit_internal(
     config: SpatialProbitConfig,
     model_type: SpatialProbitModel,
 ) -> EconResult<SpatialProbitResult> {
+    // Refuse impossible draw counts before any work.
+    total_mcmc_draws(&config)?;
+
     let df = dataset.df();
     let n = df.height();
     let k = x_cols.len() + 1; // +1 for intercept
@@ -397,18 +401,15 @@ fn run_spatial_probit_internal(
         }
     }
 
-    // Get spatial weights as dense matrix for MCMC
-    let w = listw.to_dense();
-
     // Get valid range for spatial parameter
-    let (rho_min, rho_max) = listw.rho_range();
+    let (rho_min, rho_max) = listw.try_rho_range()?;
     let rho_range = (
         rho_min.max(config.rho_prior_range.0),
         rho_max.min(config.rho_prior_range.1),
     );
 
     // Run MCMC estimation
-    let mcmc_result = run_mcmc_spatial_probit(&y, &x, &w, model_type, &config, rho_range)?;
+    let mcmc_result = run_mcmc_spatial_probit(&y, &x, listw, model_type, &config, rho_range)?;
 
     // Compute posterior statistics
     let n_draws = mcmc_result.beta_draws.nrows();
@@ -443,7 +444,7 @@ fn run_spatial_probit_internal(
 
     // Compute log-likelihood at posterior mean
     let ll_mean =
-        compute_spatial_probit_log_likelihood(&y, &x, &w, &beta_mean, rho_mean, model_type);
+        compute_spatial_probit_log_likelihood(&y, &x, listw, &beta_mean, rho_mean, model_type);
 
     // Compute null log-likelihood (intercept only, no spatial)
     let p_bar = n_positive as f64 / n as f64;
@@ -453,7 +454,7 @@ fn run_spatial_probit_internal(
     let pseudo_r2 = 1.0 - ll_mean / ll_null;
 
     // Compute fitted probabilities at posterior mean
-    let fitted_prob = compute_fitted_probabilities(&x, &w, &beta_mean, rho_mean, model_type);
+    let fitted_prob = compute_fitted_probabilities(&x, listw, &beta_mean, rho_mean, model_type);
 
     // Percent correctly predicted
     let correct: usize = y
@@ -477,12 +478,12 @@ fn run_spatial_probit_internal(
     let impacts = if config.compute_impacts {
         Some(compute_spatial_probit_impacts(
             &x,
-            &w,
+            listw,
             &mcmc_result.beta_draws,
             &mcmc_result.rho_draws,
             model_type,
             &coef_names[1..], // Exclude intercept
-        ))
+        )?)
     } else {
         None
     };
@@ -514,6 +515,30 @@ fn run_spatial_probit_internal(
     })
 }
 
+/// The number of Gibbs iterations, burn_in + n_draws * thin, after checking that at least
+/// one draw is kept, the thinning interval is positive and the total does not overflow.
+fn total_mcmc_draws(config: &SpatialProbitConfig) -> EconResult<usize> {
+    let (n_draws, burn_in, thin) = (config.n_draws, config.burn_in, config.thin);
+    if n_draws == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_draws must be at least 1".to_string(),
+        });
+    }
+    if thin == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "thin must be at least 1".to_string(),
+        });
+    }
+    n_draws
+        .checked_mul(thin)
+        .and_then(|v| v.checked_add(burn_in))
+        .ok_or_else(|| {
+            EconError::ResourceLimit(format!(
+                "burn_in + n_draws * thin overflows ({burn_in} + {n_draws} * {thin})"
+            ))
+        })
+}
+
 /// MCMC result structure (internal).
 struct McmcResult {
     beta_draws: Array2<f64>,
@@ -531,14 +556,14 @@ struct McmcResult {
 fn run_mcmc_spatial_probit(
     y: &Array1<f64>,
     x: &Array2<f64>,
-    w: &Array2<f64>,
+    listw: &SpatialWeights,
     model_type: SpatialProbitModel,
     config: &SpatialProbitConfig,
     rho_range: (f64, f64),
 ) -> EconResult<McmcResult> {
     let _n = y.len();
     let k = x.ncols();
-    let total_draws = config.burn_in + config.n_draws * config.thin;
+    let total_draws = total_mcmc_draws(config)?;
 
     // Initialize RNG
     use rand::SeedableRng;
@@ -565,25 +590,35 @@ fn run_mcmc_spatial_probit(
     let mut rho = 0.0; // Start at no spatial dependence
     let mut y_star = pseudo_y.clone(); // Latent variable
 
+    // WX does not change between iterations
+    let mut wx = Array2::zeros((x.nrows(), k));
+    for col in 0..k {
+        wx.column_mut(col)
+            .assign(&listw.lag(&x.column(col).to_owned()));
+    }
+
     // Storage for draws
     let keep_draws = config.n_draws;
-    let mut beta_draws = Array2::zeros((keep_draws, k));
-    let mut rho_draws = Array1::zeros(keep_draws);
-    let mut log_lik_draws = Array1::zeros(keep_draws);
+    let mut beta_draws = try_zeros2(keep_draws, k, "posterior draws of beta")?;
+    let mut rho_draws = try_zeros1(keep_draws, "posterior draws of rho")?;
+    let mut log_lik_draws = try_zeros1(keep_draws, "posterior log-likelihood draws")?;
 
     // MCMC iterations
     let mut n_accepted = 0;
     let mut draw_idx = 0;
 
     for iter in 0..total_draws {
+        crate::resource::checkpoint()?;
+
         // --- Step 1: Sample latent y* given (beta, rho) ---
-        y_star = sample_latent_y(y, x, w, &beta, rho, model_type, &mut rng);
+        y_star = sample_latent_y(y, x, listw, &beta, rho, model_type, &mut rng);
 
         // --- Step 2: Sample beta given (y*, rho) ---
         beta = sample_beta(
             &y_star,
             x,
-            w,
+            &wx,
+            listw,
             rho,
             model_type,
             &beta0,
@@ -592,8 +627,9 @@ fn run_mcmc_spatial_probit(
         )?;
 
         // --- Step 3: Sample rho given (y*, beta) using griddy Gibbs ---
-        let (new_rho, accepted) =
-            sample_rho_griddy_gibbs(&y_star, x, w, &beta, rho, model_type, rho_range, &mut rng);
+        let (new_rho, accepted) = sample_rho_griddy_gibbs(
+            &y_star, x, listw, &beta, rho, model_type, rho_range, &mut rng,
+        );
         rho = new_rho;
         if accepted {
             n_accepted += 1;
@@ -609,7 +645,7 @@ fn run_mcmc_spatial_probit(
             }
             rho_draws[draw_idx] = rho;
             log_lik_draws[draw_idx] =
-                compute_spatial_probit_log_likelihood(y, x, w, &beta, rho, model_type);
+                compute_spatial_probit_log_likelihood(y, x, listw, &beta, rho, model_type);
             draw_idx += 1;
         }
     }
@@ -628,7 +664,7 @@ fn run_mcmc_spatial_probit(
 fn sample_latent_y<R: rand::Rng>(
     y: &Array1<f64>,
     x: &Array2<f64>,
-    w: &Array2<f64>,
+    listw: &SpatialWeights,
     beta: &Array1<f64>,
     rho: f64,
     model_type: SpatialProbitModel,
@@ -675,7 +711,7 @@ fn sample_latent_y<R: rand::Rng>(
         let xb = x.dot(beta);
         for _ in 0..3 {
             // A few iterations for convergence
-            let wy = w.dot(&y_star);
+            let wy = listw.lag(&y_star);
             for i in 0..n {
                 let new_mu = xb[i] + rho * wy[i];
                 if y[i] >= 0.5 {
@@ -694,7 +730,8 @@ fn sample_latent_y<R: rand::Rng>(
 fn sample_beta<R: rand::Rng>(
     y_star: &Array1<f64>,
     x: &Array2<f64>,
-    w: &Array2<f64>,
+    wx: &Array2<f64>,
+    listw: &SpatialWeights,
     rho: f64,
     model_type: SpatialProbitModel,
     beta0: &Array1<f64>,
@@ -707,15 +744,14 @@ fn sample_beta<R: rand::Rng>(
     let (y_tilde, x_tilde) = match model_type {
         SpatialProbitModel::Sar => {
             // (I - rho*W)*y* = X*beta + epsilon
-            let y_t: Array1<f64> = y_star - rho * &w.dot(y_star);
+            let y_t: Array1<f64> = y_star - rho * &listw.lag(y_star);
             (y_t, x.clone())
         }
         SpatialProbitModel::Sem => {
             // y* = X*beta + (I - lambda*W)^{-1}*epsilon
             // Transform: (I - lambda*W)*y* = (I - lambda*W)*X*beta + epsilon
-            let y_t: Array1<f64> = y_star - rho * &w.dot(y_star);
+            let y_t: Array1<f64> = y_star - rho * &listw.lag(y_star);
             let mut x_t = x.clone();
-            let wx = w.dot(x);
             for i in 0..x.nrows() {
                 for j in 0..x.ncols() {
                     x_t[[i, j]] -= rho * wx[[i, j]];
@@ -756,7 +792,7 @@ fn sample_beta<R: rand::Rng>(
 fn sample_rho_griddy_gibbs<R: rand::Rng>(
     y_star: &Array1<f64>,
     x: &Array2<f64>,
-    w: &Array2<f64>,
+    listw: &SpatialWeights,
     beta: &Array1<f64>,
     current_rho: f64,
     model_type: SpatialProbitModel,
@@ -772,17 +808,19 @@ fn sample_rho_griddy_gibbs<R: rand::Rng>(
 
     // Evaluate log-likelihood kernel at each grid point
     let xb = x.dot(beta);
-    let wy_star = w.dot(y_star);
+    let wy_star = listw.lag(y_star);
+    // W y* - W X beta, for the SEM residual; computed once, not per grid point
+    let dw = match model_type {
+        SpatialProbitModel::Sar => None,
+        SpatialProbitModel::Sem => Some(&wy_star - &listw.lag(&xb)),
+    };
 
     let log_probs: Vec<f64> = grid
         .iter()
         .map(|&rho| {
-            let resid: Array1<f64> = match model_type {
-                SpatialProbitModel::Sar => y_star - rho * &wy_star - &xb,
-                SpatialProbitModel::Sem => {
-                    let wxb = w.dot(&xb);
-                    y_star - &xb - rho * &(w.dot(y_star) - &wxb)
-                }
+            let resid: Array1<f64> = match &dw {
+                None => y_star - rho * &wy_star - &xb,
+                Some(dw) => y_star - &xb - rho * dw,
             };
             // Log-likelihood contribution (ignoring normalizing constants)
             -0.5 * resid.iter().map(|&r| r * r).sum::<f64>()
@@ -830,7 +868,7 @@ fn sample_rho_griddy_gibbs<R: rand::Rng>(
 fn compute_spatial_probit_log_likelihood(
     y: &Array1<f64>,
     x: &Array2<f64>,
-    w: &Array2<f64>,
+    listw: &SpatialWeights,
     beta: &Array1<f64>,
     rho: f64,
     model_type: SpatialProbitModel,
@@ -843,7 +881,7 @@ fn compute_spatial_probit_log_likelihood(
             // Use iterative approximation for (I - rho*W)^{-1} * X * beta
             let mut z_approx = xb.clone();
             for _ in 0..5 {
-                let wz = w.dot(&z_approx);
+                let wz = listw.lag(&z_approx);
                 z_approx = &xb + rho * &wz;
             }
             z_approx
@@ -875,7 +913,7 @@ fn compute_spatial_probit_log_likelihood(
 /// Compute fitted probabilities.
 fn compute_fitted_probabilities(
     x: &Array2<f64>,
-    w: &Array2<f64>,
+    listw: &SpatialWeights,
     beta: &Array1<f64>,
     rho: f64,
     model_type: SpatialProbitModel,
@@ -887,7 +925,7 @@ fn compute_fitted_probabilities(
             // Approximate (I - rho*W)^{-1} * X * beta iteratively
             let mut z_approx = xb.clone();
             for _ in 0..10 {
-                let wz = w.dot(&z_approx);
+                let wz = listw.lag(&z_approx);
                 z_approx = &xb + rho * &wz;
             }
             z_approx
@@ -898,74 +936,160 @@ fn compute_fitted_probabilities(
     z.mapv(normal_cdf)
 }
 
+/// Highest power of W in the truncated Neumann series the probit impacts use.
+const NEUMANN_MAX_POWER: usize = 10;
+
+/// `diag(W^p)` and `W^p 1` for p = 0..=[`NEUMANN_MAX_POWER`], one row per power.
+struct NeumannTerms {
+    /// `diag[[p, i]] = (W^p)_ii`
+    diag: Array2<f64>,
+    /// `rowsum[[p, i]] = (W^p 1)_i`
+    rowsum: Array2<f64>,
+}
+
+/// The powers of W the impacts need, computed once per fit from the sparse rows: the row
+/// sums by repeated lags, and each diagonal entry by propagating the row vector e_i' W^p.
+/// Costs at most O(10 n links), against ten dense n x n products per draw before.
+fn neumann_terms(listw: &SpatialWeights) -> EconResult<NeumannTerms> {
+    let n = listw.n();
+    let p_max = NEUMANN_MAX_POWER;
+    let mut diag = try_zeros2(p_max + 1, n, "diagonals of the powers of W")?;
+    let mut rowsum = try_zeros2(p_max + 1, n, "row sums of the powers of W")?;
+
+    // W^p 1 by repeated lags
+    let mut v = Array1::ones(n);
+    rowsum.row_mut(0).assign(&v);
+    for p in 1..=p_max {
+        v = listw.lag(&v);
+        rowsum.row_mut(p).assign(&v);
+    }
+
+    // (W^p)_ii: propagate r = e_i' W^p through the sparse rows. `cur`/`next` are dense
+    // scratch rows; the index lists name their non-zero entries so they reset cheaply.
+    let mut cur = vec![0.0; n];
+    let mut next = vec![0.0; n];
+    let mut in_next = vec![false; n];
+    let mut cur_idx: Vec<usize> = Vec::new();
+    let mut next_idx: Vec<usize> = Vec::new();
+    for i in 0..n {
+        crate::resource::checkpoint()?;
+        diag[[0, i]] = 1.0;
+        cur[i] = 1.0;
+        cur_idx.clear();
+        cur_idx.push(i);
+        for p in 1..=p_max {
+            for &m in &cur_idx {
+                let r = cur[m];
+                let sw = listw.get_weights(m);
+                for (&j, &w) in sw.indices.iter().zip(sw.weights.iter()) {
+                    if !in_next[j] {
+                        in_next[j] = true;
+                        next_idx.push(j);
+                    }
+                    next[j] += r * w;
+                }
+                cur[m] = 0.0;
+            }
+            std::mem::swap(&mut cur, &mut next);
+            std::mem::swap(&mut cur_idx, &mut next_idx);
+            next_idx.clear();
+            for &j in &cur_idx {
+                in_next[j] = false;
+            }
+            diag[[p, i]] = cur[i];
+        }
+        for &m in &cur_idx {
+            cur[m] = 0.0;
+        }
+    }
+    Ok(NeumannTerms { diag, rowsum })
+}
+
+/// Direct, indirect and total impacts of one posterior draw, from the truncated Neumann
+/// series A = I + Σ_p ρ^p W^p (the terms up to the first with |ρ^(p+1)| < 1e-10, at most
+/// [`NEUMANN_MAX_POWER`]): z = A Xβ, φ = dnorm(z), direct_j = β_j Σ_i φ_i A_ii / n and
+/// total_j = β_j Σ_i φ_i (A 1)_i / n.
+fn probit_impacts_one_draw(
+    x: &Array2<f64>,
+    listw: &SpatialWeights,
+    terms: &NeumannTerms,
+    beta: &Array1<f64>,
+    rho: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let n = x.nrows();
+    let k = x.ncols() - 1; // Exclude intercept
+
+    // Series coefficients ρ^p by repeated multiplication, as the dense loop built them
+    let mut coefs = vec![1.0];
+    let mut c = rho;
+    for _ in 0..NEUMANN_MAX_POWER {
+        coefs.push(c);
+        c *= rho;
+        if c.abs() < 1e-10 {
+            break;
+        }
+    }
+
+    // z = A Xβ by repeated lags
+    let xb = x.dot(beta);
+    let mut z = xb.clone();
+    let mut v = xb;
+    for &cp in &coefs[1..] {
+        v = listw.lag(&v);
+        z.scaled_add(cp, &v);
+    }
+    let phi_z: Array1<f64> = z.mapv(normal_pdf);
+
+    // Σ_i φ_i A_ii and Σ_i φ_i (A 1)_i
+    let mut diag_sum = 0.0;
+    let mut row_sum = 0.0;
+    for i in 0..n {
+        let mut a_ii = 0.0;
+        let mut a_i1 = 0.0;
+        for (p, &cp) in coefs.iter().enumerate() {
+            a_ii += cp * terms.diag[[p, i]];
+            a_i1 += cp * terms.rowsum[[p, i]];
+        }
+        diag_sum += phi_z[i] * a_ii;
+        row_sum += phi_z[i] * a_i1;
+    }
+
+    let n_f = n as f64;
+    let direct: Vec<f64> = (0..k).map(|j| beta[j + 1] * diag_sum / n_f).collect();
+    let total: Vec<f64> = (0..k).map(|j| beta[j + 1] * row_sum / n_f).collect();
+    let indirect: Vec<f64> = total.iter().zip(&direct).map(|(t, d)| t - d).collect();
+    (direct, indirect, total)
+}
+
 /// Compute spatial impacts for probit model.
 fn compute_spatial_probit_impacts(
     x: &Array2<f64>,
-    w: &Array2<f64>,
+    listw: &SpatialWeights,
     beta_draws: &Array2<f64>,
     rho_draws: &Array1<f64>,
     _model_type: SpatialProbitModel,
     var_names: &[String],
-) -> SpatialProbitImpacts {
-    let n = x.nrows();
+) -> EconResult<SpatialProbitImpacts> {
     let k = x.ncols() - 1; // Exclude intercept
     let n_draws = beta_draws.nrows();
 
+    let terms = neumann_terms(listw)?;
+
     // Storage for impacts across draws
-    let mut direct_draws = Array2::zeros((n_draws, k));
-    let mut indirect_draws = Array2::zeros((n_draws, k));
-    let mut total_draws = Array2::zeros((n_draws, k));
+    let mut direct_draws = try_zeros2(n_draws, k, "direct impact draws")?;
+    let mut indirect_draws = try_zeros2(n_draws, k, "indirect impact draws")?;
+    let mut total_draws = try_zeros2(n_draws, k, "total impact draws")?;
 
     // For each draw, compute impacts
     for d in 0..n_draws {
-        let rho = rho_draws[d];
+        crate::resource::checkpoint()?;
         let beta: Array1<f64> = beta_draws.row(d).to_owned();
-
-        // Compute A^{-1} = (I - rho*W)^{-1} approximately
-        // Use Neumann series approximation: A^{-1} = I + rho*W + rho^2*W^2 + ...
-        let mut a_inv = Array2::eye(n);
-        let mut w_power = w.clone();
-        let mut rho_power = rho;
-        for _ in 0..10 {
-            for i in 0..n {
-                for j in 0..n {
-                    a_inv[[i, j]] += rho_power * w_power[[i, j]];
-                }
-            }
-            w_power = w.dot(&w_power);
-            rho_power *= rho;
-            if rho_power.abs() < 1e-10 {
-                break;
-            }
-        }
-
-        // Compute X*beta and phi(A^{-1}*X*beta)
-        let xb = x.dot(&beta);
-        let z = a_inv.dot(&xb);
-        let phi_z: Array1<f64> = z.mapv(normal_pdf);
-
-        // For each variable k (excluding intercept)
+        let (direct, indirect, total) =
+            probit_impacts_one_draw(x, listw, &terms, &beta, rho_draws[d]);
         for j in 0..k {
-            let beta_j = beta[j + 1]; // +1 to skip intercept
-
-            // S_j = beta_j * A^{-1}
-            let s_j = &a_inv * beta_j;
-
-            // Direct effect: average of diag(S_j * diag(phi_z))
-            let direct: f64 = (0..n).map(|i| s_j[[i, i]] * phi_z[i]).sum::<f64>() / n as f64;
-
-            // Total effect: average column sum
-            let total: f64 = (0..n)
-                .map(|col| (0..n).map(|row| s_j[[row, col]] * phi_z[row]).sum::<f64>())
-                .sum::<f64>()
-                / n as f64;
-
-            // Indirect = total - direct
-            let indirect = total - direct;
-
-            direct_draws[[d, j]] = direct;
-            indirect_draws[[d, j]] = indirect;
-            total_draws[[d, j]] = total;
+            direct_draws[[d, j]] = direct[j];
+            indirect_draws[[d, j]] = indirect[j];
+            total_draws[[d, j]] = total[j];
         }
     }
 
@@ -990,7 +1114,7 @@ fn compute_spatial_probit_impacts(
         .map(|j| compute_std(&total_draws.column(j).to_owned()))
         .collect();
 
-    SpatialProbitImpacts {
+    Ok(SpatialProbitImpacts {
         direct,
         indirect,
         total,
@@ -998,7 +1122,7 @@ fn compute_spatial_probit_impacts(
         indirect_se,
         total_se,
         var_names: var_names.to_vec(),
-    }
+    })
 }
 
 /// Sample from truncated normal, truncated above threshold.
@@ -1008,8 +1132,6 @@ fn sample_truncated_normal_above<R: rand::Rng>(
     lower: f64,
     rng: &mut R,
 ) -> f64 {
-    use rand_distr::{Distribution, Uniform};
-
     // Use inverse CDF method
     let alpha = (lower - mu) / sigma;
     let phi_alpha = normal_cdf(alpha);
@@ -1024,7 +1146,7 @@ fn sample_truncated_normal_above<R: rand::Rng>(
     }
 
     // Sample u ~ Uniform(phi_alpha, 1)
-    let u: f64 = Uniform::new(lower_bound, upper_bound).sample(rng);
+    let u: f64 = uniform_f64(lower_bound, upper_bound, rng);
 
     // Return mu + sigma * Phi^{-1}(u)
     mu + sigma * inverse_normal_cdf(u)
@@ -1037,8 +1159,6 @@ fn sample_truncated_normal_below<R: rand::Rng>(
     upper: f64,
     rng: &mut R,
 ) -> f64 {
-    use rand_distr::{Distribution, Uniform};
-
     // Use inverse CDF method
     let beta = (upper - mu) / sigma;
     let phi_beta = normal_cdf(beta);
@@ -1053,10 +1173,49 @@ fn sample_truncated_normal_below<R: rand::Rng>(
     }
 
     // Sample u ~ Uniform(0, phi_beta)
-    let u: f64 = Uniform::new(lower_bound, upper_bound).sample(rng);
+    let u: f64 = uniform_f64(lower_bound, upper_bound, rng);
 
     // Return mu + sigma * Phi^{-1}(u)
     mu + sigma * inverse_normal_cdf(u)
+}
+
+/// The largest scale rand 0.8's `UniformFloat::new(low, high)` settles on, for
+/// `low < high`: the largest `s <= high - low` with `s * max_rand + low < high`.
+///
+/// rand lowers the scale one ulp at a time until that holds, which takes about 1e10 steps
+/// when `high - low` is tiny next to `high` (the truncated-normal draws meet that once the
+/// mean is about 6 standard deviations from the threshold) and cannot be interrupted. The
+/// condition is monotone in `s`, so bisection on the bit pattern finds the same value in at
+/// most 64 steps.
+fn uniform_scale(low: f64, high: f64) -> f64 {
+    // (u64::MAX >> 12) with exponent 0, minus 1: the largest value0_1 rand produces
+    let max_rand = f64::from_bits((u64::MAX >> 12) | (1023_u64 << 52)) - 1.0;
+    let fits = |s: f64| s * max_rand + low < high;
+    let scale = high - low;
+    if fits(scale) {
+        return scale;
+    }
+    // `fits(0.0)` holds because low < high; non-negative floats are ordered by their bits.
+    let (mut lo, mut hi) = (0_u64, scale.to_bits());
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if fits(f64::from_bits(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    f64::from_bits(lo)
+}
+
+/// `rand_distr::Uniform::new(low, high).sample(rng)` for `low < high`, bit for bit, with the
+/// scale from [`uniform_scale`] instead of rand's ulp-by-ulp construction loop.
+fn uniform_f64<R: rand::Rng>(low: f64, high: f64, rng: &mut R) -> f64 {
+    let scale = uniform_scale(low, high);
+    // a value in [1, 2) from the top 52 bits, as rand's UniformFloat::sample does
+    let value1_2 = f64::from_bits((rng.next_u64() >> 12) | (1023_u64 << 52));
+    let value0_1 = value1_2 - 1.0;
+    value0_1 * scale + low
 }
 
 /// Inverse of standard normal CDF (quantile function).
@@ -1273,6 +1432,202 @@ mod tests {
         // Mean should be greater than 1 (truncation shifts mean up)
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         assert!(mean > 1.0);
+    }
+
+    fn cfg(n_draws: usize, burn_in: usize, thin: usize) -> SpatialProbitConfig {
+        SpatialProbitConfig {
+            n_draws,
+            burn_in,
+            thin,
+            compute_impacts: false,
+            seed: Some(42),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn probit_rejects_zero_draws_and_zero_thinning() {
+        let (d, mut w) = create_test_spatial_binary_data();
+        for (c, word) in [(cfg(0, 10, 1), "n_draws"), (cfg(10, 10, 0), "thin")] {
+            let e = run_sar_probit(&d, "y", &["x"], &mut w, c).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains(word)),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn probit_rejects_draw_counts_that_overflow_or_cannot_be_stored() {
+        let (d, mut w) = create_test_spatial_binary_data();
+        // overflow of burn_in + n_draws * thin, and an n_draws x k buffer larger than isize::MAX bytes
+        for c in [
+            cfg(usize::MAX / 2, 0, 3),
+            cfg(1, usize::MAX, 1),
+            cfg(usize::MAX / 8, 0, 1),
+        ] {
+            assert!(matches!(
+                run_sem_probit(&d, "y", &["x"], &mut w, c),
+                Err(EconError::ResourceLimit(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn probit_sampler_honours_cancellation() {
+        let (d, mut w) = create_test_spatial_binary_data();
+        let t = crate::resource::CancelToken::new();
+        t.cancel();
+        let r = crate::resource::with_budget(crate::resource::Budget::new(None, t), || {
+            run_sar_probit(&d, "y", &["x"], &mut w, cfg(10, 5, 1))
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn uniform_draws_match_rand_and_tiny_intervals_finish() {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Uniform};
+        for (low, high) in [
+            (0.0, 1.0),
+            (1e-10, 0.3),
+            (1e-10, 2e-10),
+            (0.5, 1.0 - 1e-10),
+            (0.9, 1.0 - 1e-10),
+            (-3.0, 2.0),
+        ] {
+            let mut a = rand::rngs::StdRng::seed_from_u64(9);
+            let mut b = rand::rngs::StdRng::seed_from_u64(9);
+            let dist: Uniform<f64> = Uniform::new(low, high);
+            for _ in 0..200 {
+                assert_eq!(
+                    dist.sample(&mut a).to_bits(),
+                    uniform_f64(low, high, &mut b).to_bits(),
+                    "[{low}, {high})"
+                );
+            }
+        }
+        // rand's own construction needs ~1e10 one-ulp steps for this interval
+        let (low, high) = (1.0 - 1.5e-10, 1.0 - 1e-10);
+        let max_rand = 1.0 - f64::EPSILON;
+        let s = uniform_scale(low, high);
+        assert!(s * max_rand + low < high);
+        assert!(f64::from_bits(s.to_bits() + 1) * max_rand + low >= high);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let u = uniform_f64(low, high, &mut rng);
+        assert!((low..high).contains(&u));
+    }
+
+    // R 4.3.3 (fixture): X <- cbind(1, x1); xb <- X %*% beta; A <- diag(n); Wp <- W; rp <- rho
+    //   for (it in 1:10) { A <- A + rp*Wp; Wp <- W %*% Wp; rp <- rp*rho; if (abs(rp) < 1e-10) break }
+    //   z <- A %*% xb; phi <- dnorm(z); direct <- sum(beta[2]*diag(A)*phi)/n; total <- sum(beta[2]*A*phi)/n
+    //   (the existing truncated Neumann series, transcribed)
+    #[test]
+    fn probit_draw_impacts_match_r_reference() {
+        use crate::spatial::test_fixtures::{X1, knn3};
+        use ndarray::array;
+        let mut x = Array2::ones((30, 2));
+        for (i, &v) in X1.iter().enumerate() {
+            x[[i, 1]] = v;
+        }
+        for (w, rho, d, i, t) in [
+            (
+                knn3(WeightStyle::RowStd),
+                0.4,
+                0.07423545257844562,
+                0.04334337166509111,
+                0.11757882424353673,
+            ),
+            (
+                knn3(WeightStyle::RowStd),
+                0.0,
+                0.1181903507676808,
+                0.0,
+                0.1181903507676808,
+            ),
+            (
+                knn3(WeightStyle::Binary),
+                -0.3,
+                0.17835073842548715,
+                -0.07465542591941698,
+                0.10369531250607017,
+            ),
+        ] {
+            let terms = neumann_terms(&w).unwrap();
+            let (dd, ii, tt) = probit_impacts_one_draw(&x, &w, &terms, &array![0.2, 0.7], rho);
+            assert!(
+                (dd[0] - d).abs() < 1e-12 && (ii[0] - i).abs() < 1e-12 && (tt[0] - t).abs() < 1e-12,
+                "rho={rho}: {dd:?} {ii:?} {tt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_probit_runs_are_unchanged() {
+        use crate::spatial::test_fixtures::{dataset, knn3};
+        let d = dataset();
+        let c = |compute_impacts| SpatialProbitConfig {
+            n_draws: 200,
+            burn_in: 50,
+            compute_impacts,
+            seed: Some(42),
+            ..Default::default()
+        };
+        // Pinned at the values the dense-W sampler printed. Summation order may change the
+        // floating-point noise, so 1e-8 relative.
+        let close = |a: f64, b: f64, what: &str| {
+            assert!(
+                (a - b).abs() <= 1e-8 * b.abs().max(1.0),
+                "{what}: {a:.17e} vs {b:.17e}"
+            );
+        };
+        let mut w = knn3(WeightStyle::RowStd);
+        let sar = run_sar_probit(&d, "y_bin", &["x1"], &mut w, c(true)).unwrap();
+        let mut w = knn3(WeightStyle::RowStd);
+        let sem = run_sem_probit(&d, "y_bin", &["x1"], &mut w, c(false)).unwrap();
+        // [rho, intercept, slope, se(intercept), se(slope), log-likelihood, pcp]
+        for (r, pins) in [
+            (
+                &sar,
+                [
+                    0.26853377453216576,
+                    -1.5824391907711777,
+                    0.9247471464298688,
+                    0.5945409283880447,
+                    0.29034472301461767,
+                    -10.513275392427618,
+                    80.0,
+                ],
+            ),
+            (
+                &sem,
+                [
+                    0.3468302105165128,
+                    -4.773850063209376,
+                    6.219834386413967,
+                    7.425521429647995,
+                    4.244364752859552,
+                    -100.86956513153757,
+                    76.66666666666667,
+                ],
+            ),
+        ] {
+            close(r.rho, pins[0], "rho");
+            close(r.coefficients[0], pins[1], "intercept");
+            close(r.coefficients[1], pins[2], "slope");
+            close(r.std_errors[0], pins[3], "se(intercept)");
+            close(r.std_errors[1], pins[4], "se(slope)");
+            close(r.log_likelihood, pins[5], "log-likelihood");
+            close(r.pcp, pins[6], "pcp");
+        }
+        let imp = sar.impacts.as_ref().unwrap();
+        close(imp.direct[0], 0.16947020129887946, "direct");
+        close(imp.indirect[0], 0.06864930005662946, "indirect");
+        close(imp.total[0], 0.2381195013555089, "total");
+        close(imp.direct_se[0], 0.03478246966142034, "direct se");
+        close(imp.indirect_se[0], 0.07196166499069034, "indirect se");
+        close(imp.total_se[0], 0.07184313351227577, "total se");
+        assert!(sem.impacts.is_none());
     }
 
     #[test]

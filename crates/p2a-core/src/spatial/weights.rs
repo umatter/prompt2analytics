@@ -3,10 +3,14 @@
 //! Provides spatial weights structures that combine neighbor definitions with
 //! weighting schemes, equivalent to R's `listw` class from spdep.
 
+use std::sync::Arc;
+
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
 use super::neighbors::Neighbors;
+use crate::errors::EconResult;
+use crate::resource::{checkpoint, try_zeros2};
 
 /// Weighting style for spatial weights matrix.
 ///
@@ -27,9 +31,12 @@ pub enum WeightStyle {
 }
 
 /// Sparse representation of spatial weights for a single observation.
+///
+/// For every weights object this crate builds, `indices` is strictly increasing (the
+/// neighbour lists are sorted and free of duplicates); lookups rely on that.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SparseWeights {
-    /// Indices of neighbors
+    /// Indices of neighbors (strictly increasing)
     pub indices: Vec<usize>,
     /// Weights corresponding to each neighbor
     pub weights: Vec<f64>,
@@ -57,19 +64,34 @@ pub struct SparseWeights {
 /// let y = array![1.0, 2.0, 1.5, 2.5];
 /// let wy = listw.lag(&y);
 /// ```
+///
+/// The neighbour lists, the weight lists and the eigenvalue cache are shared, so `clone()`
+/// is O(1); [`SpatialWeights::same_weights`] tells whether two objects are clones.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpatialWeights {
     /// Underlying neighbors structure
     neighbors: Neighbors,
     /// Sparse weights for each observation
-    weights: Vec<SparseWeights>,
+    #[serde(with = "super::neighbors::arc_serde")]
+    weights: Arc<Vec<SparseWeights>>,
     /// Style of weights
     style: WeightStyle,
     /// Number of observations
     n: usize,
-    /// Cached eigenvalues of W (computed on demand)
+    /// Cached eigen decomposition of W (computed on demand)
     #[serde(skip)]
-    eigenvalues: Option<Array1<f64>>,
+    spectrum: Option<Arc<Spectrum>>,
+}
+
+/// The eigenvalues of W, as the dense eigen decomposition returned them.
+#[derive(Debug)]
+struct Spectrum {
+    /// Real parts, sorted ascending (what [`SpatialWeights::eigenvalues`] returns).
+    real_sorted: Array1<f64>,
+    /// All eigenvalues as (real, imaginary) pairs; empty when the decomposition failed.
+    values: Vec<(f64, f64)>,
+    /// False when the decomposition failed and `real_sorted` is the legacy zero fallback.
+    ok: bool,
 }
 
 impl SpatialWeights {
@@ -181,11 +203,12 @@ impl SpatialWeights {
         }
 
         SpatialWeights {
+            // O(1): the neighbour lists are shared, not copied
             neighbors: nb.clone(),
-            weights,
+            weights: Arc::new(weights),
             style,
             n,
-            eigenvalues: None,
+            spectrum: None,
         }
     }
 
@@ -243,11 +266,12 @@ impl SpatialWeights {
         };
 
         SpatialWeights {
+            // O(1): the neighbour lists are shared, not copied
             neighbors: nb.clone(),
-            weights: weights_list,
+            weights: Arc::new(weights_list),
             style,
             n,
-            eigenvalues: None,
+            spectrum: None,
         }
     }
 
@@ -318,18 +342,162 @@ impl SpatialWeights {
     ///
     /// This uses dense matrix operations so is only suitable for moderate n.
     pub fn eigenvalues(&mut self) -> &Array1<f64> {
-        if self.eigenvalues.is_none() {
-            let w = self.to_dense();
+        let spectrum = match self.spectrum.take() {
+            Some(s) => s,
             // Use faer for eigenvalue computation
-            let eigs = compute_eigenvalues(&w);
-            self.eigenvalues = Some(eigs);
+            None => Arc::new(compute_spectrum(&self.to_dense())),
+        };
+        &self.spectrum.insert(spectrum).real_sorted
+    }
+
+    /// Dense n x n copy of W, allocated fallibly.
+    ///
+    /// # Errors
+    ///
+    /// [`EconError::ResourceLimit`](crate::errors::EconError::ResourceLimit) when the n x n
+    /// matrix cannot be allocated (or exceeds an
+    /// installed per-allocation ceiling).
+    pub fn try_to_dense(&self) -> EconResult<Array2<f64>> {
+        let mut w = try_zeros2(self.n, self.n, "dense spatial weights matrix")?;
+        for (i, sw) in self.weights.iter().enumerate() {
+            for (&j, &v) in sw.indices.iter().zip(sw.weights.iter()) {
+                w[[i, j]] = v;
+            }
         }
-        self.eigenvalues.as_ref().unwrap()
+        Ok(w)
+    }
+
+    /// Eigenvalues of W like [`SpatialWeights::eigenvalues`], but the dense matrix behind
+    /// them is allocated fallibly and an installed budget is checked first.
+    ///
+    /// # Errors
+    ///
+    /// [`EconError::ResourceLimit`](crate::errors::EconError::ResourceLimit) when the dense
+    /// matrix cannot be allocated; [`EconError::Cancelled`](crate::errors::EconError::Cancelled)
+    /// when an installed budget has expired.
+    pub fn try_eigenvalues(&mut self) -> EconResult<&Array1<f64>> {
+        Ok(&self.try_spectrum()?.real_sorted)
+    }
+
+    /// The valid range for ρ like [`SpatialWeights::rho_range`], with the errors of
+    /// [`SpatialWeights::try_eigenvalues`].
+    pub fn try_rho_range(&mut self) -> EconResult<(f64, f64)> {
+        Ok(rho_range_from(self.try_eigenvalues()?))
+    }
+
+    /// log|I - ρW| like [`SpatialWeights::log_det`], with the errors of
+    /// [`SpatialWeights::try_eigenvalues`].
+    pub fn try_log_det(&mut self, rho: f64) -> EconResult<f64> {
+        Ok(log_det_from(self.try_eigenvalues()?, rho))
+    }
+
+    /// The cached spectrum, computed fallibly when missing.
+    fn try_spectrum(&mut self) -> EconResult<&Arc<Spectrum>> {
+        let spectrum = match self.spectrum.take() {
+            Some(s) => s,
+            None => {
+                checkpoint()?;
+                Arc::new(compute_spectrum(&self.try_to_dense()?))
+            }
+        };
+        Ok(self.spectrum.insert(spectrum))
+    }
+
+    /// tr((I - ρW)^-1) = Σ Re(1 / (1 - ρλ)) over the complex eigenvalues λ of W.
+    ///
+    /// `None` when the eigen decomposition failed or the sum is not finite (1 - ρλ = 0).
+    pub(crate) fn trace_inverse_i_minus_rho_w(&mut self, rho: f64) -> EconResult<Option<f64>> {
+        let spectrum = self.try_spectrum()?;
+        if !spectrum.ok {
+            return Ok(None);
+        }
+        let sum: f64 = spectrum
+            .values
+            .iter()
+            .map(|&(a, b)| {
+                // 1 - ρ(a + bi) = (1 - ρa) - ρb i
+                let re = 1.0 - rho * a;
+                let im = rho * b;
+                re / (re * re + im * im)
+            })
+            .sum();
+        Ok(sum.is_finite().then_some(sum))
+    }
+
+    /// The common row sum of W, if every row sums to the same value (within 1e-12
+    /// relative), as row-standardised weights without isolates do.
+    pub(crate) fn constant_row_sum(&self) -> Option<f64> {
+        let mut sums = self.weights.iter().map(|sw| sw.weights.iter().sum::<f64>());
+        let first = sums.next()?;
+        let tol = 1e-12 * first.abs().max(1.0);
+        sums.all(|s| (s - first).abs() <= tol).then_some(first)
+    }
+
+    /// Solves (I - ρW) v = b.
+    ///
+    /// With a spectral radius |ρ| max|λ| below 0.99 this is the Neumann iteration
+    /// v ← b + ρWv (O(links) per step); otherwise, or if the iteration does not settle, a
+    /// dense LU solve on a fallibly allocated n x n matrix.
+    pub(crate) fn solve_i_minus_rho_w(
+        &mut self,
+        rho: f64,
+        b: &Array1<f64>,
+    ) -> EconResult<Array1<f64>> {
+        let spectrum = Arc::clone(self.try_spectrum()?);
+        let q = if spectrum.ok {
+            rho.abs()
+                * spectrum
+                    .values
+                    .iter()
+                    .map(|&(a, im)| a.hypot(im))
+                    .fold(0.0, f64::max)
+        } else {
+            f64::INFINITY
+        };
+        if q < 0.99 {
+            let max_iter = if q > 0.0 {
+                let needed = (1e-17_f64.ln() / q.ln()).ceil();
+                (needed as usize).saturating_add(50).min(100_000)
+            } else {
+                50
+            };
+            let mut v = b.clone();
+            for it in 0..max_iter {
+                if it % 64 == 0 {
+                    checkpoint()?;
+                }
+                let next = b + &(rho * &self.lag(&v));
+                let delta = next
+                    .iter()
+                    .zip(v.iter())
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0.0, f64::max);
+                let scale = next.iter().map(|x| x.abs()).fold(0.0, f64::max);
+                v = next;
+                if delta <= 1e-14 * scale.max(1.0) {
+                    return Ok(v);
+                }
+            }
+        }
+        let mut a = try_zeros2(self.n, self.n, "dense matrix I - rho*W")?;
+        for (i, sw) in self.weights.iter().enumerate() {
+            a[[i, i]] = 1.0;
+            for (&j, &w) in sw.indices.iter().zip(sw.weights.iter()) {
+                a[[i, j]] -= rho * w;
+            }
+        }
+        Ok(crate::linalg::matrix_ops::solve(&a.view(), b)?)
     }
 
     /// Get cached eigenvalues if available.
     pub fn get_eigenvalues(&self) -> Option<&Array1<f64>> {
-        self.eigenvalues.as_ref()
+        self.spectrum.as_ref().map(|s| &s.real_sorted)
+    }
+
+    /// Whether `other` is a clone of `self` (they share their weight lists). Weights built
+    /// separately are never the same, even when they are equal.
+    pub fn same_weights(&self, other: &SpatialWeights) -> bool {
+        Arc::ptr_eq(&self.weights, &other.weights)
     }
 
     /// Compute log|I - ρW| using eigenvalues.
@@ -345,8 +513,7 @@ impl SpatialWeights {
     ///
     /// The log-determinant value
     pub fn log_det(&mut self, rho: f64) -> f64 {
-        let eigs = self.eigenvalues();
-        eigs.iter().map(|&lambda| (1.0 - rho * lambda).ln()).sum()
+        log_det_from(self.eigenvalues(), rho)
     }
 
     /// Get the valid range for ρ based on eigenvalues.
@@ -355,22 +522,7 @@ impl SpatialWeights {
     /// ρ to be in (1/λ_min, 1/λ_max) where λ_min and λ_max are the
     /// extreme eigenvalues of W.
     pub fn rho_range(&mut self) -> (f64, f64) {
-        let eigs = self.eigenvalues();
-        let lambda_min = eigs.iter().copied().fold(f64::INFINITY, f64::min);
-        let lambda_max = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-
-        let lower = if lambda_min < 0.0 {
-            1.0 / lambda_min
-        } else {
-            f64::NEG_INFINITY
-        };
-        let upper = if lambda_max > 0.0 {
-            1.0 / lambda_max
-        } else {
-            f64::INFINITY
-        };
-
-        (lower, upper)
+        rho_range_from(self.eigenvalues())
     }
 
     /// Compute (I - ρW)y.
@@ -428,16 +580,15 @@ impl SpatialWeights {
             for (idx, &j) in sw_i.indices.iter().enumerate() {
                 let w_ij = sw_i.weights[idx];
 
-                // Find w_ji
+                // Find w_ji (indices are sorted)
                 let sw_j = &self.weights[j];
-                let pos = sw_j.indices.iter().position(|&x| x == i);
-                match pos {
-                    Some(jdx) => {
+                match sw_j.indices.binary_search(&i) {
+                    Ok(jdx) => {
                         if (sw_j.weights[jdx] - w_ij).abs() > 1e-10 {
                             return false;
                         }
                     }
-                    None => return false,
+                    Err(_) => return false,
                 }
             }
         }
@@ -456,16 +607,16 @@ impl SpatialWeights {
     ///
     /// trace(W²) = Σᵢ (W²)ᵢᵢ = Σᵢ Σⱼ Wᵢⱼ * Wⱼᵢ
     ///
-    /// This is O(m) where m is the number of non-zero entries, not O(n³).
+    /// This is O(m log d) for m non-zero entries and at most d per row, not O(n³).
     pub fn trace_w2(&self) -> f64 {
         let mut trace = 0.0;
         for i in 0..self.n {
             let sw_i = &self.weights[i];
             for (idx, &j) in sw_i.indices.iter().enumerate() {
                 let w_ij = sw_i.weights[idx];
-                // Find w_ji in sparse representation
+                // Find w_ji in sparse representation (indices are sorted)
                 let sw_j = &self.weights[j];
-                if let Some(jdx) = sw_j.indices.iter().position(|&x| x == i) {
+                if let Ok(jdx) = sw_j.indices.binary_search(&i) {
                     let w_ji = sw_j.weights[jdx];
                     trace += w_ij * w_ji;
                 }
@@ -533,8 +684,32 @@ pub struct WeightsSummary {
     pub style: WeightStyle,
 }
 
-/// Compute eigenvalues of a matrix using faer.
-fn compute_eigenvalues(m: &Array2<f64>) -> Array1<f64> {
+/// log|I - ρW| = Σ log(1 - ρλ_i) from the (real parts of the) eigenvalues.
+fn log_det_from(eigs: &Array1<f64>, rho: f64) -> f64 {
+    eigs.iter().map(|&lambda| (1.0 - rho * lambda).ln()).sum()
+}
+
+/// (1/λ_min, 1/λ_max), open-ended when no eigenvalue has that sign.
+fn rho_range_from(eigs: &Array1<f64>) -> (f64, f64) {
+    let lambda_min = eigs.iter().copied().fold(f64::INFINITY, f64::min);
+    let lambda_max = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    let lower = if lambda_min < 0.0 {
+        1.0 / lambda_min
+    } else {
+        f64::NEG_INFINITY
+    };
+    let upper = if lambda_max > 0.0 {
+        1.0 / lambda_max
+    } else {
+        f64::INFINITY
+    };
+
+    (lower, upper)
+}
+
+/// Compute the eigenvalues of a matrix using faer.
+fn compute_spectrum(m: &Array2<f64>) -> Spectrum {
     use crate::linalg::matrix_ops::ndarray_to_faer;
 
     let n = m.nrows();
@@ -545,18 +720,26 @@ fn compute_eigenvalues(m: &Array2<f64>) -> Array1<f64> {
     let eigenvalues = mat.eigenvalues();
 
     // Extract real parts from the Result
-    let mut eigs_vec: Vec<f64> = match eigenvalues {
-        Ok(evs) => evs.iter().map(|ev| ev.re).collect(),
+    let (mut eigs_vec, values, ok): (Vec<f64>, Vec<(f64, f64)>, bool) = match eigenvalues {
+        Ok(evs) => (
+            evs.iter().map(|ev| ev.re).collect(),
+            evs.iter().map(|ev| (ev.re, ev.im)).collect(),
+            true,
+        ),
         Err(_) => {
             // Fallback: return zeros if eigenvalue computation fails
-            vec![0.0; n]
+            (vec![0.0; n], Vec::new(), false)
         }
     };
 
     // Sort eigenvalues
     eigs_vec.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    Array1::from_vec(eigs_vec)
+    Spectrum {
+        real_sorted: Array1::from_vec(eigs_vec),
+        values,
+        ok,
+    }
 }
 
 #[cfg(test)]
@@ -669,6 +852,75 @@ mod tests {
         // For row-standardized weights, maximum eigenvalue is 1
         let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!((max_eig - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fallible_eigen_paths_respect_the_ceiling_and_cancellation() {
+        use crate::errors::EconError;
+        use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
+        let nb = Neighbors::fully_connected(64);
+        let mut w = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        // a 64 x 64 matrix needs 32 KiB
+        let r = with_alloc_ceiling(Some(1024), || w.try_eigenvalues().map(|e| e.len()));
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))), "{r:?}");
+        let t = CancelToken::new();
+        t.cancel();
+        let r = with_budget(Budget::new(None, t), || w.try_rho_range());
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{r:?}");
+        assert!(w.get_eigenvalues().is_none());
+        // the fallible forms return what the legacy ones return
+        let mut legacy = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        assert_eq!(w.try_rho_range().unwrap(), legacy.rho_range());
+        assert_eq!(w.try_log_det(0.3).unwrap(), legacy.log_det(0.3));
+        assert_eq!(w.try_to_dense().unwrap(), legacy.to_dense());
+    }
+
+    #[test]
+    fn from_neighbors_shares_the_neighbour_lists() {
+        let nb = simple_neighbors();
+        let w = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        assert!(std::ptr::eq(w.neighbors().as_slice(), nb.as_slice()));
+    }
+
+    #[test]
+    fn clone_shares_weight_lists_and_eigen_cache() {
+        let mut w = SpatialWeights::from_neighbors(&simple_neighbors(), WeightStyle::RowStd);
+        let _ = w.eigenvalues();
+        let c = w.clone();
+        assert!(c.same_weights(&w));
+        assert!(std::ptr::eq(c.get_weights(0), w.get_weights(0)));
+        assert!(c.get_eigenvalues().is_some());
+        assert!(
+            !SpatialWeights::from_neighbors(&simple_neighbors(), WeightStyle::RowStd)
+                .same_weights(&w)
+        );
+    }
+
+    #[test]
+    fn serialized_shape_is_unchanged() {
+        let w = SpatialWeights::from_neighbors(&simple_neighbors(), WeightStyle::Binary);
+        let v = serde_json::to_value(&w).unwrap();
+        assert_eq!(v["neighbors"]["neighbors"][0], serde_json::json!([1, 2]));
+        assert_eq!(v["weights"][0]["indices"], serde_json::json!([1, 2]));
+        assert_eq!(v["n"], serde_json::json!(4));
+        let back: SpatialWeights = serde_json::from_value(v).unwrap();
+        assert_eq!(back.n(), 4);
+        assert!(back.get_eigenvalues().is_none());
+    }
+
+    #[test]
+    fn sparse_traces_and_symmetry_match_dense_on_wide_rows() {
+        // fully connected, 199 links per row: the old position() scans were O(m * degree)
+        for style in [WeightStyle::Binary, WeightStyle::RowStd] {
+            let w = SpatialWeights::from_neighbors(&Neighbors::fully_connected(200), style);
+            let d = w.to_dense();
+            let tr_w2: f64 = d.dot(&d).diag().sum();
+            let tr_wtw: f64 = d.iter().map(|v| v * v).sum();
+            assert!((w.trace_w2() - tr_w2).abs() <= 1e-12 * tr_w2.abs().max(1.0));
+            assert!((w.trace_wtw() - tr_wtw).abs() <= 1e-12 * tr_wtw.abs().max(1.0));
+            assert!(w.is_symmetric());
+        }
+        assert!(!crate::spatial::test_fixtures::knn3(WeightStyle::Binary).is_symmetric());
     }
 
     #[test]

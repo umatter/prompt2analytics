@@ -46,6 +46,21 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, pseudoinverse, xtx, xty};
 use crate::spatial::SpatialWeights;
 
+/// Refuses an optimiser tolerance that is not finite and positive, and `max_iter == 0`.
+fn validate_optimizer(tol: f64, max_iter: usize) -> EconResult<()> {
+    if !(tol.is_finite() && tol > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("tol must be a finite positive number, got {tol}"),
+        });
+    }
+    if max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Configuration for SAR model estimation.
 #[derive(Debug, Clone)]
 pub struct SarConfig {
@@ -232,6 +247,7 @@ pub fn run_sar(
     listw: &mut SpatialWeights,
     config: SarConfig,
 ) -> EconResult<SarResult> {
+    validate_optimizer(config.tol, config.max_iter)?;
     let df = dataset.df();
     let n = df.height();
     let k = x_cols.len() + 1; // +1 for intercept
@@ -320,7 +336,7 @@ pub fn run_sar(
     let wy = listw.lag(&y);
 
     // Get valid range for ρ
-    let (rho_min, rho_max) = listw.rho_range();
+    let (rho_min, rho_max) = listw.try_rho_range()?;
     let rho_min = rho_min.max(-0.999);
     let rho_max = rho_max.min(0.999);
 
@@ -356,7 +372,7 @@ pub fn run_sar(
     let fitted = &fitted_xb + rho_opt * &wy;
 
     // Log-likelihood at convergence
-    let log_det = listw.log_det(rho_opt);
+    let log_det = listw.try_log_det(rho_opt)?;
     let ll = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma2.ln()) + log_det;
 
     // Information matrix and standard errors
@@ -457,6 +473,7 @@ pub fn run_sem(
     listw: &mut SpatialWeights,
     config: SemConfig,
 ) -> EconResult<SemResult> {
+    validate_optimizer(config.tol, config.max_iter)?;
     let df = dataset.df();
     let n = df.height();
     let k = x_cols.len() + 1; // +1 for intercept
@@ -511,7 +528,7 @@ pub fn run_sem(
     }
 
     // Get valid range for λ
-    let (lambda_min, lambda_max) = listw.rho_range();
+    let (lambda_min, lambda_max) = listw.try_rho_range()?;
     let lambda_min = lambda_min.max(-0.999);
     let lambda_max = lambda_max.min(0.999);
 
@@ -548,7 +565,7 @@ pub fn run_sem(
     let residuals = &y - &fitted;
 
     // Log-likelihood
-    let log_det = listw.log_det(lambda_opt);
+    let log_det = listw.try_log_det(lambda_opt)?;
     let ll = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma2.ln()) + log_det;
 
     // Standard errors
@@ -738,6 +755,7 @@ pub fn run_sac(
     listw: &mut SpatialWeights,
     config: SacConfig,
 ) -> EconResult<SacResult> {
+    validate_optimizer(config.tol, config.max_iter)?;
     let df = dataset.df();
     let n = df.height();
     let k = x_cols.len() + 1; // +1 for intercept
@@ -792,10 +810,10 @@ pub fn run_sac(
     }
 
     // Pre-compute eigenvalues
-    let eigenvalues = listw.eigenvalues().clone();
+    let eigenvalues = listw.try_eigenvalues()?.clone();
 
     // Get valid range for ρ and λ
-    let (param_min, param_max) = listw.rho_range();
+    let (param_min, param_max) = listw.try_rho_range()?;
     let param_min = param_min.max(-0.99);
     let param_max = param_max.min(0.99);
 
@@ -1083,6 +1101,7 @@ fn optimize_sac(
 
     let step = (param_max - param_min) / grid_resolution as f64;
     for i in 1..grid_resolution {
+        crate::resource::checkpoint()?;
         let rho = param_min + i as f64 * step;
         for j in 1..grid_resolution {
             let lambda = param_min + j as f64 * step;
@@ -1099,6 +1118,7 @@ fn optimize_sac(
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
 
     for _ in 0..max_iter {
+        crate::resource::checkpoint()?;
         let old_rho = best_rho;
         let old_lambda = best_lambda;
 
@@ -1251,7 +1271,7 @@ fn optimize_rho_sar(
     let xtx_inv = matrix_inverse(&xtx_mat.view())?;
 
     // Pre-compute eigenvalues for log-determinant (caches in listw)
-    let eigenvalues = listw.eigenvalues().clone();
+    let eigenvalues = listw.try_eigenvalues()?.clone();
 
     // Constant term in log-likelihood
     let const_term = 0.5 * n_f64 * (1.0 + (2.0 * std::f64::consts::PI).ln());
@@ -1313,6 +1333,7 @@ fn optimize_rho_sar(
     let mut fd = neg_ll(d);
 
     for _ in 0..max_iter {
+        crate::resource::checkpoint()?;
         if (b - a).abs() < tol {
             break;
         }
@@ -1387,7 +1408,7 @@ fn optimize_lambda_sem(
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
 
     // Pre-compute eigenvalues for log-determinant
-    let eigenvalues = listw.eigenvalues().clone();
+    let eigenvalues = listw.try_eigenvalues()?.clone();
 
     // Pre-compute Wy and WX (these don't change with lambda)
     let wy = listw.lag(y);
@@ -1475,6 +1496,7 @@ fn optimize_lambda_sem(
     let mut fd = neg_ll(d);
 
     for _ in 0..max_iter {
+        crate::resource::checkpoint()?;
         if (b - a).abs() < tol {
             break;
         }
@@ -1622,7 +1644,56 @@ fn compute_sem_standard_errors(
 /// - Direct: effect on own observation
 /// - Indirect: effect on other observations (spillovers)
 /// - Total: direct + indirect
+///
+/// The direct effect needs tr((I - ρW)^{-1}), computed exactly from the complex eigenvalues
+/// the fit has already cached (spatialreg's `evalues` route). The total effect needs the sum
+/// of all entries of (I - ρW)^{-1}: n / (1 - ρc) when every row of W sums to c, otherwise
+/// one linear solve (I - ρW) v = 1. The dense inverse is formed only when the eigen
+/// decomposition failed or a sum is not finite.
 fn compute_impacts(
+    beta: &Array1<f64>,
+    rho: f64,
+    listw: &mut SpatialWeights,
+    var_names: &[String],
+) -> EconResult<SpatialImpacts> {
+    let n = listw.n();
+    let k = beta.len() - 1; // Exclude intercept
+
+    let diag_sum = listw.trace_inverse_i_minus_rho_w(rho)?;
+    let total_sum = match listw.constant_row_sum() {
+        Some(c) => n as f64 / (1.0 - rho * c),
+        None => match listw.solve_i_minus_rho_w(rho, &Array1::ones(n)) {
+            Ok(v) => v.sum(),
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+            Err(_) => f64::NAN,
+        },
+    };
+    let (diag_sum, total_sum) = match diag_sum {
+        Some(d) if d.is_finite() && total_sum.is_finite() => (d, total_sum),
+        _ => return compute_impacts_dense(beta, rho, listw, var_names),
+    };
+
+    let n_f = n as f64;
+    let direct: Vec<f64> = (0..k).map(|j| beta[j + 1] * diag_sum / n_f).collect();
+    let total: Vec<f64> = (0..k).map(|j| beta[j + 1] * total_sum / n_f).collect();
+    let indirect: Vec<f64> = total
+        .iter()
+        .zip(direct.iter())
+        .map(|(t, d)| t - d)
+        .collect();
+
+    Ok(SpatialImpacts {
+        direct,
+        indirect,
+        total,
+        var_names: var_names.to_vec(),
+        warnings: Vec::new(),
+    })
+}
+
+/// Spatial impacts from the dense inverse (I - ρW)^{-1}: the fallback of
+/// [`compute_impacts`], with fallible n x n allocations.
+fn compute_impacts_dense(
     beta: &Array1<f64>,
     rho: f64,
     listw: &SpatialWeights,
@@ -1632,13 +1703,17 @@ fn compute_impacts(
     let k = beta.len() - 1; // Exclude intercept
 
     // Compute (I - ρW)^{-1}
-    let w = listw.to_dense();
-    let mut i_rho_w = Array2::eye(n);
+    let w = listw.try_to_dense()?;
+    let mut i_rho_w = crate::resource::try_zeros2(n, n, "dense matrix I - rho*W")?;
+    for i in 0..n {
+        i_rho_w[[i, i]] = 1.0;
+    }
     for i in 0..n {
         for j in 0..n {
             i_rho_w[[i, j]] -= rho * w[[i, j]];
         }
     }
+    drop(w);
 
     let multiplier = match matrix_inverse(&i_rho_w.view()) {
         Ok(inv) if !inv.iter().any(|v| v.is_nan() || v.is_infinite()) => inv,
@@ -2256,5 +2331,250 @@ mod tests {
         for coef in &result.coefficients {
             assert!(coef.is_finite());
         }
+    }
+
+    use crate::spatial::test_fixtures::{band2, knn3};
+    use ndarray::array;
+
+    // R 4.3.3 (fixture): S <- solve(diag(n) - rho * W); direct <- beta[-1]*mean(diag(S)); total <- beta[-1]*sum(S)/n
+    // W: knn3 or band2 (0, 2] weights, styles "W" (row-standardised) and "B" (binary); beta = c(1, 2, -0.5)
+    #[test]
+    fn sar_impacts_match_r_solve_reference() {
+        #[allow(clippy::type_complexity)]
+        let cases: [(SpatialWeights, f64, [f64; 2], [f64; 2], [f64; 2]); 7] = [
+            // (weights, rho, direct, indirect, total)                       path exercised
+            // constant row sums
+            (
+                knn3(WeightStyle::RowStd),
+                0.4,
+                [2.106615512105862, -0.5266538780264655],
+                [1.2267178212274716, -0.3066794553068679],
+                [3.3333333333333335, -0.8333333333333334],
+            ),
+            (
+                knn3(WeightStyle::RowStd),
+                -0.7,
+                [2.2006493621499876, -0.5501623405374969],
+                [-1.0241787739146935, 0.25604469347867337],
+                [1.1764705882352942, -0.29411764705882354],
+            ),
+            (
+                knn3(WeightStyle::Binary),
+                0.12,
+                [2.082709614373916, -0.520677403593479],
+                [1.042290385626084, -0.260572596406521],
+                [3.125, -0.78125],
+            ),
+            // isolates: Neumann
+            (
+                band2(WeightStyle::RowStd),
+                0.3,
+                [2.0517776386547717, -0.5129444096636929],
+                [0.7196509327737997, -0.17991273319344991],
+                [2.7714285714285714, -0.6928571428571428],
+            ),
+            // Neumann, q = 0.48
+            (
+                band2(WeightStyle::Binary),
+                0.1,
+                [2.094684105504974, -0.5236710263762435],
+                [1.101127304917072, -0.275281826229268],
+                [3.195811410422046, -0.7989528526055115],
+            ),
+            // Neumann, q = 0.96
+            (
+                band2(WeightStyle::Binary),
+                -0.2,
+                [2.2393344487779285, -0.5598336121944821],
+                [-0.9729643888739399, 0.24324109721848497],
+                [1.2663700599039887, -0.31659251497599716],
+            ),
+            // q = 1.68: dense solve
+            (
+                band2(WeightStyle::Binary),
+                -0.35,
+                [3.053661716595591, -0.7634154291488977],
+                [-1.990823153699782, 0.4977057884249455],
+                [1.0628385628958088, -0.2657096407239522],
+            ),
+        ];
+        for (mut w, rho, d, i, t) in cases {
+            let imp = compute_impacts(
+                &array![1.0, 2.0, -0.5],
+                rho,
+                &mut w,
+                &["a".into(), "b".into()],
+            )
+            .unwrap();
+            for j in 0..2 {
+                assert!(
+                    (imp.direct[j] - d[j]).abs() < 1e-9
+                        && (imp.indirect[j] - i[j]).abs() < 1e-9
+                        && (imp.total[j] - t[j]).abs() < 1e-9,
+                    "rho={rho} j={j}: {imp:?}"
+                );
+            }
+            assert!(imp.warnings.is_empty());
+        }
+    }
+
+    /// Relative closeness: `(a - b).abs() <= tol * max(1, |b|)`.
+    fn assert_rel(a: f64, b: f64, tol: f64, what: &str) {
+        assert!(
+            (a - b).abs() <= tol * b.abs().max(1.0),
+            "{what}: {a:.17e} vs {b:.17e}"
+        );
+    }
+
+    #[test]
+    fn sar_results_are_unchanged() {
+        // Pinned at the values the dense-inverse code printed before the trace-based impacts:
+        // [rho, intercept, slope, log-likelihood, direct, indirect, total]
+        let (d16, w16) = create_test_data();
+        let fixture = crate::spatial::test_fixtures::dataset();
+        for (dataset, mut w, y, x, pins) in [
+            (
+                d16,
+                w16,
+                "y",
+                "x",
+                [
+                    0.563062022739153,
+                    0.7115505817274794,
+                    0.5527794364074365,
+                    3.4256516808126527,
+                    0.6059112852484777,
+                    0.6592097735177948,
+                    1.2651210587662725,
+                ],
+            ),
+            (
+                fixture,
+                knn3(WeightStyle::RowStd),
+                "y",
+                "x1",
+                [
+                    0.25113680807766964,
+                    2.3239067118867496,
+                    1.745732427166816,
+                    -54.37410609368971,
+                    1.7774931103853961,
+                    0.553683593179811,
+                    2.331176703565207,
+                ],
+            ),
+        ] {
+            let r = run_sar(&dataset, y, &[x], &mut w, SarConfig::default()).unwrap();
+            let imp = r.impacts.as_ref().unwrap();
+            assert_rel(r.rho, pins[0], 1e-10, "rho");
+            assert_rel(r.coefficients[0], pins[1], 1e-10, "intercept");
+            assert_rel(r.coefficients[1], pins[2], 1e-10, "slope");
+            assert_rel(r.log_likelihood, pins[3], 1e-10, "log-likelihood");
+            assert_rel(imp.direct[0], pins[4], 1e-10, "direct");
+            assert_rel(imp.indirect[0], pins[5], 1e-10, "indirect");
+            assert_rel(imp.total[0], pins[6], 1e-10, "total");
+            assert!(imp.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn estimators_reject_bad_tolerance_and_iterations() {
+        let (d, mut w) = create_test_data();
+        let is_param_error = |e: EconError, word: &str| matches!(&e, EconError::InvalidSpecification { message } if message.contains(word));
+        for tol in [0.0, -1e-8, f64::NAN, f64::INFINITY] {
+            let e = run_sar(
+                &d,
+                "y",
+                &["x"],
+                &mut w,
+                SarConfig {
+                    tol,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(is_param_error(e, "tol"), "sar tol={tol}");
+            let e = run_sem(
+                &d,
+                "y",
+                &["x"],
+                &mut w,
+                SemConfig {
+                    tol,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(is_param_error(e, "tol"), "sem tol={tol}");
+            let e = run_sac(
+                &d,
+                "y",
+                &["x"],
+                &mut w,
+                SacConfig {
+                    tol,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(is_param_error(e, "tol"), "sac tol={tol}");
+        }
+        let e = run_sar(
+            &d,
+            "y",
+            &["x"],
+            &mut w,
+            SarConfig {
+                max_iter: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(is_param_error(e, "max_iter"));
+        let e = run_sem(
+            &d,
+            "y",
+            &["x"],
+            &mut w,
+            SemConfig {
+                max_iter: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(is_param_error(e, "max_iter"));
+        let e = run_sac(
+            &d,
+            "y",
+            &["x"],
+            &mut w,
+            SacConfig {
+                max_iter: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(is_param_error(e, "max_iter"));
+    }
+
+    #[test]
+    fn estimators_honour_cancellation() {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let (d, mut w) = create_test_data();
+        let t = CancelToken::new();
+        t.cancel();
+        let budget = || Budget::new(None, t.clone());
+        let r = with_budget(budget(), || {
+            run_sar(&d, "y", &["x"], &mut w, SarConfig::default())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "sar");
+        let r = with_budget(budget(), || {
+            run_sem(&d, "y", &["x"], &mut w, SemConfig::default())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "sem");
+        let r = with_budget(budget(), || {
+            run_sac(&d, "y", &["x"], &mut w, SacConfig::default())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "sac");
     }
 }
