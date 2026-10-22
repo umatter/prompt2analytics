@@ -1038,8 +1038,6 @@ fn sample_truncated_normal_above<R: rand::Rng>(
     lower: f64,
     rng: &mut R,
 ) -> f64 {
-    use rand_distr::{Distribution, Uniform};
-
     // Use inverse CDF method
     let alpha = (lower - mu) / sigma;
     let phi_alpha = normal_cdf(alpha);
@@ -1054,7 +1052,7 @@ fn sample_truncated_normal_above<R: rand::Rng>(
     }
 
     // Sample u ~ Uniform(phi_alpha, 1)
-    let u: f64 = Uniform::new(lower_bound, upper_bound).sample(rng);
+    let u: f64 = uniform_f64(lower_bound, upper_bound, rng);
 
     // Return mu + sigma * Phi^{-1}(u)
     mu + sigma * inverse_normal_cdf(u)
@@ -1067,8 +1065,6 @@ fn sample_truncated_normal_below<R: rand::Rng>(
     upper: f64,
     rng: &mut R,
 ) -> f64 {
-    use rand_distr::{Distribution, Uniform};
-
     // Use inverse CDF method
     let beta = (upper - mu) / sigma;
     let phi_beta = normal_cdf(beta);
@@ -1083,10 +1079,49 @@ fn sample_truncated_normal_below<R: rand::Rng>(
     }
 
     // Sample u ~ Uniform(0, phi_beta)
-    let u: f64 = Uniform::new(lower_bound, upper_bound).sample(rng);
+    let u: f64 = uniform_f64(lower_bound, upper_bound, rng);
 
     // Return mu + sigma * Phi^{-1}(u)
     mu + sigma * inverse_normal_cdf(u)
+}
+
+/// The largest scale rand 0.8's `UniformFloat::new(low, high)` settles on, for
+/// `low < high`: the largest `s <= high - low` with `s * max_rand + low < high`.
+///
+/// rand lowers the scale one ulp at a time until that holds, which takes about 1e10 steps
+/// when `high - low` is tiny next to `high` (the truncated-normal draws meet that once the
+/// mean is about 6 standard deviations from the threshold) and cannot be interrupted. The
+/// condition is monotone in `s`, so bisection on the bit pattern finds the same value in at
+/// most 64 steps.
+fn uniform_scale(low: f64, high: f64) -> f64 {
+    // (u64::MAX >> 12) with exponent 0, minus 1: the largest value0_1 rand produces
+    let max_rand = f64::from_bits((u64::MAX >> 12) | (1023_u64 << 52)) - 1.0;
+    let fits = |s: f64| s * max_rand + low < high;
+    let scale = high - low;
+    if fits(scale) {
+        return scale;
+    }
+    // `fits(0.0)` holds because low < high; non-negative floats are ordered by their bits.
+    let (mut lo, mut hi) = (0_u64, scale.to_bits());
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if fits(f64::from_bits(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    f64::from_bits(lo)
+}
+
+/// `rand_distr::Uniform::new(low, high).sample(rng)` for `low < high`, bit for bit, with the
+/// scale from [`uniform_scale`] instead of rand's ulp-by-ulp construction loop.
+fn uniform_f64<R: rand::Rng>(low: f64, high: f64, rng: &mut R) -> f64 {
+    let scale = uniform_scale(low, high);
+    // a value in [1, 2) from the top 52 bits, as rand's UniformFloat::sample does
+    let value1_2 = f64::from_bits((rng.next_u64() >> 12) | (1023_u64 << 52));
+    let value0_1 = value1_2 - 1.0;
+    value0_1 * scale + low
 }
 
 /// Inverse of standard normal CDF (quantile function).
@@ -1353,6 +1388,108 @@ mod tests {
             run_sar_probit(&d, "y", &["x"], &mut w, cfg(10, 5, 1))
         });
         assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn uniform_draws_match_rand_and_tiny_intervals_finish() {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Uniform};
+        for (low, high) in [
+            (0.0, 1.0),
+            (1e-10, 0.3),
+            (1e-10, 2e-10),
+            (0.5, 1.0 - 1e-10),
+            (0.9, 1.0 - 1e-10),
+            (-3.0, 2.0),
+        ] {
+            let mut a = rand::rngs::StdRng::seed_from_u64(9);
+            let mut b = rand::rngs::StdRng::seed_from_u64(9);
+            let dist: Uniform<f64> = Uniform::new(low, high);
+            for _ in 0..200 {
+                assert_eq!(
+                    dist.sample(&mut a).to_bits(),
+                    uniform_f64(low, high, &mut b).to_bits(),
+                    "[{low}, {high})"
+                );
+            }
+        }
+        // rand's own construction needs ~1e10 one-ulp steps for this interval
+        let (low, high) = (1.0 - 1.5e-10, 1.0 - 1e-10);
+        let max_rand = 1.0 - f64::EPSILON;
+        let s = uniform_scale(low, high);
+        assert!(s * max_rand + low < high);
+        assert!(f64::from_bits(s.to_bits() + 1) * max_rand + low >= high);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let u = uniform_f64(low, high, &mut rng);
+        assert!((low..high).contains(&u));
+    }
+
+    #[test]
+    fn seeded_probit_runs_are_unchanged() {
+        use crate::spatial::test_fixtures::{dataset, knn3};
+        let d = dataset();
+        let c = |compute_impacts| SpatialProbitConfig {
+            n_draws: 200,
+            burn_in: 50,
+            compute_impacts,
+            seed: Some(42),
+            ..Default::default()
+        };
+        // Pinned at the values the dense-W sampler printed. Summation order may change the
+        // floating-point noise, so 1e-8 relative.
+        let close = |a: f64, b: f64, what: &str| {
+            assert!(
+                (a - b).abs() <= 1e-8 * b.abs().max(1.0),
+                "{what}: {a:.17e} vs {b:.17e}"
+            );
+        };
+        let mut w = knn3(WeightStyle::RowStd);
+        let sar = run_sar_probit(&d, "y_bin", &["x1"], &mut w, c(true)).unwrap();
+        let mut w = knn3(WeightStyle::RowStd);
+        let sem = run_sem_probit(&d, "y_bin", &["x1"], &mut w, c(false)).unwrap();
+        // [rho, intercept, slope, se(intercept), se(slope), log-likelihood, pcp]
+        for (r, pins) in [
+            (
+                &sar,
+                [
+                    2.68533774532165759e-1,
+                    -1.58243919077117767e0,
+                    9.24747146429868772e-1,
+                    5.94540928388044732e-1,
+                    2.90344723014617667e-1,
+                    -1.05132753924276177e1,
+                    8.00000000000000000e1,
+                ],
+            ),
+            (
+                &sem,
+                [
+                    3.46830210516512805e-1,
+                    -4.77385006320937588e0,
+                    6.21983438641396713e0,
+                    7.42552142964799522e0,
+                    4.24436475285955161e0,
+                    -1.00869565131537570e2,
+                    7.66666666666666714e1,
+                ],
+            ),
+        ] {
+            close(r.rho, pins[0], "rho");
+            close(r.coefficients[0], pins[1], "intercept");
+            close(r.coefficients[1], pins[2], "slope");
+            close(r.std_errors[0], pins[3], "se(intercept)");
+            close(r.std_errors[1], pins[4], "se(slope)");
+            close(r.log_likelihood, pins[5], "log-likelihood");
+            close(r.pcp, pins[6], "pcp");
+        }
+        let imp = sar.impacts.as_ref().unwrap();
+        close(imp.direct[0], 1.69470201298879464e-1, "direct");
+        close(imp.indirect[0], 6.86493000566294614e-2, "indirect");
+        close(imp.total[0], 2.38119501355508911e-1, "total");
+        close(imp.direct_se[0], 3.47824696614203385e-2, "direct se");
+        close(imp.indirect_se[0], 7.19616649906903438e-2, "indirect se");
+        close(imp.total_se[0], 7.18431335122757669e-2, "total se");
+        assert!(sem.impacts.is_none());
     }
 
     #[test]
