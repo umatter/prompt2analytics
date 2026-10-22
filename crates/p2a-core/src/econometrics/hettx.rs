@@ -1217,6 +1217,27 @@ mod tests {
         (y_arr, treatment_arr, x_arr)
     }
 
+    fn pinned_hettx_result() -> HetTxResult {
+        let (y, treatment, x) = create_hettx_test_data();
+        let config = HetTxConfig {
+            n_permutations: 200,
+            seed: Some(42),
+            ..Default::default()
+        };
+        run_hettx(&y.view(), &treatment.view(), Some(&x.view()), config).unwrap()
+    }
+
+    /// Seeded permutation p-values captured from the current implementation.
+    #[test]
+    fn test_hettx_pinned_seed42() {
+        let r = pinned_hettx_result();
+        let d = r.decomposition.as_ref().unwrap();
+        assert_eq!(r.p_value, 1.0);
+        assert_eq!(r.null_distribution.len(), 200);
+        assert_eq!(d.systematic_p_value, 0.004975124378109453);
+        assert_eq!(d.idiosyncratic_p_value, 1.0);
+    }
+
     #[test]
     fn test_hettx_detects_heterogeneity() {
         let (y, treatment, x) = create_hettx_test_data();

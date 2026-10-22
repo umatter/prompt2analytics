@@ -999,6 +999,36 @@ mod tests {
         println!("{}", result);
     }
 
+    fn pinned_bp_result() -> BPBoundsResult {
+        let (z, d, y) = create_test_data();
+        let config = BPBoundsConfig {
+            monotonicity: false,
+            bootstrap_ci: true,
+            n_bootstrap: 500,
+            alpha: 0.05,
+            seed: Some(42),
+        };
+        run_bp_bounds(&z.view(), &d.view(), &y.view(), config).unwrap()
+    }
+
+    /// Seeded percentile intervals captured from the current implementation.
+    #[test]
+    fn test_bp_bounds_bootstrap_ci_pinned_seed42() {
+        let r = pinned_bp_result();
+        assert_eq!(
+            r.ace_lower_ci,
+            Some((-0.23737373737373735, 0.4322250639386189))
+        );
+        assert_eq!(
+            r.ace_upper_ci,
+            Some((-0.6133333333333334, 0.12030075187969924))
+        );
+        assert_eq!(
+            r.overall_ci,
+            Some((-0.23737373737373735, 0.12030075187969924))
+        );
+    }
+
     #[test]
     fn test_run_bp_bounds_with_bootstrap() {
         let (z, d, y) = create_test_data();

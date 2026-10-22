@@ -1550,6 +1550,170 @@ mod tests {
         Dataset::new(df)
     }
 
+    /// `create_staggered_dataset` made unbalanced: `(unit 3, 2001)` and `(unit 17, 2003)`
+    /// are missing, so some cells lack a base period, and `(unit 18, 2005)` appears twice
+    /// (the second row, `+ 0.37`, is the one `panel_map` keeps).
+    fn create_unbalanced_staggered_dataset() -> Dataset {
+        let mut year_vec = Vec::new();
+        let mut unit_vec = Vec::new();
+        let mut g_vec = Vec::new();
+        let mut y_vec = Vec::new();
+
+        let outcome = |unit: i32, year: i32, g: i32| {
+            let base = unit as f64 * 0.5;
+            let trend = (year - 2000) as f64 * 0.3;
+            let treated = if g > 0 && year >= g { 2.0 } else { 0.0 };
+            let noise = ((unit * year) % 10) as f64 * 0.1 - 0.5;
+            base + trend + treated + noise
+        };
+        let cohort = |unit: i32| {
+            if unit <= 5 {
+                2002
+            } else if unit <= 10 {
+                2004
+            } else if unit <= 15 {
+                2006
+            } else {
+                0
+            }
+        };
+
+        for year in 2000..=2008 {
+            for unit in 1..=20 {
+                if (unit, year) == (3, 2001) || (unit, year) == (17, 2003) {
+                    continue;
+                }
+                let g = cohort(unit);
+                year_vec.push(year as f64);
+                unit_vec.push(unit as f64);
+                g_vec.push(g as f64);
+                y_vec.push(outcome(unit, year, g));
+            }
+        }
+        // duplicate (unit, time) row
+        year_vec.push(2005.0);
+        unit_vec.push(18.0);
+        g_vec.push(0.0);
+        y_vec.push(outcome(18, 2005, 0) + 0.37);
+
+        let df = df! {
+            "year" => year_vec,
+            "unit" => unit_vec,
+            "first_treat" => g_vec,
+            "outcome" => y_vec
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    fn pinned_bootstrap_ses(dataset: &Dataset) -> (Vec<f64>, f64) {
+        let config = StaggeredDidConfig {
+            comparison_group: ComparisonGroup::NeverTreated,
+            estimation_method: AttEstimationMethod::OutcomeRegression,
+            bootstrap: 200,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+        let result = run_staggered_did(
+            dataset,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config,
+        )
+        .unwrap();
+        (
+            result.group_time_atts.iter().map(|g| g.std_error).collect(),
+            result.overall_att.std_error,
+        )
+    }
+
+    /// Seeded bootstrap SEs captured from the per-replicate implementation.
+    #[test]
+    fn test_staggered_did_bootstrap_ses_pinned() {
+        let balanced: [f64; 27] = [
+            0.18490145985527776,
+            0.0,
+            0.1808923855953215,
+            0.2120487328975394,
+            0.23072744644304863,
+            0.20823152025499436,
+            0.2234537656899955,
+            0.20283205173975313,
+            0.2643189612585981,
+            0.23320011561681045,
+            0.19070322569314244,
+            0.21563141541771244,
+            0.0,
+            0.2663685066745486,
+            0.2820728319220123,
+            0.16984345547733584,
+            0.3512417480039077,
+            0.2329391410405387,
+            0.17593078822888253,
+            0.18756652059065274,
+            0.23298033218340553,
+            0.26624152070207663,
+            0.24366619071737705,
+            0.0,
+            0.2664967811861835,
+            0.24702693059618694,
+            0.2644702388339487,
+        ];
+        let unbalanced: [f64; 27] = [
+            0.21337412146962192,
+            0.0,
+            0.232739771272861,
+            0.21241129431089897,
+            0.2817675615414031,
+            0.21708208206051982,
+            0.23785277691140902,
+            0.19642515916927691,
+            0.3138385482197044,
+            0.26805398079298853,
+            0.1934452831682178,
+            0.24658069499501026,
+            0.0,
+            0.1959086120946041,
+            0.26577482181776185,
+            0.20143567711747046,
+            0.3307623266903197,
+            0.19900134217799495,
+            0.1678336974288942,
+            0.16490510588398063,
+            0.21398659180199545,
+            0.24759731634793528,
+            0.25467304901955323,
+            0.047623165826116136,
+            0.23329045958420777,
+            0.2280247643824537,
+            0.2594670200444654,
+        ];
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs().max(1.0);
+        for (ds, want, want_overall) in [
+            (create_staggered_dataset(), &balanced, 0.06304150304892771),
+            (
+                create_unbalanced_staggered_dataset(),
+                &unbalanced,
+                0.06328624510379224,
+            ),
+        ] {
+            let (ses, overall) = pinned_bootstrap_ses(&ds);
+            assert_eq!(ses.len(), want.len());
+            for (i, (&a, &b)) in ses.iter().zip(want.iter()).enumerate() {
+                assert!(close(a, b), "cell {i}: {a} vs pinned {b}");
+            }
+            assert!(
+                close(overall, want_overall),
+                "overall {overall} vs pinned {want_overall}"
+            );
+        }
+    }
+
     #[test]
     fn test_staggered_did_basic() {
         let dataset = create_staggered_dataset();
