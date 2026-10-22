@@ -924,7 +924,6 @@ fn bootstrap_draws(
 ) -> EconResult<Array2<f64>> {
     let n_cells = table.n_cells();
     let n_units = table.n_units;
-    resource::checked_len(&[bootstrap, n_cells], "bootstrap replicates x cells")?;
     let mut draws = resource::try_zeros2(bootstrap, n_cells, "bootstrap replicate draws")?;
     let mut counts = vec![0usize; n_units];
 
@@ -2699,6 +2698,53 @@ mod tests {
                 bootstrap_draws(&table, 10, &mut StdRng::seed_from_u64(1))
             }));
         }
+    }
+
+    /// `build_boot_table` checks the budget once per (g, t) cell. The end-to-end
+    /// cancellation test stops at the point estimate's first cell, so this calls
+    /// the table builder directly on the `test_bootstrap_draws_match_reference`
+    /// inputs.
+    #[test]
+    fn test_build_boot_table_stops_when_cancelled() {
+        let ds = create_staggered_dataset();
+        let config = StaggeredDidConfig {
+            bootstrap: 0,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+        let point = run_staggered_did(
+            &ds,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config.clone(),
+        )
+        .unwrap();
+        let cells: Vec<(i64, i64, i64)> = point
+            .group_time_atts
+            .iter()
+            .map(|g| (g.group, g.time, g.group + config.base_period as i64))
+            .collect();
+        assert!(!cells.is_empty());
+        let col = |c: &str| DesignMatrix::extract_column(ds.df(), c).unwrap();
+        let (y, g, t, u) = (col("outcome"), col("first_treat"), col("year"), col("unit"));
+        let panel_map = build_panel_map(&t, &u);
+        let build = || {
+            build_boot_table(
+                &y,
+                &g,
+                &t,
+                &u,
+                &panel_map,
+                &cells,
+                ComparisonGroup::NeverTreated,
+            )
+        };
+        assert!(build().is_ok());
+        expect_cancelled(with_budget(cancelled(), build));
     }
 
     #[test]
