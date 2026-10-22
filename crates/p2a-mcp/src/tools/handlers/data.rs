@@ -6,7 +6,7 @@
 //! Note: Cleaning session tools remain in server.rs due to their complexity.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rmcp::{
     ErrorData as McpError,
@@ -20,6 +20,20 @@ use crate::server::AnalyticsServer;
 use crate::tools::requests::data::*;
 
 use p2a_core::data::{DataLoader, Dataset, DatasetInfo};
+
+/// `text` (an error from a loader or writer) with the absolute forms of
+/// `path` and its folder replaced by their [`path_jail::display_path`] forms,
+/// so no server path reaches the caller.
+fn without_server_paths(text: &str, path: &Path) -> String {
+    let mut out = text.replace(&path.display().to_string(), &path_jail::display_path(path));
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        out = out.replace(
+            &parent.display().to_string(),
+            &path_jail::display_path(parent),
+        );
+    }
+    out
+}
 
 #[tool_router(router = data_router, vis = "pub")]
 impl AnalyticsServer {
@@ -84,7 +98,7 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Failed to load dataset: {}",
-                    e
+                    without_server_paths(&e.to_string(), &path)
                 ))]));
             }
         };
@@ -170,7 +184,7 @@ impl AnalyticsServer {
                 Ok(()) => format!(
                     "Successfully exported dataset '{}' to CSV file:\n  {}\n  {} rows x {} columns",
                     request.dataset,
-                    path.display(),
+                    path_jail::display_path(&path),
                     dataset.nrows(),
                     dataset.ncols()
                 ),
@@ -185,7 +199,7 @@ impl AnalyticsServer {
                 Ok(()) => format!(
                     "Successfully exported dataset '{}' to Parquet file:\n  {}\n  {} rows x {} columns",
                     request.dataset,
-                    path.display(),
+                    path_jail::display_path(&path),
                     dataset.nrows(),
                     dataset.ncols()
                 ),
@@ -209,7 +223,7 @@ impl AnalyticsServer {
                         format!(
                             "Successfully exported dataset '{}' to JSON file:\n  {}\n  {} rows x {} columns",
                             request.dataset,
-                            path.display(),
+                            path_jail::display_path(&path),
                             dataset.nrows(),
                             dataset.ncols()
                         )

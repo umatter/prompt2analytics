@@ -26,15 +26,35 @@
 //!   environment variable name: they echo the caller's input (at most 200
 //!   characters) or a [`display_path`] form, which is relative to the root.
 //!
-//! It also holds the per-call session-scope interface the tool governor enters
-//! on the thread that runs each HTTP-side tool call. For now that is a stub
-//! that records the session id; T0-WP09 implements per-session directories.
+//! # Per-session directories
+//!
+//! With session directories off (local, desktop, stdio use) every path
+//! resolves against the single data root. With them on
+//! ([`configure_session_dirs`], automatic in the open public mode), the tool
+//! governor enters the calling session's scope ([`enter_session_scope`]) on
+//! the thread that runs each tool call, and the active root is
+//! `<data_root>/sessions/<session_id>/`:
+//! - The id must be a UUID. The directory is created on first use with mode
+//!   `0700`, and so is its parent `sessions/`, which `--session-dirs on`
+//!   reserves. Other sessions' directories and the shared root are outside
+//!   the active root and so unreachable.
+//! - On the first scoped use in a process, UUID-named entries already under
+//!   `sessions/` (left by an earlier process) are removed; other names are
+//!   left alone. [`remove_session_dir`] removes a session's directory when
+//!   the session goes.
+//! - Without an active scope every path is refused ("needs a session")
+//!   rather than falling back to the shared root. Handlers must therefore not
+//!   validate paths from threads or tasks they spawn: those have no scope.
+//! - The `session_disk_bytes` budget bounds what a session stores: new files
+//!   are refused once the directory has used it, and [`write_atomically`]
+//!   refuses a write that would take the directory past it.
 
 use std::cell::RefCell;
 use std::fs;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Once, OnceLock};
 
 /// Cached resolved jail root, computed once on first use.
 static DATA_ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -51,8 +71,9 @@ static DATA_ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 /// from, never the whole of `$HOME`. Operators should set `P2A_DATA_ROOT` to a
 /// narrow, dedicated data directory for any exposed deployment.
 ///
-/// The value is cached for the lifetime of the process. In test builds the
-/// `reset_data_root_for_tests` helper is available.
+/// The value is cached for the lifetime of the process. This is the global
+/// root; with per-session directories on, tool paths resolve inside
+/// `<root>/sessions/<session_id>/` instead (see the module documentation).
 pub fn allowed_data_root() -> Result<PathBuf, String> {
     DATA_ROOT.get_or_init(resolve_data_root).clone()
 }
@@ -73,21 +94,23 @@ fn resolve_data_root() -> Result<PathBuf, String> {
         .map_err(|e| format!("working directory {:?} cannot be canonicalized: {}", cwd, e))
 }
 
-/// The root every path is resolved against, with a caller-safe error: the
-/// detail (which names the environment variable and the path) is only logged.
+/// The root this thread's paths resolve against: the data root, or the active
+/// session's directory when session directories are on.
 fn active_root() -> Result<PathBuf, String> {
-    allowed_data_root().map_err(|e| {
-        tracing::warn!(error = %e, "the data root cannot be resolved");
-        "the server's data directory is not available".to_string()
-    })
+    active_root_for(
+        &data_root()?,
+        SESSION_DIRS.load(Ordering::SeqCst),
+        current_session_scope().as_deref(),
+    )
 }
 
 /// Validate a user-supplied path for reading.
 ///
-/// A relative input is resolved against the data root, an absolute one must
-/// lie inside it, and a final-component symlink is refused (see the module
-/// documentation). A path that does not exist yet is accepted when its parent
-/// folder exists inside the root.
+/// A relative input is resolved against the active root (the data root, or
+/// the session's directory), an absolute one must lie inside it, and a
+/// final-component symlink is refused (see the module documentation). A path
+/// that does not exist yet is accepted when its parent folder exists inside
+/// the root.
 ///
 /// Returns the canonical absolute path on success, or a message for the
 /// caller (never containing a server path) on rejection.
@@ -96,24 +119,40 @@ pub fn validate_data_path(input: &str) -> Result<PathBuf, String> {
 }
 
 /// Validate a user-supplied path as the target of a write: as
-/// [`validate_data_path`], and the target must not be a folder.
+/// [`validate_data_path`], and the target must not be a folder. Inside a
+/// session scope with a `session_disk_bytes` budget, a new file is refused
+/// once the session's directory has used the quota (overwriting a file passes
+/// this check; [`write_atomically`] checks the result).
 pub fn validate_data_path_for_write(input: &str) -> Result<PathBuf, String> {
-    resolve_for_write_in(&active_root()?, input, None)
+    let root = active_root()?;
+    let quota = current_quota(&root).map(|(_, limit)| limit);
+    resolve_for_write_in(&root, input, quota)
 }
 
 /// Write `target` atomically: `write` fills a new temporary file (mode `0600`)
 /// in the target's folder, which is then renamed over the target. A symlink
 /// at the target is replaced, never followed, and on every error the
-/// temporary file is removed. `target` should come from
-/// [`validate_data_path_for_write`].
+/// temporary file is removed. Inside a session scope with a
+/// `session_disk_bytes` budget, the write is refused (and nothing is left
+/// behind) when the session's directory would exceed it. `target` should come
+/// from [`validate_data_path_for_write`].
 pub fn write_atomically(
     target: &Path,
     write: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    write_atomically_in(target, None, write)
+    let quota = if SESSION_DIRS.load(Ordering::SeqCst) {
+        current_quota(&active_root()?)
+    } else {
+        None
+    };
+    write_atomically_in(
+        target,
+        quota.as_ref().map(|(dir, limit)| (dir.as_path(), *limit)),
+        write,
+    )
 }
 
-/// `path` for a message: relative to the data root (`/`-separated, `.` for
+/// `path` for a message: relative to the active root (`/`-separated, `.` for
 /// the root itself), never absolute.
 pub fn display_path(path: &Path) -> String {
     match active_root() {
@@ -134,18 +173,32 @@ fn shown_input(input: &str) -> String {
     }
 }
 
+/// A caller's path for a refusal: a relative input as typed (see
+/// [`shown_input`]); an absolute input only by its file name, so a message
+/// never carries an absolute server path, not even one the caller supplied.
+fn shown_path_input(input: &str) -> String {
+    let path = Path::new(input);
+    if !path.is_absolute() {
+        return shown_input(input);
+    }
+    match path.file_name() {
+        Some(name) => format!("…/{}", shown_input(&name.to_string_lossy())),
+        None => "(an absolute path)".to_string(),
+    }
+}
+
 fn outside_error(input: &str) -> String {
     format!(
         "path `{}` is outside the data directory; use a path relative to it, for example \
          `results.csv`",
-        shown_input(input)
+        shown_path_input(input)
     )
 }
 
 fn unresolvable_error(input: &str) -> String {
     format!(
         "cannot resolve path `{}`; check that its folder exists in the data directory",
-        shown_input(input)
+        shown_path_input(input)
     )
 }
 
@@ -166,7 +219,7 @@ fn resolve_in(root: &Path, input: &str) -> Result<PathBuf, String> {
     if meta.as_ref().is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(format!(
             "`{}` is a symbolic link; links are not followed",
-            shown_input(input)
+            shown_path_input(input)
         ));
     }
     let canonical = if meta.is_ok() {
@@ -201,7 +254,7 @@ fn resolve_for_write_in(root: &Path, input: &str, quota: Option<u64>) -> Result<
     if meta.as_ref().is_some_and(|m| m.is_dir()) {
         return Err(format!(
             "`{}` is a folder; give a file name, for example `results.csv`",
-            shown_input(input)
+            shown_path_input(input)
         ));
     }
     if let Some(limit) = quota
@@ -346,78 +399,243 @@ fn display_file_name(path: &Path) -> String {
 }
 
 // =============================================================================
-// Session scope (stub)
+// Session scopes and per-session directories
 // =============================================================================
 //
 // The tool governor enters a session scope on the blocking thread that runs
-// each HTTP-side tool call, so path validation can later resolve against a
-// per-session directory. This is the interface only: it records the session
-// id for the current thread when session directories are enabled. T0-WP09
-// implements the semantics (per-session roots, write validation, quotas and
-// directory removal).
+// each HTTP-side tool call. While session directories are on, every path is
+// resolved inside that session's directory; without a scope, file access is
+// refused (fail closed).
+
+/// The folder under the data root that holds the per-session directories.
+const SESSIONS_DIR: &str = "sessions";
 
 /// Whether per-session data directories are enabled (set at startup).
-static SESSION_DIRS_ENABLED: AtomicBool = AtomicBool::new(false);
+static SESSION_DIRS: AtomicBool = AtomicBool::new(false);
+
+/// Removes stale session directories once, on the first scoped use.
+static PURGE: Once = Once::new();
 
 thread_local! {
     /// The session whose scope is active on this thread, if any.
-    static CURRENT_SESSION_SCOPE: RefCell<Option<String>> = const { RefCell::new(None) };
+    static SCOPE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Enable or disable per-session data directories. Called at startup from the
-/// governor's settings; may be called again (tests restore it).
-///
-/// Stub: only switches whether [`enter_session_scope`] records the id;
-/// T0-WP09 implements the directories.
+/// governor's settings; may be called more than once.
 pub fn configure_session_dirs(enabled: bool) {
-    SESSION_DIRS_ENABLED.store(enabled, Ordering::SeqCst);
+    SESSION_DIRS.store(enabled, Ordering::SeqCst);
 }
 
-/// An active session scope; restores the previous scope on drop.
+/// An active session scope; restores the previous scope on drop, also when
+/// unwinding. Not `Send`: it must be dropped on the thread that created it.
 #[must_use = "the session scope ends when this guard is dropped"]
 #[derive(Debug)]
 pub struct SessionScope {
-    prev: Option<String>,
+    previous: Option<String>,
     active: bool,
+    _not_send: PhantomData<*const ()>,
 }
 
 impl Drop for SessionScope {
     fn drop(&mut self) {
         if self.active {
-            let prev = self.prev.take();
-            CURRENT_SESSION_SCOPE.with(|s| *s.borrow_mut() = prev);
+            let previous = self.previous.take();
+            // `try_with`: never panic while the thread's locals are torn down.
+            let _ = SCOPE.try_with(|s| *s.borrow_mut() = previous);
         }
     }
 }
 
-/// Enter `session_id`'s scope on the current thread until the returned guard
-/// is dropped. A no-op when session directories are disabled.
-///
-/// Stub: records the id only; T0-WP09 makes path validation resolve against
-/// the session's directory while a scope is active.
-pub fn enter_session_scope(session_id: &str) -> SessionScope {
-    if !SESSION_DIRS_ENABLED.load(Ordering::SeqCst) {
-        return SessionScope {
-            prev: None,
-            active: false,
-        };
+/// Set `session_id` as this thread's scope until the guard is dropped,
+/// whether or not session directories are on.
+fn scope_guard(session_id: &str) -> SessionScope {
+    let previous = SCOPE.with(|s| s.borrow_mut().replace(session_id.to_string()));
+    SessionScope {
+        previous,
+        active: true,
+        _not_send: PhantomData,
     }
-    let prev = CURRENT_SESSION_SCOPE.with(|s| s.borrow_mut().replace(session_id.to_string()));
-    SessionScope { prev, active: true }
+}
+
+/// Enter `session_id`'s scope on the current thread until the returned guard
+/// is dropped: while session directories are on, paths then resolve inside
+/// that session's directory. Inert when session directories are off.
+pub fn enter_session_scope(session_id: &str) -> SessionScope {
+    if SESSION_DIRS.load(Ordering::SeqCst) {
+        scope_guard(session_id)
+    } else {
+        SessionScope {
+            previous: None,
+            active: false,
+            _not_send: PhantomData,
+        }
+    }
 }
 
 /// The session whose scope is active on the current thread, if any.
 pub fn current_session_scope() -> Option<String> {
-    CURRENT_SESSION_SCOPE.with(|s| s.borrow().clone())
+    SCOPE.with(|s| s.borrow().clone())
 }
 
 /// Remove a session's data directory. Called (off the async runtime) for every
-/// session removal: delete, expiry, cleanup and eviction.
-///
-/// Stub: returns `Ok(())`; T0-WP09 deletes the directory.
+/// session removal: delete, expiry, cleanup and eviction. `Ok(())` when
+/// session directories are off, when the id is not a UUID and when the
+/// directory does not exist. Links inside the directory are removed, never
+/// followed.
 pub fn remove_session_dir(session_id: &str) -> std::io::Result<()> {
-    let _ = session_id;
-    Ok(())
+    if !SESSION_DIRS.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let data_root = allowed_data_root().map_err(std::io::Error::other)?;
+    remove_session_dir_in(&data_root, session_id)
+}
+
+/// Whether `id` is a session id in canonical UUID form (lowercase, hyphenated),
+/// so the directory name and the id are the same string.
+fn is_session_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id)
+}
+
+/// The global data root with a caller-safe error; the detail (which names the
+/// environment variable and the path) is only logged.
+fn data_root() -> Result<PathBuf, String> {
+    allowed_data_root().map_err(|e| {
+        tracing::warn!(error = %e, "the data root cannot be resolved");
+        "the server's data directory is not available".to_string()
+    })
+}
+
+/// The root paths resolve against: `data_root` when session directories are
+/// off, else the scope's session directory; refused when they are on and no
+/// scope is active.
+fn active_root_for(
+    data_root: &Path,
+    enabled: bool,
+    scope: Option<&str>,
+) -> Result<PathBuf, String> {
+    if !enabled {
+        return Ok(data_root.to_path_buf());
+    }
+    match scope {
+        None => Err(
+            "file access needs a session; this server keeps each session's files separate"
+                .to_string(),
+        ),
+        Some(id) => session_dir_in(data_root, id),
+    }
+}
+
+/// `<data_root>/sessions/<id>`, created on first use with mode `0700` (its
+/// parent too). The first call in a process first removes stale session
+/// directories left by an earlier process.
+fn session_dir_in(data_root: &Path, id: &str) -> Result<PathBuf, String> {
+    if !is_session_id(id) {
+        return Err("this session needs a session id in UUID form to use files".to_string());
+    }
+    PURGE.call_once(|| {
+        purge_stale_session_dirs_in(data_root);
+    });
+    let sessions = data_root.join(SESSIONS_DIR);
+    let dir = sessions.join(id);
+    let cannot_prepare = |what: &Path, detail: &dyn std::fmt::Display| {
+        tracing::warn!(path = %what.display(), error = %detail, "cannot prepare a session directory");
+        "cannot prepare this session's data directory".to_string()
+    };
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&dir).map_err(|e| cannot_prepare(&dir, &e))?;
+    for d in [&sessions, &dir] {
+        let meta = fs::symlink_metadata(d).map_err(|e| cannot_prepare(d, &e))?;
+        if !meta.is_dir() {
+            return Err(cannot_prepare(d, &"not a real directory"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.permissions().mode() & 0o777 != 0o700 {
+                fs::set_permissions(d, fs::Permissions::from_mode(0o700))
+                    .map_err(|e| cannot_prepare(d, &e))?;
+            }
+        }
+    }
+    Ok(dir)
+}
+
+/// Remove every UUID-named entry under `<data_root>/sessions/` (directories
+/// recursively, without following links); other names are left alone.
+/// Returns the number of entries removed.
+fn purge_stale_session_dirs_in(data_root: &Path) -> usize {
+    let sessions = data_root.join(SESSIONS_DIR);
+    if !fs::symlink_metadata(&sessions).is_ok_and(|m| m.is_dir()) {
+        return 0;
+    }
+    let Ok(entries) = fs::read_dir(&sessions) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let is_uuid = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| uuid::Uuid::parse_str(n).is_ok());
+        if !is_uuid {
+            continue;
+        }
+        let path = entry.path();
+        let result = match fs::symlink_metadata(&path) {
+            Ok(m) if m.is_dir() => fs::remove_dir_all(&path),
+            Ok(_) => fs::remove_file(&path),
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cannot remove a stale session directory")
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "removed stale session directories");
+    }
+    removed
+}
+
+/// Remove `<data_root>/sessions/<id>` (see [`remove_session_dir`]).
+fn remove_session_dir_in(data_root: &Path, id: &str) -> std::io::Result<()> {
+    if !is_session_id(id) {
+        return Ok(());
+    }
+    let sessions = data_root.join(SESSIONS_DIR);
+    if !fs::symlink_metadata(&sessions).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
+    let dir = sessions.join(id);
+    let result = match fs::symlink_metadata(&dir) {
+        Ok(m) if m.is_dir() => fs::remove_dir_all(&dir),
+        Ok(_) => fs::remove_file(&dir),
+        Err(e) => Err(e),
+    };
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// The session storage quota for writes under `root`: `Some` only while a
+/// session scope is active and the limits set `session_disk_bytes`.
+fn current_quota(root: &Path) -> Option<(PathBuf, u64)> {
+    if !SESSION_DIRS.load(Ordering::SeqCst) || current_session_scope().is_none() {
+        return None;
+    }
+    crate::tools::limits::current()
+        .session_disk_bytes
+        .map(|limit| (root.to_path_buf(), limit))
 }
 
 #[cfg(test)]
@@ -560,5 +778,113 @@ mod tests {
         assert!(shown.len() <= 220);
         // char-boundary truncation, no panic
         assert!(shown_input(&"é".repeat(300)).chars().count() <= 201);
+    }
+
+    const A: &str = "4b0f5a8e-1c2d-4e3f-9a8b-7c6d5e4f3a2b";
+
+    #[test]
+    fn active_root_is_global_when_off_and_session_scoped_when_on() {
+        let (_t, data) = tmp_root();
+        assert_eq!(active_root_for(&data, false, None).unwrap(), data);
+        // switch off: scope ignored
+        assert_eq!(active_root_for(&data, false, Some(A)).unwrap(), data);
+        let dir = active_root_for(&data, true, Some(A)).unwrap();
+        assert_eq!(dir, data.join("sessions").join(A));
+        assert!(dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(data.join("sessions"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        // fail closed
+        let err = active_root_for(&data, true, None).unwrap_err();
+        assert!(err.contains("needs a session"), "{err}");
+        for bad in ["../etc", "abc", "", "4b0f5a8e/../x"] {
+            assert!(active_root_for(&data, true, Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn purge_removes_only_uuid_named_entries() {
+        let (_t, data) = tmp_root();
+        let stale = data.join("sessions").join(A);
+        fs::create_dir_all(&stale).unwrap();
+        fs::write(stale.join("old.csv"), "x").unwrap();
+        fs::create_dir_all(data.join("sessions").join("notes")).unwrap();
+        assert_eq!(purge_stale_session_dirs_in(&data), 1);
+        assert!(!stale.exists());
+        assert!(data.join("sessions").join("notes").exists());
+    }
+
+    #[test]
+    fn remove_session_dir_in_is_idempotent_and_ignores_non_uuids() {
+        let (_t, data) = tmp_root();
+        let dir = data.join("sessions").join(A);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.csv"), "x").unwrap();
+        remove_session_dir_in(&data, A).unwrap();
+        assert!(!dir.exists());
+        // missing: Ok
+        remove_session_dir_in(&data, A).unwrap();
+        fs::create_dir_all(data.join("keep")).unwrap();
+        // not a UUID: no-op
+        remove_session_dir_in(&data, "../keep").unwrap();
+        assert!(data.join("keep").exists());
+    }
+
+    #[test]
+    fn session_quota_refuses_new_files_and_oversized_writes() {
+        let (_t, dir) = tmp_root();
+        fs::write(dir.join("a.csv"), vec![b'x'; 3_000]).unwrap();
+        let err = resolve_for_write_in(&dir, "new.csv", Some(2_048)).unwrap_err();
+        assert!(err.contains("storage limit"), "{err}");
+        // overwrite passes the pre-check
+        assert!(resolve_for_write_in(&dir, "a.csv", Some(2_048)).is_ok());
+        let target = dir.join("big.csv");
+        let err = write_atomically_in(&target, Some((&dir, 4_096)), |tmp| {
+            fs::write(tmp, vec![b'y'; 5_000]).map_err(|e| e.to_string())
+        })
+        .unwrap_err();
+        assert!(err.contains("storage limit"), "{err}");
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "temp file left behind"
+        );
+        // replacing a.csv (3,000) by 1,000 bytes is allowed even though 3,000 + 1,000 > 3,500
+        write_atomically_in(&dir.join("a.csv"), Some((&dir, 3_500)), |tmp| {
+            fs::write(tmp, vec![b'z'; 1_000]).map_err(|e| e.to_string())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn scope_guard_is_thread_local_nested_and_restored() {
+        assert_eq!(current_session_scope(), None);
+        {
+            let _a = scope_guard(A);
+            assert_eq!(current_session_scope().as_deref(), Some(A));
+            {
+                let _b = scope_guard("b");
+                assert_eq!(current_session_scope().as_deref(), Some("b"));
+            }
+            assert_eq!(current_session_scope().as_deref(), Some(A));
+            std::thread::spawn(|| assert_eq!(current_session_scope(), None))
+                .join()
+                .unwrap();
+        }
+        assert_eq!(current_session_scope(), None);
     }
 }
