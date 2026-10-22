@@ -732,7 +732,68 @@ project memory).
 
 ## Release and redeploy
 
-The release steps follow in the next revision of this guide.
+These are the maintainer's steps for shipping a new backend to the hosted demo.
+Nothing here runs automatically except the two workflows named in steps 0 and
+2.
+
+0. **Order.** Merging to `main` redeploys the web app automatically (when the
+   merge touches the paths listed in the frontend section). The current web app
+   sends `X-P2A-Session-Id` on the conversation routes and an older backend
+   ignores the header, so the web app can go first. The reverse is not true: a
+   new backend answers 400 to a conversation-detail request that names no
+   session, which an older web app sends. Release the backend soon after the
+   merge, and do not deploy a new backend behind an old web app.
+1. **Version.** Choose `X.Y.Z`; for 0.x releases a minor bump (for example
+   `0.2.0`) marks changed HTTP behaviour, but the choice is yours. Edit
+   `[workspace.package] version` in `Cargo.toml`, then refresh the lockfile:
+
+   ```bash
+   cargo update --workspace
+   git diff --stat Cargo.lock      # only the five p2a-* entries may change
+   git commit -am "chore: bump workspace version to X.Y.Z"
+   ```
+2. **Tag.** The tag push is what builds and publishes the backend image (and the
+   desktop bundles, `.github/workflows/desktop-bundle.yml`):
+
+   ```bash
+   git tag -a vX.Y.Z -m "vX.Y.Z"
+   git push origin main vX.Y.Z
+   ```
+
+   `.github/workflows/backend-image.yml` then publishes `X.Y.Z`, `vX.Y.Z` and
+   `sha-<short>` to GHCR. Do not run that workflow by `workflow_dispatch` on
+   `main` for a release: a dispatch on `main` publishes only `latest` and a sha
+   tag.
+3. **Confirm the image exists.** The package is public, so an anonymous token
+   is enough:
+
+   ```bash
+   TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:umatter/prompt2analytics/backend:pull" | jq -r .token)
+   curl -s -H "Authorization: Bearer $TOKEN" https://ghcr.io/v2/umatter/prompt2analytics/backend/tags/list | jq .tags
+   ```
+
+   The list must contain `X.Y.Z`.
+4. **Re-pin.** Set `[build].image` in `deploy/fly.toml` to
+   `ghcr.io/umatter/prompt2analytics/backend:X.Y.Z` and commit
+   `chore(deploy): pin backend image to X.Y.Z`.
+5. **Validate and deploy.**
+
+   ```bash
+   fly config validate --strict -c deploy/fly.toml
+   fly deploy -c deploy/fly.toml
+   ```
+
+   A deploy restarts the machine and discards every in-memory session, so pick
+   a quiet time.
+6. **Verify**, with read-only requests:
+   - `curl -s https://p2a-api.qamelab.org/health | jq '{status, version, governor}'`
+     shows `X.Y.Z` and a `governor` object;
+   - `GET /api/sessions` answers 405, `GET /api/files` 404 and `GET /ws` 404;
+   - one chat in the web app works, and its conversation list reloads.
+7. **Roll back** by re-pinning the previous tag and running `fly deploy` again.
+8. **Dependency checks.** The Security audit workflow runs weekly and on every
+   change to `Cargo.lock`, any `Cargo.toml` or `audit.yml`. "Dependabot security
+   updates" is a repository setting that only the owner can turn on.
 
 ## Fly.io quick reference
 
