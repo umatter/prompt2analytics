@@ -55,22 +55,26 @@ pub enum DatabaseError {
 /// and `SHOW`. Anything else — `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`,
 /// `CREATE`, `ATTACH`, `COPY`, `INSTALL`, `LOAD`, … — is rejected.
 ///
-/// This is a keyword-level filter, not a full SQL parser. It strips SQL block
-/// comments (`/* ... */`) and line comments (`-- ...`) from the leading whitespace
-/// before inspecting the first statement keyword.
+/// This is a keyword-level filter, not a full SQL parser. The first keyword is
+/// found with the statement lexer of [`ensure_single_statement`], which skips
+/// comments as DuckDB does (nested `/* */`, `--` up to an LF or CR), so a
+/// comment cannot hide the keyword the engine parses.
 ///
-/// It is defence in depth only. The enforcement is the engine configuration of
-/// every query connection (DuckDB: external access off, extensions off, locked
-/// configuration, read-only files; SQLite: read-only, `query_only`, no ATTACH,
-/// schema PRAGMAs only) together with [`ensure_single_statement`].
+/// For SQLite it is defence in depth only: the enforcement is the engine
+/// configuration (read-only, `query_only`, no ATTACH, schema PRAGMAs only)
+/// together with [`ensure_single_statement`]. The DuckDB connections lock the
+/// engine too (external access off, extensions off, locked configuration,
+/// read-only files), but the file-query connection can write the one file it
+/// may read, so for DuckDB this check and the further lexical checks of
+/// `validate_duckdb_query` are what keep that file read-only.
 pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
     const ALLOWED: &[&str] = &["select", "with", "explain", "pragma", "describe", "show"];
 
-    let first_token = first_keyword(query);
-
-    if first_token.is_empty() {
-        return Err(DatabaseError::Forbidden("empty SQL statement".to_string()));
-    }
+    let first_token = match SqlLexer::new(query).next_token()? {
+        Some((_, SqlToken::Word(w))) => w.to_ascii_lowercase(),
+        Some(_) => String::new(),
+        None => return Err(DatabaseError::Forbidden("empty SQL statement".to_string())),
+    };
     if !ALLOWED.contains(&first_token.as_str()) {
         return Err(DatabaseError::Forbidden(format!(
             "statement starting with `{}` is not allowed; only read-only queries \
@@ -81,14 +85,50 @@ pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
     Ok(())
 }
 
-/// The first keyword of `query` after leading comments, lowercased (empty if
-/// the statement does not start with a word).
+/// [`validate_read_only_query`] plus the checks a DuckDB statement needs. The
+/// file-query connection may write the one file it may read (DuckDB's
+/// `allowed_paths` grants both), so the statement must not be able to write:
+/// `EXPLAIN ANALYZE` (also spelled `ANALYSE`, and the parenthesised option
+/// form) executes the statement it explains, and a `COPY` keyword anywhere
+/// outside strings, quoted identifiers and comments is refused as well.
+fn validate_duckdb_query(body: &str) -> Result<(), DatabaseError> {
+    validate_read_only_query(body)?;
+    let mut lexer = SqlLexer::new(body);
+    let mut after_explain = false;
+    while let Some((_, token)) = lexer.next_token()? {
+        if after_explain
+            && match token {
+                SqlToken::Word(w) => {
+                    w.eq_ignore_ascii_case("analyze") || w.eq_ignore_ascii_case("analyse")
+                }
+                SqlToken::Byte(b) => b == b'(',
+                SqlToken::Quoted => false,
+            }
+        {
+            return Err(DatabaseError::Forbidden(
+                "EXPLAIN ANALYZE (or EXPLAIN with options) is not allowed: it executes the \
+                 statement it explains; use plain EXPLAIN"
+                    .to_string(),
+            ));
+        }
+        after_explain = matches!(token, SqlToken::Word(w) if w.eq_ignore_ascii_case("explain"));
+        if matches!(token, SqlToken::Word(w) if w.eq_ignore_ascii_case("copy")) {
+            return Err(DatabaseError::Forbidden(
+                "COPY is not allowed in a read-only query (quote the name if it is a column)"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The first keyword of `query`, lowercased: its first code token if that is
+/// a word, otherwise (or for text the lexer refuses) the empty string.
 fn first_keyword(query: &str) -> String {
-    strip_leading_comments(query)
-        .chars()
-        .take_while(|c| c.is_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase()
+    match SqlLexer::new(query).next_token() {
+        Ok(Some((_, SqlToken::Word(w)))) => w.to_ascii_lowercase(),
+        _ => String::new(),
+    }
 }
 
 /// Refuse any input that is not exactly one SQL statement.
@@ -125,80 +165,19 @@ fn single_statement_body(query: &str) -> Result<&str, DatabaseError> {
     }
     let unterminated = || DatabaseError::Forbidden(UNTERMINATED.to_string());
 
-    let n = bytes.len();
-    let mut i = 0;
+    let mut lexer = SqlLexer::new(query);
     let mut has_code = false;
-    let mut terminator = None;
-    while i < n {
-        let b = bytes[i];
-        let next = bytes.get(i + 1).copied();
-        match b {
-            b'\'' => {
-                let after_e = i >= 1 && matches!(bytes[i - 1], b'E' | b'e');
-                // DuckDB's `realfail1` rule gives the trailing E/e back after a
-                // numeric literal, so `1E'..'` and `1.E'..'` lex there as a
-                // number followed by an escape string. The byte before the E is
-                // then a digit or `.`, and the quote still starts an escape
-                // string whose `\'` the engine would honour. The lexer cannot
-                // tell that apart from a plain string cheaply, so it fails
-                // closed (over-rejection is acceptable per the plan).
-                if after_e && i >= 2 && (bytes[i - 2].is_ascii_digit() || bytes[i - 2] == b'.') {
-                    return Err(DatabaseError::Forbidden(
-                        "a quote after a digit and `E` is ambiguous (DuckDB reads it as an \
-                         escape string); separate the number from the string"
-                            .to_string(),
-                    ));
-                }
-                // An escape string (`E'..'`) when the E/e is a standalone token,
-                // i.e. not the tail of an identifier.
-                let escape = after_e && (i < 2 || !is_ident_byte(bytes[i - 2]));
-                i = skip_string(bytes, i + 1, escape).ok_or_else(unterminated)?;
-                has_code = true;
-            }
-            b'"' => {
-                i = skip_quoted_identifier(bytes, i + 1).ok_or_else(unterminated)?;
-                has_code = true;
-            }
-            b'$' if i == 0 || !is_ident_byte(bytes[i - 1]) => {
-                match dollar_tag_len(&bytes[i..]) {
-                    Some(len) => {
-                        let tag = &bytes[i..i + len];
-                        let start = i + len;
-                        let close = bytes[start..]
-                            .windows(len)
-                            .position(|w| w == tag)
-                            .ok_or_else(unterminated)?;
-                        i = start + close + len;
-                    }
-                    None => i += 1,
-                }
-                has_code = true;
-            }
-            b'-' if next == Some(b'-') => i = skip_line_comment(bytes, i + 2),
-            b'/' if next == Some(b'*') => {
-                i = skip_block_comment(bytes, i + 2).ok_or_else(unterminated)?;
-            }
-            b';' => {
-                terminator = Some(i);
-                break;
-            }
-            b if b.is_ascii_whitespace() => i += 1,
-            _ => {
-                has_code = true;
-                i += 1;
-            }
+    let end = loop {
+        match lexer.next_token()? {
+            Some((i, SqlToken::Byte(b';'))) => break i,
+            Some(_) => has_code = true,
+            None if has_code => return Ok(query),
+            None => return Err(DatabaseError::Forbidden("empty SQL statement".to_string())),
         }
-    }
-
-    let Some(end) = terminator else {
-        return if has_code {
-            Ok(query)
-        } else {
-            Err(DatabaseError::Forbidden("empty SQL statement".to_string()))
-        };
     };
 
     // After the first top-level `;`: only blanks, `;` and terminated comments.
+    let n = bytes.len();
     let mut j = end + 1;
     while j < n {
         let b = bytes[j];
@@ -303,33 +282,112 @@ fn skip_block_comment(bytes: &[u8], mut i: usize) -> Option<usize> {
     None
 }
 
-fn strip_leading_comments(query: &str) -> &str {
-    let mut rest = query.trim_start();
-    loop {
-        if let Some(after) = rest.strip_prefix("--") {
-            // Line comment: drop through end of line, LF or CR as in DuckDB
-            // (or end of string).
-            let end = after
-                .find(['\n', '\r'])
-                .map(|i| i + 1)
-                .unwrap_or(after.len());
-            rest = after[end..].trim_start();
-            continue;
-        }
-        if let Some(after) = rest.strip_prefix("/*") {
-            // Block comment: drop through matching `*/`.
-            match after.find("*/") {
-                Some(i) => {
-                    rest = after[i + 2..].trim_start();
+/// One code token of SQL text: a word (keyword, identifier or number), a
+/// quoted item (string, escape string, quoted identifier, dollar quote), or
+/// any other single byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlToken<'a> {
+    Word(&'a str),
+    Quoted,
+    Byte(u8),
+}
+
+/// Splits SQL text into [`SqlToken`]s with DuckDB's lexical rules, skipping
+/// whitespace and comments (`--` up to an LF or CR, nested `/* */`). Every
+/// check that looks at the code of a query goes through it, so a comment hides
+/// the same text from the checks as from the engine.
+struct SqlLexer<'a> {
+    query: &'a str,
+    i: usize,
+}
+
+impl<'a> SqlLexer<'a> {
+    fn new(query: &'a str) -> Self {
+        Self { query, i: 0 }
+    }
+
+    /// The next code token and the byte offset it starts at, or `None` at the
+    /// end of the text. Unterminated strings, quoted identifiers and comments
+    /// are refused, and so is a quote after a digit and `E` (see below).
+    fn next_token(&mut self) -> Result<Option<(usize, SqlToken<'a>)>, DatabaseError> {
+        let bytes = self.query.as_bytes();
+        let unterminated = || DatabaseError::Forbidden(UNTERMINATED.to_string());
+        while self.i < bytes.len() {
+            let i = self.i;
+            let b = bytes[i];
+            let next = bytes.get(i + 1).copied();
+            let token = match b {
+                b'-' if next == Some(b'-') => {
+                    self.i = skip_line_comment(bytes, i + 2);
                     continue;
                 }
-                None => {
-                    // Unterminated comment; let the SQL parser report it.
-                    return rest;
+                b'/' if next == Some(b'*') => {
+                    self.i = skip_block_comment(bytes, i + 2).ok_or_else(unterminated)?;
+                    continue;
                 }
-            }
+                b if b.is_ascii_whitespace() => {
+                    self.i += 1;
+                    continue;
+                }
+                b'\'' => {
+                    let after_e = i >= 1 && matches!(bytes[i - 1], b'E' | b'e');
+                    // DuckDB's `realfail1` rule gives the trailing E/e back after a
+                    // numeric literal, so `1E'..'` and `1.E'..'` lex there as a
+                    // number followed by an escape string. The byte before the E is
+                    // then a digit or `.`, and the quote still starts an escape
+                    // string whose `\'` the engine would honour. The lexer cannot
+                    // tell that apart from a plain string cheaply, so it fails
+                    // closed (over-rejection is acceptable per the plan).
+                    if after_e && i >= 2 && (bytes[i - 2].is_ascii_digit() || bytes[i - 2] == b'.')
+                    {
+                        return Err(DatabaseError::Forbidden(
+                            "a quote after a digit and `E` is ambiguous (DuckDB reads it as an \
+                             escape string); separate the number from the string"
+                                .to_string(),
+                        ));
+                    }
+                    // An escape string (`E'..'`) when the E/e is a standalone token,
+                    // i.e. not the tail of an identifier.
+                    let escape = after_e && (i < 2 || !is_ident_byte(bytes[i - 2]));
+                    self.i = skip_string(bytes, i + 1, escape).ok_or_else(unterminated)?;
+                    SqlToken::Quoted
+                }
+                b'"' => {
+                    self.i = skip_quoted_identifier(bytes, i + 1).ok_or_else(unterminated)?;
+                    SqlToken::Quoted
+                }
+                b'$' if i == 0 || !is_ident_byte(bytes[i - 1]) => match dollar_tag_len(&bytes[i..])
+                {
+                    Some(len) => {
+                        let tag = &bytes[i..i + len];
+                        let start = i + len;
+                        let close = bytes[start..]
+                            .windows(len)
+                            .position(|w| w == tag)
+                            .ok_or_else(unterminated)?;
+                        self.i = start + close + len;
+                        SqlToken::Quoted
+                    }
+                    None => {
+                        self.i += 1;
+                        SqlToken::Byte(b'$')
+                    }
+                },
+                b if is_ident_byte(b) => {
+                    // Every non-ASCII byte is an identifier byte, so a word
+                    // never starts or ends inside a UTF-8 sequence.
+                    let len = bytes[i..].iter().take_while(|&&c| is_ident_byte(c)).count();
+                    self.i = i + len;
+                    SqlToken::Word(&self.query[i..i + len])
+                }
+                _ => {
+                    self.i += 1;
+                    SqlToken::Byte(b)
+                }
+            };
+            return Ok(Some((i, token)));
         }
-        return rest;
+        Ok(None)
     }
 }
 
@@ -1024,6 +1082,12 @@ fn quoted_file_literal(file: &Path) -> Result<String, DatabaseError> {
 /// else: `allowed_paths` names the file, then external access is disabled and
 /// the configuration locked, so ATTACH, COPY and the file readers refuse every
 /// other path.
+///
+/// The engine leaves `file` itself writable: `allowed_paths` grants write
+/// access as well as read. What keeps it read-only are the lexical checks run
+/// before the statement reaches this connection ([`ensure_single_statement`],
+/// [`validate_read_only_query`] and `validate_duckdb_query`: one statement,
+/// a read-only first keyword, no `EXPLAIN ANALYZE`, no `COPY`).
 fn open_file_query_connection(
     file: &Path,
     opts: &QueryOptions,
@@ -1060,7 +1124,7 @@ pub fn query_duckdb_with(
 ) -> Result<QueryOutcome, DatabaseError> {
     checkpoint()?;
     let body = single_statement_body(query)?;
-    validate_read_only_query(body)?;
+    validate_duckdb_query(body)?;
     let path = db_path.as_ref();
     let path_str = path.to_string_lossy();
 
@@ -1151,7 +1215,7 @@ pub fn query_file_with_duckdb_with(
     let literal = quoted_file_literal(file)?;
     let full_query = query.replace("{file}", &literal);
     let body = single_statement_body(&full_query)?;
-    validate_read_only_query(body)?;
+    validate_duckdb_query(body)?;
 
     if !file.exists() {
         return Err(DatabaseError::FileNotFound(file.display().to_string()));
@@ -1558,6 +1622,52 @@ mod tests {
         let err = query_file_with_duckdb_with(&csv, q, &rows(10)).unwrap_err();
         assert!(matches!(err, DatabaseError::Forbidden(_)), "{err}");
         assert_eq!(std::fs::read(&csv).unwrap(), original);
+    }
+
+    #[test]
+    fn query_file_keeps_the_allowed_file_read_only() {
+        // The allowed file stays writable by the engine (Fact 5). The keyword
+        // check must see through nested block comments as DuckDB does, and
+        // EXPLAIN ANALYZE executes the statement it explains. Both with and
+        // without a row budget (only SELECT/WITH are wrapped in a LIMIT).
+        let write = "COPY (SELECT 9 AS a) TO {file} (HEADER false, USE_TMP_FILE false)";
+        let queries = [
+            format!("/* /* */ SELECT */ {write}"),
+            format!("/* /* */ SHOW */ {write}"),
+            format!("EXPLAIN ANALYZE {write}"),
+            format!("EXPLAIN ANALYSE {write}"),
+            format!("EXPLAIN (ANALYZE) {write}"),
+            format!("EXPLAIN /* x */ ANALYZE {write}"),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let original = b"a,b\n1,2\n3,4\n";
+        let csv = dir.path().join("in.csv");
+        for opts in [QueryOptions::default(), rows(10)] {
+            for q in &queries {
+                std::fs::write(&csv, original).unwrap();
+                let err = query_file_with_duckdb_with(&csv, q, &opts).unwrap_err();
+                assert!(matches!(err, DatabaseError::Forbidden(_)), "{q}: {err}");
+                assert_eq!(std::fs::read(&csv).unwrap(), original, "{q}");
+            }
+        }
+        // Plain EXPLAIN and a quoted `copy` are still read-only queries.
+        assert!(query_file_with_duckdb(&csv, "EXPLAIN SELECT * FROM {file}").is_ok());
+        let r = query_file_with_duckdb(&csv, "SELECT 'copy' AS \"copy\" FROM {file}").unwrap();
+        assert_eq!(r.rows, 2);
+    }
+
+    #[test]
+    fn duckdb_refuses_explain_analyze_and_copy() {
+        for q in [
+            "EXPLAIN ANALYZE SELECT 1",
+            "explain /* a */ analyse SELECT 1",
+            "EXPLAIN (FORMAT json) SELECT 1",
+            "SELECT 1 AS copy",
+        ] {
+            let err = query_duckdb(":memory:", q).unwrap_err();
+            assert!(matches!(err, DatabaseError::Forbidden(_)), "{q}: {err}");
+        }
+        assert!(query_duckdb(":memory:", "EXPLAIN SELECT 1").is_ok());
     }
 
     // ------------------------------------------------------------------
@@ -2155,6 +2265,13 @@ mod tests {
         assert!(validate_read_only_query("-- a comment\rSELECT 1").is_ok());
         assert!(validate_read_only_query("-- hide\rDROP TABLE t").is_err());
         assert_eq!(first_keyword("-- c\rshow tables"), "show");
+        // block comments nest, as in DuckDB's scanner
+        assert_eq!(first_keyword("/* a /* b */ c */ show tables"), "show");
+        assert!(validate_read_only_query("/* /* */ SELECT */ DROP TABLE t").is_err());
+        assert!(matches!(
+            bounded_duckdb_sql("/* /* */ x */ SELECT 1", &rows(10)),
+            Cow::Owned(_)
+        ));
     }
 
     #[test]
