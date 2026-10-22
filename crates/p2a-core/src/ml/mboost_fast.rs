@@ -144,7 +144,10 @@ impl std::fmt::Display for FastMboostResult {
     }
 }
 
-/// Train a fast MBoost model
+/// Train a fast MBoost model.
+///
+/// Refuses (`InvalidSpecification`) fewer than 2 rows, a design without
+/// predictor columns, and non-finite values in `x` or `y`.
 pub fn fast_mboost(
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
@@ -168,6 +171,18 @@ pub fn fast_mboost(
     if p == 0 {
         return Err(EconError::InvalidSpecification {
             message: "x must have at least one predictor column".to_string(),
+        });
+    }
+    // NaN would not panic (the sorts use total_cmp) but would boost into NaN
+    // predictions; refuse it as mboost does
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+    if let Some((i, v)) = y.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("y must contain only finite values (row {i} is {v})"),
         });
     }
 
@@ -427,7 +442,10 @@ fn fit_stump_parallel(
             indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
 
             // Find best split point in one sweep: minimising the RSS of a
-            // split is maximising left_sum^2 / left_n + right_sum^2 / right_n
+            // split is maximising left_sum^2 / left_n + right_sum^2 / right_n.
+            // That criterion is accumulated in sort order, so the sweep picks
+            // the quadratic search's split except where two candidates'
+            // criteria agree to within floating-point rounding
             let mut left_sum = 0.0;
             let mut left_count = 0;
             let total_sum: f64 = residuals.iter().sum();
@@ -467,8 +485,9 @@ fn fit_stump_parallel(
                 }
             }
 
-            // RSS of the chosen split, summed exactly as the full search did,
-            // so the cross-feature comparison below sees the same values
+            // RSS of the chosen split, recomputed exactly as the full search
+            // summed it, so for the same split the cross-feature comparison
+            // below sees the same values
             let best_rss = match best_pos {
                 Some(i) => {
                     let mut rss = 0.0;
@@ -812,6 +831,18 @@ mod tests {
             fast_mboost(empty.view(), y.view(), &stump),
             Err(EconError::InvalidSpecification { .. })
         ));
+        // Non-finite data is refused, not boosted into NaN predictions
+        let mut bad_x = x.clone();
+        bad_x[[7, 2]] = f64::NAN;
+        let mut bad_y = y.clone();
+        bad_y[11] = f64::INFINITY;
+        for (xv, yv) in [(bad_x.view(), y.view()), (x.view(), bad_y.view())] {
+            let e = fast_mboost(xv, yv, &stump).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("finite")),
+                "{e:?}"
+            );
+        }
     }
 
     /// Golden (characterization) test: captured on the code before the
