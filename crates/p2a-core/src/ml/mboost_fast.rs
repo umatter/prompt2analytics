@@ -14,6 +14,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
+use crate::resource::{checkpoint, try_with_capacity};
 
 /// Fast MBoost configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +160,16 @@ pub fn fast_mboost(
             context: "X and y must have same number of rows".to_string(),
         });
     }
+    if n < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must have at least 2 rows (got {n})"),
+        });
+    }
+    if p == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "x must have at least one predictor column".to_string(),
+        });
+    }
 
     // Initialize offset and predictions
     let offset = compute_initial_offset(y.as_slice().unwrap(), config.family);
@@ -178,12 +189,14 @@ pub fn fast_mboost(
     let mut accumulated_coefs = vec![0.0; p];
     let mut feature_selection_count = vec![0usize; p];
 
-    let mut learners = Vec::with_capacity(config.m_stop);
-    let mut risk = Vec::with_capacity(config.m_stop);
+    let mut learners = try_with_capacity(config.m_stop, "fast mboost learners")?;
+    let mut risk = try_with_capacity(config.m_stop, "fast mboost risk path")?;
 
     let y_slice = y.as_slice().unwrap();
 
     for m in 0..config.m_stop {
+        checkpoint()?;
+
         // Compute negative gradient (pseudo-residuals)
         let residuals = compute_negative_gradient(&predictions, y_slice, config.family);
 
@@ -413,12 +426,14 @@ fn fit_stump_parallel(
                 col.iter().enumerate().map(|(i, &v)| (i, v)).collect();
             indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
 
-            // Find best split point
+            // Find best split point in one sweep: minimising the RSS of a
+            // split is maximising left_sum^2 / left_n + right_sum^2 / right_n
             let mut left_sum = 0.0;
             let mut left_count = 0;
             let total_sum: f64 = residuals.iter().sum();
 
-            let mut best_rss = f64::INFINITY;
+            let mut best_pos: Option<usize> = None;
+            let mut best_gain = f64::NEG_INFINITY;
             let mut best_threshold = indexed[0].1;
             let mut best_left_val = 0.0;
             let mut best_right_val = total_sum / n as f64;
@@ -440,27 +455,35 @@ fn fit_stump_parallel(
                     continue;
                 }
 
-                let left_mean = left_sum / left_count as f64;
-                let right_mean = right_sum / right_count as f64;
+                let gain = left_sum * left_sum / left_count as f64
+                    + right_sum * right_sum / right_count as f64;
 
-                // Compute RSS
-                let mut rss = 0.0;
-                for k in 0..=i {
-                    let resid = residuals[indexed[k].0] - left_mean;
-                    rss += resid * resid;
-                }
-                for k in i + 1..n {
-                    let resid = residuals[indexed[k].0] - right_mean;
-                    rss += resid * resid;
-                }
-
-                if rss < best_rss {
-                    best_rss = rss;
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_pos = Some(i);
                     best_threshold = (val + indexed[i + 1].1) / 2.0;
-                    best_left_val = left_mean;
-                    best_right_val = right_mean;
+                    best_left_val = left_sum / left_count as f64;
+                    best_right_val = right_sum / right_count as f64;
                 }
             }
+
+            // RSS of the chosen split, summed exactly as the full search did,
+            // so the cross-feature comparison below sees the same values
+            let best_rss = match best_pos {
+                Some(i) => {
+                    let mut rss = 0.0;
+                    for k in 0..=i {
+                        let resid = residuals[indexed[k].0] - best_left_val;
+                        rss += resid * resid;
+                    }
+                    for k in i + 1..n {
+                        let resid = residuals[indexed[k].0] - best_right_val;
+                        rss += resid * resid;
+                    }
+                    rss
+                }
+                None => f64::INFINITY,
+            };
 
             (j, best_threshold, best_left_val, best_right_val, best_rss)
         })
@@ -749,9 +772,79 @@ fn predict_tree(nodes: &[TreeNode], x: ArrayView1<f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use rand::prelude::*;
     use rand_distr::{Distribution, Normal};
     use std::time::Instant;
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    #[test]
+    fn fast_mboost_bounds_cancellation_and_empty_design() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let x = Array2::from_shape_fn((60, 3), |_| rng.r#gen::<f64>());
+        let y: Array1<f64> =
+            x.column(0).mapv(|v| 2.0 * v) + Array1::from_shape_fn(60, |_| rng.r#gen::<f64>() * 0.1);
+        let huge = FastMboostConfig {
+            m_stop: 1usize << 44,
+            ..Default::default()
+        };
+        let r = with_alloc_ceiling(Some(1 << 30), || fast_mboost(x.view(), y.view(), &huge));
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(_))),
+            "{:?}",
+            r.err()
+        );
+        let r = with_budget(cancelled(), || {
+            fast_mboost(x.view(), y.view(), &FastMboostConfig::default())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{:?}", r.err());
+        let empty = Array2::<f64>::zeros((60, 0));
+        let stump = FastMboostConfig {
+            base_learner: FastMboostLearner::Stump,
+            ..Default::default()
+        };
+        assert!(matches!(
+            fast_mboost(empty.view(), y.view(), &stump),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+    }
+
+    /// Golden (characterization) test: captured on the code before the
+    /// stump sweep; it must pass before and after that change.
+    #[test]
+    fn fast_mboost_stump_unchanged_by_the_sweep() {
+        const GOLDEN: [u64; 3] = [
+            4608131849867851993,
+            4609280476697468353,
+            4591465190771073947,
+        ];
+        let n = 300;
+        let p = 5;
+        let mut rng = StdRng::seed_from_u64(42);
+        let normal = Normal::new(0.0, 0.3).unwrap();
+        let x = Array2::from_shape_fn((n, p), |_| rng.r#gen::<f64>());
+        let y: Array1<f64> = x.column(0).mapv(|v| 2.0 * v)
+            + x.column(1).mapv(|v| 0.5 * v)
+            + Array1::from_shape_fn(n, |_| normal.sample(&mut rng));
+        let config = FastMboostConfig {
+            m_stop: 40,
+            base_learner: FastMboostLearner::Stump,
+            ..Default::default()
+        };
+        let r = fast_mboost(x.view(), y.view(), &config).unwrap();
+        let got = [
+            r.predictions[0],
+            r.predictions[299],
+            *r.risk.last().unwrap(),
+        ];
+        let bits = got.map(f64::to_bits);
+        assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
+    }
 
     #[test]
     fn test_fast_mboost_componentwise_speed() {

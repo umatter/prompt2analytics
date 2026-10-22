@@ -59,6 +59,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
+use crate::resource::{checkpoint, try_with_capacity, try_zeros2};
 
 // ============================================================================
 // Configuration
@@ -498,7 +499,7 @@ struct BartSampler {
 
 impl BartSampler {
     /// Initialize the sampler
-    fn new(y: &Array1<f64>, x: ArrayView2<f64>, config: &BartConfig) -> Self {
+    fn new(y: &Array1<f64>, x: ArrayView2<f64>, config: &BartConfig) -> EconResult<Self> {
         let n = y.len();
         let p = x.ncols();
         let m = config.n_trees;
@@ -517,9 +518,10 @@ impl BartSampler {
 
         // Initialize all trees as stumps with mu = y_mean / m
         let initial_mu = y_mean / m as f64;
-        let trees: Vec<BartTree> = (0..m).map(|_| BartTree::new(initial_mu)).collect();
+        let mut trees = try_with_capacity::<BartTree>(m, "BART trees")?;
+        trees.extend((0..m).map(|_| BartTree::new(initial_mu)));
 
-        Self {
+        Ok(Self {
             trees,
             sigma: sigma_hat,
             sigma_mu,
@@ -528,7 +530,7 @@ impl BartSampler {
             var_counts: vec![0; p],
             n_features: p,
             y_sd,
-        }
+        })
     }
 
     /// Simple LCG random number generator
@@ -1046,6 +1048,40 @@ pub fn bart(
     bart_arrays(y.view(), x.view(), Some(feature_names), config)
 }
 
+/// Check the counts and prior parameters of a BART configuration.
+///
+/// `n_burn = 0` is valid.
+fn validate_bart_config(config: &BartConfig) -> EconResult<()> {
+    let invalid = |message: String| Err(EconError::InvalidSpecification { message });
+    if config.n_trees == 0 {
+        return invalid("n_trees must be at least 1 (got 0)".to_string());
+    }
+    if config.n_mcmc == 0 {
+        return invalid("n_mcmc must be at least 1 (got 0)".to_string());
+    }
+    for (name, v) in [("nu", config.nu), ("k", config.k)] {
+        if !(v.is_finite() && v > 0.0) {
+            return invalid(format!("{name} must be finite and positive (got {v})"));
+        }
+    }
+    for (name, v) in [("alpha", config.alpha), ("q", config.q)] {
+        if !(v.is_finite() && v > 0.0 && v < 1.0) {
+            return invalid(format!("{name} must be in (0, 1) (got {v})"));
+        }
+    }
+    if !(config.beta.is_finite() && config.beta >= 0.0) {
+        return invalid(format!(
+            "beta must be finite and non-negative (got {})",
+            config.beta
+        ));
+    }
+    let cl = config.confidence_level;
+    if !(cl.is_finite() && cl > 0.0 && cl < 1.0) {
+        return invalid(format!("confidence_level must be in (0, 1) (got {cl})"));
+    }
+    Ok(())
+}
+
 /// Run BART with array inputs.
 ///
 /// This is the core implementation, separate from data loading for flexibility.
@@ -1055,6 +1091,8 @@ pub fn bart_arrays(
     feature_names: Option<Vec<String>>,
     config: BartConfig,
 ) -> EconResult<BartResult> {
+    validate_bart_config(&config)?;
+
     let n = y.len();
     let p = x.ncols();
 
@@ -1073,15 +1111,31 @@ pub fn bart_arrays(
         });
     }
 
+    if let Some((i, v)) = y.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("y must contain only finite values (row {i} is {v})"),
+        });
+    }
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+
     // Convert to owned arrays
     let y_owned = y.to_owned();
     let x_owned = x.to_owned();
 
     // Initialize sampler
-    let mut sampler = BartSampler::new(&y_owned, x_owned.view(), &config);
+    let mut sampler = BartSampler::new(&y_owned, x_owned.view(), &config)?;
+
+    // Posterior draws, allocated before any sweep runs
+    let mut posterior_preds = try_zeros2(config.n_mcmc, n, "BART posterior draws")?;
+    let mut sigma_samples = try_with_capacity::<f64>(config.n_mcmc, "BART sigma draws")?;
 
     // Burn-in
     for _ in 0..config.n_burn {
+        checkpoint()?;
         sampler.step(&y_owned, x_owned.view());
     }
 
@@ -1089,10 +1143,8 @@ pub fn bart_arrays(
     sampler.var_counts = vec![0; p];
 
     // Collect posterior samples
-    let mut posterior_preds: Array2<f64> = Array2::zeros((config.n_mcmc, n));
-    let mut sigma_samples: Vec<f64> = Vec::with_capacity(config.n_mcmc);
-
     for iter in 0..config.n_mcmc {
+        checkpoint()?;
         sampler.step(&y_owned, x_owned.view());
 
         let pred = sampler.predict(x_owned.view());
@@ -1216,7 +1268,134 @@ pub fn bart_predict(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn tiny() -> BartConfig {
+        BartConfig {
+            n_trees: 5,
+            n_burn: 2,
+            n_mcmc: 5,
+            seed: Some(1),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bart_huge_counts_are_errors_not_aborts() {
+        let (y, x) = generate_test_data(40, 2);
+        for cfg in [
+            BartConfig {
+                n_mcmc: 1usize << 44,
+                ..tiny()
+            },
+            BartConfig {
+                n_trees: 1usize << 44,
+                ..tiny()
+            },
+        ] {
+            let r =
+                with_alloc_ceiling(Some(1 << 30), || bart_arrays(y.view(), x.view(), None, cfg));
+            assert!(
+                matches!(r, Err(EconError::ResourceLimit(_))),
+                "{:?}",
+                r.err()
+            );
+        }
+    }
+
+    #[test]
+    fn bart_validates_parameters() {
+        validate_bart_config(&tiny()).unwrap();
+        for (cfg, param) in [
+            (
+                BartConfig {
+                    n_trees: 0,
+                    ..tiny()
+                },
+                "n_trees",
+            ),
+            (
+                BartConfig {
+                    n_mcmc: 0,
+                    ..tiny()
+                },
+                "n_mcmc",
+            ), // panicked on an empty draw vector
+            (
+                BartConfig {
+                    nu: f64::NAN,
+                    ..tiny()
+                },
+                "nu",
+            ), // inverse-gamma sampler never exits
+            (BartConfig { nu: 0.0, ..tiny() }, "nu"),
+            (BartConfig { k: -1.0, ..tiny() }, "k"),
+            (
+                BartConfig {
+                    alpha: 1.5,
+                    ..tiny()
+                },
+                "alpha",
+            ),
+            (
+                BartConfig {
+                    beta: f64::INFINITY,
+                    ..tiny()
+                },
+                "beta",
+            ),
+            (BartConfig { q: 1.0, ..tiny() }, "q"),
+            (
+                BartConfig {
+                    confidence_level: 0.0,
+                    ..tiny()
+                },
+                "confidence_level",
+            ),
+        ] {
+            let e = validate_bart_config(&cfg).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.starts_with(&format!("{param} "))),
+                "{e}"
+            );
+        }
+        let (y, x) = generate_test_data(40, 2);
+        assert!(
+            bart_arrays(
+                y.view(),
+                x.view(),
+                None,
+                BartConfig {
+                    n_mcmc: 0,
+                    ..tiny()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn bart_honours_cancellation_and_rejects_non_finite_inputs() {
+        let (mut y, x) = generate_test_data(40, 2);
+        let r = with_budget(cancelled(), || {
+            bart_arrays(y.view(), x.view(), None, tiny())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{:?}", r.err());
+        y[0] = f64::NAN;
+        let r = bart_arrays(y.view(), x.view(), None, tiny());
+        assert!(
+            matches!(&r, Err(EconError::InvalidSpecification { message }) if message.contains("finite")),
+            "{:?}",
+            r.err()
+        );
+    }
 
     /// Generate synthetic data: y = sin(x1) + x2 + noise
     fn generate_test_data(n: usize, seed: u64) -> (Array1<f64>, Array2<f64>) {

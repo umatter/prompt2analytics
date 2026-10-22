@@ -74,13 +74,14 @@
 //!
 //! R equivalent: `bartCause::bartc()`
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
+use crate::resource::{checkpoint, try_with_capacity, try_zeros2};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 /// Configuration for BART-based causal inference.
@@ -415,7 +416,7 @@ impl RegressionTree {
     }
 
     fn select_features(&self, rng_state: &mut u64) -> Vec<usize> {
-        let mut selected = Vec::with_capacity(self.mtry);
+        let mut selected = Vec::with_capacity(self.mtry.min(self.n_features));
         let mut available: Vec<usize> = (0..self.n_features).collect();
 
         for _ in 0..self.mtry.min(self.n_features) {
@@ -429,6 +430,15 @@ impl RegressionTree {
         selected
     }
 
+    /// Best (feature, threshold) by pooled within-child squared error.
+    ///
+    /// Minimising the children's total sum of squares is maximising
+    /// `s_left^2 / n_left + s_right^2 / n_right` for sums of `y - m0` (any
+    /// constant `m0`; the node mean keeps the sums small). Each feature's node
+    /// values are sorted once and the thresholds (midpoints of consecutive
+    /// distinct values, ascending) are swept with a pointer that adds every
+    /// observation with `x <= threshold` to the left, the partition the
+    /// re-partitioning search this replaces used. `x` must be finite.
     fn find_best_split(
         &self,
         x: &ArrayView2<f64>,
@@ -436,55 +446,56 @@ impl RegressionTree {
         indices: &[usize],
         features: &[usize],
     ) -> Option<(usize, f64)> {
-        let mut best_mse = f64::INFINITY;
+        let mut best_score = f64::NEG_INFINITY;
         let mut best_split = None;
 
+        let n = indices.len();
+        if n < 2 {
+            return None;
+        }
+        let m0 = indices.iter().map(|&i| y[i]).sum::<f64>() / n as f64;
+        let s_total: f64 = indices.iter().map(|&i| y[i] - m0).sum();
+
+        let mut order: Vec<usize> = indices.to_vec();
         for &feature in features {
-            let mut values: Vec<f64> = indices.iter().map(|&i| x[[i, feature]]).collect();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            values.dedup();
+            order.sort_by(|&a, &b| x[[a, feature]].total_cmp(&x[[b, feature]]));
 
-            for window in values.windows(2) {
-                let threshold = (window[0] + window[1]) / 2.0;
+            let mut s_left = 0.0;
+            let mut ptr = 0usize;
+            let mut lower = x[[order[0], feature]];
 
-                let (left_indices, right_indices): (Vec<usize>, Vec<usize>) =
-                    indices.iter().partition(|&&i| x[[i, feature]] <= threshold);
+            for pos in 1..n {
+                let upper = x[[order[pos], feature]];
+                if upper == lower {
+                    continue;
+                }
+                let threshold = (lower + upper) / 2.0;
+                lower = upper;
 
-                if left_indices.len() < self.min_node_size
-                    || right_indices.len() < self.min_node_size
+                while ptr < n && x[[order[ptr], feature]] <= threshold {
+                    s_left += y[order[ptr]] - m0;
+                    ptr += 1;
+                }
+
+                let (n_left, n_right) = (ptr, n - ptr);
+                if n_left == 0
+                    || n_right == 0
+                    || n_left < self.min_node_size
+                    || n_right < self.min_node_size
                 {
                     continue;
                 }
 
-                let mse = self.compute_split_mse(y, &left_indices, &right_indices);
-                if mse < best_mse {
-                    best_mse = mse;
+                let s_right = s_total - s_left;
+                let score = s_left * s_left / n_left as f64 + s_right * s_right / n_right as f64;
+                if score > best_score {
+                    best_score = score;
                     best_split = Some((feature, threshold));
                 }
             }
         }
 
         best_split
-    }
-
-    fn compute_split_mse(&self, y: &ArrayView1<f64>, left: &[usize], right: &[usize]) -> f64 {
-        let n = (left.len() + right.len()) as f64;
-
-        let left_mean: f64 = left.iter().map(|&i| y[i]).sum::<f64>() / left.len() as f64;
-        let left_mse: f64 = left
-            .iter()
-            .map(|&i| (y[i] - left_mean).powi(2))
-            .sum::<f64>()
-            / left.len() as f64;
-
-        let right_mean: f64 = right.iter().map(|&i| y[i]).sum::<f64>() / right.len() as f64;
-        let right_mse: f64 = right
-            .iter()
-            .map(|&i| (y[i] - right_mean).powi(2))
-            .sum::<f64>()
-            / right.len() as f64;
-
-        (left.len() as f64 * left_mse + right.len() as f64 * right_mse) / n
     }
 
     fn predict_one(&self, x: &ArrayView1<f64>) -> f64 {
@@ -571,19 +582,20 @@ impl TreeEnsemble {
         sample_fraction: f64,
         mtry: Option<usize>,
         rng_state: &mut u64,
-    ) {
+    ) -> EconResult<()> {
         self.n_features = x.ncols();
         let mtry_value = mtry.unwrap_or_else(|| {
             let sqrt_p = (self.n_features as f64).sqrt().ceil() as usize;
             sqrt_p.max(1)
         });
 
-        self.trees.clear();
-        self.trees.reserve(n_trees);
+        self.trees = try_with_capacity(n_trees, "BART trees")?;
 
         let n_samples = x.nrows();
 
         for _ in 0..n_trees {
+            checkpoint()?;
+
             // Subsample
             let sample_indices = subsample(n_samples, sample_fraction, rng_state);
 
@@ -596,6 +608,7 @@ impl TreeEnsemble {
             tree.fit(x_sample.view(), y_sample.view(), rng_state);
             self.trees.push(tree);
         }
+        Ok(())
     }
 
     /// Predict for all observations.
@@ -743,6 +756,49 @@ pub fn bart_causal(
     )
 }
 
+/// Check the counts, fractions and levels of a BART-causal configuration.
+fn validate_bart_causal_config(config: &BartCausalConfig) -> EconResult<()> {
+    if config.n_trees == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_trees must be at least 1 (got 0)".to_string(),
+        });
+    }
+    if config.n_bootstrap < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "n_bootstrap must be at least 2 to estimate a standard error (got {})",
+                config.n_bootstrap
+            ),
+        });
+    }
+    let sf = config.sample_fraction;
+    if !(sf.is_finite() && sf > 0.0 && sf <= 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("sample_fraction must be in (0, 1] (got {sf})"),
+        });
+    }
+    let cl = config.confidence_level;
+    if !(cl.is_finite() && cl > 0.0 && cl < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("confidence_level must be in (0, 1) (got {cl})"),
+        });
+    }
+    Ok(())
+}
+
+/// `InvalidSpecification` naming the first non-finite value of `values`.
+fn check_finite_1d(values: &ArrayView1<f64>, name: &str) -> EconResult<()> {
+    match values.iter().position(|v| !v.is_finite()) {
+        Some(i) => Err(EconError::InvalidSpecification {
+            message: format!(
+                "{name} must contain only finite values (row {i} is {})",
+                values[i]
+            ),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Core BART causal inference algorithm using arrays.
 ///
 /// This is the main implementation, separate from data loading for testability.
@@ -753,6 +809,8 @@ pub fn bart_causal_arrays(
     covariate_names: Vec<String>,
     config: BartCausalConfig,
 ) -> EconResult<BartCausalResult> {
+    validate_bart_causal_config(&config)?;
+
     let n = x.nrows();
     let p = x.ncols();
 
@@ -772,6 +830,14 @@ pub fn bart_causal_arrays(
         });
     }
 
+    check_finite_1d(&y, "y")?;
+    check_finite_1d(&treatment, "treatment")?;
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+
     // Split data into treated and control
     let treated_indices: Vec<usize> = (0..n).filter(|&i| treatment[i] > 0.5).collect();
     let control_indices: Vec<usize> = (0..n).filter(|&i| treatment[i] <= 0.5).collect();
@@ -786,6 +852,10 @@ pub fn bart_causal_arrays(
             context: "Need at least 10 treated and 10 control units".to_string(),
         });
     }
+
+    // Bootstrap CATE draws (one row per successful replicate), allocated
+    // before any ensemble is fitted
+    let mut cate_draws = try_zeros2(config.n_bootstrap, n, "BART bootstrap CATE draws")?;
 
     // Initialize RNG
     let mut rng_state = config.seed.unwrap_or(42);
@@ -825,7 +895,7 @@ pub fn bart_causal_arrays(
         config.sample_fraction,
         config.mtry,
         &mut rng_state,
-    );
+    )?;
 
     let mut ensemble_control = TreeEnsemble::new();
     ensemble_control.fit(
@@ -837,7 +907,7 @@ pub fn bart_causal_arrays(
         config.sample_fraction,
         config.mtry,
         &mut rng_state,
-    );
+    )?;
 
     // Predict Y(1) and Y(0) for all units
     let y1_pred = ensemble_treated.predict(x_aug.view());
@@ -850,12 +920,13 @@ pub fn bart_causal_arrays(
     let ate: f64 = cate.mean().unwrap_or(0.0);
 
     // Bootstrap for uncertainty quantification
-    let (ate_bootstrap, cate_bootstrap) = bootstrap_cate(
+    let (ate_bootstrap, n_draws) = bootstrap_cate(
         y.view(),
         treatment.view(),
         x_aug.view(),
         &config,
         &mut rng_state,
+        &mut cate_draws,
     )?;
 
     // Compute ATE statistics from bootstrap
@@ -874,7 +945,7 @@ pub fn bart_causal_arrays(
     let mut cate_se_vec = Vec::with_capacity(n);
 
     for i in 0..n {
-        let obs_bootstrap: Vec<f64> = cate_bootstrap.iter().map(|b| b[i]).collect();
+        let obs_bootstrap: Vec<f64> = cate_draws.slice(s![..n_draws, i]).to_vec();
         let se = bootstrap_se(&obs_bootstrap);
         let (ci_low, ci_high) = percentile_ci(&obs_bootstrap, alpha);
         cate_lower.push(ci_low);
@@ -1098,7 +1169,7 @@ fn estimate_propensity(
     // Use a simple ensemble to predict propensity
     let mtry = (p as f64).sqrt().ceil() as usize;
     let mut ensemble = TreeEnsemble::new();
-    ensemble.fit(x, treatment, 50, 3, 5, 0.632, Some(mtry), rng_state);
+    ensemble.fit(x, treatment, 50, 3, 5, 0.632, Some(mtry), rng_state)?;
 
     let mut propensity = ensemble.predict(x);
 
@@ -1111,18 +1182,26 @@ fn estimate_propensity(
 }
 
 /// Bootstrap CATE estimation.
+///
+/// Writes the CATE draw of every successful replicate into the next row of
+/// `draws` (`n_bootstrap x n`, allocated by the caller) and returns the ATE
+/// draws together with the number of rows filled. Replicates with fewer than
+/// 5 treated or control units are skipped and leave no row.
 fn bootstrap_cate(
     y: ArrayView1<f64>,
     treatment: ArrayView1<f64>,
     x: ArrayView2<f64>,
     config: &BartCausalConfig,
     rng_state: &mut u64,
-) -> EconResult<(Vec<f64>, Vec<Array1<f64>>)> {
+    draws: &mut Array2<f64>,
+) -> EconResult<(Vec<f64>, usize)> {
     let n = x.nrows();
-    let mut ate_samples = Vec::with_capacity(config.n_bootstrap);
-    let mut cate_samples = Vec::with_capacity(config.n_bootstrap);
+    let mut ate_samples = try_with_capacity(config.n_bootstrap, "BART bootstrap ATE draws")?;
+    let mut n_filled = 0usize;
 
     for _ in 0..config.n_bootstrap {
+        checkpoint()?;
+
         // Bootstrap resample
         let indices: Vec<usize> = (0..n).map(|_| lcg_random(rng_state) % n).collect();
 
@@ -1156,7 +1235,7 @@ fn bootstrap_cate(
             config.sample_fraction,
             config.mtry,
             rng_state,
-        );
+        )?;
 
         let mut ens_c = TreeEnsemble::new();
         ens_c.fit(
@@ -1168,7 +1247,7 @@ fn bootstrap_cate(
             config.sample_fraction,
             config.mtry,
             rng_state,
-        );
+        )?;
 
         // Predict on original data (not bootstrap sample) for CATE
         let y1_pred = ens_t.predict(x);
@@ -1177,10 +1256,11 @@ fn bootstrap_cate(
 
         let ate = cate.mean().unwrap_or(0.0);
         ate_samples.push(ate);
-        cate_samples.push(cate);
+        draws.row_mut(n_filled).assign(&cate);
+        n_filled += 1;
     }
 
-    Ok((ate_samples, cate_samples))
+    Ok((ate_samples, n_filled))
 }
 
 /// Compute bootstrap standard error.
@@ -1225,7 +1305,240 @@ fn percentile_ci(samples: &[f64], alpha: f64) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn names3() -> Vec<String> {
+        vec!["x0".into(), "x1".into(), "x2".into()]
+    }
+
+    fn small() -> BartCausalConfig {
+        BartCausalConfig {
+            n_trees: 8,
+            n_bootstrap: 4,
+            max_depth: 3,
+            seed: Some(5),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bart_causal_huge_counts_are_errors_not_aborts() {
+        let (y, w, x) = generate_test_data(60, 3);
+        for cfg in [
+            BartCausalConfig {
+                n_trees: 1usize << 44,
+                ..small()
+            },
+            BartCausalConfig {
+                n_bootstrap: 1usize << 44,
+                ..small()
+            },
+        ] {
+            let r = with_alloc_ceiling(Some(1 << 30), || {
+                bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg)
+            });
+            assert!(
+                matches!(r, Err(EconError::ResourceLimit(_))),
+                "{:?}",
+                r.err()
+            );
+        }
+    }
+
+    #[test]
+    fn bart_causal_validates_parameters() {
+        let ok = small();
+        assert!(validate_bart_causal_config(&ok).is_ok());
+        for (cfg, param) in [
+            (
+                BartCausalConfig {
+                    n_trees: 0,
+                    ..ok.clone()
+                },
+                "n_trees",
+            ),
+            (
+                BartCausalConfig {
+                    n_bootstrap: 1,
+                    ..ok.clone()
+                },
+                "n_bootstrap",
+            ),
+            (
+                BartCausalConfig {
+                    sample_fraction: 1.5,
+                    ..ok.clone()
+                },
+                "sample_fraction",
+            ), // looped forever
+            (
+                BartCausalConfig {
+                    sample_fraction: 0.0,
+                    ..ok.clone()
+                },
+                "sample_fraction",
+            ),
+            (
+                BartCausalConfig {
+                    confidence_level: 1.0,
+                    ..ok.clone()
+                },
+                "confidence_level",
+            ),
+            (
+                BartCausalConfig {
+                    confidence_level: f64::NAN,
+                    ..ok.clone()
+                },
+                "confidence_level",
+            ),
+        ] {
+            let e = validate_bart_causal_config(&cfg).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.starts_with(param)),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn bart_causal_honours_cancellation_and_rejects_non_finite_inputs() {
+        let (mut y, w, x) = generate_test_data(60, 3);
+        let r = with_budget(cancelled(), || {
+            bart_causal_arrays(y.view(), w.view(), x.view(), names3(), small())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{:?}", r.err());
+        y[5] = f64::INFINITY;
+        let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), small());
+        assert!(
+            matches!(&r, Err(EconError::InvalidSpecification { message }) if message.contains("finite")),
+            "{:?}",
+            r.err()
+        );
+    }
+
+    /// Verbatim copy of `find_best_split` and `compute_split_mse` before the
+    /// sorted sweep, kept as the reference for
+    /// `regression_split_sweep_matches_naive_reference`.
+    fn naive_find_best_split(
+        min_node_size: usize,
+        x: &ArrayView2<f64>,
+        y: &ArrayView1<f64>,
+        indices: &[usize],
+        features: &[usize],
+    ) -> Option<(usize, f64)> {
+        fn compute_split_mse(y: &ArrayView1<f64>, left: &[usize], right: &[usize]) -> f64 {
+            let n = (left.len() + right.len()) as f64;
+
+            let left_mean: f64 = left.iter().map(|&i| y[i]).sum::<f64>() / left.len() as f64;
+            let left_mse: f64 = left
+                .iter()
+                .map(|&i| (y[i] - left_mean).powi(2))
+                .sum::<f64>()
+                / left.len() as f64;
+
+            let right_mean: f64 = right.iter().map(|&i| y[i]).sum::<f64>() / right.len() as f64;
+            let right_mse: f64 = right
+                .iter()
+                .map(|&i| (y[i] - right_mean).powi(2))
+                .sum::<f64>()
+                / right.len() as f64;
+
+            (left.len() as f64 * left_mse + right.len() as f64 * right_mse) / n
+        }
+
+        let mut best_mse = f64::INFINITY;
+        let mut best_split = None;
+
+        for &feature in features {
+            let mut values: Vec<f64> = indices.iter().map(|&i| x[[i, feature]]).collect();
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            values.dedup();
+
+            for window in values.windows(2) {
+                let threshold = (window[0] + window[1]) / 2.0;
+
+                let (left_indices, right_indices): (Vec<usize>, Vec<usize>) =
+                    indices.iter().partition(|&&i| x[[i, feature]] <= threshold);
+
+                if left_indices.len() < min_node_size || right_indices.len() < min_node_size {
+                    continue;
+                }
+
+                let mse = compute_split_mse(y, &left_indices, &right_indices);
+                if mse < best_mse {
+                    best_mse = mse;
+                    best_split = Some((feature, threshold));
+                }
+            }
+        }
+
+        best_split
+    }
+
+    /// Reference guard: the sorted sweep must choose the same split as the
+    /// re-partitioning search it replaced.
+    #[test]
+    fn regression_split_sweep_matches_naive_reference() {
+        let (y, _w, x) = generate_test_data(400, 77); // x on a 0.01 grid: many tied values
+        let mut s = 4321u64;
+        for min_node_size in [1usize, 5, 20] {
+            let tree = RegressionTree {
+                n_features: 3,
+                ..RegressionTree::new(4, min_node_size, 3)
+            };
+            for rep in 0..30 {
+                let mut idx: Vec<usize> = (0..400).collect();
+                for i in (1..idx.len()).rev() {
+                    let j = lcg_random(&mut s) % (i + 1);
+                    idx.swap(i, j);
+                }
+                idx.truncate(20 + lcg_random(&mut s) % 380);
+                let got = tree.find_best_split(&x.view(), &y.view(), &idx, &[0, 1, 2]);
+                let want =
+                    naive_find_best_split(min_node_size, &x.view(), &y.view(), &idx, &[0, 1, 2]);
+                assert_eq!(got, want, "min_node_size={min_node_size} rep={rep}");
+            }
+        }
+    }
+
+    /// Golden (characterization) test: captured on the code before the
+    /// sweep and the pre-allocated draw matrix; it passes before and after.
+    #[test]
+    fn bart_causal_outputs_unchanged_by_the_sweep() {
+        const GOLDEN: [u64; 5] = [
+            4611755592916943784,
+            4598325582365110606,
+            4611869894934495320,
+            4611929815967930294,
+            4611545322639029136,
+        ];
+        let (y, w, x) = generate_test_data(80, 42);
+        let cfg = BartCausalConfig {
+            n_trees: 12,
+            n_bootstrap: 6,
+            max_depth: 4,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap();
+        let got = [
+            r.ate,
+            r.ate_se,
+            r.cate[0],
+            r.cate_lower[0],
+            r.cate_upper[79],
+        ];
+        let bits = got.map(f64::to_bits);
+        assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
+    }
 
     fn generate_test_data(n: usize, seed: u64) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
         let mut rng = seed;
@@ -1452,7 +1765,9 @@ mod tests {
 
         let mut ensemble = TreeEnsemble::new();
         let mut rng = 42u64;
-        ensemble.fit(x.view(), y.view(), 10, 3, 2, 0.7, None, &mut rng);
+        ensemble
+            .fit(x.view(), y.view(), 10, 3, 2, 0.7, None, &mut rng)
+            .unwrap();
 
         let predictions = ensemble.predict(x.view());
 

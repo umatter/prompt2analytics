@@ -64,6 +64,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
+use crate::resource::{checkpoint, try_with_capacity};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 /// Configuration for causal forest estimation.
@@ -404,7 +405,7 @@ impl CausalTree {
 
     /// Select random features for splitting.
     fn select_features(&self, rng_state: &mut u64) -> Vec<usize> {
-        let mut selected = Vec::with_capacity(self.mtry);
+        let mut selected = Vec::with_capacity(self.mtry.min(self.n_features));
         let mut available: Vec<usize> = (0..self.n_features).collect();
 
         for _ in 0..self.mtry.min(self.n_features) {
@@ -421,7 +422,16 @@ impl CausalTree {
     /// Find the best split for causal effect heterogeneity.
     ///
     /// The splitting criterion maximizes the variance of treatment effects
-    /// across child nodes, following Athey & Imbens (2016).
+    /// across child nodes, following Athey & Imbens (2016): it maximises
+    /// `w_L * tau_L^2 + w_R * tau_R^2`, where `w` is the harmonic mean of the
+    /// treated and control counts of a child.
+    ///
+    /// Each feature's node values are sorted once and the candidate
+    /// thresholds (midpoints of consecutive distinct values, ascending) are
+    /// swept with running treated/control counts and sums. The left child of a
+    /// threshold is every observation with `x <= threshold`, exactly as a
+    /// partition of the node would give, so the chosen split matches the
+    /// re-partitioning search this replaces. `x` must be finite.
     fn find_best_causal_split(
         &self,
         x: &ArrayView2<f64>,
@@ -433,36 +443,74 @@ impl CausalTree {
         let mut best_criterion = f64::NEG_INFINITY;
         let mut best_split = None;
 
+        let n = indices.len();
+        if n < 2 {
+            return None;
+        }
+
+        // Node totals (treated means w > 0.5)
+        let (mut tot_nt, mut tot_nc, mut tot_st, mut tot_sc) = (0usize, 0usize, 0.0, 0.0);
+        for &i in indices {
+            if w[i] > 0.5 {
+                tot_nt += 1;
+                tot_st += y[i];
+            } else {
+                tot_nc += 1;
+                tot_sc += y[i];
+            }
+        }
+
+        let harmonic = |nt: usize, nc: usize| {
+            if nt > 0 && nc > 0 {
+                2.0 * (nt as f64) * (nc as f64) / ((nt + nc) as f64)
+            } else {
+                0.0
+            }
+        };
+
+        let mut order: Vec<usize> = indices.to_vec();
         for &feature in features {
-            // Get unique values for this feature
-            let mut values: Vec<f64> = indices.iter().map(|&i| x[[i, feature]]).collect();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            values.dedup();
+            order.sort_by(|&a, &b| x[[a, feature]].total_cmp(&x[[b, feature]]));
 
-            // Try thresholds between consecutive values
-            for window in values.windows(2) {
-                let threshold = (window[0] + window[1]) / 2.0;
+            // Left-child accumulators, advanced by a pointer into `order`
+            let (mut l_nt, mut l_nc, mut l_st, mut l_sc) = (0usize, 0usize, 0.0, 0.0);
+            let mut ptr = 0usize;
+            let mut lower = x[[order[0], feature]];
 
-                let (left_indices, right_indices): (Vec<usize>, Vec<usize>) =
-                    indices.iter().partition(|&&i| x[[i, feature]] <= threshold);
+            for pos in 1..n {
+                let upper = x[[order[pos], feature]];
+                if upper == lower {
+                    continue;
+                }
+                let threshold = (lower + upper) / 2.0;
+                lower = upper;
 
-                if left_indices.len() < self.min_node_size
-                    || right_indices.len() < self.min_node_size
-                {
+                while ptr < n && x[[order[ptr], feature]] <= threshold {
+                    let i = order[ptr];
+                    if w[i] > 0.5 {
+                        l_nt += 1;
+                        l_st += y[i];
+                    } else {
+                        l_nc += 1;
+                        l_sc += y[i];
+                    }
+                    ptr += 1;
+                }
+
+                if ptr < self.min_node_size || n - ptr < self.min_node_size {
                     continue;
                 }
 
                 // Check for treatment variation in both children
-                let (left_treated, left_control) = count_treated_control(w, &left_indices);
-                let (right_treated, right_control) = count_treated_control(w, &right_indices);
-
-                if left_treated < 2 || left_control < 2 || right_treated < 2 || right_control < 2 {
+                let (r_nt, r_nc) = (tot_nt - l_nt, tot_nc - l_nc);
+                if l_nt < 2 || l_nc < 2 || r_nt < 2 || r_nc < 2 {
                     continue;
                 }
 
-                // Compute causal split criterion: variance of treatment effect heterogeneity
-                // Athey & Imbens (2016) Eq. 4 - maximize treatment effect variance
-                let criterion = self.compute_causal_criterion(y, w, &left_indices, &right_indices);
+                let tau_left = l_st / l_nt as f64 - l_sc / l_nc as f64;
+                let tau_right = (tot_st - l_st) / r_nt as f64 - (tot_sc - l_sc) / r_nc as f64;
+                let criterion = harmonic(l_nt, l_nc) * tau_left.powi(2)
+                    + harmonic(r_nt, r_nc) * tau_right.powi(2);
 
                 if criterion > best_criterion {
                     best_criterion = criterion;
@@ -472,38 +520,6 @@ impl CausalTree {
         }
 
         best_split
-    }
-
-    /// Compute the causal splitting criterion.
-    ///
-    /// We maximize the variance of treatment effects, which is equivalent to
-    /// maximizing: n_L * tau_L^2 + n_R * tau_R^2
-    /// (weighted sum of squared treatment effects in children)
-    fn compute_causal_criterion(
-        &self,
-        y: &ArrayView1<f64>,
-        w: &ArrayView1<f64>,
-        left: &[usize],
-        right: &[usize],
-    ) -> f64 {
-        let (tau_left, _, n_t_left, n_c_left) = estimate_treatment_effect(y, w, left);
-        let (tau_right, _, n_t_right, n_c_right) = estimate_treatment_effect(y, w, right);
-
-        // Weight by effective sample size (harmonic mean of treated/control)
-        let w_left = if n_t_left > 0 && n_c_left > 0 {
-            2.0 * (n_t_left as f64) * (n_c_left as f64) / ((n_t_left + n_c_left) as f64)
-        } else {
-            0.0
-        };
-
-        let w_right = if n_t_right > 0 && n_c_right > 0 {
-            2.0 * (n_t_right as f64) * (n_c_right as f64) / ((n_t_right + n_c_right) as f64)
-        } else {
-            0.0
-        };
-
-        // Weighted variance of treatment effects
-        w_left * tau_left.powi(2) + w_right * tau_right.powi(2)
     }
 
     /// Predict treatment effect for a single observation.
@@ -805,6 +821,44 @@ pub fn causal_forest(
     )
 }
 
+/// Check the counts and fractions of a causal-forest configuration.
+///
+/// `n_trees >= 1`; `sample_fraction` finite and in (0, 1]; with honesty,
+/// `honesty_fraction` in the open interval (0, 1), as `grf` requires.
+fn validate_causal_forest_config(config: &CausalForestConfig) -> EconResult<()> {
+    if config.n_trees == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_trees must be at least 1 (got 0)".to_string(),
+        });
+    }
+    let sf = config.sample_fraction;
+    if !(sf.is_finite() && sf > 0.0 && sf <= 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("sample_fraction must be in (0, 1] (got {sf})"),
+        });
+    }
+    let hf = config.honesty_fraction;
+    if config.honesty && !(hf.is_finite() && hf > 0.0 && hf < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("honesty_fraction must be in (0, 1) when honesty is on (got {hf})"),
+        });
+    }
+    Ok(())
+}
+
+/// `InvalidSpecification` naming the first non-finite value of `values`.
+fn check_finite_1d(values: &ArrayView1<f64>, name: &str) -> EconResult<()> {
+    match values.iter().position(|v| !v.is_finite()) {
+        Some(i) => Err(EconError::InvalidSpecification {
+            message: format!(
+                "{name} must contain only finite values (row {i} is {})",
+                values[i]
+            ),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Core causal forest algorithm working with arrays.
 ///
 /// This is the main implementation, separate from data loading for testability.
@@ -815,6 +869,8 @@ pub fn causal_forest_arrays(
     covariate_names: Vec<String>,
     config: CausalForestConfig,
 ) -> EconResult<CausalForestResult> {
+    validate_causal_forest_config(&config)?;
+
     let n = x.nrows();
     let p = x.ncols();
 
@@ -833,6 +889,14 @@ pub fn causal_forest_arrays(
                 .to_string(),
         });
     }
+
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+    check_finite_1d(&y, "y")?;
+    check_finite_1d(&w, "w")?;
 
     // Count treated/control
     let (n_treated, n_control) = count_treated_control(&w, &(0..n).collect::<Vec<_>>());
@@ -854,11 +918,18 @@ pub fn causal_forest_arrays(
     });
 
     // Build forest
-    let mut trees = Vec::with_capacity(config.n_trees);
-    let mut oob_predictions: Vec<Vec<f64>> = vec![Vec::new(); n];
+    let mut trees = try_with_capacity::<CausalTree>(config.n_trees, "causal forest trees")?;
+    // Per-row prediction buffer, reused for every observation below
+    let mut preds = try_with_capacity::<f64>(config.n_trees, "causal forest per-row predictions")?;
+    // Out-of-bag statistics per observation, accumulated with Welford's algorithm
+    let mut oob_count = vec![0usize; n];
+    let mut oob_mean = vec![0.0f64; n];
+    let mut oob_m2 = vec![0.0f64; n];
     let mut feature_importance_sum = Array1::zeros(p);
 
     for _tree_idx in 0..config.n_trees {
+        checkpoint()?;
+
         // Subsample
         let (sample_indices, oob_indices) = subsample(n, config.sample_fraction, &mut rng_state);
 
@@ -909,7 +980,10 @@ pub fn causal_forest_arrays(
         // OOB predictions
         for &oob_idx in &oob_indices {
             let (pred, _) = tree.predict_one(&x.row(oob_idx));
-            oob_predictions[oob_idx].push(pred);
+            oob_count[oob_idx] += 1;
+            let delta = pred - oob_mean[oob_idx];
+            oob_mean[oob_idx] += delta / oob_count[oob_idx] as f64;
+            oob_m2[oob_idx] += delta * (pred - oob_mean[oob_idx]);
         }
 
         // Accumulate feature importance
@@ -925,7 +999,8 @@ pub fn causal_forest_arrays(
     let mut variance_estimates = Vec::with_capacity(n);
 
     for i in 0..n {
-        let mut preds = Vec::with_capacity(config.n_trees);
+        checkpoint()?;
+        preds.clear();
         for tree in &trees {
             let (pred, _) = tree.predict_one(&x.row(i));
             preds.push(pred);
@@ -941,7 +1016,7 @@ pub fn causal_forest_arrays(
     }
 
     // Compute OOB error
-    let oob_error = compute_oob_error(&oob_predictions, &y, &w);
+    let oob_error = compute_oob_error(&oob_count, &oob_m2);
 
     // Compute ATE and its standard error
     let ate: f64 = predictions.iter().sum::<f64>() / n as f64;
@@ -1009,7 +1084,10 @@ fn select_rows_view(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
 }
 
 /// Compute OOB error (MSE of treatment effect predictions).
-fn compute_oob_error(oob_preds: &[Vec<f64>], _y: &ArrayView1<f64>, _w: &ArrayView1<f64>) -> f64 {
+///
+/// `counts[i]` and `m2[i]` are observation `i`'s number of out-of-bag
+/// predictions and Welford sum of squared deviations from their mean.
+fn compute_oob_error(counts: &[usize], m2: &[f64]) -> f64 {
     // For causal forest, we can't directly compute OOB error because
     // we don't observe the true treatment effect. Instead, we use
     // a proxy based on R-loss (Nie & Wager, 2021).
@@ -1021,12 +1099,9 @@ fn compute_oob_error(oob_preds: &[Vec<f64>], _y: &ArrayView1<f64>, _w: &ArrayVie
     let mut sum_var = 0.0;
     let mut count = 0;
 
-    for preds in oob_preds.iter() {
-        if preds.len() > 1 {
-            let mean: f64 = preds.iter().sum::<f64>() / preds.len() as f64;
-            let var: f64 =
-                preds.iter().map(|&p| (p - mean).powi(2)).sum::<f64>() / (preds.len() - 1) as f64;
-            sum_var += var;
+    for (&c, &ss) in counts.iter().zip(m2) {
+        if c > 1 {
+            sum_var += ss / (c - 1) as f64;
             count += 1;
         }
     }
@@ -1100,6 +1175,7 @@ pub fn causal_forest_predict_arrays(
     let mut predictions = Vec::with_capacity(n);
 
     for i in 0..n {
+        checkpoint()?;
         let mut sum = 0.0;
         for tree in &forest.trees {
             let (pred, _) = tree.predict_one(&x.row(i));
@@ -1180,7 +1256,268 @@ pub fn run_causal_forest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn names3() -> Vec<String> {
+        vec!["x0".into(), "x1".into(), "x2".into()]
+    }
+
+    fn small_config() -> CausalForestConfig {
+        CausalForestConfig {
+            n_trees: 10,
+            max_depth: 4,
+            seed: Some(3),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn causal_forest_huge_n_trees_is_an_error_not_an_abort() {
+        let (x, y, w) = generate_test_data(60, 5);
+        let cfg = CausalForestConfig {
+            n_trees: 1usize << 44,
+            ..small_config()
+        };
+        let r = with_alloc_ceiling(Some(1 << 30), || {
+            causal_forest_arrays(x.view(), y.view(), w.view(), names3(), cfg)
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(_))),
+            "{:?}",
+            r.err()
+        );
+    }
+
+    #[test]
+    fn causal_forest_validates_counts_and_fractions() {
+        let ok = small_config();
+        assert!(validate_causal_forest_config(&ok).is_ok());
+        for (cfg, param) in [
+            (
+                CausalForestConfig {
+                    n_trees: 0,
+                    ..ok.clone()
+                },
+                "n_trees",
+            ),
+            (
+                CausalForestConfig {
+                    sample_fraction: 1.5,
+                    ..ok.clone()
+                },
+                "sample_fraction",
+            ), // looped forever
+            (
+                CausalForestConfig {
+                    sample_fraction: 0.0,
+                    ..ok.clone()
+                },
+                "sample_fraction",
+            ),
+            (
+                CausalForestConfig {
+                    sample_fraction: f64::NAN,
+                    ..ok.clone()
+                },
+                "sample_fraction",
+            ),
+            (
+                CausalForestConfig {
+                    honesty_fraction: 1.0,
+                    ..ok.clone()
+                },
+                "honesty_fraction",
+            ),
+            (
+                CausalForestConfig {
+                    honesty_fraction: 0.0,
+                    ..ok.clone()
+                },
+                "honesty_fraction",
+            ),
+        ] {
+            let e = validate_causal_forest_config(&cfg).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.starts_with(param)),
+                "{e}"
+            );
+        }
+        // honesty_fraction is irrelevant without honesty
+        let no_honesty = CausalForestConfig {
+            honesty: false,
+            honesty_fraction: 1.0,
+            ..ok.clone()
+        };
+        assert!(validate_causal_forest_config(&no_honesty).is_ok());
+        // full path: n_trees = 0 used to underflow `preds.len() - 1`
+        let (x, y, w) = generate_test_data(60, 5);
+        let zero = CausalForestConfig { n_trees: 0, ..ok };
+        assert!(causal_forest_arrays(x.view(), y.view(), w.view(), names3(), zero).is_err());
+    }
+
+    #[test]
+    fn causal_forest_honours_cancellation_and_rejects_non_finite_inputs() {
+        let (mut x, y, w) = generate_test_data(60, 5);
+        let r = with_budget(cancelled(), || {
+            causal_forest_arrays(x.view(), y.view(), w.view(), names3(), small_config())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{:?}", r.err());
+        x[[3, 1]] = f64::NAN;
+        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names3(), small_config());
+        assert!(
+            matches!(&r, Err(EconError::InvalidSpecification { message }) if message.contains("finite")),
+            "{:?}",
+            r.err()
+        );
+    }
+
+    /// Verbatim copy of the split search before the sorted sweep (with
+    /// `self.min_node_size` as an argument and the criterion inlined), kept
+    /// as the reference for `causal_split_sweep_matches_naive_reference`.
+    fn naive_find_best_causal_split(
+        min_node_size: usize,
+        x: &ArrayView2<f64>,
+        y: &ArrayView1<f64>,
+        w: &ArrayView1<f64>,
+        indices: &[usize],
+        features: &[usize],
+    ) -> Option<(usize, f64)> {
+        let mut best_criterion = f64::NEG_INFINITY;
+        let mut best_split = None;
+
+        for &feature in features {
+            // Get unique values for this feature
+            let mut values: Vec<f64> = indices.iter().map(|&i| x[[i, feature]]).collect();
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            values.dedup();
+
+            // Try thresholds between consecutive values
+            for window in values.windows(2) {
+                let threshold = (window[0] + window[1]) / 2.0;
+
+                let (left_indices, right_indices): (Vec<usize>, Vec<usize>) =
+                    indices.iter().partition(|&&i| x[[i, feature]] <= threshold);
+
+                if left_indices.len() < min_node_size || right_indices.len() < min_node_size {
+                    continue;
+                }
+
+                // Check for treatment variation in both children
+                let (left_treated, left_control) = count_treated_control(w, &left_indices);
+                let (right_treated, right_control) = count_treated_control(w, &right_indices);
+
+                if left_treated < 2 || left_control < 2 || right_treated < 2 || right_control < 2 {
+                    continue;
+                }
+
+                // compute_causal_criterion, inlined
+                let criterion = {
+                    let (tau_left, _, n_t_left, n_c_left) =
+                        estimate_treatment_effect(y, w, &left_indices);
+                    let (tau_right, _, n_t_right, n_c_right) =
+                        estimate_treatment_effect(y, w, &right_indices);
+
+                    let w_left = if n_t_left > 0 && n_c_left > 0 {
+                        2.0 * (n_t_left as f64) * (n_c_left as f64) / ((n_t_left + n_c_left) as f64)
+                    } else {
+                        0.0
+                    };
+
+                    let w_right = if n_t_right > 0 && n_c_right > 0 {
+                        2.0 * (n_t_right as f64) * (n_c_right as f64)
+                            / ((n_t_right + n_c_right) as f64)
+                    } else {
+                        0.0
+                    };
+
+                    w_left * tau_left.powi(2) + w_right * tau_right.powi(2)
+                };
+
+                if criterion > best_criterion {
+                    best_criterion = criterion;
+                    best_split = Some((feature, threshold));
+                }
+            }
+        }
+
+        best_split
+    }
+
+    /// Reference guard: the sorted sweep must choose the same split as the
+    /// re-partitioning search it replaced.
+    #[test]
+    fn causal_split_sweep_matches_naive_reference() {
+        let (x, y, w) = generate_test_data(400, 77); // x on a 0.01 grid: many tied values
+        let mut s = 1234u64;
+        for min_node_size in [1usize, 5, 20] {
+            let tree = CausalTree {
+                n_features: 3,
+                ..CausalTree::new(10, min_node_size, 3)
+            };
+            for rep in 0..30 {
+                let mut idx: Vec<usize> = (0..400).collect();
+                for i in (1..idx.len()).rev() {
+                    let j = lcg_random(&mut s) % (i + 1);
+                    idx.swap(i, j);
+                }
+                idx.truncate(20 + lcg_random(&mut s) % 380);
+                let got =
+                    tree.find_best_causal_split(&x.view(), &y.view(), &w.view(), &idx, &[0, 1, 2]);
+                let want = naive_find_best_causal_split(
+                    min_node_size,
+                    &x.view(),
+                    &y.view(),
+                    &w.view(),
+                    &idx,
+                    &[0, 1, 2],
+                );
+                assert_eq!(got, want, "min_node_size={min_node_size} rep={rep}");
+            }
+        }
+    }
+
+    /// Golden (characterization) test: captured on the code before the
+    /// sweep and the Welford OOB accumulation; it passes before and after.
+    #[test]
+    fn causal_forest_outputs_unchanged_by_the_sweep() {
+        const GOLDEN: [u64; 5] = [
+            4612786064148362328,
+            4597828295416546379,
+            4612736549338654852,
+            4612690148895398169,
+            4590552795750182621,
+        ];
+        const GOLDEN_OOB: f64 = 0.058642006360354874;
+        let (x, y, w) = generate_test_data(200, 42);
+        let cfg = CausalForestConfig {
+            n_trees: 25,
+            max_depth: 5,
+            seed: Some(42),
+            ..Default::default()
+        };
+        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names3(), cfg).unwrap();
+        let got = [
+            r.ate,
+            r.ate_se,
+            r.predictions[0],
+            r.predictions[199],
+            r.variance_estimates[0],
+        ];
+        let bits = got.map(f64::to_bits);
+        assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
+        assert!(
+            (r.oob_error - GOLDEN_OOB).abs() <= 1e-12 * GOLDEN_OOB.abs(),
+            "oob_error {:?}",
+            r.oob_error
+        );
+    }
 
     fn generate_test_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
         let mut rng = seed;
