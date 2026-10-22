@@ -53,7 +53,8 @@ use crate::errors::{EconError, EconResult};
 /// Configuration for C5.0.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct C50Config {
-    /// Number of boosting iterations (trials). Default: 1 (no boosting)
+    /// Number of boosting iterations (trials), 1 to 100 (the limit of R's C5.0).
+    /// Default: 1 (no boosting)
     pub trials: usize,
     /// Whether to extract rules from the tree. Default: false
     pub rules: bool,
@@ -99,7 +100,8 @@ pub struct C50Rule {
     pub id: usize,
     /// Conditions for the rule (feature index, operator, threshold)
     pub conditions: Vec<C50RuleCondition>,
-    /// Predicted class
+    /// Predicted class, as the original class code (an entry of
+    /// [`C50Result::class_labels`])
     pub predicted_class: usize,
     /// Confidence (proportion of training cases correctly classified)
     pub confidence: f64,
@@ -173,9 +175,11 @@ pub struct C50Node {
     pub id: usize,
     /// Number of observations
     pub n: usize,
-    /// Class distribution at this node
+    /// Class distribution at this node; entry `k` counts class
+    /// [`C50Result::class_labels`]`[k]`
     pub class_counts: Vec<usize>,
-    /// Predicted class (majority class)
+    /// Predicted class (majority class), as an index into
+    /// [`C50Result::class_labels`]
     pub predicted_class: usize,
     /// Entropy at this node
     pub entropy: f64,
@@ -216,13 +220,16 @@ pub struct C50Result {
     pub rules: Option<Vec<C50Rule>>,
     /// Variable importance (sum of gain ratios)
     pub variable_importance: Vec<f64>,
-    /// Training predictions
+    /// Training predictions, as class codes (entries of `class_labels`)
     pub predictions: Vec<usize>,
     /// Training accuracy
     pub accuracy: f64,
     /// Number of classes
     pub n_classes: usize,
-    /// Class labels (as integers)
+    /// The distinct class codes of the target, in ascending order. Node
+    /// `class_counts[k]`, node `predicted_class` and column `k` of
+    /// [`c50_predict_proba`] refer to `class_labels[k]`; `predictions`,
+    /// [`c50_predict`] and rule classes report the codes themselves.
     pub class_labels: Vec<usize>,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
@@ -402,6 +409,62 @@ fn pessimistic_error(n: usize, errors: usize, cf: f64) -> f64 {
     (numerator / denominator) * n_f
 }
 
+/// The largest number of distinct class codes C5.0 accepts for `n_samples`
+/// rows: `max(2, min(1000, n/2))`.
+///
+/// This is a method-level cap in the sense of `nnet::multinom`'s `MaxNWts`
+/// (design 3.1): a target with more distinct values than this is an
+/// identifier or a continuous variable, not a class label.
+fn max_classes(n_samples: usize) -> usize {
+    2.max(1000.min(n_samples / 2))
+}
+
+/// Validate the target's class codes and map them to dense indices.
+///
+/// Returns `(class_labels, dense_index_per_row)`: the distinct codes in
+/// ascending order, and for each row the position of its code in that list.
+/// Codes must be finite, non-negative integers no larger than 2^53.
+fn class_codes(y: &ArrayView1<f64>) -> EconResult<(Vec<usize>, Vec<usize>)> {
+    let mut codes = Vec::with_capacity(y.len());
+    for (i, &v) in y.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "the target has a non-finite value (NaN or infinite) at row {i}; \
+                     C5.0 needs class codes 0, 1, 2, ..."
+                ),
+            });
+        }
+        if v < 0.0 || v.fract() != 0.0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "C5.0 needs non-negative integer class codes; the target holds {v} at \
+                     row {i}. Recode the classes as 0, 1, 2, ..."
+                ),
+            });
+        }
+        if v > 9_007_199_254_740_992.0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "class code {v} at row {i} is larger than 2^53 and cannot be \
+                     represented exactly"
+                ),
+            });
+        }
+        codes.push(v as usize);
+    }
+    let mut class_labels = codes.clone();
+    class_labels.sort_unstable();
+    class_labels.dedup();
+    let dense = codes
+        .iter()
+        .map(|code| match class_labels.binary_search(code) {
+            Ok(k) | Err(k) => k,
+        })
+        .collect();
+    Ok((class_labels, dense))
+}
+
 /// Build a C5.0 tree recursively.
 fn build_c50_tree(
     x: &ArrayView2<f64>,
@@ -414,7 +477,8 @@ fn build_c50_tree(
     node_id: &mut usize,
     importance: &mut Array1<f64>,
     selected_features: Option<&[usize]>,
-) -> C50Node {
+) -> EconResult<C50Node> {
+    crate::resource::checkpoint()?;
     let id = *node_id;
     *node_id += 1;
 
@@ -449,8 +513,8 @@ fn build_c50_tree(
     let error_estimate = pessimistic_error(n, errors, config.cf);
 
     // Check stopping conditions
-    if n < config.min_cases * 2 || current_entropy < 1e-10 {
-        return C50Node {
+    if n < config.min_cases.saturating_mul(2) || current_entropy < 1e-10 {
+        return Ok(C50Node {
             id,
             n,
             class_counts,
@@ -460,7 +524,7 @@ fn build_c50_tree(
             left: None,
             right: None,
             error_estimate,
-        };
+        });
     }
 
     // Find best split using gain ratio
@@ -480,13 +544,18 @@ fn build_c50_tree(
         let mut values: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
         values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Scan through possible thresholds
+        // Scan through possible thresholds. With up to 1000 classes the
+        // per-candidate work is O(K), so the left total is a running counter
+        // and the right counts reuse one buffer.
         let mut left_counts = vec![0usize; n_classes];
+        let mut right_counts = vec![0usize; n_classes];
+        let mut left_total = 0usize;
 
         for j in 0..values.len() - 1 {
             let (x_val, idx) = values[j];
             let class = y[idx] as usize;
             left_counts[class] += 1;
+            left_total += 1;
 
             // Skip if next value is the same
             let next_x = values[j + 1].0;
@@ -495,18 +564,18 @@ fn build_c50_tree(
             }
 
             // Check minimum cases constraint
-            let left_total: usize = left_counts.iter().sum();
             let right_total = n - left_total;
             if left_total < config.min_cases || right_total < config.min_cases {
                 continue;
             }
 
             // Compute right counts
-            let right_counts: Vec<usize> = class_counts
-                .iter()
-                .zip(left_counts.iter())
-                .map(|(&t, &l)| t - l)
-                .collect();
+            for (r, (&t, &l)) in right_counts
+                .iter_mut()
+                .zip(class_counts.iter().zip(left_counts.iter()))
+            {
+                *r = t - l;
+            }
 
             let (gain, gr) = gain_ratio(&class_counts, &left_counts, &right_counts);
             all_gains.push(gain);
@@ -537,7 +606,7 @@ fn build_c50_tree(
                 indices.iter().partition(|&&i| x[[i, feature]] <= threshold);
 
             if left_indices.is_empty() || right_indices.is_empty() {
-                return C50Node {
+                return Ok(C50Node {
                     id,
                     n,
                     class_counts,
@@ -547,7 +616,7 @@ fn build_c50_tree(
                     left: None,
                     right: None,
                     error_estimate,
-                };
+                });
             }
 
             // Build children
@@ -562,7 +631,7 @@ fn build_c50_tree(
                 node_id,
                 importance,
                 selected_features,
-            );
+            )?;
             let right_child = build_c50_tree(
                 x,
                 y,
@@ -574,14 +643,14 @@ fn build_c50_tree(
                 node_id,
                 importance,
                 selected_features,
-            );
+            )?;
 
             // Pruning decision: compare subtree error vs leaf error
             let subtree_error = left_child.error_estimate + right_child.error_estimate;
 
             if !config.no_global_pruning && subtree_error >= error_estimate + 0.5 {
                 // Prune: return leaf node
-                return C50Node {
+                return Ok(C50Node {
                     id,
                     n,
                     class_counts,
@@ -591,10 +660,10 @@ fn build_c50_tree(
                     left: None,
                     right: None,
                     error_estimate,
-                };
+                });
             }
 
-            return C50Node {
+            return Ok(C50Node {
                 id,
                 n,
                 class_counts,
@@ -609,12 +678,12 @@ fn build_c50_tree(
                 left: Some(Box::new(left_child)),
                 right: Some(Box::new(right_child)),
                 error_estimate: subtree_error,
-            };
+            });
         }
     }
 
     // No good split found - return leaf
-    C50Node {
+    Ok(C50Node {
         id,
         n,
         class_counts,
@@ -624,7 +693,7 @@ fn build_c50_tree(
         left: None,
         right: None,
         error_estimate,
-    }
+    })
 }
 
 /// Predict class for a single observation using one tree.
@@ -697,7 +766,7 @@ fn winnow_features(
     config: &C50Config,
     n_classes: usize,
     rng_state: &mut u64,
-) -> Vec<usize> {
+) -> EconResult<Vec<usize>> {
     let n_features = x.ncols();
     let n_samples = x.nrows();
 
@@ -718,7 +787,7 @@ fn winnow_features(
         &mut node_id,
         &mut importance,
         None,
-    );
+    )?;
 
     // Compute threshold for selection
     // C5.0 uses a heuristic: keep features with importance > median importance
@@ -754,7 +823,7 @@ fn winnow_features(
         selected = vec![lcg_random(rng_state) % n_features];
     }
 
-    selected
+    Ok(selected)
 }
 
 /// Extract rules from a C5.0 tree.
@@ -834,13 +903,21 @@ fn extract_rules(
 ///
 /// # Arguments
 ///
-/// * `x` - Feature matrix (n_samples x n_features)
-/// * `y` - Target class labels (as floating point, will be converted to integers)
-/// * `config` - C5.0 configuration
+/// * `x` - Feature matrix (n_samples x n_features); every value must be finite
+/// * `y` - Target class codes: finite, non-negative integers (stored as `f64`)
+///   no larger than 2^53. They need not be contiguous; predictions and rules
+///   report the same codes. At most `max(2, min(1000, n/2))` distinct codes.
+/// * `config` - C5.0 configuration (`trials` 1 to 100)
 ///
 /// # Returns
 ///
 /// C50Result containing the fitted model(s) and diagnostics.
+///
+/// # Errors
+///
+/// `InvalidSpecification` for invalid codes, too many classes, non-finite
+/// features or `trials` outside 1..=100; `Cancelled` once the installed
+/// computation budget expires (checked per node and per trial).
 ///
 /// # References
 ///
@@ -865,18 +942,53 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
             "min_cases must be at least 1".to_string(),
         ));
     }
+    if n_features == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "C5.0 needs at least one feature column".to_string(),
+        });
+    }
+    if !(1..=100).contains(&config.trials) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "trials must be between 1 and 100 (the boosting limit of R's C5.0), got {}; \
+                 use fewer boosting trials",
+                config.trials
+            ),
+        });
+    }
+    for (j, column) in x.axis_iter(Axis(1)).enumerate() {
+        let k = column.iter().filter(|v| !v.is_finite()).count();
+        if k > 0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "feature column {j} (0-based) has {k} non-finite values (NaN or infinite); \
+                     remove or impute them first"
+                ),
+            });
+        }
+    }
 
     let mut rng_state = config.seed.unwrap_or(42);
 
-    // Determine number of classes
-    let y_int: Vec<usize> = y.iter().map(|&v| v.round() as usize).collect();
-    let max_class = y_int.iter().max().copied().unwrap_or(0);
-    let n_classes = max_class + 1;
+    // Map the class codes to dense indices 0..K-1; everything below works on
+    // the dense indices, and results are mapped back to the codes at the end.
+    let (class_labels, y_int) = class_codes(&y)?;
+    let n_classes = class_labels.len();
 
     if n_classes < 2 {
         return Err(EconError::Computation(
             "Need at least 2 classes for classification".to_string(),
         ));
+    }
+    let cap = max_classes(n_samples);
+    if n_classes > cap {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "C5.0 supports at most {cap} classes for {n_samples} rows, but the target has \
+                 {n_classes} distinct values; it looks like an identifier or a continuous \
+                 variable. Use a regression method or recode the target"
+            ),
+        });
     }
 
     // Compute class base rates for lift calculation
@@ -889,18 +1001,25 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
         .map(|&c| c as f64 / n_samples as f64)
         .collect();
 
+    // Convert y_int to f64 for the build_c50_tree function
+    let y_f64: Vec<f64> = y_int.iter().map(|&c| c as f64).collect();
+    let y_array = Array1::from_vec(y_f64);
+
     // Winnowing: select features
     let selected_features = if config.winnow {
-        Some(winnow_features(&x, &y, config, n_classes, &mut rng_state))
+        Some(winnow_features(
+            &x,
+            &y_array.view(),
+            config,
+            n_classes,
+            &mut rng_state,
+        )?)
     } else {
         None
     };
 
     // Initialize sample weights
     let mut weights = Array1::from_elem(n_samples, 1.0 / n_samples as f64);
-    // Convert y_int to f64 for the build_c50_tree function
-    let y_f64: Vec<f64> = y_int.iter().map(|&c| c as f64).collect();
-    let y_array = Array1::from_vec(y_f64);
 
     // Build boosted ensemble
     let mut trees: Vec<C50Node> = Vec::with_capacity(config.trials);
@@ -908,6 +1027,7 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
     let mut importance = Array1::zeros(n_features);
 
     for trial in 0..config.trials {
+        crate::resource::checkpoint()?;
         // Sample indices if configured
         let indices: Vec<usize> = if config.sample > 0.0 && config.sample < 1.0 {
             let sample_size = ((n_samples as f64 * config.sample).round() as usize).max(2);
@@ -930,7 +1050,7 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
             &mut node_id,
             &mut importance,
             selected_features.as_deref(),
-        );
+        )?;
 
         // Compute weighted error rate
         let mut weighted_error = 0.0;
@@ -1018,6 +1138,8 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
         .filter(|&(p, a)| *p == *a)
         .count();
     let accuracy = correct as f64 / n_samples as f64;
+    // Report the original class codes, not the dense indices.
+    let predictions: Vec<usize> = predictions.iter().map(|&k| class_labels[k]).collect();
 
     // Extract rules if requested
     let rules = if config.rules {
@@ -1031,6 +1153,10 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
                 &mut all_rules,
                 &mut rule_id,
             );
+        }
+        // Lift was computed on dense indices; report the class codes.
+        for rule in &mut all_rules {
+            rule.predicted_class = class_labels[rule.predicted_class];
         }
         // Sort rules by support and confidence
         all_rules.sort_by(|a, b| {
@@ -1060,7 +1186,7 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
         predictions,
         accuracy,
         n_classes,
-        class_labels: (0..n_classes).collect(),
+        class_labels,
         feature_names: None,
         selected_features,
         config: config.clone(),
@@ -1076,7 +1202,7 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
 ///
 /// # Returns
 ///
-/// Predicted class labels for each observation.
+/// Predicted class codes (entries of `result.class_labels`) for each observation.
 pub fn c50_predict(result: &C50Result, x: ArrayView2<f64>) -> EconResult<Vec<usize>> {
     if result.trees.is_empty() {
         return Err(EconError::Computation("No trees in the model".to_string()));
@@ -1084,12 +1210,13 @@ pub fn c50_predict(result: &C50Result, x: ArrayView2<f64>) -> EconResult<Vec<usi
 
     let predictions: Vec<usize> = (0..x.nrows())
         .map(|i| {
-            predict_boosted(
+            let k = predict_boosted(
                 &result.trees,
                 &result.boosting_weights,
                 &x.row(i),
                 result.n_classes,
-            )
+            );
+            result.class_labels.get(k).copied().unwrap_or(k)
         })
         .collect();
 
@@ -1105,7 +1232,8 @@ pub fn c50_predict(result: &C50Result, x: ArrayView2<f64>) -> EconResult<Vec<usi
 ///
 /// # Returns
 ///
-/// Class probabilities for each observation (n_samples x n_classes).
+/// Class probabilities for each observation (n_samples x n_classes); column
+/// `k` is the probability of class code `result.class_labels[k]`.
 pub fn c50_predict_proba(result: &C50Result, x: ArrayView2<f64>) -> EconResult<Vec<Vec<f64>>> {
     if result.trees.is_empty() {
         return Err(EconError::Computation("No trees in the model".to_string()));
@@ -1132,7 +1260,7 @@ pub fn c50_predict_proba(result: &C50Result, x: ArrayView2<f64>) -> EconResult<V
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
-/// * `y_col` - Target column name (must be integer class labels)
+/// * `y_col` - Target column name (non-negative integer class codes)
 /// * `x_cols` - Feature column names
 /// * `config` - C5.0 configuration
 ///
@@ -1189,7 +1317,160 @@ pub fn run_c50_default(dataset: &Dataset, y_col: &str, x_cols: &[&str]) -> EconR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn two_cluster_x(n: usize) -> Array2<f64> {
+        Array2::from_shape_fn((n, 2), |(i, j)| {
+            (if i < n / 2 { 1.0 } else { 8.0 }) + ((i * 7 + j * 3) % 5) as f64 * 0.1
+        })
+    }
+
+    #[test]
+    fn test_c50_large_class_codes_are_dense() {
+        // ML-1. Before the fix this aborts the whole test binary
+        // ("memory allocation of 80000000000008 bytes failed").
+        let x = two_cluster_x(40);
+        let y = Array1::from_shape_fn(40, |i| if i < 20 { 0.0 } else { 1e13 });
+        let r = c50(
+            x.view(),
+            y.view(),
+            &C50Config {
+                min_cases: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(r.n_classes, 2);
+        assert_eq!(r.class_labels, vec![0, 10_000_000_000_000]);
+        assert_eq!(r.accuracy, 1.0);
+        assert_eq!(r.predictions[0], 0);
+        assert_eq!(r.predictions[39], 10_000_000_000_000);
+        assert_eq!(c50_predict(&r, x.view()).unwrap()[39], 10_000_000_000_000);
+        assert_eq!(c50_predict_proba(&r, x.view()).unwrap()[0].len(), 2);
+    }
+
+    #[test]
+    fn test_c50_noncontiguous_codes_have_no_phantom_class() {
+        let x = two_cluster_x(20);
+        let y = Array1::from_shape_fn(20, |i| if i < 10 { 1.0 } else { 2.0 });
+        let cfg = C50Config {
+            min_cases: 1,
+            rules: true,
+            ..Default::default()
+        };
+        let r = c50(x.view(), y.view(), &cfg).unwrap();
+        assert_eq!(r.n_classes, 2); // was 3: an empty class 0
+        assert_eq!(r.class_labels, vec![1, 2]);
+        assert_eq!((r.predictions[0], r.predictions[19]), (1, 2));
+        assert!(
+            r.rules
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|rule| rule.predicted_class == 1 || rule.predicted_class == 2)
+        );
+    }
+
+    #[test]
+    fn test_c50_rejects_invalid_class_codes() {
+        let x = two_cluster_x(10);
+        let cfg = C50Config {
+            min_cases: 1,
+            ..Default::default()
+        };
+        let cases: [(f64, &str); 5] = [
+            (f64::NAN, "non-finite"),
+            (f64::INFINITY, "non-finite"),
+            (-1.0, "non-negative integer class codes"),
+            (0.5, "non-negative integer class codes"),
+            (1e19, "2^53"),
+        ];
+        for (bad, needle) in cases {
+            let mut y = Array1::from_shape_fn(10, |i| if i < 5 { 0.0 } else { 1.0 });
+            y[7] = bad;
+            let err = c50(x.view(), y.view(), &cfg).unwrap_err().to_string();
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_c50_class_count_is_bounded() {
+        let cfg = C50Config {
+            min_cases: 1,
+            ..Default::default()
+        };
+        let x = Array2::from_shape_fn((12, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(12, |i| (i % 7) as f64); // 7 classes on 12 rows
+        let err = c50(x.view(), y.view(), &cfg).unwrap_err().to_string();
+        assert!(err.contains("at most 6 classes"), "{err}");
+        let x = Array2::from_shape_fn((3, 1), |(i, _)| i as f64);
+        let y = Array1::from_vec(vec![0.0, 1.0, 2.0]);
+        assert!(
+            c50(x.view(), y.view(), &cfg)
+                .unwrap_err()
+                .to_string()
+                .contains("at most 2 classes")
+        );
+        let x = Array2::from_shape_fn((2004, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(2004, |i| (i % 1001) as f64);
+        assert!(
+            c50(x.view(), y.view(), &cfg)
+                .unwrap_err()
+                .to_string()
+                .contains("at most 1000 classes")
+        );
+    }
+
+    #[test]
+    fn test_c50_trials_must_be_between_1_and_100() {
+        let x = two_cluster_x(20);
+        let y = Array1::from_shape_fn(20, |i| if i < 10 { 0.0 } else { 1.0 });
+        for trials in [0usize, 101, 10_000_000_000] {
+            let cfg = C50Config {
+                trials,
+                min_cases: 1,
+                ..Default::default()
+            };
+            let err = c50(x.view(), y.view(), &cfg).unwrap_err().to_string();
+            assert!(
+                err.contains("trials must be between 1 and 100"),
+                "{trials}: {err}"
+            );
+        }
+        let cfg = C50Config {
+            trials: 100,
+            min_cases: 1,
+            ..Default::default()
+        };
+        assert!(c50(x.view(), y.view(), &cfg).is_ok());
+    }
+
+    #[test]
+    fn test_c50_rejects_non_finite_features_and_honours_cancellation() {
+        let x = two_cluster_x(20);
+        let y = Array1::from_shape_fn(20, |i| if i < 10 { 0.0 } else { 1.0 });
+        let cfg = C50Config {
+            min_cases: 1,
+            ..Default::default()
+        };
+        let mut xb = x.clone();
+        xb[[3, 1]] = f64::NAN;
+        assert!(
+            c50(xb.view(), y.view(), &cfg)
+                .unwrap_err()
+                .to_string()
+                .contains("non-finite")
+        );
+        let err = with_budget(cancelled_budget(), || c50(x.view(), y.view(), &cfg)).unwrap_err();
+        assert!(matches!(err, EconError::Cancelled(_)), "{err}");
+    }
 
     #[test]
     fn test_c50_basic_classification() {
