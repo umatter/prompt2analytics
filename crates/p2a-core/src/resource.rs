@@ -106,7 +106,9 @@ pub fn with_alloc_ceiling<R>(limit: Option<usize>, f: impl FnOnce() -> R) -> R {
 // Checked sizes and fallible allocation
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn overflow(what: &str) -> EconError {
+/// The [`EconError::ResourceLimit`] for a size computation on `what` that
+/// overflows.
+pub(crate) fn overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
 }
 
@@ -141,7 +143,9 @@ pub fn check_alloc<T>(len: usize, what: &str) -> EconResult<()> {
     Ok(())
 }
 
-fn reserve_failed(what: &str, len: usize, size: usize) -> EconError {
+/// The [`EconError::ResourceLimit`] for an allocation of `len` values of
+/// `size` bytes for `what` that passed the checks but could not be made.
+pub(crate) fn reserve_failed(what: &str, len: usize, size: usize) -> EconError {
     EconError::ResourceLimit(format!(
         "{what} would need {}, which could not be allocated; use a smaller input",
         format_bytes(len.saturating_mul(size))

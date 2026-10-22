@@ -803,6 +803,15 @@ impl std::fmt::Display for CmdscaleResult {
 /// # Returns
 /// * `CmdscaleResult` containing the configuration and diagnostics
 ///
+/// # Errors
+///
+/// - Fewer than 2 points; a non-square, non-symmetric or non-finite `d`, a
+///   non-zero diagonal or a negative distance; `k = 0`.
+/// - `"Resource limit: ..."` when the `n x n` matrix or the eigensolver's
+///   workspace (about `3 n^2` `f64`) exceeds the per-allocation ceiling.
+/// - `"Computation stopped: ..."` when the budget is cancelled or expires.
+/// - A failed eigendecomposition.
+///
 /// # Algorithm
 /// 1. Compute squared distance matrix D²
 /// 2. Double-center: B = -½ H D² H where H = I - (1/n) 11'
@@ -919,11 +928,10 @@ fn cmdscale_core(
     let par = faer::get_global_parallelism();
     let scratch =
         self_adjoint_evd_scratch::<f64>(n, ComputeEigenvectors::Yes, par, Default::default());
+    // faer signals an overflowing requirement as StackReq::OVERFLOW (size 0),
+    // which check_alloc would pass
     if scratch.layout().is_err() {
-        return Err(EconError::ResourceLimit(format!(
-            "{ws} is too large: the requested size overflows"
-        ))
-        .to_string());
+        return Err(crate::resource::overflow(ws).to_string());
     }
     check_alloc::<u8>(scratch.size_bytes(), ws).map_err(to_string)?;
 
@@ -967,13 +975,8 @@ fn cmdscale_core(
     }
 
     checkpoint().map_err(to_string)?;
-    let mut buf = MemBuffer::try_new(scratch).map_err(|_| {
-        EconError::ResourceLimit(format!(
-            "{ws} would need {}, which could not be allocated; use a smaller input",
-            crate::memory::format_bytes(scratch.size_bytes())
-        ))
-        .to_string()
-    })?;
+    let mut buf = MemBuffer::try_new(scratch)
+        .map_err(|_| crate::resource::reserve_failed(ws, scratch.size_bytes(), 1).to_string())?;
     let mut vectors = Mat::<f64>::zeros(n, n);
     let mut s = faer::diag::Diag::<f64>::zeros(n);
     self_adjoint_evd(
@@ -1045,6 +1048,14 @@ fn cmdscale_result(
 ///
 /// # Returns
 /// * `CmdscaleResult` containing the configuration
+///
+/// # Errors
+///
+/// - Fewer than 2 rows, a non-finite value in `data`, or `k = 0`.
+/// - `"Resource limit: ..."` when the `n x n` matrix or the eigensolver's
+///   workspace (about `3 n^2` `f64`) exceeds the per-allocation ceiling.
+/// - `"Computation stopped: ..."` when the budget is cancelled or expires.
+/// - A failed eigendecomposition.
 pub fn cmdscale_from_data(
     data: ArrayView2<f64>,
     k: Option<usize>,
