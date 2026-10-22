@@ -90,7 +90,7 @@ fn redact_path(message: &str, resolved: &Path, requested: &str) -> String {
 fn format_mib(bytes: u64) -> String {
     if bytes < MIB {
         format!("{bytes} bytes")
-    } else if bytes % MIB == 0 {
+    } else if bytes.is_multiple_of(MIB) {
         format!("{} MiB", bytes / MIB)
     } else {
         format!("{:.1} MiB", bytes as f64 / MIB as f64)
