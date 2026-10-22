@@ -76,7 +76,8 @@ pub struct GlsResult {
 /// and σ. `P` is the Prais-Winsten transform for AR(1), a closed-form symmetric
 /// square root of `Ω⁻¹` for compound symmetry (both O(n p)), no transform for
 /// the identity, and `L⁻¹` applied by forward substitution, where `Ω = L L'`, for
-/// a known `Ω` (O(n² p), with the n × n factor `L` allocated fallibly).
+/// a known `Ω` (an O(n³) Cholesky factor, allocated fallibly, then O(n² p)
+/// whitening).
 ///
 /// # Arguments
 ///
@@ -232,7 +233,11 @@ fn whiten(
             let rho = *rho;
             if !rho.is_finite() || rho <= -1.0 / (n as f64 - 1.0) || rho >= 1.0 {
                 return Err(EconError::InvalidSpecification {
-                    message: "Compound symmetry rho out of valid range".to_string(),
+                    message: format!(
+                        "compound symmetry rho must lie in (-1/(n - 1), 1) = ({:.6}, 1) \
+                         for n = {n} (got {rho})",
+                        -1.0 / (n as f64 - 1.0)
+                    ),
                 });
             }
             // Ω = (1 - ρ) I + ρ 11' has eigenvalue 1 + (n - 1)ρ on 1 and 1 - ρ on its
@@ -746,6 +751,28 @@ mod tests {
                     "Known vs closed form {corr:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_gls_compound_symmetry_rho_error_names_value_and_bound() {
+        // n = 5: rho must lie in (-0.25, 1)
+        let y = array![1.0, 2.1, 2.9, 4.1, 5.0];
+        let x = array![[1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0], [1.0, 5.0]];
+        let e = gls(
+            &y.view(),
+            &x.view(),
+            CorrelationStructure::CompoundSymmetry { rho: -0.3 },
+        )
+        .unwrap_err();
+        match e {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("(-0.250000, 1)")
+                    && message.contains("n = 5")
+                    && message.contains("got -0.3"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
         }
     }
 
