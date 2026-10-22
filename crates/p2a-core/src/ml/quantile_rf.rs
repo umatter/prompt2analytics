@@ -95,7 +95,8 @@ pub struct QuantileRfConfig {
     /// Larger values produce more stable quantile estimates.
     pub min_node_size: usize,
 
-    /// Maximum depth of trees (default: None = unlimited)
+    /// Maximum depth of trees (default: `None` = no explicit limit; trees stop
+    /// at depth 512 in any case, and larger values act as 512)
     pub max_depth: Option<usize>,
 
     /// Quantiles to estimate (default: [0.025, 0.5, 0.975] for 95% PI)
@@ -230,6 +231,12 @@ impl std::fmt::Display for QuantileRfResult {
     }
 }
 
+/// Deepest tree level (root = 0) the builder grows. A node at this depth
+/// becomes a leaf in every mode, so no input can recurse deep enough to
+/// overflow a 2 MiB worker stack (user decision, Tier 0). Trees that stay
+/// shallower are unchanged.
+const MAX_TREE_DEPTH: usize = 512;
+
 /// A tree node in the quantile regression forest.
 /// Unlike standard RF, leaf nodes store indices to all observations in that leaf.
 #[derive(Debug, Clone)]
@@ -291,7 +298,10 @@ impl QuantileTree {
             .mtry
             .unwrap_or_else(|| (x.ncols() as f64 / 3.0).floor().max(1.0) as usize);
 
-        let max_depth = config.max_depth.unwrap_or(usize::MAX);
+        let max_depth = config
+            .max_depth
+            .unwrap_or(MAX_TREE_DEPTH)
+            .min(MAX_TREE_DEPTH);
 
         // Build tree recursively
         self.root = Some(self.build_tree(
@@ -1479,6 +1489,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
+    fn chain_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        (
+            Array2::from_shape_fn((n, 1), |(i, _)| i as f64),
+            Array1::from_shape_fn(n, |i| (i % 2) as f64),
+        )
+    }
+
+    /// Runs `f` on a thread with a 2 MiB stack, the size of tokio's blocking threads and rayon's workers.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn qrf_depth(root: &QrfNode) -> usize {
+        let (mut max, mut stack) = (0, vec![(root, 0usize)]);
+        while let Some((node, d)) = stack.pop() {
+            max = max.max(d);
+            if let QrfNode::Split { left, right, .. } = node {
+                stack.push((left.as_ref(), d + 1));
+                stack.push((right.as_ref(), d + 1));
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn test_qrf_depth_is_capped_on_a_chain_input() {
+        // Through the private tree, so no bootstrap breaks the chain.
+        assert_eq!(MAX_TREE_DEPTH, 512);
+        let depth = on_small_stack(|| {
+            let (x, y) = chain_data(2_000);
+            let cfg = QuantileRfConfig {
+                min_node_size: 1,
+                max_depth: None,
+                mtry: Some(1),
+                ..Default::default()
+            };
+            let mut tree = QuantileTree::new(1);
+            let mut rng = 1u64;
+            tree.fit(
+                &x.view(),
+                &y.view(),
+                (0..2_000).collect(),
+                Vec::new(),
+                &cfg,
+                &mut rng,
+            );
+            qrf_depth(tree.root.as_ref().unwrap())
+        });
+        assert_eq!(depth, MAX_TREE_DEPTH);
     }
 
     #[test]

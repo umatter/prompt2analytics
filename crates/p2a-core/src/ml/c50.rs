@@ -51,6 +51,9 @@ use crate::Dataset;
 use crate::errors::{EconError, EconResult};
 
 /// Configuration for C5.0.
+///
+/// Trees stop at depth 512 (root = 0): a node at that depth becomes a leaf
+/// whatever the data, so no input can recurse deeper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct C50Config {
     /// Number of boosting iterations (trials), 1 to 100 (the limit of R's C5.0).
@@ -465,6 +468,12 @@ fn class_codes(y: &ArrayView1<f64>) -> EconResult<(Vec<usize>, Vec<usize>)> {
     Ok((class_labels, dense))
 }
 
+/// Deepest tree level (root = 0) the builder grows. A node at this depth
+/// becomes a leaf in every mode, so no input can recurse deep enough to
+/// overflow a 2 MiB worker stack (user decision, Tier 0). Trees that stay
+/// shallower are unchanged.
+const MAX_TREE_DEPTH: usize = 512;
+
 /// Build a C5.0 tree recursively.
 fn build_c50_tree(
     x: &ArrayView2<f64>,
@@ -513,7 +522,8 @@ fn build_c50_tree(
     let error_estimate = pessimistic_error(n, errors, config.cf);
 
     // Check stopping conditions
-    if n < config.min_cases.saturating_mul(2) || current_entropy < 1e-10 {
+    if depth >= MAX_TREE_DEPTH || n < config.min_cases.saturating_mul(2) || current_entropy < 1e-10
+    {
         return Ok(C50Node {
             id,
             n,
@@ -1450,6 +1460,62 @@ mod tests {
             ..Default::default()
         };
         assert!(c50(x.view(), y.view(), &cfg).is_ok());
+    }
+
+    /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
+    fn chain_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        (
+            Array2::from_shape_fn((n, 1), |(i, _)| i as f64),
+            Array1::from_shape_fn(n, |i| (i % 2) as f64),
+        )
+    }
+
+    /// Runs `f` on a thread with an 8 MiB stack.
+    ///
+    /// The QRF and Cubist copies of this helper use 2 MiB, the size of tokio's
+    /// blocking threads and rayon's workers. 512 levels of `build_c50_tree` fit
+    /// in 2 MiB in an optimised build (checked at opt-level 1), but an
+    /// unoptimised (opt-level 0) build, as CI's test profile is, needs about
+    /// 4.5 to 5 KiB per level, about 2.4 MiB for 513 frames (measured: 2.25 MiB
+    /// overflows, 2.5 MiB passes). The test thread therefore gets 8 MiB; the
+    /// depth assertion is what guards the cap.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn c50_depth(root: &C50Node) -> usize {
+        // iterative, so the test itself never recurses
+        let (mut max, mut stack) = (0, vec![(root, 0usize)]);
+        while let Some((node, d)) = stack.pop() {
+            max = max.max(d);
+            for child in [&node.left, &node.right].into_iter().flatten() {
+                stack.push((child.as_ref(), d + 1));
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn test_c50_depth_is_capped_on_a_chain_input() {
+        // User decision 2026-10-21 (8). Before the fix the build recurses about 2,000 levels: the thread
+        // overflows its stack (the test binary aborts) or the tree comes back deeper than 512.
+        assert_eq!(MAX_TREE_DEPTH, 512);
+        let depth = on_small_stack(|| {
+            let (x, y) = chain_data(2_000);
+            let cfg = C50Config {
+                min_cases: 1,
+                no_global_pruning: true,
+                ..Default::default()
+            };
+            let r = c50(x.view(), y.view(), &cfg).unwrap();
+            c50_depth(&r.trees[0])
+        });
+        assert_eq!(depth, MAX_TREE_DEPTH); // exactly 512: the guard, not the data, stopped the chain
     }
 
     #[test]

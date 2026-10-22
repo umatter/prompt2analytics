@@ -81,7 +81,7 @@ pub struct CubistConfig {
     /// When > 0, predictions are adjusted using k-NN of training data.
     pub neighbors: usize,
 
-    /// Maximum depth of trees. Default: 10.
+    /// Maximum depth of trees; values above 512 act as 512. Default: 10.
     pub max_depth: usize,
 
     /// Minimum samples required to split a node. Default: 10.
@@ -275,6 +275,12 @@ impl std::fmt::Display for CubistResult {
     }
 }
 
+/// Deepest tree level (root = 0) the builder grows. A node at this depth
+/// becomes a leaf in every mode, so no input can recurse deep enough to
+/// overflow a 2 MiB worker stack (user decision, Tier 0). Trees that stay
+/// shallower are unchanged.
+const MAX_TREE_DEPTH: usize = 512;
+
 /// Internal tree node for Cubist.
 #[derive(Debug, Clone)]
 pub(crate) enum CubistNode {
@@ -341,7 +347,7 @@ impl CubistTree {
         let (intercept, coefficients) = self.fit_linear_model(x, y, indices, &path_features);
 
         // Check stopping conditions
-        if depth >= config.max_depth
+        if depth >= config.max_depth.min(MAX_TREE_DEPTH)
             || n_samples < config.min_split
             || n_samples <= config.min_bucket.saturating_mul(2)
         {
@@ -1187,6 +1193,55 @@ mod tests {
                 "{committees}: {err}"
             );
         }
+    }
+
+    /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
+    fn chain_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        (
+            Array2::from_shape_fn((n, 1), |(i, _)| i as f64),
+            Array1::from_shape_fn(n, |i| (i % 2) as f64),
+        )
+    }
+
+    /// Runs `f` on a thread with a 2 MiB stack, the size of tokio's blocking threads and rayon's workers.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn cubist_depth(root: &CubistNode) -> usize {
+        let (mut max, mut stack) = (0, vec![(root, 0usize)]);
+        while let Some((node, d)) = stack.pop() {
+            max = max.max(d);
+            if let CubistNode::Split { left, right, .. } = node {
+                stack.push((left.as_ref(), d + 1));
+                stack.push((right.as_ref(), d + 1));
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn test_cubist_depth_is_capped_on_a_chain_input() {
+        assert_eq!(MAX_TREE_DEPTH, 512);
+        let depth = on_small_stack(|| {
+            let (x, y) = chain_data(2_000);
+            let cfg = CubistConfig {
+                max_depth: usize::MAX,
+                min_split: 2,
+                min_bucket: 1,
+                min_improvement: 0.0,
+                extract_rules: false,
+                ..Default::default()
+            };
+            let r = cubist(x.view(), y.view(), &cfg).unwrap();
+            cubist_depth(r.committee_trees[0].root.as_ref().unwrap())
+        });
+        assert_eq!(depth, MAX_TREE_DEPTH);
     }
 
     #[test]
