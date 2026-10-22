@@ -13,7 +13,6 @@
 
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF};
-use std::collections::HashSet;
 
 use crate::errors::{EconError, EconResult};
 use crate::resource;
@@ -111,6 +110,18 @@ impl std::fmt::Display for LoglinResult {
 ///
 /// # Returns
 /// * `LoglinResult` containing fitted values and test statistics
+///
+/// # Errors
+///
+/// - `eps` that is not finite and greater than 0, or `max_iter` of 0.
+/// - A dimension with no levels, a table whose cell count overflows `usize`, or a table whose
+///   length differs from the product of `dimensions`.
+/// - No margins, a margin naming a dimension the table does not have, or a margin that names the
+///   same dimension more than once.
+/// - A cell that is not finite or is negative, or a table whose total is not positive.
+/// - A fitted table or margin buffer too large to allocate (the per-allocation ceiling
+///   included), and cancellation through [`resource::checkpoint`], which is checked before every
+///   margin step of every IPF iteration.
 ///
 /// # Algorithm
 ///
@@ -226,34 +237,7 @@ pub fn loglin(
 
         // Apply each margin
         for margin in margins {
-            // Compute observed margin
-            let obs_margin = compute_margin(table, dimensions, margin)?;
-
-            // Compute fitted margin
-            let fit_margin = compute_margin(&fit, dimensions, margin)?;
-
-            // Compute adjustment factors
-            let mut adjustments = resource::try_vec(obs_margin.len(), 0.0, "margin adjustments")
-                .map_err(|e| e.to_string())?;
-            for i in 0..obs_margin.len() {
-                if fit_margin[i] > 1e-10 {
-                    adjustments[i] = obs_margin[i] / fit_margin[i];
-                } else {
-                    adjustments[i] = 1.0;
-                }
-            }
-
-            // Apply adjustments to fitted values
-            for_each_margin_index(dimensions, margin, |cell_idx, margin_idx| {
-                fit[cell_idx] *= adjustments[margin_idx];
-            });
-
-            // Check convergence for this margin
-            let new_fit_margin = compute_margin(&fit, dimensions, margin)?;
-            for i in 0..obs_margin.len() {
-                let dev = (new_fit_margin[i] - obs_margin[i]).abs();
-                max_dev = max_dev.max(dev);
-            }
+            max_dev = max_dev.max(fit_one_margin(table, &mut fit, dimensions, margin)?);
         }
 
         if max_dev < eps {
@@ -293,6 +277,51 @@ pub fn loglin(
         total,
         n_cells,
     })
+}
+
+/// One IPF step: scale `fit` so that its `margin` matches the observed table's, and return the
+/// largest deviation left in that margin afterwards.
+///
+/// A step walks the whole table three times and a model may list hundreds of margins, so the
+/// budget is checked before each step, not only once per IPF iteration.
+fn fit_one_margin(
+    table: &[f64],
+    fit: &mut [f64],
+    dimensions: &[usize],
+    margin: &[usize],
+) -> Result<f64, String> {
+    resource::checkpoint().map_err(|e| e.to_string())?;
+
+    // Compute observed margin
+    let obs_margin = compute_margin(table, dimensions, margin)?;
+
+    // Compute fitted margin
+    let fit_margin = compute_margin(fit, dimensions, margin)?;
+
+    // Compute adjustment factors
+    let mut adjustments = resource::try_vec(obs_margin.len(), 0.0, "margin adjustments")
+        .map_err(|e| e.to_string())?;
+    for i in 0..obs_margin.len() {
+        if fit_margin[i] > 1e-10 {
+            adjustments[i] = obs_margin[i] / fit_margin[i];
+        } else {
+            adjustments[i] = 1.0;
+        }
+    }
+
+    // Apply adjustments to fitted values
+    for_each_margin_index(dimensions, margin, |cell_idx, margin_idx| {
+        fit[cell_idx] *= adjustments[margin_idx];
+    });
+
+    // Check convergence for this margin
+    let new_fit_margin = compute_margin(fit, dimensions, margin)?;
+    let mut max_dev: f64 = 0.0;
+    for i in 0..obs_margin.len() {
+        let dev = (new_fit_margin[i] - obs_margin[i]).abs();
+        max_dev = max_dev.max(dev);
+    }
+    Ok(max_dev)
 }
 
 /// Compute a margin (sum over specified dimensions) of a table.
@@ -389,7 +418,9 @@ fn compute_test_statistics(observed: &[f64], fitted: &[f64]) -> (f64, f64) {
 /// A dimension with one level makes every effect that contains it contribute 0, so only the
 /// dimensions with two or more levels are mapped to bits, and each margin's effects are the
 /// non-empty submasks of its mask. There are at most 63 such dimensions because `2^k <= n_cells`,
-/// and a margin visits at most `n_cells` submasks.
+/// and a margin visits at most `n_cells` submasks. The effects already counted are a bitset over
+/// all `2^k` masks, allocated fallibly: `2^k / 8 <= n_cells / 8` bytes, rounded up to whole
+/// 8-byte words.
 fn count_free_parameters(dimensions: &[usize], margins: &[Vec<usize>]) -> EconResult<usize> {
     let mut bit_of: Vec<Option<u32>> = vec![None; dimensions.len()];
     let mut free_levels: Vec<usize> = Vec::new();
@@ -405,7 +436,15 @@ fn count_free_parameters(dimensions: &[usize], margins: &[Vec<usize>]) -> EconRe
         }
     }
 
-    let mut counted: HashSet<u64> = HashSet::new();
+    // One bit per effect mask; 2^k <= n_cells fits in usize, so the shift cannot overflow
+    let n_masks = 1usize
+        .checked_shl(free_levels.len() as u32)
+        .ok_or_else(|| {
+            EconError::ResourceLimit(
+                "contingency table has too many dimensions with two or more levels".to_string(),
+            )
+        })?;
+    let mut counted: Vec<u64> = resource::try_vec(n_masks.div_ceil(64), 0, "model effects")?;
     let mut n_params = 1usize; // grand mean
     let mut visited = 0u64;
     for margin in margins {
@@ -419,7 +458,9 @@ fn count_free_parameters(dimensions: &[usize], margins: &[Vec<usize>]) -> EconRe
             if visited.is_multiple_of(65_536) {
                 resource::checkpoint()?;
             }
-            if counted.insert(sub) {
+            let (word, bit) = ((sub / 64) as usize, 1u64 << (sub % 64));
+            if counted[word] & bit == 0 {
+                counted[word] |= bit;
                 let mut bits = sub;
                 let mut effect_size = 1usize;
                 while bits != 0 {
@@ -696,6 +737,48 @@ mod tests {
         })
         .unwrap_err();
         assert!(e.contains("stopped"), "{e}");
+    }
+
+    #[test]
+    fn test_ipf_margin_step_checks_the_budget() {
+        // One IPF iteration can walk a 1M-cell table three times for each of 500 margins, so each
+        // margin step checks the budget itself, not only the iteration around it
+        let t = CancelToken::new();
+        t.cancel();
+        let mut fit = vec![25.0; 4];
+        let e = resource::with_budget(Budget::new(None, t), || {
+            fit_one_margin(&[15.0, 15.0, 25.0, 45.0], &mut fit, &[2, 2], &[0])
+        })
+        .unwrap_err();
+        assert!(e.contains("stopped"), "{e}");
+        assert_eq!(
+            fit,
+            vec![25.0; 4],
+            "a refused step leaves the fit untouched"
+        );
+
+        // Without a budget the step scales the fit to the observed margin (30, 70)
+        let dev = fit_one_margin(&[15.0, 15.0, 25.0, 45.0], &mut fit, &[2, 2], &[0]).unwrap();
+        assert_eq!(fit, vec![15.0, 15.0, 35.0, 35.0]);
+        assert!(dev < 1e-12, "{dev}");
+    }
+
+    #[test]
+    fn test_count_free_parameters_allocates_effects_fallibly() {
+        // 20 two-level dimensions and the saturated margin: 2^20 effect masks, a 128 KiB bitset.
+        // Pre-fix the counted effects were an infallible HashSet of about 1M entries.
+        let dims = vec![2usize; 20];
+        let all: Vec<usize> = (0..20).collect();
+        let e = resource::with_alloc_ceiling(Some(64 * 1024), || {
+            count_free_parameters(&dims, std::slice::from_ref(&all))
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::ResourceLimit(m) if m.contains("model effects")),
+            "{e}"
+        );
+        // Saturated: every one of the 2^20 cells is a parameter
+        assert_eq!(count_free_parameters(&dims, &[all]).unwrap(), 1 << 20);
     }
 
     #[test]
