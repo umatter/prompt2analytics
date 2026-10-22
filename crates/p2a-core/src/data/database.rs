@@ -531,8 +531,10 @@ fn stop_reason(
         && now.rss_bytes > start.saturating_add(growth)
     {
         return Some(format!(
-            "the query used more than {} MiB of working memory",
-            growth / MIB
+            "the server's memory grew by more than {} MiB while the query ran \
+             (twice its {} MiB memory limit)",
+            growth / MIB,
+            growth / MIB / 2
         ));
     }
     None
@@ -784,9 +786,18 @@ pub fn query_sqlite_with(
     }
     let stopped = |e: rusqlite::Error| {
         // A PRAGMA refused by the authorizer surfaces as a "not authorized"
-        // error during prepare; name it. Otherwise fall back to the normal
-        // interrupt/error mapping.
+        // error during prepare; name it.
         denied_pragma_error(&denied_pragma, || {
+            // A value over SQLITE_LIMIT_LENGTH surfaces as the bare "string or
+            // blob too big"; name the server's result size limit instead.
+            if opts.max_bytes.is_some()
+                && e.sqlite_error_code() == Some(rusqlite::ErrorCode::TooBig)
+            {
+                let b = opts.max_bytes.unwrap();
+                return DatabaseError::Forbidden(format!(
+                    "a value is too big for this server's result size limit of {b} bytes"
+                ));
+            }
             stopped_by(reason.get().map(String::as_str), e.into())
         })
     };
@@ -1815,10 +1826,13 @@ mod tests {
 
     #[test]
     fn duckdb_row_limit_stops_the_engine_not_just_the_copy() {
-        // Without the engine-side LIMIT this materialises 10^13 rows inside DuckDB;
-        // the timeout is a backstop so a broken wrapper fails instead of exhausting memory.
+        // Without the engine-side LIMIT this materialises 10^13 rows inside
+        // DuckDB. The backstop so a broken wrapper fails cleanly instead of
+        // exhausting memory is the RSS guard (memory_limit_mb below; it
+        // interrupts at 128 MiB of growth on Linux) plus the timeout.
         let opts = QueryOptions {
             max_rows: Some(5),
+            memory_limit_mb: Some(64),
             timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         };
@@ -1950,7 +1964,14 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(err.to_string().contains("too big"), "{err}");
+        // Forbidden, naming the server's result size limit, not the bare
+        // "string or blob too big".
+        assert!(
+            matches!(err, DatabaseError::Forbidden(_)),
+            "expected Forbidden: {err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("too big") && msg.contains("10000"), "{err}");
     }
 
     // ------------------------------------------------------------------
