@@ -26,6 +26,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -85,7 +86,8 @@ pub struct IpwConfig {
     pub trim: f64,
     /// Number of bootstrap replications for standard errors (default: 0 = analytic).
     /// When 0, uses the influence-function variance estimator (Lunceford & Davidian 2004).
-    /// Set to e.g. 999 to use bootstrap instead.
+    /// Set to e.g. 999 to use bootstrap instead. Must be 0 or at least 2; a count whose
+    /// result buffer cannot be allocated is refused with `EconError::ResourceLimit`.
     pub bootstrap: usize,
     /// Use normalized (Hajek) weights (default: true)
     /// If false, uses Horvitz-Thompson weights
@@ -115,7 +117,10 @@ pub struct DoublyRobustConfig {
     pub estimand: Estimand,
     /// Trimming threshold for propensity scores
     pub trim: f64,
-    /// Number of bootstrap replications
+    /// Number of bootstrap replications. Methods `IPW` and `Regression` take their
+    /// standard errors from the bootstrap and need at least 2; `AIPW` uses the analytic
+    /// influence function and ignores this field. A count whose result buffer cannot be
+    /// allocated is refused with `EconError::ResourceLimit`.
     pub bootstrap: usize,
     /// Random seed for bootstrap
     pub seed: Option<u64>,
@@ -423,6 +428,13 @@ pub fn run_ipw_treatment(
 ) -> EconResult<IpwResult> {
     let mut warnings = Vec::new();
 
+    if config.bootstrap == 1 {
+        return Err(EconError::InvalidSpecification {
+            message: "bootstrap must be 0 (analytic influence-function SE) or at least 2; got 1"
+                .to_string(),
+        });
+    }
+
     // Extract outcome variable
     let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
         EconError::ColumnNotFound {
@@ -635,32 +647,28 @@ pub fn run_ipw_treatment(
             None => StdRng::from_entropy(),
         };
 
-        let boot_indices: Vec<Vec<usize>> = (0..config.bootstrap)
-            .map(|_| (0..n_trim).map(|_| rng.gen_range(0..n_trim)).collect())
-            .collect();
-
-        let boot_effects: Vec<f64> = boot_indices
-            .into_par_iter()
-            .filter_map(|indices| {
+        let estimand = config.estimand;
+        let normalized = config.normalized;
+        let boot_effects: Vec<f64> = streamed_bootstrap(
+            &mut rng,
+            n_trim,
+            config.bootstrap,
+            boot_chunk_len(n_trim),
+            |indices| {
                 let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
                 let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
                 let ps_boot: Array1<f64> = indices.iter().map(|&i| ps_trim[i]).collect();
 
-                let effect_boot = compute_ipw_effect(
-                    &y_boot,
-                    &d_boot,
-                    &ps_boot,
-                    config.estimand,
-                    config.normalized,
-                );
+                let effect_boot =
+                    compute_ipw_effect(&y_boot, &d_boot, &ps_boot, estimand, normalized);
 
                 if effect_boot.is_finite() {
                     Some(effect_boot)
                 } else {
                     None
                 }
-            })
-            .collect();
+            },
+        )?;
 
         if boot_effects.len() < config.bootstrap / 2 {
             warnings.push(
@@ -751,6 +759,60 @@ pub fn run_ipw_treatment(
         bootstrap_reps: config.bootstrap,
         warnings,
     })
+}
+
+/// At most this many bootstrap indices (8 MiB) exist at once.
+const BOOT_CHUNK_INDICES: usize = 1 << 20;
+/// At most this many bootstrap index sets exist at once.
+const BOOT_CHUNK_MAX: usize = 256;
+
+/// Number of bootstrap index sets of size `n` drawn per chunk.
+fn boot_chunk_len(n: usize) -> usize {
+    (BOOT_CHUNK_INDICES / n.max(1)).clamp(1, BOOT_CHUNK_MAX)
+}
+
+/// Draws `reps` bootstrap index sets of size `n` from `rng`, in replicate order and with the
+/// same draws as building all sets up front, holding at most `chunk` sets at a time. `stat`
+/// is evaluated in parallel within a chunk. Returns the `Some` values in replicate order.
+///
+/// The result buffer is reserved fallibly (an unallocatable `reps` is
+/// `EconError::ResourceLimit`), and the installed cooperative-cancellation budget is checked
+/// before every chunk and before every replicate (on the rayon worker).
+fn streamed_bootstrap<F>(
+    rng: &mut StdRng,
+    n: usize,
+    reps: usize,
+    chunk: usize,
+    stat: F,
+) -> EconResult<Vec<f64>>
+where
+    F: Fn(&[usize]) -> Option<f64> + Sync,
+{
+    let mut out = resource::try_with_capacity::<f64>(reps, "bootstrap replications")?;
+    let budget = resource::current_budget();
+    let chunk = chunk.max(1);
+    let mut done = 0;
+    while done < reps {
+        resource::checkpoint()?;
+        let m = chunk.min(reps - done);
+        // Sequential draws from the single stream keep seeded results identical to
+        // materialising every index set first.
+        let sets: Vec<Vec<usize>> = (0..m)
+            .map(|_| (0..n).map(|_| rng.gen_range(0..n)).collect())
+            .collect();
+        let values = sets
+            .par_iter()
+            .map(|s| {
+                if let Some(b) = &budget {
+                    b.check()?;
+                }
+                Ok(stat(s))
+            })
+            .collect::<EconResult<Vec<Option<f64>>>>()?;
+        out.extend(values.into_iter().flatten());
+        done += m;
+    }
+    Ok(out)
 }
 
 /// Naive influence function SE for ATE (treats propensity scores as known).
@@ -990,6 +1052,20 @@ pub fn run_doubly_robust(
 ) -> EconResult<DoublyRobustResult> {
     let mut warnings = Vec::new();
 
+    if matches!(config.method, DRMethod::IPW | DRMethod::Regression) && config.bootstrap < 2 {
+        let method = if config.method == DRMethod::IPW {
+            "ipw"
+        } else {
+            "regression"
+        };
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "bootstrap must be at least 2 for method {method} (its standard errors come from the bootstrap); got {}",
+                config.bootstrap
+            ),
+        });
+    }
+
     // Extract variables
     let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
         EconError::ColumnNotFound {
@@ -1155,23 +1231,22 @@ pub fn run_doubly_robust(
         }
         DRMethod::IPW | DRMethod::Regression => {
             // Parallel bootstrap with cached propensity scores for IPW/Regression.
-            // Pre-generate index sets sequentially for reproducibility,
-            // then compute effects in parallel reusing cached ps/outcome models.
+            // Index sets are drawn sequentially (one bounded chunk at a time) for
+            // reproducibility, then evaluated in parallel reusing cached ps/outcome models.
             let mut rng: StdRng = match config.seed {
                 Some(s) => StdRng::seed_from_u64(s),
                 None => StdRng::from_entropy(),
             };
 
-            let boot_indices: Vec<Vec<usize>> = (0..config.bootstrap)
-                .map(|_| (0..n_trim).map(|_| rng.gen_range(0..n_trim)).collect())
-                .collect();
-
             let method = config.method;
             let estimand = config.estimand;
 
-            let boot_effects: Vec<f64> = boot_indices
-                .into_par_iter()
-                .filter_map(|indices| {
+            let boot_effects: Vec<f64> = streamed_bootstrap(
+                &mut rng,
+                n_trim,
+                config.bootstrap,
+                boot_chunk_len(n_trim),
+                |indices| {
                     let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
                     let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
 
@@ -1202,8 +1277,8 @@ pub fn run_doubly_robust(
                     } else {
                         None
                     }
-                })
-                .collect();
+                },
+            )?;
 
             if boot_effects.len() < config.bootstrap / 2 {
                 warnings.push(
@@ -1542,7 +1617,185 @@ fn compute_ps_summary(ps: &Array1<f64>) -> PropensityScoreSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
+
+    fn expect_invalid_spec(err: EconError, needle: &str) {
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains(needle),
+                    "message `{message}` does not mention `{needle}`"
+                )
+            }
+            other => panic!("expected InvalidSpecification mentioning `{needle}`, got {other:?}"),
+        }
+    }
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    #[test]
+    fn test_streamed_bootstrap_matches_materialised_draws() {
+        // stat rejects some sets so the filtering path is covered
+        let stat = |idx: &[usize]| {
+            if idx[0] % 5 == 0 {
+                None
+            } else {
+                Some(idx.iter().map(|&i| ((i * 7919) % 101) as f64).sum::<f64>())
+            }
+        };
+        let mut rng = StdRng::seed_from_u64(7);
+        let sets: Vec<Vec<usize>> = (0..101)
+            .map(|_| (0..37).map(|_| rng.gen_range(0..37)).collect())
+            .collect();
+        let reference: Vec<f64> = sets.iter().filter_map(|s| stat(s)).collect();
+        assert!(
+            reference.len() < 101,
+            "precondition: some sets are rejected"
+        );
+        for chunk in [1, 8, 101, 1000] {
+            let mut rng = StdRng::seed_from_u64(7);
+            assert_eq!(
+                streamed_bootstrap(&mut rng, 37, 101, chunk, &stat).unwrap(),
+                reference,
+                "chunk {chunk}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_count_is_an_error_not_an_abort() {
+        let ds = create_treatment_dataset();
+        let err = run_ipw_treatment(
+            &ds,
+            "y",
+            "treatment",
+            &["x1", "x2"],
+            IpwConfig {
+                trim: 0.01,
+                bootstrap: usize::MAX,
+                seed: Some(42),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "got {err:?}");
+        for method in [DRMethod::IPW, DRMethod::Regression] {
+            let err = run_doubly_robust(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                DoublyRobustConfig {
+                    method,
+                    estimand: Estimand::ATE,
+                    trim: 0.01,
+                    bootstrap: usize::MAX,
+                    seed: Some(42),
+                },
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, EconError::ResourceLimit(_)),
+                "{method:?}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_needs_two_replicates() {
+        let ds = create_treatment_dataset();
+        let err = run_ipw_treatment(
+            &ds,
+            "y",
+            "treatment",
+            &["x1", "x2"],
+            IpwConfig {
+                trim: 0.01,
+                bootstrap: 1,
+                seed: Some(42),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        expect_invalid_spec(err, "bootstrap");
+        for method in [DRMethod::IPW, DRMethod::Regression] {
+            for b in [0, 1] {
+                let err = run_doubly_robust(
+                    &ds,
+                    "y",
+                    "treatment",
+                    &["x1", "x2"],
+                    DoublyRobustConfig {
+                        method,
+                        estimand: Estimand::ATE,
+                        trim: 0.01,
+                        bootstrap: b,
+                        seed: Some(42),
+                    },
+                )
+                .unwrap_err();
+                expect_invalid_spec(err, "bootstrap");
+            }
+        }
+        // AIPW uses the influence function and ignores `bootstrap`
+        assert!(
+            run_doubly_robust(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                DoublyRobustConfig {
+                    method: DRMethod::AIPW,
+                    estimand: Estimand::ATE,
+                    trim: 0.01,
+                    bootstrap: 0,
+                    seed: None,
+                },
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_honours_cancellation() {
+        let ds = create_treatment_dataset();
+        let ipw = resource::with_budget(cancelled_budget(), || {
+            run_ipw_treatment(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                IpwConfig {
+                    trim: 0.01,
+                    bootstrap: 50,
+                    seed: Some(42),
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(matches!(ipw, Err(EconError::Cancelled(_))), "got {ipw:?}");
+        let dr = resource::with_budget(cancelled_budget(), || {
+            run_doubly_robust(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                DoublyRobustConfig {
+                    method: DRMethod::Regression,
+                    estimand: Estimand::ATE,
+                    trim: 0.01,
+                    bootstrap: 50,
+                    seed: Some(42),
+                },
+            )
+        });
+        assert!(matches!(dr, Err(EconError::Cancelled(_))), "got {dr:?}");
+    }
 
     /// Create a dataset with known treatment effect and good overlap.
     ///
