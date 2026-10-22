@@ -700,10 +700,10 @@ impl AnalyticsServer {
     /// Dispatches to all registered tool handler methods directly, bypassing the
     /// ToolRouter (which requires a Peer that cannot be constructed outside rmcp).
     ///
-    /// Only `exec::ToolGovernor::call` calls this, so every HTTP-side tool
-    /// call runs under the governor. In-crate HTTP-side code must go through
-    /// `exec::ToolGovernor::call`; direct calls are for tests and embedders.
-    /// Unknown names, unparsable arguments and handler errors come back as
+    /// Within this crate only `exec::ToolGovernor::call` calls this, so every
+    /// HTTP-side tool call runs under the governor. Direct calls (integration
+    /// tests, embedders) bypass admission control, permits, deadlines,
+    /// cancellation and the dataset quotas. Unknown names, unparsable arguments and handler errors come back as
     /// `ToolCallError`; a tool's own error result is an `Ok` with
     /// `success == false`.
     ///
