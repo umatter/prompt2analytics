@@ -56,6 +56,18 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
+use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_with_capacity};
+
+fn size_overflow(what: &str) -> EconError {
+    EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
+}
+
+/// Iterations between budget checks for a loop whose body costs about
+/// `work` operations, so that the budget is checked about every 65,536
+/// operations.
+fn checkpoint_stride(work: usize) -> usize {
+    (65_536 / work.max(1)).max(1)
+}
 
 // ============================================================================
 // Lag Function
@@ -231,7 +243,35 @@ pub struct EmbedResult {
 /// R `stats::embed`
 pub fn embed(x: &[f64], dimension: usize) -> EconResult<EmbedResult> {
     let n = x.len();
+    let n_rows = embed_rows(n, dimension)?;
+    let mut matrix = try_with_capacity(n_rows, EMBED_WHAT)?;
 
+    // Build each row: [x[t], x[t-1], ..., x[t-dimension+1]]
+    // where t goes from dimension-1 to n-1
+    for (i, t) in ((dimension - 1)..n).enumerate() {
+        if i % 1024 == 0 {
+            checkpoint()?;
+        }
+        let mut row = try_with_capacity(dimension, EMBED_WHAT)?;
+        for lag in 0..dimension {
+            row.push(x[t - lag]);
+        }
+        matrix.push(row);
+    }
+
+    Ok(EmbedResult {
+        matrix,
+        dimension,
+        n_rows,
+        original_length: n,
+    })
+}
+
+const EMBED_WHAT: &str = "the embedding matrix (rows × dimension)";
+
+/// Validate an embedding of a length-`n` series and admit its
+/// `(n - dimension + 1) × dimension` values; returns the row count.
+fn embed_rows(n: usize, dimension: usize) -> EconResult<usize> {
     if dimension == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Embedding dimension must be at least 1".to_string(),
@@ -248,34 +288,28 @@ pub fn embed(x: &[f64], dimension: usize) -> EconResult<EmbedResult> {
     }
 
     let n_rows = n - dimension + 1;
-    let mut matrix = Vec::with_capacity(n_rows);
-
-    // Build each row: [x[t], x[t-1], ..., x[t-dimension+1]]
-    // where t goes from dimension-1 to n-1
-    for t in (dimension - 1)..n {
-        let mut row = Vec::with_capacity(dimension);
-        for lag in 0..dimension {
-            row.push(x[t - lag]);
-        }
-        matrix.push(row);
-    }
-
-    Ok(EmbedResult {
-        matrix,
-        dimension,
-        n_rows,
-        original_length: n,
-    })
+    let cells = checked_len(&[n_rows, dimension], EMBED_WHAT)?;
+    check_alloc::<f64>(cells, EMBED_WHAT)?;
+    Ok(n_rows)
 }
 
 /// Embed a time series into an ndarray matrix.
 ///
 /// Same as `embed` but returns an ndarray Array2<f64>.
 pub fn embed_array(x: &[f64], dimension: usize) -> EconResult<Array2<f64>> {
-    let result = embed(x, dimension)?;
-    let n_rows = result.n_rows;
+    let n = x.len();
+    let n_rows = embed_rows(n, dimension)?;
+    let cells = checked_len(&[n_rows, dimension], EMBED_WHAT)?;
 
-    let flat: Vec<f64> = result.matrix.into_iter().flatten().collect();
+    // Row-major, row i = [x[t], x[t-1], ..., x[t-dimension+1]] with
+    // t = i + dimension - 1, exactly as `embed` builds it.
+    let mut flat = try_with_capacity(cells, EMBED_WHAT)?;
+    for (i, t) in ((dimension - 1)..n).enumerate() {
+        if i % 1024 == 0 {
+            checkpoint()?;
+        }
+        flat.extend((0..dimension).map(|lag| x[t - lag]));
+    }
     Array2::from_shape_vec((n_rows, dimension), flat)
         .map_err(|e| EconError::Internal(e.to_string()))
 }
@@ -349,28 +383,36 @@ pub fn diffinv(
         });
     }
 
+    const WHAT: &str = "the integrated series (length + lag × differences)";
+
     // For differences > 0, we need lag * differences initial values
-    let n_xi = lag * differences;
-    let xi_values: Vec<f64> = match xi {
-        Some(v) if v.len() >= n_xi => v[..n_xi].to_vec(),
-        Some(v) => {
-            // Pad with zeros if not enough initial values
-            let mut padded = v.to_vec();
-            padded.resize(n_xi, 0.0);
-            padded
-        }
-        None => vec![0.0; n_xi],
-    };
+    let n_xi = lag
+        .checked_mul(differences)
+        .ok_or_else(|| size_overflow(WHAT))?;
+    let final_len = x
+        .len()
+        .checked_add(n_xi)
+        .ok_or_else(|| size_overflow(WHAT))?;
+    // Admit the output before any work, so an oversized request fails at once.
+    check_alloc::<f64>(final_len, WHAT)?;
+
+    // Initial values: a long xi is truncated, a short one padded with zeros.
+    let mut xi_values = try_vec(n_xi, 0.0, WHAT)?;
+    if let Some(v) = xi {
+        let k = v.len().min(n_xi);
+        xi_values[..k].copy_from_slice(&v[..k]);
+    }
 
     // Start with input
     let mut result = x.to_vec();
 
     // Apply cumsum 'differences' times
     for d in 0..differences {
+        checkpoint()?;
         let xi_start = d * lag;
         let xi_for_this_diff = &xi_values[xi_start..xi_start + lag];
 
-        result = cumsum_with_init(&result, lag, xi_for_this_diff);
+        result = cumsum_with_init(&result, lag, xi_for_this_diff)?;
     }
 
     Ok(DiffinvResult {
@@ -382,9 +424,13 @@ pub fn diffinv(
 }
 
 /// Cumulative sum with lag and initial values.
-fn cumsum_with_init(x: &[f64], lag: usize, xi: &[f64]) -> Vec<f64> {
-    let n = x.len() + lag;
-    let mut result = Vec::with_capacity(n);
+fn cumsum_with_init(x: &[f64], lag: usize, xi: &[f64]) -> EconResult<Vec<f64>> {
+    const WHAT: &str = "the integrated series (length + lag × differences)";
+    let n = x
+        .len()
+        .checked_add(lag)
+        .ok_or_else(|| size_overflow(WHAT))?;
+    let mut result = try_with_capacity(n, WHAT)?;
 
     // Initial values
     for &v in xi.iter().take(lag) {
@@ -398,7 +444,7 @@ fn cumsum_with_init(x: &[f64], lag: usize, xi: &[f64]) -> Vec<f64> {
         result.push(x_val + y_prev);
     }
 
-    result
+    Ok(result)
 }
 
 // ============================================================================
@@ -728,22 +774,33 @@ pub fn arma_acf(ar: &[f64], ma: &[f64], lag_max: usize, pacf: bool) -> EconResul
         });
     }
 
-    let acf_values: Vec<f64> = acvf.iter().map(|&g| g / gamma0).collect();
+    let mut acf_values = acvf;
+    for g in acf_values.iter_mut() {
+        *g /= gamma0;
+    }
 
     let values = if pacf {
         // Compute PACF from ACF using Durbin-Levinson
         let pacf_vals = durbin_levinson_from_acf(&acf_values)?;
         // Include lag 0 = 1.0 for consistency
-        let mut result = vec![1.0];
+        let mut result = try_with_capacity(
+            pacf_vals.len() + 1,
+            "the partial autocorrelations up to lag_max",
+        )?;
+        result.push(1.0);
         result.extend(pacf_vals);
         result
     } else {
         acf_values
     };
 
+    // lag_max + 1 cannot overflow: arma_autocovariance allocated that many values.
+    let mut lags = try_with_capacity::<usize>(lag_max + 1, "the lags up to lag_max")?;
+    lags.extend(0..=lag_max);
+
     Ok(ArmaAcfResult {
         values,
-        lags: (0..=lag_max).collect(),
+        lags,
         ar: ar.to_vec(),
         ma: ma.to_vec(),
         is_pacf: pacf,
@@ -762,10 +819,15 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
 
     // For ARMA, we need to solve the Yule-Walker equations modified for MA component
 
-    let m = p.max(q + 1);
-    let n_lags = lag_max.max(m) + 1;
+    const WHAT: &str = "the ARMA autocovariances up to lag_max";
 
-    let mut gamma = vec![0.0; n_lags];
+    let m = p.max(q + 1);
+    let n_lags = lag_max
+        .max(m)
+        .checked_add(1)
+        .ok_or_else(|| size_overflow(WHAT))?;
+
+    let mut gamma = try_vec(n_lags, 0.0, WHAT)?;
 
     // For sigma^2 = 1 (scale later if needed)
     // First compute initial autocovariances gamma(0), ..., gamma(m-1)
@@ -781,7 +843,11 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
         // Pure MA(q) process
         // gamma(k) = sigma^2 * sum(theta_i * theta_{i+k}) for k <= q, 0 otherwise
         gamma[0] = 1.0 + ma.iter().map(|&t| t * t).sum::<f64>();
+        let stride = checkpoint_stride(q);
         for k in 1..=q.min(lag_max) {
+            if k % stride == 0 {
+                checkpoint()?;
+            }
             let mut sum = 0.0;
             for i in 0..(q - k) {
                 sum += ma[i] * ma[i + k];
@@ -807,13 +873,20 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
         // Initial approximation
         gamma[0] = 1.0;
 
+        // Each lag below costs O(p).
+        let stride = checkpoint_stride(p);
+
         // Use recursion: gamma(k) = sum(phi_i * gamma(|k-i|))
         for _ in 0..100 {
+            checkpoint()?;
             // Iterate to convergence
             let old_gamma0 = gamma[0];
 
             // First compute gamma(1) to gamma(p) from gamma(0)
             for k in 1..=p.min(n_lags - 1) {
+                if k % stride == 0 {
+                    checkpoint()?;
+                }
                 let mut sum = 0.0;
                 for i in 0..p {
                     let idx = (k as i64 - 1 - i as i64).unsigned_abs() as usize;
@@ -838,6 +911,9 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
 
         // Extend to remaining lags using recursion
         for k in (p + 1)..n_lags {
+            if k % stride == 0 {
+                checkpoint()?;
+            }
             let mut sum = 0.0;
             for i in 0..p {
                 if k > i {
@@ -864,9 +940,16 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
     // Initialize with approximate values from AR part
     gamma[0] = 1.0;
 
+    // Each lag below costs O(p) (O(q) in the MA contribution).
+    let stride = checkpoint_stride(p);
+
     // First pass: AR contribution
     for _ in 0..50 {
+        checkpoint()?;
         for k in 1..n_lags {
+            if k % stride == 0 {
+                checkpoint()?;
+            }
             let mut sum = 0.0;
             for i in 0..p {
                 let idx = (k as i64 - 1 - i as i64).unsigned_abs() as usize;
@@ -894,7 +977,11 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
     }
 
     // Add MA contribution to autocovariances
+    let stride = checkpoint_stride(q);
     for k in 1..=q.min(n_lags - 1) {
+        if k % stride == 0 {
+            checkpoint()?;
+        }
         let mut ma_contrib = 0.0;
         for i in 0..(q - k) {
             ma_contrib += ma[i] * ma[i + k];
@@ -910,18 +997,24 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
 
 /// Durbin-Levinson algorithm to compute PACF from ACF.
 fn durbin_levinson_from_acf(acf: &[f64]) -> EconResult<Vec<f64>> {
+    const WHAT: &str = "the partial autocorrelations up to lag_max";
+
     let p = acf.len() - 1; // acf[0] = 1
     if p == 0 {
         return Ok(vec![]);
     }
 
-    let mut pacf = Vec::with_capacity(p);
-    let mut phi: Vec<f64> = vec![0.0; p];
+    let mut pacf = try_with_capacity(p, WHAT)?;
+    let mut phi: Vec<f64> = try_vec(p, 0.0, WHAT)?;
+    // phi of the previous order, reused across orders instead of a clone each time
+    let mut prev: Vec<f64> = try_vec(p, 0.0, WHAT)?;
 
     phi[0] = acf[1];
     pacf.push(phi[0]);
 
     for n in 2..=p {
+        // Each order costs O(n).
+        checkpoint()?;
         let mut num = acf[n];
         let mut den = 1.0;
 
@@ -939,9 +1032,9 @@ fn durbin_levinson_from_acf(acf: &[f64]) -> EconResult<Vec<f64>> {
         let phi_nn = num / den;
         pacf.push(phi_nn);
 
-        let phi_prev = phi.clone();
+        prev[..n - 1].copy_from_slice(&phi[..n - 1]);
         for k in 1..n {
-            phi[k - 1] = phi_prev[k - 1] - phi_nn * phi_prev[n - k - 1];
+            phi[k - 1] = prev[k - 1] - phi_nn * prev[n - k - 1];
         }
         phi[n - 1] = phi_nn;
     }
@@ -1002,9 +1095,14 @@ pub fn arma_to_ma(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<ArmaToMa
     // psi_j = theta_j + sum(phi_i * psi_{j-i}) for i = 1 to min(j, p)
     // where theta_j = 0 for j > q
 
-    let mut psi = Vec::with_capacity(lag_max);
+    let mut psi = try_with_capacity(lag_max, "the psi weights up to lag_max")?;
 
+    // Each weight costs O(min(j, p)).
+    let stride = checkpoint_stride(p.saturating_add(1));
     for j in 1..=lag_max {
+        if j % stride == 0 {
+            checkpoint()?;
+        }
         let mut sum = 0.0;
 
         // theta_j contribution (0 if j > q)
@@ -1106,11 +1204,22 @@ pub fn acf_to_ar(acf: &[f64]) -> EconResult<Acf2ArResult> {
         });
     }
 
-    let mut ar_matrix: Vec<Vec<f64>> = Vec::with_capacity(max_order);
-    let mut pacf = Vec::with_capacity(max_order);
+    // The triangular matrix holds max_order * (max_order + 1) / 2 coefficients;
+    // admit them before any work.
+    const WHAT: &str = "the AR coefficient matrix (order × order / 2)";
+    let order_plus_one = max_order
+        .checked_add(1)
+        .ok_or_else(|| size_overflow(WHAT))?;
+    let cells = checked_len(&[max_order, order_plus_one], WHAT)? / 2;
+    check_alloc::<f64>(cells, WHAT)?;
+
+    let mut ar_matrix: Vec<Vec<f64>> = try_with_capacity(max_order, WHAT)?;
+    let mut pacf = try_with_capacity(max_order, WHAT)?;
 
     // Durbin-Levinson recursion
-    let mut phi: Vec<f64> = vec![0.0; max_order];
+    let mut phi: Vec<f64> = try_vec(max_order, 0.0, WHAT)?;
+    // phi of the previous order, reused across orders instead of a clone each time
+    let mut prev: Vec<f64> = try_vec(max_order, 0.0, WHAT)?;
 
     // AR(1)
     phi[0] = rho[1];
@@ -1119,6 +1228,8 @@ pub fn acf_to_ar(acf: &[f64]) -> EconResult<Acf2ArResult> {
 
     // AR(n) for n = 2 to max_order
     for n in 2..=max_order {
+        // Each order costs O(n).
+        checkpoint()?;
         // Compute phi_{n,n}
         let mut num = rho[n];
         let mut den = 1.0;
@@ -1137,14 +1248,16 @@ pub fn acf_to_ar(acf: &[f64]) -> EconResult<Acf2ArResult> {
         pacf.push(phi_nn);
 
         // Update phi coefficients
-        let phi_prev = phi.clone();
+        prev[..n - 1].copy_from_slice(&phi[..n - 1]);
         for k in 1..n {
-            phi[k - 1] = phi_prev[k - 1] - phi_nn * phi_prev[n - k - 1];
+            phi[k - 1] = prev[k - 1] - phi_nn * prev[n - k - 1];
         }
         phi[n - 1] = phi_nn;
 
         // Store AR(n) coefficients
-        ar_matrix.push(phi[..n].to_vec());
+        let mut row = try_with_capacity(n, WHAT)?;
+        row.extend_from_slice(&phi[..n]);
+        ar_matrix.push(row);
     }
 
     Ok(Acf2ArResult {
@@ -1218,8 +1331,16 @@ pub fn arima_sim(
     use rand::{Rng, SeedableRng};
     use rand_distr::{Distribution, StandardNormal};
 
+    const WHAT: &str = "the simulated series (n plus burn-in)";
+
     let p = ar.len();
     let q = ma.len();
+
+    if n == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n must be at least 1 (R: 'n' must be strictly positive)".to_string(),
+        });
+    }
 
     // Validate stationarity of AR part
     if p > 0 {
@@ -1238,7 +1359,7 @@ pub fn arima_sim(
         (p.max(q) * 10).max(100)
     });
 
-    let total_length = n + burn_in;
+    let total_length = n.checked_add(burn_in).ok_or_else(|| size_overflow(WHAT))?;
 
     // Generate or use innovations
     let innov: Vec<f64> = if let Some(ext_innov) = innovations {
@@ -1258,15 +1379,22 @@ pub fn arima_sim(
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::from_entropy(),
         };
-        (0..total_length)
-            .map(|_| StandardNormal.sample(&mut rng))
-            .collect()
+        let mut innov = try_vec(total_length, 0.0, WHAT)?;
+        for v in innov.iter_mut() {
+            *v = StandardNormal.sample(&mut rng);
+        }
+        innov
     };
 
     // Simulate ARMA part
-    let mut x = vec![0.0; total_length];
+    let mut x = try_vec(total_length, 0.0, WHAT)?;
 
+    // Each step costs O(p + q).
+    let stride = checkpoint_stride(p + q + 1);
     for t in 0..total_length {
+        if t % stride == 0 {
+            checkpoint()?;
+        }
         let mut val = innov[t];
 
         // AR part: sum(phi_i * x[t-i])
@@ -1287,28 +1415,20 @@ pub fn arima_sim(
     }
 
     // Remove burn-in
-    let arma_series: Vec<f64> = x[burn_in..].to_vec();
+    x.drain(..burn_in);
 
-    // Un-difference if d > 0
-    let final_series = if d > 0 {
-        // Apply cumsum d times
-        let mut result = arma_series;
-        for _ in 0..d {
-            let mut cumsum = Vec::with_capacity(result.len());
-            let mut running = 0.0;
-            for &val in &result {
-                running += val;
-                cumsum.push(running);
-            }
-            result = cumsum;
+    // Un-difference: apply cumsum d times, in place
+    for _ in 0..d {
+        checkpoint()?;
+        let mut running = 0.0;
+        for v in x.iter_mut() {
+            running += *v;
+            *v = running;
         }
-        result
-    } else {
-        arma_series
-    };
+    }
 
     Ok(ArimaSimResult {
-        values: final_series,
+        values: x,
         ar: ar.to_vec(),
         ma: ma.to_vec(),
         d,
@@ -1678,5 +1798,198 @@ mod tests {
         assert_eq!(result.matrix[0], vec![3.0, 2.0, 1.0]);
         assert_eq!(result.matrix[1], vec![4.0, 3.0, 2.0]);
         assert_eq!(result.matrix[2], vec![5.0, 4.0, 3.0]);
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn arima_sim_absurd_n_is_an_error() {
+        // Before the fix: "memory allocation of 9007199254741792 bytes failed", SIGABRT.
+        let err = arima_sim(&[0.5], &[], 0, 1usize << 50, None, None, Some(1)).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        // n + burn-in overflows (a debug-build panic before the fix)
+        let err = arima_sim(&[0.5], &[], 0, usize::MAX, None, Some(1), Some(1)).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+    }
+
+    /// R 4.3.3: arima.sim(list(ar = 0.5), n = 0) -> Error: 'n' must be strictly positive
+    #[test]
+    fn arima_sim_rejects_zero_n() {
+        let err = arima_sim(&[0.5], &[], 0, 0, None, None, Some(1)).unwrap_err();
+        assert!(
+            matches!(err, EconError::InvalidSpecification { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn arima_sim_honours_cancellation() {
+        let r = cancelled(|| arima_sim(&[0.5], &[], 3, 100, None, None, Some(1)));
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn arma_acf_and_psi_weights_refuse_absurd_lag_max() {
+        // Before the fix: "memory allocation of 9007199254741000 bytes failed", SIGABRT.
+        let err = arma_acf(&[0.5], &[], 1usize << 50, false).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err = arma_acf(&[0.5], &[], usize::MAX, false).unwrap_err(); // lag_max + 1 overflows
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err = arma_to_ma(&[0.5], &[0.3], 1usize << 50).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            arma_to_ma(&[0.5], &[0.3], 100_000)
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("lag_max"), "{err}");
+    }
+
+    #[test]
+    fn arma_pacf_honours_cancellation() {
+        // The PACF path (Durbin-Levinson is O(lag_max^2)) must stop when the budget is cancelled.
+        assert!(matches!(
+            cancelled(|| arma_acf(&[0.5, 0.2], &[], 2_000, true)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    /// The pre-change recursion, verbatim (clones phi every order).
+    fn durbin_levinson_reference(acf: &[f64]) -> Vec<f64> {
+        let p = acf.len() - 1; // acf[0] = 1
+        if p == 0 {
+            return vec![];
+        }
+
+        let mut pacf = Vec::with_capacity(p);
+        let mut phi: Vec<f64> = vec![0.0; p];
+
+        phi[0] = acf[1];
+        pacf.push(phi[0]);
+
+        for n in 2..=p {
+            let mut num = acf[n];
+            let mut den = 1.0;
+
+            for k in 1..n {
+                num -= phi[k - 1] * acf[n - k];
+                den -= phi[k - 1] * acf[k];
+            }
+
+            if den.abs() < 1e-15 {
+                // Numerical issues
+                pacf.push(0.0);
+                continue;
+            }
+
+            let phi_nn = num / den;
+            pacf.push(phi_nn);
+
+            let phi_prev = phi.clone();
+            for k in 1..n {
+                phi[k - 1] = phi_prev[k - 1] - phi_nn * phi_prev[n - k - 1];
+            }
+            phi[n - 1] = phi_nn;
+        }
+
+        pacf
+    }
+
+    #[test]
+    fn durbin_levinson_buffer_reuse_is_bit_identical() {
+        let acf = arma_acf(&[0.6, -0.3, 0.1], &[0.4], 300, false)
+            .unwrap()
+            .values;
+        assert_eq!(
+            durbin_levinson_from_acf(&acf).unwrap(),
+            durbin_levinson_reference(&acf)
+        );
+    }
+
+    /// R 4.3.3: diffinv(c(2,3,4), differences = 2)            -> 0 0 2 7 16
+    ///          diffinv(c(2,3,4,5), lag = 2, differences = 2) -> 0 0 0 0 2 3 8 11
+    /// (zero xi, where this module and R agree; non-zero xi with differences >= 2 is TS-28)
+    #[test]
+    fn test_validate_diffinv_zero_xi_against_r() {
+        assert_eq!(
+            diffinv(&[2.0, 3.0, 4.0], 1, 2, None).unwrap().values,
+            vec![0.0, 0.0, 2.0, 7.0, 16.0]
+        );
+        assert_eq!(
+            diffinv(&[2.0, 3.0, 4.0, 5.0], 2, 2, None).unwrap().values,
+            vec![0.0, 0.0, 0.0, 0.0, 2.0, 3.0, 8.0, 11.0]
+        );
+    }
+
+    #[test]
+    fn diffinv_refuses_impossible_sizes() {
+        let x = [1.0, 2.0];
+        let err = diffinv(&x, 1, 1usize << 50, None).unwrap_err(); // aborted before the fix
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err = diffinv(&x, usize::MAX, 2, None).unwrap_err(); // lag * differences overflows
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err =
+            crate::resource::with_alloc_ceiling(Some(1 << 16), || diffinv(&x, 100, 100, None))
+                .unwrap_err();
+        assert!(err.to_string().contains("integrated series"), "{err}"); // 10,002 values > 64 KiB
+    }
+
+    #[test]
+    fn diffinv_honours_cancellation() {
+        assert!(matches!(
+            cancelled(|| diffinv(&[1.0, 2.0, 3.0], 1, 3, None)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    #[test]
+    fn embed_and_acf_to_ar_check_their_output_size() {
+        let x: Vec<f64> = (0..5_000)
+            .map(|t| (t as f64 * 0.37).sin() + 0.01 * ((t * 13 % 7) as f64))
+            .collect();
+        // 4,001 x 1,000 f64 = 32 MB against a 1 MiB ceiling
+        let err =
+            crate::resource::with_alloc_ceiling(Some(1 << 20), || embed(&x, 1_000)).unwrap_err();
+        assert!(err.to_string().contains("embedding matrix"), "{err}");
+        let err = crate::resource::with_alloc_ceiling(Some(1 << 20), || embed_array(&x, 1_000))
+            .unwrap_err();
+        assert!(err.to_string().contains("embedding matrix"), "{err}");
+        // 200 orders -> 20,100 coefficients = 161 KB against a 64 KiB ceiling
+        let acf: Vec<f64> = (0..201).map(|k| 0.9f64.powi(k)).collect();
+        let err =
+            crate::resource::with_alloc_ceiling(Some(1 << 16), || acf_to_ar(&acf)).unwrap_err();
+        assert!(err.to_string().contains("AR coefficient matrix"), "{err}");
+    }
+
+    #[test]
+    fn acf_to_ar_honours_cancellation() {
+        let acf: Vec<f64> = (0..50).map(|k| 0.9f64.powi(k)).collect();
+        assert!(matches!(
+            cancelled(|| acf_to_ar(&acf)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    /// Guard for the in-place integration: d = 2 is exactly two cumulative sums of the d = 0 series.
+    #[test]
+    fn arima_sim_differencing_is_cumulative_sum_of_arma_part() {
+        let base = arima_sim(&[0.5], &[0.3], 0, 200, None, Some(60), Some(7))
+            .unwrap()
+            .values;
+        let d2 = arima_sim(&[0.5], &[0.3], 2, 200, None, Some(60), Some(7))
+            .unwrap()
+            .values;
+        let mut expected = base;
+        for _ in 0..2 {
+            let mut run = 0.0;
+            for v in expected.iter_mut() {
+                run += *v;
+                *v = run;
+            }
+        }
+        assert_eq!(d2, expected);
     }
 }

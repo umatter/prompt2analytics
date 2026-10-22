@@ -6,8 +6,20 @@
 
 use ndarray::Array2;
 
+use crate::resource::{checkpoint, try_zeros2};
+
 /// Result type for Toeplitz matrix operations.
 pub type ToeplitzResult<T> = Result<T, String>;
+
+/// A `rows x cols` zero matrix, allocated fallibly (`"Resource limit: …"`).
+fn zeros(rows: usize, cols: usize) -> ToeplitzResult<Array2<f64>> {
+    try_zeros2(rows, cols, "the Toeplitz matrix").map_err(|e| e.to_string())
+}
+
+/// The cancellation budget, as this module's `String` error (`"Computation stopped: …"`).
+fn check_budget() -> ToeplitzResult<()> {
+    checkpoint().map_err(|e| e.to_string())
+}
 
 /// Create a symmetric Toeplitz matrix from the first column.
 ///
@@ -37,9 +49,10 @@ pub fn toeplitz(x: &[f64]) -> ToeplitzResult<Array2<f64>> {
     }
 
     let n = x.len();
-    let mut mat = Array2::zeros((n, n));
+    let mut mat = zeros(n, n)?;
 
     for i in 0..n {
+        check_budget()?;
         for j in 0..n {
             let idx = i.abs_diff(j);
             mat[[i, j]] = x[idx];
@@ -80,9 +93,10 @@ pub fn toeplitz_asymmetric(col: &[f64], row: &[f64]) -> ToeplitzResult<Array2<f6
 
     let n = col.len();
     let m = row.len();
-    let mut mat = Array2::zeros((n, m));
+    let mut mat = zeros(n, m)?;
 
     for i in 0..n {
+        check_budget()?;
         for j in 0..m {
             if i > j {
                 // Below main diagonal: use column values
@@ -126,12 +140,13 @@ pub fn toeplitz2(
     // Compute dimensions (following R's logic)
     let (n, m) = match (nrow, ncol) {
         (Some(nr), Some(nc)) => {
-            if nr + nc > len + 1 {
+            let (Some(sum), Some(len_plus_one)) = (nr.checked_add(nc), len.checked_add(1)) else {
+                return Err(format!("nrow ({nr}) + ncol ({nc}) is too large"));
+            };
+            if sum > len_plus_one {
                 return Err(format!(
                     "nrow ({}) + ncol ({}) must be <= length(x) + 1 ({})",
-                    nr,
-                    nc,
-                    len + 1
+                    nr, nc, len_plus_one
                 ));
             }
             (nr, nc)
@@ -157,9 +172,10 @@ pub fn toeplitz2(
         }
     };
 
-    let mut mat = Array2::zeros((n, m));
+    let mut mat = zeros(n, m)?;
 
     for i in 0..n {
+        check_budget()?;
         for j in 0..m {
             // T[i,j] = x[i - j + ncol - 1] (0-indexed adjustment)
             let idx = (i as isize) - (j as isize) + (m as isize) - 1;
@@ -296,5 +312,43 @@ mod tests {
     fn test_toeplitz_empty_error() {
         let result = toeplitz(&[]);
         assert!(result.is_err());
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn toeplitz_refuses_matrices_above_the_allocation_ceiling() {
+        let col = vec![0.5; 1_000]; // 1,000 x 1,000 f64 = 8 MB
+        let err =
+            crate::resource::with_alloc_ceiling(Some(1 << 20), || toeplitz(&col)).unwrap_err();
+        assert!(
+            err.contains("Resource limit") && err.contains("Toeplitz"),
+            "{err}"
+        );
+        let err = crate::resource::with_alloc_ceiling(Some(1 << 20), || {
+            toeplitz_asymmetric(&col, &col[..200])
+        })
+        .unwrap_err(); // 1,000 x 200 = 1.6 MB
+        assert!(err.contains("Toeplitz"), "{err}");
+        let ok =
+            crate::resource::with_alloc_ceiling(Some(1 << 20), || toeplitz(&col[..300])).unwrap();
+        assert_eq!(ok.dim(), (300, 300)); // 720 KB passes
+    }
+
+    #[test]
+    fn toeplitz2_dimension_sum_cannot_overflow() {
+        // nrow + ncol overflowed (a debug-build panic) before the fix
+        let err = toeplitz2(&[1.0, 2.0], Some(usize::MAX), Some(2)).unwrap_err();
+        assert!(err.contains("nrow"), "{err}");
+    }
+
+    #[test]
+    fn toeplitz_honours_cancellation() {
+        let err = cancelled(|| toeplitz(&[1.0, 2.0, 3.0])).unwrap_err();
+        assert!(err.contains("Computation stopped"), "{err}");
     }
 }

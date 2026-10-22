@@ -16,6 +16,7 @@
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::resource::{check_alloc, checked_len, checkpoint, try_with_capacity};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
@@ -399,8 +400,14 @@ pub fn kalman_forecast(
         });
     }
 
+    const WHAT: &str = "the Kalman forecast (horizon × state dimension)";
+
     let n = filter_result.n_obs;
-    let _m = filter_result.state_dim;
+    let m = filter_result.state_dim;
+
+    // The state forecasts hold horizon × m values; admit them before any work.
+    let cells = checked_len(&[horizon, m], WHAT)?;
+    check_alloc::<f64>(cells, WHAT)?;
 
     // Forecasting starts from the final filtered state; an empty filter result
     // has none, so indexing `[n - 1]` would underflow/panic.
@@ -418,12 +425,14 @@ pub fn kalman_forecast(
 
     let state_dist_cov = model.state_disturbance_cov();
 
-    let mut forecasts = Vec::with_capacity(horizon);
-    let mut variances = Vec::with_capacity(horizon);
-    let mut std_errors = Vec::with_capacity(horizon);
-    let mut state_forecasts = Vec::with_capacity(horizon);
+    let mut forecasts = try_with_capacity(horizon, WHAT)?;
+    let mut variances = try_with_capacity(horizon, WHAT)?;
+    let mut std_errors = try_with_capacity(horizon, WHAT)?;
+    let mut state_forecasts: Vec<Vec<f64>> = try_with_capacity(horizon, WHAT)?;
 
     for _ in 0..horizon {
+        // Each step costs O(m³).
+        checkpoint()?;
         // Predict state
         state = model.transition.dot(&state);
         cov = model.transition.dot(&cov).dot(&model.transition.t()) + &state_dist_cov;
@@ -793,5 +802,38 @@ mod tests {
             "Smoothed covariance should be <= filtered covariance in at least 90% of points, got {:.1}%",
             ratio * 100.0
         );
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    fn local_level() -> (StateSpaceModel, KalmanFilterResult) {
+        let model = StateSpaceModel::new(
+            array![[1.0]],
+            array![1.0],
+            array![[1.0]],
+            array![[0.1]],
+            0.2,
+        )
+        .unwrap();
+        let y = vec![1.0, 1.5, 2.0, 2.2, 2.5];
+        let f = kalman_filter(&y, &model, array![y[0]].view(), array![[1.0]].view()).unwrap();
+        (model, f)
+    }
+
+    #[test]
+    fn kalman_forecast_refuses_absurd_horizon_and_honours_cancellation() {
+        let (model, f) = local_level();
+        assert!(matches!(
+            kalman_forecast(&f, &model, 1usize << 50),
+            Err(EconError::ResourceLimit(_))
+        ));
+        assert!(matches!(
+            cancelled(|| kalman_forecast(&f, &model, 3)),
+            Err(EconError::Cancelled(_))
+        ));
     }
 }

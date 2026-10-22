@@ -1007,6 +1007,16 @@ impl AnalyticsServer {
                             output.push_str(&format!("  t+{}: {:.4}\n", i + 1, val));
                         }
                     }
+                    // A resource or deadline failure is a failure of the call, not a
+                    // note on a successful fit: the governor maps an expired budget to 504.
+                    Err(
+                        e @ (p2a_core::EconError::ResourceLimit(_)
+                        | p2a_core::EconError::Cancelled(_)),
+                    ) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Holt-Winters forecast failed: {e}"
+                        ))]));
+                    }
                     Err(e) => {
                         output.push_str(&format!("\nForecast generation failed: {}\n", e));
                     }
@@ -1723,7 +1733,12 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match embed(&values, request.dimension) {
+        // The response shows the first 10 rows only, so embed only the prefix those rows
+        // need (dimension + 9 values). With dimension 0 or above the series length, embed
+        // returns the same errors as on the whole series.
+        let n = values.len();
+        let prefix = n.min(request.dimension.saturating_add(9));
+        let result = match embed(&values[..prefix], request.dimension) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1735,8 +1750,9 @@ impl AnalyticsServer {
 
         let output = serde_json::json!({
             "dimension": result.dimension,
-            "n_rows": result.n_rows,
-            "matrix_sample": &result.matrix[..result.n_rows.min(10)]
+            // 1 <= dimension <= n here, since embed succeeded
+            "n_rows": n - request.dimension + 1,
+            "matrix_sample": &result.matrix
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -2194,5 +2210,141 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap(),
         )]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2a_core::data::Dataset;
+    use p2a_core::polars::prelude::*;
+    use rmcp::model::RawContent;
+
+    fn text_of(r: &CallToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| match &c.raw {
+                RawContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    async fn server_with_series(name: &str, y: &[f64]) -> AnalyticsServer {
+        let server = AnalyticsServer::new();
+        let df = df!("y" => y).unwrap();
+        server
+            .datasets
+            .write()
+            .await
+            .insert(name.to_string(), Dataset::new(df));
+        server
+    }
+
+    fn seasonal(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|t| {
+                let tf = t as f64;
+                50.0 + 0.4 * tf
+                    + 5.0 * (2.0 * std::f64::consts::PI * tf / 12.0).sin()
+                    + 0.3 * (((t * 7) % 5) as f64 - 2.0)
+            })
+            .collect()
+    }
+
+    fn hw(horizon: usize) -> HoltWintersRequest {
+        HoltWintersRequest {
+            dataset: "hw".into(),
+            column: "y".into(),
+            period: 12,
+            seasonal: None,
+            alpha: None,
+            beta: None,
+            gamma: None,
+            horizon: Some(horizon),
+        }
+    }
+
+    #[tokio::test]
+    async fn ts_holt_winters_oversized_horizon_is_a_tool_error() {
+        let server = server_with_series("hw", &seasonal(48)).await;
+        // Before the fix this aborted the whole process.
+        let r = server
+            .ts_holt_winters(Parameters(hw(1usize << 50)))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("Resource limit"), "{}", text_of(&r));
+        let ok = server.ts_holt_winters(Parameters(hw(12))).await.unwrap();
+        assert_ne!(ok.is_error, Some(true), "{}", text_of(&ok));
+        assert!(text_of(&ok).contains("t+12:"));
+    }
+
+    #[tokio::test]
+    async fn timeseries_embed_output_is_unchanged() {
+        let x = seasonal(300);
+        let server = server_with_series("e", &x).await;
+        let r = server
+            .timeseries_embed(Parameters(EmbedRequest {
+                dataset: "e".into(),
+                column: "y".into(),
+                dimension: 40,
+            }))
+            .await
+            .unwrap();
+        let full = p2a_core::embed(&x, 40).unwrap();
+        let expected = serde_json::to_string_pretty(&serde_json::json!({
+            "dimension": 40, "n_rows": 261, "matrix_sample": &full.matrix[..10]
+        }))
+        .unwrap();
+        assert_eq!(text_of(&r), expected);
+    }
+
+    /// The handler returns 10 rows, so it must not build the full 4,001 x 1,000 embedding
+    /// (which the 1 MiB ceiling refuses).
+    #[test]
+    fn timeseries_embed_builds_only_the_rows_it_returns() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let x = seasonal(5_000);
+        let r = p2a_core::resource::with_alloc_ceiling(Some(1 << 20), || {
+            rt.block_on(async {
+                let server = server_with_series("e", &x).await;
+                server
+                    .timeseries_embed(Parameters(EmbedRequest {
+                        dataset: "e".into(),
+                        column: "y".into(),
+                        dimension: 1_000,
+                    }))
+                    .await
+                    .unwrap()
+            })
+        });
+        assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("\"n_rows\": 4001"), "{}", text_of(&r));
+    }
+
+    /// Dimension 0 and dimension above the series length keep their messages.
+    #[tokio::test]
+    async fn timeseries_embed_invalid_dimension_messages_are_unchanged() {
+        let server = server_with_series("e", &seasonal(30)).await;
+        for (dimension, expected) in [
+            (0, "Embedding dimension must be at least 1"),
+            (31, "Embedding dimension 31 exceeds series length 30"),
+        ] {
+            let r = server
+                .timeseries_embed(Parameters(EmbedRequest {
+                    dataset: "e".into(),
+                    column: "y".into(),
+                    dimension,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+            assert!(text_of(&r).contains(expected), "{}", text_of(&r));
+        }
     }
 }
