@@ -301,10 +301,11 @@ async fn session_db_bytes_bounds_the_session_total() {
     assert!(done.result.as_deref().unwrap().len() <= 49);
     assert_eq!(db.session_stored_bytes("s5").await.unwrap(), 100);
 
-    // A seed after the counter was dropped reads the store: clearing the
-    // conversation frees its messages and tool calls but keeps its title.
+    // Clearing the conversation releases its messages' and tool calls'
+    // bytes from the counter and keeps its title's.
     db.clear_messages(&c5.id_string()).await.unwrap();
     assert_eq!(db.session_stored_bytes("s5").await.unwrap(), 1);
+    assert_eq!(db.session_bytes_entry("s5"), Some(1));
     db.add_message(&c5.id_string(), "user", &"f".repeat(99))
         .await
         .unwrap();
@@ -363,6 +364,179 @@ async fn deleting_a_conversation_releases_its_bytes_without_a_reseed() {
     // Deleting the session's rows drops the counter.
     db.delete_session("s1").await.unwrap();
     assert_eq!(db.session_bytes_entry("s1"), None);
+}
+
+/// A conversation of `session_id` holding twenty messages and a tool call;
+/// returns its id.
+async fn filled_conversation(db: &DbConnection, session_id: &str, title: &str) -> String {
+    let conv = db.create_conversation(session_id, title).await.unwrap();
+    let id = conv.id_string();
+    for i in 0..20 {
+        db.add_message(&id, "user", &format!("message {i}: {}", "x".repeat(40 + i)))
+            .await
+            .unwrap();
+    }
+    let m = db.add_message(&id, "assistant", "").await.unwrap();
+    let call = ToolCall::new(
+        m.id_string(),
+        id.clone(),
+        "regression_ols".into(),
+        "a".repeat(40),
+    );
+    db.create_tool_call(&call).await.unwrap();
+    id
+}
+
+/// The counter of `session_id` equals what the store holds.
+async fn assert_counter_matches_store(db: &DbConnection, session_id: &str) {
+    let stored = db.session_stored_bytes(session_id).await.unwrap();
+    assert_eq!(db.session_bytes_entry(session_id), Some(stored));
+}
+
+/// Two concurrent deletes (or clears) of one conversation release its bytes
+/// once: each call releases only what its own statements removed, so the
+/// counter never drops below what the store holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_deletes_release_a_conversations_bytes_once() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100_000),
+        ..Default::default()
+    })
+    .await;
+    let keep = db.create_conversation("s1", "keep").await.unwrap();
+    db.add_message(&keep.id_string(), "user", &"k".repeat(100))
+        .await
+        .unwrap();
+
+    let gone = filled_conversation(&db, "s1", "gone").await;
+    assert_counter_matches_store(&db, "s1").await; // seeded
+    let (a, b) = tokio::join!(db.delete_conversation(&gone), db.delete_conversation(&gone));
+    // One deletes it; the other, in its turn after the first, finds nothing.
+    assert!(
+        matches!(
+            (&a, &b),
+            (Ok(()), Err(DbError::NotFound(_))) | (Err(DbError::NotFound(_)), Ok(()))
+        ),
+        "{a:?} / {b:?}"
+    );
+    assert_counter_matches_store(&db, "s1").await;
+
+    let cleared = filled_conversation(&db, "s1", "cleared").await;
+    assert_counter_matches_store(&db, "s1").await;
+    let (a, b) = tokio::join!(db.clear_messages(&cleared), db.clear_messages(&cleared));
+    assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
+    assert_counter_matches_store(&db, "s1").await;
+    assert!(db.get_messages(&cleared).await.unwrap().is_empty());
+    assert_eq!(db.delete_turns_in_use(), 0);
+}
+
+/// Without the byte budget, on RocksDB (which fails one of two conflicting
+/// transactions): two parallel deletes of one conversation take turns, so
+/// the second finds nothing instead of failing on a write conflict.
+#[tokio::test(flavor = "multi_thread")]
+async fn parallel_deletes_on_rocksdb_do_not_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = DbConnection::connect_rocksdb(dir.path().join("db"))
+        .await
+        .unwrap();
+    for _ in 0..5 {
+        let gone = filled_conversation(&db, "s1", "gone").await;
+        let (a, b) = tokio::join!(db.delete_conversation(&gone), db.delete_conversation(&gone));
+        assert!(
+            matches!(
+                (&a, &b),
+                (Ok(()), Err(DbError::NotFound(_))) | (Err(DbError::NotFound(_)), Ok(()))
+            ),
+            "{a:?} / {b:?}"
+        );
+        let cleared = filled_conversation(&db, "s1", "cleared").await;
+        let (a, b) = tokio::join!(db.clear_messages(&cleared), db.clear_messages(&cleared));
+        assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
+    }
+    assert_eq!(db.delete_turns_in_use(), 0);
+}
+
+/// A delete turn leaves the map with its last holder or waiter, also when
+/// the waiting call is cancelled.
+#[tokio::test]
+async fn delete_turns_leave_the_map() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100),
+        ..Default::default()
+    })
+    .await;
+    let first = db.delete_turn("c").await;
+    {
+        let waiting = db.delete_turn("c");
+        tokio::pin!(waiting);
+        // It cannot finish while `first` is held; the wait is then cancelled.
+        let polled = tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting).await;
+        assert!(polled.is_err());
+    }
+    assert_eq!(db.delete_turns_in_use(), 1);
+    drop(first);
+    assert_eq!(db.delete_turns_in_use(), 0);
+    let again = db.delete_turn("c").await;
+    assert_eq!(db.delete_turns_in_use(), 1);
+    drop(again);
+    assert_eq!(db.delete_turns_in_use(), 0);
+}
+
+/// Store a message for `conversation_id` directly, without the existence
+/// check of `add_message` (a write that raced the conversation's delete, or
+/// a row from before the process started).
+async fn insert_raw_message(db: &DbConnection, conversation_id: &str) {
+    let m = Message::user(conversation_id.into(), "orphan".into());
+    let _: Option<Message> = db.db().create(m.id.clone()).content(m).await.unwrap();
+}
+
+/// The recent orphan sweep deletes what is left for a deleted conversation
+/// for two sweeps, through the index and without scanning the tables; a
+/// conversation that still exists is left alone, and rows of one this
+/// process never deleted need the full scan.
+#[tokio::test]
+async fn recent_orphan_sweep_follows_deleted_conversations() {
+    let db = test_db().await;
+    db.set_session_last_accessed("s1", chrono::Utc::now())
+        .await
+        .unwrap();
+    let kept = db.create_conversation("s1", "kept").await.unwrap();
+    db.add_message(&kept.id_string(), "user", "kept")
+        .await
+        .unwrap();
+    let gone = db.create_conversation("s1", "gone").await.unwrap();
+    let gone = gone.id_string();
+    db.delete_conversation(&gone).await.unwrap();
+    insert_raw_message(&db, &gone).await;
+    insert_raw_message(&db, "from-before").await;
+
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 1);
+    insert_raw_message(&db, &gone).await; // lands after that sweep started
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 1);
+    insert_raw_message(&db, &gone).await;
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 0); // forgotten
+
+    db.note_conversation_deleted(&kept.id_string());
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
+    assert_eq!(db.get_messages(&kept.id_string()).await.unwrap().len(), 1);
+
+    // The full scan finds the rest: the row from before and the last one.
+    assert_eq!(db.delete_orphans().await.unwrap(), 2);
+    assert_eq!(db.get_messages(&kept.id_string()).await.unwrap().len(), 1);
+}
+
+/// More deleted conversations than are remembered: the next recent sweep
+/// scans in full.
+#[tokio::test]
+async fn recent_orphan_sweep_scans_in_full_after_too_many_deletes() {
+    let db = test_db().await;
+    insert_raw_message(&db, "from-before").await;
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
+    for i in 0..=super::connection::MAX_REMEMBERED_DELETES {
+        db.note_conversation_deleted(&format!("c{i}"));
+    }
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 1);
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
 }
 
 #[tokio::test]

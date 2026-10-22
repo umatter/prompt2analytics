@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{HeaderMap, Request, StatusCode, header};
 use p2a_mcp::config::ServerConfig;
 use p2a_mcp::db::DatasetMeta;
 use p2a_mcp::path_jail::allowed_data_root;
@@ -32,6 +32,18 @@ async fn call(
     session: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    let (status, _, body) = call_with_headers(r, method, uri, session, body).await;
+    (status, body)
+}
+
+/// [`call`], also returning the response headers.
+async fn call_with_headers(
+    r: &Router,
+    method: &str,
+    uri: &str,
+    session: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, HeaderMap, Value) {
     let mut req = Request::builder().method(method).uri(uri);
     if let Some(sid) = session {
         req = req.header("x-p2a-session-id", sid);
@@ -45,11 +57,13 @@ async fn call(
     .unwrap();
     let resp = r.clone().oneshot(req).await.unwrap();
     let status = resp.status();
+    let headers = resp.headers().clone();
     let bytes = axum::body::to_bytes(resp.into_body(), 16 << 20)
         .await
         .unwrap();
     (
         status,
+        headers,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
 }
@@ -205,6 +219,154 @@ async fn reload_restores_datasets_into_the_live_session() {
     );
 }
 
+/// A CSV of `rows` rows with two float columns, y = 2x plus noise.
+fn noisy_csv(rows: usize, seed: usize) -> String {
+    let mut csv = String::from("x,y\n");
+    for i in 0..rows {
+        let x = i as f64 + 0.25;
+        let noise = ((i * 7919 + seed * 104_729) % 1000) as f64 / 1000.0 - 0.5;
+        csv.push_str(&format!("{x},{}\n", 2.0 * x + noise));
+    }
+    csv
+}
+
+/// Store a dataset_meta row for `name` loaded from `path`, `age_minutes`
+/// old (a reload goes through the rows newest first).
+async fn store_meta(
+    state: &AppState,
+    sid: &str,
+    name: &str,
+    path: &std::path::Path,
+    age_minutes: i64,
+) {
+    let mut meta = DatasetMeta::new(
+        sid.to_string(),
+        name.to_string(),
+        "csv".to_string(),
+        0,
+        2,
+        vec!["x".to_string(), "y".to_string()],
+    );
+    meta.source_path = Some(path.to_string_lossy().into_owned());
+    meta.loaded_at = (chrono::Utc::now() - chrono::Duration::minutes(age_minutes)).into();
+    pm(state).db().save_dataset_meta(&meta).await.unwrap();
+}
+
+/// A reload runs under the governor's dataset quotas: with two stored
+/// datasets that together pass the session's quota, the second is reported
+/// failed and the session stays within the quota.
+#[tokio::test]
+async fn reload_respects_the_session_dataset_quota() {
+    let quota: u64 = 1 << 20;
+    let mut cfg = ServerConfig::default();
+    cfg.exec.session_data_mb = Some(1);
+    let (r, state) = app(cfg).await;
+    let sid = new_session(&r).await;
+
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-wp07-")
+        .tempdir_in(allowed_data_root().unwrap())
+        .unwrap();
+    // 40,000 rows x 2 float columns: 640,000 bytes in memory each, so one
+    // fits the 1 MiB quota and two do not.
+    for (age, name) in [(0, "first"), (1, "second")] {
+        let path = dir.path().join(format!("{name}.csv"));
+        std::fs::write(&path, noisy_csv(40_000, age as usize)).unwrap();
+        store_meta(&state, &sid, name, &path, age).await;
+    }
+
+    let (st, body) = call(
+        &r,
+        "POST",
+        &format!("/api/sessions/{sid}/datasets/reload"),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["succeeded"], json!(["first"]), "{body}");
+    assert_eq!(body["data"]["failed"][0]["name"], "second", "{body}");
+    assert_eq!(
+        body["data"]["failed"][0]["error"], "the session's dataset quota is full",
+        "{body}"
+    );
+    let session = state.session_manager.get_session(&sid).await.unwrap();
+    assert!(!session.datasets.read().await.contains_key("second"));
+    let bytes = session.refresh_data_bytes().await;
+    assert!(bytes > 0 && bytes <= quota, "{bytes}");
+}
+
+/// A reload is admitted like a tool call: above the memory soft limit it is
+/// refused with the governor's 503.
+#[tokio::test]
+async fn reload_is_refused_under_memory_pressure() {
+    if p2a_core::get_process_memory().is_none() {
+        return; // the platform does not report the process memory
+    }
+    let mut cfg = ServerConfig::default();
+    cfg.exec.memory_soft_limit_mb = Some(1);
+    let (r, _state) = app(cfg).await;
+    let sid = new_session(&r).await;
+    let (st, headers, body) = call_with_headers(
+        &r,
+        "POST",
+        &format!("/api/sessions/{sid}/datasets/reload"),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "memory_pressure", "{body}");
+    assert!(headers.contains_key(header::RETRY_AFTER));
+}
+
+/// `GET /api/sessions/{id}` adopts a stored session through the persistent
+/// manager; a full registry answers 503 `capacity` with `Retry-After`, as
+/// session creation does.
+#[tokio::test]
+async fn get_session_answers_capacity_when_adoption_finds_the_registry_full() {
+    let mut cfg = ServerConfig::default();
+    cfg.session.max_sessions = 1;
+    let (r, state) = app(cfg).await;
+    new_session(&r).await;
+    let stored = uuid::Uuid::new_v4().to_string();
+    pm(&state)
+        .db()
+        .set_session_last_accessed(&stored, chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let (st, headers, body) =
+        call_with_headers(&r, "GET", &format!("/api/sessions/{stored}"), None, None).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "capacity", "{body}");
+    assert_eq!(headers[header::RETRY_AFTER], "60");
+}
+
+/// A store failure while looking a session up is a 500 `internal` with a
+/// generic text, not a 404 that tells the client to abandon the session.
+#[tokio::test]
+async fn get_session_answers_internal_on_a_store_failure() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let broken = uuid::Uuid::new_v4().to_string();
+    // A session row the store cannot read back as a session.
+    pm(&state)
+        .db()
+        .db()
+        .query("REMOVE TABLE sessions")
+        .query("CREATE type::thing('sessions', $id) SET last_accessed = 'not-a-date'")
+        .bind(("id", broken.clone()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (st, body) = call(&r, "GET", &format!("/api/sessions/{broken}"), None, None).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["code"], "internal", "{body}");
+    assert_eq!(body["error"], "internal error", "{body}");
+}
+
 // =============================================================================
 // Task 2: the owning session on every conversation route (MCP-11; MCP-7 settings)
 // =============================================================================
@@ -316,6 +478,28 @@ async fn conversation_routes_answer_404_to_other_sessions() {
         .await
         .0,
         StatusCode::NOT_FOUND
+    );
+    // Listing takes the caller like every other conversation route: the
+    // header alone is enough, and a query naming another session is a 400.
+    let (st, body) = call(&r, "GET", "/api/conversations", Some(&s1), None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["data"].as_array().unwrap().len(), 1, "{body}");
+    let (st, body) = call(
+        &r,
+        "GET",
+        &format!("/api/conversations?session_id={s2}"),
+        Some(&s1),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (st, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_arguments"))
+    );
+    let (st, body) = call(&r, "GET", "/api/conversations", None, None).await;
+    assert_eq!(
+        (st, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_arguments"))
     );
 }
 

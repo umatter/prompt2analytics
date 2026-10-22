@@ -372,6 +372,7 @@ pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
     let config = &as_http(config);
     #[cfg(feature = "db")]
     let persistent_manager = state.persistent_manager.clone();
+    let governor = Arc::clone(&state.governor);
 
     let router = create_base_router(state, config);
 
@@ -394,9 +395,12 @@ pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
     //
     // The deployment mode (of the HTTP-forced config) is handed to the
     // handlers that depend on it, e.g. session creation ignores `user_id`
-    // in open public mode.
+    // in open public mode. The governor goes to the conversation routes
+    // whose work it bounds (the dataset reload) without changing their
+    // state type.
     middleware::apply_global_middleware(router, config)
         .layer(axum::Extension(config.deployment_mode()))
+        .layer(axum::Extension(governor))
 }
 
 /// Create the base router with core routes.

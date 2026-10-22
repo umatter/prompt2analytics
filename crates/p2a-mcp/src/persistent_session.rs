@@ -28,6 +28,8 @@ pub struct PersistentSessionManager {
     sessions: Arc<SessionManager>,
     /// Database connection for persistence
     db: Arc<DbConnection>,
+    /// Whether a sweep has scanned the messages and tool calls in full.
+    full_orphan_scan_done: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "db")]
@@ -56,6 +58,7 @@ impl PersistentSessionManager {
         Self {
             sessions,
             db: Arc::new(db.with_limits(limits)),
+            full_orphan_scan_done: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -368,7 +371,11 @@ impl PersistentSessionManager {
     /// 2. delete the rows of every session that is not live and whose row was
     ///    last accessed longer ago than the TTL (the whole-minute rule the
     ///    live table uses);
-    /// 3. delete orphaned rows (see `DbConnection::delete_orphans`).
+    /// 3. delete orphaned rows: the first successful sweep of this manager
+    ///    scans every row (`DbConnection::delete_orphans`), the later ones
+    ///    only the rows of recently deleted conversations
+    ///    (`DbConnection::delete_recent_orphans`), so a periodic sweep does
+    ///    not read every message of the store.
     pub async fn sweep(&self) -> Result<SweepStats, PersistentSessionError> {
         let mut stats = SweepStats::default();
         for (id, at) in self.sessions.live_last_accessed().await {
@@ -401,7 +408,14 @@ impl PersistentSessionManager {
             }
         }
 
-        stats.orphans_deleted = self.db.delete_orphans().await?;
+        use std::sync::atomic::Ordering;
+        stats.orphans_deleted = if self.full_orphan_scan_done.load(Ordering::SeqCst) {
+            self.db.delete_recent_orphans().await?
+        } else {
+            let deleted = self.db.delete_orphans().await?;
+            self.full_orphan_scan_done.store(true, Ordering::SeqCst);
+            deleted
+        };
         if stats.expired_deleted > 0 || stats.orphans_deleted > 0 {
             tracing::info!(
                 refreshed = stats.refreshed,
@@ -420,8 +434,9 @@ impl PersistentSessionManager {
     /// - A listener on [`SessionManager::subscribe_removals`] deletes the
     ///   rows of every session that leaves the registry (deleted, expired,
     ///   evicted). When it falls behind it runs a [`sweep`](Self::sweep).
-    /// - A timer runs a sweep at start and then every 30 s per TTL minute,
-    ///   clamped to 60 s ..= 600 s.
+    /// - A timer runs a sweep at start (the one that scans every row for
+    ///   orphans) and then every 30 s per TTL minute, clamped to
+    ///   60 s ..= 600 s.
     pub fn start_background_tasks(self: &Arc<Self>) {
         use tokio::sync::broadcast::error::RecvError;
 
@@ -505,89 +520,137 @@ impl PersistentSessionManager {
         Ok(self.db.save_dataset_meta(meta).await?)
     }
 
-    /// Reload datasets for a session from their original source paths.
+    /// The metadata step of a dataset reload: the live session (adopted if
+    /// necessary) and the stored datasets, split into those with a source
+    /// path and those without (skipped).
     ///
-    /// The datasets go into the live session (adopted if necessary). Every
-    /// stored path is validated through the path jail inside the session's
-    /// scope, and the files are loaded on the blocking pool without holding
-    /// the session's dataset lock. Failure texts are fixed and never contain
-    /// server paths; the details are logged at debug level.
-    pub async fn reload_session_datasets(
+    /// Loading is a separate step, [`load_reload_source`] and then
+    /// [`insert_reloaded_dataset`] for each source, which the HTTP route runs
+    /// under the tool governor (admission, permits, deadline, dataset
+    /// quotas), so a reload is bounded like a tool call.
+    pub async fn reload_plan(
         &self,
         session_id: &str,
-    ) -> Result<ReloadResult, PersistentSessionError> {
-        use p2a_core::DataLoader;
-
+    ) -> Result<ReloadPlan, PersistentSessionError> {
         let session = self.get_session(session_id).await?;
         let metas = self.db.get_datasets_for_session(session_id).await?;
-
-        let mut result = ReloadResult::default();
-        let mut to_load = Vec::new();
+        let mut plan = ReloadPlan {
+            session,
+            sources: Vec::new(),
+            skipped: Vec::new(),
+        };
         for meta in metas {
             match meta.source_path {
-                Some(source_path) => to_load.push((meta.name, source_path)),
+                Some(source_path) => plan.sources.push(ReloadSource {
+                    name: meta.name,
+                    source_path,
+                }),
                 // e.g. uploaded datasets without a file path
-                None => result.skipped.push(ReloadSkip {
+                None => plan.skipped.push(ReloadSkip {
                     name: meta.name,
                     reason: RELOAD_NO_SOURCE.to_string(),
                 }),
             }
         }
-
-        let scope_id = session.id.clone();
-        let loaded = tokio::task::spawn_blocking(move || {
-            let _scope = crate::path_jail::enter_session_scope(&scope_id);
-            to_load
-                .into_iter()
-                .map(|(name, source_path)| {
-                    let outcome = match crate::path_jail::validate_data_path(&source_path) {
-                        Err(e) => {
-                            tracing::debug!(dataset = %name, error = %e, "Reload path rejected by the path jail");
-                            Err(RELOAD_OUTSIDE_JAIL)
-                        }
-                        Ok(path) => DataLoader::load(&path).map_err(|e| {
-                            tracing::debug!(dataset = %name, error = %e, "Failed to reload dataset");
-                            RELOAD_LOAD_FAILED
-                        }),
-                    };
-                    (name, source_path, outcome)
-                })
-                .collect::<Vec<_>>()
-        })
-        .await
-        .map_err(|e| {
-            tracing::warn!(session_id = %session_id, error = %e, "Dataset reload task failed");
-            PersistentSessionError::Internal("dataset reload failed".to_string())
-        })?;
-
-        let mut datasets = session.datasets.write().await;
-        for (name, source_path, outcome) in loaded {
-            match outcome {
-                Ok(dataset) => {
-                    tracing::info!(dataset = %name, "Reloaded dataset from file");
-                    datasets.insert(name.clone(), dataset);
-                    result.succeeded.push(name);
-                }
-                Err(error) => result.failed.push(ReloadFailure {
-                    name,
-                    source_path,
-                    error: error.to_string(),
-                }),
-            }
-        }
-        drop(datasets);
-        session.refresh_data_bytes().await;
-
-        tracing::info!(
-            session_id = %session_id,
-            succeeded = result.succeeded.len(),
-            failed = result.failed.len(),
-            skipped = result.skipped.len(),
-            "Dataset reload completed"
-        );
-
-        Ok(result)
+        Ok(plan)
     }
+}
+
+/// What a dataset reload works through (see
+/// [`PersistentSessionManager::reload_plan`]).
+#[derive(Debug)]
+pub struct ReloadPlan {
+    /// The live session the datasets go into.
+    pub session: Arc<Session>,
+    /// The stored datasets with a source path, newest first.
+    pub sources: Vec<ReloadSource>,
+    /// The stored datasets without one.
+    pub skipped: Vec<ReloadSkip>,
+}
+
+/// A stored dataset to reload.
+#[derive(Debug, Clone)]
+pub struct ReloadSource {
+    /// Dataset name
+    pub name: String,
+    /// The stored source path (the caller's own input)
+    pub source_path: String,
+}
+
+/// The load step of a dataset reload: validate `source.source_path` through
+/// the path jail and load the file. It blocks; run it on the blocking pool
+/// inside the session's path-jail scope (`ToolGovernor::run_blocking` does
+/// both). The error is a fixed text without server paths; the details are
+/// logged at debug level.
+pub fn load_reload_source(source: &ReloadSource) -> Result<p2a_core::data::Dataset, &'static str> {
+    let name = &source.name;
+    match crate::path_jail::validate_data_path(&source.source_path) {
+        Err(e) => {
+            tracing::debug!(dataset = %name, error = %e, "Reload path rejected by the path jail");
+            Err(RELOAD_OUTSIDE_JAIL)
+        }
+        Ok(path) => p2a_core::DataLoader::load(&path).map_err(|e| {
+            tracing::debug!(dataset = %name, error = %e, "Failed to reload dataset");
+            RELOAD_LOAD_FAILED
+        }),
+    }
+}
+
+/// The in-memory dataset quotas a reload keeps (the governor's
+/// `session_data_bytes` and `total_data_bytes`); `None` is unlimited.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DatasetQuotas {
+    /// Dataset bytes one session may hold.
+    pub per_session: Option<u64>,
+    /// Dataset bytes all sessions together may hold.
+    pub total: Option<u64>,
+}
+
+/// Insert a reloaded `dataset` as `name` into `session` unless it would push
+/// the session past `quotas.per_session` (its datasets with this one in
+/// place of any dataset of the same name) or all sessions past
+/// `quotas.total` (their cached dataset bytes). The error is a fixed text.
+///
+/// Call it while holding the session's governor permit: the quota rollback
+/// of a tool call assumes one change of a session's datasets at a time.
+pub async fn insert_reloaded_dataset(
+    session: &Session,
+    sessions: &SessionManager,
+    name: String,
+    dataset: p2a_core::data::Dataset,
+    quotas: DatasetQuotas,
+) -> Result<(), &'static str> {
+    let added = dataset.df().estimated_size() as u64;
+    // Read before taking the session's dataset lock: the total takes the
+    // registry's lock, which is never awaited under a dataset lock.
+    let others = match quotas.total {
+        Some(_) => sessions
+            .total_data_bytes()
+            .await
+            .saturating_sub(session.data_bytes()),
+        None => 0,
+    };
+    let mut datasets = session.datasets.write().await;
+    let replaced = datasets
+        .get(&name)
+        .map_or(0, |d| d.df().estimated_size() as u64);
+    let after = crate::session::datasets_bytes(&datasets)
+        .saturating_sub(replaced)
+        .saturating_add(added);
+    if quotas.per_session.is_some_and(|limit| after > limit) {
+        return Err(RELOAD_SESSION_QUOTA);
+    }
+    if quotas
+        .total
+        .is_some_and(|limit| others.saturating_add(after) > limit)
+    {
+        return Err(RELOAD_SERVER_QUOTA);
+    }
+    tracing::info!(dataset = %name, "Reloaded dataset from file");
+    datasets.insert(name, dataset);
+    drop(datasets);
+    session.refresh_data_bytes().await;
+    Ok(())
 }
 
 /// The answer for a conversation or message the caller does not own; the
@@ -599,6 +662,8 @@ const MESSAGE_NOT_FOUND: &str = "Message not found";
 const RELOAD_NO_SOURCE: &str = "no source path stored";
 const RELOAD_OUTSIDE_JAIL: &str = "path is not inside this session's data directory";
 const RELOAD_LOAD_FAILED: &str = "the file could not be loaded";
+const RELOAD_SESSION_QUOTA: &str = "the session's dataset quota is full";
+const RELOAD_SERVER_QUOTA: &str = "the server's dataset memory is full";
 
 /// What one [`PersistentSessionManager::sweep`] did.
 #[derive(Debug, Default, Clone, Copy)]
@@ -972,16 +1037,17 @@ mod tests {
         let stats = pm.sweep().await.unwrap();
         assert_eq!((stats.refreshed, stats.expired_deleted), (1, 0));
         let row = pm.db().get_session(&sid).await.unwrap().expect("row kept");
-        let live = *pm
+        // The sweep writes the live value verbatim; read it without touching
+        // the session, so the two agree to the store's precision.
+        let (_, live) = pm
             .sessions()
-            .get_session(&sid)
+            .live_last_accessed()
             .await
-            .unwrap()
-            .last_accessed
-            .read()
-            .await;
+            .into_iter()
+            .find(|(id, _)| *id == sid)
+            .expect("still live");
         let drift = live.signed_duration_since(row.last_accessed_chrono());
-        assert!(drift.num_seconds().abs() < 1, "{drift}");
+        assert!(drift.num_milliseconds().abs() < 1, "{drift}");
         assert!(pm.db().get_conversation(&conv.id_string()).await.is_ok());
     }
 
@@ -998,8 +1064,32 @@ mod tests {
             .content(ghost)
             .await
             .unwrap();
-        // Settings and a conversation of a session without a row.
+        // A tool call whose conversation does not exist.
+        let ghost_call = crate::db::ToolCall::new(
+            "ghost-message".into(),
+            "ghost".into(),
+            "regression_ols".into(),
+            "{}".into(),
+        );
+        let ghost_call_id = ghost_call.id_string();
+        let _: Option<crate::db::ToolCall> = db
+            .db()
+            .create(ghost_call.id.clone())
+            .content(ghost_call)
+            .await
+            .unwrap();
+        // Settings, dataset metadata and a conversation of a session without
+        // a row.
         db.get_or_create_settings("no-row-session").await.unwrap();
+        let meta = crate::db::DatasetMeta::new(
+            "no-row-session".into(),
+            "d".into(),
+            "csv".into(),
+            1,
+            1,
+            vec!["x".into()],
+        );
+        db.save_dataset_meta(&meta).await.unwrap();
         let orphan_conv = db.create_conversation("no-row-session", "t").await.unwrap();
         db.add_message(&orphan_conv.id_string(), "user", "x")
             .await
@@ -1013,11 +1103,23 @@ mod tests {
         pm.get_settings(&sid).await.unwrap();
 
         let stats = pm.sweep().await.unwrap();
-        assert!(stats.orphans_deleted >= 3, "{stats:?}");
+        // The ghost message and tool call, the settings, the dataset
+        // metadata and the conversation (counted once with its message).
+        assert_eq!(stats.orphans_deleted, 5, "{stats:?}");
         assert!(matches!(
             db.get_message(&ghost_id).await,
             Err(DbError::NotFound(_))
         ));
+        assert!(matches!(
+            db.get_tool_call(&ghost_call_id).await,
+            Err(DbError::NotFound(_))
+        ));
+        assert!(
+            db.get_datasets_for_session("no-row-session")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let row: Option<Settings> = db
             .db()
             .select(("settings", "no-row-session"))
@@ -1036,6 +1138,32 @@ mod tests {
         assert!(row.is_some());
         // A second sweep finds nothing left to do.
         assert_eq!(pm.sweep().await.unwrap().orphans_deleted, 0);
+    }
+
+    /// The first sweep scans every row for orphans; later ones only follow
+    /// the conversations deleted since, so a periodic sweep does not read
+    /// the whole store.
+    #[tokio::test]
+    async fn later_sweeps_follow_recent_deletes_only() {
+        let pm = manager().await;
+        let db = pm.db();
+        let raw = |conversation: &str| {
+            let m = Message::user(conversation.into(), "orphan".into());
+            let db = db.clone();
+            async move {
+                let _: Option<Message> = db.db().create(m.id.clone()).content(m).await.unwrap();
+            }
+        };
+        raw("from-before").await;
+        assert_eq!(pm.sweep().await.unwrap().orphans_deleted, 1); // full
+        raw("from-before-2").await;
+        let sid = pm.create_session(None).await.unwrap();
+        let conv = pm.create_conversation(&sid, "gone").await.unwrap();
+        pm.delete_conversation(&conv.id_string()).await.unwrap();
+        raw(&conv.id_string()).await; // a write that raced the delete
+        assert_eq!(pm.sweep().await.unwrap().orphans_deleted, 1); // recent
+        assert_eq!(db.get_messages("from-before-2").await.unwrap().len(), 1);
+        assert!(db.get_messages(&conv.id_string()).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1088,6 +1216,58 @@ mod tests {
             std::os::unix::fs::symlink(&r, &link).unwrap();
             assert!(check_db_path_outside_data_root(&link.join("db"), &r).is_err());
         }
+    }
+
+    /// A reloaded dataset goes in only within the per-session and the total
+    /// dataset quotas; one replacing a dataset of the same name counts only
+    /// the difference.
+    #[tokio::test]
+    async fn reloaded_datasets_respect_both_quotas() {
+        fn ds(n: usize, offset: f64) -> p2a_core::data::Dataset {
+            use polars::prelude::*;
+            p2a_core::data::Dataset::new(
+                df! {"x" => (0..n).map(|i| i as f64 * 1.5 + offset).collect::<Vec<_>>()}.unwrap(),
+            )
+        }
+        async fn put(
+            s: &Session,
+            sm: &SessionManager,
+            name: &str,
+            offset: f64,
+            quotas: DatasetQuotas,
+        ) -> Result<(), &'static str> {
+            insert_reloaded_dataset(s, sm, name.to_string(), ds(1000, offset), quotas).await
+        }
+
+        let one = ds(1000, 0.25).df().estimated_size() as u64;
+        let sm = registry(60);
+        let a = sm
+            .get_session(&sm.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let b = sm
+            .get_session(&sm.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let q = DatasetQuotas {
+            per_session: Some(2 * one),
+            total: Some(3 * one),
+        };
+
+        assert_eq!(put(&a, &sm, "x", 0.1, q).await, Ok(()));
+        assert_eq!(put(&a, &sm, "y", 0.2, q).await, Ok(()));
+        assert_eq!(put(&a, &sm, "z", 0.3, q).await, Err(RELOAD_SESSION_QUOTA));
+        assert_eq!(put(&a, &sm, "x", 0.4, q).await, Ok(())); // replaces x
+        assert_eq!(a.data_bytes(), 2 * one);
+        assert_eq!(put(&b, &sm, "x", 0.5, q).await, Ok(()));
+        assert_eq!(put(&b, &sm, "y", 0.6, q).await, Err(RELOAD_SERVER_QUOTA));
+        assert_eq!(sm.total_data_bytes().await, 3 * one);
+        assert!(!a.datasets.read().await.contains_key("z"));
+        assert!(!b.datasets.read().await.contains_key("y"));
+        // Without quotas nothing is refused.
+        let open = DatasetQuotas::default();
+        let big = insert_reloaded_dataset(&b, &sm, "big".into(), ds(10_000, 0.7), open).await;
+        assert_eq!(big, Ok(()));
     }
 
     #[test]

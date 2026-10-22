@@ -87,11 +87,68 @@ pub struct DbConnection {
     limits: PersistenceLimits,
     /// Bytes each session's conversation history stores, as counted by the
     /// `session_db_bytes` budget. An entry is seeded from the store on first
-    /// use (a read of every stored message of the session), lowered by what
-    /// a deleted or cleared conversation held, and dropped when the
-    /// session's rows are deleted. Only touched when the budget is set;
-    /// shared by clones.
+    /// use (a read of every stored message of the session), lowered by the
+    /// bytes a conversation delete or clear actually removed, and dropped
+    /// when the session's rows are deleted. Only touched when the budget is
+    /// set; shared by clones.
     session_bytes: Arc<Mutex<HashMap<String, u64>>>,
+    /// One lock per conversation that a delete or clear is working on, with
+    /// the number of calls holding or waiting for it (see [`DeleteTurn`]);
+    /// shared by clones.
+    delete_turns: DeleteTurns,
+    /// Conversations deleted recently, for
+    /// [`delete_recent_orphans`](Self::delete_recent_orphans); shared by
+    /// clones.
+    deleted_conversations: Arc<Mutex<DeletedConversations>>,
+}
+
+/// The conversations deleted since the last orphan sweep (`current`) and
+/// during the one before (`previous`).
+#[derive(Debug, Default)]
+struct DeletedConversations {
+    current: std::collections::HashSet<String>,
+    previous: std::collections::HashSet<String>,
+    /// More were deleted than are remembered; the next sweep scans in full.
+    overflowed: bool,
+}
+
+/// Recently deleted conversations remembered for the orphan sweep; past
+/// this the next sweep scans the messages and tool calls in full.
+pub(crate) const MAX_REMEMBERED_DELETES: usize = 100_000;
+
+type DeleteTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
+
+/// One call's turn at deleting a conversation's rows (a conversation delete
+/// or clear); the next call's turn starts when it is dropped.
+///
+/// Two deletes of one conversation that run at the same time conflict in
+/// the store: the in-memory engine hands both the same rows (neither
+/// fails), so each would release their bytes from the `session_db_bytes`
+/// counter, and RocksDB fails one of them with a write conflict. Taking
+/// turns makes the later call find nothing instead. The counter is per
+/// process, and so are the turns. An entry leaves the map with its last
+/// holder or waiter, also when a waiting call is cancelled.
+pub(crate) struct DeleteTurn {
+    turns: DeleteTurns,
+    conversation_id: String,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for DeleteTurn {
+    fn drop(&mut self) {
+        // Let the next call in before giving up the entry.
+        self.guard.take();
+        let mut turns = self
+            .turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, users)) = turns.get_mut(&self.conversation_id) {
+            *users = users.saturating_sub(1);
+            if *users == 0 {
+                turns.remove(&self.conversation_id);
+            }
+        }
+    }
 }
 
 /// Appended to text the store shortens.
@@ -162,6 +219,8 @@ impl DbConnection {
             db: Arc::new(db),
             limits: PersistenceLimits::default(),
             session_bytes: Arc::new(Mutex::new(HashMap::new())),
+            delete_turns: Arc::new(Mutex::new(HashMap::new())),
+            deleted_conversations: Arc::new(Mutex::new(DeletedConversations::default())),
         })
     }
 
@@ -311,12 +370,79 @@ impl DbConnection {
 
     /// Subtract `n` deleted bytes from the session's counter, if it is
     /// seeded (an unseeded counter reads the store when it is seeded).
+    /// `n` must be what the caller's own statements removed during the
+    /// conversation's [`DeleteTurn`], so that no row is released twice.
     pub(crate) fn release_session_bytes(&self, session_id: &str, n: u64) {
         if self.limits.session_db_bytes.is_some()
             && let Some(used) = self.session_bytes_map().get_mut(session_id)
         {
             *used = used.saturating_sub(n);
         }
+    }
+
+    /// Wait for this call's turn at deleting conversation `conversation_id`'s
+    /// rows (see [`DeleteTurn`]).
+    pub(crate) async fn delete_turn(&self, conversation_id: &str) -> DeleteTurn {
+        let lock = {
+            let mut turns = self
+                .delete_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (lock, users) = turns
+                .entry(conversation_id.to_string())
+                .or_insert_with(|| (Arc::new(tokio::sync::Mutex::new(())), 0));
+            *users += 1;
+            Arc::clone(lock)
+        };
+        // Registered before waiting, so a cancelled wait still leaves.
+        let mut turn = DeleteTurn {
+            turns: Arc::clone(&self.delete_turns),
+            conversation_id: conversation_id.to_string(),
+            guard: None,
+        };
+        turn.guard = Some(lock.lock_owned().await);
+        turn
+    }
+
+    fn deleted_conversations_map(&self) -> MutexGuard<'_, DeletedConversations> {
+        self.deleted_conversations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Remember that conversation `id` is being deleted, so the next two
+    /// orphan sweeps look for rows left behind for it.
+    pub(crate) fn note_conversation_deleted(&self, id: &str) {
+        let mut deleted = self.deleted_conversations_map();
+        deleted.current.insert(id.to_string());
+        if deleted.current.len() + deleted.previous.len() > MAX_REMEMBERED_DELETES {
+            deleted.current.clear();
+            deleted.previous.clear();
+            deleted.overflowed = true;
+        }
+    }
+
+    /// The conversations deleted since the sweep before the last one, and
+    /// the start of the next sweep's memory; `None` when more were deleted
+    /// than are remembered (the caller scans in full).
+    pub(crate) fn take_deleted_conversations(&self) -> Option<std::collections::HashSet<String>> {
+        let mut deleted = self.deleted_conversations_map();
+        let current = std::mem::take(&mut deleted.current);
+        let mut ids = std::mem::replace(&mut deleted.previous, current);
+        if std::mem::take(&mut deleted.overflowed) {
+            return None;
+        }
+        ids.extend(deleted.previous.iter().cloned());
+        Some(ids)
+    }
+
+    /// Conversations with a delete turn held or awaited.
+    #[cfg(test)]
+    pub(crate) fn delete_turns_in_use(&self) -> usize {
+        self.delete_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 
     /// Whether the `session_db_bytes` budget is set.
@@ -375,6 +501,7 @@ impl DbConnection {
             DEFINE FIELD IF NOT EXISTS completed_at ON tool_calls TYPE option<datetime>;
             DEFINE FIELD IF NOT EXISTS duration_ms ON tool_calls TYPE option<int>;
             DEFINE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls COLUMNS message_id;
+            DEFINE INDEX IF NOT EXISTS idx_tool_calls_conversation ON tool_calls COLUMNS conversation_id;
             DEFINE INDEX IF NOT EXISTS idx_tool_calls_id ON tool_calls COLUMNS id UNIQUE;
 
             -- Sessions table
@@ -473,6 +600,8 @@ impl Clone for DbConnection {
             db: Arc::clone(&self.db),
             limits: self.limits,
             session_bytes: Arc::clone(&self.session_bytes),
+            delete_turns: Arc::clone(&self.delete_turns),
+            deleted_conversations: Arc::clone(&self.deleted_conversations),
         }
     }
 }

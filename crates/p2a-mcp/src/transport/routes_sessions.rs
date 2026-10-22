@@ -26,7 +26,31 @@ pub struct CreateSessionResponse {
 }
 
 /// Seconds a client should wait before retrying when the session table is full.
-pub(crate) const CAPACITY_RETRY_AFTER_SECS: &str = "60";
+const CAPACITY_RETRY_AFTER_SECS: &str = "60";
+
+/// The answer when the session table is full: 503 with code `capacity` and
+/// `Retry-After`.
+pub(crate) fn capacity_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, CAPACITY_RETRY_AFTER_SECS)],
+        Json(ApiResponse::<()>::error_with_code(
+            "Maximum number of sessions reached",
+            "capacity",
+            None,
+        )),
+    )
+        .into_response()
+}
+
+/// A JSON error with a machine-readable `code`.
+fn error_with(status: StatusCode, message: &str, code: &'static str) -> Response {
+    (
+        status,
+        Json(ApiResponse::<()>::error_with_code(message, code, None)),
+    )
+        .into_response()
+}
 
 /// Create a new session. A full session table answers 503 with code
 /// `capacity` and `Retry-After`. The `user_id` must pass
@@ -84,16 +108,7 @@ pub(crate) async fn create_session(
             )
                 .into_response()
         }
-        Err(SessionError::MaxSessionsReached) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::RETRY_AFTER, CAPACITY_RETRY_AFTER_SECS)],
-            Json(ApiResponse::<()>::error_with_code(
-                "Maximum number of sessions reached",
-                "capacity",
-                None,
-            )),
-        )
-            .into_response(),
+        Err(SessionError::MaxSessionsReached) => capacity_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::<()>::error(e.to_string())),
@@ -108,47 +123,62 @@ pub(crate) async fn list_sessions(State(state): State<AppState>) -> impl IntoRes
     Json(ApiResponse::success(sessions))
 }
 
+/// Why [`live_session`] found no session.
+#[derive(Debug)]
+enum LookupError {
+    /// The registry's answer: not found, expired, or full (adoption).
+    Session(SessionError),
+    /// The store failed (logged). The session may still exist, so this is
+    /// not a "not found".
+    #[cfg_attr(not(feature = "db"), allow(dead_code))]
+    Internal,
+}
+
 /// Look up a live session. With persistence, a stored session still within
-/// its TTL is adopted (a RocksDB server after a restart).
+/// its TTL is adopted (a RocksDB server after a restart), subject to the
+/// registry's capacity.
 async fn live_session(
     state: &AppState,
     id: &str,
-) -> Result<std::sync::Arc<crate::session::Session>, SessionError> {
+) -> Result<std::sync::Arc<crate::session::Session>, LookupError> {
     #[cfg(feature = "db")]
     if let Some(pm) = &state.persistent_manager {
         use crate::persistent_session::PersistentSessionError;
         return pm.get_session(id).await.map_err(|e| match e {
-            PersistentSessionError::Session(e) => e,
+            PersistentSessionError::Session(e) => LookupError::Session(e),
             other => {
                 tracing::warn!(session_id = %id, error = %other, "Session lookup failed");
-                SessionError::NotFound
+                LookupError::Internal
             }
         });
     }
-    state.session_manager.get_session(id).await
+    state
+        .session_manager
+        .get_session(id)
+        .await
+        .map_err(LookupError::Session)
 }
 
-/// Get session information.
-pub(crate) async fn get_session(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+/// Get session information: 404 `not_found`, 410 `session_expired`, 503
+/// `capacity` (with `Retry-After`) when adopting a stored session finds the
+/// registry full, and 500 `internal` when the store fails.
+pub(crate) async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match live_session(&state, &id).await {
         Ok(session) => {
             let info = session.info().await;
-            (StatusCode::OK, Json(ApiResponse::success(info)))
+            (StatusCode::OK, Json(ApiResponse::success(info))).into_response()
         }
-        Err(SessionError::NotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Session not found")),
-        ),
-        Err(SessionError::Expired) => (
-            StatusCode::GONE,
-            Json(ApiResponse::error("Session expired")),
-        ),
-        Err(e) => (
+        Err(LookupError::Session(SessionError::NotFound)) => {
+            error_with(StatusCode::NOT_FOUND, "Session not found", "not_found")
+        }
+        Err(LookupError::Session(SessionError::Expired)) => {
+            error_with(StatusCode::GONE, "Session expired", "session_expired")
+        }
+        Err(LookupError::Session(SessionError::MaxSessionsReached)) => capacity_response(),
+        Err(LookupError::Internal) => error_with(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(e.to_string())),
+            "internal error",
+            "internal",
         ),
     }
 }
