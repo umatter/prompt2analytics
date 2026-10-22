@@ -59,7 +59,7 @@
 //! - Stata package `bacondecomp` (Goodman-Bacon, Goldring, & Nichols):
 //!   https://github.com/tgoldring/bacondecomp
 
-use ndarray::{Array1, Array2};
+use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -67,7 +67,6 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Public Types
@@ -411,31 +410,29 @@ pub fn bacon_decomp(
 
     let n = y.len();
 
-    // Identify unique units and time periods
-    let unique_units: BTreeSet<i64> = unit.iter().map(|&u| u as i64).collect();
+    // Identify unique time periods
     let unique_times: BTreeSet<i64> = time.iter().map(|&t| t as i64).collect();
     let times: Vec<i64> = unique_times.iter().copied().collect();
 
-    let n_units = unique_units.len();
     let n_times = times.len();
 
-    // Build unit -> treatment timing map
+    // Build unit -> treatment timing map in one pass over the rows.
     // Treatment timing = first period where treatment = 1 (0 means never treated)
-    let mut unit_treatment_time: BTreeMap<i64, i64> = BTreeMap::new();
-
-    for &u in &unique_units {
-        let mut first_treat: Option<i64> = None;
-        for i in 0..n {
-            if (unit[i] as i64) == u && treatment[i] > 0.5 {
-                let t = time[i] as i64;
-                if first_treat.is_none() || t < first_treat.unwrap() {
-                    first_treat = Some(t);
-                }
+    let mut first_treat: BTreeMap<i64, Option<i64>> = BTreeMap::new();
+    for i in 0..n {
+        let entry = first_treat.entry(unit[i] as i64).or_insert(None);
+        if treatment[i] > 0.5 {
+            let t = time[i] as i64;
+            if entry.is_none_or(|f| t < f) {
+                *entry = Some(t);
             }
         }
-        // 0 indicates never treated
-        unit_treatment_time.insert(u, first_treat.unwrap_or(0));
     }
+    let unit_treatment_time: BTreeMap<i64, i64> = first_treat
+        .into_iter()
+        .map(|(u, first)| (u, first.unwrap_or(0)))
+        .collect();
+    let n_units = unit_treatment_time.len();
 
     // Identify timing groups (distinct treatment times, excluding never-treated)
     let timing_groups: Vec<i64> = unit_treatment_time
@@ -456,10 +453,9 @@ pub fn bacon_decomp(
         });
     }
 
-    // First, compute the overall TWFE estimate for reference
-    // This uses the standard two-way fixed effects regression
-    // Note: We compute this for comparison but use the decomposed weighted sum as the output
-    let _twfe_estimate = compute_twfe_estimate(&y, &unit, &time, &treatment, n)?;
+    // Outcome sums and counts per (cohort, period), built once. Every 2x2
+    // mean below is a sum over a range of these cells.
+    let cells = build_cohort_cells(&y, &unit, &time, &unit_treatment_time, &times);
 
     // Now compute all 2x2 comparisons
     let mut components = Vec::new();
@@ -472,27 +468,9 @@ pub fn bacon_decomp(
     // Type 1: Treated vs. Never-Treated
     if n_never_treated > 0 {
         for &g in &timing_groups {
-            // Units in timing group g
-            let treated_units: Vec<i64> = unit_treatment_time
-                .iter()
-                .filter(|(_, timing)| **timing == g)
-                .map(|(u, _)| *u)
-                .collect();
-
-            // Never-treated units
-            let control_units: Vec<i64> = unit_treatment_time
-                .iter()
-                .filter(|(_, timing)| **timing == 0)
-                .map(|(u, _)| *u)
-                .collect();
-
+            crate::resource::checkpoint()?;
             if let Some(comp) = compute_2x2_did(
-                &y,
-                &unit,
-                &time,
-                &treatment,
-                &treated_units,
-                &control_units,
+                &cells,
                 g,
                 0, // Never-treated
                 &times,
@@ -506,32 +484,14 @@ pub fn bacon_decomp(
     // Type 2 & 3: Comparisons between timing groups
     for (i, &g_early) in timing_groups.iter().enumerate() {
         for &g_late in timing_groups.iter().skip(i + 1) {
+            crate::resource::checkpoint()?;
             // g_early treated before g_late
-
-            // Earlier-treated units
-            let early_units: Vec<i64> = unit_treatment_time
-                .iter()
-                .filter(|(_, timing)| **timing == g_early)
-                .map(|(u, _)| *u)
-                .collect();
-
-            // Later-treated units
-            let late_units: Vec<i64> = unit_treatment_time
-                .iter()
-                .filter(|(_, timing)| **timing == g_late)
-                .map(|(u, _)| *u)
-                .collect();
 
             // Comparison A: Early-treated (as treated) vs Late-treated (as not-yet-treated)
             // This uses periods before g_late where early is treated, late is not yet treated
             // Type: Treated vs Not-Yet-Treated (clean comparison)
             if let Some(comp) = compute_2x2_did_timing(
-                &y,
-                &unit,
-                &time,
-                &treatment,
-                &early_units,
-                &late_units,
+                &cells,
                 g_early,
                 g_late,
                 &times,
@@ -545,12 +505,7 @@ pub fn bacon_decomp(
             // This uses periods after g_late where both are treated
             // Type: Later vs Earlier Treated ("forbidden" comparison)
             if let Some(comp) = compute_2x2_did_timing(
-                &y,
-                &unit,
-                &time,
-                &treatment,
-                &late_units,
-                &early_units,
+                &cells,
                 g_late,
                 g_early,
                 &times,
@@ -623,292 +578,181 @@ pub fn bacon_decomp(
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Compute the standard TWFE DiD estimate.
+/// Outcome sums and counts of one treatment cohort, per time period.
 ///
-/// Estimates: Y_it = α_i + λ_t + β × D_it + ε_it
-/// Returns β (the coefficient on treatment).
-fn compute_twfe_estimate(
-    y: &Array1<f64>,
-    unit: &Array1<f64>,
-    time: &Array1<f64>,
-    treatment: &Array1<f64>,
-    n: usize,
-) -> EconResult<f64> {
-    // Get unique units and times for fixed effects
-    let unique_units: Vec<i64> = unit
-        .iter()
-        .map(|&u| u as i64)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let unique_times: Vec<i64> = time
-        .iter()
-        .map(|&t| t as i64)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-
-    let n_units = unique_units.len();
-    let n_times = unique_times.len();
-
-    // Create unit and time index maps
-    let unit_idx: BTreeMap<i64, usize> = unique_units
-        .iter()
-        .enumerate()
-        .map(|(i, &u)| (u, i))
-        .collect();
-    let time_idx: BTreeMap<i64, usize> = unique_times
-        .iter()
-        .enumerate()
-        .map(|(i, &t)| (t, i))
-        .collect();
-
-    // Build design matrix: [treatment, unit_dummies (minus 1), time_dummies (minus 1)]
-    // We exclude one unit and one time dummy for identification
-    let k = 1 + (n_units - 1) + (n_times - 1);
-    let mut x = Array2::zeros((n, k));
-
-    for i in 0..n {
-        // Treatment indicator
-        x[[i, 0]] = treatment[i];
-
-        // Unit fixed effects (excluding first unit)
-        let u = unit[i] as i64;
-        let ui = unit_idx[&u];
-        if ui > 0 {
-            x[[i, ui]] = 1.0;
-        }
-
-        // Time fixed effects (excluding first time)
-        let t = time[i] as i64;
-        let ti = time_idx[&t];
-        if ti > 0 {
-            x[[i, n_units - 1 + ti]] = 1.0;
-        }
-    }
-
-    // OLS: β = (X'X)^(-1) X'y
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "TWFE estimation".to_string(),
-        suggestion: format!("Check for collinearity in fixed effects: {:?}", e),
-    })?;
-
-    let xty_vec = xty(&x.view(), y);
-    let beta = xtx_inv.dot(&xty_vec);
-
-    // The treatment coefficient is the first element
-    Ok(beta[0])
+/// `ti`, `sum` and `count` are parallel and ascending in `ti`, the index of
+/// the period in the sorted list of distinct times. Only periods in which
+/// the cohort has rows are stored, so the cells of all cohorts together
+/// number at most n.
+#[derive(Debug, Default)]
+struct CohortCells {
+    ti: Vec<usize>,
+    sum: Vec<f64>,
+    count: Vec<usize>,
 }
 
-/// Compute a 2x2 DiD comparison between treated and never-treated groups.
-#[allow(clippy::too_many_arguments)]
-fn compute_2x2_did(
+impl CohortCells {
+    /// Sum and count of the outcome over the periods with index in `range`.
+    fn window(&self, range: std::ops::Range<usize>) -> (f64, usize) {
+        let a = self.ti.partition_point(|&t| t < range.start);
+        let b = self.ti.partition_point(|&t| t < range.end);
+        (
+            self.sum[a..b].iter().sum::<f64>(),
+            self.count[a..b].iter().sum::<usize>(),
+        )
+    }
+}
+
+/// Build the per-(cohort, period) outcome sums in one pass over the rows,
+/// O(n log n). The cohort of a row is its unit's first treatment period (0
+/// for never treated); rows are accumulated in row order.
+fn build_cohort_cells(
     y: &Array1<f64>,
     unit: &Array1<f64>,
     time: &Array1<f64>,
-    _treatment: &Array1<f64>,
-    treated_units: &[i64],
-    control_units: &[i64],
+    unit_treatment_time: &BTreeMap<i64, i64>,
+    times: &[i64],
+) -> BTreeMap<i64, CohortCells> {
+    let mut cell_sums: BTreeMap<(i64, usize), (f64, usize)> = BTreeMap::new();
+    for i in 0..y.len() {
+        // Both lookups always succeed (the maps are built from these rows);
+        // a miss would skip the row rather than panic.
+        let Some(&g) = unit_treatment_time.get(&(unit[i] as i64)) else {
+            continue;
+        };
+        let Ok(ti) = times.binary_search(&(time[i] as i64)) else {
+            continue;
+        };
+        let cell = cell_sums.entry((g, ti)).or_insert((0.0, 0));
+        cell.0 += y[i];
+        cell.1 += 1;
+    }
+
+    let mut cohorts: BTreeMap<i64, CohortCells> = BTreeMap::new();
+    for ((g, ti), (sum, count)) in cell_sums {
+        let cells = cohorts.entry(g).or_default();
+        cells.ti.push(ti);
+        cells.sum.push(sum);
+        cells.count.push(count);
+    }
+    cohorts
+}
+
+/// The 2x2 DiD estimate from the four (group, window) cells, or `None` when
+/// any of them is empty.
+#[allow(clippy::too_many_arguments)]
+fn two_by_two(
+    treated: &CohortCells,
+    control: &CohortCells,
+    pre: std::ops::Range<usize>,
+    post: std::ops::Range<usize>,
     g_treated: i64,
     g_control: i64,
-    _times: &[i64],
     comparison_type: ComparisonType,
+    time_range: (i64, i64),
 ) -> Option<BaconComponent> {
-    let n = y.len();
-
-    if treated_units.is_empty() || control_units.is_empty() {
-        return None;
-    }
-
-    // Convert to sets for fast lookup
-    let treated_set: BTreeSet<i64> = treated_units.iter().copied().collect();
-    let control_set: BTreeSet<i64> = control_units.iter().copied().collect();
-
-    // For treated vs never-treated:
-    // Pre-period: before g_treated
-    // Post-period: g_treated and after
-    // Treated group: units with treatment timing = g_treated
-    // Control group: never-treated units (g_control = 0)
-
-    let mut y_treated_pre = Vec::new();
-    let mut y_treated_post = Vec::new();
-    let mut y_control_pre = Vec::new();
-    let mut y_control_post = Vec::new();
-
-    for i in 0..n {
-        let u = unit[i] as i64;
-        let t = time[i] as i64;
-
-        if treated_set.contains(&u) {
-            if t < g_treated {
-                y_treated_pre.push(y[i]);
-            } else {
-                y_treated_post.push(y[i]);
-            }
-        } else if control_set.contains(&u) {
-            if t < g_treated {
-                y_control_pre.push(y[i]);
-            } else {
-                y_control_post.push(y[i]);
-            }
-        }
-    }
+    let (s_treated_pre, n_treated_pre) = treated.window(pre.clone());
+    let (s_treated_post, n_treated_post) = treated.window(post.clone());
+    let (s_control_pre, n_control_pre) = control.window(pre);
+    let (s_control_post, n_control_post) = control.window(post);
 
     // Need observations in all four cells
-    if y_treated_pre.is_empty()
-        || y_treated_post.is_empty()
-        || y_control_pre.is_empty()
-        || y_control_post.is_empty()
-    {
+    if n_treated_pre == 0 || n_treated_post == 0 || n_control_pre == 0 || n_control_post == 0 {
         return None;
     }
 
     // Compute 2x2 DiD: (Ȳ_treat_post - Ȳ_treat_pre) - (Ȳ_ctrl_post - Ȳ_ctrl_pre)
-    let mean_treated_pre = y_treated_pre.iter().sum::<f64>() / y_treated_pre.len() as f64;
-    let mean_treated_post = y_treated_post.iter().sum::<f64>() / y_treated_post.len() as f64;
-    let mean_control_pre = y_control_pre.iter().sum::<f64>() / y_control_pre.len() as f64;
-    let mean_control_post = y_control_post.iter().sum::<f64>() / y_control_post.len() as f64;
+    let mean_treated_pre = s_treated_pre / n_treated_pre as f64;
+    let mean_treated_post = s_treated_post / n_treated_post as f64;
+    let mean_control_pre = s_control_pre / n_control_pre as f64;
+    let mean_control_post = s_control_post / n_control_post as f64;
 
     let estimate = (mean_treated_post - mean_treated_pre) - (mean_control_post - mean_control_pre);
-
-    let n_treated = y_treated_pre.len() + y_treated_post.len();
-    let n_control = y_control_pre.len() + y_control_post.len();
-
-    // Find time range for this comparison
-    let min_time = time.iter().map(|&t| t as i64).min().unwrap_or(0);
-    let max_time = time.iter().map(|&t| t as i64).max().unwrap_or(0);
 
     Some(BaconComponent {
         treated_group: g_treated,
         control_group: g_control,
         estimate,
         weight: 0.0, // Will be computed later
-        n_treated,
-        n_control,
+        n_treated: n_treated_pre + n_treated_post,
+        n_control: n_control_pre + n_control_post,
         comparison_type,
-        time_range: (min_time, max_time),
+        time_range,
     })
+}
+
+/// Compute a 2x2 DiD comparison between treated and never-treated groups.
+///
+/// Pre-period: before g_treated; post-period: g_treated and after. The time
+/// range is the whole panel.
+fn compute_2x2_did(
+    cells: &BTreeMap<i64, CohortCells>,
+    g_treated: i64,
+    g_control: i64,
+    times: &[i64],
+    comparison_type: ComparisonType,
+) -> Option<BaconComponent> {
+    let treated = cells.get(&g_treated)?;
+    let control = cells.get(&g_control)?;
+    let (&first, &last) = (times.first()?, times.last()?);
+
+    let lb = times.partition_point(|&t| t < g_treated);
+    two_by_two(
+        treated,
+        control,
+        0..lb,
+        lb..times.len(),
+        g_treated,
+        g_control,
+        comparison_type,
+        (first, last),
+    )
 }
 
 /// Compute a 2x2 DiD comparison between two timing groups.
 ///
 /// This handles the more complex case where both groups eventually get treated,
 /// so we need to carefully select the time window.
-#[allow(clippy::too_many_arguments)]
 fn compute_2x2_did_timing(
-    y: &Array1<f64>,
-    unit: &Array1<f64>,
-    time: &Array1<f64>,
-    _treatment: &Array1<f64>,
-    treated_units: &[i64],
-    control_units: &[i64],
+    cells: &BTreeMap<i64, CohortCells>,
     g_treated: i64,
     g_control: i64,
     times: &[i64],
     comparison_type: ComparisonType,
     early_as_treated: bool,
 ) -> Option<BaconComponent> {
-    let n = y.len();
+    let treated = cells.get(&g_treated)?;
+    let control = cells.get(&g_control)?;
 
-    if treated_units.is_empty() || control_units.is_empty() {
-        return None;
-    }
-
-    let treated_set: BTreeSet<i64> = treated_units.iter().copied().collect();
-    let control_set: BTreeSet<i64> = control_units.iter().copied().collect();
-
+    let lb = |g: i64| times.partition_point(|&t| t < g);
     // Determine the appropriate time window based on comparison type
-    let (pre_periods, post_periods): (Vec<i64>, Vec<i64>) = if early_as_treated {
+    let (pre, post) = if early_as_treated {
         // Treated vs Not-Yet-Treated:
         // - Pre-period: before g_treated (early group treatment time)
         // - Post-period: g_treated to (g_control - 1) when early is treated but late is not yet
-        let pre: Vec<i64> = times.iter().copied().filter(|&t| t < g_treated).collect();
-        let post: Vec<i64> = times
-            .iter()
-            .copied()
-            .filter(|&t| t >= g_treated && t < g_control)
-            .collect();
-        (pre, post)
+        (0..lb(g_treated), lb(g_treated)..lb(g_control))
     } else {
         // Later vs Earlier Treated ("forbidden"):
         // - Pre-period: g_control (early treatment time) to g_treated - 1
         // - Post-period: g_treated and after (both groups now treated)
-        let pre: Vec<i64> = times
-            .iter()
-            .copied()
-            .filter(|&t| t >= g_control && t < g_treated)
-            .collect();
-        let post: Vec<i64> = times.iter().copied().filter(|&t| t >= g_treated).collect();
-        (pre, post)
+        (lb(g_control)..lb(g_treated), lb(g_treated)..times.len())
     };
 
-    if pre_periods.is_empty() || post_periods.is_empty() {
+    if pre.is_empty() || post.is_empty() {
         return None;
     }
 
-    let pre_set: BTreeSet<i64> = pre_periods.iter().copied().collect();
-    let post_set: BTreeSet<i64> = post_periods.iter().copied().collect();
-
-    let mut y_treated_pre = Vec::new();
-    let mut y_treated_post = Vec::new();
-    let mut y_control_pre = Vec::new();
-    let mut y_control_post = Vec::new();
-
-    for i in 0..n {
-        let u = unit[i] as i64;
-        let t = time[i] as i64;
-
-        if treated_set.contains(&u) {
-            if pre_set.contains(&t) {
-                y_treated_pre.push(y[i]);
-            } else if post_set.contains(&t) {
-                y_treated_post.push(y[i]);
-            }
-        } else if control_set.contains(&u) {
-            if pre_set.contains(&t) {
-                y_control_pre.push(y[i]);
-            } else if post_set.contains(&t) {
-                y_control_post.push(y[i]);
-            }
-        }
-    }
-
-    // Need observations in all four cells
-    if y_treated_pre.is_empty()
-        || y_treated_post.is_empty()
-        || y_control_pre.is_empty()
-        || y_control_post.is_empty()
-    {
-        return None;
-    }
-
-    // Compute 2x2 DiD
-    let mean_treated_pre = y_treated_pre.iter().sum::<f64>() / y_treated_pre.len() as f64;
-    let mean_treated_post = y_treated_post.iter().sum::<f64>() / y_treated_post.len() as f64;
-    let mean_control_pre = y_control_pre.iter().sum::<f64>() / y_control_pre.len() as f64;
-    let mean_control_post = y_control_post.iter().sum::<f64>() / y_control_post.len() as f64;
-
-    let estimate = (mean_treated_post - mean_treated_pre) - (mean_control_post - mean_control_pre);
-
-    let n_treated = y_treated_pre.len() + y_treated_post.len();
-    let n_control = y_control_pre.len() + y_control_post.len();
-
-    let time_range = (
-        pre_periods.iter().copied().min().unwrap_or(0),
-        post_periods.iter().copied().max().unwrap_or(0),
-    );
-
-    Some(BaconComponent {
-        treated_group: g_treated,
-        control_group: g_control,
-        estimate,
-        weight: 0.0,
-        n_treated,
-        n_control,
+    let time_range = (times[pre.start], times[post.end - 1]);
+    two_by_two(
+        treated,
+        control,
+        pre,
+        post,
+        g_treated,
+        g_control,
         comparison_type,
         time_range,
-    })
+    )
 }
 
 /// Compute weights for each 2x2 comparison following Goodman-Bacon (2021).
@@ -1683,5 +1527,122 @@ mod tests {
                 "Should have LvE estimate when weight > 0"
             );
         }
+    }
+
+    // =========================================================================
+    // Cell-sum 2x2 estimates, pinned to bacondecomp and R (T0-WP11)
+    // =========================================================================
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        with_budget(Budget::new(None, token), f)
+    }
+
+    /// 12 units x 8 periods; units 1-4 treated from t=3, 5-8 from t=6, 9-12 never;
+    /// dynamic effect 1 + 0.2 (t - g); noise 0.4 sin(1.3 u + 0.7 t). `drop` removes rows.
+    fn bacon_panel(drop: impl Fn(i64, i64) -> bool) -> Dataset {
+        let (mut u_v, mut t_v, mut d_v, mut y_v) = (vec![], vec![], vec![], vec![]);
+        for u in 1..=12i64 {
+            let g = if u <= 4 {
+                3
+            } else if u <= 8 {
+                6
+            } else {
+                0
+            };
+            for t in 1..=8i64 {
+                if drop(u, t) {
+                    continue;
+                }
+                let d = if g > 0 && t >= g { 1.0 } else { 0.0 };
+                let y = 0.5 * u as f64
+                    + 0.3 * t as f64
+                    + d * (1.0 + 0.2 * (t - g) as f64)
+                    + 0.4 * (1.3 * u as f64 + 0.7 * t as f64).sin();
+                u_v.push(u as f64);
+                t_v.push(t as f64);
+                d_v.push(d);
+                y_v.push(y);
+            }
+        }
+        Dataset::new(df! { "unit" => u_v, "time" => t_v, "D" => d_v, "y" => y_v }.unwrap())
+    }
+
+    fn comp(r: &BaconDecompResult, tg: i64, cg: i64) -> &BaconComponent {
+        r.components
+            .iter()
+            .find(|c| c.treated_group == tg && c.control_group == cg)
+            .unwrap_or_else(|| panic!("no component {tg} vs {cg}"))
+    }
+
+    /// R 4.3.3, bacondecomp 0.1.1:
+    ///   units <- 1:12; times <- 1:8; cohort <- c(rep(3,4), rep(6,4), rep(0,4))
+    ///   d <- expand.grid(time = times, unit = units); d$g <- cohort[d$unit]
+    ///   d$D <- as.numeric(d$g > 0 & d$time >= d$g)
+    ///   d$y <- 0.5*d$unit + 0.3*d$time + d$D*(1 + 0.2*(d$time - d$g)) + 0.4*sin(1.3*d$unit + 0.7*d$time)
+    ///   bacon(y ~ D, data = d, id_var = "unit", time_var = "time")
+    /// The 2x2 estimates match; the weights do not (CAUS-10, Tier 4), so they are not compared.
+    #[test]
+    fn test_bacon_components_match_bacondecomp() {
+        let r = bacon_decomp(&bacon_panel(|_, _| false), "y", "unit", "time", "D").unwrap();
+        assert_eq!(r.components.len(), 4);
+        for (tg, cg, want, range) in [
+            (3, 0, 1.70190208989377223, (1, 8)),
+            (6, 0, 1.31395450341578623, (1, 8)),
+            (3, 6, 1.32021179413731549, (1, 5)),
+            (6, 3, 0.63491348028797567, (3, 8)),
+        ] {
+            let c = comp(&r, tg, cg);
+            assert!((c.estimate - want).abs() < 1e-10, "{tg} vs {cg}");
+            assert_eq!(c.time_range, range, "{tg} vs {cg}");
+        }
+        let ws: f64 = r.components.iter().map(|c| c.weight * c.estimate).sum();
+        assert!((ws - r.overall_estimate).abs() < 1e-12);
+    }
+
+    /// Unbalanced: rows with unit %% 5 == 0 and time %% 3 == 0 dropped (92 rows). Unit 5 then
+    /// first shows treatment at t = 7, so p2a forms a cohort 7. Reference computed in R from the
+    /// 2x2 definition p2a uses (cell means over the comparison windows):
+    ///   g <- per-unit min(time[D > 0.5]) else 0
+    ///   est(tg, cg, pre, post) = (mean y[tg,post] - mean y[tg,pre]) - (mean y[cg,post] - mean y[cg,pre])
+    #[test]
+    fn test_bacon_unbalanced_components_pinned() {
+        let r = bacon_decomp(
+            &bacon_panel(|u, t| u % 5 == 0 && t % 3 == 0),
+            "y",
+            "unit",
+            "time",
+            "D",
+        )
+        .unwrap();
+        assert_eq!(r.n_obs, 92);
+        assert_eq!(r.timing_groups, vec![3, 6, 7]);
+        assert_eq!(r.components.len(), 7);
+        for (tg, cg, est, nt, nc, range) in [
+            (3, 0, 1.6473318293605486, 32, 30, (1, 8)),
+            (6, 0, 1.4218183251615919, 24, 30, (1, 8)),
+            (7, 0, 1.0231643682502058, 6, 30, (1, 8)),
+            (3, 6, 1.2358640135079875, 20, 15, (1, 5)),
+            (6, 3, 0.7923376456502278, 18, 24, (3, 8)),
+            (3, 7, 1.8228762052453114, 24, 4, (1, 6)),
+            (7, 3, 0.45335893016458684, 4, 24, (3, 8)),
+        ] {
+            let c = comp(&r, tg, cg);
+            assert!(
+                (c.estimate - est).abs() < 1e-10,
+                "{tg} vs {cg}: {}",
+                c.estimate
+            );
+            assert_eq!((c.n_treated, c.n_control), (nt, nc), "{tg} vs {cg}");
+            assert_eq!(c.time_range, range, "{tg} vs {cg}");
+        }
+    }
+
+    #[test]
+    fn test_bacon_stops_when_cancelled() {
+        let r = cancelled(|| bacon_decomp(&bacon_panel(|_, _| false), "y", "unit", "time", "D"));
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
     }
 }
