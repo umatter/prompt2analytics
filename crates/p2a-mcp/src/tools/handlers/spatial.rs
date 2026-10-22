@@ -245,12 +245,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<MoranTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let spatial_weights = self.spatial_weights.read().await;
-        let listw = match spatial_weights.get(&request.weights) {
+        let listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -289,7 +289,7 @@ impl AnalyticsServer {
             _ => MoranAlternative::Greater, // Default: positive autocorrelation
         };
 
-        match moran_test(&x, listw, alternative) {
+        match moran_test(&x, &listw, alternative) {
             Ok(result) => {
                 let output = format!(
                     "Moran's I Test for Spatial Autocorrelation\n\
@@ -330,12 +330,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SpatialLmTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let mut spatial_weights_map = self.spatial_weights.write().await;
-        let listw = match spatial_weights_map.get_mut(&request.weights) {
+        let mut listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -348,8 +348,13 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
         // Run OLS to get residuals
-        let ols_result = match run_ols(dataset, &request.y, &x_refs, true, CovarianceType::Standard)
-        {
+        let ols_result = match run_ols(
+            &dataset,
+            &request.y,
+            &x_refs,
+            true,
+            CovarianceType::Standard,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -392,7 +397,9 @@ impl AnalyticsServer {
             }
         }
 
-        match spatial_lm_tests(ols_result.residuals(), &x_mat, listw) {
+        let tests = spatial_lm_tests(ols_result.residuals(), &x_mat, &mut listw);
+        self.keep_weights_cache(&request.weights, listw).await;
+        match tests {
             Ok(result) => {
                 let output = format!(
                     "Spatial Lagrange Multiplier Tests\n\
@@ -448,12 +455,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SarModelRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let mut spatial_weights = self.spatial_weights.write().await;
-        let listw = match spatial_weights.get_mut(&request.weights) {
+        let mut listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -471,7 +478,9 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match run_sar(dataset, &request.y, &x_refs, listw, config) {
+        let fit = run_sar(&dataset, &request.y, &x_refs, &mut listw, config);
+        self.keep_weights_cache(&request.weights, listw).await;
+        match fit {
             Ok(result) => {
                 let model_type = if result.is_durbin {
                     "Spatial Durbin Model (SDM)"
@@ -559,12 +568,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SemModelRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let mut spatial_weights = self.spatial_weights.write().await;
-        let listw = match spatial_weights.get_mut(&request.weights) {
+        let mut listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -578,7 +587,9 @@ impl AnalyticsServer {
 
         let config = SemConfig::default();
 
-        match run_sem(dataset, &request.y, &x_refs, listw, config) {
+        let fit = run_sem(&dataset, &request.y, &x_refs, &mut listw, config);
+        self.keep_weights_cache(&request.weights, listw).await;
+        match fit {
             Ok(result) => {
                 let mut output = format!(
                     "Spatial Error Model (SEM)\n\
@@ -645,12 +656,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SphetRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let spatial_weights = self.spatial_weights.read().await;
-        let listw = match spatial_weights.get(&request.weights) {
+        let listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -696,7 +707,7 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match run_sphet(dataset, &request.y, &x_refs, listw, config) {
+        match run_sphet(&dataset, &request.y, &x_refs, &listw, config) {
             Ok(result) => {
                 let model_name = match result.model_type {
                     SphetModel::SpatialLag => "Spatial Lag (SAR) - GMM",
@@ -793,12 +804,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SarProbitRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let mut spatial_weights = self.spatial_weights.write().await;
-        let listw = match spatial_weights.get_mut(&request.weights) {
+        let mut listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -818,7 +829,9 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match run_sar_probit(dataset, &request.y, &x_refs, listw, config) {
+        let fit = run_sar_probit(&dataset, &request.y, &x_refs, &mut listw, config);
+        self.keep_weights_cache(&request.weights, listw).await;
+        match fit {
             Ok(result) => {
                 let mut output = format!(
                     "SAR Probit Model (Bayesian MCMC)\n\
@@ -920,12 +933,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SemProbitRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let mut spatial_weights = self.spatial_weights.write().await;
-        let listw = match spatial_weights.get_mut(&request.weights) {
+        let mut listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -945,7 +958,9 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match run_sem_probit(dataset, &request.y, &x_refs, listw, config) {
+        let fit = run_sem_probit(&dataset, &request.y, &x_refs, &mut listw, config);
+        self.keep_weights_cache(&request.weights, listw).await;
+        match fit {
             Ok(result) => {
                 let mut output = format!(
                     "SEM Probit Model (Bayesian MCMC)\n\
@@ -1025,12 +1040,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SpmlRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let mut spatial_weights = self.spatial_weights.write().await;
-        let listw = match spatial_weights.get_mut(&request.weights) {
+        let mut listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1071,15 +1086,17 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match run_spml(
-            dataset,
+        let fit = run_spml(
+            &dataset,
             &request.y,
             &x_refs,
             &request.entity_col,
             &request.time_col,
-            listw,
+            &mut listw,
             config,
-        ) {
+        );
+        self.keep_weights_cache(&request.weights, listw).await;
+        match fit {
             Ok(result) => {
                 let mut output = format!(
                     "Spatial Panel Model (ML)\n\
@@ -1171,12 +1188,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SpgmRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let mut spatial_weights = self.spatial_weights.write().await;
-        let listw = match spatial_weights.get_mut(&request.weights) {
+        let mut listw = match self.weights_snapshot(&request.weights).await {
             Some(w) => w,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1203,15 +1220,17 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match run_spgm(
-            dataset,
+        let fit = run_spgm(
+            &dataset,
             &request.y,
             &x_refs,
             &request.entity_col,
             &request.time_col,
-            listw,
+            &mut listw,
             config,
-        ) {
+        );
+        self.keep_weights_cache(&request.weights, listw).await;
+        match fit {
             Ok(result) => {
                 let mut output = format!(
                     "Spatial Panel Model (GMM)\n\
@@ -1288,6 +1307,30 @@ impl AnalyticsServer {
                 "Spatial panel GMM estimation failed: {}",
                 e
             ))])),
+        }
+    }
+}
+
+/// Lock discipline for the weights map: handlers compute on O(1) snapshots and hold the
+/// map's lock only to take a snapshot or to store a cache computed on one.
+impl AnalyticsServer {
+    /// O(1) clone of a stored weights object; the read lock is released before returning.
+    async fn weights_snapshot(&self, name: &str) -> Option<SpatialWeights> {
+        self.spatial_weights.read().await.get(name).cloned()
+    }
+
+    /// Store eigenvalues computed on a snapshot, if the entry is still the weights the
+    /// snapshot was taken from and has none.
+    async fn keep_weights_cache(&self, name: &str, used: SpatialWeights) {
+        if used.get_eigenvalues().is_none() {
+            return;
+        }
+        let mut map = self.spatial_weights.write().await;
+        if let Some(entry) = map.get_mut(name)
+            && entry.same_weights(&used)
+            && entry.get_eigenvalues().is_none()
+        {
+            *entry = used;
         }
     }
 }
@@ -1437,5 +1480,228 @@ mod tests {
             let r = call(&s, Limits::off(), req);
             assert_eq!(r.is_error, Some(true), "{}", text(&r));
         }
+    }
+
+    // The 30-point example of p2a-core's spatial test fixture (cfg(test) there, so copied).
+    const CX: [f64; 30] = [
+        1.551, 9.684, 4.683, 7.768, 4.079, 5.388, 2.069, 1.871, 7.800, 1.939, 4.342, 0.023, 8.347,
+        8.301, 9.570, 9.485, 6.007, 2.618, 6.430, 5.262, 8.812, 6.075, 7.400, 8.031, 9.024, 0.927,
+        5.745, 5.755, 9.442, 2.190,
+    ];
+    const CY: [f64; 30] = [
+        4.780, 0.447, 7.991, 3.683, 5.633, 2.470, 7.343, 7.037, 7.368, 8.019, 7.521, 6.338, 2.476,
+        5.513, 2.348, 2.586, 9.529, 8.569, 2.757, 5.545, 8.769, 1.188, 5.467, 2.328, 6.023, 7.125,
+        6.489, 1.876, 2.384, 0.704,
+    ];
+    const X1: [f64; 30] = [
+        -0.376, 4.290, 0.149, 2.401, 2.935, 1.013, 0.149, -0.074, 2.054, 0.720, 2.530, -0.795,
+        1.424, 2.333, 1.799, 2.707, 1.205, -1.399, 2.170, 1.319, 3.544, 2.764, 3.688, 3.116, 3.526,
+        -0.015, 3.142, 3.225, 2.176, -0.196,
+    ];
+    const Y: [f64; 30] = [
+        2.954, 10.913, 7.509, 8.861, 11.166, 5.213, 3.960, 2.370, 7.030, 6.307, 11.371, 1.777,
+        5.011, 10.318, 5.315, 8.269, 7.287, 2.026, 5.994, 6.341, 13.936, 7.310, 12.132, 7.804,
+        10.951, 3.608, 11.282, 8.275, 6.480, 1.193,
+    ];
+
+    fn fx_neighbors(k: usize) -> SpatialNeighborsRequest {
+        SpatialNeighborsRequest {
+            dataset: "fx".into(),
+            x_coord: "cx".into(),
+            y_coord: "cy".into(),
+            method: Some("knn".into()),
+            k: Some(k),
+            d_max: None,
+            d_min: None,
+            weights_name: Some("w".into()),
+            style: None,
+        }
+    }
+
+    /// Dataset "fx" (the fixture, plus `y_bin`), panel "fxp" (the same 30 units over 3
+    /// periods) and kNN-3 weights "w" built through `spatial_neighbors`.
+    fn fixture_server() -> AnalyticsServer {
+        let server = AnalyticsServer::new();
+        let y_bin: Vec<f64> = Y.iter().map(|&v| if v > 7.0 { 1.0 } else { 0.0 }).collect();
+        let fx = p2a_core::Dataset::new(
+            df! {
+                "y" => Y.to_vec(), "x1" => X1.to_vec(), "y_bin" => y_bin,
+                "cx" => CX.to_vec(), "cy" => CY.to_vec(),
+            }
+            .unwrap(),
+        );
+        let (mut entity, mut time, mut py, mut px1, mut px2) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for t in 0..3_i64 {
+            for i in 0..30 {
+                let (fi, ft) = (i as f64, t as f64);
+                let v1 = X1[i] + 0.1 * ft + 0.05 * (fi * ft).sin();
+                let v2 = CY[i] / 10.0 + 0.2 * (1.3 * fi + ft).cos();
+                entity.push(i as i64);
+                time.push(t);
+                px1.push(v1);
+                px2.push(v2);
+                py.push(Y[i] / 4.0 + 0.6 * v1 - 0.4 * v2 + 0.15 * (2.1 * fi + 0.7 * ft).sin());
+            }
+        }
+        let fxp = p2a_core::Dataset::new(
+            df! { "entity" => entity, "time" => time, "y" => py, "x1" => px1, "x2" => px2 }
+                .unwrap(),
+        );
+        {
+            let rt = runtime();
+            let mut map = rt.block_on(server.datasets.write());
+            map.insert("fx".into(), fx);
+            map.insert("fxp".into(), fxp);
+        }
+        let r = call(&server, Limits::off(), fx_neighbors(3));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        server
+    }
+
+    fn sar_req() -> SarModelRequest {
+        SarModelRequest {
+            dataset: "fx".into(),
+            y: "y".into(),
+            x: vec!["x1".into()],
+            weights: "w".into(),
+            durbin: None,
+            compute_impacts: None,
+        }
+    }
+
+    #[test]
+    fn weights_snapshot_releases_the_lock() {
+        let s = fixture_server();
+        let rt = runtime();
+        let snap = rt.block_on(s.weights_snapshot("w")).unwrap();
+        assert!(s.spatial_weights.try_write().is_ok());
+        assert!(snap.same_weights(&rt.block_on(s.spatial_weights.read())["w"]));
+        assert!(rt.block_on(s.weights_snapshot("missing")).is_none());
+    }
+
+    #[test]
+    fn model_handlers_keep_the_eigenvalue_cache() {
+        let s = fixture_server();
+        let rt = runtime();
+        let r = rt.block_on(s.sar_model(Parameters(sar_req()))).unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let map = s
+            .spatial_weights
+            .try_read()
+            .expect("no lock held after the call");
+        assert!(map["w"].get_eigenvalues().is_some());
+    }
+
+    #[test]
+    fn cache_is_not_written_into_replaced_weights() {
+        let s = fixture_server();
+        let rt = runtime();
+        let mut snap = rt.block_on(s.weights_snapshot("w")).unwrap();
+        let _ = snap.eigenvalues();
+        // the user rebuilds "w" while a model ran on the snapshot
+        let r = call(&s, Limits::off(), fx_neighbors(4));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        rt.block_on(s.keep_weights_cache("w", snap));
+        let map = rt.block_on(s.spatial_weights.read());
+        assert!(map["w"].get_eigenvalues().is_none());
+        assert!((map["w"].neighbors().avg_neighbors() - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn every_weights_handler_runs_on_a_snapshot() {
+        let s = fixture_server();
+        let rt = runtime();
+        let x = || vec!["x1".to_string()];
+        let px = || vec!["x1".to_string(), "x2".to_string()];
+        let results = [
+            rt.block_on(s.moran_test(Parameters(MoranTestRequest {
+                dataset: "fx".into(),
+                variable: "y".into(),
+                weights: "w".into(),
+                alternative: None,
+            }))),
+            rt.block_on(s.spatial_lm_tests_tool(Parameters(SpatialLmTestRequest {
+                dataset: "fx".into(),
+                y: "y".into(),
+                x: x(),
+                weights: "w".into(),
+            }))),
+            rt.block_on(s.sar_model(Parameters(sar_req()))),
+            rt.block_on(s.sem_model(Parameters(SemModelRequest {
+                dataset: "fx".into(),
+                y: "y".into(),
+                x: x(),
+                weights: "w".into(),
+            }))),
+            rt.block_on(s.sphet_model(Parameters(SphetRequest {
+                dataset: "fx".into(),
+                y: "y".into(),
+                x: x(),
+                weights: "w".into(),
+                model: Some("sarar".into()),
+                se_type: None,
+                kernel: None,
+                bandwidth: None,
+                instrument_order: None,
+            }))),
+            rt.block_on(s.sar_probit_model(Parameters(SarProbitRequest {
+                dataset: "fx".into(),
+                y: "y_bin".into(),
+                x: x(),
+                weights: "w".into(),
+                n_draws: Some(40),
+                burn_in: Some(10),
+                compute_impacts: Some(true),
+                seed: Some(1),
+            }))),
+            rt.block_on(s.sem_probit_model(Parameters(SemProbitRequest {
+                dataset: "fx".into(),
+                y: "y_bin".into(),
+                x: x(),
+                weights: "w".into(),
+                n_draws: Some(40),
+                burn_in: Some(10),
+                seed: Some(1),
+            }))),
+            rt.block_on(s.spatial_panel_ml(Parameters(SpmlRequest {
+                dataset: "fxp".into(),
+                y: "y".into(),
+                x: px(),
+                entity_col: "entity".into(),
+                time_col: "time".into(),
+                weights: "w".into(),
+                model: None,
+                lag: Some(true),
+                spatial_error: None,
+                effect: None,
+            }))),
+            rt.block_on(s.spatial_panel_gmm(Parameters(SpgmRequest {
+                dataset: "fxp".into(),
+                y: "y".into(),
+                x: px(),
+                entity_col: "entity".into(),
+                time_col: "time".into(),
+                weights: "w".into(),
+                method: None,
+                lag: Some(true),
+                spatial_error: None,
+            }))),
+        ];
+        for (i, r) in results.into_iter().enumerate() {
+            let r = r.unwrap();
+            assert_ne!(r.is_error, Some(true), "handler {i}: {}", text(&r));
+            assert!(s.spatial_weights.try_write().is_ok(), "handler {i}");
+            assert!(s.datasets.try_write().is_ok(), "handler {i}");
+        }
+        let missing = rt
+            .block_on(s.sem_model(Parameters(SemModelRequest {
+                dataset: "fx".into(),
+                y: "y".into(),
+                x: x(),
+                weights: "nope".into(),
+            })))
+            .unwrap();
+        assert!(text(&missing).contains("Spatial weights 'nope' not found"));
     }
 }
