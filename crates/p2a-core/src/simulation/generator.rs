@@ -123,8 +123,10 @@ pub enum Distribution {
     },
 }
 
-/// Largest Poisson mean rand_distr 0.4.3 samples accurately (see the T0-WP09 plan; above
-/// ~1e14 its log-gamma rejection step inflates the variance, above ~2.6e305 it never returns).
+/// Largest Poisson mean rand_distr 0.4.3 samples accurately. In a line-for-line emulation of
+/// its rejection sampler (f64, 20,000 draws per lambda), sd/sqrt(lambda) is 0.999 at 1e13 but
+/// 1.058 at 1e14 and 1.174 at 1e15, because cancellation in its log-gamma step inflates the
+/// variance; above ~2.6e305, lambda * ln(lambda) overflows and the sampler never returns.
 const MAX_POISSON_LAMBDA: f64 = 1e13;
 /// Largest binomial n whose draws fit exactly in f64 and i64.
 const MAX_BINOMIAL_N: u64 = 1 << 53;
