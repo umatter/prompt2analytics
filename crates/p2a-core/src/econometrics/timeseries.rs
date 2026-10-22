@@ -62,6 +62,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{cholesky, safe_inverse, xtx, xty};
+use crate::resource;
 
 /// Result from a VAR model estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,10 +373,10 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
     let (data, var_names) = df_to_array2(dataset.df(), columns)?;
     let (t_full, k) = data.dim();
 
-    if t_full <= lags + 1 {
+    if t_full <= lags.saturating_add(1) {
         return Err(EconError::InsufficientTimePeriods {
             lags,
-            required: lags + 2,
+            required: lags.saturating_add(2),
             provided: t_full,
         });
     }
@@ -383,9 +384,10 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
     let t = t_full - lags; // Usable observations
 
     // Build the design matrix Z: [1, y_{t-1}, y_{t-2}, ..., y_{t-p}]
-    // Shape: (t, 1 + k*p)
-    let n_regressors = 1 + k * lags;
-    let mut z = Array2::zeros((t, n_regressors));
+    // Shape: (t, 1 + k*p). lags < t_full, so k * lags is below the size of the
+    // data matrix and the + 1 cannot overflow.
+    let n_regressors = 1 + resource::checked_len(&[k, lags], "VAR design")?;
+    let mut z = resource::try_zeros2(t, n_regressors, "VAR design")?;
     let mut y = Array2::zeros((t, k));
 
     for i in 0..t {
@@ -409,6 +411,10 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
     }
 
     // Estimate each equation by OLS: β = (Z'Z)^{-1} Z'Y
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[n_regressors, n_regressors], "VAR Z'Z")?,
+        "VAR Z'Z",
+    )?;
     let ztz = xtx(&z.view());
     let (ztz_inv, _) = safe_inverse(&ztz.view()).map_err(|e| EconError::SingularMatrix {
         context: "Z'Z in VAR estimation".to_string(),
@@ -500,9 +506,14 @@ pub fn compute_irf(
     let k = var_result.n_vars;
     let p = var_result.lags;
 
+    // The output holds steps k x k matrices; refuse an impossible horizon up front
+    let cells = resource::checked_len(&[steps, k, k], "IRF horizons x variables^2")?;
+    resource::check_alloc::<f64>(cells, "impulse responses")?;
+
     // Extract coefficient matrices A_1, A_2, ..., A_p from the VAR result
     // coefficients shape: (k, 1 + k*p) - first column is intercept
-    let mut a_matrices: Vec<Array2<f64>> = Vec::with_capacity(p);
+    let mut a_matrices: Vec<Array2<f64>> =
+        resource::try_with_capacity(p, "VAR coefficient matrices")?;
 
     for lag in 0..p {
         let mut a_lag = Array2::zeros((k, k));
@@ -534,10 +545,11 @@ pub fn compute_irf(
     // Compute IRF recursively
     // Φ_0 = P (impact matrix)
     // Φ_h = Σ_{j=1}^{min(h,p)} A_j Φ_{h-j}
-    let mut phi_matrices: Vec<Array2<f64>> = Vec::with_capacity(steps);
+    let mut phi_matrices: Vec<Array2<f64>> = resource::try_with_capacity(steps, "IRF horizons")?;
     phi_matrices.push(impact_matrix.clone());
 
     for h in 1..steps {
+        resource::checkpoint()?;
         let mut phi_h = Array2::zeros((k, k));
 
         for j in 0..p.min(h) {
@@ -558,14 +570,14 @@ pub fn compute_irf(
     }
 
     // Convert to nested Vec format
-    let irf: Vec<Vec<Vec<f64>>> = phi_matrices
-        .iter()
-        .map(|phi| {
+    let mut irf: Vec<Vec<Vec<f64>>> = resource::try_with_capacity(steps, "impulse responses")?;
+    for phi in &phi_matrices {
+        irf.push(
             (0..k)
                 .map(|i| (0..k).map(|j| phi[[i, j]]).collect())
-                .collect()
-        })
-        .collect();
+                .collect(),
+        );
+    }
 
     Ok(VarIrfResult {
         var_names: var_result.var_names.clone(),
@@ -601,7 +613,7 @@ pub fn run_varma(
     let (t_full, k) = data.dim();
 
     // Step 1: Fit a high-order VAR to get residual estimates
-    let high_order = (p + q + 5).min(t_full / 3);
+    let high_order = p.saturating_add(q).saturating_add(5).min(t_full / 3);
     let min_obs = high_order + 2;
 
     if t_full < min_obs {
@@ -614,12 +626,23 @@ pub fn run_varma(
 
     // For simplicity, we'll use a pure VAR(p) and set MA params to zero
     // Full VARMA estimation is very complex
-    let t = t_full - p.max(q);
-    let n_ar_params = k * k * p;
-    let n_ma_params = k * k * q;
+    let max_lag = p.max(q);
+    let t = match t_full.checked_sub(max_lag) {
+        Some(t) if t > 0 => t,
+        _ => {
+            return Err(EconError::InsufficientTimePeriods {
+                lags: max_lag,
+                required: max_lag.saturating_add(1),
+                provided: t_full,
+            });
+        }
+    };
+    let n_ar_params = resource::checked_len(&[k, k, p], "VARMA AR parameters")?;
+    let n_ma_params = resource::checked_len(&[k, k, q], "VARMA MA parameters")?;
 
-    // Build AR design matrix
-    let mut z_ar = Array2::zeros((t, 1 + k * p));
+    // Build AR design matrix (p < t_full, so 1 + k * p cannot overflow)
+    let n_ar_cols = 1 + resource::checked_len(&[k, p], "VARMA design")?;
+    let mut z_ar = resource::try_zeros2(t, n_ar_cols, "VARMA design")?;
     let mut y = Array2::zeros((t, k));
 
     for i in 0..t {
@@ -639,13 +662,17 @@ pub fn run_varma(
     }
 
     // Estimate AR parameters
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[n_ar_cols, n_ar_cols], "VARMA Z'Z")?,
+        "VARMA Z'Z",
+    )?;
     let ztz = xtx(&z_ar.view());
     let (ztz_inv, _) = safe_inverse(&ztz.view()).map_err(|e| EconError::SingularMatrix {
         context: "Z'Z in VARMA estimation".to_string(),
         suggestion: format!("Check for collinearity: {:?}", e),
     })?;
 
-    let mut ar_params = Array2::zeros((k, 1 + k * p));
+    let mut ar_params = Array2::zeros((k, n_ar_cols));
     let mut residuals = Array2::zeros((t, k));
 
     for eq in 0..k {
@@ -673,7 +700,11 @@ pub fn run_varma(
     }
 
     // MA params set to zeros (simplified implementation)
-    let ma_params = vec![vec![0.0; k * q]; k];
+    resource::check_alloc::<f64>(n_ma_params, "VARMA MA parameters")?;
+    let mut ma_params: Vec<Vec<f64>> = resource::try_with_capacity(k, "VARMA MA parameters")?;
+    for _ in 0..k {
+        ma_params.push(resource::try_vec(k * q, 0.0, "VARMA MA parameters")?);
+    }
 
     // Log-likelihood and information criteria
     let det_sigma = sigma_u
@@ -731,7 +762,7 @@ pub fn run_vecm(
         });
     }
 
-    let min_obs = lags + 2;
+    let min_obs = lags.saturating_add(2);
     if t_full < min_obs {
         return Err(EconError::InsufficientTimePeriods {
             lags,
@@ -741,9 +772,11 @@ pub fn run_vecm(
     }
 
     let t = t_full - lags;
+    // lags < t_full, so this is below the size of the data matrix
+    let n_lag_diff_cols = resource::checked_len(&[k, lags - 1], "VECM lagged differences")?;
 
     // Compute first differences
-    let mut delta_y = Array2::zeros((t, k));
+    let mut delta_y = resource::try_zeros2(t, k, "VECM differences")?;
     for i in 0..t {
         let t_idx = i + lags;
         for var in 0..k {
@@ -752,7 +785,7 @@ pub fn run_vecm(
     }
 
     // Build lagged level matrix (y_{t-1})
-    let mut y_lag1 = Array2::zeros((t, k));
+    let mut y_lag1 = resource::try_zeros2(t, k, "VECM lagged levels")?;
     for i in 0..t {
         let t_idx = i + lags - 1;
         for var in 0..k {
@@ -761,7 +794,7 @@ pub fn run_vecm(
     }
 
     // Build lagged difference matrices
-    let mut delta_y_lags = Array2::zeros((t, k * (lags - 1).max(0)));
+    let mut delta_y_lags = resource::try_zeros2(t, n_lag_diff_cols, "VECM lagged differences")?;
     for i in 0..t {
         for lag in 1..lags {
             let t_idx = i + lags - lag;
@@ -818,7 +851,14 @@ pub fn run_vecm(
         .collect();
 
     // Short-run dynamics (gamma) - zeros for simplicity
-    let gamma: Vec<Vec<f64>> = (0..k).map(|_| vec![0.0; k * (lags - 1).max(0)]).collect();
+    let mut gamma: Vec<Vec<f64>> = resource::try_with_capacity(k, "VECM short-run dynamics")?;
+    for _ in 0..k {
+        gamma.push(resource::try_vec(
+            n_lag_diff_cols,
+            0.0,
+            "VECM short-run dynamics",
+        )?);
+    }
 
     Ok(VecmResult {
         rank,
@@ -1006,9 +1046,10 @@ pub fn granger_test(
             message: "Variables must have the same length".to_string(),
         });
     }
-    if n_total <= 2 * lags + 1 {
+    let bound = lags.checked_mul(2).and_then(|v| v.checked_add(1));
+    if bound.is_none_or(|b| n_total <= b) {
         return Err(EconError::InsufficientData {
-            required: 2 * lags + 2,
+            required: lags.saturating_mul(2).saturating_add(2),
             provided: n_total,
             context: "Granger causality test".to_string(),
         });
@@ -1021,7 +1062,7 @@ pub fn granger_test(
 
     // Build restricted design matrix: intercept + lagged y only
     // X_R = [1, y_{t-1}, y_{t-2}, ..., y_{t-p}]
-    let mut x_restricted = Array2::<f64>::zeros((n, lags + 1));
+    let mut x_restricted = resource::try_zeros2(n, lags + 1, "restricted Granger design")?;
     for i in 0..n {
         x_restricted[[i, 0]] = 1.0; // intercept
         for lag in 1..=lags {
@@ -1031,7 +1072,7 @@ pub fn granger_test(
 
     // Build unrestricted design matrix: intercept + lagged y + lagged x
     // X_U = [1, y_{t-1}, ..., y_{t-p}, x_{t-1}, ..., x_{t-p}]
-    let mut x_unrestricted = Array2::<f64>::zeros((n, 2 * lags + 1));
+    let mut x_unrestricted = resource::try_zeros2(n, 2 * lags + 1, "unrestricted Granger design")?;
     for i in 0..n {
         x_unrestricted[[i, 0]] = 1.0; // intercept
         for lag in 1..=lags {
@@ -1039,6 +1080,12 @@ pub fn granger_test(
             x_unrestricted[[i, lags + lag]] = x_vec[lags + i - lag];
         }
     }
+
+    // Both X'X matrices are at most (2 * lags + 1)^2
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[2 * lags + 1, 2 * lags + 1], "unrestricted Granger X'X")?,
+        "unrestricted Granger X'X",
+    )?;
 
     // Estimate restricted model and compute RSS
     let xtx_r = xtx(&x_restricted.view());
@@ -1148,6 +1195,29 @@ pub fn granger_test_bidirectional(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
+
+    fn cancelled() -> Budget {
+        let token = CancelToken::new();
+        token.cancel();
+        Budget::new(None, token)
+    }
+
+    fn expect_resource_limit<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::ResourceLimit(_)) => {}
+            Err(e) => panic!("expected ResourceLimit, got: {e}"),
+            Ok(_) => panic!("expected ResourceLimit, got Ok"),
+        }
+    }
+
+    fn expect_cancelled<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::Cancelled(_)) => {}
+            Err(e) => panic!("expected Cancelled, got: {e}"),
+            Ok(_) => panic!("expected Cancelled, got Ok"),
+        }
+    }
 
     #[test]
     fn test_array2_to_vec() {
@@ -1581,5 +1651,34 @@ mod tests {
         assert!(display.contains("AIC:"));
         assert!(display.contains("BIC:"));
         assert!(display.contains("Sigma_u"));
+    }
+
+    #[test]
+    fn test_irf_rejects_unallocatable_horizon() {
+        let ds = create_var_validation_dataset();
+        let var = run_var(&ds, &["y1", "y2"], 1).unwrap();
+        expect_resource_limit(compute_irf(&var, usize::MAX / 4, true));
+        expect_resource_limit(run_var_irf(&ds, &["y1", "y2"], 1, usize::MAX / 4));
+    }
+
+    #[test]
+    fn test_lag_counts_cannot_overflow() {
+        let ds = create_var_validation_dataset();
+        assert!(matches!(
+            run_var(&ds, &["y1", "y2"], usize::MAX),
+            Err(EconError::InsufficientTimePeriods { .. })
+        ));
+        assert!(run_varma(&ds, &["y1", "y2"], usize::MAX, 0).is_err());
+        assert!(run_varma(&ds, &["y1", "y2"], 1, usize::MAX).is_err());
+        assert!(run_vecm(&ds, &["y1", "y2"], usize::MAX, 1).is_err());
+        let g = create_granger_test_dataset();
+        assert!(granger_test(&g, "y", "x", usize::MAX).is_err());
+    }
+
+    #[test]
+    fn test_irf_stops_when_cancelled() {
+        let ds = create_var_validation_dataset();
+        let var = run_var(&ds, &["y1", "y2"], 1).unwrap();
+        expect_cancelled(with_budget(cancelled(), || compute_irf(&var, 10, true)));
     }
 }

@@ -69,6 +69,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::SignificanceLevel;
 
 // ===============================================================================
@@ -536,6 +537,8 @@ fn run_hettx_with_names(
         }
     }
 
+    validate_config(y, treatment, covariates, &config)?;
+
     // Identify treated and control units
     let treated_idx: Vec<usize> = (0..n).filter(|&i| treatment[i] >= 0.5).collect();
     let control_idx: Vec<usize> = (0..n).filter(|&i| treatment[i] < 0.5).collect();
@@ -556,6 +559,11 @@ fn run_hettx_with_names(
         Some(s) => ChaCha8Rng::seed_from_u64(s),
         None => ChaCha8Rng::from_entropy(),
     };
+
+    // The null distribution has one slot per permutation; refuse an impossible
+    // count before any estimation runs.
+    let mut null_distribution =
+        resource::try_with_capacity::<f64>(config.n_permutations, "permutation null distribution")?;
 
     // Step 1: Estimate individual treatment effects
     let tau_hat = estimate_individual_effects(
@@ -580,10 +588,11 @@ fn run_hettx_with_names(
     let observed_stat = compute_test_statistic(&tau_hat, config.test_statistic);
 
     // Step 3: Permutation test
-    let mut null_distribution = Vec::with_capacity(config.n_permutations);
     let mut treatment_perm = treatment.to_owned();
 
     for _ in 0..config.n_permutations {
+        resource::checkpoint()?;
+
         // Permute treatment assignment
         let perm: Vec<usize> = {
             let mut indices: Vec<usize> = (0..n).collect();
@@ -610,6 +619,7 @@ fn run_hettx_with_names(
             config.n_neighbors,
         ) {
             Ok(t) => t,
+            Err(e) if is_resource_stop(&e) => return Err(e),
             Err(_) => continue, // Skip this permutation if estimation fails
         };
 
@@ -681,6 +691,49 @@ fn run_hettx_with_names(
 // Helper Functions
 // ===============================================================================
 
+/// Whether an error must stop the computation instead of being skipped as a
+/// failed permutation: a cancelled budget or a refused allocation.
+fn is_resource_stop(e: &EconError) -> bool {
+    matches!(e, EconError::Cancelled(_) | EconError::ResourceLimit(_))
+}
+
+/// Check the permutation and matching controls and refuse non-finite data,
+/// which the nearest-neighbour sort and the variance statistics cannot order.
+fn validate_config(
+    y: &ArrayView1<f64>,
+    treatment: &ArrayView1<f64>,
+    covariates: Option<&ArrayView2<f64>>,
+    config: &HetTxConfig,
+) -> EconResult<()> {
+    if config.n_permutations == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_permutations must be at least 1 (got 0)".to_string(),
+        });
+    }
+    if config.effect_method == EffectEstimationMethod::Matching && config.n_neighbors == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_neighbors must be at least 1 for matching (got 0)".to_string(),
+        });
+    }
+    let non_finite = |what: &str| {
+        Err(EconError::InvalidSpecification {
+            message: format!("{what} contains non-finite values (NaN or infinite)"),
+        })
+    };
+    if y.iter().any(|v| !v.is_finite()) {
+        return non_finite("The outcome");
+    }
+    if treatment.iter().any(|v| !v.is_finite()) {
+        return non_finite("The treatment indicator");
+    }
+    if let Some(x) = covariates
+        && x.iter().any(|v| !v.is_finite())
+    {
+        return non_finite("The covariate matrix");
+    }
+    Ok(())
+}
+
 /// Estimate individual treatment effects using the specified method.
 fn estimate_individual_effects(
     y: &ArrayView1<f64>,
@@ -703,6 +756,7 @@ fn estimate_individual_effects(
 
             // For each unit, impute the missing potential outcome using neighbors
             for i in 0..n {
+                resource::checkpoint()?;
                 let is_treated = treatment[i] >= 0.5;
 
                 if is_treated {
@@ -780,8 +834,8 @@ fn impute_by_matching(
         })
         .collect();
 
-    // Sort by distance
-    distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort by distance (inputs are finite, so distances are finite and never -0.0)
+    distances.sort_by(|a, b| a.1.total_cmp(&b.1));
 
     // Take k nearest neighbors
     let k_actual = k.min(distances.len());
@@ -990,10 +1044,14 @@ fn compute_heterogeneity_decomposition(
     let idiosyncratic_test_stat = idiosyncratic_variance;
 
     // Permutation tests for decomposition components
-    let mut systematic_null = Vec::with_capacity(n_perm);
-    let mut idiosyncratic_null = Vec::with_capacity(n_perm);
+    let mut systematic_null =
+        resource::try_with_capacity::<f64>(n_perm, "systematic null distribution")?;
+    let mut idiosyncratic_null =
+        resource::try_with_capacity::<f64>(n_perm, "idiosyncratic null distribution")?;
 
     for _ in 0..n_perm {
+        resource::checkpoint()?;
+
         // Permute the relationship between X and tau
         let perm: Vec<usize> = {
             let mut indices: Vec<usize> = (0..n).collect();
@@ -1130,8 +1188,44 @@ fn compute_covariate_importance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::Array1;
     use polars::prelude::*;
+
+    fn cancelled() -> Budget {
+        let token = CancelToken::new();
+        token.cancel();
+        Budget::new(None, token)
+    }
+
+    fn expect_invalid<T>(res: EconResult<T>, needle: &str) {
+        match res {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains(needle),
+                    "message {message:?} should name `{needle}`"
+                )
+            }
+            Err(e) => panic!("expected InvalidSpecification naming `{needle}`, got: {e}"),
+            Ok(_) => panic!("expected InvalidSpecification naming `{needle}`, got Ok"),
+        }
+    }
+
+    fn expect_resource_limit<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::ResourceLimit(_)) => {}
+            Err(e) => panic!("expected ResourceLimit, got: {e}"),
+            Ok(_) => panic!("expected ResourceLimit, got Ok"),
+        }
+    }
+
+    fn expect_cancelled<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::Cancelled(_)) => {}
+            Err(e) => panic!("expected Cancelled, got: {e}"),
+            Ok(_) => panic!("expected Cancelled, got Ok"),
+        }
+    }
 
     /// Create test data with known heterogeneity structure.
     ///
@@ -1215,6 +1309,27 @@ mod tests {
         }
 
         (y_arr, treatment_arr, x_arr)
+    }
+
+    fn pinned_hettx_result() -> HetTxResult {
+        let (y, treatment, x) = create_hettx_test_data();
+        let config = HetTxConfig {
+            n_permutations: 200,
+            seed: Some(42),
+            ..Default::default()
+        };
+        run_hettx(&y.view(), &treatment.view(), Some(&x.view()), config).unwrap()
+    }
+
+    /// Seeded permutation p-values captured from the current implementation.
+    #[test]
+    fn test_hettx_pinned_seed42() {
+        let r = pinned_hettx_result();
+        let d = r.decomposition.as_ref().unwrap();
+        assert_eq!(r.p_value, 1.0);
+        assert_eq!(r.null_distribution.len(), 200);
+        assert_eq!(d.systematic_p_value, 0.004975124378109453);
+        assert_eq!(d.idiosyncratic_p_value, 1.0);
     }
 
     #[test]
@@ -1532,5 +1647,90 @@ mod tests {
         // MAD: mean(|x - 3|) for x in [1,2,3,4,5] = (2+1+0+1+2)/5 = 1.2
         let mad_stat = compute_test_statistic(&tau, HetTestStat::MeanAbsDeviation);
         assert!((mad_stat - 1.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_hettx_rejects_bad_counts_and_data() {
+        let (y, tr, x) = create_hettx_test_data();
+        let run = |config: HetTxConfig| run_hettx(&y.view(), &tr.view(), Some(&x.view()), config);
+        expect_invalid(
+            run(HetTxConfig {
+                n_permutations: 0,
+                seed: Some(1),
+                ..Default::default()
+            }),
+            "n_permutations",
+        );
+        expect_invalid(
+            run(HetTxConfig {
+                n_neighbors: 0,
+                n_permutations: 10,
+                seed: Some(1),
+                ..Default::default()
+            }),
+            "n_neighbors",
+        );
+        let mut y_bad = y.clone();
+        y_bad[0] = f64::NAN;
+        expect_invalid(
+            run_hettx(
+                &y_bad.view(),
+                &tr.view(),
+                Some(&x.view()),
+                HetTxConfig {
+                    n_permutations: 10,
+                    seed: Some(1),
+                    ..Default::default()
+                },
+            ),
+            "non-finite",
+        );
+        let mut x_bad = x.clone();
+        x_bad[[3, 1]] = f64::INFINITY;
+        expect_invalid(
+            run_hettx(
+                &y.view(),
+                &tr.view(),
+                Some(&x_bad.view()),
+                HetTxConfig {
+                    n_permutations: 10,
+                    seed: Some(1),
+                    ..Default::default()
+                },
+            ),
+            "non-finite",
+        );
+    }
+
+    #[test]
+    fn test_hettx_rejects_unallocatable_permutations() {
+        let (y, tr, x) = create_hettx_test_data();
+        expect_resource_limit(run_hettx(
+            &y.view(),
+            &tr.view(),
+            Some(&x.view()),
+            HetTxConfig {
+                n_permutations: usize::MAX / 4,
+                seed: Some(1),
+                ..Default::default()
+            },
+        ));
+    }
+
+    #[test]
+    fn test_hettx_stops_when_cancelled() {
+        let (y, tr, x) = create_hettx_test_data();
+        expect_cancelled(with_budget(cancelled(), || {
+            run_hettx(
+                &y.view(),
+                &tr.view(),
+                Some(&x.view()),
+                HetTxConfig {
+                    n_permutations: 20,
+                    seed: Some(1),
+                    ..Default::default()
+                },
+            )
+        }));
     }
 }

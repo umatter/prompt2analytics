@@ -57,6 +57,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf, normal_pdf};
 
 use super::hdfe::FactorInfo;
@@ -242,6 +243,11 @@ impl GlmFamily {
     }
 
     /// Log-likelihood contribution for a single observation.
+    ///
+    /// For Poisson this is `y ln(mu) - mu - ln Gamma(y + 1)`, which takes constant
+    /// time, is continuous in `y` (PPML outcomes need not be integers), equals R's
+    /// `dpois(y, mu, log = TRUE)` for integer counts and follows fixest's
+    /// convention for non-integer ones.
     #[inline]
     pub fn log_lik(&self, y: f64, mu: f64) -> f64 {
         match self {
@@ -254,11 +260,9 @@ impl GlmFamily {
                 }
             }
             GlmFamily::Poisson => {
-                // y*log(μ) - μ - log(y!)
+                // y*log(μ) - μ - log Γ(y + 1)
                 let mu_safe = mu.max(1e-10);
-                let y_int = y.round() as i64;
-                let log_factorial = (1..=y_int).map(|i| (i as f64).ln()).sum::<f64>();
-                y * mu_safe.ln() - mu_safe - log_factorial
+                y * mu_safe.ln() - mu_safe - statrs::function::gamma::ln_gamma(y + 1.0)
             }
             GlmFamily::Gaussian => {
                 // -0.5 * (y - μ)² (up to a constant)
@@ -580,6 +584,8 @@ fn weighted_map_step(
 }
 
 /// Weighted demean using the Method of Alternating Projections.
+///
+/// Returns `EconError::Cancelled` when the current budget runs out between sweeps.
 fn weighted_demean_map(
     data: &Array1<f64>,
     weights: &Array1<f64>,
@@ -587,15 +593,15 @@ fn weighted_demean_map(
     tolerance: f64,
     max_iter: usize,
     accelerate: bool,
-) -> (Array1<f64>, usize, f64, bool) {
+) -> EconResult<(Array1<f64>, usize, f64, bool)> {
     if factors.is_empty() {
-        return (data.clone(), 0, 0.0, true);
+        return Ok((data.clone(), 0, 0.0, true));
     }
 
     // Single factor: one pass is sufficient
     if factors.len() == 1 {
         let demeaned = weighted_demean_by_factor(data, weights, &factors[0]);
-        return (demeaned, 1, 0.0, true);
+        return Ok((demeaned, 1, 0.0, true));
     }
 
     let mut current = data.clone();
@@ -605,6 +611,7 @@ fn weighted_demean_map(
     let mut final_change = f64::MAX;
 
     for iter in 1..=max_iter {
+        resource::checkpoint()?;
         if iter > 1 {
             prev_prev = prev.clone();
         }
@@ -625,7 +632,7 @@ fn weighted_demean_map(
         // Check convergence
         if final_change < tolerance {
             converged = true;
-            return (current, iter, final_change, converged);
+            return Ok((current, iter, final_change, converged));
         }
 
         // Gearhart-Koshy acceleration
@@ -649,7 +656,7 @@ fn weighted_demean_map(
         }
     }
 
-    (current, max_iter, final_change, converged)
+    Ok((current, max_iter, final_change, converged))
 }
 
 /// Weighted demean a matrix column-wise.
@@ -660,7 +667,7 @@ fn weighted_demean_matrix_map(
     tolerance: f64,
     max_iter: usize,
     accelerate: bool,
-) -> (Array2<f64>, usize, f64, bool) {
+) -> EconResult<(Array2<f64>, usize, f64, bool)> {
     let (n, k) = x.dim();
     let mut x_demeaned = Array2::zeros((n, k));
     let mut max_iterations: usize = 0;
@@ -670,7 +677,7 @@ fn weighted_demean_matrix_map(
     for j in 0..k {
         let col = x.column(j).to_owned();
         let (col_demeaned, iters, change, converged) =
-            weighted_demean_map(&col, weights, factors, tolerance, max_iter, accelerate);
+            weighted_demean_map(&col, weights, factors, tolerance, max_iter, accelerate)?;
         x_demeaned.column_mut(j).assign(&col_demeaned);
 
         max_iterations = max_iterations.max(iters);
@@ -678,7 +685,7 @@ fn weighted_demean_matrix_map(
         all_converged = all_converged && converged;
     }
 
-    (x_demeaned, max_iterations, max_change, all_converged)
+    Ok((x_demeaned, max_iterations, max_change, all_converged))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -778,6 +785,53 @@ fn extract_factor_info(dataset: &Dataset, col: &str) -> EconResult<FactorInfo> {
     })
 }
 
+/// Check the IRLS and MAP controls: a tolerance of zero or less can never be
+/// met, zero iterations cannot fit anything, and the weight floor must be a
+/// usable number.
+fn validate_config(config: &FeglmConfig) -> EconResult<()> {
+    let invalid = |message: String| Err(EconError::InvalidSpecification { message });
+    for (name, value) in [
+        ("tolerance", config.tolerance),
+        ("map_tolerance", config.map_tolerance),
+    ] {
+        if !(value.is_finite() && value > 0.0) {
+            return invalid(format!(
+                "{name} must be a finite number greater than 0 (got {value})"
+            ));
+        }
+    }
+    if config.max_iter == 0 {
+        return invalid("max_iter must be at least 1 (got 0)".to_string());
+    }
+    if config.map_max_iter == 0 {
+        return invalid("map_max_iter must be at least 1 (got 0)".to_string());
+    }
+    if !(config.weight_min.is_finite() && config.weight_min >= 0.0) {
+        return invalid(format!(
+            "weight_min must be a finite number of at least 0 (got {})",
+            config.weight_min
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a column with NaN or infinite values, naming it and the count.
+fn reject_non_finite<'a>(values: impl Iterator<Item = &'a f64>, what: &str) -> EconResult<()> {
+    let bad = values.filter(|v| !v.is_finite()).count();
+    if bad == 0 {
+        return Ok(());
+    }
+    Err(EconError::InvalidSpecification {
+        message: format!(
+            "{} contains {} non-finite value{} (NaN or infinite); remove or impute {} first",
+            what,
+            bad,
+            if bad == 1 { "" } else { "s" },
+            if bad == 1 { "it" } else { "them" }
+        ),
+    })
+}
+
 /// Compute degrees of freedom absorbed by fixed effects.
 fn compute_absorbed_df(factors: &[FactorInfo]) -> usize {
     if factors.is_empty() {
@@ -858,6 +912,8 @@ pub fn run_feglm(
         });
     }
 
+    validate_config(&config)?;
+
     // Extract y
     let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
         EconError::ColumnNotFound {
@@ -865,6 +921,7 @@ pub fn run_feglm(
             available: get_column_names(dataset.df()),
         }
     })?;
+    reject_non_finite(y.iter(), &format!("Dependent variable '{}'", y_col))?;
 
     // Validate y for binomial families
     let n_positive = y.iter().filter(|&&v| v >= 0.5).count();
@@ -901,6 +958,9 @@ pub fn run_feglm(
     let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
     let x = design.data;
     let var_names = design.column_names;
+    for (j, name) in var_names.iter().enumerate() {
+        reject_non_finite(x.column(j).iter(), &format!("Regressor '{}'", name))?;
+    }
     let n = y.len();
     let k = x.ncols();
 
@@ -956,6 +1016,7 @@ pub fn run_feglm(
     let mut final_change = f64::MAX;
 
     for iter in 0..config.max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // 1. Compute μ from η
@@ -998,7 +1059,7 @@ pub fn run_feglm(
             config.map_tolerance,
             config.map_max_iter,
             config.accelerate,
-        );
+        )?;
 
         let (x_demeaned, _, _, x_conv) = weighted_demean_matrix_map(
             &x_scaled,
@@ -1007,7 +1068,7 @@ pub fn run_feglm(
             config.map_tolerance,
             config.map_max_iter,
             config.accelerate,
-        );
+        )?;
 
         if !z_conv || !x_conv {
             return Err(EconError::ConvergenceFailure {
@@ -1219,7 +1280,7 @@ pub fn run_feglm(
         config.map_tolerance,
         config.map_max_iter,
         config.accelerate,
-    );
+    )?;
 
     let xtx_final = xtx(&x_demeaned_final.view());
     let (vcov, _) = safe_inverse(&xtx_final.view()).map_err(|e| EconError::SingularMatrix {
@@ -1292,7 +1353,35 @@ pub fn run_feglm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use polars::df;
+
+    fn cancelled() -> Budget {
+        let token = CancelToken::new();
+        token.cancel();
+        Budget::new(None, token)
+    }
+
+    fn expect_cancelled<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::Cancelled(_)) => {}
+            Err(e) => panic!("expected Cancelled, got: {e}"),
+            Ok(_) => panic!("expected Cancelled, got Ok"),
+        }
+    }
+
+    fn expect_invalid<T>(res: EconResult<T>, needle: &str) {
+        match res {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains(needle),
+                    "message {message:?} should name `{needle}`"
+                )
+            }
+            Err(e) => panic!("expected InvalidSpecification naming `{needle}`, got: {e}"),
+            Ok(_) => panic!("expected InvalidSpecification naming `{needle}`, got Ok"),
+        }
+    }
 
     // Test data: binary panel with known structure
     fn create_binary_panel() -> Dataset {
@@ -1699,5 +1788,210 @@ mod tests {
             logit_result.coefficients[0].signum() == probit_result.coefficients[0].signum(),
             "Logit and Probit should have same coefficient sign"
         );
+    }
+
+    // R 4.3.3, fixest 0.14.2 reference values:
+    //   dpois(0, 2.5, log = TRUE)            # -2.5
+    //   dpois(3, 2.5, log = TRUE)            # -1.5428872736055899
+    //   dpois(17, 12.3, log = TRUE)          # -3.1418859897045666
+    //   dpois(1e6, 999000, log = TRUE)       # -8.327027479053644
+    //   2.5 * log(3) - 3 - lgamma(3.5)       # -1.4544428806767997 (fixest convention; dpois gives -Inf)
+    //   dpois(1e12, 1e12 + 1e6, log = TRUE)  # -15.234448757835947
+    //   library(fixest)
+    //   i <- 0:39
+    //   d <- data.frame(id = i %/% 8, x = ((i * 7) %% 11) / 10)
+    //   d$y1 <- ((i * 37) %% 23) + 1 + 0.25 * (i %% 3)
+    //   d$y2 <- 1e12 + ((i * 7919) %% 1000003) * 1e6
+    //   fepois(y1 ~ x | id, d)$ll_null                              # -165.74049709539213
+    //   sum(d$y2 * log(mean(d$y2)) - mean(d$y2) - lgamma(d$y2 + 1))  # -145041993560.08203
+    //   fepois(y2 ~ x | id, d)$ll_null                              # -145041993560 (same, printed)
+
+    /// Non-integer y uses fixest's y*log(mu) - mu - lgamma(y + 1); integer y matches dpois.
+    #[test]
+    fn test_poisson_log_lik_matches_r() {
+        use statrs::function::gamma::ln_gamma;
+        let cases: [(f64, f64, f64); 5] = [
+            (2.5, 3.0, -1.4544428806767997),
+            (0.0, 2.5, -2.5),
+            (3.0, 2.5, -1.5428872736055899),
+            (17.0, 12.3, -3.1418859897045666),
+            (1e6, 999000.0, -8.327027479053644),
+        ];
+        for (y, mu, want) in cases {
+            let got = GlmFamily::Poisson.log_lik(y, mu);
+            let scale = (y * mu.ln()).abs() + mu + ln_gamma(y + 1.0);
+            assert!(
+                (got - want).abs() <= 1e-12 * scale.max(1.0),
+                "log_lik({y}, {mu}) = {got}, R {want}"
+            );
+        }
+    }
+
+    fn ppml_panel(y_of: impl Fn(usize) -> f64) -> Dataset {
+        let id: Vec<i64> = (0..40).map(|i| (i / 8) as i64).collect();
+        let x: Vec<f64> = (0..40).map(|i| ((i * 7) % 11) as f64 / 10.0).collect();
+        let y: Vec<f64> = (0..40).map(y_of).collect();
+        Dataset::new(df! { "id" => id, "x" => x, "y" => y }.unwrap())
+    }
+
+    #[test]
+    fn test_feglm_poisson_null_loglik_matches_fixest_non_integer() {
+        // fepois(y1 ~ x | id, d)$ll_null = -165.74049709539213
+        let ds = ppml_panel(|i| ((i * 37) % 23) as f64 + 1.0 + 0.25 * (i % 3) as f64);
+        let r = run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Poisson, None).unwrap();
+        let want = -165.74049709539213;
+        assert!(
+            (r.log_likelihood_null - want).abs() <= 1e-10 * want.abs(),
+            "got {}",
+            r.log_likelihood_null
+        );
+    }
+
+    #[test]
+    fn test_feglm_rejects_non_finite_outcome() {
+        let ds = ppml_panel(|i| {
+            if i == 5 {
+                f64::NAN
+            } else {
+                3.0 + (i % 4) as f64
+            }
+        });
+        expect_invalid(
+            run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Poisson, None),
+            "non-finite",
+        );
+        let ds = ppml_panel(|i| {
+            if i == 5 {
+                f64::INFINITY
+            } else {
+                3.0 + (i % 4) as f64
+            }
+        });
+        expect_invalid(
+            run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Logit, None),
+            "non-finite",
+        );
+        // a non-finite regressor is refused too
+        let mut x: Vec<f64> = (0..40).map(|i| ((i * 7) % 11) as f64 / 10.0).collect();
+        x[7] = f64::NAN;
+        let ds = Dataset::new(
+            df! {
+                "id" => (0..40).map(|i| (i / 8) as i64).collect::<Vec<i64>>(),
+                "x" => x,
+                "y" => (0..40).map(|i| 3.0 + (i % 4) as f64).collect::<Vec<f64>>(),
+            }
+            .unwrap(),
+        );
+        expect_invalid(
+            run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Poisson, None),
+            "Regressor 'x'",
+        );
+    }
+
+    /// The closed form is O(1): y = 1e12 used to loop 10^12 times. The 1e-14 x scale
+    /// tolerance (about 0.55 here) is the cancellation floor of the closed form, which
+    /// fixest shares; R's dpois uses Loader's saddle point.
+    #[test]
+    fn test_poisson_log_lik_large_counts() {
+        use statrs::function::gamma::ln_gamma;
+        let (y, mu) = (1e12, 1e12 + 1e6);
+        let got = GlmFamily::Poisson.log_lik(y, mu);
+        let scale = (y * mu.ln()).abs() + mu + ln_gamma(y + 1.0);
+        assert!(
+            (got - (-15.234448757835947)).abs() <= 1e-14 * scale,
+            "got {got}"
+        );
+        for v in [1e15, 1e18] {
+            assert!(GlmFamily::Poisson.log_lik(v, v).is_finite());
+        }
+    }
+
+    #[test]
+    fn test_feglm_poisson_large_counts_null_loglik_matches_fixest() {
+        // sum(d$y2 * log(mean(d$y2)) - mean(d$y2) - lgamma(d$y2 + 1)) = -145041993560.08203
+        let ds = ppml_panel(|i| 1e12 + ((i * 7919) % 1_000_003) as f64 * 1e6);
+        let r = run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Poisson, None).unwrap();
+        let want = -145041993560.08203;
+        assert!(
+            (r.log_likelihood_null - want).abs() <= 1e-10 * want.abs(),
+            "got {}",
+            r.log_likelihood_null
+        );
+        assert!(r.log_likelihood.is_finite());
+    }
+
+    #[test]
+    fn test_feglm_rejects_invalid_iteration_controls() {
+        let ds = create_count_panel();
+        let run = |c: FeglmConfig| {
+            run_feglm(&ds, "count", &["x"], &["firm"], GlmFamily::Poisson, Some(c))
+        };
+        for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            expect_invalid(
+                run(FeglmConfig {
+                    tolerance,
+                    ..Default::default()
+                }),
+                "tolerance",
+            );
+        }
+        expect_invalid(
+            run(FeglmConfig {
+                max_iter: 0,
+                ..Default::default()
+            }),
+            "max_iter",
+        );
+        expect_invalid(
+            run(FeglmConfig {
+                map_tolerance: 0.0,
+                ..Default::default()
+            }),
+            "map_tolerance",
+        );
+        expect_invalid(
+            run(FeglmConfig {
+                map_max_iter: 0,
+                ..Default::default()
+            }),
+            "map_max_iter",
+        );
+        expect_invalid(
+            run(FeglmConfig {
+                weight_min: f64::NAN,
+                ..Default::default()
+            }),
+            "weight_min",
+        );
+    }
+
+    #[test]
+    fn test_feglm_stops_when_cancelled() {
+        let ds = create_count_panel();
+        expect_cancelled(with_budget(cancelled(), || {
+            run_feglm(&ds, "count", &["x"], &["firm"], GlmFamily::Poisson, None)
+        }));
+    }
+
+    #[test]
+    fn test_weighted_demean_map_stops_when_cancelled() {
+        // the two FactorInfo literals of hdfe's test_demean_map_two_factors, data 1..=6, unit weights
+        let data = Array1::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let weights = Array1::from_elem(6, 1.0);
+        let factor1 = FactorInfo {
+            name: "entity".to_string(),
+            n_levels: 2,
+            ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
+        };
+        let factor2 = FactorInfo {
+            name: "time".to_string(),
+            n_levels: 3,
+            ids: vec![0, 1, 2, 0, 1, 2],
+            counts: vec![2, 2, 2],
+        };
+        expect_cancelled(with_budget(cancelled(), || {
+            weighted_demean_map(&data, &weights, &[factor1, factor2], 1e-8, 1000, true)
+        }));
     }
 }
