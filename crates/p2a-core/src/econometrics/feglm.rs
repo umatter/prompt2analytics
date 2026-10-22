@@ -57,6 +57,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf, normal_pdf};
 
 use super::hdfe::FactorInfo;
@@ -583,6 +584,8 @@ fn weighted_map_step(
 }
 
 /// Weighted demean using the Method of Alternating Projections.
+///
+/// Returns `EconError::Cancelled` when the current budget runs out between sweeps.
 fn weighted_demean_map(
     data: &Array1<f64>,
     weights: &Array1<f64>,
@@ -590,15 +593,15 @@ fn weighted_demean_map(
     tolerance: f64,
     max_iter: usize,
     accelerate: bool,
-) -> (Array1<f64>, usize, f64, bool) {
+) -> EconResult<(Array1<f64>, usize, f64, bool)> {
     if factors.is_empty() {
-        return (data.clone(), 0, 0.0, true);
+        return Ok((data.clone(), 0, 0.0, true));
     }
 
     // Single factor: one pass is sufficient
     if factors.len() == 1 {
         let demeaned = weighted_demean_by_factor(data, weights, &factors[0]);
-        return (demeaned, 1, 0.0, true);
+        return Ok((demeaned, 1, 0.0, true));
     }
 
     let mut current = data.clone();
@@ -608,6 +611,7 @@ fn weighted_demean_map(
     let mut final_change = f64::MAX;
 
     for iter in 1..=max_iter {
+        resource::checkpoint()?;
         if iter > 1 {
             prev_prev = prev.clone();
         }
@@ -628,7 +632,7 @@ fn weighted_demean_map(
         // Check convergence
         if final_change < tolerance {
             converged = true;
-            return (current, iter, final_change, converged);
+            return Ok((current, iter, final_change, converged));
         }
 
         // Gearhart-Koshy acceleration
@@ -652,7 +656,7 @@ fn weighted_demean_map(
         }
     }
 
-    (current, max_iter, final_change, converged)
+    Ok((current, max_iter, final_change, converged))
 }
 
 /// Weighted demean a matrix column-wise.
@@ -663,7 +667,7 @@ fn weighted_demean_matrix_map(
     tolerance: f64,
     max_iter: usize,
     accelerate: bool,
-) -> (Array2<f64>, usize, f64, bool) {
+) -> EconResult<(Array2<f64>, usize, f64, bool)> {
     let (n, k) = x.dim();
     let mut x_demeaned = Array2::zeros((n, k));
     let mut max_iterations: usize = 0;
@@ -673,7 +677,7 @@ fn weighted_demean_matrix_map(
     for j in 0..k {
         let col = x.column(j).to_owned();
         let (col_demeaned, iters, change, converged) =
-            weighted_demean_map(&col, weights, factors, tolerance, max_iter, accelerate);
+            weighted_demean_map(&col, weights, factors, tolerance, max_iter, accelerate)?;
         x_demeaned.column_mut(j).assign(&col_demeaned);
 
         max_iterations = max_iterations.max(iters);
@@ -681,7 +685,7 @@ fn weighted_demean_matrix_map(
         all_converged = all_converged && converged;
     }
 
-    (x_demeaned, max_iterations, max_change, all_converged)
+    Ok((x_demeaned, max_iterations, max_change, all_converged))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -781,6 +785,36 @@ fn extract_factor_info(dataset: &Dataset, col: &str) -> EconResult<FactorInfo> {
     })
 }
 
+/// Check the IRLS and MAP controls: a tolerance of zero or less can never be
+/// met, zero iterations cannot fit anything, and the weight floor must be a
+/// usable number.
+fn validate_config(config: &FeglmConfig) -> EconResult<()> {
+    let invalid = |message: String| Err(EconError::InvalidSpecification { message });
+    for (name, value) in [
+        ("tolerance", config.tolerance),
+        ("map_tolerance", config.map_tolerance),
+    ] {
+        if !(value.is_finite() && value > 0.0) {
+            return invalid(format!(
+                "{name} must be a finite number greater than 0 (got {value})"
+            ));
+        }
+    }
+    if config.max_iter == 0 {
+        return invalid("max_iter must be at least 1 (got 0)".to_string());
+    }
+    if config.map_max_iter == 0 {
+        return invalid("map_max_iter must be at least 1 (got 0)".to_string());
+    }
+    if !(config.weight_min.is_finite() && config.weight_min >= 0.0) {
+        return invalid(format!(
+            "weight_min must be a finite number of at least 0 (got {})",
+            config.weight_min
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse a column with NaN or infinite values, naming it and the count.
 fn reject_non_finite<'a>(values: impl Iterator<Item = &'a f64>, what: &str) -> EconResult<()> {
     let bad = values.filter(|v| !v.is_finite()).count();
@@ -877,6 +911,8 @@ pub fn run_feglm(
             message: "At least one regressor (X) column must be specified".to_string(),
         });
     }
+
+    validate_config(&config)?;
 
     // Extract y
     let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
@@ -980,6 +1016,7 @@ pub fn run_feglm(
     let mut final_change = f64::MAX;
 
     for iter in 0..config.max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // 1. Compute μ from η
@@ -1022,7 +1059,7 @@ pub fn run_feglm(
             config.map_tolerance,
             config.map_max_iter,
             config.accelerate,
-        );
+        )?;
 
         let (x_demeaned, _, _, x_conv) = weighted_demean_matrix_map(
             &x_scaled,
@@ -1031,7 +1068,7 @@ pub fn run_feglm(
             config.map_tolerance,
             config.map_max_iter,
             config.accelerate,
-        );
+        )?;
 
         if !z_conv || !x_conv {
             return Err(EconError::ConvergenceFailure {
@@ -1243,7 +1280,7 @@ pub fn run_feglm(
         config.map_tolerance,
         config.map_max_iter,
         config.accelerate,
-    );
+    )?;
 
     let xtx_final = xtx(&x_demeaned_final.view());
     let (vcov, _) = safe_inverse(&xtx_final.view()).map_err(|e| EconError::SingularMatrix {
@@ -1316,7 +1353,22 @@ pub fn run_feglm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use polars::df;
+
+    fn cancelled() -> Budget {
+        let token = CancelToken::new();
+        token.cancel();
+        Budget::new(None, token)
+    }
+
+    fn expect_cancelled<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::Cancelled(_)) => {}
+            Err(e) => panic!("expected Cancelled, got: {e}"),
+            Ok(_) => panic!("expected Cancelled, got Ok"),
+        }
+    }
 
     fn expect_invalid<T>(res: EconResult<T>, needle: &str) {
         match res {
@@ -1866,5 +1918,80 @@ mod tests {
             r.log_likelihood_null
         );
         assert!(r.log_likelihood.is_finite());
+    }
+
+    #[test]
+    fn test_feglm_rejects_invalid_iteration_controls() {
+        let ds = create_count_panel();
+        let run = |c: FeglmConfig| {
+            run_feglm(&ds, "count", &["x"], &["firm"], GlmFamily::Poisson, Some(c))
+        };
+        for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            expect_invalid(
+                run(FeglmConfig {
+                    tolerance,
+                    ..Default::default()
+                }),
+                "tolerance",
+            );
+        }
+        expect_invalid(
+            run(FeglmConfig {
+                max_iter: 0,
+                ..Default::default()
+            }),
+            "max_iter",
+        );
+        expect_invalid(
+            run(FeglmConfig {
+                map_tolerance: 0.0,
+                ..Default::default()
+            }),
+            "map_tolerance",
+        );
+        expect_invalid(
+            run(FeglmConfig {
+                map_max_iter: 0,
+                ..Default::default()
+            }),
+            "map_max_iter",
+        );
+        expect_invalid(
+            run(FeglmConfig {
+                weight_min: f64::NAN,
+                ..Default::default()
+            }),
+            "weight_min",
+        );
+    }
+
+    #[test]
+    fn test_feglm_stops_when_cancelled() {
+        let ds = create_count_panel();
+        expect_cancelled(with_budget(cancelled(), || {
+            run_feglm(&ds, "count", &["x"], &["firm"], GlmFamily::Poisson, None)
+        }));
+    }
+
+    #[test]
+    fn test_weighted_demean_map_stops_when_cancelled() {
+        // the two FactorInfo literals of hdfe's test_demean_map_two_factors, data 1..=6, unit weights
+        let data = Array1::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let weights = Array1::from_elem(6, 1.0);
+        let factor1 = FactorInfo {
+            name: "entity".to_string(),
+            n_levels: 2,
+            ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
+        };
+        let factor2 = FactorInfo {
+            name: "time".to_string(),
+            n_levels: 3,
+            ids: vec![0, 1, 2, 0, 1, 2],
+            counts: vec![2, 2, 2],
+        };
+        expect_cancelled(with_budget(cancelled(), || {
+            weighted_demean_map(&data, &weights, &[factor1, factor2], 1e-8, 1000, true)
+        }));
     }
 }
