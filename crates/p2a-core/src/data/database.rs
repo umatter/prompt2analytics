@@ -1210,8 +1210,8 @@ fn run_duckdb_query(
         }
         let mut row_bytes = 0u64;
         for i in 0..column_count {
-            let value: duckdb::types::Value = row.get(i).map_err(stopped)?;
-            row_bytes = row_bytes.saturating_add(duckdb_value_bytes(&value));
+            let (value, bytes) = duckdb_owned_value(row.get_ref(i).map_err(stopped)?);
+            row_bytes = row_bytes.saturating_add(bytes);
             row_values.push(value);
         }
         if !collector.push(&mut row_values, row_bytes) {
@@ -1225,28 +1225,40 @@ fn run_duckdb_query(
     finish_outcome(collector, column_names, duckdb_column_to_series)
 }
 
-/// Estimated size of one DuckDB value: booleans and numbers 8 bytes, text and
-/// binary values their length, anything else 16.
-fn duckdb_value_bytes(value: &duckdb::types::Value) -> u64 {
-    use duckdb::types::Value;
+/// One DuckDB value read *without owning* the container types the converter
+/// discards, plus its estimated byte size: booleans and numbers 8 bytes, text
+/// and binary values their length.
+///
+/// [`duckdb_column_to_series`] keeps only Null, the signed integers, the two
+/// floats, text and blobs; everything else (LIST, STRUCT, MAP, ARRAY, UNION,
+/// ENUM, DECIMAL, TIMESTAMP, the huge and unsigned integers, …) it renders as
+/// an empty string. Reading those through [`duckdb::types::ValueRef`] and
+/// replacing them with an empty [`Value::Text`] here, instead of
+/// `row.get`-ing an owned [`Value`], means a LIST of millions of elements is
+/// never allocated in Rust (outside DuckDB's `memory_limit`, in a conversion
+/// the watchdog cannot interrupt) only to be thrown away. The output column is
+/// identical. Text is decoded losslessly (`from_utf8_lossy`) so a non-UTF-8
+/// byte sequence cannot panic.
+fn duckdb_owned_value(value: duckdb::types::ValueRef<'_>) -> (duckdb::types::Value, u64) {
+    use duckdb::types::{Value, ValueRef};
     match value {
-        Value::Null => 0,
-        Value::Boolean(_)
-        | Value::TinyInt(_)
-        | Value::SmallInt(_)
-        | Value::Int(_)
-        | Value::BigInt(_)
-        | Value::HugeInt(_)
-        | Value::UHugeInt(_)
-        | Value::UTinyInt(_)
-        | Value::USmallInt(_)
-        | Value::UInt(_)
-        | Value::UBigInt(_)
-        | Value::Float(_)
-        | Value::Double(_) => 8,
-        Value::Text(s) => s.len() as u64,
-        Value::Blob(b) | Value::Geometry(b) => b.len() as u64,
-        _ => 16,
+        ValueRef::Null => (Value::Null, 0),
+        ValueRef::Boolean(b) => (Value::Boolean(b), 8),
+        ValueRef::TinyInt(i) => (Value::TinyInt(i), 8),
+        ValueRef::SmallInt(i) => (Value::SmallInt(i), 8),
+        ValueRef::Int(i) => (Value::Int(i), 8),
+        ValueRef::BigInt(i) => (Value::BigInt(i), 8),
+        ValueRef::Float(f) => (Value::Float(f), 8),
+        ValueRef::Double(f) => (Value::Double(f), 8),
+        ValueRef::Text(b) => {
+            let s = String::from_utf8_lossy(b).into_owned();
+            let n = s.len() as u64;
+            (Value::Text(s), n)
+        }
+        ValueRef::Blob(b) => (Value::Blob(b.to_vec()), b.len() as u64),
+        // Every other variant renders as "" in the converter; do not
+        // materialise it, and count it as zero bytes.
+        _ => (Value::Text(String::new()), 0),
     }
 }
 
@@ -1846,6 +1858,33 @@ mod tests {
         .unwrap();
         assert!(o.truncated);
         assert_eq!(o.rows_returned, 50);
+    }
+
+    #[test]
+    fn duckdb_container_values_are_not_materialised() {
+        // A LIST of a million elements must not be allocated in Rust just to be
+        // rendered as "". The byte budget would admit it (0 bytes), so a row is
+        // returned; its value is the empty string, and no OOM occurs.
+        let o = query_duckdb_with(
+            ":memory:",
+            "SELECT list(range) AS l FROM range(1000000)",
+            &QueryOptions {
+                max_bytes: Some(1000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(o.rows_returned, 1);
+        let l = o
+            .result
+            .dataframe
+            .column("l")
+            .unwrap()
+            .as_materialized_series()
+            .str()
+            .unwrap()
+            .get(0);
+        assert_eq!(l, Some(""));
     }
 
     #[test]
