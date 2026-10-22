@@ -6,6 +6,7 @@
 //! when dimensionality ≤ 20, with parallel neighborhood queries via rayon.
 
 use crate::errors::{EconError, EconResult};
+use crate::resource::{checked_len, checkpoint, current_budget, try_vec};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -134,6 +135,18 @@ pub fn kmeans(
     let tol = tolerance.unwrap_or(1e-4);
     let n_initializations = n_init.unwrap_or(10);
 
+    if n_initializations == 0 {
+        return Err("n_init must be at least 1 (got 0)".to_string());
+    }
+    if max_iter == 0 {
+        return Err("max_iterations must be at least 1 (got 0)".to_string());
+    }
+    if !(tol.is_finite() && tol >= 0.0) {
+        return Err(format!(
+            "tolerance must be finite and non-negative (got {tol})"
+        ));
+    }
+
     let mut rng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
         None => StdRng::from_entropy(),
@@ -143,11 +156,13 @@ pub fn kmeans(
     let mut best_inertia = f64::INFINITY;
 
     for _ in 0..n_initializations {
+        checkpoint().map_err(|e| e.to_string())?;
+
         // Initialize centroids using k-means++
-        let centroids = kmeans_plusplus_init(&data, k, &mut rng);
+        let centroids = kmeans_plusplus_init(&data, k, &mut rng)?;
 
         // Run k-means
-        let result = kmeans_single(&data, centroids, max_iter, tol);
+        let result = kmeans_single(&data, centroids, max_iter, tol)?;
 
         if result.inertia < best_inertia {
             best_inertia = result.inertia;
@@ -159,7 +174,16 @@ pub fn kmeans(
 }
 
 /// K-means++ initialization.
-fn kmeans_plusplus_init(data: &ArrayView2<f64>, k: usize, rng: &mut StdRng) -> Array2<f64> {
+///
+/// Keeps each point's squared distance to its nearest chosen centroid and
+/// updates it with the newest centroid only (O(n k d) overall). `f64::min` is
+/// exact and order-independent, so the minima, and with them the sampled
+/// centroids, equal those of a full rescan over all chosen centroids.
+fn kmeans_plusplus_init(
+    data: &ArrayView2<f64>,
+    k: usize,
+    rng: &mut StdRng,
+) -> Result<Array2<f64>, String> {
     let n_samples = data.nrows();
     let n_features = data.ncols();
 
@@ -169,18 +193,18 @@ fn kmeans_plusplus_init(data: &ArrayView2<f64>, k: usize, rng: &mut StdRng) -> A
     let first_idx = rng.gen_range(0..n_samples);
     centroids.row_mut(0).assign(&data.row(first_idx));
 
+    // Squared distance of each point to its nearest chosen centroid
+    let mut distances = vec![f64::INFINITY; n_samples];
+
     // Choose remaining centroids
     for i in 1..k {
-        // Compute distances to nearest centroid
-        let mut distances = Vec::with_capacity(n_samples);
-        for j in 0..n_samples {
-            let point = data.row(j);
-            let mut min_dist = f64::INFINITY;
-            for c in 0..i {
-                let dist = euclidean_distance_squared(&point, &centroids.row(c));
-                min_dist = min_dist.min(dist);
-            }
-            distances.push(min_dist);
+        checkpoint().map_err(|e| e.to_string())?;
+
+        // Fold the newest centroid into the nearest-centroid distances
+        let newest = centroids.row(i - 1);
+        for (j, min_dist) in distances.iter_mut().enumerate() {
+            let dist = euclidean_distance_squared(&data.row(j), &newest);
+            *min_dist = min_dist.min(dist);
         }
 
         // Sample proportional to squared distance
@@ -199,7 +223,7 @@ fn kmeans_plusplus_init(data: &ArrayView2<f64>, k: usize, rng: &mut StdRng) -> A
         centroids.row_mut(i).assign(&data.row(chosen_idx));
     }
 
-    centroids
+    Ok(centroids)
 }
 
 /// Single run of k-means.
@@ -211,7 +235,7 @@ fn kmeans_single(
     mut centroids: Array2<f64>,
     max_iter: usize,
     tol: f64,
-) -> KMeansResult {
+) -> Result<KMeansResult, String> {
     let n_samples = data.nrows();
     let k = centroids.nrows();
 
@@ -229,6 +253,7 @@ fn kmeans_single(
     let gpu_ctx: Option<&()> = None;
 
     for iter in 0..max_iter {
+        checkpoint().map_err(|e| e.to_string())?;
         n_iterations = iter + 1;
 
         if gpu_ctx.is_some() {
@@ -299,13 +324,13 @@ fn kmeans_single(
         cluster_sizes[labels[i]] += 1;
     }
 
-    KMeansResult {
+    Ok(KMeansResult {
         labels,
         centroids,
         n_iterations,
         inertia,
         cluster_sizes,
-    }
+    })
 }
 
 /// CPU path for K-means label assignment.
@@ -352,6 +377,22 @@ pub fn dbscan(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult
     let n_samples = data.nrows();
     let n_features = data.ncols();
 
+    if !(eps.is_finite() && eps > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("eps must be finite and positive (got {eps})"),
+        });
+    }
+    if min_samples == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "min_samples must be at least 1 (got 0)".to_string(),
+        });
+    }
+    if let Some(((i, j), v)) = data.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("data must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+
     // Small datasets: use condensed distance matrix, no KD-tree, no rayon
     if n_samples < DBSCAN_SMALL_N_THRESHOLD {
         return dbscan_small(data, eps, min_samples);
@@ -378,17 +419,6 @@ pub fn dbscan(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult
 fn dbscan_small(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult<DBSCANResult> {
     let n = data.nrows();
 
-    if eps <= 0.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "eps must be positive".to_string(),
-        });
-    }
-    if min_samples == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "min_samples must be at least 1".to_string(),
-        });
-    }
-
     if n == 0 {
         return Ok(DBSCANResult {
             labels: Vec::new(),
@@ -413,9 +443,11 @@ fn dbscan_small(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResu
 
     // Pre-compute condensed distance matrix (squared Euclidean distances).
     // Layout: for i < j, index = i * (2*n - i - 1) / 2 + j - i - 1
-    let condensed_len = n * (n - 1) / 2;
-    let mut dist_sq = vec![0.0f64; condensed_len];
+    let what = "DBSCAN distance matrix";
+    let condensed_len = checked_len(&[n, n - 1], what)? / 2;
+    let mut dist_sq = try_vec(condensed_len, 0.0f64, what)?;
     for i in 0..n {
+        checkpoint()?;
         let row_i = data.row(i);
         // Use the condensed_index formula inline for i < j
         let base = i * (2 * n - i - 1) / 2;
@@ -470,6 +502,8 @@ fn dbscan_small(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResu
         stack.push(core_idx);
 
         while let Some(idx) = stack.pop() {
+            checkpoint()?;
+
             // Find neighbors of idx by scanning the condensed matrix.
             // For each j != idx, check if dist_sq(idx, j) <= eps_sq.
             //
@@ -517,22 +551,16 @@ fn dbscan_small(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResu
 
 /// Run DBSCAN using KD-tree for efficient neighborhood queries.
 ///
-/// Achieves O(n log n) average case for low-dimensional data.
+/// Achieves O(n log n) average case for low-dimensional data. Neighbourhoods
+/// are not stored: core points are found from parallel neighbour counts, and
+/// the expansion re-queries the tree for every core point it pops (each point
+/// is pushed at most once, so there are at most n queries). The queries return
+/// neighbours in the same order every time, so the labels equal those of an
+/// expansion over stored neighbourhoods, in O(n) memory plus one query result.
 fn dbscan_kdtree(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult<DBSCANResult> {
     use super::kdtree::KdTree;
 
     let n_samples = data.nrows();
-
-    if eps <= 0.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "eps must be positive".to_string(),
-        });
-    }
-    if min_samples == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "min_samples must be at least 1".to_string(),
-        });
-    }
 
     if n_samples == 0 {
         return Ok(DBSCANResult {
@@ -546,23 +574,23 @@ fn dbscan_kdtree(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconRes
     // Build KD-tree from data
     let data_vec: Vec<Vec<f64>> = data.rows().into_iter().map(|row| row.to_vec()).collect();
     let tree = KdTree::new(data_vec);
+    let query = |i: usize| tree.radius_query_unsorted(&tree.data()[i], eps, None);
 
-    // Find neighbors for each point using KD-tree radius queries (parallel, unsorted)
-    let neighborhoods: Vec<Vec<usize>> = (0..n_samples)
+    // Count neighbors for each point (parallel); nothing else is kept
+    let budget = current_budget();
+    let neighbor_counts: Vec<usize> = (0..n_samples)
         .into_par_iter()
         .map(|i| {
-            tree.radius_query_unsorted(tree.data().get(i).unwrap(), eps, None)
-                .into_iter()
-                .map(|(_, idx)| idx)
-                .collect()
+            if let Some(budget) = &budget {
+                budget.check()?;
+            }
+            Ok(query(i).len())
         })
-        .collect();
+        .collect::<EconResult<Vec<usize>>>()?;
 
     // Identify core points
-    let core_sample_indices: Vec<usize> = (0..n_samples)
-        .filter(|&i| neighborhoods[i].len() >= min_samples)
-        .collect();
-    let core_set: HashSet<usize> = core_sample_indices.iter().cloned().collect();
+    let is_core: Vec<bool> = neighbor_counts.iter().map(|&c| c >= min_samples).collect();
+    let core_sample_indices: Vec<usize> = (0..n_samples).filter(|&i| is_core[i]).collect();
 
     // Initialize labels (-1 = unvisited/noise)
     let mut labels = vec![-1i32; n_samples];
@@ -579,12 +607,13 @@ fn dbscan_kdtree(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconRes
         let mut stack = vec![core_idx];
 
         while let Some(idx) = stack.pop() {
-            for &neighbor in &neighborhoods[idx] {
+            checkpoint()?;
+            for (_, neighbor) in query(idx) {
                 if labels[neighbor] == -1 {
                     labels[neighbor] = current_cluster;
 
                     // If neighbor is a core point, expand from it
-                    if core_set.contains(&neighbor) {
+                    if is_core[neighbor] {
                         stack.push(neighbor);
                     }
                 }
@@ -607,39 +636,34 @@ fn dbscan_kdtree(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconRes
 
 /// Run DBSCAN using naive O(n²) pairwise distance computation.
 ///
-/// Used for high-dimensional data where KD-tree is inefficient.
+/// Used for high-dimensional data where KD-tree is inefficient. Like the
+/// KD-tree path it keeps only neighbour counts and recomputes a core point's
+/// neighbours (ascending index order) when the expansion pops it.
 fn dbscan_naive(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult<DBSCANResult> {
     let n_samples = data.nrows();
 
-    if eps <= 0.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "eps must be positive".to_string(),
-        });
-    }
-    if min_samples == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "min_samples must be at least 1".to_string(),
-        });
-    }
-
     let eps_squared = eps * eps;
+    let neighbors = |i: usize| {
+        let row_i = data.row(i);
+        (0..n_samples)
+            .filter(move |&j| euclidean_distance_squared(&row_i, &data.row(j)) <= eps_squared)
+    };
 
-    // Find neighbors for each point (parallel)
-    let neighborhoods: Vec<Vec<usize>> = (0..n_samples)
+    // Count neighbors for each point (parallel)
+    let budget = current_budget();
+    let neighbor_counts: Vec<usize> = (0..n_samples)
         .into_par_iter()
         .map(|i| {
-            let row_i = data.row(i);
-            (0..n_samples)
-                .filter(|&j| euclidean_distance_squared(&row_i, &data.row(j)) <= eps_squared)
-                .collect()
+            if let Some(budget) = &budget {
+                budget.check()?;
+            }
+            Ok(neighbors(i).count())
         })
-        .collect();
+        .collect::<EconResult<Vec<usize>>>()?;
 
     // Identify core points
-    let core_sample_indices: Vec<usize> = (0..n_samples)
-        .filter(|&i| neighborhoods[i].len() >= min_samples)
-        .collect();
-    let core_set: HashSet<usize> = core_sample_indices.iter().cloned().collect();
+    let is_core: Vec<bool> = neighbor_counts.iter().map(|&c| c >= min_samples).collect();
+    let core_sample_indices: Vec<usize> = (0..n_samples).filter(|&i| is_core[i]).collect();
 
     // Initialize labels (-1 = unvisited/noise)
     let mut labels = vec![-1i32; n_samples];
@@ -656,12 +680,13 @@ fn dbscan_naive(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResu
         let mut stack = vec![core_idx];
 
         while let Some(idx) = stack.pop() {
-            for &neighbor in &neighborhoods[idx] {
+            checkpoint()?;
+            for neighbor in neighbors(idx) {
                 if labels[neighbor] == -1 {
                     labels[neighbor] = current_cluster;
 
                     // If neighbor is a core point, expand from it
-                    if core_set.contains(&neighbor) {
+                    if is_core[neighbor] {
                         stack.push(neighbor);
                     }
                 }
@@ -826,9 +851,11 @@ pub fn hierarchical(
     // Store pairwise distances in a flat Vec using the condensed index formula.
     // For Ward's method we store squared Euclidean distances; for others, Euclidean distances.
     let use_squared = linkage == Linkage::Ward;
-    let condensed_len = n * (n - 1) / 2;
-    let mut dist = vec![0.0f64; condensed_len];
+    let what = "hierarchical clustering distance matrix";
+    let condensed_len = checked_len(&[n, n - 1], what).map_err(|e| e.to_string())? / 2;
+    let mut dist = try_vec(condensed_len, 0.0f64, what).map_err(|e| e.to_string())?;
     for i in 0..n {
+        checkpoint().map_err(|e| e.to_string())?;
         let row_i = data.row(i);
         for j in (i + 1)..n {
             let d = euclidean_distance_squared(&row_i, &data.row(j));
@@ -853,6 +880,7 @@ pub fn hierarchical(
 
     // Initialize nearest neighbors for each cluster.
     for i in 0..n {
+        checkpoint().map_err(|e| e.to_string())?;
         for j in (i + 1)..n {
             let d = ward_or_raw_dist(&dist, n, i, j, &size, linkage);
             if d < nn_dist[i] {
@@ -884,6 +912,7 @@ pub fn hierarchical(
 
     // --- Main agglomerative loop ---
     for _step in 0..(n - 1) {
+        checkpoint().map_err(|e| e.to_string())?;
         if let Some(target) = target_clusters {
             if n_active <= target {
                 break;
@@ -1532,7 +1561,323 @@ pub fn run_cutree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
+    use std::collections::HashSet;
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// Three loose clusters along the diagonal, uniform noise in each coordinate.
+    fn three_clusters(n: usize, d: usize, seed: u64) -> Array2<f64> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        Array2::from_shape_fn((n, d), |(i, _)| (i % 3) as f64 * 4.0 + rng.r#gen::<f64>())
+    }
+
+    #[test]
+    fn kmeans_validates_counts_and_tolerance() {
+        let data = three_clusters(60, 2, 1);
+        assert!(
+            kmeans(data.view(), 3, Some(100), None, Some(0), Some(1))
+                .unwrap_err()
+                .starts_with("n_init")
+        );
+        assert!(
+            kmeans(data.view(), 3, Some(0), None, Some(2), Some(1))
+                .unwrap_err()
+                .starts_with("max_iterations")
+        );
+        assert!(
+            kmeans(data.view(), 3, Some(100), Some(f64::NAN), Some(2), Some(1))
+                .unwrap_err()
+                .starts_with("tolerance")
+        );
+        assert!(
+            kmeans(data.view(), 3, Some(100), Some(-1.0), Some(2), Some(1))
+                .unwrap_err()
+                .starts_with("tolerance")
+        );
+        let e = with_budget(cancelled(), || {
+            kmeans(data.view(), 3, None, None, Some(2), Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+    }
+
+    #[test]
+    fn dbscan_validates_eps_and_data() {
+        let mut data = three_clusters(50, 2, 2);
+        for eps in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            assert!(
+                matches!(
+                    dbscan(data.view(), eps, 3),
+                    Err(EconError::InvalidSpecification { .. })
+                ),
+                "eps={eps}"
+            );
+        }
+        data[[7, 0]] = f64::NAN;
+        assert!(
+            dbscan(data.view(), 0.5, 3)
+                .unwrap_err()
+                .to_string()
+                .contains("finite")
+        );
+    }
+
+    #[test]
+    fn dbscan_and_hierarchical_buffers_are_fallible_and_cancellable() {
+        let data = three_clusters(100, 2, 3);
+        let r = with_alloc_ceiling(Some(4096), || dbscan(data.view(), 0.5, 3)); // small-n path, 39,600 B condensed
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))), "{r:?}");
+        let e = with_alloc_ceiling(Some(4096), || {
+            hierarchical(data.view(), Some(3), Linkage::Average, None)
+        })
+        .unwrap_err();
+        assert!(e.contains("limit"), "{e}");
+        let e = with_budget(cancelled(), || {
+            hierarchical(data.view(), Some(3), Linkage::Ward, None)
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+        let big = three_clusters(600, 2, 4); // kd-tree path
+        let r = with_budget(cancelled(), || dbscan(big.view(), 0.3, 4));
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{r:?}");
+        assert!(
+            dbscan(data.view(), 0.5, 3).is_ok()
+                && hierarchical(data.view(), Some(3), Linkage::Ward, None).is_ok()
+        );
+    }
+
+    /// Verbatim copy of `dbscan_kdtree` before it stopped storing every
+    /// neighbourhood; the reference for
+    /// `dbscan_without_stored_neighbourhoods_matches_reference`.
+    fn reference_dbscan_kdtree(
+        data: ArrayView2<f64>,
+        eps: f64,
+        min_samples: usize,
+    ) -> EconResult<DBSCANResult> {
+        use super::super::kdtree::KdTree;
+
+        let n_samples = data.nrows();
+
+        if eps <= 0.0 {
+            return Err(EconError::InvalidSpecification {
+                message: "eps must be positive".to_string(),
+            });
+        }
+        if min_samples == 0 {
+            return Err(EconError::InvalidSpecification {
+                message: "min_samples must be at least 1".to_string(),
+            });
+        }
+
+        if n_samples == 0 {
+            return Ok(DBSCANResult {
+                labels: Vec::new(),
+                n_clusters: 0,
+                n_noise: 0,
+                core_sample_indices: Vec::new(),
+            });
+        }
+
+        // Build KD-tree from data
+        let data_vec: Vec<Vec<f64>> = data.rows().into_iter().map(|row| row.to_vec()).collect();
+        let tree = KdTree::new(data_vec);
+
+        // Find neighbors for each point using KD-tree radius queries (parallel, unsorted)
+        let neighborhoods: Vec<Vec<usize>> = (0..n_samples)
+            .into_par_iter()
+            .map(|i| {
+                tree.radius_query_unsorted(tree.data().get(i).unwrap(), eps, None)
+                    .into_iter()
+                    .map(|(_, idx)| idx)
+                    .collect()
+            })
+            .collect();
+
+        // Identify core points
+        let core_sample_indices: Vec<usize> = (0..n_samples)
+            .filter(|&i| neighborhoods[i].len() >= min_samples)
+            .collect();
+        let core_set: HashSet<usize> = core_sample_indices.iter().cloned().collect();
+
+        // Initialize labels (-1 = unvisited/noise)
+        let mut labels = vec![-1i32; n_samples];
+        let mut current_cluster = 0i32;
+
+        // Expand clusters from core points
+        for &core_idx in &core_sample_indices {
+            if labels[core_idx] != -1 {
+                continue;
+            }
+
+            // Start new cluster
+            labels[core_idx] = current_cluster;
+            let mut stack = vec![core_idx];
+
+            while let Some(idx) = stack.pop() {
+                for &neighbor in &neighborhoods[idx] {
+                    if labels[neighbor] == -1 {
+                        labels[neighbor] = current_cluster;
+
+                        // If neighbor is a core point, expand from it
+                        if core_set.contains(&neighbor) {
+                            stack.push(neighbor);
+                        }
+                    }
+                }
+            }
+
+            current_cluster += 1;
+        }
+
+        let n_clusters = current_cluster as usize;
+        let n_noise = labels.iter().filter(|&&l| l == -1).count();
+
+        Ok(DBSCANResult {
+            labels,
+            n_clusters,
+            n_noise,
+            core_sample_indices,
+        })
+    }
+
+    /// Verbatim copy of `dbscan_naive` before it stopped storing every
+    /// neighbourhood; the reference for
+    /// `dbscan_without_stored_neighbourhoods_matches_reference`.
+    fn reference_dbscan_naive(
+        data: ArrayView2<f64>,
+        eps: f64,
+        min_samples: usize,
+    ) -> EconResult<DBSCANResult> {
+        let n_samples = data.nrows();
+
+        if eps <= 0.0 {
+            return Err(EconError::InvalidSpecification {
+                message: "eps must be positive".to_string(),
+            });
+        }
+        if min_samples == 0 {
+            return Err(EconError::InvalidSpecification {
+                message: "min_samples must be at least 1".to_string(),
+            });
+        }
+
+        let eps_squared = eps * eps;
+
+        // Find neighbors for each point (parallel)
+        let neighborhoods: Vec<Vec<usize>> = (0..n_samples)
+            .into_par_iter()
+            .map(|i| {
+                let row_i = data.row(i);
+                (0..n_samples)
+                    .filter(|&j| euclidean_distance_squared(&row_i, &data.row(j)) <= eps_squared)
+                    .collect()
+            })
+            .collect();
+
+        // Identify core points
+        let core_sample_indices: Vec<usize> = (0..n_samples)
+            .filter(|&i| neighborhoods[i].len() >= min_samples)
+            .collect();
+        let core_set: HashSet<usize> = core_sample_indices.iter().cloned().collect();
+
+        // Initialize labels (-1 = unvisited/noise)
+        let mut labels = vec![-1i32; n_samples];
+        let mut current_cluster = 0i32;
+
+        // Expand clusters from core points
+        for &core_idx in &core_sample_indices {
+            if labels[core_idx] != -1 {
+                continue;
+            }
+
+            // Start new cluster
+            labels[core_idx] = current_cluster;
+            let mut stack = vec![core_idx];
+
+            while let Some(idx) = stack.pop() {
+                for &neighbor in &neighborhoods[idx] {
+                    if labels[neighbor] == -1 {
+                        labels[neighbor] = current_cluster;
+
+                        // If neighbor is a core point, expand from it
+                        if core_set.contains(&neighbor) {
+                            stack.push(neighbor);
+                        }
+                    }
+                }
+            }
+
+            current_cluster += 1;
+        }
+
+        let n_clusters = current_cluster as usize;
+        let n_noise = labels.iter().filter(|&&l| l == -1).count();
+
+        Ok(DBSCANResult {
+            labels,
+            n_clusters,
+            n_noise,
+            core_sample_indices,
+        })
+    }
+
+    /// Reference guard: DBSCAN without stored neighbourhoods must label
+    /// exactly as the versions that stored them (kd-tree and naive paths).
+    #[test]
+    fn dbscan_without_stored_neighbourhoods_matches_reference() {
+        for (n, d, eps, min_samples, seed) in [
+            (700, 2, 0.1, 5, 10),
+            (700, 3, 0.2, 8, 11),
+            (520, 21, 1.4, 5, 12),
+        ] {
+            let data = three_clusters(n, d, seed);
+            let got = dbscan(data.view(), eps, min_samples).unwrap();
+            let want = if d <= KDTREE_MAX_DIMS {
+                reference_dbscan_kdtree(data.view(), eps, min_samples)
+            } else {
+                reference_dbscan_naive(data.view(), eps, min_samples)
+            }
+            .unwrap();
+            assert!(
+                want.n_clusters >= 2 && want.n_noise > 0,
+                "tune eps: {} clusters, {} noise",
+                want.n_clusters,
+                want.n_noise
+            );
+            assert_eq!(got.labels, want.labels, "n={n} d={d}");
+            assert_eq!(got.core_sample_indices, want.core_sample_indices);
+            assert_eq!(
+                (got.n_clusters, got.n_noise),
+                (want.n_clusters, want.n_noise)
+            );
+        }
+    }
+
+    /// Golden (characterization) test: captured on the code before the
+    /// running-minimum k-means++; it passes before and after.
+    #[test]
+    fn kmeans_plusplus_running_min_is_unchanged() {
+        const GOLDEN_INERTIA: u64 = 4633615604438900480;
+        const GOLDEN_ITERS: usize = 8;
+        const GOLDEN_LABELS: [usize; 12] = [3, 2, 0, 1, 4, 0, 1, 2, 0, 1, 2, 0];
+        let data = three_clusters(300, 3, 4);
+        let r = kmeans(data.view(), 5, Some(100), Some(1e-6), Some(3), Some(11)).unwrap();
+        assert_eq!(
+            (r.inertia.to_bits(), r.n_iterations, &r.labels[..12]),
+            (GOLDEN_INERTIA, GOLDEN_ITERS, &GOLDEN_LABELS[..]),
+            "got inertia {:?} ({}), iterations {}, labels {:?}",
+            r.inertia,
+            r.inertia.to_bits(),
+            r.n_iterations,
+            &r.labels[..12]
+        );
+    }
 
     #[test]
     fn test_kmeans_basic() {
