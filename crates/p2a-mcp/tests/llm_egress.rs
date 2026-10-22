@@ -744,3 +744,82 @@ async fn stream_task_stops_after_client_disconnects() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Task 7: conversation ownership in the chat stream (db builds)
+// ---------------------------------------------------------------------------
+
+/// The whole SSE body of one chat-stream request.
+#[cfg(feature = "db")]
+async fn stream_body(app: &Router, body: Value) -> String {
+    let resp = app
+        .clone()
+        .oneshot(post_json("/api/llm/chat/stream", &body))
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(10),
+        axum::body::to_bytes(resp.into_body(), usize::MAX),
+    )
+    .await
+    .expect("the stream ends")
+    .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(feature = "db")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_stream_refuses_foreign_conversation() {
+    let (app, state) = app().await;
+    let s1 = new_session(&app).await;
+    let s2 = new_session(&app).await;
+    let db = state.persistent_manager.as_ref().unwrap().db().clone();
+    let conv = db
+        .create_conversation(&s1, "private")
+        .await
+        .unwrap()
+        .id_string();
+    let hits = counter();
+    let h = hits.clone();
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(move || {
+            h.fetch_add(1, Ordering::SeqCst);
+            async {
+                format!(
+                    "{}\n",
+                    json!({"message": {"role": "assistant", "content": "ok"}, "done": true})
+                )
+            }
+        }),
+    ))
+    .await;
+
+    // Another session's conversation, and one that does not exist, get the
+    // same answer before any write or upstream call.
+    for (sid, conv_id) in [(&s2, conv.as_str()), (&s1, "no-such-conversation")] {
+        let body = stream_body(
+            &app,
+            json!({"session_id": sid, "conversation_id": conv_id, "message": "hi",
+                   "provider": stub_provider(addr)}),
+        )
+        .await;
+        assert!(
+            body.contains(r#""type":"error""#) && body.contains("Conversation not found"),
+            "{body}"
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    assert!(db.get_messages(&conv).await.unwrap().is_empty());
+
+    // Positive control: the owner can use it.
+    let body = stream_body(
+        &app,
+        json!({"session_id": s1, "conversation_id": conv, "message": "hi",
+               "provider": stub_provider(addr)}),
+    )
+    .await;
+    assert!(body.contains(r#""type":"done""#), "{body}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(!db.get_messages(&conv).await.unwrap().is_empty());
+}

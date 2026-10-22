@@ -1293,6 +1293,27 @@ async fn run_chat_stream(
         }
     };
 
+    // Compute a human-readable provider name for the status message
+    // before `request.provider` is moved into the resolver — OpenRouter
+    // is routed through the OpenAI client with a custom base_url, so
+    // "openai" alone would be misleading in the connecting banner.
+    let provider_display = provider_display_name(request.provider.as_ref());
+
+    // Resolve the provider (egress policy, key policy, iteration clamp)
+    // before any database write or provider request.
+    let provider_config = match resolve_provider_config(
+        request.provider.clone(),
+        request.max_tool_iterations,
+        &settings,
+        &server_env,
+    ) {
+        Ok(cfg) => cfg,
+        Err(msg) => {
+            let _ = tx.send(ProgressEvent::Error { error: msg }).await;
+            return;
+        }
+    };
+
     // Get database connection for persistence/tracking
     #[cfg(feature = "db")]
     let db_connection = state.persistent_manager.as_ref().map(|pm| pm.db().clone());
@@ -1304,6 +1325,26 @@ async fn run_chat_stream(
         .as_ref()
         .filter(|id| !id.is_empty())
         .cloned();
+
+    // A named conversation must belong to this session. A missing and a
+    // foreign conversation get the same answer, so the check is not an
+    // existence oracle; it runs before the placeholder is written, stored
+    // history is read or the provider is contacted.
+    #[cfg(feature = "db")]
+    if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id) {
+        let owned = matches!(
+            db.get_conversation(conv_id).await,
+            Ok(c) if c.session_id == request.session_id
+        );
+        if !owned {
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: "Conversation not found".to_string(),
+                })
+                .await;
+            return;
+        }
+    }
 
     // Create placeholder assistant message if conversation persistence is enabled
     #[cfg(feature = "db")]
@@ -1331,27 +1372,6 @@ async fn run_chat_stream(
     }
     #[cfg(not(feature = "db"))]
     let _ = placeholder;
-
-    // Compute a human-readable provider name for the status message
-    // before `request.provider` is moved into the resolver — OpenRouter
-    // is routed through the OpenAI client with a custom base_url, so
-    // "openai" alone would be misleading in the connecting banner.
-    let provider_display = provider_display_name(request.provider.as_ref());
-
-    // Resolve the provider (egress policy, key policy, iteration clamp)
-    // before making any request.
-    let provider_config = match resolve_provider_config(
-        request.provider.clone(),
-        request.max_tool_iterations,
-        &settings,
-        &server_env,
-    ) {
-        Ok(cfg) => cfg,
-        Err(msg) => {
-            let _ = tx.send(ProgressEvent::Error { error: msg }).await;
-            return;
-        }
-    };
 
     // Create streaming tool executor (the provider is built once the
     // messages are, below)
