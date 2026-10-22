@@ -698,8 +698,10 @@ impl AnalyticsServer {
     /// the request limits in force on this thread (`tools::limits::current`,
     /// which the governor sets on its blocking thread): the tool must exist,
     /// then its cost parameters must be within the catalogue's caps, then the
-    /// dataset a `ROW_RULES` tool names must be within its row class. A refusal
-    /// is `ToolCallError::LimitExceeded` (422 `limit_exceeded`).
+    /// dataset a `ROW_RULES` tool names must be within its row class. After
+    /// the handler returns, text and image output above the `response_bytes`
+    /// budget replaces the result. A refusal is
+    /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`).
     #[cfg(feature = "http")]
     pub async fn call_tool_with_session(
         &self,
@@ -719,7 +721,10 @@ impl AnalyticsServer {
 
         // A session-scoped server instance that shares the session's datasets.
         let session_server = Self::with_session(session);
-        session_server.dispatch_tool(tool_name, arguments).await
+        let result = session_server.dispatch_tool(tool_name, arguments).await?;
+        check_response_size(&limits, tool_name, tool_result_bytes(&result))
+            .map_err(log_and_convert)?;
+        Ok(result)
     }
 
     /// Deserialise `arguments` into the tool's request type and run its
@@ -1326,6 +1331,46 @@ async fn enforce_request_limits(
         }
     }
     Ok(())
+}
+
+/// Refuses a tool result whose text and image output (`bytes`) is above the
+/// `response_bytes` budget (none when limits are off).
+#[allow(
+    clippy::result_large_err,
+    reason = "LimitViolation is WP02's fixed public shape"
+)]
+fn check_response_size(limits: &Limits, tool: &str, bytes: usize) -> Result<(), LimitViolation> {
+    let Some(max) = limits.response_bytes else {
+        return Ok(());
+    };
+    if u64::try_from(bytes).is_ok_and(|b| b <= max) {
+        return Ok(());
+    }
+    Err(LimitViolation {
+        tool: tool.to_string(),
+        parameter: "response_bytes".to_string(),
+        requested: bytes.to_string(),
+        limit: max.to_string(),
+        override_key: "response_bytes",
+        message: format!(
+            "The output of `{tool}` is {bytes} bytes, above this server's limit of {max} bytes \
+             per response. Ask for less output, for example fewer rows, columns or grid points."
+        ),
+    })
+}
+
+/// Bytes of text and image data in a governed call's result.
+#[cfg(feature = "http")]
+fn tool_result_bytes(result: &crate::transport::http::ToolResult) -> usize {
+    use crate::transport::http::ContentItem;
+    result
+        .content
+        .iter()
+        .map(|item| match item {
+            ContentItem::Text { text } => text.len(),
+            ContentItem::Image { data, .. } => data.len(),
+        })
+        .sum()
 }
 
 /// Logs a refusal with the knob that would raise the limit (`override_key`

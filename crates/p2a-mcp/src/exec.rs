@@ -567,7 +567,19 @@ impl ToolGovernor {
                     } else {
                         None
                     };
-                    let result = server.call_tool_with_session(&tool_name, args, &s).await?;
+                    let result = match server.call_tool_with_session(&tool_name, args, &s).await
+                    {
+                        Ok(result) => result,
+                        Err(e) => {
+                            // A result refused for its size comes from work
+                            // that ran: undo dataset growth past a quota
+                            // before reporting the refusal.
+                            if let Some(snapshot) = snapshot {
+                                quotas.enforce(&s, &sessions, snapshot).await?;
+                            }
+                            return Err(e);
+                        }
+                    };
                     if !result.success && budget.deadline().is_some_and(|d| Instant::now() >= d) {
                         return Err(ToolCallError::DeadlineExceeded { limit_secs });
                     }

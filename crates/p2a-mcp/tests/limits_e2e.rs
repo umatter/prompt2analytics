@@ -373,6 +373,77 @@ mod http_paths {
     }
 
     #[test]
+    fn response_cap_refuses_oversized_output() {
+        let cfg = open_public_config();
+        let head = |app: Router, state: AppState| async move {
+            let sid = new_session(&app).await;
+            insert_dataset(&state, &sid, "small", 60).await;
+            post_tool(&app, &sid, "head_dataset", json!({"dataset": "small", "n": 50})).await
+        };
+        let l = Limits::hosted()
+            .with_overrides(&["response_bytes=200".to_string()])
+            .unwrap();
+        run(l, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let (status, body) = head(app, state).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["code"], "limit_exceeded", "{body}");
+            assert_eq!(body["details"]["parameter"], "response_bytes", "{body}");
+            assert_eq!(body["details"]["limit"], "200", "{body}");
+            let requested: u64 = body["details"]["requested"]
+                .as_str()
+                .and_then(|r| r.parse().ok())
+                .unwrap();
+            assert!(requested > 200, "{body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("above this server's limit of 200 bytes"),
+                "{body}"
+            );
+        });
+        // The hosted default (16 MiB) lets the same call through.
+        run(Limits::hosted(), async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let (status, body) = head(app, state).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["success"], true, "{body}");
+        });
+    }
+
+    #[test]
+    fn response_cap_does_not_bypass_dataset_quotas() {
+        // The handler runs before its output is measured. A refused output
+        // must not let the call's dataset growth escape the quota check.
+        let cfg = local_config();
+        let l = Limits::off()
+            .with_overrides(&["response_bytes=10".to_string()])
+            .unwrap();
+        run(l, async {
+            let exec = p2a_mcp::exec::ExecConfig {
+                session_data_bytes: Some(1),
+                ..Default::default()
+            };
+            let (app, state) = p2a_mcp::transport::http::build_app_with(&cfg, exec)
+                .await
+                .unwrap();
+            let sid = new_session(&app).await;
+            let (status, body) = post_tool(
+                &app,
+                &sid,
+                "create_dataset",
+                json!({"name": "d", "csv_content": "x,y\n1.0,1.1\n2.0,1.9\n3.0,3.2\n"}),
+            )
+            .await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["code"], "quota_exceeded", "{body}");
+            let session = state.session_manager.get_session(&sid).await.unwrap();
+            assert!(session.datasets.read().await.is_empty(), "change not undone");
+        });
+    }
+
+    #[test]
     fn x1_local_mode_is_unlimited() {
         // The local default (limits off) runs a value above the hosted cap.
         let cfg = local_config();
