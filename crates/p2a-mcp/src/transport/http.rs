@@ -250,7 +250,10 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 /// ceiling, session directories) and serves it with graceful shutdown.
 /// It does not install the request limits or apply `--limit-override`
 /// (`P2A_LIMIT_OVERRIDES`); `transport::start_transport` does that before it
-/// calls `start_http_transport`.
+/// calls `start_http_transport`. A caller that uses `serve` directly gets the
+/// off profile's request limits, whatever the governor's resource profile,
+/// unless it first calls
+/// `tools::limits::install(tools::limits::resolve(&config)?)`.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     mut config: ServerConfig,

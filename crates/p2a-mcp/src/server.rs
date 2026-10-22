@@ -701,17 +701,18 @@ impl AnalyticsServer {
     /// ToolRouter (which requires a Peer that cannot be constructed outside rmcp).
     ///
     /// Within this crate only `exec::ToolGovernor::call` calls this, so every
-    /// HTTP-side tool call runs under the governor. Direct calls (integration
-    /// tests, embedders) bypass admission control, permits, execution on the
-    /// blocking pool (a direct call runs on the caller's task), deadlines,
-    /// cancellation, panic isolation, the per-session directory scope (with
-    /// session directories on, file tools are refused without it), the
-    /// session's active-call mark (which keeps a running session from
-    /// eviction and expiry) and the `touch` on success, the dataset quotas
-    /// and the audit entry; the request limits below still apply. Unknown
-    /// names, unparsable arguments and handler errors come back as
-    /// `ToolCallError`; a tool's own error result is an `Ok` with
-    /// `success == false`.
+    /// HTTP-side tool call runs under the governor. A direct call (integration
+    /// tests, embedders) runs on the caller's task and skips everything the
+    /// governor adds: memory admission, the session and global permits, the
+    /// blocking pool, the deadline and cancellation budget, panic isolation,
+    /// the session directory scope (with session directories on, file tools
+    /// are refused without it), the in-flight registry (`/health` and the
+    /// stuck watchdog do not count it), the session's active-call mark (which
+    /// keeps a running session from eviction and expiry), the `touch` on
+    /// success, the dataset quotas and the audit entry. The request limits
+    /// below still apply. Unknown names, unparsable arguments and handler
+    /// errors come back as `ToolCallError`; a tool's own error result is an
+    /// `Ok` with `success == false`.
     ///
     /// Before the arguments are deserialised, the call is checked against
     /// the request limits in force on this thread (`tools::limits::current`,

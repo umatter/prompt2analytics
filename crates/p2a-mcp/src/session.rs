@@ -433,9 +433,10 @@ impl SessionManager {
     /// calls once the session has left the table. It tells the removal
     /// subscribers (the persistent manager deletes the session's rows) and
     /// removes the session's data directory: on tokio's blocking pool inside
-    /// a runtime, inline outside one (the manager's async methods, all but
-    /// `start_cleanup_task`, which spawns a tokio task, only use tokio's
-    /// runtime-agnostic locks, so they can be polled by any executor).
+    /// a runtime, inline outside one. Every async method of the manager only
+    /// awaits tokio's runtime-agnostic locks, so any executor can poll it;
+    /// `start_cleanup_task`, a plain function that spawns a tokio task, is the
+    /// only method that needs a runtime.
     fn session_removed(&self, id: &str, reason: RemovalReason) {
         tracing::debug!(session_id = %id, ?reason, "Session removed");
         // An error only means that nobody is subscribed.

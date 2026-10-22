@@ -529,8 +529,9 @@ impl ServerConfig {
     }
 
     /// Startup refusals: the bind guard, `P2A_LIMITS=off` in open public mode,
-    /// zero threads or concurrency, and governor knobs too large to apply
-    /// (each refusal names the flag, its environment variable and the bound).
+    /// zero threads or concurrency, more than `MAX_WORKER_THREADS` worker
+    /// threads, and governor knobs too large to apply (each refusal names the
+    /// flag, its environment variable and the bound).
     pub fn validate(&self) -> anyhow::Result<()> {
         #[cfg(feature = "http")]
         if self.transport == TransportType::Http {

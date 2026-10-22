@@ -6,10 +6,10 @@
 //!
 //! 1. memory admission (refuse while the process RSS is above a soft limit);
 //! 2. a per-session and a global permit, within one bounded queue wait;
-//! 3. execution on tokio's blocking pool, so the async runtime keeps serving
-//!    `/health`, SSE keep-alives and other visitors, inside the session's
-//!    directory scope (`path_jail::enter_session_scope`; with session
-//!    directories on, file tools are refused outside one);
+//! 3. execution on tokio's blocking pool inside the session's directory scope
+//!    (`path_jail::enter_session_scope`; with session directories on, file
+//!    tools are refused outside one), so the async runtime keeps serving
+//!    `/health`, SSE keep-alives and other visitors;
 //! 4. a per-call [`Budget`] installed for p2a-core's cooperative
 //!    [`resource::checkpoint`]s, cancelled at the deadline and when the
 //!    future driving the call is dropped (for `POST /api/tools/{name}`, when
