@@ -122,19 +122,53 @@ pub enum Distribution {
     },
 }
 
+/// Largest Poisson mean rand_distr 0.4.3 samples accurately (see the T0-WP09 plan; above
+/// ~1e14 its log-gamma rejection step inflates the variance, above ~2.6e305 it never returns).
+const MAX_POISSON_LAMBDA: f64 = 1e13;
+/// Largest binomial n whose draws fit exactly in f64 and i64.
+const MAX_BINOMIAL_N: u64 = 1 << 53;
+
+fn invalid(msg: String) -> GenerationError {
+    GenerationError::InvalidParameters(msg)
+}
+
+/// `Err` naming `what` unless `value` is finite.
+fn require_finite(what: &str, value: f64) -> Result<(), GenerationError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(invalid(format!("{what} ({value}) must be a finite number")))
+    }
+}
+
 impl Distribution {
     /// Validate distribution parameters.
+    ///
+    /// Every parameter must be finite. In addition: a uniform range must be
+    /// non-empty and its width representable, a Poisson mean must lie in
+    /// `(0, 1e13]`, a binomial `n` in `1..=2^53`, probabilities in `[0, 1]`,
+    /// and categorical weights non-negative with a finite, positive sum.
     pub fn validate(&self) -> Result<(), GenerationError> {
         match self {
             Distribution::Uniform { min, max } => {
+                require_finite("Uniform: min", *min)?;
+                require_finite("Uniform: max", *max)?;
                 if min >= max {
                     return Err(GenerationError::InvalidParameters(format!(
                         "Uniform: min ({}) must be less than max ({})",
                         min, max
                     )));
                 }
+                if !(max - min).is_finite() {
+                    return Err(invalid(format!(
+                        "Uniform: the range max - min ({max} - {min}) must be at most {:e}",
+                        f64::MAX
+                    )));
+                }
             }
-            Distribution::Normal { std, .. } => {
+            Distribution::Normal { mean, std } => {
+                require_finite("Normal: mean", *mean)?;
+                require_finite("Normal: std", *std)?;
                 if *std <= 0.0 {
                     return Err(GenerationError::InvalidParameters(format!(
                         "Normal: std ({}) must be positive",
@@ -143,7 +177,7 @@ impl Distribution {
                 }
             }
             Distribution::Binomial { n, p } => {
-                if *p < 0.0 || *p > 1.0 {
+                if !(0.0..=1.0).contains(p) {
                     return Err(GenerationError::InvalidParameters(format!(
                         "Binomial: p ({}) must be between 0 and 1",
                         p
@@ -154,16 +188,31 @@ impl Distribution {
                         "Binomial: n must be positive".to_string(),
                     ));
                 }
+                if *n > MAX_BINOMIAL_N {
+                    return Err(invalid(format!(
+                        "Binomial: n ({n}) must be at most {MAX_BINOMIAL_N} (2^53), \
+                         so that every draw is exact"
+                    )));
+                }
             }
             Distribution::Poisson { lambda } => {
+                require_finite("Poisson: lambda", *lambda)?;
                 if *lambda <= 0.0 {
                     return Err(GenerationError::InvalidParameters(format!(
                         "Poisson: lambda ({}) must be positive",
                         lambda
                     )));
                 }
+                if *lambda > MAX_POISSON_LAMBDA {
+                    return Err(invalid(format!(
+                        "Poisson: lambda ({lambda}) must be at most {MAX_POISSON_LAMBDA:e}; \
+                         larger means cannot be sampled accurately (for such counts use a \
+                         normal distribution with mean = lambda and std = sqrt(lambda))"
+                    )));
+                }
             }
             Distribution::Exponential { rate } => {
+                require_finite("Exponential: rate", *rate)?;
                 if *rate <= 0.0 {
                     return Err(GenerationError::InvalidParameters(format!(
                         "Exponential: rate ({}) must be positive",
@@ -172,7 +221,7 @@ impl Distribution {
                 }
             }
             Distribution::Bernoulli { p } => {
-                if *p < 0.0 || *p > 1.0 {
+                if !(0.0..=1.0).contains(p) {
                     return Err(GenerationError::InvalidParameters(format!(
                         "Bernoulli: p ({}) must be between 0 and 1",
                         p
@@ -188,6 +237,13 @@ impl Distribution {
                         "Categorical: categories cannot be empty".to_string(),
                     ));
                 }
+                if categories.len() > IdxSize::MAX as usize {
+                    return Err(invalid(format!(
+                        "Categorical: {} categories exceed the limit of {}",
+                        categories.len(),
+                        IdxSize::MAX
+                    )));
+                }
                 if let Some(w) = weights {
                     if w.len() != categories.len() {
                         return Err(GenerationError::InvalidParameters(format!(
@@ -196,12 +252,23 @@ impl Distribution {
                             categories.len()
                         )));
                     }
+                    if let Some(bad) = w.iter().find(|x| !x.is_finite()) {
+                        return Err(invalid(format!(
+                            "Categorical: weights must be finite numbers (got {bad})"
+                        )));
+                    }
                     if w.iter().any(|&x| x < 0.0) {
                         return Err(GenerationError::InvalidParameters(
                             "Categorical: weights must be non-negative".to_string(),
                         ));
                     }
                     let sum: f64 = w.iter().sum();
+                    if !sum.is_finite() {
+                        return Err(invalid(format!(
+                            "Categorical: the weights' sum must be at most {:e}",
+                            f64::MAX
+                        )));
+                    }
                     if sum <= 0.0 {
                         return Err(GenerationError::InvalidParameters(
                             "Categorical: weights must sum to a positive value".to_string(),
@@ -279,6 +346,13 @@ pub fn generate_random_data(
         return Err(GenerationError::InvalidParameters(
             "n_rows must be positive".to_string(),
         ));
+    }
+
+    if n_rows > IdxSize::MAX as usize {
+        return Err(invalid(format!(
+            "n_rows ({n_rows}) must be at most {}",
+            IdxSize::MAX
+        )));
     }
 
     if columns.is_empty() {
@@ -411,6 +485,20 @@ fn generate_column(
         }
 
         Distribution::Sequence { start } => {
+            // n_rows >= 1 (checked by the caller); the last value must fit in i64,
+            // after which `start + i` cannot overflow for any row.
+            let fits = i64::try_from(n_rows - 1)
+                .ok()
+                .and_then(|span| start.checked_add(span))
+                .is_some();
+            if !fits {
+                return Err(invalid(format!(
+                    "Sequence: start ({start}) plus n_rows - 1 ({}) exceeds the largest \
+                     integer {}",
+                    n_rows - 1,
+                    i64::MAX
+                )));
+            }
             let values: Vec<i64> = (0..n_rows as i64).map(|i| start + i).collect();
             Ok(Column::new(name.into(), values))
         }
@@ -745,5 +833,140 @@ mod tests {
 
         // Empty columns
         assert!(generate_random_data(10, vec![], None).is_err());
+    }
+
+    #[test]
+    fn test_poisson_lambda_bound_rejected_before_sampling() {
+        // rand_distr 0.4.3's rejection loop never ends once lambda*ln(lambda) overflows (~2.6e305);
+        // between 9.2e18 and that, every draw saturates to i64::MAX.
+        for lambda in [
+            1e308,
+            2.6e305,
+            1e19,
+            1e14,
+            1.0000001e13,
+            f64::INFINITY,
+            f64::NAN,
+        ] {
+            let err = Distribution::Poisson { lambda }.validate().unwrap_err();
+            assert!(
+                matches!(err, GenerationError::InvalidParameters(_)),
+                "lambda={lambda}"
+            );
+        }
+        let msg = Distribution::Poisson { lambda: 1e308 }
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("1e13"), "{msg}");
+        assert!(Distribution::Poisson { lambda: 1e13 }.validate().is_ok());
+    }
+
+    #[test]
+    fn test_non_finite_and_overflowing_parameters_rejected() {
+        let two = || vec!["a".to_string(), "b".to_string()];
+        let bad = [
+            Distribution::Uniform {
+                min: f64::NEG_INFINITY,
+                max: 0.0,
+            },
+            // rand's Uniform::new panics on this today
+            Distribution::Uniform {
+                min: f64::NAN,
+                max: 1.0,
+            },
+            // max - min overflows: "range overflow" panic
+            Distribution::Uniform {
+                min: -1e308,
+                max: 1e308,
+            },
+            Distribution::Normal {
+                mean: f64::INFINITY,
+                std: 1.0,
+            },
+            Distribution::Normal {
+                mean: 0.0,
+                std: f64::NAN,
+            },
+            Distribution::Normal {
+                mean: 0.0,
+                std: f64::INFINITY,
+            },
+            Distribution::Binomial { n: 10, p: f64::NAN },
+            // draws do not fit i64; rand_distr asserts
+            Distribution::Binomial {
+                n: u64::MAX,
+                p: 0.5,
+            },
+            Distribution::Exponential {
+                rate: f64::INFINITY,
+            },
+            Distribution::Exponential { rate: f64::NAN },
+            Distribution::Bernoulli { p: f64::NAN },
+            Distribution::Categorical {
+                categories: two(),
+                weights: Some(vec![f64::NAN, 1.0]),
+            },
+            Distribution::Categorical {
+                categories: two(),
+                weights: Some(vec![f64::INFINITY, 1.0]),
+            },
+            // the sum overflows
+            Distribution::Categorical {
+                categories: two(),
+                weights: Some(vec![1e308, 1e308]),
+            },
+        ];
+        for d in bad {
+            assert!(d.validate().is_err(), "{d:?} must be rejected");
+        }
+        assert!(
+            Distribution::Binomial { n: 1 << 53, p: 0.5 }
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_poisson_saturating_lambda_is_an_error_not_i64_max() {
+        // 1e19 terminates in rand_distr but every draw is i64::MAX; it must now be refused.
+        let columns = vec![ColumnSpec::new("x", Distribution::Poisson { lambda: 1e19 })];
+        assert!(generate_random_data(3, columns, Some(1)).is_err());
+    }
+
+    #[test]
+    fn test_poisson_large_lambda_within_bound_is_accurate() {
+        let columns = vec![ColumnSpec::new("x", Distribution::Poisson { lambda: 1e13 })];
+        let ds = generate_random_data(1000, columns, Some(42)).unwrap();
+        let v: Vec<f64> = ds
+            .df()
+            .column("x")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_no_null_iter()
+            .map(|x| x as f64)
+            .collect();
+        let mean = v.iter().sum::<f64>() / v.len() as f64;
+        let var = v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (v.len() - 1) as f64;
+        assert!(((mean - 1e13) / 1e13).abs() < 1e-6, "mean {mean}");
+        // sd of the variance ratio at n = 1000 is about 0.045; 0.2 is more than 4 sd
+        assert!((var / 1e13 - 1.0).abs() < 0.2, "var/lambda {}", var / 1e13);
+    }
+
+    #[test]
+    fn test_sequence_overflow_rejected() {
+        let cols = |start| vec![ColumnSpec::new("id", Distribution::Sequence { start })];
+        assert!(generate_random_data(3, cols(i64::MAX - 1), None).is_err());
+        let ds = generate_random_data(3, cols(i64::MAX - 2), None).unwrap();
+        let v: Vec<i64> = ds
+            .df()
+            .column("id")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_eq!(v, vec![i64::MAX - 2, i64::MAX - 1, i64::MAX]);
     }
 }
