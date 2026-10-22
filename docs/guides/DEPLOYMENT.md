@@ -106,9 +106,12 @@ without a token, so they run in Local mode with no limits.
 
 These controls run inside the backend, and they are what bounds the cost of a
 single request. An edge rate limit (checklist step 5) only bounds how many
-requests arrive. The numbers below are the hosted defaults; with the Off
-profile none of them applies unless its knob is set (see
-[Configuration reference](#configuration-reference)).
+requests arrive. The numbers below are the hosted defaults. With the Off
+profile every HTTP tool call still runs through the governor's slots and panic
+isolation, but there is no deadline, memory floor, quota or request limit unless
+a knob sets one (see [Configuration reference](#configuration-reference)). The
+core invariants and the file, SQL, egress and ownership checks hold in every
+profile.
 
 ### Execution governor
 
@@ -326,7 +329,8 @@ not.
 - **Resolve, check, pin.** Host names are resolved by the client's own
   resolver; if any address is private, loopback, link-local, shared (CGNAT),
   multicast, reserved or a documentation range (including an IPv4 address
-  embedded in an IPv6 transition form), the whole host is refused. The client
+  embedded in an IPv6 transition form), the whole host is refused; the only
+  exception is the loopback Ollama endpoint described above. The client
   connects only to the addresses it checked. IP-literal hosts are checked the
   same way.
 - **No redirects, no proxy.** Redirects are never followed and system proxies
@@ -349,7 +353,7 @@ not.
   `session_busy` (`Retry-After: 2`).
 - **Tool loop.** A request's `max_tool_iterations` (default 25) is clamped to
   `llm_max_tool_iterations` (25 hosted, 50 off). Each tool result in the loop is
-  cut to 16 KiB. The model may not call the server's internal tools (session
+  cut to at most 16 KiB. The model may not call the server's internal tools (session
   export and import, seeds, cleaning sessions, the search meta-tools, ...) or
   unknown names; registered analytical tools outside the advertised subset stay
   callable.
