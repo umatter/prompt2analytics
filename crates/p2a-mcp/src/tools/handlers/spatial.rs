@@ -13,6 +13,7 @@ use crate::server::AnalyticsServer;
 use crate::tools::requests::spatial::*;
 
 use p2a_core::{
+    EconError,
     // Traits
     LinearEstimator,
     MoranAlternative,
@@ -60,9 +61,11 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SpatialNeighborsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
-
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
+        // Snapshot the dataset (a cheap clone) so no lock is held while computing.
+        let dataset = {
+            let datasets = self.datasets.read().await;
+            crate::get_dataset!(datasets, &request.dataset).clone()
+        };
 
         let df = dataset.df();
 
@@ -108,27 +111,78 @@ impl AnalyticsServer {
         let coords: Vec<(f64, f64)> = x_vals.into_iter().zip(y_vals.into_iter()).collect();
         let n = coords.len();
 
+        // The link budget (none without a resource profile).
+        let limits = crate::tools::limits::current();
+        let cap = limits.spatial_links;
+        let cap_links = cap.map(|c| usize::try_from(c).unwrap_or(usize::MAX));
+
         // Create neighbors based on method
         let method = request.method.as_deref().unwrap_or("knn");
-        let neighbors = match method {
+        let (built, band) = match method {
             "knn" => {
                 let k = request.k.unwrap_or(5);
-                Neighbors::from_knn(&coords, k)
+                // kNN stores exactly n * min(k, n - 1) links: refuse before building anything.
+                let links = (n as u64).saturating_mul(k.min(n.saturating_sub(1)) as u64);
+                if let Err(v) =
+                    limits.check_budget("spatial_neighbors", "spatial_links", links, cap)
+                {
+                    tracing::info!(
+                        tool = "spatial_neighbors",
+                        override_key = v.override_key,
+                        requested = links,
+                        limit = cap,
+                        "request refused by the spatial_links budget"
+                    );
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "{} Use a smaller k.",
+                        v.message
+                    ))]));
+                }
+                (Neighbors::try_from_knn(&coords, k), None)
             }
             "distance" => {
                 let d_max = request.d_max.unwrap_or(1.0);
                 let d_min = request.d_min.unwrap_or(0.0);
-                Neighbors::from_distance(&coords, d_min, d_max)
+                (
+                    Neighbors::try_from_distance(&coords, d_min, d_max, cap_links),
+                    Some((d_min, d_max)),
+                )
             }
             "distance_longlat" | "longlat" => {
                 let d_max = request.d_max.unwrap_or(100.0); // km
                 let d_min = request.d_min.unwrap_or(0.0);
-                Neighbors::from_distance_longlat(&coords, d_min, d_max)
+                (
+                    Neighbors::try_from_distance_longlat(&coords, d_min, d_max, cap_links),
+                    Some((d_min, d_max)),
+                )
             }
             other => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Unknown neighbor method '{}'. Use 'knn', 'distance', or 'distance_longlat'.",
                     other
+                ))]));
+            }
+        };
+        let neighbors = match (built, cap, band) {
+            (Ok(nb), _, _) => nb,
+            // The core stopped at the cap without counting further.
+            (Err(EconError::ResourceLimit(_)), Some(c), Some((d_min, d_max))) => {
+                tracing::info!(
+                    tool = "spatial_neighbors",
+                    override_key = "spatial_links",
+                    limit = c,
+                    "request refused by the spatial_links budget"
+                );
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "This request to `spatial_neighbors` needs more than {c} neighbour links \
+                     (spatial_links), which exceeds this server's limit of {c}. The distance \
+                     band from d_min = {d_min} to d_max = {d_max} is too wide for these \
+                     coordinates; use a smaller d_max, or method 'knn' with a small k."
+                ))]));
+            }
+            (Err(e), _, _) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Could not create spatial neighbours: {e}"
                 ))]));
             }
         };
@@ -141,23 +195,26 @@ impl AnalyticsServer {
             _ => WeightStyle::RowStd,                                  // Default: row-standardized
         };
 
-        // Create spatial weights
-        let weights = SpatialWeights::from_neighbors(&neighbors, style);
-
         // Get stats from neighbors before we lose access to it
         let avg_neighbors = neighbors.avg_neighbors();
         let has_isolates = neighbors.has_isolates();
         let n_isolates = neighbors.isolates().len();
         let is_symmetric = neighbors.is_symmetric();
 
-        // Store the weights
+        // Create spatial weights (they share the neighbour lists)
+        let weights = SpatialWeights::from_neighbors(&neighbors, style);
+        drop(neighbors);
+        drop(dataset);
+
+        // Store the weights; the lock is held only for the insert
         let weights_name = request
             .weights_name
             .unwrap_or_else(|| format!("{}_weights", request.dataset));
 
-        drop(datasets);
-        let mut spatial_weights = self.spatial_weights.write().await;
-        spatial_weights.insert(weights_name.clone(), weights);
+        self.spatial_weights
+            .write()
+            .await
+            .insert(weights_name.clone(), weights);
 
         let mut output = format!(
             "Spatial Weights Created: '{}'\n\
@@ -1231,6 +1288,154 @@ impl AnalyticsServer {
                 "Spatial panel GMM estimation failed: {}",
                 e
             ))])),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::limits::{self, Limits};
+    use polars::prelude::*;
+
+    /// A current-thread runtime: `limits::with_limits` is thread-local.
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn server_with_points(n: usize) -> AnalyticsServer {
+        // jittered 10-column grid: no distance ties needed here
+        let x: Vec<f64> = (0..n)
+            .map(|i| (i % 10) as f64 + 0.01 * ((i * 7) % 13) as f64)
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| (i / 10) as f64 + 0.01 * ((i * 5) % 11) as f64)
+            .collect();
+        let server = AnalyticsServer::new();
+        let ds = p2a_core::Dataset::new(df! { "x" => x, "y" => y }.unwrap());
+        runtime()
+            .block_on(server.datasets.write())
+            .insert("pts".into(), ds);
+        server
+    }
+
+    fn neighbors_req(
+        method: &str,
+        k: Option<usize>,
+        d_min: Option<f64>,
+        d_max: Option<f64>,
+    ) -> SpatialNeighborsRequest {
+        SpatialNeighborsRequest {
+            dataset: "pts".into(),
+            x_coord: "x".into(),
+            y_coord: "y".into(),
+            method: Some(method.into()),
+            k,
+            d_max,
+            d_min,
+            weights_name: Some("w".into()),
+            style: None,
+        }
+    }
+
+    fn call(
+        server: &AnalyticsServer,
+        limits: Limits,
+        req: SpatialNeighborsRequest,
+    ) -> CallToolResult {
+        let rt = runtime();
+        limits::with_limits(limits, || {
+            rt.block_on(server.spatial_neighbors(Parameters(req)))
+        })
+        .expect("refusals are in-band tool errors")
+    }
+
+    /// The first content block's text.
+    fn text(r: &CallToolResult) -> String {
+        r.content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
+    }
+
+    fn tight() -> Limits {
+        Limits::hosted()
+            .with_overrides(&["spatial_links=100".to_string()])
+            .unwrap()
+    }
+
+    #[test]
+    fn knn_over_the_link_budget_is_refused() {
+        let s = server_with_points(50);
+        // 150 links
+        let r = call(&s, tight(), neighbors_req("knn", Some(3), None, None));
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("spatial_links") && t.contains("150") && t.contains("100"),
+            "{t}"
+        );
+        assert!(runtime().block_on(s.spatial_weights.read()).is_empty());
+    }
+
+    #[test]
+    fn distance_band_over_the_link_budget_is_refused() {
+        let s = server_with_points(50);
+        // 2,450 links
+        let r = call(
+            &s,
+            tight(),
+            neighbors_req("distance", None, None, Some(1e9)),
+        );
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("spatial_links") && t.contains("more than 100") && t.contains("d_max"),
+            "{t}"
+        );
+        let r = call(
+            &s,
+            tight(),
+            neighbors_req("distance_longlat", None, None, Some(30_000.0)),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(runtime().block_on(s.spatial_weights.read()).is_empty());
+    }
+
+    #[test]
+    fn requests_within_budget_and_unprofiled_requests_succeed() {
+        let s = server_with_points(50);
+        let r = call(
+            &s,
+            Limits::hosted(),
+            neighbors_req("knn", Some(5), None, None),
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).contains("Average neighbors: 5.00"));
+        let r = call(
+            &s,
+            Limits::off(),
+            neighbors_req("distance", None, None, Some(1e9)),
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).contains("Average neighbors: 49.00"));
+    }
+
+    #[test]
+    fn invalid_neighbour_parameters_are_refused() {
+        let s = server_with_points(50);
+        for req in [
+            neighbors_req("knn", Some(0), None, None),
+            neighbors_req("knn", Some(50), None, None),
+            neighbors_req("distance", None, Some(-1.0), Some(1.0)),
+            neighbors_req("distance", None, Some(2.0), Some(1.0)),
+        ] {
+            let r = call(&s, Limits::off(), req);
+            assert_eq!(r.is_error, Some(true), "{}", text(&r));
         }
     }
 }
