@@ -53,8 +53,13 @@ services:
       - P2A_MAX_HTTP_BODY_MB=${P2A_MAX_HTTP_BODY_MB:-32}
       # Confine the filesystem/DB jail to the mounted data volume.
       - P2A_DATA_ROOT=/data
-      # Persist the database under the mounted data volume (see below).
-      - P2A_DB_PATH=/data
+      # Persist the session database on its own volume, OUTSIDE the data root:
+      # file tools can write anywhere under P2A_DATA_ROOT, so a database there
+      # could be overwritten, and the server refuses to start with one there.
+      # Upgrading from a compose file that used P2A_DB_PATH=/data: move the old
+      # RocksDB store out of the p2a-data volume into p2a-db (as /var/lib/p2a/db),
+      # or delete it.
+      - P2A_DB_PATH=/var/lib/p2a/db
     restart: unless-stopped
     # --- Container hardening ---
     security_opt:
@@ -64,13 +69,14 @@ services:
     pids_limit: 512
     mem_limit: 2g
     cpus: "2.0"
-    # Writable data lives on a named volume; everything else can be read-only.
+    # Writable data lives on named volumes; everything else can be read-only.
     volumes:
       - p2a-data:/data
+      - p2a-db:/var/lib/p2a
     tmpfs:
       - /tmp
     # read_only rootfs is recommended but VERIFY first with `docker compose up`
-    # that the only write paths are /data and /tmp, then uncomment:
+    # that the only write paths are /data, /var/lib/p2a and /tmp, then uncomment:
     # read_only: true
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -108,4 +114,6 @@ volumes:
   ollama_data:
     driver: local
   p2a-data:
+    driver: local
+  p2a-db:
     driver: local

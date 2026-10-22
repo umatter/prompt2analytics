@@ -79,7 +79,10 @@ RUN chown p2a:p2a /usr/local/bin/p2a-mcp
 # Dedicated, empty data-root directory for the path jail (P2A_DATA_ROOT=/data).
 # Keeping the jail root here — rather than the container home or the binary's
 # working directory — narrows what any filesystem/DB tool can reach.
-RUN mkdir -p /data && chown p2a:p2a /data
+# /var/lib/p2a holds the session database (P2A_DB_PATH=/var/lib/p2a/db), which
+# must lie outside the jail root: file tools can write anywhere under /data.
+# A fresh named volume takes its ownership from this directory.
+RUN mkdir -p /data /var/lib/p2a && chown p2a:p2a /data /var/lib/p2a
 
 # Switch to non-root user
 USER p2a

@@ -41,7 +41,7 @@ mod tool_calls;
 #[cfg(test)]
 mod tests;
 
-pub use connection::{DbConnection, DbError, DbStats};
+pub use connection::{DbConnection, DbError, DbStats, PersistenceLimits};
 pub use models::{
     Conversation, ConversationWithMessages, DatasetMeta, DbSession, Message, MessageRole, Settings,
     ToolCall, ToolCallStatus,

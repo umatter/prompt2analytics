@@ -2,8 +2,9 @@
 //!
 //! Provides connection to embedded SurrealDB with RocksDB or in-memory backend.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, RocksDb};
@@ -23,6 +24,21 @@ pub enum DbError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    /// A client-posted message, title or settings string longer than
+    /// `message_bytes`. The text names the size and the limit.
+    #[error("{0}")]
+    TooLarge(String),
+
+    /// A count or byte budget of the conversation store is used up
+    /// (`messages_per_conversation`, `conversations_per_session`,
+    /// `session_db_bytes`). The text names the budget.
+    #[error("{0}")]
+    QuotaExceeded(String),
+
+    /// The process's resident memory is above the soft limit.
+    #[error("the server is low on memory; try again shortly")]
+    MemoryPressure,
 }
 
 impl From<surrealdb::Error> for DbError {
@@ -31,11 +47,131 @@ impl From<surrealdb::Error> for DbError {
     }
 }
 
+/// Bounds on what the conversation store keeps. The server resolves them
+/// from its resource profile (`tools::limits`) and hands them over with
+/// [`DbConnection::with_limits`]; `None` means unlimited. The default is the
+/// `Off` profile: 2 MiB per message and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PersistenceLimits {
+    /// Bytes of one client-posted message, title or settings string; longer
+    /// server-produced text is truncated to it.
+    pub message_bytes: Option<usize>,
+    /// Conversations one session may hold.
+    pub conversations_per_session: Option<usize>,
+    /// Messages one conversation may hold.
+    pub messages_per_conversation: Option<usize>,
+    /// Bytes one session's conversation history may hold (titles, message
+    /// contents, tool-call arguments, results and errors).
+    pub session_db_bytes: Option<u64>,
+    /// Writes are refused while the process's resident memory is above this.
+    pub rss_soft_limit_bytes: Option<u64>,
+}
+
+impl Default for PersistenceLimits {
+    fn default() -> Self {
+        Self {
+            message_bytes: Some(2_097_152),
+            conversations_per_session: None,
+            messages_per_conversation: None,
+            session_db_bytes: None,
+            rss_soft_limit_bytes: None,
+        }
+    }
+}
+
 /// Database connection wrapper
 ///
 /// Supports both RocksDB (persistent) and in-memory backends.
 pub struct DbConnection {
     db: Arc<Surreal<Db>>,
+    limits: PersistenceLimits,
+    /// Bytes each session's conversation history stores, as counted by the
+    /// `session_db_bytes` budget. An entry is seeded from the store on first
+    /// use (a read of every stored message of the session), lowered by the
+    /// bytes a conversation delete or clear actually removed, and dropped
+    /// when the session's rows are deleted. Only touched when the budget is
+    /// set; shared by clones.
+    session_bytes: Arc<Mutex<HashMap<String, u64>>>,
+    /// One lock per conversation that a delete or clear is working on, with
+    /// the number of calls holding or waiting for it (see [`DeleteTurn`]);
+    /// shared by clones.
+    delete_turns: DeleteTurns,
+    /// Conversations deleted recently, for
+    /// [`delete_recent_orphans`](Self::delete_recent_orphans); shared by
+    /// clones.
+    deleted_conversations: Arc<Mutex<DeletedConversations>>,
+}
+
+/// The conversations deleted since the last orphan sweep (`current`) and
+/// during the one before (`previous`).
+#[derive(Debug, Default)]
+struct DeletedConversations {
+    current: std::collections::HashSet<String>,
+    previous: std::collections::HashSet<String>,
+    /// More were deleted than are remembered; the next sweep scans in full.
+    overflowed: bool,
+}
+
+/// Recently deleted conversations remembered for the orphan sweep; past
+/// this the next sweep scans the messages and tool calls in full.
+pub(crate) const MAX_REMEMBERED_DELETES: usize = 100_000;
+
+type DeleteTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
+
+/// One call's turn at deleting a conversation's rows (a conversation delete
+/// or clear); the next call's turn starts when it is dropped.
+///
+/// Two deletes of one conversation that run at the same time conflict in
+/// the store: the in-memory engine hands both the same rows (neither
+/// fails), so each would release their bytes from the `session_db_bytes`
+/// counter, and RocksDB fails one of them with a write conflict. Taking
+/// turns makes the later call find nothing instead. The counter is per
+/// process, and so are the turns. An entry leaves the map with its last
+/// holder or waiter, also when a waiting call is cancelled.
+pub(crate) struct DeleteTurn {
+    turns: DeleteTurns,
+    conversation_id: String,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for DeleteTurn {
+    fn drop(&mut self) {
+        // Let the next call in before giving up the entry.
+        self.guard.take();
+        let mut turns = self
+            .turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, users)) = turns.get_mut(&self.conversation_id) {
+            *users = users.saturating_sub(1);
+            if *users == 0 {
+                turns.remove(&self.conversation_id);
+            }
+        }
+    }
+}
+
+/// Appended to text the store shortens.
+const TRUNCATION_SUFFIX: &str = "\n[truncated]";
+
+/// `s` cut at a char boundary so that, with [`TRUNCATION_SUFFIX`] appended,
+/// it is at most `limit` bytes; `s` itself when it already fits. A `limit`
+/// smaller than the suffix gives the empty string.
+pub(crate) fn truncate_to(s: &str, limit: usize) -> String {
+    if s.len() <= limit {
+        return s.to_string();
+    }
+    let Some(room) = limit.checked_sub(TRUNCATION_SUFFIX.len()) else {
+        return String::new();
+    };
+    let mut cut = room;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = String::with_capacity(cut + TRUNCATION_SUFFIX.len());
+    out.push_str(&s[..cut]);
+    out.push_str(TRUNCATION_SUFFIX);
+    out
 }
 
 impl DbConnection {
@@ -79,7 +215,245 @@ impl DbConnection {
 
         tracing::info!("SurrealDB connected and schema initialized");
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            limits: PersistenceLimits::default(),
+            session_bytes: Arc::new(Mutex::new(HashMap::new())),
+            delete_turns: Arc::new(Mutex::new(HashMap::new())),
+            deleted_conversations: Arc::new(Mutex::new(DeletedConversations::default())),
+        })
+    }
+
+    /// This connection with `limits` applied to every later write.
+    pub fn with_limits(mut self, limits: PersistenceLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// The limits this connection applies.
+    pub fn limits(&self) -> &PersistenceLimits {
+        &self.limits
+    }
+
+    // ==================== Limits ====================
+
+    /// `MemoryPressure` while the process's resident memory is above
+    /// `rss_soft_limit_bytes` (never when the limit is unset or the platform
+    /// does not report the process memory).
+    pub(crate) fn check_memory(&self) -> Result<(), DbError> {
+        let Some(limit) = self.limits.rss_soft_limit_bytes else {
+            return Ok(());
+        };
+        match p2a_core::get_process_memory() {
+            Some(mem) if u64::try_from(mem.rss_bytes).unwrap_or(u64::MAX) > limit => {
+                Err(DbError::MemoryPressure)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// `TooLarge` when a client-posted `what` ("message", "title", a
+    /// settings field) of `len` bytes is longer than `message_bytes`; `per`
+    /// names the unit the limit applies to ("message", "title", "setting").
+    pub(crate) fn check_message_bytes(
+        &self,
+        what: &str,
+        per: &str,
+        len: usize,
+    ) -> Result<(), DbError> {
+        match self.limits.message_bytes {
+            Some(limit) if len > limit => Err(DbError::TooLarge(format!(
+                "{what} is {len} bytes; this server accepts at most {limit} bytes per {per}"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// Server-produced text cut to `message_bytes` (see [`truncate_to`]).
+    pub(crate) fn truncate_server_text(&self, text: &str) -> String {
+        match self.limits.message_bytes {
+            Some(limit) => truncate_to(text, limit),
+            None => text.to_string(),
+        }
+    }
+
+    fn session_bytes_map(&self) -> MutexGuard<'_, HashMap<String, u64>> {
+        self.session_bytes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Run `f` on the session's byte counter under its lock, seeding the
+    /// counter from the store first when it is missing. No lock is held
+    /// across the query; a counter another write seeded in the meantime wins.
+    async fn with_session_bytes<R>(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut u64) -> R,
+    ) -> Result<R, DbError> {
+        let mut seed = None;
+        loop {
+            {
+                let mut map = self.session_bytes_map();
+                if let Some(stored) = seed {
+                    map.entry(session_id.to_string()).or_insert(stored);
+                }
+                if let Some(used) = map.get_mut(session_id) {
+                    return Ok(f(used));
+                }
+            }
+            seed = Some(self.session_stored_bytes(session_id).await?);
+        }
+    }
+
+    /// Count `n` more bytes against the session's `session_db_bytes`
+    /// budget, or refuse with `QuotaExceeded` when they would pass it. The
+    /// check and the increment happen under one lock. A no-op without the
+    /// budget.
+    pub(crate) async fn reserve_session_bytes(
+        &self,
+        session_id: &str,
+        n: u64,
+    ) -> Result<(), DbError> {
+        let Some(limit) = self.limits.session_db_bytes else {
+            return Ok(());
+        };
+        self.with_session_bytes(session_id, |used| {
+            if used.saturating_add(n) > limit {
+                return Err(DbError::QuotaExceeded(format!(
+                    "this session already stores {used} bytes of conversation history and this \
+                     server keeps at most {limit} bytes per session; delete a conversation first"
+                )));
+            }
+            *used += n;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Server-produced `text` cut to the bytes the session has left under
+    /// `session_db_bytes` (possibly to the empty string) and counted; never
+    /// refused. `text` unchanged without the budget.
+    pub(crate) async fn fit_session_bytes(
+        &self,
+        session_id: &str,
+        text: String,
+    ) -> Result<String, DbError> {
+        let Some(limit) = self.limits.session_db_bytes else {
+            return Ok(text);
+        };
+        self.with_session_bytes(session_id, |used| {
+            let room = usize::try_from(limit.saturating_sub(*used)).unwrap_or(usize::MAX);
+            let stored = if text.len() > room {
+                truncate_to(&text, room)
+            } else {
+                text
+            };
+            *used = used.saturating_add(stored.len() as u64);
+            stored
+        })
+        .await
+    }
+
+    /// Drop the session's byte counter (its rows were deleted); a later
+    /// write re-seeds it from the store.
+    pub(crate) fn forget_session_bytes(&self, session_id: &str) {
+        if self.limits.session_db_bytes.is_some() {
+            self.session_bytes_map().remove(session_id);
+        }
+    }
+
+    /// Whether the session's byte counter is seeded.
+    pub(crate) fn has_session_bytes(&self, session_id: &str) -> bool {
+        self.limits.session_db_bytes.is_some() && self.session_bytes_map().contains_key(session_id)
+    }
+
+    /// Subtract `n` deleted bytes from the session's counter, if it is
+    /// seeded (an unseeded counter reads the store when it is seeded).
+    /// `n` must be what the caller's own statements removed during the
+    /// conversation's [`DeleteTurn`], so that no row is released twice.
+    pub(crate) fn release_session_bytes(&self, session_id: &str, n: u64) {
+        if self.limits.session_db_bytes.is_some()
+            && let Some(used) = self.session_bytes_map().get_mut(session_id)
+        {
+            *used = used.saturating_sub(n);
+        }
+    }
+
+    /// Wait for this call's turn at deleting conversation `conversation_id`'s
+    /// rows (see [`DeleteTurn`]).
+    pub(crate) async fn delete_turn(&self, conversation_id: &str) -> DeleteTurn {
+        let lock = {
+            let mut turns = self
+                .delete_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (lock, users) = turns
+                .entry(conversation_id.to_string())
+                .or_insert_with(|| (Arc::new(tokio::sync::Mutex::new(())), 0));
+            *users += 1;
+            Arc::clone(lock)
+        };
+        // Registered before waiting, so a cancelled wait still leaves.
+        let mut turn = DeleteTurn {
+            turns: Arc::clone(&self.delete_turns),
+            conversation_id: conversation_id.to_string(),
+            guard: None,
+        };
+        turn.guard = Some(lock.lock_owned().await);
+        turn
+    }
+
+    fn deleted_conversations_map(&self) -> MutexGuard<'_, DeletedConversations> {
+        self.deleted_conversations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Remember that conversation `id` is being deleted, so the next two
+    /// orphan sweeps look for rows left behind for it.
+    pub(crate) fn note_conversation_deleted(&self, id: &str) {
+        let mut deleted = self.deleted_conversations_map();
+        deleted.current.insert(id.to_string());
+        if deleted.current.len() + deleted.previous.len() > MAX_REMEMBERED_DELETES {
+            deleted.current.clear();
+            deleted.previous.clear();
+            deleted.overflowed = true;
+        }
+    }
+
+    /// The conversations deleted since the sweep before the last one, and
+    /// the start of the next sweep's memory; `None` when more were deleted
+    /// than are remembered (the caller scans in full).
+    pub(crate) fn take_deleted_conversations(&self) -> Option<std::collections::HashSet<String>> {
+        let mut deleted = self.deleted_conversations_map();
+        let current = std::mem::take(&mut deleted.current);
+        let mut ids = std::mem::replace(&mut deleted.previous, current);
+        if std::mem::take(&mut deleted.overflowed) {
+            return None;
+        }
+        ids.extend(deleted.previous.iter().cloned());
+        Some(ids)
+    }
+
+    /// Conversations with a delete turn held or awaited.
+    #[cfg(test)]
+    pub(crate) fn delete_turns_in_use(&self) -> usize {
+        self.delete_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    /// Whether the `session_db_bytes` budget is set.
+    pub(crate) fn tracks_session_bytes(&self) -> bool {
+        self.limits.session_db_bytes.is_some()
+    }
+
+    /// The session's byte counter as it stands (`None` when not seeded).
+    #[cfg(test)]
+    pub(crate) fn session_bytes_entry(&self, session_id: &str) -> Option<u64> {
+        self.session_bytes_map().get(session_id).copied()
     }
 
     /// Initialize database schema
@@ -127,6 +501,7 @@ impl DbConnection {
             DEFINE FIELD IF NOT EXISTS completed_at ON tool_calls TYPE option<datetime>;
             DEFINE FIELD IF NOT EXISTS duration_ms ON tool_calls TYPE option<int>;
             DEFINE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls COLUMNS message_id;
+            DEFINE INDEX IF NOT EXISTS idx_tool_calls_conversation ON tool_calls COLUMNS conversation_id;
             DEFINE INDEX IF NOT EXISTS idx_tool_calls_id ON tool_calls COLUMNS id UNIQUE;
 
             -- Sessions table
@@ -223,6 +598,10 @@ impl Clone for DbConnection {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
+            limits: self.limits,
+            session_bytes: Arc::clone(&self.session_bytes),
+            delete_turns: Arc::clone(&self.delete_turns),
+            deleted_conversations: Arc::clone(&self.deleted_conversations),
         }
     }
 }

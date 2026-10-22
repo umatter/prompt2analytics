@@ -8,28 +8,89 @@ use super::models::{ToolCall, ToolCallStatus};
 impl DbConnection {
     // ==================== Tool Call Operations ====================
 
-    /// Create a new tool call record
+    /// Create a new tool call record. Its conversation must exist
+    /// (`NotFound`), and it is refused with `MemoryPressure` above the RSS
+    /// soft limit. Its texts are cut at a char boundary to `message_bytes`
+    /// and to the bytes the session has left under `session_db_bytes`, never
+    /// refused.
     pub async fn create_tool_call(&self, tool_call: &ToolCall) -> Result<ToolCall, DbError> {
+        self.check_memory()?;
+        let conv = self.get_conversation(&tool_call.conversation_id).await?;
+        let tool_call = self
+            .fit_tool_call_texts(&conv.session_id, tool_call.clone())
+            .await?;
         let created: Option<ToolCall> = self
             .db()
             .create(tool_call.id.clone())
-            .content(tool_call.clone())
+            .content(tool_call)
             .await?;
 
         created.ok_or_else(|| DbError::Query("Failed to create tool call".to_string()))
     }
 
-    /// Update an existing tool call (typically to set result/error/status)
+    /// Update an existing tool call (typically to set result/error/status).
+    /// Its texts are cut to fit, like those of a new one.
     pub async fn update_tool_call(&self, tool_call: &ToolCall) -> Result<ToolCall, DbError> {
         let id_str = tool_call.id_string();
+        let session_id = self.tool_call_session(&tool_call.conversation_id).await?;
+        let tool_call = self
+            .fit_tool_call_texts(&session_id, tool_call.clone())
+            .await?;
 
         let result: Option<ToolCall> = self
             .db()
             .update(("tool_calls", id_str.as_str()))
-            .content(tool_call.clone())
+            .content(tool_call)
             .await?;
 
         result.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id_str)))
+    }
+
+    /// Server-produced tool-call text (arguments, a result or an error) cut
+    /// at a char boundary to `message_bytes` and, with a `session_db_bytes`
+    /// budget, to the bytes session `session_id` has left, where it is then
+    /// counted. Never refused.
+    async fn fit_tool_call_text(&self, session_id: &str, text: &str) -> Result<String, DbError> {
+        let text = self.truncate_server_text(text);
+        self.fit_session_bytes(session_id, text).await
+    }
+
+    /// [`fit_tool_call_text`](Self::fit_tool_call_text) for every text field
+    /// of `tool_call`.
+    async fn fit_tool_call_texts(
+        &self,
+        session_id: &str,
+        mut tool_call: ToolCall,
+    ) -> Result<ToolCall, DbError> {
+        tool_call.arguments = self
+            .fit_tool_call_text(session_id, &tool_call.arguments)
+            .await?;
+        if let Some(result) = tool_call.result.take() {
+            tool_call.result = Some(self.fit_tool_call_text(session_id, &result).await?);
+        }
+        if let Some(error) = tool_call.error.take() {
+            tool_call.error = Some(self.fit_tool_call_text(session_id, &error).await?);
+        }
+        Ok(tool_call)
+    }
+
+    /// The session that owns conversation `conversation_id`, read only when
+    /// the `session_db_bytes` budget needs it (the empty string otherwise).
+    async fn tool_call_session(&self, conversation_id: &str) -> Result<String, DbError> {
+        if !self.tracks_session_bytes() {
+            return Ok(String::new());
+        }
+        Ok(self.get_conversation(conversation_id).await?.session_id)
+    }
+
+    /// The session that owns tool call `id`, read only when the
+    /// `session_db_bytes` budget needs it (the empty string otherwise).
+    async fn tool_call_owner(&self, id: &str) -> Result<String, DbError> {
+        if !self.tracks_session_bytes() {
+            return Ok(String::new());
+        }
+        let tool_call = self.get_tool_call(id).await?;
+        self.tool_call_session(&tool_call.conversation_id).await
     }
 
     /// Mark a tool call as running
@@ -46,13 +107,16 @@ impl DbConnection {
         updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))
     }
 
-    /// Mark a tool call as completed successfully
+    /// Mark a tool call as completed successfully. The result is cut to
+    /// fit, never refused.
     pub async fn complete_tool_call(
         &self,
         id: &str,
         result_str: &str,
         duration_ms: i32,
     ) -> Result<ToolCall, DbError> {
+        let session_id = self.tool_call_owner(id).await?;
+        let result_str = self.fit_tool_call_text(&session_id, result_str).await?;
         let id_owned = id.to_string();
         let mut result = self
             .db()
@@ -66,7 +130,7 @@ impl DbConnection {
             )
             .bind(("id", RecordId::from(("tool_calls", id_owned.as_str()))))
             .bind(("status", ToolCallStatus::Success))
-            .bind(("result", result_str.to_string()))
+            .bind(("result", result_str))
             .bind(("duration_ms", duration_ms))
             .await?;
 
@@ -74,13 +138,16 @@ impl DbConnection {
         updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))
     }
 
-    /// Mark a tool call as failed
+    /// Mark a tool call as failed. The error text is cut to fit, never
+    /// refused.
     pub async fn fail_tool_call(
         &self,
         id: &str,
         error: &str,
         duration_ms: i32,
     ) -> Result<ToolCall, DbError> {
+        let session_id = self.tool_call_owner(id).await?;
+        let error = self.fit_tool_call_text(&session_id, error).await?;
         let id_owned = id.to_string();
         let mut result = self
             .db()
@@ -94,7 +161,7 @@ impl DbConnection {
             )
             .bind(("id", RecordId::from(("tool_calls", id_owned.as_str()))))
             .bind(("status", ToolCallStatus::Error))
-            .bind(("error", error.to_string()))
+            .bind(("error", error))
             .bind(("duration_ms", duration_ms))
             .await?;
 

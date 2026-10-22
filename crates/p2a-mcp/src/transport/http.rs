@@ -88,6 +88,18 @@ pub async fn build_app_with(
     exec: ExecConfig,
 ) -> Result<(Router, AppState), TransportError> {
     let config = &as_http(config);
+    // Resolved before anything is spawned, so a bad override refuses the
+    // start without leaving tasks behind.
+    #[cfg(feature = "db")]
+    let limits = resolve_limits(config)?;
+    #[cfg(feature = "db")]
+    if let Some(db_path) = config.http.db_path.as_deref() {
+        enforce_db_path_policy(
+            config.deployment_mode(),
+            std::path::Path::new(db_path),
+            crate::path_jail::allowed_data_root(),
+        )?;
+    }
     // The eviction threshold follows the resource profile here, like the
     // deadlines and quotas, whichever way `config` was built.
     let session_manager = Arc::new(SessionManager::new(SessionConfig {
@@ -111,11 +123,19 @@ pub async fn build_app_with(
 
     let governor = Arc::new(ToolGovernor::new(exec, session_manager.clone()));
 
+    #[cfg(feature = "db")]
+    let persistent_manager = init_persistence(
+        config,
+        session_manager.clone(),
+        persistence_limits(&limits, governor.config().rss_soft_limit_bytes),
+    )
+    .await;
+
     let state = AppState {
         server,
         session_manager,
         #[cfg(feature = "db")]
-        persistent_manager: init_persistence(config).await,
+        persistent_manager,
         audit_logger,
         governor,
     };
@@ -123,24 +143,86 @@ pub async fn build_app_with(
     Ok((create_router(state.clone(), config), state))
 }
 
-/// Create the persistent session manager, or `None` (with a log line) when
-/// the database cannot be opened.
+/// The request limits of `config`'s resource profile with its overrides
+/// applied, the values `tools::limits::current()` holds once installed. An
+/// invalid override refuses the start.
+#[cfg(feature = "db")]
+fn resolve_limits(config: &ServerConfig) -> Result<crate::tools::limits::Limits, TransportError> {
+    use crate::config::ResourceProfile;
+    use crate::tools::limits::Limits;
+    match config.resource_profile() {
+        ResourceProfile::Off => Limits::off(),
+        ResourceProfile::Hosted => Limits::hosted(),
+    }
+    .with_overrides(&config.limits.overrides)
+    .map_err(TransportError::Config)
+}
+
+/// The session database must lie outside the path-jail root (INF-1): file
+/// tools can write anywhere under it. An authenticated or open public server
+/// refuses to start otherwise; a local one (the desktop app keeps its store
+/// under the user's data directory, which can be inside a data root that
+/// defaults to the working directory) logs a warning and starts. A data root
+/// that cannot be resolved is treated the same way.
+#[cfg(feature = "db")]
+fn enforce_db_path_policy(
+    mode: DeploymentMode,
+    db_path: &std::path::Path,
+    data_root: Result<std::path::PathBuf, String>,
+) -> Result<(), TransportError> {
+    let verdict = data_root
+        .map_err(|e| format!("cannot check P2A_DB_PATH against the data root: {e}"))
+        .and_then(|root| {
+            crate::persistent_session::check_db_path_outside_data_root(db_path, &root)
+        });
+    match verdict {
+        Ok(()) => Ok(()),
+        Err(message) if mode == DeploymentMode::Local => {
+            tracing::warn!("{message}");
+            Ok(())
+        }
+        Err(message) => Err(TransportError::Config(message)),
+    }
+}
+
+/// The conversation-store bounds from the resolved request limits and the
+/// governor's resident-memory floor. They are handed to the store, so the db
+/// module never reads the process-wide limits.
+#[cfg(feature = "db")]
+fn persistence_limits(
+    limits: &crate::tools::limits::Limits,
+    rss_soft_limit_bytes: Option<u64>,
+) -> crate::db::PersistenceLimits {
+    crate::db::PersistenceLimits {
+        message_bytes: Some(usize::try_from(limits.message_bytes).unwrap_or(usize::MAX)),
+        conversations_per_session: limits.conversations_per_session,
+        messages_per_conversation: limits.messages_per_conversation,
+        session_db_bytes: limits.session_db_bytes,
+        rss_soft_limit_bytes,
+    }
+}
+
+/// Create the persistent session manager over the shared live registry and
+/// start its background tasks (row deletion on session removal, the
+/// periodic sweep), or `None` (with a log line) when the database cannot be
+/// opened.
 #[cfg(feature = "db")]
 async fn init_persistence(
     config: &ServerConfig,
+    session_manager: Arc<SessionManager>,
+    limits: crate::db::PersistenceLimits,
 ) -> Option<Arc<crate::persistent_session::PersistentSessionManager>> {
     let db_path = config.http.db_path.as_deref();
     tracing::info!("Initializing database with path: {:?}", db_path);
-    match crate::persistent_session::PersistentSessionManager::new(
-        db_path,
-        config.session.max_sessions,
-        config.session.ttl_minutes,
-    )
-    .await
+    match crate::persistent_session::PersistentSessionManager::new(db_path, session_manager, limits)
+        .await
     {
         Ok(manager) => {
             tracing::info!("Database persistence enabled - conversation routes will be available");
-            Some(Arc::new(manager))
+            let manager = Arc::new(manager);
+            // Delete the rows of removed sessions and sweep stale ones.
+            manager.start_background_tasks();
+            Some(manager)
         }
         Err(e) => {
             tracing::warn!(
@@ -290,6 +372,7 @@ pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
     let config = &as_http(config);
     #[cfg(feature = "db")]
     let persistent_manager = state.persistent_manager.clone();
+    let governor = Arc::clone(&state.governor);
 
     let router = create_base_router(state, config);
 
@@ -309,7 +392,15 @@ pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
     // Apply global middleware LAST, so it also covers the nested conversation
     // routes (e.g. /api/sessions/{id}/datasets). Applying CORS inside
     // create_base_router would skip routes nested afterwards.
+    //
+    // The deployment mode (of the HTTP-forced config) is handed to the
+    // handlers that depend on it, e.g. session creation ignores `user_id`
+    // in open public mode. The governor goes to the conversation routes
+    // whose work it bounds (the dataset reload) without changing their
+    // state type.
     middleware::apply_global_middleware(router, config)
+        .layer(axum::Extension(config.deployment_mode()))
+        .layer(axum::Extension(governor))
 }
 
 /// Create the base router with core routes.
@@ -487,4 +578,37 @@ async fn health_check(State(state): State<AppState>) -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(all(test, feature = "db"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_path_policy_by_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path().canonicalize().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let inside = r.join("db");
+        let outside = other.path().join("db");
+
+        // Local mode (the desktop app) only warns.
+        assert!(enforce_db_path_policy(DeploymentMode::Local, &inside, Ok(r.clone())).is_ok());
+        assert!(
+            enforce_db_path_policy(DeploymentMode::Local, &inside, Err("no root".into())).is_ok()
+        );
+        for mode in [DeploymentMode::Authenticated, DeploymentMode::OpenPublic] {
+            match enforce_db_path_policy(mode, &inside, Ok(r.clone())) {
+                Err(TransportError::Config(message)) => {
+                    assert!(message.contains("P2A_DB_PATH"), "{message}")
+                }
+                other => panic!("{mode:?}: expected a config error, got {other:?}"),
+            }
+            assert!(enforce_db_path_policy(mode, &outside, Ok(r.clone())).is_ok());
+            assert!(matches!(
+                enforce_db_path_policy(mode, &outside, Err("no root".into())),
+                Err(TransportError::Config(_))
+            ));
+        }
+    }
 }

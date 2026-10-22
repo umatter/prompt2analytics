@@ -2,14 +2,559 @@
 //!
 //! Run with: `cargo test -p p2a-mcp --features full db_tests`
 
-use super::connection::DbConnection;
-use super::models::MessageRole;
+use super::connection::{DbConnection, DbError, PersistenceLimits, truncate_to};
+use super::models::{Message, MessageRole, ToolCall};
 
 /// Helper to create an in-memory database for testing
 async fn test_db() -> DbConnection {
     DbConnection::connect_memory()
         .await
         .expect("Failed to create in-memory database")
+}
+
+/// An in-memory database with `limits` applied.
+async fn limited_db(limits: PersistenceLimits) -> DbConnection {
+    test_db().await.with_limits(limits)
+}
+
+// ==================== Limits ====================
+
+#[tokio::test]
+async fn add_message_refuses_unknown_conversation() {
+    let db = test_db().await;
+    assert!(matches!(
+        db.add_message("no-such-conversation", "user", "x").await,
+        Err(DbError::NotFound(_))
+    ));
+    let message = Message::user("no-such-conversation".into(), "x".into());
+    assert!(matches!(
+        db.save_message(&message).await,
+        Err(DbError::NotFound(_))
+    ));
+    assert_eq!(db.stats().await.unwrap().message_count, 0);
+}
+
+#[tokio::test]
+async fn add_message_enforces_size_and_count() {
+    let db = limited_db(PersistenceLimits {
+        message_bytes: Some(8),
+        messages_per_conversation: Some(1),
+        ..Default::default()
+    })
+    .await;
+    let conv = db.create_conversation("s1", "t").await.unwrap();
+    let id = conv.id_string();
+    match db.add_message(&id, "user", "123456789").await {
+        Err(DbError::TooLarge(text)) => {
+            assert!(
+                text.contains("9 bytes") && text.contains("at most 8"),
+                "{text}"
+            )
+        }
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+    db.add_message(&id, "user", "12345678").await.unwrap();
+    assert!(matches!(
+        db.add_message(&id, "user", "x").await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+    assert!(matches!(
+        db.save_message(&Message::user(id.clone(), "x".into()))
+            .await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+    assert_eq!(db.get_messages(&id).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn create_conversation_enforces_per_session_count() {
+    let db = limited_db(PersistenceLimits {
+        message_bytes: Some(8),
+        conversations_per_session: Some(2),
+        ..Default::default()
+    })
+    .await;
+    assert!(matches!(
+        db.create_conversation("s1", "123456789").await,
+        Err(DbError::TooLarge(_))
+    ));
+    db.create_conversation("s1", "a").await.unwrap();
+    db.create_conversation("s1", "b").await.unwrap();
+    assert!(matches!(
+        db.create_conversation("s1", "c").await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+    // The count is per session.
+    db.create_conversation("s2", "a").await.unwrap();
+    assert_eq!(db.count_conversations("s1").await.unwrap(), 2);
+    // A new title counts against message_bytes too.
+    let conv = db.list_conversations("s1").await.unwrap().remove(0);
+    assert!(matches!(
+        db.update_conversation_title(&conv.id_string(), "123456789")
+            .await,
+        Err(DbError::TooLarge(_))
+    ));
+}
+
+#[test]
+fn truncate_to_cuts_at_char_boundaries() {
+    assert_eq!(truncate_to("short", 20), "short");
+    // 21 - 12 (suffix) = 9 bytes, inside the fifth "ä": cut to 8.
+    let cut = truncate_to(&"ä".repeat(20), 21);
+    assert_eq!(cut, format!("{}\n[truncated]", "ä".repeat(4)));
+    // No room for the suffix: nothing is kept.
+    assert_eq!(truncate_to(&"x".repeat(50), 11), "");
+    assert_eq!(truncate_to(&"x".repeat(50), 12), "\n[truncated]");
+}
+
+#[tokio::test]
+async fn update_message_content_truncates_at_char_boundary() {
+    let db = limited_db(PersistenceLimits {
+        message_bytes: Some(20),
+        ..Default::default()
+    })
+    .await;
+    let conv = db.create_conversation("s1", "t").await.unwrap();
+    let msg = db
+        .add_message(&conv.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let stored = db
+        .update_message_content(&msg.id_string(), &"ä".repeat(20))
+        .await
+        .unwrap();
+    assert!(stored.content.len() <= 20, "{}", stored.content.len());
+    assert!(
+        stored.content.ends_with("[truncated]"),
+        "{}",
+        stored.content
+    );
+    assert!(stored.content.starts_with('ä'));
+    assert_eq!(
+        db.get_message(&msg.id_string()).await.unwrap().content,
+        stored.content
+    );
+}
+
+#[tokio::test]
+async fn tool_call_text_is_truncated() {
+    let db = limited_db(PersistenceLimits {
+        message_bytes: Some(64),
+        ..Default::default()
+    })
+    .await;
+    let conv = db.create_conversation("s1", "t").await.unwrap();
+    let msg = db
+        .add_message(&conv.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let new_call = |arguments: String| {
+        ToolCall::new(
+            msg.id_string(),
+            conv.id_string(),
+            "regression_ols".into(),
+            arguments,
+        )
+    };
+    let tc = db
+        .create_tool_call(&new_call("é".repeat(100)))
+        .await
+        .unwrap();
+    assert!(tc.arguments.len() <= 64 && tc.arguments.ends_with("[truncated]"));
+    let done = db
+        .complete_tool_call(&tc.id_string(), &"r".repeat(500), 3)
+        .await
+        .unwrap();
+    let result = done.result.unwrap();
+    assert!(result.len() <= 64 && result.ends_with("[truncated]"));
+    let tc2 = db.create_tool_call(&new_call("{}".into())).await.unwrap();
+    assert_eq!(tc2.arguments, "{}");
+    let failed = db
+        .fail_tool_call(&tc2.id_string(), &"e".repeat(500), 3)
+        .await
+        .unwrap();
+    assert!(failed.error.unwrap().len() <= 64);
+    // The conversation must exist.
+    let ghost = ToolCall::new(msg.id_string(), "ghost".into(), "x".into(), "{}".into());
+    assert!(matches!(
+        db.create_tool_call(&ghost).await,
+        Err(DbError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn memory_admission_refuses_writes() {
+    if p2a_core::get_process_memory().is_none() {
+        return; // the platform does not report the process memory
+    }
+    let open = test_db().await;
+    let conv = open.create_conversation("s1", "t").await.unwrap();
+    let msg = open
+        .add_message(&conv.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let db = open.clone().with_limits(PersistenceLimits {
+        rss_soft_limit_bytes: Some(1),
+        ..Default::default()
+    });
+    assert!(matches!(
+        db.create_conversation("s1", "t").await,
+        Err(DbError::MemoryPressure)
+    ));
+    assert!(matches!(
+        db.add_message(&conv.id_string(), "user", "x").await,
+        Err(DbError::MemoryPressure)
+    ));
+    assert!(matches!(
+        db.save_message(&Message::user(conv.id_string(), "x".into()))
+            .await,
+        Err(DbError::MemoryPressure)
+    ));
+    let call = ToolCall::new(msg.id_string(), conv.id_string(), "x".into(), "{}".into());
+    assert!(matches!(
+        db.create_tool_call(&call).await,
+        Err(DbError::MemoryPressure)
+    ));
+    // The server's final answer to a turn that already ran still lands.
+    db.update_message_content(&msg.id_string(), "answer")
+        .await
+        .unwrap();
+    assert_eq!(open.stats().await.unwrap().message_count, 1);
+}
+
+#[tokio::test]
+async fn session_db_bytes_bounds_the_session_total() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100),
+        ..Default::default()
+    })
+    .await;
+    let c = db.create_conversation("s1", "t").await.unwrap(); // 1
+    db.add_message(&c.id_string(), "user", &"a".repeat(60))
+        .await
+        .unwrap(); // 61
+    match db
+        .add_message(&c.id_string(), "user", &"b".repeat(40))
+        .await
+    {
+        Err(DbError::QuotaExceeded(text)) => {
+            assert!(
+                text.contains("61 bytes") && text.contains("100 bytes"),
+                "{text}"
+            )
+        } // 101 > 100
+        other => panic!("expected QuotaExceeded, got {other:?}"),
+    }
+    db.add_message(&c.id_string(), "user", &"c".repeat(39))
+        .await
+        .unwrap(); // exactly 100
+    assert_eq!(db.session_stored_bytes("s1").await.unwrap(), 100);
+    let other = db.create_conversation("s2", "t").await.unwrap(); // own budget
+    db.add_message(&other.id_string(), "user", &"d".repeat(60))
+        .await
+        .unwrap();
+
+    // Server-produced text is truncated to the room left, never refused.
+    let c3 = db.create_conversation("s3", "t").await.unwrap(); // 1
+    let m = db
+        .add_message(&c3.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let stored = db
+        .update_message_content(&m.id_string(), &"y".repeat(200))
+        .await
+        .unwrap();
+    assert!(
+        stored.content.len() <= 99 && stored.content.ends_with("[truncated]"),
+        "{}",
+        stored.content.len()
+    );
+    assert!(matches!(
+        db.add_message(&c3.id_string(), "user", "z").await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+    db.delete_conversation(&c3.id_string()).await.unwrap(); // frees s3's bytes
+    let c4 = db.create_conversation("s3", "t").await.unwrap();
+    db.add_message(&c4.id_string(), "user", &"e".repeat(90))
+        .await
+        .unwrap();
+
+    // Tool-call text counts and is truncated to the room left.
+    let c5 = db.create_conversation("s5", "t").await.unwrap(); // 1
+    let m5 = db
+        .add_message(&c5.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let tc = db
+        .create_tool_call(&ToolCall::new(
+            m5.id_string(),
+            c5.id_string(),
+            "regression_ols".into(),
+            "x".repeat(50),
+        ))
+        .await
+        .unwrap(); // 51
+    let done = db
+        .complete_tool_call(&tc.id_string(), &"r".repeat(500), 3)
+        .await
+        .unwrap();
+    assert!(done.result.as_deref().unwrap().len() <= 49);
+    assert_eq!(db.session_stored_bytes("s5").await.unwrap(), 100);
+
+    // Clearing the conversation releases its messages' and tool calls'
+    // bytes from the counter and keeps its title's.
+    db.clear_messages(&c5.id_string()).await.unwrap();
+    assert_eq!(db.session_stored_bytes("s5").await.unwrap(), 1);
+    assert_eq!(db.session_bytes_entry("s5"), Some(1));
+    db.add_message(&c5.id_string(), "user", &"f".repeat(99))
+        .await
+        .unwrap();
+
+    // Limits off: no accounting at all.
+    let off = test_db().await;
+    let c = off.create_conversation("s1", "t").await.unwrap();
+    off.add_message(&c.id_string(), "user", &"f".repeat(10_000))
+        .await
+        .unwrap();
+}
+
+/// Deleting or clearing a conversation subtracts its bytes from the
+/// session's counter instead of dropping the counter, so the next write does
+/// not re-read the whole session (which costs one row read per stored
+/// message).
+#[tokio::test]
+async fn deleting_a_conversation_releases_its_bytes_without_a_reseed() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1000),
+        ..Default::default()
+    })
+    .await;
+    let keep = db.create_conversation("s1", "keep").await.unwrap(); // 4
+    db.add_message(&keep.id_string(), "user", &"a".repeat(100))
+        .await
+        .unwrap(); // 104
+    let gone = db.create_conversation("s1", "gone").await.unwrap(); // 108
+    let m = db
+        .add_message(&gone.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let call = ToolCall::new(
+        m.id_string(),
+        gone.id_string(),
+        "regression_ols".into(),
+        "y".repeat(50),
+    );
+    db.create_tool_call(&call).await.unwrap(); // 158
+    db.add_message(&gone.id_string(), "user", &"b".repeat(200))
+        .await
+        .unwrap(); // 358
+    assert_eq!(db.session_bytes_entry("s1"), Some(358));
+
+    db.delete_conversation(&gone.id_string()).await.unwrap();
+    assert_eq!(db.session_bytes_entry("s1"), Some(104));
+
+    let c = db.create_conversation("s1", "c").await.unwrap(); // 105
+    db.add_message(&c.id_string(), "user", &"c".repeat(10))
+        .await
+        .unwrap(); // 115
+    db.clear_messages(&c.id_string()).await.unwrap();
+    assert_eq!(db.session_bytes_entry("s1"), Some(105));
+    assert_eq!(db.session_stored_bytes("s1").await.unwrap(), 105);
+
+    // Deleting the session's rows drops the counter.
+    db.delete_session("s1").await.unwrap();
+    assert_eq!(db.session_bytes_entry("s1"), None);
+}
+
+/// A conversation of `session_id` holding twenty messages and a tool call;
+/// returns its id.
+async fn filled_conversation(db: &DbConnection, session_id: &str, title: &str) -> String {
+    let conv = db.create_conversation(session_id, title).await.unwrap();
+    let id = conv.id_string();
+    for i in 0..20 {
+        db.add_message(&id, "user", &format!("message {i}: {}", "x".repeat(40 + i)))
+            .await
+            .unwrap();
+    }
+    let m = db.add_message(&id, "assistant", "").await.unwrap();
+    let call = ToolCall::new(
+        m.id_string(),
+        id.clone(),
+        "regression_ols".into(),
+        "a".repeat(40),
+    );
+    db.create_tool_call(&call).await.unwrap();
+    id
+}
+
+/// The counter of `session_id` equals what the store holds.
+async fn assert_counter_matches_store(db: &DbConnection, session_id: &str) {
+    let stored = db.session_stored_bytes(session_id).await.unwrap();
+    assert_eq!(db.session_bytes_entry(session_id), Some(stored));
+}
+
+/// Two concurrent deletes (or clears) of one conversation release its bytes
+/// once: each call releases only what its own statements removed, so the
+/// counter never drops below what the store holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_deletes_release_a_conversations_bytes_once() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100_000),
+        ..Default::default()
+    })
+    .await;
+    let keep = db.create_conversation("s1", "keep").await.unwrap();
+    db.add_message(&keep.id_string(), "user", &"k".repeat(100))
+        .await
+        .unwrap();
+
+    let gone = filled_conversation(&db, "s1", "gone").await;
+    assert_counter_matches_store(&db, "s1").await; // seeded
+    let (a, b) = tokio::join!(db.delete_conversation(&gone), db.delete_conversation(&gone));
+    // One deletes it; the other, in its turn after the first, finds nothing.
+    assert!(
+        matches!(
+            (&a, &b),
+            (Ok(()), Err(DbError::NotFound(_))) | (Err(DbError::NotFound(_)), Ok(()))
+        ),
+        "{a:?} / {b:?}"
+    );
+    assert_counter_matches_store(&db, "s1").await;
+
+    let cleared = filled_conversation(&db, "s1", "cleared").await;
+    assert_counter_matches_store(&db, "s1").await;
+    let (a, b) = tokio::join!(db.clear_messages(&cleared), db.clear_messages(&cleared));
+    assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
+    assert_counter_matches_store(&db, "s1").await;
+    assert!(db.get_messages(&cleared).await.unwrap().is_empty());
+    assert_eq!(db.delete_turns_in_use(), 0);
+}
+
+/// Without the byte budget, on RocksDB (which fails one of two conflicting
+/// transactions): two parallel deletes of one conversation take turns, so
+/// the second finds nothing instead of failing on a write conflict.
+#[tokio::test(flavor = "multi_thread")]
+async fn parallel_deletes_on_rocksdb_do_not_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = DbConnection::connect_rocksdb(dir.path().join("db"))
+        .await
+        .unwrap();
+    for _ in 0..5 {
+        let gone = filled_conversation(&db, "s1", "gone").await;
+        let (a, b) = tokio::join!(db.delete_conversation(&gone), db.delete_conversation(&gone));
+        assert!(
+            matches!(
+                (&a, &b),
+                (Ok(()), Err(DbError::NotFound(_))) | (Err(DbError::NotFound(_)), Ok(()))
+            ),
+            "{a:?} / {b:?}"
+        );
+        let cleared = filled_conversation(&db, "s1", "cleared").await;
+        let (a, b) = tokio::join!(db.clear_messages(&cleared), db.clear_messages(&cleared));
+        assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
+    }
+    assert_eq!(db.delete_turns_in_use(), 0);
+}
+
+/// A delete turn leaves the map with its last holder or waiter, also when
+/// the waiting call is cancelled.
+#[tokio::test]
+async fn delete_turns_leave_the_map() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100),
+        ..Default::default()
+    })
+    .await;
+    let first = db.delete_turn("c").await;
+    {
+        let waiting = db.delete_turn("c");
+        tokio::pin!(waiting);
+        // It cannot finish while `first` is held; the wait is then cancelled.
+        let polled = tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting).await;
+        assert!(polled.is_err());
+    }
+    assert_eq!(db.delete_turns_in_use(), 1);
+    drop(first);
+    assert_eq!(db.delete_turns_in_use(), 0);
+    let again = db.delete_turn("c").await;
+    assert_eq!(db.delete_turns_in_use(), 1);
+    drop(again);
+    assert_eq!(db.delete_turns_in_use(), 0);
+}
+
+/// Store a message for `conversation_id` directly, without the existence
+/// check of `add_message` (a write that raced the conversation's delete, or
+/// a row from before the process started).
+async fn insert_raw_message(db: &DbConnection, conversation_id: &str) {
+    let m = Message::user(conversation_id.into(), "orphan".into());
+    let _: Option<Message> = db.db().create(m.id.clone()).content(m).await.unwrap();
+}
+
+/// The recent orphan sweep deletes what is left for a deleted conversation
+/// for two sweeps, through the index and without scanning the tables; a
+/// conversation that still exists is left alone, and rows of one this
+/// process never deleted need the full scan.
+#[tokio::test]
+async fn recent_orphan_sweep_follows_deleted_conversations() {
+    let db = test_db().await;
+    db.set_session_last_accessed("s1", chrono::Utc::now())
+        .await
+        .unwrap();
+    let kept = db.create_conversation("s1", "kept").await.unwrap();
+    db.add_message(&kept.id_string(), "user", "kept")
+        .await
+        .unwrap();
+    let gone = db.create_conversation("s1", "gone").await.unwrap();
+    let gone = gone.id_string();
+    db.delete_conversation(&gone).await.unwrap();
+    insert_raw_message(&db, &gone).await;
+    insert_raw_message(&db, "from-before").await;
+
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 1);
+    insert_raw_message(&db, &gone).await; // lands after that sweep started
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 1);
+    insert_raw_message(&db, &gone).await;
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 0); // forgotten
+
+    db.note_conversation_deleted(&kept.id_string());
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
+    assert_eq!(db.get_messages(&kept.id_string()).await.unwrap().len(), 1);
+
+    // The full scan finds the rest: the row from before and the last one.
+    assert_eq!(db.delete_orphans().await.unwrap(), 2);
+    assert_eq!(db.get_messages(&kept.id_string()).await.unwrap().len(), 1);
+}
+
+/// More deleted conversations than are remembered: the next recent sweep
+/// scans in full.
+#[tokio::test]
+async fn recent_orphan_sweep_scans_in_full_after_too_many_deletes() {
+    let db = test_db().await;
+    insert_raw_message(&db, "from-before").await;
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
+    for i in 0..=super::connection::MAX_REMEMBERED_DELETES {
+        db.note_conversation_deleted(&format!("c{i}"));
+    }
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 1);
+    assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn session_rows_by_last_access() {
+    let db = test_db().await;
+    let now = chrono::Utc::now();
+    db.set_session_last_accessed("old", now - chrono::Duration::hours(2))
+        .await
+        .unwrap(); // creates the row
+    db.set_session_last_accessed("new", now).await.unwrap();
+    let stale = db
+        .session_ids_last_accessed_before(now - chrono::Duration::hours(1))
+        .await
+        .unwrap();
+    assert_eq!(stale, vec!["old".to_string()]);
+    let row = db.get_session("new").await.unwrap().unwrap();
+    let drift = row.last_accessed_chrono().signed_duration_since(now);
+    assert!(drift.num_milliseconds().abs() < 1, "{drift}");
 }
 
 // ==================== Conversation Tests ====================
