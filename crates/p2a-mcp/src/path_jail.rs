@@ -41,7 +41,10 @@
 //! - On the first scoped use in a process, UUID-named entries already under
 //!   `sessions/` (left by an earlier process) are removed; other names are
 //!   left alone. [`remove_session_dir`] removes a session's directory when
-//!   the session goes.
+//!   the session goes, and from then on the directory is never created again
+//!   for that id: a call that was still queued or running when its session
+//!   went is refused ("needs a session") instead of leaving a directory
+//!   behind that nothing would remove.
 //! - Without an active scope every path is refused ("needs a session")
 //!   rather than falling back to the shared root. Handlers must therefore not
 //!   validate paths from threads or tasks they spawn: those have no scope.
@@ -50,11 +53,12 @@
 //!   refuses a write that would take the directory past it.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Once, OnceLock};
+use std::sync::{LazyLock, Mutex, MutexGuard, Once, OnceLock};
 
 /// Cached resolved jail root, computed once on first use.
 static DATA_ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -416,6 +420,25 @@ static SESSION_DIRS: AtomicBool = AtomicBool::new(false);
 /// Removes stale session directories once, on the first scoped use.
 static PURGE: Once = Once::new();
 
+/// Sessions whose directory [`remove_session_dir`] has removed (as UUIDs),
+/// whose directory must therefore never be created again. A session id is a
+/// fresh random UUID that is never reused, so an id stays here until the
+/// process exits: 16 bytes (plus the set's overhead) per removed session.
+/// [`session_dir_in`] checks the set and creates the directory under this
+/// lock, and [`remove_session_dir_in`] marks the id under it before removing
+/// anything, so a creation either happens before the mark (and is removed)
+/// or is refused.
+static REMOVED_SESSIONS: LazyLock<Mutex<HashSet<u128>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// The removed-session set, also after a panic elsewhere while it was held
+/// (it is only ever inserted into, so it cannot be left inconsistent).
+fn removed_sessions() -> MutexGuard<'static, HashSet<u128>> {
+    REMOVED_SESSIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 thread_local! {
     /// The session whose scope is active on this thread, if any.
     static SCOPE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -482,7 +505,9 @@ pub fn current_session_scope() -> Option<String> {
 /// session removal: delete, expiry, cleanup and eviction. `Ok(())` when
 /// session directories are off, when the id is not a UUID and when the
 /// directory does not exist. Links inside the directory are removed, never
-/// followed.
+/// followed. From then on the directory is not created again for this id
+/// (also when it never existed), so a call that runs after its session went
+/// cannot use files.
 pub fn remove_session_dir(session_id: &str) -> std::io::Result<()> {
     if !SESSION_DIRS.load(Ordering::SeqCst) {
         return Ok(());
@@ -491,10 +516,13 @@ pub fn remove_session_dir(session_id: &str) -> std::io::Result<()> {
     remove_session_dir_in(&data_root, session_id)
 }
 
-/// Whether `id` is a session id in canonical UUID form (lowercase, hyphenated),
-/// so the directory name and the id are the same string.
-fn is_session_id(id: &str) -> bool {
-    uuid::Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id)
+/// `id` as a UUID when it is a session id in canonical UUID form (lowercase,
+/// hyphenated), so the directory name and the id are the same string.
+fn session_uuid(id: &str) -> Option<u128> {
+    uuid::Uuid::parse_str(id)
+        .ok()
+        .filter(|u| u.hyphenated().to_string() == id)
+        .map(|u| u.as_u128())
 }
 
 /// The global data root with a caller-safe error; the detail (which names the
@@ -528,11 +556,12 @@ fn active_root_for(
 
 /// `<data_root>/sessions/<id>`, created on first use with mode `0700` (its
 /// parent too). The first call in a process first removes stale session
-/// directories left by an earlier process.
+/// directories left by an earlier process. Refused for a session whose
+/// directory [`remove_session_dir_in`] has removed.
 fn session_dir_in(data_root: &Path, id: &str) -> Result<PathBuf, String> {
-    if !is_session_id(id) {
+    let Some(uuid) = session_uuid(id) else {
         return Err("this session needs a session id in UUID form to use files".to_string());
-    }
+    };
     PURGE.call_once(|| {
         purge_stale_session_dirs_in(data_root);
     });
@@ -549,7 +578,14 @@ fn session_dir_in(data_root: &Path, id: &str) -> Result<PathBuf, String> {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder.create(&dir).map_err(|e| cannot_prepare(&dir, &e))?;
+    {
+        // Check and create under the lock the removal marks the id under.
+        let removed = removed_sessions();
+        if removed.contains(&uuid) {
+            return Err("this session has ended; file access needs a session".to_string());
+        }
+        builder.create(&dir).map_err(|e| cannot_prepare(&dir, &e))?;
+    }
     for d in [&sessions, &dir] {
         let meta = fs::symlink_metadata(d).map_err(|e| cannot_prepare(d, &e))?;
         if !meta.is_dir() {
@@ -606,24 +642,44 @@ fn purge_stale_session_dirs_in(data_root: &Path) -> usize {
     removed
 }
 
-/// Remove `<data_root>/sessions/<id>` (see [`remove_session_dir`]).
+/// How many times [`remove_session_dir_in`] tries to remove a directory in
+/// which a write in progress created a file while it was being emptied.
+const REMOVE_ATTEMPTS: usize = 4;
+
+/// Remove `<data_root>/sessions/<id>` (see [`remove_session_dir`]) and mark
+/// the id so that [`session_dir_in`] never creates the directory again.
 fn remove_session_dir_in(data_root: &Path, id: &str) -> std::io::Result<()> {
-    if !is_session_id(id) {
+    let Some(uuid) = session_uuid(id) else {
         return Ok(());
-    }
+    };
+    // Mark first, whether or not the directory exists yet: from here on no
+    // call can create it, so what is removed below stays removed.
+    removed_sessions().insert(uuid);
     let sessions = data_root.join(SESSIONS_DIR);
     if !fs::symlink_metadata(&sessions).is_ok_and(|m| m.is_dir()) {
         return Ok(());
     }
     let dir = sessions.join(id);
-    let result = match fs::symlink_metadata(&dir) {
-        Ok(m) if m.is_dir() => fs::remove_dir_all(&dir),
-        Ok(_) => fs::remove_file(&dir),
-        Err(e) => Err(e),
-    };
-    match result {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        other => other,
+    let mut attempt = 1;
+    loop {
+        let result = match fs::symlink_metadata(&dir) {
+            Ok(m) if m.is_dir() => fs::remove_dir_all(&dir),
+            Ok(_) => fs::remove_file(&dir),
+            Err(e) => Err(e),
+        };
+        match result {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            // A write that passed its path check before the mark created its
+            // temporary file while the folder was being emptied. A write that
+            // starts after the mark is refused, so trying again finishes.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                    && attempt < REMOVE_ATTEMPTS =>
+            {
+                attempt += 1;
+            }
+            other => return other,
+        }
     }
 }
 
@@ -827,20 +883,51 @@ mod tests {
         assert!(data.join("sessions").join("notes").exists());
     }
 
+    /// A session id no other test uses: removing one is recorded process-wide
+    /// and would refuse that id's directory in every other test.
+    fn fresh_id() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
     #[test]
     fn remove_session_dir_in_is_idempotent_and_ignores_non_uuids() {
         let (_t, data) = tmp_root();
-        let dir = data.join("sessions").join(A);
+        let id = fresh_id();
+        let dir = data.join("sessions").join(&id);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a.csv"), "x").unwrap();
-        remove_session_dir_in(&data, A).unwrap();
+        remove_session_dir_in(&data, &id).unwrap();
         assert!(!dir.exists());
         // missing: Ok
-        remove_session_dir_in(&data, A).unwrap();
+        remove_session_dir_in(&data, &id).unwrap();
         fs::create_dir_all(data.join("keep")).unwrap();
         // not a UUID: no-op
         remove_session_dir_in(&data, "../keep").unwrap();
         assert!(data.join("keep").exists());
+    }
+
+    #[test]
+    fn a_removed_session_dir_is_never_recreated() {
+        let (_t, data) = tmp_root();
+        let id = fresh_id();
+        let dir = active_root_for(&data, true, Some(&id)).unwrap();
+        fs::write(dir.join("a.csv"), "x\n1\n").unwrap();
+        remove_session_dir_in(&data, &id).unwrap();
+        // A call that was still queued when the session went resolves its
+        // first path after the removal: it must not create the folder again.
+        let err = active_root_for(&data, true, Some(&id)).unwrap_err();
+        assert!(err.contains("needs a session"), "{err}");
+        assert!(
+            fs::symlink_metadata(data.join("sessions").join(&id)).is_err(),
+            "the removed session's directory was recreated"
+        );
+        // Also for a session that never used files before it went.
+        let unused = fresh_id();
+        remove_session_dir_in(&data, &unused).unwrap();
+        assert!(active_root_for(&data, true, Some(&unused)).is_err());
+        assert!(fs::symlink_metadata(data.join("sessions").join(&unused)).is_err());
+        // Other sessions are unaffected.
+        assert!(active_root_for(&data, true, Some(&fresh_id())).is_ok());
     }
 
     #[test]

@@ -327,6 +327,56 @@ async fn deleting_a_session_removes_its_directory() {
     panic!("the session directory was not removed");
 }
 
+/// A call that was still waiting for its permit when its session went runs
+/// later with the session's data. Its export must not recreate the removed
+/// directory, which nothing would remove again. The test removes the
+/// directory directly, as the session's removal does, and keeps the session
+/// in the table so that the call reaches the handler.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_after_the_directory_was_removed_cannot_recreate_it() {
+    let app = app().await;
+    let s = session(&app).await;
+    assert!(
+        call(
+            &app,
+            &s,
+            "create_dataset",
+            json!({"name": "d", "csv_content": "x\n1\n"})
+        )
+        .await
+        .0
+    );
+    let (ok, _) = call(
+        &app,
+        &s,
+        "export_dataset",
+        json!({"dataset": "d", "path": "before.csv"}),
+    )
+    .await;
+    assert!(ok);
+    let dir = session_dir(&s);
+    assert!(dir.is_dir());
+    let id = s.clone();
+    tokio::task::spawn_blocking(move || p2a_mcp::path_jail::remove_session_dir(&id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!dir.exists());
+    let (ok, text) = call(
+        &app,
+        &s,
+        "export_dataset",
+        json!({"dataset": "d", "path": "after.csv"}),
+    )
+    .await;
+    assert!(!ok, "{text}");
+    assert!(text.contains("needs a session"), "{text}");
+    assert!(
+        std::fs::symlink_metadata(&dir).is_err(),
+        "the removed session directory was recreated"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn symlinks_in_a_session_directory_are_not_followed() {
