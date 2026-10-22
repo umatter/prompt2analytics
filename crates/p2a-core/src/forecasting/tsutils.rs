@@ -56,6 +56,11 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
+use crate::resource::{checkpoint, try_vec};
+
+fn size_overflow(what: &str) -> EconError {
+    EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
+}
 
 // ============================================================================
 // Lag Function
@@ -1218,8 +1223,16 @@ pub fn arima_sim(
     use rand::{Rng, SeedableRng};
     use rand_distr::{Distribution, StandardNormal};
 
+    const WHAT: &str = "the simulated series (n plus burn-in)";
+
     let p = ar.len();
     let q = ma.len();
+
+    if n == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n must be at least 1 (R: 'n' must be strictly positive)".to_string(),
+        });
+    }
 
     // Validate stationarity of AR part
     if p > 0 {
@@ -1238,7 +1251,7 @@ pub fn arima_sim(
         (p.max(q) * 10).max(100)
     });
 
-    let total_length = n + burn_in;
+    let total_length = n.checked_add(burn_in).ok_or_else(|| size_overflow(WHAT))?;
 
     // Generate or use innovations
     let innov: Vec<f64> = if let Some(ext_innov) = innovations {
@@ -1258,15 +1271,22 @@ pub fn arima_sim(
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::from_entropy(),
         };
-        (0..total_length)
-            .map(|_| StandardNormal.sample(&mut rng))
-            .collect()
+        let mut innov = try_vec(total_length, 0.0, WHAT)?;
+        for v in innov.iter_mut() {
+            *v = StandardNormal.sample(&mut rng);
+        }
+        innov
     };
 
     // Simulate ARMA part
-    let mut x = vec![0.0; total_length];
+    let mut x = try_vec(total_length, 0.0, WHAT)?;
 
+    // Each step costs O(p + q); check the budget about every 65,536 operations.
+    let stride = (65_536 / (p + q + 1)).max(1);
     for t in 0..total_length {
+        if t % stride == 0 {
+            checkpoint()?;
+        }
         let mut val = innov[t];
 
         // AR part: sum(phi_i * x[t-i])
@@ -1287,28 +1307,20 @@ pub fn arima_sim(
     }
 
     // Remove burn-in
-    let arma_series: Vec<f64> = x[burn_in..].to_vec();
+    x.drain(..burn_in);
 
-    // Un-difference if d > 0
-    let final_series = if d > 0 {
-        // Apply cumsum d times
-        let mut result = arma_series;
-        for _ in 0..d {
-            let mut cumsum = Vec::with_capacity(result.len());
-            let mut running = 0.0;
-            for &val in &result {
-                running += val;
-                cumsum.push(running);
-            }
-            result = cumsum;
+    // Un-difference: apply cumsum d times, in place
+    for _ in 0..d {
+        checkpoint()?;
+        let mut running = 0.0;
+        for v in x.iter_mut() {
+            running += *v;
+            *v = running;
         }
-        result
-    } else {
-        arma_series
-    };
+    }
 
     Ok(ArimaSimResult {
-        values: final_series,
+        values: x,
         ar: ar.to_vec(),
         ma: ma.to_vec(),
         d,
@@ -1678,5 +1690,57 @@ mod tests {
         assert_eq!(result.matrix[0], vec![3.0, 2.0, 1.0]);
         assert_eq!(result.matrix[1], vec![4.0, 3.0, 2.0]);
         assert_eq!(result.matrix[2], vec![5.0, 4.0, 3.0]);
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn arima_sim_absurd_n_is_an_error() {
+        // Before the fix: "memory allocation of 9007199254741792 bytes failed", SIGABRT.
+        let err = arima_sim(&[0.5], &[], 0, 1usize << 50, None, None, Some(1)).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        // n + burn-in overflows (a debug-build panic before the fix)
+        let err = arima_sim(&[0.5], &[], 0, usize::MAX, None, Some(1), Some(1)).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+    }
+
+    /// R 4.3.3: arima.sim(list(ar = 0.5), n = 0) -> Error: 'n' must be strictly positive
+    #[test]
+    fn arima_sim_rejects_zero_n() {
+        let err = arima_sim(&[0.5], &[], 0, 0, None, None, Some(1)).unwrap_err();
+        assert!(
+            matches!(err, EconError::InvalidSpecification { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn arima_sim_honours_cancellation() {
+        let r = cancelled(|| arima_sim(&[0.5], &[], 3, 100, None, None, Some(1)));
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    /// Guard for the in-place integration: d = 2 is exactly two cumulative sums of the d = 0 series.
+    #[test]
+    fn arima_sim_differencing_is_cumulative_sum_of_arma_part() {
+        let base = arima_sim(&[0.5], &[0.3], 0, 200, None, Some(60), Some(7))
+            .unwrap()
+            .values;
+        let d2 = arima_sim(&[0.5], &[0.3], 2, 200, None, Some(60), Some(7))
+            .unwrap()
+            .values;
+        let mut expected = base;
+        for _ in 0..2 {
+            let mut run = 0.0;
+            for v in expected.iter_mut() {
+                run += *v;
+                *v = run;
+            }
+        }
+        assert_eq!(d2, expected);
     }
 }
