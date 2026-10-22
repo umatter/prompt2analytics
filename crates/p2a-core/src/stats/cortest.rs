@@ -5,6 +5,7 @@
 //! Spearman's rho.
 
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use crate::stats::Alternative;
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal, StudentsT};
@@ -321,40 +322,14 @@ fn kendall_test(
 ) -> EconResult<CorTestResult> {
     let n = x.len();
 
-    // Count concordant and discordant pairs
-    let mut concordant = 0i64;
-    let mut discordant = 0i64;
-    let mut ties_x = 0i64;
-    let mut ties_y = 0i64;
-
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let dx = x[j] - x[i];
-            let dy = y[j] - y[i];
-
-            if dx.abs() < 1e-15 && dy.abs() < 1e-15 {
-                // Tie in both
-                ties_x += 1;
-                ties_y += 1;
-            } else if dx.abs() < 1e-15 {
-                ties_x += 1;
-            } else if dy.abs() < 1e-15 {
-                ties_y += 1;
-            } else if dx * dy > 0.0 {
-                concordant += 1;
-            } else {
-                discordant += 1;
-            }
-        }
-    }
-
-    let n_pairs = (n * (n - 1) / 2) as i64;
-    let tau = (concordant - discordant) as f64 / n_pairs as f64;
+    // S = concordant - discordant pairs (Knight's O(n log n) algorithm)
+    let s = kendall_s(x, y)?;
+    let n_pairs = tie_pairs(n)?;
+    let tau = s as f64 / n_pairs as f64;
 
     // For the test, we use the normal approximation
     // Var(S) = n(n-1)(2n+5)/18 for no ties
-    let s = concordant - discordant;
-    let var_s = (n * (n - 1) * (2 * n + 5)) as f64 / 18.0;
+    let var_s = kendall_var_s_no_ties(n);
 
     // Continuity correction
     let z_stat = if s > 0 {
@@ -390,6 +365,120 @@ fn kendall_test(
         method: CorrelationMethod::Kendall,
         method_name: "Kendall's rank correlation tau".to_string(),
     })
+}
+
+/// `t(t-1)/2`, the number of pairs among `t` values, with checked `u64` arithmetic.
+fn tie_pairs(t: usize) -> EconResult<u64> {
+    let t = t as u64;
+    t.checked_mul(t.saturating_sub(1))
+        .map(|v| v / 2)
+        .ok_or_else(|| {
+            EconError::ResourceLimit(
+                "Kendall's tau: the number of observation pairs is too large".to_string(),
+            )
+        })
+}
+
+/// Kendall's S = (concordant pairs) - (discordant pairs), by Knight's (1966) algorithm.
+///
+/// Sort by `(x, y)`, count the pairs tied in x (`n1`) and in both (`n3`), merge-sort the y
+/// values in that order counting strict inversions (the discordant pairs), and count the pairs
+/// tied in y (`n2`): `S = n0 - n1 - n2 + n3 - 2 * inversions`. O(n log n). Ties are exact
+/// equality, as in R (equal infinities tie; -0.0 equals 0.0). The callers have removed NaN pairs.
+fn kendall_s(x: &[f64], y: &[f64]) -> EconResult<i64> {
+    let n = x.len();
+    let n0 = tie_pairs(n)?;
+    // `+ 0.0` turns -0.0 into +0.0 so that total_cmp treats them as equal
+    let key = |v: f64| v + 0.0;
+
+    let mut order: Vec<usize> = resource::try_with_capacity(n, "Kendall sort order")?;
+    order.extend(0..n);
+    order.sort_unstable_by(|&a, &b| {
+        key(x[a])
+            .total_cmp(&key(x[b]))
+            .then_with(|| key(y[a]).total_cmp(&key(y[b])))
+    });
+
+    // Pairs tied in x (n1) and tied in both x and y (n3)
+    let mut n1 = 0u64;
+    let mut n3 = 0u64;
+    let mut i = 0;
+    while i < n {
+        let xi = key(x[order[i]]);
+        let mut j = i + 1;
+        while j < n && key(x[order[j]]) == xi {
+            j += 1;
+        }
+        n1 += tie_pairs(j - i)?;
+        let mut k = i;
+        while k < j {
+            let yk = key(y[order[k]]);
+            let mut l = k + 1;
+            while l < j && key(y[order[l]]) == yk {
+                l += 1;
+            }
+            n3 += tie_pairs(l - k)?;
+            k = l;
+        }
+        i = j;
+    }
+
+    // Bottom-up merge sort of y in (x, y) order, counting strict inversions
+    let mut a: Vec<f64> = resource::try_with_capacity(n, "Kendall merge buffer")?;
+    a.extend(order.iter().map(|&i| key(y[i])));
+    let mut buf: Vec<f64> = resource::try_vec(n, 0.0, "Kendall merge buffer")?;
+    let mut inversions = 0u64;
+    let mut width = 1usize;
+    while width < n {
+        resource::checkpoint()?;
+        let mut lo = 0;
+        while lo < n {
+            let mid = lo.saturating_add(width).min(n);
+            let hi = lo.saturating_add(width.saturating_mul(2)).min(n);
+            let (mut l, mut r, mut out) = (lo, mid, lo);
+            while l < mid && r < hi {
+                if a[r] < a[l] {
+                    buf[out] = a[r];
+                    r += 1;
+                    inversions += (mid - l) as u64;
+                } else {
+                    buf[out] = a[l];
+                    l += 1;
+                }
+                out += 1;
+            }
+            buf[out..out + (mid - l)].copy_from_slice(&a[l..mid]);
+            out += mid - l;
+            buf[out..out + (hi - r)].copy_from_slice(&a[r..hi]);
+            lo = hi;
+        }
+        std::mem::swap(&mut a, &mut buf);
+        width = width.saturating_mul(2);
+    }
+
+    // Pairs tied in y (n2), from the sorted y values
+    let mut n2 = 0u64;
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && a[j] == a[i] {
+            j += 1;
+        }
+        n2 += tie_pairs(j - i)?;
+        i = j;
+    }
+
+    let s = i128::from(n0) - i128::from(n1) - i128::from(n2) + i128::from(n3)
+        - 2 * i128::from(inversions);
+    i64::try_from(s).map_err(|_| {
+        EconError::ResourceLimit("Kendall's tau: the statistic does not fit in 64 bits".to_string())
+    })
+}
+
+/// Tie-free variance of Kendall's S, `n(n-1)(2n+5)/18`, with the product exact in `u128`.
+fn kendall_var_s_no_ties(n: usize) -> f64 {
+    let n = n as u128;
+    (n * n.saturating_sub(1) * (2 * n + 5)) as f64 / 18.0
 }
 
 /// Compute Pearson correlation coefficient.
@@ -485,6 +574,164 @@ pub fn run_cor_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reference: today's O(n^2) all-pairs Kendall test, copied verbatim.
+    fn kendall_test_pairwise_reference(
+        x: &[f64],
+        y: &[f64],
+        alternative: Alternative,
+        conf_level: f64,
+    ) -> EconResult<CorTestResult> {
+        let n = x.len();
+
+        // Count concordant and discordant pairs
+        let mut concordant = 0i64;
+        let mut discordant = 0i64;
+        let mut ties_x = 0i64;
+        let mut ties_y = 0i64;
+
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let dx = x[j] - x[i];
+                let dy = y[j] - y[i];
+
+                if dx.abs() < 1e-15 && dy.abs() < 1e-15 {
+                    // Tie in both
+                    ties_x += 1;
+                    ties_y += 1;
+                } else if dx.abs() < 1e-15 {
+                    ties_x += 1;
+                } else if dy.abs() < 1e-15 {
+                    ties_y += 1;
+                } else if dx * dy > 0.0 {
+                    concordant += 1;
+                } else {
+                    discordant += 1;
+                }
+            }
+        }
+
+        let n_pairs = (n * (n - 1) / 2) as i64;
+        let tau = (concordant - discordant) as f64 / n_pairs as f64;
+
+        // For the test, we use the normal approximation
+        // Var(S) = n(n-1)(2n+5)/18 for no ties
+        let s = concordant - discordant;
+        let var_s = (n * (n - 1) * (2 * n + 5)) as f64 / 18.0;
+
+        // Continuity correction
+        let z_stat = if s > 0 {
+            (s as f64 - 1.0) / var_s.sqrt()
+        } else if s < 0 {
+            (s as f64 + 1.0) / var_s.sqrt()
+        } else {
+            0.0
+        };
+
+        let normal = Normal::new(0.0, 1.0)
+            .map_err(|e| EconError::Computation(format!("Normal distribution error: {}", e)))?;
+
+        let p_value = match alternative {
+            Alternative::TwoSided => 2.0 * (1.0 - normal.cdf(z_stat.abs())),
+            Alternative::Less => normal.cdf(z_stat),
+            Alternative::Greater => 1.0 - normal.cdf(z_stat),
+        };
+
+        Ok(CorTestResult {
+            estimate: tau,
+            estimate_name: "tau".to_string(),
+            statistic: z_stat,
+            statistic_name: "z".to_string(),
+            p_value,
+            df: None,
+            conf_low: None,
+            conf_high: None,
+            conf_level,
+            n,
+            null_value: 0.0,
+            alternative,
+            method: CorrelationMethod::Kendall,
+            method_name: "Kendall's rank correlation tau".to_string(),
+        })
+    }
+
+    // R 4.3.3: set.seed(20261021); x <- round(rnorm(40), 4); y <- round(0.6 * x + rnorm(40, sd = 0.8), 4)
+    //   cor.test(x, y, method = "kendall", exact = FALSE, continuity = TRUE, alternative = alt)
+    const KX: [f64; 40] = [
+        0.1603, 0.5681, 0.5066, 1.0145, 0.6190, -0.6551, -0.7773, 0.4089, 1.7813, 0.8909, -0.3686,
+        -0.3427, 0.2088, -1.1010, -1.2737, 0.5803, -1.0766, 2.2568, -0.6514, 0.1311, -1.1748,
+        -0.5524, 1.6524, 0.8165, 1.4044, -0.5720, -0.5585, 0.5073, 0.8963, 1.1749, 0.2317, -0.3034,
+        0.6418, -0.3841, 0.1446, 0.8489, 0.8137, -0.4105, 0.8105, -1.3586,
+    ];
+    const KY: [f64; 40] = [
+        0.2247, -0.3042, 0.5043, 1.4535, -0.1108, -0.0848, 0.5737, -0.8745, 1.5106, -0.3778,
+        -0.1653, 0.0670, 1.1093, -2.0171, 0.3239, 1.2860, -1.4404, 1.2230, 0.4424, 0.1354, -1.5561,
+        -0.7617, 1.4101, -0.5054, 1.5702, -0.0184, -0.0037, -0.4206, 0.3890, -0.9830, 0.5311,
+        0.9519, 1.6406, -1.0129, -0.1247, -0.0295, 0.1230, -0.3533, -0.9709, 0.0493,
+    ];
+
+    #[test]
+    fn test_validate_kendall_tie_free_against_r() {
+        for (alt, p) in [
+            (Alternative::TwoSided, 0.021718583114218416),
+            (Alternative::Less, 0.9891407084428908),
+            (Alternative::Greater, 0.010859291557109208),
+        ] {
+            let r = cor_test(&KX, &KY, CorrelationMethod::Kendall, alt, 0.95).unwrap();
+            assert!((r.estimate - 0.2538461538461539).abs() < 1e-12);
+            assert!((r.statistic - 2.2952538084597247).abs() < 1e-12);
+            assert!((r.p_value - p).abs() < 1e-12, "{alt:?}: {}", r.p_value);
+        }
+        assert_eq!(kendall_s(&KX, &KY).unwrap(), 198); // R: S = 2*T - n(n-1)/2 = 2*489 - 780
+    }
+
+    fn lcg(seed: u64) -> impl FnMut() -> u64 {
+        let mut s = seed;
+        move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            s >> 33
+        }
+    }
+
+    #[test]
+    fn test_kendall_knight_matches_pairwise_reference_with_ties() {
+        let mut next = lcg(42);
+        let x: Vec<f64> = (0..500).map(|_| (next() % 21) as f64).collect();
+        let y: Vec<f64> = (0..500)
+            .map(|i| (next() % 13) as f64 + 0.5 * x[i])
+            .collect();
+        assert_eq!(kendall_s(&x, &y).unwrap(), 55869); // also computed by the planning port of the old loop
+        for alt in [
+            Alternative::TwoSided,
+            Alternative::Less,
+            Alternative::Greater,
+        ] {
+            let new = cor_test(&x, &y, CorrelationMethod::Kendall, alt, 0.95).unwrap();
+            let old = kendall_test_pairwise_reference(&x, &y, alt, 0.95).unwrap();
+            assert_eq!(
+                (new.estimate, new.statistic, new.p_value),
+                (old.estimate, old.statistic, old.p_value)
+            );
+        }
+    }
+
+    #[test]
+    fn test_kendall_s_scales_and_counts_ties() {
+        // 200,000 points, x tied in pairs, y strictly increasing: S = n(n-1)/2 - n/2
+        let n = 200_000usize;
+        let x: Vec<f64> = (0..n).map(|i| (i / 2) as f64).collect();
+        let y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        assert_eq!(kendall_s(&x, &y).unwrap(), 19_999_900_000 - 100_000);
+    }
+
+    #[test]
+    fn test_kendall_variance_does_not_overflow() {
+        // n(n-1)(2n+5) = 18522013229989500000 > u64::MAX; exact integer, then f64, then / 18
+        assert_eq!(kendall_var_s_no_ties(2_100_000), 1.0290007349994166e18);
+        assert_eq!(kendall_var_s_no_ties(40), 7366.666666666667);
+    }
 
     #[test]
     fn test_pearson_positive() {

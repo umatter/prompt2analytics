@@ -22,7 +22,9 @@ use rmcp::{
 const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{extract_column_f64, extract_numeric_matrix};
+use crate::tools::common::{
+    REFUSAL_NAMES, check_named_budget, echo_list, extract_column_f64, extract_numeric_matrix,
+};
 use crate::tools::requests::stats::{
     ApproxRequest, CancorRequest, CorrelationRequest, CovWtRequest, DensityRequest, EcdfRequest,
     FactorAnalysisRequest, FivenumRequest, IqrRequest, IsoregRequest, LoglinRequest, MadRequest,
@@ -162,11 +164,48 @@ impl AnalyticsServer {
         // Build dimensions
         let dimensions: Vec<usize> = factor_levels.iter().map(|l| l.len()).collect();
 
+        // Size the contingency table with checked arithmetic, then hold it to the budget
+        let n_cells = match p2a_core::resource::checked_len(&dimensions, "contingency table") {
+            Ok(n) => n,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Log-linear model refused: {e}"
+                ))]));
+            }
+        };
+        let limits = crate::tools::limits::current();
+        if let Err(msg) = check_named_budget(
+            "stats_loglin",
+            "table_cells",
+            n_cells as u64,
+            limits.table_cells,
+        ) {
+            let dims: Vec<String> = dimensions.iter().map(|d| d.to_string()).collect();
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Log-linear model refused: the contingency table of {} would have {n_cells} cells \
+                 ({}). {msg} Use factor columns with fewer distinct values.",
+                echo_list(&request.factor_columns, ", ", REFUSAL_NAMES),
+                echo_list(&dims, " x ", REFUSAL_NAMES)
+            ))]));
+        }
+
         // Build flattened contingency table
-        let n_cells: usize = dimensions.iter().product();
-        let mut table = vec![0.0; n_cells];
+        let mut table = match p2a_core::resource::try_vec(n_cells, 0.0, "contingency table") {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Log-linear model refused: {e}"
+                ))]));
+            }
+        };
 
         for (i, &count) in counts.iter().enumerate() {
+            if i % 65_536 == 0
+                && let Err(e) = p2a_core::resource::checkpoint()
+            {
+                // "Computation stopped: ...", raised while the table is being counted
+                return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
+            }
             // Compute cell index from factor indices
             let mut cell_idx = 0;
             let mut multiplier = 1;
@@ -645,6 +684,13 @@ impl AnalyticsServer {
             }
         };
 
+        let p = request.columns.len();
+        if let Err(msg) = check_square_matrix("stats_cov_wt", p) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Weighted covariance refused: {p} columns give a {p} x {p} matrix. {msg}"
+            ))]));
+        }
+
         let data = match extract_numeric_matrix(dataset, &request.columns) {
             Ok(d) => d,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
@@ -676,7 +722,7 @@ impl AnalyticsServer {
         // Flatten matrix data to row-major slice
         let n_rows = data.nrows();
         let n_cols = data.ncols();
-        let flat_data: Vec<f64> = data.iter().copied().collect();
+        let flat_data = into_row_major(data);
 
         let result = match run_cov_wt(
             &flat_data,
@@ -730,6 +776,13 @@ impl AnalyticsServer {
             }
         };
 
+        let p = request.columns.len();
+        if let Err(msg) = check_square_matrix("stats_mauchly_test", p) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Mauchly's test refused: {p} columns give a {p} x {p} matrix. {msg}"
+            ))]));
+        }
+
         let data = match extract_numeric_matrix(dataset, &request.columns) {
             Ok(d) => d,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
@@ -738,7 +791,7 @@ impl AnalyticsServer {
         // Flatten to row-major and call run_mauchly_test
         let n_rows = data.nrows();
         let n_cols = data.ncols();
-        let flat_data: Vec<f64> = data.iter().copied().collect();
+        let flat_data = into_row_major(data);
 
         let result = match run_mauchly_test(&flat_data, n_rows, n_cols) {
             Ok(r) => r,
@@ -1632,6 +1685,15 @@ impl AnalyticsServer {
         let xcenter = request.xcenter.unwrap_or(true);
         let ycenter = request.ycenter.unwrap_or(true);
 
+        let (p, q) = (request.x_columns.len(), request.y_columns.len());
+        let side = p.max(q);
+        if let Err(msg) = check_square_matrix("multivariate_cancor", side) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Canonical correlation refused: {p} X columns and {q} Y columns need {side} x \
+                 {side} matrices. {msg}"
+            ))]));
+        }
+
         let x_refs: Vec<&str> = request.x_columns.iter().map(|s| s.as_str()).collect();
         let y_refs: Vec<&str> = request.y_columns.iter().map(|s| s.as_str()).collect();
 
@@ -2092,5 +2154,245 @@ impl AnalyticsServer {
                 e
             ))])),
         }
+    }
+}
+
+/// Checks a `side x side` matrix against the `table_cells` budget of the installed limits (a
+/// product past `u64` counts as `u64::MAX`, so it passes only when the budget is unlimited).
+fn check_square_matrix(tool: &str, side: usize) -> Result<(), String> {
+    let cells = (side as u64).saturating_mul(side as u64);
+    check_named_budget(
+        tool,
+        "table_cells",
+        cells,
+        crate::tools::limits::current().table_cells,
+    )
+}
+
+/// The elements of `data` in row-major order, without a copy when it already has that layout
+/// (a matrix fresh from `extract_numeric_matrix` does).
+fn into_row_major(data: ndarray::Array2<f64>) -> Vec<f64> {
+    if !data.is_standard_layout() {
+        return data.iter().copied().collect();
+    }
+    let n = data.len();
+    let (raw, offset) = data.into_raw_vec_and_offset();
+    let start = offset.unwrap_or(0);
+    if start == 0 && raw.len() == n {
+        raw
+    } else {
+        raw[start..start + n].to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::common::test_support::{hosted_with, server_with, text};
+    use crate::tools::limits::{self, Limits};
+    use p2a_core::polars::prelude::*;
+
+    /// One unique string level per row and column, and a count column `n` = 1.0.
+    fn ids(n: usize, cols: &[&str]) -> DataFrame {
+        let mut columns: Vec<Column> = cols
+            .iter()
+            .map(|c| {
+                Column::new(
+                    (*c).into(),
+                    (0..n).map(|i| format!("{c}{i}")).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        columns.push(Column::new("n".into(), vec![1.0f64; n]));
+        DataFrame::new(columns).unwrap()
+    }
+
+    fn loglin_req(cols: &[&str]) -> LoglinRequest {
+        LoglinRequest {
+            dataset: "d".into(),
+            count_column: "n".into(),
+            factor_columns: cols.iter().map(|c| c.to_string()).collect(),
+            margins: None,
+            eps: None,
+            max_iter: None,
+        }
+    }
+
+    #[test]
+    fn loglin_refuses_table_above_table_cells() {
+        // 120 x 120 x 120 = 1,728,000 cells > 1,000,000 (hosted). Pre-fix: allocates and fits it.
+        let (rt, server) = server_with(vec![("d", ids(120, &["a", "b", "c"]))]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.stats_loglin(Parameters(loglin_req(&["a", "b", "c"]))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("1728000") && t.contains("table_cells") && t.contains("1000000"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn loglin_refusal_bounds_the_names_it_echoes() {
+        // 7 factors of 10 levels: 10^7 cells > 1,000,000. Pre-fix the refusal listed every
+        // factor name in full.
+        let names: Vec<String> = (0..7).map(|i| format!("{}{i}", "f".repeat(200))).collect();
+        let cols: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let (rt, server) = server_with(vec![("d", ids(10, &cols))]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.stats_loglin(Parameters(loglin_req(&cols))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("table_cells") && t.contains("(and 2 more)"),
+            "{t}"
+        );
+        assert!(!t.contains(&"f".repeat(65)), "{t}");
+    }
+
+    #[test]
+    fn loglin_cancelled_while_counting_says_so_once() {
+        // Pre-fix: "Log-linear model fitting stopped: Computation stopped: ...", raised while the
+        // table was still being counted
+        let (rt, server) = server_with(vec![("d", ids(4, &["a", "b"]))]);
+        let token = p2a_core::resource::CancelToken::new();
+        token.cancel();
+        let r =
+            p2a_core::resource::with_budget(p2a_core::resource::Budget::new(None, token), || {
+                rt.block_on(server.stats_loglin(Parameters(loglin_req(&["a", "b"]))))
+            })
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.starts_with("Computation stopped") && t.matches("stopped").count() == 1,
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn loglin_reports_overflowing_table_instead_of_panicking() {
+        // 1000^7 overflows usize. Pre-fix: debug panic "attempt to multiply with overflow".
+        let cols = ["a", "b", "c", "d", "e", "f", "g"];
+        let (rt, server) = server_with(vec![("d", ids(1000, &cols))]);
+        let r = limits::with_limits(Limits::off(), || {
+            rt.block_on(server.stats_loglin(Parameters(loglin_req(&cols))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("too large"), "{}", text(&r));
+    }
+
+    #[test]
+    fn loglin_small_table_still_runs_under_hosted_limits() {
+        let df = df!(
+            "a" => ["a1", "a1", "a1", "a2", "a2", "a2"],
+            "b" => ["b1", "b2", "b3", "b1", "b2", "b3"],
+            "n" => [12.0, 7.0, 9.0, 8.0, 11.0, 14.0]
+        )
+        .unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.stats_loglin(Parameters(loglin_req(&["a", "b"]))))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).contains("\"df\": 2"), "{}", text(&r));
+    }
+
+    fn xyw(n: usize) -> DataFrame {
+        let f = |k: f64| {
+            (0..n)
+                .map(|i| (i as f64 * k).sin() + i as f64 * 0.01)
+                .collect::<Vec<f64>>()
+        };
+        df!(
+            "x1" => f(0.37),
+            "x2" => f(1.13),
+            "x3" => f(2.07),
+            "y1" => f(0.71),
+            "w" => (0..n).map(|i| 1.0 + (i % 5) as f64 * 0.1).collect::<Vec<f64>>()
+        )
+        .unwrap()
+    }
+
+    fn cov_wt_req() -> CovWtRequest {
+        CovWtRequest {
+            dataset: "d".into(),
+            columns: vec!["x1".into(), "x2".into()],
+            weights: "w".into(),
+            center: None,
+            method: None,
+        }
+    }
+
+    #[test]
+    fn cancor_refuses_matrices_above_table_cells() {
+        let (rt, server) = server_with(vec![("d", xyw(30))]);
+        let req = CancorRequest {
+            dataset: "d".into(),
+            x_columns: vec!["x1".into(), "x2".into()],
+            y_columns: vec!["y1".into()],
+            xcenter: None,
+            ycenter: None,
+        };
+        let r = limits::with_limits(hosted_with(&["table_cells=3"]), || {
+            rt.block_on(server.multivariate_cancor(Parameters(req)))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("table_cells"), "{}", text(&r));
+    }
+
+    #[test]
+    fn cov_wt_refuses_matrix_above_table_cells() {
+        let (rt, server) = server_with(vec![("d", xyw(30))]);
+        let r = limits::with_limits(hosted_with(&["table_cells=3"]), || {
+            rt.block_on(server.stats_cov_wt(Parameters(cov_wt_req())))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("table_cells"), "{}", text(&r));
+    }
+
+    #[test]
+    fn mauchly_refuses_matrix_above_table_cells() {
+        let (rt, server) = server_with(vec![("d", xyw(30))]);
+        let req = MauchlyTestRequest {
+            dataset: "d".into(),
+            columns: vec!["x1".into(), "x2".into(), "x3".into()],
+        };
+        let r = limits::with_limits(hosted_with(&["table_cells=8"]), || {
+            rt.block_on(server.stats_mauchly_test(Parameters(req)))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+    }
+
+    #[test]
+    fn cov_wt_still_runs_under_hosted_limits() {
+        let (rt, server) = server_with(vec![("d", xyw(30))]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.stats_cov_wt(Parameters(cov_wt_req())))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+    }
+
+    #[test]
+    fn into_row_major_keeps_logical_order() {
+        let m = ndarray::array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        assert_eq!(
+            into_row_major(m.clone()),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+        assert_eq!(
+            into_row_major(m.reversed_axes()),
+            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
     }
 }

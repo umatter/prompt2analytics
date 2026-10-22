@@ -3,6 +3,7 @@
 //! Implements fivenum, IQR, mad, ecdf, and density from R stats.
 
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 #[cfg(feature = "spectral-analysis")]
 use rustfft::{FftPlanner, num_complex::Complex};
 use serde::{Deserialize, Serialize};
@@ -73,7 +74,7 @@ fn median_sorted(sorted: &[f64]) -> f64 {
     if n == 0 {
         return f64::NAN;
     }
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
@@ -218,18 +219,21 @@ pub struct EcdfResult {
 }
 
 impl EcdfResult {
-    /// Evaluate the ECDF at a point.
+    /// Evaluate the ECDF at a point: the proportion of data values `<= point`.
+    ///
+    /// The step is found by binary search over the sorted knots. A NaN point gives NaN
+    /// (R: `ecdf(x)(NA)` is `NA`).
     pub fn evaluate(&self, point: f64) -> f64 {
+        if point.is_nan() {
+            return f64::NAN;
+        }
         if self.x.is_empty() {
             return 0.0;
         }
 
-        // Find largest x <= point
-        match self.x.iter().position(|&xi| xi > point) {
-            Some(0) => 0.0,
-            Some(i) => self.y[i - 1],
-            None => 1.0,
-        }
+        // Number of knots <= point; the step value is the last of them
+        let i = self.x.partition_point(|&xi| xi <= point);
+        if i == 0 { 0.0 } else { self.y[i - 1] }
     }
 
     /// Evaluate ECDF at multiple points.
@@ -268,7 +272,8 @@ pub fn ecdf(data: &[f64]) -> EconResult<EcdfResult> {
         let val = sorted[i];
         // Count how many equal values
         let mut count = 1;
-        while i + count < n && (sorted[i + count] - val).abs() < 1e-15 {
+        while i + count < n && (sorted[i + count] == val || (sorted[i + count] - val).abs() < 1e-15)
+        {
             count += 1;
         }
 
@@ -322,6 +327,9 @@ pub struct DensityResult {
     pub kernel: DensityKernel,
 }
 
+/// Largest evaluation grid [`density`] accepts (`n` in `2..=2^20`, in every mode).
+const MAX_DENSITY_POINTS: usize = 1 << 20;
+
 /// Compute kernel density estimate using FFT-based convolution.
 ///
 /// This implementation uses Fast Fourier Transform for O(n + m log m) complexity
@@ -330,12 +338,16 @@ pub struct DensityResult {
 ///
 /// # Arguments
 ///
-/// * `data` - Input data
-/// * `bw` - Bandwidth (None for Silverman's rule of thumb)
+/// * `data` - Input data. NaN values are dropped. Infinite values are dropped the way R
+///   does it: the density is computed from the finite values and scaled by their share of
+///   the non-NaN values, and `n` reports the non-NaN count.
+/// * `bw` - Bandwidth (None for Silverman's rule of thumb, which needs two finite values);
+///   a supplied bandwidth must be finite and greater than 0
 /// * `kernel` - Kernel function to use
-/// * `n_points` - Number of evaluation points (default 512, must be power of 2 for FFT)
-/// * `from` - Lower bound of evaluation range (default: min - 3*bw)
-/// * `to` - Upper bound of evaluation range (default: max + 3*bw)
+/// * `n_points` - Number of evaluation points, 2 to 1,048,576 (default 512)
+/// * `from` - Lower bound of evaluation range (default: min - 3*bw); must be finite
+/// * `to` - Upper bound of evaluation range (default: max + 3*bw); must be finite. A default
+///   bound that overflows, or a range whose width `to - from` overflows, is refused.
 ///
 /// # Returns
 ///
@@ -348,25 +360,60 @@ pub fn density(
     from: Option<f64>,
     to: Option<f64>,
 ) -> EconResult<DensityResult> {
-    let clean: Vec<f64> = data.iter().filter(|x| !x.is_nan()).copied().collect();
+    // Grid size, checked before any arithmetic on it
+    let n_points_requested = n_points.unwrap_or(512);
+    if !(2..=MAX_DENSITY_POINTS).contains(&n_points_requested) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "n must be between 2 and {MAX_DENSITY_POINTS} grid points, got {n_points_requested}"
+            ),
+        });
+    }
+
+    if from.is_some_and(|v| !v.is_finite()) || to.is_some_and(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "from and to must be finite numbers".to_string(),
+        });
+    }
+
+    // N counts the non-NaN values; the estimate uses the finite ones (R's density)
+    let n_total = data.iter().filter(|x| !x.is_nan()).count();
+    let n_finite = data.iter().filter(|x| x.is_finite()).count();
+    let mut clean: Vec<f64> = resource::try_with_capacity(n_finite, "density data")?;
+    clean.extend(data.iter().copied().filter(|x| x.is_finite()));
 
     let n = clean.len();
     if n == 0 {
         return Err(EconError::EmptyDataset);
     }
 
-    // Compute bandwidth if not provided (Silverman's rule)
-    let bw = bw.unwrap_or_else(|| silverman_bandwidth(&clean));
+    // Bandwidth: a supplied one must be usable; otherwise Silverman's rule
+    let bw = match bw {
+        Some(bw) => {
+            if !(bw.is_finite() && bw > 0.0) {
+                return Err(EconError::InvalidSpecification {
+                    message: format!("bw must be a finite number greater than 0, got {bw}"),
+                });
+            }
+            bw
+        }
+        None => {
+            if n < 2 {
+                return Err(EconError::InvalidSpecification {
+                    message: "need at least 2 finite values to choose a bandwidth \
+                              automatically; supply bw"
+                        .to_string(),
+                });
+            }
+            silverman_bandwidth(&clean)
+        }
+    };
 
-    if bw <= 0.0 {
+    if !(bw.is_finite() && bw > 0.0) {
         return Err(EconError::InvalidSpecification {
             message: "Bandwidth must be positive".to_string(),
         });
     }
-
-    // Round n_points to power of 2 for efficient FFT
-    let n_points_requested = n_points.unwrap_or(512);
-    let n_points = n_points_requested.next_power_of_two();
 
     // Determine range
     let data_min = clean.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -374,104 +421,141 @@ pub fn density(
 
     let from = from.unwrap_or(data_min - 3.0 * bw);
     let to = to.unwrap_or(data_max + 3.0 * bw);
-    let range = to - from;
-    let step = range / n_points as f64;
+    // The default range can overflow for finite data near f64::MAX with a large bw, which would
+    // make the grid and the density NaN
+    if !(from.is_finite() && to.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "from and to must be finite numbers (the default range min - 3*bw .. \
+                      max + 3*bw overflows)"
+                .to_string(),
+        });
+    }
+    // Two finite bounds can still be too far apart for the grid step
+    if !(to - from).is_finite() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("the range from {from} to {to} is too wide (to - from overflows)"),
+        });
+    }
 
     // For small datasets or compact kernels, use direct computation
     // FFT overhead isn't worth it for small n
     #[cfg(feature = "spectral-analysis")]
-    let use_fft = n >= 100 && matches!(kernel, DensityKernel::Gaussian);
+    let mut result = if n >= 100 && matches!(kernel, DensityKernel::Gaussian) {
+        density_fft(&clean, bw, kernel, n_points_requested, from, to)?
+    } else {
+        density_direct(&clean, bw, kernel, n_points_requested, from, to)?
+    };
     #[cfg(not(feature = "spectral-analysis"))]
-    let use_fft = false;
+    let mut result = density_direct(&clean, bw, kernel, n_points_requested, from, to)?;
 
-    if !use_fft {
-        return density_direct(&clean, bw, kernel, n_points_requested, from, to);
+    // Infinite values carry mass that no finite grid point can show (R's totMass)
+    if n < n_total {
+        let mass = n as f64 / n_total as f64;
+        for v in &mut result.y {
+            *v *= mass;
+        }
+    }
+    result.n = n_total;
+
+    Ok(result)
+}
+
+/// FFT-based density for the Gaussian kernel. `n_points_requested` is in `2..=2^20`.
+#[cfg(feature = "spectral-analysis")]
+fn density_fft(
+    clean: &[f64],
+    bw: f64,
+    kernel: DensityKernel,
+    n_points_requested: usize,
+    from: f64,
+    to: f64,
+) -> EconResult<DensityResult> {
+    resource::checkpoint()?;
+    let n = clean.len();
+
+    // Round n_points to power of 2 for efficient FFT (at most 2^20, so no overflow)
+    let n_points = n_points_requested.next_power_of_two();
+    let range = to - from;
+    let step = range / n_points as f64;
+
+    // Step 1: Bin the data onto the grid
+    let fft_size = n_points * 2;
+    let mut binned = resource::try_vec(fft_size, 0.0f64, "density FFT grid")?; // Zero-pad for circular convolution
+    for &xi in clean {
+        if xi >= from && xi <= to {
+            let idx = ((xi - from) / step).floor() as usize;
+            let idx = idx.min(n_points - 1);
+            binned[idx] += 1.0;
+        }
     }
 
-    // FFT-based convolution for Gaussian kernel
-    #[cfg(feature = "spectral-analysis")]
-    {
-        // Step 1: Bin the data onto the grid
-        let mut binned = vec![0.0f64; n_points * 2]; // Zero-pad for circular convolution
-        for &xi in &clean {
-            if xi >= from && xi <= to {
-                let idx = ((xi - from) / step).floor() as usize;
-                let idx = idx.min(n_points - 1);
-                binned[idx] += 1.0;
-            }
-        }
+    // Step 2: Create kernel weights on the grid
+    // For Gaussian: K(u) = exp(-u²/2) / sqrt(2π)
+    let mut kernel_weights = resource::try_vec(fft_size, 0.0f64, "density kernel grid")?;
+    for i in 0..n_points {
+        let u = (i as f64 * step) / bw;
+        kernel_weights[i] = (-0.5 * u * u).exp();
+    }
+    // Mirror for negative side (wrap-around for circular convolution)
+    for i in 1..n_points {
+        kernel_weights[n_points * 2 - i] = kernel_weights[i];
+    }
 
-        // Step 2: Create kernel weights on the grid
-        // For Gaussian: K(u) = exp(-u²/2) / sqrt(2π)
-        let mut kernel_weights = vec![0.0f64; n_points * 2];
-        #[allow(unused_variables)]
-        let half = n_points;
-        for i in 0..n_points {
-            let u = (i as f64 * step) / bw;
-            kernel_weights[i] = (-0.5 * u * u).exp();
-        }
-        // Mirror for negative side (wrap-around for circular convolution)
-        for i in 1..n_points {
-            kernel_weights[n_points * 2 - i] = kernel_weights[i];
-        }
+    // Step 3: FFT both signals
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(fft_size);
+    let ifft = planner.plan_fft_inverse(fft_size);
 
-        // Step 3: FFT both signals
-        let fft_size = n_points * 2;
-        let mut planner = FftPlanner::<f64>::new();
-        let fft = planner.plan_fft_forward(fft_size);
-        let ifft = planner.plan_fft_inverse(fft_size);
+    let mut binned_complex: Vec<Complex<f64>> =
+        resource::try_with_capacity(fft_size, "density FFT grid")?;
+    binned_complex.extend(binned.iter().map(|&x| Complex::new(x, 0.0)));
+    let mut kernel_complex: Vec<Complex<f64>> =
+        resource::try_with_capacity(fft_size, "density kernel grid")?;
+    kernel_complex.extend(kernel_weights.iter().map(|&x| Complex::new(x, 0.0)));
 
-        let mut binned_complex: Vec<Complex<f64>> =
-            binned.iter().map(|&x| Complex::new(x, 0.0)).collect();
-        let mut kernel_complex: Vec<Complex<f64>> = kernel_weights
-            .iter()
-            .map(|&x| Complex::new(x, 0.0))
-            .collect();
+    fft.process(&mut binned_complex);
+    fft.process(&mut kernel_complex);
 
-        fft.process(&mut binned_complex);
-        fft.process(&mut kernel_complex);
-
-        // Step 4: Multiply in frequency domain
-        let mut result_complex: Vec<Complex<f64>> = binned_complex
+    // Step 4: Multiply in frequency domain
+    let mut result_complex: Vec<Complex<f64>> =
+        resource::try_with_capacity(fft_size, "density FFT grid")?;
+    result_complex.extend(
+        binned_complex
             .iter()
             .zip(kernel_complex.iter())
-            .map(|(a, b)| a * b)
-            .collect();
+            .map(|(a, b)| a * b),
+    );
 
-        // Step 5: Inverse FFT
-        ifft.process(&mut result_complex);
+    // Step 5: Inverse FFT
+    ifft.process(&mut result_complex);
 
-        // Step 6: Extract and normalize the density values
-        let norm_factor =
-            1.0 / (n as f64 * bw * (2.0 * std::f64::consts::PI).sqrt() * fft_size as f64);
-        let y: Vec<f64> = result_complex[..n_points_requested]
+    // Step 6: Extract and normalize the density values
+    let norm_factor = 1.0 / (n as f64 * bw * (2.0 * std::f64::consts::PI).sqrt() * fft_size as f64);
+    let mut y: Vec<f64> = resource::try_with_capacity(n_points_requested, "density values")?;
+    y.extend(
+        result_complex[..n_points_requested]
             .iter()
-            .map(|c| (c.re * norm_factor).max(0.0)) // Ensure non-negative
-            .collect();
+            .map(|c| (c.re * norm_factor).max(0.0)), // Ensure non-negative
+    );
 
-        // Create x values
-        let x: Vec<f64> = (0..n_points_requested)
-            .map(|i| from + i as f64 * (range / (n_points_requested - 1) as f64))
-            .collect();
+    // Create x values
+    let mut x: Vec<f64> = resource::try_with_capacity(n_points_requested, "density grid")?;
+    x.extend(
+        (0..n_points_requested)
+            .map(|i| from + i as f64 * (range / (n_points_requested - 1) as f64)),
+    );
 
-        Ok(DensityResult {
-            x,
-            y,
-            bw,
-            n,
-            kernel,
-        })
-    }
-
-    // Fallback for when spectral-analysis feature is disabled but use_fft was somehow true
-    // This shouldn't happen due to the cfg above, but satisfies the compiler
-    #[cfg(not(feature = "spectral-analysis"))]
-    {
-        unreachable!("FFT path should not be reached without spectral-analysis feature")
-    }
+    Ok(DensityResult {
+        x,
+        y,
+        bw,
+        n,
+        kernel,
+    })
 }
 
 /// Direct density computation for small datasets or non-Gaussian kernels.
+/// `n_points` is in `2..=2^20`; each grid point honours cancellation.
 fn density_direct(
     data: &[f64],
     bw: f64,
@@ -482,18 +566,18 @@ fn density_direct(
 ) -> EconResult<DensityResult> {
     let n = data.len();
     let step = (to - from) / (n_points - 1) as f64;
-    let x: Vec<f64> = (0..n_points).map(|i| from + i as f64 * step).collect();
+    let mut x: Vec<f64> = resource::try_with_capacity(n_points, "density grid")?;
+    x.extend((0..n_points).map(|i| from + i as f64 * step));
 
-    let y: Vec<f64> = x
-        .iter()
-        .map(|&xi| {
-            let sum: f64 = data
-                .iter()
-                .map(|&xj| kernel_function((xi - xj) / bw, kernel))
-                .sum();
-            sum / (n as f64 * bw)
-        })
-        .collect();
+    let mut y: Vec<f64> = resource::try_with_capacity(n_points, "density values")?;
+    for &xi in &x {
+        resource::checkpoint()?;
+        let sum: f64 = data
+            .iter()
+            .map(|&xj| kernel_function((xi - xj) / bw, kernel))
+            .sum();
+        y.push(sum / (n as f64 * bw));
+    }
 
     Ok(DensityResult {
         x,
@@ -612,6 +696,299 @@ pub fn run_density(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
+
+    // R 4.3.3: dx as below; d <- density(dx, bw = 0.4, n = 50)
+    //   y_exact <- sapply(d$x, function(x0) mean(dnorm((x0 - dx) / 0.4)) / 0.4)
+    //   (d$x is seq(min(dx) - 1.2, max(dx) + 1.2, length.out = 50) = seq(-2.33, 4.25, length.out = 50))
+    const DX: [f64; 30] = [
+        1.21, 0.37, -0.45, 2.08, 1.66, 0.92, -1.13, 0.05, 1.48, 2.61, 0.74, -0.28, 1.02, 3.05,
+        0.51, -0.66, 1.87, 1.33, 0.19, 2.34, -0.91, 0.88, 1.55, 0.62, 2.79, -0.12, 1.11, 0.43,
+        1.94, 0.27,
+    ];
+    const R_DENSITY_Y: [f64; 50] = [
+        0.0004363519876198267,
+        0.0011692584065983236,
+        0.0028209682399536933,
+        0.006139718786480934,
+        0.012085661044025012,
+        0.021588697620735155,
+        0.03515232402227199,
+        0.05248249555024953,
+        0.07240230641008048,
+        0.09320139951982209,
+        0.11329299657713199,
+        0.13182480056904658,
+        0.14892074872175362,
+        0.1654908332270454,
+        0.18278756602578952,
+        0.20191561913472617,
+        0.2233862179068877,
+        0.24676799917899828,
+        0.2705825178601217,
+        0.2926302675968569,
+        0.31072011385022885,
+        0.32343305591948524,
+        0.3304479774923035,
+        0.33227483885856157,
+        0.3297024362034387,
+        0.32341490920712346,
+        0.31395069690946276,
+        0.30181766815669364,
+        0.2875149690513099,
+        0.27143665615716134,
+        0.2538360650640523,
+        0.23498985990967755,
+        0.21547546547342242,
+        0.1962924254325087,
+        0.17860438814941712,
+        0.16315809414073765,
+        0.1497433839758532,
+        0.1371201384962765,
+        0.12356060275358817,
+        0.10773718732989186,
+        0.08944675405233493,
+        0.06976709054395504,
+        0.050591141729530165,
+        0.033832898601711146,
+        0.020736025517617118,
+        0.01158982895687627,
+        0.00588378051173514,
+        0.0027042878032145995,
+        0.0011223260401492597,
+        0.0004196861378714332,
+    ];
+
+    fn r_grid(i: usize) -> f64 {
+        -2.33 + i as f64 * (4.25 - -2.33) / 49.0
+    }
+
+    #[test]
+    fn test_validate_density_direct_path_against_r() {
+        // 30 points < 100, so this is the direct path with or without spectral-analysis
+        let d = density(
+            &DX,
+            Some(0.4),
+            DensityKernel::Gaussian,
+            Some(50),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!((d.x.len(), d.n), (50, 30));
+        for i in 0..50 {
+            assert!((d.x[i] - r_grid(i)).abs() < 1e-12, "x[{i}]");
+            assert!(
+                (d.y[i] - R_DENSITY_Y[i]).abs() < 1e-12 * R_DENSITY_Y[i].max(1.0),
+                "y[{i}]"
+            );
+        }
+    }
+
+    #[test]
+    fn test_density_rejects_grid_size_outside_bounds() {
+        // pre-fix: n = 0 underflows `n_points - 1` (debug panic); n = 1 returns [NaN]; 2^20 + 1 is accepted
+        for n in [0usize, 1, (1 << 20) + 1, usize::MAX] {
+            let e =
+                density(&DX, Some(0.4), DensityKernel::Gaussian, Some(n), None, None).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("1048576")),
+                "n={n}: {e}"
+            );
+        }
+        assert!(density(&DX, Some(0.4), DensityKernel::Gaussian, Some(2), None, None).is_ok());
+    }
+
+    #[test]
+    fn test_density_rejects_bad_bandwidth_and_range() {
+        for bw in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            let e =
+                density(&DX, Some(bw), DensityKernel::Gaussian, Some(50), None, None).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("bw")),
+                "bw={bw}: {e}"
+            );
+        }
+        for (from, to) in [(Some(f64::NAN), None), (None, Some(f64::INFINITY))] {
+            assert!(matches!(
+                density(&DX, Some(0.4), DensityKernel::Gaussian, Some(50), from, to),
+                Err(EconError::InvalidSpecification { .. })
+            ));
+        }
+        // automatic bandwidth needs two finite values (pre-fix: Silverman gives NaN and the call succeeds)
+        let e = density(
+            &[1.0, f64::INFINITY],
+            None,
+            DensityKernel::Gaussian,
+            Some(50),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("bw"), "{e}");
+    }
+
+    #[test]
+    fn test_density_rejects_overflowing_default_range() {
+        // min - 3*bw and max + 3*bw overflow to -inf/+inf for finite data and a finite bw.
+        // Pre-fix the grid and the density were NaN and the call returned Ok.
+        for (data, from, to) in [
+            (vec![1e308, 1.5e308], None, None),
+            (vec![1e308, 1.5e308], Some(0.0), None),
+            (vec![-1e308, -1.5e308], None, Some(0.0)),
+            // two finite bounds whose difference overflows
+            (vec![0.0, 1.0], Some(-1e308), Some(1e308)),
+        ] {
+            let e = density(
+                &data,
+                Some(1e308),
+                DensityKernel::Gaussian,
+                Some(16),
+                from,
+                to,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("overflows")),
+                "{data:?}: {e}"
+            );
+        }
+        // The same data with a range that fits still works
+        let r = density(
+            &[1e308, 1.5e308],
+            Some(1e306),
+            DensityKernel::Gaussian,
+            Some(16),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(r.x.iter().chain(&r.y).all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_density_drops_infinite_values_like_r() {
+        // R: density(c(dx, Inf, -Inf), bw = 0.4, n = 50) has d$x unchanged, y scaled by 30/32 and n = 32
+        let mut data = DX.to_vec();
+        data.extend([f64::INFINITY, f64::NEG_INFINITY, f64::NAN]); // NaN is dropped and not counted, as in R with na.rm
+        let d = density(
+            &data,
+            Some(0.4),
+            DensityKernel::Gaussian,
+            Some(50),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(d.n, 32);
+        for i in 0..50 {
+            assert!((d.x[i] - r_grid(i)).abs() < 1e-12);
+            assert!(
+                (d.y[i] - R_DENSITY_Y[i] * 30.0 / 32.0).abs() < 1e-12,
+                "y[{i}]"
+            );
+        }
+    }
+
+    #[test]
+    fn test_density_honours_cancellation() {
+        let t = CancelToken::new();
+        t.cancel();
+        let r = resource::with_budget(Budget::new(None, t), || {
+            density(
+                &DX,
+                Some(0.4),
+                DensityKernel::Epanechnikov,
+                Some(50),
+                None,
+                None,
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    // R 4.3.3: ex <- c(2.3,-0.7,1.1,2.3,0.4,-0.7,3.9,1.1,1.1,0.0,-2.5,0.4); Fn <- ecdf(ex); Fn(at)
+    #[test]
+    fn test_validate_ecdf_against_r() {
+        let ex = [
+            2.3, -0.7, 1.1, 2.3, 0.4, -0.7, 3.9, 1.1, 1.1, 0.0, -2.5, 0.4,
+        ];
+        let at = [
+            -3.0, -2.5, -1.0, -0.7, 0.0, 0.2, 0.4, 1.1, 1.5, 2.3, 3.9, 4.5,
+        ];
+        let r_at = [
+            0.0,
+            1.0 / 12.0,
+            1.0 / 12.0,
+            3.0 / 12.0,
+            4.0 / 12.0,
+            4.0 / 12.0,
+            6.0 / 12.0,
+            9.0 / 12.0,
+            9.0 / 12.0,
+            11.0 / 12.0,
+            1.0,
+            1.0,
+        ];
+        let f = ecdf(&ex).unwrap();
+        assert_eq!(f.x, vec![-2.5, -0.7, 0.0, 0.4, 1.1, 2.3, 3.9]); // R: knots(Fn)
+        for (got, want) in f.evaluate_many(&at).iter().zip(r_at) {
+            assert!((got - want).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn test_ecdf_evaluate_nan_is_nan() {
+        // R: ecdf(x)(NA) is NA; pre-fix returned 1.0
+        assert!(ecdf(&[1.0, 2.0, 3.0]).unwrap().evaluate(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_ecdf_evaluate_matches_linear_scan() {
+        let data: Vec<f64> = (0..500)
+            .map(|i| ((i * 7919) % 103) as f64 * 0.25 - 10.0)
+            .collect(); // many ties
+        let f = ecdf(&data).unwrap();
+        let naive = |p: f64| match f.x.iter().position(|&xi| xi > p) {
+            Some(0) => 0.0,
+            Some(i) => f.y[i - 1],
+            None => 1.0,
+        };
+        let mut pts: Vec<f64> = f.x.clone();
+        pts.extend(f.x.iter().map(|v| v + 0.125));
+        pts.extend([f64::NEG_INFINITY, f64::INFINITY, -1e300, 1e300]);
+        for p in pts {
+            assert_eq!(f.evaluate(p), naive(p), "p={p}");
+        }
+    }
+
+    #[test]
+    fn test_ecdf_groups_equal_infinities() {
+        // R: knots(ecdf(c(1, Inf, Inf))) = c(1, Inf)
+        let f = ecdf(&[1.0, f64::INFINITY, f64::INFINITY]).unwrap();
+        assert_eq!(f.x, vec![1.0, f64::INFINITY]);
+        assert_eq!(f.y, vec![1.0 / 3.0, 1.0]);
+    }
+
+    #[cfg(feature = "spectral-analysis")]
+    #[test]
+    fn test_density_fft_grid_respects_allocation_ceiling() {
+        // 200 points take the FFT path; the zero-padded grid is 1024 f64 = 8192 bytes > 4096
+        let data: Vec<f64> = (0..200)
+            .map(|i| (i as f64 * 0.37).sin() * 3.0 + i as f64 * 0.01)
+            .collect();
+        let r = resource::with_alloc_ceiling(Some(4096), || {
+            density(
+                &data,
+                Some(0.4),
+                DensityKernel::Gaussian,
+                Some(512),
+                None,
+                None,
+            )
+        });
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))));
+    }
 
     #[test]
     fn test_fivenum() {

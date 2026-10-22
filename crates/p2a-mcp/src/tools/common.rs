@@ -161,26 +161,160 @@ pub fn extract_numeric_matrix(
         return Err("At least one column must be specified".to_string());
     }
 
-    let mut data = ndarray::Array2::zeros((n_rows, n_cols));
+    // Fallible, so an n x p request above the allocation ceiling is an error, not an abort
+    let mut data = p2a_core::resource::try_zeros2(n_rows, n_cols, "numeric matrix")
+        .map_err(|e| e.to_string())?;
 
     for (j, col_name) in columns.iter().enumerate() {
         let col = df
             .column(col_name)
             .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
 
-        let values: Vec<f64> = col
+        let cast = col
             .cast(&DataType::Float64)
-            .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", col_name, e))?
+            .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", col_name, e))?;
+        let values = cast
             .f64()
-            .map_err(|e| format!("Column '{}' is not numeric: {}", col_name, e))?
-            .into_iter()
-            .map(|v: Option<f64>| v.unwrap_or(f64::NAN))
-            .collect();
+            .map_err(|e| format!("Column '{}' is not numeric: {}", col_name, e))?;
 
-        for (i, &val) in values.iter().enumerate() {
-            data[[i, j]] = val;
+        for (cell, v) in data.column_mut(j).iter_mut().zip(values) {
+            *cell = v.unwrap_or(f64::NAN);
         }
     }
 
     Ok(data)
+}
+
+/// Check a size derived from the data (not a request field) against a named budget of the
+/// installed request limits.
+///
+/// `limit` is the budget value the caller read from [`crate::tools::limits::current`] (for
+/// example `limits.table_cells`); `None` passes. On refusal this returns the LLM-readable message
+/// and logs the override key an operator would raise.
+pub fn check_named_budget(
+    tool: &str,
+    knob: &'static str,
+    requested: u64,
+    limit: Option<u64>,
+) -> Result<(), String> {
+    crate::tools::limits::current()
+        .check_budget(tool, knob, requested, limit)
+        .map_err(|v| {
+            tracing::info!(
+                tool,
+                knob = v.override_key,
+                requested,
+                limit = %v.limit,
+                "request refused by a named budget"
+            );
+            v.message
+        })
+}
+
+/// How many caller-supplied names a refusal lists before "(and N more)".
+pub(crate) const REFUSAL_NAMES: usize = 5;
+
+/// Caller-supplied names for a refusal, joined by `sep`: each cut by
+/// [`crate::tools::limits::echo`], at most `max` of them, then "(and N more)".
+pub(crate) fn echo_list<S: AsRef<str>>(items: &[S], sep: &str, max: usize) -> String {
+    let mut out = items
+        .iter()
+        .take(max)
+        .map(|s| crate::tools::limits::echo(s.as_ref()))
+        .collect::<Vec<_>>()
+        .join(sep);
+    if items.len() > max {
+        out.push_str(&format!(" (and {} more)", items.len() - max));
+    }
+    out
+}
+
+/// Shared helpers for handler unit tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::server::AnalyticsServer;
+    use crate::tools::limits::Limits;
+    use p2a_core::polars::prelude::DataFrame;
+    use rmcp::model::CallToolResult;
+
+    /// A current-thread runtime and a server holding each (name, frame) as a dataset.
+    pub(crate) fn server_with(
+        datasets: Vec<(&str, DataFrame)>,
+    ) -> (tokio::runtime::Runtime, AnalyticsServer) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let server = AnalyticsServer::new();
+        rt.block_on(async {
+            let mut map = server.datasets.write().await;
+            for (name, df) in datasets {
+                map.insert(name.to_string(), p2a_core::data::Dataset::new(df));
+            }
+        });
+        (rt, server)
+    }
+
+    /// The concatenated text content of a tool result.
+    pub(crate) fn text(r: &CallToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| c.raw.as_text())
+            .map(|t| t.text.as_str())
+            .collect()
+    }
+
+    /// `Limits::hosted()` with `key=value` overrides applied.
+    pub(crate) fn hosted_with(overrides: &[&str]) -> Limits {
+        Limits::hosted()
+            .with_overrides(&overrides.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .expect("valid limit overrides")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_named_budget_refuses_over_and_passes_unlimited() {
+        let e = check_named_budget("stats_loglin", "table_cells", 2_000_000, Some(1_000_000))
+            .unwrap_err();
+        assert!(
+            e.contains("table_cells") && e.contains("2000000") && e.contains("1000000"),
+            "{e}"
+        );
+        assert!(check_named_budget("stats_loglin", "table_cells", u64::MAX, None).is_ok());
+    }
+
+    #[test]
+    fn echo_list_cuts_each_name_and_the_list() {
+        let long = "n".repeat(200);
+        let names: Vec<String> = (0..7).map(|i| format!("{long}{i}")).collect();
+        let s = echo_list(&names, ", ", 3);
+        assert!(s.ends_with(" (and 4 more)"), "{s}");
+        assert_eq!(s.matches(&"n".repeat(64)).count(), 3, "{s}");
+        assert!(!s.contains(&"n".repeat(65)), "{s}");
+        assert_eq!(echo_list(&["a", "b"], " x ", 3), "a x b");
+    }
+
+    #[test]
+    fn extract_numeric_matrix_allocation_is_fallible() {
+        use p2a_core::polars::prelude::*;
+        let ds = p2a_core::data::Dataset::new(
+            df!("x" => (0..200).map(|i| i as f64 * 0.5).collect::<Vec<_>>()).unwrap(),
+        );
+        let e = p2a_core::resource::with_alloc_ceiling(Some(1024), || {
+            extract_numeric_matrix(&ds, &["x".to_string()])
+        })
+        .unwrap_err();
+        assert!(e.contains("limit"), "{e}"); // 200 x 1 x 8 = 1600 bytes > 1024
+        // repeated names are still allowed
+        assert_eq!(
+            extract_numeric_matrix(&ds, &["x".to_string(), "x".to_string()])
+                .unwrap()
+                .dim(),
+            (200, 2)
+        );
+    }
 }

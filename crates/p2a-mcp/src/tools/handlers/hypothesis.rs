@@ -12,6 +12,8 @@
 //! - And more
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::check_named_budget;
+use crate::tools::limits::echo;
 use crate::tools::requests::hypothesis::*;
 use p2a_core::stats::{
     Alternative, CmhAlternative, PValueAdjustMethod, PoissonAlternative, mcnemar_test, mood_test,
@@ -143,22 +145,89 @@ impl AnalyticsServer {
 
         let correct = request.correct.unwrap_or(true);
 
+        // Size the table before any work, when a budget depends on its size: both counts include
+        // null as a level, as the core's `unique()` does. A missing column is left to the core
+        // to report; a count that fails is a refusal, since the budget could not be checked.
+        let limits = crate::tools::limits::current();
+        let mut cells: Option<usize> = None;
+        if limits.table_cells.is_some() || limits.response_bytes.is_some() {
+            let df = dataset.df();
+            let (r, c) = match (
+                budget_level_count(df, &request.row_var),
+                budget_level_count(df, &request.col_var),
+            ) {
+                (Ok(r), Ok(c)) => (r, c),
+                (Err(msg), _) | (_, Err(msg)) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Chi-squared test of independence refused: {msg}"
+                    ))]));
+                }
+            };
+            if let (Some(r), Some(c)) = (r, c) {
+                let (row_var, col_var) = (echo(&request.row_var), echo(&request.col_var));
+                let Some(n) = r.checked_mul(c) else {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Chi-squared test of independence refused: `{row_var}` has {r} levels \
+                         and `{col_var}` has {c}, a table that is too large to count."
+                    ))]));
+                };
+                if let Err(msg) = check_named_budget(
+                    "hypothesis_chisq_independence",
+                    "table_cells",
+                    n as u64,
+                    limits.table_cells,
+                ) {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Chi-squared test of independence refused: `{row_var}` has {r} levels \
+                         and `{col_var}` has {c}, a table of {n} cells. {msg} Use columns with \
+                         fewer distinct values."
+                    ))]));
+                }
+                cells = Some(n);
+            }
+        }
+
         match run_chisq_independence(dataset, &request.row_var, &request.col_var, correct) {
             Ok(result) => {
-                let json_output = serde_json::json!({
-                    "test": result.test_name,
-                    "statistic": result.statistic,
-                    "df": result.df,
-                    "p_value": result.p_value,
-                    "significance": result.significance.to_string(),
-                    "n_rows": result.n_rows,
-                    "n_cols": result.n_cols,
-                    "observed": result.observed,
-                    "expected": result.expected,
-                    "residuals": result.residuals,
-                    "std_residuals": result.std_residuals,
-                    "yates_correction": result.yates_correction,
-                });
+                // The four per-cell arrays take about 4 x 32 bytes of JSON per cell; leave them
+                // out when they could not fit the response budget.
+                let n_cells = cells.unwrap_or(result.observed.len());
+                let fits = limits
+                    .response_bytes
+                    .is_none_or(|cap| (n_cells as u64).saturating_mul(128) <= cap);
+                let mut out = serde_json::Map::new();
+                out.insert("test".into(), serde_json::json!(result.test_name));
+                out.insert("statistic".into(), serde_json::json!(result.statistic));
+                out.insert("df".into(), serde_json::json!(result.df));
+                out.insert("p_value".into(), serde_json::json!(result.p_value));
+                out.insert(
+                    "significance".into(),
+                    serde_json::json!(result.significance.to_string()),
+                );
+                out.insert("n_rows".into(), serde_json::json!(result.n_rows));
+                out.insert("n_cols".into(), serde_json::json!(result.n_cols));
+                if fits {
+                    out.insert("observed".into(), serde_json::json!(result.observed));
+                    out.insert("expected".into(), serde_json::json!(result.expected));
+                    out.insert("residuals".into(), serde_json::json!(result.residuals));
+                    out.insert(
+                        "std_residuals".into(),
+                        serde_json::json!(result.std_residuals),
+                    );
+                } else {
+                    out.insert(
+                        "per_cell_arrays".into(),
+                        serde_json::json!(format!(
+                            "omitted: a table of {n_cells} cells is too large to return; the \
+                             statistic, df and p-value are complete"
+                        )),
+                    );
+                }
+                out.insert(
+                    "yates_correction".into(),
+                    serde_json::json!(result.yates_correction),
+                );
+                let json_output = serde_json::Value::Object(out);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -987,6 +1056,15 @@ impl AnalyticsServer {
 
         let pool_sd = request.pool_sd.unwrap_or(false);
 
+        if let Err(msg) = check_pairwise_groups(
+            dataset,
+            "hypothesis_pairwise_t_test",
+            "t-test",
+            &request.factor,
+        ) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
+
         match run_pairwise_t_test(
             dataset,
             &request.response,
@@ -996,13 +1074,16 @@ impl AnalyticsServer {
             p_adjust_method,
         ) {
             Ok(result) => {
-                let k = result.group_names.len();
-                let mut p_matrix: Vec<Vec<Option<f64>>> = vec![vec![None; k]; k];
-                for i in 1..k {
-                    for j in 0..i {
-                        p_matrix[i][j] = Some(result.p_values_adj[result.index(i, j)]);
+                let p_matrix = match lower_triangular_p_matrix(result.group_names.len(), |i, j| {
+                    result.p_values_adj[result.index(i, j)]
+                }) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Pairwise t-test failed: {e}"
+                        ))]));
                     }
-                }
+                };
 
                 let output = serde_json::json!({
                     "test": result.test_name,
@@ -1077,6 +1158,15 @@ impl AnalyticsServer {
             None => Alternative::TwoSided,
         };
 
+        if let Err(msg) = check_pairwise_groups(
+            dataset,
+            "hypothesis_pairwise_wilcox",
+            "Wilcoxon test",
+            &request.factor,
+        ) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
+
         match run_pairwise_wilcox_test(
             dataset,
             &request.response,
@@ -1086,13 +1176,16 @@ impl AnalyticsServer {
             request.exact,
         ) {
             Ok(result) => {
-                let k = result.group_names.len();
-                let mut p_matrix: Vec<Vec<Option<f64>>> = vec![vec![None; k]; k];
-                for i in 1..k {
-                    for j in 0..i {
-                        p_matrix[i][j] = Some(result.p_values_adj[result.index(i, j)]);
+                let p_matrix = match lower_triangular_p_matrix(result.group_names.len(), |i, j| {
+                    result.p_values_adj[result.index(i, j)]
+                }) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Pairwise Wilcoxon test failed: {e}"
+                        ))]));
                     }
-                }
+                };
 
                 let output = serde_json::json!({
                     "test": result.test_name,
@@ -1612,5 +1705,328 @@ impl AnalyticsServer {
                 e
             ))])),
         }
+    }
+}
+
+/// Refuses a pairwise test whose factor has more groups than the `max_groups` budget, before any
+/// of the k(k-1)/2 tests run.
+///
+/// The count is the factor's distinct values minus one for null, an upper bound on the core's k
+/// (the core also drops rows whose response is missing). Nothing is counted when `max_groups` is
+/// off. A missing column is left to the core to report; a count that fails is a refusal.
+fn check_pairwise_groups(
+    dataset: &p2a_core::data::Dataset,
+    tool: &str,
+    label: &str,
+    factor: &str,
+) -> Result<(), String> {
+    let Some(max_groups) = crate::tools::limits::current().max_groups else {
+        return Ok(());
+    };
+    let Ok(col) = dataset.df().column(factor) else {
+        return Ok(());
+    };
+    let n_unique = level_count_or_refusal(factor, col.n_unique())
+        .map_err(|msg| format!("Pairwise {label} refused: {msg}"))?;
+    let k = n_unique.saturating_sub(usize::from(col.null_count() > 0)) as u64;
+    check_named_budget(tool, "max_groups", k, Some(max_groups as u64)).map_err(|msg| {
+        let comparisons = k.saturating_mul(k.saturating_sub(1)) / 2;
+        format!(
+            "Pairwise {label} refused: factor `{}` has {k} groups, which needs \
+             {comparisons} comparisons. {msg} Use a factor with fewer levels or filter the data \
+             first.",
+            echo(factor)
+        )
+    })
+}
+
+/// The distinct values of column `name` (null counted as one, as the core's `unique()` does) for
+/// a size budget: `Ok(None)` when the column is missing, which the core reports itself.
+fn budget_level_count(
+    df: &p2a_core::polars::prelude::DataFrame,
+    name: &str,
+) -> Result<Option<usize>, String> {
+    let Ok(col) = df.column(name) else {
+        return Ok(None);
+    };
+    level_count_or_refusal(name, col.n_unique()).map(Some)
+}
+
+/// A distinct-value count a budget depends on, or the refusal when it could not be taken (the
+/// budget cannot be checked, so the request must not run unbounded).
+fn level_count_or_refusal(
+    name: &str,
+    count: p2a_core::polars::prelude::PolarsResult<usize>,
+) -> Result<usize, String> {
+    count.map_err(|e| {
+        format!(
+            "the distinct values of `{}` could not be counted to check this server's limits \
+             ({e}).",
+            echo(name)
+        )
+    })
+}
+
+/// The k x k lower-triangular matrix of adjusted p-values (row i, column j < i), with its size
+/// checked before it is built.
+fn lower_triangular_p_matrix(
+    k: usize,
+    p_value: impl Fn(usize, usize) -> f64,
+) -> Result<Vec<Vec<Option<f64>>>, String> {
+    let cells =
+        p2a_core::resource::checked_len(&[k, k], "p-value matrix").map_err(|e| e.to_string())?;
+    p2a_core::resource::check_alloc::<Option<f64>>(cells, "p-value matrix")
+        .map_err(|e| e.to_string())?;
+    let mut p_matrix: Vec<Vec<Option<f64>>> = vec![vec![None; k]; k];
+    for (i, row) in p_matrix.iter_mut().enumerate().skip(1) {
+        for (j, cell) in row.iter_mut().enumerate().take(i) {
+            *cell = Some(p_value(i, j));
+        }
+    }
+    Ok(p_matrix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::common::test_support::{hosted_with, server_with, text};
+    use crate::tools::limits::{self, Limits};
+    use p2a_core::polars::prelude::*;
+
+    /// `r{i}`, `c{i}`: an n x n table
+    fn pair_ids(n: usize) -> DataFrame {
+        df!(
+            "id1" => (0..n).map(|i| format!("r{i}")).collect::<Vec<_>>(),
+            "id2" => (0..n).map(|i| format!("c{i}")).collect::<Vec<_>>()
+        )
+        .unwrap()
+    }
+
+    fn chisq_req(row: &str, col: &str) -> ChiSquaredIndependenceRequest {
+        ChiSquaredIndependenceRequest {
+            dataset: "d".into(),
+            row_var: row.into(),
+            col_var: col.into(),
+            correct: None,
+        }
+    }
+
+    #[test]
+    fn chisq_independence_refuses_table_above_table_cells() {
+        // 1001 x 1001 = 1,002,001 > 1,000,000 cells
+        let (rt, server) = server_with(vec![("d", pair_ids(1001))]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req("id1", "id2"))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(t.contains("1002001") && t.contains("table_cells"), "{t}");
+    }
+
+    #[test]
+    fn chisq_independence_refusal_bounds_the_names_it_echoes() {
+        let (row, col) = ("r".repeat(300), "c".repeat(300));
+        let mut df = pair_ids(1001);
+        df.rename("id1", row.as_str().into()).unwrap();
+        df.rename("id2", col.as_str().into()).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req(&row, &col))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("table_cells") && t.contains(&"r".repeat(64)),
+            "{t}"
+        );
+        assert!(
+            !t.contains(&"r".repeat(65)) && !t.contains(&"c".repeat(65)),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn chisq_independence_with_limits_off_returns_every_array() {
+        // No budget: no level pre-count, and the per-cell arrays are always returned
+        let (rt, server) = server_with(vec![("d", pair_ids(50))]);
+        let r = limits::with_limits(Limits::off(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req("id1", "id2"))))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let v: serde_json::Value = serde_json::from_str(&text(&r)).unwrap();
+        assert_eq!(v["observed"].as_array().map(Vec::len), Some(2500));
+        assert_eq!(v["std_residuals"].as_array().map(Vec::len), Some(2500));
+    }
+
+    #[test]
+    fn level_count_failure_is_a_refusal_naming_the_column() {
+        // Pre-fix a failed n_unique() skipped the budget check and the core ran unbounded
+        let long = "g".repeat(100);
+        let e = level_count_or_refusal(&long, Err(PolarsError::ComputeError("boom".into())))
+            .unwrap_err();
+        assert!(
+            e.contains(&"g".repeat(64)) && !e.contains(&"g".repeat(65)),
+            "{e}"
+        );
+        assert!(
+            e.contains("could not be counted") && e.contains("boom"),
+            "{e}"
+        );
+        assert_eq!(level_count_or_refusal("g", Ok(7)), Ok(7));
+    }
+
+    #[test]
+    fn chisq_independence_omits_per_cell_arrays_above_response_budget() {
+        // 400 x 400 = 160,000 cells: within table_cells, but 4 arrays x 32 bytes x 160,000 > 16 MiB
+        let (rt, server) = server_with(vec![("d", pair_ids(400))]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req("id1", "id2"))))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(
+            t.contains("\"statistic\"") && t.contains("omitted") && !t.contains("\"expected\""),
+            "{}",
+            t.chars().take(400).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn chisq_independence_small_table_matches_r_under_hosted_limits() {
+        // same 40 rows as the core test; pre-fix this panicked inside the runtime (STAT-10)
+        let mut h: Vec<&str> = Vec::new();
+        for (lvl, k) in [("x", 7), ("y", 5), ("z", 8), ("x", 4), ("y", 9), ("z", 7)] {
+            h.extend(std::iter::repeat_n(lvl, k));
+        }
+        let g: Vec<&str> = (0..40).map(|i| if i < 20 { "a" } else { "b" }).collect();
+        let (rt, server) = server_with(vec![("d", df!("g" => g, "h" => h).unwrap())]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req("g", "h"))))
+        })
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text(&r)).unwrap();
+        assert!((v["statistic"].as_f64().unwrap() - 2.0277056277056276).abs() < 1e-10);
+        assert!(v["expected"].is_array());
+    }
+
+    fn grouped(n_rows: usize, rows_per_group: usize) -> DataFrame {
+        df!(
+            "y" => (0..n_rows)
+                .map(|i| (i as f64 * 0.37).sin() + (i % 7) as f64 * 0.1)
+                .collect::<Vec<_>>(),
+            "g" => (0..n_rows)
+                .map(|i| format!("g{}", i / rows_per_group))
+                .collect::<Vec<_>>()
+        )
+        .unwrap()
+    }
+
+    fn ttest_req() -> PairwiseTTestRequest {
+        PairwiseTTestRequest {
+            dataset: "d".into(),
+            response: "y".into(),
+            factor: "g".into(),
+            p_adjust_method: None,
+            pool_sd: None,
+            alternative: None,
+        }
+    }
+
+    #[test]
+    fn pairwise_t_test_refuses_more_groups_than_max_groups() {
+        let (rt, server) = server_with(vec![("d", grouped(202, 2))]); // 101 groups > 100
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_pairwise_t_test(Parameters(ttest_req())))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("max_groups") && text(&r).contains("101"),
+            "{}",
+            text(&r)
+        );
+    }
+
+    #[test]
+    fn pairwise_wilcox_refuses_more_groups_than_max_groups() {
+        let (rt, server) = server_with(vec![("d", grouped(101, 1))]); // 101 singleton groups
+        let req = PairwiseWilcoxRequest {
+            dataset: "d".into(),
+            response: "y".into(),
+            factor: "g".into(),
+            p_adjust_method: None,
+            alternative: None,
+            exact: None,
+        };
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_pairwise_wilcox(Parameters(req)))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("max_groups"), "{}", text(&r));
+    }
+
+    #[test]
+    fn pairwise_refusal_bounds_the_factor_name_it_echoes() {
+        let long = "f".repeat(300);
+        let mut df = grouped(202, 2); // 101 groups > 100
+        df.rename("g", long.as_str().into()).unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let req = PairwiseTTestRequest {
+            factor: long.clone(),
+            ..ttest_req()
+        };
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_pairwise_t_test(Parameters(req)))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("max_groups") && t.contains(&"f".repeat(64)),
+            "{t}"
+        );
+        assert!(!t.contains(&"f".repeat(65)), "{t}");
+    }
+
+    #[test]
+    fn pairwise_group_cap_boundary() {
+        let l = hosted_with(&["max_groups=3"]);
+        let (rt, server) = server_with(vec![("ok", grouped(15, 5)), ("over", grouped(20, 5))]);
+        let ok = PairwiseTTestRequest {
+            dataset: "ok".into(),
+            ..ttest_req()
+        };
+        let over = PairwiseTTestRequest {
+            dataset: "over".into(),
+            ..ttest_req()
+        };
+        let r = limits::with_limits(l.clone(), || {
+            rt.block_on(server.hypothesis_pairwise_t_test(Parameters(ok)))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let r = limits::with_limits(l, || {
+            rt.block_on(server.hypothesis_pairwise_t_test(Parameters(over)))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+    }
+
+    #[test]
+    fn pairwise_p_matrix_layout_is_lower_triangular() {
+        let m = lower_triangular_p_matrix(3, |i, j| (i * 10 + j) as f64).unwrap();
+        assert_eq!(
+            m,
+            vec![
+                vec![None, None, None],
+                vec![Some(10.0), None, None],
+                vec![Some(20.0), Some(21.0), None],
+            ]
+        );
     }
 }
