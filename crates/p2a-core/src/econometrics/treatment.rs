@@ -1717,6 +1717,52 @@ mod tests {
     }
 
     #[test]
+    fn test_seeded_bootstrap_unchanged() {
+        // Pinned from the pre-streaming implementation at 1fdb22f, seed 42.
+        const IPW_SE: f64 = 0.11590718872111475;
+        const IPW_CI: (f64, f64) = (0.25552711023373686, 0.677351661847506);
+        const DR_IPW_SE: f64 = 0.11590718872111475;
+        const DR_REG_SE: f64 = 0.011033127368161828;
+        let ds = create_treatment_dataset();
+        let ipw = run_ipw_treatment(
+            &ds,
+            "y",
+            "treatment",
+            &["x1", "x2"],
+            IpwConfig {
+                estimand: Estimand::ATE,
+                trim: 0.01,
+                bootstrap: 200,
+                normalized: true,
+                seed: Some(42),
+            },
+        )
+        .unwrap();
+        assert_eq!(ipw.std_error, IPW_SE);
+        assert_eq!((ipw.ci_lower, ipw.ci_upper), IPW_CI);
+        for (method, se) in [
+            (DRMethod::IPW, DR_IPW_SE),
+            (DRMethod::Regression, DR_REG_SE),
+        ] {
+            let dr = run_doubly_robust(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                DoublyRobustConfig {
+                    method,
+                    estimand: Estimand::ATE,
+                    trim: 0.01,
+                    bootstrap: 200,
+                    seed: Some(42),
+                },
+            )
+            .unwrap();
+            assert_eq!(dr.std_error, se, "{method:?}");
+        }
+    }
+
+    #[test]
     fn test_propensity_score_summary() {
         let ps = Array1::from(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
         let summary = compute_ps_summary(&ps);
