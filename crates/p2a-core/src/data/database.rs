@@ -95,9 +95,9 @@ fn first_keyword(query: &str) -> String {
 ///
 /// The text may end in `;`, further `;`, whitespace and comments, but nothing
 /// else may follow the first top-level `;`. Strings (`'..'`, `E'..'`), quoted
-/// identifiers, dollar quotes (`$$..$$`, `$tag$..$tag$`) and comments (`--`,
-/// nested `/* */`) are skipped with DuckDB's rules, so a `;` inside them does
-/// not count. Unterminated strings or comments, empty input and NUL bytes are
+/// identifiers, dollar quotes (`$$..$$`, `$tag$..$tag$`) and comments (`--`
+/// up to an LF or CR, nested `/* */`) are skipped with DuckDB's rules, so a
+/// `;` inside them does not count. Unterminated strings or comments, empty input and NUL bytes are
 /// refused as well.
 pub fn ensure_single_statement(query: &str) -> Result<(), DatabaseError> {
     single_statement_body(query).map(|_| ())
@@ -249,11 +249,17 @@ fn dollar_tag_len(s: &[u8]) -> Option<usize> {
     }
 }
 
-/// Index of the byte after the newline ending a line comment whose body
-/// starts at `i`, or the end of the input.
+/// Whether `b` ends a `--` line comment. DuckDB's scanner (libpg_query
+/// `scan.l`, `newline [\n\r]`) ends it at a CR as well as at an LF.
+fn is_newline(b: u8) -> bool {
+    b == b'\n' || b == b'\r'
+}
+
+/// Index of the byte after the newline (LF or CR, see [`is_newline`]) ending a
+/// line comment whose body starts at `i`, or the end of the input.
 fn skip_line_comment(bytes: &[u8], i: usize) -> usize {
     let i = i.min(bytes.len());
-    match bytes[i..].iter().position(|&b| b == b'\n') {
+    match bytes[i..].iter().position(|&b| is_newline(b)) {
         Some(p) => i + p + 1,
         None => bytes.len(),
     }
@@ -286,8 +292,12 @@ fn strip_leading_comments(query: &str) -> &str {
     let mut rest = query.trim_start();
     loop {
         if let Some(after) = rest.strip_prefix("--") {
-            // Line comment: drop through end of line (or end of string).
-            let end = after.find('\n').map(|i| i + 1).unwrap_or(after.len());
+            // Line comment: drop through end of line, LF or CR as in DuckDB
+            // (or end of string).
+            let end = after
+                .find(['\n', '\r'])
+                .map(|i| i + 1)
+                .unwrap_or(after.len());
             rest = after[end..].trim_start();
             continue;
         }
@@ -1293,6 +1303,10 @@ mod tests {
             "SELECT /* ; */ 1",
             "SELECT /* outer /* inner ; */ still ; */ 2",
             "SELECT 1 -- ; trailing",
+            // DuckDB ends a line comment at CR as well as LF
+            "SELECT 1; -- done\r  \r\n",
+            "SELECT 1 -- c\r",
+            "SELECT 1; -- c\r/* still \n a comment */ \r",
             "SELECT $1",
             "WITH x AS (SELECT 1) SELECT * FROM x",
         ] {
@@ -1321,6 +1335,9 @@ mod tests {
             "SELECT 1; SELECT 2",
             "SELECT 1;\nATTACH 'x.duckdb' AS e",
             "SELECT 1 -- c\n; SELECT 2",
+            // a line comment ends at a lone CR, before and after the terminator
+            "SELECT 1 -- c\r; SELECT 2",
+            "SELECT 1; -- c\rSELECT 2",
             // E-string: DuckDB sees two statements
             r"SELECT E'\''; ATTACH 'x' AS e; --'",
             // nested comment: DuckDB sees two statements
@@ -1397,6 +1414,21 @@ mod tests {
             DatabaseError::Forbidden(_)
         ));
         assert!(!out.exists());
+    }
+
+    #[test]
+    fn query_file_refuses_a_statement_after_a_cr_terminated_comment() {
+        // DuckDB ends the comment at the CR; the allowed file itself stays
+        // writable by the engine (Fact 5), so the lexer must refuse this.
+        let dir = tempfile::tempdir().unwrap();
+        let original = b"a,b\n1,2\n3,4\n";
+        let csv = dir.path().join("in.csv");
+        std::fs::write(&csv, original).unwrap();
+        let q =
+            "SELECT 1 -- c\r; COPY (SELECT 9 AS a) TO {file} (HEADER false, USE_TMP_FILE false)";
+        let err = query_file_with_duckdb_with(&csv, q, &rows(10)).unwrap_err();
+        assert!(matches!(err, DatabaseError::Forbidden(_)), "{err}");
+        assert_eq!(std::fs::read(&csv).unwrap(), original);
     }
 
     // ------------------------------------------------------------------
@@ -1905,6 +1937,10 @@ mod tests {
         assert!(validate_read_only_query("-- a comment\nSELECT 1").is_ok());
         assert!(validate_read_only_query("/* block */ SELECT 1").is_ok());
         assert!(validate_read_only_query("-- hide\nDROP TABLE t").is_err());
+        // a line comment ends at CR too, as in DuckDB's scanner
+        assert!(validate_read_only_query("-- a comment\rSELECT 1").is_ok());
+        assert!(validate_read_only_query("-- hide\rDROP TABLE t").is_err());
+        assert_eq!(first_keyword("-- c\rshow tables"), "show");
     }
 
     #[test]
