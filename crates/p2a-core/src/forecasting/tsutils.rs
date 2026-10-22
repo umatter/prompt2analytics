@@ -56,10 +56,17 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
-use crate::resource::{checkpoint, try_vec};
+use crate::resource::{checkpoint, try_vec, try_with_capacity};
 
 fn size_overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
+}
+
+/// Iterations between budget checks for a loop whose body costs about
+/// `work` operations, so that the budget is checked about every 65,536
+/// operations.
+fn checkpoint_stride(work: usize) -> usize {
+    (65_536 / work.max(1)).max(1)
 }
 
 // ============================================================================
@@ -733,22 +740,33 @@ pub fn arma_acf(ar: &[f64], ma: &[f64], lag_max: usize, pacf: bool) -> EconResul
         });
     }
 
-    let acf_values: Vec<f64> = acvf.iter().map(|&g| g / gamma0).collect();
+    let mut acf_values = acvf;
+    for g in acf_values.iter_mut() {
+        *g /= gamma0;
+    }
 
     let values = if pacf {
         // Compute PACF from ACF using Durbin-Levinson
         let pacf_vals = durbin_levinson_from_acf(&acf_values)?;
         // Include lag 0 = 1.0 for consistency
-        let mut result = vec![1.0];
+        let mut result = try_with_capacity(
+            pacf_vals.len() + 1,
+            "the partial autocorrelations up to lag_max",
+        )?;
+        result.push(1.0);
         result.extend(pacf_vals);
         result
     } else {
         acf_values
     };
 
+    // lag_max + 1 cannot overflow: arma_autocovariance allocated that many values.
+    let mut lags = try_with_capacity::<usize>(lag_max + 1, "the lags up to lag_max")?;
+    lags.extend(0..=lag_max);
+
     Ok(ArmaAcfResult {
         values,
-        lags: (0..=lag_max).collect(),
+        lags,
         ar: ar.to_vec(),
         ma: ma.to_vec(),
         is_pacf: pacf,
@@ -767,10 +785,15 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
 
     // For ARMA, we need to solve the Yule-Walker equations modified for MA component
 
-    let m = p.max(q + 1);
-    let n_lags = lag_max.max(m) + 1;
+    const WHAT: &str = "the ARMA autocovariances up to lag_max";
 
-    let mut gamma = vec![0.0; n_lags];
+    let m = p.max(q + 1);
+    let n_lags = lag_max
+        .max(m)
+        .checked_add(1)
+        .ok_or_else(|| size_overflow(WHAT))?;
+
+    let mut gamma = try_vec(n_lags, 0.0, WHAT)?;
 
     // For sigma^2 = 1 (scale later if needed)
     // First compute initial autocovariances gamma(0), ..., gamma(m-1)
@@ -786,7 +809,11 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
         // Pure MA(q) process
         // gamma(k) = sigma^2 * sum(theta_i * theta_{i+k}) for k <= q, 0 otherwise
         gamma[0] = 1.0 + ma.iter().map(|&t| t * t).sum::<f64>();
+        let stride = checkpoint_stride(q);
         for k in 1..=q.min(lag_max) {
+            if k % stride == 0 {
+                checkpoint()?;
+            }
             let mut sum = 0.0;
             for i in 0..(q - k) {
                 sum += ma[i] * ma[i + k];
@@ -812,13 +839,20 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
         // Initial approximation
         gamma[0] = 1.0;
 
+        // Each lag below costs O(p).
+        let stride = checkpoint_stride(p);
+
         // Use recursion: gamma(k) = sum(phi_i * gamma(|k-i|))
         for _ in 0..100 {
+            checkpoint()?;
             // Iterate to convergence
             let old_gamma0 = gamma[0];
 
             // First compute gamma(1) to gamma(p) from gamma(0)
             for k in 1..=p.min(n_lags - 1) {
+                if k % stride == 0 {
+                    checkpoint()?;
+                }
                 let mut sum = 0.0;
                 for i in 0..p {
                     let idx = (k as i64 - 1 - i as i64).unsigned_abs() as usize;
@@ -843,6 +877,9 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
 
         // Extend to remaining lags using recursion
         for k in (p + 1)..n_lags {
+            if k % stride == 0 {
+                checkpoint()?;
+            }
             let mut sum = 0.0;
             for i in 0..p {
                 if k > i {
@@ -869,9 +906,16 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
     // Initialize with approximate values from AR part
     gamma[0] = 1.0;
 
+    // Each lag below costs O(p) (O(q) in the MA contribution).
+    let stride = checkpoint_stride(p);
+
     // First pass: AR contribution
     for _ in 0..50 {
+        checkpoint()?;
         for k in 1..n_lags {
+            if k % stride == 0 {
+                checkpoint()?;
+            }
             let mut sum = 0.0;
             for i in 0..p {
                 let idx = (k as i64 - 1 - i as i64).unsigned_abs() as usize;
@@ -899,7 +943,11 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
     }
 
     // Add MA contribution to autocovariances
+    let stride = checkpoint_stride(q);
     for k in 1..=q.min(n_lags - 1) {
+        if k % stride == 0 {
+            checkpoint()?;
+        }
         let mut ma_contrib = 0.0;
         for i in 0..(q - k) {
             ma_contrib += ma[i] * ma[i + k];
@@ -915,18 +963,24 @@ fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec
 
 /// Durbin-Levinson algorithm to compute PACF from ACF.
 fn durbin_levinson_from_acf(acf: &[f64]) -> EconResult<Vec<f64>> {
+    const WHAT: &str = "the partial autocorrelations up to lag_max";
+
     let p = acf.len() - 1; // acf[0] = 1
     if p == 0 {
         return Ok(vec![]);
     }
 
-    let mut pacf = Vec::with_capacity(p);
-    let mut phi: Vec<f64> = vec![0.0; p];
+    let mut pacf = try_with_capacity(p, WHAT)?;
+    let mut phi: Vec<f64> = try_vec(p, 0.0, WHAT)?;
+    // phi of the previous order, reused across orders instead of a clone each time
+    let mut prev: Vec<f64> = try_vec(p, 0.0, WHAT)?;
 
     phi[0] = acf[1];
     pacf.push(phi[0]);
 
     for n in 2..=p {
+        // Each order costs O(n).
+        checkpoint()?;
         let mut num = acf[n];
         let mut den = 1.0;
 
@@ -944,9 +998,9 @@ fn durbin_levinson_from_acf(acf: &[f64]) -> EconResult<Vec<f64>> {
         let phi_nn = num / den;
         pacf.push(phi_nn);
 
-        let phi_prev = phi.clone();
+        prev[..n - 1].copy_from_slice(&phi[..n - 1]);
         for k in 1..n {
-            phi[k - 1] = phi_prev[k - 1] - phi_nn * phi_prev[n - k - 1];
+            phi[k - 1] = prev[k - 1] - phi_nn * prev[n - k - 1];
         }
         phi[n - 1] = phi_nn;
     }
@@ -1007,9 +1061,14 @@ pub fn arma_to_ma(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<ArmaToMa
     // psi_j = theta_j + sum(phi_i * psi_{j-i}) for i = 1 to min(j, p)
     // where theta_j = 0 for j > q
 
-    let mut psi = Vec::with_capacity(lag_max);
+    let mut psi = try_with_capacity(lag_max, "the psi weights up to lag_max")?;
 
+    // Each weight costs O(min(j, p)).
+    let stride = checkpoint_stride(p.saturating_add(1));
     for j in 1..=lag_max {
+        if j % stride == 0 {
+            checkpoint()?;
+        }
         let mut sum = 0.0;
 
         // theta_j contribution (0 if j > q)
@@ -1281,8 +1340,8 @@ pub fn arima_sim(
     // Simulate ARMA part
     let mut x = try_vec(total_length, 0.0, WHAT)?;
 
-    // Each step costs O(p + q); check the budget about every 65,536 operations.
-    let stride = (65_536 / (p + q + 1)).max(1);
+    // Each step costs O(p + q).
+    let stride = checkpoint_stride(p + q + 1);
     for t in 0..total_length {
         if t % stride == 0 {
             checkpoint()?;
@@ -1722,6 +1781,83 @@ mod tests {
     fn arima_sim_honours_cancellation() {
         let r = cancelled(|| arima_sim(&[0.5], &[], 3, 100, None, None, Some(1)));
         assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn arma_acf_and_psi_weights_refuse_absurd_lag_max() {
+        // Before the fix: "memory allocation of 9007199254741000 bytes failed", SIGABRT.
+        let err = arma_acf(&[0.5], &[], 1usize << 50, false).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err = arma_acf(&[0.5], &[], usize::MAX, false).unwrap_err(); // lag_max + 1 overflows
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err = arma_to_ma(&[0.5], &[0.3], 1usize << 50).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            arma_to_ma(&[0.5], &[0.3], 100_000)
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("lag_max"), "{err}");
+    }
+
+    #[test]
+    fn arma_pacf_honours_cancellation() {
+        // The PACF path (Durbin-Levinson is O(lag_max^2)) must stop when the budget is cancelled.
+        assert!(matches!(
+            cancelled(|| arma_acf(&[0.5, 0.2], &[], 2_000, true)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    /// The pre-change recursion, verbatim (clones phi every order).
+    fn durbin_levinson_reference(acf: &[f64]) -> Vec<f64> {
+        let p = acf.len() - 1; // acf[0] = 1
+        if p == 0 {
+            return vec![];
+        }
+
+        let mut pacf = Vec::with_capacity(p);
+        let mut phi: Vec<f64> = vec![0.0; p];
+
+        phi[0] = acf[1];
+        pacf.push(phi[0]);
+
+        for n in 2..=p {
+            let mut num = acf[n];
+            let mut den = 1.0;
+
+            for k in 1..n {
+                num -= phi[k - 1] * acf[n - k];
+                den -= phi[k - 1] * acf[k];
+            }
+
+            if den.abs() < 1e-15 {
+                // Numerical issues
+                pacf.push(0.0);
+                continue;
+            }
+
+            let phi_nn = num / den;
+            pacf.push(phi_nn);
+
+            let phi_prev = phi.clone();
+            for k in 1..n {
+                phi[k - 1] = phi_prev[k - 1] - phi_nn * phi_prev[n - k - 1];
+            }
+            phi[n - 1] = phi_nn;
+        }
+
+        pacf
+    }
+
+    #[test]
+    fn durbin_levinson_buffer_reuse_is_bit_identical() {
+        let acf = arma_acf(&[0.6, -0.3, 0.1], &[0.4], 300, false)
+            .unwrap()
+            .values;
+        assert_eq!(
+            durbin_levinson_from_acf(&acf).unwrap(),
+            durbin_levinson_reference(&acf)
+        );
     }
 
     /// Guard for the in-place integration: d = 2 is exactly two cumulative sums of the d = 0 series.
