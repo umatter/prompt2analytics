@@ -72,7 +72,8 @@ use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 /// Configuration for Cubist regression trees.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CubistConfig {
-    /// Number of committee models (boosting-like ensemble). Default: 1.
+    /// Number of committee models (boosting-like ensemble), 1 to 100 (the limit
+    /// of R's Cubist). Default: 1.
     /// Each committee fits adjusted residuals from the previous iteration.
     pub committees: usize,
 
@@ -80,7 +81,7 @@ pub struct CubistConfig {
     /// When > 0, predictions are adjusted using k-NN of training data.
     pub neighbors: usize,
 
-    /// Maximum depth of trees. Default: 10.
+    /// Maximum depth of trees; values above 512 act as 512. Default: 10.
     pub max_depth: usize,
 
     /// Minimum samples required to split a node. Default: 10.
@@ -274,6 +275,12 @@ impl std::fmt::Display for CubistResult {
     }
 }
 
+/// Deepest tree level (root = 0) the builder grows. A node at this depth
+/// becomes a leaf in every mode, so no input can recurse deep enough to
+/// overflow a 2 MiB worker stack (user decision, Tier 0). Trees that stay
+/// shallower are unchanged.
+const MAX_TREE_DEPTH: usize = 512;
+
 /// Internal tree node for Cubist.
 #[derive(Debug, Clone)]
 pub(crate) enum CubistNode {
@@ -340,9 +347,9 @@ impl CubistTree {
         let (intercept, coefficients) = self.fit_linear_model(x, y, indices, &path_features);
 
         // Check stopping conditions
-        if depth >= config.max_depth
+        if depth >= config.max_depth.min(MAX_TREE_DEPTH)
             || n_samples < config.min_split
-            || n_samples <= 2 * config.min_bucket
+            || n_samples <= config.min_bucket.saturating_mul(2)
         {
             let (mean_response, std_response) = self.compute_stats(y, indices);
             return CubistNode::Leaf {
@@ -836,6 +843,14 @@ fn find_k_neighbors(
 ///
 /// CubistResult containing fitted model, rules, and predictions.
 ///
+/// # Errors
+///
+/// `InsufficientData` for fewer than 2 rows; `Computation` when `x` and `y`
+/// differ in length; `InvalidSpecification` when `committees` is outside
+/// 1..=100 or `x` or `y` holds a non-finite value; `Cancelled` once the
+/// installed computation budget expires (checked per committee and per row of
+/// the final prediction pass, which runs the nearest-neighbour correction).
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -873,21 +888,45 @@ pub fn cubist(
             "X and y must have same number of samples".to_string(),
         ));
     }
-    if config.committees == 0 {
+    if !(1..=100).contains(&config.committees) {
         return Err(EconError::InvalidSpecification {
-            message: "committees must be at least 1".to_string(),
+            message: format!(
+                "committees must be between 1 and 100 (the limit of R's Cubist), got {}",
+                config.committees
+            ),
+        });
+    }
+    for (j, column) in x.axis_iter(Axis(1)).enumerate() {
+        let k = column.iter().filter(|v| !v.is_finite()).count();
+        if k > 0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "feature column {j} (0-based) has {k} non-finite values (NaN or infinite); \
+                     remove or impute them first"
+                ),
+            });
+        }
+    }
+    let k = y.iter().filter(|v| !v.is_finite()).count();
+    if k > 0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the target has {k} non-finite values (NaN or infinite); remove or impute them first"
+            ),
         });
     }
 
     let _rng_state = config.seed.unwrap_or(42);
 
     // Build committee models
-    let mut committee_trees = Vec::with_capacity(config.committees);
+    let mut committee_trees =
+        crate::resource::try_with_capacity(config.committees, "Cubist committees")?;
     let mut current_y = y.to_owned();
     let mut all_rules = Vec::new();
     let mut total_importance = Array1::zeros(n_features);
 
     for c in 0..config.committees {
+        crate::resource::checkpoint()?;
         let mut tree = CubistTree::new(n_features, None, config.smoothing_coefficient);
         tree.fit(&x, &current_y.view(), config);
 
@@ -929,6 +968,8 @@ pub fn cubist(
     // Compute final predictions (average of committees)
     let mut predictions = Vec::with_capacity(n_samples);
     for i in 0..n_samples {
+        // With neighbors > 0 this loop is O(n^2 p log n): check the budget per row.
+        crate::resource::checkpoint()?;
         let row = x.row(i);
         let pred_sum: f64 = committee_trees
             .iter()
@@ -1122,7 +1163,114 @@ pub fn run_cubist_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn cubist_data() -> (Array2<f64>, Array1<f64>) {
+        let x = Array2::from_shape_fn((40, 2), |(i, j)| {
+            ((i * (7 + 4 * j)) % 13) as f64 + 0.1 * j as f64
+        });
+        let y = Array1::from_shape_fn(40, |i| {
+            1.5 * ((i * 7) % 13) as f64 + ((i * 5) % 3) as f64 * 0.3
+        });
+        (x, y)
+    }
+
+    #[test]
+    fn test_cubist_committees_are_bounded() {
+        let (x, y) = cubist_data();
+        for committees in [0usize, 101, 10_000_000_000] {
+            let err = cubist(
+                x.view(),
+                y.view(),
+                &CubistConfig {
+                    committees,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("committees must be between 1 and 100"),
+                "{committees}: {err}"
+            );
+        }
+    }
+
+    /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
+    fn chain_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        (
+            Array2::from_shape_fn((n, 1), |(i, _)| i as f64),
+            Array1::from_shape_fn(n, |i| (i % 2) as f64),
+        )
+    }
+
+    /// Runs `f` on a thread with a 2 MiB stack, the size of tokio's blocking threads and rayon's workers.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn cubist_depth(root: &CubistNode) -> usize {
+        let (mut max, mut stack) = (0, vec![(root, 0usize)]);
+        while let Some((node, d)) = stack.pop() {
+            max = max.max(d);
+            if let CubistNode::Split { left, right, .. } = node {
+                stack.push((left.as_ref(), d + 1));
+                stack.push((right.as_ref(), d + 1));
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn test_cubist_depth_is_capped_on_a_chain_input() {
+        assert_eq!(MAX_TREE_DEPTH, 512);
+        let depth = on_small_stack(|| {
+            let (x, y) = chain_data(2_000);
+            let cfg = CubistConfig {
+                max_depth: usize::MAX,
+                min_split: 2,
+                min_bucket: 1,
+                min_improvement: 0.0,
+                extract_rules: false,
+                ..Default::default()
+            };
+            let r = cubist(x.view(), y.view(), &cfg).unwrap();
+            cubist_depth(r.committee_trees[0].root.as_ref().unwrap())
+        });
+        assert_eq!(depth, MAX_TREE_DEPTH);
+    }
+
+    #[test]
+    fn test_cubist_rejects_non_finite_and_honours_cancellation() {
+        let (x, y) = cubist_data();
+        let mut yb = y.clone();
+        yb[3] = f64::INFINITY;
+        assert!(
+            cubist(x.view(), yb.view(), &CubistConfig::default())
+                .unwrap_err()
+                .to_string()
+                .contains("non-finite")
+        );
+        let cfg = CubistConfig {
+            committees: 3,
+            neighbors: 2,
+            ..Default::default()
+        };
+        let err = with_budget(cancelled_budget(), || cubist(x.view(), y.view(), &cfg)).unwrap_err();
+        assert!(matches!(err, EconError::Cancelled(_)), "{err}");
+    }
 
     #[test]
     fn test_cubist_basic() {

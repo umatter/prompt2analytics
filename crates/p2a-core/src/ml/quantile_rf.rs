@@ -77,13 +77,14 @@
 
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use crate::resource;
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use std::collections::HashMap;
 
 /// Configuration for Quantile Regression Forest.
 #[derive(Debug, Clone)]
 pub struct QuantileRfConfig {
-    /// Number of trees in the forest (default: 500)
+    /// Number of trees in the forest, at least 1 (default: 500)
     pub n_trees: usize,
 
     /// Number of features to consider at each split.
@@ -94,13 +95,14 @@ pub struct QuantileRfConfig {
     /// Larger values produce more stable quantile estimates.
     pub min_node_size: usize,
 
-    /// Maximum depth of trees (default: None = unlimited)
+    /// Maximum depth of trees (default: `None` = no explicit limit; trees stop
+    /// at depth 512 in any case, and larger values act as 512)
     pub max_depth: Option<usize>,
 
     /// Quantiles to estimate (default: [0.025, 0.5, 0.975] for 95% PI)
     pub quantiles: Vec<f64>,
 
-    /// Sample size for bootstrap (default: n_samples with replacement)
+    /// Sample size for bootstrap, at least 1 (default: n_samples with replacement)
     pub sample_size: Option<usize>,
 
     /// Whether to keep in-bag observations for each tree (for OOB computation)
@@ -229,6 +231,12 @@ impl std::fmt::Display for QuantileRfResult {
     }
 }
 
+/// Deepest tree level (root = 0) the builder grows. A node at this depth
+/// becomes a leaf in every mode, so no input can recurse deep enough to
+/// overflow a 2 MiB worker stack (user decision, Tier 0). Trees that stay
+/// shallower are unchanged.
+const MAX_TREE_DEPTH: usize = 512;
+
 /// A tree node in the quantile regression forest.
 /// Unlike standard RF, leaf nodes store indices to all observations in that leaf.
 #[derive(Debug, Clone)]
@@ -290,7 +298,10 @@ impl QuantileTree {
             .mtry
             .unwrap_or_else(|| (x.ncols() as f64 / 3.0).floor().max(1.0) as usize);
 
-        let max_depth = config.max_depth.unwrap_or(usize::MAX);
+        let max_depth = config
+            .max_depth
+            .unwrap_or(MAX_TREE_DEPTH)
+            .min(MAX_TREE_DEPTH);
 
         // Build tree recursively
         self.root = Some(self.build_tree(
@@ -320,7 +331,7 @@ impl QuantileTree {
         let n_samples = indices.len();
 
         // Check stopping conditions
-        if depth >= max_depth || n_samples <= min_node_size * 2 {
+        if depth >= max_depth || n_samples <= min_node_size.saturating_mul(2) {
             return QrfNode::Leaf {
                 observation_indices: indices.to_vec(),
             };
@@ -400,6 +411,22 @@ impl QuantileTree {
     }
 
     /// Find the best split for given indices.
+    ///
+    /// Per feature the rows are sorted once and the candidate thresholds (the
+    /// midpoints between distinct sorted values) are scanned with prefix sums
+    /// of the node-centred response, so a feature costs O(n log n) instead of
+    /// one partition and two variance passes per candidate. A forward pointer
+    /// over the sorted values gives each candidate's left count exactly as a
+    /// partition with `x <= threshold` would, also when the midpoint rounds up
+    /// to the right value. Only the winning split is partitioned, in the
+    /// original row order.
+    ///
+    /// The chosen split is the one the earlier partition-per-threshold search
+    /// (two-pass child variances) chose, except at exact ties in the
+    /// within-child sum of squares: rounding may break those differently, so a
+    /// response with repeated values (counts, integers, Likert scores) can grow
+    /// a different, equally good tree. Seeded output on continuous data is
+    /// unchanged.
     fn find_best_split(
         &self,
         x: &ArrayView2<f64>,
@@ -408,18 +435,37 @@ impl QuantileTree {
         features: &[usize],
         min_node_size: usize,
     ) -> Option<(usize, f64, Vec<usize>, Vec<usize>)> {
+        let n = indices.len();
+        if n == 0 {
+            return None;
+        }
+        // Centring keeps the one-pass sums accurate when |mean| >> sd.
+        let mean = indices.iter().map(|&i| y[i]).sum::<f64>() / n as f64;
+        let n_f = n as f64;
+
         let mut best_mse = f64::INFINITY;
-        let mut best_split = None;
+        let mut best_split: Option<(usize, f64)> = None;
+
+        // (feature value, centred response), and prefix sums of the centred
+        // response and its square; reused across features.
+        let mut values: Vec<(f64, f64)> = Vec::with_capacity(n);
+        let mut sum = vec![0.0f64; n + 1];
+        let mut sum_sq = vec![0.0f64; n + 1];
 
         for &feature in features {
-            // Get values for this feature
-            let mut values: Vec<(f64, usize)> =
-                indices.iter().map(|&i| (x[[i, feature]], i)).collect();
-            values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            values.clear();
+            values.extend(indices.iter().map(|&i| (x[[i, feature]], y[i] - mean)));
+            values.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (k, &(_, d)) in values.iter().enumerate() {
+                sum[k + 1] = sum[k] + d;
+                sum_sq[k + 1] = sum_sq[k] + d * d;
+            }
+            let (total, total_sq) = (sum[n], sum_sq[n]);
 
             // Try splits at midpoints between unique values
             let mut prev_val = f64::NEG_INFINITY;
-            for i in 0..values.len() {
+            let mut ptr = 0usize;
+            for i in 0..n {
                 let curr_val = values[i].0;
                 if (curr_val - prev_val).abs() < 1e-10 {
                     continue;
@@ -432,27 +478,44 @@ impl QuantileTree {
                 }
                 let threshold = (values[i - 1].0 + curr_val) / 2.0;
 
-                // Partition indices
-                let (left_indices, right_indices): (Vec<usize>, Vec<usize>) = indices
-                    .iter()
-                    .partition(|&&idx| x[[idx, feature]] <= threshold);
+                // Rows with x <= threshold go left
+                while ptr < n && values[ptr].0 <= threshold {
+                    ptr += 1;
+                }
+                let (n_left, n_right) = (ptr, n - ptr);
 
                 // Check minimum node size
-                if left_indices.len() < min_node_size || right_indices.len() < min_node_size {
+                if n_left < min_node_size || n_right < min_node_size {
                     continue;
                 }
 
-                // Compute weighted MSE
-                let mse = compute_split_mse(y, &left_indices, &right_indices);
+                // Within-child sums of squares (an empty side contributes 0)
+                let sse_left = if n_left > 0 {
+                    (sum_sq[n_left] - sum[n_left] * sum[n_left] / n_left as f64).max(0.0)
+                } else {
+                    0.0
+                };
+                let sse_right = if n_right > 0 {
+                    let s_r = total - sum[n_left];
+                    ((total_sq - sum_sq[n_left]) - s_r * s_r / n_right as f64).max(0.0)
+                } else {
+                    0.0
+                };
+                let mse = (sse_left + sse_right) / n_f;
 
                 if mse < best_mse {
                     best_mse = mse;
-                    best_split = Some((feature, threshold, left_indices, right_indices));
+                    best_split = Some((feature, threshold));
                 }
             }
         }
 
-        best_split
+        best_split.map(|(feature, threshold)| {
+            let (left_indices, right_indices): (Vec<usize>, Vec<usize>) = indices
+                .iter()
+                .partition(|&&idx| x[[idx, feature]] <= threshold);
+            (feature, threshold, left_indices, right_indices)
+        })
     }
 
     /// Get leaf observation indices for a single observation.
@@ -541,38 +604,16 @@ impl QuantileTree {
     }
 }
 
-/// Compute weighted MSE for a split.
-fn compute_split_mse(y: &ArrayView1<f64>, left: &[usize], right: &[usize]) -> f64 {
-    let n = (left.len() + right.len()) as f64;
-
-    let left_mse = compute_variance(y, left);
-    let right_mse = compute_variance(y, right);
-
-    (left.len() as f64 * left_mse + right.len() as f64 * right_mse) / n
-}
-
-/// Compute variance for a set of indices.
-fn compute_variance(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
-    if indices.is_empty() {
-        return 0.0;
-    }
-
-    let sum: f64 = indices.iter().map(|&i| y[i]).sum();
-    let mean = sum / indices.len() as f64;
-
-    indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
-}
-
 use super::lcg_random;
 
-/// Generate bootstrap sample indices.
+/// Generate bootstrap sample indices (the sample vector is allocated fallibly).
 fn bootstrap_sample(
     n_samples: usize,
     sample_size: usize,
     rng_state: &mut u64,
-) -> (Vec<usize>, Vec<usize>) {
+) -> EconResult<(Vec<usize>, Vec<usize>)> {
     let mut in_bag = vec![false; n_samples];
-    let mut bootstrap = Vec::with_capacity(sample_size);
+    let mut bootstrap = resource::try_with_capacity(sample_size, "bootstrap sample")?;
 
     for _ in 0..sample_size {
         let idx = lcg_random(rng_state) % n_samples;
@@ -582,7 +623,7 @@ fn bootstrap_sample(
 
     let oob: Vec<usize> = (0..n_samples).filter(|&i| !in_bag[i]).collect();
 
-    (bootstrap, oob)
+    Ok((bootstrap, oob))
 }
 
 /// Compute empirical quantile from a set of values.
@@ -710,17 +751,48 @@ pub fn quantile_rf_with_names(
             return Err(format!("Quantile {} must be in (0, 1)", q));
         }
     }
+    if config.n_trees == 0 {
+        return Err("n_trees must be at least 1".to_string());
+    }
+    if config.sample_size == Some(0) {
+        return Err("sample_size must be at least 1".to_string());
+    }
+    for (j, column) in x.axis_iter(Axis(1)).enumerate() {
+        let k = column.iter().filter(|v| !v.is_finite()).count();
+        if k > 0 {
+            let name = feature_names
+                .as_ref()
+                .and_then(|names| names.get(j))
+                .map(|name| format!("feature '{name}'"))
+                .unwrap_or_else(|| format!("feature column {j} (0-based)"));
+            return Err(format!(
+                "Quantile Regression Forest: {name} has {k} non-finite values (NaN or infinite); \
+                 remove or impute them first"
+            ));
+        }
+    }
+    let k = y.iter().filter(|v| !v.is_finite()).count();
+    if k > 0 {
+        return Err(format!(
+            "Quantile Regression Forest: the target has {k} non-finite values (NaN or infinite); \
+             remove or impute them first"
+        ));
+    }
 
     let sample_size = config.sample_size.unwrap_or(n_samples);
     let mut rng_state = config.seed.unwrap_or(42);
 
     // Build forest
-    let mut trees = Vec::with_capacity(config.n_trees);
-    let mut all_oob_indices: Vec<Vec<usize>> = Vec::with_capacity(config.n_trees);
+    let mut trees = resource::try_with_capacity(config.n_trees, "quantile forest trees")
+        .map_err(|e| e.to_string())?;
+    let mut all_oob_indices: Vec<Vec<usize>> =
+        resource::try_with_capacity(config.n_trees, "quantile forest trees")
+            .map_err(|e| e.to_string())?;
 
     for _ in 0..config.n_trees {
+        resource::checkpoint().map_err(|e| e.to_string())?;
         let (bootstrap_indices, oob_indices) =
-            bootstrap_sample(n_samples, sample_size, &mut rng_state);
+            bootstrap_sample(n_samples, sample_size, &mut rng_state).map_err(|e| e.to_string())?;
 
         let mut tree = QuantileTree::new(n_features);
         tree.fit(
@@ -1189,7 +1261,366 @@ pub fn run_quantile_rf_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// Noisy regression data from a fixed LCG (no external RNG).
+    fn noisy_regression(n: usize, p: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut s = seed;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut x = Array2::zeros((n, p));
+        let mut y = Array1::zeros(n);
+        for i in 0..n {
+            for j in 0..p {
+                x[[i, j]] = 10.0 * next();
+            }
+            y[i] = 2.0 * x[[i, 0]] - x[[i, p - 1]] + 3.0 * (next() - 0.5);
+        }
+        (x, y)
+    }
+
+    // R reference data (rpart 4.1.x; run with `Rscript`):
+    //
+    // library(rpart)
+    // i <- 0:39
+    // x1 <- ((i * 17) %% 41) / 4; x2 <- ((i * 29) %% 43) / 5; x3 <- (i %% 7) / 2
+    // noise <- ((i * 7919) %% 101) / 100 - 0.5
+    // y_reg <- 2 * (x1 > 5) + 0.3 * x2 + noise
+    // y_cls <- factor(ifelse(x2 > 6, 2, ifelse(x1 + 0.5 * noise > 5, 1, 0)))
+    // ctl <- rpart.control(minsplit = 10, minbucket = 5, cp = 0, maxdepth = 1, xval = 0,
+    //                      maxcompete = 0, maxsurrogate = 0, usesurrogate = 0)
+    // rpart(y_reg ~ x1 + x2 + x3, method = "anova", control = ctl)$splits    # x1 at 5.125 (21 | 19)
+    // # one variable at a time:
+    // # anova:                          x1 5.125 (21|19), x2 3.5 (17|23), x3 2.75 (35|5)
+    // # class, parms=list(split="information"): x1 5.125 (21|19), x2 6.1 (29|11), x3 2.75 (35|5)
+    //
+    // rpart sends `x3 >= 2.75` left; the code here sends `x <= threshold` left, so the
+    // sizes above are written as (<= | >).
+
+    /// The 40 rows of the rpart reference script (see comment above).
+    fn rpart_reference_data() -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        let n = 40;
+        let mut x = Array2::zeros((n, 3));
+        let (mut y_reg, mut y_cls) = (Array1::zeros(n), Array1::zeros(n));
+        for i in 0..n {
+            let x1 = ((i * 17) % 41) as f64 / 4.0;
+            let x2 = ((i * 29) % 43) as f64 / 5.0;
+            let x3 = (i % 7) as f64 / 2.0;
+            let noise = ((i * 7919) % 101) as f64 / 100.0 - 0.5;
+            x[[i, 0]] = x1;
+            x[[i, 1]] = x2;
+            x[[i, 2]] = x3;
+            y_reg[i] = 2.0 * (if x1 > 5.0 { 1.0 } else { 0.0 }) + 0.3 * x2 + noise;
+            y_cls[i] = if x2 > 6.0 {
+                2.0
+            } else if x1 + 0.5 * noise > 5.0 {
+                1.0
+            } else {
+                0.0
+            };
+        }
+        (x, y_reg, y_cls)
+    }
+
+    /// The partition-per-threshold split search as it was before WT-14, kept as
+    /// the reference the running-sum scan must reproduce wherever the
+    /// within-child sums of squares do not tie exactly.
+    fn find_best_split_reference(
+        x: &ArrayView2<f64>,
+        y: &ArrayView1<f64>,
+        indices: &[usize],
+        features: &[usize],
+        min_node_size: usize,
+    ) -> Option<(usize, f64, Vec<usize>, Vec<usize>)> {
+        let mut best_mse = f64::INFINITY;
+        let mut best_split = None;
+
+        for &feature in features {
+            // Get values for this feature
+            let mut values: Vec<(f64, usize)> =
+                indices.iter().map(|&i| (x[[i, feature]], i)).collect();
+            values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Try splits at midpoints between unique values
+            let mut prev_val = f64::NEG_INFINITY;
+            for i in 0..values.len() {
+                let curr_val = values[i].0;
+                if (curr_val - prev_val).abs() < 1e-10 {
+                    continue;
+                }
+                prev_val = curr_val;
+
+                // Split at midpoint between this and previous value
+                if i == 0 {
+                    continue;
+                }
+                let threshold = (values[i - 1].0 + curr_val) / 2.0;
+
+                // Partition indices
+                let (left_indices, right_indices): (Vec<usize>, Vec<usize>) = indices
+                    .iter()
+                    .partition(|&&idx| x[[idx, feature]] <= threshold);
+
+                // Check minimum node size
+                if left_indices.len() < min_node_size || right_indices.len() < min_node_size {
+                    continue;
+                }
+
+                // Compute weighted MSE
+                let mse = compute_split_mse_reference(y, &left_indices, &right_indices);
+
+                if mse < best_mse {
+                    best_mse = mse;
+                    best_split = Some((feature, threshold, left_indices, right_indices));
+                }
+            }
+        }
+
+        best_split
+    }
+
+    /// Compute weighted MSE for a split.
+    fn compute_split_mse_reference(y: &ArrayView1<f64>, left: &[usize], right: &[usize]) -> f64 {
+        let n = (left.len() + right.len()) as f64;
+
+        let left_mse = compute_variance_reference(y, left);
+        let right_mse = compute_variance_reference(y, right);
+
+        (left.len() as f64 * left_mse + right.len() as f64 * right_mse) / n
+    }
+
+    /// Compute variance for a set of indices.
+    fn compute_variance_reference(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
+        if indices.is_empty() {
+            return 0.0;
+        }
+
+        let sum: f64 = indices.iter().map(|&i| y[i]).sum();
+        let mean = sum / indices.len() as f64;
+
+        indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
+    }
+
+    #[test]
+    fn test_quantile_rf_seeded_output_is_unchanged() {
+        let (x, y) = noisy_regression(150, 3, 5);
+        let cfg = QuantileRfConfig {
+            n_trees: 25,
+            min_node_size: 3,
+            seed: Some(5),
+            ..Default::default()
+        };
+        let r = quantile_rf(x.view(), y.view(), &cfg).unwrap();
+        let got = [
+            r.predictions[[0, 1]],
+            r.predictions[[149, 0]],
+            r.predictions[[75, 2]],
+            r.variable_importance[0],
+            r.variable_importance[2],
+            r.oob_error.unwrap(),
+        ];
+        // Captured from the partition-per-threshold code on continuous data (no
+        // exact SSE ties); must stay bit-identical.
+        const EXPECTED: [u64; 6] = [
+            0x401d26720478d36c,
+            0xbff92b57a34a5541,
+            0x4028bfee6c5e0c40,
+            0x3fd4422ce1652783,
+            0x3fd74b00dfcb2501,
+            0x4016a63d0ba8b5a4,
+        ];
+        assert_eq!(got.map(f64::to_bits), EXPECTED);
+    }
+
+    #[test]
+    fn test_validate_qrf_split_matches_rpart() {
+        // R reference: the rpart anova script above (minbucket = 5).
+        let (x, y, _) = rpart_reference_data();
+        let idx: Vec<usize> = (0..40).collect();
+        let tree = QuantileTree::new(3);
+        for (features, f, thr, n_left) in [
+            (vec![0usize, 1, 2], 0usize, 5.125, 21usize),
+            (vec![1], 1, 3.5, 17),
+            (vec![2], 2, 2.75, 35),
+        ] {
+            let (bf, t, l, r) = tree
+                .find_best_split(&x.view(), &y.view(), &idx, &features, 5)
+                .unwrap();
+            assert_eq!(bf, f);
+            assert!((t - thr).abs() < 1e-12, "{features:?}: {t}");
+            assert_eq!((l.len(), r.len()), (n_left, 40 - n_left));
+        }
+    }
+
+    #[test]
+    fn test_qrf_split_matches_partition_reference() {
+        for seed in 0..20u64 {
+            let n = 15 + 7 * seed as usize;
+            let (mut x, y) = noisy_regression(n, 3, seed);
+            for i in 0..n {
+                x[[i, 2]] = x[[i, 2]].round() / 2.0; // tie-heavy feature
+            }
+            let indices: Vec<usize> = (0..n).filter(|i| i % 4 != 1).collect();
+            let tree = QuantileTree::new(3);
+            for min_node_size in [1usize, 3, 5] {
+                for features in [vec![0usize, 1, 2], vec![2, 0], vec![1]] {
+                    let key = |o: Option<(usize, f64, Vec<usize>, Vec<usize>)>| {
+                        o.map(|(f, t, l, r)| (f, t.to_bits(), l, r))
+                    };
+                    assert_eq!(
+                        key(tree.find_best_split(
+                            &x.view(),
+                            &y.view(),
+                            &indices,
+                            &features,
+                            min_node_size
+                        )),
+                        key(find_best_split_reference(
+                            &x.view(),
+                            &y.view(),
+                            &indices,
+                            &features,
+                            min_node_size
+                        )),
+                        "seed {seed} min_node_size {min_node_size} features {features:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_qrf_split_tie_may_resolve_differently_from_reference() {
+        // Documents the one place the running-sum scan departs from the old
+        // search: two candidates with exactly equal within-child SSE (32/6 in
+        // units of 0.7^2 here), whose rounded values compare the other way.
+        let x =
+            Array2::from_shape_vec((8, 1), vec![1.1, 1.1, 0.8, 0.0, 0.1, 0.3, 0.2, 0.8]).unwrap();
+        let y = Array1::from(vec![0.0, 0.7, 0.0, 0.7, 0.0, 1.4, 1.4, 1.4]);
+        let idx: Vec<usize> = (0..8).collect();
+        let tree = QuantileTree::new(1);
+        let (f, t, l, r) = tree
+            .find_best_split(&x.view(), &y.view(), &idx, &[0], 1)
+            .unwrap();
+        assert_eq!((f, l.len(), r.len()), (0, 6, 2));
+        assert!((t - 0.95).abs() < 1e-12, "{t}");
+        let (f, t, l, r) = find_best_split_reference(&x.view(), &y.view(), &idx, &[0], 1).unwrap();
+        assert_eq!((f, l.len(), r.len()), (0, 2, 6));
+        assert!((t - 0.15).abs() < 1e-12, "{t}");
+    }
+
+    /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
+    fn chain_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        (
+            Array2::from_shape_fn((n, 1), |(i, _)| i as f64),
+            Array1::from_shape_fn(n, |i| (i % 2) as f64),
+        )
+    }
+
+    /// Runs `f` on a thread with a 2 MiB stack, the size of tokio's blocking threads and rayon's workers.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn qrf_depth(root: &QrfNode) -> usize {
+        let (mut max, mut stack) = (0, vec![(root, 0usize)]);
+        while let Some((node, d)) = stack.pop() {
+            max = max.max(d);
+            if let QrfNode::Split { left, right, .. } = node {
+                stack.push((left.as_ref(), d + 1));
+                stack.push((right.as_ref(), d + 1));
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn test_qrf_depth_is_capped_on_a_chain_input() {
+        // Through the private tree, so no bootstrap breaks the chain.
+        assert_eq!(MAX_TREE_DEPTH, 512);
+        let depth = on_small_stack(|| {
+            let (x, y) = chain_data(2_000);
+            let cfg = QuantileRfConfig {
+                min_node_size: 1,
+                max_depth: None,
+                mtry: Some(1),
+                ..Default::default()
+            };
+            let mut tree = QuantileTree::new(1);
+            let mut rng = 1u64;
+            tree.fit(
+                &x.view(),
+                &y.view(),
+                (0..2_000).collect(),
+                Vec::new(),
+                &cfg,
+                &mut rng,
+            );
+            qrf_depth(tree.root.as_ref().unwrap())
+        });
+        assert_eq!(depth, MAX_TREE_DEPTH);
+    }
+
+    #[test]
+    fn test_quantile_rf_rejects_bad_config_and_honours_cancellation() {
+        let (x, y) = noisy_regression(40, 2, 2);
+        let run = |cfg: QuantileRfConfig| quantile_rf(x.view(), y.view(), &cfg);
+        assert!(
+            run(QuantileRfConfig {
+                n_trees: 0,
+                ..Default::default()
+            })
+            .unwrap_err()
+            .contains("n_trees must be at least 1")
+        );
+        assert!(
+            run(QuantileRfConfig {
+                sample_size: Some(0),
+                ..Default::default()
+            })
+            .unwrap_err()
+            .contains("sample_size must be at least 1")
+        );
+        assert!(
+            run(QuantileRfConfig {
+                n_trees: usize::MAX / 2,
+                ..Default::default()
+            })
+            .unwrap_err()
+            .contains("Resource limit")
+        );
+        let mut xb = x.clone();
+        xb[[1, 0]] = f64::NAN;
+        assert!(
+            quantile_rf(xb.view(), y.view(), &QuantileRfConfig::default())
+                .unwrap_err()
+                .contains("non-finite")
+        );
+        let err = with_budget(cancelled_budget(), || {
+            run(QuantileRfConfig {
+                n_trees: 5,
+                ..Default::default()
+            })
+        })
+        .unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+    }
 
     #[test]
     fn test_quantile_rf_basic() {

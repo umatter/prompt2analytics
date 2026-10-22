@@ -8,7 +8,8 @@
 //! - **Parallel tree building**: Trees are built concurrently via rayon
 //! - **Pre-sorted feature indices**: Sorted index arrays computed once, shared read-only
 //! - **Running statistics**: Split finding uses running sums instead of repeated partitioning
-//! - **Zero-copy bootstrap**: Trees reference original data via index arrays
+//! - **Lazy bootstrap**: each tree draws its sample from (seed, tree index) inside
+//!   its worker; at most a few trees per thread are in memory
 //!
 //! # References
 //!
@@ -16,6 +17,9 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::prelude::*;
+
+use crate::errors::EconResult;
+use crate::resource::{self, Budget};
 
 /// A node in a decision tree.
 #[derive(Debug, Clone)]
@@ -368,12 +372,17 @@ fn build_tree_optimized(
     n_features: usize,
     sorted_feature_indices: &SortedFeatureIndices,
     rng_state: &mut u64,
-) -> TreeNode {
+    budget: Option<&Budget>,
+) -> EconResult<TreeNode> {
+    // Checked per node, so even one deep tree stops at the deadline.
+    if let Some(b) = budget {
+        b.check()?;
+    }
     let n_samples = node_indices.len();
 
     // Stopping conditions
     if depth >= max_depth || n_samples < min_samples_split || n_samples <= 1 {
-        return make_leaf(target, node_indices);
+        return Ok(make_leaf(target, node_indices));
     }
 
     // Check if all targets are the same
@@ -382,7 +391,7 @@ fn build_tree_optimized(
         .iter()
         .all(|&i| (target[i] - first_val).abs() < 1e-10)
     {
-        return make_leaf(target, node_indices);
+        return Ok(make_leaf(target, node_indices));
     }
 
     // Select features to consider
@@ -413,7 +422,7 @@ fn build_tree_optimized(
         sorted_feature_indices,
     ) {
         if split.left_indices.is_empty() || split.right_indices.is_empty() {
-            return make_leaf(target, node_indices);
+            return Ok(make_leaf(target, node_indices));
         }
 
         let left = build_tree_optimized(
@@ -427,7 +436,8 @@ fn build_tree_optimized(
             n_features,
             sorted_feature_indices,
             rng_state,
-        );
+            budget,
+        )?;
         let right = build_tree_optimized(
             data,
             target,
@@ -439,16 +449,17 @@ fn build_tree_optimized(
             n_features,
             sorted_feature_indices,
             rng_state,
-        );
+            budget,
+        )?;
 
-        TreeNode::Split {
+        Ok(TreeNode::Split {
             feature_index: split.feature,
             threshold: split.threshold,
             left: Box::new(left),
             right: Box::new(right),
-        }
+        })
     } else {
-        make_leaf(target, node_indices)
+        Ok(make_leaf(target, node_indices))
     }
 }
 
@@ -685,7 +696,15 @@ impl std::fmt::Display for RandomForestResult {
 ///
 /// Trees are built in parallel using rayon. Pre-sorted feature indices are
 /// computed once and shared across all trees for O(n) split evaluation per
-/// feature per node.
+/// feature per node. Each tree draws its bootstrap lazily from (seed, tree
+/// index), and no tree is kept: predictions, OOB sums and importances are
+/// folded in tree order, so memory does not grow with `n_trees`.
+///
+/// # Errors
+///
+/// `n_trees` must be at least 1 and every feature and target value finite.
+/// Returns the "Computation stopped" message once the installed computation
+/// budget expires (checked per tree and per node).
 pub fn random_forest(
     data: ArrayView2<f64>,
     target: ArrayView1<f64>,
@@ -707,98 +726,59 @@ pub fn random_forest(
     }
 
     let num_trees = n_trees.unwrap_or(100);
+    validate_forest_inputs(&data, &target, num_trees, feature_names.as_deref())?;
     let tree_max_depth = max_depth.unwrap_or(10);
     let tree_min_split = min_samples_split.unwrap_or(2);
 
     // Parse max_features
     let max_feat = parse_max_features(max_features, n_features);
 
-    let base_seed = seed.unwrap_or(42);
+    let spec = ForestSpec {
+        n_trees: num_trees,
+        max_depth: tree_max_depth,
+        min_split: tree_min_split,
+        max_features: max_feat,
+        n_features,
+        seed: seed.unwrap_or(42),
+    };
 
     // Pre-sort feature indices once (shared read-only across all trees)
     let sorted_features = SortedFeatureIndices::new(&data);
 
-    // Pre-generate per-tree seeds and bootstrap samples deterministically
-    // so results are reproducible regardless of thread scheduling.
-    let mut rng_state = base_seed;
-    let tree_configs: Vec<(u64, Vec<usize>, Vec<usize>)> = (0..num_trees)
-        .map(|_| {
-            let tree_seed = lcg_random(&mut rng_state) as u64;
-            let (bootstrap, oob) = bootstrap_sample(n_samples, &mut rng_state);
-            (tree_seed, bootstrap, oob)
-        })
-        .collect();
-
-    // Build trees in parallel
-    let tree_results: Vec<(DecisionTree, Vec<(usize, f64)>)> = tree_configs
-        .par_iter()
-        .map(|(tree_seed, bootstrap_indices, oob_indices)| {
-            let mut tree_rng = *tree_seed;
-
-            // Build tree on original data using bootstrap indices (no copy)
-            let root = build_tree_optimized(
-                &data,
-                &target,
-                bootstrap_indices,
-                0,
-                tree_max_depth,
-                tree_min_split,
-                max_feat,
-                n_features,
-                &sorted_features,
-                &mut tree_rng,
-            );
-
-            let tree = DecisionTree {
-                root: Some(root),
-                max_depth: tree_max_depth,
-                min_samples_split: tree_min_split,
-                max_features: Some(max_feat),
-                n_features,
-            };
-
-            // Compute OOB predictions for this tree
-            let oob_preds: Vec<(usize, f64)> = oob_indices
-                .iter()
-                .map(|&idx| (idx, tree.predict_one(&data.row(idx))))
-                .collect();
-
-            (tree, oob_preds)
-        })
-        .collect();
-
-    // Separate trees and OOB predictions
-    let mut trees = Vec::with_capacity(num_trees);
-    // OOB: accumulate sum and count per sample
+    // No tree is kept: predictions, OOB sums and importances are folded in
+    // tree order as the trees arrive. `-0.0` is the neutral element
+    // `Iterator::sum` starts from, so each row's sum is bit-identical to
+    // summing a stored forest.
+    let mut pred_sum = vec![-0.0f64; n_samples];
     let mut oob_sum = vec![0.0f64; n_samples];
     let mut oob_count = vec![0u32; n_samples];
+    let mut importances: Array1<f64> = Array1::zeros(n_features);
 
-    for (tree, oob_preds) in tree_results {
-        for (idx, pred) in oob_preds {
-            oob_sum[idx] += pred;
-            oob_count[idx] += 1;
-        }
-        trees.push(tree);
-    }
+    grow_forest(
+        &data,
+        &target,
+        &sorted_features,
+        &spec,
+        |tree, oob_preds| {
+            for (idx, pred) in oob_preds {
+                oob_sum[idx] += pred;
+                oob_count[idx] += 1;
+            }
+            importances += &tree.feature_importances();
+            pred_sum
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, sum)| *sum += tree.predict_one(&data.row(i)));
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
-    // Aggregate predictions in parallel (mean across all trees)
-    let predictions: Vec<f64> = (0..n_samples)
-        .into_par_iter()
-        .map(|i| {
-            let row = data.row(i);
-            let sum: f64 = trees.iter().map(|t| t.predict_one(&row)).sum();
-            sum / num_trees as f64
-        })
-        .collect();
+    // Mean across all trees
+    let predictions: Vec<f64> = pred_sum.iter().map(|&sum| sum / num_trees as f64).collect();
 
     // Compute OOB score
     let oob_score = compute_oob_score_fast(&oob_sum, &oob_count, &target);
 
-    // Aggregate feature importances
-    let mut importances = Array1::zeros(n_features);
-    for tree in &trees {
-        importances = importances + tree.feature_importances();
-    }
     importances /= num_trees as f64;
 
     Ok(RandomForestResult {
@@ -884,6 +864,11 @@ impl std::fmt::Display for RandomForestModel {
 /// * `seed` - Random seed
 /// * `feature_names` - Optional feature names
 ///
+/// # Errors
+///
+/// As [`random_forest`]; the tree vector is allocated fallibly, so an
+/// impossible `n_trees` returns a "Resource limit" message.
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -913,74 +898,46 @@ pub fn random_forest_with_trees(
     }
 
     let num_trees = n_trees.unwrap_or(100);
+    validate_forest_inputs(&data, &target, num_trees, feature_names.as_deref())?;
     let tree_max_depth = max_depth.unwrap_or(10);
     let tree_min_split = min_samples_split.unwrap_or(2);
 
     let max_feat = parse_max_features(max_features, n_features);
 
-    let base_seed = seed.unwrap_or(42);
+    let spec = ForestSpec {
+        n_trees: num_trees,
+        max_depth: tree_max_depth,
+        min_split: tree_min_split,
+        max_features: max_feat,
+        n_features,
+        seed: seed.unwrap_or(42),
+    };
+
+    // The model keeps every tree, so its vector is sized up front, fallibly.
+    let mut trees = resource::try_with_capacity::<DecisionTree>(num_trees, "random forest trees")
+        .map_err(|e| e.to_string())?;
 
     // Pre-sort feature indices once (shared read-only across all trees)
     let sorted_features = SortedFeatureIndices::new(&data);
 
-    // Pre-generate per-tree seeds and bootstrap samples deterministically
-    let mut rng_state = base_seed;
-    let tree_configs: Vec<(u64, Vec<usize>, Vec<usize>)> = (0..num_trees)
-        .map(|_| {
-            let tree_seed = lcg_random(&mut rng_state) as u64;
-            let (bootstrap, oob) = bootstrap_sample(n_samples, &mut rng_state);
-            (tree_seed, bootstrap, oob)
-        })
-        .collect();
-
-    // Build trees in parallel
-    let tree_results: Vec<(DecisionTree, Vec<(usize, f64)>)> = tree_configs
-        .par_iter()
-        .map(|(tree_seed, bootstrap_indices, oob_indices)| {
-            let mut tree_rng = *tree_seed;
-
-            let root = build_tree_optimized(
-                &data,
-                &target,
-                bootstrap_indices,
-                0,
-                tree_max_depth,
-                tree_min_split,
-                max_feat,
-                n_features,
-                &sorted_features,
-                &mut tree_rng,
-            );
-
-            let tree = DecisionTree {
-                root: Some(root),
-                max_depth: tree_max_depth,
-                min_samples_split: tree_min_split,
-                max_features: Some(max_feat),
-                n_features,
-            };
-
-            let oob_preds: Vec<(usize, f64)> = oob_indices
-                .iter()
-                .map(|&idx| (idx, tree.predict_one(&data.row(idx))))
-                .collect();
-
-            (tree, oob_preds)
-        })
-        .collect();
-
-    // Separate trees and accumulate OOB
-    let mut trees = Vec::with_capacity(num_trees);
+    // Grow the trees (bootstraps drawn lazily per tree) and accumulate OOB
     let mut oob_sum = vec![0.0f64; n_samples];
     let mut oob_count = vec![0u32; n_samples];
 
-    for (tree, oob_preds) in tree_results {
-        for (idx, pred) in oob_preds {
-            oob_sum[idx] += pred;
-            oob_count[idx] += 1;
-        }
-        trees.push(tree);
-    }
+    grow_forest(
+        &data,
+        &target,
+        &sorted_features,
+        &spec,
+        |tree, oob_preds| {
+            for (idx, pred) in oob_preds {
+                oob_sum[idx] += pred;
+                oob_count[idx] += 1;
+            }
+            trees.push(tree);
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
     // Aggregate predictions in parallel
     let predictions: Vec<f64> = (0..n_samples)
@@ -1014,6 +971,151 @@ pub fn random_forest_with_trees(
         feature_names,
         base_value,
     })
+}
+
+/// The state of `lcg_random`'s generator after `steps` calls from `state`, in
+/// O(log steps).
+///
+/// The standard LCG skip-ahead (Brown 1994, "Random number generation with
+/// arbitrary strides"; PCG's `pcg_advance_lcg_64`) for multiplier
+/// 6364136223846793005 and increment 1: it composes the affine map
+/// `s -> a*s + c` with itself by repeated squaring, modulo 2^64.
+fn lcg_jump(state: u64, steps: u64) -> u64 {
+    let (mut acc_mult, mut acc_plus) = (1u64, 0u64);
+    let (mut cur_mult, mut cur_plus) = (6364136223846793005u64, 1u64);
+    let mut k = steps;
+    while k > 0 {
+        if k & 1 == 1 {
+            acc_mult = acc_mult.wrapping_mul(cur_mult);
+            acc_plus = acc_plus.wrapping_mul(cur_mult).wrapping_add(cur_plus);
+        }
+        cur_plus = cur_mult.wrapping_add(1).wrapping_mul(cur_plus);
+        cur_mult = cur_mult.wrapping_mul(cur_mult);
+        k >>= 1;
+    }
+    acc_mult.wrapping_mul(state).wrapping_add(acc_plus)
+}
+
+/// The settings every tree of one forest shares.
+struct ForestSpec {
+    n_trees: usize,
+    max_depth: usize,
+    min_split: usize,
+    max_features: usize,
+    n_features: usize,
+    seed: u64,
+}
+
+/// Grow `spec.n_trees` trees and hand each one, with its out-of-bag
+/// predictions, to `visit` in tree order.
+///
+/// The generator is one sequential stream in which tree `t` draws its own
+/// seed and then `n` bootstrap indices, so tree `t` starts at
+/// `lcg_jump(seed, t * (n + 1))`. Each tree derives that state and draws its
+/// bootstrap inside its rayon task, which reproduces the draws of a forest
+/// whose bootstraps were all generated up front. Trees are grown in chunks of
+/// `4 x` the rayon thread count, so only one chunk's bootstraps, in-bag masks
+/// and OOB vectors are alive at a time. The budget is checked per tree and,
+/// inside the builder, per node.
+fn grow_forest(
+    data: &ArrayView2<f64>,
+    target: &ArrayView1<f64>,
+    sorted: &SortedFeatureIndices,
+    spec: &ForestSpec,
+    mut visit: impl FnMut(DecisionTree, Vec<(usize, f64)>),
+) -> EconResult<()> {
+    let budget = resource::current_budget();
+    let n_samples = data.nrows();
+    // One tree seed plus n bootstrap draws per tree; the period is 2^64, so
+    // wrapping arithmetic keeps the jump exact.
+    let stride = (n_samples as u64).wrapping_add(1);
+    let chunk = 4 * rayon::current_num_threads().max(1);
+
+    let grow_one = |t: usize| -> EconResult<(DecisionTree, Vec<(usize, f64)>)> {
+        if let Some(b) = budget.as_ref() {
+            b.check()?;
+        }
+        let mut rng_state = lcg_jump(spec.seed, (t as u64).wrapping_mul(stride));
+        let mut tree_rng = lcg_random(&mut rng_state) as u64;
+        let (bootstrap_indices, oob_indices) = bootstrap_sample(n_samples, &mut rng_state);
+
+        // Build tree on original data using bootstrap indices (no copy)
+        let root = build_tree_optimized(
+            data,
+            target,
+            &bootstrap_indices,
+            0,
+            spec.max_depth,
+            spec.min_split,
+            spec.max_features,
+            spec.n_features,
+            sorted,
+            &mut tree_rng,
+            budget.as_ref(),
+        )?;
+
+        let tree = DecisionTree {
+            root: Some(root),
+            max_depth: spec.max_depth,
+            min_samples_split: spec.min_split,
+            max_features: Some(spec.max_features),
+            n_features: spec.n_features,
+        };
+
+        // Compute OOB predictions for this tree
+        let oob_preds: Vec<(usize, f64)> = oob_indices
+            .iter()
+            .map(|&idx| (idx, tree.predict_one(&data.row(idx))))
+            .collect();
+
+        Ok((tree, oob_preds))
+    };
+
+    let mut start = 0usize;
+    while start < spec.n_trees {
+        let end = start.saturating_add(chunk).min(spec.n_trees);
+        let grown = (start..end)
+            .into_par_iter()
+            .map(&grow_one)
+            .collect::<EconResult<Vec<_>>>()?;
+        for (tree, oob_preds) in grown {
+            visit(tree, oob_preds);
+        }
+        start = end;
+    }
+    Ok(())
+}
+
+/// Shared argument checks of [`random_forest`] and [`random_forest_with_trees`].
+fn validate_forest_inputs(
+    data: &ArrayView2<f64>,
+    target: &ArrayView1<f64>,
+    n_trees: usize,
+    feature_names: Option<&[String]>,
+) -> Result<(), String> {
+    if n_trees == 0 {
+        return Err("n_trees must be at least 1".to_string());
+    }
+    let k = target.iter().filter(|v| !v.is_finite()).count();
+    if k > 0 {
+        return Err(format!(
+            "Random Forest: the target has {k} missing or non-finite values; \
+             remove or impute them first"
+        ));
+    }
+    for (j, column) in data.columns().into_iter().enumerate() {
+        let k = column.iter().filter(|v| !v.is_finite()).count();
+        if k > 0 {
+            let name = feature_names
+                .and_then(|names| names.get(j).cloned())
+                .unwrap_or_else(|| format!("Feature_{j}"));
+            return Err(format!(
+                "Random Forest: feature '{name}' has {k} missing or non-finite values; \
+                 remove or impute them first"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parse max_features parameter.
@@ -1159,7 +1261,210 @@ fn compute_oob_score(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// Noisy regression data from a fixed LCG (no external RNG).
+    fn noisy_regression(n: usize, p: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut s = seed;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut x = Array2::zeros((n, p));
+        let mut y = Array1::zeros(n);
+        for i in 0..n {
+            for j in 0..p {
+                x[[i, j]] = 10.0 * next();
+            }
+            y[i] = 2.0 * x[[i, 0]] - x[[i, p - 1]] + 3.0 * (next() - 0.5);
+        }
+        (x, y)
+    }
+
+    #[test]
+    fn test_random_forest_seeded_output_is_unchanged() {
+        let (x, y) = noisy_regression(300, 4, 7);
+        let r = random_forest(
+            x.view(),
+            y.view(),
+            Some(37),
+            Some(6),
+            Some(2),
+            Some("sqrt"),
+            Some(11),
+            None,
+        )
+        .unwrap();
+        let m = random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(37),
+            Some(6),
+            Some(2),
+            Some("sqrt"),
+            Some(11),
+            None,
+        )
+        .unwrap();
+        let got = [
+            r.predictions[0],
+            r.predictions[150],
+            r.predictions[299],
+            r.feature_importances[0],
+            r.feature_importances[3],
+            r.oob_score.unwrap(),
+        ];
+        // Captured from the eager-bootstrap code; must stay bit-identical.
+        const EXPECTED: [u64; 6] = [
+            0x401d26a9fd218cc0,
+            0x4029c6a3b0d89c33,
+            0x4030cd6c294f6c87,
+            0x3fd8b33f2441aa5d,
+            0x3fd3df5ecf0af560,
+            0x3fee130a9b6dadeb,
+        ];
+        assert_eq!(got.map(f64::to_bits), EXPECTED);
+        assert_eq!(r.predictions, m.predictions);
+        assert_eq!(r.feature_importances, m.feature_importances);
+        assert_eq!(r.oob_score, m.oob_score);
+    }
+
+    #[test]
+    fn test_random_forest_output_does_not_depend_on_chunk_size() {
+        // One rayon thread makes the chunk 4 trees, so 37 trees cross nine
+        // chunk boundaries whatever the host's thread count.
+        let (x, y) = noisy_regression(300, 4, 7);
+        let run = || {
+            let r = random_forest(
+                x.view(),
+                y.view(),
+                Some(37),
+                Some(6),
+                Some(2),
+                Some("sqrt"),
+                Some(11),
+                None,
+            )
+            .unwrap();
+            let m = random_forest_with_trees(
+                x.view(),
+                y.view(),
+                Some(37),
+                Some(6),
+                Some(2),
+                Some("sqrt"),
+                Some(11),
+                None,
+            )
+            .unwrap();
+            (r, m)
+        };
+        let (wide, wide_m) = run();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let (narrow, narrow_m) = pool.install(run);
+        assert_eq!(wide.predictions, narrow.predictions);
+        assert_eq!(wide.feature_importances, narrow.feature_importances);
+        assert_eq!(wide.oob_score, narrow.oob_score);
+        assert_eq!(wide_m.predictions, narrow_m.predictions);
+        assert_eq!(wide_m.n_trees, narrow_m.trees.len());
+    }
+
+    #[test]
+    fn test_lcg_jump_matches_sequential_draws() {
+        for seed in [0u64, 1, 42, u64::MAX - 7] {
+            let mut s = seed;
+            for k in 0..300u64 {
+                assert_eq!(lcg_jump(seed, k), s, "seed {seed}, k {k}");
+                lcg_random(&mut s);
+            }
+        }
+    }
+
+    #[test]
+    fn test_random_forest_rejects_bad_arguments() {
+        let (x, y) = noisy_regression(30, 2, 3);
+        let err = random_forest(x.view(), y.view(), Some(0), None, None, None, Some(1), None)
+            .unwrap_err();
+        assert!(err.contains("n_trees must be at least 1"), "{err}");
+        let err =
+            random_forest_with_trees(x.view(), y.view(), Some(0), None, None, None, Some(1), None)
+                .unwrap_err();
+        assert!(err.contains("n_trees must be at least 1"), "{err}");
+        let mut yb = y.clone();
+        yb[4] = f64::NAN;
+        let err = random_forest(
+            x.view(),
+            yb.view(),
+            Some(5),
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("non-finite"), "{err}");
+        let mut xb = x.clone();
+        xb[[2, 1]] = f64::INFINITY;
+        let err = random_forest_with_trees(
+            xb.view(),
+            y.view(),
+            Some(5),
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("non-finite"), "{err}");
+    }
+
+    #[test]
+    fn test_random_forest_tree_count_is_lazy_and_bounded() {
+        // ML-4. Before the fix both calls build a Vec of n_trees bootstrap pairs before
+        // any tree and panic with "capacity overflow". Counts below isize::MAX bytes
+        // abort the process instead.
+        let (x, y) = noisy_regression(30, 2, 3);
+        let err = with_budget(cancelled_budget(), || {
+            random_forest(
+                x.view(),
+                y.view(),
+                Some(usize::MAX / 2),
+                None,
+                None,
+                None,
+                Some(1),
+                None,
+            )
+        })
+        .unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        let err = random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(usize::MAX / 2),
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("Resource limit"), "{err}");
+    }
 
     #[test]
     fn test_decision_tree_basic() {
