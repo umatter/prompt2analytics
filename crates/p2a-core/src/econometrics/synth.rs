@@ -1964,8 +1964,9 @@ fn placebo_rmspe_ratio(
 
 /// Post- over pre-treatment RMSPE ratio, the statistic placebo inference ranks
 /// units by. The post-treatment RMSPE of no effects is 0; a pre-treatment
-/// RMSPE of at most 1e-10 gives an infinite ratio. The treated unit and every
-/// placebo go through this one function so that their ratios stay comparable.
+/// RMSPE that is not above 1e-10 (NaN included) gives an infinite ratio. The
+/// treated unit and every placebo go through this one function so that their
+/// ratios stay comparable.
 fn rmspe_ratio(pre_rmspe: f64, effects: &[TimeEffect]) -> f64 {
     let post_rmspe = if !effects.is_empty() {
         let mse: f64 =
@@ -2236,7 +2237,8 @@ mod tests {
     #[test]
     fn test_rmspe_ratio_rule() {
         // The treated unit and the placebos share this rule: post-RMSPE over
-        // pre-RMSPE, 0 for no effects, infinite for a pre-RMSPE at most 1e-10
+        // pre-RMSPE, 0 for no effects, infinite for a pre-RMSPE that is not
+        // above 1e-10 (NaN included)
         let effect = |time, effect| TimeEffect {
             time,
             effect,
@@ -2249,6 +2251,7 @@ mod tests {
         assert_eq!(rmspe_ratio(0.7, &[]), 0.0);
         assert_eq!(rmspe_ratio(1e-10, &effects), f64::INFINITY);
         assert_eq!(rmspe_ratio(0.0, &[]), f64::INFINITY);
+        assert_eq!(rmspe_ratio(f64::NAN, &effects), f64::INFINITY);
     }
 
     fn synth_cfg() -> SynthConfig {
@@ -3907,6 +3910,7 @@ fn bootstrap_gsynth(
 
 #[cfg(test)]
 mod gsynth_tests {
+    use super::tests::cancelled;
     use super::*;
 
     fn create_gsynth_dataset() -> Dataset {
@@ -4176,8 +4180,6 @@ mod gsynth_tests {
         let res = r.unwrap();
         assert_eq!(res.n_factors, 1);
     }
-
-    use super::tests::cancelled;
 
     #[test]
     fn test_gsynth_explicit_factor_count_stops_when_cancelled() {
