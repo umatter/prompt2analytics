@@ -56,7 +56,7 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
-use crate::resource::{check_alloc, checkpoint, try_vec, try_with_capacity};
+use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_with_capacity};
 
 fn size_overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
@@ -243,7 +243,35 @@ pub struct EmbedResult {
 /// R `stats::embed`
 pub fn embed(x: &[f64], dimension: usize) -> EconResult<EmbedResult> {
     let n = x.len();
+    let n_rows = embed_rows(n, dimension)?;
+    let mut matrix = try_with_capacity(n_rows, EMBED_WHAT)?;
 
+    // Build each row: [x[t], x[t-1], ..., x[t-dimension+1]]
+    // where t goes from dimension-1 to n-1
+    for (i, t) in ((dimension - 1)..n).enumerate() {
+        if i % 1024 == 0 {
+            checkpoint()?;
+        }
+        let mut row = try_with_capacity(dimension, EMBED_WHAT)?;
+        for lag in 0..dimension {
+            row.push(x[t - lag]);
+        }
+        matrix.push(row);
+    }
+
+    Ok(EmbedResult {
+        matrix,
+        dimension,
+        n_rows,
+        original_length: n,
+    })
+}
+
+const EMBED_WHAT: &str = "the embedding matrix (rows × dimension)";
+
+/// Validate an embedding of a length-`n` series and admit its
+/// `(n - dimension + 1) × dimension` values; returns the row count.
+fn embed_rows(n: usize, dimension: usize) -> EconResult<usize> {
     if dimension == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Embedding dimension must be at least 1".to_string(),
@@ -260,34 +288,28 @@ pub fn embed(x: &[f64], dimension: usize) -> EconResult<EmbedResult> {
     }
 
     let n_rows = n - dimension + 1;
-    let mut matrix = Vec::with_capacity(n_rows);
-
-    // Build each row: [x[t], x[t-1], ..., x[t-dimension+1]]
-    // where t goes from dimension-1 to n-1
-    for t in (dimension - 1)..n {
-        let mut row = Vec::with_capacity(dimension);
-        for lag in 0..dimension {
-            row.push(x[t - lag]);
-        }
-        matrix.push(row);
-    }
-
-    Ok(EmbedResult {
-        matrix,
-        dimension,
-        n_rows,
-        original_length: n,
-    })
+    let cells = checked_len(&[n_rows, dimension], EMBED_WHAT)?;
+    check_alloc::<f64>(cells, EMBED_WHAT)?;
+    Ok(n_rows)
 }
 
 /// Embed a time series into an ndarray matrix.
 ///
 /// Same as `embed` but returns an ndarray Array2<f64>.
 pub fn embed_array(x: &[f64], dimension: usize) -> EconResult<Array2<f64>> {
-    let result = embed(x, dimension)?;
-    let n_rows = result.n_rows;
+    let n = x.len();
+    let n_rows = embed_rows(n, dimension)?;
+    let cells = checked_len(&[n_rows, dimension], EMBED_WHAT)?;
 
-    let flat: Vec<f64> = result.matrix.into_iter().flatten().collect();
+    // Row-major, row i = [x[t], x[t-1], ..., x[t-dimension+1]] with
+    // t = i + dimension - 1, exactly as `embed` builds it.
+    let mut flat = try_with_capacity(cells, EMBED_WHAT)?;
+    for (i, t) in ((dimension - 1)..n).enumerate() {
+        if i % 1024 == 0 {
+            checkpoint()?;
+        }
+        flat.extend((0..dimension).map(|lag| x[t - lag]));
+    }
     Array2::from_shape_vec((n_rows, dimension), flat)
         .map_err(|e| EconError::Internal(e.to_string()))
 }
@@ -1182,11 +1204,22 @@ pub fn acf_to_ar(acf: &[f64]) -> EconResult<Acf2ArResult> {
         });
     }
 
-    let mut ar_matrix: Vec<Vec<f64>> = Vec::with_capacity(max_order);
-    let mut pacf = Vec::with_capacity(max_order);
+    // The triangular matrix holds max_order * (max_order + 1) / 2 coefficients;
+    // admit them before any work.
+    const WHAT: &str = "the AR coefficient matrix (order × order / 2)";
+    let order_plus_one = max_order
+        .checked_add(1)
+        .ok_or_else(|| size_overflow(WHAT))?;
+    let cells = checked_len(&[max_order, order_plus_one], WHAT)? / 2;
+    check_alloc::<f64>(cells, WHAT)?;
+
+    let mut ar_matrix: Vec<Vec<f64>> = try_with_capacity(max_order, WHAT)?;
+    let mut pacf = try_with_capacity(max_order, WHAT)?;
 
     // Durbin-Levinson recursion
-    let mut phi: Vec<f64> = vec![0.0; max_order];
+    let mut phi: Vec<f64> = try_vec(max_order, 0.0, WHAT)?;
+    // phi of the previous order, reused across orders instead of a clone each time
+    let mut prev: Vec<f64> = try_vec(max_order, 0.0, WHAT)?;
 
     // AR(1)
     phi[0] = rho[1];
@@ -1195,6 +1228,8 @@ pub fn acf_to_ar(acf: &[f64]) -> EconResult<Acf2ArResult> {
 
     // AR(n) for n = 2 to max_order
     for n in 2..=max_order {
+        // Each order costs O(n).
+        checkpoint()?;
         // Compute phi_{n,n}
         let mut num = rho[n];
         let mut den = 1.0;
@@ -1213,14 +1248,16 @@ pub fn acf_to_ar(acf: &[f64]) -> EconResult<Acf2ArResult> {
         pacf.push(phi_nn);
 
         // Update phi coefficients
-        let phi_prev = phi.clone();
+        prev[..n - 1].copy_from_slice(&phi[..n - 1]);
         for k in 1..n {
-            phi[k - 1] = phi_prev[k - 1] - phi_nn * phi_prev[n - k - 1];
+            phi[k - 1] = prev[k - 1] - phi_nn * prev[n - k - 1];
         }
         phi[n - 1] = phi_nn;
 
         // Store AR(n) coefficients
-        ar_matrix.push(phi[..n].to_vec());
+        let mut row = try_with_capacity(n, WHAT)?;
+        row.extend_from_slice(&phi[..n]);
+        ar_matrix.push(row);
     }
 
     Ok(Acf2ArResult {
@@ -1904,6 +1941,34 @@ mod tests {
     fn diffinv_honours_cancellation() {
         assert!(matches!(
             cancelled(|| diffinv(&[1.0, 2.0, 3.0], 1, 3, None)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    #[test]
+    fn embed_and_acf_to_ar_check_their_output_size() {
+        let x: Vec<f64> = (0..5_000)
+            .map(|t| (t as f64 * 0.37).sin() + 0.01 * ((t * 13 % 7) as f64))
+            .collect();
+        // 4,001 x 1,000 f64 = 32 MB against a 1 MiB ceiling
+        let err =
+            crate::resource::with_alloc_ceiling(Some(1 << 20), || embed(&x, 1_000)).unwrap_err();
+        assert!(err.to_string().contains("embedding matrix"), "{err}");
+        let err = crate::resource::with_alloc_ceiling(Some(1 << 20), || embed_array(&x, 1_000))
+            .unwrap_err();
+        assert!(err.to_string().contains("embedding matrix"), "{err}");
+        // 200 orders -> 20,100 coefficients = 161 KB against a 64 KiB ceiling
+        let acf: Vec<f64> = (0..201).map(|k| 0.9f64.powi(k)).collect();
+        let err =
+            crate::resource::with_alloc_ceiling(Some(1 << 16), || acf_to_ar(&acf)).unwrap_err();
+        assert!(err.to_string().contains("AR coefficient matrix"), "{err}");
+    }
+
+    #[test]
+    fn acf_to_ar_honours_cancellation() {
+        let acf: Vec<f64> = (0..50).map(|k| 0.9f64.powi(k)).collect();
+        assert!(matches!(
+            cancelled(|| acf_to_ar(&acf)),
             Err(EconError::Cancelled(_))
         ));
     }
