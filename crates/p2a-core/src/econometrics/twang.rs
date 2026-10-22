@@ -1476,7 +1476,7 @@ mod tests {
         let n = 20_000;
         let mut s = 7u64;
         let treatment: Vec<f64> = (0..n).map(|i| (i % 3 == 0) as u8 as f64).collect();
-        let mut cols: Vec<Vec<f64>> = vec![Vec::with_capacity(n); 5];
+        let mut cols: Vec<Vec<f64>> = (0..5).map(|_| Vec::with_capacity(n)).collect();
         for i in 0..n {
             for (j, col) in cols.iter_mut().enumerate() {
                 let v = lcg(&mut s);

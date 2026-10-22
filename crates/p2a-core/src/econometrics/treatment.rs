@@ -1642,7 +1642,7 @@ mod tests {
     fn test_streamed_bootstrap_matches_materialised_draws() {
         // stat rejects some sets so the filtering path is covered
         let stat = |idx: &[usize]| {
-            if idx[0] % 5 == 0 {
+            if idx[0].is_multiple_of(5) {
                 None
             } else {
                 Some(idx.iter().map(|&i| ((i * 7919) % 101) as f64).sum::<f64>())
@@ -1660,7 +1660,7 @@ mod tests {
         for chunk in [1, 8, 101, 1000] {
             let mut rng = StdRng::seed_from_u64(7);
             assert_eq!(
-                streamed_bootstrap(&mut rng, 37, 101, chunk, &stat).unwrap(),
+                streamed_bootstrap(&mut rng, 37, 101, chunk, stat).unwrap(),
                 reference,
                 "chunk {chunk}"
             );
