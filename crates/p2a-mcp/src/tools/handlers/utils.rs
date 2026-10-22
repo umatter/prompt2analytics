@@ -23,6 +23,60 @@ use p2a_core::{
     simulation::{ColumnSpec, Distribution, generate_random_data},
 };
 
+/// A writer that refuses to pass more than `cap` bytes to `inner`: the shared
+/// byte cap for exports. A write that would take the total past the cap is
+/// refused whole (nothing of it reaches `inner`), marks the writer as
+/// exceeded and fails with an I/O error; `None` means no cap.
+pub(crate) struct CappedWriter<W> {
+    inner: W,
+    cap: Option<u64>,
+    written: u64,
+    exceeded: bool,
+}
+
+impl<W> CappedWriter<W> {
+    pub(crate) fn new(inner: W, cap: Option<u64>) -> Self {
+        Self {
+            inner,
+            cap,
+            written: 0,
+            exceeded: false,
+        }
+    }
+
+    /// Whether a write was refused because of the cap.
+    pub(crate) fn exceeded(&self) -> bool {
+        self.exceeded
+    }
+
+    /// Bytes passed to the inner writer so far.
+    pub(crate) fn written(&self) -> u64 {
+        self.written
+    }
+
+    pub(crate) fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for CappedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(cap) = self.cap
+            && self.written.saturating_add(buf.len() as u64) > cap
+        {
+            self.exceeded = true;
+            return Err(std::io::Error::other("export size limit reached"));
+        }
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// A refusal by a named budget, as an in-band tool error (logged at `info`).
 fn budget_refusal(v: LimitViolation) -> CallToolResult {
     tracing::info!(
@@ -811,6 +865,21 @@ impl AnalyticsServer {
 mod tests {
     use super::*;
     use crate::tools::limits::{self, Family, Limits};
+    use std::io::Write;
+
+    #[test]
+    fn capped_writer_stops_at_the_cap() {
+        let mut w = CappedWriter::new(Vec::new(), Some(10));
+        assert!(w.write_all(b"0123456789").is_ok());
+        assert!(!w.exceeded());
+        assert!(w.write_all(b"x").is_err());
+        assert!(w.exceeded());
+        assert_eq!(w.written(), 10);
+        assert_eq!(w.into_inner(), b"0123456789");
+        let mut unbounded = CappedWriter::new(Vec::new(), None);
+        assert!(unbounded.write_all(&[0u8; 4096]).is_ok());
+        assert!(!unbounded.exceeded());
+    }
 
     /// A path guaranteed to sit outside the jail root, whatever it resolves to:
     /// the root is either the process CWD (this crate's directory under the repo)

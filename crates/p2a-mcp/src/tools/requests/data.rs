@@ -12,7 +12,7 @@ use serde::Deserialize;
 pub struct LoadDatasetRequest {
     /// Path to the data file
     #[schemars(
-        description = "Absolute or relative path to the data file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats."
+        description = "Path of the data file, relative to the server's data directory (for example 'sales.csv' or 'raw/sales.csv'). An absolute path must lie inside that directory. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats."
     )]
     pub path: String,
 
@@ -62,7 +62,7 @@ pub struct ExportDatasetRequest {
 
     /// Output file path
     #[schemars(
-        description = "Path where the file will be saved. The format is determined by extension: .csv, .parquet, .json"
+        description = "Where to save the file, relative to the server's data directory (for example 'results.csv'). The format is determined by extension: .csv, .parquet, .json. An existing file with the same name is replaced."
     )]
     pub path: String,
 

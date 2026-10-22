@@ -371,3 +371,185 @@ async fn symlinks_in_a_session_directory_are_not_followed() {
     assert!(!msg.contains(root_str()), "leaks the root: {msg}");
     assert!(temp_files(&session_dir(&s)).is_empty());
 }
+
+/// `"i,j\n"` plus `"{i},{2i}\n"` for `i` in `0..n`.
+fn numbered_csv(n: usize) -> String {
+    let rows: String = (0..n).map(|i| format!("{i},{}\n", 2 * i)).collect();
+    format!("i,j\n{rows}")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_disk_quota_refuses_exports_past_the_limit() {
+    let app = app().await;
+    let s = session(&app).await;
+    // About 24 KB per export; the quota is 64 KiB.
+    assert!(
+        call(
+            &app,
+            &s,
+            "create_dataset",
+            json!({"name": "n", "csv_content": numbered_csv(2500)})
+        )
+        .await
+        .0
+    );
+    for name in ["a.csv", "b.csv"] {
+        let (ok, msg) = call(
+            &app,
+            &s,
+            "export_dataset",
+            json!({"dataset": "n", "path": name}),
+        )
+        .await;
+        assert!(ok, "{name}: {msg}");
+    }
+    let (ok, msg) = call(
+        &app,
+        &s,
+        "export_dataset",
+        json!({"dataset": "n", "path": "c.csv"}),
+    )
+    .await;
+    assert!(!ok, "the third export passed the quota");
+    assert!(msg.contains("storage limit"), "{msg}");
+    assert!(!msg.contains(root_str()), "leaks the root: {msg}");
+    assert!(!session_dir(&s).join("c.csv").exists());
+    assert!(temp_files(&session_dir(&s)).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_messages_show_relative_paths() {
+    let app = app().await;
+    let s = session(&app).await;
+    assert!(
+        call(
+            &app,
+            &s,
+            "create_dataset",
+            json!({"name": "d", "csv_content": "x,y\n1,1.1\n2,1.9\n"})
+        )
+        .await
+        .0
+    );
+    // `sub` does not exist.
+    let (ok, msg) = call(
+        &app,
+        &s,
+        "export_dataset",
+        json!({"dataset": "d", "path": "sub/x.csv"}),
+    )
+    .await;
+    assert!(!ok, "{msg}");
+    assert!(msg.contains("sub") && !msg.contains(root_str()), "{msg}");
+    for path in ["x.csv", "x.parquet", "x.json"] {
+        let (ok, msg) = call(
+            &app,
+            &s,
+            "export_dataset",
+            json!({"dataset": "d", "path": path}),
+        )
+        .await;
+        assert!(ok, "{path}: {msg}");
+        assert!(msg.contains(path) && !msg.contains(root_str()), "{msg}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn load_dataset_refuses_files_above_the_load_limit() {
+    let app = app().await;
+    let s = session(&app).await;
+    // about 2.8 KB on disk
+    let rows: String = (0..400).map(|i| format!("{i},{}.5\n", i % 7)).collect();
+    assert!(
+        call(
+            &app,
+            &s,
+            "create_dataset",
+            json!({"name": "big", "csv_content": format!("x,y\n{rows}")})
+        )
+        .await
+        .0
+    );
+    assert!(
+        call(
+            &app,
+            &s,
+            "export_dataset",
+            json!({"dataset": "big", "path": "big.csv"})
+        )
+        .await
+        .0
+    );
+    let (ok, msg) = call(
+        &app,
+        &s,
+        "load_dataset",
+        json!({"path": "big.csv", "name": "again"}),
+    )
+    .await;
+    assert!(!ok, "a file above load_file_bytes was loaded");
+    assert!(
+        msg.contains("(load_file_bytes)") && msg.contains("2048"),
+        "{msg}"
+    );
+    assert!(!msg.contains(root_str()), "leaks the root: {msg}");
+    assert!(
+        call(
+            &app,
+            &s,
+            "create_dataset",
+            json!({"name": "small", "csv_content": "x,y\n1,1.1\n2,1.9\n"})
+        )
+        .await
+        .0
+    );
+    assert!(
+        call(
+            &app,
+            &s,
+            "export_dataset",
+            json!({"dataset": "small", "path": "small.csv"})
+        )
+        .await
+        .0
+    );
+    let (ok, msg) = call(
+        &app,
+        &s,
+        "load_dataset",
+        json!({"path": "small.csv", "name": "again"}),
+    )
+    .await;
+    assert!(ok, "{msg}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_dataset_respects_export_bytes() {
+    let app = app().await;
+    let s = session(&app).await;
+    // About 48 KB as CSV, more than export_bytes = 32,768.
+    assert!(
+        call(
+            &app,
+            &s,
+            "create_dataset",
+            json!({"name": "n", "csv_content": numbered_csv(5000)})
+        )
+        .await
+        .0
+    );
+    let (ok, msg) = call(
+        &app,
+        &s,
+        "export_dataset",
+        json!({"dataset": "n", "path": "n.csv"}),
+    )
+    .await;
+    assert!(!ok, "an export above export_bytes was written");
+    assert!(
+        msg.contains("export limit") && msg.contains("32768"),
+        "{msg}"
+    );
+    assert!(!session_dir(&s).join("n.csv").exists());
+    assert!(temp_files(&session_dir(&s)).is_empty());
+}
