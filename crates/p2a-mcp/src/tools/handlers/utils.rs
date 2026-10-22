@@ -238,6 +238,487 @@ impl Serialize for SessionCell<'_> {
     }
 }
 
+// ============================================================================
+// Streaming session import
+// ============================================================================
+
+/// One dataset of a session file, as `import_session` reads it.
+#[derive(Debug)]
+enum ParsedDataset {
+    /// The dataset's value is not an object.
+    Invalid,
+    /// No `data` object (a metadata-only export).
+    NoData,
+    /// The `data` object's columns, in file order.
+    Columns(Vec<(String, ParsedColumn)>),
+}
+
+/// One column of a session file. The type is decided by the first non-null
+/// element, as the previous import decided it.
+#[derive(Debug)]
+enum ParsedColumn {
+    F64(Vec<Option<f64>>),
+    I64(Vec<Option<i64>>),
+    Bool(Vec<Option<bool>>),
+    Str(Vec<Option<String>>),
+    /// The column's value is not an array (skipped).
+    NotArray,
+}
+
+/// Shared state of one streaming parse: the bytes charged against the
+/// budget, and why the parse was stopped (budget or cancellation), if it was.
+struct ImportState {
+    used: std::cell::Cell<u64>,
+    budget: Option<u64>,
+    stop: std::cell::RefCell<Option<String>>,
+}
+
+impl ImportState {
+    /// Charge `bytes`; an error once the total passes the budget.
+    fn charge<E: serde::de::Error>(&self, bytes: u64) -> Result<(), E> {
+        let used = self.used.get().saturating_add(bytes);
+        self.used.set(used);
+        match self.budget {
+            Some(budget) if used > budget => Err(self.stopped(format!(
+                "the session file needs more than this server's import limit of {budget} bytes \
+                 in memory"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// Give back `bytes` charged for something already freed.
+    fn refund(&self, bytes: u64) {
+        self.used.set(self.used.get().saturating_sub(bytes));
+    }
+
+    fn checkpoint<E: serde::de::Error>(&self) -> Result<(), E> {
+        p2a_core::resource::checkpoint().map_err(|e| self.stopped(e.to_string()))
+    }
+
+    fn stopped<E: serde::de::Error>(&self, reason: String) -> E {
+        let err = E::custom(&reason);
+        *self.stop.borrow_mut() = Some(reason);
+        err
+    }
+}
+
+/// Parse a session file in one streaming pass, straight into typed column
+/// vectors, without a `serde_json::Value` tree for the document. At most
+/// `budget` bytes (values, plus the text of string cells and names, plus the
+/// one element being read) are held at a time.
+fn parse_session_json(
+    reader: impl std::io::Read,
+    budget: Option<u64>,
+) -> Result<Vec<(String, ParsedDataset)>, String> {
+    use serde::de::DeserializeSeed;
+    let state = ImportState {
+        used: std::cell::Cell::new(0),
+        budget,
+        stop: std::cell::RefCell::new(None),
+    };
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    let parsed = TopSeed(&state)
+        .deserialize(&mut de)
+        .and_then(|datasets| de.end().map(|()| datasets));
+    match parsed {
+        Ok(Some(datasets)) => Ok(datasets),
+        Ok(None) => Err("Invalid session file: missing 'datasets'".to_string()),
+        Err(e) => Err(match state.stop.borrow_mut().take() {
+            Some(reason) => reason,
+            None if e.is_io() => format!("Failed to read the session file: {e}"),
+            None => format!("Invalid session file: {e}"),
+        }),
+    }
+}
+
+/// Implements every non-map `Visitor` method by consuming the value and
+/// returning `$fallback` (serde_json calls only these for JSON values).
+macro_rules! non_map_values_are {
+    ($fallback:expr) => {
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok($fallback)
+        }
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok($fallback)
+        }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+            Ok($fallback)
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+            Ok($fallback)
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok($fallback)
+        }
+        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+            Ok($fallback)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok($fallback)
+        }
+    };
+}
+
+/// Insert `(key, value)`, replacing an earlier entry with the same key in
+/// place (a JSON object's last duplicate wins, as in `serde_json::Map`).
+fn upsert<V>(entries: &mut Vec<(String, V)>, key: String, value: V) {
+    match entries.iter_mut().find(|(k, _)| *k == key) {
+        Some(entry) => entry.1 = value,
+        None => entries.push((key, value)),
+    }
+}
+
+/// The document: `Some(datasets)`, or `None` when it is not an object or has
+/// no `datasets` object. Other top-level keys are skipped.
+struct TopSeed<'s>(&'s ImportState);
+
+impl<'de> serde::de::DeserializeSeed<'de> for TopSeed<'_> {
+    type Value = Option<Vec<(String, ParsedDataset)>>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for TopSeed<'_> {
+    type Value = Option<Vec<(String, ParsedDataset)>>;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a session object")
+    }
+    non_map_values_are!(None);
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut datasets = None;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "datasets" {
+                datasets = map.next_value_seed(DatasetsSeed(self.0))?;
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(datasets)
+    }
+}
+
+/// The `datasets` value: `Some` for an object, in file order.
+struct DatasetsSeed<'s>(&'s ImportState);
+
+impl<'de> serde::de::DeserializeSeed<'de> for DatasetsSeed<'_> {
+    type Value = Option<Vec<(String, ParsedDataset)>>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for DatasetsSeed<'_> {
+    type Value = Option<Vec<(String, ParsedDataset)>>;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an object of datasets")
+    }
+    non_map_values_are!(None);
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out = Vec::new();
+        while let Some(name) = map.next_key::<String>()? {
+            self.0.charge(name.len() as u64)?;
+            let dataset = map.next_value_seed(DatasetSeed(self.0))?;
+            upsert(&mut out, name, dataset);
+        }
+        Ok(Some(out))
+    }
+}
+
+/// One dataset's value: only its `data` key is read.
+struct DatasetSeed<'s>(&'s ImportState);
+
+impl<'de> serde::de::DeserializeSeed<'de> for DatasetSeed<'_> {
+    type Value = ParsedDataset;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for DatasetSeed<'_> {
+    type Value = ParsedDataset;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a dataset object")
+    }
+    non_map_values_are!(ParsedDataset::Invalid);
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut data = None;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "data" {
+                data = map.next_value_seed(DataSeed(self.0))?;
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(data.map_or(ParsedDataset::NoData, ParsedDataset::Columns))
+    }
+}
+
+/// A dataset's `data` value: `Some(columns)` for an object.
+struct DataSeed<'s>(&'s ImportState);
+
+impl<'de> serde::de::DeserializeSeed<'de> for DataSeed<'_> {
+    type Value = Option<Vec<(String, ParsedColumn)>>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for DataSeed<'_> {
+    type Value = Option<Vec<(String, ParsedColumn)>>;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an object of columns")
+    }
+    non_map_values_are!(None);
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut columns = Vec::new();
+        while let Some(name) = map.next_key::<String>()? {
+            self.0.checkpoint()?;
+            self.0.charge(name.len() as u64)?;
+            let column = map.next_value_seed(ColumnSeed(self.0))?;
+            upsert(&mut columns, name, column);
+        }
+        Ok(Some(columns))
+    }
+}
+
+/// One column's value: an array becomes a typed vector, anything else
+/// [`ParsedColumn::NotArray`].
+struct ColumnSeed<'s>(&'s ImportState);
+
+impl<'de> serde::de::DeserializeSeed<'de> for ColumnSeed<'_> {
+    type Value = ParsedColumn;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+/// A column being filled: `Pending(n)` until the first non-null element has
+/// decided the type (`n` leading nulls so far).
+enum ColumnBuilder {
+    Pending(usize),
+    Typed(ParsedColumn),
+}
+
+impl ColumnBuilder {
+    fn push<E: serde::de::Error>(
+        &mut self,
+        v: serde_json::Value,
+        state: &ImportState,
+    ) -> Result<(), E> {
+        use serde_json::Value;
+        if let ColumnBuilder::Pending(nulls) = self {
+            if v.is_null() {
+                *nulls += 1;
+                return Ok(());
+            }
+            let leading = *nulls;
+            let column = match &v {
+                Value::Number(n) if n.is_f64() => {
+                    ParsedColumn::F64(pending_nulls::<f64, E>(leading, state)?)
+                }
+                Value::Number(_) => ParsedColumn::I64(pending_nulls::<i64, E>(leading, state)?),
+                Value::Bool(_) => ParsedColumn::Bool(pending_nulls::<bool, E>(leading, state)?),
+                _ => ParsedColumn::Str(pending_nulls::<String, E>(leading, state)?),
+            };
+            *self = ColumnBuilder::Typed(column);
+        }
+        let ColumnBuilder::Typed(column) = self else {
+            unreachable!("the type is decided above");
+        };
+        match column {
+            ParsedColumn::F64(vals) => {
+                state.charge(std::mem::size_of::<Option<f64>>() as u64)?;
+                vals.push(v.as_f64());
+            }
+            ParsedColumn::I64(vals) => {
+                state.charge(std::mem::size_of::<Option<i64>>() as u64)?;
+                vals.push(v.as_i64());
+            }
+            ParsedColumn::Bool(vals) => {
+                state.charge(std::mem::size_of::<Option<bool>>() as u64)?;
+                vals.push(v.as_bool());
+            }
+            ParsedColumn::Str(vals) => {
+                let s = match v {
+                    Value::Null => None,
+                    Value::String(s) => Some(s),
+                    other => Some(other.to_string()),
+                };
+                let text = s.as_ref().map_or(0, String::len) as u64;
+                state.charge(std::mem::size_of::<Option<String>>() as u64 + text)?;
+                vals.push(s);
+            }
+            ParsedColumn::NotArray => {}
+        }
+        Ok(())
+    }
+
+    fn finish<E: serde::de::Error>(self, state: &ImportState) -> Result<ParsedColumn, E> {
+        Ok(match self {
+            // An all-null (or empty) column is a string column, as before.
+            ColumnBuilder::Pending(nulls) => {
+                ParsedColumn::Str(pending_nulls::<String, E>(nulls, state)?)
+            }
+            ColumnBuilder::Typed(column) => column,
+        })
+    }
+}
+
+/// `n` leading `None`s for a column whose type has just been decided.
+fn pending_nulls<T, E: serde::de::Error>(
+    n: usize,
+    state: &ImportState,
+) -> Result<Vec<Option<T>>, E> {
+    let size = std::mem::size_of::<Option<T>>() as u64;
+    state.charge((n as u64).saturating_mul(size))?;
+    let mut v = Vec::new();
+    v.resize_with(n, || None);
+    Ok(v)
+}
+
+impl<'de> serde::de::Visitor<'de> for ColumnSeed<'_> {
+    type Value = ParsedColumn;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an array of values")
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(ParsedColumn::NotArray)
+    }
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(ParsedColumn::NotArray)
+    }
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(ParsedColumn::NotArray)
+    }
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(ParsedColumn::NotArray)
+    }
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(ParsedColumn::NotArray)
+    }
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(ParsedColumn::NotArray)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        while map
+            .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+            .is_some()
+        {}
+        Ok(ParsedColumn::NotArray)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let state = self.0;
+        let mut column = ColumnBuilder::Pending(0);
+        loop {
+            // The element is held as one transient value, charged while it is
+            // read and given back once it has been converted.
+            let before = state.used.get();
+            let Some(v) = seq.next_element_seed(ElementSeed(state))? else {
+                break;
+            };
+            state.refund(state.used.get().saturating_sub(before));
+            column.push(v, state)?;
+        }
+        column.finish(state)
+    }
+}
+
+/// One element of a column, read as a `serde_json::Value` whose nodes and
+/// text are charged against the budget as they are read.
+struct ElementSeed<'s>(&'s ImportState);
+
+impl<'de> serde::de::DeserializeSeed<'de> for ElementSeed<'_> {
+    type Value = serde_json::Value;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for ElementSeed<'_> {
+    type Value = serde_json::Value;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+    fn visit_bool<E: serde::de::Error>(self, b: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Bool(b))
+    }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(v.into())
+    }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(v.into())
+    }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        Ok(serde_json::Number::from_f64(v).map_or(serde_json::Value::Null, Into::into))
+    }
+    fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
+        self.0.charge(s.len() as u64)?;
+        Ok(serde_json::Value::String(s.to_string()))
+    }
+    fn visit_string<E: serde::de::Error>(self, s: String) -> Result<Self::Value, E> {
+        self.0.charge(s.len() as u64)?;
+        Ok(serde_json::Value::String(s))
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element_seed(ElementSeed(self.0))? {
+            self.0
+                .charge(std::mem::size_of::<serde_json::Value>() as u64)?;
+            items.push(item);
+        }
+        Ok(serde_json::Value::Array(items))
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            self.0
+                .charge(key.len() as u64 + std::mem::size_of::<serde_json::Value>() as u64 * 2)?;
+            let value = map.next_value_seed(ElementSeed(self.0))?;
+            object.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(object))
+    }
+}
+
+/// A parsed dataset as a frame, with the per-dataset error texts of the
+/// previous import (`invalid format`, `no data field (metadata-only
+/// session)`, `no column data found`, `DataFrame error - ...`). Columns that
+/// were not arrays are skipped.
+fn build_dataset(parsed: ParsedDataset) -> Result<DataFrame, String> {
+    use p2a_core::polars::prelude::{NamedFrom, Series};
+    let columns = match parsed {
+        ParsedDataset::Invalid => return Err("invalid format".to_string()),
+        ParsedDataset::NoData => return Err("no data field (metadata-only session)".to_string()),
+        ParsedDataset::Columns(columns) => columns,
+    };
+    let columns: Vec<Column> = columns
+        .into_iter()
+        .filter_map(|(name, column)| {
+            let series = match column {
+                ParsedColumn::F64(v) => Series::new(name.as_str().into(), v),
+                ParsedColumn::I64(v) => Series::new(name.as_str().into(), v),
+                ParsedColumn::Bool(v) => Series::new(name.as_str().into(), v),
+                ParsedColumn::Str(v) => Series::new(name.as_str().into(), v),
+                ParsedColumn::NotArray => return None,
+            };
+            Some(series.into())
+        })
+        .collect();
+    if columns.is_empty() {
+        return Err("no column data found".to_string());
+    }
+    DataFrame::new(columns).map_err(|e| format!("DataFrame error - {}", e))
+}
+
 /// A refusal by a named budget, as an in-band tool error (logged at `info`).
 fn budget_refusal(v: LimitViolation) -> CallToolResult {
     tracing::info!(
@@ -877,9 +1358,6 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<ImportSessionRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-        use std::fs;
-
         let path = match path_jail::validate_data_path(&request.file_path) {
             Ok(p) => p,
             Err(e) => {
@@ -889,20 +1367,42 @@ impl AnalyticsServer {
                 ))]));
             }
         };
+        let shown = path_jail::display_path(&path);
+        let read_failed = || {
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to read session file `{shown}`"
+            ))]))
+        };
 
-        let json_content = fs::read_to_string(&path).map_err(|e| {
-            McpError::internal_error(format!("Failed to read session file: {}", e), None)
-        })?;
-
-        let session: serde_json::Value = serde_json::from_str(&json_content)
-            .map_err(|e| McpError::internal_error(format!("Invalid JSON: {}", e), None))?;
-
-        let datasets_obj = session
-            .get("datasets")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| {
-                McpError::internal_error("Invalid session format: missing 'datasets' field", None)
-            })?;
+        // Size-checked before the file is opened, then parsed in one
+        // streaming pass under the same budget; nothing in the session
+        // changes until the whole file has been read.
+        let budget = crate::tools::limits::current().export_bytes;
+        if let Some(cap) = budget {
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.len() > cap => {
+                    tracing::info!(
+                        tool = "import_session",
+                        override_key = "export_bytes",
+                        requested = meta.len(),
+                        limit = cap,
+                        "request refused by a named budget"
+                    );
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "`{shown}` is larger than this server's import limit of {cap} bytes"
+                    ))]));
+                }
+                Ok(_) => {}
+                Err(_) => return read_failed(),
+            }
+        }
+        let Ok(file) = std::fs::File::open(&path) else {
+            return read_failed();
+        };
+        let parsed = match parse_session_json(std::io::BufReader::new(file), budget) {
+            Ok(parsed) => parsed,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
 
         let merge = request.merge.unwrap_or(false);
         let mut datasets = self.datasets.write().await;
@@ -914,78 +1414,13 @@ impl AnalyticsServer {
         let mut imported_count = 0;
         let mut errors = Vec::new();
 
-        for (name, ds_info) in datasets_obj {
-            let ds_obj = match ds_info.as_object() {
-                Some(obj) => obj,
-                None => {
-                    errors.push(format!("{}: invalid format", name));
-                    continue;
+        for (name, dataset) in parsed {
+            match build_dataset(dataset) {
+                Ok(df) => {
+                    datasets.insert(name, Dataset::new(df));
+                    imported_count += 1;
                 }
-            };
-
-            // Check if we have data to restore
-            if let Some(data) = ds_obj.get("data").and_then(|v| v.as_object()) {
-                // Reconstruct DataFrame from stored columns
-                let mut columns_vec: Vec<Column> = Vec::new();
-
-                for (col_name, values) in data {
-                    if let Some(arr) = values.as_array() {
-                        // Try to determine column type from first non-null value
-                        let first_non_null = arr.iter().find(|v| !v.is_null());
-
-                        let series: Series = match first_non_null {
-                            Some(serde_json::Value::Number(n)) if n.is_f64() => {
-                                let vals: Vec<Option<f64>> =
-                                    arr.iter().map(|v| v.as_f64()).collect();
-                                Series::new(col_name.into(), vals)
-                            }
-                            Some(serde_json::Value::Number(_)) => {
-                                let vals: Vec<Option<i64>> =
-                                    arr.iter().map(|v| v.as_i64()).collect();
-                                Series::new(col_name.into(), vals)
-                            }
-                            Some(serde_json::Value::Bool(_)) => {
-                                let vals: Vec<Option<bool>> =
-                                    arr.iter().map(|v| v.as_bool()).collect();
-                                Series::new(col_name.into(), vals)
-                            }
-                            _ => {
-                                // Default to string
-                                let vals: Vec<Option<String>> = arr
-                                    .iter()
-                                    .map(|v| {
-                                        if v.is_null() {
-                                            None
-                                        } else if let Some(s) = v.as_str() {
-                                            Some(s.to_string())
-                                        } else {
-                                            Some(v.to_string())
-                                        }
-                                    })
-                                    .collect();
-                                Series::new(col_name.into(), vals)
-                            }
-                        };
-                        columns_vec.push(series.into());
-                    }
-                }
-
-                if !columns_vec.is_empty() {
-                    match DataFrame::new(columns_vec) {
-                        Ok(df) => {
-                            let dataset = p2a_core::Dataset::new(df);
-                            datasets.insert(name.clone(), dataset);
-                            imported_count += 1;
-                        }
-                        Err(e) => {
-                            errors.push(format!("{}: DataFrame error - {}", name, e));
-                        }
-                    }
-                } else {
-                    errors.push(format!("{}: no column data found", name));
-                }
-            } else {
-                errors.push(format!("{}: no data field (metadata-only session)", name));
+                Err(e) => errors.push(format!("{}: {}", name, e)),
             }
         }
 
@@ -995,7 +1430,7 @@ impl AnalyticsServer {
              Mode: {}\n\
              Datasets imported: {}\n",
             "=".repeat(40),
-            path.display(),
+            shown,
             if merge { "merge" } else { "replace" },
             imported_count
         );
@@ -1218,6 +1653,197 @@ mod tests {
             serde_json::json!(["a", "b", "c"])
         );
         assert_eq!(v["datasets"]["small"]["n_rows"], 3);
+    }
+
+    /// Verbatim copy of the pre-change column conversion of `import_session`,
+    /// applied to a parsed `Value`, as the reference for the streaming parser.
+    fn legacy_import(json: &str) -> Vec<(String, Result<DataFrame, String>)> {
+        use p2a_core::polars::prelude::*;
+
+        let session: serde_json::Value = serde_json::from_str(json).unwrap();
+        let datasets_obj = session.get("datasets").and_then(|v| v.as_object()).unwrap();
+        let mut out = Vec::new();
+        for (name, ds_info) in datasets_obj {
+            let ds_obj = match ds_info.as_object() {
+                Some(obj) => obj,
+                None => {
+                    out.push((name.clone(), Err("invalid format".to_string())));
+                    continue;
+                }
+            };
+
+            // Check if we have data to restore
+            if let Some(data) = ds_obj.get("data").and_then(|v| v.as_object()) {
+                // Reconstruct DataFrame from stored columns
+                let mut columns_vec: Vec<Column> = Vec::new();
+
+                for (col_name, values) in data {
+                    if let Some(arr) = values.as_array() {
+                        // Try to determine column type from first non-null value
+                        let first_non_null = arr.iter().find(|v| !v.is_null());
+
+                        let series: Series = match first_non_null {
+                            Some(serde_json::Value::Number(n)) if n.is_f64() => {
+                                let vals: Vec<Option<f64>> =
+                                    arr.iter().map(|v| v.as_f64()).collect();
+                                Series::new(col_name.into(), vals)
+                            }
+                            Some(serde_json::Value::Number(_)) => {
+                                let vals: Vec<Option<i64>> =
+                                    arr.iter().map(|v| v.as_i64()).collect();
+                                Series::new(col_name.into(), vals)
+                            }
+                            Some(serde_json::Value::Bool(_)) => {
+                                let vals: Vec<Option<bool>> =
+                                    arr.iter().map(|v| v.as_bool()).collect();
+                                Series::new(col_name.into(), vals)
+                            }
+                            _ => {
+                                // Default to string
+                                let vals: Vec<Option<String>> = arr
+                                    .iter()
+                                    .map(|v| {
+                                        if v.is_null() {
+                                            None
+                                        } else if let Some(s) = v.as_str() {
+                                            Some(s.to_string())
+                                        } else {
+                                            Some(v.to_string())
+                                        }
+                                    })
+                                    .collect();
+                                Series::new(col_name.into(), vals)
+                            }
+                        };
+                        columns_vec.push(series.into());
+                    }
+                }
+
+                if !columns_vec.is_empty() {
+                    match DataFrame::new(columns_vec) {
+                        Ok(df) => out.push((name.clone(), Ok(df))),
+                        Err(e) => out.push((name.clone(), Err(format!("DataFrame error - {}", e)))),
+                    }
+                } else {
+                    out.push((name.clone(), Err("no column data found".to_string())));
+                }
+            } else {
+                out.push((
+                    name.clone(),
+                    Err("no data field (metadata-only session)".to_string()),
+                ));
+            }
+        }
+        out
+    }
+
+    /// `df` with its columns in name order.
+    fn sorted_columns(df: &DataFrame) -> DataFrame {
+        let mut names: Vec<String> = df
+            .get_column_names()
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect();
+        names.sort();
+        df.select(names).unwrap()
+    }
+
+    #[test]
+    fn streaming_import_matches_legacy_conversion() {
+        let json = r#"{"version":"1.0","datasets":{
+          "a":{"data":{"lead_nulls":[null,null,1.5,2],"ints":[1,2.5,null],"mixed":["x",1,true,null],
+                       "all_null":[null,null],"bools":[true,null,false],"not_array":5}},
+          "b":{"schema":[]},
+          "c":7,
+          "d":{"data":{}},
+          "e":{"schema":[{"name":"ignored"}],"data":{"lead_nulls":[null,null,1.5,2],
+                       "ints":[1,2.5,null,4],"mixed":["x",1,true,null],"all_null":[null,null,null,null],
+                       "bools":[true,null,false,true],"big":[1,18446744073709551615,-3,null],
+                       "nested":[[1,2],{"k":"v"},null,"s"],"not_array":{"x":1}},"n_rows":4},
+          "f":{"data":5}}}"#;
+        let got: Vec<(String, Result<DataFrame, String>)> =
+            parse_session_json(json.as_bytes(), None)
+                .unwrap()
+                .into_iter()
+                .map(|(name, parsed)| (name, build_dataset(parsed)))
+                .collect();
+        let want = legacy_import(json);
+        let names = |v: &[(String, Result<DataFrame, String>)]| {
+            let mut n: Vec<String> = v.iter().map(|(k, _)| k.clone()).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(&got), names(&want));
+        // Kind of each error: the text before " - " (DataFrame errors name a column).
+        let kind = |e: &str| e.split(" - ").next().unwrap().to_string();
+        for (name, legacy) in &want {
+            let (_, streamed) = got.iter().find(|(n, _)| n == name).unwrap();
+            match (streamed, legacy) {
+                (Ok(a), Ok(b)) => assert!(
+                    sorted_columns(a).equals_missing(&sorted_columns(b)),
+                    "{name}:\n{a}\n{b}"
+                ),
+                (Err(a), Err(b)) => assert_eq!(kind(a), kind(b), "{name}"),
+                (a, b) => panic!("{name}: streamed {a:?}, legacy {b:?}"),
+            }
+        }
+        // Columns keep their file order.
+        let (_, e) = got.iter().find(|(n, _)| n == "e").unwrap();
+        let order: Vec<String> = e
+            .as_ref()
+            .unwrap()
+            .get_column_names()
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "lead_nulls",
+                "ints",
+                "mixed",
+                "all_null",
+                "bools",
+                "big",
+                "nested"
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_import_refuses_files_without_datasets() {
+        for json in [
+            r#"{"version":"1.0"}"#,
+            r#"{"datasets":[1,2]}"#,
+            "[1,2]",
+            "7",
+        ] {
+            let err = parse_session_json(json.as_bytes(), None).unwrap_err();
+            assert!(err.contains("missing 'datasets'"), "{json}: {err}");
+        }
+        let err = parse_session_json(r#"{"datasets":{} trailing"#.as_bytes(), None).unwrap_err();
+        assert!(err.starts_with("Invalid session file"), "{err}");
+    }
+
+    #[test]
+    fn streaming_import_enforces_its_byte_budget() {
+        let values: Vec<String> = (0..10_000).map(|i| i.to_string()).collect();
+        let json = format!(
+            r#"{{"datasets":{{"a":{{"data":{{"x":[{}]}}}}}}}}"#,
+            values.join(",")
+        );
+        let err = parse_session_json(json.as_bytes(), Some(1_000)).unwrap_err();
+        assert!(err.contains("import limit"), "{err}");
+        assert!(err.contains("1000"), "{err}");
+        // A nested element is charged while it is read, not after.
+        let nested = format!(
+            r#"{{"datasets":{{"a":{{"data":{{"x":[[{}]]}}}}}}}}"#,
+            values.join(",")
+        );
+        let err = parse_session_json(nested.as_bytes(), Some(1_000)).unwrap_err();
+        assert!(err.contains("import limit"), "{err}");
+        // The same file passes with room to spare.
+        assert!(parse_session_json(json.as_bytes(), Some(10_000_000)).is_ok());
     }
 
     /// A path guaranteed to sit outside the jail root, whatever it resolves to:

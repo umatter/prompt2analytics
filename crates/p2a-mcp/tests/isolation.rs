@@ -601,3 +601,57 @@ async fn export_session_streams_to_file_and_respects_export_bytes() {
     assert!(!session_dir(&s).join("big.json").exists());
     assert!(temp_files(&session_dir(&s)).is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_then_import_round_trips_in_a_session() {
+    let app = app().await;
+    let s = private_session(&app).await;
+    let (ok, msg) = call(&app, &s, "export_session", json!({"file_path": "s.json"})).await;
+    assert!(ok, "{msg}");
+    let (ok, msg) = call(
+        &app,
+        &s,
+        "import_session",
+        json!({"file_path": "s.json", "merge": false}),
+    )
+    .await;
+    assert!(ok, "{msg}");
+    assert!(msg.contains("Datasets imported: 1"), "{msg}");
+    assert!(msg.contains("s.json") && !msg.contains(root_str()), "{msg}");
+    let (ok, msg) = call(&app, &s, "head_dataset", json!({"dataset": "private"})).await;
+    assert!(ok, "{msg}");
+    assert!(msg.contains("alice") && msg.contains("bob"), "{msg}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_session_refuses_files_above_the_import_limit() {
+    let app = app().await;
+    let s = private_session(&app).await;
+    // The first export creates the session directory; then a 40 KB session
+    // file (more than export_bytes = 32,768) is dropped straight into it.
+    assert!(
+        call(&app, &s, "export_session", json!({"file_path": "s.json"}))
+            .await
+            .0
+    );
+    let values: Vec<String> = (0..8_000).map(|i| i.to_string()).collect();
+    let json_text = format!(
+        r#"{{"datasets":{{"big":{{"data":{{"x":[{}]}}}}}}}}"#,
+        values.join(",")
+    );
+    assert!(json_text.len() > 32_768 && json_text.len() < 65_536);
+    std::fs::write(session_dir(&s).join("big.json"), json_text).unwrap();
+    let (ok, msg) = call(
+        &app,
+        &s,
+        "import_session",
+        json!({"file_path": "big.json", "merge": false}),
+    )
+    .await;
+    assert!(!ok, "a session file above the import limit was imported");
+    assert!(msg.contains("import limit"), "{msg}");
+    assert!(!msg.contains(root_str()), "leaks the root: {msg}");
+    // Refused before anything was replaced.
+    let (ok, msg) = call(&app, &s, "head_dataset", json!({"dataset": "private"})).await;
+    assert!(ok, "{msg}");
+}
