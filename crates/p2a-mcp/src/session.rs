@@ -433,7 +433,8 @@ impl SessionManager {
     /// calls once the session has left the table. It tells the removal
     /// subscribers (the persistent manager deletes the session's rows) and
     /// removes the session's data directory: on tokio's blocking pool inside
-    /// a runtime, inline outside one (the manager's methods only use tokio's
+    /// a runtime, inline outside one (the manager's async methods, all but
+    /// `start_cleanup_task`, which spawns a tokio task, only use tokio's
     /// runtime-agnostic locks, so they can be polled by any executor).
     fn session_removed(&self, id: &str, reason: RemovalReason) {
         tracing::debug!(session_id = %id, ?reason, "Session removed");
@@ -838,15 +839,17 @@ mod tests {
     }
 
     /// Drive `f` on this thread without a Tokio runtime. Uncontended tokio
-    /// locks are ready on their first poll, so a no-op waker is enough.
+    /// locks are ready on their first poll, so one poll with a no-op waker
+    /// is enough; a future that is not ready then would never be woken, so
+    /// the helper panics instead of spinning.
     fn block_on_without_runtime<F: std::future::Future>(f: F) -> F::Output {
         let mut f = std::pin::pin!(f);
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        loop {
-            if let std::task::Poll::Ready(v) = f.as_mut().poll(&mut cx) {
-                return v;
-            }
-            std::thread::yield_now();
+        match f.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(v) => v,
+            std::task::Poll::Pending => panic!(
+                "future was not ready on its first poll; it needs a runtime or hit a contended lock"
+            ),
         }
     }
 
