@@ -32,6 +32,27 @@ fn jail_db_path(requested: &str) -> Result<PathBuf, String> {
     path_jail::validate_data_path(requested)
 }
 
+/// The refusal `db_duckdb_query` and `db_query_file` give when the
+/// `sql_freeform` budget is false, which is the hosted profile's default (user
+/// decision of 2026-10-21). DuckDB builds per-row values and materialised
+/// results outside its `memory_limit`, and no engine setting caps them, so on
+/// the public demo the two free-form DuckDB tools stay off. Operators can turn
+/// them back on with `P2A_LIMIT_OVERRIDES=sql_freeform=true`.
+pub(crate) const SQL_FREEFORM_REFUSAL: &str =
+    "free-form SQL is not available on the public demo; load the file with load_dataset instead";
+
+/// The tool error for `db_duckdb_query`/`db_query_file` when the active limits
+/// disable free-form SQL (`sql_freeform = false`); `None` when they may run.
+fn freeform_sql_refusal() -> Option<CallToolResult> {
+    if crate::tools::limits::current().sql_freeform {
+        None
+    } else {
+        Some(CallToolResult::error(vec![Content::text(
+            SQL_FREEFORM_REFUSAL,
+        )]))
+    }
+}
+
 const MIB: u64 = 1024 * 1024;
 
 /// The SQL bounds of the active request limits (the `db_*` budgets): rows,
@@ -355,12 +376,16 @@ impl AnalyticsServer {
 
     /// Query a DuckDB database and load results as a dataset.
     #[tool(
-        description = "Execute exactly one read-only SQL statement (SELECT, WITH, EXPLAIN, PRAGMA, DESCRIBE or SHOW) against a DuckDB database and load the results as a dataset. DuckDB supports advanced analytics SQL including window functions, CTEs, and more. ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused, and the query cannot read files: ':memory:' starts empty, so to query a CSV or Parquet file use db_query_file with {file}. The server may cap the number of rows, the result size and the run time; a truncated result is reported."
+        description = "Execute exactly one read-only SQL statement (SELECT, WITH, EXPLAIN, PRAGMA, DESCRIBE or SHOW) against a DuckDB database and load the results as a dataset. DuckDB supports advanced analytics SQL including window functions, CTEs, and more. ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused, and the query cannot read files: ':memory:' starts empty, so to query a CSV or Parquet file use db_query_file with {file}. The server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
     )]
     pub async fn db_duckdb_query(
         &self,
         Parameters(request): Parameters<DuckDBQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // Before any path is validated or any engine is opened.
+        if let Some(refusal) = freeform_sql_refusal() {
+            return Ok(refusal);
+        }
         let db_path = jail_or_return!(&request.db_path, "query DuckDB database");
         guard_sql_or_return!(&request.query, "query DuckDB database");
         let opts = sql_query_options();
@@ -491,12 +516,16 @@ impl AnalyticsServer {
 
     /// Query a Parquet or CSV file directly using DuckDB SQL.
     #[tool(
-        description = "Execute exactly one read-only SQL statement directly on a Parquet or CSV file using DuckDB. This is powerful for filtering, aggregating, or joining large files before loading them as datasets. Refer to the file as {file}, also inside reader functions, for example SELECT * FROM {file} or read_csv_auto({file}, header = true); the query can read file_path and no other file. ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused. The server may cap the number of rows, the result size and the run time; a truncated result is reported."
+        description = "Execute exactly one read-only SQL statement directly on a Parquet or CSV file using DuckDB. This is powerful for filtering, aggregating, or joining large files before loading them as datasets. Refer to the file as {file}, also inside reader functions, for example SELECT * FROM {file} or read_csv_auto({file}, header = true); the query can read file_path and no other file. ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused. The server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
     )]
     pub async fn db_query_file(
         &self,
         Parameters(request): Parameters<DuckDBFileQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // Before any path is validated or any engine is opened.
+        if let Some(refusal) = freeform_sql_refusal() {
+            return Ok(refusal);
+        }
         let file_path = jail_or_return!(&request.file_path, "query data file");
         guard_sql_or_return!(&request.query, "query data file");
         let opts = sql_query_options();
@@ -557,10 +586,12 @@ impl AnalyticsServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{guard_sql_file_access, redact_path, sql_query_options};
+    use super::{SQL_FREEFORM_REFUSAL, guard_sql_file_access, redact_path, sql_query_options};
     use crate::server::AnalyticsServer;
     use crate::tools::limits::{self, Limits};
-    use crate::tools::requests::database::DuckDBQueryRequest;
+    use crate::tools::requests::database::{
+        DuckDBFileQueryRequest, DuckDBQueryRequest, SqliteQueryRequest,
+    };
     use rmcp::handler::server::wrapper::Parameters;
     use rmcp::model::{CallToolResult, RawContent};
     use std::path::Path;
@@ -684,6 +715,86 @@ mod tests {
             out.contains("\"in.csv\"") && !out.contains("/srv/data"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn freeform_duckdb_sql_is_refused_when_sql_freeform_is_false() {
+        // User decision 2026-10-21 (3). The file lies outside the jail on purpose: the
+        // refusal must come before path validation, so the text is the refusal and never
+        // a jail error or a server path.
+        assert_eq!(
+            SQL_FREEFORM_REFUSAL,
+            "free-form SQL is not available on the public demo; load the file with load_dataset instead"
+        );
+        let outside = tempfile::tempdir().unwrap();
+        let csv = outside.path().join("in.csv");
+        std::fs::write(&csv, "a,b\n1,2\n").unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = AnalyticsServer::new();
+        let (q, f) = limits::with_limits(Limits::hosted(), || {
+            let q = rt
+                .block_on(server.db_duckdb_query(Parameters(DuckDBQueryRequest {
+                    db_path: ":memory:".into(),
+                    query: "SELECT 1 AS x".into(),
+                    name: Some("q".into()),
+                })))
+                .unwrap();
+            let f = rt
+                .block_on(server.db_query_file(Parameters(DuckDBFileQueryRequest {
+                    file_path: csv.to_string_lossy().into_owned(),
+                    query: "SELECT * FROM {file}".into(),
+                    name: Some("f".into()),
+                })))
+                .unwrap();
+            (q, f)
+        });
+        for r in [&q, &f] {
+            assert_eq!(r.is_error, Some(true));
+            assert_eq!(text_of(r), SQL_FREEFORM_REFUSAL);
+        }
+        let ds = rt.block_on(server.datasets.read());
+        assert!(!ds.contains_key("q") && !ds.contains_key("f"));
+    }
+
+    #[test]
+    fn freeform_duckdb_sql_runs_when_sql_freeform_is_true_and_sqlite_is_untouched() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = AnalyticsServer::new();
+        let run = |l: Limits, name: &str| {
+            limits::with_limits(l, || {
+                rt.block_on(server.db_duckdb_query(Parameters(DuckDBQueryRequest {
+                    db_path: ":memory:".into(),
+                    query: "SELECT 1 AS x".into(),
+                    name: Some(name.into()),
+                })))
+            })
+            .unwrap()
+        };
+        let on = Limits::hosted()
+            .with_overrides(&["sql_freeform=true".to_string()])
+            .unwrap();
+        for (l, name) in [(on, "override"), (Limits::off(), "off")] {
+            let r = run(l, name);
+            assert_ne!(r.is_error, Some(true), "{name}: {}", text_of(&r));
+            assert!(rt.block_on(server.datasets.read()).contains_key(name));
+        }
+        // db_sqlite_query is not free-form DuckDB: whatever it answers here (no such
+        // file), it is not the refusal.
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.db_sqlite_query(Parameters(SqliteQueryRequest {
+                db_path: "p2a-wp10-missing.sqlite".into(),
+                query: "SELECT 1".into(),
+                name: None,
+            })))
+        })
+        .unwrap();
+        assert_ne!(text_of(&r), SQL_FREEFORM_REFUSAL);
     }
 
     #[test]
