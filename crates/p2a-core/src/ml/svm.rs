@@ -115,7 +115,7 @@ impl std::fmt::Display for SvmResult {
 /// the start of every sweep (O(n·p)) and updated in O(n·p) whenever an alpha or
 /// the bias changes, so a sweep costs O(n·(V + p·S)) for V KKT violators and S
 /// alpha changes. The installed computation budget is checked per sweep and
-/// every 256 rows; once it expires the "Computation stopped" message is
+/// per KKT violator; once it expires the "Computation stopped" message is
 /// returned.
 pub fn linear_svm(
     data: ArrayView2<f64>,
@@ -223,11 +223,40 @@ pub fn linear_svm(
     })
 }
 
+/// Convert target values to binary -1/+1.
+fn convert_to_binary(target: &ArrayView1<f64>) -> Result<(Array1<f64>, (i32, i32)), String> {
+    let mut unique_values: Vec<f64> = target.iter().cloned().collect();
+    unique_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    unique_values.dedup();
+
+    if unique_values.len() != 2 {
+        return Err(format!(
+            "SVM requires exactly 2 classes, found {}",
+            unique_values.len()
+        ));
+    }
+
+    let neg_class = unique_values[0] as i32;
+    let pos_class = unique_values[1] as i32;
+
+    let y = target.map(|&v| {
+        if (v - unique_values[0]).abs() < 1e-10 {
+            -1.0
+        } else {
+            1.0
+        }
+    });
+
+    Ok((y, (neg_class, pos_class)))
+}
+
 /// The outcome of [`smo_linear`].
 struct SmoState {
     alpha: Array1<f64>,
     b: f64,
     /// `errors[k]` = decision value of row k minus `y[k]` (the SMO error cache).
+    /// `linear_svm` does not use it; it is returned so the cache-invariant
+    /// test can compare it with freshly computed decision values.
     errors: Vec<f64>,
     n_iterations: usize,
     converged: bool,
@@ -298,9 +327,6 @@ fn smo_linear(
         let mut num_changed = 0;
 
         for i in 0..n_samples {
-            if i % 256 == 255 {
-                resource::checkpoint()?;
-            }
             // Error E_i = f(x_i) - y_i
             let e_i = errors[i];
 
@@ -308,6 +334,10 @@ fn smo_linear(
             let r_i = e_i * y[i];
 
             if (r_i < -tol && alpha[i] < c) || (r_i > tol && alpha[i] > 0.0) {
+                // A violator can cost O(n·p) (second-alpha choice plus the
+                // cache update), so the budget is checked once per violator.
+                resource::checkpoint()?;
+
                 // Select j using heuristics (max |E_i - E_j|)
                 let j = select_second_alpha(i, e_i, &errors, &alpha);
 
@@ -459,33 +489,6 @@ fn select_second_alpha(i: usize, e_i: f64, errors: &[f64], alpha: &Array1<f64>) 
     }
 
     j_best
-}
-
-/// Convert target values to binary -1/+1.
-fn convert_to_binary(target: &ArrayView1<f64>) -> Result<(Array1<f64>, (i32, i32)), String> {
-    let mut unique_values: Vec<f64> = target.iter().cloned().collect();
-    unique_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    unique_values.dedup();
-
-    if unique_values.len() != 2 {
-        return Err(format!(
-            "SVM requires exactly 2 classes, found {}",
-            unique_values.len()
-        ));
-    }
-
-    let neg_class = unique_values[0] as i32;
-    let pos_class = unique_values[1] as i32;
-
-    let y = target.map(|&v| {
-        if (v - unique_values[0]).abs() < 1e-10 {
-            -1.0
-        } else {
-            1.0
-        }
-    });
-
-    Ok((y, (neg_class, pos_class)))
 }
 
 /// Compute dot product of two vectors.
