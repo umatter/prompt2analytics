@@ -259,9 +259,7 @@ fn midranks(values: &[f64]) -> EconResult<Vec<f64>> {
     while i < n {
         // The group always holds x_ranked[i], so the scan always advances.
         let mut j = i + 1;
-        while j < n
-            && (x_ranked[j].0 == x_ranked[i].0 || (x_ranked[j].0 - x_ranked[i].0).abs() < 1e-10)
-        {
+        while j < n && (x_ranked[j].0 - x_ranked[i].0).abs() < 1e-10 {
             j += 1;
         }
         // Average rank for ties
