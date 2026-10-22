@@ -974,7 +974,7 @@ fn compute_out_sample_variance(
             let mut abs_resid: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
             abs_resid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-            let median_abs = if abs_resid.len() % 2 == 0 {
+            let median_abs = if abs_resid.len().is_multiple_of(2) {
                 let mid = abs_resid.len() / 2;
                 (abs_resid[mid - 1] + abs_resid[mid]) / 2.0
             } else {

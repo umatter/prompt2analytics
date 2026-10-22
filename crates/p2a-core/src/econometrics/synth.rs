@@ -1625,7 +1625,7 @@ fn solve_symmetric_positive(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
             return x;
         }
         // Add increasing regularization
-        let reg = 1e-8 * 10.0_f64.powi(attempt as i32);
+        let reg = 1e-8 * 10.0_f64.powi(attempt);
         for i in 0..n {
             mat[[i, i]] = a[[i, i]] + reg;
         }
