@@ -248,6 +248,9 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 /// Then it validates the configuration again, so no caller can skip the
 /// guard, builds the app, installs the process-wide policies (allocation
 /// ceiling, session directories) and serves it with graceful shutdown.
+/// It does not install the request limits or apply `--limit-override`
+/// (`P2A_LIMIT_OVERRIDES`); `transport::start_transport` does that before it
+/// calls `start_http_transport`.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     mut config: ServerConfig,
