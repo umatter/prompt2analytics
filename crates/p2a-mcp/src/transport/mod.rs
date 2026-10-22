@@ -48,8 +48,20 @@ pub enum TransportError {
 pub type TransportResult<T> = Result<T, TransportError>;
 
 /// Start the appropriate transport based on configuration.
+///
+/// The request limits of the configured resource profile, with the
+/// `--limit-override` (`P2A_LIMIT_OVERRIDES`) entries applied, are installed
+/// first, for every transport; an unknown override key fails startup.
 pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::config::TransportType;
+
+    let limits = crate::tools::limits::resolve(config).map_err(TransportError::Config)?;
+    tracing::info!(
+        profile = ?config.resource_profile(),
+        overrides = ?config.limits.overrides,
+        "resource limits"
+    );
+    crate::tools::limits::install(limits);
 
     match config.transport {
         TransportType::Stdio => start_stdio_transport(config).await,
@@ -68,7 +80,6 @@ async fn start_stdio_transport(config: &ServerConfig) -> TransportResult<()> {
     use rmcp::{ServiceExt, transport::stdio};
 
     p2a_core::resource::set_alloc_ceiling_bytes(config.alloc_ceiling_bytes());
-    config.warn_unapplied_limit_overrides();
 
     tracing::info!("Starting stdio transport...");
 

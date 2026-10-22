@@ -34,9 +34,12 @@
 //!
 //! # Installation
 //!
-//! This module only defines and checks limits. T0-WP06 installs the configured profile at startup
-//! with [`install`] and enforces it before every tool call; handlers read named budgets through
-//! [`current`]. Until something is installed, [`current`] returns the off profile.
+//! `transport::start_transport` computes the process's limits with [`resolve`] (the deployment's
+//! resource profile plus `P2A_LIMIT_OVERRIDES`) and installs them with [`install`]. Every tool
+//! call is checked against [`current`] before its arguments are deserialised: governed HTTP-side
+//! calls in `AnalyticsServer::call_tool_with_session` (the governor carries the limits onto its
+//! blocking thread), stdio calls in the server's `ServerHandler::call_tool`. Handlers read named
+//! budgets through [`current`]. Until something is installed, [`current`] returns the off profile.
 
 // `LimitViolation` (five `String`s and a `&'static str`) is the error type of the published
 // limits API that T0-WP06 to T0-WP20 compile against. It is built only when a request is
@@ -718,7 +721,7 @@ pub(crate) fn echo(s: &str) -> String {
 /// Collects every non-null value `path` resolves to inside `value` (path grammar: see
 /// [`ParamRule`]). A missing key, `null` or a type that does not fit a segment (`[]` on a
 /// non-array, a field on a non-object) yields nothing.
-fn resolve<'v>(value: &'v Value, path: &str, out: &mut Vec<&'v Value>) {
+fn resolve_path<'v>(value: &'v Value, path: &str, out: &mut Vec<&'v Value>) {
     let (segment, rest) = match path.split_once('.') {
         Some((segment, rest)) => (segment, Some(rest)),
         None => (path, None),
@@ -741,7 +744,7 @@ fn expand<'v>(value: &'v Value, depth: usize, rest: Option<&str>, out: &mut Vec<
             expand(item, depth - 1, rest, out);
         }
     } else if let Some(rest) = rest {
-        resolve(value, rest, out);
+        resolve_path(value, rest, out);
     } else if !value.is_null() {
         out.push(value);
     }
@@ -839,7 +842,7 @@ impl Limits {
         let mut values = Vec::new();
         for rule in select_rules(tool, rules) {
             values.clear();
-            resolve(args, rule.path, &mut values);
+            resolve_path(args, rule.path, &mut values);
             for value in &values {
                 self.check_value(tool, rule, value)?;
             }
@@ -1020,6 +1023,18 @@ pub fn current() -> Arc<Limits> {
         return limits;
     }
     current_from(&INSTALLED)
+}
+
+/// Limits for this process: the profile from `config.resource_profile()` plus
+/// `config.limits.overrides`. An unknown override key or an invalid value is an error (startup
+/// fails).
+pub fn resolve(config: &crate::config::ServerConfig) -> Result<Limits, String> {
+    use crate::config::ResourceProfile;
+    match config.resource_profile() {
+        ResourceProfile::Off => Limits::off(),
+        ResourceProfile::Hosted => Limits::hosted(),
+    }
+    .with_overrides(&config.limits.overrides)
 }
 
 /// Installs the process-wide limits (startup; a later call replaces them).
@@ -1694,5 +1709,81 @@ mod tests {
                 .unwrap()
         });
         assert_eq!(other, Some(5_000));
+    }
+
+    #[cfg(feature = "http")]
+    fn open_public() -> crate::config::ServerConfig {
+        let mut c = crate::config::ServerConfig::default();
+        // `ServerConfig::deployment_mode()` is Local for the default stdio transport, whatever
+        // the http fields say; `resolve` reads the config as given, so the transport is Http.
+        c.transport = crate::config::TransportType::Http;
+        c.http.addr = "0.0.0.0:8080".parse().unwrap();
+        c.http.allow_unauthenticated = true;
+        c
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn resolve_open_public_is_hosted() {
+        let l = resolve(&open_public()).unwrap();
+        assert!(!l.is_off());
+        assert_eq!(l.cap(Family::Replications), Some(10_000));
+    }
+
+    #[test]
+    fn resolve_local_is_off() {
+        assert!(
+            resolve(&crate::config::ServerConfig::default())
+                .unwrap()
+                .is_off()
+        );
+    }
+
+    #[test]
+    fn resolve_explicit_hosted_profile_in_local_mode() {
+        let mut c = crate::config::ServerConfig::default();
+        c.limits.profile = Some(crate::config::ResourceProfile::Hosted);
+        assert_eq!(resolve(&c).unwrap().cap(Family::Folds), Some(20));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn resolve_applies_overrides() {
+        let mut c = open_public();
+        c.limits.overrides = vec!["replications=50".into()];
+        assert_eq!(resolve(&c).unwrap().cap(Family::Replications), Some(50));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn resolve_rejects_unknown_override_key() {
+        let mut c = open_public();
+        c.limits.overrides = vec!["no_such_knob=1".into()];
+        assert!(resolve(&c).unwrap_err().contains("no_such_knob"));
+    }
+
+    #[test]
+    fn resolve_applies_overrides_in_local_mode() {
+        // Overrides apply to the off profile too (stdio builds have no http fields).
+        let mut c = crate::config::ServerConfig::default();
+        c.limits.overrides = vec!["folds=7".into()];
+        let l = resolve(&c).unwrap();
+        assert_eq!(l.cap(Family::Folds), Some(7));
+        assert_eq!(l.cap(Family::Replications), None);
+        c.limits.overrides = vec!["no_such_knob=1".into()];
+        assert!(resolve(&c).unwrap_err().contains("no_such_knob"));
+    }
+
+    #[test]
+    fn with_limits_is_visible_to_current_on_this_thread_only() {
+        with_limits(Limits::hosted(), || {
+            assert_eq!(current().cap(Family::Trees), Some(5_000));
+            // Valid only while no lib test calls install(). The tests above use the private
+            // install_into() on a test-local slot. If a later lib test calls install(), drop
+            // this line.
+            std::thread::spawn(|| assert!(current().is_off()))
+                .join()
+                .unwrap();
+        });
     }
 }

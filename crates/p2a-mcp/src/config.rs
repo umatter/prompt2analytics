@@ -643,15 +643,17 @@ impl ServerConfig {
             .collect()
     }
 
-    /// Warn that request-limit overrides are configured: this build parses
-    /// them, but nothing applies them yet, so they would otherwise be dropped
-    /// silently. Called at startup by the HTTP and stdio transports.
+    /// Log the keys of the configured request-limit overrides. Called at
+    /// startup by the HTTP transport. `transport::start_transport` applies
+    /// the overrides through `tools::limits::resolve` before any transport
+    /// starts (an unknown key fails startup there), so this only names them.
+    /// The name is kept from the build in which the overrides were not yet
+    /// applied, because the HTTP startup code still calls it.
     pub(crate) fn warn_unapplied_limit_overrides(&self) {
         let keys = self.limit_override_keys();
         if !keys.is_empty() {
-            tracing::warn!(
-                "--limit-override (P2A_LIMIT_OVERRIDES) is not applied in this build; \
-                 ignoring the overrides for: {}",
+            tracing::info!(
+                "--limit-override (P2A_LIMIT_OVERRIDES) sets: {}",
                 keys.join(", ")
             );
         }
