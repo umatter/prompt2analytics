@@ -55,6 +55,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -376,6 +377,18 @@ impl fmt::Display for StaggeredDidResult {
 /// - NeverTreated: Units with G = ∞ (never treated)
 /// - NotYetTreated: Units with G > t (not yet treated by time t)
 ///
+/// # Bootstrap
+///
+/// With `bootstrap > 0`, standard errors come from a nonparametric bootstrap
+/// that resamples units. Each cell's outcome changes are tabulated once (at
+/// most `n_cohorts x n` entries), so the bootstrap costs
+/// O(bootstrap x (units + entries)) and its replicate-by-cell draws are one
+/// fallibly allocated matrix: an impossible replication count is a
+/// `ResourceLimit` error. Every (g, t) cell and every replicate honours the
+/// cooperative cancellation budget (`p2a_core::resource`). A replicate that
+/// draws a unit without a base-period row has no estimate for that cell
+/// (unbalanced panels, CAUS-85), and replicates ignore covariates (CAUS-36).
+///
 /// # Example
 ///
 /// ```ignore
@@ -486,12 +499,7 @@ pub fn run_staggered_did(
     }
 
     // Build panel structure: map (unit, time) -> observation index
-    let mut panel_map: BTreeMap<(i64, i64), usize> = BTreeMap::new();
-    for i in 0..n {
-        let u = unit_ids[i] as i64;
-        let t = t_col[i] as i64;
-        panel_map.insert((u, t), i);
-    }
+    let panel_map = build_panel_map(&t_col, &unit_ids);
 
     // Compute group-time ATTs
     let mut group_time_atts = Vec::new();
@@ -501,6 +509,8 @@ pub fn run_staggered_did(
         let base_t = g + config.base_period as i64;
 
         for &t in &periods {
+            resource::checkpoint()?;
+
             // Skip if base period not available
             if !periods.contains(&base_t) {
                 continue;
@@ -546,63 +556,42 @@ pub fn run_staggered_did(
     });
     let mut rng = StdRng::seed_from_u64(rng_seed);
 
-    // Collect bootstrap samples for group-time ATTs
-    let n_units: usize = {
-        let unique_units: BTreeSet<i64> = (0..n).map(|i| unit_ids[i] as i64).collect();
-        unique_units.len()
-    };
-
-    let unit_list: Vec<i64> = {
-        let unique_units: BTreeSet<i64> = (0..n).map(|i| unit_ids[i] as i64).collect();
-        unique_units.into_iter().collect()
-    };
-
-    let mut boot_atts: Vec<Vec<f64>> = vec![Vec::new(); group_time_atts.len()];
-
-    for _ in 0..config.bootstrap {
-        // Block bootstrap by unit
-        let boot_units: Vec<i64> = (0..n_units)
-            .map(|_| unit_list[rng.gen_range(0..n_units)])
-            .collect();
-
-        // Compute bootstrap ATTs
-        for (idx, gta) in group_time_atts.iter().enumerate() {
-            let boot_att = compute_bootstrap_att(
-                &y,
-                &g_col,
-                &t_col,
-                &unit_ids,
-                &x_cov,
-                &panel_map,
-                &boot_units,
-                gta.group,
-                gta.time,
-                gta.group + config.base_period as i64,
-                &config,
-            );
-
-            if let Some(att) = boot_att {
-                if att.is_finite() {
-                    boot_atts[idx].push(att);
-                }
-            }
-        }
-    }
-
-    // Update standard errors from bootstrap
     let z = quantile_normal(1.0 - (1.0 - config.confidence_level) / 2.0);
 
-    for (idx, gta) in group_time_atts.iter_mut().enumerate() {
-        if boot_atts[idx].len() >= 50 {
-            let mean: f64 = boot_atts[idx].iter().sum::<f64>() / boot_atts[idx].len() as f64;
-            let var: f64 = boot_atts[idx]
+    // Unit-resampling bootstrap: each cell's outcome changes are tabulated once,
+    // and every replicate weights them by how often it drew each unit.
+    if config.bootstrap > 0 {
+        let cells: Vec<(i64, i64, i64)> = group_time_atts
+            .iter()
+            .map(|gta| (gta.group, gta.time, gta.group + config.base_period as i64))
+            .collect();
+        let table = build_boot_table(
+            &y,
+            &g_col,
+            &t_col,
+            &unit_ids,
+            &panel_map,
+            &cells,
+            config.comparison_group,
+        )?;
+        let draws = bootstrap_draws(&table, config.bootstrap, &mut rng)?;
+
+        // Update standard errors from the finite draws of each cell, in replicate order
+        for (idx, gta) in group_time_atts.iter_mut().enumerate() {
+            let boot_atts: Vec<f64> = draws
+                .column(idx)
                 .iter()
-                .map(|&x| (x - mean).powi(2))
-                .sum::<f64>()
-                / (boot_atts[idx].len() - 1) as f64;
-            gta.std_error = var.sqrt();
-            gta.ci_lower = gta.att - z * gta.std_error;
-            gta.ci_upper = gta.att + z * gta.std_error;
+                .copied()
+                .filter(|v| v.is_finite())
+                .collect();
+            if boot_atts.len() >= 50 {
+                let mean: f64 = boot_atts.iter().sum::<f64>() / boot_atts.len() as f64;
+                let var: f64 = boot_atts.iter().map(|&x| (x - mean).powi(2)).sum::<f64>()
+                    / (boot_atts.len() - 1) as f64;
+                gta.std_error = var.sqrt();
+                gta.ci_lower = gta.att - z * gta.std_error;
+                gta.ci_upper = gta.att + z * gta.std_error;
+            }
         }
     }
 
@@ -784,77 +773,210 @@ fn compute_group_time_att(
     })
 }
 
-/// Compute bootstrap ATT (simplified for efficiency).
+// ═══════════════════════════════════════════════════════════════════════════════
+// Bootstrap
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Map each `(unit, time)` pair to its row index. Rows are inserted in order, so
+/// when a pair occurs more than once the last row wins.
+fn build_panel_map(t_col: &Array1<f64>, unit_ids: &Array1<f64>) -> BTreeMap<(i64, i64), usize> {
+    let mut panel_map: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+    for i in 0..t_col.len() {
+        let u = unit_ids[i] as i64;
+        let t = t_col[i] as i64;
+        panel_map.insert((u, t), i);
+    }
+    panel_map
+}
+
+/// One row of a cell's bootstrap table: the outcome change `Y_t - Y_base` of a
+/// treated or comparison row, and the index of its unit in the sorted unit list.
+struct BootEntry {
+    unit: usize,
+    dy: f64,
+    treated: bool,
+}
+
+/// The outcome changes every bootstrap replicate needs, computed once.
+///
+/// Cell `c` owns `entries[starts[c]..starts[c + 1]]` in ascending row order and
+/// `blockers[blocker_starts[c]..blocker_starts[c + 1]]`: the units with a row at
+/// time `t` but no row at the base period. A replicate that draws a blocker has
+/// no estimate for that cell, as before (unbalanced panels are CAUS-85).
+///
+/// The table holds at most `n_cohorts x n` entries: a row appears once per cell
+/// at its time period, and there is one cell per cohort and period.
+struct BootTable {
+    n_units: usize,
+    entries: Vec<BootEntry>,
+    starts: Vec<usize>,
+    blockers: Vec<usize>,
+    blocker_starts: Vec<usize>,
+}
+
+impl BootTable {
+    fn n_cells(&self) -> usize {
+        self.starts.len().saturating_sub(1)
+    }
+}
+
+/// Tabulate, for each `(g, t, base_t)` cell, the outcome changes of its treated
+/// and comparison rows, with the same row semantics as the point estimate:
+/// treated rows have `G = g`, comparison rows follow `comparison_group`, and
+/// rows of other cohorts are left out.
+///
+/// Covariates are not used: the replicates are unadjusted differences in mean
+/// changes (CAUS-36), as before.
 #[allow(clippy::too_many_arguments)]
-fn compute_bootstrap_att(
+fn build_boot_table(
     y: &Array1<f64>,
     g_col: &Array1<f64>,
     t_col: &Array1<f64>,
     unit_ids: &Array1<f64>,
-    _x_cov: &Option<Array2<f64>>,
     panel_map: &BTreeMap<(i64, i64), usize>,
-    boot_units: &[i64],
-    g: i64,
-    t: i64,
-    base_t: i64,
-    config: &StaggeredDidConfig,
-) -> Option<f64> {
+    cells: &[(i64, i64, i64)],
+    comparison_group: ComparisonGroup,
+) -> EconResult<BootTable> {
     let n = y.len();
 
-    // Count unit occurrences in bootstrap sample
-    let mut unit_weights: BTreeMap<i64, usize> = BTreeMap::new();
-    for &u in boot_units {
-        *unit_weights.entry(u).or_insert(0) += 1;
+    let mut unit_list: Vec<i64> = (0..n).map(|i| unit_ids[i] as i64).collect();
+    unit_list.sort_unstable();
+    unit_list.dedup();
+    let unit_of_row: Vec<usize> = (0..n)
+        .map(|i| match unit_list.binary_search(&(unit_ids[i] as i64)) {
+            Ok(pos) | Err(pos) => pos,
+        })
+        .collect();
+
+    let mut rows_by_time: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        rows_by_time.entry(t_col[i] as i64).or_default().push(i);
     }
 
-    // Compute weighted outcome changes
-    let mut sum_dy_treated = 0.0;
-    let mut n_treated_weighted = 0.0;
-    let mut sum_dy_comp = 0.0;
-    let mut n_comp_weighted = 0.0;
+    let mut capacity: usize = 0;
+    for &(_, t, _) in cells {
+        let rows = rows_by_time.get(&t).map_or(0, Vec::len);
+        capacity = capacity.checked_add(rows).ok_or_else(|| {
+            EconError::ResourceLimit(
+                "staggered DiD bootstrap table is too large: the requested size overflows"
+                    .to_string(),
+            )
+        })?;
+    }
+    let mut entries =
+        resource::try_with_capacity::<BootEntry>(capacity, "staggered DiD bootstrap table")?;
+    let mut starts = Vec::with_capacity(cells.len() + 1);
+    let mut blockers = Vec::new();
+    let mut blocker_starts = Vec::with_capacity(cells.len() + 1);
+    starts.push(0);
+    blocker_starts.push(0);
 
-    for i in 0..n {
-        let gi = g_col[i] as i64;
-        let ti = t_col[i] as i64;
-        let ui = unit_ids[i] as i64;
-
-        // Get bootstrap weight
-        let weight = *unit_weights.get(&ui).unwrap_or(&0) as f64;
-        if weight == 0.0 {
-            continue;
-        }
-
-        if ti != t {
-            continue;
-        }
-
-        // Get base period observation
-        let base_idx = panel_map.get(&(ui, base_t))?;
-        let dy = y[i] - y[*base_idx];
-
-        if gi == g {
-            // Treated
-            sum_dy_treated += weight * dy;
-            n_treated_weighted += weight;
-        } else {
-            // Check if comparison
-            let is_comparison = match config.comparison_group {
-                ComparisonGroup::NeverTreated => gi <= 0,
-                ComparisonGroup::NotYetTreated => gi > t || gi <= 0,
-            };
-
-            if is_comparison {
-                sum_dy_comp += weight * dy;
-                n_comp_weighted += weight;
+    for &(g, t, base_t) in cells {
+        resource::checkpoint()?;
+        if let Some(rows) = rows_by_time.get(&t) {
+            for &i in rows {
+                let ui = unit_ids[i] as i64;
+                let Some(&base_idx) = panel_map.get(&(ui, base_t)) else {
+                    blockers.push(unit_of_row[i]);
+                    continue;
+                };
+                let gi = g_col[i] as i64;
+                let dy = y[i] - y[base_idx];
+                let treated = gi == g;
+                let is_comparison = match comparison_group {
+                    ComparisonGroup::NeverTreated => gi <= 0,
+                    ComparisonGroup::NotYetTreated => gi > t || gi <= 0,
+                };
+                if treated || is_comparison {
+                    entries.push(BootEntry {
+                        unit: unit_of_row[i],
+                        dy,
+                        treated,
+                    });
+                }
             }
         }
+        starts.push(entries.len());
+        blocker_starts.push(blockers.len());
     }
 
-    if n_treated_weighted > 0.0 && n_comp_weighted > 0.0 {
-        Some(sum_dy_treated / n_treated_weighted - sum_dy_comp / n_comp_weighted)
-    } else {
-        None
+    Ok(BootTable {
+        n_units: unit_list.len(),
+        entries,
+        starts,
+        blockers,
+        blocker_starts,
+    })
+}
+
+/// Draw `bootstrap` unit-resampling replicates of every cell's ATT.
+///
+/// Each replicate draws `n_units` units with replacement from the one `rng`
+/// (the same stream as before) and turns the draws into multiplicity weights,
+/// so it costs O(units + table entries). Rows of the result are replicates and
+/// columns are cells, which keeps the joint draws available for aggregate
+/// standard errors (CAUS-2). A cell without an estimate in a replicate (a drawn
+/// unit lacks the base period, or one side has no weight) is `NaN`.
+fn bootstrap_draws(
+    table: &BootTable,
+    bootstrap: usize,
+    rng: &mut StdRng,
+) -> EconResult<Array2<f64>> {
+    let n_cells = table.n_cells();
+    let n_units = table.n_units;
+    resource::checked_len(&[bootstrap, n_cells], "bootstrap replicates x cells")?;
+    let mut draws = resource::try_zeros2(bootstrap, n_cells, "bootstrap replicate draws")?;
+    let mut counts = vec![0usize; n_units];
+
+    for b in 0..bootstrap {
+        resource::checkpoint()?;
+        if n_units == 0 {
+            draws.row_mut(b).fill(f64::NAN);
+            continue;
+        }
+
+        counts.fill(0);
+        for _ in 0..n_units {
+            counts[rng.gen_range(0..n_units)] += 1;
+        }
+
+        for c in 0..n_cells {
+            let blocked = table.blockers[table.blocker_starts[c]..table.blocker_starts[c + 1]]
+                .iter()
+                .any(|&u| counts[u] > 0);
+            let draw = if blocked {
+                f64::NAN
+            } else {
+                let mut sum_dy_treated = 0.0;
+                let mut n_treated_weighted = 0.0;
+                let mut sum_dy_comp = 0.0;
+                let mut n_comp_weighted = 0.0;
+                for entry in &table.entries[table.starts[c]..table.starts[c + 1]] {
+                    let weight = counts[entry.unit] as f64;
+                    // Skipping zero weights keeps the sums bit-identical to a
+                    // pass over only the resampled units.
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    if entry.treated {
+                        sum_dy_treated += weight * entry.dy;
+                        n_treated_weighted += weight;
+                    } else {
+                        sum_dy_comp += weight * entry.dy;
+                        n_comp_weighted += weight;
+                    }
+                }
+                if n_treated_weighted > 0.0 && n_comp_weighted > 0.0 {
+                    sum_dy_treated / n_treated_weighted - sum_dy_comp / n_comp_weighted
+                } else {
+                    f64::NAN
+                }
+            };
+            draws[[b, c]] = if draw.is_finite() { draw } else { f64::NAN };
+        }
     }
+
+    Ok(draws)
 }
 
 /// Estimate ATT with covariates using IPW or doubly robust (AIPW).
@@ -1488,7 +1610,30 @@ fn ln_gamma(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use polars::prelude::*;
+
+    fn cancelled() -> Budget {
+        let token = CancelToken::new();
+        token.cancel();
+        Budget::new(None, token)
+    }
+
+    fn expect_cancelled<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::Cancelled(_)) => {}
+            Err(e) => panic!("expected Cancelled, got: {e}"),
+            Ok(_) => panic!("expected Cancelled, got Ok"),
+        }
+    }
+
+    fn expect_resource_limit<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::ResourceLimit(_)) => {}
+            Err(e) => panic!("expected ResourceLimit, got: {e}"),
+            Ok(_) => panic!("expected ResourceLimit, got Ok"),
+        }
+    }
 
     /// Create a simple staggered treatment panel dataset.
     ///
@@ -2361,5 +2506,232 @@ mod tests {
                 ge.att
             );
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bootstrap: the previous per-replicate implementation, kept as the reference
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The bootstrap ATT of one cell as computed before the table-based rewrite
+    /// (verbatim apart from the name).
+    #[allow(clippy::too_many_arguments)]
+    fn reference_bootstrap_att(
+        y: &Array1<f64>,
+        g_col: &Array1<f64>,
+        t_col: &Array1<f64>,
+        unit_ids: &Array1<f64>,
+        _x_cov: &Option<Array2<f64>>,
+        panel_map: &BTreeMap<(i64, i64), usize>,
+        boot_units: &[i64],
+        g: i64,
+        t: i64,
+        base_t: i64,
+        config: &StaggeredDidConfig,
+    ) -> Option<f64> {
+        let n = y.len();
+
+        // Count unit occurrences in bootstrap sample
+        let mut unit_weights: BTreeMap<i64, usize> = BTreeMap::new();
+        for &u in boot_units {
+            *unit_weights.entry(u).or_insert(0) += 1;
+        }
+
+        // Compute weighted outcome changes
+        let mut sum_dy_treated = 0.0;
+        let mut n_treated_weighted = 0.0;
+        let mut sum_dy_comp = 0.0;
+        let mut n_comp_weighted = 0.0;
+
+        for i in 0..n {
+            let gi = g_col[i] as i64;
+            let ti = t_col[i] as i64;
+            let ui = unit_ids[i] as i64;
+
+            // Get bootstrap weight
+            let weight = *unit_weights.get(&ui).unwrap_or(&0) as f64;
+            if weight == 0.0 {
+                continue;
+            }
+
+            if ti != t {
+                continue;
+            }
+
+            // Get base period observation
+            let base_idx = panel_map.get(&(ui, base_t))?;
+            let dy = y[i] - y[*base_idx];
+
+            if gi == g {
+                // Treated
+                sum_dy_treated += weight * dy;
+                n_treated_weighted += weight;
+            } else {
+                // Check if comparison
+                let is_comparison = match config.comparison_group {
+                    ComparisonGroup::NeverTreated => gi <= 0,
+                    ComparisonGroup::NotYetTreated => gi > t || gi <= 0,
+                };
+
+                if is_comparison {
+                    sum_dy_comp += weight * dy;
+                    n_comp_weighted += weight;
+                }
+            }
+        }
+
+        if n_treated_weighted > 0.0 && n_comp_weighted > 0.0 {
+            Some(sum_dy_treated / n_treated_weighted - sum_dy_comp / n_comp_weighted)
+        } else {
+            None
+        }
+    }
+
+    /// The previous bootstrap loop: per replicate, resample units and recompute
+    /// every cell from the rows.
+    fn reference_draws(
+        ds: &Dataset,
+        config: &StaggeredDidConfig,
+        cells: &[(i64, i64, i64)],
+    ) -> Vec<Vec<f64>> {
+        let col = |c: &str| DesignMatrix::extract_column(ds.df(), c).unwrap();
+        let (y, g_col, t_col, unit_ids) =
+            (col("outcome"), col("first_treat"), col("year"), col("unit"));
+        let n = y.len();
+        let panel_map = build_panel_map(&t_col, &unit_ids);
+        let unit_list: Vec<i64> = (0..n)
+            .map(|i| unit_ids[i] as i64)
+            .collect::<BTreeSet<i64>>()
+            .into_iter()
+            .collect();
+        let n_units = unit_list.len();
+        let mut rng = StdRng::seed_from_u64(config.seed.unwrap());
+
+        let mut out = vec![Vec::new(); cells.len()];
+        for _ in 0..config.bootstrap {
+            let boot_units: Vec<i64> = (0..n_units)
+                .map(|_| unit_list[rng.gen_range(0..n_units)])
+                .collect();
+            for (c, &(g, t, base_t)) in cells.iter().enumerate() {
+                if let Some(a) = reference_bootstrap_att(
+                    &y,
+                    &g_col,
+                    &t_col,
+                    &unit_ids,
+                    &None,
+                    &panel_map,
+                    &boot_units,
+                    g,
+                    t,
+                    base_t,
+                    config,
+                ) {
+                    if a.is_finite() {
+                        out[c].push(a);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_bootstrap_draws_match_reference() {
+        for (ds, comparison_group) in [
+            (create_staggered_dataset(), ComparisonGroup::NeverTreated),
+            (create_staggered_dataset(), ComparisonGroup::NotYetTreated),
+            (
+                create_unbalanced_staggered_dataset(),
+                ComparisonGroup::NeverTreated,
+            ),
+        ] {
+            let config = StaggeredDidConfig {
+                comparison_group,
+                bootstrap: 200,
+                seed: Some(42),
+                min_obs_per_cell: 3,
+                ..Default::default()
+            };
+            let point = run_staggered_did(
+                &ds,
+                "outcome",
+                "first_treat",
+                "year",
+                "unit",
+                None,
+                StaggeredDidConfig {
+                    bootstrap: 0,
+                    ..config.clone()
+                },
+            )
+            .unwrap();
+            let cells: Vec<(i64, i64, i64)> = point
+                .group_time_atts
+                .iter()
+                .map(|g| (g.group, g.time, g.group + config.base_period as i64))
+                .collect();
+            let expected = reference_draws(&ds, &config, &cells);
+
+            let col = |c: &str| DesignMatrix::extract_column(ds.df(), c).unwrap();
+            let (y, g, t, u) = (col("outcome"), col("first_treat"), col("year"), col("unit"));
+            let panel_map = build_panel_map(&t, &u);
+            let table =
+                build_boot_table(&y, &g, &t, &u, &panel_map, &cells, comparison_group).unwrap();
+            let draws = bootstrap_draws(&table, 200, &mut StdRng::seed_from_u64(42)).unwrap();
+            assert_eq!(draws.dim(), (200, cells.len()));
+            for (c, want) in expected.iter().enumerate() {
+                let got: Vec<f64> = draws
+                    .column(c)
+                    .iter()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .collect();
+                assert_eq!(got.len(), want.len(), "cell {:?}", cells[c]);
+                for (a, b) in got.iter().zip(want) {
+                    assert!(
+                        (a - b).abs() <= 1e-12 * b.abs().max(1.0),
+                        "cell {:?}: {a} vs {b}",
+                        cells[c]
+                    );
+                }
+            }
+            // the bootstrap honours a cancelled budget
+            expect_cancelled(with_budget(cancelled(), || {
+                bootstrap_draws(&table, 10, &mut StdRng::seed_from_u64(1))
+            }));
+        }
+    }
+
+    #[test]
+    fn test_staggered_did_rejects_unallocatable_bootstrap() {
+        let ds = create_staggered_dataset();
+        let config = StaggeredDidConfig {
+            bootstrap: usize::MAX / 4,
+            seed: Some(1),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+        expect_resource_limit(run_staggered_did(
+            &ds,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config,
+        ));
+    }
+
+    #[test]
+    fn test_staggered_did_stops_when_cancelled() {
+        let ds = create_staggered_dataset();
+        let config = StaggeredDidConfig {
+            bootstrap: 50,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+        expect_cancelled(with_budget(cancelled(), || {
+            run_staggered_did(&ds, "outcome", "first_treat", "year", "unit", None, config)
+        }));
     }
 }
