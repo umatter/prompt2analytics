@@ -3581,6 +3581,11 @@ fn extract_factors_svd(
     let mut mat = yty.clone();
 
     for k in 0..r {
+        // Each factor costs up to 200 power-iteration steps and a deflation on
+        // the T x T matrix; an explicit n_factors reaches this loop without the
+        // per-fold checkpoints of select_factors_cv.
+        crate::resource::checkpoint()?;
+
         // Power iteration for dominant eigenvector
         let mut v = Array1::<f64>::from_elem(n_cols, 1.0 / (n_cols as f64).sqrt());
 
@@ -4117,13 +4122,30 @@ mod gsynth_tests {
                 ..Default::default()
             },
         );
-        match r {
-            Ok(res) => assert!(res.n_factors <= 1, "{}", res.n_factors),
-            Err(e) => assert!(
-                !matches!(e, EconError::InvalidSpecification { .. }),
-                "unexpected parameter error: {e}"
-            ),
-        }
+        // extract_factors_svd caps r at min(2, 3 controls, 1 pre-period) = 1
+        let res = r.unwrap();
+        assert_eq!(res.n_factors, 1);
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        with_budget(Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn test_gsynth_explicit_factor_count_stops_when_cancelled() {
+        // An explicit n_factors does not go through select_factors_cv, whose
+        // per-fold checkpoints were the only ones on the gsynth path; the factor
+        // extraction checks the budget once per factor
+        let ds = create_gsynth_dataset();
+        let r = cancelled(|| run_gsynth(&ds, "outcome", "treated", "unit", "time", &[], gs_cfg()));
+        assert!(
+            matches!(r, Err(EconError::Cancelled(_))),
+            "ok={}",
+            r.is_ok()
+        );
     }
 
     #[test]
