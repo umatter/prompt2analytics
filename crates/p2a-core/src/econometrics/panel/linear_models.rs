@@ -282,12 +282,18 @@ pub fn run_random_effects(
     // Compute group means of y and X (with intercept)
     let y_means = compute_entity_means(&y, &entity_ids, n_groups);
 
+    // First row of each group, found in one pass (every group has a row)
+    let mut first_row_of_group = vec![usize::MAX; n_groups];
+    for (i, &g) in entity_ids.iter().enumerate() {
+        if first_row_of_group[g] == usize::MAX {
+            first_row_of_group[g] = i;
+        }
+    }
+
     // Extract unique group means for y and x (no intercept)
-    let y_between: Array1<f64> = (0..n_groups)
-        .map(|g| {
-            let first_idx = entity_ids.iter().position(|&id| id == g).unwrap();
-            y_means[first_idx]
-        })
+    let y_between: Array1<f64> = first_row_of_group
+        .iter()
+        .map(|&first_idx| y_means[first_idx])
         .collect();
 
     // Build between-regression X matrix: group means of x_cols + intercept
@@ -301,8 +307,7 @@ pub fn run_random_effects(
         for j in 0..k_no_int {
             let col = x_no_intercept.column(j).to_owned();
             let col_means = compute_entity_means(&col, &entity_ids, n_groups);
-            for g in 0..n_groups {
-                let first_idx = entity_ids.iter().position(|&id| id == g).unwrap();
+            for (g, &first_idx) in first_row_of_group.iter().enumerate() {
                 xb[[g, j + 1]] = col_means[first_idx];
             }
         }
@@ -554,6 +559,43 @@ mod tests {
                 "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
             );
         }
+    }
+
+    /// A balanced synthetic panel of `n_ent` entities and `n_t` periods (the
+    /// same generator as `gls_models::tests::synthetic_panel`).
+    fn synthetic_panel(n_ent: usize, n_t: usize) -> Dataset {
+        let n = n_ent * n_t;
+        let entity: Vec<i64> = (0..n).map(|i| (i / n_t) as i64).collect();
+        let time: Vec<i64> = (0..n).map(|i| (i % n_t) as i64 + 2000).collect();
+        let x: Vec<f64> = (0..n).map(|i| ((i * 37) % 101) as f64 / 10.0).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + 0.5 * x[i]
+                    + ((i / n_t) % 17) as f64 * 0.1
+                    + ((i * 7919) % 1009) as f64 / 1009.0
+                    - 0.5
+            })
+            .collect();
+        Dataset::new(
+            polars::prelude::df! { "entity" => entity, "time" => time, "x" => x, "y" => y }
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_random_effects_scaling_many_entities() {
+        if cfg!(debug_assertions) {
+            return; // release-only timing check
+        }
+        let ds = synthetic_panel(100_000, 5);
+        let t0 = std::time::Instant::now();
+        let r = run_random_effects(&ds, "y", &["x"], "entity").unwrap();
+        assert_eq!(r.n_groups, 100_000);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}",
+            t0.elapsed()
+        );
     }
 
     /// Characterisation test recorded from the code before the T0-WP14 resource
