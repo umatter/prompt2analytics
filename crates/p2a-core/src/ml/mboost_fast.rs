@@ -192,8 +192,19 @@ pub fn fast_mboost(
         });
     }
 
+    // A strided y (say, a column of a row-major matrix) has no slice; copy it
+    // once instead
+    let y_owned;
+    let y_slice: &[f64] = match y.as_slice() {
+        Some(s) => s,
+        None => {
+            y_owned = y.to_vec();
+            &y_owned
+        }
+    };
+
     // Initialize offset and predictions
-    let offset = compute_initial_offset(y.as_slice().unwrap(), config.family);
+    let offset = compute_initial_offset(y_slice, config.family);
     let mut predictions = vec![offset; n];
 
     // Pre-compute feature statistics for centering
@@ -212,8 +223,6 @@ pub fn fast_mboost(
 
     let mut learners = try_with_capacity(config.m_stop, "fast mboost learners")?;
     let mut risk = try_with_capacity(config.m_stop, "fast mboost risk path")?;
-
-    let y_slice = y.as_slice().unwrap();
 
     for m in 0..config.m_stop {
         checkpoint()?;
@@ -848,6 +857,38 @@ mod tests {
                 matches!(&e, EconError::InvalidSpecification { message } if message.contains("finite")),
                 "{e:?}"
             );
+        }
+    }
+
+    #[test]
+    fn fast_mboost_accepts_a_strided_y() {
+        // y as a column of a row-major matrix: a valid view whose as_slice()
+        // is None, which used to panic
+        let mut rng = StdRng::seed_from_u64(9);
+        let x = Array2::from_shape_fn((50, 2), |_| rng.r#gen::<f64>());
+        let xy = Array2::from_shape_fn((50, 2), |(i, j)| {
+            if j == 0 {
+                1.5 * x[[i, 0]] + rng.r#gen::<f64>() * 0.1
+            } else {
+                0.0
+            }
+        });
+        let y_strided = xy.column(0);
+        assert!(y_strided.as_slice().is_none());
+        let y_owned = y_strided.to_owned();
+        for learner in [
+            FastMboostLearner::ComponentwiseLinear,
+            FastMboostLearner::Stump,
+        ] {
+            let config = FastMboostConfig {
+                m_stop: 20,
+                base_learner: learner,
+                ..Default::default()
+            };
+            let strided = fast_mboost(x.view(), y_strided, &config).unwrap();
+            let contiguous = fast_mboost(x.view(), y_owned.view(), &config).unwrap();
+            assert_eq!(strided.predictions, contiguous.predictions);
+            assert_eq!(strided.risk, contiguous.risk);
         }
     }
 
