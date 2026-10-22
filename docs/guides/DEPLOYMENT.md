@@ -429,7 +429,7 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | env only | `P2A_LLM_ALLOWED_HOSTS` | none (any public host) | api.openai.com, api.anthropic.com, openrouter.ai | comma-separated bare hostnames |
 | env only | `P2A_AUDIT_MAX_MB` | 50 | 50 | audit log rotation size; `0` = never rotate; keeps 3 old files |
 | env only | `RUST_LOG` | `p2a_mcp=info` | same | log filter; logs go to stderr |
-| env only | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | used for default endpoints | never used | see the server-key rule above; leave unset on a public server |
+| env only | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | used for default endpoints | not used (`llm_server_keys=false`) | see the server-key rule above; leave unset on a public server |
 
 ### `P2A_LIMIT_OVERRIDES` keys
 
@@ -533,11 +533,11 @@ Named budgets:
    (bare hostnames, matched exactly and case-insensitively against the URL
    host). The hosted profile uses this list when the variable is unset, but only
    while `llm_allow_loopback` stays false; set it explicitly anyway, so the
-   policy depends on neither the profile nor that flag. An
-   Authenticated or Local server without it can reach any public https host a
-   caller names, carrying whatever key the caller supplied. With or without the
-   list, every resolved address is still checked and internal addresses are
-   refused.
+   policy depends on neither the profile nor that flag. An Authenticated or
+   Local server on the Off profile without it can reach any public https host
+   a caller names, carrying whatever key the caller supplied. With or without
+   the list, every resolved address is still checked and internal addresses
+   are refused.
 
 3. **Terminate TLS in front of the backend.**
    BYOK keys travel in request bodies; without HTTPS they're exposed on the wire.
@@ -648,8 +648,8 @@ is **in transit** — hence the TLS requirement above.
 **Server-held keys.** The backend uses its own `OPENAI_API_KEY` or
 `ANTHROPIC_API_KEY` only when the profile allows server keys and the request
 targets that provider's default endpoint; a server key is never sent to a host
-the caller picked. In the hosted profile it never uses them, and
-`GET /api/llm/env-keys` answers `false` for both providers.
+the caller picked. With the hosted profile's `llm_server_keys=false` it uses
+none of them, and `GET /api/llm/env-keys` answers `false` for both providers.
 
 **Upstream errors.** A provider's error body is never returned to the caller;
 the caller sees the provider, the HTTP status and a hint. At most 512

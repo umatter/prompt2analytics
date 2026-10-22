@@ -84,7 +84,7 @@ Some layers are always on; others follow the resource profile, which is Hosted i
 | Concurrency slots and panic isolation (HTTP) | on | on | on |
 | Core invariants | on | on | on |
 | LLM egress: internal addresses refused | on | on | on |
-| LLM host allowlist | when `P2A_LLM_ALLOWED_HOSTS` is set, or the profile is Hosted and `llm_allow_loopback` is false | same | on unless `llm_allow_loopback=true` and `P2A_LLM_ALLOWED_HOSTS` is unset |
+| LLM host allowlist | when `P2A_LLM_ALLOWED_HOSTS` is set, or `llm_allow_loopback` is false (the hosted default) | same | on unless `llm_allow_loopback=true` and `P2A_LLM_ALLOWED_HOSTS` is unset |
 | Server-held LLM keys | default endpoint only, and not with the hosted profile unless `llm_server_keys=true` | same | not unless `llm_server_keys=true` (false in the hosted profile), and then default endpoint only |
 | Ownership checks on conversation routes | on | on | on |
 | Session-list and file-browser routes | only with `--expose-enumeration` | on | absent |

@@ -461,7 +461,7 @@ GET /api/llm/models
 GET /api/llm/env-keys
 ```
 
-Whether the server would supply its own key for each provider. In the hosted profile the server never uses its own keys, so both are `false` (captured from an open public server):
+Whether the server would supply its own key for each provider. In the hosted profile (`llm_server_keys=false`) the server does not use its own keys, so both are `false` (captured from an open public server):
 
 ```json
 {"success":true,"data":{"openai":false,"anthropic":false}}

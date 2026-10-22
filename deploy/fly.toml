@@ -41,8 +41,8 @@ primary_region = "fra"          # Frankfurt — EU
   # resolved when a connection is made and refused if any of its addresses is
   # private, loopback, link-local or otherwise internal; redirects are never
   # followed. The default Ollama endpoint is refused because it is not listed.
-  # The hosted profile uses this same list when the variable is unset; it is
-  # set here so the policy is visible.
+  # The hosted profile uses this same list when the variable is unset (and
+  # llm_allow_loopback stays false); it is set here so the policy is visible.
   P2A_LLM_ALLOWED_HOSTS = "api.openai.com,api.anthropic.com,openrouter.ai"
 
   # Open public mode: no login, and isolation rests on unguessable session
