@@ -843,6 +843,14 @@ fn find_k_neighbors(
 ///
 /// CubistResult containing fitted model, rules, and predictions.
 ///
+/// # Errors
+///
+/// `InsufficientData` for fewer than 2 rows; `Computation` when `x` and `y`
+/// differ in length; `InvalidSpecification` when `committees` is outside
+/// 1..=100 or `x` or `y` holds a non-finite value; `Cancelled` once the
+/// installed computation budget expires (checked per committee and per row of
+/// the final prediction pass, which runs the nearest-neighbour correction).
+///
 /// # Example
 ///
 /// ```rust,no_run

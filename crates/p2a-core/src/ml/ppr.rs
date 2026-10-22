@@ -120,9 +120,11 @@ pub enum SmoothingMethod {
 /// Configuration for PPR.
 #[derive(Debug, Clone)]
 pub struct PprConfig {
-    /// Number of terms in final model
+    /// Number of terms in final model, at least 1. The larger of `nterms` and
+    /// `max_terms` must not exceed the number of observations.
     pub nterms: usize,
-    /// Maximum terms to consider (for backward elimination)
+    /// Maximum terms to consider (for backward elimination). The larger of
+    /// `nterms` and `max_terms` must not exceed the number of observations.
     pub max_terms: usize,
     /// Optimization level (0-3): higher = more refitting during backward elimination
     pub optlevel: usize,
@@ -166,6 +168,15 @@ impl Default for PprConfig {
 ///
 /// # Returns
 /// A `PprResult` containing the fitted model
+///
+/// # Errors
+///
+/// Returns an error message when `y` (or `weights`) does not match the rows of
+/// `x`, when there are fewer than 3 observations, when `nterms` is 0, when the
+/// larger of `nterms` and `max_terms` exceeds the number of observations, when
+/// `x` or `y` holds a non-finite value, or when a weight is non-finite or
+/// negative. Returns the "Computation stopped" message once the installed
+/// computation budget expires (checked per term and per direction iteration).
 pub fn ppr(
     x: ArrayView2<f64>,
     y: &[f64],
