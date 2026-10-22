@@ -231,6 +231,11 @@ pub(crate) fn lcg_random(state: &mut u64) -> usize {
 /// matrixmultiply's `KernelFmaAvx2` needs AVX2 (it falls back to `KernelFma`
 /// without it), nano-gemm's f64 kernels need AVX2 and pulp's x86-v3 path
 /// needs both. Elsewhere the golden tests compare to a tolerance instead.
+///
+/// AVX-512 hosts pass this gate because they run the same x86-v3 kernels:
+/// pulp's `nightly-x86-v4` and gemm's and nano-gemm's `nightly` features are
+/// not enabled. Enabling any of them requires recapturing the constants or
+/// adding `avx512f` to this gate.
 #[cfg(test)]
 pub(crate) fn golden_bits_platform() -> bool {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

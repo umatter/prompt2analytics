@@ -143,6 +143,15 @@ impl std::fmt::Display for KMedoidsResult {
 /// # Returns
 /// * `KMedoidsResult` containing cluster assignments and medoid indices
 ///
+/// # Errors
+///
+/// - `k == 0` or `k > n`.
+/// - `"Resource limit: k-medoids distance matrix ..."` when the `n x n` `f64`
+///   distance matrix exceeds the per-allocation ceiling (or its size
+///   overflows).
+/// - `"Computation stopped: ..."` when the budget is cancelled or expires;
+///   this is checked once per row of the distance matrix.
+///
 /// # References
 ///
 /// - Kaufman, L. and Rousseeuw, P.J. (1990). "Finding Groups in Data".
@@ -5107,6 +5116,16 @@ impl std::fmt::Display for ClaraResult {
 ///
 /// # Returns
 /// * `ClaraResult` with cluster assignments and medoids
+///
+/// # Errors
+///
+/// - `k == 0` or `k > n`, `samples == 0`, or a `sample_size` (after
+///   clamping to `n`) below `k`.
+/// - `"Computation stopped: ..."` when the budget is cancelled or expires
+///   between samples.
+/// - The [`kmedoids`] errors for a sample (its `sample_size x sample_size`
+///   distance matrix over the ceiling, or a cancellation while it is
+///   built), prefixed `"CLARA sample of N rows (sample_size): "`.
 ///
 /// # Algorithm
 ///
