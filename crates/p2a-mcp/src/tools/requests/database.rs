@@ -15,7 +15,9 @@ pub struct SqliteQueryRequest {
     pub db_path: String,
 
     /// SQL query to execute
-    #[schemars(description = "SQL query to execute (SELECT statements only recommended).")]
+    #[schemars(
+        description = "Exactly one read-only SQL statement (SELECT, WITH, EXPLAIN, or a schema PRAGMA: table_info, table_list, index_list, ...). Statements that would modify the database, ATTACH, other PRAGMAs and any second statement are refused. The server may cap the rows returned."
+    )]
     pub query: String,
 
     /// Optional name for the resulting dataset
@@ -54,12 +56,14 @@ pub struct SqliteSchemaRequest {
 pub struct DuckDBQueryRequest {
     /// Path to the DuckDB database file
     #[schemars(
-        description = "Path to the DuckDB database file (.duckdb, .db). Use ':memory:' for in-memory database."
+        description = "Path to the DuckDB database file (.duckdb, .db), opened read-only. Use ':memory:' for an empty in-memory database; it cannot read files (use db_query_file with {file} for CSV or Parquet)."
     )]
     pub db_path: String,
 
     /// SQL query to execute
-    #[schemars(description = "SQL query to execute. DuckDB supports advanced analytics SQL.")]
+    #[schemars(
+        description = "Exactly one read-only SQL statement (SELECT, WITH, EXPLAIN without ANALYZE, PRAGMA, DESCRIBE or SHOW). DuckDB supports advanced analytics SQL. EXPLAIN ANALYZE, ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused. The server may cap the rows returned."
+    )]
     pub query: String,
 
     /// Optional name for the resulting dataset
@@ -92,13 +96,13 @@ pub struct DuckDBSchemaRequest {
 pub struct DuckDBFileQueryRequest {
     /// Path to the data file (Parquet or CSV)
     #[schemars(
-        description = "Path to the data file (.parquet, .csv). DuckDB can query these files directly with SQL."
+        description = "Path to the data file (.parquet, .csv). DuckDB can query these files directly with SQL; the query can read this file and no other."
     )]
     pub file_path: String,
 
     /// SQL query to execute
     #[schemars(
-        description = "SQL query to execute. Use {file} as placeholder for the file path. Example: 'SELECT * FROM {file} WHERE amount > 100'"
+        description = "Exactly one read-only SQL statement. Use {file} as the placeholder for the file path, also inside reader functions. Example: 'SELECT * FROM {file} WHERE amount > 100' or 'SELECT * FROM read_csv_auto({file}, header = true)'. The server may cap the rows returned."
     )]
     pub query: String,
 
