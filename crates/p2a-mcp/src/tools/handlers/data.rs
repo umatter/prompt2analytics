@@ -6,7 +6,7 @@
 //! Note: Cleaning session tools remain in server.rs due to their complexity.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rmcp::{
     ErrorData as McpError,
@@ -17,9 +17,147 @@ use rmcp::{
 
 use crate::path_jail;
 use crate::server::AnalyticsServer;
+use crate::tools::handlers::utils::CappedWriter;
 use crate::tools::requests::data::*;
 
 use p2a_core::data::{DataLoader, Dataset, DatasetInfo};
+use p2a_core::polars::prelude::{AnyValue, Column, CsvWriter, DataFrame, ParquetWriter, SerWriter};
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+
+/// Rows serialised between two cancellation checkpoints in a JSON export.
+const CHECKPOINT_ROWS: usize = 1 << 16;
+
+/// The file formats `export_dataset` writes.
+#[derive(Clone, Copy)]
+enum ExportKind {
+    Csv,
+    Parquet,
+    Json,
+}
+
+/// Why an export could not be written.
+enum ExportError {
+    /// The output passed the export_bytes budget.
+    TooLarge,
+    /// The writer failed (the detail may still name the file).
+    Failed(String),
+}
+
+fn export_limit_message(cap: Option<u64>) -> String {
+    format!(
+        "The export is larger than this server's export limit of {} bytes; export fewer rows or \
+         columns and try again.",
+        cap.unwrap_or_default()
+    )
+}
+
+/// Write `df` as `kind` to the new file `tmp` through a buffered writer
+/// capped at `cap` bytes.
+fn write_export(
+    df: &DataFrame,
+    kind: ExportKind,
+    tmp: &Path,
+    cap: Option<u64>,
+) -> Result<(), ExportError> {
+    let file = std::fs::File::create(tmp).map_err(|e| ExportError::Failed(e.to_string()))?;
+    let mut w = CappedWriter::new(std::io::BufWriter::new(file), cap);
+    let result = match kind {
+        ExportKind::Csv => CsvWriter::new(&mut w)
+            .finish(&mut df.clone())
+            .map_err(|e| e.to_string()),
+        ExportKind::Parquet => ParquetWriter::new(&mut w)
+            .finish(&mut df.clone())
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        ExportKind::Json => {
+            serde_json::to_writer_pretty(&mut w, &RecordsJson(df)).map_err(|e| e.to_string())
+        }
+    };
+    let result = result.and_then(|()| w.flush().map_err(|e| e.to_string()));
+    if w.exceeded() {
+        return Err(ExportError::TooLarge);
+    }
+    result.map_err(ExportError::Failed)
+}
+
+/// A data frame serialised in the records layout of
+/// `Dataset::to_json_string` (an array with one object per row, keys in
+/// column order) without building it in memory. Values map as there, except
+/// that text cells are plain JSON strings (the legacy path formatted them
+/// with polars' `Display`, which wraps them in literal quote characters).
+struct RecordsJson<'a>(&'a DataFrame);
+
+impl Serialize for RecordsJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
+        let df = self.0;
+        let columns = df.get_columns();
+        let mut seq = serializer.serialize_seq(Some(df.height()))?;
+        for row in 0..df.height() {
+            if row % CHECKPOINT_ROWS == 0 {
+                p2a_core::resource::checkpoint().map_err(S::Error::custom)?;
+            }
+            seq.serialize_element(&RecordRow { columns, row })?;
+        }
+        seq.end()
+    }
+}
+
+/// One row of [`RecordsJson`].
+struct RecordRow<'a> {
+    columns: &'a [Column],
+    row: usize,
+}
+
+impl Serialize for RecordRow<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.columns.len()))?;
+        for col in self.columns {
+            map.serialize_entry(col.name().as_str(), &CellJson(col.get(self.row).ok()))?;
+        }
+        map.end()
+    }
+}
+
+/// One cell of [`RecordsJson`]; `None` (a failed read) is null.
+struct CellJson<'a>(Option<AnyValue<'a>>);
+
+impl Serialize for CellJson<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match &self.0 {
+            None | Some(AnyValue::Null) => s.serialize_none(),
+            Some(AnyValue::Boolean(b)) => s.serialize_bool(*b),
+            Some(AnyValue::Int8(v)) => s.serialize_i64(i64::from(*v)),
+            Some(AnyValue::Int16(v)) => s.serialize_i64(i64::from(*v)),
+            Some(AnyValue::Int32(v)) => s.serialize_i64(i64::from(*v)),
+            Some(AnyValue::Int64(v)) => s.serialize_i64(*v),
+            Some(AnyValue::UInt8(v)) => s.serialize_u64(u64::from(*v)),
+            Some(AnyValue::UInt16(v)) => s.serialize_u64(u64::from(*v)),
+            Some(AnyValue::UInt32(v)) => s.serialize_u64(u64::from(*v)),
+            Some(AnyValue::UInt64(v)) => s.serialize_u64(*v),
+            // serde_json writes non-finite floats as null, as the legacy export did.
+            Some(AnyValue::Float32(v)) => s.serialize_f64(f64::from(*v)),
+            Some(AnyValue::Float64(v)) => s.serialize_f64(*v),
+            Some(AnyValue::String(v)) => s.serialize_str(v),
+            Some(AnyValue::StringOwned(v)) => s.serialize_str(v.as_str()),
+            Some(other) => s.serialize_str(&format!("{other}")),
+        }
+    }
+}
+
+/// `text` (an error from a loader or writer) with the absolute forms of
+/// `path` and its folder replaced by their [`path_jail::display_path`] forms,
+/// so no server path reaches the caller.
+fn without_server_paths(text: &str, path: &Path) -> String {
+    let mut out = text.replace(&path.display().to_string(), &path_jail::display_path(path));
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        out = out.replace(
+            &parent.display().to_string(),
+            &path_jail::display_path(parent),
+        );
+    }
+    out
+}
 
 #[tool_router(router = data_router, vis = "pub")]
 impl AnalyticsServer {
@@ -78,13 +216,47 @@ impl AnalyticsServer {
             }
         };
 
+        // The configurable maximum file size: checked on disk before any
+        // parsing, only when the limits set a load_file_bytes budget (hosted
+        // 64 MiB, none when limits are off, P2A_LIMIT_OVERRIDES in any mode).
+        let limits = crate::tools::limits::current();
+        if limits.load_file_bytes.is_some() {
+            let size = match std::fs::metadata(&path) {
+                Ok(meta) => meta.len(),
+                Err(_) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to load dataset: File not found: {}",
+                        path_jail::display_path(&path)
+                    ))]));
+                }
+            };
+            if let Err(v) = limits.check_budget(
+                "load_dataset",
+                "load_file_bytes",
+                size,
+                limits.load_file_bytes,
+            ) {
+                tracing::info!(
+                    tool = "load_dataset",
+                    override_key = v.override_key,
+                    requested = %v.requested,
+                    limit = %v.limit,
+                    "request refused by a named budget"
+                );
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "{} Load a smaller file, or split it and load the parts.",
+                    v.message
+                ))]));
+            }
+        }
+
         // Load the dataset
         let dataset = match DataLoader::load(&path) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Failed to load dataset: {}",
-                    e
+                    without_server_paths(&e.to_string(), &path)
                 ))]));
             }
         };
@@ -149,7 +321,7 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let path = match path_jail::validate_data_path(&request.path) {
+        let path = match path_jail::validate_data_path_for_write(&request.path) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -165,63 +337,10 @@ impl AnalyticsServer {
             .as_deref()
             .or_else(|| path.extension().and_then(|ext| ext.to_str()));
 
-        let result_msg = match format {
-            Some("csv") => match dataset.to_csv(&path) {
-                Ok(()) => format!(
-                    "Successfully exported dataset '{}' to CSV file:\n  {}\n  {} rows x {} columns",
-                    request.dataset,
-                    path.display(),
-                    dataset.nrows(),
-                    dataset.ncols()
-                ),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to export to CSV: {}",
-                        e
-                    ))]));
-                }
-            },
-            Some("parquet") => match dataset.to_parquet(&path) {
-                Ok(()) => format!(
-                    "Successfully exported dataset '{}' to Parquet file:\n  {}\n  {} rows x {} columns",
-                    request.dataset,
-                    path.display(),
-                    dataset.nrows(),
-                    dataset.ncols()
-                ),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to export to Parquet: {}",
-                        e
-                    ))]));
-                }
-            },
-            Some("json") => {
-                // to_json_string() returns String, so we write it to file manually
-                match dataset.to_json_string() {
-                    Ok(json_str) => {
-                        if let Err(e) = std::fs::write(&path, json_str) {
-                            return Ok(CallToolResult::error(vec![Content::text(format!(
-                                "Failed to write JSON file: {}",
-                                e
-                            ))]));
-                        }
-                        format!(
-                            "Successfully exported dataset '{}' to JSON file:\n  {}\n  {} rows x {} columns",
-                            request.dataset,
-                            path.display(),
-                            dataset.nrows(),
-                            dataset.ncols()
-                        )
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Failed to export to JSON: {}",
-                            e
-                        ))]));
-                    }
-                }
-            }
+        let (kind, label) = match format {
+            Some("csv") => (ExportKind::Csv, "CSV"),
+            Some("parquet") => (ExportKind::Parquet, "Parquet"),
+            Some("json") => (ExportKind::Json, "JSON"),
             Some(other) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Unsupported format '{}'. Use 'csv', 'parquet', or 'json'.",
@@ -235,7 +354,30 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result_msg)]))
+        // Written to a temporary file in the validated folder, capped at the
+        // export_bytes budget, then renamed into place (path_jail checks the
+        // session storage quota before the rename).
+        let cap = crate::tools::limits::current().export_bytes;
+        let written = path_jail::write_atomically(&path, |tmp| {
+            write_export(dataset.df(), kind, tmp, cap).map_err(|e| match e {
+                ExportError::TooLarge => export_limit_message(cap),
+                ExportError::Failed(detail) => format!(
+                    "Failed to export to {label}: {}",
+                    without_server_paths(&without_server_paths(&detail, tmp), &path)
+                ),
+            })
+        });
+        if let Err(e) = written {
+            return Ok(CallToolResult::error(vec![Content::text(e)]));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Successfully exported dataset '{}' to {label} file:\n  {}\n  {} rows x {} columns",
+            request.dataset,
+            path_jail::display_path(&path),
+            dataset.nrows(),
+            dataset.ncols()
+        ))]))
     }
 
     /// Upload and load a dataset from base64-encoded content.
@@ -467,5 +609,59 @@ impl AnalyticsServer {
         );
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2a_core::polars::prelude::df;
+    use serde_json::json;
+
+    #[test]
+    fn path_schemas_say_relative_to_data_directory() {
+        for schema in [
+            serde_json::to_string(&schemars::schema_for!(LoadDatasetRequest)).unwrap(),
+            serde_json::to_string(&schemars::schema_for!(ExportDatasetRequest)).unwrap(),
+        ] {
+            assert!(
+                schema.contains("relative to the server's data directory"),
+                "{schema}"
+            );
+        }
+    }
+
+    #[test]
+    fn records_json_matches_to_json_string_except_string_quoting() {
+        let df = df! {
+            "f" => [Some(1.5), Some(f64::NAN), None],
+            "i" => [Some(1i64), None, Some(3)],
+            "s" => [Some("a"), None, Some("c\"q")],
+            "b" => [Some(true), Some(false), None],
+            "g" => [Some(0.1f32), None, Some(2.0f32)]
+        }
+        .unwrap();
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&Dataset::new(df.clone()).to_json_string().unwrap()).unwrap();
+        let streamed: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec_pretty(&RecordsJson(&df)).unwrap()).unwrap();
+        // Strings: plain JSON strings now (legacy wrapped them in literal quotes).
+        let s: Vec<serde_json::Value> = streamed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["s"].clone())
+            .collect();
+        assert_eq!(s, vec![json!("a"), json!(null), json!("c\"q")]);
+        // Everything else: identical to the legacy export.
+        let rows_old = legacy.as_array_mut().unwrap();
+        let rows_new = streamed.as_array().unwrap();
+        assert_eq!(rows_new.len(), rows_old.len());
+        for (row_new, row_old) in rows_new.iter().zip(rows_old) {
+            let mut row_new = row_new.clone();
+            row_new.as_object_mut().unwrap().remove("s");
+            row_old.as_object_mut().unwrap().remove("s");
+            assert_eq!(&row_new, row_old);
+        }
     }
 }

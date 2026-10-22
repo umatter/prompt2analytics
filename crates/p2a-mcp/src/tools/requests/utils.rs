@@ -170,7 +170,7 @@ pub struct GenerateReportRequest {
 pub struct ExportSessionRequest {
     /// Path to save the session file
     #[schemars(
-        description = "File path to save the session (JSON format). If not provided, returns session data as string."
+        description = "File to save the session to (JSON), relative to the server's data directory (for example 'session.json'). If omitted, the session JSON is returned in the response; large sessions must be saved to a file."
     )]
     pub file_path: Option<String>,
 
@@ -185,7 +185,9 @@ pub struct ExportSessionRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ImportSessionRequest {
     /// Path to the session file to import
-    #[schemars(description = "File path to the session JSON file to import.")]
+    #[schemars(
+        description = "Session JSON file to import, relative to the server's data directory (for example 'session.json')."
+    )]
     pub file_path: String,
 
     /// Whether to merge with existing session (default: false, replaces)
