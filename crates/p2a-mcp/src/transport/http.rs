@@ -312,8 +312,10 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig) {
         && exec.session_concurrency > 1
     {
         tracing::warn!(
-            "dataset quotas are configured with --session-concurrency > 1; a refused call is \
-             undone by restoring the session's datasets, which assumes one call per session"
+            "dataset quotas are configured with --session-concurrency \
+             (P2A_SESSION_CONCURRENCY) above 1: a call refused by a dataset quota restores the \
+             session's datasets as they were when it started, which removes datasets that \
+             another concurrent call in the same session added and reverts the ones it replaced"
         );
     }
     if exec.rss_soft_limit_bytes.is_some() && p2a_core::get_process_memory().is_none() {

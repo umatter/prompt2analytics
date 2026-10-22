@@ -217,7 +217,8 @@ pub struct CliArgs {
     #[arg(long, env = "P2A_TOOL_CONCURRENCY")]
     pub tool_concurrency: Option<usize>,
 
-    /// Tool calls that may run at once in one session (default: CPUs; hosted: 1).
+    /// Tool calls that may run at once in one session (default: CPUs, or 1
+    /// when a dataset quota applies; hosted: 1).
     #[arg(long, env = "P2A_SESSION_CONCURRENCY")]
     pub session_concurrency: Option<usize>,
 
