@@ -521,12 +521,13 @@ Named budgets:
 
 1. **Do NOT set LLM API keys on the backend.**
    Leave `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `OPENROUTER_API_KEY` unset in
-   the backend's environment. The hosted profile ignores server-held keys
-   anyway; the reason not to set them is that the same environment without the
-   hosted profile (an authenticated or local deployment without
-   `P2A_LIMITS=hosted`) would use them for every request to a provider's default
-   endpoint that omits a key, which makes the server an open proxy billed to
-   your account. Unset = true BYOK.
+   the backend's environment. The hosted profile does not use server-held keys
+   (`llm_server_keys=false`); the reason not to set them is that the same
+   environment without the hosted profile (an authenticated or local deployment
+   without `P2A_LIMITS=hosted`), or with
+   `P2A_LIMIT_OVERRIDES=llm_server_keys=true`, would use them for every request
+   to a provider's default endpoint that omits a key, which makes the server an
+   open proxy billed to your account. Unset = true BYOK.
 
 2. **Pin the LLM egress allowlist (`P2A_LLM_ALLOWED_HOSTS`).**
    Set `P2A_LLM_ALLOWED_HOSTS=api.openai.com,api.anthropic.com,openrouter.ai`
@@ -536,8 +537,9 @@ Named budgets:
    policy depends on neither the profile nor that flag. An Authenticated or
    Local server on the Off profile without it can reach any public https host
    a caller names, carrying whatever key the caller supplied. With or without
-   the list, every resolved address is still checked and internal addresses
-   are refused.
+   the list, every resolved address is still checked and internal addresses are
+   refused, except a loopback Ollama endpoint while `llm_allow_loopback` is
+   true (the Off default).
 
 3. **Terminate TLS in front of the backend.**
    BYOK keys travel in request bodies; without HTTPS they're exposed on the wire.
@@ -676,7 +678,8 @@ be listed in `P2A_CORS_ORIGINS`.
 
 **The destination is only as constrained as `P2A_LLM_ALLOWED_HOSTS`.** Callers
 supply their own `base_url`, so on an exposed deployment set this variable (step
-2 above); the hosted profile's default list applies only when it is unset.
+2 above); the default list applies only when it is unset and
+`llm_allow_loopback` is false (the hosted default).
 
 **Keys are the smaller half of the story.** Every tool call also sends the
 user's dataset, prompt, and tool arguments to your server — that is the larger

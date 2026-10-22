@@ -248,7 +248,7 @@ A tool that runs and fails still answers HTTP 200, with `data.success: false` (c
 {"success":true,"data":{"success":false,"content":[{"type":"text","text":"Failed to load dataset: File not found: missing.csv"}],"error":"Failed to load dataset: File not found: missing.csv"}}
 ```
 
-The same holds for limits a tool checks while it runs (file size, export size, join output, table cells), and for the free-form DuckDB tools in the hosted profile: there `db_duckdb_query` and `db_query_file` always answer with a tool error whose text is "free-form SQL is not available on the public demo; load the file with load_dataset instead" (`sql_freeform` is false). `db_sqlite_query` and the table and schema tools are not affected.
+The same holds for limits a tool checks while it runs (file size, export size, join output, table cells), and for the free-form DuckDB tools in the hosted profile: while `sql_freeform` is false (the hosted default; `P2A_LIMIT_OVERRIDES=sql_freeform=true` re-enables them), `db_duckdb_query` and `db_query_file` answer with a tool error whose text is "free-form SQL is not available on the public demo; load the file with load_dataset instead". `db_sqlite_query` and the table and schema tools are not affected.
 
 Every call runs under the server's execution governor. An unknown session answers 404 `"Session not found"` and an expired one 410 `"Session expired"`, both without a `code`. An unknown tool, invalid arguments, a request limit, a quota, a busy session or server, memory pressure and the deadline answer with the error contract below (400, 422, 429, 503 or 504, with `code`).
 

@@ -11,7 +11,8 @@
 # Prereqs:
 #   * The GHCR package ghcr.io/umatter/prompt2analytics/backend must be PUBLIC.
 #   * NEVER set OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY here.
-#     The hosted profile below never uses server-held keys, but a key in this
+#     The hosted profile below does not use server-held keys
+#     (llm_server_keys=false), but a key in this
 #     environment is still one configuration change (for example
 #     P2A_LIMIT_OVERRIDES=llm_server_keys=true) away from an open proxy billed
 #     to the account. Unset = true BYOK.

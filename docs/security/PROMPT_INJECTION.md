@@ -60,7 +60,7 @@ A steered model (or any caller) can ask for very expensive work: a huge replicat
 
 Callers choose the provider's `base_url`, so a steered or hostile client could point the server at an internal address. The LLM client:
 
-- connects only to hosts on the allowlist (`P2A_LLM_ALLOWED_HOSTS`; when it is unset and `llm_allow_loopback` is false, as in the hosted profile, api.openai.com, api.anthropic.com and openrouter.ai);
+- connects only to hosts on the allowlist (`P2A_LLM_ALLOWED_HOSTS`; when it is unset and `llm_allow_loopback` is false, as in the hosted profile, api.openai.com, api.anthropic.com and openrouter.ai; when it is unset and `llm_allow_loopback` is true, as in the Off profile, there is no list and any public https host is allowed);
 - resolves each host itself and refuses it if any address is private, loopback, link-local or otherwise internal, then connects only to the addresses it checked;
 - never follows redirects and ignores system proxies;
 - never sends a server-held API key to a host the caller picked, and uses no server-held key at all while `llm_server_keys` is false (the hosted default).
