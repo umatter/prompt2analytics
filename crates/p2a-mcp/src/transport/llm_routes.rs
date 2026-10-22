@@ -15,10 +15,11 @@ use serde::{Deserialize, Serialize};
 use super::http::{ApiResponse, AppState, ContentItem};
 use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
 use crate::llm::{
-    AnthropicProvider, ChatSlot, ContextManager, LlmProvider, LlmSettings, Message, OllamaProvider,
-    OpenAIProvider, ProviderConfig, ProviderType, ToolDefinition, ToolExecutor,
+    AnthropicProvider, ChatSlot, ContextManager, LlmError, LlmProvider, LlmSettings, Message,
+    OllamaProvider, OpenAIProvider, ProviderConfig, ProviderType, ToolDefinition, ToolExecutor,
     build_dataset_context_bounded, check_llm_tool_call, get_system_prompt_with_context,
-    resolve_provider_config, server_key_availability, try_acquire_chat_slot,
+    resolve_provider_config, server_key_availability, truncate_str, truncate_tool_result,
+    try_acquire_chat_slot,
 };
 use crate::session::Session;
 
@@ -162,6 +163,55 @@ fn build_provider(cfg: ProviderConfig, settings: &LlmSettings) -> Box<dyn LlmPro
         ProviderType::OpenAI => Box::new(OpenAIProvider::with_settings(cfg, settings)),
         ProviderType::Anthropic => Box::new(AnthropicProvider::with_settings(cfg, settings)),
     }
+}
+
+/// The HTTP status of a failed LLM call: the provider's own failure is a
+/// 502, its silence a 504, a refused endpoint or key the caller's 400. The
+/// message is the error's text, which never carries an upstream body.
+fn llm_error_status(e: &LlmError) -> StatusCode {
+    match e {
+        LlmError::Upstream { .. } => StatusCode::BAD_GATEWAY,
+        LlmError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        LlmError::EgressDenied(_) | LlmError::InvalidApiKey => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// The prompt of a title request: the user's message (at most 2,000 bytes)
+/// and the assistant's reply (at most 500), cut on char boundaries.
+fn title_prompt(user: &str, assistant: Option<&str>) -> String {
+    let context = match assistant {
+        Some(a) => format!(
+            "User: {}\nAssistant: {}",
+            truncate_str(user, 2_000),
+            truncate_str(a, 500)
+        ),
+        None => format!("User: {}", truncate_str(user, 2_000)),
+    };
+    format!(
+        "Generate a very short title (3-6 words, no quotes) for this conversation:\n\n{context}\n\nTitle:"
+    )
+}
+
+/// The result preview of a `ToolEnd` event: at most 2,000 bytes plus "...".
+fn tool_end_preview(text: &str) -> String {
+    if text.len() > 2_000 {
+        format!("{}...", truncate_str(text, 2_000))
+    } else {
+        text.to_string()
+    }
+}
+
+/// The size of a dataset's source file for its stored metadata, read only
+/// through the path jail inside the session's scope: `None` for a path
+/// outside the data root or a file that cannot be read. Synchronous, so the
+/// scope is never held across an `.await`.
+#[cfg_attr(not(feature = "db"), allow(dead_code))]
+fn jailed_file_size(session_id: &str, path: &str) -> Option<i64> {
+    let _scope = crate::path_jail::enter_session_scope(session_id);
+    let checked = crate::path_jail::validate_data_path(path).ok()?;
+    let len = std::fs::metadata(checked).ok()?.len();
+    Some(i64::try_from(len).unwrap_or(i64::MAX))
 }
 
 /// Human-readable provider name for UI status messages. OpenRouter is
@@ -350,7 +400,7 @@ pub async fn llm_chat(
         Err(e) => {
             tracing::error!(error = %e, elapsed_ms = %elapsed.as_millis(), "LLM chat failed");
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                llm_error_status(&e),
                 Json(ApiResponse::<()>::error(e.to_string())),
             )
                 .into_response()
@@ -443,25 +493,7 @@ pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> im
     let provider = build_provider(provider_config, &settings);
 
     // Build a simple prompt for title generation
-    let context = if let Some(ref response) = request.assistant_response {
-        format!(
-            "User: {}\nAssistant: {}",
-            request.user_message,
-            // Truncate long responses
-            if response.len() > 500 {
-                &response[..500]
-            } else {
-                response
-            }
-        )
-    } else {
-        format!("User: {}", request.user_message)
-    };
-
-    let prompt = format!(
-        "Generate a very short title (3-6 words, no quotes) for this conversation:\n\n{}\n\nTitle:",
-        context
-    );
+    let prompt = title_prompt(&request.user_message, request.assistant_response.as_deref());
 
     let messages = vec![
         Message::system(
@@ -499,7 +531,7 @@ pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> im
         Err(e) => {
             tracing::error!(error = %e, "Failed to generate title");
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                llm_error_status(&e),
                 Json(ApiResponse::error(format!(
                     "Failed to generate title: {}",
                     e
@@ -668,7 +700,7 @@ impl StreamingToolExecutor {
         let result_preview = if result_text.len() > 2000 {
             format!(
                 "{}...[truncated, total {} bytes]",
-                &result_text[..2000],
+                truncate_str(result_text, 2_000),
                 result_text.len()
             )
         } else {
@@ -839,9 +871,8 @@ impl StreamingToolExecutor {
             .map(|s| s.to_string());
 
         let file_size_bytes = source_path
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len() as i64);
+            .as_deref()
+            .and_then(|p| jailed_file_size(session_id, p));
 
         // Determine source type
         let source_type = if tool_name == "upload_dataset" {
@@ -1034,11 +1065,7 @@ impl ToolExecutor for StreamingToolExecutor {
                     .collect::<Vec<_>>()
                     .join("\n");
                 // Truncate for the event (keep it reasonable for SSE)
-                if text.len() > 2000 {
-                    Some(format!("{}...", &text[..2000]))
-                } else {
-                    Some(text)
-                }
+                Some(tool_end_preview(&text))
             }
             Err(e) => Some(format!("Error: {}", e)),
         };
@@ -1074,7 +1101,7 @@ impl ToolExecutor for StreamingToolExecutor {
                 if let (Some(db), Some(tc_id)) = (&self.db, &tool_call_id) {
                     // Truncate result if too long (max 10KB)
                     let truncated_result = if result_str.len() > 10240 {
-                        format!("{}...[truncated]", &result_str[..10240])
+                        format!("{}...[truncated]", truncate_str(&result_str, 10_240))
                     } else {
                         result_str.clone()
                     };
@@ -1487,14 +1514,8 @@ async fn run_chat_stream(
                                                     let result_content =
                                                         tc.result.as_deref().unwrap_or("");
                                                     // Truncate long results
-                                                    let truncated = if result_content.len() > 2000 {
-                                                        format!(
-                                                            "{}...\n[Truncated]",
-                                                            &result_content[..2000]
-                                                        )
-                                                    } else {
-                                                        result_content.to_string()
-                                                    };
+                                                    let truncated =
+                                                        truncate_tool_result(result_content, 2_000);
                                                     crate::llm::ToolResult {
                                                         tool_call_id: tc.id_string(),
                                                         content: truncated,
@@ -1887,5 +1908,52 @@ mod chat_tests {
         assert!(acquire_chat_slot_or_busy("chat-busy-test", None).is_ok());
         drop(held);
         assert!(acquire_chat_slot_or_busy("chat-busy-test", Some(1)).is_ok());
+    }
+
+    #[test]
+    fn title_prompt_truncates_on_char_boundary() {
+        // Byte 500 falls inside a char.
+        let resp = format!("a{}", "é".repeat(400));
+        let p = title_prompt(&format!("b{}", "ü".repeat(3000)), Some(&resp));
+        assert!(p.contains("Assistant: a") && p.len() < 4_000, "{}", p.len());
+        assert!(title_prompt("hi", None).contains("User: hi"));
+    }
+
+    #[test]
+    fn tool_end_preview_is_char_safe() {
+        let s = tool_end_preview(&format!("a{}", "é".repeat(1500)));
+        assert!(s.len() <= 2_003 && s.ends_with("..."));
+        assert_eq!(tool_end_preview("short"), "short");
+    }
+
+    #[test]
+    fn metadata_file_size_goes_through_the_jail() {
+        assert_eq!(
+            jailed_file_size("00000000-0000-4000-8000-000000000000", "/etc/passwd"),
+            None
+        );
+    }
+
+    #[test]
+    fn llm_errors_map_to_http_statuses() {
+        let cases = [
+            (
+                LlmError::Upstream {
+                    provider: "OpenAI",
+                    status: 401,
+                },
+                StatusCode::BAD_GATEWAY,
+            ),
+            (LlmError::Timeout, StatusCode::GATEWAY_TIMEOUT),
+            (LlmError::EgressDenied("no".into()), StatusCode::BAD_REQUEST),
+            (LlmError::InvalidApiKey, StatusCode::BAD_REQUEST),
+            (
+                LlmError::NetworkError("x".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (e, want) in cases {
+            assert_eq!(llm_error_status(&e), want, "{e}");
+        }
     }
 }
