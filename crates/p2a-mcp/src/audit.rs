@@ -11,15 +11,24 @@
 //! - whether it succeeded, its outcome (`ok`, `tool_error`, `cancelled` or a
 //!   refusal code such as `limit_exceeded`) and its duration;
 //! - the size of its result ([`ResultSummary`]), never the result itself.
+//!
+//! Entries go through a bounded queue to one writer thread per file
+//! ([`AuditLogger::new`] returns a handle to the existing writer for a path),
+//! so tool calls never do file IO on a runtime worker. The file is created
+//! with mode 0600 and rotates by size ([`RotationPolicy`], `P2A_AUDIT_MAX_MB`,
+//! default 50 MiB, `0` disables), keeping `<path>.1` to `<path>.3`. Entries
+//! still queued when the process is killed are lost.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, PoisonError, Weak};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::AuditConfig;
 
@@ -151,62 +160,286 @@ impl AuditEntry {
     }
 }
 
-/// Thread-safe audit logger.
+/// Default size at which the audit log rotates, in MiB (`P2A_AUDIT_MAX_MB`).
+const DEFAULT_ROTATE_MB: u64 = 50;
+/// Rotated files kept (`<path>.1` .. `<path>.3`).
+const DEFAULT_KEEP: usize = 3;
+/// Entries queued for the writer thread before `log` waits.
+const QUEUE_CAPACITY: usize = 1024;
+
+/// When the audit log rotates and how many old files it keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotationPolicy {
+    /// Rotate before a write would take the file above this size (`None`:
+    /// never rotate).
+    pub max_bytes: Option<u64>,
+    /// Rotated files kept as `<path>.1` (newest) to `<path>.<keep>`.
+    pub keep: usize,
+}
+
+impl RotationPolicy {
+    /// The policy for a `P2A_AUDIT_MAX_MB` value: unset means 50 MiB, `0`
+    /// disables rotation, anything unparsable is logged and gives the
+    /// default. Three old files are kept.
+    pub fn from_env_value(value: Option<&str>) -> Self {
+        let mb = match value.map(str::trim) {
+            None | Some("") => DEFAULT_ROTATE_MB,
+            Some(v) => v.parse::<u64>().unwrap_or_else(|_| {
+                tracing::warn!(
+                    value = v,
+                    "P2A_AUDIT_MAX_MB is not a whole number of MiB; rotating the audit log at \
+                     {DEFAULT_ROTATE_MB} MiB"
+                );
+                DEFAULT_ROTATE_MB
+            }),
+        };
+        Self {
+            max_bytes: (mb > 0).then(|| mb.saturating_mul(1 << 20)),
+            keep: DEFAULT_KEEP,
+        }
+    }
+}
+
+/// A message to the writer thread.
+enum Msg {
+    Entry(Box<AuditEntry>),
+    /// Reply once every earlier entry is written and flushed.
+    Flush(oneshot::Sender<()>),
+}
+
+/// The handle side of one file's writer thread. The thread stops after the
+/// last handle drops and the queue is drained.
+struct Sink {
+    tx: mpsc::Sender<Msg>,
+    /// Set once the writer is found gone (warned once).
+    closed_warned: AtomicBool,
+}
+
+/// One writer per absolute path in the process: every `AuditLogger` for the
+/// same file shares its thread, file handle and rotation state.
+static WRITERS: LazyLock<StdMutex<HashMap<PathBuf, Weak<Sink>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Audit logger: hands entries to a dedicated writer thread through a
+/// bounded queue, so callers never do file IO.
 pub struct AuditLogger {
-    writer: Arc<Mutex<Option<BufWriter<File>>>>,
-    enabled: bool,
+    sink: Option<Arc<Sink>>,
 }
 
 impl AuditLogger {
-    /// Create a new audit logger from configuration.
+    /// A logger for `config` (disabled unless `config.enabled`), rotating
+    /// at `P2A_AUDIT_MAX_MB`. Returns a handle to the process's one writer
+    /// for that file when there already is one.
     pub fn new(config: &AuditConfig) -> std::io::Result<Self> {
+        let policy =
+            RotationPolicy::from_env_value(std::env::var("P2A_AUDIT_MAX_MB").ok().as_deref());
+        Self::with_rotation(config, policy)
+    }
+
+    /// A logger for `config` with an explicit rotation policy. The first
+    /// configuration of a path wins: a later logger for the same file shares
+    /// the existing writer and its policy. Opening the file (create, append,
+    /// mode 0600 on Unix) is the one synchronous step, at startup.
+    pub fn with_rotation(config: &AuditConfig, policy: RotationPolicy) -> std::io::Result<Self> {
         if !config.enabled {
-            return Ok(Self {
-                writer: Arc::new(Mutex::new(None)),
-                enabled: false,
-            });
+            return Ok(Self::disabled());
         }
-
-        let path = Path::new(&config.path);
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
-
+        let path = std::path::absolute(&config.path)?;
+        let mut writers = WRITERS.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(sink) = writers.get(&path).and_then(Weak::upgrade) {
+            return Ok(Self { sink: Some(sink) });
+        }
+        let file = open_log(&path)?;
+        let size = file.metadata()?.len();
+        let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
+        let writer = Writer {
+            path: path.clone(),
+            file: BufWriter::new(file),
+            size,
+            policy,
+            io_errors: 0,
+        };
+        std::thread::Builder::new()
+            .name("p2a-audit".to_string())
+            .spawn(move || writer.run(rx))?;
+        let sink = Arc::new(Sink {
+            tx,
+            closed_warned: AtomicBool::new(false),
+        });
+        writers.retain(|_, w| w.strong_count() > 0);
+        writers.insert(path, Arc::downgrade(&sink));
         tracing::info!(path = %config.path, "Audit logging enabled");
-
-        Ok(Self {
-            writer: Arc::new(Mutex::new(Some(BufWriter::new(file)))),
-            enabled: true,
-        })
+        Ok(Self { sink: Some(sink) })
     }
 
     /// Create a disabled audit logger.
     pub fn disabled() -> Self {
-        Self {
-            writer: Arc::new(Mutex::new(None)),
-            enabled: false,
-        }
+        Self { sink: None }
     }
 
     /// Check if audit logging is enabled.
     pub fn is_enabled(&self) -> bool {
-        self.enabled
+        self.sink.is_some()
     }
 
-    /// Log a tool call.
+    /// Queue one entry for the writer thread. Waits while the queue is full
+    /// (back-pressure); never touches the file itself.
     pub async fn log(&self, entry: AuditEntry) {
-        if !self.enabled {
+        let Some(sink) = &self.sink else {
             return;
+        };
+        if sink.tx.send(Msg::Entry(Box::new(entry))).await.is_err()
+            && !sink.closed_warned.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!("the audit log writer has stopped; audit entries are being dropped");
         }
+    }
 
-        let mut guard = self.writer.lock().await;
-        if let Some(ref mut writer) = *guard {
-            // Serialize to JSON with newline
-            if let Ok(json) = serde_json::to_string(&entry) {
-                if let Err(e) = writeln!(writer, "{}", json) {
-                    tracing::warn!(error = %e, "Failed to write audit log entry");
-                } else if let Err(e) = writer.flush() {
-                    tracing::warn!(error = %e, "Failed to flush audit log");
+    /// Resolves after every entry queued before it is written and flushed.
+    pub async fn flush(&self) {
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        let (reply, done) = oneshot::channel();
+        if sink.tx.send(Msg::Flush(reply)).await.is_ok() {
+            let _ = done.await;
+        }
+    }
+
+    /// True when both loggers write through the same writer thread (and so
+    /// the same file).
+    pub fn shares_writer_with(&self, other: &AuditLogger) -> bool {
+        matches!((&self.sink, &other.sink), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
+    }
+}
+
+/// Opens the log for appending, creating it private to the owner (0600) on
+/// Unix.
+fn open_log(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// `<path>.<k>`.
+fn numbered(path: &Path, k: usize) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{k}"));
+    PathBuf::from(name)
+}
+
+/// The writer thread's state for one file.
+struct Writer {
+    path: PathBuf,
+    file: BufWriter<File>,
+    /// Bytes in the current file.
+    size: u64,
+    policy: RotationPolicy,
+    io_errors: u64,
+}
+
+impl Writer {
+    /// Writes queued messages until every handle is gone and the queue is
+    /// drained; flushes whenever the queue runs empty.
+    fn run(mut self, mut rx: mpsc::Receiver<Msg>) {
+        while let Some(msg) = rx.blocking_recv() {
+            self.handle(msg);
+            while let Ok(msg) = rx.try_recv() {
+                self.handle(msg);
+            }
+            self.flush();
+        }
+        self.flush();
+    }
+
+    fn handle(&mut self, msg: Msg) {
+        match msg {
+            Msg::Entry(entry) => self.write_entry(&entry),
+            Msg::Flush(reply) => {
+                self.flush();
+                let _ = reply.send(());
+            }
+        }
+    }
+
+    fn write_entry(&mut self, entry: &AuditEntry) {
+        let mut line = match serde_json::to_string(entry) {
+            Ok(line) => line,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not serialise an audit entry");
+                return;
+            }
+        };
+        line.push('\n');
+        let len = line.len() as u64;
+        if let Some(max) = self.policy.max_bytes
+            && self.size > 0
+            && self.size.saturating_add(len) > max
+        {
+            self.rotate();
+        }
+        match self.file.write_all(line.as_bytes()) {
+            Ok(()) => self.size = self.size.saturating_add(len),
+            Err(e) => self.io_error(&e),
+        }
+    }
+
+    fn flush(&mut self) {
+        if let Err(e) = self.file.flush() {
+            self.io_error(&e);
+        }
+    }
+
+    /// `<path>.<keep>` is removed, `.k` becomes `.k+1`, the current file
+    /// becomes `.1` and a new file is opened. A failed rename or open is
+    /// logged and writing continues in the file at hand, so no entry is
+    /// dropped.
+    fn rotate(&mut self) {
+        self.flush();
+        let keep = self.policy.keep;
+        let moved = if keep == 0 {
+            std::fs::remove_file(&self.path)
+        } else {
+            match std::fs::remove_file(numbered(&self.path, keep)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => self.io_error(&e),
+                _ => {}
+            }
+            for k in (1..keep).rev() {
+                match std::fs::rename(numbered(&self.path, k), numbered(&self.path, k + 1)) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => self.io_error(&e),
+                    _ => {}
                 }
             }
+            std::fs::rename(&self.path, numbered(&self.path, 1))
+        };
+        if let Err(e) = moved {
+            self.io_error(&e);
+            return;
+        }
+        match open_log(&self.path) {
+            Ok(file) => {
+                self.file = BufWriter::new(file);
+                self.size = 0;
+            }
+            Err(e) => self.io_error(&e),
+        }
+    }
+
+    /// Counts IO errors; warns on the first and every 1000th.
+    fn io_error(&mut self, e: &std::io::Error) {
+        self.io_errors += 1;
+        if self.io_errors == 1 || self.io_errors.is_multiple_of(1000) {
+            tracing::warn!(
+                error = %e,
+                errors = self.io_errors,
+                path = %self.path.display(),
+                "audit log write failed"
+            );
         }
     }
 }
@@ -440,6 +673,135 @@ mod tests {
         assert!(json.contains("load_dataset"));
         assert!(json.contains("test-session"));
         assert!(json.contains("\"origin\":\"llm_tool\""));
+    }
+
+    fn cfg_in(dir: &tempfile::TempDir) -> AuditConfig {
+        AuditConfig {
+            enabled: true,
+            path: dir.path().join("audit.log").to_string_lossy().into_owned(),
+        }
+    }
+
+    fn entry(i: usize) -> AuditEntry {
+        AuditEntry::new(
+            &format!("s{i}"),
+            "http",
+            "list_datasets",
+            serde_json::json!({ "i": i }),
+            "ok",
+            1,
+            ResultSummary::default(),
+        )
+    }
+
+    #[test]
+    fn rotation_policy_from_env_value() {
+        let mib = 1024 * 1024;
+        assert_eq!(
+            RotationPolicy::from_env_value(None).max_bytes,
+            Some(50 * mib)
+        );
+        assert_eq!(
+            RotationPolicy::from_env_value(Some("10")).max_bytes,
+            Some(10 * mib)
+        );
+        assert_eq!(RotationPolicy::from_env_value(Some("0")).max_bytes, None);
+        // unparsable: warn and use the default
+        assert_eq!(
+            RotationPolicy::from_env_value(Some("ten")).max_bytes,
+            Some(50 * mib)
+        );
+        assert_eq!(RotationPolicy::from_env_value(None).keep, 3);
+    }
+
+    #[tokio::test]
+    async fn writer_rotates_and_keeps_three_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = AuditLogger::with_rotation(
+            &cfg_in(&dir),
+            RotationPolicy {
+                max_bytes: Some(4096),
+                keep: 3,
+            },
+        )
+        .unwrap();
+        for i in 0..200 {
+            logger.log(entry(i)).await;
+        }
+        logger.flush().await;
+
+        let file = |k: usize| match k {
+            0 => dir.path().join("audit.log"),
+            k => dir.path().join(format!("audit.log.{k}")),
+        };
+        for k in 0..=3 {
+            let len = std::fs::metadata(file(k)).unwrap().len();
+            assert!(len > 0 && len <= 4096, "file {k}: {len} bytes");
+        }
+        assert!(!file(4).exists());
+        let mut ids = Vec::new();
+        for k in [3, 2, 1, 0] {
+            for line in std::fs::read_to_string(file(k)).unwrap().lines() {
+                let v: Value = serde_json::from_str(line).unwrap();
+                let id = v["session_id"].as_str().unwrap();
+                ids.push(id[1..].parse::<usize>().unwrap());
+            }
+        }
+        assert_eq!(ids.last(), Some(&199));
+        assert!(ids.len() < 200, "old files were not dropped");
+        assert!(
+            ids.windows(2).all(|w| w[1] == w[0] + 1),
+            "not consecutive: {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_path_shares_one_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = AuditLogger::new(&cfg_in(&dir)).unwrap();
+        let b = AuditLogger::new(&cfg_in(&dir)).unwrap();
+        assert!(a.shares_writer_with(&b));
+        let other_dir = tempfile::tempdir().unwrap();
+        let c = AuditLogger::new(&cfg_in(&other_dir)).unwrap();
+        assert!(!a.shares_writer_with(&c));
+        assert!(!AuditLogger::disabled().shares_writer_with(&AuditLogger::disabled()));
+
+        a.log(entry(1)).await;
+        b.log(entry(2)).await;
+        a.flush().await;
+        let text = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+        let ids: Vec<String> = text
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap()["session_id"].to_string())
+            .collect();
+        assert_eq!(ids, ["\"s1\"", "\"s2\""]);
+    }
+
+    #[tokio::test]
+    async fn disabled_logger_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = cfg_in(&dir);
+        cfg.enabled = false;
+        let logger = AuditLogger::new(&cfg).unwrap();
+        assert!(!logger.is_enabled());
+        logger.log(entry(1)).await;
+        logger.flush().await;
+        assert!(!dir.path().join("audit.log").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn audit_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let logger = AuditLogger::new(&cfg_in(&dir)).unwrap();
+        logger.log(entry(1)).await;
+        logger.flush().await;
+        let mode = std::fs::metadata(dir.path().join("audit.log"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     /// Words that mark a request field as a likely carrier of data values.
