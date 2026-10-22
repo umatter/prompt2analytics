@@ -386,6 +386,8 @@ pub fn run_sphet(
     listw: &SpatialWeights,
     config: SphetConfig,
 ) -> EconResult<SphetResult> {
+    validate_config(&config)?;
+
     let df = dataset.df();
     let n = df.height();
     let k = x_cols.len() + 1; // +1 for intercept
@@ -461,6 +463,36 @@ pub fn run_sphet(
     }
 }
 
+/// Highest power of W used as an instrument (`[X, WX, ..., W^4 X]`).
+const MAX_INSTRUMENT_ORDER: usize = 4;
+
+/// Reject configurations that cannot be estimated or would size absurd work.
+fn validate_config(config: &SphetConfig) -> EconResult<()> {
+    let uses_instruments = matches!(config.model, SphetModel::SpatialLag | SphetModel::SARAR);
+    if uses_instruments && !(1..=MAX_INSTRUMENT_ORDER).contains(&config.instrument_order) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "instrument_order must be between 1 and {MAX_INSTRUMENT_ORDER} (instruments X, WX, ..., W^order X), got {}",
+                config.instrument_order
+            ),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be a finite positive number, got {}",
+                config.tolerance
+            ),
+        });
+    }
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Convenience function for dataset-based estimation.
 pub fn sphet(
     dataset: &Dataset,
@@ -495,7 +527,7 @@ fn estimate_sar_gmm(
     let wy = listw.lag(y);
 
     // Build instrument matrix [X, WX, W²X, ...]
-    let h = build_instruments(x, listw, config.instrument_order);
+    let h = build_instruments(x, listw, config.instrument_order)?;
     let n_inst = h.ncols();
 
     if n_inst < k + 1 {
@@ -742,7 +774,7 @@ fn estimate_sarar_gmm(
     let wy = listw.lag(y);
 
     // Build instrument matrix
-    let h = build_instruments(x, listw, config.instrument_order);
+    let h = build_instruments(x, listw, config.instrument_order)?;
 
     // Augmented regressor matrix Z = [X, Wy]
     let mut z = Array2::zeros((n, k + 1));
@@ -872,12 +904,16 @@ fn estimate_sarar_gmm(
 ///
 /// Following Kelejian-Prucha, uses powers of W applied to X as instruments
 /// for the endogenous Wy.
-fn build_instruments(x: &Array2<f64>, listw: &SpatialWeights, order: usize) -> Array2<f64> {
+fn build_instruments(
+    x: &Array2<f64>,
+    listw: &SpatialWeights,
+    order: usize,
+) -> EconResult<Array2<f64>> {
     let n = x.nrows();
     let k = x.ncols();
-    let n_cols = k * (order + 1);
+    let n_cols = crate::resource::checked_len(&[k, order.saturating_add(1)], "instrument columns")?;
 
-    let mut h = Array2::zeros((n, n_cols));
+    let mut h = crate::resource::try_zeros2(n, n_cols, "instrument matrix")?;
 
     // Start with X
     h.slice_mut(s![.., ..k]).assign(x);
@@ -900,7 +936,7 @@ fn build_instruments(x: &Array2<f64>, listw: &SpatialWeights, order: usize) -> A
         h.slice_mut(s![.., start_col..end_col]).assign(&wx);
     }
 
-    h
+    Ok(h)
 }
 
 /// Transform a matrix: M* = (I - ρW)M
@@ -995,6 +1031,7 @@ fn estimate_rho_gm(
 
     // Newton refinement
     for _ in 0..config.max_iter {
+        crate::resource::checkpoint()?;
         let h = 1e-6;
         let f0 = gm_objective(best_rho, g1, g2, g3, g4, g5, tr_wtw / n_f64, tr_w2 / n_f64);
         let f1 = gm_objective(
@@ -1066,6 +1103,15 @@ fn gm_objective(
 
     // Quadratic objective
     m1 * m1 + m2 * m2
+}
+
+/// Largest HAC lag that can contribute for a sample of `n` rows.
+///
+/// A lag `>= n` has no pairs `(i, i - lag)` inside the sample, so its
+/// autocovariance is zero; stopping at `n - 1` gives the same result for any
+/// bandwidth.
+fn hac_max_lag(bw: usize, n: usize) -> usize {
+    bw.min(n.saturating_sub(1))
 }
 
 /// Compute standard errors for spatial 2SLS.
@@ -1142,8 +1188,9 @@ fn compute_spatial_2sls_se(
                 }
             }
 
-            // Lags 1 to bw
-            for lag in 1..=bw {
+            // Lags 1 to bw; lags >= n have no pairs in the sample and add nothing
+            for lag in 1..=hac_max_lag(bw, n) {
+                crate::resource::checkpoint()?;
                 let w = config.kernel.weight(lag, bw);
                 if w.abs() < 1e-15 {
                     continue;
@@ -1387,12 +1434,108 @@ mod tests {
         let x = Array2::from_shape_fn((25, 2), |(i, j)| if j == 0 { 1.0 } else { i as f64 / 5.0 });
 
         // Order 2: [X, WX, W²X]
-        let h = build_instruments(&x, &listw, 2);
+        let h = build_instruments(&x, &listw, 2).unwrap();
         assert_eq!(h.ncols(), 6); // 2 * 3 = 6 columns
 
         // Order 1: [X, WX]
-        let h1 = build_instruments(&x, &listw, 1);
+        let h1 = build_instruments(&x, &listw, 1).unwrap();
         assert_eq!(h1.ncols(), 4); // 2 * 2 = 4 columns
+    }
+
+    #[test]
+    fn instrument_matrix_too_large_is_an_error_not_an_abort() {
+        let (_, listw) = create_test_data();
+        let x = Array2::from_shape_fn((25, 2), |(i, j)| if j == 0 { 1.0 } else { i as f64 });
+        for order in [usize::MAX / 4, usize::MAX] {
+            assert!(matches!(
+                build_instruments(&x, &listw, order),
+                Err(EconError::ResourceLimit(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn hac_with_huge_bandwidth_finishes() {
+        let (d, w) = create_test_data();
+        for model in [SphetModel::SpatialLag, SphetModel::SARAR] {
+            let c = SphetConfig {
+                model,
+                se_type: SphetSE::HAC,
+                bandwidth: Some(1_000_000_000_000_000),
+                ..Default::default()
+            };
+            let r = run_sphet(&d, "y", &["x"], &w, c).unwrap();
+            assert!(
+                r.std_errors.iter().all(|s| s.is_finite() && *s > 0.0),
+                "{:?}",
+                r.std_errors
+            );
+        }
+    }
+
+    #[test]
+    fn hac_lag_range_is_clamped_to_the_sample() {
+        assert_eq!(hac_max_lag(1_000_000_000_000_000, 60), 59);
+        assert_eq!(hac_max_lag(3, 60), 3);
+        assert_eq!(hac_max_lag(5, 1), 0);
+        assert_eq!(hac_max_lag(5, 0), 0);
+    }
+
+    #[test]
+    fn instrument_order_must_be_between_1_and_4() {
+        let (d, w) = create_test_data();
+        for (model, order) in [
+            (SphetModel::SpatialLag, 0),
+            (SphetModel::SpatialLag, 5),
+            (SphetModel::SARAR, usize::MAX / 4),
+        ] {
+            let c = SphetConfig {
+                model,
+                instrument_order: order,
+                ..Default::default()
+            };
+            let e = run_sphet(&d, "y", &["x"], &w, c).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("instrument_order")),
+                "{e}"
+            );
+        }
+        let c = SphetConfig {
+            instrument_order: 4,
+            ..Default::default()
+        };
+        assert!(run_sphet(&d, "y", &["x"], &w, c).is_ok());
+    }
+
+    #[test]
+    fn sphet_rejects_bad_tolerance_and_honours_cancellation() {
+        let (d, w) = create_test_data();
+        for tol in [0.0, f64::NAN] {
+            assert!(
+                run_sphet(
+                    &d,
+                    "y",
+                    &["x"],
+                    &w,
+                    SphetConfig {
+                        tolerance: tol,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+            );
+        }
+        let t = crate::resource::CancelToken::new();
+        t.cancel();
+        let c = SphetConfig {
+            se_type: SphetSE::HAC,
+            bandwidth: Some(10),
+            ..Default::default()
+        };
+        let r = crate::resource::with_budget(crate::resource::Budget::new(None, t), || {
+            run_sphet(&d, "y", &["x"], &w, c)
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
     }
 
     #[test]
