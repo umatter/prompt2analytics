@@ -703,9 +703,10 @@ impl AnalyticsServer {
     /// Within this crate only `exec::ToolGovernor::call` calls this, so every
     /// HTTP-side tool call runs under the governor. Direct calls (integration
     /// tests, embedders) bypass admission control, permits, deadlines,
-    /// cancellation and the dataset quotas. Unknown names, unparsable arguments and handler errors come back as
-    /// `ToolCallError`; a tool's own error result is an `Ok` with
-    /// `success == false`.
+    /// cancellation, panic isolation, the dataset quotas and the audit entry;
+    /// the request limits below still apply. Unknown names, unparsable
+    /// arguments and handler errors come back as `ToolCallError`; a tool's own
+    /// error result is an `Ok` with `success == false`.
     ///
     /// Before the arguments are deserialised, the call is checked against
     /// the request limits in force on this thread (`tools::limits::current`,
