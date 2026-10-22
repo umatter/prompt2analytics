@@ -2162,7 +2162,7 @@ impl AnalyticsServer {
 /// Checks a `side x side` matrix against the `table_cells` budget of the installed limits (a
 /// product past `u64` counts as `u64::MAX`, so it passes only when the budget is unlimited).
 fn check_square_matrix(tool: &str, side: usize) -> Result<(), String> {
-    let cells = (side as u64).checked_mul(side as u64).unwrap_or(u64::MAX);
+    let cells = (side as u64).saturating_mul(side as u64);
     check_named_budget(
         tool,
         "table_cells",

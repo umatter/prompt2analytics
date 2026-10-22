@@ -416,7 +416,7 @@ fn count_free_parameters(dimensions: &[usize], margins: &[Vec<usize>]) -> EconRe
         let mut sub = mask;
         while sub != 0 {
             visited += 1;
-            if visited % 65_536 == 0 {
+            if visited.is_multiple_of(65_536) {
                 resource::checkpoint()?;
             }
             if counted.insert(sub) {
