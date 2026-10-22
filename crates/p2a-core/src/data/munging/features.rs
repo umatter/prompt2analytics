@@ -341,12 +341,29 @@ pub enum BinStrategy {
 
 /// Discretize a continuous column into bins.
 ///
+/// Adds the string column `{column}_binned`: `bin_0`, `bin_1`, ... or the
+/// given `labels`. A value `v` goes to the bin `j` with
+/// `edges[j] < v <= edges[j + 1]`; a value at or below the first edge, above
+/// the last one, NaN or null goes to the first bin. Quantile edges are taken
+/// over the values that are neither null nor NaN, as R's
+/// `quantile(type = 7, na.rm = TRUE)` does.
+///
 /// # Arguments
 ///
 /// * `dataset` - Dataset containing the column
 /// * `column` - Column to bin
 /// * `strategy` - Binning strategy
 /// * `labels` - Optional labels for the bins
+///
+/// # Errors
+///
+/// Returns an error when the column is missing or cannot be cast to
+/// `Float64`; when the number of bins is zero or its edges cannot be
+/// allocated; when custom edges are fewer than two, contain NaN or decrease;
+/// when the minimum or maximum of an equal-width column is not finite or its
+/// range overflows; when an infinite value in the column makes a quantile
+/// edge NaN (`-inf + inf`), which leaves the edges unsorted; when `labels`
+/// does not have one label per bin; and when the computation is cancelled.
 ///
 /// # Example
 ///
@@ -427,6 +444,22 @@ pub fn bin(
         }
     };
 
+    // `partition_point` below needs sorted edges. Equal-width and custom edges
+    // are sorted by construction and by the checks above; quantile edges are
+    // not when an interpolation meets an infinite value (`-inf + inf` is NaN),
+    // and `<=` rejects a NaN edge as well as a decreasing pair.
+    if !edges.windows(2).all(|w| w[0] <= w[1]) {
+        let kind = match strategy {
+            BinStrategy::EqualWidth(_) => "equal-width",
+            BinStrategy::Quantile(_) => "quantile",
+            BinStrategy::Custom(_) => "custom",
+        };
+        return Err(MungeError::FeatureError(format!(
+            "cannot compute {kind} bins: column `{column}` contains infinite values, \
+             which leave the bin edges undefined"
+        )));
+    }
+
     // Validate labels match number of bins
     let n_bins = edges.len().saturating_sub(1);
     if let Some(lbls) = labels {
@@ -450,9 +483,9 @@ pub fn bin(
         }
         let val = float_ca.get(i);
         let bin_idx = match val {
-            // For sorted edges, `partition_point` is the unique j with
-            // edges[j-1] < v <= edges[j]; values at or below the first edge,
-            // above the last one, or NaN go to the first bin.
+            // The edges are sorted (checked above), so `partition_point` is
+            // the unique j with edges[j-1] < v <= edges[j]; values at or below
+            // the first edge, above the last one, or NaN go to the first bin.
             Some(v) => match edges.partition_point(|e| *e < v) {
                 j if j >= 1 && j < edges.len() => j - 1,
                 _ => 0,
@@ -502,10 +535,12 @@ fn edge_buffer(n: usize) -> MungeResult<Vec<f64>> {
 /// All `n + 1` edges of `n` equal-frequency bins: `-inf`, the interior
 /// quantiles `i / n` for `i` in `1..n`, and `+inf`.
 ///
-/// The interior edges are bit-identical to polars'
-/// `quantile(i / n, QuantileMethod::Linear)` (R's `quantile(type = 7)`), but
-/// the column is sorted once instead of once per edge. An all-null or empty
-/// column gives interior edges of `0.0`, as the per-edge `unwrap_or(0.0)` did.
+/// NaN values are skipped like nulls. The interior edges are then
+/// bit-identical to polars' `quantile(i / n, QuantileMethod::Linear)` (R's
+/// `quantile(type = 7)`) of the column with its NaN values made null, but the
+/// column is sorted once instead of once per edge. A column without a value
+/// that is neither null nor NaN, or an empty one, gives interior edges of
+/// `0.0`, as the per-edge `unwrap_or(0.0)` did for an all-null column.
 fn quantile_edges(ca: &Float64Chunked, n: usize) -> MungeResult<Vec<f64>> {
     check_bin_count(n)?;
     let mut edges = edge_buffer(n)?;
@@ -513,8 +548,15 @@ fn quantile_edges(ca: &Float64Chunked, n: usize) -> MungeResult<Vec<f64>> {
 
     let len = ca.len();
     let nc = ca.null_count();
-    let m = len - nc;
-    // Nulls first, the order polars' generic quantile path uses.
+    let n_nan = ca
+        .into_iter()
+        .filter(|v| v.is_some_and(f64::is_nan))
+        .count();
+    // `m` values are neither null nor NaN. polars sorts nulls first (the order
+    // its generic quantile path uses) and NaN last, so the sorted entries
+    // `nc..nc + m` are exactly those values and the interpolation below never
+    // reads a NaN.
+    let m = len - nc - n_nan;
     let sorted = if m > 0 { Some(ca.sort(false)) } else { None };
 
     for i in 1..n {
@@ -838,11 +880,8 @@ mod tests {
         let e = quantile_edges(&ca, 4).unwrap();
         assert_eq!(e.len(), 5);
         assert!(e[0] == f64::NEG_INFINITY && e[4] == f64::INFINITY);
-        for (got, r) in
-            e[1..4]
-                .iter()
-                .zip([2.5499999999999998, 4.3499999999999996, 6.3749999999999991])
-        {
+        // R's 17-digit values above, written in their shortest round-trip form.
+        for (got, r) in e[1..4].iter().zip([2.55, 4.35, 6.374999999999999]) {
             assert!((got - r).abs() < 1e-12, "{got} vs R {r}");
         }
     }
@@ -927,6 +966,61 @@ mod tests {
         let wide = Dataset::new(df!("x" => [-1e308, 0.0, 1e308]).unwrap());
         let e = err_text(bin(&wide, "x", BinStrategy::EqualWidth(3), None));
         assert!(e.contains("too wide"), "{e}");
+    }
+
+    #[test]
+    fn quantile_bins_treat_nan_like_null() {
+        // R 4.x:
+        // x <- c(1, 2, 3, NaN)
+        // q <- quantile(x, c(.25, .5, .75), type = 7, na.rm = TRUE)   # 1.5 2 2.5
+        // cut(x, c(-Inf, q, Inf), labels = FALSE) - 1                 # 0 1 3 NA (bin_0 here, as for a null)
+        let ds = Dataset::new(df!("x" => [1.0, 2.0, 3.0, f64::NAN]).unwrap());
+        let out = bin(&ds, "x", BinStrategy::Quantile(4), None).unwrap();
+        assert_eq!(labels_of(&out, "x_binned"), idx(&[0, 1, 3, 0]));
+
+        // A NaN anywhere gives the edges of the same column with that NaN made null.
+        let with_nan = Float64Chunked::from_iter_options(
+            "x".into(),
+            [4.2, f64::NAN, -9.0, -1.3, 0.7, f64::NAN, 2.9]
+                .into_iter()
+                .map(|v| (v != -9.0).then_some(v)),
+        );
+        let as_null = Float64Chunked::from_iter_options(
+            "x".into(),
+            [4.2, f64::NAN, -9.0, -1.3, 0.7, f64::NAN, 2.9]
+                .into_iter()
+                .map(|v| (v != -9.0 && !v.is_nan()).then_some(v)),
+        );
+        for n in 1..=6usize {
+            assert_eq!(
+                quantile_edges(&with_nan, n).unwrap(),
+                quantile_edges(&as_null, n).unwrap(),
+                "n = {n}"
+            );
+        }
+        // An all-NaN column has the interior edges of an all-null one.
+        let all_nan = Float64Chunked::from_slice("x".into(), &[f64::NAN, f64::NAN]);
+        assert_eq!(
+            quantile_edges(&all_nan, 2).unwrap(),
+            vec![f64::NEG_INFINITY, 0.0, f64::INFINITY]
+        );
+    }
+
+    #[test]
+    fn bin_refuses_edges_that_are_not_sorted() {
+        // -inf next to a finite value interpolates to -inf + inf = NaN.
+        for x in [
+            vec![f64::NEG_INFINITY, 1.0, 2.0, 3.0],
+            vec![f64::NEG_INFINITY, 0.5, f64::INFINITY],
+        ] {
+            let ds = Dataset::new(df!("x" => x.clone()).unwrap());
+            let e = err_text(bin(&ds, "x", BinStrategy::Quantile(4), None));
+            assert!(e.contains("`x`") && e.contains("infinite"), "{x:?}: {e}");
+        }
+        // +inf only pushes the top edges to +inf ([-inf, 1.5, 2, inf, inf]), which keeps them sorted.
+        let ds = Dataset::new(df!("x" => [1.0, 2.0, f64::INFINITY]).unwrap());
+        let out = bin(&ds, "x", BinStrategy::Quantile(4), None).unwrap();
+        assert_eq!(labels_of(&out, "x_binned"), idx(&[0, 1, 2]));
     }
 
     #[test]
