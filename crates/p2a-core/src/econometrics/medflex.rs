@@ -73,6 +73,7 @@ use std::fmt;
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::normal_cdf;
 
 /// Scale for reporting mediation effects.
@@ -104,7 +105,9 @@ pub struct MedflexConfig {
     pub allow_interaction: bool,
     /// Use bootstrap for confidence intervals (default: true)
     pub bootstrap_ci: bool,
-    /// Number of bootstrap samples (default: 1000)
+    /// Number of bootstrap samples (default: 1000). Must be at least 50 when
+    /// `bootstrap_ci` is true (unused otherwise); a count whose result buffers cannot
+    /// be allocated is refused with `EconError::ResourceLimit`.
     pub n_bootstrap: usize,
     /// Confidence level for intervals (default: 0.95)
     pub confidence_level: f64,
@@ -407,6 +410,14 @@ pub fn run_medflex(
     let n = y.len();
 
     // Validate inputs
+    if config.bootstrap_ci && config.n_bootstrap < MIN_VALID_BOOTSTRAP {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "n_bootstrap must be at least {MIN_VALID_BOOTSTRAP} when bootstrap_ci is true (fewer cannot give percentile intervals); got {}",
+                config.n_bootstrap
+            ),
+        });
+    }
     if treatment.len() != n {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -745,6 +756,9 @@ fn compute_natural_effects(
     }
 }
 
+/// Fewest valid bootstrap replicates from which percentile intervals are reported.
+const MIN_VALID_BOOTSTRAP: usize = 50;
+
 /// Bootstrap confidence intervals for natural effects.
 fn bootstrap_effects(
     y: &ArrayView1<f64>,
@@ -763,11 +777,14 @@ fn bootstrap_effects(
         None => Box::new(rand::thread_rng()),
     };
 
-    let mut boot_te = Vec::with_capacity(n_bootstrap);
-    let mut boot_nde = Vec::with_capacity(n_bootstrap);
-    let mut boot_nie = Vec::with_capacity(n_bootstrap);
+    let what = "bootstrap replications (n_bootstrap)";
+    let mut boot_te = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
+    let mut boot_nde = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
+    let mut boot_nie = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
 
     for _ in 0..n_bootstrap {
+        resource::checkpoint()?;
+
         // Resample with replacement
         let indices: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
 
@@ -825,7 +842,7 @@ fn bootstrap_effects(
         }
     }
 
-    if boot_te.len() < 50 {
+    if boot_te.len() < MIN_VALID_BOOTSTRAP {
         return Err(EconError::ConvergenceFailure {
             iterations: n_bootstrap,
             last_change: 0.0,
@@ -1091,8 +1108,85 @@ pub fn run_medflex_dataset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use ndarray::array;
     use polars::prelude::*;
+
+    fn expect_invalid_spec(err: EconError, needle: &str) {
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains(needle),
+                    "message `{message}` does not mention `{needle}`"
+                )
+            }
+            other => panic!("expected InvalidSpecification mentioning `{needle}`, got {other:?}"),
+        }
+    }
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn run_test_medflex(config: MedflexConfig) -> EconResult<MedflexResult> {
+        let (y, treatment, mediator, confounders) = create_test_data();
+        run_medflex(
+            &y.view(),
+            &treatment.view(),
+            &mediator.view(),
+            &confounders.view(),
+            config,
+        )
+    }
+
+    #[test]
+    fn test_medflex_bootstrap_count_is_an_error_not_an_abort() {
+        let err = run_test_medflex(MedflexConfig {
+            bootstrap_ci: true,
+            n_bootstrap: usize::MAX,
+            seed: Some(42),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn test_medflex_needs_fifty_replicates() {
+        let err = run_test_medflex(MedflexConfig {
+            bootstrap_ci: true,
+            n_bootstrap: 10,
+            seed: Some(42),
+            ..Default::default()
+        })
+        .unwrap_err();
+        expect_invalid_spec(err, "n_bootstrap");
+        // delta method: the count is unused
+        assert!(
+            run_test_medflex(MedflexConfig {
+                bootstrap_ci: false,
+                n_bootstrap: 10,
+                seed: Some(42),
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_medflex_honours_cancellation() {
+        let r = resource::with_budget(cancelled_budget(), || {
+            run_test_medflex(MedflexConfig {
+                bootstrap_ci: true,
+                n_bootstrap: 60,
+                seed: Some(42),
+                ..Default::default()
+            })
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+    }
 
     fn create_test_data() -> (Array1<f64>, Array1<f64>, Array1<f64>, Array2<f64>) {
         // Synthetic data with known mediation structure:

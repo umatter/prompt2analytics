@@ -29,12 +29,15 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use crate::traits::estimator::{logistic_cdf, normal_cdf};
 
 /// Configuration for mediation analysis.
 #[derive(Debug, Clone)]
 pub struct MediationConfig {
-    /// Number of bootstrap replications for standard errors (default: 999)
+    /// Number of bootstrap replications for standard errors (default: 999). Must be at
+    /// least 2; a count whose result buffers cannot be allocated is refused with
+    /// `EconError::ResourceLimit`.
     pub bootstrap: usize,
     /// Trimming threshold for propensity scores (default: 0.05)
     pub trim: f64,
@@ -217,6 +220,15 @@ pub fn run_mediation_analysis(
     covariates: &[&str],
     config: MediationConfig,
 ) -> EconResult<MediationResult> {
+    if config.bootstrap < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "bootstrap must be at least 2 (the standard errors come from the bootstrap); got {}",
+                config.bootstrap
+            ),
+        });
+    }
+
     let df = dataset.df();
     let n = df.height();
     let available_cols: Vec<String> = df
@@ -315,11 +327,14 @@ pub fn run_mediation_analysis(
         None => Box::new(rand::thread_rng()),
     };
 
-    let mut boot_total = Vec::with_capacity(config.bootstrap);
-    let mut boot_direct = Vec::with_capacity(config.bootstrap);
-    let mut boot_indirect = Vec::with_capacity(config.bootstrap);
+    let what = "bootstrap replications";
+    let mut boot_total = resource::try_with_capacity::<f64>(config.bootstrap, what)?;
+    let mut boot_direct = resource::try_with_capacity::<f64>(config.bootstrap, what)?;
+    let mut boot_indirect = resource::try_with_capacity::<f64>(config.bootstrap, what)?;
 
     for _ in 0..config.bootstrap {
+        resource::checkpoint()?;
+
         // Resample with replacement from kept observations
         let boot_indices: Vec<usize> = (0..n_obs).map(|_| rng.gen_range(0..n_obs)).collect();
 
@@ -662,7 +677,85 @@ fn compute_p_value(estimate: f64, se: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
+
+    fn expect_invalid_spec(err: EconError, needle: &str) {
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains(needle),
+                    "message `{message}` does not mention `{needle}`"
+                )
+            }
+            other => panic!("expected InvalidSpecification mentioning `{needle}`, got {other:?}"),
+        }
+    }
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    #[test]
+    fn test_mediation_bootstrap_count_is_an_error_not_an_abort() {
+        let err = run_mediation_analysis(
+            &create_mediation_dataset(),
+            "y",
+            "d",
+            "m",
+            &["x"],
+            MediationConfig {
+                bootstrap: usize::MAX,
+                trim: 0.01,
+                seed: Some(42),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn test_mediation_needs_two_replicates() {
+        for b in [0, 1] {
+            expect_invalid_spec(
+                run_mediation_analysis(
+                    &create_mediation_dataset(),
+                    "y",
+                    "d",
+                    "m",
+                    &["x"],
+                    MediationConfig {
+                        bootstrap: b,
+                        trim: 0.01,
+                        seed: Some(42),
+                    },
+                )
+                .unwrap_err(),
+                "bootstrap",
+            );
+        }
+    }
+
+    #[test]
+    fn test_mediation_honours_cancellation() {
+        let r = resource::with_budget(cancelled_budget(), || {
+            run_mediation_analysis(
+                &create_mediation_dataset(),
+                "y",
+                "d",
+                "m",
+                &["x"],
+                MediationConfig {
+                    bootstrap: 20,
+                    trim: 0.01,
+                    seed: Some(42),
+                },
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+    }
 
     fn create_mediation_dataset() -> Dataset {
         // Create synthetic data with known mediation structure.
