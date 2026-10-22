@@ -11,6 +11,7 @@ use rmcp::{
 use std::collections::HashMap;
 
 use crate::server::AnalyticsServer;
+use crate::tools::limits::{self, Family, LimitViolation};
 use crate::tools::requests::munging::*;
 
 use p2a_core::{
@@ -22,6 +23,7 @@ use p2a_core::{
             ArithOp,
             BinStrategy,
             FillStrategy,
+            JoinType,
             MutateExpr,
             bin,
             concat,
@@ -30,18 +32,17 @@ use p2a_core::{
             drop_columns,
             // Clean operations
             drop_na,
+            estimate_join_rows,
             fill_na,
             // Transform operations
             filter,
-            full_join,
             // Aggregate operations
             group_by,
             // Join operations
-            inner_join,
+            join,
             // Feature engineering
             lag,
             lead,
-            left_join,
             melt,
             mutate,
             normalize,
@@ -54,7 +55,6 @@ use p2a_core::{
             regex_replace,
             rename,
             replace,
-            right_join,
             sample,
             select,
             sort,
@@ -62,6 +62,7 @@ use p2a_core::{
             str_concat,
             str_length,
             str_split,
+            str_split_part_count,
             str_substring,
             to_lowercase,
             to_uppercase,
@@ -676,9 +677,17 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<JoinDatasetsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        // Owned copies (polars columns are reference-counted): the read lock is
+        // released before the join is estimated and computed.
+        let (left_ds, right_ds) = {
+            let datasets = self.datasets.read().await;
+            (
+                datasets.get(&request.left).cloned(),
+                datasets.get(&request.right).cloned(),
+            )
+        };
 
-        let left_ds = match datasets.get(&request.left) {
+        let left_ds = match left_ds {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -688,7 +697,7 @@ impl AnalyticsServer {
             }
         };
 
-        let right_ds = match datasets.get(&request.right) {
+        let right_ds = match right_ds {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -706,21 +715,45 @@ impl AnalyticsServer {
         let right_on: Option<&[&str]> = right_on_vec.as_deref();
         let suffix: Option<&str> = request.suffix.as_deref();
 
-        let join_type = request.join_type.as_deref().unwrap_or("left");
-        let result = match join_type {
-            "left" => left_join(left_ds, right_ds, &left_on, right_on, suffix),
-            "right" => right_join(left_ds, right_ds, &left_on, right_on, suffix),
-            "inner" => inner_join(left_ds, right_ds, &left_on, right_on, suffix),
-            "full" => full_join(left_ds, right_ds, &left_on, right_on, suffix),
+        let join_type_name = request.join_type.as_deref().unwrap_or("left");
+        let join_type = match join_type_name {
+            "left" => JoinType::Left,
+            "right" => JoinType::Right,
+            "inner" => JoinType::Inner,
+            "full" => JoinType::Full,
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Unknown join type: '{}'. Use 'left', 'right', 'inner', or 'full'.",
-                    join_type
+                    join_type_name
                 ))]));
             }
         };
 
-        let result = match result {
+        // With a join_output_rows budget, predict the result size from per-key
+        // counts before joining.
+        let limits = limits::current();
+        if limits.join_output_rows.is_some() {
+            let rows = match estimate_join_rows(&left_ds, &right_ds, &left_on, right_on, join_type)
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Join failed: {}",
+                        e
+                    ))]));
+                }
+            };
+            if let Err(v) = limits.check_budget(
+                "munge_join",
+                "join_output_rows",
+                rows,
+                limits.join_output_rows,
+            ) {
+                return Ok(refused(v));
+            }
+        }
+
+        let result = match join(&left_ds, &right_ds, &left_on, right_on, join_type, suffix) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -736,13 +769,12 @@ impl AnalyticsServer {
         let n_rows = result.nrows();
         let n_cols = result.ncols();
 
-        drop(datasets);
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{} join completed, saved as '{}' ({} rows, {} columns)",
-            join_type, result_name, n_rows, n_cols
+            join_type_name, result_name, n_rows, n_cols
         ))]))
     }
 
@@ -1566,9 +1598,10 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<StrSplitRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        // An owned copy: the read lock is released before splitting.
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
 
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1578,8 +1611,35 @@ impl AnalyticsServer {
             }
         };
 
+        // With a str_split_parts budget, count the output columns first.
+        let limits = limits::current();
+        if limits.str_split_parts.is_some() {
+            let parts = match str_split_part_count(
+                &dataset,
+                &request.column,
+                &request.pattern,
+                request.max_splits,
+            ) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "String split failed: {}",
+                        e
+                    ))]));
+                }
+            };
+            if let Err(v) = limits.check_budget(
+                "str_split",
+                "str_split_parts",
+                parts as u64,
+                limits.str_split_parts.map(|v| v as u64),
+            ) {
+                return Ok(refused(v));
+            }
+        }
+
         let result = match str_split(
-            dataset,
+            &dataset,
             &request.column,
             &request.pattern,
             request.max_splits,
@@ -1598,7 +1658,6 @@ impl AnalyticsServer {
             .result_name
             .unwrap_or_else(|| request.dataset.clone());
 
-        drop(datasets);
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
@@ -1881,9 +1940,11 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<BinColumnRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        // An owned copy (polars columns are reference-counted): the read lock
+        // is released at the end of this statement, not held while binning.
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
 
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1894,13 +1955,25 @@ impl AnalyticsServer {
         };
 
         let strategy = match request.strategy.to_lowercase().as_str() {
-            "uniform" | "equal_width" => {
-                let n_bins = request.bins.first().map(|&v| v as usize).unwrap_or(5);
-                BinStrategy::EqualWidth(n_bins)
-            }
-            "quantile" => {
-                let n_bins = request.bins.first().map(|&v| v as usize).unwrap_or(5);
-                BinStrategy::Quantile(n_bins)
+            name @ ("uniform" | "equal_width" | "quantile") => {
+                let n_bins = match bin_count(&request.bins, &request.strategy) {
+                    Ok(n) => n,
+                    Err(message) => return Ok(CallToolResult::error(vec![Content::text(message)])),
+                };
+                let limits = limits::current();
+                if let Err(v) = limits.check_budget(
+                    "munge_bin",
+                    Family::Bins.key(),
+                    n_bins as u64,
+                    limits.cap(Family::Bins),
+                ) {
+                    return Ok(refused(v));
+                }
+                if name == "quantile" {
+                    BinStrategy::Quantile(n_bins)
+                } else {
+                    BinStrategy::EqualWidth(n_bins)
+                }
             }
             "custom" => BinStrategy::Custom(request.bins.clone()),
             _ => {
@@ -1916,7 +1989,7 @@ impl AnalyticsServer {
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
-        let result = match bin(dataset, &request.column, strategy, labels.as_deref()) {
+        let result = match bin(&dataset, &request.column, strategy, labels.as_deref()) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1930,7 +2003,6 @@ impl AnalyticsServer {
             .result_name
             .unwrap_or_else(|| request.dataset.clone());
 
-        drop(datasets);
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
@@ -1948,9 +2020,10 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<OneHotEncodeRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        // An owned copy: the read lock is released before encoding.
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
 
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1960,9 +2033,34 @@ impl AnalyticsServer {
             }
         };
 
+        // With an onehot_levels budget, count the distinct values (a null is a
+        // level, as in one_hot_encode) before encoding.
+        let limits = limits::current();
+        if limits.onehot_levels.is_some()
+            && let Ok(column) = dataset.df().column(&request.column)
+        {
+            let levels = match column.n_unique() {
+                Ok(levels) => levels,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "One-hot encode failed: {}",
+                        e
+                    ))]));
+                }
+            };
+            if let Err(v) = limits.check_budget(
+                "munge_one_hot_encode",
+                "onehot_levels",
+                levels as u64,
+                limits.onehot_levels.map(|v| v as u64),
+            ) {
+                return Ok(refused(v));
+            }
+        }
+
         let drop_first = request.drop_first.unwrap_or(false);
 
-        let result = match one_hot_encode(dataset, &request.column, drop_first) {
+        let result = match one_hot_encode(&dataset, &request.column, drop_first) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1977,7 +2075,6 @@ impl AnalyticsServer {
             .unwrap_or_else(|| request.dataset.clone());
         let n_cols = result.ncols();
 
-        drop(datasets);
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
@@ -2269,5 +2366,210 @@ impl AnalyticsServer {
             cast_desc.join(", "),
             result_name
         ))]))
+    }
+}
+
+/// The bin count of the `uniform` and `quantile` strategies: `bins[0]`, which
+/// must be a whole number of at least 1 (5 when `bins` is empty).
+fn bin_count(bins: &[f64], strategy: &str) -> Result<usize, String> {
+    let Some(&v) = bins.first() else {
+        return Ok(5);
+    };
+    let invalid = || {
+        format!(
+            "`bins` must be a whole number of at least 1 for the '{strategy}' strategy (got {v})"
+        )
+    };
+    if !(v.is_finite() && v >= 1.0 && v.fract() == 0.0) {
+        return Err(invalid());
+    }
+    // `as u64` saturates above u64::MAX; the budget and the core refuse such counts.
+    usize::try_from(v as u64).map_err(|_| invalid())
+}
+
+/// A request refused by a resource limit: logged, and returned as an in-band
+/// tool error whose text names the parameter, the requested size and the limit.
+fn refused(v: LimitViolation) -> CallToolResult {
+    tracing::info!(
+        tool = %v.tool,
+        knob = v.override_key,
+        requested = %v.requested,
+        limit = %v.limit,
+        "tool request refused by a resource limit"
+    );
+    CallToolResult::error(vec![Content::text(v.message)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::limits::{self, Limits};
+    use p2a_core::polars::prelude::*;
+    use rmcp::model::RawContent;
+
+    fn server_with(datasets: Vec<(&str, DataFrame)>) -> AnalyticsServer {
+        let server = AnalyticsServer::new();
+        for (name, df) in datasets {
+            server
+                .datasets
+                .blocking_write()
+                .insert(name.to_string(), Dataset::new(df));
+        }
+        server
+    }
+
+    fn run(
+        limits: Limits,
+        fut: impl std::future::Future<Output = Result<CallToolResult, McpError>>,
+    ) -> CallToolResult {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        limits::with_limits(limits, || rt.block_on(fut)).expect("refusals are in-band tool errors")
+    }
+
+    fn text(r: &CallToolResult) -> String {
+        match &r.content[0].raw {
+            RawContent::Text(t) => t.text.clone(),
+            _ => String::new(),
+        }
+    }
+
+    fn hosted_with(o: &str) -> Limits {
+        Limits::hosted().with_overrides(&[o.to_string()]).unwrap()
+    }
+
+    fn noise(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|i| (i as f64 * 0.73).sin() * 5.0 + i as f64 * 0.1)
+            .collect()
+    }
+
+    #[test]
+    fn munge_bin_validates_the_bin_count() {
+        let server = server_with(vec![("d", df!("x" => noise(40)).unwrap())]);
+        let req = |bins: Vec<f64>| BinColumnRequest {
+            dataset: "d".into(),
+            column: "x".into(),
+            strategy: "uniform".into(),
+            bins,
+            labels: None,
+            result_name: Some("b".into()),
+        };
+        let r = run(
+            Limits::hosted(),
+            server.munge_bin(Parameters(req(vec![1e18]))),
+        );
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("needs 1000000000000000000 (bins)") && t.contains("limit of 1000"),
+            "{t}"
+        );
+        for bad in [2.5, -1.0, 0.0] {
+            let r = run(Limits::off(), server.munge_bin(Parameters(req(vec![bad]))));
+            assert_eq!(r.is_error, Some(true));
+            assert!(text(&r).contains("whole number"), "{}", text(&r));
+        }
+        // No profile: the core refuses the impossible allocation; the process survives.
+        assert_eq!(
+            run(Limits::off(), server.munge_bin(Parameters(req(vec![1e18])))).is_error,
+            Some(true)
+        );
+        let ok = run(
+            Limits::hosted(),
+            server.munge_bin(Parameters(req(vec![4.0]))),
+        );
+        assert_ne!(ok.is_error, Some(true), "{}", text(&ok));
+    }
+
+    #[test]
+    fn munge_join_refuses_output_above_budget() {
+        let v: Vec<f64> = (0..20).map(|i| i as f64 * 0.37 + 0.11).collect();
+        let server = server_with(vec![("a", df!("k" => vec![1i64; 20], "v" => v).unwrap())]);
+        let req = || JoinDatasetsRequest {
+            left: "a".into(),
+            right: "a".into(),
+            left_on: vec!["k".into()],
+            right_on: None,
+            join_type: Some("inner".into()),
+            suffix: None,
+            result_name: Some("j".into()),
+        };
+        let r = run(
+            hosted_with("join_output_rows=100"),
+            server.munge_join(Parameters(req())),
+        );
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("needs 400 (join_output_rows)") && t.contains("limit of 100"),
+            "{t}"
+        );
+        assert!(server.datasets.blocking_read().get("j").is_none());
+        let ok = run(Limits::off(), server.munge_join(Parameters(req())));
+        assert!(text(&ok).contains("(400 rows"), "{}", text(&ok));
+    }
+
+    #[test]
+    fn one_hot_refuses_too_many_levels() {
+        let cat: Vec<String> = (0..24).map(|i| format!("c{}", i % 8)).collect();
+        let server = server_with(vec![("d", df!("cat" => cat, "y" => noise(24)).unwrap())]);
+        let req = || OneHotEncodeRequest {
+            dataset: "d".into(),
+            column: "cat".into(),
+            drop_first: None,
+            result_name: Some("o".into()),
+        };
+        let r = run(
+            hosted_with("onehot_levels=5"),
+            server.munge_one_hot_encode(Parameters(req())),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("needs 8 (onehot_levels)"), "{}", text(&r));
+        assert_ne!(
+            run(
+                Limits::off(),
+                server.munge_one_hot_encode(Parameters(req()))
+            )
+            .is_error,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn str_split_refuses_too_many_parts() {
+        let server = server_with(vec![("d", df!("s" => ["a,b,c,d", "e"]).unwrap())]);
+        let req = || StrSplitRequest {
+            dataset: "d".into(),
+            column: "s".into(),
+            pattern: ",".into(),
+            max_splits: None,
+            prefix: "p".into(),
+            result_name: Some("o".into()),
+        };
+        let r = run(
+            hosted_with("str_split_parts=3"),
+            server.str_split(Parameters(req())),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("needs 4 (str_split_parts)"),
+            "{}",
+            text(&r)
+        );
+        let ok = run(Limits::off(), server.str_split(Parameters(req())));
+        assert_ne!(ok.is_error, Some(true), "{}", text(&ok));
+        assert!(
+            server
+                .datasets
+                .blocking_read()
+                .get("o")
+                .unwrap()
+                .df()
+                .column("p_3")
+                .is_ok()
+        );
     }
 }

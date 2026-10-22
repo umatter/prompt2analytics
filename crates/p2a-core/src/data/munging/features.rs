@@ -377,27 +377,53 @@ pub fn bin(
     // Calculate bin edges based on strategy
     let edges = match &strategy {
         BinStrategy::EqualWidth(n) => {
+            let n = *n;
+            check_bin_count(n)?;
             let min = float_ca.min().unwrap_or(0.0);
             let max = float_ca.max().unwrap_or(1.0);
-            let step = (max - min) / (*n as f64);
-            (0..=*n)
-                .map(|i| min + (i as f64) * step)
-                .collect::<Vec<_>>()
-        }
-        BinStrategy::Quantile(n) => {
-            let mut edges = vec![f64::NEG_INFINITY];
-            for i in 1..*n {
-                let q = (i as f64) / (*n as f64);
-                let quantile = float_ca
-                    .quantile(q, QuantileMethod::Linear)
-                    .map_err(|e| MungeError::FeatureError(e.to_string()))?
-                    .unwrap_or(0.0);
-                edges.push(quantile);
+            if !min.is_finite() || !max.is_finite() {
+                return Err(MungeError::FeatureError(format!(
+                    "cannot compute equal-width bins: column `{column}` contains non-finite values"
+                )));
             }
-            edges.push(f64::INFINITY);
+            if !(max - min).is_finite() {
+                return Err(MungeError::FeatureError(format!(
+                    "the range of `{column}` is too wide to divide into equal-width bins"
+                )));
+            }
+            let step = (max - min) / (n as f64);
+            let mut edges = edge_buffer(n)?;
+            for i in 0..=n {
+                if i.is_multiple_of(CHECKPOINT_EVERY) {
+                    crate::resource::checkpoint().map_err(feature_err)?;
+                }
+                edges.push(min + (i as f64) * step);
+            }
             edges
         }
-        BinStrategy::Custom(edges) => edges.clone(),
+        BinStrategy::Quantile(n) => {
+            check_bin_count(*n)?;
+            quantile_edges(float_ca, *n)?
+        }
+        BinStrategy::Custom(edges) => {
+            if edges.len() < 2 {
+                return Err(MungeError::FeatureError(format!(
+                    "custom bins need at least two edges, got {}",
+                    edges.len()
+                )));
+            }
+            if edges.iter().any(|e| e.is_nan()) {
+                return Err(MungeError::FeatureError(
+                    "custom bin edges must not contain NaN".to_string(),
+                ));
+            }
+            if !edges.windows(2).all(|w| w[0] <= w[1]) {
+                return Err(MungeError::FeatureError(
+                    "custom bin edges must be in non-decreasing order".to_string(),
+                ));
+            }
+            edges.clone()
+        }
     };
 
     // Validate labels match number of bins
@@ -418,19 +444,18 @@ pub fn bin(
     let mut bin_values: Vec<String> = Vec::with_capacity(df.height());
 
     for i in 0..df.height() {
+        if i.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(feature_err)?;
+        }
         let val = float_ca.get(i);
         let bin_idx = match val {
-            Some(v) => {
-                // Find bin index
-                let mut idx = 0;
-                for j in 1..edges.len() {
-                    if v > edges[j - 1] && v <= edges[j] {
-                        idx = j - 1;
-                        break;
-                    }
-                }
-                idx
-            }
+            // For sorted edges, `partition_point` is the unique j with
+            // edges[j-1] < v <= edges[j]; values at or below the first edge,
+            // above the last one, or NaN go to the first bin.
+            Some(v) => match edges.partition_point(|e| *e < v) {
+                j if j >= 1 && j < edges.len() => j - 1,
+                _ => 0,
+            },
             None => 0, // Assign nulls to first bin
         };
 
@@ -450,6 +475,80 @@ pub fn bin(
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
     Ok(Dataset::new(result))
+}
+
+/// Loop iterations between two cooperative-cancellation checkpoints.
+const CHECKPOINT_EVERY: usize = 65_536;
+
+fn feature_err(e: crate::errors::EconError) -> MungeError {
+    MungeError::FeatureError(e.to_string())
+}
+
+fn check_bin_count(n: usize) -> MungeResult<()> {
+    if n == 0 {
+        return Err(MungeError::FeatureError(
+            "the number of bins must be at least 1".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// An empty, fallibly allocated buffer for the `n + 1` edges of `n` bins.
+fn edge_buffer(n: usize) -> MungeResult<Vec<f64>> {
+    let len = n.checked_add(1).ok_or_else(|| {
+        MungeError::FeatureError(format!("{n} bins are too many: the edge count overflows"))
+    })?;
+    crate::resource::try_with_capacity::<f64>(len, "bin edges").map_err(feature_err)
+}
+
+/// All `n + 1` edges of `n` equal-frequency bins: `-inf`, the interior
+/// quantiles `i / n` for `i` in `1..n`, and `+inf`.
+///
+/// The interior edges are bit-identical to polars'
+/// `quantile(i / n, QuantileMethod::Linear)` (R's `quantile(type = 7)`), but
+/// the column is sorted once instead of once per edge. An all-null or empty
+/// column gives interior edges of `0.0`, as the per-edge `unwrap_or(0.0)` did.
+fn quantile_edges(ca: &Float64Chunked, n: usize) -> MungeResult<Vec<f64>> {
+    check_bin_count(n)?;
+    let mut edges = edge_buffer(n)?;
+    edges.push(f64::NEG_INFINITY);
+
+    let len = ca.len();
+    let nc = ca.null_count();
+    let m = len - nc;
+    // Nulls first, the order polars' generic quantile path uses.
+    let sorted = if m > 0 { Some(ca.sort(false)) } else { None };
+
+    for i in 1..n {
+        if i.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(feature_err)?;
+        }
+        let edge = match &sorted {
+            None => 0.0,
+            Some(sorted) => {
+                // polars-core 0.52 `quantile_idx` and `linear_interpol`.
+                let q = i as f64 / n as f64;
+                let fi = (m as f64 - 1.0) * q + nc as f64;
+                let lo = (fi as usize).clamp(0, len - 1);
+                let top = fi.ceil() as usize;
+                let lower = sorted.get(lo).unwrap_or(0.0);
+                if lo == top {
+                    lower
+                } else {
+                    let upper = sorted.get(lo + 1).unwrap_or(lower);
+                    if lower == upper {
+                        lower
+                    } else {
+                        (fi - lo as f64) * (upper - lower) + lower
+                    }
+                }
+            }
+        };
+        edges.push(edge);
+    }
+
+    edges.push(f64::INFINITY);
+    Ok(edges)
 }
 
 /// Create one-hot encoded dummy variables from a categorical column.
@@ -490,22 +589,58 @@ pub fn one_hot_encode(dataset: &Dataset, column: &str, drop_first: bool) -> Mung
         })
         .collect();
 
-    let mut result = df.clone();
+    let feature_err = |e: crate::errors::EconError| MungeError::FeatureError(e.to_string());
 
     // Skip first category if drop_first is true
     let start_idx = if drop_first { 1 } else { 0 };
 
-    for cat in unique_str.iter().skip(start_idx) {
-        let dummy_name = format!("{}_{}", column, cat);
-        let mut dummy_values: Vec<i32> = Vec::with_capacity(df.height());
+    // The k x n dummy cells, checked before anything is built
+    let height = df.height();
+    let n_dummies = unique_str.len().saturating_sub(start_idx);
+    let cells = crate::resource::checked_len(&[n_dummies, height], "one-hot dummy columns")
+        .map_err(feature_err)?;
+    crate::resource::check_alloc::<i32>(cells, "one-hot dummy columns").map_err(feature_err)?;
 
-        for row_idx in 0..df.height() {
-            let val = col_data
-                .get(row_idx)
-                .map(|v| format!("{}", v))
-                .unwrap_or_else(|_| "null".to_string());
-            dummy_values.push(if val == *cat { 1 } else { 0 });
+    // Each distinct display string maps to the index of its first occurrence,
+    // so categories whose display strings coincide get the same dummy values,
+    // as with the per-cell string comparison.
+    let mut category_ids: std::collections::HashMap<&str, u32> =
+        std::collections::HashMap::with_capacity(unique_str.len());
+    for (i, cat) in unique_str.iter().enumerate() {
+        // u32::MAX marks a row without a category below.
+        let id = u32::try_from(i)
+            .ok()
+            .filter(|&id| id != u32::MAX)
+            .ok_or_else(|| {
+                MungeError::FeatureError(format!(
+                    "column `{column}` has too many distinct values to one-hot encode"
+                ))
+            })?;
+        category_ids.entry(cat.as_str()).or_insert(id);
+    }
+
+    // Format every cell once and record its category (u32::MAX if none)
+    let mut row_ids: Vec<u32> =
+        crate::resource::try_with_capacity(height, "one-hot row categories")
+            .map_err(feature_err)?;
+    for row_idx in 0..height {
+        if row_idx.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(feature_err)?;
         }
+        let val = col_data
+            .get(row_idx)
+            .map(|v| format!("{}", v))
+            .unwrap_or_else(|_| "null".to_string());
+        row_ids.push(category_ids.get(val.as_str()).copied().unwrap_or(u32::MAX));
+    }
+
+    let mut result = df.clone();
+
+    for cat in unique_str.iter().skip(start_idx) {
+        crate::resource::checkpoint().map_err(feature_err)?;
+        let id = category_ids[cat.as_str()];
+        let dummy_name = format!("{}_{}", column, cat);
+        let dummy_values: Vec<i32> = row_ids.iter().map(|&r| i32::from(r == id)).collect();
 
         let dummy_col = Column::new(dummy_name.into(), dummy_values);
         result
@@ -614,6 +749,293 @@ pub fn rank(dataset: &Dataset, column: &str, descending: bool) -> MungeResult<Da
 mod tests {
     use super::*;
     use polars::prelude::df;
+    use rand::{Rng, SeedableRng};
+
+    fn ten_values() -> Dataset {
+        Dataset::new(df!("x" => [2.3, 1.1, 5.7, 3.3, 4.8, 0.4, 9.1, 6.6, 7.2, 3.9]).unwrap())
+    }
+
+    fn labels_of(ds: &Dataset, col: &str) -> Vec<String> {
+        ds.df()
+            .column(col)
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.unwrap_or("").to_string())
+            .collect()
+    }
+
+    /// The error text of a call that must fail (`Dataset` is not `Debug`).
+    fn err_text(r: MungeResult<Dataset>) -> String {
+        match r {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    fn idx(v: &[usize]) -> Vec<String> {
+        v.iter().map(|i| format!("bin_{i}")).collect()
+    }
+
+    /// The pre-fix assignment: first j with edges[j-1] < v <= edges[j], else 0 (nulls 0).
+    fn bin_reference(values: &[Option<f64>], edges: &[f64]) -> Vec<String> {
+        values
+            .iter()
+            .map(|val| {
+                let bin_idx = match val {
+                    Some(v) => {
+                        let mut idx = 0;
+                        for j in 1..edges.len() {
+                            if *v > edges[j - 1] && *v <= edges[j] {
+                                idx = j - 1;
+                                break;
+                            }
+                        }
+                        idx
+                    }
+                    None => 0,
+                };
+                format!("bin_{bin_idx}")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bin_matches_r_cut_for_equal_width_and_type7_quantiles() {
+        // R 4.x:
+        // x <- c(2.3, 1.1, 5.7, 3.3, 4.8, 0.4, 9.1, 6.6, 7.2, 3.9)
+        // e <- min(x) + (0:4) * ((max(x) - min(x)) / 4)
+        // cut(x, e, right = TRUE, include.lowest = TRUE, labels = FALSE) - 1     # 0 0 2 1 2 0 3 2 3 1
+        // q <- quantile(x, c(.25, .5, .75), type = 7)   # 2.5499999999999998 4.3499999999999996 6.3749999999999991
+        // cut(x, c(-Inf, q, Inf), labels = FALSE) - 1                             # 0 0 2 1 2 0 3 3 3 1
+        // cut(x, c(-Inf, quantile(x, (1:4)/5, type = 7), Inf), labels = FALSE) - 1 # 1 0 3 1 2 0 4 3 4 2
+        // cut(x, c(-Inf, 2, 5, Inf), labels = FALSE) - 1                          # 1 0 2 1 1 0 2 2 2 1
+        let ds = ten_values();
+        let ew = bin(&ds, "x", BinStrategy::EqualWidth(4), None).unwrap();
+        assert_eq!(
+            labels_of(&ew, "x_binned"),
+            idx(&[0, 0, 2, 1, 2, 0, 3, 2, 3, 1])
+        );
+        let q4 = bin(&ds, "x", BinStrategy::Quantile(4), None).unwrap();
+        assert_eq!(
+            labels_of(&q4, "x_binned"),
+            idx(&[0, 0, 2, 1, 2, 0, 3, 3, 3, 1])
+        );
+        let q5 = bin(&ds, "x", BinStrategy::Quantile(5), None).unwrap();
+        assert_eq!(
+            labels_of(&q5, "x_binned"),
+            idx(&[1, 0, 3, 1, 2, 0, 4, 3, 4, 2])
+        );
+        let c = bin(
+            &ds,
+            "x",
+            BinStrategy::Custom(vec![f64::NEG_INFINITY, 2.0, 5.0, f64::INFINITY]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            labels_of(&c, "x_binned"),
+            idx(&[1, 0, 2, 1, 1, 0, 2, 2, 2, 1])
+        );
+        let ca = ds.df().column("x").unwrap().f64().unwrap().clone();
+        let e = quantile_edges(&ca, 4).unwrap();
+        assert_eq!(e.len(), 5);
+        assert!(e[0] == f64::NEG_INFINITY && e[4] == f64::INFINITY);
+        for (got, r) in
+            e[1..4]
+                .iter()
+                .zip([2.5499999999999998, 4.3499999999999996, 6.3749999999999991])
+        {
+            assert!((got - r).abs() < 1e-12, "{got} vs R {r}");
+        }
+    }
+
+    #[test]
+    fn quantile_edges_equal_polars_linear_quantiles() {
+        // Covers polars' slice path (no nulls, one chunk) and generic path (nulls; two chunks), with ties.
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+        let tied: Vec<Option<f64>> = (0..1_000)
+            .map(|_| {
+                if rng.gen_bool(0.05) {
+                    None
+                } else {
+                    Some((rng.gen_range(-50.0..50.0_f64) * 2.0).round() / 2.0)
+                }
+            })
+            .collect();
+        let smooth: Vec<f64> = (0..1_000).map(|_| rng.gen_range(-3.0..3.0_f64)).collect();
+        let mut two_chunks = Float64Chunked::from_slice("x".into(), &smooth[..400]);
+        two_chunks
+            .append(&Float64Chunked::from_slice("x".into(), &smooth[400..]))
+            .unwrap();
+        let cases = [
+            Float64Chunked::from_iter_options("x".into(), tied.iter().copied()),
+            Float64Chunked::from_slice("x".into(), &smooth),
+            two_chunks,
+        ];
+        for ca in &cases {
+            for n in 1..=12usize {
+                let got = quantile_edges(ca, n).unwrap();
+                let want: Vec<f64> = (1..n)
+                    .map(|i| {
+                        ca.quantile(i as f64 / n as f64, QuantileMethod::Linear)
+                            .unwrap()
+                            .unwrap_or(0.0)
+                    })
+                    .collect();
+                assert_eq!(&got[1..n], &want[..], "n = {n}");
+            }
+        }
+        // Labels equal the old linear scan for every strategy.
+        let ds = Dataset::new(df!("x" => tied.clone()).unwrap());
+        let ca = ds.df().column("x").unwrap().f64().unwrap().clone();
+        for (s, edges) in [
+            (BinStrategy::Quantile(7), quantile_edges(&ca, 7).unwrap()),
+            (
+                BinStrategy::Custom(vec![-20.0, -5.0, -5.0, 0.0, 12.5, 30.0]),
+                vec![-20.0, -5.0, -5.0, 0.0, 12.5, 30.0],
+            ),
+        ] {
+            let out = bin(&ds, "x", s, None).unwrap();
+            assert_eq!(labels_of(&out, "x_binned"), bin_reference(&tied, &edges));
+        }
+        let (mn, mx) = (ca.min().unwrap(), ca.max().unwrap());
+        let step = (mx - mn) / 7.0;
+        let ew: Vec<f64> = (0..=7).map(|i| mn + i as f64 * step).collect();
+        let out = bin(&ds, "x", BinStrategy::EqualWidth(7), None).unwrap();
+        assert_eq!(labels_of(&out, "x_binned"), bin_reference(&tied, &ew));
+    }
+
+    #[test]
+    fn bin_rejects_degenerate_requests() {
+        let ds = ten_values();
+        for s in [BinStrategy::EqualWidth(0), BinStrategy::Quantile(0)] {
+            let e = err_text(bin(&ds, "x", s, None));
+            assert!(e.contains("at least 1"), "{e}");
+        }
+        for edges in [
+            vec![],
+            vec![1.0],
+            vec![0.0, f64::NAN, 2.0],
+            vec![3.0, 1.0, 2.0],
+        ] {
+            assert!(
+                bin(&ds, "x", BinStrategy::Custom(edges.clone()), None).is_err(),
+                "{edges:?}"
+            );
+        }
+        let inf = Dataset::new(df!("x" => [1.0, f64::INFINITY, 2.0]).unwrap());
+        let e = err_text(bin(&inf, "x", BinStrategy::EqualWidth(3), None));
+        assert!(e.contains("finite"), "{e}");
+        let wide = Dataset::new(df!("x" => [-1e308, 0.0, 1e308]).unwrap());
+        let e = err_text(bin(&wide, "x", BinStrategy::EqualWidth(3), None));
+        assert!(e.contains("too wide"), "{e}");
+    }
+
+    #[test]
+    fn bin_huge_count_is_an_error_not_an_abort() {
+        // Keep this order: before the fix the first call aborts the test binary (8e18-byte edge vector);
+        // the Quantile line would hang instead.
+        let ds = ten_values();
+        assert!(
+            bin(
+                &ds,
+                "x",
+                BinStrategy::EqualWidth(1_000_000_000_000_000_000),
+                None
+            )
+            .is_err()
+        );
+        assert!(bin(&ds, "x", BinStrategy::EqualWidth(usize::MAX), None).is_err());
+        assert!(
+            bin(
+                &ds,
+                "x",
+                BinStrategy::Quantile(1_000_000_000_000_000_000),
+                None
+            )
+            .is_err()
+        );
+        let e = err_text(crate::resource::with_alloc_ceiling(Some(1 << 20), || {
+            bin(&ds, "x", BinStrategy::EqualWidth(1_000_000), None)
+        }));
+        assert!(e.contains("limit"), "{e}");
+    }
+
+    /// The pre-fix algorithm, verbatim, as the reference (formats every cell
+    /// once per category).
+    fn one_hot_reference(ds: &Dataset, column: &str, drop_first: bool) -> DataFrame {
+        let df = ds.df();
+        let col_data = df.column(column).unwrap();
+        let unique = col_data.unique().unwrap();
+        let unique_str: Vec<String> = (0..unique.len())
+            .map(|i| {
+                unique
+                    .get(i)
+                    .map(|v| format!("{}", v))
+                    .unwrap_or_else(|_| "null".to_string())
+            })
+            .collect();
+        let mut result = df.clone();
+        let start_idx = if drop_first { 1 } else { 0 };
+        for cat in unique_str.iter().skip(start_idx) {
+            let dummy_name = format!("{}_{}", column, cat);
+            let mut dummy_values: Vec<i32> = Vec::with_capacity(df.height());
+            for row_idx in 0..df.height() {
+                let val = col_data
+                    .get(row_idx)
+                    .map(|v| format!("{}", v))
+                    .unwrap_or_else(|_| "null".to_string());
+                dummy_values.push(if val == *cat { 1 } else { 0 });
+            }
+            let dummy_col = Column::new(dummy_name.into(), dummy_values);
+            result.with_column(dummy_col).unwrap();
+        }
+        result
+    }
+
+    #[test]
+    fn one_hot_matches_per_cell_reference() {
+        let ds = Dataset::new(
+            df!(
+                "region" => [Some("north"), Some("south"), None, Some("west"), Some("north"), Some("east")],
+                "g" => [Some(1i64), Some(2), Some(2), None, Some(3), Some(1)],
+                "h" => [1.5, 3.0, 1.5, 2.25, 3.0, 1.5],
+            )
+            .unwrap(),
+        );
+        for col in ["region", "g", "h"] {
+            let got = one_hot_encode(&ds, col, false).unwrap();
+            let want = one_hot_reference(&ds, col, false);
+            assert_eq!(got.df().width(), want.width(), "{col}");
+            for c in want.get_columns() {
+                let g = got.df().column(c.name().as_str()).unwrap();
+                assert!(
+                    g.as_materialized_series()
+                        .equals_missing(c.as_materialized_series()),
+                    "{col}: {}",
+                    c.name()
+                );
+            }
+        }
+        // 5 levels including null; drop_first removes one (which one depends
+        // on polars' unique order).
+        assert_eq!(
+            one_hot_encode(&ds, "region", true).unwrap().df().width(),
+            3 + 4
+        );
+    }
+
+    #[test]
+    fn one_hot_output_size_is_checked() {
+        let ds = Dataset::new(df!("id" => (0..600i64).collect::<Vec<_>>()).unwrap());
+        // 600 x 600 x 4 bytes > 1 MiB
+        let r =
+            crate::resource::with_alloc_ceiling(Some(1 << 20), || one_hot_encode(&ds, "id", false));
+        assert!(err_text(r).contains("limit"));
+        assert_eq!(one_hot_encode(&ds, "id", false).unwrap().df().width(), 601);
+    }
 
     #[test]
     fn test_lag() {

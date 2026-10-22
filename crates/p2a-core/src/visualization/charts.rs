@@ -2,6 +2,7 @@
 
 use super::colors::{CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, TREND_LINE_COLOR};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
+use crate::resource;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use plotters::prelude::*;
 
@@ -91,6 +92,12 @@ pub fn histogram(
     let max_val = clean_data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let mean_val: f64 = clean_data.iter().sum::<f64>() / clean_data.len() as f64;
 
+    if bins == Some(0) {
+        return Err(VisualizationError::InvalidData(
+            "bins must be at least 1".to_string(),
+        ));
+    }
+
     // Auto-calculate bins using Sturges' rule if not specified
     let n_bins = bins
         .unwrap_or_else(|| {
@@ -106,7 +113,7 @@ pub fn histogram(
         (max_val - min_val) / n_bins as f64
     };
 
-    let mut counts = vec![0u32; n_bins];
+    let mut counts = resource::try_vec(n_bins, 0u32, "histogram bins").map_err(invalid_data)?;
 
     for &val in &clean_data {
         let bin_idx = if bin_width > 0.0 {
@@ -119,9 +126,10 @@ pub fn histogram(
     }
 
     let max_count = *counts.iter().max().unwrap_or(&1);
+    let x_range = checked_axis_range(min_val, max_val + bin_width * 0.01, "x")?;
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -133,7 +141,6 @@ pub fn histogram(
         let x_label = config.x_label.as_deref().unwrap_or("Value");
         let y_label = config.y_label.as_deref().unwrap_or("Frequency");
 
-        let x_range = min_val..(max_val + bin_width * 0.01);
         let y_range = 0u32..(max_count + max_count / 10 + 1);
 
         let mut chart = ChartBuilder::on(&root)
@@ -155,6 +162,7 @@ pub fn histogram(
 
         // Draw histogram bars as rectangles
         for (i, &count) in counts.iter().enumerate() {
+            resource::checkpoint().map_err(invalid_data)?;
             let x0 = min_val + i as f64 * bin_width;
             let x1 = x0 + bin_width;
 
@@ -256,8 +264,11 @@ pub fn scatter_plot(
     // Calculate correlation
     let correlation = calculate_correlation(&points);
 
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -274,10 +285,7 @@ pub fn scatter_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -387,8 +395,13 @@ pub fn box_plot(
     let y_max = all_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let y_pad = (y_max - y_min).max(0.1) * 0.1;
 
+    // x-axis with continuous coordinates (0 to n_groups)
+    let n_groups = statistics.len() as f64;
+    let x_range = checked_axis_range(-0.5, n_groups - 0.5, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -399,16 +412,14 @@ pub fn box_plot(
         let title = config.title.as_deref().unwrap_or("Box Plot");
         let y_label = config.y_label.as_deref().unwrap_or("Value");
 
-        // Build x-axis with continuous coordinates (0 to n_groups)
         let labels: Vec<String> = statistics.iter().map(|s| s.label.clone()).collect();
-        let n_groups = labels.len() as f64;
 
         let mut chart = ChartBuilder::on(&root)
             .caption(title, ("sans-serif", config.title_font_size))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(-0.5..(n_groups - 0.5), (y_min - y_pad)..(y_max + y_pad))
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -569,11 +580,14 @@ pub fn line_chart(
     let x_pad = (x_max - x_min).max(0.1) * 0.05;
     let y_pad = (y_max - y_min).max(0.1) * 0.05;
 
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     // Colors for multiple series (brand palette)
     let colors = CHART_PALETTE;
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -590,10 +604,7 @@ pub fn line_chart(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -733,6 +744,8 @@ pub fn event_study_plot(
 
     let x_pad = (x_max - x_min).max(1.0) * 0.1;
     let y_pad = (y_max - y_min).max(0.1) * 0.1;
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
 
     // Detect treatment period (typically 0)
     let treatment_period = if valid_points.iter().any(|p| (p.0 - 0.0).abs() < 0.01) {
@@ -742,7 +755,7 @@ pub fn event_study_plot(
     };
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -762,10 +775,7 @@ pub fn event_study_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(60)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -928,8 +938,15 @@ pub fn coefficient_plot(
     let x_range_min = x_min.min(0.0) - x_pad;
     let x_range_max = x_max.max(0.0) + x_pad;
 
+    // The estimates run along x (horizontal layout) or y (vertical layout),
+    // the coefficients along the other axis.
+    let n_coefs = valid_coefs.len() as f64;
+    let (value_axis, coef_axis) = if horizontal { ("x", "y") } else { ("y", "x") };
+    let value_range = checked_axis_range(x_range_min, x_range_max, value_axis)?;
+    let coef_range = checked_axis_range(-0.5, n_coefs - 0.5, coef_axis)?;
+
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -940,8 +957,6 @@ pub fn coefficient_plot(
         let title = config.title.as_deref().unwrap_or("Coefficient Plot");
         let x_label = config.x_label.as_deref().unwrap_or("Estimate");
 
-        let n_coefs = valid_coefs.len() as f64;
-
         if horizontal {
             // Horizontal layout: coefficients on Y-axis, values on X-axis
             let mut chart = ChartBuilder::on(&root)
@@ -949,7 +964,7 @@ pub fn coefficient_plot(
                 .margin(10)
                 .x_label_area_size(40)
                 .y_label_area_size(120) // More space for variable names
-                .build_cartesian_2d(x_range_min..x_range_max, -0.5..(n_coefs - 0.5))
+                .build_cartesian_2d(value_range, coef_range)
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             chart
@@ -1011,15 +1026,12 @@ pub fn coefficient_plot(
             }
         } else {
             // Vertical layout: coefficients on X-axis, values on Y-axis
-            let y_range_min = x_range_min; // Swap x and y ranges
-            let y_range_max = x_range_max;
-
             let mut chart = ChartBuilder::on(&root)
                 .caption(title, ("sans-serif", config.title_font_size))
                 .margin(10)
                 .x_label_area_size(60)
                 .y_label_area_size(60)
-                .build_cartesian_2d(-0.5..(n_coefs - 0.5), y_range_min..y_range_max)
+                .build_cartesian_2d(coef_range, value_range)
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             chart
@@ -1226,8 +1238,11 @@ pub fn irf_plot(
     y_min = y_min.min(0.0);
     y_max = y_max.max(0.0);
 
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1250,10 +1265,7 @@ pub fn irf_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(60)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1518,7 +1530,10 @@ fn generate_residuals_vs_fitted(
     let y_min_adj = y_min.min(0.0) - y_pad;
     let y_max_adj = y_max.max(0.0) + y_pad;
 
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min_adj, y_max_adj, "y")?;
+
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1531,7 +1546,7 @@ fn generate_residuals_vs_fitted(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d((x_min - x_pad)..(x_max + x_pad), y_min_adj..y_max_adj)
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1609,7 +1624,10 @@ fn generate_qq_plot(
     let x_pad = range * 0.1;
     let y_pad = range * 0.1;
 
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1622,10 +1640,7 @@ fn generate_qq_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1688,7 +1703,10 @@ fn generate_scale_location(
     let x_pad = (x_max - x_min).max(0.1) * 0.05;
     let y_pad = y_max * 0.1;
 
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(0.0, y_max + y_pad, "y")?;
+
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1701,7 +1719,7 @@ fn generate_scale_location(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d((x_min - x_pad)..(x_max + x_pad), 0.0..(y_max + y_pad))
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1765,7 +1783,10 @@ fn generate_residuals_vs_leverage(
     let cooks_threshold = 0.5;
     let has_influential = cooks_distance.iter().any(|&c| c > cooks_threshold);
 
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let x_range = checked_axis_range(x_min, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1778,7 +1799,7 @@ fn generate_residuals_vs_leverage(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(x_min..(x_max + x_pad), (y_min - y_pad)..(y_max + y_pad))
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1987,25 +2008,90 @@ fn calculate_box_stats(label: String, data: &[f64]) -> BoxPlotStats {
     }
 }
 
-fn encode_rgb_to_png_base64(
-    rgb_buffer: &[u8],
+/// Map a core resource error (allocation, size arithmetic, cancellation) to
+/// this module's invalid-data error, keeping its text.
+fn invalid_data(e: crate::errors::EconError) -> VisualizationError {
+    VisualizationError::InvalidData(e.to_string())
+}
+
+/// The widest f64 axis a chart may have.
+///
+/// plotters 0.3.7's f64 key-point search (`coord/ranged1d/types/numeric.rs:157`)
+/// never terminates when the axis width is infinite, which finite data near
+/// `f64::MAX` produce through their spread or the padding, and with a single
+/// key point (a very small axis) its scale also overflows once the width
+/// reaches 1e308. Below this width the search terminates for any number of
+/// key points.
+const MAX_AXIS_WIDTH: f64 = 1e308;
+
+/// The axis range `lo..hi` if plotters can lay it out: both ends finite,
+/// `hi >= lo` and a width below [`MAX_AXIS_WIDTH`]. A zero-width range is
+/// accepted (plotters returns early on it, so constant data still render).
+/// Anything else is `InvalidData` naming the axis, so that no chart reaches
+/// `build_cartesian_2d` with a range its key-point search cannot handle.
+fn checked_axis_range(
+    lo: f64,
+    hi: f64,
+    axis: &str,
+) -> Result<std::ops::Range<f64>, VisualizationError> {
+    if !lo.is_finite() || !hi.is_finite() {
+        return Err(VisualizationError::InvalidData(format!(
+            "the {axis} axis range is not finite; the data contain values too large to plot"
+        )));
+    }
+    if hi < lo {
+        return Err(VisualizationError::InvalidData(format!(
+            "the {axis} axis range is empty"
+        )));
+    }
+    // Both ends are finite and hi >= lo, so the width is finite and >= 0, or +inf.
+    if hi - lo >= MAX_AXIS_WIDTH {
+        return Err(VisualizationError::InvalidData(format!(
+            "the {axis} axis would span from {lo:e} to {hi:e}, which is too wide to draw; \
+             rescale the data (for example divide by a power of ten)"
+        )));
+    }
+    Ok(lo..hi)
+}
+
+/// A zeroed RGB buffer for a `width` x `height` image, sized with checked
+/// arithmetic and allocated fallibly, so an impossible size is an error
+/// instead of a wrapped `u32` product, a panic or a process abort.
+pub(super) fn rgb_buffer(width: u32, height: u32) -> Result<Vec<u8>, VisualizationError> {
+    if width == 0 || height == 0 {
+        return Err(VisualizationError::InvalidData(format!(
+            "image size {width} x {height}: width and height must be at least 1"
+        )));
+    }
+    let len = resource::checked_len(&[width as usize, height as usize, 3], "image buffer")
+        .map_err(invalid_data)?;
+    resource::try_vec(len, 0u8, "image buffer").map_err(invalid_data)
+}
+
+/// Encode an RGB buffer of `width` x `height` pixels as a base64 PNG, without
+/// copying the buffer.
+pub(super) fn encode_rgb_to_png_base64(
+    rgb: &[u8],
     width: u32,
     height: u32,
 ) -> Result<String, VisualizationError> {
-    use image::{ColorType, ImageBuffer, ImageEncoder, Rgb, codecs::png::PngEncoder};
+    use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
     use std::io::Cursor;
 
-    // Create image from RGB buffer
-    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::from_raw(width, height, rgb_buffer.to_vec()).ok_or_else(|| {
-            VisualizationError::EncodingError("Failed to create image buffer".to_string())
-        })?;
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(3));
+    if expected != Some(rgb.len()) {
+        return Err(VisualizationError::EncodingError(
+            "Failed to create image buffer".to_string(),
+        ));
+    }
 
     // Encode to PNG
     let mut png_data = Vec::new();
     let encoder = PngEncoder::new(Cursor::new(&mut png_data));
     encoder
-        .write_image(img.as_raw(), width, height, ColorType::Rgb8)
+        .write_image(rgb, width, height, ColorType::Rgb8)
         .map_err(|e: image::ImageError| VisualizationError::EncodingError(e.to_string()))?;
 
     Ok(BASE64.encode(&png_data))
@@ -2046,6 +2132,7 @@ pub fn dendrogram(
 
     let n_merges = linkage_matrix.len();
     let n_samples = n_merges + 1;
+    validate_linkage(linkage_matrix, n_samples)?;
 
     let max_distance = linkage_matrix
         .iter()
@@ -2057,7 +2144,7 @@ pub fn dendrogram(
     let title = config.title.unwrap_or_else(|| "Dendrogram".to_string());
 
     // Create drawing area
-    let mut buffer = vec![0u8; (width * height * 3) as usize];
+    let mut buffer = rgb_buffer(width, height)?;
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
         root.fill(&WHITE)
@@ -2114,6 +2201,7 @@ pub fn dendrogram(
 
         // Draw the dendrogram links
         for (i, (c1, c2, dist, _size)) in linkage_matrix.iter().enumerate() {
+            resource::checkpoint().map_err(invalid_data)?;
             let (x1, y1) = cluster_pos[*c1];
             let (x2, y2) = cluster_pos[*c2];
             let new_cluster_idx = n_samples + i;
@@ -2230,44 +2318,285 @@ pub fn dendrogram(
     })
 }
 
+/// Check a linkage matrix before it is used to index the cluster table.
+///
+/// Merge `i` creates cluster `n_samples + i`, so it may only refer to the
+/// samples and the clusters created by earlier merges; it must join two
+/// different clusters, neither of which was merged before, at a finite,
+/// non-negative height.
+fn validate_linkage(
+    linkage: &[(usize, usize, f64, usize)],
+    n_samples: usize,
+) -> Result<(), VisualizationError> {
+    let n_clusters = n_samples
+        .checked_add(linkage.len())
+        .ok_or_else(|| VisualizationError::InvalidData("linkage matrix is too large".into()))?;
+    let mut merged = vec![false; n_clusters];
+    for (i, &(c1, c2, height, _)) in linkage.iter().enumerate() {
+        let existing = n_samples + i;
+        for c in [c1, c2] {
+            if c >= existing {
+                return Err(VisualizationError::InvalidData(format!(
+                    "linkage row {i} refers to cluster {c}, which does not exist yet"
+                )));
+            }
+        }
+        if c1 == c2 {
+            return Err(VisualizationError::InvalidData(format!(
+                "linkage row {i} merges cluster {c1} with itself"
+            )));
+        }
+        for c in [c1, c2] {
+            if merged[c] {
+                return Err(VisualizationError::InvalidData(format!(
+                    "linkage row {i} merges cluster {c}, which an earlier row already merged"
+                )));
+            }
+            merged[c] = true;
+        }
+        if !height.is_finite() || height < 0.0 {
+            return Err(VisualizationError::InvalidData(format!(
+                "linkage row {i} has merge height {height}; heights must be finite and \
+                 non-negative"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Compute the optimal leaf ordering for dendrogram visualization.
 /// Returns the order in which leaves should be placed (left to right).
+///
+/// The leaves of the last cluster, left subtree before right subtree, found
+/// by one depth-first traversal of the merge tree (O(n) time and memory).
+/// The linkage must have passed [`validate_linkage`].
 fn compute_leaf_order(
     linkage_matrix: &[(usize, usize, f64, usize)],
     n_samples: usize,
 ) -> Vec<usize> {
-    // Build a tree structure from linkage matrix
-    // Each cluster has left and right children (or is a leaf)
+    let n_clusters = n_samples + linkage_matrix.len();
+    let Some(root) = n_clusters.checked_sub(1) else {
+        return Vec::new();
+    };
 
-    let n_merges = linkage_matrix.len();
-
-    // For each cluster, store its leaves in order
-    let mut cluster_leaves: Vec<Vec<usize>> = Vec::with_capacity(n_samples + n_merges);
-
-    // Initialize leaves (original samples)
-    for i in 0..n_samples {
-        cluster_leaves.push(vec![i]);
+    let mut order = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if id < n_samples {
+            order.push(id);
+        } else {
+            // Merge `id - n_samples` created cluster `id`; visit its left
+            // child first, so push the right child first.
+            let (left, right, _, _) = linkage_matrix[id - n_samples];
+            stack.push(right);
+            stack.push(left);
+        }
     }
-
-    // Process merges
-    for (c1, c2, _, _) in linkage_matrix.iter() {
-        let left_leaves = cluster_leaves[*c1].clone();
-        let right_leaves = cluster_leaves[*c2].clone();
-        let mut merged = left_leaves;
-        merged.extend(right_leaves);
-        cluster_leaves.push(merged);
-    }
-
-    // The last cluster contains all leaves in order
-    cluster_leaves
-        .last()
-        .cloned()
-        .unwrap_or_else(|| (0..n_samples).collect())
+    order
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wavy(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|i| (i as f64 * 0.37).sin() * 10.0 + i as f64)
+            .collect()
+    }
+
+    #[test]
+    fn histogram_rejects_zero_and_impossible_bin_counts() {
+        let data = wavy(50);
+        assert!(matches!(histogram(&data, Some(0), ChartConfig::default()),
+            Err(VisualizationError::InvalidData(m)) if m.contains("bins")));
+        assert!(matches!(
+            histogram(&data, Some(usize::MAX), ChartConfig::default()),
+            Err(VisualizationError::InvalidData(_))
+        ));
+        let small = ChartConfig {
+            width: 100,
+            height: 100,
+            ..ChartConfig::default()
+        };
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 20), || {
+            histogram(&data, Some(300_000), small)
+        });
+        assert!(matches!(r, Err(VisualizationError::InvalidData(m)) if m.contains("bins")));
+    }
+
+    #[test]
+    fn image_buffers_use_checked_sizes() {
+        assert!(rgb_buffer(0, 10).is_err());
+        assert!(rgb_buffer(10, 0).is_err());
+        assert_eq!(rgb_buffer(10, 20).unwrap().len(), 600);
+        assert!(rgb_buffer(u32::MAX, u32::MAX).is_err()); // product overflows usize
+        let link = [(0usize, 1usize, 1.0f64, 2usize)];
+        let huge = ChartConfig {
+            width: u32::MAX,
+            height: u32::MAX,
+            ..ChartConfig::default()
+        };
+        assert!(matches!(
+            dendrogram(&link, None, huge),
+            Err(VisualizationError::InvalidData(_))
+        ));
+        let big = ChartConfig {
+            width: 65_536,
+            height: 65_536,
+            ..ChartConfig::default()
+        };
+        let r =
+            crate::resource::with_alloc_ceiling(Some(256 << 20), || dendrogram(&link, None, big));
+        assert!(matches!(r, Err(VisualizationError::InvalidData(_))));
+    }
+
+    #[test]
+    fn axis_range_refuses_non_finite_and_overflowing_widths() {
+        assert!(checked_axis_range(-1e308, f64::INFINITY, "x").is_err());
+        assert!(checked_axis_range(f64::NEG_INFINITY, f64::INFINITY, "y").is_err());
+        assert!(checked_axis_range(f64::NAN, 1.0, "x").is_err());
+        assert!(checked_axis_range(-1.1e308, 1.1e308, "x").is_err()); // finite ends, infinite width
+        assert!(checked_axis_range(0.0, 1.5e308, "x").is_err()); // finite width >= 1e308
+        assert!(checked_axis_range(2.0, 1.0, "x").is_err()); // reversed
+        assert!(matches!(checked_axis_range(-1e308, 1e308, "x"),
+            Err(VisualizationError::InvalidData(m)) if m.contains("x axis")));
+        assert_eq!(checked_axis_range(0.0, 1.0, "x").unwrap(), 0.0..1.0);
+        assert_eq!(checked_axis_range(5.0, 5.0, "y").unwrap(), 5.0..5.0);
+        assert_eq!(
+            checked_axis_range(-4.9e307, 4.9e307, "y").unwrap(),
+            -4.9e307..4.9e307
+        );
+    }
+
+    #[test]
+    fn charts_refuse_ranges_that_overflow() {
+        let cfg = ChartConfig::default;
+        let v = [-1e308, 0.0, 1e308];
+        let bad = |r: Result<(), VisualizationError>| {
+            matches!(r, Err(VisualizationError::InvalidData(_)))
+        };
+        assert!(bad(histogram(&v, Some(3), cfg()).map(|_| ())));
+        assert!(histogram(&[-1e300, 0.0, 1e300], Some(3), cfg()).is_ok()); // control
+        assert!(bad(scatter_plot(&v, &[1.0, 2.0, 3.0], cfg()).map(|_| ())));
+        // padding overflow
+        assert!(bad(scatter_plot(
+            &[0.0, 1.0, 1.75e308],
+            &[1.0, 2.0, 3.0],
+            cfg()
+        )
+        .map(|_| ())));
+        assert!(bad(line_chart(
+            &[("s".into(), vec![0.0, 1.0, 2.0], v.to_vec())],
+            cfg()
+        )
+        .map(|_| ())));
+        assert!(bad(box_plot(&[("g".into(), v.to_vec())], cfg()).map(|_| ())));
+        assert!(bad(event_study_plot(
+            &[-1.0, 0.0, 1.0],
+            &[0.0; 3],
+            &[-1e308, 0.0, 0.0],
+            &[0.0, 0.0, 1e308],
+            cfg()
+        )
+        .map(|_| ())));
+        let names = ["a".to_string(), "b".to_string()];
+        for horizontal in [true, false] {
+            assert!(bad(coefficient_plot(
+                &names,
+                &[0.0, 0.0],
+                &[-1e308, 0.0],
+                &[0.0, 1e308],
+                cfg(),
+                horizontal
+            )
+            .map(|_| ())));
+        }
+        assert!(bad(irf_plot(
+            &[0.0, 1.0, 2.0],
+            &v,
+            None,
+            None,
+            None,
+            None,
+            cfg()
+        )
+        .map(|_| ())));
+        assert!(bad(residual_diagnostics(
+            &[-1e308, 0.0, 1e308, 1.0],
+            &[0.1, -0.2, 0.3, -0.1],
+            None,
+            cfg()
+        )
+        .map(|_| ())));
+    }
+
+    #[test]
+    fn dendrogram_rejects_malformed_linkage() {
+        let cfg = || ChartConfig {
+            width: 200,
+            height: 150,
+            ..ChartConfig::default()
+        };
+        for bad in [
+            vec![(0usize, 7usize, 1.0f64, 2usize)], // cluster 7 does not exist yet
+            vec![(0, 1, 1.0, 2), (0, 2, 2.0, 2)],   // cluster 0 merged twice
+            vec![(1, 1, 1.0, 2)],                   // self-merge
+            vec![(0, 1, f64::NAN, 2)],              // non-finite height
+            vec![(0, 1, -1.0, 2)],                  // negative height
+        ] {
+            assert!(
+                matches!(
+                    dendrogram(&bad, None, cfg()),
+                    Err(VisualizationError::InvalidData(_))
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// The pre-fix leaf order (one cloned leaf list per merge), kept as the
+    /// reference.
+    fn leaf_order_reference(linkage: &[(usize, usize, f64, usize)], n: usize) -> Vec<usize> {
+        let mut cluster_leaves: Vec<Vec<usize>> = Vec::with_capacity(n + linkage.len());
+        for i in 0..n {
+            cluster_leaves.push(vec![i]);
+        }
+        for (c1, c2, _, _) in linkage.iter() {
+            let mut merged = cluster_leaves[*c1].clone();
+            merged.extend(cluster_leaves[*c2].clone());
+            cluster_leaves.push(merged);
+        }
+        cluster_leaves
+            .last()
+            .cloned()
+            .unwrap_or_else(|| (0..n).collect())
+    }
+
+    #[test]
+    fn leaf_order_matches_reference_on_random_trees() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let n = 300;
+        let (mut active, mut next, mut linkage) = ((0..n).collect::<Vec<usize>>(), n, Vec::new());
+        while active.len() > 1 {
+            let a = active.swap_remove(rng.gen_range(0..active.len()));
+            let b = active.swap_remove(rng.gen_range(0..active.len()));
+            linkage.push((a, b, linkage.len() as f64 + rng.gen_range(0.0..0.5), 2));
+            active.push(next);
+            next += 1;
+        }
+        assert_eq!(
+            compute_leaf_order(&linkage, n),
+            leaf_order_reference(&linkage, n)
+        );
+        // A forest: the order of the last cluster's leaves.
+        let partial = &linkage[..n / 2];
+        assert_eq!(
+            compute_leaf_order(partial, n),
+            leaf_order_reference(partial, n)
+        );
+    }
 
     #[test]
     fn test_histogram() {

@@ -92,6 +92,34 @@ pub fn join(
     join_type: JoinType,
     suffix: Option<&str>,
 ) -> MungeResult<Dataset> {
+    join_with(
+        left,
+        right,
+        left_on,
+        right_on,
+        join_type,
+        suffix,
+        &JoinOptions::default(),
+    )
+}
+
+/// Opt-in output ceiling for joins.
+///
+/// `Default` means no ceiling, which is what [`join`] and [`cross_join`] use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JoinOptions {
+    /// Refuse a join whose result would have more rows than this.
+    pub max_output_rows: Option<u64>,
+}
+
+/// Validate the key columns of a join and return the right-hand keys
+/// (`right_on`, or `left_on` when it is `None`).
+fn join_keys<'a>(
+    left: &Dataset,
+    right: &Dataset,
+    left_on: &[&'a str],
+    right_on: Option<&[&'a str]>,
+) -> MungeResult<Vec<&'a str>> {
     // Validate left_on columns exist
     for col in left_on {
         if left.df().column(col).is_err() {
@@ -119,6 +147,125 @@ pub fn join(
             left_on.len(),
             right_on_cols.len()
         )));
+    }
+
+    Ok(right_on_cols)
+}
+
+/// The number of rows `join(left, right, left_on, right_on, join_type, _)`
+/// would return, computed from per-key row counts on both sides (two hash
+/// group-bys and a join of the two count tables; the data are not joined).
+///
+/// Null keys never match, as in [`join`]. The count saturates at `u64::MAX`.
+///
+/// # Example
+///
+/// ```ignore
+/// use p2a_core::data::munging::{estimate_join_rows, JoinType};
+///
+/// let rows = estimate_join_rows(&orders, &customers, &["customer_id"], None, JoinType::Left)?;
+/// ```
+pub fn estimate_join_rows(
+    left: &Dataset,
+    right: &Dataset,
+    left_on: &[&str],
+    right_on: Option<&[&str]>,
+    join_type: JoinType,
+) -> MungeResult<u64> {
+    const LEFT_N: &str = "__p2a_left_n";
+    const RIGHT_N: &str = "__p2a_right_n";
+
+    let right_keys = join_keys(left, right, left_on, right_on)?;
+    let join_err = |e: PolarsError| MungeError::JoinError(e.to_string());
+
+    // Per-key row counts on each side, with eager group-bys: polars runs a
+    // lazy group-by of this shape on its streaming engine, which blocks on a
+    // tokio runtime of its own and therefore panics when it is called from
+    // inside another one, as every MCP tool call is.
+    let key_counts = |ds: &Dataset, keys: &[&str], name: &str| -> MungeResult<DataFrame> {
+        let groups = ds.df().group_by(keys.iter().copied()).map_err(join_err)?;
+        let mut columns = groups.keys();
+        let counts = groups.get_groups().group_count().with_name(name.into());
+        columns.push(counts.into_series().into_column());
+        DataFrame::new(columns).map_err(join_err)
+    };
+    let left_counts = key_counts(left, left_on, LEFT_N)?;
+    let right_counts = key_counts(right, &right_keys, RIGHT_N)?;
+    // Null keys never match (the JoinArgs default), as in `join`.
+    let matched = left_counts
+        .join(
+            &right_counts,
+            left_on.iter().copied(),
+            right_keys.iter().copied(),
+            JoinArgs::new(polars::prelude::JoinType::Inner),
+            None,
+        )
+        .map_err(join_err)?;
+
+    let counts = |name: &str| -> MungeResult<UInt64Chunked> {
+        let column = matched
+            .column(name)
+            .and_then(|c| c.cast(&DataType::UInt64))
+            .map_err(|e| MungeError::JoinError(e.to_string()))?;
+        column
+            .u64()
+            .cloned()
+            .map_err(|e| MungeError::JoinError(e.to_string()))
+    };
+    let (left_n, right_n) = (counts(LEFT_N)?, counts(RIGHT_N)?);
+
+    // inner = sum of l * r over matching keys; ml / mr = rows of each side
+    // that have a match.
+    let (mut inner, mut ml, mut mr) = (0u64, 0u64, 0u64);
+    for (i, (l, r)) in left_n.into_iter().zip(right_n.into_iter()).enumerate() {
+        if i.is_multiple_of(65_536) {
+            crate::resource::checkpoint().map_err(|e| MungeError::JoinError(e.to_string()))?;
+        }
+        let (l, r) = (l.unwrap_or(0), r.unwrap_or(0));
+        inner = inner.saturating_add(l.saturating_mul(r));
+        ml = ml.saturating_add(l);
+        mr = mr.saturating_add(r);
+    }
+    let unmatched_left = (left.nrows() as u64).saturating_sub(ml);
+    let unmatched_right = (right.nrows() as u64).saturating_sub(mr);
+
+    Ok(match join_type {
+        JoinType::Inner => inner,
+        JoinType::Left => inner.saturating_add(unmatched_left),
+        JoinType::Right => inner.saturating_add(unmatched_right),
+        JoinType::Full => inner
+            .saturating_add(unmatched_left)
+            .saturating_add(unmatched_right),
+        JoinType::Semi => ml,
+        JoinType::Anti => unmatched_left,
+    })
+}
+
+/// [`join`] with an optional ceiling on the number of result rows.
+///
+/// When `opts.max_output_rows` is set, the result size is predicted with
+/// [`estimate_join_rows`] first and a join above the ceiling is refused with
+/// [`MungeError::JoinError`] naming both numbers. Without a ceiling this is
+/// exactly [`join`].
+pub fn join_with(
+    left: &Dataset,
+    right: &Dataset,
+    left_on: &[&str],
+    right_on: Option<&[&str]>,
+    join_type: JoinType,
+    suffix: Option<&str>,
+    opts: &JoinOptions,
+) -> MungeResult<Dataset> {
+    let right_on_cols = join_keys(left, right, left_on, right_on)?;
+
+    if let Some(max) = opts.max_output_rows {
+        let rows = estimate_join_rows(left, right, left_on, right_on, join_type)?;
+        if rows > max {
+            return Err(MungeError::JoinError(format!(
+                "the join would return {rows} rows, more than the allowed {max}; join on more \
+                 specific keys or remove duplicate keys first"
+            )));
+        }
     }
 
     // Convert to owned strings for Polars (PlSmallStr needs owned data)
@@ -345,7 +492,38 @@ pub fn hconcat(datasets: &[&Dataset]) -> MungeResult<Dataset> {
 /// let combos = cross_join(&products, &stores, Some("_store"))?;
 /// ```
 pub fn cross_join(left: &Dataset, right: &Dataset, suffix: Option<&str>) -> MungeResult<Dataset> {
+    cross_join_with(left, right, suffix, &JoinOptions::default())
+}
+
+/// [`cross_join`] with an optional ceiling on the number of result rows.
+///
+/// The result has `left.nrows() * right.nrows()` rows; a product that
+/// overflows is an error, and one above `opts.max_output_rows` is refused
+/// with [`MungeError::JoinError`] naming both numbers.
+pub fn cross_join_with(
+    left: &Dataset,
+    right: &Dataset,
+    suffix: Option<&str>,
+    opts: &JoinOptions,
+) -> MungeResult<Dataset> {
     use polars_ops::frame::join::MaintainOrderJoin;
+
+    let rows = (left.nrows() as u64)
+        .checked_mul(right.nrows() as u64)
+        .ok_or_else(|| {
+            MungeError::JoinError(format!(
+                "a cross join of {} and {} rows is too large",
+                left.nrows(),
+                right.nrows()
+            ))
+        })?;
+    if let Some(max) = opts.max_output_rows
+        && rows > max
+    {
+        return Err(MungeError::JoinError(format!(
+            "the cross join would return {rows} rows, more than the allowed {max}"
+        )));
+    }
 
     let suffix_str: PlSmallStr = suffix.unwrap_or("_right").into();
 
@@ -361,6 +539,132 @@ pub fn cross_join(left: &Dataset, right: &Dataset, suffix: Option<&str>) -> Mung
 mod tests {
     use super::*;
     use polars::prelude::df;
+
+    /// The error text of a call that must fail (`Dataset` is not `Debug`).
+    fn err_text(r: MungeResult<Dataset>) -> String {
+        match r {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn estimated_rows_equal_actual_join_heights() {
+        let l = Dataset::new(
+            df!("k" => [Some(1i64), Some(1), Some(2), Some(3), None],
+                "lv" => [0.5, 1.7, 2.2, 3.9, 4.1])
+            .unwrap(),
+        );
+        let r = Dataset::new(
+            df!("k" => [Some(1i64), Some(1), Some(1), Some(2), Some(4), None],
+                "rv" => [1.1, 2.3, 3.2, 4.4, 5.6, 6.5])
+            .unwrap(),
+        );
+        for (jt, want) in [
+            (JoinType::Inner, 7u64),
+            (JoinType::Left, 9),
+            (JoinType::Right, 9),
+            (JoinType::Full, 11),
+            (JoinType::Semi, 3),
+            (JoinType::Anti, 2),
+        ] {
+            assert_eq!(
+                estimate_join_rows(&l, &r, &["k"], None, jt).unwrap(),
+                want,
+                "{jt:?}"
+            );
+            assert_eq!(
+                join(&l, &r, &["k"], None, jt, None).unwrap().nrows() as u64,
+                want,
+                "{jt:?}"
+            );
+        }
+        let l2 = Dataset::new(df!("a" => [1i64, 1, 1, 2], "b" => ["x", "x", "y", "x"]).unwrap());
+        let r2 =
+            Dataset::new(df!("c" => [1i64, 1, 2, 2, 3], "d" => ["x", "x", "x", "x", "z"]).unwrap());
+        for (jt, want) in [
+            (JoinType::Inner, 6u64),
+            (JoinType::Left, 7),
+            (JoinType::Right, 7),
+            (JoinType::Full, 8),
+            (JoinType::Semi, 3),
+            (JoinType::Anti, 1),
+        ] {
+            let right_on: &[&str] = &["c", "d"];
+            assert_eq!(
+                estimate_join_rows(&l2, &r2, &["a", "b"], Some(right_on), jt).unwrap(),
+                want,
+                "{jt:?}"
+            );
+            assert_eq!(
+                join(&l2, &r2, &["a", "b"], Some(right_on), jt, None)
+                    .unwrap()
+                    .nrows() as u64,
+                want
+            );
+        }
+        assert!(matches!(
+            estimate_join_rows(&l, &r, &["nope"], None, JoinType::Inner),
+            Err(MungeError::ColumnNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn estimate_join_rows_runs_inside_a_tokio_runtime() {
+        // MCP tool calls run inside a tokio runtime. A lazy group-by on at
+        // least 1000 rows (15 with debug assertions) with few distinct keys
+        // runs on polars' streaming engine, which blocks on a runtime of its
+        // own and panics there.
+        let k: Vec<i64> = (0..2_000).map(|i| i % 10).collect();
+        let v: Vec<f64> = (0..2_000).map(|i| (i as f64 * 0.37).sin()).collect();
+        let d = Dataset::new(df!("k" => k, "v" => v).unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let rows = rt.block_on(async {
+            (
+                estimate_join_rows(&d, &d, &["k"], None, JoinType::Inner),
+                estimate_join_rows(&d, &d, &["k"], None, JoinType::Full),
+            )
+        });
+        assert_eq!(rows.0.unwrap(), 400_000); // 10 keys x 200 x 200
+        assert_eq!(rows.1.unwrap(), 400_000);
+    }
+
+    #[test]
+    fn join_with_refuses_output_above_limit() {
+        let v: Vec<f64> = (0..50).map(|i| i as f64 * 0.31 + 0.05).collect();
+        let d = Dataset::new(df!("k" => vec![7i64; 50], "v" => v).unwrap());
+        let cap = |n| JoinOptions {
+            max_output_rows: Some(n),
+        };
+        let e = err_text(join_with(
+            &d,
+            &d,
+            &["k"],
+            None,
+            JoinType::Inner,
+            None,
+            &cap(2_499),
+        ));
+        assert!(e.contains("2500") && e.contains("2499"), "{e}");
+        assert_eq!(
+            join_with(&d, &d, &["k"], None, JoinType::Inner, None, &cap(2_500))
+                .unwrap()
+                .nrows(),
+            2_500
+        );
+        assert_eq!(
+            join(&d, &d, &["k"], None, JoinType::Inner, None)
+                .unwrap()
+                .nrows(),
+            2_500
+        );
+        let s = Dataset::new(df!("p" => [1.5, 2.5, 3.5]).unwrap());
+        assert!(err_text(cross_join_with(&s, &s, None, &cap(8))).contains('9'));
+        assert_eq!(cross_join_with(&s, &s, None, &cap(9)).unwrap().nrows(), 9);
+        assert_eq!(cross_join(&s, &s, None).unwrap().nrows(), 9);
+    }
 
     fn make_orders() -> Dataset {
         let df = df! {
