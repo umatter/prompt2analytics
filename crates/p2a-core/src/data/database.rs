@@ -339,6 +339,27 @@ impl std::fmt::Display for QueryResult {
 // SQLite Support
 // ============================================================================
 
+/// Open a SQLite database for queries: read-only, without `file:` URI parsing
+/// (so no `mode=`/`vfs=` parameters), no attached databases, `query_only` on,
+/// and, when a byte budget is set, no value larger than that budget.
+fn open_sqlite_locked(
+    path: &Path,
+    opts: &QueryOptions,
+) -> Result<rusqlite::Connection, DatabaseError> {
+    use rusqlite::limits::Limit;
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
+    conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    if let Some(bytes) = opts.max_bytes {
+        // A larger value could never be returned within the byte budget anyway.
+        let len = i32::try_from(bytes).unwrap_or(i32::MAX);
+        conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, len)?;
+    }
+    conn.execute_batch("PRAGMA query_only = ON")?;
+    Ok(conn)
+}
+
 /// Execute a SQL query against a SQLite database and return results as a DataFrame.
 ///
 /// # Arguments
@@ -356,13 +377,16 @@ pub fn query_sqlite(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResul
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    // Open read-only; combined with validate_read_only_query this blocks DDL/DML
-    // even if the keyword filter is ever bypassed.
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-        | rusqlite::OpenFlags::SQLITE_OPEN_URI
-        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
+    // Read-only, query_only, no ATTACH. rusqlite's prepare compiles only the
+    // first statement; the lexer above already refused any second one.
+    let conn = open_sqlite_locked(path, &QueryOptions::default())?;
     let mut stmt = conn.prepare(query)?;
+    if !stmt.readonly() {
+        return Err(DatabaseError::Forbidden(
+            "the statement would modify the database; only read-only queries are allowed"
+                .to_string(),
+        ));
+    }
 
     // Get column information
     let column_count = stmt.column_count();
@@ -464,10 +488,7 @@ pub fn list_sqlite_tables(db_path: impl AsRef<Path>) -> Result<Vec<String>, Data
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-        | rusqlite::OpenFlags::SQLITE_OPEN_URI
-        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
+    let conn = open_sqlite_locked(path, &QueryOptions::default())?;
     let mut stmt =
         conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
 
@@ -490,10 +511,7 @@ pub fn sqlite_table_schema(
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-        | rusqlite::OpenFlags::SQLITE_OPEN_URI
-        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
+    let conn = open_sqlite_locked(path, &QueryOptions::default())?;
     validate_identifier(table_name)?;
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table_name))?;
 
@@ -1244,6 +1262,47 @@ mod tests {
             .unwrap();
         let r = query_file_with_duckdb(&path, "SELECT count(*) AS n FROM {file}").unwrap();
         assert_eq!(i64_col(&r.dataframe, "n"), vec![Some(5)]);
+    }
+
+    // ------------------------------------------------------------------
+    // Locked SQLite connections (LLM-1)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn locked_sqlite_refuses_attach_and_is_query_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sqlite_fixture(dir.path());
+        let other = dir.path().join("other.sqlite");
+        rusqlite::Connection::open(&other)
+            .unwrap()
+            .execute_batch("CREATE TABLE s(secret TEXT); INSERT INTO s VALUES ('v');")
+            .unwrap();
+        let conn = open_sqlite_locked(&db, &QueryOptions::default()).unwrap();
+        let err = conn
+            .execute_batch(&format!("ATTACH '{}' AS o", other.display()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too many attached databases"), "{err}");
+        let q: i64 = conn
+            .query_row("PRAGMA query_only", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(q, 1);
+    }
+
+    #[test]
+    fn query_sqlite_refuses_statements_that_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sqlite_fixture(dir.path());
+        // starts with WITH, so the keyword allowlist admits it
+        let err = query_sqlite(
+            &db,
+            "WITH v AS (SELECT 1 AS x) INSERT INTO t SELECT x FROM v",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Forbidden(_)) && err.to_string().contains("read-only"),
+            "{err}"
+        );
     }
 
     #[test]
