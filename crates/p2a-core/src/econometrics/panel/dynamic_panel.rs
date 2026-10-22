@@ -29,11 +29,21 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
 
 use super::utils::{
     build_gmm_instrument_matrix, compute_ab_ar_test, extract_entity_ids, extract_time_ids,
 };
+
+/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
+/// SVD fallback). Check the working set against the allocation ceiling before building it.
+const DENSE_INVERSE_COPIES: usize = 6;
+
+fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
+    let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
+    resource::check_alloc::<f64>(cells, what)
+}
 
 /// GMM transformation type for dynamic panel models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -294,13 +304,13 @@ pub fn run_gmm(
     let n_periods = time_values.len();
     let _n = entity_ids.len();
 
-    if n_periods < lags + 3 {
+    if lags >= n_periods.saturating_sub(2) {
         return Err(EconError::InsufficientData {
-            required: lags + 3,
+            required: lags.saturating_add(3),
             provided: n_periods,
             context: format!(
                 "GMM estimation requires at least {} time periods for {} lags",
-                lags + 3,
+                lags.saturating_add(3),
                 lags
             ),
         });
@@ -313,6 +323,26 @@ pub fn run_gmm(
             context: "GMM requires at least 2 entities".to_string(),
         });
     }
+
+    // Instrument lags: max_lag is limited to T - 1 and must not fall below min_lag
+    let max_lag_eff = config.max_lag.unwrap_or(n_periods - 1).min(n_periods - 1);
+    if config.min_lag > max_lag_eff {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "max_lag ({max_lag_eff} after limiting to T - 1) must be at least min_lag \
+                 ({}); T = {n_periods}",
+                config.min_lag
+            ),
+        });
+    }
+
+    // The N x T layout of y and X
+    let k_x = x_cols.len();
+    let layout_what = "GMM N x T panel layout";
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[n_groups, n_periods, 1 + k_x], layout_what)?,
+        layout_what,
+    )?;
 
     // Extract y values
     let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
@@ -354,11 +384,18 @@ pub fn run_gmm(
     let mut dx: Vec<Vec<f64>> = Vec::new();
     let mut valid_obs: Vec<(usize, usize)> = Vec::new(); // (entity, time) pairs
 
-    let k_x = x_cols.len();
     let k_lag = lags;
     let k = k_lag + k_x; // total parameters
 
+    // The differenced data: one row per entity and period after the lags
+    let diff_what = "GMM differenced data";
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[n_groups, n_periods - lags - 1, k + 1], diff_what)?,
+        diff_what,
+    )?;
+
     for i in 0..n_groups {
+        resource::checkpoint()?;
         for t in (lags + 1)..n_periods {
             // First difference: Δy_it = y_it - y_{i,t-1}
             let dy_it = y_by_entity[i][t] - y_by_entity[i][t - 1];
@@ -399,8 +436,14 @@ pub fn run_gmm(
         });
     }
 
+    // Rows per entity, counted once
+    let mut n_by_entity = vec![0usize; n_groups];
+    for &(e, _) in &valid_obs {
+        n_by_entity[e] += 1;
+    }
+
     // Build the regressor matrix [Δy_{t-1}, ..., Δy_{t-k}, ΔX]
-    let mut w = Array2::zeros((n_obs, k));
+    let mut w = resource::try_zeros2(n_obs, k, "GMM regressor matrix")?;
     for (row, dy_lags) in dy_lag.iter().enumerate() {
         for (col, &val) in dy_lags.iter().enumerate() {
             w[[row, col]] = val;
@@ -422,11 +465,11 @@ pub fn run_gmm(
         config.min_lag,
         config.max_lag,
         config.collapse,
-    );
+    )?;
 
     // Add X variables as instruments (assumed exogenous)
     let z = if !dx.is_empty() {
-        let mut z_full = Array2::zeros((n_obs, n_instruments + k_x));
+        let mut z_full = resource::try_zeros2(n_obs, n_instruments + k_x, "GMM instrument matrix")?;
         for row in 0..n_obs.min(z.nrows()) {
             for col in 0..n_instruments.min(z.ncols()) {
                 z_full[[row, col]] = z[[row, col]];
@@ -442,7 +485,7 @@ pub fn run_gmm(
         z_full
     } else {
         // Ensure z has the right number of rows
-        let mut z_adj = Array2::zeros((n_obs, n_instruments.max(1)));
+        let mut z_adj = resource::try_zeros2(n_obs, n_instruments.max(1), "GMM instrument matrix")?;
         for row in 0..n_obs.min(z.nrows()) {
             for col in 0..n_instruments.min(z.ncols()) {
                 z_adj[[row, col]] = z[[row, col]];
@@ -471,6 +514,7 @@ pub fn run_gmm(
 
     // For one-step, use A = (Z'HZ)^{-1} where H is an appropriate matrix
     // Simplified: use A = (Z'Z)^{-1}
+    ensure_dense_inverse_fits(n_inst_total, "GMM instrument cross-product")?;
     let ztz = xtx(&z.view());
     let (ztz_inv, _) = safe_inverse(&ztz.view()).map_err(|e| EconError::SingularMatrix {
         context: "Z'Z in GMM".to_string(),
@@ -500,10 +544,10 @@ pub fn run_gmm(
 
         // Build the optimal weighting matrix from one-step residuals
         // For simplicity, use the "robust" version: Ω = sum_i (Z_i' e_i e_i' Z_i)
-        let mut omega = Array2::zeros((n_inst_total, n_inst_total));
+        let mut omega = resource::try_zeros2(n_inst_total, n_inst_total, "GMM weighting matrix")?;
         let mut row_start = 0;
-        for i in 0..n_groups {
-            let n_i = valid_obs.iter().filter(|(e, _)| *e == i).count();
+        for &n_i in &n_by_entity {
+            resource::checkpoint()?;
             if n_i == 0 {
                 continue;
             }
@@ -562,8 +606,8 @@ pub fn run_gmm(
         // Simplified version: use robust variance
         let mut meat = Array2::zeros((k, k));
         let mut row_start = 0;
-        for i in 0..n_groups {
-            let n_i = valid_obs.iter().filter(|(e, _)| *e == i).count();
+        for &n_i in &n_by_entity {
+            resource::checkpoint()?;
             if n_i == 0 {
                 continue;
             }
@@ -676,4 +720,229 @@ pub fn run_arellano_bond(
     time_col: &str,
 ) -> EconResult<GmmResult> {
     run_gmm(dataset, y_col, x_cols, entity_col, time_col, 1, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resource::{self, Budget, CancelToken};
+
+    const GRUNFELD_CSV: &str = include_str!("../../../../../validation/datasets/grunfeld.csv");
+
+    fn grunfeld() -> Dataset {
+        Dataset::new(crate::data::DataLoader::from_csv_string(GRUNFELD_CSV).unwrap())
+    }
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// A balanced synthetic panel of `n_ent` entities and `n_t` periods (the
+    /// same generator as `gls_models::tests::synthetic_panel`).
+    fn synthetic_panel(n_ent: usize, n_t: usize) -> Dataset {
+        let n = n_ent * n_t;
+        let entity: Vec<i64> = (0..n).map(|i| (i / n_t) as i64).collect();
+        let time: Vec<i64> = (0..n).map(|i| (i % n_t) as i64 + 2000).collect();
+        let x: Vec<f64> = (0..n).map(|i| ((i * 37) % 101) as f64 / 10.0).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + 0.5 * x[i]
+                    + ((i / n_t) % 17) as f64 * 0.1
+                    + ((i * 7919) % 1009) as f64 / 1009.0
+                    - 0.5
+            })
+            .collect();
+        Dataset::new(
+            polars::prelude::df! { "entity" => entity, "time" => time, "x" => x, "y" => y }
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_gmm_rejects_max_lag_below_min_lag() {
+        let cfg = GmmConfig {
+            min_lag: 3,
+            max_lag: Some(2),
+            ..Default::default()
+        };
+        let e = run_gmm(
+            &grunfeld(),
+            "inv",
+            &["value", "capital"],
+            "firm",
+            "year",
+            1,
+            Some(cfg),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("max_lag")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_gmm_huge_lags_is_an_error_not_a_panic() {
+        let e = run_gmm(
+            &grunfeld(),
+            "inv",
+            &["value"],
+            "firm",
+            "year",
+            usize::MAX,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(e, EconError::InsufficientData { .. }), "{e:?}");
+    }
+
+    #[test]
+    fn test_gmm_instrument_matrix_respects_alloc_ceiling() {
+        // full instruments for T = 20: 170 rows x 153 columns x 8 bytes = 208 KB > 64 KiB
+        let e = resource::with_alloc_ceiling(Some(64 << 10), || {
+            run_gmm(
+                &grunfeld(),
+                "inv",
+                &["value", "capital"],
+                "firm",
+                "year",
+                1,
+                None,
+            )
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_gmm_stops_when_cancelled() {
+        let e = resource::with_budget(cancelled(), || {
+            run_arellano_bond(&grunfeld(), "inv", &["value", "capital"], "firm", "year")
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_gmm_scaling_many_entities() {
+        if cfg!(debug_assertions) {
+            return; // release-only timing check
+        }
+        let ds = synthetic_panel(50_000, 5);
+        let t0 = std::time::Instant::now();
+        let r = run_arellano_bond(&ds, "y", &["x"], "entity", "time").unwrap();
+        assert_eq!(r.n_groups, 50_000);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test on full Grunfeld (N = 10, T = 20): the code before
+    /// the T0-WP14 resource bounds gives the same numbers, and later refactors
+    /// must not move them. They characterise the current algorithm, not
+    /// pgmm: the instrument rows are misaligned (ECON-38) and the variances are
+    /// not the GMM ones (ECON-29), and fixing either will move these numbers.
+    ///
+    /// - One-step, non-robust, full instruments (155 columns). Z'Z is singular,
+    ///   but its rank gap is clean (singular values below 1e-9 and from 4.5e-2
+    ///   up, either side of the 8.7e-7 tolerance), so the pseudo-inverse is
+    ///   well defined; a numpy re-implementation reproduces these values to
+    ///   1e-10.
+    /// - Two-step, robust, collapsed, lags 2 to 4: 3 lag instruments plus the 2
+    ///   differenced regressors, so the weighting matrix
+    ///   Omega = sum_i Z_i'e_i e_i'Z_i over the 10 firms has full rank 5
+    ///   (condition number 6e4; Z'Z 1.3e2). The numpy re-implementation
+    ///   reproduces these values to 1e-13, and to 4e-13 whether Omega is
+    ///   inverted by Cholesky, LU, SVD or eigh; a symmetric perturbation of size
+    ///   eps * ||Omega||, or one ulp on every third data value, moves no value
+    ///   by more than 4e-13 relative. This still runs both per-entity loops
+    ///   (two-step weighting and robust meat).
+    ///
+    /// The two-step fits with all lag instruments are not pinned. Omega is a
+    /// sum of 10 rank-one terms, so it has rank 10 in 155 dimensions (full) or
+    /// 20 (collapsed), and the pseudo-inverse has to separate its range from
+    /// rounding noise: on the range its condition number is 2e8 (full) and 8e9
+    /// (collapsed), and the two-step coefficients then depend on the
+    /// floating-point path. Independent SVD and eigh routes agree with each
+    /// other to 1e-9 (full) and 2e-8 (collapsed) but give lag coefficients
+    /// 7e-4 and 1.4e-4 away from p2a's, relative.
+    #[test]
+    fn test_pinned_gmm_outputs() {
+        let ds = grunfeld();
+        let mut v = Vec::new();
+        for cfg in [
+            GmmConfig {
+                step: GmmStep::OneStep,
+                robust: false,
+                ..Default::default()
+            },
+            GmmConfig {
+                collapse: true,
+                max_lag: Some(4),
+                ..Default::default()
+            },
+        ] {
+            let r = run_gmm(
+                &ds,
+                "inv",
+                &["value", "capital"],
+                "firm",
+                "year",
+                1,
+                Some(cfg),
+            )
+            .unwrap();
+            v.extend(&r.coefficients);
+            v.extend(&r.std_errors);
+            v.push(r.sargan_statistic);
+            v.push(r.ar1_statistic);
+            v.push(r.ar2_statistic);
+            v.push(r.n_instruments as f64);
+        }
+        assert_pinned(
+            "GMM",
+            &v,
+            &[
+                0.263063356103039,
+                0.09857082152215238,
+                0.15393705960952475,
+                0.07625725241170737,
+                0.008469925443997283,
+                0.05957087254941484,
+                144.39190430609358,
+                -0.5501390898230673,
+                -0.821665673760031,
+                155.0,
+                1.2776203861790023,
+                0.10491943788104607,
+                -0.3591484493721673,
+                5.426073095729653,
+                0.05880660004922151,
+                2.7731474160382645,
+                17.86526064174635,
+                -2.112344018854466,
+                -2.014207810925843,
+                5.0,
+            ],
+        );
+    }
 }

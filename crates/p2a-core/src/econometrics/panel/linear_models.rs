@@ -282,12 +282,18 @@ pub fn run_random_effects(
     // Compute group means of y and X (with intercept)
     let y_means = compute_entity_means(&y, &entity_ids, n_groups);
 
+    // First row of each group, found in one pass (every group has a row)
+    let mut first_row_of_group = vec![usize::MAX; n_groups];
+    for (i, &g) in entity_ids.iter().enumerate() {
+        if first_row_of_group[g] == usize::MAX {
+            first_row_of_group[g] = i;
+        }
+    }
+
     // Extract unique group means for y and x (no intercept)
-    let y_between: Array1<f64> = (0..n_groups)
-        .map(|g| {
-            let first_idx = entity_ids.iter().position(|&id| id == g).unwrap();
-            y_means[first_idx]
-        })
+    let y_between: Array1<f64> = first_row_of_group
+        .iter()
+        .map(|&first_idx| y_means[first_idx])
         .collect();
 
     // Build between-regression X matrix: group means of x_cols + intercept
@@ -301,8 +307,7 @@ pub fn run_random_effects(
         for j in 0..k_no_int {
             let col = x_no_intercept.column(j).to_owned();
             let col_means = compute_entity_means(&col, &entity_ids, n_groups);
-            for g in 0..n_groups {
-                let first_idx = entity_ids.iter().position(|&id| id == g).unwrap();
+            for (g, &first_idx) in first_row_of_group.iter().enumerate() {
                 xb[[g, j + 1]] = col_means[first_idx];
             }
         }
@@ -513,4 +518,129 @@ pub fn run_random_effects(
         vcov,
         theta: Some(theta),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GRUNFELD_CSV: &str = include_str!("../../../../../validation/datasets/grunfeld.csv");
+
+    /// Grunfeld rows for which `keep(firm, year)` holds.
+    fn grunfeld_where(keep: impl Fn(i64, i64) -> bool) -> Dataset {
+        let csv: String = GRUNFELD_CSV
+            .lines()
+            .enumerate()
+            .filter(|(i, line)| {
+                if *i == 0 {
+                    return true;
+                }
+                let mut fields = line.split(',').map(|f| f.trim().parse::<i64>());
+                match (fields.next(), fields.next()) {
+                    (Some(Ok(firm)), Some(Ok(year))) => keep(firm, year),
+                    _ => false,
+                }
+            })
+            .map(|(_, line)| format!("{line}\n"))
+            .collect();
+        Dataset::new(crate::data::DataLoader::from_csv_string(&csv).unwrap())
+    }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// A balanced synthetic panel of `n_ent` entities and `n_t` periods (the
+    /// same generator as `gls_models::tests::synthetic_panel`).
+    fn synthetic_panel(n_ent: usize, n_t: usize) -> Dataset {
+        let n = n_ent * n_t;
+        let entity: Vec<i64> = (0..n).map(|i| (i / n_t) as i64).collect();
+        let time: Vec<i64> = (0..n).map(|i| (i % n_t) as i64 + 2000).collect();
+        let x: Vec<f64> = (0..n).map(|i| ((i * 37) % 101) as f64 / 10.0).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + 0.5 * x[i]
+                    + ((i / n_t) % 17) as f64 * 0.1
+                    + ((i * 7919) % 1009) as f64 / 1009.0
+                    - 0.5
+            })
+            .collect();
+        Dataset::new(
+            polars::prelude::df! { "entity" => entity, "time" => time, "x" => x, "y" => y }
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_random_effects_scaling_many_entities() {
+        if cfg!(debug_assertions) {
+            return; // release-only timing check
+        }
+        let ds = synthetic_panel(100_000, 5);
+        let t0 = std::time::Instant::now();
+        let r = run_random_effects(&ds, "y", &["x"], "entity").unwrap();
+        assert_eq!(r.n_groups, 100_000);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds (full Grunfeld, and an unbalanced copy); the refactor must not move
+    /// these numbers.
+    #[test]
+    fn test_pinned_random_effects_outputs() {
+        let mut v = Vec::new();
+        for ds in [
+            grunfeld_where(|_, _| true),
+            grunfeld_where(|firm, year| (firm + year) % 7 != 0),
+        ] {
+            let r = run_random_effects(&ds, "inv", &["value", "capital"], "firm").unwrap();
+            v.extend(&r.coefficients);
+            v.extend(&r.std_errors);
+            v.push(r.theta.unwrap());
+            v.push(r.sigma_u.unwrap());
+            v.push(r.sigma_e.unwrap());
+            v.push(r.r_squared);
+        }
+        assert_pinned(
+            "random effects",
+            &v,
+            &[
+                -57.83441490503308,
+                0.10978115223248376,
+                0.308112982830713,
+                168.5470799771813,
+                0.033513202175696935,
+                0.05825701517154266,
+                0.8612236207478787,
+                84.20095070311291,
+                52.767965952630156,
+                0.8061042277659057,
+                -51.80460190637258,
+                0.10171042934454234,
+                0.31778453800732426,
+                144.18764163473352,
+                0.03756116091391904,
+                0.060083300300656194,
+                0.8421608692254301,
+                83.23435669958732,
+                55.00850791319012,
+                0.8021936587934488,
+            ],
+        );
+    }
 }

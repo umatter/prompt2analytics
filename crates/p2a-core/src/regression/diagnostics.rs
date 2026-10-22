@@ -92,6 +92,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult, EstimationWarning};
 use crate::linalg::{DesignMatrix, condition_number, safe_inverse, xtx};
 use crate::regression::{CovarianceType, run_ols};
+use crate::resource;
 use crate::traits::chi_squared_p_value;
 
 /// Result from regression diagnostics.
@@ -941,7 +942,8 @@ fn compute_auxiliary_r2(y: &Array1<f64>, x: &Array2<f64>) -> f64 {
 /// * `dataset` - Dataset containing the data
 /// * `y_col` - Dependent variable column name
 /// * `x_cols` - Independent variable column names
-/// * `powers` - Powers to use (default: [2, 3])
+/// * `powers` - Powers to use (default: [2, 3]). Duplicates are removed (first occurrence
+///   kept) and powers below 2 are ignored; a power above `i32::MAX` is `InvalidSpecification`.
 /// * `reset_type` - Type of augmentation (Fitted, Regressor, PrinComp)
 ///
 /// # Returns
@@ -981,17 +983,7 @@ pub fn reset_test(
     reset_type: ResetType,
 ) -> EconResult<ResetTestResult> {
     // Validate powers
-    let powers: Vec<usize> = if powers.is_empty() {
-        vec![2, 3] // Default
-    } else {
-        powers.iter().filter(|&&p| p >= 2).copied().collect()
-    };
-
-    if powers.is_empty() {
-        return Err(EconError::InvalidSpecification {
-            message: "RESET test requires powers >= 2".to_string(),
-        });
-    }
+    let powers = normalize_reset_powers(powers)?;
 
     // Step 1: Run original OLS regression
     let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
@@ -1015,75 +1007,40 @@ pub fn reset_test(
         .map(|i| (0..k_original).map(|j| x_orig[[i, j]] * beta[j]).sum())
         .collect();
 
-    // Compute augmentation variables based on type
-    let aug_vars: Vec<Array1<f64>> = match reset_type {
-        ResetType::Fitted => {
-            // Powers of fitted values
-            powers
-                .iter()
-                .map(|&p| fitted.mapv(|f| f.powi(p as i32)))
-                .collect()
+    if matches!(reset_type, ResetType::PrinComp) {
+        // First principal component of regressors, then powers
+        // Simple PC: weighted average of standardized regressors
+        let k_noint = x_cols.len(); // excluding intercept
+        if k_noint == 0 {
+            return Err(EconError::InvalidSpecification {
+                message: "PrinComp RESET requires at least one regressor".to_string(),
+            });
         }
-        ResetType::Regressor => {
-            // Powers of each regressor (skip intercept)
-            let mut vars = Vec::new();
-            for &p in &powers {
-                for j in 0..x_orig.ncols() {
-                    // Skip if this column is all 1s (intercept)
-                    let col: Array1<f64> = (0..n).map(|i| x_orig[[i, j]]).collect();
-                    if col.iter().all(|&v| (v - 1.0).abs() < 1e-10) {
-                        continue;
-                    }
-                    vars.push(col.mapv(|x| x.powi(p as i32)));
-                }
-            }
-            vars
-        }
-        ResetType::PrinComp => {
-            // First principal component of regressors, then powers
-            // Simple PC: weighted average of standardized regressors
-            let k_noint = x_cols.len(); // excluding intercept
-            if k_noint == 0 {
-                return Err(EconError::InvalidSpecification {
-                    message: "PrinComp RESET requires at least one regressor".to_string(),
-                });
-            }
 
-            // Not yet implemented: this reuses the powers-of-fitted-values
-            // augmentation (identical to ResetType::Fitted) rather than
-            // computing the first principal component of the regressors, so it
-            // does not match R's resettest(type = "princomp").
-            tracing::warn!(
-                "RESET test: the 'princomp' augmentation is not implemented; using the \
-                 powers-of-fitted-values augmentation (identical to 'fitted'). Results will \
-                 not match R's resettest(type = \"princomp\")."
-            );
-            powers
-                .iter()
-                .map(|&p| fitted.mapv(|f| f.powi(p as i32)))
-                .collect()
-        }
-    };
-
-    let n_aug = aug_vars.len();
-    if n_aug == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "No augmentation variables generated".to_string(),
-        });
+        // Not yet implemented: this reuses the powers-of-fitted-values
+        // augmentation (identical to ResetType::Fitted) rather than
+        // computing the first principal component of the regressors, so it
+        // does not match R's resettest(type = "princomp").
+        tracing::warn!(
+            "RESET test: the 'princomp' augmentation is not implemented; using the \
+             powers-of-fitted-values augmentation (identical to 'fitted'). Results will \
+             not match R's resettest(type = \"princomp\")."
+        );
     }
 
-    let k_augmented = k_original + n_aug;
+    // Size the augmented model before building it
+    let regressor_cols = reset_regressor_columns(&x_orig.view());
+    let k_augmented = reset_augmented_width(
+        n,
+        k_original,
+        powers.len(),
+        reset_type,
+        regressor_cols.len(),
+    )?;
+    let n_aug = k_augmented - k_original;
 
-    if n <= k_augmented {
-        return Err(EconError::InsufficientData {
-            required: k_augmented + 1,
-            provided: n,
-            context: "RESET test augmented model".to_string(),
-        });
-    }
-
-    // Build augmented X matrix: [X_original, aug_vars]
-    let mut x_aug = Array2::zeros((n, k_augmented));
+    // Build augmented X matrix: [X_original, augmentation columns]
+    let mut x_aug = resource::try_zeros2(n, k_augmented, "RESET augmented design")?;
 
     // Copy original X
     for i in 0..n {
@@ -1093,11 +1050,15 @@ pub fn reset_test(
     }
 
     // Add augmentation variables
-    for (aug_idx, aug_var) in aug_vars.iter().enumerate() {
-        for i in 0..n {
-            x_aug[[i, k_original + aug_idx]] = aug_var[i];
-        }
-    }
+    fill_reset_augmentation(
+        &mut x_aug,
+        k_original,
+        &powers,
+        reset_type,
+        &fitted,
+        &x_orig.view(),
+        &regressor_cols,
+    )?;
 
     // Step 3: Run augmented regression
     let xtx_aug = xtx(&x_aug.view());
@@ -1177,6 +1138,111 @@ pub fn reset_test(
     })
 }
 
+/// RESET powers as both RESET variants use them: an empty list means `[2, 3]`,
+/// powers below 2 are dropped, duplicates are removed (the first occurrence is
+/// kept; a repeated power would only add a collinear column), and powers that do
+/// not fit `powi`'s `i32` exponent are refused.
+fn normalize_reset_powers(powers: &[usize]) -> EconResult<Vec<usize>> {
+    if powers.is_empty() {
+        return Ok(vec![2, 3]);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for &p in powers {
+        if p > i32::MAX as usize {
+            return Err(EconError::InvalidSpecification {
+                message: format!("RESET power {p} is too large (at most {})", i32::MAX),
+            });
+        }
+        if p >= 2 && seen.insert(p) {
+            normalized.push(p);
+        }
+    }
+    if normalized.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: "RESET test requires powers >= 2".to_string(),
+        });
+    }
+    Ok(normalized)
+}
+
+/// The columns of `x` whose powers the `Regressor` RESET adds: every column that
+/// is not all ones (the intercept).
+fn reset_regressor_columns(x: &ndarray::ArrayView2<f64>) -> Vec<usize> {
+    (0..x.ncols())
+        .filter(|&j| !x.column(j).iter().all(|&v| (v - 1.0).abs() < 1e-10))
+        .collect()
+}
+
+/// Width of the augmented RESET design (original plus augmentation columns),
+/// checked against the sample size before anything is allocated.
+fn reset_augmented_width(
+    n: usize,
+    k_original: usize,
+    n_powers: usize,
+    reset_type: ResetType,
+    n_regressor_cols: usize,
+) -> EconResult<usize> {
+    let n_aug = match reset_type {
+        ResetType::Fitted | ResetType::PrinComp => n_powers,
+        ResetType::Regressor => {
+            resource::checked_len(&[n_powers, n_regressor_cols], "RESET augmented design")?
+        }
+    };
+    if n_aug == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "No augmentation variables generated".to_string(),
+        });
+    }
+    let k_augmented = k_original.saturating_add(n_aug);
+    if n <= k_augmented {
+        return Err(EconError::InsufficientData {
+            required: k_augmented.saturating_add(1),
+            provided: n,
+            context: "RESET test augmented model".to_string(),
+        });
+    }
+    Ok(k_augmented)
+}
+
+/// Fill the augmentation columns of `x_aug`, from column `k_original` on: for
+/// each power in order, the power of the fitted values (`Fitted`, `PrinComp`) or
+/// of each regressor column in `regressor_cols` (`Regressor`).
+fn fill_reset_augmentation(
+    x_aug: &mut Array2<f64>,
+    k_original: usize,
+    powers: &[usize],
+    reset_type: ResetType,
+    fitted: &Array1<f64>,
+    x: &ndarray::ArrayView2<f64>,
+    regressor_cols: &[usize],
+) -> EconResult<()> {
+    let n = x_aug.nrows();
+    let mut col = k_original;
+    for &p in powers {
+        resource::checkpoint()?;
+        // normalize_reset_powers keeps every power within i32
+        let p = p as i32;
+        match reset_type {
+            ResetType::Fitted | ResetType::PrinComp => {
+                for i in 0..n {
+                    x_aug[[i, col]] = fitted[i].powi(p);
+                }
+                col += 1;
+            }
+            ResetType::Regressor => {
+                for &j in regressor_cols {
+                    for i in 0..n {
+                        x_aug[[i, col]] = x[[i, j]].powi(p);
+                    }
+                    col += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Convenience function for RESET test with default parameters.
 ///
 /// Uses powers [2, 3] and Fitted type.
@@ -1198,7 +1264,8 @@ pub fn run_reset_test(
 /// * `ols_result` - Pre-computed OLS result
 /// * `x` - Design matrix used in OLS (including intercept if present)
 /// * `y` - Response vector
-/// * `powers` - Powers to test (e.g., [2, 3])
+/// * `powers` - Powers to test (e.g., [2, 3]). Deduplicated and checked as in [`reset_test`]:
+///   first occurrence kept, powers below 2 ignored, each at most `i32::MAX`.
 /// * `reset_type` - Type of RESET test
 pub fn reset_test_from_ols(
     ols_result: &crate::regression::OlsResult,
@@ -1207,17 +1274,7 @@ pub fn reset_test_from_ols(
     powers: &[usize],
     reset_type: ResetType,
 ) -> EconResult<ResetTestResult> {
-    let powers: Vec<usize> = if powers.is_empty() {
-        vec![2, 3]
-    } else {
-        powers.iter().filter(|&&p| p >= 2).copied().collect()
-    };
-
-    if powers.is_empty() {
-        return Err(EconError::InvalidSpecification {
-            message: "RESET test requires powers >= 2".to_string(),
-        });
-    }
+    let powers = normalize_reset_powers(powers)?;
 
     let n = ols_result.n_obs;
     let k_original = ols_result.n_params;
@@ -1227,56 +1284,31 @@ pub fn reset_test_from_ols(
     let x_view: ndarray::ArrayView2<f64> = x.view();
     let fitted: Array1<f64> = x_view.dot(&beta);
 
-    // Compute augmentation variables
-    let aug_vars: Vec<Array1<f64>> = match reset_type {
-        ResetType::Fitted => powers
-            .iter()
-            .map(|&p| fitted.mapv(|f| f.powi(p as i32)))
-            .collect(),
-        ResetType::Regressor => {
-            let mut vars = Vec::new();
-            for &p in &powers {
-                for j in 0..x.ncols() {
-                    let col = x.column(j);
-                    // Skip intercept column
-                    if col.iter().all(|&v| (v - 1.0).abs() < 1e-10) {
-                        continue;
-                    }
-                    vars.push(col.mapv(|x_val| x_val.powi(p as i32)));
-                }
-            }
-            vars
-        }
-        ResetType::PrinComp => powers
-            .iter()
-            .map(|&p| fitted.mapv(|f| f.powi(p as i32)))
-            .collect(),
-    };
-
-    let n_aug = aug_vars.len();
-    if n_aug == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "No augmentation variables generated".to_string(),
-        });
-    }
-
-    let k_augmented = k_original + n_aug;
-    if n <= k_augmented {
-        return Err(EconError::InsufficientData {
-            required: k_augmented + 1,
-            provided: n,
-            context: "RESET test augmented model".to_string(),
-        });
-    }
+    // Size the augmented model before building it
+    let regressor_cols = reset_regressor_columns(x);
+    let k_augmented = reset_augmented_width(
+        n,
+        k_original,
+        powers.len(),
+        reset_type,
+        regressor_cols.len(),
+    )?;
+    let n_aug = k_augmented - k_original;
 
     // Build augmented X matrix using slice assignment (vectorized)
-    let mut x_aug = Array2::zeros((n, k_augmented));
+    let mut x_aug = resource::try_zeros2(n, k_augmented, "RESET augmented design")?;
     x_aug.slice_mut(ndarray::s![.., ..k_original]).assign(x);
 
-    // Add augmentation columns using slice assignment
-    for (aug_idx, aug_var) in aug_vars.iter().enumerate() {
-        x_aug.column_mut(k_original + aug_idx).assign(aug_var);
-    }
+    // Add augmentation columns
+    fill_reset_augmentation(
+        &mut x_aug,
+        k_original,
+        &powers,
+        reset_type,
+        &fitted,
+        x,
+        &regressor_cols,
+    )?;
 
     // Run augmented regression using vectorized operations
     // X'X - use pure ndarray for speed
@@ -2209,6 +2241,71 @@ mod tests {
         }
         .unwrap();
         Dataset::new(df)
+    }
+
+    #[test]
+    fn test_reset_deduplicates_powers() {
+        let ds = create_test_dataset();
+        let base = reset_test(&ds, "y", &["x1"], &[2, 3], ResetType::Fitted).unwrap();
+        let dup = reset_test(&ds, "y", &["x1"], &[2, 3, 2, 3, 3], ResetType::Fitted).unwrap();
+        assert_eq!(dup.powers, vec![2, 3]);
+        assert_eq!(dup.df, base.df);
+        assert!((dup.statistic - base.statistic).abs() <= 1e-12 * base.statistic.abs().max(1.0));
+    }
+
+    #[test]
+    fn test_reset_rejects_power_beyond_i32() {
+        let ds = create_test_dataset();
+        let e = reset_test(
+            &ds,
+            "y",
+            &["x1"],
+            &[2, i32::MAX as usize + 1],
+            ResetType::Fitted,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("power")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_reset_checks_sample_size_before_allocating() {
+        // Guard: passes before and after. After the fix, no augmented buffer is
+        // built for an impossible model.
+        let ds = create_test_dataset();
+        let powers: Vec<usize> = (2..302).collect();
+        let e = crate::resource::with_alloc_ceiling(Some(1024), || {
+            reset_test(&ds, "y", &["x1"], &powers, ResetType::Fitted)
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::InsufficientData { .. }), "{e:?}");
+    }
+
+    #[test]
+    fn test_reset_from_ols_deduplicates_and_bounds_powers() {
+        let ds = create_test_dataset();
+        let ols = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let x = DesignMatrix::from_dataframe(ds.df(), &["x1"], true).unwrap();
+        let y = DesignMatrix::extract_column(ds.df(), "y").unwrap();
+        let base = reset_test_from_ols(&ols, &x.view(), &y, &[3, 2], ResetType::Fitted).unwrap();
+        let dup = reset_test_from_ols(&ols, &x.view(), &y, &[3, 2, 3], ResetType::Fitted).unwrap();
+        assert_eq!(dup.powers, vec![3, 2]);
+        assert_eq!(dup.df, base.df);
+        assert!((dup.statistic - base.statistic).abs() <= 1e-12 * base.statistic.abs().max(1.0));
+        let e = reset_test_from_ols(
+            &ols,
+            &x.view(),
+            &y,
+            &[i32::MAX as usize + 1],
+            ResetType::Regressor,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("power")),
+            "{e:?}"
+        );
     }
 
     #[test]

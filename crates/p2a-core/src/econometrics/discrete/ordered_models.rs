@@ -22,7 +22,25 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::resource;
 use crate::traits::estimator::{logistic_cdf, logistic_pdf, normal_cdf, normal_pdf};
+
+/// Most outcome categories an ordered logit/probit accepts.
+///
+/// A method-level cap, the analogue of `nnet::multinom`'s `MaxNWts`, active in
+/// every mode: each category adds a threshold parameter to a dense Hessian
+/// that is rebuilt and inverted every Newton iteration, so a continuous column
+/// passed as the outcome would otherwise create one category per observation.
+const MAX_OUTCOME_CATEGORIES: usize = 100;
+
+/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
+/// SVD fallback). Check the working set against the allocation ceiling before building it.
+const DENSE_INVERSE_COPIES: usize = 6;
+
+fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
+    let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
+    resource::check_alloc::<f64>(cells, what)
+}
 
 /// Type of ordered discrete choice model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +162,11 @@ impl fmt::Display for OrderedResult {
 /// Run ordered logit regression (proportional odds model).
 ///
 /// R equivalent: `MASS::polr()`
+///
+/// # Errors
+///
+/// An outcome with more than 100 distinct values is refused with
+/// `InvalidSpecification` (a method-level cap on the outcome categories).
 pub fn run_ordered_logit(
     dataset: &Dataset,
     y_col: &str,
@@ -155,6 +178,11 @@ pub fn run_ordered_logit(
 /// Run ordered probit regression.
 ///
 /// R equivalent: `MASS::polr(method = "probit")`
+///
+/// # Errors
+///
+/// An outcome with more than 100 distinct values is refused with
+/// `InvalidSpecification` (a method-level cap on the outcome categories).
 pub fn run_ordered_probit(
     dataset: &Dataset,
     y_col: &str,
@@ -209,6 +237,16 @@ fn run_ordered_model(
     if j < 2 {
         return Err(EconError::InvalidSpecification {
             message: "Ordered model requires at least 2 categories".to_string(),
+        });
+    }
+    if j > MAX_OUTCOME_CATEGORIES {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Outcome column '{y_col}' has {j} distinct values; ordered logit/probit \
+                 supports at most {MAX_OUTCOME_CATEGORIES} outcome categories (like \
+                 nnet::multinom's MaxNWts limit). Check that '{y_col}' is a categorical \
+                 outcome, not a continuous variable, or recode it into fewer categories."
+            ),
         });
     }
 
@@ -281,8 +319,18 @@ fn run_ordered_model(
     let tol = 1e-8;
     let mut converged = false;
     let mut iterations = 0;
+    let hessian_what = match model_type {
+        OrderedModelType::Logit => "ordered logit Hessian",
+        OrderedModelType::Probit => "ordered probit Hessian",
+    };
+    ensure_dense_inverse_fits(n_params, hessian_what)?;
+    // Positions and values of the non-zero score entries of one observation:
+    // the k slopes and at most two thresholds.
+    let mut score_idx: Vec<usize> = Vec::with_capacity(k + 2);
+    let mut score_val: Vec<f64> = Vec::with_capacity(k + 2);
 
     for iter in 0..max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // Extract current parameters
@@ -291,9 +339,12 @@ fn run_ordered_model(
 
         // Compute gradient and Hessian
         let mut gradient = vec![0.0; n_params];
-        let mut hessian = vec![vec![0.0; n_params]; n_params];
+        let mut hess = resource::try_zeros2(n_params, n_params, hessian_what)?;
 
         for i in 0..n {
+            if i % 256 == 0 {
+                resource::checkpoint()?;
+            }
             let yi = y_idx[i];
 
             // Compute X'beta
@@ -340,48 +391,31 @@ fn run_ordered_model(
                 gradient[k + yi] += f_high / p_i;
             }
 
-            // Hessian (approximate using outer product)
-            for a in 0..n_params {
-                for b in 0..n_params {
-                    let g_a = if a < k {
-                        x[[i, a]] * grad_beta
-                    } else if a - k == yi.saturating_sub(1) && yi > 0 {
-                        -f_low / p_i
-                    } else if a - k == yi && yi < j - 1 {
-                        f_high / p_i
-                    } else {
-                        0.0
-                    };
-
-                    let g_b = if b < k {
-                        x[[i, b]] * grad_beta
-                    } else if b - k == yi.saturating_sub(1) && yi > 0 {
-                        -f_low / p_i
-                    } else if b - k == yi && yi < j - 1 {
-                        f_high / p_i
-                    } else {
-                        0.0
-                    };
-
-                    hessian[a][b] -= g_a * g_b / p_i;
-                }
+            // Hessian (approximate using outer product), over the non-zero
+            // score entries only
+            score_idx.clear();
+            score_val.clear();
+            for kk in 0..k {
+                score_idx.push(kk);
+                score_val.push(x[[i, kk]] * grad_beta);
             }
+            if yi > 0 {
+                score_idx.push(k + yi - 1);
+                score_val.push(-f_low / p_i);
+            }
+            if yi < j - 1 {
+                score_idx.push(k + yi);
+                score_val.push(f_high / p_i);
+            }
+            subtract_scaled_outer(&mut hess, &score_idx, &score_val, p_i);
         }
-
-        // Convert hessian to Array2
-        let hess_arr = Array2::from_shape_vec(
-            (n_params, n_params),
-            hessian.iter().flatten().copied().collect(),
-        )
-        .unwrap();
 
         // Add regularization to diagonal
-        let mut hess_reg = hess_arr.clone();
         for i in 0..n_params {
-            hess_reg[[i, i]] -= 1e-6;
+            hess[[i, i]] -= 1e-6;
         }
 
-        let (hess_inv, _) = match safe_inverse(&hess_reg.view()) {
+        let (hess_inv, _) = match safe_inverse(&hess.view()) {
             Ok(inv) => inv,
             Err(_) => {
                 // Fall back to gradient descent step
@@ -492,9 +526,23 @@ fn run_ordered_model(
     })
 }
 
+/// Subtract `g g' / p_i` from `hess` for a score `g` that is zero except at the
+/// positions `idx`, where it takes the values `val`.
+///
+/// Only the non-zero pairs are visited. The terms the dense double loop would
+/// add for the other pairs are exact zeros, so the result is bit-identical.
+fn subtract_scaled_outer(hess: &mut Array2<f64>, idx: &[usize], val: &[f64], p_i: f64) {
+    for (&a, &g_a) in idx.iter().zip(val) {
+        for (&b, &g_b) in idx.iter().zip(val) {
+            hess[[a, b]] -= g_a * g_b / p_i;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
 
     fn create_ordered_dataset() -> Dataset {
@@ -504,6 +552,81 @@ mod tests {
         }
         .unwrap();
         Dataset::new(df)
+    }
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// A continuous outcome with `n` distinct values.
+    fn continuous_y_dataset(n: usize) -> Dataset {
+        let y: Vec<f64> = (0..n).map(|i| i as f64 + 0.5).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i * 7) % 13) as f64 + 0.1 * i as f64)
+            .collect();
+        Dataset::new(df! { "y" => y, "x" => x }.unwrap())
+    }
+
+    #[test]
+    fn test_ordered_refuses_more_than_100_categories() {
+        let err = run_ordered_logit(&continuous_y_dataset(101), "y", &["x"]).unwrap_err();
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains("'y'") && message.contains("101") && message.contains("100"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ordered_accepts_100_categories() {
+        let r = run_ordered_logit(&continuous_y_dataset(100), "y", &["x"]).unwrap();
+        assert_eq!(r.categories.len(), 100);
+    }
+
+    #[test]
+    fn test_ordered_stops_when_cancelled() {
+        let ds = create_ordered_dataset();
+        let e =
+            resource::with_budget(cancelled(), || run_ordered_logit(&ds, "y", &["x"])).unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_ordered_hessian_respects_alloc_ceiling() {
+        // n_params = 1 + 2 = 3; working set 3*3*6*8 = 432 bytes > 256
+        let ds = create_ordered_dataset();
+        let e = resource::with_alloc_ceiling(Some(256), || run_ordered_logit(&ds, "y", &["x"]))
+            .unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_sparse_outer_product_matches_dense_loop() {
+        let n_params = 9;
+        let idx = [0usize, 1, 2, 5, 6];
+        let val = [0.31, -1.7, 2.25, -0.42, 0.9];
+        let p_i = 0.37;
+        let mut base = Array2::<f64>::from_shape_fn((n_params, n_params), |(a, b)| {
+            0.01 * (a * 3 + b) as f64 - 0.2
+        });
+        let mut dense = base.clone();
+        let mut g = vec![0.0; n_params];
+        for (&i, &v) in idx.iter().zip(&val) {
+            g[i] = v;
+        }
+        for a in 0..n_params {
+            for b in 0..n_params {
+                dense[[a, b]] -= g[a] * g[b] / p_i;
+            }
+        }
+        subtract_scaled_outer(&mut base, &idx, &val, p_i);
+        assert_eq!(base, dense); // bitwise: skipped entries would only subtract +-0.0
     }
 
     #[test]
@@ -536,6 +659,106 @@ mod tests {
         for i in 1..result.thresholds.len() {
             assert!(result.thresholds[i] > result.thresholds[i - 1]);
         }
+    }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// 60 noisy rows with two regressors and four ordered categories
+    /// (14, 15, 15 and 16 rows).
+    fn create_ordered_dataset_60() -> Dataset {
+        let mut y: Vec<&str> = Vec::with_capacity(60);
+        let mut x1: Vec<f64> = Vec::with_capacity(60);
+        let mut x2: Vec<f64> = Vec::with_capacity(60);
+        for i in 0..60usize {
+            let a = ((i * 37) % 23) as f64 / 4.0;
+            let b = ((i * 11) % 7) as f64 - 3.0 + 0.05 * i as f64;
+            let z = 0.6 * a - 0.4 * b + (((i * 7919) % 101) as f64 / 101.0 - 0.5);
+            y.push(if z < 0.0 {
+                "a"
+            } else if z < 1.0 {
+                "b"
+            } else if z < 2.0 {
+                "c"
+            } else {
+                "d"
+            });
+            x1.push(a);
+            x2.push(b);
+        }
+        for cat in ["a", "b", "c", "d"] {
+            assert!(y.contains(&cat), "category {cat} missing");
+        }
+        Dataset::new(df! { "y" => y, "x1" => x1, "x2" => x2 }.unwrap())
+    }
+
+    fn ordered_outputs(r: &OrderedResult) -> Vec<f64> {
+        let mut v = r.coefficients.clone();
+        v.extend(&r.thresholds);
+        v.push(r.log_likelihood);
+        v.push(r.iterations as f64);
+        v
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds; the refactor must not move these numbers.
+    ///
+    /// None of the three fits converges: each stops at max_iter = 100, so these
+    /// are characterisations of a non-converged, step-clamped Newton iterate,
+    /// not of an MLE. The 10-row `create_ordered_dataset()` is separated by x
+    /// (and its labels sort as High < Low < Medium, ECON-19). The 60-row noisy
+    /// fit has overlapping categories, but does not converge either, because
+    /// the beta score has the wrong sign and the outer-product Hessian divides
+    /// by p_i twice (ECON-4, Tier 2); fixing that will move these numbers. The
+    /// 1e-6 ridge keeps the iterate well conditioned: raising every third x
+    /// value by one ulp (each of the three offsets in turn) moves no pinned
+    /// value by more than 3e-14 relative.
+    #[test]
+    fn test_pinned_ordered_outputs() {
+        let ds = create_ordered_dataset();
+        let mut v = ordered_outputs(&run_ordered_logit(&ds, "y", &["x"]).unwrap());
+        v.extend(ordered_outputs(
+            &run_ordered_probit(&ds, "y", &["x"]).unwrap(),
+        ));
+        let ds60 = create_ordered_dataset_60();
+        v.extend(ordered_outputs(
+            &run_ordered_logit(&ds60, "y", &["x1", "x2"]).unwrap(),
+        ));
+        assert_pinned(
+            "ordered",
+            &v,
+            &[
+                0.3752165575229469,
+                -1.2899202006035233,
+                1.2960992251299421,
+                -20.825411738564778,
+                100.0,
+                0.14718029310181532,
+                -1.6730261733593013,
+                0.4754700045772722,
+                -28.113493958327997,
+                100.0,
+                -0.8444065857208708,
+                0.48623222352263373,
+                -1.4516923297598314,
+                -0.28377059830396983,
+                4.250486294194607,
+                -205.37544947447003,
+                100.0,
+            ],
+        );
     }
 
     // ==========================================================================

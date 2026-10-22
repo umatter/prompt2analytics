@@ -20,6 +20,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use crate::traits::estimator::normal_cdf;
 
 /// Distribution type for random parameters in mixed logit.
@@ -62,13 +63,14 @@ pub struct RandomParameterSpec {
 /// Configuration for mixed logit estimation.
 #[derive(Debug, Clone)]
 pub struct MixedLogitConfig {
-    /// Number of simulation draws per individual
+    /// Number of simulation draws per individual. At least 1 (otherwise
+    /// `InvalidSpecification`); a draw buffer that cannot be allocated is `ResourceLimit`.
     pub n_draws: usize,
     /// Use Halton sequences (quasi-random) instead of pseudo-random
     pub halton: bool,
-    /// Maximum iterations
+    /// Maximum iterations. At least 1 (otherwise `InvalidSpecification`).
     pub max_iter: usize,
-    /// Convergence tolerance
+    /// Convergence tolerance. Must be finite and > 0 (otherwise `InvalidSpecification`).
     pub tolerance: f64,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
@@ -209,10 +211,13 @@ impl fmt::Display for MixedLogitResult {
 }
 
 /// Generate Halton sequence for quasi-random draws.
-fn halton_sequence(n: usize, base: usize) -> Vec<f64> {
-    let mut result = Vec::with_capacity(n);
+fn halton_sequence(n: usize, base: usize) -> EconResult<Vec<f64>> {
+    let mut result = resource::try_with_capacity::<f64>(n, "Halton draws")?;
 
     for i in 1..=n {
+        if i % 65_536 == 0 {
+            resource::checkpoint()?;
+        }
         let mut f = 1.0;
         let mut r = 0.0;
         let mut i_val = i;
@@ -226,7 +231,7 @@ fn halton_sequence(n: usize, base: usize) -> Vec<f64> {
         result.push(r);
     }
 
-    result
+    Ok(result)
 }
 
 /// Generate standard normal draws from uniform using inverse CDF.
@@ -265,6 +270,65 @@ fn transform_draw(z: f64, mean: f64, std_dev: f64, dist: RandomDistribution) -> 
         }
         RandomDistribution::Fixed => mean,
     }
+}
+
+/// One choice situation: the attribute rows of its alternatives and the index
+/// of the chosen one.
+#[derive(Clone)]
+struct ChoiceSituation {
+    x: Vec<Vec<f64>>,
+    chosen_idx: usize,
+}
+
+/// Draw-alternative evaluations in the simulated likelihood between two
+/// cancellation checks (the draw-generation loops check every 65,536 draws).
+const SIM_WORK_PER_CHECKPOINT: usize = 65_536;
+
+/// Simulated probability of the chosen alternative of `sit`: the logit
+/// probability averaged over the first `n_draws` draws.
+///
+/// `work` counts the draw-alternative evaluations since the last cancellation
+/// check, carried across situations; the budget is checked whenever it reaches
+/// [`SIM_WORK_PER_CHECKPOINT`], so a situation with a large `n_draws` cannot
+/// run unchecked.
+fn simulated_choice_probability(
+    sit: &ChoiceSituation,
+    draws: &[Vec<f64>],
+    n_draws: usize,
+    means: &[f64],
+    std_devs: &[f64],
+    distributions: &[RandomDistribution],
+    work: &mut usize,
+) -> EconResult<f64> {
+    let n_vars = means.len();
+    let mut sim_prob = 0.0;
+
+    for r in 0..n_draws {
+        *work += sit.x.len().max(1);
+        if *work >= SIM_WORK_PER_CHECKPOINT {
+            *work = 0;
+            resource::checkpoint()?;
+        }
+        let beta: Vec<f64> = (0..n_vars)
+            .map(|j| transform_draw(draws[j][r], means[j], std_devs[j], distributions[j]))
+            .collect();
+
+        let utils: Vec<f64> = sit
+            .x
+            .iter()
+            .map(|x_alt| x_alt.iter().zip(&beta).map(|(x, b)| x * b).sum::<f64>())
+            .collect();
+
+        let max_util = utils.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_utils: Vec<f64> = utils.iter().map(|u| (u - max_util).exp()).collect();
+        let sum_exp: f64 = exp_utils.iter().sum();
+
+        let prob = exp_utils[sit.chosen_idx] / sum_exp;
+        sim_prob += prob;
+    }
+
+    sim_prob /= n_draws as f64;
+    Ok(sim_prob)
 }
 
 /// Helper to extract column as strings.
@@ -309,6 +373,26 @@ pub fn run_mixed_logit(
     config: Option<MixedLogitConfig>,
 ) -> EconResult<MixedLogitResult> {
     let config = config.unwrap_or_default();
+    if config.n_draws == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_draws must be at least 1: the simulated likelihood averages over \
+                      the draws"
+                .to_string(),
+        });
+    }
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be a positive finite number (got {})",
+                config.tolerance
+            ),
+        });
+    }
     let df = dataset.df();
 
     let choice_ids: Vec<String> = extract_string_or_int_column(df, choice_id_col)?;
@@ -380,12 +464,6 @@ pub fn run_mixed_logit(
     let n_alternatives = alternatives.len();
 
     // Build choice situation data structure
-    #[derive(Clone)]
-    struct ChoiceSituation {
-        x: Vec<Vec<f64>>,
-        chosen_idx: usize,
-    }
-
     let mut choice_id_to_idx: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for (i, cid) in unique_choice_ids.iter().enumerate() {
@@ -428,13 +506,25 @@ pub fn run_mixed_logit(
     let primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47];
     let n_draws = config.n_draws;
 
-    let mut draws: Vec<Vec<f64>> = vec![vec![0.0; n_draws]; n_vars];
+    let draws_what = "mixed logit simulation draws";
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[n_vars, n_draws], draws_what)?,
+        draws_what,
+    )?;
+    // One row per variable (also for fixed ones, which keeps the indexing simple)
+    let mut draws: Vec<Vec<f64>> = Vec::with_capacity(n_vars);
+    for _ in 0..n_vars {
+        draws.push(resource::try_vec(n_draws, 0.0, draws_what)?);
+    }
     if config.halton {
         let mut prime_idx = 0;
         for j in 0..n_vars {
             if distributions[j] != RandomDistribution::Fixed {
-                let halton = halton_sequence(n_draws, primes[prime_idx % primes.len()]);
+                let halton = halton_sequence(n_draws, primes[prime_idx % primes.len()])?;
                 for r in 0..n_draws {
+                    if r % 65_536 == 0 {
+                        resource::checkpoint()?;
+                    }
                     draws[j][r] = uniform_to_normal(halton[r]);
                 }
                 prime_idx += 1;
@@ -450,6 +540,9 @@ pub fn run_mixed_logit(
         for j in 0..n_vars {
             if distributions[j] != RandomDistribution::Fixed {
                 for r in 0..n_draws {
+                    if r % 65_536 == 0 {
+                        resource::checkpoint()?;
+                    }
                     let u1: f64 = rng.gen_range(0.0001..0.9999);
                     let u2: f64 = rng.gen_range(0.0001..0.9999);
                     draws[j][r] = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
@@ -467,7 +560,8 @@ pub fn run_mixed_logit(
     let ll_null = -(n_choice_situations as f64) * (n_alternatives as f64).ln();
 
     // Simulated log-likelihood function
-    let compute_simulated_ll = |theta: &[f64]| -> f64 {
+    let compute_simulated_ll = |theta: &[f64]| -> EconResult<f64> {
+        resource::checkpoint()?;
         let means: Vec<f64> = theta[..n_vars].to_vec();
         let mut std_devs: Vec<f64> = vec![0.0; n_vars];
         let mut sd_idx = n_vars;
@@ -479,58 +573,46 @@ pub fn run_mixed_logit(
         }
 
         let mut total_ll = 0.0;
+        let mut work = 0;
 
         for sit in &situations {
-            let _n_alts = sit.x.len();
-            let mut sim_prob = 0.0;
-
-            for r in 0..n_draws {
-                let beta: Vec<f64> = (0..n_vars)
-                    .map(|j| transform_draw(draws[j][r], means[j], std_devs[j], distributions[j]))
-                    .collect();
-
-                let utils: Vec<f64> = sit
-                    .x
-                    .iter()
-                    .map(|x_alt| x_alt.iter().zip(&beta).map(|(x, b)| x * b).sum::<f64>())
-                    .collect();
-
-                let max_util = utils.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let exp_utils: Vec<f64> = utils.iter().map(|u| (u - max_util).exp()).collect();
-                let sum_exp: f64 = exp_utils.iter().sum();
-
-                let prob = exp_utils[sit.chosen_idx] / sum_exp;
-                sim_prob += prob;
-            }
-
-            sim_prob /= n_draws as f64;
+            let sim_prob = simulated_choice_probability(
+                sit,
+                &draws,
+                n_draws,
+                &means,
+                &std_devs,
+                &distributions,
+                &mut work,
+            )?;
             total_ll += sim_prob.max(1e-300).ln();
         }
 
-        total_ll
+        Ok(total_ll)
     };
 
     // Gradient ascent optimization
-    let mut ll = compute_simulated_ll(&theta);
+    let mut ll = compute_simulated_ll(&theta)?;
     let mut converged = false;
     let mut iterations = 0;
 
-    let compute_gradient = |theta: &[f64], ll_current: f64| -> Vec<f64> {
+    let compute_gradient = |theta: &[f64], ll_current: f64| -> EconResult<Vec<f64>> {
         let h = 1e-5;
         let mut grad = vec![0.0; n_params];
         for i in 0..n_params {
             let mut theta_plus = theta.to_vec();
             theta_plus[i] += h;
-            let ll_plus = compute_simulated_ll(&theta_plus);
+            let ll_plus = compute_simulated_ll(&theta_plus)?;
             grad[i] = (ll_plus - ll_current) / h;
         }
-        grad
+        Ok(grad)
     };
 
     for iter in 0..config.max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
-        let grad = compute_gradient(&theta, ll);
+        let grad = compute_gradient(&theta, ll)?;
         let grad_norm: f64 = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
 
         if grad_norm < config.tolerance {
@@ -545,7 +627,7 @@ pub fn run_mixed_logit(
         for _ in 0..10 {
             let new_theta: Vec<f64> = theta.iter().zip(&grad).map(|(t, g)| t + step * g).collect();
 
-            let new_ll = compute_simulated_ll(&new_theta);
+            let new_ll = compute_simulated_ll(&new_theta)?;
             if new_ll > best_ll {
                 best_ll = new_ll;
                 best_theta = new_theta;
@@ -704,6 +786,7 @@ pub fn run_mixl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
 
     fn create_mlogit_dataset() -> Dataset {
@@ -754,6 +837,149 @@ mod tests {
 
         assert_eq!(result.distributions[0], RandomDistribution::Normal);
         assert_eq!(result.distributions[1], RandomDistribution::Fixed);
+    }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds (the `test_mixed_logit_basic` call); the refactor must not move
+    /// these numbers.
+    #[test]
+    fn test_pinned_mixed_logit_outputs() {
+        let r = run_mixed_logit(
+            &create_mlogit_dataset(),
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost", "time"],
+            &[RandomParameterSpec {
+                name: "cost".to_string(),
+                distribution: RandomDistribution::Normal,
+            }],
+            Some(MixedLogitConfig {
+                n_draws: 50,
+                halton: true,
+                max_iter: 50,
+                tolerance: 1e-4,
+                seed: Some(42),
+            }),
+        )
+        .unwrap();
+        let mut v = r.means.clone();
+        v.extend(&r.std_devs);
+        v.push(r.log_likelihood);
+        v.push(r.iterations as f64);
+        assert_pinned(
+            "mixed logit",
+            &v,
+            &[
+                -0.937956316132693,
+                -0.1483991201329387,
+                0.9909120948804444,
+                0.0,
+                -2.6330359066917888,
+                50.0,
+            ],
+        );
+    }
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn ml_config(n_draws: usize, max_iter: usize, tolerance: f64) -> MixedLogitConfig {
+        MixedLogitConfig {
+            n_draws,
+            halton: true,
+            max_iter,
+            tolerance,
+            seed: Some(42),
+        }
+    }
+
+    fn ml_run(cfg: MixedLogitConfig) -> EconResult<MixedLogitResult> {
+        let ds = create_mlogit_dataset();
+        run_mixed_logit(
+            &ds,
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost", "time"],
+            &[RandomParameterSpec {
+                name: "cost".into(),
+                distribution: RandomDistribution::Normal,
+            }],
+            Some(cfg),
+        )
+    }
+
+    #[test]
+    fn test_mixed_logit_rejects_invalid_controls() {
+        for (cfg, field) in [
+            (ml_config(0, 50, 1e-4), "n_draws"),
+            (ml_config(50, 0, 1e-4), "max_iter"),
+            (ml_config(50, 50, -1.0), "tolerance"),
+            (ml_config(50, 50, f64::NAN), "tolerance"),
+        ] {
+            match ml_run(cfg).unwrap_err() {
+                EconError::InvalidSpecification { message } => {
+                    assert!(message.contains(field), "{message}")
+                }
+                e => panic!("{field}: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_mixed_logit_impossible_draw_count_is_an_error() {
+        let e = ml_run(ml_config(1usize << 60, 50, 1e-4)).unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    /// One situation with 2 alternatives and 100,000 draws is 200,000
+    /// draw-alternative evaluations: the budget must be checked inside it.
+    #[test]
+    fn test_simulated_probability_checks_cancellation_within_a_situation() {
+        let sit = ChoiceSituation {
+            x: vec![vec![1.0], vec![0.5]],
+            chosen_idx: 0,
+        };
+        let n_draws = 100_000;
+        let draws = vec![
+            (0..n_draws)
+                .map(|r| ((r * 7919) % 1009) as f64 / 1009.0 - 0.5)
+                .collect::<Vec<f64>>(),
+        ];
+        let dists = [RandomDistribution::Normal];
+        let run = || {
+            let mut work = 0;
+            simulated_choice_probability(&sit, &draws, n_draws, &[0.3], &[0.2], &dists, &mut work)
+        };
+        let p = run().unwrap();
+        assert!(p > 0.5 && p < 1.0, "{p}");
+        let e = resource::with_budget(cancelled(), run).unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_mixed_logit_stops_when_cancelled() {
+        let e = resource::with_budget(cancelled(), || ml_run(ml_config(50, 50, 1e-4))).unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
     }
 
     #[test]

@@ -12,6 +12,7 @@
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for smooth.spline fitting.
@@ -164,13 +165,13 @@ pub fn smooth_spline(
         select_knots(&xs, n_unique.min(50))
     };
 
-    // Compute the B-spline basis and penalty matrix
-    let (basis, penalty) = compute_bspline_basis_and_penalty(&xs, &knots)?;
+    // Compute the roughness penalty R'R (pentadiagonal, stored as bands)
+    let penalty = penalty_bands(&xs)?;
 
     // Determine lambda
     let (lambda, cv_score) = if let Some(df) = config.df {
         // Convert df to lambda
-        (df_to_lambda(&basis, &penalty, &ws, df)?, None)
+        (df_to_lambda(&penalty, &ws, df)?, None)
     } else if let Some(spar) = config.spar {
         // Convert spar to lambda
         let range = xs[xs.len() - 1] - xs[0];
@@ -180,11 +181,11 @@ pub fn smooth_spline(
         (lam, None)
     } else {
         // Use cross-validation to select lambda
-        cross_validate(&basis, &penalty, &ys, &ws, config.cv)?
+        cross_validate(&penalty, &ys, &ws, config.cv)?
     };
 
     // Fit the smoothing spline with the selected lambda
-    let (fitted, df, leverage) = fit_smoothing_spline(&basis, &penalty, &ys, &ws, lambda)?;
+    let (fitted, df, leverage) = fit_smoothing_spline(&penalty, &ys, &ws, lambda)?;
 
     // Compute spar from lambda
     let range = xs[xs.len() - 1] - xs[0];
@@ -351,78 +352,67 @@ fn select_knots(x: &[f64], n_knots: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Compute B-spline basis and penalty matrix.
-/// Optimized O(n) implementation using the fact that R is tridiagonal,
-/// so R^T * R is pentadiagonal.
-fn compute_bspline_basis_and_penalty(
-    x: &[f64],
-    _knots: &[f64],
-) -> EconResult<(Vec<Vec<f64>>, Vec<Vec<f64>>)> {
+/// The symmetric pentadiagonal roughness penalty `R'R`, stored as its diagonal
+/// and its first and second super-diagonals (each of length n, zero-padded).
+struct PentaPenalty {
+    d0: Vec<f64>,
+    d1: Vec<f64>,
+    d2: Vec<f64>,
+}
+
+impl PentaPenalty {
+    /// Number of rows (and columns) of the penalty.
+    fn n(&self) -> usize {
+        self.d0.len()
+    }
+
+    /// Entry `(i, j)` of the penalty; `0.0` outside the band.
+    fn at(&self, i: usize, j: usize) -> f64 {
+        let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
+        match hi - lo {
+            0 => self.d0[lo],
+            1 => self.d1[lo],
+            2 => self.d2[lo],
+            _ => 0.0,
+        }
+    }
+}
+
+/// Build the penalty `R'R` for sorted, distinct `x` in O(n).
+///
+/// R (the second difference operator) is (n-2) x n and tridiagonal:
+/// R[k][k-1] = 1/h[k-1], R[k][k] = -1/h[k-1] - 1/h[k], R[k][k+1] = 1/h[k]
+/// for k = 1..n-2, so R'R has bandwidth 2. The bands accumulate in the same
+/// k order as a dense R'R would, so every entry is bit-identical to it.
+fn penalty_bands(x: &[f64]) -> EconResult<PentaPenalty> {
     let n = x.len();
+    let what = "smoothing spline penalty";
+    let mut d0 = resource::try_vec(n, 0.0, what)?;
+    let mut d1 = resource::try_vec(n, 0.0, what)?;
+    let mut d2 = resource::try_vec(n, 0.0, what)?;
 
-    // Compute spacing differences
-    let mut h = Vec::with_capacity(n - 1);
-    for i in 0..n - 1 {
-        h.push(x[i + 1] - x[i]);
+    for k in 1..n.saturating_sub(1) {
+        let h_left = x[k] - x[k - 1];
+        let h_right = x[k + 1] - x[k];
+        let r_left = 1.0 / h_left;
+        let r_mid = -1.0 / h_left - 1.0 / h_right;
+        let r_right = 1.0 / h_right;
+
+        // Ω[i][j] += R[k][i] * R[k][j]; R[k] is non-zero only at k-1, k, k+1
+        d0[k - 1] += r_left * r_left;
+        d1[k - 1] += r_left * r_mid;
+        d2[k - 1] += r_left * r_right;
+        d0[k] += r_mid * r_mid;
+        d1[k] += r_mid * r_right;
+        d0[k + 1] += r_right * r_right;
     }
 
-    // The R matrix (second difference operator) is (n-2) × n, tridiagonal:
-    // R[k][k-1] = 1/h[k-1]
-    // R[k][k]   = -1/h[k-1] - 1/h[k]
-    // R[k][k+1] = 1/h[k]
-    // for k = 1..n-2 (interior points)
-
-    // Build penalty matrix Ω = R^T R directly as pentadiagonal in O(n)
-    // Since R is tridiagonal, Ω has bandwidth 2 (pentadiagonal)
-    let mut penalty = vec![vec![0.0; n]; n];
-
-    // Precompute R values for each row k (k goes 1 to n-2, but stored as 0 to n-3)
-    // R[k] has values at positions k-1, k, k+1
-    for k in 1..n - 1 {
-        let r_left = 1.0 / h[k - 1];
-        let r_mid = -1.0 / h[k - 1] - 1.0 / h[k];
-        let r_right = 1.0 / h[k];
-
-        // Ω[i][j] += R[k][i] * R[k][j] for all k
-        // R[k] is non-zero only at positions k-1, k, k+1
-
-        // Position k-1, k-1
-        penalty[k - 1][k - 1] += r_left * r_left;
-        // Position k-1, k
-        penalty[k - 1][k] += r_left * r_mid;
-        penalty[k][k - 1] += r_mid * r_left;
-        // Position k-1, k+1
-        penalty[k - 1][k + 1] += r_left * r_right;
-        penalty[k + 1][k - 1] += r_right * r_left;
-        // Position k, k
-        penalty[k][k] += r_mid * r_mid;
-        // Position k, k+1
-        penalty[k][k + 1] += r_mid * r_right;
-        penalty[k + 1][k] += r_right * r_mid;
-        // Position k+1, k+1
-        penalty[k + 1][k + 1] += r_right * r_right;
-    }
-
-    // Basis matrix (identity for this simplified approach)
-    let basis: Vec<Vec<f64>> = (0..n)
-        .map(|i| {
-            let mut row = vec![0.0; n];
-            row[i] = 1.0;
-            row
-        })
-        .collect();
-
-    Ok((basis, penalty))
+    Ok(PentaPenalty { d0, d1, d2 })
 }
 
 /// Convert degrees of freedom to lambda using bisection.
-fn df_to_lambda(
-    basis: &[Vec<f64>],
-    penalty: &[Vec<f64>],
-    weights: &[f64],
-    target_df: f64,
-) -> EconResult<f64> {
-    let n = basis.len();
+fn df_to_lambda(penalty: &PentaPenalty, weights: &[f64], target_df: f64) -> EconResult<f64> {
+    let n = penalty.n();
 
     // Binary search for lambda that gives target df
     // Using log-scale search for faster convergence
@@ -430,9 +420,10 @@ fn df_to_lambda(
     let mut log_lambda_high: f64 = 10.0;
 
     for _ in 0..30 {
+        resource::checkpoint()?;
         let log_lambda_mid = (log_lambda_low + log_lambda_high) / 2.0;
         let lambda_mid = 10.0_f64.powf(log_lambda_mid);
-        let (_, df, _) = fit_smoothing_spline(basis, penalty, &vec![0.0; n], weights, lambda_mid)?;
+        let (_, df, _) = fit_smoothing_spline(penalty, &vec![0.0; n], weights, lambda_mid)?;
 
         if (df - target_df).abs() < 0.05 {
             return Ok(lambda_mid);
@@ -452,14 +443,11 @@ fn df_to_lambda(
 ///
 /// Uses a coarse-to-fine search strategy for efficiency.
 fn cross_validate(
-    basis: &[Vec<f64>],
-    penalty: &[Vec<f64>],
+    penalty: &PentaPenalty,
     y: &[f64],
     weights: &[f64],
     gcv: bool,
 ) -> EconResult<(f64, Option<f64>)> {
-    let _n = basis.len();
-
     // Coarse search first (fewer iterations)
     let mut best_lambda = 1.0;
     let mut best_score = f64::INFINITY;
@@ -470,7 +458,8 @@ fn cross_validate(
         .collect();
 
     for &lambda in &coarse_lambdas {
-        let score = compute_cv_score(basis, penalty, y, weights, lambda, gcv)?;
+        resource::checkpoint()?;
+        let score = compute_cv_score(penalty, y, weights, lambda, gcv)?;
         if score < best_score {
             best_score = score;
             best_lambda = lambda;
@@ -484,7 +473,8 @@ fn cross_validate(
         .collect();
 
     for &lambda in &fine_lambdas {
-        let score = compute_cv_score(basis, penalty, y, weights, lambda, gcv)?;
+        resource::checkpoint()?;
+        let score = compute_cv_score(penalty, y, weights, lambda, gcv)?;
         if score < best_score {
             best_score = score;
             best_lambda = lambda;
@@ -496,15 +486,14 @@ fn cross_validate(
 
 /// Compute CV score for a given lambda (helper for cross_validate).
 fn compute_cv_score(
-    basis: &[Vec<f64>],
-    penalty: &[Vec<f64>],
+    penalty: &PentaPenalty,
     y: &[f64],
     weights: &[f64],
     lambda: f64,
     gcv: bool,
 ) -> EconResult<f64> {
-    let n = basis.len();
-    let (fitted, df, leverage) = fit_smoothing_spline(basis, penalty, y, weights, lambda)?;
+    let n = penalty.n();
+    let (fitted, df, leverage) = fit_smoothing_spline(penalty, y, weights, lambda)?;
 
     let score = if gcv {
         // GCV score: (1/n) Σ (y_i - f(x_i))² / (1 - df/n)²
@@ -541,8 +530,7 @@ fn compute_cv_score(
 /// Uses banded matrix representation for O(n) complexity per solve.
 /// The penalty matrix for natural cubic splines is pentadiagonal (bandwidth 2).
 fn fit_smoothing_spline(
-    _basis: &[Vec<f64>],
-    penalty: &[Vec<f64>],
+    penalty: &PentaPenalty,
     y: &[f64],
     weights: &[f64],
     lambda: f64,
@@ -563,7 +551,7 @@ fn fit_smoothing_spline(
             let j = i as i32 + k as i32 - bandwidth as i32;
             if j >= 0 && (j as usize) < n {
                 let j = j as usize;
-                band[k][i] = lambda * penalty[i][j];
+                band[k][i] = lambda * penalty.at(i, j);
                 if i == j {
                     band[k][i] += weights[i];
                 }
@@ -670,61 +658,6 @@ fn solve_banded_system(
     Ok((x, leverage))
 }
 
-/// Cholesky decomposition: A = L L^T
-/// Returns lower triangular matrix L.
-fn cholesky_decompose(a: &[Vec<f64>]) -> EconResult<Vec<Vec<f64>>> {
-    let n = a.len();
-    let mut l = vec![vec![0.0; n]; n];
-
-    for i in 0..n {
-        for j in 0..=i {
-            let mut sum = a[i][j];
-            for k in 0..j {
-                sum -= l[i][k] * l[j][k];
-            }
-            if i == j {
-                if sum <= 0.0 {
-                    // Add regularization for numerical stability
-                    l[i][j] = 1e-10_f64.sqrt();
-                } else {
-                    l[i][j] = sum.sqrt();
-                }
-            } else {
-                l[i][j] = sum / l[j][j];
-            }
-        }
-    }
-
-    Ok(l)
-}
-
-/// Solve A x = b using pre-computed Cholesky factor L (where A = L L^T).
-fn cholesky_solve(l: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
-    let n = l.len();
-
-    // Forward substitution: L y = b
-    let mut y = vec![0.0; n];
-    for i in 0..n {
-        let mut sum = b[i];
-        for k in 0..i {
-            sum -= l[i][k] * y[k];
-        }
-        y[i] = sum / l[i][i];
-    }
-
-    // Backward substitution: L^T x = y
-    let mut x = vec![0.0; n];
-    for i in (0..n).rev() {
-        let mut sum = y[i];
-        for k in (i + 1)..n {
-            sum -= l[k][i] * x[k];
-        }
-        x[i] = sum / l[i][i];
-    }
-
-    x
-}
-
 /// Compute residuals at original data points.
 fn compute_residuals_at_original(
     x_orig: &[f64],
@@ -798,19 +731,10 @@ fn evaluate_spline(x: &[f64], y: &[f64], m: &[f64], xi: f64) -> f64 {
         return if n == 1 { y[0] } else { f64::NAN };
     }
 
-    // Find interval
-    let mut i = 0;
-    for j in 0..n - 1 {
-        if xi >= x[j] && xi <= x[j + 1] {
-            i = j;
-            break;
-        }
-    }
-    if xi < x[0] {
-        i = 0;
-    } else if xi > x[n - 1] {
-        i = n - 2;
-    }
+    // Find the interval by binary search over the sorted knots: the first i with
+    // x[i + 1] >= xi, clamped to the last interval. This is the interval a
+    // linear scan picks, also for knots, out-of-range points and NaN (interval 0).
+    let i = x[1..].partition_point(|&v| v < xi).min(n - 2);
 
     let h = x[i + 1] - x[i];
     let a = (x[i + 1] - xi) / h;
@@ -822,6 +746,125 @@ fn evaluate_spline(x: &[f64], y: &[f64], m: &[f64], xi: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// The pre-T0-WP14 `evaluate_spline` (linear interval scan), kept as the
+    /// reference for the binary search.
+    fn evaluate_spline_linear_scan(x: &[f64], y: &[f64], m: &[f64], xi: f64) -> f64 {
+        let n = x.len();
+        if n < 2 {
+            return if n == 1 { y[0] } else { f64::NAN };
+        }
+
+        // Find interval
+        let mut i = 0;
+        for j in 0..n - 1 {
+            if xi >= x[j] && xi <= x[j + 1] {
+                i = j;
+                break;
+            }
+        }
+        if xi < x[0] {
+            i = 0;
+        } else if xi > x[n - 1] {
+            i = n - 2;
+        }
+
+        let h = x[i + 1] - x[i];
+        let a = (x[i + 1] - xi) / h;
+        let b = (xi - x[i]) / h;
+
+        a * y[i]
+            + b * y[i + 1]
+            + ((a.powi(3) - a) * m[i] + (b.powi(3) - b) * m[i + 1]) * h * h / 6.0
+    }
+
+    #[test]
+    fn test_penalty_bands_match_dense_rtr() {
+        let x = [0.0, 0.4, 1.0, 1.1, 2.5, 3.0, 4.2, 4.3, 6.0];
+        let n = x.len();
+        let h: Vec<f64> = x.windows(2).map(|w| w[1] - w[0]).collect();
+        // naive R'R, rows k = 1..n-2, same accumulation order
+        let mut dense = vec![vec![0.0; n]; n];
+        for k in 1..n - 1 {
+            let r = [
+                (k - 1, 1.0 / h[k - 1]),
+                (k, -1.0 / h[k - 1] - 1.0 / h[k]),
+                (k + 1, 1.0 / h[k]),
+            ];
+            for &(i, ri) in &r {
+                for &(j, rj) in &r {
+                    dense[i][j] += ri * rj;
+                }
+            }
+        }
+        let p = penalty_bands(&x).unwrap();
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(p.at(i, j), dense[i][j], "({i},{j})");
+            }
+        }
+    }
+
+    #[test]
+    fn test_spline_interval_search_matches_linear_scan() {
+        let x = [0.0, 0.5, 1.5, 2.0, 3.5, 5.0];
+        let y = [1.0, 0.2, -0.4, 0.9, 1.7, 0.3];
+        let m = compute_spline_coefficients(&x, &y).unwrap();
+        for xi in [
+            -1.0,
+            0.0,
+            0.25,
+            0.5,
+            1.5,
+            1.7,
+            2.0,
+            4.99,
+            5.0,
+            7.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(
+                evaluate_spline(&x, &y, &m, xi).to_bits(),
+                evaluate_spline_linear_scan(&x, &y, &m, xi).to_bits(),
+                "xi={xi}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_smooth_spline_stops_when_cancelled() {
+        let x: Vec<f64> = (0..60).map(|i| i as f64 * 0.1).collect();
+        let y: Vec<f64> = x.iter().map(|v| v.sin()).collect();
+        let e = resource::with_budget(cancelled(), || {
+            smooth_spline(&x, &y, SmoothSplineConfig::with_cv(true))
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_smooth_spline_large_n_is_linear_memory() {
+        // Post-fix guard. Do NOT run against the dense code: it allocates two
+        // 80 GB n x n tables.
+        let n = 100_000;
+        let x: Vec<f64> = (0..n).map(|i| i as f64 / 1000.0).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v.sin() + 0.1 * ((i * 7919 % 1009) as f64 / 1009.0 - 0.5))
+            .collect();
+        let r = smooth_spline(&x, &y, SmoothSplineConfig::with_df(10.0)).unwrap();
+        assert_eq!(r.n_obs, n);
+    }
 
     #[test]
     fn test_smooth_spline_basic() {
@@ -962,5 +1005,103 @@ mod tests {
         // Residuals should be small for smooth data
         let max_resid = result.residuals.iter().map(|r| r.abs()).fold(0.0, f64::max);
         assert!(max_resid < 0.5, "Residuals too large: max = {}", max_resid);
+    }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds: 120 points with ties (108 unique x values, so knots are
+    /// subsampled). The refactor must not move these numbers.
+    #[test]
+    fn test_pinned_smooth_spline_outputs() {
+        let x: Vec<f64> = (0..120)
+            .map(|i| ((i as f64 * 0.37) % 11.0 * 10.0).round() / 10.0)
+            .collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| xi.sin() + 0.2 * (13.7 * i as f64).sin())
+            .collect();
+        let mut v = Vec::new();
+        for config in [
+            SmoothSplineConfig::with_df(8.0),
+            SmoothSplineConfig::with_cv(true),
+            SmoothSplineConfig::with_cv(false),
+            SmoothSplineConfig::with_spar(0.5),
+        ] {
+            let r = smooth_spline(&x, &y, config).unwrap();
+            assert!(r.x.len() > 50 && r.x.len() < x.len());
+            v.push(r.df);
+            v.push(r.lambda);
+            v.push(r.cv_crit.unwrap_or(-1.0));
+            v.push(r.y[0]);
+            v.push(r.y[r.y.len() / 2]);
+            v.push(r.y[r.y.len() - 1]);
+            v.push(r.residuals.iter().map(|e| e * e).sum::<f64>());
+            v.extend(smooth_spline_predict(&r, &[-1.0, 0.5, 5.25, 12.0]).unwrap());
+        }
+        assert_pinned(
+            "smooth spline",
+            &v,
+            &[
+                7.959650339740675,
+                0.31765311974565075,
+                -1.0,
+                0.039855882916652235,
+                -0.741512866824391,
+                -0.9894474775718114,
+                2.208640342105104,
+                -0.574606194806342,
+                0.5178801934638836,
+                -0.8798477928818665,
+                -2.3711789722590013,
+                3.385695443841225,
+                1.2589254117941675,
+                0.02009268620312995,
+                0.07080868290266186,
+                -0.7193031982347561,
+                -1.0182308450943232,
+                2.2761536407365695,
+                -0.6673589267151805,
+                0.5085642766694489,
+                -0.8637937775405333,
+                -1.8037473116242337,
+                3.385695443841225,
+                1.2589254117941675,
+                0.02061709010005428,
+                0.07080868290266186,
+                -0.7193031982347561,
+                -1.0182308450943232,
+                2.2761536407365695,
+                -0.6673589267151805,
+                0.5085642766694489,
+                -0.8637937775405333,
+                -1.8037473116242337,
+                0.3910712187506279,
+                191.85614814814815,
+                -1.0,
+                0.7089811199425499,
+                -0.2561670964031391,
+                -0.7676214379156595,
+                20.123882967936165,
+                0.7986745269386725,
+                0.6678437240664398,
+                -0.32252981657746854,
+                -1.4014086129325052,
+            ],
+        );
     }
 }

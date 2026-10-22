@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 
 /// Extract entity IDs from a DataFrame column and return as Vec<usize>.
 pub fn extract_entity_ids(dataset: &Dataset, entity_var: &str) -> EconResult<(Vec<usize>, usize)> {
@@ -176,6 +177,10 @@ pub fn extract_time_ids(dataset: &Dataset, time_var: &str) -> EconResult<(Vec<us
 ///
 /// For period t, valid instruments are y_{i,t-2}, y_{i,t-3}, ..., y_{i,1}
 /// The instrument matrix is block-diagonal across time periods.
+///
+/// The caller guarantees `n_periods >= 1` and `min_lag <= max_lag` after
+/// `max_lag` is limited to `n_periods - 1`. The matrix is sized with checked
+/// arithmetic and allocated through [`resource`].
 pub fn build_gmm_instrument_matrix(
     y_lagged: &[Vec<f64>], // y values by entity, each vec is time series
     n_groups: usize,
@@ -183,12 +188,14 @@ pub fn build_gmm_instrument_matrix(
     min_lag: usize,
     max_lag: Option<usize>,
     collapse: bool,
-) -> (Array2<f64>, usize) {
+) -> EconResult<(Array2<f64>, usize)> {
     // For difference GMM, we use lags 2, 3, ... as instruments for differenced equation
     // The instrument matrix grows with T
+    let what = "GMM instrument matrix";
 
     let max_lag = max_lag.unwrap_or(n_periods - 1);
     let max_lag = max_lag.min(n_periods - 1);
+    debug_assert!(min_lag <= max_lag, "callers validate min_lag <= max_lag");
 
     // Calculate number of instrument columns
     let n_inst_cols = if collapse {
@@ -197,25 +204,36 @@ pub fn build_gmm_instrument_matrix(
     } else {
         // Full: sum of available lags for each period
         // For t=min_lag+1, we have 1 instrument; for t=min_lag+2, we have 2, etc.
-        let mut total = 0;
+        let mut total: usize = 0;
         for t in (min_lag + 1)..n_periods {
             let n_lags = (t - min_lag).min(max_lag - min_lag + 1);
-            total += n_lags;
+            total = total.checked_add(n_lags).ok_or_else(|| {
+                EconError::ResourceLimit(format!(
+                    "{what} is too large: the requested size overflows"
+                ))
+            })?;
         }
         total
     };
 
     // Number of rows = number of groups × (number of valid time periods)
-    let n_rows = n_groups * (n_periods.saturating_sub(min_lag + 1));
+    let n_rows = resource::checked_len(
+        &[
+            n_groups,
+            n_periods.saturating_sub(min_lag.saturating_add(1)),
+        ],
+        what,
+    )?;
 
     if n_inst_cols == 0 || n_rows == 0 {
-        return (Array2::zeros((1, 1)), 0);
+        return Ok((Array2::zeros((1, 1)), 0));
     }
 
-    let mut z = Array2::zeros((n_rows, n_inst_cols));
+    let mut z = resource::try_zeros2(n_rows, n_inst_cols, what)?;
 
     let mut row = 0;
     for i in 0..n_groups {
+        resource::checkpoint()?;
         if y_lagged[i].len() < n_periods {
             continue;
         }
@@ -246,7 +264,7 @@ pub fn build_gmm_instrument_matrix(
         }
     }
 
-    (z, n_inst_cols)
+    Ok((z, n_inst_cols))
 }
 
 /// Compute Arellano-Bond test for serial correlation.
@@ -261,20 +279,22 @@ pub fn compute_ab_ar_test(
     let mut var_e = 0.0;
     let mut var_e_lag = 0.0;
 
-    for i in 0..n_groups {
-        let obs_i: Vec<(usize, &(usize, usize))> = valid_obs
-            .iter()
-            .enumerate()
-            .filter(|(_, (e, _))| *e == i)
-            .collect();
+    // Rows of each entity, in row order, grouped in one pass
+    let mut rows_by_entity: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
+    for (row, &(e, _)) in valid_obs.iter().enumerate() {
+        if e < n_groups {
+            rows_by_entity[e].push(row);
+        }
+    }
 
+    for obs_i in &rows_by_entity {
         if obs_i.len() <= order {
             continue;
         }
 
         for idx in order..obs_i.len() {
-            let (row_idx, _) = obs_i[idx];
-            let (row_idx_lag, _) = obs_i[idx - order];
+            let row_idx = obs_i[idx];
+            let row_idx_lag = obs_i[idx - order];
 
             let e_it = resid[row_idx];
             let e_it_lag = resid[row_idx_lag];

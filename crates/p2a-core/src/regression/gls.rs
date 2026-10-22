@@ -8,8 +8,9 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::DesignError;
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
+use crate::resource;
 use crate::traits::estimator::t_test_p_value;
-use ndarray::{Array1, Array2, ArrayView2, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 
 /// Correlation structure for GLS.
@@ -70,6 +71,14 @@ pub struct GlsResult {
 ///
 /// Estimates Y = Xβ + ε where Var(ε) = σ²Ω using generalized least squares.
 ///
+/// The data are whitened with a matrix `P` such that `P'P = Ω⁻¹` and OLS is fit
+/// to `(P y, P X)`, which gives exactly the GLS estimator, its standard errors
+/// and σ. `P` is the Prais-Winsten transform for AR(1), a closed-form symmetric
+/// square root of `Ω⁻¹` for compound symmetry (both O(n p)), no transform for
+/// the identity, and `L⁻¹` applied by forward substitution, where `Ω = L L'`, for
+/// a known `Ω` (an O(n³) Cholesky factor, allocated fallibly, then O(n² p)
+/// whitening).
+///
 /// # Arguments
 ///
 /// * `y` - Response vector (n × 1)
@@ -101,16 +110,8 @@ pub fn gls(
         });
     }
 
-    // Build the correlation matrix Ω
-    let omega = build_correlation_matrix(n, &correlation)?;
-
-    // Compute Ω^(-1/2) via Cholesky: Ω = LL', so Ω^(-1/2) = L^(-T)
-    let omega_inv_sqrt = compute_omega_inv_sqrt(&omega)?;
-
-    // Transform data: y* = Ω^(-1/2) y, X* = Ω^(-1/2) X
-    let y_arr = y.to_owned();
-    let y_star = omega_inv_sqrt.dot(&y_arr);
-    let x_star = omega_inv_sqrt.dot(x);
+    // Transform data: y* = P y, X* = P X with P'P = Ω⁻¹
+    let (y_star, x_star) = whiten(y, x, &correlation)?;
 
     // Now apply OLS to transformed data
     let xtx_star = xtx(&x_star.view());
@@ -195,35 +196,67 @@ pub fn gls(
     })
 }
 
-/// Build correlation matrix Ω from the specified structure.
-fn build_correlation_matrix(n: usize, structure: &CorrelationStructure) -> EconResult<Array2<f64>> {
+/// Whitened data `(P y, P X)` for a whitening matrix `P` with `P'P = Ω⁻¹`.
+///
+/// Any such `P` turns GLS into OLS on the transformed data.
+fn whiten(
+    y: &ArrayView1<f64>,
+    x: &ArrayView2<f64>,
+    structure: &CorrelationStructure,
+) -> EconResult<(Array1<f64>, Array2<f64>)> {
+    let n = y.len();
     match structure {
+        CorrelationStructure::Identity => Ok((y.to_owned(), x.to_owned())),
         CorrelationStructure::AR1 { rho } => {
-            if rho.abs() >= 1.0 {
+            let rho = *rho;
+            if !rho.is_finite() || rho.abs() >= 1.0 {
                 return Err(EconError::InvalidSpecification {
-                    message: "AR(1) correlation |rho| must be < 1".to_string(),
+                    message: format!("AR(1) correlation |rho| must be < 1 (got {rho})"),
                 });
             }
-            let mut omega = Array2::zeros((n, n));
-            for i in 0..n {
-                for j in 0..n {
-                    let lag = (i as i64 - j as i64).unsigned_abs() as i32;
-                    omega[[i, j]] = rho.powi(lag);
+            // Prais-Winsten: exactly L⁻¹ for the Cholesky factor of Ω[i,j] = ρ^|i-j|
+            let scale = (1.0 - rho * rho).sqrt();
+            let transform = |v: &mut [f64]| {
+                for t in (1..v.len()).rev() {
+                    v[t] = (v[t] - rho * v[t - 1]) / scale;
                 }
-            }
-            Ok(omega)
+            };
+            let mut y_star = y.to_vec();
+            transform(&mut y_star);
+            let x_star = whiten_columns(x, |col| {
+                transform(col);
+                Ok(())
+            })?;
+            Ok((Array1::from_vec(y_star), x_star))
         }
         CorrelationStructure::CompoundSymmetry { rho } => {
-            if *rho <= -1.0 / (n as f64 - 1.0) || *rho >= 1.0 {
+            let rho = *rho;
+            if !rho.is_finite() || rho <= -1.0 / (n as f64 - 1.0) || rho >= 1.0 {
                 return Err(EconError::InvalidSpecification {
-                    message: "Compound symmetry rho out of valid range".to_string(),
+                    message: format!(
+                        "compound symmetry rho must lie in (-1/(n - 1), 1) = ({:.6}, 1) \
+                         for n = {n} (got {rho})",
+                        -1.0 / (n as f64 - 1.0)
+                    ),
                 });
             }
-            let mut omega = Array2::from_elem((n, n), *rho);
-            for i in 0..n {
-                omega[[i, i]] = 1.0;
-            }
-            Ok(omega)
+            // Ω = (1 - ρ) I + ρ 11' has eigenvalue 1 + (n - 1)ρ on 1 and 1 - ρ on its
+            // complement, so P = c (I - a 11'/n) is symmetric with P² = Ω⁻¹.
+            let a = 1.0 - ((1.0 - rho) / (1.0 + (n as f64 - 1.0) * rho)).sqrt();
+            let c = 1.0 / (1.0 - rho).sqrt();
+            let transform = |v: &mut [f64]| {
+                let mean = v.iter().sum::<f64>() / v.len() as f64;
+                for e in v.iter_mut() {
+                    *e = c * (*e - a * mean);
+                }
+            };
+            let mut y_star = y.to_vec();
+            transform(&mut y_star);
+            let x_star = whiten_columns(x, |col| {
+                transform(col);
+                Ok(())
+            })?;
+            Ok((Array1::from_vec(y_star), x_star))
         }
         CorrelationStructure::Known { omega } => {
             if omega.nrows() != n || omega.ncols() != n {
@@ -231,51 +264,64 @@ fn build_correlation_matrix(n: usize, structure: &CorrelationStructure) -> EconR
                     message: format!("Known Omega must be {}x{}", n, n),
                 });
             }
-            Ok(omega.clone())
+            // Ω = L L', P = L⁻¹: solve L z = v by forward substitution
+            let l = cholesky_lower(omega)?;
+            let mut y_star = y.to_vec();
+            forward_substitute(&l, &mut y_star)?;
+            let x_star = whiten_columns(x, |col| forward_substitute(&l, col))?;
+            Ok((Array1::from_vec(y_star), x_star))
         }
-        CorrelationStructure::Identity => Ok(Array2::eye(n)),
     }
 }
 
-/// Compute Ω^(-1/2) using Cholesky decomposition.
-fn compute_omega_inv_sqrt(omega: &Array2<f64>) -> EconResult<Array2<f64>> {
-    let n = omega.nrows();
-
-    // For identity matrix, return identity
-    if is_identity(omega) {
-        return Ok(Array2::eye(n));
-    }
-
-    // Cholesky decomposition: Ω = LL'
-    let l = cholesky_lower(omega)?;
-
-    // Compute L^(-1) by forward substitution
-    let l_inv = lower_triangular_inverse(&l)?;
-
-    // Ω^(-1/2) = L^(-T) = (L^(-1))'
-    Ok(l_inv.t().to_owned())
-}
-
-/// Check if matrix is identity.
-fn is_identity(m: &Array2<f64>) -> bool {
-    let n = m.nrows();
-    for i in 0..n {
-        for j in 0..n {
-            let expected = if i == j { 1.0 } else { 0.0 };
-            if (m[[i, j]] - expected).abs() > 1e-10 {
-                return false;
-            }
+/// Apply a whitening transform to each column of `x`, checking the
+/// cancellation budget once per column.
+fn whiten_columns(
+    x: &ArrayView2<f64>,
+    mut transform: impl FnMut(&mut [f64]) -> EconResult<()>,
+) -> EconResult<Array2<f64>> {
+    let (n, p) = x.dim();
+    let mut x_star = Array2::zeros((n, p));
+    let mut col = vec![0.0; n];
+    for j in 0..p {
+        resource::checkpoint()?;
+        for (c, &v) in col.iter_mut().zip(x.column(j)) {
+            *c = v;
+        }
+        transform(&mut col)?;
+        for (dst, &v) in x_star.column_mut(j).iter_mut().zip(&col) {
+            *dst = v;
         }
     }
-    true
+    Ok(x_star)
+}
+
+/// Solve `L z = v` in place for a lower-triangular `L` (forward substitution).
+fn forward_substitute(l: &Array2<f64>, v: &mut [f64]) -> EconResult<()> {
+    for i in 0..v.len() {
+        let diag = l[[i, i]];
+        if diag.abs() < 1e-15 {
+            return Err(EconError::SingularMatrix {
+                context: "Lower triangular matrix has zero on diagonal".to_string(),
+                suggestion: "Check matrix conditioning".to_string(),
+            });
+        }
+        let mut sum = v[i];
+        for k in 0..i {
+            sum -= l[[i, k]] * v[k];
+        }
+        v[i] = sum / diag;
+    }
+    Ok(())
 }
 
 /// Cholesky decomposition (lower triangular L such that A = LL').
 fn cholesky_lower(a: &Array2<f64>) -> EconResult<Array2<f64>> {
     let n = a.nrows();
-    let mut l = Array2::zeros((n, n));
+    let mut l = resource::try_zeros2(n, n, "GLS Cholesky factor")?;
 
     for i in 0..n {
+        resource::checkpoint()?;
         for j in 0..=i {
             let mut sum = 0.0;
             for k in 0..j {
@@ -300,32 +346,6 @@ fn cholesky_lower(a: &Array2<f64>) -> EconResult<Array2<f64>> {
     }
 
     Ok(l)
-}
-
-/// Compute inverse of lower triangular matrix.
-fn lower_triangular_inverse(l: &Array2<f64>) -> EconResult<Array2<f64>> {
-    let n = l.nrows();
-    let mut inv = Array2::zeros((n, n));
-
-    for i in 0..n {
-        if l[[i, i]].abs() < 1e-15 {
-            return Err(EconError::SingularMatrix {
-                context: "Lower triangular matrix has zero on diagonal".to_string(),
-                suggestion: "Check matrix conditioning".to_string(),
-            });
-        }
-        inv[[i, i]] = 1.0 / l[[i, i]];
-
-        for j in 0..i {
-            let mut sum = 0.0;
-            for k in j..i {
-                sum += l[[i, k]] * inv[[k, j]];
-            }
-            inv[[i, j]] = -sum / l[[i, i]];
-        }
-    }
-
-    Ok(inv)
 }
 
 /// Fit GLS with automatic AR(1) correlation parameter estimation.
@@ -551,9 +571,266 @@ mod tests {
         assert!(result.coefficients[1] > 0.5);
     }
 
+    /// Dense n x n correlation matrix (the pre-T0-WP14 `build_correlation_matrix`),
+    /// kept as a test reference for the closed-form transforms.
+    fn dense_correlation_matrix(n: usize, structure: &CorrelationStructure) -> Array2<f64> {
+        match structure {
+            CorrelationStructure::AR1 { rho } => {
+                let mut omega = Array2::zeros((n, n));
+                for i in 0..n {
+                    for j in 0..n {
+                        let lag = (i as i64 - j as i64).unsigned_abs() as i32;
+                        omega[[i, j]] = rho.powi(lag);
+                    }
+                }
+                omega
+            }
+            CorrelationStructure::CompoundSymmetry { rho } => {
+                let mut omega = Array2::from_elem((n, n), *rho);
+                for i in 0..n {
+                    omega[[i, i]] = 1.0;
+                }
+                omega
+            }
+            CorrelationStructure::Known { omega } => omega.clone(),
+            CorrelationStructure::Identity => Array2::eye(n),
+        }
+    }
+
+    /// Textbook GLS with an explicit inverse: beta = (X'O^-1 X)^-1 X'O^-1 y,
+    /// sigma^2 = e'O^-1 e / (n - p). Returns (beta, standard errors, sigma).
+    fn dense_gls_reference(
+        y: &Array1<f64>,
+        x: &Array2<f64>,
+        omega: &Array2<f64>,
+    ) -> (Array1<f64>, Array1<f64>, f64) {
+        let (omega_inv, _) = safe_inverse(&omega.view()).unwrap();
+        let xto = x.t().dot(&omega_inv);
+        let (a_inv, _) = safe_inverse(&xto.dot(x).view()).unwrap();
+        let beta = a_inv.dot(&xto.dot(y));
+        let e = y - &x.dot(&beta);
+        let (n, p) = x.dim();
+        let sigma2 = e.dot(&omega_inv.dot(&e)) / (n - p) as f64;
+        let se = a_inv.diag().mapv(|v| (v * sigma2).sqrt());
+        (beta, se, sigma2.sqrt())
+    }
+
+    const NLME_X: [f64; 30] = [
+        5.637, 8.080, 7.150, 8.753, 6.938, 6.813, 8.448, 7.718, 7.320, 6.537, 2.562, 2.370, 2.185,
+        0.415, 6.587, 0.424, 9.626, 7.693, 8.135, 7.260, 3.562, 6.383, 3.659, 6.179, 5.827, 9.956,
+        1.355, 9.545, 1.014, 3.836,
+    ];
+    const NLME_Y: [f64; 30] = [
+        6.5899, 7.4509, 8.7175, 8.8798, 7.3817, 6.2093, 7.3718, 8.4644, 8.4831, 8.5294, 4.1718,
+        3.3226, 3.6097, 2.7661, 8.2699, 2.9248, 9.6094, 8.4130, 8.1559, 7.5124, 5.1513, 7.7384,
+        4.7780, 7.3021, 5.5900, 9.2503, 1.8103, 8.8721, 2.9977, 4.4985,
+    ];
+
+    fn nlme_xy() -> (Array1<f64>, Array2<f64>) {
+        let x = Array2::from_shape_fn((30, 2), |(i, j)| if j == 0 { 1.0 } else { NLME_X[i] });
+        (Array1::from_vec(NLME_Y.to_vec()), x)
+    }
+
+    /// GLS with a fixed correlation vs `nlme::gls` (nlme 3.1.164; REML sigma).
+    ///
+    /// ```r
+    /// library(nlme); set.seed(20261021); n <- 30
+    /// x <- round(runif(n, 0, 10), 3); e <- numeric(n); e[1] <- rnorm(1)
+    /// for (i in 2:n) e[i] <- 0.6 * e[i - 1] + rnorm(1, sd = 0.8)
+    /// y <- round(1.5 + 0.8 * x + e, 4); d <- data.frame(y = y, x = x)
+    /// gls(y ~ x, data = d, correlation = corAR1(0.6, fixed = TRUE))
+    /// # and corAR1(-0.4), corCompSymm(0.3), corCompSymm(-0.02), no correlation
+    /// # reported: coef(fit), summary(fit)$tTable[, 2], fit$sigma
+    /// ```
+    #[test]
+    fn test_validate_gls_fixed_correlation_vs_nlme() {
+        let (y, x) = nlme_xy();
+        let cases = [
+            (
+                CorrelationStructure::AR1 { rho: 0.6 },
+                [
+                    1.941977840640,
+                    0.791557641587,
+                    0.387453755473,
+                    0.040120184694,
+                    0.903229314501,
+                ],
+            ),
+            (
+                CorrelationStructure::AR1 { rho: -0.4 },
+                [
+                    2.213916554461,
+                    0.747378376163,
+                    0.307612193194,
+                    0.049986850996,
+                    0.906511290861,
+                ],
+            ),
+            (
+                CorrelationStructure::CompoundSymmetry { rho: 0.3 },
+                [
+                    2.093925805991,
+                    0.767614285417,
+                    0.552217510279,
+                    0.046135388346,
+                    0.852538446062,
+                ],
+            ),
+            (
+                CorrelationStructure::CompoundSymmetry { rho: -0.02 },
+                [
+                    2.093925805991,
+                    0.767614285417,
+                    0.277347530251,
+                    0.046135388346,
+                    0.706257230683,
+                ],
+            ),
+            (
+                CorrelationStructure::Identity,
+                [
+                    2.093925805991,
+                    0.767614285417,
+                    0.294784053256,
+                    0.046135388346,
+                    0.713284838904,
+                ],
+            ),
+        ];
+        for (corr, r) in cases {
+            let label = format!("{corr:?}");
+            let g = gls(&y.view(), &x.view(), corr).unwrap();
+            let got = [
+                g.coefficients[0],
+                g.coefficients[1],
+                g.std_errors[0],
+                g.std_errors[1],
+                g.sigma,
+            ];
+            for (a, e) in got.iter().zip(r) {
+                assert!((a - e).abs() < 1e-8, "{label}: got {got:?}, nlme {r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_gls_closed_forms_match_dense_reference() {
+        let n = 25;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => (i as f64 * 0.7).sin() * 3.0 + i as f64 * 0.1,
+            _ => ((i * 13) % 7) as f64 - 3.0,
+        });
+        let y = Array1::from_shape_fn(n, |i| {
+            1.0 + 0.5 * x[[i, 1]] - 0.3 * x[[i, 2]] + (i as f64 * 1.9).cos() * 0.4
+        });
+        for corr in [
+            CorrelationStructure::AR1 { rho: 0.9 },
+            CorrelationStructure::AR1 { rho: 0.3 },
+            CorrelationStructure::AR1 { rho: -0.7 },
+            CorrelationStructure::CompoundSymmetry { rho: 0.5 },
+            CorrelationStructure::CompoundSymmetry { rho: -0.03 },
+        ] {
+            let omega = dense_correlation_matrix(n, &corr);
+            let (b_ref, se_ref, sigma_ref) = dense_gls_reference(&y, &x, &omega);
+            let g = gls(&y.view(), &x.view(), corr.clone()).unwrap();
+            for j in 0..3 {
+                assert!(
+                    (g.coefficients[j] - b_ref[j]).abs() < 1e-10
+                        && (g.std_errors[j] - se_ref[j]).abs() < 1e-10,
+                    "{corr:?}: {:?} vs {b_ref}, {:?} vs {se_ref}",
+                    g.coefficients,
+                    g.std_errors
+                );
+            }
+            assert!((g.sigma - sigma_ref).abs() < 1e-10, "{corr:?}");
+            let known = gls(&y.view(), &x.view(), CorrelationStructure::Known { omega }).unwrap();
+            for j in 0..3 {
+                assert!(
+                    (known.coefficients[j] - g.coefficients[j]).abs() < 1e-10,
+                    "Known vs closed form {corr:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_gls_compound_symmetry_rho_error_names_value_and_bound() {
+        // n = 5: rho must lie in (-0.25, 1)
+        let y = array![1.0, 2.1, 2.9, 4.1, 5.0];
+        let x = array![[1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0], [1.0, 5.0]];
+        let e = gls(
+            &y.view(),
+            &x.view(),
+            CorrelationStructure::CompoundSymmetry { rho: -0.3 },
+        )
+        .unwrap_err();
+        match e {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("(-0.250000, 1)")
+                    && message.contains("n = 5")
+                    && message.contains("got -0.3"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gls_rejects_non_finite_rho() {
+        let (y, x) = nlme_xy();
+        for corr in [
+            CorrelationStructure::AR1 { rho: f64::NAN },
+            CorrelationStructure::CompoundSymmetry { rho: f64::NAN },
+        ] {
+            let e = gls(&y.view(), &x.view(), corr).unwrap_err();
+            assert!(matches!(e, EconError::InvalidSpecification { .. }), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn test_gls_known_omega_respects_alloc_ceiling() {
+        let n = 400;
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| {
+            if j == 0 {
+                1.0
+            } else {
+                (i as f64 * 0.37).sin() * 5.0
+            }
+        });
+        let y = Array1::from_shape_fn(n, |i| 2.0 + 0.5 * x[[i, 1]] + (i as f64 * 2.1).cos());
+        let omega = dense_correlation_matrix(n, &CorrelationStructure::AR1 { rho: 0.5 });
+        // L is 400*400*8 = 1.28 MB
+        let e = crate::resource::with_alloc_ceiling(Some(256 << 10), || {
+            gls(&y.view(), &x.view(), CorrelationStructure::Known { omega })
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_gls_ar1_large_n_is_linear() {
+        // Post-fix guard. Do NOT run against the dense code: it allocates
+        // several 320 GB matrices.
+        let n = 200_000;
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| {
+            if j == 0 {
+                1.0
+            } else {
+                (i % 1000) as f64 / 100.0
+            }
+        });
+        let y = Array1::from_shape_fn(n, |i| {
+            1.0 + 0.8 * x[[i, 1]] + ((i * 7919) % 1009) as f64 / 1009.0
+        });
+        let g = gls(&y.view(), &x.view(), CorrelationStructure::AR1 { rho: 0.5 }).unwrap();
+        assert_eq!(g.n_obs, n);
+        assert!((g.coefficients[1] - 0.8).abs() < 0.05);
+    }
+
     #[test]
     fn test_build_ar1_matrix() {
-        let omega = build_correlation_matrix(4, &CorrelationStructure::AR1 { rho: 0.5 }).unwrap();
+        let omega = dense_correlation_matrix(4, &CorrelationStructure::AR1 { rho: 0.5 });
 
         // Check structure: Ω[i,j] = 0.5^|i-j|
         assert!((omega[[0, 0]] - 1.0).abs() < 1e-10);
