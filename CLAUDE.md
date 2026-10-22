@@ -876,8 +876,11 @@ Auto-discovered guidance:
   gates and commands are in `docs/guides/TESTING.md`. `sessions.rs` (needs `db`) and the `/ws` test (needs
   `websocket`) are outside CI: run `cargo test -p p2a-mcp --features full` (or
   `--no-default-features --features "http,llm,auth,db"`) when touching sessions, the DB or the websocket.
-- **Tests never call `limits::install` or `resource::set_alloc_ceiling_bytes`** (process-global, and tests in
-  one binary run in parallel): use the thread-local `limits::with_limits` and `resource::with_alloc_ceiling`.
+- **Do not call `limits::install` or `resource::set_alloc_ceiling_bytes` per test** (process-global, and tests
+  in one binary run in parallel). Select limits with the thread-local `limits::with_limits` and
+  `resource::with_alloc_ceiling`. The exceptions: a test binary whose tests all share one configuration installs
+  it once inside a `OnceLock` (`crates/p2a-mcp/tests/isolation.rs`), and p2a-core's `global_ceiling_round_trips`
+  sets only a harmless ceiling (`usize::MAX - 1`) and restores `None`.
 - **Clippy runs but does not gate**: p2a-core has a pre-existing backlog of clippy violations, and
   `Cargo.toml` `[workspace.lints]` allows a long list of lints (dead_code, unused_imports, too_many_arguments, ...).
   Do not "fix" the allow-list to make a build green; do keep new code warning-free.
@@ -947,9 +950,9 @@ let df = df! {
    - CSV via `CsvExport` trait (all result types)
 6. **ARM64 builds**: On aarch64-linux, debug builds require `opt-level = 1` due to relocation range limits with large binaries. Create `.cargo/config.toml` locally (see ARM64 Build Notes); it is gitignored. Release builds work without modification.
 8. **Filesystem access in p2a-mcp**: any tool or HTTP handler that takes a path must call `path_jail::validate_data_path` first (writers: `validate_data_path_for_write` + `write_atomically`), and messages show `display_path` only, never absolute paths. Paths are session-scoped automatically, because the governor enters `path_jail::enter_session_scope` on the blocking thread that runs the handler; handlers must therefore not spawn threads or tasks that validate paths (those have no scope and are refused). The hosted demo (p2a.qamelab.org) runs in open public mode with the hosted resource profile; see `docs/guides/DEPLOYMENT.md` for the threat model before changing anything on the HTTP surface.
-10. **Deployment mode and resource profile are decided only in `config.rs`** (`DeploymentMode`, `ResourceProfile`). Local, stdio, desktop and the paper's evaluation runs are `Off`: no caps, no deadline, no per-session directories. `P2A_LIMITS=hosted` turns the server layer on anywhere, and open public mode always has it. Never key behaviour to the bind address.
 9. **Native Dioxus builds embed the backend**: `desktop`/`mobile` features depend on `p2a-mcp` and start an in-process server (`start_embedded_server` in `p2a-dioxus/src/main.rs`); the web build talks to `P2A_BACKEND_URL` baked in at build time. A change to `p2a-mcp`'s public API can break the desktop build even when the web build passes.
 7. **Disk space**: The `target/` directory can grow large. Use `cargo clean` to reclaim space.
+10. **Deployment mode and resource profile are decided only in `config.rs`** (`DeploymentMode`, `ResourceProfile`). Local, stdio, desktop and the paper's evaluation runs are `Off`: no caps, no deadline, no per-session directories. `P2A_LIMITS=hosted` turns the server layer on anywhere, and open public mode always has it. Never key behaviour to the bind address.
 
 ## Key Files
 

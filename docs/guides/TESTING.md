@@ -213,9 +213,11 @@ Tests for the resource guards (core) and the server's limits follow these conven
 - **Governor tests** use synthetic closures that loop on `resource::checkpoint()` until a release
   flag is set, with bounded polling and generous margins.
 - **Limits and allocation ceilings** are selected per test with the thread-local
-  `limits::with_limits` and `resource::with_alloc_ceiling`. Never call `limits::install` or
-  `resource::set_alloc_ceiling_bytes` in a test: they are process-wide, and the tests of one binary
-  run in parallel.
+  `limits::with_limits` and `resource::with_alloc_ceiling`. Do not call `limits::install` or
+  `resource::set_alloc_ceiling_bytes` per test: they are process-wide, and the tests of one binary
+  run in parallel. The exceptions: a test binary whose tests all share one configuration installs
+  it once inside a `OnceLock` (`crates/p2a-mcp/tests/isolation.rs`), and p2a-core's
+  `global_ceiling_round_trips` sets only a harmless ceiling (`usize::MAX - 1`) and restores `None`.
 - **Complexity rewrites** need an equivalence test against a naive reference on noisy random data,
   plus R-pinned values where R has the method.
 
