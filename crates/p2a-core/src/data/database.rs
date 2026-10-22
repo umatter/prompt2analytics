@@ -50,6 +50,11 @@ pub enum DatabaseError {
 /// This is a keyword-level filter, not a full SQL parser. It strips SQL block
 /// comments (`/* ... */`) and line comments (`-- ...`) from the leading whitespace
 /// before inspecting the first statement keyword.
+///
+/// It is defence in depth only. The enforcement is the engine configuration of
+/// every query connection (DuckDB: external access off, extensions off, locked
+/// configuration, read-only files; SQLite: read-only, `query_only`, no ATTACH)
+/// together with [`ensure_single_statement`].
 pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
     const ALLOWED: &[&str] = &["select", "with", "explain", "pragma", "describe", "show"];
 
@@ -290,6 +295,23 @@ fn strip_leading_comments(query: &str) -> &str {
     }
 }
 
+/// Bounds for one SQL query. The default has none: the engine lockdown
+/// (read-only, no file access, no extensions, locked configuration) always
+/// applies, but rows, bytes, memory, threads and time are unbounded.
+#[derive(Debug, Clone, Default)]
+pub struct QueryOptions {
+    /// Rows kept; also the engine-side `LIMIT` (+1) for `SELECT`/`WITH` statements.
+    pub max_rows: Option<usize>,
+    /// Estimated result bytes kept; for SQLite also the largest value (`SQLITE_LIMIT_LENGTH`).
+    pub max_bytes: Option<u64>,
+    /// Wall-clock limit for the query.
+    pub timeout: Option<std::time::Duration>,
+    /// DuckDB `memory_limit` in MiB (spilling to disk is then disabled). SQLite ignores it.
+    pub memory_limit_mb: Option<u64>,
+    /// DuckDB worker threads. SQLite ignores it.
+    pub threads: Option<u32>,
+}
+
 /// Result of a database query.
 #[derive(Debug)]
 pub struct QueryResult {
@@ -489,6 +511,87 @@ pub fn sqlite_table_schema(
 // DuckDB Support
 // ============================================================================
 
+/// What a DuckDB connection is opened for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DuckDbKind {
+    /// A database file, opened read-only.
+    File,
+    /// A fresh `:memory:` database.
+    Memory,
+    /// The in-memory connection of [`query_file_with_duckdb`]; external access
+    /// is disabled and the configuration locked after `allowed_paths` is set.
+    FileQuery,
+}
+
+/// The startup configuration of every DuckDB connection. The order matters:
+/// `temp_directory` can no longer be changed once external access is off, and
+/// `lock_configuration` must come last.
+fn duckdb_config(opts: &QueryOptions, kind: DuckDbKind) -> Result<duckdb::Config, DatabaseError> {
+    let mut config = duckdb::Config::default();
+    if let Some(mb) = opts.memory_limit_mb {
+        // No temp directory: buffer-managed operators cannot spill past the limit.
+        config = config
+            .with("memory_limit", format!("{mb}MiB"))?
+            .with("temp_directory", "")?;
+    }
+    if let Some(n) = opts.threads {
+        config = config.threads(i64::from(n))?;
+    }
+    config = config
+        .enable_autoload_extension(false)?
+        .with("allow_community_extensions", "false")?;
+    if kind == DuckDbKind::File {
+        config = config.access_mode(duckdb::AccessMode::ReadOnly)?;
+    }
+    if kind != DuckDbKind::FileQuery {
+        config = config
+            .enable_external_access(false)?
+            .with("lock_configuration", "true")?;
+    }
+    Ok(config)
+}
+
+/// Open a DuckDB database (`:memory:` or a file, the latter read-only) with
+/// external access, extension install/load and reconfiguration disabled by the
+/// engine itself.
+fn open_duckdb_locked(
+    path: &Path,
+    opts: &QueryOptions,
+) -> Result<duckdb::Connection, DatabaseError> {
+    if path.to_string_lossy() == ":memory:" {
+        let config = duckdb_config(opts, DuckDbKind::Memory)?;
+        Ok(duckdb::Connection::open_in_memory_with_flags(config)?)
+    } else {
+        let config = duckdb_config(opts, DuckDbKind::File)?;
+        Ok(duckdb::Connection::open_with_flags(path, config)?)
+    }
+}
+
+/// `file` as a single-quoted SQL string literal (`'` doubled).
+fn quoted_file_literal(file: &Path) -> Result<String, DatabaseError> {
+    let s = file
+        .to_str()
+        .ok_or_else(|| DatabaseError::Forbidden("the file path is not valid UTF-8".to_string()))?;
+    Ok(format!("'{}'", s.replace('\'', "''")))
+}
+
+/// An in-memory DuckDB connection that can read exactly `file` and nothing
+/// else: `allowed_paths` names the file, then external access is disabled and
+/// the configuration locked, so ATTACH, COPY and the file readers refuse every
+/// other path.
+fn open_file_query_connection(
+    file: &Path,
+    opts: &QueryOptions,
+) -> Result<duckdb::Connection, DatabaseError> {
+    let literal = quoted_file_literal(file)?;
+    let config = duckdb_config(opts, DuckDbKind::FileQuery)?;
+    let conn = duckdb::Connection::open_in_memory_with_flags(config)?;
+    conn.execute_batch(&format!("SET allowed_paths = [{literal}]"))?;
+    conn.execute_batch("SET enable_external_access = false")?;
+    conn.execute_batch("SET lock_configuration = true")?;
+    Ok(conn)
+}
+
 /// Execute a SQL query against a DuckDB database and return results as a DataFrame.
 ///
 /// # Arguments
@@ -508,14 +611,9 @@ pub fn query_duckdb(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResul
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    // Open read-only. In-memory databases don't support ReadOnly mode so fall back
-    // to the default configuration for those; the keyword filter already rejects DDL/DML.
-    let conn = if path_str == ":memory:" {
-        duckdb::Connection::open(path)?
-    } else {
-        let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
-        duckdb::Connection::open_with_flags(path, config)?
-    };
+    // Locked by the engine: no file access, no extensions, no reconfiguration;
+    // file databases are also read-only.
+    let conn = open_duckdb_locked(path, &QueryOptions::default())?;
     let mut stmt = conn.prepare(query)?;
 
     // Execute query first - DuckDB requires this before accessing column info
@@ -644,12 +742,7 @@ pub fn list_duckdb_tables(db_path: impl AsRef<Path>) -> Result<Vec<String>, Data
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = if path_str == ":memory:" {
-        duckdb::Connection::open(path)?
-    } else {
-        let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
-        duckdb::Connection::open_with_flags(path, config)?
-    };
+    let conn = open_duckdb_locked(path, &QueryOptions::default())?;
     let mut stmt = conn
         .prepare("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'")?;
 
@@ -676,12 +769,7 @@ pub fn duckdb_table_schema(
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = if path_str == ":memory:" {
-        duckdb::Connection::open(path)?
-    } else {
-        let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
-        duckdb::Connection::open_with_flags(path, config)?
-    };
+    let conn = open_duckdb_locked(path, &QueryOptions::default())?;
     let query = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ? ORDER BY ordinal_position";
     let mut stmt = conn.prepare(query)?;
 
@@ -703,16 +791,13 @@ pub fn query_file_with_duckdb(
     file_path: impl AsRef<Path>,
     query: &str,
 ) -> Result<QueryResult, DatabaseError> {
-    // External-access SQL functions (read_csv_auto, read_parquet, …) are the whole
-    // point of this entry point, so we cannot disable external access wholesale;
-    // but the statement itself must still be a read-only query.
     let path = file_path.as_ref();
 
-    // Replace placeholder with actual file path, escaping single quotes to prevent
-    // injection. The path sits inside a quoted literal, so it cannot open a second
-    // statement; the lexer checks the substituted text.
-    let sanitized_path = path.display().to_string().replace('\'', "''");
-    let full_query = query.replace("{file}", &format!("'{}'", sanitized_path));
+    // Replace the placeholder with the file path as a quoted literal (`'` doubled).
+    // The path cannot open a second statement from inside the literal; the lexer
+    // checks the substituted text.
+    let literal = quoted_file_literal(path)?;
+    let full_query = query.replace("{file}", &literal);
     let body = single_statement_body(&full_query)?;
     validate_read_only_query(body)?;
 
@@ -720,8 +805,9 @@ pub fn query_file_with_duckdb(
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    // Use in-memory DuckDB
-    let conn = duckdb::Connection::open_in_memory()?;
+    // In-memory DuckDB that can read exactly this file (allowed_paths), with
+    // external access otherwise disabled and the configuration locked.
+    let conn = open_file_query_connection(path, &QueryOptions::default())?;
 
     query_duckdb_connection(&conn, body)
 }
@@ -1009,6 +1095,155 @@ mod tests {
             DatabaseError::Forbidden(_)
         ));
         assert!(!out.exists());
+    }
+
+    // ------------------------------------------------------------------
+    // Locked DuckDB connections (LLM-1)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn locked_duckdb_connection_settings() {
+        let s = |c: &duckdb::Connection, name: &str| -> String {
+            c.query_row(
+                &format!("SELECT current_setting('{name}')::VARCHAR"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let conn = open_duckdb_locked(Path::new(":memory:"), &QueryOptions::default()).unwrap();
+        assert_eq!(s(&conn, "enable_external_access"), "false");
+        assert_eq!(s(&conn, "lock_configuration"), "true");
+        assert_eq!(s(&conn, "autoload_known_extensions"), "false");
+        assert_eq!(s(&conn, "autoinstall_known_extensions"), "false");
+        assert_eq!(s(&conn, "allow_community_extensions"), "false");
+        let opts = QueryOptions {
+            memory_limit_mb: Some(64),
+            threads: Some(1),
+            ..Default::default()
+        };
+        let conn = open_duckdb_locked(Path::new(":memory:"), &opts).unwrap();
+        assert_eq!(s(&conn, "memory_limit"), "64.0 MiB");
+        assert_eq!(s(&conn, "threads"), "1");
+        assert_eq!(s(&conn, "temp_directory"), "");
+    }
+
+    #[test]
+    fn locked_duckdb_refuses_file_access_extensions_and_reconfiguration() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = write_file(outside.path(), "secret.csv", "k,v\nsecret,42\n");
+        let o = outside.path().display();
+        let conn = open_duckdb_locked(Path::new(":memory:"), &QueryOptions::default()).unwrap();
+        for sql in [
+            format!("ATTACH '{o}/evil.duckdb' AS e"),
+            format!("COPY (SELECT 1) TO '{o}/copied.csv'"),
+            format!("SELECT * FROM read_csv_auto('{}')", secret.display()),
+            format!("SELECT * FROM '{}'", secret.display()),
+        ] {
+            let err = conn.execute_batch(&sql).unwrap_err().to_string();
+            assert!(err.contains("disabled by configuration"), "{sql}: {err}");
+        }
+        assert!(
+            conn.execute_batch("SET enable_external_access = true")
+                .unwrap_err()
+                .to_string()
+                .contains("locked")
+        );
+        assert!(conn.execute_batch("INSTALL httpfs").is_err());
+        assert!(conn.execute_batch("LOAD httpfs").is_err());
+        assert_eq!(dir_names(outside.path()), vec!["secret.csv"]);
+    }
+
+    #[test]
+    fn query_duckdb_cannot_read_files_by_literal_path() {
+        // single statement, passes the keyword check
+        let outside = tempfile::tempdir().unwrap();
+        let secret = write_file(outside.path(), "secret.csv", "k,v\nsecret,42\n");
+        for q in [
+            format!("SELECT * FROM '{}'", secret.display()),
+            format!("SELECT * FROM read_csv_auto('{}')", secret.display()),
+        ] {
+            let err = query_duckdb(":memory:", &q).unwrap_err();
+            assert!(
+                err.to_string().contains("disabled by configuration"),
+                "{q}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn locked_duckdb_file_database_is_read_only_and_cannot_attach() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("main.duckdb");
+        duckdb::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE t AS SELECT range AS x FROM range(3)")
+            .unwrap();
+        let other = dir.path().join("other.duckdb");
+        duckdb::Connection::open(&other)
+            .unwrap()
+            .execute_batch("CREATE TABLE s AS SELECT 'v' AS secret")
+            .unwrap();
+        let r = query_duckdb(&db, "SELECT count(*) AS n FROM t").unwrap();
+        assert_eq!(i64_col(&r.dataframe, "n"), vec![Some(3)]);
+        let conn = open_duckdb_locked(&db, &QueryOptions::default()).unwrap();
+        assert!(conn.execute_batch("CREATE TABLE z AS SELECT 1").is_err());
+        let err = conn
+            .execute_batch(&format!("ATTACH '{}' AS e (READ_ONLY)", other.display()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("disabled by configuration"), "{err}");
+    }
+
+    #[test]
+    fn file_query_reads_only_the_named_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = write_file(dir.path(), "in.csv", "a,b\n1,2\n3,4\n");
+        let other = write_file(dir.path(), "other.csv", "k,v\nsecret,42\n");
+        let r = query_file_with_duckdb(&csv, "SELECT count(*) AS n FROM {file}").unwrap();
+        assert_eq!(i64_col(&r.dataframe, "n"), vec![Some(2)]);
+        let r = query_file_with_duckdb(&csv, "SELECT * FROM read_csv_auto({file}, header = true)")
+            .unwrap();
+        assert_eq!(r.rows, 2); // reader options still work
+        let err = query_file_with_duckdb(
+            &csv,
+            &format!("SELECT * FROM read_csv_auto('{}')", other.display()),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("disabled by configuration"),
+            "{err}"
+        );
+        let conn = open_file_query_connection(&csv, &QueryOptions::default()).unwrap();
+        let d = dir.path().display();
+        for sql in [
+            format!("ATTACH '{d}/evil.duckdb' AS e"),
+            format!("COPY (SELECT 1) TO '{d}/copied.csv'"),
+            format!("SELECT * FROM glob('{d}/*')"),
+        ] {
+            let err = conn.execute_batch(&sql).unwrap_err().to_string();
+            assert!(err.contains("disabled by configuration"), "{sql}: {err}");
+        }
+        assert!(
+            conn.execute_batch("SET enable_external_access = true")
+                .unwrap_err()
+                .to_string()
+                .contains("locked")
+        );
+        assert_eq!(dir_names(dir.path()), vec!["in.csv", "other.csv"]);
+    }
+
+    #[test]
+    fn file_query_reads_parquet_with_extension_autoload_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("in.parquet");
+        let mut df =
+            df!("x" => [1i64, 2, 3, 4, 5], "y" => [0.52f64, 1.38, 2.61, 3.47, 4.55]).unwrap();
+        ParquetWriter::new(std::fs::File::create(&path).unwrap())
+            .finish(&mut df)
+            .unwrap();
+        let r = query_file_with_duckdb(&path, "SELECT count(*) AS n FROM {file}").unwrap();
+        assert_eq!(i64_col(&r.dataframe, "n"), vec![Some(5)]);
     }
 
     #[test]
