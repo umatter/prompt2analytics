@@ -19,9 +19,12 @@ use crate::tools::requests::utils::{
 };
 
 use p2a_core::{
-    HtmlReport, ReportSection, ReportTable,
+    Dataset, HtmlReport, ReportSection, ReportTable,
+    polars::prelude::{AnyValue, Column, DataFrame},
     simulation::{ColumnSpec, Distribution, generate_random_data},
 };
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+use std::collections::HashMap;
 
 /// A writer that refuses to pass more than `cap` bytes to `inner`: the shared
 /// byte cap for exports. A write that would take the total past the cap is
@@ -74,6 +77,164 @@ impl<W: std::io::Write> std::io::Write for CappedWriter<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+/// Write the `export_session` JSON for `datasets` to `w` in one streaming
+/// pass (compact, no intermediate `Value` tree): top-level keys `version`,
+/// `created_at`, `datasets`; datasets in name order, each with `schema`,
+/// `n_rows`, `n_cols` and, with `include_data`, `data` (one array per column,
+/// in column order). Cell values map as the previous tree builder mapped them.
+fn write_session_json<W: std::io::Write>(
+    datasets: &HashMap<String, Dataset>,
+    include_data: bool,
+    created_at: &str,
+    w: W,
+) -> serde_json::Result<()> {
+    serde_json::to_writer(
+        w,
+        &SessionView {
+            datasets,
+            include_data,
+            created_at,
+        },
+    )
+}
+
+struct SessionView<'a> {
+    datasets: &'a HashMap<String, Dataset>,
+    include_data: bool,
+    created_at: &'a str,
+}
+
+impl Serialize for SessionView<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(3))?;
+        map.serialize_entry("version", "1.0")?;
+        map.serialize_entry("created_at", self.created_at)?;
+        map.serialize_entry(
+            "datasets",
+            &DatasetsView {
+                datasets: self.datasets,
+                include_data: self.include_data,
+            },
+        )?;
+        map.end()
+    }
+}
+
+struct DatasetsView<'a> {
+    datasets: &'a HashMap<String, Dataset>,
+    include_data: bool,
+}
+
+impl Serialize for DatasetsView<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut names: Vec<&String> = self.datasets.keys().collect();
+        names.sort();
+        let mut map = s.serialize_map(Some(names.len()))?;
+        for name in names {
+            let view = DatasetView {
+                df: self.datasets[name].df(),
+                include_data: self.include_data,
+            };
+            map.serialize_entry(name, &view)?;
+        }
+        map.end()
+    }
+}
+
+struct DatasetView<'a> {
+    df: &'a DataFrame,
+    include_data: bool,
+}
+
+impl Serialize for DatasetView<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(if self.include_data { 4 } else { 3 }))?;
+        map.serialize_entry("schema", &SchemaView(self.df.get_columns()))?;
+        map.serialize_entry("n_rows", &self.df.height())?;
+        map.serialize_entry("n_cols", &self.df.width())?;
+        if self.include_data {
+            map.serialize_entry("data", &ColumnsView(self.df.get_columns()))?;
+        }
+        map.end()
+    }
+}
+
+struct SchemaView<'a>(&'a [Column]);
+
+impl Serialize for SchemaView<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        for col in self.0 {
+            seq.serialize_element(&SchemaEntry(col))?;
+        }
+        seq.end()
+    }
+}
+
+struct SchemaEntry<'a>(&'a Column);
+
+impl Serialize for SchemaEntry<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(2))?;
+        map.serialize_entry("name", self.0.name().as_str())?;
+        map.serialize_entry("dtype", &format!("{:?}", self.0.dtype()))?;
+        map.end()
+    }
+}
+
+struct ColumnsView<'a>(&'a [Column]);
+
+impl Serialize for ColumnsView<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
+        let mut map = s.serialize_map(Some(self.0.len()))?;
+        for col in self.0 {
+            p2a_core::resource::checkpoint().map_err(S::Error::custom)?;
+            map.serialize_entry(col.name().as_str(), &ColumnValues(col))?;
+        }
+        map.end()
+    }
+}
+
+struct ColumnValues<'a>(&'a Column);
+
+impl Serialize for ColumnValues<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let col = self.0;
+        let mut seq = s.serialize_seq(Some(col.len()))?;
+        for i in 0..col.len() {
+            seq.serialize_element(&SessionCell(col.get(i).ok()))?;
+        }
+        seq.end()
+    }
+}
+
+/// One cell of a session export; `None` (a failed read) is null.
+struct SessionCell<'a>(Option<AnyValue<'a>>);
+
+impl Serialize for SessionCell<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match &self.0 {
+            None | Some(AnyValue::Null) => s.serialize_none(),
+            Some(AnyValue::Boolean(b)) => s.serialize_bool(*b),
+            Some(AnyValue::Int8(v)) => s.serialize_i64(i64::from(*v)),
+            Some(AnyValue::Int16(v)) => s.serialize_i64(i64::from(*v)),
+            Some(AnyValue::Int32(v)) => s.serialize_i64(i64::from(*v)),
+            Some(AnyValue::Int64(v)) => s.serialize_i64(*v),
+            Some(AnyValue::UInt8(v)) => s.serialize_u64(u64::from(*v)),
+            Some(AnyValue::UInt16(v)) => s.serialize_u64(u64::from(*v)),
+            Some(AnyValue::UInt32(v)) => s.serialize_u64(u64::from(*v)),
+            Some(AnyValue::UInt64(v)) => s.serialize_u64(*v),
+            // The previous builder widened f32 to f64 (`json!`); non-finite
+            // values are written as null.
+            Some(AnyValue::Float32(v)) => s.serialize_f64(f64::from(*v)),
+            Some(AnyValue::Float64(v)) => s.serialize_f64(*v),
+            Some(AnyValue::String(v)) => s.serialize_str(v),
+            Some(other) => s.serialize_str(&format!("{other:?}")),
+        }
     }
 }
 
@@ -616,80 +777,15 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<ExportSessionRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-        use std::fs;
+        use std::io::Write;
 
+        let limits = crate::tools::limits::current();
         let datasets = self.datasets.read().await;
         let include_data = request.include_data.unwrap_or(true);
-
-        let mut session_data = serde_json::Map::new();
-        session_data.insert("version".to_string(), serde_json::json!("1.0"));
-        session_data.insert(
-            "created_at".to_string(),
-            serde_json::json!(chrono::Utc::now().to_rfc3339()),
-        );
-
-        let mut datasets_json = serde_json::Map::new();
-        for (name, dataset) in datasets.iter() {
-            let df = dataset.df();
-            let mut ds_info = serde_json::Map::new();
-
-            // Save schema
-            let schema: Vec<serde_json::Value> = df
-                .get_columns()
-                .iter()
-                .map(|col| {
-                    serde_json::json!({
-                        "name": col.name().to_string(),
-                        "dtype": format!("{:?}", col.dtype())
-                    })
-                })
-                .collect();
-            ds_info.insert("schema".to_string(), serde_json::json!(schema));
-            ds_info.insert("n_rows".to_string(), serde_json::json!(df.height()));
-            ds_info.insert("n_cols".to_string(), serde_json::json!(df.width()));
-
-            if include_data {
-                // Serialize actual data
-                let mut columns_data = serde_json::Map::new();
-                for col in df.get_columns() {
-                    let col_name = col.name().to_string();
-                    let values: Vec<serde_json::Value> = (0..col.len())
-                        .map(|i| match col.get(i) {
-                            Ok(av) => match av {
-                                AnyValue::Null => serde_json::Value::Null,
-                                AnyValue::Boolean(b) => serde_json::json!(b),
-                                AnyValue::Int8(v) => serde_json::json!(v),
-                                AnyValue::Int16(v) => serde_json::json!(v),
-                                AnyValue::Int32(v) => serde_json::json!(v),
-                                AnyValue::Int64(v) => serde_json::json!(v),
-                                AnyValue::UInt8(v) => serde_json::json!(v),
-                                AnyValue::UInt16(v) => serde_json::json!(v),
-                                AnyValue::UInt32(v) => serde_json::json!(v),
-                                AnyValue::UInt64(v) => serde_json::json!(v),
-                                AnyValue::Float32(v) => serde_json::json!(v),
-                                AnyValue::Float64(v) => serde_json::json!(v),
-                                AnyValue::String(s) => serde_json::json!(s),
-                                _ => serde_json::json!(format!("{:?}", av)),
-                            },
-                            Err(_) => serde_json::Value::Null,
-                        })
-                        .collect();
-                    columns_data.insert(col_name, serde_json::json!(values));
-                }
-                ds_info.insert("data".to_string(), serde_json::json!(columns_data));
-            }
-
-            datasets_json.insert(name.clone(), serde_json::json!(ds_info));
-        }
-        session_data.insert("datasets".to_string(), serde_json::json!(datasets_json));
-
-        let json_output = serde_json::to_string_pretty(&session_data).map_err(|e| {
-            McpError::internal_error(format!("JSON serialization failed: {}", e), None)
-        })?;
+        let created_at = chrono::Utc::now().to_rfc3339();
 
         if let Some(file_path) = request.file_path {
-            let path = match path_jail::validate_data_path(&file_path) {
+            let path = match path_jail::validate_data_path_for_write(&file_path) {
                 Ok(p) => p,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -699,19 +795,70 @@ impl AnalyticsServer {
                 }
             };
 
-            fs::write(&path, &json_output).map_err(|e| {
-                McpError::internal_error(format!("Failed to write session file: {}", e), None)
-            })?;
+            // Streamed to a temporary file in the validated folder, capped at
+            // the export_bytes budget, then renamed into place.
+            let cap = limits.export_bytes;
+            let mut written = 0u64;
+            let saved = path_jail::write_atomically(&path, |tmp| {
+                let file = std::fs::File::create(tmp)
+                    .map_err(|_| "Failed to write the session file".to_string())?;
+                let mut w = CappedWriter::new(std::io::BufWriter::new(file), cap);
+                let result = write_session_json(&datasets, include_data, &created_at, &mut w)
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| w.flush().map_err(|e| e.to_string()));
+                if w.exceeded() {
+                    return Err(format!(
+                        "The session export is larger than this server's export limit of {} \
+                         bytes; export fewer or smaller datasets (export_dataset writes one \
+                         dataset).",
+                        cap.unwrap_or_default()
+                    ));
+                }
+                written = w.written();
+                result.map_err(|e| format!("Failed to write the session file: {e}"))
+            });
+            if let Err(e) = saved {
+                return Ok(CallToolResult::error(vec![Content::text(e)]));
+            }
 
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Session exported successfully to: {}\n\
                  Datasets saved: {}\n\
-                 Include data: {}",
-                path.display(),
+                 Include data: {}\n\
+                 Bytes written: {}",
+                path_jail::display_path(&path),
                 datasets.len(),
-                include_data
+                include_data,
+                written
             ))]))
         } else {
+            // Inline: bounded by the smaller of the export and response budgets.
+            let cap = match (limits.export_bytes, limits.response_bytes) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let mut w = CappedWriter::new(Vec::new(), cap);
+            let result = write_session_json(&datasets, include_data, &created_at, &mut w);
+            if w.exceeded() {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "The session is too large to return inline (more than {} bytes); pass \
+                     file_path to save it to a file.",
+                    cap.unwrap_or_default()
+                ))]));
+            }
+            if let Err(e) = result {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to serialise the session: {e}"
+                ))]));
+            }
+            let json_output = match String::from_utf8(w.into_inner()) {
+                Ok(s) => s,
+                Err(_) => {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Failed to serialise the session: the output is not UTF-8",
+                    )]));
+                }
+            };
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Session Export\n{}\n\
                  Datasets: {}\n\n{}",
@@ -879,6 +1026,198 @@ mod tests {
         let mut unbounded = CappedWriter::new(Vec::new(), None);
         assert!(unbounded.write_all(&[0u8; 4096]).is_ok());
         assert!(!unbounded.exceeded());
+    }
+
+    use p2a_core::polars::prelude::df;
+
+    fn mixed_datasets() -> HashMap<String, Dataset> {
+        let df = df! {
+            "f" => [Some(1.5), Some(f64::NAN), None],
+            "i" => [Some(1i64), None, Some(3)],
+            "s" => [Some("a"), None, Some("c\"q")],
+            "b" => [Some(true), Some(false), None],
+            "g" => [Some(0.1f32), None, Some(2.0f32)]
+        }
+        .unwrap();
+        let other = df! { "z" => [10i64, 20], "a" => [0.5, 0.25] }.unwrap();
+        HashMap::from([
+            ("mixed".to_string(), Dataset::new(df)),
+            ("other".to_string(), Dataset::new(other)),
+        ])
+    }
+
+    /// Verbatim copy of the pre-change Value-tree builder of `export_session`
+    /// (`created_at` aside), kept as the reference the streamed writer must
+    /// reproduce.
+    fn legacy_session_value(
+        datasets: &HashMap<String, Dataset>,
+        include_data: bool,
+    ) -> serde_json::Value {
+        use p2a_core::polars::prelude::*;
+
+        let mut session_data = serde_json::Map::new();
+        session_data.insert("version".to_string(), serde_json::json!("1.0"));
+        session_data.insert(
+            "created_at".to_string(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
+
+        let mut datasets_json = serde_json::Map::new();
+        for (name, dataset) in datasets.iter() {
+            let df = dataset.df();
+            let mut ds_info = serde_json::Map::new();
+
+            // Save schema
+            let schema: Vec<serde_json::Value> = df
+                .get_columns()
+                .iter()
+                .map(|col| {
+                    serde_json::json!({
+                        "name": col.name().to_string(),
+                        "dtype": format!("{:?}", col.dtype())
+                    })
+                })
+                .collect();
+            ds_info.insert("schema".to_string(), serde_json::json!(schema));
+            ds_info.insert("n_rows".to_string(), serde_json::json!(df.height()));
+            ds_info.insert("n_cols".to_string(), serde_json::json!(df.width()));
+
+            if include_data {
+                // Serialize actual data
+                let mut columns_data = serde_json::Map::new();
+                for col in df.get_columns() {
+                    let col_name = col.name().to_string();
+                    let values: Vec<serde_json::Value> = (0..col.len())
+                        .map(|i| match col.get(i) {
+                            Ok(av) => match av {
+                                AnyValue::Null => serde_json::Value::Null,
+                                AnyValue::Boolean(b) => serde_json::json!(b),
+                                AnyValue::Int8(v) => serde_json::json!(v),
+                                AnyValue::Int16(v) => serde_json::json!(v),
+                                AnyValue::Int32(v) => serde_json::json!(v),
+                                AnyValue::Int64(v) => serde_json::json!(v),
+                                AnyValue::UInt8(v) => serde_json::json!(v),
+                                AnyValue::UInt16(v) => serde_json::json!(v),
+                                AnyValue::UInt32(v) => serde_json::json!(v),
+                                AnyValue::UInt64(v) => serde_json::json!(v),
+                                AnyValue::Float32(v) => serde_json::json!(v),
+                                AnyValue::Float64(v) => serde_json::json!(v),
+                                AnyValue::String(s) => serde_json::json!(s),
+                                _ => serde_json::json!(format!("{:?}", av)),
+                            },
+                            Err(_) => serde_json::Value::Null,
+                        })
+                        .collect();
+                    columns_data.insert(col_name, serde_json::json!(values));
+                }
+                ds_info.insert("data".to_string(), serde_json::json!(columns_data));
+            }
+
+            datasets_json.insert(name.clone(), serde_json::json!(ds_info));
+        }
+        session_data.insert("datasets".to_string(), serde_json::json!(datasets_json));
+        serde_json::Value::Object(session_data)
+    }
+
+    #[test]
+    fn streamed_session_json_matches_legacy_tree() {
+        let ds = mixed_datasets();
+        for include_data in [true, false] {
+            let mut out = Vec::new();
+            write_session_json(&ds, include_data, "2026-01-01T00:00:00Z", &mut out).unwrap();
+            let mut got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            let mut want = legacy_session_value(&ds, include_data);
+            assert_eq!(got["created_at"], "2026-01-01T00:00:00Z");
+            got.as_object_mut().unwrap().remove("created_at");
+            want.as_object_mut().unwrap().remove("created_at");
+            assert_eq!(got, want, "include_data={include_data}");
+        }
+        // Datasets in name order, top-level keys in a fixed order.
+        let mut out = Vec::new();
+        write_session_json(&ds, false, "t", &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with(r#"{"version":"1.0","created_at":"t","datasets":{"mixed""#));
+        assert!(text.find(r#""mixed""#) < text.find(r#""other""#));
+    }
+
+    /// Runs `export_session` under `limits` on a server holding `datasets`.
+    fn export_session_under(
+        limits: Limits,
+        datasets: HashMap<String, Dataset>,
+        request: ExportSessionRequest,
+    ) -> CallToolResult {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = AnalyticsServer::new();
+        rt.block_on(async { server.datasets.write().await.extend(datasets) });
+        limits::with_limits(limits, || {
+            rt.block_on(server.export_session(Parameters(request)))
+        })
+        .expect("refusals are in-band tool errors")
+    }
+
+    #[test]
+    fn export_session_inline_refuses_large_sessions() {
+        // response_bytes override 2,000; a 1,000-row numeric dataset serialises to well over that.
+        let limits = Limits::off()
+            .with_overrides(&["response_bytes=2000".into()])
+            .unwrap();
+        let big = generate_random_data(
+            1_000,
+            vec![ColumnSpec::new(
+                "a",
+                Distribution::Normal {
+                    mean: 0.0,
+                    std: 1.0,
+                },
+            )],
+            Some(1),
+        )
+        .unwrap();
+        let r = export_session_under(
+            limits,
+            HashMap::from([("big".to_string(), big)]),
+            ExportSessionRequest {
+                file_path: None,
+                include_data: Some(true),
+            },
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("too large to return inline"),
+            "{}",
+            text(&r)
+        );
+        assert!(text(&r).contains("2000"), "{}", text(&r));
+    }
+
+    #[test]
+    fn export_session_inline_small_session_parses() {
+        let df = df! { "x" => [1.5, 2.25, 3.0], "name" => ["a", "b", "c"] }.unwrap();
+        let r = export_session_under(
+            Limits::off(),
+            HashMap::from([("small".to_string(), Dataset::new(df))]),
+            ExportSessionRequest {
+                file_path: None,
+                include_data: Some(true),
+            },
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let body = text(&r);
+        let (header, json) = body.split_once("\n\n").unwrap();
+        assert!(header.starts_with("Session Export"), "{header}");
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            v["datasets"]["small"]["data"]["x"],
+            serde_json::json!([1.5, 2.25, 3.0])
+        );
+        assert_eq!(
+            v["datasets"]["small"]["data"]["name"],
+            serde_json::json!(["a", "b", "c"])
+        );
+        assert_eq!(v["datasets"]["small"]["n_rows"], 3);
     }
 
     /// A path guaranteed to sit outside the jail root, whatever it resolves to:

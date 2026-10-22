@@ -553,3 +553,51 @@ async fn export_dataset_respects_export_bytes() {
     assert!(!session_dir(&s).join("n.csv").exists());
     assert!(temp_files(&session_dir(&s)).is_empty());
 }
+
+/// A session holding the two-row `private` dataset.
+async fn private_session(app: &Router) -> String {
+    let s = session(app).await;
+    assert!(
+        call(
+            app,
+            &s,
+            "create_dataset",
+            json!({"name": "private", "csv_content": "patient,score\nalice,3\nbob,5\n"})
+        )
+        .await
+        .0
+    );
+    s
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_session_streams_to_file_and_respects_export_bytes() {
+    let app = app().await;
+    let s = private_session(&app).await;
+    let (ok, msg) = call(&app, &s, "export_session", json!({"file_path": "s.json"})).await;
+    assert!(ok, "{msg}");
+    assert!(msg.contains("s.json") && !msg.contains(root_str()), "{msg}");
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(session_dir(&s).join("s.json")).unwrap()).unwrap();
+    assert_eq!(
+        saved["datasets"]["private"]["data"]["patient"],
+        json!(["alice", "bob"])
+    );
+    // About 48 KB as session JSON, more than export_bytes = 32,768 (the
+    // 2,500-row set is only about 23 KB, too small).
+    assert!(
+        call(
+            &app,
+            &s,
+            "create_dataset",
+            json!({"name": "big", "csv_content": numbered_csv(5000)})
+        )
+        .await
+        .0
+    );
+    let (ok, msg) = call(&app, &s, "export_session", json!({"file_path": "big.json"})).await;
+    assert!(!ok, "a session export above export_bytes was written");
+    assert!(msg.contains("export limit"), "{msg}");
+    assert!(!session_dir(&s).join("big.json").exists());
+    assert!(temp_files(&session_dir(&s)).is_empty());
+}
