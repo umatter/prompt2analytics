@@ -89,6 +89,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 
 /// Configuration for Balke-Pearl bounds estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -495,6 +496,10 @@ pub fn run_bp_bounds(
 ) -> EconResult<BPBoundsResult> {
     let n = z.len();
 
+    if config.bootstrap_ci {
+        validate_bootstrap_config(&config)?;
+    }
+
     // Compute cell probabilities
     let cell_probs = CellProbabilities::from_data(z, d, y)?;
 
@@ -731,6 +736,24 @@ fn compute_wald_estimate(
     (wald, se)
 }
 
+/// Check the bootstrap controls, which only matter when `bootstrap_ci` is set.
+fn validate_bootstrap_config(config: &BPBoundsConfig) -> EconResult<()> {
+    if config.n_bootstrap == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_bootstrap must be at least 1 when bootstrap_ci is set (got 0)".to_string(),
+        });
+    }
+    if !(config.alpha.is_finite() && config.alpha > 0.0 && config.alpha < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "alpha must lie strictly between 0 and 1 (got {}); the confidence level is 1 - alpha",
+                config.alpha
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Compute bootstrap confidence intervals for the bounds.
 fn compute_bootstrap_ci(
     z: &ArrayView1<f64>,
@@ -744,20 +767,25 @@ fn compute_bootstrap_ci(
         None => StdRng::from_entropy(),
     };
 
-    let mut lower_bounds = Vec::with_capacity(config.n_bootstrap);
-    let mut upper_bounds = Vec::with_capacity(config.n_bootstrap);
+    let mut lower_bounds =
+        resource::try_with_capacity::<f64>(config.n_bootstrap, "bootstrap lower bounds")?;
+    let mut upper_bounds =
+        resource::try_with_capacity::<f64>(config.n_bootstrap, "bootstrap upper bounds")?;
 
     // Convert to owned arrays for resampling
     let z_vec: Vec<f64> = z.iter().cloned().collect();
     let d_vec: Vec<f64> = d.iter().cloned().collect();
     let y_vec: Vec<f64> = y.iter().cloned().collect();
 
-    for _ in 0..config.n_bootstrap {
-        // Bootstrap sample with replacement
-        let mut z_boot = Array1::zeros(n);
-        let mut d_boot = Array1::zeros(n);
-        let mut y_boot = Array1::zeros(n);
+    // Resample buffers, overwritten by every replicate
+    let mut z_boot = Array1::zeros(n);
+    let mut d_boot = Array1::zeros(n);
+    let mut y_boot = Array1::zeros(n);
 
+    for _ in 0..config.n_bootstrap {
+        resource::checkpoint()?;
+
+        // Bootstrap sample with replacement
         for i in 0..n {
             let idx = rng.gen_range(0..n);
             z_boot[i] = z_vec[idx];
@@ -852,7 +880,43 @@ pub fn bp_bounds_from_probs(probs: CellProbabilities, monotonicity: bool) -> BPB
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::Array1;
+
+    fn cancelled() -> Budget {
+        let token = CancelToken::new();
+        token.cancel();
+        Budget::new(None, token)
+    }
+
+    fn expect_invalid<T>(res: EconResult<T>, needle: &str) {
+        match res {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains(needle),
+                    "message {message:?} should name `{needle}`"
+                )
+            }
+            Err(e) => panic!("expected InvalidSpecification naming `{needle}`, got: {e}"),
+            Ok(_) => panic!("expected InvalidSpecification naming `{needle}`, got Ok"),
+        }
+    }
+
+    fn expect_resource_limit<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::ResourceLimit(_)) => {}
+            Err(e) => panic!("expected ResourceLimit, got: {e}"),
+            Ok(_) => panic!("expected ResourceLimit, got Ok"),
+        }
+    }
+
+    fn expect_cancelled<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::Cancelled(_)) => {}
+            Err(e) => panic!("expected Cancelled, got: {e}"),
+            Ok(_) => panic!("expected Cancelled, got Ok"),
+        }
+    }
 
     /// Create test data for IV analysis that satisfies BP bounds assumptions.
     ///
@@ -1211,5 +1275,72 @@ mod tests {
             "  P(D=1|Z=0) = {:.4}, P(D=1|Z=1) = {:.4}",
             marginals.p_d1_z0, marginals.p_d1_z1
         );
+    }
+
+    #[test]
+    fn test_bp_bounds_rejects_bad_bootstrap_controls() {
+        let (z, d, y) = create_test_data();
+        let run = |config: BPBoundsConfig| run_bp_bounds(&z.view(), &d.view(), &y.view(), config);
+        expect_invalid(
+            run(BPBoundsConfig {
+                n_bootstrap: 0,
+                seed: Some(1),
+                ..Default::default()
+            }),
+            "n_bootstrap",
+        );
+        for alpha in [f64::NAN, 0.0, 1.0, -0.5, 2.5] {
+            expect_invalid(
+                run(BPBoundsConfig {
+                    alpha,
+                    n_bootstrap: 200,
+                    seed: Some(1),
+                    ..Default::default()
+                }),
+                "alpha",
+            );
+        }
+        // without a bootstrap neither field is used
+        assert!(
+            run(BPBoundsConfig {
+                bootstrap_ci: false,
+                n_bootstrap: 0,
+                alpha: f64::NAN,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_bp_bounds_rejects_unallocatable_bootstrap() {
+        let (z, d, y) = create_test_data();
+        expect_resource_limit(run_bp_bounds(
+            &z.view(),
+            &d.view(),
+            &y.view(),
+            BPBoundsConfig {
+                n_bootstrap: usize::MAX / 4,
+                seed: Some(1),
+                ..Default::default()
+            },
+        ));
+    }
+
+    #[test]
+    fn test_bp_bounds_stops_when_cancelled() {
+        let (z, d, y) = create_test_data();
+        expect_cancelled(with_budget(cancelled(), || {
+            run_bp_bounds(
+                &z.view(),
+                &d.view(),
+                &y.view(),
+                BPBoundsConfig {
+                    n_bootstrap: 200,
+                    seed: Some(1),
+                    ..Default::default()
+                },
+            )
+        }));
     }
 }
