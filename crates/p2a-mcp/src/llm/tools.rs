@@ -175,9 +175,9 @@ pub const INTERNAL_TOOLS: &[&str] = &[
 /// (`is_registered`). Registered analytical tools outside the advertised
 /// subset stay callable: the model can find them through the search
 /// meta-tools' descriptions. The refusal is a tool error the model can act
-/// on; the name in it is cut to 64 characters.
+/// on; the name in it is cut to 64 bytes on a char boundary.
 pub fn check_llm_tool_call(name: &str, is_registered: impl Fn(&str) -> bool) -> Result<(), String> {
-    let shown: String = name.chars().take(64).collect();
+    let shown = super::context::truncate_str(name, 64);
     if INTERNAL_TOOLS.contains(&name) {
         return Err(format!(
             "Tool `{shown}` is not available to the assistant. Use one of the tools in your tool \
@@ -609,12 +609,16 @@ mod tests {
         assert!(check_llm_tool_call("regression_ols", |_| true).is_ok());
         // Registered, not advertised, not internal.
         assert!(check_llm_tool_call("descriptive_medpolish", |_| true).is_ok());
-        // The name is truncated in the message.
+        // The name is truncated in the message, by bytes and on a char
+        // boundary.
         assert!(
             check_llm_tool_call(&"x".repeat(10_000), |_| false)
                 .unwrap_err()
                 .len()
                 < 300
         );
+        let wide = check_llm_tool_call(&"\u{1D4C1}".repeat(1_000), |_| false).unwrap_err();
+        assert!(wide.len() < 300, "{} bytes", wide.len());
+        assert!(wide.contains(&"\u{1D4C1}".repeat(16)), "{wide}");
     }
 }

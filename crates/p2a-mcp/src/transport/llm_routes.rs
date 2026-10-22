@@ -144,8 +144,10 @@ fn refuse_unless_callable(
     name: &str,
 ) -> Result<(), String> {
     check_llm_tool_call(name, |n| llm_callable_tools(server).contains(n)).inspect_err(|_| {
-        let shown: String = name.chars().take(64).collect();
-        tracing::warn!(tool = %shown, "Refused a tool call the assistant may not make");
+        tracing::warn!(
+            tool = %truncate_str(name, 64),
+            "Refused a tool call the assistant may not make"
+        );
     })
 }
 
