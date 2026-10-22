@@ -73,7 +73,9 @@ pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
 /// Start the stdio transport (existing behavior).
 ///
 /// The per-allocation ceiling of the configured resource profile applies
-/// here too (none unless `--limits hosted` or `--max-alloc-mb` is set);
+/// here too (none unless `--limits hosted` or `--max-alloc-mb` is set), and
+/// so do the request limits `start_transport` installed (argument, dataset
+/// row and response-size checks in `AnalyticsServer`'s `call_tool`);
 /// deadlines and quotas are HTTP-only.
 async fn start_stdio_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::server::AnalyticsServer;

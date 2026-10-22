@@ -462,3 +462,149 @@ mod http_paths {
         });
     }
 }
+
+mod stdio_path {
+    use super::*;
+
+    use p2a_mcp::AnalyticsServer;
+    use rmcp::ServiceExt;
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    async fn send_line<W: AsyncWriteExt + Unpin>(w: &mut W, msg: Value) {
+        w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    async fn read_until_id<R: AsyncBufReadExt + Unpin>(
+        lines: &mut tokio::io::Lines<R>,
+        id: u64,
+    ) -> Value {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("server closed the stream");
+            let msg: Value = serde_json::from_str(&line).unwrap();
+            if msg["id"] == id {
+                return msg;
+            }
+        }
+    }
+
+    /// Serves `server` over an in-memory duplex stream, as the stdio
+    /// transport does over stdin/stdout, initialises the session and returns
+    /// the JSON-RPC response to one request (`method`, `params`).
+    async fn stdio_request(server: AnalyticsServer, method: &str, params: Value) -> Value {
+        let (client, server_end) = tokio::io::duplex(1 << 22);
+        let (r, w) = tokio::io::split(server_end);
+        let service = tokio::spawn(async move {
+            let running = server.serve((r, w)).await.expect("serve");
+            let _ = running.waiting().await;
+        });
+        let (cr, mut cw) = tokio::io::split(client);
+        let mut lines = BufReader::new(cr).lines();
+        send_line(
+            &mut cw,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2024-11-05", "capabilities": {},
+                "clientInfo": {"name": "limits-e2e", "version": "0"}}}),
+        )
+        .await;
+        read_until_id(&mut lines, 1).await;
+        send_line(
+            &mut cw,
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+        send_line(
+            &mut cw,
+            json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params}),
+        )
+        .await;
+        let msg = read_until_id(&mut lines, 2).await;
+        drop(cw);
+        service.abort();
+        msg
+    }
+
+    /// The JSON-RPC response to one `tools/call` over the stdio transport.
+    pub(super) async fn stdio_call(server: AnalyticsServer, tool: &str, args: Value) -> Value {
+        stdio_request(
+            server,
+            "tools/call",
+            json!({"name": tool, "arguments": args}),
+        )
+        .await
+    }
+
+    #[test]
+    fn stdio_refuses_cost_parameters_when_hosted() {
+        let msg = run(
+            Limits::hosted(),
+            stdio_call(
+                AnalyticsServer::new(),
+                "timeseries_arma_to_ma",
+                json!({"lag_max": 2000, "ar": [0.5], "ma": [0.3]}),
+            ),
+        );
+        assert_eq!(msg["error"]["code"], -32602, "{msg}");
+        assert!(
+            msg["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("exceeds this server's limit of 1000"),
+            "{msg}"
+        );
+        assert_eq!(msg["error"]["data"]["code"], "limit_exceeded", "{msg}");
+        assert_eq!(msg["error"]["data"]["parameter"], "lag_max", "{msg}");
+        assert_eq!(msg["error"]["data"]["requested"], "2000", "{msg}");
+        assert_eq!(msg["error"]["data"]["limit"], "1000", "{msg}");
+    }
+
+    #[test]
+    fn stdio_runs_the_same_call_when_off() {
+        let msg = run(
+            Limits::off(),
+            stdio_call(
+                AnalyticsServer::new(),
+                "timeseries_arma_to_ma",
+                json!({"lag_max": 2000, "ar": [0.5], "ma": [0.3]}),
+            ),
+        );
+        assert!(msg.get("error").is_none(), "{msg}");
+        assert_ne!(msg["result"]["isError"], true, "{msg}");
+    }
+
+    #[test]
+    fn stdio_caps_the_response_size() {
+        let l = Limits::off()
+            .with_overrides(&["response_bytes=100".to_string()])
+            .unwrap();
+        let msg = run(
+            l,
+            stdio_call(
+                AnalyticsServer::new(),
+                "timeseries_arma_to_ma",
+                json!({"lag_max": 200, "ar": [0.5], "ma": [0.3]}),
+            ),
+        );
+        assert_eq!(msg["error"]["code"], -32602, "{msg}");
+        assert_eq!(msg["error"]["data"]["code"], "limit_exceeded", "{msg}");
+        assert_eq!(msg["error"]["data"]["parameter"], "response_bytes", "{msg}");
+        assert_eq!(msg["error"]["data"]["limit"], "100", "{msg}");
+    }
+
+    #[test]
+    fn stdio_lists_every_tool() {
+        // The manual ServerHandler still lists the router's tools.
+        let msg = run(
+            Limits::off(),
+            stdio_request(AnalyticsServer::new(), "tools/list", json!({})),
+        );
+        let tools = msg["result"]["tools"].as_array().expect("tools");
+        assert!(tools.len() > 200, "{} tools", tools.len());
+        assert!(tools.iter().any(|t| t["name"] == "timeseries_arma_to_ma"));
+    }
+}

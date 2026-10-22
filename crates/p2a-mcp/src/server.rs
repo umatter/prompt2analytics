@@ -6,8 +6,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler, handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
+    ErrorData as McpError, RoleServer, ServerHandler,
+    handler::server::router::tool::ToolRouter, handler::server::tool::ToolCallContext,
+    handler::server::wrapper::Parameters, model::*, service::RequestContext, tool, tool_router,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -1386,6 +1387,35 @@ fn log_violation(v: &LimitViolation) {
     );
 }
 
+/// Bytes of text and image data in an MCP tool result (stdio).
+fn call_result_bytes(result: &CallToolResult) -> usize {
+    result
+        .content
+        .iter()
+        .map(|c| match &c.raw {
+            RawContent::Text(text) => text.text.len(),
+            RawContent::Image(image) => image.data.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Logs a refusal and turns it into the stdio transport's JSON-RPC error:
+/// `invalid_params` (-32602) whose data names the code, the parameter, the
+/// requested value and the limit.
+fn limit_error(v: LimitViolation) -> McpError {
+    log_violation(&v);
+    McpError::invalid_params(
+        v.message,
+        Some(serde_json::json!({
+            "code": "limit_exceeded",
+            "parameter": v.parameter,
+            "requested": v.requested,
+            "limit": v.limit,
+        })),
+    )
+}
+
 /// Logs a refusal and turns it into the governed path's 422 error.
 #[cfg(feature = "http")]
 fn log_and_convert(v: LimitViolation) -> crate::exec::ToolCallError {
@@ -1397,8 +1427,52 @@ fn log_and_convert(v: LimitViolation) -> crate::exec::ToolCallError {
 // ServerHandler Implementation
 // ============================================================================
 
-#[tool_handler(router = self.tool_router)]
+/// The MCP handler of the stdio transport. Tool calls run the same request
+/// limits as the governed HTTP-side path (arguments, dataset rows of this
+/// server's own datasets, response size) before and after delegating to the
+/// tool router. Deadlines and dataset quotas are HTTP-only.
 impl ServerHandler for AnalyticsServer {
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
+    }
+
+    async fn call_tool(
+        &self,
+        mut request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if !self.tool_router.has_route(&request.name) {
+            // The router answers an unknown name with its own error.
+            return self
+                .tool_router
+                .call(ToolCallContext::new(self, request, context))
+                .await;
+        }
+        let tool = request.name.to_string();
+        let limits = crate::tools::limits::current();
+
+        // Check the arguments as a JSON object without copying them, then
+        // hand them back to the request unchanged.
+        let had_arguments = request.arguments.is_some();
+        let args = serde_json::Value::Object(request.arguments.take().unwrap_or_default());
+        let checked = enforce_request_limits(&limits, &tool, &args, &self.datasets).await;
+        if let (true, serde_json::Value::Object(map)) = (had_arguments, args) {
+            request.arguments = Some(map);
+        }
+        checked.map_err(limit_error)?;
+
+        let result = self
+            .tool_router
+            .call(ToolCallContext::new(self, request, context))
+            .await?;
+        check_response_size(&limits, &tool, call_result_bytes(&result)).map_err(limit_error)?;
+        Ok(result)
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
