@@ -29,7 +29,7 @@ Fixed Effects Generalized Linear Model (FEGLM) combines GLM estimation with high
 |---------|----------|----------|----------------|
 | alpaca | R | `feglm()` | 0.3.4 |
 | fixest | R | `feglm()`/`fepois()` | 0.11.x |
-| fixest | R 4.3.3 | `fepois()$ll_null`, with `stats::dpois()` for the pointwise values (Test 7) | 0.14.2 |
+| fixest | R | `fepois()$ll_null`, with `stats::dpois()` for the pointwise values (Test 7) | 0.14.2 (R 4.3.3) |
 | ppmlhdfe | Stata | `ppmlhdfe` | 2.x |
 
 **Primary Reference**:
@@ -377,6 +377,7 @@ For IRLS, we compute:
 | Probit | 100+ | < 0.1 | < 0.01 |
 | Poisson | 100+ | < 0.1 | < 0.01 |
 | Gaussian | 100+ | < 1e-5 | N/A |
+| Poisson LL / null LL (Test 7, fixest convention) | 40 | N/A | 1e-12 × scale pointwise; 1e-10 relative (null) |
 
 ## Known Differences
 
