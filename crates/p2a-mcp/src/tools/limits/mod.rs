@@ -39,13 +39,13 @@
 //! These request fields of every registered tool must be matched by a rule:
 //!
 //! - an integer field, by [`Rule::Max`] with a numeric family (not [`Family::StringBytes`]);
-//! - a float field whose name contains `tol` or `eps`, by [`Rule::Tolerance`] or a numeric
-//!   [`Rule::Max`];
+//! - a float field, by a numeric [`Rule::Max`] (a count or size given as a float, such as the
+//!   `n` of the power tools) or, for a convergence tolerance, by [`Rule::Tolerance`];
 //! - an array field, an array element that is itself an array (`a[]`) or a tuple, by
 //!   [`Rule::ArrayLen`], [`Rule::UniqueList`] or [`Rule::SquareLen`];
-//! - the integer elements of an array (`Vec<usize>`, a tuple of integers), which the test lists
-//!   at the element path `a[]`, by [`Rule::ArrayElemMax`] on the array's path `a`, or by a
-//!   numeric [`Rule::Max`] on `a[]`;
+//! - the integer or float elements of an array (`Vec<usize>`, `Vec<f64>`, a tuple of numbers),
+//!   which the test lists at the element path `a[]`, by [`Rule::ArrayElemMax`] on the array's
+//!   path `a`, or by a numeric [`Rule::Max`] on `a[]`;
 //! - any of these, alternatively, by `Rule::Exempt` on the same path with the reason the value
 //!   costs nothing. An `Exempt` on `a[]` covers the elements only, never the array's length.
 //!
