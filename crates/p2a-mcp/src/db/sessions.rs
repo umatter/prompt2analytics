@@ -151,11 +151,12 @@ impl OwnerGap<'_> {
 /// The owners in `known` that bound the gaps of an owner index, sorted by
 /// their bytes (the order of the index).
 ///
-/// An owner with a NUL byte is left out: SurrealDB cannot encode such a
-/// string into an index key (as a bound it would fail the query), and for
-/// the same reason no row of an indexed owner column holds it, so the gaps
-/// on its two sides merge without taking in any row it owns. The server's
-/// session and conversation ids are UUIDs.
+/// An owner with a NUL byte is left out. SurrealDB strings (`Strand`)
+/// cannot hold a NUL byte, so no owner column stores one, and binding one
+/// as a gap bound would fail the query (a debug build of SurrealDB panics
+/// at a debug assertion instead). Leaving it out merges its two gaps
+/// without taking in any row. The server's session and conversation ids
+/// are UUIDs.
 fn sorted_owners(known: &HashSet<String>) -> Vec<&str> {
     let mut owners: Vec<&str> = known
         .iter()
@@ -1043,7 +1044,8 @@ mod tests {
         assert!(d.warnings.is_empty(), "{:?}", d.warnings);
     }
 
-    /// An owner with a NUL byte is no bound (it could not be bound to a
+    /// An owner with a NUL byte is no bound (SurrealDB strings cannot hold
+    /// one: no owner column stores it, and binding it would fail the
     /// query); the gaps around it merge.
     #[test]
     fn owner_gaps_skip_an_owner_with_a_nul_byte() {
