@@ -481,7 +481,7 @@ pub static PARAM_RULES: &[ParamRule] = {
             Exempt("starting dispersion; the fit's iteration limit does not depend on it"),
         ),
         p("power_anova_test", "groups", Max(DesignGroups)),
-        p("power_anova_test", "n", Max(SampleSize)),
+        p("power_anova_test", "n", Max(PowerSampleSize)),
         p("power_anova_test", "between_var", Exempt(EFFECT)),
         p("power_anova_test", "within_var", Exempt(EFFECT)),
         p("power_anova_test", "power", Exempt(TARGET_POWER)),
@@ -496,7 +496,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("power_prop_test", "p1", Exempt(EFFECT)),
         p("power_prop_test", "p2", Exempt(EFFECT)),
         p("power_prop_test", "power", Exempt(TARGET_POWER)),
-        p("power_t_test", "n", Max(SampleSize)),
+        p("power_t_test", "n", Max(PowerSampleSize)),
         p("power_t_test", "delta", Exempt(EFFECT)),
         p("power_t_test", "sd", Exempt(EFFECT)),
         p("power_t_test", "power", Exempt(TARGET_POWER)),
@@ -945,7 +945,7 @@ mod tests {
         (Family::ArrayLength, "stats_spline", "xout"),
         (Family::StringBytes, "str_regex_count", "pattern"),
         (Family::TreeDepth, "ml_random_forest", "max_depth"),
-        (Family::SampleSize, "power_t_test", "n"),
+        (Family::PowerSampleSize, "power_t_test", "n"),
         (Family::DesignGroups, "power_anova_test", "groups"),
     ];
 
@@ -1635,35 +1635,35 @@ mod tests {
                 "power_t_test",
                 "n",
                 json!({"n": 1e7, "delta": 1.0, "sd": 1.0, "sig_level": 0.05}),
-                "sample_size",
+                "power_sample_size",
                 "1000000",
             ),
             (
                 "power_t_test",
                 "n",
                 json!({"n": 1e300, "delta": 1.0}),
-                "sample_size",
+                "power_sample_size",
                 "1000000",
             ),
             (
                 "power_t_test",
                 "n",
                 json!({"n": -1e300, "delta": 1.0}),
-                "sample_size",
+                "power_sample_size",
                 "1000000",
             ),
             (
                 "power_t_test",
                 "n",
                 json!({"n": 1_000_001, "delta": 1.0}),
-                "sample_size",
+                "power_sample_size",
                 "1000000",
             ),
             (
                 "power_anova_test",
                 "n",
                 json!({"groups": 3, "n": 1e7, "between_var": 0.25, "within_var": 1.0}),
-                "sample_size",
+                "power_sample_size",
                 "1000000",
             ),
             (
@@ -1721,6 +1721,21 @@ mod tests {
         ] {
             assert!(hosted("power_anova_test", args.clone()).is_ok(), "{args}");
         }
+        // The override key is `power_sample_size`, so it cannot be read as the `sample_size`
+        // request field of other tools; `sample_size` is not a limit key.
+        let raised = Limits::hosted()
+            .with_overrides(&["power_sample_size=2000000".to_string()])
+            .unwrap();
+        assert!(
+            raised
+                .check_tool_arguments("power_t_test", &json!({"n": 2e6, "delta": 1.0}))
+                .is_ok()
+        );
+        assert!(
+            Limits::hosted()
+                .with_overrides(&["sample_size=2000000".to_string()])
+                .is_err()
+        );
     }
 
     /// PELT's work is quadratic in the rows when it prunes nothing, so `ts_changepoint` is

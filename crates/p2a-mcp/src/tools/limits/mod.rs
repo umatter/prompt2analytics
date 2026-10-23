@@ -177,11 +177,16 @@ families! {
     /// `power_t_test` and `power_anova_test` are given; it sets the degrees of freedom of their
     /// t and F distributions. The cap is the top of the bracket in which those tools solve for
     /// `n`, so every sample size they can return is accepted. `power_prop_test` computes with
-    /// the normal distribution only, and its `n` is not capped.
-    SampleSize => "sample_size", 1_000_000;
-    /// Groups of a planned design (`power_anova_test` `groups`). With [`Family::SampleSize`] it
-    /// bounds the F distribution's degrees of freedom, `groups * (n - 1)`, also when `n` is
-    /// solved for.
+    /// the normal distribution only, and its `n` is not capped. The key is `power_sample_size`,
+    /// not `sample_size`, which other tools use as a request field name. Until p2a-core bounds
+    /// the t and F quantiles of the power calculations (PR-01), this cap also keeps them within
+    /// the range the core computes, so it must not be raised with `P2A_LIMIT_OVERRIDES`.
+    PowerSampleSize => "power_sample_size", 1_000_000;
+    /// Groups of a planned design (`power_anova_test` `groups`). With
+    /// [`Family::PowerSampleSize`] it bounds the F distribution's degrees of freedom,
+    /// `groups * (n - 1)`, also when `n` is solved for. Until p2a-core bounds the t and F
+    /// quantiles of the power calculations (PR-01), this cap also keeps them within the range
+    /// the core computes, so it must not be raised with `P2A_LIMIT_OVERRIDES`.
     DesignGroups => "design_groups", 10;
 }
 
@@ -1798,7 +1803,7 @@ mod tests {
             (Family::ArrayLength, "array_length", 100_000),
             (Family::StringBytes, "string_bytes", 4_096),
             (Family::TreeDepth, "tree_depth", 100),
-            (Family::SampleSize, "sample_size", 1_000_000),
+            (Family::PowerSampleSize, "power_sample_size", 1_000_000),
             (Family::DesignGroups, "design_groups", 10),
         ];
         assert_eq!(Family::ALL.len(), expect.len());
