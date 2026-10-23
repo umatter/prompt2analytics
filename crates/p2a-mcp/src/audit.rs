@@ -10,9 +10,11 @@
 //!   other strings and object keys are cut to 200 bytes, arrays to 20
 //!   elements, objects to 64 keys, nesting to 4 levels and the whole to about
 //!   16 KiB, so an entry stays small whatever the request carried. The
-//!   parameters the tool declares are taken first (`query` and `pattern`
-//!   ahead of the rest), so the key cap and the size bound fall on keys the
-//!   tool ignores before any parameter it runs with;
+//!   parameters the tool's schema declares are taken first (`query` and
+//!   `pattern` ahead of the rest), so the key cap and the size bound fall on
+//!   the other keys before them; a value passed under a serde alias (such as
+//!   `entity` for a panel tool's `entity_var`) is not declared and ranks
+//!   with those other keys;
 //! - whether it succeeded, its outcome (`ok`, `tool_error`, `cancelled` or a
 //!   refusal code such as `limit_exceeded`) and its duration;
 //! - the size of its result ([`ResultSummary`]), never the result itself.
@@ -22,9 +24,10 @@
 //! so tool calls never do file IO on a runtime worker. The file is created
 //! with mode 0600 and rotates by size ([`RotationPolicy`], `P2A_AUDIT_MAX_MB`,
 //! default 50 MiB, `0` disables), keeping `<path>.1` to `<path>.3`. When the
-//! file is removed or moved away outside the server, the next entry starts a
-//! new file at the path and the numbered files are left as they are; that
-//! new file is created exclusively, so a symlink planted at the path is never
+//! file is removed or moved away outside the server, the next entry or flush
+//! starts a new file at the path, which also takes the entries not yet
+//! written out, and the numbered files are left as they are; that new file
+//! is created exclusively, so a symlink planted at the path is never
 //! followed. The writer flushes whenever its queue runs empty, and the stdio
 //! transport and `transport::http::serve` write out every entry queued by the
 //! time they return (a call still running after its deadline answer is
@@ -36,7 +39,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Write, WriterPanicked};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, PoisonError, Weak};
@@ -66,10 +69,11 @@ pub const REDACT_KEYS: &[&str] = &[
     "binary",
 ];
 
-/// Declared parameters taken ahead of every other argument: the SQL text and
-/// regex patterns an operator needs to investigate injected tool use
-/// (`db_sqlite_query`, `db_duckdb_query`, `db_query_file`,
-/// `str_regex_replace`, `str_regex_count`, `str_split`).
+/// Declared parameters taken ahead of every other argument: the SQL text,
+/// regex patterns and search queries an operator needs to investigate
+/// injected tool use (`query`: `db_sqlite_query`, `db_duckdb_query`,
+/// `db_query_file`, `search_tools`; `pattern`: `str_regex_replace`,
+/// `str_regex_extract`, `str_regex_count`, `str_split`).
 const KEEP_FIRST_KEYS: &[&str] = &["query", "pattern"];
 
 /// Longest string kept in an entry, in bytes (cut at a char boundary).
@@ -462,7 +466,18 @@ impl Writer {
         }
     }
 
+    /// Writes the buffered entries out to the file at the log's path: when
+    /// the file was removed or moved away since they were written, to a new
+    /// file there ([`reopen_if_removed`](Self::reopen_if_removed)).
     fn flush(&mut self) {
+        if !self.file.buffer().is_empty() {
+            self.reopen_if_removed();
+        }
+        self.flush_buffer();
+    }
+
+    /// Writes the buffer out to the file at hand.
+    fn flush_buffer(&mut self) {
         if let Err(e) = self.file.flush() {
             self.io_error(&e);
         }
@@ -471,34 +486,41 @@ impl Writer {
     /// Opens a new file when nothing is at the log's path any more (an
     /// operator's `rm`, or a log rotator that moved the file without
     /// creating a new one), so later entries do not go to a file that can no
-    /// longer be found. One `lstat` per entry; a file or symlink at the path
-    /// is left as it is.
+    /// longer be found; the entries still buffered go to the new file too
+    /// ([`reopen`](Self::reopen)). One `lstat` per entry and one per flush of
+    /// a non-empty buffer; a file or symlink at the path is left as it is.
     fn reopen_if_removed(&mut self) {
         let gone = std::fs::symlink_metadata(&self.path)
             .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
-        if gone {
-            // What is buffered belongs to the file it was written to.
-            self.flush();
-            if self.reopen() {
-                tracing::warn!(
-                    path = %self.path.display(),
-                    "the audit log was removed or moved away; writing to a new file at its path"
-                );
-            }
+        if gone && self.reopen() {
+            tracing::warn!(
+                path = %self.path.display(),
+                "the audit log was removed or moved away; writing to a new file at its path"
+            );
         }
     }
 
     /// Makes a new file at `self.path`, which the caller found empty, the
-    /// file at hand. The file is created exclusively: whatever appeared at
-    /// the path since the check, a symlink included, is refused rather than
-    /// opened or followed. On failure the error is counted, writing continues
-    /// in the file at hand and the size count restarts, so the next rotation
-    /// waits for another `max_bytes`.
+    /// file at hand, and writes into it the entries the old file's buffer
+    /// still held: after an `rm` they would be lost with the old file, and
+    /// after a move they are kept at the path with the entries that follow.
+    /// The file is created exclusively: whatever appeared at the path since
+    /// the check, a symlink included, is refused rather than opened or
+    /// followed. On failure the error is counted, writing (the buffered
+    /// entries included) continues in the file at hand and the size count
+    /// restarts, so the next rotation waits for another `max_bytes`.
     fn reopen(&mut self) -> bool {
         match create_log(&self.path) {
             Ok(file) => {
+                let old = std::mem::replace(&mut self.file, BufWriter::new(file));
+                // `into_parts` hands back the buffer without writing it out.
+                let (_, unwritten) = old.into_parts();
+                let unwritten = unwritten.unwrap_or_else(WriterPanicked::into_inner);
                 self.size = 0;
-                self.file = BufWriter::new(file);
+                match self.file.write_all(&unwritten) {
+                    Ok(()) => self.size = unwritten.len() as u64,
+                    Err(e) => self.io_error(&e),
+                }
                 true
             }
             Err(e) => {
@@ -510,16 +532,17 @@ impl Writer {
     }
 
     /// `<path>.<keep>` is removed, `.k` becomes `.k+1`, the current file
-    /// becomes `.1` and a new file is opened. When nothing is at the path
-    /// any more (the file was removed or moved away outside the server), the
-    /// numbered files are left as they are and a new file is opened. Any
+    /// (its buffer written out first) becomes `.1` and a new file is opened.
+    /// When nothing is at the path any more (the file was removed or moved
+    /// away outside the server), the numbered files are left as they are and
+    /// a new file is opened, which takes the entries still buffered. Any
     /// other failure is logged and writing continues in the file at hand;
     /// the size count restarts, so the next attempt waits for another
     /// `max_bytes` instead of shifting the numbered files again on every
-    /// entry. No entry is dropped.
+    /// entry. Buffered entries stay in a removed file only when no new file
+    /// can be created at the path, which is logged.
     fn rotate(&mut self) {
         use std::io::ErrorKind::NotFound;
-        self.flush();
         match std::fs::symlink_metadata(&self.path) {
             Ok(_) => {}
             Err(e) if e.kind() == NotFound => {
@@ -532,6 +555,8 @@ impl Writer {
                 return;
             }
         }
+        // What the current file was sent goes with it to `.1`.
+        self.flush_buffer();
         let keep = self.policy.keep;
         let moved = if keep == 0 {
             std::fs::remove_file(&self.path)
@@ -595,6 +620,7 @@ pub(crate) mod gate {
     }
 
     /// Closes the gate of the log at `path` until the guard drops.
+    #[must_use = "the gate opens when this guard drops"]
     pub(crate) fn hold(path: &Path) -> Held {
         let path = std::path::absolute(path).expect("an absolute path");
         let shared: Shared = Arc::new((Mutex::new(true), Condvar::new()));
@@ -650,15 +676,20 @@ pub(crate) mod gate {
 ///
 /// The top-level keys are taken in this order: the declared `query` and
 /// `pattern`, the other declared parameters that are single values (or are
-/// redacted to one), the declared objects and arrays, then the keys the tool
-/// does not declare (and ignores), in key order. The key cap and the byte
-/// bound therefore fall on undeclared keys before any parameter the tool
-/// runs with, and SQL text and regex patterns are kept (truncated): they are
-/// what an operator needs to investigate injected tool use. Nested objects
-/// keep key order. A key cut to the name of a key already kept, or spelled
-/// like the `"[+n more keys]"` marker, is left out and counted by the
-/// marker, so no kept value is overwritten and the marker is always the
-/// sanitiser's own.
+/// redacted to one), the declared objects and arrays (by name within each
+/// group), then the keys the schema does not declare, in the order the
+/// arguments map holds them (sorted by key, or as sent in builds where a
+/// dependency enables serde_json's `preserve_order`, as the `db` feature
+/// does). The key cap and the byte bound therefore fall on undeclared keys
+/// before any declared parameter, and SQL text and regex patterns are kept
+/// (truncated): they are what an operator needs to investigate injected
+/// tool use. The ordering covers the parameters the schema declares: a
+/// value passed under a serde alias (such as `entity` for a panel tool's
+/// `entity_var`) is not declared and ranks with the undeclared keys. Nested
+/// objects keep the map's order. A key cut to the name of a key already
+/// kept, or spelled like the `"[+n more keys]"` marker, is left out and
+/// counted by the marker, so no kept value is overwritten and the marker is
+/// always the sanitiser's own.
 pub fn sanitize_arguments(args: &Value, declared: &[&str]) -> Value {
     let mut budget = MAX_ARGUMENT_BYTES;
     // A top-level value always fits: a container needs 3 bytes, a scalar at
@@ -698,9 +729,12 @@ fn sanitize_value(value: &Value, level: usize, budget: &mut usize) -> Option<Val
 }
 
 /// The sanitised object `map` at `level`, charged to `budget` like
-/// [`sanitize_value`]. Its keys are taken in [`key_rank`] order for
-/// `declared` (key order when `declared` is empty), at most
-/// [`MAX_OBJECT_KEYS`] of them.
+/// [`sanitize_value`]. The keys in `declared` come first, in [`key_rank`]
+/// order and by name within a rank; the others follow in map order (sorted
+/// by key, or the order the request was sent in where serde_json's
+/// `preserve_order` is on, as it is in `db` builds). At most
+/// [`MAX_OBJECT_KEYS`] are kept, and the map is walked lazily, so a wide
+/// object's keys are never collected.
 fn sanitize_object(
     map: &serde_json::Map<String, Value>,
     level: usize,
@@ -709,13 +743,18 @@ fn sanitize_object(
 ) -> Option<Value> {
     // Braces and a separator.
     *budget = budget.checked_sub(3)?;
-    let mut order: Vec<(&String, &Value)> = map.iter().collect();
-    if !declared.is_empty() {
-        // Stable: key order within a rank.
-        order.sort_by_cached_key(|&(key, v)| key_rank(key, v, declared));
-    }
+    // The declared keys present, at most the schema's parameter count, by
+    // rank and then by name; the rest in map order.
+    let mut head: Vec<(&String, &Value)> = declared
+        .iter()
+        .filter_map(|name| map.get_key_value(*name))
+        .collect();
+    head.sort_by_key(|&(key, v)| (key_rank(key, v), key));
+    let rest = map
+        .iter()
+        .filter(|(key, _)| !declared.contains(&key.as_str()));
     let mut kept = serde_json::Map::new();
-    for (key, v) in order {
+    for (key, v) in head.into_iter().chain(rest) {
         if kept.len() == MAX_OBJECT_KEYS {
             break;
         }
@@ -751,14 +790,12 @@ fn sanitize_object(
     Some(Value::Object(kept))
 }
 
-/// Where a top-level key comes in the sanitising order, lowest first: a
-/// declared [`KEEP_FIRST_KEYS`] parameter, another declared parameter that
-/// is a single value or is redacted to one, a declared object or array, a
-/// key the tool does not declare.
-fn key_rank(key: &str, value: &Value, declared: &[&str]) -> u8 {
-    if !declared.contains(&key) {
-        3
-    } else if KEEP_FIRST_KEYS.contains(&key) {
+/// Where a declared top-level parameter comes in the sanitising order,
+/// lowest first: a [`KEEP_FIRST_KEYS`] parameter, another parameter that is
+/// a single value or is redacted to one, an object or array. The keys the
+/// tool does not declare come after all of them.
+fn key_rank(key: &str, value: &Value) -> u8 {
+    if KEEP_FIRST_KEYS.contains(&key) {
         0
     } else if REDACT_KEYS.contains(&key) || !(value.is_object() || value.is_array()) {
         1
@@ -998,9 +1035,16 @@ mod tests {
         // 64 undeclared keys sorting before `query` would fill the key cap.
         let mut args = padding_keys();
         args.insert("query".into(), "select 1".into());
-        let s = sanitize_arguments(&Value::Object(args), &["query"]);
+        let args = Value::Object(args);
+        let s = sanitize_arguments(&args, &["query"]);
         assert_eq!(s["query"], "select 1", "{s}");
         assert_eq!(left_out_and_kept(&s), (1, MAX_OBJECT_KEYS));
+        // Without the declared list (a call site passing `&[]`) the padding,
+        // first in key order and inserted first, takes the cap. The e2e tests
+        // in tests/limits_e2e.rs send these arguments through each call site.
+        let undeclared = sanitize_arguments(&args, &[]);
+        assert!(undeclared.get("query").is_none(), "{undeclared}");
+        assert_eq!(left_out_and_kept(&undeclared), (1, MAX_OBJECT_KEYS));
         // One undeclared key with about 24 KB of escapes would fill the
         // byte budget.
         let args = serde_json::json!({"a": vec!["\u{1}".repeat(200); 20], "query": "select 1"});
@@ -1384,6 +1428,33 @@ mod tests {
             );
         }
         assert_eq!(ids_in(&path), [1, 2, 3]);
+    }
+
+    #[test]
+    fn entries_buffered_when_the_log_is_removed_go_to_the_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let policy = RotationPolicy {
+            max_bytes: None,
+            keep: 3,
+        };
+        let mut writer = writer_at(&path, policy);
+        // Removed with an entry still buffered; the next entry finds the
+        // path empty.
+        writer.write_entry(&entry(0));
+        assert!(!writer.file.buffer().is_empty());
+        std::fs::remove_file(&path).unwrap();
+        writer.write_entry(&entry(1));
+        writer.flush();
+        assert_eq!(ids_in(&path), [0, 1]);
+        assert_eq!(writer.size, std::fs::metadata(&path).unwrap().len());
+        // Removed between the last entry of a burst and its flush.
+        writer.write_entry(&entry(2));
+        std::fs::remove_file(&path).unwrap();
+        writer.flush();
+        assert_eq!(ids_in(&path), [2]);
+        assert_eq!(writer.size, std::fs::metadata(&path).unwrap().len());
+        assert_eq!(writer.io_errors, 0);
     }
 
     #[test]

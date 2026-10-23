@@ -630,6 +630,17 @@ mod serve_tests {
         let held = crate::audit::gate::hold(&log);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        // `serve` installs process-wide policies (the p2a-core allocation
+        // ceiling, the session-directory switch) in this test process, which
+        // the other lib tests share. Resolved as `serve` resolves them (at
+        // the bound address), they must be the defaults.
+        let mut bound = config.clone();
+        bound.http.addr = addr;
+        let exec = crate::exec::ExecConfig::from_config(&bound);
+        assert!(
+            exec.alloc_ceiling_bytes.is_none() && !exec.session_dirs,
+            "serve would install a non-default process policy in the shared test process"
+        );
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let mut server = tokio::spawn(serve(listener, config, async {
             let _ = stopped.await;
