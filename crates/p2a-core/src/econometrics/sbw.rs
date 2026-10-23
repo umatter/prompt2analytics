@@ -150,18 +150,34 @@ impl fmt::Display for SBWEstimand {
 pub struct SBWConfig {
     /// Target estimand (ATT, ATE, ATC)
     pub estimand: SBWEstimand,
-    /// Tolerance for approximate balance (0 = exact balance)
-    /// Constraints: |Σw_i X_ij / Σw_i - target_j| <= balance_tol
+    /// Balance tolerance; must be finite and >= 0. `0` (the default) selects exact balance,
+    /// solved by the dual Newton method of the module docs. A positive value selects the
+    /// penalised approximate solver, which aims for
+    /// |Σw_i X_ij / Σw_i - target_j| <= balance_tol: it reports convergence only when the
+    /// largest such violation is below `balance_tol + 0.001` (and the gradient norm below
+    /// `tolerance`), but it does not enforce the bound.
     pub balance_tol: f64,
-    /// Minimum weight allowed (default 0 for non-negativity)
+    /// Lower bound l on each reweighted unit's weight (default 0, non-negative weights);
+    /// must be finite. Exact balance holds w_i >= l exactly in the n scale (the weights
+    /// average 1), so there l must be <= 1, and with l >= 0 a target mean outside the
+    /// reweighted group's range is refused. The approximate solver clips its iterate, whose
+    /// weights sum to 1, at l before renormalising, so there l bounds weights in that scale
+    /// and holds only approximately.
     pub min_weight: f64,
     /// Normalize weights to sum to n (true) or 1 (false)
     pub normalize_to_n: bool,
-    /// Maximum iterations for approximate balance solver
+    /// Iteration cap, at least 1. Approximate balance: projected-gradient steps. Exact
+    /// balance: dual Newton steps, the closed-form first step counting as one; running out
+    /// within `tolerance` stops as converged, otherwise it is an
+    /// `EconError::InvalidSpecification` naming `max_iter`.
     pub max_iter: usize,
-    /// Convergence tolerance for optimization
+    /// Convergence tolerance; must be finite and > 0. Exact balance stops once the balance
+    /// residual satisfies ||r||_inf <= tolerance (1 + ||b||_inf) after a full Newton step
+    /// (b = [target means; 1]; see the module docs for every exit). Approximate balance
+    /// uses it as the threshold on the gradient norm.
     pub tolerance: f64,
-    /// Penalty parameter for approximate balance (higher = stricter balance)
+    /// Penalty ρ on the balance violation for approximate balance (higher = stricter
+    /// balance); must be finite and > 0 when `balance_tol > 0`, unused for exact balance.
     pub balance_penalty: f64,
 }
 
@@ -380,12 +396,14 @@ impl fmt::Display for SBWResult {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use p2a_core::econometrics::sbw::{run_sbw, SBWConfig, SBWEstimand};
-/// use ndarray::Array1;
+/// ```
+/// use ndarray::{Array1, array};
+/// use p2a_core::econometrics::{SBWConfig, SBWEstimand, run_sbw};
 ///
+/// // The treated means (1.1, 0.55) lie inside the controls' ranges, so exact balance (the
+/// // default, balance_tol = 0) is feasible with non-negative weights.
 /// let treatment = Array1::from(vec![1.0, 1.0, 0.0, 0.0, 0.0]);
-/// let covariates = ndarray::array![[1.0, 0.5], [1.2, 0.6], [0.5, 0.2], [0.4, 0.3], [0.6, 0.25]];
+/// let covariates = array![[1.0, 0.5], [1.2, 0.6], [0.9, 0.4], [1.3, 0.7], [1.0, 0.6]];
 ///
 /// let config = SBWConfig {
 ///     estimand: SBWEstimand::ATT,
@@ -393,7 +411,9 @@ impl fmt::Display for SBWResult {
 /// };
 ///
 /// let result = run_sbw(&treatment.view(), &covariates.view(), config)?;
+/// assert!(result.converged && result.max_constraint_violation < 1e-10);
 /// println!("ESS: {:.1}", result.effective_sample_size);
+/// # Ok::<(), p2a_core::EconError>(())
 /// ```
 ///
 /// # References
