@@ -32,19 +32,25 @@
 //!   [`Rule::Max`];
 //! - an array field, an array element that is itself an array (`a[]`) or a tuple, by
 //!   [`Rule::ArrayLen`], [`Rule::UniqueList`] or [`Rule::SquareLen`];
-//! - the integer elements of an array (`Vec<usize>`, a tuple of integers), by
-//!   [`Rule::ArrayElemMax`] on the array's path;
-//! - any of these, alternatively, by `Rule::Exempt` with the reason the value costs nothing.
+//! - the integer elements of an array (`Vec<usize>`, a tuple of integers), which the test lists
+//!   at the element path `a[]`, by [`Rule::ArrayElemMax`] on the array's path `a`, or by a
+//!   numeric [`Rule::Max`] on `a[]`;
+//! - any of these, alternatively, by `Rule::Exempt` on the same path with the reason the value
+//!   costs nothing. An `Exempt` on `a[]` covers the elements only, never the array's length.
 //!
 //! Add a [`ParamRule`] to `PARAM_RULES` in `rules.rs`: a generic `"*"` rule when the field name
 //! means the same thing in every tool, a tool-specific rule otherwise. The schema test in
 //! `rules.rs` (built with the `http` feature) fails and names each unclassified `(tool, path)`.
+//! It also fails on a field nested more than eight objects or arrays deep, below which it does
+//! not look, rather than skip it.
 //!
-//! A rule path cannot address the values of a map (`HashMap`, `BTreeMap`), so a map whose values
-//! are integers, arrays or objects can only be `Exempt`; give a cost field a struct or a list
-//! instead. Do not give a cost field a `#[serde(alias = ...)]`. If one is unavoidable, add the
-//! same rule for the alias name, because the schema, and so the schema test, does not list
-//! aliases.
+//! A field whose schema has no type (a `serde_json::Value`, which accepts any JSON) can only be
+//! `Exempt`; give each of its cost sub-fields a rule of its own by path, because the schema does
+//! not list them and the test cannot find them. A rule path cannot address the values of a map
+//! (`HashMap`, `BTreeMap`), so a map whose values are integers, arrays, objects or any JSON can
+//! only be `Exempt`; give a cost field a struct or a list instead. Do not give a cost field a
+//! `#[serde(alias = ...)]`. If one is unavoidable, add the same rule for the alias name, because
+//! the schema, and so the schema test, does not list aliases.
 //!
 //! # Installation
 //!
@@ -728,6 +734,17 @@ fn magnitude_exceeds(u: Option<u64>, i: Option<i64>, f: Option<f64>, cap: u64) -
     }
 }
 
+/// True when a tolerance, given as the number's `f64` reading, is below `min`. A number with no
+/// `f64` reading is below every minimum, so the check fails closed.
+fn below_min_tolerance(f: Option<f64>, min: f64) -> bool {
+    match f {
+        Some(x) if x >= min => false,
+        // `None` is reachable only with serde_json's `arbitrary_precision` feature (for example
+        // -1e400). A NaN reading, which JSON cannot produce, is refused as well.
+        _ => true,
+    }
+}
+
 impl Limits {
     /// Checks a tool call's JSON arguments against [`PARAM_RULES`]; returns the first violation
     /// in [`rules_for`] order. Arguments that are not an object, and the off profile, pass.
@@ -933,18 +950,18 @@ impl Limits {
                 let (Some(min), Some(n)) = (self.min_tolerance, value.as_number()) else {
                     return Ok(());
                 };
-                match n.as_f64() {
-                    Some(x) if x < min => violation(
-                        n.to_string(),
-                        format!("{min:e}"),
-                        "min_tolerance",
-                        format!(
-                            "Parameter `{path}` = {n} is below this server's minimum of {min:e} \
-                             (min_tolerance) for `{tool_echo}`. Use a larger tolerance such as 1e-8."
-                        ),
-                    ),
-                    _ => Ok(()),
+                if !below_min_tolerance(n.as_f64(), min) {
+                    return Ok(());
                 }
+                violation(
+                    n.to_string(),
+                    format!("{min:e}"),
+                    "min_tolerance",
+                    format!(
+                        "Parameter `{path}` = {n} is below this server's minimum of {min:e} \
+                         (min_tolerance) for `{tool_echo}`. Use a larger tolerance such as 1e-8."
+                    ),
+                )
             }
             Rule::SquareLen => {
                 let (Some(cells), Some(items)) = (self.table_cells, value.as_array()) else {
@@ -1169,6 +1186,22 @@ mod tests {
         assert!(!magnitude_exceeds(Some(10), Some(10), Some(10.0), 10));
         assert!(magnitude_exceeds(None, Some(-11), Some(-11.0), 10));
         assert!(!magnitude_exceeds(None, None, Some(-9.5), 10));
+    }
+
+    #[test]
+    fn a_tolerance_without_an_f64_reading_is_below_every_minimum() {
+        // Only serde_json's `arbitrary_precision` feature produces such a number (-1e400); the
+        // minimum-tolerance check must refuse it rather than let it through.
+        assert!(below_min_tolerance(None, 1e-12));
+        assert!(!below_min_tolerance(Some(1e-12), 1e-12));
+        assert!(below_min_tolerance(Some(9.999e-13), 1e-12));
+        assert!(!below_min_tolerance(Some(1e-8), 1e-12));
+        assert!(below_min_tolerance(Some(0.0), 1e-12));
+        assert!(below_min_tolerance(Some(-1.0), 1e-12));
+        assert!(below_min_tolerance(Some(f64::NAN), 1e-12));
+        // the hosted minimum itself is accepted
+        let h = Limits::hosted();
+        assert!(h.check_with("t", &json!({"tol": 1e-15}), T).is_ok());
     }
 
     #[test]
