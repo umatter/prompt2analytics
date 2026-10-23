@@ -167,8 +167,10 @@ Further exact-balance checks in the same module:
   control mean of x2, 0.474, is below every treated x2) and is refused, as by R sbw.
 - `test_sbw_exact_large_n_is_tractable`: 2,000 treated and 20,000 controls with binding bounds.
 - `test_sbw_exact_max_iter_exhaustion_is_not_infeasibility`: Test Case 1 with `max_iter = 2`
-  is an error naming `max_iter`, not the infeasibility verdict; with `max_iter = 4` and
-  `tolerance = 1e-2` the fourth step is within tolerance and the solve stops as converged.
+  and `tolerance = 1e-3` is a `ConvergenceFailure` with `iterations = 2` (not the
+  infeasibility verdict) whose message shows the threshold tolerance (1 + ||b||_inf) and the
+  configured tolerance; with `max_iter = 4` and `tolerance = 1e-2` the fourth step is within
+  tolerance and the solve stops as converged.
 - `test_sbw_exact_overflow_is_an_error_not_a_converged_fallback`: an overflowing target mean,
   a target that overflows the multipliers and covariates of order 1e200 are errors. With
   `min_weight < 0` the first used to return uniform weights reported as converged, and the

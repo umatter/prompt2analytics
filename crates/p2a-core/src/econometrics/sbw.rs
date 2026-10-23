@@ -983,7 +983,7 @@ fn solve_sbw_exact(
                 iterations: config.max_iter,
                 last_change: r_inf,
                 suggestion: format!(
-                    "exact balance residual {r_inf:.3e} is above the threshold tolerance (1 + ||b||_inf) = {:.3e} (tolerance = {}) after max_iter = {} steps; increase max_iter, or use approximate balance (balance_tol > 0) if exact balance may be infeasible",
+                    "Exact balance residual {r_inf:.3e} is above the threshold tolerance (1 + ||b||_inf) = {:.3e} (tolerance = {:e}) after max_iter = {} steps; increase max_iter, or use approximate balance (balance_tol > 0) if exact balance may be infeasible.",
                     config.tolerance * b_scale,
                     config.tolerance,
                     config.max_iter
@@ -1652,12 +1652,16 @@ mod tests {
                 );
                 assert!(
                     suggestion.contains("(1 + ||b||_inf) = 2.000e-3")
-                        && suggestion.contains("tolerance = 0.001"),
+                        && suggestion.contains("tolerance = 1e-3"),
                     "threshold and configured tolerance not both shown in `{suggestion}`"
                 );
                 assert!(
                     last_change.is_finite() && *last_change > 2e-3,
                     "last_change {last_change} is not the residual outside tolerance"
+                );
+                assert!(
+                    suggestion.contains(&format!("residual {last_change:.3e}")),
+                    "last_change {last_change} is not the residual reported in `{suggestion}`"
                 );
             }
             other => panic!("expected ConvergenceFailure after 2 iterations, got {other:?}"),
