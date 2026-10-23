@@ -10,6 +10,12 @@
 //! freedom and away from the far tails, see the "Bounded t and F quantiles"
 //! section), and the solvers check the cooperative-cancellation budget
 //! ([`crate::resource::checkpoint`]) once per bisection step.
+//!
+//! A significance level reaches the critical value as 1 - sig_level
+//! (1 - sig_level / 2 when two-sided), which rounds it to a multiple of 2^-53:
+//! by up to 1.1e-8 (relative) at sig_level = 1e-8 and 1.1e-4 at 1e-12. Levels
+//! at or below 2^-53 (about 1.1e-16), where it rounds to 1 and the critical
+//! value would be infinite, are refused.
 
 use crate::errors::{EconError, EconResult};
 use crate::resource::checkpoint;
@@ -38,6 +44,27 @@ fn require_finite_at_least(name: &str, value: f64, min: f64) -> EconResult<()> {
     } else {
         Err(EconError::InvalidSpecification {
             message: format!("{name} must be a finite number of at least {min}, got {value:?}"),
+        })
+    }
+}
+
+/// The significance level must be greater than this, 2^-53 (about 1.1e-16):
+/// at or below it 1 - sig_level / 2 rounds to 1, the critical value is
+/// infinite, and every finite non-centrality would get a power of 0.
+const MIN_SIG_LEVEL: f64 = f64::EPSILON / 2.0;
+
+/// `Err` unless `sig_level` lies strictly between [`MIN_SIG_LEVEL`] and 1.
+fn require_sig_level(sig_level: f64) -> EconResult<()> {
+    require_open_unit("sig_level", sig_level)?;
+    if sig_level > MIN_SIG_LEVEL {
+        Ok(())
+    } else {
+        Err(EconError::InvalidSpecification {
+            message: format!(
+                "sig_level must be greater than {MIN_SIG_LEVEL:?} (2^-53: at or below it \
+                 1 - sig_level / 2 rounds to 1 and the critical value is infinite), \
+                 got {sig_level:?}"
+            ),
         })
     }
 }
@@ -87,9 +114,22 @@ fn require_finite_positive(name: &str, value: f64) -> EconResult<()> {
 // The functions below therefore use statrs' `inverse_cdf` only at small
 // degrees of freedom and with both tails (p and 1 - p) of at least
 // STATRS_MIN_P = 1e-5, and the F quantile only in the upper tail with df1 < df2,
-// the shape `power_anova_test` asks for. There statrs is within 3e-13 (t) and
-// 2e-9 (F) of R, measured over df from 1 to 1e3, and its start is far from
-// overflow. Everywhere else they use loops of their own with fixed bounds, on
+// the shape `power_anova_test` asks for. There its start is far from overflow,
+// though its result is not everywhere close to full precision. Compared with
+// R (quantiles polished by Newton steps on `pt` and `pf`), on grids of df
+// from 1 to 1e3 and of tails from 1e-5 to 0.5, its t quantile is within 2e-12
+// (relative) for tails up to 0.45 and within 2e-11 (absolute) nearer the
+// median, except in a band of tails between about 0.12 and 0.21 that widens
+// with df (0.145 to 0.163 at df = 50, 0.129 to 0.188 at 500, 0.12 to 0.207 at
+// 1e3). In the band the error grows with df: 7e-12 at df = 50, 6.3e-11 at
+// 150, 5.3e-10 at 400 and 4.7e-9 at 1e3 (at a tail of 0.207). Its F quantile
+// is within 1e-8: F(1, df2) at p is the square of t(df2) at (1 + p) / 2, so at
+// df1 = 1 the same band (F tails of 0.24 to 0.415) doubles the t error, to
+// 9.4e-9 at (1, 1e3) and a tail of 0.415; it is within 3.6e-9 at df1 = 1.5,
+// 1.3e-9 at df1 = 2 and 5e-10 from df1 = 3 on. Errors of that size move a
+// power by about 1e-9.
+//
+// Everywhere else the functions use loops of their own with fixed bounds, on
 // top of statrs' incomplete beta function (whose continued fraction stops
 // after 140 terms), or closed-form large-df limits. (The power functions ask
 // for 1 - sig_level and 1 - sig_level / 2, whose upper tails go down to
@@ -109,14 +149,14 @@ const F_SMALL_DF: f64 = 1e4;
 
 /// Largest degrees of freedom at which [`f_quantile_by_bisection`] is used:
 /// statrs' incomplete beta function, and so the bisection, is accurate to
-/// about 1e-9 up to here when the other degrees of freedom are at most
+/// about 2e-9 up to here when the other degrees of freedom are at most
 /// [`F_SMALL_DF`].
 const F_BISECTION_MAX_DF: f64 = 1e6;
 
 /// Smallest tail probability, p or 1 - p, passed to statrs' quantiles: below
 /// it statrs' t quantile is 4e-11 off at df = 1.05 (at a tail of 1e-6) and
 /// grossly off further out (see above), while the bisection that replaces it
-/// is within 2e-14 of R.
+/// is within 3e-14 of R.
 const STATRS_MIN_P: f64 = 1e-5;
 
 /// Degrees of freedom above which [`t_cdf`] uses its large-df expansion
@@ -193,8 +233,11 @@ fn bisect_root(above: impl Fn(f64) -> EconResult<bool>) -> EconResult<f64> {
 /// Quantile of Student's t with `df` degrees of freedom at probability `p`.
 ///
 /// Up to [`T_STATRS_MAX_DF`]: statrs' `inverse_cdf` when p and 1 - p are both
-/// at least [`STATRS_MIN_P`], within 3e-13 (relative) of R's `qt`, and
-/// otherwise bisection on the distribution function, within 2e-14. Above it,
+/// at least [`STATRS_MIN_P`], within 2e-12 (relative) of R for tails up to
+/// 0.45 (2e-11 absolute nearer the median) except in a band of tails between
+/// about 0.12 and 0.21, where it is up to 4.7e-9 off at df = 1e3 (see the
+/// "Bounded t and F quantiles" section), and otherwise bisection on the
+/// distribution function, within 3e-14. Above it,
 /// the Cornish-Fisher expansion about the normal quantile (Abramowitz &
 /// Stegun 26.7.5) to the df^-4 term: just above the switch (df = 1001) within
 /// 7e-13 for tails down to 1e-6, 3e-11 at 1e-12 and 1.2e-10 at 1.1e-16, the
@@ -202,10 +245,11 @@ fn bisect_root(above: impl Fn(f64) -> EconResult<bool>) -> EconResult<f64> {
 /// on.
 ///
 /// The bisection works on df / (df + m^2), so m^2 must stay finite and the
-/// magnitude it returns saturates at about 1.3e154. At df < 2 that clamps
-/// every tail below a floor of about 2e-155 at df = 1, falling to about 3e-309
-/// as df nears 2: `t_quantile(1.0, 1e-300)` is -1.3e154 where R gives
-/// -3.2e299. The power functions never ask for tails below 1.1e-16.
+/// magnitude it returns saturates at about 1.3e154. At df below about 2.1 that
+/// clamps every tail below a floor of about 2.4e-155 at df = 1, 2.8e-309 at
+/// df = 2, falling below the smallest subnormal near df = 2.1:
+/// `t_quantile(1.0, 1e-300)` is -1.3e154 where R gives -3.2e299. The power
+/// functions never ask for tails below 1.1e-16.
 fn t_quantile(df: f64, p: f64) -> EconResult<f64> {
     check_quantile_probability(p)?;
     if df.is_nan() || df <= 0.0 {
@@ -244,8 +288,8 @@ fn t_quantile(df: f64, p: f64) -> EconResult<f64> {
 /// Central t distribution function, with the large-df expansion above
 /// [`T_CDF_EXPANSION_MIN_DF`] degrees of freedom.
 fn t_cdf(x: f64, df: f64) -> EconResult<f64> {
-    // An infinite critical value (sig_level below 1.1e-16) must not reach the
-    // expansion, where it would give 0 * inf = NaN.
+    // An infinite x must not reach the expansion, where it would give
+    // 0 * inf = NaN.
     if x.is_infinite() {
         return Ok(if x > 0.0 { 1.0 } else { 0.0 });
     }
@@ -276,8 +320,10 @@ fn t_cdf(x: f64, df: f64) -> EconResult<f64> {
 ///
 /// Compared with R (quantiles found by root-finding on `pf`) on a grid of
 /// degrees of freedom and of tails (p or 1 - p) from 1.1e-16 to 0.5, the
-/// result is within 2e-9 (relative) in the first two cases and within 2e-6 in
-/// the third (1.6e-6 at df1 = 1e4 and df2 = 1e15). Paulson's approximation is
+/// result is within 1e-8 (relative) in the first case (9.4e-9 at (1, 1e3) and
+/// a tail of 0.415, see the "Bounded t and F quantiles" section), within 2.2e-9
+/// in the second (at (1, 1e6) and a tail of 0.09) and within 2e-6 in the third
+/// (1.6e-6 at df1 = 1e4 and df2 = 1e15). Paulson's approximation is
 /// within 1.5e-6 for tails down to 1e-6 and within 1e-5 down to 1.1e-16
 /// (8.6e-6 at (1.1e4, 1.1e4) and tail 2^-53, just above the switch; its error
 /// falls like 1 / df).
@@ -452,10 +498,17 @@ pub struct PowerTTestResult {
 /// - `delta` is not finite;
 /// - `sd` is not finite or not greater than 0, or, when solving for `delta`,
 ///   above `f64::MAX / 10` (the search runs up to `10 * sd`);
-/// - `sig_level` or `power` is not strictly between 0 and 1 (NaN included).
+/// - `sig_level` is not strictly between 2^-53 (about 1.1e-16) and 1 (NaN
+///   included): at or below 2^-53, 1 - sig_level / 2 rounds to 1 and the
+///   critical value would be infinite;
+/// - `power` is not strictly between 0 and 1 (NaN included).
 ///
 /// [`EconError::Cancelled`] when the cooperative-cancellation budget
 /// ([`crate::resource`]) runs out while solving for `n` or `delta`.
+///
+/// [`EconError::Computation`] if a distribution routine fails or the power
+/// comes out undefined (NaN); not expected for inputs that pass the checks
+/// above.
 pub fn power_t_test(
     n: Option<f64>,
     delta: Option<f64>,
@@ -507,7 +560,7 @@ pub fn power_t_test(
             message: format!("sd must be at most {max_sd:e} when solving for delta, got {sd:?}"),
         });
     }
-    require_open_unit("sig_level", sig_level)?;
+    require_sig_level(sig_level)?;
     if let Some(p) = power {
         require_open_unit("power", p)?;
     }
@@ -576,15 +629,19 @@ fn compute_power_t_test(
         TTestType::OneSample | TTestType::Paired => n - 1.0,
     };
 
-    // Standard error
-    let se = match test_type {
-        TTestType::TwoSample => sd * (2.0 / n).sqrt(),
-        TTestType::OneSample | TTestType::Paired => sd / n.sqrt(),
+    // Non-centrality |delta| / se, with the standard error se = sd sqrt(2 / n)
+    // for two samples and sd / sqrt(n) otherwise, which R's power.t.test
+    // writes as sqrt(n / tsample) delta / sd. Formed as |delta| / sd times
+    // sqrt(n / tsample), with n >= 2: |delta| / sd underflows only when the
+    // non-centrality is negligible and overflows only when it is beyond
+    // f64::MAX, and delta = 0 gives exactly 0. Dividing by se instead turns
+    // its underflow (delta = 5e-324, sd = 1e-174, n = 1e300) into an infinite
+    // non-centrality where the true one is 3.5, and delta = 0 into 0 / 0.
+    let tsample = match test_type {
+        TTestType::TwoSample => 2.0,
+        TTestType::OneSample | TTestType::Paired => 1.0,
     };
-
-    // Non-centrality parameter. With a tiny sd and a huge n the standard
-    // error underflows to 0, and delta = 0 would then give 0 / 0 = NaN.
-    let ncp = if delta == 0.0 { 0.0 } else { delta.abs() / se };
+    let ncp = delta.abs() / sd * (n / tsample).sqrt();
 
     // Critical value
     let t_crit = match alternative {
@@ -690,10 +747,9 @@ fn nct_cdf(t: f64, df: f64, ncp: f64) -> EconResult<f64> {
         return t_cdf(t, df);
     }
 
-    // An infinite non-centrality (the standard error underflowed to 0) puts
-    // all the mass at +inf or -inf. The limit holds for every critical value,
-    // including the infinite one a sig_level below 1.1e-16 gives, where the
-    // approximations below would compute inf - inf = NaN.
+    // An infinite non-centrality (the true one is beyond f64::MAX) puts all
+    // the mass at +inf or -inf. The limit holds for every t, an infinite one
+    // included, where the approximations below would compute inf - inf = NaN.
     if ncp.is_infinite() {
         return Ok(if ncp > 0.0 { 0.0 } else { 1.0 });
     }
@@ -754,12 +810,18 @@ pub struct PowerPropTestResult {
 /// [`EconError::InvalidSpecification`], naming the parameter and its limit,
 /// when
 /// - `p2` is `None`, or not exactly one of `n` and `power` is `None`;
-/// - `p1`, `p2`, `sig_level` or `power` is not strictly between 0 and 1 (NaN
-///   included);
+/// - `p1`, `p2` or `power` is not strictly between 0 and 1 (NaN included);
+/// - `sig_level` is not strictly between 2^-53 (about 1.1e-16) and 1 (NaN
+///   included): at or below 2^-53, 1 - sig_level / 2 rounds to 1 and the
+///   critical value would be infinite;
 /// - `n` is not finite or is below 1.
 ///
 /// [`EconError::Cancelled`] when the cooperative-cancellation budget
 /// ([`crate::resource`]) runs out while solving for `n`.
+///
+/// [`EconError::Computation`] if a distribution routine fails or the power
+/// comes out undefined (NaN); not expected for inputs that pass the checks
+/// above.
 pub fn power_prop_test(
     n: Option<f64>,
     p1: f64,
@@ -778,7 +840,7 @@ pub fn power_prop_test(
     })?;
 
     require_open_unit("p2", p2)?;
-    require_open_unit("sig_level", sig_level)?;
+    require_sig_level(sig_level)?;
     if let Some(p) = power {
         require_open_unit("power", p)?;
     }
@@ -826,31 +888,39 @@ fn compute_power_prop_test(
     // Effect size (Cohen's h)
     let _h = 2.0 * (p1.sqrt().asin() - p2.sqrt().asin());
 
-    // Standard error under null
+    // Non-centrality |p1 - p2| / se, with the standard error under the null
+    // se = sqrt(2 p q / n) (p the pooled proportion, q = 1 - p), formed
+    // without se: |p1 - p2| / sqrt(2 p q) is at most sqrt(2) and its
+    // denominator at least 3e-162, so the non-centrality stays finite (below
+    // 2e154) for any n and is exactly 0 when p1 == p2. Dividing by se instead
+    // turns its underflow to 0 (p1 = 5e-324, p2 = 1e-323, n = 100) into an
+    // infinite non-centrality where the true one is about 1e-161.
     let p_pooled = (p1 + p2) / 2.0;
-    let se = (2.0 * p_pooled * (1.0 - p_pooled) / n).sqrt();
-
-    // Non-centrality parameter. With proportions near the smallest f64 the
-    // standard error underflows to 0, and p1 == p2 would then give 0 / 0 = NaN.
-    let ncp = if p1 == p2 { 0.0 } else { (p1 - p2).abs() / se };
+    let ncp = (p1 - p2).abs() / (2.0 * p_pooled * (1.0 - p_pooled)).sqrt() * n.sqrt();
 
     let normal = Normal::standard();
     let alt = Normal::new(ncp, 1.0)
         .map_err(|e| EconError::Computation(format!("Normal distribution error: {e}")))?;
 
+    let z_crit = match alternative {
+        PowerAlternative::TwoSided => normal.inverse_cdf(1.0 - sig_level / 2.0),
+        PowerAlternative::OneSided => normal.inverse_cdf(1.0 - sig_level),
+    };
     let power = match alternative {
         PowerAlternative::TwoSided => {
-            let z_crit = normal.inverse_cdf(1.0 - sig_level / 2.0);
             let power_upper = 1.0 - alt.cdf(z_crit);
             let power_lower = alt.cdf(-z_crit);
             power_upper + power_lower
         }
-        PowerAlternative::OneSided => {
-            let z_crit = normal.inverse_cdf(1.0 - sig_level);
-            1.0 - alt.cdf(z_crit)
-        }
+        PowerAlternative::OneSided => 1.0 - alt.cdf(z_crit),
     };
 
+    // the clamp below would turn a NaN into 0 without a word
+    if power.is_nan() {
+        return Err(EconError::Computation(format!(
+            "power is undefined for non-centrality {ncp:?} and critical value {z_crit:?}"
+        )));
+    }
     Ok(power.max(0.0).min(1.0))
 }
 
@@ -934,10 +1004,16 @@ pub struct PowerAnovaTestResult {
 ///   `f64::MAX / groups`; the message names the largest n accepted);
 /// - `between_var` is not finite or is negative;
 /// - `within_var` is not finite or not greater than 0;
-/// - `sig_level` or `power` is not strictly between 0 and 1 (NaN included).
+/// - `sig_level` is not strictly between 2^-53 (about 1.1e-16) and 1 (NaN
+///   included): at or below 2^-53, as in [`power_t_test`] and
+///   [`power_prop_test`], the critical value can be infinite;
+/// - `power` is not strictly between 0 and 1 (NaN included).
 ///
 /// [`EconError::Cancelled`] when the cooperative-cancellation budget
 /// ([`crate::resource`]) runs out while solving for `n`.
+///
+/// [`EconError::Computation`] if a distribution routine fails; not expected
+/// for inputs that pass the checks above.
 pub fn power_anova_test(
     groups: usize,
     n: Option<f64>,
@@ -977,7 +1053,7 @@ pub fn power_anova_test(
     }
     require_finite_at_least("between_var", between_var, 0.0)?;
     require_finite_positive("within_var", within_var)?;
-    require_open_unit("sig_level", sig_level)?;
+    require_sig_level(sig_level)?;
     if let Some(p) = power {
         require_open_unit("power", p)?;
     }
@@ -1646,18 +1722,21 @@ mod tests {
 
     #[test]
     fn test_validate_power_t_test_infinite_non_centrality_is_full_power() {
-        // R: power.t.test(n = 1e300, delta = 1, sd = 1e-300, sig.level = 1e-17,
-        // strict = TRUE)$power == 1. The standard error underflows to 0, so the
-        // non-centrality is infinite, and 1 - sig_level rounds to 1, so the
-        // critical value is too: the power used to come out as inf - inf = NaN,
-        // clamped to 0.
+        // R: power.t.test(n = 1e300, delta = 1, sd = 1e-300, sig.level = s,
+        // strict = TRUE)$power == 1, for s = 0.05 and for the smallest level
+        // accepted, just above 2^-53. The non-centrality, sqrt(n / 2) delta / sd,
+        // is beyond f64::MAX, and the power is its limit. (At sig_level = 1e-17
+        // the critical value is infinite as well, and the power once came out
+        // there as inf - inf = NaN, clamped to 0. Levels at or below 2^-53 are
+        // now refused, see
+        // test_power_functions_refuse_a_sig_level_at_or_below_2_pow_minus_53.)
         let cases = [
             (1.0, PowerAlternative::TwoSided),
             (1.0, PowerAlternative::OneSided),
             (-1.0, PowerAlternative::OneSided),
         ];
         for (delta, alternative) in cases {
-            for sig_level in [1e-17, 0.05] {
+            for sig_level in [MIN_SIG_LEVEL.next_up(), 0.05] {
                 let r = power_t_test(
                     Some(1e300),
                     Some(delta),
@@ -1674,6 +1753,94 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_validate_power_t_test_non_centrality_beside_an_underflowing_standard_error() {
+        // The standard error sd sqrt(2 / n) underflows to 0 at sd = 1e-174 and
+        // n = 1e300, but the non-centrality sqrt(n / 2) delta / sd is 3.5:
+        // dividing delta by the underflowed standard error used to give an
+        // infinite non-centrality and a power of 1.
+        // R: power.t.test(n = 1e300, delta = 5e-324, sd = 1e-174, type = t,
+        // strict = TRUE)$power
+        let cases = [
+            (TTestType::TwoSample, 0.937_436_928_340_223_3),
+            (TTestType::OneSample, 0.998_562_012_785_837_1),
+            (TTestType::Paired, 0.998_562_012_785_837_1),
+        ];
+        for (test_type, expected) in cases {
+            let r = power_t_test(
+                Some(1e300),
+                Some(5e-324),
+                Some(1e-174),
+                Some(0.05),
+                None,
+                test_type,
+                PowerAlternative::TwoSided,
+            )
+            .unwrap();
+            assert!(
+                (r.power - expected).abs() < 1e-6,
+                "{test_type:?}: {}",
+                r.power
+            );
+        }
+    }
+
+    #[test]
+    fn test_power_functions_refuse_a_sig_level_at_or_below_2_pow_minus_53() {
+        // At or below 2^-53, 1 - sig_level / 2 rounds to 1, the critical value
+        // is infinite, and the power came out as 0 for any finite
+        // non-centrality (R: power.prop.test(n = 1e300, p1 = 0.3, p2 = 0.5,
+        // sig.level = 1e-300)$power is 1).
+        let limit = "greater than 1.1102230246251565e-16";
+        let two = PowerAlternative::TwoSided;
+        for sig in [1e-300, 1e-17, MIN_SIG_LEVEL] {
+            let t = power_t_test(
+                Some(1e6),
+                Some(1.0),
+                Some(1.0),
+                Some(sig),
+                None,
+                TTestType::TwoSample,
+                two,
+            );
+            assert_refused_containing(t, "sig_level", limit);
+            let t_n = power_t_test(
+                None,
+                Some(1.0),
+                Some(1.0),
+                Some(sig),
+                Some(0.8),
+                TTestType::OneSample,
+                PowerAlternative::OneSided,
+            );
+            assert_refused_containing(t_n, "sig_level", limit);
+            let prop = power_prop_test(Some(1e300), 0.3, Some(0.5), Some(sig), None, two);
+            assert_refused_containing(prop, "sig_level", limit);
+            let prop_n = power_prop_test(None, 0.3, Some(0.5), Some(sig), Some(0.8), two);
+            assert_refused_containing(prop_n, "sig_level", limit);
+            let anova = power_anova_test(3, Some(1e6), 0.25, 1.0, Some(sig), None);
+            assert_refused_containing(anova, "sig_level", limit);
+        }
+        // Just above the limit the critical values are finite (tail 2^-53),
+        // and a large effect still has full power
+        let sig = MIN_SIG_LEVEL.next_up();
+        let t = power_t_test(
+            Some(1e6),
+            Some(1.0),
+            Some(1.0),
+            Some(sig),
+            None,
+            TTestType::TwoSample,
+            two,
+        )
+        .unwrap();
+        assert!((t.power - 1.0).abs() < 1e-12, "t: {}", t.power);
+        let prop = power_prop_test(Some(1e300), 0.3, Some(0.5), Some(sig), None, two).unwrap();
+        assert!((prop.power - 1.0).abs() < 1e-12, "prop: {}", prop.power);
+        let anova = power_anova_test(3, Some(1e6), 0.25, 1.0, Some(sig), None).unwrap();
+        assert_power_in_range(&anova);
     }
 
     #[test]
@@ -1727,8 +1894,13 @@ mod tests {
             .unwrap();
             assert!((r.power - 0.05).abs() < 1e-9, "p = {p:e}: {}", r.power);
         }
-        // Distinct proportions there: the non-centrality is infinite, the
-        // power 1
+        // Distinct proportions there: the standard error sqrt(2 p q / n)
+        // underflows to 0, but the non-centrality |p1 - p2| / sqrt(2 p q / n)
+        // is about 1e-161, so the power is the significance level. Dividing by
+        // the underflowed standard error used to give an infinite
+        // non-centrality and a power of 1. R: power.prop.test(n = 100,
+        // p1 = 5e-324, p2 = 1e-323, alternative = "one.sided")$power is
+        // 0.049999999999999989.
         let r = power_prop_test(
             Some(100.0),
             5e-324,
@@ -1738,7 +1910,11 @@ mod tests {
             PowerAlternative::OneSided,
         )
         .unwrap();
-        assert_eq!(r.power, 1.0);
+        assert!(
+            (r.power - 0.049_999_999_999_999_99).abs() < 1e-9,
+            "{}",
+            r.power
+        );
     }
 
     #[test]
@@ -1838,8 +2014,8 @@ mod tests {
             assert!((r.power - 0.05).abs() < 1e-9, "n = {n}: {}", r.power);
         }
         // R: power.t.test(n = 1e300, delta = 0, sd = 1e-300, strict = TRUE)$power
-        // == 0.05. The standard error, sd * sqrt(2 / n), underflows to 0 here,
-        // and 0 / 0 must not turn into a non-centrality of NaN.
+        // == 0.05. The standard error, sd * sqrt(2 / n), would underflow to 0
+        // here, and 0 / 0 must not turn into a non-centrality of NaN.
         let r = power_t_test(
             Some(1e300),
             Some(0.0),
@@ -1855,8 +2031,9 @@ mod tests {
 
     #[test]
     fn test_t_cdf_at_infinite_x() {
-        // The infinite critical value that a sig_level below 1.1e-16 produces
-        // (1 - sig_level / 2 == 1) used to give NaN in the large-df expansion.
+        // An infinite x (the critical value of a sig_level at or below 2^-53,
+        // which the power functions now refuse) used to give NaN in the
+        // large-df expansion.
         for df in [5.0, 1e7] {
             assert_eq!(t_cdf(f64::INFINITY, df).unwrap(), 1.0, "df = {df}");
             assert_eq!(t_cdf(f64::NEG_INFINITY, df).unwrap(), 0.0, "df = {df}");
@@ -1915,6 +2092,29 @@ mod tests {
         }
         assert_eq!(t_quantile(1e7, 1.0).unwrap(), f64::INFINITY);
         assert!(t_quantile(1e7, 1.5).is_err() && t_quantile(f64::NAN, 0.5).is_err());
+    }
+
+    #[test]
+    fn test_validate_statrs_quantiles_in_their_error_band() {
+        // statrs' quantiles are used unchanged where they are, and in a band
+        // of t tails between about 0.12 and 0.21 they are off by up to 4.7e-9
+        // (9.4e-9 for F at df1 = 1): within the bounds the module comment
+        // states, not the 1e-12 they reach elsewhere.
+        // R: qt(0.8, 1000) polished by Newton steps on pt (statrs: 2.8e-9 off)
+        let t = t_quantile(1000.0, 0.8).unwrap();
+        assert_eq!(
+            t,
+            StudentsT::new(0.0, 1.0, 1000.0).unwrap().inverse_cdf(0.8)
+        );
+        assert_rel(t, 0.841_980_822_162_429_1, 5e-9, "qt(0.8, 1000)");
+        // F(1, 1e3) at p is t(1e3) at (1 + p) / 2, squared.
+        // R: qf(0.6, 1, 1000) polished by Newton steps on pf (statrs: 5.5e-9 off)
+        let f = f_quantile(1.0, 1000.0, 0.6).unwrap();
+        assert_eq!(
+            f,
+            FisherSnedecor::new(1.0, 1000.0).unwrap().inverse_cdf(0.6)
+        );
+        assert_rel(f, 0.708_931_704_889_319_6, 1e-8, "qf(0.6, 1, 1000)");
     }
 
     #[test]
