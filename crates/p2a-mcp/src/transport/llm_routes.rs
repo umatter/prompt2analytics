@@ -161,7 +161,8 @@ impl ChatSession {
     }
 
     /// The chat's session, when it is still the live session under its id
-    /// (the lookup also refreshes its last access). Otherwise why not, and
+    /// (a successful lookup refreshes the last access of the session now
+    /// under the id). Otherwise why not, and
     /// the driver is woken: the first call to find the session gone records
     /// the reason, and every later call gives it without a lookup.
     async fn live(&self) -> Result<Arc<Session>, SessionGone> {
@@ -203,6 +204,11 @@ impl ChatSession {
 /// The audit outcome of a tool the assistant may not call although a
 /// handler registers it (an internal tool).
 const NOT_AVAILABLE: &str = "not_available";
+
+/// The audit outcome of a tool name no handler registers. It matches the
+/// code of [`ToolCallError::UnknownTool`], which the governor records for
+/// such a name on the other entry paths.
+const UNKNOWN_TOOL: &str = "unknown_tool";
 
 /// Admit one tool call the model emitted, before any `ToolStart` event, DB
 /// tool-call row or governor call, and return the session to run it on.
@@ -340,10 +346,13 @@ fn refuse_unless_callable(
     name: &str,
 ) -> Result<(), (&'static str, String)> {
     check_llm_tool_call(name, |n| llm_callable_tools(server).contains(n)).map_err(|refusal| {
+        // Classified in `check_llm_tool_call`'s order (internal names first,
+        // then unregistered ones); a new refusal reason there needs its own
+        // outcome here.
         let outcome = if INTERNAL_TOOLS.contains(&name) {
             NOT_AVAILABLE
         } else {
-            "unknown_tool"
+            UNKNOWN_TOOL
         };
         (outcome, refusal)
     })
@@ -2429,6 +2438,23 @@ mod chat_tests {
         for (e, want) in cases {
             assert_eq!(llm_error_status(&e), want, "{e}");
         }
+    }
+
+    /// The audit outcome of a refused tool name: an internal tool is
+    /// `not_available`, an unregistered name `unknown_tool`, the code the
+    /// governor records for such a name on the other entry paths.
+    #[test]
+    fn refused_tool_names_carry_their_audit_outcome() {
+        assert_eq!(
+            UNKNOWN_TOOL,
+            ToolCallError::UnknownTool(String::new()).code()
+        );
+        let server = crate::server::AnalyticsServer::new();
+        let outcome = |name: &str| refuse_unless_callable(&server, name).map_err(|(o, _)| o);
+        assert_eq!(outcome("server_stats"), Err(NOT_AVAILABLE));
+        assert_eq!(outcome("import_session"), Err(NOT_AVAILABLE));
+        assert_eq!(outcome("definitely_not_a_tool"), Err(UNKNOWN_TOOL));
+        assert_eq!(outcome("regression_ols"), Ok(()));
     }
 
     /// A model's tool call whose arguments are a positional array (an

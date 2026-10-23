@@ -451,6 +451,23 @@ async fn new_session(app: &Router) -> String {
     b["data"]["session_id"].as_str().unwrap().to_string()
 }
 
+/// The whole SSE body of one chat-stream request.
+async fn stream_body(app: &Router, body: Value) -> String {
+    let resp = app
+        .clone()
+        .oneshot(post_json("/api/llm/chat/stream", &body))
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(10),
+        axum::body::to_bytes(resp.into_body(), usize::MAX),
+    )
+    .await
+    .expect("the stream ends")
+    .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// The provider block of a chat request pointing at an Ollama stub.
 fn stub_provider(addr: SocketAddr) -> Value {
     json!({"provider_type": "ollama", "base_url": format!("http://{addr}"), "model": "stub"})
@@ -924,23 +941,6 @@ async fn stream_task_stops_after_client_disconnects() {
 // ---------------------------------------------------------------------------
 // Task 7: conversation ownership in the chat stream (db builds)
 // ---------------------------------------------------------------------------
-
-/// The whole SSE body of one chat-stream request.
-async fn stream_body(app: &Router, body: Value) -> String {
-    let resp = app
-        .clone()
-        .oneshot(post_json("/api/llm/chat/stream", &body))
-        .await
-        .unwrap();
-    let bytes = tokio::time::timeout(
-        Duration::from_secs(10),
-        axum::body::to_bytes(resp.into_body(), usize::MAX),
-    )
-    .await
-    .expect("the stream ends")
-    .unwrap();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
 
 #[cfg(feature = "db")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
