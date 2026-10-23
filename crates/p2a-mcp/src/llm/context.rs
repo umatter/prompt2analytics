@@ -193,10 +193,12 @@ fn write_dataset(w: &mut BoundedLines, name: &str, ds: &Dataset) -> (bool, bool)
     )) {
         return (true, false);
     }
-    // Written with the planned count, which is the longest form; rewritten
-    // below with the count actually listed (never longer).
+    // Written in its longest form, "first {planned} of {width}", even when
+    // every column is planned; rewritten below with the count actually
+    // listed, which is never longer, so the rewrite never eats into the
+    // notes' reserve.
     let columns_at = w.out.len() + usize::from(!w.out.is_empty());
-    let planned_line = columns_header(planned, width);
+    let planned_line = format!("- Columns (first {planned} of {width}):");
     if !w.try_line(&planned_line) {
         return (true, false);
     }
@@ -987,6 +989,45 @@ mod tests {
         );
         let tight = build_dataset_context_bounded(&m, 2_000).unwrap();
         assert!(tight.len() <= 2_000);
+    }
+
+    #[test]
+    fn cut_short_column_list_keeps_the_note_reserve() {
+        // A frame of at most 60 columns whose listing the budget cuts short:
+        // its header is rewritten to "first L of W", and at every budget the
+        // lines before the notes leave NOTE_RESERVE free, as try_line
+        // promises.
+        let m = HashMap::from([("d".to_string(), Dataset::new(df_with_cols(10)))]);
+        let full = build_dataset_context_bounded(&m, 65_536).unwrap();
+        assert!(full.contains("\n- Columns:\n"), "{full}");
+        let mut cut = 0;
+        for max in 0..full.len() + 2 * NOTE_RESERVE {
+            let ctx = build_dataset_context_bounded(&m, max).unwrap();
+            assert!(ctx.len() <= max, "max {max}: {}", ctx.len());
+            if !ctx.contains("- Columns") {
+                continue;
+            }
+            let body = ctx.find("\n  - ... and ").unwrap_or(ctx.len());
+            assert!(
+                body + NOTE_RESERVE <= max,
+                "max {max}: {body} bytes before the notes"
+            );
+            let listed = ctx.lines().filter(|l| l.starts_with("  - \"c")).count();
+            if listed < 10 {
+                cut += 1;
+                assert!(
+                    ctx.contains(&format!("\n- Columns (first {listed} of 10):\n")),
+                    "max {max}: {ctx}"
+                );
+                assert!(
+                    ctx.contains(&format!("and {} more columns", 10 - listed)),
+                    "max {max}: {ctx}"
+                );
+            } else {
+                assert!(ctx.contains("\n- Columns:\n"), "max {max}: {ctx}");
+            }
+        }
+        assert!(cut > 0);
     }
 
     #[test]
