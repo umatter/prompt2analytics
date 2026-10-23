@@ -16,7 +16,7 @@
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
-use crate::resource::{check_alloc, checked_len, checkpoint, try_with_capacity};
+use crate::resource::{check_alloc, checked_len, checkpoint, checkpoint_stride, try_with_capacity};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
@@ -185,7 +185,10 @@ pub struct KalmanForecastResult {
 ///
 /// # Returns
 ///
-/// `KalmanFilterResult` containing filtered states, innovations, and log-likelihood.
+/// `KalmanFilterResult` containing filtered states, innovations, and log-likelihood,
+/// or [`EconError::Cancelled`] when the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline (checked
+/// about every 65,536 operations of the O(m³) steps).
 pub fn kalman_filter(
     y: &[f64],
     model: &StateSpaceModel,
@@ -234,7 +237,12 @@ pub fn kalman_filter(
     let mut log_lik = 0.0;
     let mut n_valid = 0usize;
 
+    // Each step costs O(m³): check the budget about every 65,536 operations.
+    let stride = checkpoint_stride(m.saturating_mul(m).saturating_mul(m));
     for t in 0..n {
+        if t % stride == 0 {
+            checkpoint()?;
+        }
         // Prediction step
         let pred_state = model.transition.dot(&state);
         let pred_cov = model.transition.dot(&cov).dot(&model.transition.t()) + &state_dist_cov;
@@ -314,7 +322,9 @@ pub fn kalman_filter(
 ///
 /// # Returns
 ///
-/// `KalmanSmootherResult` with smoothed states and covariances.
+/// `KalmanSmootherResult` with smoothed states and covariances, or
+/// [`EconError::Cancelled`] when the budget is cancelled or past its deadline
+/// (checked as in [`kalman_filter`]).
 pub fn kalman_smoother(
     filter_result: &KalmanFilterResult,
     model: &StateSpaceModel,
@@ -339,8 +349,12 @@ pub fn kalman_smoother(
     smoothed_states[n - 1] = filter_result.filtered_states[n - 1].clone();
     smoothed_covs[n - 1] = filter_result.filtered_covs[n - 1].clone();
 
-    // Backward recursion
-    for t in (0..n - 1).rev() {
+    // Backward recursion; each step costs O(m³) (a matrix inverse and products)
+    let stride = checkpoint_stride(m.saturating_mul(m).saturating_mul(m));
+    for (step, t) in (0..n - 1).rev().enumerate() {
+        if step % stride == 0 {
+            checkpoint()?;
+        }
         let filtered_state = vec_to_array1(&filter_result.filtered_states[t]);
         let filtered_cov = nested_vec_to_array2(&filter_result.filtered_covs[t]);
         let predicted_state_next = vec_to_array1(&filter_result.predicted_states[t + 1]);
@@ -459,6 +473,9 @@ pub fn kalman_forecast(
 /// Compute the log-likelihood of observations given a state-space model.
 ///
 /// This is useful for maximum likelihood estimation of model parameters.
+///
+/// Errors as [`kalman_filter`] does, including [`EconError::Cancelled`] on a
+/// stopped budget.
 pub fn kalman_loglik(
     y: &[f64],
     model: &StateSpaceModel,
@@ -835,5 +852,23 @@ mod tests {
             cancelled(|| kalman_forecast(&f, &model, 3)),
             Err(EconError::Cancelled(_))
         ));
+    }
+
+    #[test]
+    fn kalman_filter_and_smoother_honour_cancellation() {
+        // Each step costs O(m³); StructTS calls the filter once per likelihood
+        // evaluation, so a long series or a large state stops at the budget.
+        // Before the fix both ran every step and returned Ok.
+        let (model, f) = local_level();
+        let y = vec![1.0, 1.5, 2.0, 2.2, 2.5];
+        assert!(matches!(
+            cancelled(|| kalman_filter(&y, &model, array![y[0]].view(), array![[1.0]].view())),
+            Err(EconError::Cancelled(_))
+        ));
+        assert!(matches!(
+            cancelled(|| kalman_smoother(&f, &model)),
+            Err(EconError::Cancelled(_))
+        ));
+        assert!(kalman_smoother(&f, &model).is_ok());
     }
 }

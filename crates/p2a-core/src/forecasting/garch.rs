@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::errors::{EconError, EconResult};
-use crate::resource::try_with_capacity;
+use crate::resource::{checkpoint, checkpoint_stride, try_with_capacity};
 use crate::traits::SignificanceLevel;
 
 /// Configuration for GARCH estimation.
@@ -211,7 +211,12 @@ impl fmt::Display for GarchResult {
 ///
 /// # Returns
 ///
-/// `GarchResult` containing parameter estimates and diagnostics.
+/// `GarchResult` containing parameter estimates and diagnostics, or
+/// [`EconError::Cancelled`] when the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline. The
+/// budget is checked once per optimiser iteration, once per parameter of the
+/// standard-error pass, and about every 65,536 operations of each
+/// likelihood evaluation.
 ///
 /// # Example
 ///
@@ -285,7 +290,7 @@ pub fn garch(data: &[f64], config: Option<GarchConfig>) -> EconResult<GarchResul
     )?;
 
     // Compute conditional variances
-    let (cond_var, std_resid, log_lik) = compute_garch_quantities(data, mu, omega, &alpha, &beta);
+    let (cond_var, std_resid, log_lik) = compute_garch_quantities(data, mu, omega, &alpha, &beta)?;
 
     // Compute information criteria
     let n_params = if config.include_mean { 2 } else { 1 } + config.p + config.q;
@@ -312,7 +317,7 @@ pub fn garch(data: &[f64], config: Option<GarchConfig>) -> EconResult<GarchResul
 
     // Compute standard errors using numerical Hessian approximation
     let (std_errors, t_stats, p_values, significance) =
-        compute_garch_inference(data, mu, omega, &alpha, &beta, config.include_mean);
+        compute_garch_inference(data, mu, omega, &alpha, &beta, config.include_mean)?;
 
     let model = format!("GARCH({},{})", config.p, config.q);
 
@@ -373,10 +378,13 @@ fn estimate_garch_params(
     let mut iter = 0;
 
     for i in 0..max_iter {
+        // Each iteration makes up to 5 + 2(p + q) likelihood passes over the series;
+        // each pass also checks the budget as it goes.
+        checkpoint()?;
         iter = i + 1;
 
         // Compute current log-likelihood
-        let (_, _, ll) = compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_vec);
+        let (_, _, ll) = compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_vec)?;
 
         // Check convergence
         if (ll - prev_ll).abs() < tol {
@@ -391,18 +399,18 @@ fn estimate_garch_params(
         // Gradient for mu
         if include_mean {
             let (_, _, ll_plus) =
-                compute_garch_quantities(data, mu + eps, omega, &alpha_vec, &beta_vec);
+                compute_garch_quantities(data, mu + eps, omega, &alpha_vec, &beta_vec)?;
             let (_, _, ll_minus) =
-                compute_garch_quantities(data, mu - eps, omega, &alpha_vec, &beta_vec);
+                compute_garch_quantities(data, mu - eps, omega, &alpha_vec, &beta_vec)?;
             let grad_mu = (ll_plus - ll_minus) / (2.0 * eps);
             mu += step_size * grad_mu;
         }
 
         // Gradient for omega
         let (_, _, ll_plus) =
-            compute_garch_quantities(data, mu, omega + eps, &alpha_vec, &beta_vec);
+            compute_garch_quantities(data, mu, omega + eps, &alpha_vec, &beta_vec)?;
         let (_, _, ll_minus) =
-            compute_garch_quantities(data, mu, (omega - eps).max(1e-10), &alpha_vec, &beta_vec);
+            compute_garch_quantities(data, mu, (omega - eps).max(1e-10), &alpha_vec, &beta_vec)?;
         let grad_omega = (ll_plus - ll_minus) / (2.0 * eps);
         omega = (omega + step_size * grad_omega).max(1e-10);
 
@@ -413,9 +421,10 @@ fn estimate_garch_params(
             alpha_plus[j] += eps;
             alpha_minus[j] = (alpha_minus[j] - eps).max(0.0);
 
-            let (_, _, ll_plus) = compute_garch_quantities(data, mu, omega, &alpha_plus, &beta_vec);
+            let (_, _, ll_plus) =
+                compute_garch_quantities(data, mu, omega, &alpha_plus, &beta_vec)?;
             let (_, _, ll_minus) =
-                compute_garch_quantities(data, mu, omega, &alpha_minus, &beta_vec);
+                compute_garch_quantities(data, mu, omega, &alpha_minus, &beta_vec)?;
             let grad = (ll_plus - ll_minus) / (2.0 * eps);
             alpha_vec[j] = (alpha_vec[j] + step_size * grad).max(0.0);
         }
@@ -427,9 +436,10 @@ fn estimate_garch_params(
             beta_plus[j] += eps;
             beta_minus[j] = (beta_minus[j] - eps).max(0.0);
 
-            let (_, _, ll_plus) = compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_plus);
+            let (_, _, ll_plus) =
+                compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_plus)?;
             let (_, _, ll_minus) =
-                compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_minus);
+                compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_minus)?;
             let grad = (ll_plus - ll_minus) / (2.0 * eps);
             beta_vec[j] = (beta_vec[j] + step_size * grad).max(0.0);
         }
@@ -451,13 +461,17 @@ fn estimate_garch_params(
 }
 
 /// Compute conditional variances, standardized residuals, and log-likelihood.
+///
+/// One pass costs O(n(p + q)) and the optimiser makes up to 5 + 2(p + q) of them
+/// per iteration, so the recursion checks the budget about every 65,536
+/// operations: a single pass over a long series also stops at the deadline.
 fn compute_garch_quantities(
     data: &[f64],
     mu: f64,
     omega: f64,
     alpha: &[f64],
     beta: &[f64],
-) -> (Vec<f64>, Vec<f64>, f64) {
+) -> EconResult<(Vec<f64>, Vec<f64>, f64)> {
     let n = data.len();
     let p = alpha.len();
     let q = beta.len();
@@ -485,8 +499,12 @@ fn compute_garch_quantities(
         std_resid[t] = residuals[t] / cond_var[t].sqrt().max(1e-10);
     }
 
-    // GARCH recursion
-    for t in start..n {
+    // GARCH recursion: each step costs O(p + q)
+    let stride = checkpoint_stride(p + q + 1);
+    for (step, t) in (start..n).enumerate() {
+        if step % stride == 0 {
+            checkpoint()?;
+        }
         let mut sigma2 = omega;
 
         // ARCH terms
@@ -512,10 +530,16 @@ fn compute_garch_quantities(
         - 0.5 * cond_var.iter().map(|&v| v.ln()).sum::<f64>()
         - 0.5 * std_resid.iter().map(|&z| z.powi(2)).sum::<f64>();
 
-    (cond_var, std_resid, log_lik)
+    Ok((cond_var, std_resid, log_lik))
 }
 
+/// The four vectors [`compute_garch_inference`] returns.
+type GarchInference = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<SignificanceLevel>);
+
 /// Compute standard errors using numerical Hessian approximation.
+///
+/// Makes three likelihood passes per parameter and checks the budget before
+/// each parameter (and, through [`compute_garch_quantities`], within each pass).
 fn compute_garch_inference(
     data: &[f64],
     mu: f64,
@@ -523,7 +547,7 @@ fn compute_garch_inference(
     alpha: &[f64],
     beta: &[f64],
     include_mean: bool,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<SignificanceLevel>) {
+) -> EconResult<GarchInference> {
     use crate::traits::t_test_p_value;
 
     let n = data.len();
@@ -545,7 +569,7 @@ fn compute_garch_inference(
     let mut std_errors = Vec::with_capacity(n_params);
 
     // Helper to compute log-likelihood with modified parameter
-    let compute_ll = |idx: usize, delta: f64| -> f64 {
+    let compute_ll = |idx: usize, delta: f64| -> EconResult<f64> {
         let mut new_alpha = alpha.to_vec();
         let mut new_beta = beta.to_vec();
         let mut new_mu = mu;
@@ -565,14 +589,15 @@ fn compute_garch_inference(
             new_beta[beta_idx] = (new_beta[beta_idx] + delta).max(0.0);
         }
 
-        let (_, _, ll) = compute_garch_quantities(data, new_mu, new_omega, &new_alpha, &new_beta);
-        ll
+        let (_, _, ll) = compute_garch_quantities(data, new_mu, new_omega, &new_alpha, &new_beta)?;
+        Ok(ll)
     };
 
     for i in 0..n_params {
-        let ll_plus = compute_ll(i, eps);
-        let ll_center = compute_ll(i, 0.0);
-        let ll_minus = compute_ll(i, -eps);
+        checkpoint()?;
+        let ll_plus = compute_ll(i, eps)?;
+        let ll_center = compute_ll(i, 0.0)?;
+        let ll_minus = compute_ll(i, -eps)?;
 
         // Second derivative approximation
         let d2ll = (ll_plus - 2.0 * ll_center + ll_minus) / (eps * eps);
@@ -602,7 +627,7 @@ fn compute_garch_inference(
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 
-    (std_errors, t_stats, p_values, significance)
+    Ok((std_errors, t_stats, p_values, significance))
 }
 
 /// Forecast conditional variance and returns using a fitted GARCH model.
@@ -663,6 +688,9 @@ pub fn garch_forecast(
 }
 
 /// Run GARCH from a Dataset (MCP entry point).
+///
+/// Errors as [`garch`] does, including [`EconError::Cancelled`] on a stopped
+/// budget.
 pub fn run_garch(
     data: &[f64],
     p: Option<usize>,
@@ -1109,6 +1137,51 @@ mod tests {
 
         // Significance levels should be present
         assert_eq!(result.significance.len(), result.p_values.len());
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn garch_fit_stops_when_the_budget_is_cancelled() {
+        // Before the fix the optimiser never looked at the budget: under a
+        // cancelled budget it ran all its iterations and returned Ok, so the
+        // server's deadline could not stop a high-order fit on a long series.
+        let data = generate_garch_data(500, 0.0001, 0.1, 0.8);
+        let config = GarchConfig {
+            p: 2,
+            q: 2,
+            ..Default::default()
+        };
+        assert!(matches!(
+            cancelled(|| garch(&data, Some(config.clone()))),
+            Err(EconError::Cancelled(_))
+        ));
+        // Without a budget nothing changes.
+        assert!(garch(&data, Some(config)).is_ok());
+    }
+
+    #[test]
+    fn garch_likelihood_and_inference_passes_honour_cancellation() {
+        // At p = q = 20 one optimiser iteration is 85 likelihood passes, so on a
+        // series of millions of rows a check per iteration alone would let a
+        // cancelled fit run for many seconds; each pass checks as it goes, and
+        // the standard-error pass checks once per parameter.
+        let data = generate_garch_data(200, 0.0001, 0.1, 0.8);
+        assert!(matches!(
+            cancelled(|| compute_garch_quantities(&data, 0.0, 1e-4, &[0.1], &[0.8])),
+            Err(EconError::Cancelled(_))
+        ));
+        assert!(matches!(
+            cancelled(|| compute_garch_inference(&data, 0.0, 1e-4, &[0.1], &[0.8], true)),
+            Err(EconError::Cancelled(_))
+        ));
+        let (cond_var, _, ll) = compute_garch_quantities(&data, 0.0, 1e-4, &[0.1], &[0.8]).unwrap();
+        assert_eq!(cond_var.len(), data.len());
+        assert!(ll.is_finite());
     }
 
     #[test]
