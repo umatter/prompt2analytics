@@ -439,7 +439,7 @@ fn code_language_class(lang: &str) -> Option<String> {
 /// a browser decodes: a multiple of 4 when padded, and not 1 more than a
 /// multiple of 4 when unpadded.
 fn normalize_base64_png(s: &str) -> Option<String> {
-    let s = s.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let s = s.trim_ascii_start();
     let s = s.strip_prefix("data:image/png;base64,").unwrap_or(s);
     let data: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     let body = data.trim_end_matches('=');

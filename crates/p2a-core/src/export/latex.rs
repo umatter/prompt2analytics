@@ -6,9 +6,10 @@
 //! - Model statistics footer (N, R², F-stat)
 //!
 //! Model names, captions and variable names are plain text: LaTeX special
-//! characters in them (`\ { } _ % & # $ ^ ~ < > |`, and a `[` or `*` that
-//! opens the text, after any leading spaces) are escaped and control
-//! characters become spaces, so pass no LaTeX markup. Labels are restricted to `[A-Za-z0-9:._-]`.
+//! characters in them (`\ { } _ % & # $ ^ ~ < > |`) are escaped, a `[` or
+//! `*` that opens the text (after any leading spaces) gets an empty group
+//! `{}` in front of it, and control characters become spaces, so pass no
+//! LaTeX markup. Labels are restricted to `[A-Za-z0-9:._-]`.
 
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
@@ -283,10 +284,10 @@ fn significance_stars(level: &SignificanceLevel) -> String {
 /// stay ahead of the `{}`, where the cell's `\ignorespaces` still drops them.
 fn escape_latex(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
-    let mut guarded = false;
+    let mut seen_text = false;
     for c in s.chars() {
-        if !guarded && c != ' ' && !c.is_control() {
-            guarded = true;
+        if !seen_text && c != ' ' && !c.is_control() {
+            seen_text = true;
             if matches!(c, '[' | '*') {
                 out.push_str("{}");
             }
