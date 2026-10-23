@@ -18,8 +18,8 @@ use p2a_mcp::transport::http::{AppState, build_app_with};
 use polars::prelude::{
     CategoricalPhysical, Categories, DataFrame, DataType, NamedFrom, ParquetWriter, Series,
 };
-use polars_parquet_format::FileMetaData;
 use polars_parquet_format::thrift::protocol::{TCompactInputProtocol, TCompactOutputProtocol};
+use polars_parquet_format::{CompressionCodec, FileMetaData, PageHeader, PageType};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -467,13 +467,17 @@ fn categorical_parquet(path: &Path, tag: &str, labels: usize) {
 async fn categorical_labels_count_against_the_session_quota() {
     // Each file holds 2,500 labels of 1,000 bytes (2.5 MB) as a dictionary
     // column, which loads as Categorical. Pre-fix each was charged its 10 kB
-    // of codes, so a 6 MiB quota held any number of them.
+    // of codes, so a quota held any number of them. Held, each is charged
+    // about 4.2 MB, so two pass a 7.5 MiB quota. Loading one takes about
+    // 7.3 MB by the check before decoding (the labels, and the decompressed
+    // dictionary page and its decoded copy while it loads), which the quota
+    // admits.
     let dir = data_dir();
     let (first, second) = (dir.path().join("a.parquet"), dir.path().join("b.parquet"));
     categorical_parquet(&first, "a", 2500);
     categorical_parquet(&second, "b", 2500);
 
-    let (app, _) = app_with_quota(6 * MIB).await;
+    let (app, _) = app_with_quota(15 * MIB / 2).await;
     let sid = new_session(&app).await;
     let (status, body) = call(
         &app,
@@ -493,4 +497,220 @@ async fn categorical_labels_count_against_the_session_quota() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(body["code"], json!("quota_exceeded"), "{body}");
+}
+
+/// Rebuild the parquet file at `path` with `edit` applied to every page
+/// header, in file order. The pages are copied as they are, the column
+/// chunks laid out again one after another, and the footer's offsets and
+/// sizes rewritten to match (its page indexes dropped), so the file reads as
+/// before wherever the decoder does not follow the edited fields.
+fn rewrite_pages(path: &Path, mut edit: impl FnMut(&mut PageHeader)) {
+    let bytes = std::fs::read(path).unwrap();
+    let n = bytes.len();
+    let len = u32::from_le_bytes(bytes[n - 8..n - 4].try_into().unwrap()) as usize;
+    let mut input = TCompactInputProtocol::new(&bytes[n - 8 - len..n - 8], usize::MAX);
+    let mut footer = FileMetaData::read_from_in_protocol(&mut input).unwrap();
+    let mut out = b"PAR1".to_vec();
+    for group in &mut footer.row_groups {
+        let mut group_bytes = 0;
+        for chunk in &mut group.columns {
+            let meta = chunk.meta_data.as_mut().unwrap();
+            assert_ne!(meta.codec, CompressionCodec::UNCOMPRESSED);
+            let from = meta.dictionary_page_offset.unwrap_or(meta.data_page_offset) as usize;
+            let to = from + meta.total_compressed_size as usize;
+            let start = out.len();
+            let mut first_data_page = None;
+            let mut dictionary_page = None;
+            let mut at = from;
+            while at < to {
+                let mut rest = &bytes[at..to];
+                let mut header = PageHeader::read_from_in_protocol(
+                    &mut TCompactInputProtocol::new(&mut rest, usize::MAX),
+                )
+                .unwrap();
+                let header_len = (to - at) - rest.len();
+                let body = &rest[..header.compressed_page_size as usize];
+                if header.type_ == PageType::DICTIONARY_PAGE {
+                    dictionary_page.get_or_insert(out.len() as i64);
+                } else {
+                    first_data_page.get_or_insert(out.len() as i64);
+                }
+                edit(&mut header);
+                header
+                    .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut out))
+                    .unwrap();
+                out.extend_from_slice(body);
+                at += header_len + body.len();
+            }
+            // A writer may leave the dictionary page's offset out and start
+            // the chunk's data at it; the rebuilt chunk states both.
+            meta.dictionary_page_offset = dictionary_page;
+            meta.data_page_offset = first_data_page.unwrap();
+            meta.total_compressed_size = (out.len() - start) as i64;
+            meta.index_page_offset = None;
+            meta.bloom_filter_offset = None;
+            meta.bloom_filter_length = None;
+            chunk.file_offset = meta.data_page_offset;
+            chunk.offset_index_offset = None;
+            chunk.offset_index_length = None;
+            chunk.column_index_offset = None;
+            chunk.column_index_length = None;
+            group_bytes += meta.total_compressed_size;
+        }
+        group.file_offset = None;
+        group.total_compressed_size = Some(group_bytes);
+    }
+    let mut written = Vec::new();
+    footer
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut written))
+        .unwrap();
+    out.extend_from_slice(&written);
+    out.extend_from_slice(&u32::try_from(written.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(b"PAR1");
+    std::fs::write(path, out).unwrap();
+}
+
+/// Bytes a test page header declares it decompresses to: far past the
+/// 8 MiB quota, and small enough that a server that decodes the file
+/// anyway survives the test.
+const DECLARED_PAGE_BYTES: i32 = 64 << 20;
+
+#[tokio::test]
+async fn a_float_data_page_that_declares_a_large_size_is_refused_before_decoding() {
+    // 100,000 noisy floats: 800 kB decoded, in compressed data pages whose
+    // headers are rewritten to declare 64 MiB each. polars decompresses a
+    // page into a zero-filled buffer of the declared size before it checks
+    // the page. Pre-fix the check before decoding counted a fixed-width
+    // column's values and not its pages, so the file was admitted.
+    let dir = data_dir();
+    let path = dir.path().join("pages.parquet");
+    let values: Vec<f64> = (0..100_000).map(|i| i as f64 * 0.731 + 0.1).collect();
+    let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
+    write_parquet(&mut df, &path);
+    let mut data_pages = 0;
+    rewrite_pages(&path, |header| {
+        if header.type_ == PageType::DATA_PAGE || header.type_ == PageType::DATA_PAGE_V2 {
+            header.uncompressed_page_size = DECLARED_PAGE_BYTES;
+            data_pages += 1;
+        }
+    });
+    assert!(data_pages > 0);
+    refused_before_decoding_by_upload_and_load(&path).await;
+}
+
+#[tokio::test]
+async fn an_integer_dictionary_page_that_declares_a_large_size_is_refused_before_decoding() {
+    // 100,000 integers of 50 values, which polars writes as a dictionary
+    // page and pages of codes; the dictionary page's header is rewritten to
+    // declare 64 MiB. polars decompresses the dictionary page into a buffer
+    // of that size before it reads a row.
+    let dir = data_dir();
+    let path = dir.path().join("dict.parquet");
+    let values: Vec<i64> = (0..100_000).map(|i| (i * 7) % 50 + 3).collect();
+    let mut df = DataFrame::new(vec![Series::new("k".into(), values).into()]).unwrap();
+    write_parquet(&mut df, &path);
+    let mut dictionaries = 0;
+    rewrite_pages(&path, |header| {
+        if header.type_ == PageType::DICTIONARY_PAGE {
+            header.uncompressed_page_size = DECLARED_PAGE_BYTES;
+            dictionaries += 1;
+        }
+    });
+    assert!(dictionaries > 0);
+    refused_before_decoding_by_upload_and_load(&path).await;
+}
+
+#[tokio::test]
+async fn a_dictionary_under_a_chunk_that_claims_no_entries_is_refused_before_decoding() {
+    // 10,000 labels of 1,000 bytes (10 MB) in a dictionary page, under a
+    // column chunk whose footer entry says it holds no entries and one byte
+    // of pages. polars reads and decodes a chunk's dictionary page before
+    // it looks at the chunk's count. Pre-fix the check before decoding read
+    // no page of such a chunk and took its footer size, so the file was
+    // admitted and its labels decoded.
+    let dir = data_dir();
+    let path = dir.path().join("labels.parquet");
+    categorical_parquet(&path, "c", 10_000);
+    rewrite_footer(&path, |footer| {
+        for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+            let meta = chunk.meta_data.as_mut().unwrap();
+            meta.num_values = 0;
+            meta.total_uncompressed_size = 1;
+        }
+    });
+    refused_before_decoding_by_upload_and_load(&path).await;
+}
+
+#[tokio::test]
+async fn a_row_group_that_overstates_its_rows_cannot_hide_another_groups_values() {
+    // Two row groups: one row holding an empty list, its count rewritten to
+    // 100,000 rows, and one row holding a list of 60,000 structs of 20
+    // floats (9.6 MB decoded). polars decodes each row group on its own, the
+    // second in full. Pre-fix the check before decoding summed rows and
+    // entries over the file, so the first group's claimed rows cancelled the
+    // second group's values and the file was admitted.
+    use polars::prelude::{IntoSeries, ListChunked, StructChunked};
+    let dir = data_dir();
+    let path = dir.path().join("groups.parquet");
+    let fields: Vec<Series> = (0..20)
+        .map(|f| {
+            Series::new(
+                format!("f{f}").into(),
+                (0..60_000)
+                    .map(|i| ((i + f) % 9) as f64 * 0.5 + 0.25)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let wide = StructChunked::from_series("".into(), 60_000, fields.iter())
+        .unwrap()
+        .into_series();
+    let lists: ListChunked = [Some(wide.clear()), Some(wide)].into_iter().collect();
+    let mut df = DataFrame::new(vec![lists.into_series().with_name("l".into()).into()]).unwrap();
+    ParquetWriter::new(std::fs::File::create(&path).unwrap())
+        .with_row_group_size(Some(1))
+        .finish(&mut df)
+        .unwrap();
+    rewrite_footer(&path, |footer| {
+        assert_eq!(footer.row_groups.len(), 2);
+        footer.row_groups[0].num_rows = 100_000;
+        footer.num_rows = 100_001;
+    });
+    refused_before_decoding_by_upload_and_load(&path).await;
+}
+
+#[tokio::test]
+async fn a_parquet_file_with_shared_column_chunks_is_not_loaded() {
+    // Row groups whose column chunks point at the same bytes: no writer
+    // produces them, and checking them would read those page headers once
+    // per chunk. They are refused as unreadable, not loaded, and not
+    // answered as a server failure.
+    let dir = data_dir();
+    let path = dir.path().join("shared.parquet");
+    let values: Vec<f64> = (0..4_000).map(|i| (i % 31) as f64 * 0.5 + 0.25).collect();
+    let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
+    ParquetWriter::new(std::fs::File::create(&path).unwrap())
+        .with_row_group_size(Some(1_000))
+        .finish(&mut df)
+        .unwrap();
+    rewrite_footer(&path, |footer| {
+        let shared = footer.row_groups[0].columns[0].meta_data.clone();
+        for group in footer.row_groups.iter_mut().skip(1) {
+            group.columns[0].meta_data = shared.clone();
+        }
+    });
+    let (app, _) = app_with_quota(8 * MIB).await;
+    let sid = new_session(&app).await;
+    let (status, body) = call(
+        &app,
+        &sid,
+        "load_dataset",
+        json!({"path": path.to_string_lossy(), "name": "shared"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["success"], json!(false), "{body}");
+    assert!(body.to_string().contains("share bytes"), "{body}");
+    let (_, listed) = call(&app, &sid, "list_datasets", json!({})).await;
+    assert!(!listed.to_string().contains("shared"), "{listed}");
 }

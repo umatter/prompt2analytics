@@ -1040,9 +1040,9 @@ pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
         && after > limit
     {
         return Err(format!(
-            "This file takes at least {} in memory once loaded, so this session's datasets \
-             would use {} (limit {} per session). Nothing was loaded; load a smaller file or \
-             start a new session.",
+            "Loading this file takes at least {} of memory, so this session's datasets would \
+             use {} (limit {} per session). Nothing was loaded; load a smaller file or start a \
+             new session.",
             fmt_bytes(added),
             fmt_bytes(after),
             fmt_bytes(limit)
@@ -1067,9 +1067,9 @@ pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
     if total > limit {
         sessions.release_data_bytes(added);
         return Err(format!(
-            "This file takes at least {} in memory once loaded, and the server's dataset \
-             memory would reach {} (limit {}). Nothing was loaded; try again later or load a \
-             smaller file.",
+            "Loading this file takes at least {} of memory, and the server's dataset memory \
+             would reach {} (limit {}). Nothing was loaded; try again later or load a smaller \
+             file.",
             fmt_bytes(added),
             fmt_bytes(total),
             fmt_bytes(limit)

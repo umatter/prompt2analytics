@@ -149,73 +149,159 @@ impl Serialize for CellJson<'_> {
     }
 }
 
-/// The least the dataset quotas will charge for the parquet file at `path`
-/// once it is decoded, read from its footer and page headers before
-/// anything is decoded: each column's values at their in-memory width, a
-/// list's from the entries counted below it (see [`least_value_bytes`]),
-/// plus the dataset's structure. A small file can declare hundreds of
-/// millions of rows, or one row holding a list of as many values (one value
-/// run-length encoded), and the quotas only see a dataset once it is built.
-/// `None` when the footer cannot be read; the loader then reports the
-/// file's error.
+/// What decoding a parquet file allocates at least, read from its footer
+/// and page headers before anything is decoded (see
+/// [`parquet_decoded_bytes`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DecodedBound {
+    /// The least the dataset quotas charge for the dataset once it is
+    /// decoded.
+    dataset: u64,
+    /// The decoder's own buffers on top of the dataset while it decodes,
+    /// freed once the file is loaded (see [`chunk_transient`]).
+    transient: u64,
+}
+
+/// What decoding the parquet file at `path` allocates at least, read from
+/// its footer and page headers before anything is decoded. A small file can
+/// declare hundreds of millions of rows, one row holding a list of as many
+/// values (one value run-length encoded), or a page that decompresses to
+/// gigabytes, and the quotas only see a dataset once it is built.
+///
+/// The dataset part is the least the quotas will charge once the file is
+/// decoded: each column's values at their in-memory width, a list's from
+/// the entries counted below it (see [`least_value_bytes`]), plus the
+/// dataset's structure. It is taken per row group and summed: polars
+/// decodes each row group on its own (several at once), so what one group
+/// declares cannot cancel what another holds. The transient part is the
+/// decoder's buffers for the column chunks it decodes at once (see
+/// [`chunk_transient`] and [`decode_threads`]).
 ///
 /// The counts are the ones the decoder follows, not the footer's summary of
 /// them: the rows are each row group's own (polars decodes those and never
-/// reads the file-level count), and a leaf column's entries and page bytes
+/// reads the file-level count), and a leaf column's entries and page sizes
 /// are what the page headers declare over the pages the decoder reads (see
-/// [`read_chunk_pages`]) where that is more than the column chunk's
-/// footer entry says. So a footer that understates either is still charged
-/// what decoding the file allocates.
-fn parquet_decoded_bytes(path: &Path) -> Option<u64> {
-    let mut reader = ParquetReader::new(std::fs::File::open(path).ok()?);
-    let metadata = std::sync::Arc::clone(reader.get_metadata().ok()?);
-    let rows = metadata
-        .row_groups
-        .iter()
-        .map(|group| group.num_rows() as u64)
-        .fold(0u64, u64::saturating_add);
-    // A second handle for the page headers: the reader keeps its own.
-    let file = std::fs::File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
-    let mut pages = std::io::BufReader::new(file);
-    // What is known about each leaf column under the top-level column
-    // `root`, summed over the row groups, in the order of the file's columns,
-    // which is the order of the column's leaves.
-    let mut leaves_of = |root: &str| {
-        let mut leaves: Vec<LeafChunks> = Vec::new();
-        for group in &metadata.row_groups {
-            let chunks = group.columns_under_root_iter(root).into_iter().flatten();
-            for (i, chunk) in chunks.enumerate() {
-                let read =
-                    read_chunk_pages(&mut pages, chunk.byte_range(), chunk.num_values(), file_len);
-                let entries = u64::try_from(chunk.num_values())
-                    .unwrap_or(0)
-                    .max(read.entries);
-                let page_bytes = u64::try_from(chunk.uncompressed_size())
-                    .unwrap_or(0)
-                    .max(read.page_bytes);
-                if i == leaves.len() {
-                    leaves.push(LeafChunks::default());
-                }
-                let leaf = &mut leaves[i];
-                leaf.entries = leaf.entries.saturating_add(entries);
-                leaf.page_bytes = leaf.page_bytes.saturating_add(page_bytes);
-            }
-        }
-        leaves
+/// [`PageWalk::chunk`]) where that is more than the column chunk's footer
+/// entry says. So a footer that understates either is still charged what
+/// decoding the file allocates.
+///
+/// `Ok(None)` when the footer cannot be read; the loader then reports the
+/// file's error. `Err` says why the file is not read: its column chunks
+/// overlap or pass its end (see [`check_chunk_ranges`]), or the call was
+/// cancelled or passed its deadline while the page headers were read.
+fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
+    let Ok(file) = std::fs::File::open(path) else {
+        return Ok(None);
     };
-    let schema = reader.schema().ok()?;
-    let values = schema.iter_values().fold(0u64, |bytes, field| {
-        let mut leaves = leaves_of(field.name.as_str()).into_iter();
-        let dtype = DataType::from_arrow_field(field);
-        bytes.saturating_add(least_value_bytes(&dtype, Slots::Known(rows), &mut leaves))
-    });
-    let structure = session::structure_bytes(schema.iter_names().map(|name| name.as_str()));
-    Some(values.saturating_add(structure))
+    let mut reader = ParquetReader::new(file);
+    let Ok(metadata) = reader.get_metadata().map(std::sync::Arc::clone) else {
+        return Ok(None);
+    };
+    let Ok(schema) = reader.schema() else {
+        return Ok(None);
+    };
+    // A second handle for the page headers: the reader keeps its own.
+    let Ok(file) = std::fs::File::open(path) else {
+        return Ok(None);
+    };
+    let Ok(file_len) = file.metadata().map(|meta| meta.len()) else {
+        return Ok(None);
+    };
+    check_chunk_ranges(
+        metadata
+            .row_groups
+            .iter()
+            .flat_map(|group| group.byte_ranges_iter()),
+        file_len,
+    )?;
+    let columns: Vec<(&str, DataType)> = schema
+        .iter_values()
+        .map(|field| (field.name.as_str(), DataType::from_arrow_field(field)))
+        .collect();
+    let mut walk = PageWalk::new(std::io::BufReader::new(file), file_len);
+    let mut dataset = 0u64;
+    let mut transients = Vec::new();
+    for group in &metadata.row_groups {
+        let rows = group.num_rows() as u64;
+        for (name, dtype) in &columns {
+            let leaf_types = leaf_types(dtype);
+            let mut leaves = Vec::with_capacity(leaf_types.len());
+            // The column chunks under the top-level column, in the order of
+            // the file's columns, which is the order of its leaves.
+            let chunks = group.columns_under_root_iter(name).into_iter().flatten();
+            for (i, chunk) in chunks.enumerate() {
+                let read = walk.chunk(chunk.byte_range(), chunk.num_values())?;
+                leaves.push(LeafChunks {
+                    entries: u64::try_from(chunk.num_values())
+                        .unwrap_or(0)
+                        .max(read.entries),
+                    page_bytes: u64::try_from(chunk.uncompressed_size())
+                        .unwrap_or(0)
+                        .max(read.page_bytes),
+                });
+                // polars' own footer type: this stops compiling when the
+                // thrift parser the walk uses is not the one polars reads
+                // the file with (see Cargo.toml).
+                let codec: polars_parquet_format::CompressionCodec = chunk.metadata().codec;
+                transients.push(chunk_transient(
+                    &read,
+                    leaf_types.get(i).copied(),
+                    codec != polars_parquet_format::CompressionCodec::UNCOMPRESSED,
+                    dtype.is_nested(),
+                ));
+            }
+            dataset = dataset.saturating_add(least_value_bytes(
+                dtype,
+                Slots::Known(rows),
+                &mut leaves.into_iter(),
+            ));
+        }
+    }
+    let structure = session::structure_bytes(columns.iter().map(|(name, _)| *name));
+    Ok(Some(DecodedBound {
+        dataset: dataset.saturating_add(structure),
+        transient: largest_sum(transients, decode_threads()),
+    }))
 }
 
-/// What is known about one leaf column before decoding, summed over the row
-/// groups.
+/// Refuse a file of `file_len` bytes whose column chunks (their byte
+/// ranges, `ranges`) pass its end or share bytes. No writer produces
+/// either: polars cannot read a chunk past the end of the file, and chunks
+/// that share their bytes would have those page headers read once for
+/// each, so the work before the file is admitted would grow with the number
+/// of chunks rather than with the file.
+fn check_chunk_ranges(
+    ranges: impl Iterator<Item = std::ops::Range<u64>>,
+    file_len: u64,
+) -> Result<(), String> {
+    let mut ranges: Vec<_> = ranges.collect();
+    if ranges.iter().any(|range| range.end > file_len) {
+        return Err("a column chunk of the file ends past the end of the file".to_string());
+    }
+    ranges.retain(|range| !range.is_empty());
+    ranges.sort_unstable_by_key(|range| range.start);
+    if ranges.windows(2).any(|pair| pair[1].start < pair[0].end) {
+        return Err("two column chunks of the file share bytes".to_string());
+    }
+    Ok(())
+}
+
+/// The leaf types of `dtype`, in the order of its parquet leaf columns
+/// (the order [`least_value_bytes`] consumes them in).
+fn leaf_types(dtype: &DataType) -> Vec<&DataType> {
+    fn push<'a>(dtype: &'a DataType, out: &mut Vec<&'a DataType>) {
+        match dtype {
+            DataType::List(inner) | DataType::Array(inner, _) => push(inner, out),
+            DataType::Struct(fields) => fields.iter().for_each(|field| push(field.dtype(), out)),
+            leaf => out.push(leaf),
+        }
+    }
+    let mut out = Vec::new();
+    push(dtype, &mut out);
+    out
+}
+
+/// What is known about one leaf column of one row group before decoding.
 #[derive(Clone, Copy, Default)]
 struct LeafChunks {
     /// Its entries: values, nulls, and empty or null lists above them.
@@ -224,94 +310,268 @@ struct LeafChunks {
     page_bytes: u64,
 }
 
-/// What the page headers of one column chunk declare.
+/// What the page headers of one column chunk declare, over the pages
+/// polars' page reader reads (see [`PageWalk::chunk`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ChunkPages {
     /// The entries of its data pages.
     entries: u64,
     /// The uncompressed size of its pages, dictionary page included.
     page_bytes: u64,
+    /// The uncompressed size of its largest data page.
+    largest_page: u64,
+    /// The entries of its data page with the most.
+    most_page_entries: u64,
+    /// The uncompressed size of its dictionary page.
+    dict_bytes: u64,
+    /// The entries of its dictionary page.
+    dict_entries: u64,
 }
 
-/// Read the page headers of the column chunk at `range` of a parquet file
-/// of `file_len` bytes, as polars' page reader (`PageReader`) does before
-/// it decodes the chunk, without decompressing or decoding anything: from
-/// the chunk's start, a header and then a page at a time, while the data
-/// pages' declared entries sum to less than `declared` (the chunk's footer
-/// entry, signed as the reader keeps it; the reader counts a whole page at
-/// a time, so the last page it reads can hold far more). It stops where the
-/// reader fails: a header that does not parse, a page type it does not
-/// read, a page without its type's header, or a page past the chunk's end.
-/// Headers are parsed with no more than the chunk's bytes, so a header
-/// cannot make this allocate more.
-fn read_chunk_pages(
-    file: &mut std::io::BufReader<std::fs::File>,
-    range: std::ops::Range<u64>,
-    declared: i64,
-    file_len: u64,
-) -> ChunkPages {
-    use polars_parquet_format::thrift::protocol::TCompactInputProtocol;
-    use polars_parquet_format::{PageHeader, PageType};
-    use std::io::{Read, Seek, SeekFrom};
+/// Bytes of one entry's definition and repetition levels, a `u16` each, as
+/// polars decodes them for a nested column's page.
+const LEVEL_BYTES: u64 = 4;
 
-    let mut read = ChunkPages::default();
-    let end = range.end.min(file_len);
-    if range.start >= end || file.seek(SeekFrom::Start(range.start)).is_err() {
-        return read;
-    }
-    let mut left = end - range.start;
-    // The reader's own tally, which a negative page count lowers.
-    let mut seen = 0i64;
-    while seen < declared {
-        let mut chunk = (&mut *file).take(left);
-        let header = {
-            let limit = usize::try_from(left).unwrap_or(usize::MAX);
-            let mut input = TCompactInputProtocol::new(&mut chunk, limit);
-            PageHeader::read_from_in_protocol(&mut input)
-        };
-        left = chunk.limit();
-        let Ok(header) = header else {
-            break;
-        };
-        let entries = match header.type_ {
-            PageType::DATA_PAGE => header.data_page_header.as_ref().map(|h| h.num_values),
-            PageType::DATA_PAGE_V2 => header.data_page_header_v2.as_ref().map(|h| h.num_values),
-            PageType::DICTIONARY_PAGE => header.dictionary_page_header.as_ref().map(|_| 0),
-            _ => None,
-        };
-        let (Some(entries), Ok(size)) = (entries, u64::try_from(header.compressed_page_size))
-        else {
-            break;
-        };
-        if size > left {
-            break;
+/// The decoder's own buffers while it decodes one column chunk, from what
+/// its page headers declare (`read`), for the leaf type `leaf` (`None` when
+/// the schema has fewer leaves than the footer has columns, counted as
+/// text), freed once the chunk is decoded. polars sizes each from what the
+/// headers declare before it decompresses or decodes the page, so a page
+/// that declares gigabytes gets them, whatever it holds:
+/// - a compressed chunk's pages are decompressed into buffers of the size
+///   their headers declare, zero-filled first (so resident): one for the
+///   data pages, reused and grown to the largest, and one for the
+///   dictionary page;
+/// - the dictionary is decoded whole, whatever the rows: room for each
+///   entry its header declares at the leaf's width (a view for text,
+///   Categorical included) and a byte, and a text dictionary's bytes copied
+///   out of its page;
+/// - a nested column's pages have their levels decoded whole, into buffers
+///   grown to the page with the most entries.
+///
+/// These count for every leaf type, fixed-width ones included, whose
+/// dataset charge does not grow with their pages.
+fn chunk_transient(
+    read: &ChunkPages,
+    leaf: Option<&DataType>,
+    compressed: bool,
+    nested: bool,
+) -> u64 {
+    let decompressed = if compressed {
+        read.largest_page.saturating_add(read.dict_bytes)
+    } else {
+        0
+    };
+    let (entry, text) = match leaf {
+        None
+        | Some(
+            DataType::String
+            | DataType::Binary
+            | DataType::BinaryOffset
+            | DataType::Categorical(_, _)
+            | DataType::Enum(_, _),
+        ) => (session::VIEW_BYTES, true),
+        // polars decodes no dictionary for a Boolean column.
+        Some(DataType::Boolean) => (0, false),
+        Some(other) => (leaf_value_bytes(other, 1), false),
+    };
+    let dictionary = entry
+        .saturating_add(1)
+        .saturating_mul(read.dict_entries)
+        .saturating_add(if text { read.dict_bytes } else { 0 });
+    let levels = if nested {
+        LEVEL_BYTES.saturating_mul(read.most_page_entries)
+    } else {
+        0
+    };
+    decompressed
+        .saturating_add(dictionary)
+        .saturating_add(levels)
+}
+
+/// The sum of the `k` largest of `values`.
+fn largest_sum(mut values: Vec<u64>, k: usize) -> u64 {
+    values.sort_unstable_by(|a, b| b.cmp(a));
+    values.into_iter().take(k).fold(0u64, u64::saturating_add)
+}
+
+/// The most column chunks polars decodes at once: the threads of its pool,
+/// sized as polars sizes it (`POLARS_MAX_THREADS`, else the available
+/// parallelism). Each thread decodes one chunk at a time, whether polars
+/// spreads a file's row groups or its columns over them.
+fn decode_threads() -> usize {
+    std::env::var("POLARS_MAX_THREADS")
+        .ok()
+        .and_then(|threads| threads.parse::<usize>().ok())
+        .filter(|&threads| threads > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
+/// Page headers parsed between two cancellation checkpoints.
+const CHECKPOINT_HEADERS: u64 = 1 << 10;
+
+/// Reads the page headers of a parquet file's column chunks, as polars'
+/// page reader (`PageReader`) does before it decodes a chunk, without
+/// decompressing or decoding anything.
+struct PageWalk {
+    file: std::io::BufReader<std::fs::File>,
+    file_len: u64,
+    /// Headers parsed so far.
+    headers: u64,
+}
+
+impl PageWalk {
+    fn new(file: std::io::BufReader<std::fs::File>, file_len: u64) -> Self {
+        Self {
+            file,
+            file_len,
+            headers: 0,
         }
-        seen = seen.saturating_add(i64::from(entries));
-        read.entries = read
-            .entries
-            .saturating_add(u64::try_from(entries).unwrap_or(0));
-        read.page_bytes = read
-            .page_bytes
-            .saturating_add(u64::try_from(header.uncompressed_page_size).unwrap_or(0));
+    }
+
+    /// Move to `offset` in the file, keeping what is buffered when it is
+    /// there (a file's chunks follow one another).
+    fn seek_to(&mut self, offset: u64) -> bool {
+        use std::io::Seek;
+        let Ok(at) = self.file.stream_position() else {
+            return false;
+        };
+        let (Ok(offset), Ok(at)) = (i64::try_from(offset), i64::try_from(at)) else {
+            return false;
+        };
+        self.file.seek_relative(offset - at).is_ok()
+    }
+
+    /// Parse the next page header from no more than `left` bytes, taking
+    /// its size off `left`; `Ok(None)` when it does not parse. The reader
+    /// parses with no size limit, from the chunk's bytes alone; the limit of
+    /// eight per byte left refuses no header the reader accepts (the
+    /// protocol counts at most eight per byte it reads) and bounds what a
+    /// header can make the parser reserve. `Err` when the call is cancelled
+    /// or past its deadline.
+    fn header(
+        &mut self,
+        left: &mut u64,
+    ) -> Result<Option<polars_parquet_format::PageHeader>, String> {
+        use polars_parquet_format::thrift::protocol::TCompactInputProtocol;
+        use std::io::Read;
+        self.headers += 1;
+        if self.headers.is_multiple_of(CHECKPOINT_HEADERS) {
+            p2a_core::resource::checkpoint()
+                .map_err(|e| format!("the call stopped while the file was checked ({e})"))?;
+        }
+        let mut chunk = (&mut self.file).take(*left);
+        let limit = usize::try_from(left.saturating_mul(8)).unwrap_or(usize::MAX);
+        let header = polars_parquet_format::PageHeader::read_from_in_protocol(
+            &mut TCompactInputProtocol::new(&mut chunk, limit),
+        );
+        *left = chunk.limit();
+        Ok(header.ok())
+    }
+
+    /// Skip a page of `size` bytes (at most `left`) after its header.
+    fn skip(&mut self, size: u64, left: &mut u64) -> bool {
         // `size` is at most `left`, which came from two u64 file offsets
         // the footer stores as i64.
-        let Ok(skip) = i64::try_from(size) else {
-            break;
-        };
-        if file.seek_relative(skip).is_err() {
-            break;
+        if size > *left {
+            return false;
         }
-        left -= size;
+        let Ok(skip) = i64::try_from(size) else {
+            return false;
+        };
+        if self.file.seek_relative(skip).is_err() {
+            return false;
+        }
+        *left -= size;
+        true
     }
-    read
+
+    /// Read the page headers of the column chunk at `range` as polars' page
+    /// reader does. First a dictionary page, which the reader reads whatever
+    /// the chunk's count says (`read_dict`); then, after it or from the
+    /// chunk's start when the first page is not one, a data page header and
+    /// its page at a time, while the data pages' declared entries sum to
+    /// less than `declared` (the chunk's footer entry, signed as the reader
+    /// keeps it; the reader counts a whole page at a time, so the last page
+    /// it reads can hold far more). It stops where the reader fails: a
+    /// header that does not parse, a page type it does not read, a
+    /// dictionary page past the first, a page without its type's header or
+    /// with a negative size, or a page past the chunk's end. `Err` when the
+    /// call is cancelled or past its deadline.
+    fn chunk(&mut self, range: std::ops::Range<u64>, declared: i64) -> Result<ChunkPages, String> {
+        use polars_parquet_format::PageType;
+        let mut read = ChunkPages::default();
+        let end = range.end.min(self.file_len);
+        if range.start >= end || !self.seek_to(range.start) {
+            return Ok(read);
+        }
+        let mut left = end - range.start;
+        let Some(first) = self.header(&mut left)? else {
+            return Ok(read);
+        };
+        if first.type_ == PageType::DICTIONARY_PAGE {
+            let entries = first
+                .dictionary_page_header
+                .as_ref()
+                .map(|dict| u64::try_from(dict.num_values));
+            let size = u64::try_from(first.compressed_page_size);
+            let bytes = u64::try_from(first.uncompressed_page_size);
+            let (Some(Ok(entries)), Ok(size), Ok(bytes)) = (entries, size, bytes) else {
+                return Ok(read);
+            };
+            if !self.skip(size, &mut left) {
+                return Ok(read);
+            }
+            read.dict_bytes = bytes;
+            read.dict_entries = entries;
+            read.page_bytes = bytes;
+        } else if self.seek_to(range.start) {
+            left = end - range.start;
+        } else {
+            return Ok(read);
+        }
+        // The reader's own tally, which a negative page count lowers.
+        let mut seen = 0i64;
+        while seen < declared {
+            let Some(header) = self.header(&mut left)? else {
+                break;
+            };
+            let entries = match header.type_ {
+                PageType::DATA_PAGE => header.data_page_header.as_ref().map(|h| h.num_values),
+                PageType::DATA_PAGE_V2 => header.data_page_header_v2.as_ref().map(|h| h.num_values),
+                _ => None,
+            };
+            let size = u64::try_from(header.compressed_page_size);
+            let bytes = u64::try_from(header.uncompressed_page_size);
+            let (Some(entries), Ok(size), Ok(bytes)) = (entries, size, bytes) else {
+                break;
+            };
+            if !self.skip(size, &mut left) {
+                break;
+            }
+            seen = seen.saturating_add(i64::from(entries));
+            let entries = u64::try_from(entries).unwrap_or(0);
+            read.entries = read.entries.saturating_add(entries);
+            read.page_bytes = read.page_bytes.saturating_add(bytes);
+            read.largest_page = read.largest_page.max(bytes);
+            read.most_page_entries = read.most_page_entries.max(entries);
+        }
+        Ok(read)
+    }
 }
 
 /// How many values a column, or a part of a nested one, holds, for
 /// [`least_value_bytes`].
 #[derive(Clone, Copy)]
 enum Slots {
-    /// No list above: the rows, times the sizes of the arrays above.
+    /// No list above: the rows, times the sizes of the arrays above. Each
+    /// leaf column below also takes room for the entries it declares where
+    /// they are more: polars reserves room for a nested column chunk's
+    /// footer count before it decodes it, and an honest chunk declares no
+    /// more entries than this.
     Known(u64),
+    /// Below an array of size zero: no values, whatever the entries.
+    Empty,
     /// Below a list: unknown, but each entry counted for a leaf column below
     /// is a value of it, an empty or null list below the outermost one, or
     /// one of the outermost list's slots, whose number `outer` holds.
@@ -341,7 +601,10 @@ const OFFSET_BYTES: u64 = 8;
 /// still a lower bound (and still counts a field that holds many values).
 /// A text or categorical leaf takes at least its pages (long
 /// strings, a dictionary of long labels): the quotas charge more for each
-/// value and label than its pages hold. Types without a fixed floor count
+/// value and label than its pages hold. A fixed-width leaf's charge does not
+/// grow with its pages, which also hold levels its values in memory do not;
+/// what decoding its pages allocates is counted with the decoder's buffers
+/// instead (see [`chunk_transient`]). Types without a fixed floor count
 /// nothing.
 fn least_value_bytes(
     dtype: &DataType,
@@ -350,8 +613,9 @@ fn least_value_bytes(
 ) -> u64 {
     match dtype {
         DataType::List(inner) => match slots {
-            // An outermost list in no slots holds nothing.
-            Slots::Known(0) => least_value_bytes(inner, slots, leaves),
+            // An outermost list in no slots holds nothing but what its leaf
+            // columns declare.
+            Slots::Known(0) | Slots::Empty => least_value_bytes(inner, slots, leaves),
             Slots::Known(n) => OFFSET_BYTES
                 .saturating_mul(n)
                 .saturating_add(least_value_bytes(
@@ -372,14 +636,13 @@ fn least_value_bytes(
             ),
         },
         DataType::Array(inner, size) => match slots {
+            // An array of size zero holds no values; an empty or null one is
+            // an entry without them.
+            _ if *size == 0 => least_value_bytes(inner, Slots::Empty, leaves),
             Slots::Known(n) => {
                 least_value_bytes(inner, Slots::Known(n.saturating_mul(*size as u64)), leaves)
             }
-            // An empty or null array of size zero is an entry without values.
-            Slots::BelowList { .. } if *size == 0 => {
-                least_value_bytes(inner, Slots::Known(0), leaves)
-            }
-            Slots::BelowList { .. } => least_value_bytes(inner, slots, leaves),
+            Slots::Empty | Slots::BelowList { .. } => least_value_bytes(inner, slots, leaves),
         },
         DataType::Struct(fields) => {
             // Every field consumes its own leaves, whichever bound is kept.
@@ -394,8 +657,8 @@ fn least_value_bytes(
         leaf => {
             let chunks = leaves.next().unwrap_or_default();
             let values = match slots {
-                Slots::Known(0) => return 0,
-                Slots::Known(n) => leaf_value_bytes(leaf, n),
+                Slots::Empty => return 0,
+                Slots::Known(n) => leaf_value_bytes(leaf, n.max(chunks.entries)),
                 Slots::BelowList { outer, .. } => {
                     let values = chunks.entries.saturating_sub(outer);
                     leaf_value_bytes(leaf, values).min(OFFSET_BYTES.saturating_mul(values))
@@ -447,12 +710,24 @@ fn leaf_value_bytes(dtype: &DataType, values: u64) -> u64 {
     }
 }
 
+/// Why a parquet file is not loaded, decided before it is decoded.
+enum NotAdmitted {
+    /// The dataset quotas refuse it: the handler's error.
+    Quota(McpError),
+    /// It is not read: the reason, for the tool's error result.
+    Unread(String),
+}
+
 /// Refuse, before decoding it, a parquet file at `path` that the dataset
 /// quotas would refuse once it was loaded as `name` (see
-/// [`session::admit_dataset`]). Other formats, and calls without quotas,
-/// pass: a CSV, Excel, Stata or SAS file is charged only once decoded, and a
-/// CSV can decode to several times its size on disk.
-async fn admit_parquet(path: &Path, name: &str) -> Result<(), McpError> {
+/// [`session::admit_dataset`]), counting what decoding it allocates on top
+/// of the dataset (see [`parquet_decoded_bytes`]). Other formats, and calls
+/// without quotas, pass: a CSV, Excel, Stata or SAS file is charged only
+/// once decoded, and a CSV can decode to several times its size on disk. A
+/// file whose footer cannot be read passes too (the loader reports its
+/// error); one the check will not read (see [`parquet_decoded_bytes`]) is
+/// not loaded.
+async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
     let is_parquet = path
         .extension()
         .and_then(|e| e.to_str())
@@ -460,12 +735,14 @@ async fn admit_parquet(path: &Path, name: &str) -> Result<(), McpError> {
     if !is_parquet || !session::dataset_admission_active() {
         return Ok(());
     }
-    let Some(at_least) = parquet_decoded_bytes(path) else {
-        return Ok(());
+    let bound = match parquet_decoded_bytes(path) {
+        Ok(Some(bound)) => bound,
+        Ok(None) => return Ok(()),
+        Err(reason) => return Err(NotAdmitted::Unread(reason)),
     };
-    session::admit_dataset(name, at_least)
+    session::admit_dataset(name, bound.dataset.saturating_add(bound.transient))
         .await
-        .map_err(session::quota_refusal)
+        .map_err(|refusal| NotAdmitted::Quota(session::quota_refusal(refusal)))
 }
 
 /// `text` (an error from a loader or writer) with the absolute forms of
@@ -583,7 +860,15 @@ impl AnalyticsServer {
 
         // A parquet file the dataset quotas would refuse is refused before
         // it is decoded.
-        admit_parquet(&path, &id).await?;
+        match admit_parquet(&path, &id).await {
+            Ok(()) => {}
+            Err(NotAdmitted::Quota(refusal)) => return Err(refusal),
+            Err(NotAdmitted::Unread(reason)) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to load dataset: {reason}. Nothing was loaded."
+                ))]));
+            }
+        }
 
         // Load the dataset
         let dataset = match DataLoader::load(&path) {
@@ -779,13 +1064,20 @@ impl AnalyticsServer {
 
                 // Refused before decoding when the quotas would refuse the
                 // decoded dataset.
-                let result = match admit_parquet(&temp_path, &id).await {
-                    Ok(()) => DataLoader::load(&temp_path),
-                    Err(refusal) => {
-                        let _ = std::fs::remove_file(&temp_path);
-                        return Err(refusal);
+                let admitted = admit_parquet(&temp_path, &id).await;
+                if admitted.is_err() {
+                    let _ = std::fs::remove_file(&temp_path);
+                }
+                match admitted {
+                    Ok(()) => {}
+                    Err(NotAdmitted::Quota(refusal)) => return Err(refusal),
+                    Err(NotAdmitted::Unread(reason)) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to parse Parquet: {reason}. Nothing was loaded."
+                        ))]));
                     }
-                };
+                }
+                let result = DataLoader::load(&temp_path);
                 let _ = std::fs::remove_file(&temp_path); // Clean up temp file
 
                 match result {
@@ -1040,27 +1332,90 @@ mod tests {
         // Flat columns count their rows, as before.
         assert_eq!(least(&DataType::Float64, 7, &[7]), 56);
         assert_eq!(least(&DataType::String, 2, &[2]), 32);
+        // Outside a list, a leaf column takes room for the entries it
+        // declares where they are more than its slots: polars reserves room
+        // for a nested chunk's footer count before it decodes it. Pre-fix a
+        // struct column counted its rows only.
+        let pair = fields(&[("a", DataType::Float64), ("b", DataType::String)]);
+        assert_eq!(least(&pair, 1, &[1_000_000, 3]), 8_000_000 + 16 * 3);
+        assert_eq!(least(&pair, 4, &[4, 4]), 32 + 64);
+        assert_eq!(least(&list(DataType::Float64), 0, &[9]), 72);
         // A text or categorical leaf counts its pages where they are more
-        // (long strings, a dictionary of long labels); a fixed-width leaf
-        // never does (its pages hold levels its values in memory do not).
+        // (long strings, a dictionary of long labels). A fixed-width leaf's
+        // pages count with the decoder's buffers instead (see the test of
+        // `chunk_transient` below), not in the dataset's charge.
         assert_eq!(least_with_pages(&DataType::String, 2, &[2], 1000), 1000);
         assert_eq!(
             least_with_pages(&list(DataType::Binary), 1, &[3], 1000),
             8 + 1000
         );
-        assert_eq!(least_with_pages(&DataType::Float64, 2, &[2], 1000), 16);
         assert_eq!(least_with_pages(&DataType::String, 200, &[200], 1000), 3200);
     }
 
-    /// What the quotas charge for `df` once written to parquet and loaded
-    /// as `d`, and the least [`parquet_decoded_bytes`] gave for it before.
-    fn loaded_charge_and_bound(df: &mut DataFrame) -> (u64, u64) {
+    #[test]
+    fn the_decoders_buffers_count_for_every_leaf_type() {
+        // Pre-fix a fixed-width column's pages counted nothing, though
+        // polars decompresses each into a zero-filled buffer of the size
+        // its header declares.
+        let pages = ChunkPages {
+            entries: 2,
+            page_bytes: 3000,
+            largest_page: 1000,
+            most_page_entries: 2,
+            ..ChunkPages::default()
+        };
+        let f64 = Some(&DataType::Float64);
+        assert_eq!(chunk_transient(&pages, f64, true, false), 1000);
+        // Uncompressed pages are decoded where they lie in the file.
+        assert_eq!(chunk_transient(&pages, f64, false, false), 0);
+        // A dictionary page: its decompression buffer, and its entries
+        // decoded at their width (and a byte each).
+        let dict = ChunkPages {
+            dict_bytes: 5000,
+            dict_entries: 600,
+            ..pages
+        };
+        assert_eq!(
+            chunk_transient(&dict, f64, true, false),
+            1000 + 5000 + 9 * 600
+        );
+        assert_eq!(chunk_transient(&dict, f64, false, false), 9 * 600);
+        // A text dictionary is decoded into views, its bytes copied out.
+        let text = Some(&DataType::String);
+        assert_eq!(chunk_transient(&dict, text, false, false), 17 * 600 + 5000);
+        assert_eq!(chunk_transient(&dict, None, false, false), 17 * 600 + 5000);
+        // A nested column's levels, two u16 per entry of its largest page.
+        let levels = ChunkPages {
+            most_page_entries: 1 << 20,
+            ..ChunkPages::default()
+        };
+        let flag = Some(&DataType::Boolean);
+        assert_eq!(chunk_transient(&levels, flag, false, true), 4 << 20);
+        assert_eq!(chunk_transient(&levels, flag, false, false), 0);
+        // The chunks decoded at once: the largest, as many as threads.
+        assert_eq!(largest_sum(vec![5, 1, 9, 3], 2), 14);
+        assert_eq!(largest_sum(vec![5, 1], 8), 6);
+        assert!(decode_threads() >= 1);
+    }
+
+    /// What decoding the parquet file at `path` allocates at least: its
+    /// dataset and transient bounds.
+    fn bound_of(path: &Path) -> DecodedBound {
+        parquet_decoded_bytes(path).unwrap().unwrap()
+    }
+
+    /// What the quotas charge for `df` once written to parquet (in row
+    /// groups of `rows_per_group` rows, or polars' default) and loaded as
+    /// `d`, and the least [`parquet_decoded_bytes`] gave for its dataset
+    /// before.
+    fn loaded_charge_and_bound(df: &mut DataFrame, rows_per_group: Option<usize>) -> (u64, u64) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("d.parquet");
         p2a_core::polars::prelude::ParquetWriter::new(std::fs::File::create(&path).unwrap())
+            .with_row_group_size(rows_per_group)
             .finish(df)
             .unwrap();
-        let bound = parquet_decoded_bytes(&path).unwrap();
+        let bound = bound_of(&path).dataset;
         let loaded = DataLoader::load(&path).unwrap();
         assert_eq!(loaded.df().dtypes(), df.dtypes());
         let charge = session::datasets_bytes_of([("d", &loaded)]);
@@ -1180,18 +1535,28 @@ mod tests {
             .unwrap()
             .get_inner()
             .len() as u64;
-        let (charge, bound) = loaded_charge_and_bound(&mut df);
-        assert!(bound <= charge, "bound {bound} > charge {charge}");
-        assert!(
-            bound >= 8 * inner_floats,
-            "bound {bound}, {inner_floats} list values"
-        );
+        // In one row group and in several: the bound is summed over the
+        // row groups.
+        for groups in [None, Some(300)] {
+            let (charge, bound) = loaded_charge_and_bound(&mut df, groups);
+            assert!(
+                bound <= charge,
+                "{groups:?}: bound {bound} > charge {charge}"
+            );
+            assert!(
+                bound >= 8 * inner_floats,
+                "{groups:?}: bound {bound}, {inner_floats} list values"
+            );
 
-        // Each column alone, too.
-        for name in ["lists", "nested", "structs", "cats", "deep", "arr"] {
-            let mut one = df.select([name]).unwrap();
-            let (charge, bound) = loaded_charge_and_bound(&mut one);
-            assert!(bound <= charge, "{name}: bound {bound} > charge {charge}");
+            // Each column alone, too.
+            for name in ["lists", "nested", "structs", "cats", "deep", "arr"] {
+                let mut one = df.select([name]).unwrap();
+                let (charge, bound) = loaded_charge_and_bound(&mut one, groups);
+                assert!(
+                    bound <= charge,
+                    "{groups:?} {name}: bound {bound} > charge {charge}"
+                );
+            }
         }
     }
 
@@ -1240,10 +1605,10 @@ mod tests {
         let values: Vec<f64> = (0..300_000).map(|i| (i % 89) as f64 * 0.31 + 0.2).collect();
         let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
         write_parquet(&mut df, &flat, 100_000);
-        let honest = parquet_decoded_bytes(&flat).unwrap();
-        assert!(honest >= 8 * 300_000, "{honest}");
+        let honest = bound_of(&flat);
+        assert!(honest.dataset >= 8 * 300_000, "{honest:?}");
         rewrite_footer(&flat, |footer| footer.num_rows = 1);
-        assert_eq!(parquet_decoded_bytes(&flat), Some(honest));
+        assert_eq!(bound_of(&flat), honest);
         // Entries: a chunk is decoded a page at a time until the pages have
         // given the chunk's count, so a chunk that says it holds one entry
         // is still decoded through its first page, here all 500,000 values
@@ -1257,7 +1622,7 @@ mod tests {
         );
         let mut df = DataFrame::new(vec![Series::new("l".into(), [inner]).into()]).unwrap();
         write_parquet(&mut df, &lists, 1);
-        let honest = parquet_decoded_bytes(&lists).unwrap();
+        let honest = bound_of(&lists).dataset;
         assert!(honest >= 8 * 499_999, "{honest}");
         rewrite_footer(&lists, |footer| {
             for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
@@ -1267,7 +1632,7 @@ mod tests {
                 meta.total_uncompressed_size = 1;
             }
         });
-        assert_eq!(parquet_decoded_bytes(&lists), Some(honest));
+        assert_eq!(bound_of(&lists).dataset, honest);
         // Pages: a text column is charged at least its pages uncompressed,
         // which a footer can understate; the page headers say what the
         // decoder decompresses.
@@ -1283,8 +1648,34 @@ mod tests {
                 chunk.meta_data.as_mut().unwrap().total_uncompressed_size = 1;
             }
         });
-        let bound = parquet_decoded_bytes(&text).unwrap();
+        let bound = bound_of(&text).dataset;
         assert!(bound >= 2_000 * 1_000, "{bound}");
+    }
+
+    #[test]
+    fn a_struct_chunk_that_declares_more_entries_counts_them() {
+        // polars reserves room for a nested column chunk's footer count, at
+        // the leaf's width, before it decodes the chunk (`collect_nested`);
+        // a one-row struct column whose chunk declares billions of entries
+        // makes that reservation fail, which aborts the process. Pre-fix
+        // the bound counted the struct's rows only.
+        use p2a_core::polars::prelude::{IntoSeries, NamedFrom, Series, StructChunked};
+        let a = Series::new("a".into(), [0.5f64, 1.75]);
+        let s = StructChunked::from_series("s".into(), 2, [a].iter())
+            .unwrap()
+            .into_series();
+        let mut df = DataFrame::new(vec![s.into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("struct.parquet");
+        write_parquet(&mut df, &path, 2);
+        assert!(bound_of(&path).dataset < 1 << 20);
+        rewrite_footer(&path, |footer| {
+            for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                chunk.meta_data.as_mut().unwrap().num_values = 1 << 31;
+            }
+        });
+        let bound = bound_of(&path).dataset;
+        assert!(bound >= 8 << 31, "{bound}");
     }
 
     #[test]
@@ -1321,22 +1712,175 @@ mod tests {
                 .get_metadata()
                 .unwrap(),
         );
-        let file = std::fs::File::open(&path).unwrap();
-        let file_len = file.metadata().unwrap().len();
-        let mut pages = std::io::BufReader::new(file);
+        let mut walk = walk_of(&path);
         let mut chunks = 0;
+        let mut dictionaries = 0;
         for group in &metadata.row_groups {
             for chunk in group.parquet_columns() {
-                let read =
-                    read_chunk_pages(&mut pages, chunk.byte_range(), chunk.num_values(), file_len);
+                let read = walk.chunk(chunk.byte_range(), chunk.num_values()).unwrap();
                 assert_eq!(read.entries, chunk.num_values() as u64);
                 assert!(read.page_bytes > 0);
                 assert!(read.page_bytes <= chunk.uncompressed_size() as u64);
+                assert!(read.largest_page > 0 && read.largest_page <= read.page_bytes);
+                assert!(read.most_page_entries > 0 && read.most_page_entries <= read.entries);
+                assert!(read.dict_bytes <= read.page_bytes);
+                if read.dict_bytes > 0 {
+                    assert!(read.dict_entries > 0);
+                    dictionaries += 1;
+                }
                 chunks += 1;
             }
         }
         assert!(metadata.row_groups.len() > 1);
         assert_eq!(chunks, metadata.row_groups.len() * 3);
+        assert!(dictionaries >= metadata.row_groups.len(), "{dictionaries}");
+    }
+
+    /// A [`PageWalk`] over the file at `path`.
+    fn walk_of(path: &Path) -> PageWalk {
+        let file = std::fs::File::open(path).unwrap();
+        let file_len = file.metadata().unwrap().len();
+        PageWalk::new(std::io::BufReader::new(file), file_len)
+    }
+
+    /// A one-column parquet file at `path` whose column `k` is a dictionary
+    /// of `labels` distinct labels of 1,000 bytes, one row each, in one row
+    /// group: it loads as Categorical.
+    fn long_labels_parquet(path: &Path, labels: usize) {
+        use p2a_core::polars::prelude::{Categories, NamedFrom, Series};
+        let values: Vec<String> = (0..labels).map(|i| format!("k{i:0999}")).collect();
+        let dtype =
+            DataType::from_categories(Categories::random("".into(), CategoricalPhysical::U32));
+        let k = Series::new("k".into(), values).cast(&dtype).unwrap();
+        let mut df = DataFrame::new(vec![k.into()]).unwrap();
+        write_parquet(&mut df, path, labels);
+    }
+
+    #[test]
+    fn a_dictionary_page_counts_whatever_the_chunks_count_says() {
+        // polars reads a chunk's dictionary page before it looks at the
+        // chunk's count (`PageReader::read_dict`), and decodes it whole.
+        // Pre-fix a chunk whose footer entry said it held no entries had no
+        // page read, and its footer size counted instead.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels.parquet");
+        long_labels_parquet(&path, 2_000);
+        let honest = bound_of(&path);
+        assert!(honest.dataset >= 2_000 * 1_000, "{honest:?}");
+        for declared in [0, -5] {
+            rewrite_footer(&path, |footer| {
+                for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                    let meta = chunk.meta_data.as_mut().unwrap();
+                    meta.num_values = declared;
+                    meta.total_uncompressed_size = 1;
+                }
+            });
+            let bound = bound_of(&path);
+            assert!(bound.dataset >= 2_000 * 1_000, "{declared}: {bound:?}");
+            // Its decoded labels and their views, too.
+            assert!(
+                bound.transient >= 2_000 * (1_000 + 16),
+                "{declared}: {bound:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_row_group_cannot_cancel_what_another_holds() {
+        // Two row groups: the first one row with an empty list, its footer
+        // rewritten to claim 200,000 rows, the second one row holding a list
+        // of 20,000 structs of 20 floats. polars decodes each group on its
+        // own, the second in full (3.2 MB). Pre-fix the bound took the
+        // entries and rows over the whole file, so the first group's rows
+        // cancelled the second group's values: 8 bytes of offsets a claimed
+        // row, and nothing for the floats.
+        use p2a_core::polars::prelude::{IntoSeries, ListChunked, NamedFrom, Series};
+        let fields: Vec<Series> = (0..20)
+            .map(|f| {
+                Series::new(
+                    format!("f{f}").into(),
+                    (0..20_000)
+                        .map(|i| (i * 3 + f) as f64 * 0.25 + 0.1)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let wide =
+            p2a_core::polars::prelude::StructChunked::from_series("".into(), 20_000, fields.iter())
+                .unwrap()
+                .into_series();
+        let empty = wide.clear();
+        let lists: ListChunked = [Some(empty), Some(wide)].into_iter().collect();
+        let mut df =
+            DataFrame::new(vec![lists.into_series().with_name("l".into()).into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("groups.parquet");
+        write_parquet(&mut df, &path, 1);
+        let honest = bound_of(&path).dataset;
+        assert!(honest >= 20 * 8 * 19_999, "{honest}");
+        rewrite_footer(&path, |footer| {
+            assert_eq!(footer.row_groups.len(), 2);
+            footer.row_groups[0].num_rows = 200_000;
+            footer.num_rows = 200_001;
+        });
+        let bound = bound_of(&path).dataset;
+        assert!(bound >= 20 * 8 * 19_999, "{bound}");
+    }
+
+    #[test]
+    fn the_header_walk_stops_when_the_call_does() {
+        // 3,000 row groups of one row: more than a few thousand headers,
+        // so the walk reaches its checkpoints. Pre-fix it had none.
+        use p2a_core::polars::prelude::{NamedFrom, Series};
+        use p2a_core::resource::{Budget, CancelToken, with_budget};
+        let values: Vec<f64> = (0..3_000).map(|i| i as f64 * 0.5 + 0.25).collect();
+        let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many.parquet");
+        write_parquet(&mut df, &path, 1);
+        let token = CancelToken::new();
+        token.cancel();
+        let stopped = with_budget(Budget::new(None, token), || parquet_decoded_bytes(&path));
+        let reason = stopped.unwrap_err();
+        assert!(reason.contains("stopped"), "{reason}");
+        assert!(parquet_decoded_bytes(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn column_chunks_that_share_bytes_or_pass_the_end_are_not_read() {
+        // A footer can point any number of chunks at the same bytes, and
+        // the walk would read their headers once per chunk; no writer does.
+        use p2a_core::polars::prelude::{NamedFrom, Series};
+        let values: Vec<f64> = (0..4_000).map(|i| (i % 31) as f64 * 0.5 + 0.25).collect();
+        let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.parquet");
+        write_parquet(&mut df, &path, 1_000);
+        assert!(parquet_decoded_bytes(&path).is_ok());
+        let first = |footer: &polars_parquet_format::FileMetaData| {
+            footer.row_groups[0].columns[0].meta_data.clone().unwrap()
+        };
+        let original = std::fs::read(&path).unwrap();
+        rewrite_footer(&path, |footer| {
+            let shared = first(footer);
+            for group in footer.row_groups.iter_mut().skip(1) {
+                group.columns[0].meta_data = Some(shared.clone());
+            }
+        });
+        let reason = parquet_decoded_bytes(&path).unwrap_err();
+        assert!(reason.contains("share bytes"), "{reason}");
+        std::fs::write(&path, &original).unwrap();
+        rewrite_footer(&path, |footer| {
+            let meta = footer.row_groups[3].columns[0].meta_data.as_mut().unwrap();
+            meta.total_compressed_size += 1 << 20;
+        });
+        let reason = parquet_decoded_bytes(&path).unwrap_err();
+        assert!(reason.contains("past the end"), "{reason}");
+        // Adjacent chunks are not shared bytes.
+        assert!(check_chunk_ranges([0..4, 4..9, 9..9, 12..20].into_iter(), 20).is_ok());
+        assert!(check_chunk_ranges([0..4, 3..9].into_iter(), 20).is_err());
+        assert!(check_chunk_ranges([0..4, 9..9, 2..3].into_iter(), 20).is_err());
+        assert!(check_chunk_ranges(std::iter::once(0..21), 20).is_err());
     }
 
     #[test]
