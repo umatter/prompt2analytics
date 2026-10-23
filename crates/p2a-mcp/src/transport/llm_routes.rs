@@ -2319,10 +2319,16 @@ mod chat_tests {
             model: "stub".into(),
             ..Default::default()
         };
-        let openai =
-            OpenAIProvider::with_client(config(ProviderType::OpenAI), reqwest::Client::new());
-        let anthropic =
-            AnthropicProvider::with_client(config(ProviderType::Anthropic), reqwest::Client::new());
+        // Like the production client (`egress::guarded_client_builder`): no
+        // proxy from HTTP_PROXY and the like, which would route the loopback
+        // stub through the machine's proxy, and no redirects.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let openai = OpenAIProvider::with_client(config(ProviderType::OpenAI), client.clone());
+        let anthropic = AnthropicProvider::with_client(config(ProviderType::Anthropic), client);
         let messages = [Message::user("the ACF of an AR(1) with 0.5, to lag 5")];
         let replies = [
             (
