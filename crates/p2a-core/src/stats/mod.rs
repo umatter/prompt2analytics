@@ -171,7 +171,9 @@ pub use pairwise::{
     PValueAdjustMethod, PairwiseTTestResult, PairwiseWilcoxResult, p_adjust, pairwise_t_test,
     pairwise_wilcox_test, run_pairwise_t_test, run_pairwise_wilcox_test,
 };
-pub use poissontest::{PoissonAlternative, PoissonTestResult, poisson_test};
+pub use poissontest::{
+    POISSON_MAX_ONE_SAMPLE_COUNT, PoissonAlternative, PoissonTestResult, poisson_test,
+};
 pub use power::{
     PowerAlternative, PowerAnovaTestResult, PowerPropTestResult, PowerTTestResult, TTestType,
     power_anova_test, power_prop_test, power_t_test, run_power_anova_test, run_power_prop_test,
