@@ -1301,9 +1301,10 @@ pub struct ArimaSimResult {
 /// * `ma` - MA coefficients (can be empty)
 /// * `d` - Differencing order (0 for ARMA)
 /// * `n` - Number of observations returned; must be at least 1, as in R's
-///   `arima.sim`. The integrated series keeps length `n`: where R returns
-///   `n + d` values for `d > 0` (`diffinv` prepends `d` zeros), this returns
-///   R's series without those leading zeros.
+///   `arima.sim`. The integrated series keeps length `n`: R returns `n + d`
+///   values for `d > 0` because `diffinv` prepends `d` zeros; this returns the
+///   `d`-fold cumulative sum of the ARMA part, which is that output without
+///   the leading zeros.
 /// * `innovations` - Optional pre-specified innovations. If None, uses standard normal.
 /// * `n_start` - Burn-in period length (default: computed from AR/MA orders)
 /// * `seed` - Random seed for reproducibility (if innovations is None)
@@ -2030,6 +2031,11 @@ mod tests {
         assert!(err.to_string().contains("AR coefficient matrix"), "{err}");
     }
 
+    // Guards only that the row loops check the budget at all. The stride rule
+    // (checkpoint_stride(dimension)) is covered by
+    // resource::tests::checkpoint_stride_targets_65536_operations; a
+    // pre-cancelled budget cannot tell strides apart, since every stride
+    // checks row 0.
     #[test]
     fn embed_and_embed_array_honour_cancellation() {
         let x: Vec<f64> = (0..300)
