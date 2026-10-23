@@ -495,8 +495,9 @@ impl PersistentSessionManager {
     /// ([`delete_rows_unless_live`](Self::delete_rows_unless_live)).
     ///
     /// A failed write stops the loop, but the rows written before it still
-    /// get that check before the write's error is returned, so a store error
-    /// cannot leave a departed session with an adoptable row.
+    /// get that check before the write's error is returned, so a failed row
+    /// write cannot leave a departed session with an adoptable row; a failed
+    /// delete is reported.
     async fn write_missing_rows(
         &self,
         missing: Vec<(SessionId, chrono::DateTime<chrono::Utc>)>,
@@ -532,6 +533,10 @@ impl PersistentSessionManager {
     /// delete may have run before the row was written. The others count as
     /// refreshed. A session still live now has any later removal's delete
     /// run after the write.
+    ///
+    /// A failed delete does not stop the others: the first error is
+    /// returned once every departed session's delete was tried (later ones
+    /// are logged), and `departed_deleted` counts the deletes that succeeded.
     async fn delete_rows_unless_live(
         &self,
         created: Vec<SessionId>,
@@ -541,15 +546,22 @@ impl PersistentSessionManager {
             return Ok(());
         }
         let live = self.live_ids().await;
+        let mut first_err = None;
         for id in created {
             if live.contains(&id) {
                 stats.refreshed += 1;
-            } else {
-                self.db.delete_session(&id).await?;
-                stats.departed_deleted += 1;
+                continue;
+            }
+            match self.db.delete_session(&id).await {
+                Ok(()) => stats.departed_deleted += 1,
+                Err(e) if first_err.is_none() => first_err = Some(e),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "Failed to delete a row the sweep wrote for a departed session"
+                ),
             }
         }
-        Ok(())
+        first_err.map_or(Ok(()), |e| Err(e.into()))
     }
 
     /// The ids of the live sessions.
@@ -1421,6 +1433,53 @@ mod tests {
             .unwrap();
         assert_eq!((stats.refreshed, stats.departed_deleted), (1, 1));
         assert!(pm.db().get_session(&live).await.unwrap().is_some());
+        assert!(pm.db().get_session(&departed).await.unwrap().is_none());
+    }
+
+    /// A failed delete of one departed session's row does not stop the
+    /// others: the later departed session keeps no adoptable row, and the
+    /// error is reported.
+    #[tokio::test]
+    async fn a_failed_departed_delete_still_deletes_the_others() {
+        let pm = manager().await;
+        let (refused, departed) = (
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        for id in [&refused, &departed] {
+            pm.db()
+                .set_session_last_accessed(id, chrono::Utc::now())
+                .await
+                .unwrap();
+        }
+        // `refused`'s delete fails at its dataset metadata.
+        let meta = crate::db::DatasetMeta::new(
+            refused.clone(),
+            "d".into(),
+            "csv".into(),
+            3,
+            1,
+            vec!["x".into()],
+        );
+        pm.db().save_dataset_meta(&meta).await.unwrap();
+        pm.db()
+            .db()
+            .query(
+                "DEFINE EVENT refuse_meta ON TABLE dataset_meta WHEN $event = 'DELETE' \
+                 THEN { THROW 'refused' }",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let mut stats = SweepStats::default();
+        let checked = pm
+            .delete_rows_unless_live(vec![refused.clone(), departed.clone()], &mut stats)
+            .await;
+        assert!(checked.is_err());
+        assert_eq!((stats.refreshed, stats.departed_deleted), (0, 1));
+        assert!(pm.db().get_session(&refused).await.unwrap().is_some());
         assert!(pm.db().get_session(&departed).await.unwrap().is_none());
     }
 
