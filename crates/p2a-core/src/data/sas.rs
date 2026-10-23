@@ -392,7 +392,12 @@ impl<R: Read + Seek> SasReader<R> {
         let mut total_width = 0usize;
         for (i, column) in self.columns.iter().enumerate() {
             let (offset, width) = (column.offset, column.length);
-            if width == 0 || add(offset, width)? > row_length {
+            if width == 0 {
+                return Err(SasError::InvalidFormat(format!(
+                    "column {i} (offset {offset}) has width 0"
+                )));
+            }
+            if add(offset, width)? > row_length {
                 return Err(SasError::InvalidFormat(format!(
                     "column {i} (offset {offset}, width {width}) extends past the row_length \
                      of {row_length}"
@@ -1014,6 +1019,9 @@ mod tests {
         let mut b = create_minimal_sas_file();
         put_i32(&mut b, ATTR2, 12); // offset 12 + width 8 > row_length 16
         assert_invalid(load(b), "extends past");
+        let mut b = create_minimal_sas_file();
+        put_i32(&mut b, ATTR2 + 4, 0); // width 0 at offset 8, inside the row
+        assert_invalid(load(b), "(offset 8) has width 0");
     }
 
     #[test]
