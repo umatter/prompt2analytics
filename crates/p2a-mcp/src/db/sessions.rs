@@ -87,13 +87,13 @@ impl DbConnection {
         Ok(())
     }
 
-    /// Set a session row's `last_accessed` to `at` (the live session's own
-    /// value, flushed by the sweep). A missing row is created.
-    pub async fn set_session_last_accessed(
+    /// Set a session row's `last_accessed` to `at` if the row exists; never
+    /// creates one. Whether the row existed.
+    pub async fn refresh_session_last_accessed(
         &self,
         id: &str,
         at: DateTime<Utc>,
-    ) -> Result<(), DbError> {
+    ) -> Result<bool, DbError> {
         let mut result = self
             .db()
             .query("UPDATE $id SET last_accessed = $at RETURN AFTER")
@@ -101,7 +101,17 @@ impl DbConnection {
             .bind(("at", Datetime::from(at)))
             .await?;
         let updated: Vec<DbSession> = result.take(0)?;
-        if updated.is_empty() {
+        Ok(!updated.is_empty())
+    }
+
+    /// Set a session row's `last_accessed` to `at`. A missing row is
+    /// created.
+    pub async fn set_session_last_accessed(
+        &self,
+        id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbError> {
+        if !self.refresh_session_last_accessed(id, at).await? {
             let mut row = DbSession::new(id.to_string(), None);
             row.last_accessed = Datetime::from(at);
             self.upsert_session(&row).await?;

@@ -557,6 +557,22 @@ async fn session_rows_by_last_access() {
     assert!(drift.num_milliseconds().abs() < 1, "{drift}");
 }
 
+/// The sweep's refresh updates an existing row and never creates one.
+#[tokio::test]
+async fn refreshing_last_access_never_creates_a_row() {
+    let db = test_db().await;
+    let at = chrono::Utc::now();
+    assert!(!db.refresh_session_last_accessed("gone", at).await.unwrap());
+    assert!(db.get_session("gone").await.unwrap().is_none());
+    db.set_session_last_accessed("here", at - chrono::Duration::hours(1))
+        .await
+        .unwrap();
+    assert!(db.refresh_session_last_accessed("here", at).await.unwrap());
+    let row = db.get_session("here").await.unwrap().unwrap();
+    let drift = row.last_accessed_chrono().signed_duration_since(at);
+    assert!(drift.num_milliseconds().abs() < 1, "{drift}");
+}
+
 // ==================== Conversation Tests ====================
 
 #[tokio::test]
