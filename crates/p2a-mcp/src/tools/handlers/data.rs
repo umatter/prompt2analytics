@@ -151,38 +151,151 @@ impl Serialize for CellJson<'_> {
 
 /// The least the dataset quotas will charge for the parquet file at `path`
 /// once it is decoded, read from its footer before anything is decoded: each
-/// column's values at their in-memory width for the rows the footer declares,
-/// or the pages' uncompressed size where that is more (a dictionary page of
-/// long labels), plus the dataset's structure. A small file can declare
-/// hundreds of millions of rows (one value run-length encoded), and the
-/// quotas only see a dataset once it is built. `None` when the footer cannot
-/// be read; the loader then reports the file's error.
+/// column's values at their in-memory width, a list's from the entries the
+/// footer counts below it (see [`least_value_bytes`]), plus the dataset's
+/// structure. A small file can declare hundreds of millions of rows, or one
+/// row holding a list of as many values (one value run-length encoded), and
+/// the quotas only see a dataset once it is built. `None` when the footer
+/// cannot be read; the loader then reports the file's error.
+///
+/// The footer is taken at its word: a file whose footer understates its rows
+/// or its columns' entries is decoded as it is and charged after.
 fn parquet_decoded_bytes(path: &Path) -> Option<u64> {
     let mut reader = ParquetReader::new(std::fs::File::open(path).ok()?);
     let rows = reader.num_rows().ok()? as u64;
-    let pages = reader
-        .get_metadata()
-        .ok()?
-        .row_groups
-        .iter()
-        .fold(0u64, |bytes, group| {
-            bytes.saturating_add(group.total_byte_size() as u64)
-        });
+    let metadata = std::sync::Arc::clone(reader.get_metadata().ok()?);
+    // What the footer says about each leaf column under the top-level column
+    // `root`, summed over the row groups, in the order of the file's columns,
+    // which is the order of the column's leaves.
+    let leaves_of = |root: &str| {
+        let mut leaves: Vec<LeafChunks> = Vec::new();
+        for group in &metadata.row_groups {
+            let chunks = group.columns_under_root_iter(root).into_iter().flatten();
+            for (i, chunk) in chunks.enumerate() {
+                let entries = u64::try_from(chunk.num_values()).unwrap_or(0);
+                let page_bytes = u64::try_from(chunk.uncompressed_size()).unwrap_or(0);
+                if i == leaves.len() {
+                    leaves.push(LeafChunks::default());
+                }
+                let leaf = &mut leaves[i];
+                leaf.entries = leaf.entries.saturating_add(entries);
+                leaf.page_bytes = leaf.page_bytes.saturating_add(page_bytes);
+            }
+        }
+        leaves
+    };
     let schema = reader.schema().ok()?;
     let values = schema.iter_values().fold(0u64, |bytes, field| {
-        bytes.saturating_add(least_value_bytes(&DataType::from_arrow_field(field), rows))
+        let mut leaves = leaves_of(field.name.as_str()).into_iter();
+        let dtype = DataType::from_arrow_field(field);
+        bytes.saturating_add(least_value_bytes(&dtype, Slots::Known(rows), &mut leaves))
     });
     let structure = session::structure_bytes(schema.iter_names().map(|name| name.as_str()));
-    Some(values.max(pages).saturating_add(structure))
+    Some(values.saturating_add(structure))
 }
 
-/// The least memory `rows` values of `dtype` take in polars: the physical
-/// width (a view per String or Binary value, a code per Categorical one,
-/// offsets per list). Types without a fixed floor count nothing.
-fn least_value_bytes(dtype: &DataType, rows: u64) -> u64 {
-    let width = |bytes: u64| bytes.saturating_mul(rows);
+/// What a parquet footer says about one leaf column, summed over the row
+/// groups.
+#[derive(Clone, Copy, Default)]
+struct LeafChunks {
+    /// Its entries: values, nulls, and empty or null lists above them.
+    entries: u64,
+    /// Its pages' uncompressed size (headers, levels and values).
+    page_bytes: u64,
+}
+
+/// How many values a column, or a part of a nested one, holds, for
+/// [`least_value_bytes`].
+#[derive(Clone, Copy)]
+enum Slots {
+    /// No list above: the rows, times the sizes of the arrays above.
+    Known(u64),
+    /// Below a list: unknown, but each entry the footer counts for a leaf
+    /// column below is a value of it, an empty or null list below the
+    /// outermost one, or one of the outermost list's slots, whose number
+    /// this holds.
+    BelowList(u64),
+}
+
+/// Bytes of a list's offset: the least an empty list below another one
+/// takes.
+const OFFSET_BYTES: u64 = 8;
+
+/// The least memory the values of `dtype` take in polars, for `slots` of it,
+/// from what the footer says about each leaf column (`leaves`, consumed in
+/// order, one per leaf).
+///
+/// A leaf column's value takes its physical width (a view per String or
+/// Binary value, a code per Categorical one); a list its offsets, plus what
+/// its values take. A list's values are counted from the entries the footer
+/// gives for each leaf column below it: past the outermost list's slots (one
+/// entry each at most when empty or null), each entry is a value or an empty
+/// list below, which take the leaf's width or an offset, so the least of the
+/// two is counted. A struct inside a list inside a list therefore counts an
+/// empty inner list once per field (at most an offset each) where it takes
+/// one offset. A text or categorical leaf takes at least its pages (long
+/// strings, a dictionary of long labels): the quotas charge more for each
+/// value and label than its pages hold. Types without a fixed floor count
+/// nothing.
+fn least_value_bytes(
+    dtype: &DataType,
+    slots: Slots,
+    leaves: &mut impl Iterator<Item = LeafChunks>,
+) -> u64 {
     match dtype {
-        DataType::Boolean => rows.div_ceil(8),
+        DataType::List(inner) => match slots {
+            // An outermost list in no slots holds nothing.
+            Slots::Known(0) => least_value_bytes(inner, slots, leaves),
+            Slots::Known(n) => OFFSET_BYTES
+                .saturating_mul(n)
+                .saturating_add(least_value_bytes(inner, Slots::BelowList(n), leaves)),
+            Slots::BelowList(_) => least_value_bytes(inner, slots, leaves),
+        },
+        DataType::Array(inner, size) => match slots {
+            Slots::Known(n) => {
+                least_value_bytes(inner, Slots::Known(n.saturating_mul(*size as u64)), leaves)
+            }
+            // An empty or null array of size zero is an entry without values.
+            Slots::BelowList(_) if *size == 0 => least_value_bytes(inner, Slots::Known(0), leaves),
+            Slots::BelowList(_) => least_value_bytes(inner, slots, leaves),
+        },
+        DataType::Struct(fields) => fields.iter().fold(0u64, |bytes, field| {
+            bytes.saturating_add(least_value_bytes(field.dtype(), slots, leaves))
+        }),
+        leaf => {
+            let chunks = leaves.next().unwrap_or_default();
+            let values = match slots {
+                Slots::Known(0) => return 0,
+                Slots::Known(n) => leaf_value_bytes(leaf, n),
+                Slots::BelowList(outer) => {
+                    let values = chunks.entries.saturating_sub(outer);
+                    leaf_value_bytes(leaf, values).min(OFFSET_BYTES.saturating_mul(values))
+                }
+            };
+            let text = matches!(
+                leaf,
+                DataType::String
+                    | DataType::Binary
+                    | DataType::BinaryOffset
+                    | DataType::Categorical(_, _)
+                    | DataType::Enum(_, _)
+            );
+            if text {
+                values.max(chunks.page_bytes)
+            } else {
+                values
+            }
+        }
+    }
+}
+
+/// The least memory `values` values of the leaf (not nested) type `dtype`
+/// take in polars: its physical width. Types without a fixed floor count
+/// nothing.
+fn leaf_value_bytes(dtype: &DataType, values: u64) -> u64 {
+    let width = |bytes: u64| bytes.saturating_mul(values);
+    match dtype {
+        DataType::Boolean => values.div_ceil(8),
         DataType::Int8 | DataType::UInt8 => width(1),
         DataType::Int16 | DataType::UInt16 => width(2),
         DataType::Int32 | DataType::UInt32 | DataType::Float32 | DataType::Date => width(4),
@@ -191,7 +304,8 @@ fn least_value_bytes(dtype: &DataType, rows: u64) -> u64 {
         | DataType::Float64
         | DataType::Datetime(_, _)
         | DataType::Duration(_)
-        | DataType::Time => width(8),
+        | DataType::Time
+        | DataType::BinaryOffset => width(8),
         DataType::Int128 | DataType::Decimal(_, _) => width(16),
         DataType::String | DataType::Binary => width(session::VIEW_BYTES),
         DataType::Categorical(_, _) | DataType::Enum(_, _) => match dtype.cat_physical() {
@@ -200,11 +314,6 @@ fn least_value_bytes(dtype: &DataType, rows: u64) -> u64 {
             Ok(CategoricalPhysical::U32) => width(4),
             Err(_) => 0,
         },
-        DataType::List(_) => width(8),
-        DataType::Array(inner, size) => least_value_bytes(inner, rows.saturating_mul(*size as u64)),
-        DataType::Struct(fields) => fields.iter().fold(0u64, |bytes, field| {
-            bytes.saturating_add(least_value_bytes(field.dtype(), rows))
-        }),
         _ => 0,
     }
 }
@@ -212,7 +321,8 @@ fn least_value_bytes(dtype: &DataType, rows: u64) -> u64 {
 /// Refuse, before decoding it, a parquet file at `path` that the dataset
 /// quotas would refuse once it was loaded as `name` (see
 /// [`session::admit_dataset`]). Other formats, and calls without quotas,
-/// pass.
+/// pass: a CSV, Excel, Stata or SAS file is charged only once decoded, and a
+/// CSV can decode to several times its size on disk.
 async fn admit_parquet(path: &Path, name: &str) -> Result<(), McpError> {
     let is_parquet = path
         .extension()
@@ -713,6 +823,209 @@ mod tests {
     use super::*;
     use p2a_core::polars::prelude::df;
     use serde_json::json;
+
+    /// [`least_value_bytes`] of a whole column of `rows` rows whose leaf
+    /// columns have `entries` entries in the footer, and `page_bytes` of
+    /// pages each.
+    fn least_with_pages(dtype: &DataType, rows: u64, entries: &[u64], page_bytes: u64) -> u64 {
+        let mut leaves = entries.iter().map(|&entries| LeafChunks {
+            entries,
+            page_bytes,
+        });
+        least_value_bytes(dtype, Slots::Known(rows), &mut leaves)
+    }
+
+    fn least(dtype: &DataType, rows: u64, entries: &[u64]) -> u64 {
+        least_with_pages(dtype, rows, entries, 0)
+    }
+
+    fn list(inner: DataType) -> DataType {
+        DataType::List(Box::new(inner))
+    }
+
+    fn fields(fields: &[(&str, DataType)]) -> DataType {
+        DataType::Struct(
+            fields
+                .iter()
+                .map(|(name, dtype)| {
+                    p2a_core::polars::prelude::Field::new((*name).into(), dtype.clone())
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_lists_values_are_counted_from_the_footers_entries() {
+        // One row holding a list of 20,000,000 floats: its offsets and every
+        // value past the row's own slot. Pre-fix a list column counted 8
+        // bytes a row, whatever its lists held.
+        assert_eq!(
+            least(&list(DataType::Float64), 1, &[20_000_000]),
+            8 + 8 * (20_000_000 - 1)
+        );
+        // Below the outermost list a value takes its width, or an offset
+        // where that is less (an entry can be an empty inner list).
+        assert_eq!(least(&list(list(DataType::Int32)), 2, &[10]), 16 + 4 * 8);
+        assert_eq!(least(&list(DataType::String), 1, &[5]), 8 + 8 * 4);
+        assert_eq!(least(&list(DataType::Boolean), 1, &[17]), 8 + 2);
+        // Each leaf column of a struct in a list has its own entries.
+        let pairs = list(fields(&[("a", DataType::Float64), ("b", DataType::UInt8)]));
+        assert_eq!(least(&pairs, 3, &[10, 10]), 24 + 8 * 7 + 7);
+        // Arrays outside a list have the slots their size gives.
+        let array = DataType::Array(Box::new(DataType::Float64), 3);
+        assert_eq!(least(&array, 2, &[6]), 48);
+        assert_eq!(least(&list(array), 2, &[9]), 16 + 8 * 7);
+        // An array of size zero holds no values, in a list or not.
+        let empty = DataType::Array(Box::new(DataType::Float64), 0);
+        assert_eq!(least(&empty, 4, &[4]), 0);
+        assert_eq!(least(&list(empty), 1, &[5]), 8);
+        // A struct beside lists: each field consumes its own leaves.
+        let mixed = fields(&[
+            ("l", list(DataType::Int64)),
+            ("f", DataType::Float32),
+            ("m", list(DataType::Int16)),
+        ]);
+        assert_eq!(
+            least(&mixed, 2, &[12, 2, 6]),
+            (16 + 8 * 10) + 8 + (16 + 2 * 4)
+        );
+        // A footer with fewer entries than slots, or none, counts no values.
+        assert_eq!(least(&list(DataType::Float64), 5, &[3]), 40);
+        assert_eq!(least(&list(DataType::Float64), 5, &[]), 40);
+        // Flat columns count their rows, as before.
+        assert_eq!(least(&DataType::Float64, 7, &[7]), 56);
+        assert_eq!(least(&DataType::String, 2, &[2]), 32);
+        // A text or categorical leaf counts its pages where they are more
+        // (long strings, a dictionary of long labels); a fixed-width leaf
+        // never does (its pages hold levels its values in memory do not).
+        assert_eq!(least_with_pages(&DataType::String, 2, &[2], 1000), 1000);
+        assert_eq!(
+            least_with_pages(&list(DataType::Binary), 1, &[3], 1000),
+            8 + 1000
+        );
+        assert_eq!(least_with_pages(&DataType::Float64, 2, &[2], 1000), 16);
+        assert_eq!(least_with_pages(&DataType::String, 200, &[200], 1000), 3200);
+    }
+
+    /// What the quotas charge for `df` once written to parquet and loaded
+    /// as `d`, and the least [`parquet_decoded_bytes`] gave for it before.
+    fn loaded_charge_and_bound(df: &mut DataFrame) -> (u64, u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.parquet");
+        p2a_core::polars::prelude::ParquetWriter::new(std::fs::File::create(&path).unwrap())
+            .finish(df)
+            .unwrap();
+        let bound = parquet_decoded_bytes(&path).unwrap();
+        let loaded = DataLoader::load(&path).unwrap();
+        assert_eq!(loaded.df().dtypes(), df.dtypes());
+        let charge = session::datasets_bytes_of([("d", &loaded)]);
+        (charge, bound)
+    }
+
+    #[test]
+    fn the_bound_before_decoding_stays_below_what_the_quotas_charge_after() {
+        use p2a_core::polars::prelude::{IntoSeries, ListChunked, NamedFrom, Series};
+        // Lists with nulls, empty lists and null values, a list of lists
+        // with empty inner lists, a list of structs, an array and a list of
+        // categoricals: the check before decoding must not refuse a file the
+        // quotas would hold once it is loaded, and must count the values the
+        // lists hold, not 8 bytes a row.
+        let floats = |n: usize, shift: f64| -> Series {
+            Series::new(
+                "".into(),
+                (0..n)
+                    .map(|i| Some(i as f64 * 0.37 + shift))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let rows = 2_000usize;
+        let lists: ListChunked = (0..rows)
+            .map(|i| match i % 7 {
+                0 => None,
+                1 => Some(Series::new_empty("".into(), &DataType::Float64)),
+                2 => Some(Series::new("".into(), [Some(0.5), None, Some(1.25)])),
+                k => Some(floats(k * 5, i as f64 * 0.01)),
+            })
+            .collect();
+        let nested: ListChunked = (0..rows)
+            .map(|i| {
+                let inner: ListChunked = (0..(i % 4))
+                    .map(|j| match (i + j) % 3 {
+                        0 => Some(Series::new_empty("".into(), &DataType::Int32)),
+                        k => Some(Series::new("".into(), vec![(i * 3 + j) as i32 + 1; k * 2])),
+                    })
+                    .collect();
+                Some(inner.into_series().cast(&list(DataType::Int32)).unwrap())
+            })
+            .collect();
+        let structs: ListChunked = (0..rows)
+            .map(|i| {
+                let n = i % 5;
+                let a = floats(n, 0.3);
+                let b = Series::new(
+                    "b".into(),
+                    (0..n)
+                        .map(|j| format!("s{}", i * 7 + j))
+                        .collect::<Vec<_>>(),
+                );
+                let s = p2a_core::polars::prelude::StructChunked::from_series(
+                    "".into(),
+                    n,
+                    [a.with_name("a".into()), b].iter(),
+                )
+                .unwrap()
+                .into_series();
+                Some(s)
+            })
+            .collect();
+        let cat = DataType::from_categories(p2a_core::polars::prelude::Categories::random(
+            "".into(),
+            CategoricalPhysical::U32,
+        ));
+        let cats: ListChunked = (0..rows)
+            .map(|i| {
+                let labels: Vec<String> = (0..(i % 6))
+                    .map(|j| format!("lab{}", (i + j) % 11))
+                    .collect();
+                Some(Series::new("".into(), labels).cast(&cat).unwrap())
+            })
+            .collect();
+        let array = Series::new("arr".into(), floats(rows * 3, 0.9))
+            .reshape_array(&[
+                p2a_core::polars::prelude::ReshapeDimension::Infer,
+                p2a_core::polars::prelude::ReshapeDimension::new_dimension(3),
+            ])
+            .unwrap();
+        let mut df = DataFrame::new(vec![
+            lists.into_series().with_name("lists".into()).into(),
+            nested.into_series().with_name("nested".into()).into(),
+            structs.into_series().with_name("structs".into()).into(),
+            cats.into_series().with_name("cats".into()).into(),
+            array.into(),
+            floats(rows, 0.1).with_name("flat".into()).into(),
+        ])
+        .unwrap();
+        let inner_floats = df
+            .column("lists")
+            .unwrap()
+            .list()
+            .unwrap()
+            .get_inner()
+            .len() as u64;
+        let (charge, bound) = loaded_charge_and_bound(&mut df);
+        assert!(bound <= charge, "bound {bound} > charge {charge}");
+        assert!(
+            bound >= 8 * inner_floats,
+            "bound {bound}, {inner_floats} list values"
+        );
+
+        // Each column alone, too.
+        for name in ["lists", "nested", "structs", "cats", "arr"] {
+            let mut one = df.select([name]).unwrap();
+            let (charge, bound) = loaded_charge_and_bound(&mut one);
+            assert!(bound <= charge, "{name}: bound {bound} > charge {charge}");
+        }
+    }
 
     #[test]
     fn path_schemas_say_relative_to_data_directory() {

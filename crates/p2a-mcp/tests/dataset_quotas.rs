@@ -304,6 +304,67 @@ async fn parquet_files_inside_the_quota_load_and_replace_by_name() {
     assert_eq!(body["code"], json!("quota_exceeded"), "{body}");
 }
 
+/// A parquet file of one row whose column `x` is a list of `values` copies
+/// of one categorical label. The values are dictionary-encoded, so the
+/// file is small and so are its pages uncompressed; decoded they take a
+/// 4-byte code each.
+fn one_row_list_parquet(path: &Path, values: usize) {
+    let dtype = DataType::from_categories(Categories::random("".into(), CategoricalPhysical::U32));
+    let inner = Series::new("".into(), ["same label"])
+        .cast(&dtype)
+        .unwrap()
+        .new_from_index(0, values);
+    let x = Series::new("x".into(), [inner]);
+    assert!(matches!(x.dtype(), DataType::List(inner) if inner.is_categorical()));
+    let mut df = DataFrame::new(vec![x.into()]).unwrap();
+    write_parquet(&mut df, path);
+}
+
+#[tokio::test]
+async fn a_one_row_list_parquet_past_the_quota_is_refused_before_it_is_decoded() {
+    // One row holding a list of 4,000,000 values: a file of about a
+    // kilobyte, its pages hardly more uncompressed, 16 MB once decoded. Pre-fix
+    // the check before decoding charged a list column 8 bytes a row, so this
+    // file was decoded in full and only then undone by the quota ("The
+    // change was undone"); a longer list could exhaust the server's memory
+    // before the quota saw it.
+    let dir = data_dir();
+    let path = dir.path().join("list.parquet");
+    one_row_list_parquet(&path, 4_000_000);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.len() < 512 * 1024, "{} bytes", bytes.len());
+
+    let (app, _) = app_with_quota(8 * MIB).await;
+    let sid = new_session(&app).await;
+    let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let (status, body) = call(
+        &app,
+        &sid,
+        "upload_dataset",
+        json!({"content": content, "filename": "list.parquet"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], json!("quota_exceeded"), "{body}");
+    assert!(error_text(&body).contains("Nothing was loaded"), "{body}");
+
+    let (status, body) = call(
+        &app,
+        &sid,
+        "load_dataset",
+        json!({"path": path.to_string_lossy(), "name": "list"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], json!("quota_exceeded"), "{body}");
+    assert!(error_text(&body).contains("Nothing was loaded"), "{body}");
+    let (_, listed) = call(&app, &sid, "list_datasets", json!({})).await;
+    assert!(
+        listed.to_string().contains("No datasets currently loaded"),
+        "{listed}"
+    );
+}
+
 /// A parquet file whose column `k` is a dictionary of `labels` distinct
 /// labels of 1,000 bytes starting with `tag`, one row each.
 fn categorical_parquet(path: &Path, tag: &str, labels: usize) {
