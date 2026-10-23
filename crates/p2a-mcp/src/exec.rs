@@ -640,6 +640,9 @@ impl ToolGovernor {
                 .run_blocking(&session, tool, move |budget| {
                     let budget = budget.clone();
                     let started = Instant::now();
+                    // Whether the call reached its quota check, which leaves
+                    // the session's cached charge current.
+                    let checked = std::cell::Cell::new(false);
                     // The entry is written where the work ends, also when the
                     // deadline answer was already sent or the work panicked.
                     let ran = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -668,6 +671,7 @@ impl ToolGovernor {
                                         // that ran: undo dataset growth past a quota
                                         // before reporting the refusal.
                                         if let Some(snapshot) = snapshot {
+                                            checked.set(true);
                                             quotas.enforce(&s, &sessions, snapshot).await?;
                                         }
                                         return Err(e);
@@ -679,12 +683,20 @@ impl ToolGovernor {
                                 return Err(ToolCallError::DeadlineExceeded { limit_secs });
                             }
                             if let Some(snapshot) = snapshot {
+                                checked.set(true);
                                 quotas.enforce(&s, &sessions, snapshot).await?;
                             }
                             s.touch().await;
                             Ok(result)
                         })
                     }));
+                    // A call that panicked or passed its deadline did not
+                    // reach its quota check, so the cached charge is
+                    // refreshed here: a later call that changes nothing
+                    // relies on it (`Quotas::enforce`).
+                    if quotas.any() && !checked.get() {
+                        handle.block_on(s.refresh_data_bytes());
+                    }
                     if let Some((audit, arguments)) = audit {
                         let (outcome, summary) = match &ran {
                             Ok(Ok(result)) => (
@@ -888,12 +900,22 @@ impl Quotas {
     /// rollback assumes one call per session at a time, which is why
     /// `ExecConfig::from_config` defaults the session concurrency to 1 when a
     /// quota applies.
+    ///
+    /// A call that left every dataset as it found it (most calls only read
+    /// them) is passed without charging anything: the session's cached
+    /// charge is still that of its datasets, since every change to them is
+    /// made by a governed call, which refreshes the charge at its quota check
+    /// or after the call when it does not reach the check, or by a reload,
+    /// which refreshes it too.
     async fn enforce(
         &self,
         session: &Session,
         sessions: &SessionManager,
         snapshot: HashMap<String, p2a_core::data::Dataset>,
     ) -> Result<(), ToolCallError> {
+        if datasets_unchanged(&snapshot, &*session.datasets.read().await) {
+            return Ok(());
+        }
         let before = datasets_bytes(&snapshot);
         let after = session.refresh_data_bytes().await;
         if after <= before {
@@ -933,6 +955,29 @@ impl Quotas {
             }
         }
     }
+}
+
+/// Whether `current` holds exactly the datasets of `snapshot`: the same
+/// names, each with the same columns, shared with the snapshot rather than
+/// rebuilt. Only columns backed by a series are compared; any other column
+/// (a scalar or partitioned one) counts as changed, so the caller charges
+/// the datasets in full.
+fn datasets_unchanged(
+    snapshot: &HashMap<String, p2a_core::data::Dataset>,
+    current: &HashMap<String, p2a_core::data::Dataset>,
+) -> bool {
+    use p2a_core::polars::prelude::Column;
+    let same_column = |a: &Column, b: &Column| match (a, b) {
+        (Column::Series(a), Column::Series(b)) => Arc::ptr_eq(&a.0, &b.0),
+        _ => false,
+    };
+    snapshot.len() == current.len()
+        && snapshot.iter().all(|(name, before)| {
+            current.get(name).is_some_and(|now| {
+                let (before, now) = (before.df().get_columns(), now.df().get_columns());
+                before.len() == now.len() && before.iter().zip(now).all(|(a, b)| same_column(a, b))
+            })
+        })
 }
 
 /// Exits the process when the governor stays unhealthy (every permit held by
@@ -1383,5 +1428,93 @@ mod tests {
         let mut open = http_cfg("0.0.0.0:8080", None, true);
         open.http.session_dirs = SessionDirsSetting::Off;
         assert!(!ExecConfig::from_config(&open).session_dirs);
+    }
+
+    #[tokio::test]
+    async fn a_call_that_changes_no_dataset_is_not_charged_again() {
+        // Most calls only read the datasets; charging them again cost two
+        // passes over every column of the session on each call. A dataset
+        // put in place here without a refresh shows whether a call charged
+        // the session again: the cached charge stays 0 unless it did.
+        let (gov, session) = governor_and_session(ExecConfig {
+            session_data_bytes: Some(64 << 20),
+            ..Default::default()
+        })
+        .await;
+        let server = Arc::new(AnalyticsServer::new());
+        let x: Vec<f64> = (0..1000).map(|i| i as f64 * 0.7 + 0.2).collect();
+        let df = p2a_core::polars::prelude::DataFrame::new(vec![
+            p2a_core::polars::prelude::Column::new("x".into(), x),
+        ])
+        .unwrap();
+        session
+            .datasets
+            .write()
+            .await
+            .insert("d".into(), p2a_core::data::Dataset::new(df));
+        let listed = gov
+            .call(
+                Arc::clone(&server),
+                Arc::clone(&session),
+                "list_datasets",
+                serde_json::json!({}),
+                CallOrigin::Http,
+            )
+            .await
+            .unwrap();
+        assert!(listed.success);
+        assert_eq!(session.data_bytes(), 0);
+        // A call that adds a dataset is charged, all datasets included.
+        let created = gov
+            .call(
+                server,
+                Arc::clone(&session),
+                "create_dataset",
+                serde_json::json!({"name": "e", "csv_content": "y\n1.5\n2.25\n"}),
+                CallOrigin::Http,
+            )
+            .await
+            .unwrap();
+        assert!(created.success);
+        assert!(session.data_bytes() >= 8000, "{}", session.data_bytes());
+    }
+
+    #[test]
+    fn only_datasets_left_as_they_were_count_as_unchanged() {
+        use p2a_core::data::Dataset;
+        use p2a_core::polars::prelude::{Column, DataFrame};
+        let frame = |shift: f64| {
+            let x: Vec<f64> = (0..50).map(|i| i as f64 * 0.3 + shift).collect();
+            Dataset::new(DataFrame::new(vec![Column::new("x".into(), x)]).unwrap())
+        };
+        let snapshot =
+            HashMap::from([("a".to_string(), frame(0.1)), ("b".to_string(), frame(0.2))]);
+        // A call that only read the datasets leaves the map's clone as it was.
+        assert!(datasets_unchanged(&snapshot, &snapshot.clone()));
+        // Added, removed, renamed or rebuilt datasets, and changed columns,
+        // are changes, also when the new data equals the old.
+        let mut added = snapshot.clone();
+        added.insert("c".into(), frame(0.3));
+        let mut removed = snapshot.clone();
+        removed.remove("b");
+        let mut renamed = snapshot.clone();
+        let b = renamed.remove("b").unwrap();
+        renamed.insert("b2".into(), b);
+        let mut rebuilt = snapshot.clone();
+        rebuilt.insert("a".into(), frame(0.1));
+        let mut widened = snapshot.clone();
+        let mut df = widened["a"].df().clone();
+        df.with_column(Column::new("y".into(), vec![1.5f64; 50]))
+            .unwrap();
+        widened.insert("a".into(), Dataset::new(df));
+        for (what, current) in [
+            ("added", added),
+            ("removed", removed),
+            ("renamed", renamed),
+            ("rebuilt", rebuilt),
+            ("widened", widened),
+        ] {
+            assert!(!datasets_unchanged(&snapshot, &current), "{what}");
+        }
     }
 }
