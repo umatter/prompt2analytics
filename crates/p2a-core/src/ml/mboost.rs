@@ -146,7 +146,9 @@ pub struct MboostConfig {
 
     /// Learning rate / step length (default: 0.1).
     /// Smaller values require more iterations but often improve generalization.
-    /// Typical range: 0.01 to 0.5.
+    /// Typical range: 0.01 to 0.5. Must be finite and in (0, 1], the range
+    /// R's mboost documents; [`mboost`] and [`mboost_cv`] refuse other values
+    /// with [`EconError::InvalidSpecification`].
     pub nu: f64,
 
     /// Loss function family (default: Gaussian).
@@ -500,11 +502,17 @@ fn fit_linear_base_learner(
 /// ascending sort order of `x_col` (see [`feature_orders`]). The candidates
 /// are swept once with running sums: minimising the RSS of a split is
 /// maximising `left_sum^2 / left_n + right_sum^2 / right_n`, so the scan is
-/// O(n). That criterion is accumulated in sort order, so the sweep chooses
-/// the split the quadratic search it replaces chose, except where two
-/// candidates' criteria agree to within floating-point rounding. The RSS of
-/// the chosen split is then recomputed exactly, with the two-pass sums of
-/// squares the full search used.
+/// O(n). The RSS of the chosen split is then recomputed exactly, with the
+/// two-pass sums of squares the full search used.
+///
+/// The criterion is accumulated in sort order, so the sweep chooses the split
+/// the quadratic search it replaces chose, except where two candidates have
+/// equal RSS, exactly or to within rounding: the two searches round
+/// differently and may break those ties either way. Pseudo-residuals with
+/// repeated values (a binary or count target, above all in the first
+/// iterations) can give candidate stumps exactly equal RSS, so on such data a
+/// different, equally good stump can be selected, and every later iteration
+/// follows from that choice.
 fn fit_tree_base_learner(
     x_col: &ArrayView1<f64>,
     residuals: &ArrayView1<f64>,
@@ -640,6 +648,21 @@ fn check_mboost_inputs(x: &ArrayView2<f64>, y: &ArrayView1<f64>) -> EconResult<(
     Ok(())
 }
 
+/// Refuses a step size `nu` outside `(0, 1]`, the range mboost documents for
+/// it. At 0 every update is scaled away and an intercept-only model would be
+/// reported as fitted; a negative step climbs the loss; above 1 the updates
+/// overshoot (at 2 the linear learner oscillates in place, beyond that the
+/// fit diverges). Shared with `fast_mboost`.
+pub(super) fn check_step_size(nu: f64) -> EconResult<()> {
+    if nu.is_finite() && nu > 0.0 && nu <= 1.0 {
+        Ok(())
+    } else {
+        Err(EconError::InvalidSpecification {
+            message: format!("nu must be a finite step size in (0, 1]; got {nu:?}"),
+        })
+    }
+}
+
 /// `mstop + 1`, the length of the loss and CV-error paths.
 fn mstop_plus_one(mstop: usize) -> EconResult<usize> {
     mstop.checked_add(1).ok_or_else(|| {
@@ -683,6 +706,7 @@ pub fn mboost(
     config: &MboostConfig,
 ) -> EconResult<MboostResult> {
     check_mboost_inputs(&x, &y)?;
+    check_step_size(config.nu)?;
     let n_samples = x.nrows();
     let n_features = x.ncols();
     let iters_plus_one = mstop_plus_one(config.mstop)?;
@@ -887,6 +911,7 @@ pub fn mboost_cv(
     config: &MboostConfig,
 ) -> EconResult<MboostResult> {
     check_mboost_inputs(&x, &y)?;
+    check_step_size(config.nu)?;
     let n_folds = config.cv_folds.unwrap_or(5);
     let n_samples = x.nrows();
 
@@ -1294,8 +1319,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mboost_refuses_a_step_size_outside_zero_one() {
+        let (x, y) = noisy_data(30, 2, 13);
+        for base_learner in [MboostBaseLearner::Linear, MboostBaseLearner::Tree] {
+            let bad = [
+                0.0,
+                -0.0,
+                -1.0,
+                1.0 + 1e-9,
+                2.0,
+                95.0,
+                1e300,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ];
+            for nu in bad {
+                let cfg = MboostConfig {
+                    mstop: 5,
+                    nu,
+                    base_learner,
+                    ..Default::default()
+                };
+                let cv = MboostConfig {
+                    cv_folds: Some(3),
+                    ..cfg.clone()
+                };
+                for (what, r) in [
+                    ("mboost", mboost(x.view(), y.view(), &cfg)),
+                    ("mboost_cv", mboost_cv(x.view(), y.view(), &cv)),
+                ] {
+                    let e = r.unwrap_err();
+                    assert!(
+                        matches!(&e, EconError::InvalidSpecification { message }
+                            if message.contains("nu") && message.contains("(0, 1]")),
+                        "{what}, {base_learner}, nu = {nu:?}: {e}"
+                    );
+                }
+            }
+            for nu in [1e-6, 0.5, 1.0] {
+                let cfg = MboostConfig {
+                    mstop: 5,
+                    nu,
+                    base_learner,
+                    ..Default::default()
+                };
+                let cv = MboostConfig {
+                    cv_folds: Some(3),
+                    ..cfg.clone()
+                };
+                assert!(mboost(x.view(), y.view(), &cfg).is_ok(), "nu = {nu}");
+                assert!(mboost_cv(x.view(), y.view(), &cv).is_ok(), "nu = {nu}");
+            }
+        }
+    }
+
     /// Golden (characterization) test: captured on the code before the
-    /// stump sweep; it must pass before and after that change.
+    /// stump sweep, on continuous data where no RSS tie breaks differently;
+    /// it must pass before and after that change.
     #[test]
     fn mboost_tree_and_cv_unchanged_by_the_sweep() {
         const GOLDEN: [u64; 5] = [
@@ -1336,8 +1418,9 @@ mod tests {
         );
     }
 
-    /// Reference guard: the sweep must pick the same split and return the
-    /// same bits as the quadratic search it replaced.
+    /// Reference guard on continuous residuals (no RSS ties): the sweep must
+    /// pick the same split and return the same bits as the quadratic search
+    /// it replaced.
     #[test]
     fn stump_sweep_matches_naive_reference() {
         let mut s = 11u64;
@@ -1373,8 +1456,82 @@ mod tests {
         }
     }
 
+    /// Reference guard on tie-prone data: x on a few levels, y binary or
+    /// 0/1/2 and centred by its mean, so candidate stumps often have exactly
+    /// equal RSS. The sweep must return the old search's stump bit for bit,
+    /// or a different one with the same RSS.
+    #[test]
+    fn stump_sweep_on_discrete_residuals_matches_or_ties_the_reference() {
+        let mut s = 2026u64;
+        for rep in 0..2000 {
+            let n = 4 + lcg_random(&mut s) % 30;
+            let levels = 2 + lcg_random(&mut s) % 5;
+            let y_levels = 2 + lcg_random(&mut s) % 2;
+            let min_samples = 1 + lcg_random(&mut s) % 3;
+            let x: Array1<f64> = (0..n)
+                .map(|_| (lcg_random(&mut s) % levels) as f64)
+                .collect();
+            let y: Array1<f64> = (0..n)
+                .map(|_| (lcg_random(&mut s) % y_levels) as f64)
+                .collect();
+            let r = &y - y.sum() / n as f64;
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
+            let new = fit_tree_base_learner(&x.view(), &r.view(), &order, min_samples);
+            let old = naive_fit_tree_base_learner(&x.view(), &r.view(), min_samples);
+            let ctx = format!("rep={rep} min_samples={min_samples} x={x} y={y}");
+            if new.threshold.map(f64::to_bits) == old.threshold.map(f64::to_bits) {
+                assert_eq!(
+                    [new.coefficient, new.intercept, new.rss].map(f64::to_bits),
+                    [old.coefficient, old.intercept, old.rss].map(f64::to_bits),
+                    "{ctx}"
+                );
+            } else {
+                assert!(new.threshold.is_some() && old.threshold.is_some(), "{ctx}");
+                assert!(
+                    (new.rss - old.rss).abs() <= 1e-12 * old.rss.max(1.0),
+                    "{ctx}: rss {} vs {}",
+                    new.rss,
+                    old.rss
+                );
+            }
+        }
+    }
+
+    /// Two stumps with exactly equal RSS, 170/21: x <= 3.5 (left n = 3,
+    /// sum 2) and x <= 4.5 (left n = 7, sum 5) of a 0/1/2 response centred by
+    /// its mean 0.7. Rounding decides which one a search sees as smaller, so
+    /// either is a correct answer; the sweep and the old search must each
+    /// return one of them, with that RSS.
+    #[test]
+    fn stump_tie_takes_one_of_the_tied_splits() {
+        let x: Array1<f64> = array![3.0, 4.0, 5.0, 5.0, 4.0, 1.0, 4.0, 2.0, 4.0, 5.0];
+        let y: Array1<f64> = array![0.0, 1.0, 0.0, 0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 2.0];
+        let r = &y - y.sum() / 10.0;
+        let mut order: Vec<usize> = (0..10).collect();
+        order.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
+        for (who, fit) in [
+            (
+                "sweep",
+                fit_tree_base_learner(&x.view(), &r.view(), &order, 3),
+            ),
+            (
+                "reference",
+                naive_fit_tree_base_learner(&x.view(), &r.view(), 3),
+            ),
+        ] {
+            let t = fit.threshold;
+            assert!(t == Some(3.5) || t == Some(4.5), "{who}: threshold {t:?}");
+            assert!(
+                (fit.rss - 170.0 / 21.0).abs() < 1e-12,
+                "{who}: rss {}",
+                fit.rss
+            );
+        }
+    }
+
     /// Verbatim copy of the stump search before the O(n) sweep, kept as the
-    /// reference for `stump_sweep_matches_naive_reference`.
+    /// reference for the stump sweep's guard tests.
     fn naive_fit_tree_base_learner(
         x_col: &ArrayView1<f64>,
         residuals: &ArrayView1<f64>,

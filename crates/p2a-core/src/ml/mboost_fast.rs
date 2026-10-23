@@ -13,6 +13,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::mboost::check_step_size;
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, try_with_capacity};
 
@@ -21,7 +22,9 @@ use crate::resource::{checkpoint, try_with_capacity};
 pub struct FastMboostConfig {
     /// Number of boosting iterations
     pub m_stop: usize,
-    /// Learning rate (nu) - shrinkage parameter
+    /// Learning rate (nu) - shrinkage parameter. Must be finite and in
+    /// (0, 1], as for [`mboost`](fn@crate::ml::mboost); [`fast_mboost`] refuses
+    /// other values.
     pub nu: f64,
     /// Base learner type
     pub base_learner: FastMboostLearner,
@@ -150,7 +153,8 @@ impl std::fmt::Display for FastMboostResult {
 ///
 /// - [`EconError::InsufficientData`] when `y.len() != x.nrows()`.
 /// - [`EconError::InvalidSpecification`] for fewer than 2 rows, no predictor
-///   columns, or non-finite values in `x` or `y`.
+///   columns, non-finite values in `x` or `y`, or a step size `nu` that is
+///   not finite or lies outside (0, 1].
 /// - [`EconError::ResourceLimit`] / [`EconError::Cancelled`] from the
 ///   resource guards: the `m_stop`-sized buffers exceed the allocation
 ///   ceiling, or the budget is cancelled or expires.
@@ -191,6 +195,7 @@ pub fn fast_mboost(
             message: format!("y must contain only finite values (row {i} is {v})"),
         });
     }
+    check_step_size(config.nu)?;
 
     // A strided y (say, a column of a row-major matrix) has no slice; copy it
     // once instead
@@ -459,8 +464,12 @@ fn fit_stump_parallel(
             // Find best split point in one sweep: minimising the RSS of a
             // split is maximising left_sum^2 / left_n + right_sum^2 / right_n.
             // That criterion is accumulated in sort order, so the sweep picks
-            // the quadratic search's split except where two candidates'
-            // criteria agree to within floating-point rounding
+            // the quadratic search's split except where two candidates have
+            // equal RSS, exactly or to within rounding: the two searches may
+            // break such a tie either way. Pseudo-residuals with repeated
+            // values (a binary or count target) can give candidates exactly
+            // equal RSS, so on such data a different, equally good stump can
+            // be chosen.
             let mut left_sum = 0.0;
             let mut left_count = 0;
             let total_sum: f64 = residuals.iter().sum();
@@ -861,6 +870,59 @@ mod tests {
     }
 
     #[test]
+    fn fast_mboost_refuses_a_step_size_outside_zero_one() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let x = Array2::from_shape_fn((40, 2), |_| rng.r#gen::<f64>());
+        let y: Array1<f64> =
+            x.column(0).mapv(|v| 2.0 * v) + Array1::from_shape_fn(40, |_| rng.r#gen::<f64>() * 0.1);
+        let learners = [
+            FastMboostLearner::ComponentwiseLinear,
+            FastMboostLearner::Stump,
+            FastMboostLearner::Tree { max_depth: 2 },
+        ];
+        for learner in learners {
+            let bad = [
+                0.0,
+                -0.0,
+                -1.0,
+                1.0 + 1e-9,
+                2.0,
+                95.0,
+                1e300,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ];
+            for nu in bad {
+                let config = FastMboostConfig {
+                    m_stop: 5,
+                    nu,
+                    base_learner: learner.clone(),
+                    ..Default::default()
+                };
+                let e = fast_mboost(x.view(), y.view(), &config).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message }
+                        if message.contains("nu") && message.contains("(0, 1]")),
+                    "{learner:?}, nu = {nu:?}: {e}"
+                );
+            }
+            for nu in [1e-6, 0.5, 1.0] {
+                let config = FastMboostConfig {
+                    m_stop: 5,
+                    nu,
+                    base_learner: learner.clone(),
+                    ..Default::default()
+                };
+                assert!(
+                    fast_mboost(x.view(), y.view(), &config).is_ok(),
+                    "nu = {nu}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fast_mboost_accepts_a_strided_y() {
         // y as a column of a row-major matrix: a valid view whose as_slice()
         // is None, which used to panic
@@ -892,8 +954,35 @@ mod tests {
         }
     }
 
+    /// Two stumps with exactly equal RSS, 2/3: on y = 0, 1, 0, 0 centred by
+    /// its mean, x <= 0.5 (1 | 3) and x <= 2 (3 | 1) are mirror images.
+    /// Rounding decides which one a search sees as smaller, so either is a
+    /// correct answer; the sweep must return one of them, with that RSS.
+    #[test]
+    fn fast_stump_tie_takes_one_of_the_tied_splits() {
+        let x = Array2::from_shape_vec((4, 1), vec![1.0, 1.0, 3.0, 0.0]).unwrap();
+        let y = [0.0, 1.0, 0.0, 0.0];
+        let mean = y.iter().sum::<f64>() / 4.0;
+        let r: Vec<f64> = y.iter().map(|v| v - mean).collect();
+        let (learner, update) = fit_stump_parallel(x.view(), &r, 1);
+        let FittedLearner::Stump {
+            feature, threshold, ..
+        } = &learner
+        else {
+            panic!("not a stump: {learner:?}");
+        };
+        assert_eq!(*feature, 0);
+        assert!(
+            *threshold == 0.5 || *threshold == 2.0,
+            "threshold {threshold}"
+        );
+        let rss: f64 = r.iter().zip(&update).map(|(a, b)| (a - b).powi(2)).sum();
+        assert!((rss - 2.0 / 3.0).abs() < 1e-12, "rss {rss}");
+    }
+
     /// Golden (characterization) test: captured on the code before the
-    /// stump sweep; it must pass before and after that change.
+    /// stump sweep, on continuous data where no RSS tie breaks differently;
+    /// it must pass before and after that change.
     #[test]
     fn fast_mboost_stump_unchanged_by_the_sweep() {
         const GOLDEN: [u64; 3] = [

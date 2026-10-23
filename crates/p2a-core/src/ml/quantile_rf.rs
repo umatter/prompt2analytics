@@ -425,8 +425,9 @@ impl QuantileTree {
     /// (two-pass child variances) chose, except where two candidates have
     /// equal within-child sums of squares, exactly or to within rounding: the
     /// two searches round differently and may break those ties either way, so
-    /// a response with repeated values (counts, integers, Likert scores) can
-    /// grow a different, equally good tree. Depth is capped separately at
+    /// on a response with repeated values (counts, integers, Likert scores)
+    /// the tree can take the other, equally good split where two candidates
+    /// tie and grow differently below it. Depth is capped separately at
     /// `MAX_TREE_DEPTH`; see the `# Reproducibility` section of
     /// [`quantile_rf`].
     fn find_best_split(

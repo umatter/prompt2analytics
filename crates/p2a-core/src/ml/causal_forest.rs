@@ -431,11 +431,19 @@ impl CausalTree {
     /// swept with running treated/control counts and sums. The left child of a
     /// threshold is every observation with `x <= threshold`, exactly as a
     /// partition of the node would give, so the candidate children are those
-    /// of the re-partitioning search this replaces. The child means now come
-    /// from sums accumulated in sorted-x order (the right child's by
-    /// subtraction from the node totals) rather than in index order, so the
-    /// chosen split is the same except where two candidates' criteria agree
-    /// to within floating-point rounding. `x` must be finite.
+    /// of the re-partitioning search this replaces. `x` must be finite.
+    ///
+    /// The child means now come from sums accumulated in sorted-x order (the
+    /// right child's by subtraction from the node totals) rather than in
+    /// index order. With integer outcomes whose sums stay below 2^53 (about
+    /// 9e15) in magnitude, as 0/1 outcomes, counts and other moderate
+    /// integers do, those sums are exact and both searches choose the same
+    /// split. Otherwise the chosen split is the same except where two
+    /// candidates' criteria are equal, exactly or to within rounding: the two
+    /// searches may break those ties either way, so decimal outcomes (say, in
+    /// tenths) can take the other, equally good split where two candidates
+    /// tie, as they do when two covariate groups mirror each other, and the
+    /// tree then grows differently below it.
     fn find_best_causal_split(
         &self,
         x: &ArrayView2<f64>,
@@ -1384,7 +1392,7 @@ mod tests {
 
     /// Verbatim copy of the split search before the sorted sweep (with
     /// `self.min_node_size` as an argument and the criterion inlined), kept
-    /// as the reference for `causal_split_sweep_matches_naive_reference`.
+    /// as the reference for the split sweep's guard tests.
     fn naive_find_best_causal_split(
         min_node_size: usize,
         x: &ArrayView2<f64>,
@@ -1454,7 +1462,137 @@ mod tests {
         best_split
     }
 
-    /// Reference guard: the sorted sweep must choose the same split as the
+    /// The split criterion of `split` over `idx`, recomputed from the
+    /// children with `estimate_treatment_effect`; NaN for no split.
+    fn split_criterion(
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        w: &Array1<f64>,
+        idx: &[usize],
+        split: Option<(usize, f64)>,
+    ) -> f64 {
+        let Some((feature, threshold)) = split else {
+            return f64::NAN;
+        };
+        let (left, right) = partition_indices(&x.view(), idx, feature, threshold);
+        let part = |side: &[usize]| {
+            let (tau, _, nt, nc) = estimate_treatment_effect(&y.view(), &w.view(), side);
+            2.0 * nt as f64 * nc as f64 / (nt + nc) as f64 * tau * tau
+        };
+        part(&left) + part(&right)
+    }
+
+    /// Mirror-image data: the groups x = 0 and x = 2 hold the same (y, w)
+    /// pairs, at least two treated and two control rows each, and x = 1 a
+    /// few other rows, all shuffled; y on a grid of 1 / `denom`. The two
+    /// thresholds then have exactly equal criteria.
+    fn mirrored_data(s: &mut u64, denom: f64) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        let k = 4 + lcg_random(s) % 3;
+        let mut group: Vec<(f64, f64)> = Vec::with_capacity(k);
+        for i in 0..k {
+            let w = match i {
+                0 | 1 => 1.0,
+                2 | 3 => 0.0,
+                _ => (lcg_random(s) % 2) as f64,
+            };
+            group.push(((lcg_random(s) % 21) as f64 / denom, w));
+        }
+        let mut rows: Vec<(f64, f64, f64)> = group.iter().map(|&(y, w)| (0.0, y, w)).collect();
+        for _ in 0..1 + lcg_random(s) % 3 {
+            let y = (lcg_random(s) % 21) as f64 / denom;
+            rows.push((1.0, y, (lcg_random(s) % 2) as f64));
+        }
+        rows.extend(group.iter().map(|&(y, w)| (2.0, y, w)));
+        for i in (1..rows.len()).rev() {
+            let j = lcg_random(s) % (i + 1);
+            rows.swap(i, j);
+        }
+        let n = rows.len();
+        (
+            Array2::from_shape_fn((n, 1), |(i, _)| rows[i].0),
+            Array1::from_shape_fn(n, |i| rows[i].1),
+            Array1::from_shape_fn(n, |i| rows[i].2),
+        )
+    }
+
+    /// Mirror-image groups (x = 0 and x = 2 hold the same (y, w) pairs) give
+    /// x <= 0.5 and x <= 1.5 exactly equal criteria, 143/3000, on outcomes in
+    /// tenths. Rounding decides which one a search sees as larger, so either
+    /// is a correct answer; the sweep and the old search must each return one.
+    #[test]
+    fn causal_split_tie_takes_one_of_the_tied_splits() {
+        let x = Array2::from_shape_vec((9, 1), vec![2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 2.0, 0.0, 2.0])
+            .unwrap();
+        let y = Array1::from(vec![0.5, 0.5, 0.5, 0.3, 0.9, 0.3, 0.5, 0.4, 0.4]);
+        let w = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0]);
+        let idx: Vec<usize> = (0..9).collect();
+        let tree = CausalTree {
+            n_features: 1,
+            ..CausalTree::new(10, 1, 1)
+        };
+        for (who, split) in [
+            (
+                "sweep",
+                tree.find_best_causal_split(&x.view(), &y.view(), &w.view(), &idx, &[0]),
+            ),
+            (
+                "reference",
+                naive_find_best_causal_split(1, &x.view(), &y.view(), &w.view(), &idx, &[0]),
+            ),
+        ] {
+            assert!(
+                matches!(split, Some((0, t)) if t == 0.5 || t == 1.5),
+                "{who}: {split:?}"
+            );
+            let c = split_criterion(&x, &y, &w, &idx, split);
+            assert!((c - 143.0 / 3000.0).abs() < 1e-12, "{who}: criterion {c}");
+        }
+    }
+
+    /// Reference guard on tie-prone (mirror-image) data. With small integer
+    /// outcomes every sum is exact, so the sweep must choose the old search's
+    /// split; with outcomes in tenths it must choose that split or a
+    /// different one with the same criterion.
+    #[test]
+    fn causal_split_sweep_on_tied_data_matches_or_ties_the_reference() {
+        let mut s = 77u64;
+        for denom in [1.0, 10.0] {
+            for rep in 0..1000 {
+                let (x, y, w) = mirrored_data(&mut s, denom);
+                let idx: Vec<usize> = (0..y.len()).collect();
+                let min_node_size = [1usize, 3][rep % 2];
+                let tree = CausalTree {
+                    n_features: 1,
+                    ..CausalTree::new(10, min_node_size, 1)
+                };
+                let got = tree.find_best_causal_split(&x.view(), &y.view(), &w.view(), &idx, &[0]);
+                let want = naive_find_best_causal_split(
+                    min_node_size,
+                    &x.view(),
+                    &y.view(),
+                    &w.view(),
+                    &idx,
+                    &[0],
+                );
+                let ctx = format!("denom={denom} rep={rep} x={x} y={y} w={w}");
+                if denom == 1.0 {
+                    assert_eq!(got, want, "{ctx}");
+                } else if got != want {
+                    let (a, b) = (
+                        split_criterion(&x, &y, &w, &idx, got),
+                        split_criterion(&x, &y, &w, &idx, want),
+                    );
+                    assert!(
+                        (a - b).abs() <= 1e-12 * b.max(1.0),
+                        "{ctx}: {got:?} criterion {a} vs {want:?} criterion {b}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Reference guard on continuous outcomes (no exact ties in the
+    /// criterion): the sorted sweep must choose the same split as the
     /// re-partitioning search it replaced.
     #[test]
     fn causal_split_sweep_matches_naive_reference() {
@@ -1488,7 +1626,8 @@ mod tests {
     }
 
     /// Golden (characterization) test: captured on the code before the
-    /// sweep and the Welford OOB accumulation; it passes before and after.
+    /// sweep and the Welford OOB accumulation, on continuous outcomes where no
+    /// criterion tie breaks differently; it passes before and after.
     #[test]
     fn causal_forest_outputs_unchanged_by_the_sweep() {
         const GOLDEN: [u64; 5] = [
