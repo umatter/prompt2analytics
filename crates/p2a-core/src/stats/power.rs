@@ -12,13 +12,22 @@
 //! ([`crate::resource::checkpoint`]) once per bisection step.
 //!
 //! A significance level reaches the critical value as 1 - sig_level
-//! (1 - sig_level / 2 when two-sided), which rounds it to a multiple of 2^-53:
-//! by up to 1.1e-8 (relative) at sig_level = 1e-8 and 1.1e-4 at 1e-12. Levels
-//! at or below 2^-53 (about 1.1e-16), where 1 - sig_level / 2 rounds to 1 and
-//! a two-sided critical value would be infinite, are refused in every test.
-//! (A one-sided level, 1 - sig_level, is exact at 2^-53 and gives a finite
-//! critical value at any level above 2^-54, but below 2^-53 it is off by up
-//! to 100%.)
+//! (1 - sig_level / 2 when two-sided), which rounds the tail to a multiple of
+//! 2^-53, by up to 2^-53 / sig_level (relative) when two-sided and
+//! 2^-54 / sig_level when one-sided: 1.1e-8 at sig_level = 1e-8, 1.1e-4 at
+//! 1e-12, 11% at 1e-15, and up to 100% for a two-sided level just above 2^-53,
+//! where sig_level / 2 rounds up to a tail of 2^-53. Levels at or below 2^-53
+//! (about 1.1e-16), where 1 - sig_level / 2 rounds to 1 and a two-sided
+//! critical value would be infinite, are refused in every test. (A one-sided
+//! level, 1 - sig_level, is exact at 2^-53 and gives a finite critical value
+//! at any level above 2^-54, but below 2^-53 it is off by up to 100%.)
+//! Two-sided levels accepted just above the floor are off by as much: for
+//! sig_level in (2^-53, 2^-52) the tail used is 2^-53, twice the one asked
+//! for at the smallest level accepted, and the error bound falls below 1%
+//! only above about 1.1e-14 (two-sided) or 5.6e-15 (one-sided). R's
+//! power.t.test, power.prop.test and power.anova.test pass the exact upper
+//! tail to qt, qnorm and qf (`lower.tail = FALSE`), so they have no such
+//! rounding.
 
 use crate::errors::{EconError, EconResult};
 use crate::resource::checkpoint;
@@ -55,26 +64,32 @@ fn require_finite_at_least(name: &str, value: f64, min: f64) -> EconResult<()> {
 /// in every test. At or below it 1 - sig_level / 2 rounds to 1, so a
 /// two-sided critical value is infinite and every finite non-centrality would
 /// get a power of 0; 1 - sig_level rounds to 1 - 2^-53 or 1, so a one-sided
-/// (or ANOVA) level is off by up to 100% (2^-54 < sig_level < 2^-53) or its
-/// critical value is infinite as well (sig_level <= 2^-54).
+/// (or ANOVA) level is off by up to 100% (2^-54 < sig_level < 2^-53), as
+/// two-sided levels just above the floor are, or its critical value is
+/// infinite as well (sig_level <= 2^-54). See the module documentation.
 const MIN_SIG_LEVEL: f64 = f64::EPSILON / 2.0;
 
 /// `Err` unless `sig_level` lies strictly between [`MIN_SIG_LEVEL`] and 1
-/// (NaN fails both comparisons).
+/// (NaN fails both comparisons). The message gives the floor's reason only
+/// for a level from 0 up to the floor, the only values it describes; a
+/// negative level, NaN, or a level of 1 or more gets the limits alone.
 fn require_sig_level(sig_level: f64) -> EconResult<()> {
     if sig_level > MIN_SIG_LEVEL && sig_level < 1.0 {
-        Ok(())
-    } else {
-        Err(EconError::InvalidSpecification {
-            message: format!(
-                "sig_level must be between {MIN_SIG_LEVEL:?} (2^-53) and 1 (exclusive), \
-                 got {sig_level:?}: every test uses this floor, since at or below 2^-53, \
-                 1 - sig_level / 2 rounds to 1 (an infinite two-sided critical value) \
-                 and 1 - sig_level to 1 - 2^-53 or 1 (a one-sided level off by up to \
-                 100%, or an infinite critical value)"
-            ),
-        })
+        return Ok(());
     }
+    let mut message = format!(
+        "sig_level must be between {MIN_SIG_LEVEL:?} (2^-53) and 1 (exclusive), \
+         got {sig_level:?}"
+    );
+    if (0.0..=MIN_SIG_LEVEL).contains(&sig_level) {
+        message.push_str(
+            ": every test uses this floor, since at or below 2^-53, \
+             1 - sig_level / 2 rounds to 1 (an infinite two-sided critical value) \
+             and 1 - sig_level to 1 - 2^-53 or 1 (a one-sided level off by up to \
+             100%, or an infinite critical value)",
+        );
+    }
+    Err(EconError::InvalidSpecification { message })
 }
 
 /// `Err` naming `name` unless `value` is finite and greater than 0.
@@ -488,7 +503,11 @@ pub struct PowerTTestResult {
 /// * `sig_level` - Significance level (None to solve for it)
 /// * `power` - Desired power (None to solve for it)
 /// * `test_type` - Type of t-test
-/// * `alternative` - One-sided or two-sided
+/// * `alternative` - One-sided or two-sided. A one-sided test is taken in the
+///   direction of `delta` (the lower tail when `delta` < 0), so the power
+///   depends only on |delta|; R's power.t.test tests the upper tail whatever
+///   the sign of delta (power 1.0e-6 at n = 20, delta = -1, one-sided, where
+///   this function gives about 0.93).
 ///
 /// # Returns
 ///
@@ -1744,8 +1763,9 @@ mod tests {
         // and the power once came out there as inf - inf = NaN, clamped to 0.
         // Levels at or below 2^-53 are now refused, see
         // test_power_functions_refuse_a_sig_level_at_or_below_2_pow_minus_53.)
-        // The one-sided delta = -1 case has no R counterpart, see
-        // test_power_t_test_one_sided_negative_delta_tests_the_lower_tail.
+        // The one-sided delta = -1 case is left out: R gives 0 there (it tests
+        // the upper tail), while this library tests the lower tail and gives
+        // 1; see test_power_t_test_one_sided_negative_delta_tests_the_lower_tail.
         let cases = [
             (1.0, PowerAlternative::TwoSided),
             (-1.0, PowerAlternative::TwoSided),
@@ -1910,6 +1930,41 @@ mod tests {
              1 - sig_level / 2 rounds to 1 (an infinite two-sided critical value) \
              and 1 - sig_level to 1 - 2^-53 or 1",
         );
+        // The reason describes levels from 0 up to the floor only: a negative
+        // level, a level of 1 or more, and NaN get the limits alone
+        for sig in [-0.1, 1.0, 1.5, f64::NAN] {
+            let refusals = [
+                power_anova_test(3, Some(20.0), 0.25, 1.0, Some(sig), None)
+                    .map(|_| ())
+                    .unwrap_err(),
+                power_t_test(
+                    Some(20.0),
+                    Some(1.0),
+                    Some(1.0),
+                    Some(sig),
+                    None,
+                    TTestType::TwoSample,
+                    one,
+                )
+                .map(|_| ())
+                .unwrap_err(),
+            ];
+            for err in refusals {
+                match err {
+                    EconError::InvalidSpecification { message } => {
+                        assert!(
+                            message.starts_with("sig_level must") && message.contains(limit),
+                            "sig {sig}: {message:?}"
+                        );
+                        assert!(
+                            !message.contains("this floor"),
+                            "sig {sig}: {message:?} should not explain the floor"
+                        );
+                    }
+                    other => panic!("sig {sig}: expected a sig_level refusal, got {other:?}"),
+                }
+            }
+        }
         // Just above the limit the critical values are finite (tail 2^-53),
         // and a large effect still has full power
         let sig = MIN_SIG_LEVEL.next_up();
@@ -2118,9 +2173,9 @@ mod tests {
 
     #[test]
     fn test_t_cdf_at_infinite_x() {
-        // An infinite x (the critical value of a two-sided sig_level at or
-        // below 2^-53, which the power functions now refuse) used to give NaN in the
-        // large-df expansion.
+        // An infinite x (the critical value of a sig_level at or below 2^-53
+        // two-sided, or 2^-54 one-sided, which the power functions now refuse)
+        // used to give NaN in the large-df expansion.
         for df in [5.0, 1e7] {
             assert_eq!(t_cdf(f64::INFINITY, df).unwrap(), 1.0, "df = {df}");
             assert_eq!(t_cdf(f64::NEG_INFINITY, df).unwrap(), 0.0, "df = {df}");
