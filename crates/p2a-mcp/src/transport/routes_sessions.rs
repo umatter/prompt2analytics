@@ -358,9 +358,15 @@ mod tests {
     /// `db` feature) and without.
     #[tokio::test]
     async fn deleting_an_unknown_session_is_not_found_with_a_code() {
-        let (app, _state) = super::super::http::build_app(&crate::config::ServerConfig::default())
+        let (app, state) = super::super::http::build_app(&crate::config::ServerConfig::default())
             .await
             .unwrap();
+        // With the db feature, the persistent branch is the one under test:
+        // build_app only logs when persistence fails to start.
+        #[cfg(feature = "db")]
+        assert!(state.persistent_manager.is_some());
+        #[cfg(not(feature = "db"))]
+        let _ = state;
         let req = Request::delete(format!("/api/sessions/{}", uuid::Uuid::new_v4()))
             .header(header::HOST, "localhost")
             .body(Body::empty())
