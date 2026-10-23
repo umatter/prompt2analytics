@@ -81,8 +81,13 @@ async-trait = { version = "0.1", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
 base64.workspace = true
 
-# Parquet page headers, read before a file is decoded (the version polars uses)
-polars-parquet-format = "0.1"
+# Parquet page headers, read before a file is decoded. Pinned to the exact
+# version polars-parquet 0.52 parses with, and bumped together with polars:
+# the check before decoding (tools/handlers/data.rs) mirrors polars' page
+# reader, so it must parse page headers with polars' own thrift code. The
+# check also names polars' footer types with this crate's, so a polars that
+# moves to another version stops compiling rather than drifting apart.
+polars-parquet-format = "=0.1.0"
 
 [dev-dependencies]
 polars.workspace = true
