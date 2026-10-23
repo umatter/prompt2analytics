@@ -60,7 +60,7 @@ use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf, normal_pdf};
 
-use super::hdfe::FactorInfo;
+use super::hdfe::{FactorInfo, reject_non_finite};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GLM Family
@@ -327,23 +327,28 @@ fn probit_inv(p: f64) -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeglmConfig {
     /// Maximum IRLS iterations.
+    /// Must be at least 1.
     /// Default: 25
     pub max_iter: usize,
 
     /// Convergence tolerance for coefficient changes.
     /// Iteration stops when max(|Δβ|) < tolerance.
+    /// Must be finite and greater than 0.
     /// Default: 1e-8
     pub tolerance: f64,
 
     /// MAP tolerance for demeaning within each IRLS step.
+    /// Must be finite and greater than 0.
     /// Default: 1e-8
     pub map_tolerance: f64,
 
     /// Maximum MAP iterations per IRLS step.
+    /// Must be at least 1.
     /// Default: 10000
     pub map_max_iter: usize,
 
     /// Minimum weight threshold (to avoid division by zero).
+    /// Must be finite and at least 0.
     /// Default: 1e-10
     pub weight_min: f64,
 
@@ -813,23 +818,6 @@ fn validate_config(config: &FeglmConfig) -> EconResult<()> {
         ));
     }
     Ok(())
-}
-
-/// Refuse a column with NaN or infinite values, naming it and the count.
-fn reject_non_finite<'a>(values: impl Iterator<Item = &'a f64>, what: &str) -> EconResult<()> {
-    let bad = values.filter(|v| !v.is_finite()).count();
-    if bad == 0 {
-        return Ok(());
-    }
-    Err(EconError::InvalidSpecification {
-        message: format!(
-            "{} contains {} non-finite value{} (NaN or infinite); remove or impute {} first",
-            what,
-            bad,
-            if bad == 1 { "" } else { "s" },
-            if bad == 1 { "it" } else { "them" }
-        ),
-    })
 }
 
 /// Compute degrees of freedom absorbed by fixed effects.
@@ -1808,7 +1796,7 @@ mod tests {
 
     /// Non-integer y uses fixest's y*log(mu) - mu - lgamma(y + 1); integer y matches dpois.
     #[test]
-    fn test_poisson_log_lik_matches_r() {
+    fn test_validate_poisson_log_lik_against_r() {
         use statrs::function::gamma::ln_gamma;
         let cases: [(f64, f64, f64); 5] = [
             (2.5, 3.0, -1.4544428806767997),
@@ -1835,7 +1823,7 @@ mod tests {
     }
 
     #[test]
-    fn test_feglm_poisson_null_loglik_matches_fixest_non_integer() {
+    fn test_validate_feglm_poisson_null_loglik_fixest_non_integer() {
         // fepois(y1 ~ x | id, d)$ll_null = -165.74049709539213
         let ds = ppml_panel(|i| ((i * 37) % 23) as f64 + 1.0 + 0.25 * (i % 3) as f64);
         let r = run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Poisson, None).unwrap();
@@ -1907,7 +1895,7 @@ mod tests {
     }
 
     #[test]
-    fn test_feglm_poisson_large_counts_null_loglik_matches_fixest() {
+    fn test_validate_feglm_poisson_null_loglik_fixest_large_counts() {
         // sum(d$y2 * log(mean(d$y2)) - mean(d$y2) - lgamma(d$y2 + 1)) = -145041993560.08203
         let ds = ppml_panel(|i| 1e12 + ((i * 7919) % 1_000_003) as f64 * 1e6);
         let r = run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Poisson, None).unwrap();

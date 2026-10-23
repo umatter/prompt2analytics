@@ -153,14 +153,17 @@ impl fmt::Display for PropensityModel {
 /// Configuration for MTE estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IVMTEConfig {
-    /// Polynomial degree for MTE approximation (default: 2)
+    /// Polynomial degree for MTE approximation (default: 2).
     /// Higher degrees allow more flexible MTE shapes but risk overfitting.
+    /// Must be at least 1, and the second stage's 1 + covariates + degree
+    /// columns must be fewer than the observations.
     pub mte_degree: usize,
 
     /// Primary estimand to report
     pub estimand: MTEEstimand,
 
-    /// Number of grid points for MTE curve evaluation (default: 100)
+    /// Number of grid points for MTE curve evaluation (default: 100).
+    /// Must be at least 1.
     pub n_grid: usize,
 
     /// Whether to compute bootstrap standard errors
@@ -172,10 +175,12 @@ pub struct IVMTEConfig {
     /// Propensity score model for first stage
     pub propensity_model: PropensityModel,
 
-    /// Maximum iterations for propensity estimation (default: 100)
+    /// Maximum iterations for propensity estimation (default: 100).
+    /// Must be at least 1.
     pub max_iter: usize,
 
-    /// Convergence tolerance for propensity estimation (default: 1e-8)
+    /// Convergence tolerance for propensity estimation (default: 1e-8).
+    /// Must be finite and greater than 0.
     pub tolerance: f64,
 
     /// Custom weights for PRTE (optional)
@@ -1160,6 +1165,7 @@ fn compute_mte_curve(poly_coefs: &[f64], n_grid: usize) -> EconResult<Vec<MTEPoi
     let mut curve = resource::try_with_capacity(n_grid, "MTE curve")?;
 
     for i in 0..n_grid {
+        resource::checkpoint()?;
         let u = (i as f64 + 0.5) / n_grid as f64; // Grid from 0 to 1
 
         // MTE = derivative of polynomial
@@ -1191,6 +1197,7 @@ fn compute_ate(poly_coefs: &[f64], n_grid: usize) -> EconResult<(f64, Vec<f64>)>
     let du = 1.0 / n_grid as f64;
 
     for i in 0..n_grid {
+        resource::checkpoint()?;
         let u = (i as f64 + 0.5) / n_grid as f64;
 
         // MTE at this point
@@ -1352,6 +1359,7 @@ fn compute_late(
     let du = 1.0 / n_grid as f64;
 
     for i in 0..n_grid {
+        resource::checkpoint()?;
         let u = (i as f64 + 0.5) / n_grid as f64;
 
         // Only weight points in complier region
@@ -1937,5 +1945,72 @@ mod tests {
                 IVMTEConfig::default(),
             )
         }));
+    }
+
+    /// The linear first stage has no iteration loop, so a cancelled budget is
+    /// first seen in the grid loops after the second stage.
+    #[test]
+    fn test_ivmte_linear_first_stage_stops_when_cancelled() {
+        let (y, d, z) = create_mte_test_data();
+        let config = IVMTEConfig {
+            propensity_model: PropensityModel::Linear,
+            ..Default::default()
+        };
+        expect_cancelled(with_budget(cancelled(), || {
+            run_ivmte(&y.view(), &d.view(), &z.view(), None, config)
+        }));
+    }
+
+    /// Each of these loops checks the budget once per outer iteration (per
+    /// grid point; per coefficient in compute_te_se), so each one is called
+    /// directly: an end-to-end run stops at the first of them.
+    #[test]
+    fn test_ivmte_grid_loops_stop_when_cancelled() {
+        let coefs = [1.5, 0.5];
+        let ses = [0.1, 0.05];
+        let propensity = Array1::from_vec((0..20).map(|i| 0.2 + 0.03 * i as f64).collect());
+        let n_grid = 10;
+        let weights = vec![1.0 / n_grid as f64; n_grid];
+
+        assert!(compute_mte_curve(&coefs, n_grid).is_ok());
+        assert!(compute_ate(&coefs, n_grid).is_ok());
+        assert!(compute_att(&coefs, &propensity, n_grid).is_ok());
+        assert!(compute_atu(&coefs, &propensity, n_grid).is_ok());
+        assert!(compute_late(&coefs, &propensity, n_grid).is_ok());
+        assert!(compute_te_se(&coefs, &ses, &weights).is_ok());
+
+        let stops = |r: EconResult<()>| matches!(r, Err(EconError::Cancelled(_)));
+        let not_stopped: Vec<&str> = with_budget(cancelled(), || {
+            [
+                (
+                    "compute_mte_curve",
+                    stops(compute_mte_curve(&coefs, n_grid).map(drop)),
+                ),
+                ("compute_ate", stops(compute_ate(&coefs, n_grid).map(drop))),
+                (
+                    "compute_att",
+                    stops(compute_att(&coefs, &propensity, n_grid).map(drop)),
+                ),
+                (
+                    "compute_atu",
+                    stops(compute_atu(&coefs, &propensity, n_grid).map(drop)),
+                ),
+                (
+                    "compute_late",
+                    stops(compute_late(&coefs, &propensity, n_grid).map(drop)),
+                ),
+                (
+                    "compute_te_se",
+                    stops(compute_te_se(&coefs, &ses, &weights).map(drop)),
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(name, stopped)| (!stopped).then_some(name))
+            .collect()
+        });
+        assert!(
+            not_stopped.is_empty(),
+            "these grid loops ignored a cancelled budget: {not_stopped:?}"
+        );
     }
 }

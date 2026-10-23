@@ -94,11 +94,15 @@ pub struct GeneralGmmConfig {
     pub vcov: GmmVcov,
     /// HAC kernel for weighting matrix
     pub kernel: HacKernel,
-    /// HAC bandwidth (None for automatic)
+    /// HAC bandwidth (None for automatic).
+    /// With HAC weighting and linear IV moments, must be less than the
+    /// number of observations.
     pub bandwidth: Option<usize>,
-    /// Convergence tolerance
+    /// Convergence tolerance.
+    /// With linear IV moments, must be finite and greater than 0.
     pub tolerance: f64,
-    /// Maximum iterations (for iterative/CUE)
+    /// Maximum iterations (for iterative/CUE).
+    /// With linear IV moments, must be at least 1.
     pub max_iter: usize,
     /// Whether to prewhiten for HAC
     pub prewhite: bool,
@@ -1041,6 +1045,23 @@ mod tests {
                     ..Default::default()
                 },
             )
+        }));
+    }
+
+    /// The HAC lag loop checks the budget once per lag. `test_gmm_stops_when_cancelled`
+    /// stops at the top of the iterative loop, so this calls the weighting directly.
+    #[test]
+    fn test_hac_weight_stops_when_cancelled() {
+        let (y, x, z) = iv_data();
+        let resid = &y - &x.dot(&Array1::from(vec![2.0, 3.0]));
+        let config = GeneralGmmConfig {
+            bandwidth: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(config.vcov, GmmVcov::HAC);
+        assert!(compute_optimal_weight(&resid, &z, 50, 3, &config).is_ok());
+        expect_cancelled(with_budget(cancelled(), || {
+            compute_optimal_weight(&resid, &z, 50, 3, &config)
         }));
     }
 

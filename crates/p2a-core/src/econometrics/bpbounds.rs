@@ -104,10 +104,13 @@ pub struct BPBoundsConfig {
     /// Compute bootstrap confidence intervals
     pub bootstrap_ci: bool,
 
-    /// Number of bootstrap replications
+    /// Number of bootstrap replications.
+    /// Must be at least 1 when `bootstrap_ci` is set. Fewer than 100 valid
+    /// replicates give no confidence intervals (the CI fields are `None`).
     pub n_bootstrap: usize,
 
-    /// Significance level for confidence intervals (default: 0.05 for 95% CI)
+    /// Significance level for confidence intervals (default: 0.05 for 95% CI).
+    /// Must lie strictly between 0 and 1 when `bootstrap_ci` is set.
     pub alpha: f64,
 
     /// Random seed for reproducibility

@@ -924,7 +924,6 @@ fn bootstrap_draws(
 ) -> EconResult<Array2<f64>> {
     let n_cells = table.n_cells();
     let n_units = table.n_units;
-    resource::checked_len(&[bootstrap, n_cells], "bootstrap replicates x cells")?;
     let mut draws = resource::try_zeros2(bootstrap, n_cells, "bootstrap replicate draws")?;
     let mut counts = vec![0usize; n_units];
 
@@ -2676,6 +2675,10 @@ mod tests {
             let panel_map = build_panel_map(&t, &u);
             let table =
                 build_boot_table(&y, &g, &t, &u, &panel_map, &cells, comparison_group).unwrap();
+            // the table builder checks the budget once per (g, t) cell
+            expect_cancelled(with_budget(cancelled(), || {
+                build_boot_table(&y, &g, &t, &u, &panel_map, &cells, comparison_group)
+            }));
             let draws = bootstrap_draws(&table, 200, &mut StdRng::seed_from_u64(42)).unwrap();
             assert_eq!(draws.dim(), (200, cells.len()));
             for (c, want) in expected.iter().enumerate() {

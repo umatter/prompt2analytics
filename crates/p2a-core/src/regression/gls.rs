@@ -198,15 +198,25 @@ pub fn gls(
 
 /// Whitened data `(P y, P X)` for a whitening matrix `P` with `P'P = Ω⁻¹`.
 ///
-/// Any such `P` turns GLS into OLS on the transformed data.
+/// Any such `P` turns GLS into OLS on the transformed data. Checks the
+/// cancellation budget before any structure-specific work (rho validation,
+/// the Cholesky factor, or the copy).
 fn whiten(
     y: &ArrayView1<f64>,
     x: &ArrayView2<f64>,
     structure: &CorrelationStructure,
 ) -> EconResult<(Array1<f64>, Array2<f64>)> {
+    resource::checkpoint()?;
     let n = y.len();
     match structure {
-        CorrelationStructure::Identity => Ok((y.to_owned(), x.to_owned())),
+        // P = I: a plain copy, allocated fallibly like every other X*. The buffer
+        // takes x's own shape, so the copy cannot mismatch whatever the caller checked.
+        CorrelationStructure::Identity => {
+            let (rows, cols) = x.dim();
+            let mut x_star = resource::try_zeros2(rows, cols, WHITENED_DESIGN)?;
+            x_star.assign(x);
+            Ok((y.to_owned(), x_star))
+        }
         CorrelationStructure::AR1 { rho } => {
             let rho = *rho;
             if !rho.is_finite() || rho.abs() >= 1.0 {
@@ -274,14 +284,17 @@ fn whiten(
     }
 }
 
+/// Allocation label for the whitened design `X*`, shared by every structure.
+const WHITENED_DESIGN: &str = "GLS whitened design";
+
 /// Apply a whitening transform to each column of `x`, checking the
-/// cancellation budget once per column.
+/// cancellation budget once per column. The output is allocated fallibly.
 fn whiten_columns(
     x: &ArrayView2<f64>,
     mut transform: impl FnMut(&mut [f64]) -> EconResult<()>,
 ) -> EconResult<Array2<f64>> {
     let (n, p) = x.dim();
-    let mut x_star = Array2::zeros((n, p));
+    let mut x_star = resource::try_zeros2(n, p, WHITENED_DESIGN)?;
     let mut col = vec![0.0; n];
     for j in 0..p {
         resource::checkpoint()?;
@@ -730,6 +743,7 @@ mod tests {
             CorrelationStructure::AR1 { rho: -0.7 },
             CorrelationStructure::CompoundSymmetry { rho: 0.5 },
             CorrelationStructure::CompoundSymmetry { rho: -0.03 },
+            CorrelationStructure::Identity,
         ] {
             let omega = dense_correlation_matrix(n, &corr);
             let (b_ref, se_ref, sigma_ref) = dense_gls_reference(&y, &x, &omega);
@@ -785,6 +799,67 @@ mod tests {
         ] {
             let e = gls(&y.view(), &x.view(), corr).unwrap_err();
             assert!(matches!(e, EconError::InvalidSpecification { .. }), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn test_gls_whitened_design_respects_alloc_ceiling() {
+        // X* is 2000 x 3 x 8 B = 48,000 B, above a 32 KiB ceiling
+        let n = 2000;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => (i as f64 * 0.37).sin() * 5.0,
+            _ => ((i * 13) % 7) as f64 - 3.0,
+        });
+        let y = Array1::from_shape_fn(n, |i| 2.0 + 0.5 * x[[i, 1]] + (i as f64 * 2.1).cos());
+        for corr in [
+            CorrelationStructure::AR1 { rho: 0.5 },
+            CorrelationStructure::CompoundSymmetry { rho: 0.3 },
+            CorrelationStructure::Identity,
+        ] {
+            let label = format!("{corr:?}");
+            let e =
+                resource::with_alloc_ceiling(Some(32 << 10), || gls(&y.view(), &x.view(), corr))
+                    .unwrap_err();
+            assert!(
+                matches!(&e, EconError::ResourceLimit(m) if m.contains("GLS whitened design")),
+                "{label}: {e:?}"
+            );
+        }
+    }
+
+    fn cancelled() -> resource::Budget {
+        let t = resource::CancelToken::new();
+        t.cancel();
+        resource::Budget::new(None, t)
+    }
+
+    #[test]
+    fn test_gls_stops_when_cancelled() {
+        let (y, x) = nlme_xy();
+        let omega = dense_correlation_matrix(y.len(), &CorrelationStructure::AR1 { rho: 0.5 });
+        for corr in [
+            CorrelationStructure::AR1 { rho: 0.5 },
+            CorrelationStructure::CompoundSymmetry { rho: 0.3 },
+            CorrelationStructure::Known { omega },
+            CorrelationStructure::Identity,
+        ] {
+            let label = match &corr {
+                CorrelationStructure::Known { .. } => "Known".to_string(),
+                c => format!("{c:?}"),
+            };
+            let e =
+                resource::with_budget(cancelled(), || gls(&y.view(), &x.view(), corr)).unwrap_err();
+            assert!(matches!(e, EconError::Cancelled(_)), "{label}: {e:?}");
+        }
+        // The string entry points, including the identity aliases
+        let x_flat: Vec<f64> = x.iter().copied().collect();
+        for kind in ["identity", "ols", "ar1_auto"] {
+            let e = resource::with_budget(cancelled(), || {
+                run_gls_raw(y.as_slice().unwrap(), &x_flat, 2, kind, None)
+            })
+            .unwrap_err();
+            assert!(matches!(e, EconError::Cancelled(_)), "{kind}: {e:?}");
         }
     }
 

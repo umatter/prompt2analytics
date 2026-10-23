@@ -26,7 +26,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::resource::{checkpoint, try_with_capacity};
+use crate::resource::{checkpoint, checkpoint_stride, try_with_capacity};
 
 fn size_overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
@@ -39,8 +39,8 @@ fn size_overflow(what: &str) -> EconError {
 pub struct SpectrumConfig {
     /// Widths of modified Daniell smoothers (must be odd integers).
     /// Multiple spans are convolved together. Default: None (no smoothing).
-    /// The combined kernel must be shorter than the series
-    /// (2·Σ⌊span/2⌋ < n_used), as in R.
+    /// The combined kernel (2M + 1 ordinates, M = Σ⌊span/2⌋) must be no
+    /// longer than the series (2M < n_used), as in R.
     ///
     /// # Example
     /// - `spans = Some(vec![3])`: Simple moving average of width 3
@@ -269,6 +269,21 @@ impl fmt::Display for SpectrumResult {
 ///
 /// where w_k are the kernel weights (half-weight at endpoints for modified Daniell).
 ///
+/// # Errors
+///
+/// - [`EconError::InsufficientData`] for fewer than 4 observations.
+/// - [`EconError::InvalidSpecification`] for a taper that is NaN or outside
+///   `[0, 0.5]`; for NaN or infinite values in `x`, or a non-finite
+///   `pad_ratio`; for an even or zero span; for spans whose combined kernel
+///   (`2M + 1` ordinates, with `M = Σ floor(span / 2)`) is longer than the
+///   padded series, i.e. `2M >= n_used` (R's `kernapply` rule, which
+///   `spec.pgram` applies); and for a series so large in magnitude that its
+///   periodogram overflows.
+/// - [`EconError::ResourceLimit`] when the padded length `n_used` overflows or
+///   its FFT buffer cannot be allocated (the per-allocation ceiling included).
+/// - [`EconError::Cancelled`] when the budget checked through [`checkpoint`]
+///   is cancelled or past its deadline before a smoothing pass.
+///
 /// # References
 ///
 /// - Priestley, M. B. (1981). *Spectral Analysis and Time Series*, Chapter 6.
@@ -294,7 +309,8 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
     }
 
     // Validate config
-    if config.taper < 0.0 || config.taper > 0.5 {
+    // `contains` also rejects NaN, for which both `< 0.0` and `> 0.5` are false.
+    if !(0.0..=0.5).contains(&config.taper) {
         return Err(EconError::InvalidSpecification {
             message: format!("Taper must be in [0, 0.5], got {}", config.taper),
         });
@@ -543,8 +559,9 @@ fn apply_daniell_smoothing(periodogram: &[f64], spans: &[usize]) -> EconResult<V
 /// Check smoothing spans against the (padded) series length `n_used`.
 ///
 /// Every span must be a positive odd integer, and the combined modified
-/// Daniell kernel must be shorter than the series. This is R's `kernapply`
-/// rule: with `M` the sum of the half-widths `span / 2`, `2 * M < n_used`.
+/// Daniell kernel (`2M + 1` ordinates) must be no longer than the series. This
+/// is R's `kernapply` rule: with `M` the sum of the half-widths `span / 2`,
+/// `2 * M < n_used`.
 fn validate_spans(spans: &[usize], n_used: usize) -> EconResult<()> {
     for &span in spans {
         if span < 1 || span % 2 == 0 {
@@ -562,7 +579,7 @@ fn validate_spans(spans: &[usize], n_used: usize) -> EconResult<()> {
     else {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "spans give a smoothing kernel too wide to represent, which is not shorter \
+                "spans give a smoothing kernel too wide to represent, which is longer \
                  than the {n_used}-point series; {ADVICE}"
             ),
         });
@@ -571,7 +588,7 @@ fn validate_spans(spans: &[usize], n_used: usize) -> EconResult<()> {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "spans give a smoothing kernel {} ordinates wide (sum of half-widths \
-                 {half_widths}), which is not shorter than the {n_used}-point series; {ADVICE}",
+                 {half_widths}), which is longer than the {n_used}-point series; {ADVICE}",
                 half_widths.saturating_mul(2).saturating_add(1)
             ),
         });
@@ -665,7 +682,9 @@ fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
 /// # Arguments
 ///
 /// * `x` - Time series data
-/// * `order` - AR order (if None, selected by AIC)
+/// * `order` - `Some(k)` fits AR(k) with k clamped to `1..=n/2 - 1`; `None`
+///   selects by AIC among orders 0 to `floor(10·log10 n)`, that maximum
+///   clamped the same way.
 /// * `n_freq` - Number of frequency points (default: 500)
 ///
 /// # Mathematical Details
@@ -675,6 +694,19 @@ fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
 /// The spectral density is:
 ///
 /// S(f) = σ² / |1 - Σ_{k=1}^p φ_k exp(-2πi f k)|²
+///
+/// # Errors
+///
+/// - [`EconError::InsufficientData`] for fewer than 4 observations.
+/// - [`EconError::InvalidSpecification`] for NaN or infinite values in `x`;
+///   for a series with zero variance; and when the autocovariances overflow
+///   (a series too large in magnitude), whether `order` is given or selected
+///   by AIC.
+/// - [`EconError::ResourceLimit`] when the `n_freq`-point grid cannot be
+///   allocated (the per-allocation ceiling included).
+/// - [`EconError::Cancelled`] when the budget checked through [`checkpoint`]
+///   is cancelled or past its deadline, during the AR fit or on the frequency
+///   grid.
 ///
 /// # References
 ///
@@ -692,6 +724,14 @@ pub fn spectrum_ar(
             required: 4,
             provided: n,
             context: "AR spectral estimation".to_string(),
+        });
+    }
+
+    // Without this a NaN slips past the zero-variance check (`NaN <= 0.0` is
+    // false) and a given order returns an all-NaN spectrum.
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "the series contains NaN or infinite values".to_string(),
         });
     }
 
@@ -713,12 +753,38 @@ pub fn spectrum_ar(
     let n_pts = n_freq.unwrap_or(500);
 
     // Compute spectral density at frequencies
+    let (freq, spec) = ar_spectrum_grid(&ar_coefs, innovation_var, n_pts)?;
+
+    Ok(SpectrumResult {
+        freq,
+        spec,
+        bandwidth: 0.0,    // AR spectrum is smooth, bandwidth not applicable
+        df: f64::INFINITY, // Smooth estimate, infinite df
+        n_obs: n,
+        n_used: n,
+        method: format!("ar({})", p),
+        series_name: None,
+        kernel_spans: None,
+        taper: 0.0,
+        detrend: true,
+    })
+}
+
+/// The AR spectral density `σ² / |1 - Σ_k φ_k exp(-2πi f k)|²` at the
+/// `n_pts` frequencies `f_j = j / (2 n_pts)`, `j = 1, ..., n_pts`; returns
+/// `(freq, spec)`.
+fn ar_spectrum_grid(
+    ar_coefs: &[f64],
+    innovation_var: f64,
+    n_pts: usize,
+) -> EconResult<(Vec<f64>, Vec<f64>)> {
     let mut freq = try_with_capacity(n_pts, "the AR spectrum frequency grid")?;
     let mut spec = try_with_capacity(n_pts, "the AR spectrum frequency grid")?;
 
+    // Each point costs O(p), and p can be as large as n / 2.
+    let stride = checkpoint_stride(ar_coefs.len());
     for j in 1..=n_pts {
-        // Each point costs O(p), and p can be as large as n / 2.
-        if j % 1024 == 0 {
+        if j % stride == 0 {
             checkpoint()?;
         }
         let f = j as f64 / (2.0 * n_pts as f64); // Frequencies in (0, 0.5]
@@ -743,19 +809,7 @@ pub fn spectrum_ar(
         spec.push(s);
     }
 
-    Ok(SpectrumResult {
-        freq,
-        spec,
-        bandwidth: 0.0,    // AR spectrum is smooth, bandwidth not applicable
-        df: f64::INFINITY, // Smooth estimate, infinite df
-        n_obs: n,
-        n_used: n,
-        method: format!("ar({})", p),
-        series_name: None,
-        kernel_spans: None,
-        taper: 0.0,
-        detrend: true,
-    })
+    Ok((freq, spec))
 }
 
 /// Fit AR(p) model using Yule-Walker equations.
@@ -779,6 +833,16 @@ fn fit_ar_yule_walker(x: &[f64], p: usize) -> EconResult<(Vec<f64>, f64)> {
         gamma.push(sum / n as f64);
     }
 
+    // Finite input can still overflow here (the mean, or the products in the
+    // sums); a given order would then return a non-finite spectrum.
+    if gamma.iter().any(|g| !g.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "the series is too large in magnitude for an AR fit: its autocovariances \
+                      overflow"
+                .to_string(),
+        });
+    }
+
     if gamma[0] <= 0.0 {
         return Err(EconError::InvalidSpecification {
             message: "Series has zero variance".to_string(),
@@ -787,18 +851,31 @@ fn fit_ar_yule_walker(x: &[f64], p: usize) -> EconResult<(Vec<f64>, f64)> {
 
     // Solve Yule-Walker equations using Durbin-Levinson
     // This is more numerically stable than direct matrix solve
-    let mut phi = vec![0.0; p];
+    yule_walker_durbin_levinson(&gamma)
+}
+
+/// Solve the Yule-Walker equations of AR(`p`), `p = gamma.len() - 1`, by the
+/// Durbin-Levinson recursion on the autocovariances `gamma[0..=p]`
+/// (`gamma[0] > 0`). Returns (coefficients, innovation variance).
+fn yule_walker_durbin_levinson(gamma: &[f64]) -> EconResult<(Vec<f64>, f64)> {
+    let p = gamma.len() - 1;
     let mut v = gamma[0];
 
     if p == 0 {
         return Ok((vec![], v));
     }
 
+    let mut phi = vec![0.0; p];
+    // phi of the previous order, reused across orders instead of a clone each time
+    let mut prev = vec![0.0; p];
+
     // First iteration
     phi[0] = gamma[1] / gamma[0];
     v = gamma[0] * (1.0 - phi[0] * phi[0]);
 
     for k in 2..=p {
+        // Each order costs O(k).
+        checkpoint()?;
         // Compute partial autocorrelation
         let mut num = gamma[k];
         for j in 0..(k - 1) {
@@ -807,9 +884,9 @@ fn fit_ar_yule_walker(x: &[f64], p: usize) -> EconResult<(Vec<f64>, f64)> {
         let phi_kk = num / v;
 
         // Update coefficients
-        let phi_old = phi.clone();
+        prev[..k - 1].copy_from_slice(&phi[..k - 1]);
         for j in 0..(k - 1) {
-            phi[j] = phi_old[j] - phi_kk * phi_old[k - 2 - j];
+            phi[j] = prev[j] - phi_kk * prev[k - 2 - j];
         }
         phi[k - 1] = phi_kk;
 
@@ -852,6 +929,8 @@ fn select_ar_order_aic(x: &[f64], max_order: usize) -> EconResult<(Vec<f64>, f64
         }
     }
 
+    // Defensive: fit_ar_yule_walker refuses non-finite and zero-variance
+    // autocovariances, so AR(0) always has a finite AIC and this cannot fire.
     if best_var <= 0.0 {
         return Err(EconError::InvalidSpecification {
             message: "Could not fit AR model".to_string(),
@@ -1458,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn spectrum_rejects_non_finite_input_and_padding() {
+    fn spectrum_rejects_non_finite_input_padding_and_taper() {
         let mut x = mk(64);
         x[10] = f64::NAN;
         assert!(matches!(
@@ -1482,6 +1561,53 @@ mod tests {
             spectrum(&x, huge),
             Err(EconError::ResourceLimit(_))
         ));
+        // A NaN taper failed both range comparisons and was used as no taper.
+        let nan_taper = SpectrumConfig {
+            taper: f64::NAN,
+            ..Default::default()
+        };
+        let r = spectrum(&x, nan_taper);
+        assert!(
+            matches!(&r, Err(EconError::InvalidSpecification { message }) if message.contains("Taper")),
+            "{r:?}"
+        );
+    }
+
+    /// Before the fix a NaN with a given order slipped past the zero-variance
+    /// check and returned an all-NaN spectrum; with the order chosen by AIC it
+    /// failed as "Could not fit AR model". A finite series whose autocovariances
+    /// overflow returned a non-finite spectrum for a given order.
+    #[test]
+    fn spectrum_ar_rejects_non_finite_and_overflowing_input() {
+        let mut nan = mk(64);
+        nan[10] = f64::NAN;
+        let mut inf = mk(64);
+        inf[20] = f64::NEG_INFINITY;
+        for x in [&nan, &inf] {
+            for order in [Some(2), None] {
+                let r = spectrum_ar(x, order, Some(50));
+                assert!(
+                    matches!(&r, Err(EconError::InvalidSpecification { message }) if message.contains("NaN or infinite")),
+                    "{order:?}: {r:?}"
+                );
+            }
+        }
+
+        // Finite, but every squared deviation is about 1e400.
+        let huge: Vec<f64> = mk(64).iter().map(|v| v * 1e200).collect();
+        assert!(huge.iter().all(|v| v.is_finite()));
+        for order in [Some(2), None] {
+            let r = spectrum_ar(&huge, order, Some(50));
+            assert!(
+                matches!(&r, Err(EconError::InvalidSpecification { message }) if message.contains("too large in magnitude")),
+                "{order:?}: {r:?}"
+            );
+        }
+
+        // A large but representable scale still fits.
+        let big: Vec<f64> = mk(64).iter().map(|v| v * 1e100).collect();
+        let r = spectrum_ar(&big, Some(2), Some(50)).unwrap();
+        assert!(r.spec.iter().all(|s| s.is_finite() && *s > 0.0));
     }
 
     #[test]
@@ -1495,6 +1621,88 @@ mod tests {
             cancelled(|| spectrum_ar(&x, Some(5), None)),
             Err(EconError::Cancelled(_))
         ));
+    }
+
+    /// spectrum_ar's autocovariance loop checks first, so this calls the recursion directly.
+    #[test]
+    fn yule_walker_durbin_levinson_honours_cancellation() {
+        // p = 3, so the order loop runs and checks the budget at k = 2.
+        assert!(matches!(
+            cancelled(|| yule_walker_durbin_levinson(&[1.0, 0.5, 0.25, 0.125])),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    /// The pre-change recursion, verbatim (clones phi every order).
+    fn yule_walker_reference(gamma: &[f64], p: usize) -> (Vec<f64>, f64) {
+        let mut phi = vec![0.0; p];
+        let mut v = gamma[0];
+
+        if p == 0 {
+            return (vec![], v);
+        }
+
+        phi[0] = gamma[1] / gamma[0];
+        v = gamma[0] * (1.0 - phi[0] * phi[0]);
+
+        for k in 2..=p {
+            let mut num = gamma[k];
+            for j in 0..(k - 1) {
+                num -= phi[j] * gamma[k - 1 - j];
+            }
+            let phi_kk = num / v;
+
+            let phi_old = phi.clone();
+            for j in 0..(k - 1) {
+                phi[j] = phi_old[j] - phi_kk * phi_old[k - 2 - j];
+            }
+            phi[k - 1] = phi_kk;
+
+            v *= 1.0 - phi_kk * phi_kk;
+
+            if v <= 0.0 {
+                break;
+            }
+        }
+
+        (phi, v)
+    }
+
+    #[test]
+    fn yule_walker_buffer_reuse_is_bit_identical() {
+        let x = mk(400);
+        let n = x.len();
+        let mean = x.iter().sum::<f64>() / n as f64;
+        let y: Vec<f64> = x.iter().map(|v| v - mean).collect();
+        let gamma: Vec<f64> = (0..=60)
+            .map(|k| (0..n - k).map(|t| y[t] * y[t + k]).sum::<f64>() / n as f64)
+            .collect();
+        for p in [0, 1, 2, 7, 60] {
+            assert_eq!(
+                yule_walker_durbin_levinson(&gamma[..=p]).unwrap(),
+                yule_walker_reference(&gamma, p),
+                "p = {p}"
+            );
+        }
+    }
+
+    /// With p >= 65,536 coefficients each grid point costs that much, so the
+    /// grid checks the budget at every point. A fixed stride of 1,024 points
+    /// did not check a 4-point grid at all.
+    #[test]
+    fn ar_spectrum_grid_checks_the_budget_by_cost() {
+        let phi: Vec<f64> = (0..70_000)
+            .map(|k| 1e-6 * (((k * 37) % 11) as f64 - 5.0))
+            .collect();
+        assert!(matches!(
+            cancelled(|| ar_spectrum_grid(&phi, 1.0, 4)),
+            Err(EconError::Cancelled(_))
+        ));
+        // Without a budget the grid is computed as before.
+        let (freq, spec) = ar_spectrum_grid(&[0.5], 2.0, 4).unwrap();
+        assert_eq!(freq, vec![0.125, 0.25, 0.375, 0.5]);
+        // f = 0.5: |1 - 0.5 e^{-iπ}|² = 1.5² = 2.25
+        assert!((spec[3] - 2.0 / 2.25).abs() < 1e-12, "{spec:?}");
     }
 
     /// R 4.3.3: x <- mk(64)

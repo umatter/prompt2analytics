@@ -56,17 +56,12 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
-use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_with_capacity};
+use crate::resource::{
+    check_alloc, checked_len, checkpoint, checkpoint_stride, try_vec, try_with_capacity,
+};
 
 fn size_overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
-}
-
-/// Iterations between budget checks for a loop whose body costs about
-/// `work` operations, so that the budget is checked about every 65,536
-/// operations.
-fn checkpoint_stride(work: usize) -> usize {
-    (65_536 / work.max(1)).max(1)
 }
 
 // ============================================================================
@@ -243,13 +238,17 @@ pub struct EmbedResult {
 /// R `stats::embed`
 pub fn embed(x: &[f64], dimension: usize) -> EconResult<EmbedResult> {
     let n = x.len();
-    let n_rows = embed_rows(n, dimension)?;
+    let (n_rows, cells) = embed_shape(n, dimension)?;
+    check_alloc::<f64>(cells, EMBED_WHAT)?;
     let mut matrix = try_with_capacity(n_rows, EMBED_WHAT)?;
+
+    // Each row costs O(dimension).
+    let stride = checkpoint_stride(dimension);
 
     // Build each row: [x[t], x[t-1], ..., x[t-dimension+1]]
     // where t goes from dimension-1 to n-1
     for (i, t) in ((dimension - 1)..n).enumerate() {
-        if i % 1024 == 0 {
+        if i % stride == 0 {
             checkpoint()?;
         }
         let mut row = try_with_capacity(dimension, EMBED_WHAT)?;
@@ -269,9 +268,10 @@ pub fn embed(x: &[f64], dimension: usize) -> EconResult<EmbedResult> {
 
 const EMBED_WHAT: &str = "the embedding matrix (rows × dimension)";
 
-/// Validate an embedding of a length-`n` series and admit its
-/// `(n - dimension + 1) × dimension` values; returns the row count.
-fn embed_rows(n: usize, dimension: usize) -> EconResult<usize> {
+/// Validate an embedding of a length-`n` series; returns its row count
+/// `n - dimension + 1` and its cell count `rows × dimension`. The caller
+/// admits the cells against the allocation ceiling.
+fn embed_shape(n: usize, dimension: usize) -> EconResult<(usize, usize)> {
     if dimension == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Embedding dimension must be at least 1".to_string(),
@@ -289,8 +289,7 @@ fn embed_rows(n: usize, dimension: usize) -> EconResult<usize> {
 
     let n_rows = n - dimension + 1;
     let cells = checked_len(&[n_rows, dimension], EMBED_WHAT)?;
-    check_alloc::<f64>(cells, EMBED_WHAT)?;
-    Ok(n_rows)
+    Ok((n_rows, cells))
 }
 
 /// Embed a time series into an ndarray matrix.
@@ -298,14 +297,15 @@ fn embed_rows(n: usize, dimension: usize) -> EconResult<usize> {
 /// Same as `embed` but returns an ndarray Array2<f64>.
 pub fn embed_array(x: &[f64], dimension: usize) -> EconResult<Array2<f64>> {
     let n = x.len();
-    let n_rows = embed_rows(n, dimension)?;
-    let cells = checked_len(&[n_rows, dimension], EMBED_WHAT)?;
+    let (n_rows, cells) = embed_shape(n, dimension)?;
 
     // Row-major, row i = [x[t], x[t-1], ..., x[t-dimension+1]] with
     // t = i + dimension - 1, exactly as `embed` builds it.
     let mut flat = try_with_capacity(cells, EMBED_WHAT)?;
+    // Each row costs O(dimension).
+    let stride = checkpoint_stride(dimension);
     for (i, t) in ((dimension - 1)..n).enumerate() {
-        if i % 1024 == 0 {
+        if i % stride == 0 {
             checkpoint()?;
         }
         flat.extend((0..dimension).map(|lag| x[t - lag]));
@@ -1300,10 +1300,24 @@ pub struct ArimaSimResult {
 /// * `ar` - AR coefficients (can be empty)
 /// * `ma` - MA coefficients (can be empty)
 /// * `d` - Differencing order (0 for ARMA)
-/// * `n` - Length of output series (before un-differencing)
+/// * `n` - Number of observations returned; must be at least 1, as in R's
+///   `arima.sim`. The integrated series keeps length `n`: R returns `n + d`
+///   values for `d > 0` because `diffinv` prepends `d` zeros; this returns the
+///   `d`-fold cumulative sum of the ARMA part, which is that output without
+///   the leading zeros.
 /// * `innovations` - Optional pre-specified innovations. If None, uses standard normal.
 /// * `n_start` - Burn-in period length (default: computed from AR/MA orders)
 /// * `seed` - Random seed for reproducibility (if innovations is None)
+///
+/// # Errors
+///
+/// - [`EconError::InvalidSpecification`] for `n = 0`, or for `innovations`
+///   shorter than `n` plus the burn-in.
+/// - [`EconError::ResourceLimit`] when `n` plus the burn-in overflows or the
+///   series is too large to allocate (the per-allocation ceiling included).
+/// - [`EconError::Cancelled`] when the budget checked through [`checkpoint`]
+///   is cancelled or past its deadline, during the ARMA recursion or before
+///   each integration pass.
 ///
 /// # Example
 ///
@@ -1379,10 +1393,8 @@ pub fn arima_sim(
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::from_entropy(),
         };
-        let mut innov = try_vec(total_length, 0.0, WHAT)?;
-        for v in innov.iter_mut() {
-            *v = StandardNormal.sample(&mut rng);
-        }
+        let mut innov: Vec<f64> = try_with_capacity(total_length, WHAT)?;
+        innov.extend((0..total_length).map(|_| -> f64 { StandardNormal.sample(&mut rng) }));
         innov
     };
 
@@ -1418,14 +1430,7 @@ pub fn arima_sim(
     x.drain(..burn_in);
 
     // Un-difference: apply cumsum d times, in place
-    for _ in 0..d {
-        checkpoint()?;
-        let mut running = 0.0;
-        for v in x.iter_mut() {
-            running += *v;
-            *v = running;
-        }
-    }
+    integrate_in_place(&mut x, d)?;
 
     Ok(ArimaSimResult {
         values: x,
@@ -1435,6 +1440,22 @@ pub fn arima_sim(
         n,
         n_start: burn_in,
     })
+}
+
+/// Integrate `x` `d` times in place: each pass replaces `x` by its
+/// cumulative sum. The budget is checked before every pass, so a large `d`
+/// stays cancellable.
+fn integrate_in_place(x: &mut [f64], d: usize) -> EconResult<()> {
+    for _ in 0..d {
+        // Each pass costs O(n).
+        checkpoint()?;
+        let mut running = 0.0;
+        for v in x.iter_mut() {
+            running += *v;
+            *v = running;
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -1826,10 +1847,45 @@ mod tests {
         );
     }
 
+    /// Stops at the ARMA recursion's first check (t = 0), before integrating;
+    /// `integrate_in_place_honours_cancellation` covers the integration passes.
     #[test]
     fn arima_sim_honours_cancellation() {
         let r = cancelled(|| arima_sim(&[0.5], &[], 3, 100, None, None, Some(1)));
         assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn integrate_in_place_honours_cancellation() {
+        assert!(matches!(
+            cancelled(|| integrate_in_place(&mut [1.0, 2.0], 3)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    #[test]
+    fn integrate_in_place_is_repeated_cumulative_sum() {
+        let mut x = [1.5, -0.25, 2.0, 0.75];
+        integrate_in_place(&mut x, 2).unwrap();
+        // cumsum: 1.5, 1.25, 3.25, 4.0; cumsum again: 1.5, 2.75, 6.0, 10.0
+        assert_eq!(x, [1.5, 2.75, 6.0, 10.0]);
+        let mut y = [0.3, 0.4];
+        integrate_in_place(&mut y, 0).unwrap();
+        assert_eq!(y, [0.3, 0.4]);
+    }
+
+    /// Guard for the innovation buffer: with no burn-in and no AR/MA terms the
+    /// series is the innovations, which must be the seeded RNG's draws in order.
+    #[test]
+    fn arima_sim_seeded_innovations_are_the_rng_draws_in_order() {
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        use rand_distr::{Distribution, StandardNormal};
+
+        let mut rng = StdRng::seed_from_u64(11);
+        let expected: Vec<f64> = (0..50).map(|_| StandardNormal.sample(&mut rng)).collect();
+        let r = arima_sim(&[], &[], 0, 50, None, Some(0), Some(11)).unwrap();
+        assert_eq!(r.values, expected);
     }
 
     #[test]
@@ -1850,9 +1906,20 @@ mod tests {
 
     #[test]
     fn arma_pacf_honours_cancellation() {
-        // The PACF path (Durbin-Levinson is O(lag_max^2)) must stop when the budget is cancelled.
+        // Covers the autocovariance loops: the pure-AR path checks the budget on its first
+        // convergence iteration, so it stops before Durbin-Levinson runs.
+        // durbin_levinson_honours_cancellation covers the order loop.
         assert!(matches!(
             cancelled(|| arma_acf(&[0.5, 0.2], &[], 2_000, true)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    #[test]
+    fn durbin_levinson_honours_cancellation() {
+        // p = 3, so the order loop runs and checks the budget at n = 2.
+        assert!(matches!(
+            cancelled(|| durbin_levinson_from_acf(&[1.0, 0.5, 0.25, 0.125])),
             Err(EconError::Cancelled(_))
         ));
     }
@@ -1962,6 +2029,26 @@ mod tests {
         let err =
             crate::resource::with_alloc_ceiling(Some(1 << 16), || acf_to_ar(&acf)).unwrap_err();
         assert!(err.to_string().contains("AR coefficient matrix"), "{err}");
+    }
+
+    // Guards only that the row loops check the budget at all. The stride rule
+    // (checkpoint_stride(dimension)) is covered by
+    // resource::tests::checkpoint_stride_targets_65536_operations; a
+    // pre-cancelled budget cannot tell strides apart, since every stride
+    // checks row 0.
+    #[test]
+    fn embed_and_embed_array_honour_cancellation() {
+        let x: Vec<f64> = (0..300)
+            .map(|t| (t as f64 * 0.41).cos() + 0.003 * t as f64)
+            .collect();
+        assert!(matches!(
+            cancelled(|| embed(&x, 4)),
+            Err(EconError::Cancelled(_))
+        ));
+        assert!(matches!(
+            cancelled(|| embed_array(&x, 4)),
+            Err(EconError::Cancelled(_))
+        ));
     }
 
     #[test]
