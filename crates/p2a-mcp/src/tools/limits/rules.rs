@@ -29,8 +29,9 @@ const fn row(tool: &'static str, class: RowClass) -> RowRule {
 //    every float field, every array field (arrays nested in arrays and tuples included), the
 //    integer and float elements of every array (at the element path `a[]`) and every untyped
 //    (any-JSON) field of every tool to be matched here; the module documentation (`Classifying
-//    a new request field`) says which rules match which. A float is a cost parameter when it
-//    counts or sizes something (the `n` of the power tools), so it gets a `Max` like an integer.
+//    a new request field`) says which rules match which. A float is a cost parameter when the
+//    work grows with what it counts or sizes (the `n` of `power_t_test`), so it gets a `Max` like
+//    an integer.
 
 // Reasons shared by the `Exempt`s of several float fields and float elements (rule 3).
 const LEVEL: &str = "confidence or significance level; it sets a quantile or the target of a \
@@ -484,7 +485,14 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("power_anova_test", "between_var", Exempt(EFFECT)),
         p("power_anova_test", "within_var", Exempt(EFFECT)),
         p("power_anova_test", "power", Exempt(TARGET_POWER)),
-        p("power_prop_test", "n", Max(SampleSize)),
+        p(
+            "power_prop_test",
+            "n",
+            Exempt(
+                "per-group sample size of a closed-form normal power; the n solver bisects at \
+                 most 100 steps",
+            ),
+        ),
         p("power_prop_test", "p1", Exempt(EFFECT)),
         p("power_prop_test", "p2", Exempt(EFFECT)),
         p("power_prop_test", "power", Exempt(TARGET_POWER)),
@@ -1615,10 +1623,11 @@ mod tests {
         }
     }
 
-    /// The float sample size `n` of the power tools and the group count of `power_anova_test`
-    /// are capped in the hosted profile: the refusal names the parameter, the cap and its
-    /// override key; every value up to the cap (fractional, negative or written as an integer)
-    /// passes; nothing is refused when limits are off.
+    /// The float sample size `n` of `power_t_test` and `power_anova_test` and the group count
+    /// of `power_anova_test` are capped in the hosted profile: the refusal names the parameter,
+    /// the cap and its override key; every value up to the cap (fractional, negative or written
+    /// as an integer) passes; nothing is refused when limits are off. `power_prop_test`'s `n`
+    /// is not capped.
     #[test]
     fn power_sample_sizes_and_groups_are_capped_in_hosted_profile() {
         let cases: &[(&str, &str, Value, &str, &str)] = &[
@@ -1647,13 +1656,6 @@ mod tests {
                 "power_t_test",
                 "n",
                 json!({"n": 1_000_001, "delta": 1.0}),
-                "sample_size",
-                "1000000",
-            ),
-            (
-                "power_prop_test",
-                "n",
-                json!({"n": 1e9, "p1": 0.3, "p2": 0.5}),
                 "sample_size",
                 "1000000",
             ),
@@ -1706,7 +1708,12 @@ mod tests {
         ] {
             assert!(hosted("power_t_test", args.clone()).is_ok(), "{args}");
         }
-        assert!(hosted("power_prop_test", json!({"n": 1e6, "p1": 0.3, "p2": 0.5})).is_ok());
+        // power_prop_test computes with the normal distribution only, so its `n` is not capped:
+        // a power question about ten million users per arm is answered.
+        for n in [1e6, 1e7, 1e9, 1e300, u64::MAX as f64] {
+            let args = json!({"n": n, "p1": 0.3, "p2": 0.5});
+            assert!(hosted("power_prop_test", args.clone()).is_ok(), "{args}");
+        }
         for args in [
             json!({"groups": 10, "n": 1e6, "between_var": 1.0, "within_var": 3.0}),
             json!({"groups": 10, "between_var": 0.0, "within_var": 1.0, "power": 0.8}),
@@ -1811,7 +1818,7 @@ mod schema_tests {
     enum Kind {
         /// An integer field.
         Integer,
-        /// A float field. A count or size given as a float (the `n` of the power tools) takes a
+        /// A float field. A count or size given as a float (the `n` of `power_t_test`) takes a
         /// numeric `Max`, a convergence tolerance `Rule::Tolerance`.
         Float,
         /// An array: a field, an element of an array (`a[]`) or a tuple.

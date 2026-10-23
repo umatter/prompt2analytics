@@ -40,7 +40,7 @@
 //!
 //! - an integer field, by [`Rule::Max`] with a numeric family (not [`Family::StringBytes`]);
 //! - a float field, by a numeric [`Rule::Max`] (a count or size given as a float, such as the
-//!   `n` of the power tools) or, for a convergence tolerance, by [`Rule::Tolerance`];
+//!   `n` of `power_t_test`) or, for a convergence tolerance, by [`Rule::Tolerance`];
 //! - an array field, an array element that is itself an array (`a[]`) or a tuple, by
 //!   [`Rule::ArrayLen`], [`Rule::UniqueList`] or [`Rule::SquareLen`];
 //! - the integer or float elements of an array (`Vec<usize>`, `Vec<f64>`, a tuple of numbers),
@@ -173,9 +173,11 @@ families! {
     StringBytes => "string_bytes", 4_096;
     /// Recursion depth of tree builders.
     TreeDepth => "tree_depth", 100;
-    /// Per-group sample sizes a power calculation is given (the float `n` of the `power_*`
-    /// tools). The cap is the top of the bracket in which those tools solve for `n`, so every
-    /// sample size they can return is accepted.
+    /// The float sample size `n` (per group in two-sample and ANOVA designs) that
+    /// `power_t_test` and `power_anova_test` are given; it sets the degrees of freedom of their
+    /// t and F distributions. The cap is the top of the bracket in which those tools solve for
+    /// `n`, so every sample size they can return is accepted. `power_prop_test` computes with
+    /// the normal distribution only, and its `n` is not capped.
     SampleSize => "sample_size", 1_000_000;
     /// Groups of a planned design (`power_anova_test` `groups`). With [`Family::SampleSize`] it
     /// bounds the F distribution's degrees of freedom, `groups * (n - 1)`, also when `n` is

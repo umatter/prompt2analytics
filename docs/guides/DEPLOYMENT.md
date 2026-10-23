@@ -471,7 +471,7 @@ Families (Off: none):
 | `array_length` | numeric arrays (`xout`, `values`, `probs`, `taus`, ...) | 100,000 |
 | `string_bytes` | generator strings, labels, pad and fill strings, regex patterns (UTF-8 bytes) | 4,096 |
 | `tree_depth` | `max_depth`, `maxdepth` | 100 |
-| `sample_size` | the per-group sample size `n` of `power_t_test`, `power_prop_test` and `power_anova_test` (the top of the range in which they solve for `n`) | 1,000,000 |
+| `sample_size` | the sample size `n` of `power_t_test` and `power_anova_test`, per group in two-sample and ANOVA designs (the top of the range in which they solve for `n`); `power_prop_test` is not capped | 1,000,000 |
 | `design_groups` | `power_anova_test` `groups` | 10 |
 
 Row classes and tolerance (Off: none):
