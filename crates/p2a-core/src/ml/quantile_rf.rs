@@ -1522,23 +1522,41 @@ mod tests {
     }
 
     #[test]
-    fn test_qrf_split_tie_may_resolve_differently_from_reference() {
-        // Documents the one place the running-sum scan departs from the old
-        // search: two candidates with exactly equal within-child SSE (32/6 in
-        // units of 0.7^2 here), whose rounded values compare the other way.
+    fn test_qrf_split_tie_picks_one_of_the_tied_splits() {
+        // Two candidates have exactly equal within-child SSE (32/6 in units of
+        // 0.7^2): x <= 0.15 (2 | 6) and x <= 0.95 (6 | 2). Rounding decides which
+        // one a search sees as smaller, so either is a correct answer; the scan
+        // and the old search must each return one of them, equally good.
         let x =
             Array2::from_shape_vec((8, 1), vec![1.1, 1.1, 0.8, 0.0, 0.1, 0.3, 0.2, 0.8]).unwrap();
         let y = Array1::from(vec![0.0, 0.7, 0.0, 0.7, 0.0, 1.4, 1.4, 1.4]);
         let idx: Vec<usize> = (0..8).collect();
         let tree = QuantileTree::new(1);
-        let (f, t, l, r) = tree
-            .find_best_split(&x.view(), &y.view(), &idx, &[0], 1)
-            .unwrap();
-        assert_eq!((f, l.len(), r.len()), (0, 6, 2));
-        assert!((t - 0.95).abs() < 1e-12, "{t}");
-        let (f, t, l, r) = find_best_split_reference(&x.view(), &y.view(), &idx, &[0], 1).unwrap();
-        assert_eq!((f, l.len(), r.len()), (0, 2, 6));
-        assert!((t - 0.15).abs() < 1e-12, "{t}");
+        let sse = |side: &[usize]| compute_variance_reference(&y.view(), side) * side.len() as f64;
+        let tied = [(0.15, 2usize), (0.95, 6usize)];
+        let mut split_sse = Vec::new();
+        for (who, split) in [
+            (
+                "scan",
+                tree.find_best_split(&x.view(), &y.view(), &idx, &[0], 1),
+            ),
+            (
+                "reference",
+                find_best_split_reference(&x.view(), &y.view(), &idx, &[0], 1),
+            ),
+        ] {
+            let (f, t, l, r) = split.unwrap();
+            assert_eq!((f, l.len() + r.len()), (0, 8), "{who}");
+            assert!(
+                tied.iter()
+                    .any(|&(thr, n_left)| (t - thr).abs() < 1e-12 && l.len() == n_left),
+                "{who}: x <= {t} ({} | {}) is not one of the tied splits",
+                l.len(),
+                r.len()
+            );
+            split_sse.push(sse(&l) + sse(&r));
+        }
+        assert!((split_sse[0] - split_sse[1]).abs() < 1e-12, "{split_sse:?}");
     }
 
     /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
