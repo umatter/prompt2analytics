@@ -984,6 +984,80 @@ async fn full_orphan_sweep_finds_orphans_between_the_owners_that_exist() {
     check_orphans_between_owners(&db).await;
 }
 
+/// What `tracing` writes while a subscriber made with it is the thread's
+/// default.
+#[derive(Clone, Default)]
+pub(super) struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Logs {
+    /// A subscriber that writes WARN and above to these logs.
+    pub(super) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+        tracing_subscriber::fmt()
+            .with_writer(self.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish()
+    }
+
+    pub(super) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+    type Writer = Logs;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Conversations of a session without a row that `delete_conversation`
+/// cannot find by the id the sweep reads for them (their keys do not
+/// survive `key_string`; the server writes UUID keys only) are not read
+/// again batch after batch until the batch bound: a full batch of them ends
+/// their gap with a warning, and the rows stay.
+#[tokio::test]
+async fn full_orphan_sweep_stops_at_a_batch_it_cannot_delete() {
+    use super::models::{Conversation, key_string};
+    use super::sessions::ORPHAN_BATCH;
+
+    let db = test_db().await;
+    for n in 0..ORPHAN_BATCH + 3 {
+        let key = format!("odd⟩{n:03}");
+        let mut conv = Conversation::new("no-row".into(), "t".into());
+        conv.id = surrealdb::RecordId::from(("conversations", key.as_str()));
+        assert_ne!(key_string(&conv.id), key);
+        let _: Option<Conversation> = db.db().create(conv.id.clone()).content(conv).await.unwrap();
+    }
+
+    let logs = Logs::default();
+    let deleted = {
+        let _default = tracing::subscriber::set_default(logs.subscriber());
+        db.delete_orphans().await.unwrap()
+    };
+    assert_eq!(deleted, 0);
+    assert_eq!(rows_in(&db, "conversations").await, ORPHAN_BATCH + 3);
+    let text = logs.text();
+    let warnings: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("WARN") && line.contains("conversations"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{text}");
+    assert!(warnings[0].contains("could not delete"), "{}", warnings[0]);
+}
+
 #[tokio::test]
 async fn session_rows_by_last_access() {
     let db = test_db().await;

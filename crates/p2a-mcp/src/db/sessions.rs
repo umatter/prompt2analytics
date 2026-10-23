@@ -30,6 +30,72 @@ enum OrphanScan {
 /// the orphans of a gap in one statement would hold all of them at once.
 pub(super) const ORPHAN_BATCH: usize = 32;
 
+/// One batch of a gap's orphans: the rows read (at most [`ORPHAN_BATCH`])
+/// and, of those, the rows deleted.
+#[derive(Debug, Clone, Copy)]
+struct Batch {
+    read: usize,
+    deleted: usize,
+}
+
+/// How the batches of one gap ended ([`drain_gap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GapEnd {
+    /// A batch came back short: it held the last rows of the gap that
+    /// match.
+    Drained,
+    /// A full batch of which no row could be deleted; reading again would
+    /// read the same rows.
+    Stuck,
+    /// The batches the gap's count allows were read, and the last was full.
+    Bound,
+}
+
+/// Delete the orphans of one gap of `table`, a batch at a time
+/// (`next_batch` reads up to [`ORPHAN_BATCH`] of them and deletes what it
+/// can), until a batch comes back short; the rows deleted, and how it ended.
+///
+/// The gap held `rows` rows when it was counted, and each batch is deleted
+/// before the next is read, so the rows that match only decrease and
+/// `rows.div_ceil(ORPHAN_BATCH) + 1` batches drain the gap. Two things keep
+/// it from draining: rows that match written into the gap after its count,
+/// and a full batch of which nothing could be deleted (conversations that
+/// `delete_conversation` cannot find by the key read for them), which every
+/// further read would return again. This then stops, at the bound or at
+/// once, and logs it; what is left waits for the next full sweep, at the
+/// next start (later sweeps follow recent deletes only).
+async fn drain_gap<F, Fut>(
+    table: &str,
+    rows: usize,
+    mut next_batch: F,
+) -> Result<(usize, GapEnd), DbError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Batch, DbError>>,
+{
+    let mut deleted = 0usize;
+    for _ in 0..=rows.div_ceil(ORPHAN_BATCH) {
+        let batch = next_batch().await?;
+        deleted += batch.deleted;
+        if batch.read < ORPHAN_BATCH {
+            return Ok((deleted, GapEnd::Drained));
+        }
+        if batch.deleted == 0 {
+            tracing::warn!(
+                table,
+                "orphan sweep could not delete a whole batch of orphaned rows; \
+                 the rest of their gap waits for the next full sweep"
+            );
+            return Ok((deleted, GapEnd::Stuck));
+        }
+    }
+    tracing::warn!(
+        table,
+        "orphan sweep stopped at its batch bound; remaining orphans wait for the next full sweep"
+    );
+    Ok((deleted, GapEnd::Bound))
+}
+
 /// A row's record id, and nothing else of it.
 #[derive(serde::Deserialize)]
 struct IdRow {
@@ -434,39 +500,16 @@ impl DbConnection {
         let mut deleted = 0usize;
 
         // Conversations (with their messages and tool calls) of sessions
-        // without a row: only those are read, a batch at a time. Each batch
-        // is deleted before the next is read, so the rows that match only
-        // decrease; the gap's row count bounds the batches.
+        // without a row: only those are read, a batch at a time.
         for (gap, rows) in self
             .gaps_with_rows("conversations", "session_id", &session_ids)
             .await?
         {
-            for _ in 0..=rows.div_ceil(ORPHAN_BATCH) {
-                let mut result = self
-                    .db()
-                    .query(format!(
-                        "SELECT id, session_id FROM conversations \
-                         WHERE {} AND created_at < $started LIMIT {ORPHAN_BATCH}",
-                        gap.condition("session_id")
-                    ))
-                    .bind(gap.bounds())
-                    .bind(("started", started.clone()))
-                    .await?;
-                let orphans: Vec<ConversationOwner> = result.take(0)?;
-                let batch = orphans.len();
-                for conv in orphans {
-                    // The session has no row any more; its counter goes too.
-                    self.forget_session_bytes(&conv.session_id);
-                    match self.delete_conversation(&key_string(&conv.id)).await {
-                        Ok(()) => deleted += 1,
-                        Err(DbError::NotFound(_)) => {}
-                        Err(e) => return Err(e),
-                    }
-                }
-                if batch < ORPHAN_BATCH {
-                    break;
-                }
-            }
+            let (n, _) = drain_gap("conversations", rows, || {
+                self.delete_orphaned_conversations(gap, &started)
+            })
+            .await?;
+            deleted += n;
         }
 
         // Settings and dataset metadata of sessions without a row.
@@ -519,6 +562,43 @@ impl DbConnection {
             tracing::info!(deleted, "Deleted orphaned conversation-store rows");
         }
         Ok(deleted)
+    }
+
+    /// Read up to [`ORPHAN_BATCH`] conversations in `gap` of the session
+    /// index that were written before `started`, and delete each with its
+    /// messages and tool calls. One that is already gone, or that
+    /// `delete_conversation` cannot find by its key, is read but not
+    /// deleted.
+    async fn delete_orphaned_conversations(
+        &self,
+        gap: OwnerGap<'_>,
+        started: &Datetime,
+    ) -> Result<Batch, DbError> {
+        let mut result = self
+            .db()
+            .query(format!(
+                "SELECT id, session_id FROM conversations \
+                 WHERE {} AND created_at < $started LIMIT {ORPHAN_BATCH}",
+                gap.condition("session_id")
+            ))
+            .bind(gap.bounds())
+            .bind(("started", started.clone()))
+            .await?;
+        let orphans: Vec<ConversationOwner> = result.take(0)?;
+        let mut batch = Batch {
+            read: orphans.len(),
+            deleted: 0,
+        };
+        for conv in orphans {
+            // The session has no row any more; its counter goes too.
+            self.forget_session_bytes(&conv.session_id);
+            match self.delete_conversation(&key_string(&conv.id)).await {
+                Ok(()) => batch.deleted += 1,
+                Err(DbError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(batch)
     }
 
     /// Delete the messages and tool calls left for deleted conversation `id`
@@ -663,34 +743,46 @@ impl DbConnection {
     ) -> Result<usize, DbError> {
         let mut deleted = 0usize;
         for (gap, rows) in self.gaps_with_rows(table, owner, known).await? {
-            let condition = format!("{} AND {stamp} < $started", gap.condition(owner));
-            // Each batch is deleted before the next is read, so the rows that
-            // match only decrease; the gap's row count bounds the batches.
-            for _ in 0..=rows.div_ceil(ORPHAN_BATCH) {
-                let mut result = self
-                    .db()
-                    .query(format!(
-                        "SELECT VALUE id FROM {table} WHERE {condition} LIMIT {ORPHAN_BATCH}"
-                    ))
-                    .bind(gap.bounds())
-                    .bind(("started", started.clone()))
-                    .await?;
-                let ids: Vec<RecordId> = result.take(0)?;
-                let batch = ids.len();
-                if batch > 0 {
-                    self.db()
-                        .query("DELETE $ids")
-                        .bind(("ids", ids))
-                        .await?
-                        .check()?;
-                    deleted += batch;
-                }
-                if batch < ORPHAN_BATCH {
-                    break;
-                }
-            }
+            let select = format!(
+                "SELECT VALUE id FROM {table} WHERE {} AND {stamp} < $started \
+                 LIMIT {ORPHAN_BATCH}",
+                gap.condition(owner)
+            );
+            let (n, _) =
+                drain_gap(table, rows, || self.delete_selected(&select, gap, started)).await?;
+            deleted += n;
         }
         Ok(deleted)
+    }
+
+    /// Delete the rows whose ids `select` returns (a `SELECT VALUE id` on
+    /// `$lo`, `$hi` and `$started`, at most [`ORPHAN_BATCH`] rows) in one
+    /// statement.
+    async fn delete_selected(
+        &self,
+        select: &str,
+        gap: OwnerGap<'_>,
+        started: &Datetime,
+    ) -> Result<Batch, DbError> {
+        let mut result = self
+            .db()
+            .query(select)
+            .bind(gap.bounds())
+            .bind(("started", started.clone()))
+            .await?;
+        let ids: Vec<RecordId> = result.take(0)?;
+        let read = ids.len();
+        if read > 0 {
+            self.db()
+                .query("DELETE $ids")
+                .bind(("ids", ids))
+                .await?
+                .check()?;
+        }
+        Ok(Batch {
+            read,
+            deleted: read,
+        })
     }
 
     /// Clean up sessions older than the given number of days
@@ -861,6 +953,100 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].condition("o"), "o >= $lo");
         assert_eq!(all[0].bounds().lo, "");
+    }
+
+    /// What [`drain`] saw: the rows deleted, how the gap ended, the batches
+    /// read and the warnings logged.
+    #[derive(Debug)]
+    struct Drain {
+        deleted: usize,
+        end: GapEnd,
+        batches: usize,
+        warnings: Vec<String>,
+    }
+
+    /// `drain_gap` over batches that read `reads[i]` rows (a full batch
+    /// past the end of `reads`) and delete all they read, except batch
+    /// `stuck`, which deletes nothing.
+    async fn drain(rows: usize, reads: &[usize], stuck: Option<usize>) -> Drain {
+        let logs = super::super::tests::Logs::default();
+        let _default = tracing::subscriber::set_default(logs.subscriber());
+        let mut batches = 0usize;
+        let (deleted, end) = drain_gap("t", rows, || {
+            let i = batches;
+            batches += 1;
+            let read = reads.get(i).copied().unwrap_or(ORPHAN_BATCH);
+            let deleted = if stuck == Some(i) { 0 } else { read };
+            std::future::ready(Ok(Batch { read, deleted }))
+        })
+        .await
+        .unwrap();
+        let warnings = logs
+            .text()
+            .lines()
+            .filter(|line| line.contains("WARN"))
+            .map(String::from)
+            .collect();
+        Drain {
+            deleted,
+            end,
+            batches,
+            warnings,
+        }
+    }
+
+    /// A gap is read until a batch comes back short, and no further than
+    /// its count allows (one batch more than its rows fill): a gap that
+    /// still returns full batches then is left with a warning.
+    #[tokio::test]
+    async fn drain_gap_stops_at_a_short_batch_or_its_bound() {
+        let b = ORPHAN_BATCH;
+        for (rows, reads) in [
+            (2 * b + 5, vec![b, b, 5]),
+            (0, vec![0]),
+            // Exactly full batches: the empty read after them ends the gap.
+            (2 * b, vec![b, b, 0]),
+        ] {
+            let d = drain(rows, &reads, None).await;
+            let read: usize = reads.iter().sum();
+            assert_eq!(
+                (d.deleted, d.end, d.batches),
+                (read, GapEnd::Drained, reads.len())
+            );
+            assert!(d.warnings.is_empty(), "{:?}", d.warnings);
+        }
+        // Rows that keep coming (written after the count): 2 + 1 batches for
+        // a count of b + 1, 1 for an empty count, then the bound.
+        for (rows, batches) in [(b + 1, 3), (0, 1)] {
+            let d = drain(rows, &[], None).await;
+            assert_eq!(
+                (d.deleted, d.end, d.batches),
+                (batches * b, GapEnd::Bound, batches)
+            );
+            assert_eq!(d.warnings.len(), 1, "{:?}", d.warnings);
+            assert!(d.warnings[0].contains("batch bound"), "{}", d.warnings[0]);
+            assert!(d.warnings[0].contains("table=\"t\""), "{}", d.warnings[0]);
+        }
+    }
+
+    /// A full batch of which nothing could be deleted ends the gap at once,
+    /// with a warning, instead of being read again; a short one ends it as
+    /// drained.
+    #[tokio::test]
+    async fn drain_gap_stops_at_a_full_batch_it_could_not_delete() {
+        let b = ORPHAN_BATCH;
+        let d = drain(10 * b, &[b, b, b], Some(1)).await;
+        assert_eq!((d.deleted, d.end, d.batches), (b, GapEnd::Stuck, 2));
+        assert_eq!(d.warnings.len(), 1, "{:?}", d.warnings);
+        assert!(
+            d.warnings[0].contains("could not delete"),
+            "{}",
+            d.warnings[0]
+        );
+
+        let d = drain(10 * b, &[3], Some(0)).await;
+        assert_eq!((d.deleted, d.end, d.batches), (0, GapEnd::Drained, 1));
+        assert!(d.warnings.is_empty(), "{:?}", d.warnings);
     }
 
     /// An owner with a NUL byte is no bound (it could not be bound to a
