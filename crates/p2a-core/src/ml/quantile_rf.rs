@@ -626,6 +626,14 @@ fn bootstrap_sample(
     Ok((bootstrap, oob))
 }
 
+/// Refuse any quantile outside the open interval (0, 1), NaN included.
+fn check_quantiles(quantiles: &[f64]) -> Result<(), String> {
+    match quantiles.iter().find(|&&q| !(q > 0.0 && q < 1.0)) {
+        Some(q) => Err(format!("Quantile {} must be in (0, 1)", q)),
+        None => Ok(()),
+    }
+}
+
 /// Compute empirical quantile from a set of values.
 ///
 /// Uses linear interpolation between order statistics (Type 7 quantile, R default).
@@ -746,11 +754,7 @@ pub fn quantile_rf_with_names(
     if config.quantiles.is_empty() {
         return Err("Must specify at least one quantile".to_string());
     }
-    for &q in &config.quantiles {
-        if q <= 0.0 || q >= 1.0 {
-            return Err(format!("Quantile {} must be in (0, 1)", q));
-        }
-    }
+    check_quantiles(&config.quantiles)?;
     if config.n_trees == 0 {
         return Err("n_trees must be at least 1".to_string());
     }
@@ -1039,11 +1043,7 @@ pub fn predict_quantiles_at(
         ));
     }
 
-    for &q in quantiles {
-        if q <= 0.0 || q >= 1.0 {
-            return Err(format!("Quantile {} must be in (0, 1)", q));
-        }
-    }
+    check_quantiles(quantiles)?;
 
     let n_samples = x_new.nrows();
     let n_quantiles = quantiles.len();
@@ -1102,6 +1102,12 @@ pub fn predict_quantiles_with_y(
 }
 
 /// Predict at specific quantiles with access to training y values.
+///
+/// # Errors
+///
+/// When `x_new` has a different number of columns from the training data,
+/// `y_train` a different length from it, or a quantile lies outside the open
+/// interval (0, 1), NaN included.
 pub fn predict_quantiles_with_y_at(
     model: &QuantileRfResult,
     x_new: ArrayView2<f64>,
@@ -1124,11 +1130,7 @@ pub fn predict_quantiles_with_y_at(
         ));
     }
 
-    for &q in quantiles {
-        if q <= 0.0 || q >= 1.0 {
-            return Err(format!("Quantile {} must be in (0, 1)", q));
-        }
-    }
+    check_quantiles(quantiles)?;
 
     let n_samples = x_new.nrows();
     let n_quantiles = quantiles.len();
@@ -1605,6 +1607,19 @@ mod tests {
             .unwrap_err()
             .contains("Resource limit")
         );
+        // A NaN quantile used to pass `q <= 0.0 || q >= 1.0` and come back as
+        // NaN predictions.
+        for bad in [f64::NAN, 0.0, 1.0] {
+            let err = run(QuantileRfConfig {
+                quantiles: vec![0.5, bad],
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(
+                err.contains(&format!("Quantile {bad} must be in (0, 1)")),
+                "{err}"
+            );
+        }
         let mut xb = x.clone();
         xb[[1, 0]] = f64::NAN;
         assert!(
@@ -1620,6 +1635,33 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("cancelled"), "{err}");
+    }
+
+    #[test]
+    fn test_predict_quantiles_rejects_quantiles_outside_the_unit_interval() {
+        let (x, y) = noisy_regression(40, 2, 3);
+        let model = quantile_rf(
+            x.view(),
+            y.view(),
+            &QuantileRfConfig {
+                n_trees: 5,
+                min_node_size: 2,
+                seed: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let x_new = x.slice(ndarray::s![..3, ..]);
+        // A NaN quantile used to return a matrix of NaN predictions.
+        for bad in [f64::NAN, -0.1, 1.0] {
+            let want = format!("Quantile {bad} must be in (0, 1)");
+            let err =
+                predict_quantiles_with_y_at(&model, x_new, y.view(), &[0.5, bad]).unwrap_err();
+            assert!(err.contains(&want), "with_y_at {bad}: {err}");
+            let err = predict_quantiles_at(&model, x_new, &[bad]).unwrap_err();
+            assert!(err.contains(&want), "at {bad}: {err}");
+        }
+        assert!(predict_quantiles_with_y_at(&model, x_new, y.view(), &[0.5]).is_ok());
     }
 
     #[test]
