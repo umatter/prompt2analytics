@@ -15,13 +15,15 @@
 //! # Complexity
 //!
 //! k-nearest-neighbour and distance-band neighbours are built with a k-d tree in
-//! O(n log n + links) time, with the same result as an all-pairs search. The
+//! O(n log n + links) time for well-spread points, with the same result as an all-pairs
+//! search; coordinates shared by many observations do not make it quadratic. The
 //! `Neighbors::try_from_knn`, `try_from_distance` and `try_from_distance_longlat`
-//! constructors also validate their input, take a cap on the number of links, and stop
-//! when an installed [`Budget`](crate::resource::Budget) expires; the older `from_*`
-//! constructors keep their behaviour. `SpatialWeights` keeps W sparse (one index and
-//! weight list per row) and forms a dense n x n matrix only for the eigenvalues that
-//! maximum-likelihood estimation needs.
+//! constructors also validate their input and stop when an installed
+//! [`Budget`](crate::resource::Budget) expires, and the distance-band ones take a cap on
+//! the number of links; the older `from_*` constructors keep their behaviour.
+//!
+//! `SpatialWeights` keeps W sparse (one index and weight list per row) and forms a dense
+//! n x n matrix only for the eigenvalues that maximum-likelihood estimation needs.
 //!
 //! # Example
 //!
