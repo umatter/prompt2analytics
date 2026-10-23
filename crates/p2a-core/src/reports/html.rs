@@ -37,8 +37,9 @@ pub enum ReportContent {
     /// Markdown text (will be converted to HTML)
     ///
     /// Only a small subset is supported: `#`, `##` and `###` headers, `- ` and
-    /// `* ` list items, `**bold**` and fenced code blocks. All text is
-    /// HTML-escaped; raw HTML is not passed through.
+    /// `* ` list items, `**bold**` within paragraphs and list items, and
+    /// fenced code blocks. All text is HTML-escaped; raw HTML is not passed
+    /// through.
     Markdown { markdown: String },
     /// Pre-formatted code block
     Code {
@@ -434,14 +435,23 @@ fn code_language_class(lang: &str) -> Option<String> {
 ///
 /// One leading `data:image/png;base64,` prefix and all ASCII whitespace are
 /// removed. The rest must be non-empty `[A-Za-z0-9+/]` followed by at most two
-/// `=` padding characters, with nothing after the padding.
+/// `=` padding characters, with nothing after the padding, and have a length
+/// a browser decodes: a multiple of 4 when padded, and not 1 more than a
+/// multiple of 4 when unpadded.
 fn normalize_base64_png(s: &str) -> Option<String> {
+    let s = s.trim_start_matches(|c: char| c.is_ascii_whitespace());
     let s = s.strip_prefix("data:image/png;base64,").unwrap_or(s);
     let data: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     let body = data.trim_end_matches('=');
     let padding = data.len() - body.len();
+    let length_ok = if padding > 0 {
+        data.len().is_multiple_of(4)
+    } else {
+        body.len() % 4 != 1
+    };
     let valid = !body.is_empty()
         && padding <= 2
+        && length_ok
         && body
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/');
@@ -944,12 +954,38 @@ mod tests {
             html.contains("<img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"Chart\">"),
             "{html}"
         );
+        // whitespace before the prefix is ignored too, and unpadded data
+        // whose length a decoder accepts is kept
+        for (good, data) in [
+            ("  data:image/png;base64,iVBORw0KGgo=", "iVBORw0KGgo="),
+            ("\n\tiVBORw0KGgo=", "iVBORw0KGgo="),
+            ("iVBORw0KGgo", "iVBORw0KGgo"),
+            ("iVBORw0KGg", "iVBORw0KGg"),
+        ] {
+            let html = render_content(&ReportContent::Chart {
+                title: None,
+                image_base64: good.into(),
+                caption: None,
+            });
+            assert!(
+                html.contains(&format!(
+                    "<img src=\"data:image/png;base64,{data}\" alt=\"Chart\">"
+                )),
+                "{good:?} -> {html}"
+            );
+        }
         for bad in [
             "",
             "====",
             "iVBO=Rw",
             "iVBO-Rw_",
             "data:image/jpeg;base64,iVBO",
+            // length and padding disagree, or the length cannot be decoded
+            "A",
+            "iVBO=",
+            "iVBORw0KG",
+            "iVBORw0KGgo==",
+            "iVBORw0KGg=",
         ] {
             let html = render_content(&ReportContent::Chart {
                 title: None,
@@ -957,6 +993,23 @@ mod tests {
                 caption: None,
             });
             assert!(!html.contains("<img"), "{bad:?} -> {html}");
+        }
+    }
+
+    #[cfg(feature = "visualization")]
+    #[test]
+    fn test_chart_accepts_every_encoder_length() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+        for n in 1..=16u8 {
+            let bytes: Vec<u8> = (0..n).map(|i| i.wrapping_mul(37) ^ 0xa5).collect();
+            for encoded in [STANDARD.encode(&bytes), STANDARD_NO_PAD.encode(&bytes)] {
+                assert_eq!(
+                    normalize_base64_png(&encoded).as_deref(),
+                    Some(encoded.as_str()),
+                    "{n} bytes"
+                );
+            }
         }
     }
 
@@ -974,6 +1027,8 @@ mod tests {
             simple_markdown_to_html("- **x** y"),
             "<li><strong>x</strong> y</li>\n"
         );
+        // headers are escaped only, as the `Markdown` variant documents
+        assert_eq!(simple_markdown_to_html("# **T**"), "<h3>**T**</h3>\n");
         let doc = HtmlReport {
             sections: vec![ReportSection {
                 title: "S".into(),
