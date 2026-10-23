@@ -2276,4 +2276,75 @@ mod tests {
             "the setting is restored when unwinding"
         );
     }
+
+    /// The governed path (`POST /api/tools/server_stats` and every other
+    /// governed entry): in open public mode `server_stats` reports no process
+    /// memory, matching the same governor's `/health` report; in local mode
+    /// both report it.
+    #[cfg(feature = "http")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn governed_server_stats_matches_the_health_redaction() {
+        use crate::config::{ServerConfig, SessionConfig, TransportType};
+        use crate::exec::{CallOrigin, ExecConfig, ToolGovernor};
+        use crate::session::SessionManager;
+        use crate::transport::http::ContentItem;
+        use std::sync::Arc;
+
+        let local = ServerConfig {
+            transport: TransportType::Http,
+            ..Default::default()
+        };
+        let mut open = local.clone();
+        open.http.allow_unauthenticated = true;
+
+        for (cfg, open_public) in [(open, true), (local, false)] {
+            let exec = ExecConfig {
+                // This test process's RSS is not a server's: no admission limit.
+                rss_soft_limit_bytes: None,
+                audit: None,
+                ..ExecConfig::from_config(&cfg)
+            };
+            assert_eq!(exec.redact_health, open_public);
+            let sessions = Arc::new(SessionManager::new(SessionConfig {
+                ttl_minutes: 60,
+                max_sessions: 10,
+                evict_idle_minutes: None,
+            }));
+            let id = sessions.create_session(None).await.unwrap();
+            let session = sessions.get_session(&id).await.unwrap();
+            let governor = ToolGovernor::new(exec, sessions);
+
+            let result = governor
+                .call(
+                    Arc::new(AnalyticsServer::new()),
+                    session,
+                    "server_stats",
+                    serde_json::json!({"include_datasets": true, "include_history": true}),
+                    CallOrigin::Http,
+                )
+                .await
+                .expect("server_stats runs");
+            assert!(result.success);
+            let text = match result.content.first() {
+                Some(ContentItem::Text { text }) => text.clone(),
+                other => panic!("no text content: {other:?}"),
+            };
+            let health = governor.health_report(&governor.health());
+
+            if open_public {
+                assert!(health["rss_bytes"].is_null(), "{health}");
+                assert!(
+                    !text.contains("Process RSS") && !text.contains("Process Virtual"),
+                    "open public mode: {text}"
+                );
+                assert!(text.contains("Process memory: not reported"), "{text}");
+            } else if p2a_core::get_process_memory().is_some() {
+                assert!(health["rss_bytes"].is_u64(), "{health}");
+                assert!(
+                    text.contains("Process RSS: ") && text.contains("Process Virtual: "),
+                    "local mode: {text}"
+                );
+            }
+        }
+    }
 }
