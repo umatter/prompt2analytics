@@ -18,7 +18,9 @@
 //! ([`AuditLogger::new`] returns a handle to the existing writer for a path),
 //! so tool calls never do file IO on a runtime worker. The file is created
 //! with mode 0600 and rotates by size ([`RotationPolicy`], `P2A_AUDIT_MAX_MB`,
-//! default 50 MiB, `0` disables), keeping `<path>.1` to `<path>.3`. Entries
+//! default 50 MiB, `0` disables), keeping `<path>.1` to `<path>.3`. When the
+//! file is removed or moved away outside the server, the next entry starts a
+//! new file at the path and the numbered files are left as they are. Entries
 //! still queued when the process is killed are lost.
 
 use chrono::{DateTime, Utc};
@@ -419,6 +421,7 @@ impl Writer {
         };
         line.push('\n');
         let len = line.len() as u64;
+        self.reopen_if_removed();
         if let Some(max) = self.policy.max_bytes
             && self.size > 0
             && self.size.saturating_add(len) > max
@@ -437,38 +440,92 @@ impl Writer {
         }
     }
 
+    /// Opens a new file when nothing is at the log's path any more (an
+    /// operator's `rm`, or a log rotator that moved the file without
+    /// creating a new one), so later entries do not go to a file that can no
+    /// longer be found. One `lstat` per entry; a file or symlink at the path
+    /// is left as it is.
+    fn reopen_if_removed(&mut self) {
+        let gone = std::fs::symlink_metadata(&self.path)
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        if gone {
+            // What is buffered belongs to the file it was written to.
+            self.flush();
+            if self.reopen() {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    "the audit log was removed or moved away; writing to a new file at its path"
+                );
+            }
+        }
+    }
+
+    /// Makes a newly opened `self.path` the file at hand. On failure the
+    /// error is counted, writing continues in the file at hand and the size
+    /// count restarts, so the next rotation waits for another `max_bytes`.
+    fn reopen(&mut self) -> bool {
+        match open_log(&self.path) {
+            Ok(file) => {
+                self.size = file.metadata().map_or(0, |m| m.len());
+                self.file = BufWriter::new(file);
+                true
+            }
+            Err(e) => {
+                self.io_error(&e);
+                self.size = 0;
+                false
+            }
+        }
+    }
+
     /// `<path>.<keep>` is removed, `.k` becomes `.k+1`, the current file
-    /// becomes `.1` and a new file is opened. A failed rename or open is
-    /// logged and writing continues in the file at hand, so no entry is
-    /// dropped.
+    /// becomes `.1` and a new file is opened. When nothing is at the path
+    /// any more (the file was removed or moved away outside the server), the
+    /// numbered files are left as they are and a new file is opened. Any
+    /// other failure is logged and writing continues in the file at hand;
+    /// the size count restarts, so the next attempt waits for another
+    /// `max_bytes` instead of shifting the numbered files again on every
+    /// entry. No entry is dropped.
     fn rotate(&mut self) {
+        use std::io::ErrorKind::NotFound;
         self.flush();
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == NotFound => {
+                self.reopen();
+                return;
+            }
+            Err(e) => {
+                self.io_error(&e);
+                self.size = 0;
+                return;
+            }
+        }
         let keep = self.policy.keep;
         let moved = if keep == 0 {
             std::fs::remove_file(&self.path)
         } else {
             match std::fs::remove_file(numbered(&self.path, keep)) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => self.io_error(&e),
+                Err(e) if e.kind() != NotFound => self.io_error(&e),
                 _ => {}
             }
             for k in (1..keep).rev() {
                 match std::fs::rename(numbered(&self.path, k), numbered(&self.path, k + 1)) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => self.io_error(&e),
+                    Err(e) if e.kind() != NotFound => self.io_error(&e),
                     _ => {}
                 }
             }
             std::fs::rename(&self.path, numbered(&self.path, 1))
         };
-        if let Err(e) = moved {
-            self.io_error(&e);
-            return;
-        }
-        match open_log(&self.path) {
-            Ok(file) => {
-                self.file = BufWriter::new(file);
+        match moved {
+            Err(e) if e.kind() != NotFound => {
+                self.io_error(&e);
                 self.size = 0;
             }
-            Err(e) => self.io_error(&e),
+            // Moved, or gone since the check: a new file either way.
+            _ => {
+                self.reopen();
+            }
         }
     }
 
@@ -1021,6 +1078,117 @@ mod tests {
             ids.windows(2).all(|w| w[1] == w[0] + 1),
             "not consecutive: {ids:?}"
         );
+    }
+
+    /// The numbers of the `s<i>` session ids in `path`, in order.
+    fn ids_in(path: &Path) -> Vec<usize> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                v["session_id"].as_str().unwrap()[1..].parse().unwrap()
+            })
+            .collect()
+    }
+
+    fn writer_at(path: &Path, policy: RotationPolicy) -> Writer {
+        Writer {
+            path: path.to_path_buf(),
+            file: BufWriter::new(open_log(path).unwrap()),
+            size: 0,
+            policy,
+            io_errors: 0,
+        }
+    }
+
+    #[test]
+    fn rotation_leaves_the_numbered_files_when_the_log_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        for k in 1..=3 {
+            std::fs::write(numbered(&path, k), format!("old {k}\n")).unwrap();
+        }
+        let policy = RotationPolicy {
+            max_bytes: Some(1 << 20),
+            keep: 3,
+        };
+        let mut writer = writer_at(&path, policy);
+        writer.write_entry(&entry(0));
+        writer.flush();
+        // Removed (or moved away) outside the server when a rotation is due.
+        std::fs::remove_file(&path).unwrap();
+        writer.rotate();
+        for i in 1..4 {
+            writer.write_entry(&entry(i));
+        }
+        writer.flush();
+        for k in 1..=3 {
+            assert_eq!(
+                std::fs::read_to_string(numbered(&path, k)).unwrap(),
+                format!("old {k}\n"),
+                "{}.{k}",
+                path.display()
+            );
+        }
+        assert_eq!(ids_in(&path), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_failing_rotation_waits_for_another_max_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        // `.1` is a non-empty directory: it can be neither removed nor
+        // replaced, so every rotation fails (and not with NotFound).
+        std::fs::create_dir(numbered(&path, 1)).unwrap();
+        std::fs::write(numbered(&path, 1).join("keep"), "x").unwrap();
+        let line = serde_json::to_string(&entry(0)).unwrap().len() as u64 + 1;
+        let policy = RotationPolicy {
+            max_bytes: Some(3 * line + line / 2),
+            keep: 1,
+        };
+        let mut writer = writer_at(&path, policy);
+        for i in 0..10 {
+            writer.write_entry(&entry(i));
+        }
+        writer.flush();
+        // Due at entries 3, 6 and 9 (two failed steps each), not at every
+        // entry from 3 on.
+        assert_eq!(writer.io_errors, 6);
+        assert_eq!(ids_in(&path), (0..10).collect::<Vec<_>>());
+        assert!(numbered(&path, 1).join("keep").exists());
+    }
+
+    #[tokio::test]
+    async fn a_removed_log_is_recreated_and_the_old_files_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let logger = AuditLogger::with_rotation(
+            &cfg_in(&dir),
+            RotationPolicy {
+                max_bytes: Some(4096),
+                keep: 3,
+            },
+        )
+        .unwrap();
+        for i in 0..200 {
+            logger.log(entry(i)).await;
+        }
+        logger.flush().await;
+        let rotated: Vec<String> = (1..=3)
+            .map(|k| std::fs::read_to_string(numbered(&path, k)).unwrap())
+            .collect();
+
+        std::fs::remove_file(&path).unwrap();
+        for i in 200..203 {
+            logger.log(entry(i)).await;
+        }
+        logger.flush().await;
+
+        for (k, text) in (1..=3).zip(&rotated) {
+            assert_eq!(&std::fs::read_to_string(numbered(&path, k)).unwrap(), text);
+        }
+        assert_eq!(ids_in(&path), [200, 201, 202]);
     }
 
     #[tokio::test]
