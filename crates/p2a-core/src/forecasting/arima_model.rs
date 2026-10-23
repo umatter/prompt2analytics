@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::errors::EconError;
+use crate::resource::checkpoint;
 
 fn size_overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
@@ -103,7 +104,11 @@ pub struct ArimaForecastResult {
 /// * `q` - MA order (number of moving average terms)
 ///
 /// # Returns
-/// `ArimaResult` containing fitted model parameters.
+/// `ArimaResult` containing fitted model parameters, or
+/// [`EconError::Cancelled`] when the budget installed with
+/// [`crate::resource::with_budget`] is already cancelled or past its deadline
+/// when the fit would start. The fit itself is the `arima` crate's L-BFGS
+/// loop, which never reaches a checkpoint: once started it runs to the end.
 pub fn run_arima(
     dataset: &Dataset,
     column: &str,
@@ -139,6 +144,10 @@ pub fn run_arima(
             q
         ));
     }
+
+    // `estimate::fit` cannot be stopped once it runs (its optimiser loop is in
+    // the `arima` crate), so do not start it on a budget that has already run out.
+    checkpoint()?;
 
     // Fit ARIMA model using conditional sum of squares
     // The fit function handles differencing internally via the d parameter
@@ -503,6 +512,34 @@ mod tests {
                 .len(),
             12
         );
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn run_arima_does_not_start_the_fit_on_a_spent_budget() {
+        // `arima::estimate::fit` runs a third-party optimiser that never looks
+        // at the budget. Before the fix the fit started whatever the budget
+        // said and ran to completion (returning Ok).
+        let y = generate_ar1_data(500, 0.6, 11);
+        let dataset = Dataset::new(df! { "y" => &y }.unwrap());
+        let is_cancelled = |e: &anyhow::Error| {
+            matches!(e.downcast_ref::<EconError>(), Some(EconError::Cancelled(_)))
+        };
+        let err = cancelled(|| run_arima(&dataset, "y", 1, 0, 1)).unwrap_err();
+        assert!(is_cancelled(&err), "{err}");
+        let err = cancelled(|| forecast_arima(&dataset, "y", 1, 0, 1, 5)).unwrap_err();
+        assert!(is_cancelled(&err), "{err}");
+        // A budget that is still live leaves the fit alone.
+        let live = crate::resource::Budget::new(
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(3600)),
+            crate::resource::CancelToken::new(),
+        );
+        assert!(crate::resource::with_budget(live, || run_arima(&dataset, "y", 1, 0, 1)).is_ok());
     }
 
     #[test]
