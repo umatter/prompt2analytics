@@ -4,10 +4,12 @@
 //! investigating tool use an LLM was steered into). Each entry records:
 //! - the timestamp (ISO 8601) and the session id;
 //! - the origin of the call (`http`, `llm_tool`, `websocket` or `stdio`);
-//! - the tool name and its arguments, sanitised by [`sanitize_arguments`]:
-//!   keys that carry data values ([`REDACT_KEYS`], such as `csv_content` or
-//!   `filter_value`) are replaced by their size, other strings are cut to 200
-//!   bytes, arrays to 20 elements and nesting to 4 levels;
+//! - the tool name, cut to 200 bytes, and its arguments, sanitised by
+//!   [`sanitize_arguments`]: keys that carry data values ([`REDACT_KEYS`],
+//!   such as `csv_content` or `filter_value`) are replaced by their size,
+//!   other strings and object keys are cut to 200 bytes, arrays to 20
+//!   elements, objects to 64 keys, nesting to 4 levels and the whole to about
+//!   16 KiB, so an entry stays small whatever the request carried;
 //! - whether it succeeded, its outcome (`ok`, `tool_error`, `cancelled` or a
 //!   refusal code such as `limit_exceeded`) and its duration;
 //! - the size of its result ([`ResultSummary`]), never the result itself.
@@ -58,8 +60,14 @@ pub const REDACT_KEYS: &[&str] = &[
 const MAX_STRING_BYTES: usize = 200;
 /// Array elements kept in an entry.
 const MAX_ARRAY_ITEMS: usize = 20;
+/// Keys kept per object, above the parameter count of the widest tool
+/// request (a test checks this).
+const MAX_OBJECT_KEYS: usize = 64;
 /// Deepest nesting kept; the top-level object is level 1.
 const MAX_DEPTH: usize = 4;
+/// Bytes the sanitised arguments may take in an entry's JSON, apart from
+/// the markers that count what was left out once it is spent.
+const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
 
 /// The size of a tool result: content items, text bytes and image data
 /// bytes. The audit log records this instead of any output.
@@ -118,7 +126,8 @@ pub struct AuditEntry {
     pub session_id: String,
     /// Where the call came from: `http`, `llm_tool`, `websocket` or `stdio`
     pub origin: &'static str,
-    /// Name of the tool invoked
+    /// Name of the tool invoked, cut to 200 bytes like an argument string
+    /// (an unknown tool's name is whatever the caller sent)
     pub tool_name: String,
     /// Sanitised arguments (see [`sanitize_arguments`])
     pub arguments: Value,
@@ -150,7 +159,7 @@ impl AuditEntry {
             timestamp: Utc::now(),
             session_id: session_id.to_string(),
             origin,
-            tool_name: tool_name.to_string(),
+            tool_name: truncate(tool_name),
             arguments: sanitized_arguments,
             success: outcome == "ok",
             outcome,
@@ -445,55 +454,93 @@ impl Writer {
 }
 
 /// Sanitise tool arguments for the audit log: [`REDACT_KEYS`] are replaced
-/// by their size at any depth; other strings longer than 200 bytes are cut
-/// at a char boundary and marked with their length; arrays keep their first
-/// 20 elements plus a `"[+n more]"` marker; objects and arrays below level 4
-/// (the top level is level 1) become `"[nested]"`. Numbers, booleans and
-/// null pass through. SQL text and regex patterns are kept (truncated): they
-/// are what an operator needs to investigate injected tool use.
+/// by their size at any depth; other strings and object keys longer than 200
+/// bytes are cut at a char boundary and marked with their length; arrays
+/// keep their first 20 elements plus a `"[+n more]"` marker, objects their
+/// first 64 keys plus a `"[+n more keys]": null` entry; objects and arrays
+/// below level 4 (the top level is level 1) become `"[nested]"`. Numbers,
+/// booleans and null pass through. The result takes at most 16 KiB as JSON,
+/// apart from the markers: once that is spent, the remaining elements are
+/// left out and counted by the same markers. SQL text and regex patterns are
+/// kept (truncated): they are what an operator needs to investigate injected
+/// tool use.
 pub fn sanitize_arguments(args: &Value) -> Value {
-    sanitize_value(args, 1)
+    let mut budget = MAX_ARGUMENT_BYTES;
+    // A top-level value always fits: a container needs 3 bytes, a scalar at
+    // most a few KiB.
+    sanitize_value(args, 1, &mut budget).unwrap_or(Value::Null)
 }
 
-fn sanitize_value(value: &Value, level: usize) -> Value {
+/// The sanitised `value`, charged to `budget` (bytes of JSON left), or
+/// `None`, with `budget` unchanged, when it does not fit.
+fn sanitize_value(value: &Value, level: usize, budget: &mut usize) -> Option<Value> {
     match value {
-        Value::Object(map) => {
-            if level > MAX_DEPTH {
-                return Value::String("[nested]".to_string());
+        Value::Object(map) if level <= MAX_DEPTH => {
+            // Braces and a separator.
+            *budget = budget.checked_sub(3)?;
+            let mut kept = serde_json::Map::new();
+            let mut taken = 0;
+            for (key, v) in map.iter().take(MAX_OBJECT_KEYS) {
+                let name = truncate(key);
+                // The key, its colon, then the value; nothing is charged
+                // unless both fit.
+                let Some(mut left) = budget.checked_sub(json_string_len(&name) + 1) else {
+                    break;
+                };
+                let v = if REDACT_KEYS.contains(&key.as_str()) {
+                    scalar(redact(v), &mut left)
+                } else {
+                    sanitize_value(v, level + 1, &mut left)
+                };
+                let Some(v) = v else {
+                    break;
+                };
+                *budget = left;
+                kept.insert(name, v);
+                taken += 1;
             }
-            let sanitized = map
-                .iter()
-                .map(|(key, v)| {
-                    let v = if REDACT_KEYS.contains(&key.as_str()) {
-                        redact(v)
-                    } else {
-                        sanitize_value(v, level + 1)
-                    };
-                    (key.clone(), v)
-                })
-                .collect();
-            Value::Object(sanitized)
+            if taken < map.len() {
+                let marker = format!("[+{} more keys]", map.len() - taken);
+                *budget = budget.saturating_sub(json_string_len(&marker) + 6);
+                kept.insert(marker, Value::Null);
+            }
+            Some(Value::Object(kept))
         }
-        Value::Array(items) => {
-            if level > MAX_DEPTH {
-                return Value::String("[nested]".to_string());
+        Value::Array(items) if level <= MAX_DEPTH => {
+            *budget = budget.checked_sub(3)?;
+            let mut kept = Vec::new();
+            for v in items.iter().take(MAX_ARRAY_ITEMS) {
+                let Some(v) = sanitize_value(v, level + 1, budget) else {
+                    break;
+                };
+                kept.push(v);
             }
-            let mut kept: Vec<Value> = items
-                .iter()
-                .take(MAX_ARRAY_ITEMS)
-                .map(|v| sanitize_value(v, level + 1))
-                .collect();
-            if items.len() > MAX_ARRAY_ITEMS {
-                kept.push(Value::String(format!(
-                    "[+{} more]",
-                    items.len() - MAX_ARRAY_ITEMS
-                )));
+            if kept.len() < items.len() {
+                let marker = format!("[+{} more]", items.len() - kept.len());
+                *budget = budget.saturating_sub(json_string_len(&marker) + 1);
+                kept.push(Value::String(marker));
             }
-            Value::Array(kept)
+            Some(Value::Array(kept))
         }
-        Value::String(s) => Value::String(truncate(s)),
-        other => other.clone(),
+        Value::Object(_) | Value::Array(_) => scalar(Value::String("[nested]".to_string()), budget),
+        Value::String(s) => scalar(Value::String(truncate(s)), budget),
+        other => scalar(other.clone(), budget),
     }
+}
+
+/// `value` (a string, number, boolean or null) when it and a separator fit
+/// in `budget`, which is charged for them.
+fn scalar(value: Value, budget: &mut usize) -> Option<Value> {
+    let len = match &value {
+        Value::String(s) => json_string_len(s),
+        Value::Number(n) => n.to_string().len(),
+        Value::Bool(true) | Value::Null => 4,
+        Value::Bool(false) => 5,
+        // Not reached: containers are charged element by element.
+        container => serde_json::to_string(container).map_or(0, |s| s.len()),
+    };
+    *budget = budget.checked_sub(len + 1)?;
+    Some(value)
 }
 
 /// The size-only stand-in for a redacted value.
@@ -513,6 +560,20 @@ fn truncate(s: &str) -> String {
     }
     let head = &s[..floor_char_boundary(s, MAX_STRING_BYTES)];
     format!("{head}...[truncated {} bytes]", s.len())
+}
+
+/// Bytes `s` takes as a JSON string as serde_json writes it: the quotes, a
+/// two-byte escape for `"`, `\` and `\b \t \n \f \r`, `\u00XX` for the other
+/// control characters, every other byte as it is.
+fn json_string_len(s: &str) -> usize {
+    2 + s
+        .bytes()
+        .map(|b| match b {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            0..=0x1f => 6,
+            _ => 1,
+        })
+        .sum::<usize>()
 }
 
 /// The largest char boundary of `s` at or below `max` (`str::floor_char_boundary`
@@ -610,6 +671,140 @@ mod tests {
         assert_eq!(
             sanitize_arguments(&Value::String(long)),
             format!("{}...[truncated 300 bytes]", "q".repeat(200))
+        );
+    }
+
+    #[test]
+    fn entry_cuts_a_long_tool_name_on_a_char_boundary() {
+        // An unknown tool's name is the caller's string. '€' (3 bytes)
+        // spans bytes 199..202; 205 bytes in all.
+        let name = format!("{}€{}", "t".repeat(199), "u".repeat(3));
+        let e = AuditEntry::new(
+            "stdio",
+            "stdio",
+            &name,
+            Value::Null,
+            "unknown_tool",
+            0,
+            ResultSummary::default(),
+        );
+        assert_eq!(
+            e.tool_name,
+            format!("{}...[truncated 205 bytes]", "t".repeat(199))
+        );
+        let short = AuditEntry::new(
+            "s",
+            "http",
+            "head_dataset",
+            Value::Null,
+            "ok",
+            0,
+            ResultSummary::default(),
+        );
+        assert_eq!(short.tool_name, "head_dataset");
+    }
+
+    #[test]
+    fn sanitize_bounds_object_keys() {
+        let wide: serde_json::Map<String, Value> = (0..1000)
+            .map(|i| (format!("k{i:04}"), Value::from(i)))
+            .collect();
+        let long_key = "K".repeat(10_000);
+        let mut args = serde_json::Map::new();
+        args.insert("wide".to_string(), Value::Object(wide));
+        args.insert(long_key, Value::from(1));
+        let s = sanitize_arguments(&Value::Object(args));
+
+        let kept = s["wide"].as_object().unwrap();
+        assert_eq!(kept.len(), MAX_OBJECT_KEYS + 1);
+        let marker = format!("[+{} more keys]", 1000 - MAX_OBJECT_KEYS);
+        assert_eq!(kept.get(&marker), Some(&Value::Null));
+        assert_eq!(kept["k0000"], 0);
+        // The 10 KB key is cut like a value and keeps its value.
+        let cut = format!("{}...[truncated 10000 bytes]", "K".repeat(200));
+        assert_eq!(s[&cut], 1, "{s}");
+        assert!(s.as_object().unwrap().keys().all(|k| k.len() < 250));
+    }
+
+    #[test]
+    fn sanitized_arguments_stay_within_the_byte_budget() {
+        // 64 x 64 objects of 200-byte keys and values: about 1.7 MB as
+        // JSON, 4.9 MB for the control-character values (6 bytes each).
+        for leaf in ["v".repeat(200), "\u{1}".repeat(200)] {
+            let inner: serde_json::Map<String, Value> = (0..64)
+                .map(|i| (format!("{i:0>200}"), Value::String(leaf.clone())))
+                .collect();
+            let outer: serde_json::Map<String, Value> = (0..64)
+                .map(|i| (format!("o{i:02}"), Value::Object(inner.clone())))
+                .collect();
+            let input = Value::Object(outer);
+            assert!(input.to_string().len() > 1_000_000);
+            let s = sanitize_arguments(&input);
+            let len = s.to_string().len();
+            assert!(
+                len <= MAX_ARGUMENT_BYTES + 256,
+                "{len} bytes of sanitised arguments"
+            );
+            // What was left out is counted, at the top level too.
+            let top = s.as_object().unwrap();
+            assert!(
+                top.keys()
+                    .any(|k| k.starts_with("[+") && k.ends_with(" more keys]")),
+                "{:?}",
+                top.keys().collect::<Vec<_>>()
+            );
+            assert!(top.contains_key("o00"));
+        }
+        // Wide arrays nested to the depth limit are bounded the same way.
+        let mut v = Value::String("a".repeat(200));
+        for _ in 0..4 {
+            v = Value::Array(vec![v; 20]);
+        }
+        let len = sanitize_arguments(&serde_json::json!({ "x": v }))
+            .to_string()
+            .len();
+        assert!(len <= MAX_ARGUMENT_BYTES + 256, "{len} bytes");
+    }
+
+    #[test]
+    fn json_string_len_counts_quotes_and_escapes() {
+        for s in [
+            "",
+            "abc",
+            "é│",
+            "a\"b\\c",
+            "\n\r\t\u{8}\u{c}",
+            "\u{0}\u{1f}\u{7f}",
+        ] {
+            assert_eq!(
+                json_string_len(s),
+                serde_json::to_string(s).unwrap().len(),
+                "{s:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn key_cap_keeps_every_parameter_of_a_tool_request() {
+        let widest = crate::server::AnalyticsServer::new()
+            .list_tools()
+            .into_iter()
+            .map(|t| {
+                let n = t
+                    .input_schema
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .map_or(0, serde_json::Map::len);
+                (n, t.name)
+            })
+            .max()
+            .unwrap();
+        assert!(
+            widest.0 <= MAX_OBJECT_KEYS,
+            "{} has {} parameters, above MAX_OBJECT_KEYS",
+            widest.1,
+            widest.0
         );
     }
 
