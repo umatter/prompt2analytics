@@ -51,8 +51,6 @@ const DISPLAY: &str = "display threshold; it filters the reported weights";
 const ARRAY_VALUE: &str = "value of a caller array; the array's length rule bounds the work";
 const COEFFICIENT: &str = "coefficient value; the array's length rule bounds the work";
 const CUT_HEIGHT: &str = "cut height; it selects where to cut the built tree";
-const BASS: &str = "bass tone of the super smoother; core clamps the span it gives to the row \
-                    count";
 const MIXING: &str = "elastic-net mixing weight; it changes the penalty, not the number of fits";
 const PENALTY_VALUE: &str = "penalty of one fit; the lambda length rule bounds their number";
 const DISTANCE_BAND: &str = "distance band; spatial_links bounds the links it produces";
@@ -505,7 +503,14 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("power_prop_test", "power", Exempt(TARGET_POWER)),
         p("power_t_test", "n", Max(PowerSampleSize)),
         p("power_t_test", "delta", Exempt(EFFECT)),
-        p("power_t_test", "sd", Exempt(EFFECT)),
+        p(
+            "power_t_test",
+            "sd",
+            Exempt(
+                "standard deviation; it scales the standard error and the delta search bracket, \
+                 which the solver bisects in at most 100 steps",
+            ),
+        ),
         p("power_t_test", "power", Exempt(TARGET_POWER)),
         p(
             "preview_cleaning",
@@ -592,7 +597,13 @@ pub static PARAM_RULES: &[ParamRule] = {
             "spar",
             Exempt("smoothing parameter; it sets the penalty of one fit"),
         ),
-        p("regression_supsmu", "bass", Exempt(BASS)),
+        p(
+            "regression_supsmu",
+            "bass",
+            Exempt(
+                "bass tone of the super smoother; core clamps the span it gives to the row count",
+            ),
+        ),
         p(
             "regression_supsmu",
             "span",
