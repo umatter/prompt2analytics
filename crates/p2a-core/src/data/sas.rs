@@ -365,9 +365,11 @@ impl<R: Read + Seek> SasReader<R> {
 
     /// Check the row and column layout against the page geometry: the row
     /// length is between 1 and the page size, the row count fits the pages,
-    /// and every column lies inside the row without overlapping the others.
-    /// A valid file satisfies all of these (columns are disjoint byte ranges
-    /// of a row), and together they bound the cells read by the file size.
+    /// every column has a nonzero width and lies inside the row, and the
+    /// column widths add up to at most the row length. So the bytes read per
+    /// row are bounded by the row length, and the cells read by the file size.
+    /// A valid file satisfies all of these. Columns are not checked for
+    /// disjointness: two overlapping columns read the same bytes of the row.
     fn validate_layout(&self) -> Result<(), SasError> {
         let row_length = self.row_length;
         if row_length == 0 {
