@@ -119,7 +119,7 @@ pub(crate) const MAX_REMEMBERED_DELETES: usize = 100_000;
 type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
 
 /// One call's turn at changing a conversation's rows (a conversation delete
-/// or clear, or a message add:
+/// or clear, a message add or content update, or a title or archive change:
 /// [`conversation_turn`](DbConnection::conversation_turn)), or at creating a
 /// conversation in a session ([`session_turn`](DbConnection::session_turn));
 /// the next call's turn starts when it is dropped.
@@ -128,17 +128,23 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// the store: the in-memory engine hands both the same rows (neither
 /// fails), so each would release their bytes from the `session_db_bytes`
 /// counter, and RocksDB fails one of them with a write conflict. Taking
-/// turns makes the later call find nothing instead. A message add holds the
-/// turn from its `messages_per_conversation` check until the message is
-/// written, and a conversation creation holds its session's turn from the
+/// turns makes the later call find nothing instead. Every write of an
+/// existing conversation's row takes its turn, so the counter update after a
+/// message add or content update never loses a write conflict to another
+/// write of that row in this process. A message add holds the turn from its
+/// `messages_per_conversation` check until the message is written, and a
+/// conversation creation holds its session's turn from the
 /// `conversations_per_session` check until the row is written, so concurrent
 /// writes cannot pass a cap together. Both checks count the rows in the
 /// store under the turn (`count_messages`, `count_conversations`): the
 /// conversation's stored `message_count` is a display counter, recounted
 /// under the turn after each message add or content update, and never what
-/// a cap is checked against. The byte counter is per process, and so are
-/// the turns. An entry leaves the map with its last holder or waiter, also
-/// when a waiting call is cancelled.
+/// a cap is checked against. A message add, a content update and a title
+/// change count their bytes against `session_db_bytes` and write them in the
+/// conversation's turn, so a delete or clear never runs between the count
+/// and the write. The byte counter is per process, and so are the turns. An
+/// entry leaves the map with its last holder or waiter, also when a waiting
+/// call is cancelled.
 pub(crate) struct StoreTurn {
     turns: StoreTurns,
     key: String,
@@ -465,6 +471,17 @@ impl DbConnection {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len()
+    }
+
+    /// The calls holding or waiting for the store turn `key` (a conversation
+    /// id, or `session:<id>`); 0 when none is.
+    #[cfg(test)]
+    pub(crate) fn store_turn_users(&self, key: &str) -> usize {
+        self.store_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .map_or(0, |(_, users)| *users)
     }
 
     /// Whether the `session_db_bytes` budget is set.

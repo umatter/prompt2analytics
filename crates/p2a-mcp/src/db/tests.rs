@@ -645,7 +645,8 @@ async fn the_message_cap_counts_the_stored_messages() {
 
 /// A failed write of a conversation's counters is reported: a message add,
 /// a content update and a clear do not answer Ok when the conversation row
-/// cannot be updated.
+/// cannot be updated. The error comes after the message row was written, so
+/// the failed add's message is stored.
 #[tokio::test]
 async fn a_failed_counter_write_is_reported() {
     let db = test_db().await;
@@ -663,6 +664,7 @@ async fn a_failed_counter_write_is_reported() {
         .unwrap();
 
     assert!(db.add_message(&id, "user", "more").await.is_err());
+    assert_eq!(db.count_messages(&id).await.unwrap(), 2);
     assert!(
         db.update_message_content(&kept.id_string(), "changed")
             .await
@@ -672,9 +674,21 @@ async fn a_failed_counter_write_is_reported() {
     assert_eq!(db.store_turns_in_use(), 0);
 }
 
-/// A content update recounts the conversation in its turn: while another
-/// call holds the turn, the message row changes but the conversation's
-/// counters wait.
+/// Whether `n` calls hold or wait for store turn `key`, polled a bounded
+/// number of times (no timing assertion: a slow machine only polls longer).
+async fn turn_has_users(db: &DbConnection, key: &str, n: usize) -> bool {
+    for _ in 0..500 {
+        if db.store_turn_users(key) == n {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// A content update runs in the conversation's turn: while another call
+/// holds the turn, the update waits for it with neither the message row nor
+/// the conversation's counters changed, and both change once it has run.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_content_update_recounts_in_the_conversations_turn() {
     let db = test_db().await;
@@ -690,24 +704,92 @@ async fn a_content_update_recounts_in_the_conversations_turn() {
         let (db, message_id) = (db.clone(), message_id.clone());
         async move { db.update_message_content(&message_id, "changed").await }
     });
-    // Poll until the message row has changed (bounded; no timing assertion).
-    let mut changed = false;
-    for _ in 0..500 {
-        if db.get_message(&message_id).await.unwrap().content == "changed" {
-            changed = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(changed);
+    // The update is waiting for the turn held here.
+    assert!(turn_has_users(&db, &id, 2).await);
+    assert_eq!(db.get_message(&message_id).await.unwrap().content, "kept");
     let conv = db.get_conversation(&id).await.unwrap();
     assert_eq!(conv.last_message_preview.as_deref(), Some("kept"));
 
     drop(turn);
     update.await.unwrap().unwrap();
+    assert_eq!(
+        db.get_message(&message_id).await.unwrap().content,
+        "changed"
+    );
     let conv = db.get_conversation(&id).await.unwrap();
     assert_eq!(conv.last_message_preview.as_deref(), Some("changed"));
     assert_eq!(conv.message_count, 1);
+}
+
+/// With the byte budget, a content update whose message went before its
+/// turn (a clear that ran between the update's read and its turn) is
+/// `NotFound` and counts no bytes for the write that found no row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_content_update_after_a_clear_counts_no_bytes() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1000),
+        ..Default::default()
+    })
+    .await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    // The server's empty placeholder for its answer.
+    let message_id = db
+        .add_message(&id, "assistant", "")
+        .await
+        .unwrap()
+        .id_string();
+    assert_counter_matches_store(&db, "s1").await; // seeded
+
+    let turn = db.conversation_turn(&id).await;
+    let update = tokio::spawn({
+        let (db, message_id) = (db.clone(), message_id.clone());
+        async move {
+            db.update_message_content(&message_id, "a final answer")
+                .await
+        }
+    });
+    assert!(turn_has_users(&db, &id, 2).await);
+    // The clear's delete, in the turn the update waits for (the placeholder
+    // held no bytes, so there is nothing to release).
+    let _: Option<Message> = db
+        .db()
+        .delete(("messages", message_id.as_str()))
+        .await
+        .unwrap();
+    drop(turn);
+
+    assert!(matches!(update.await.unwrap(), Err(DbError::NotFound(_))));
+    assert_counter_matches_store(&db, "s1").await;
+}
+
+/// A title change and an archive take the conversation's turn, like every
+/// write of its row: while another call holds it, both wait with the row
+/// unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn title_and_archive_writes_take_the_conversations_turn() {
+    let db = test_db().await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+
+    let turn = db.conversation_turn(&id).await;
+    let title = tokio::spawn({
+        let (db, id) = (db.clone(), id.clone());
+        async move { db.update_conversation_title(&id, "renamed").await }
+    });
+    assert!(turn_has_users(&db, &id, 2).await);
+    let archive = tokio::spawn({
+        let (db, id) = (db.clone(), id.clone());
+        async move { db.set_conversation_archived(&id, true).await }
+    });
+    assert!(turn_has_users(&db, &id, 3).await);
+    let conv = db.get_conversation(&id).await.unwrap();
+    assert_eq!((conv.title.as_str(), conv.is_archived), ("t", false));
+
+    drop(turn);
+    title.await.unwrap().unwrap();
+    archive.await.unwrap().unwrap();
+    let conv = db.get_conversation(&id).await.unwrap();
+    assert_eq!((conv.title.as_str(), conv.is_archived), ("renamed", true));
+    assert_eq!(db.store_turns_in_use(), 0);
 }
 
 /// Store a message for `conversation_id` directly, without the existence

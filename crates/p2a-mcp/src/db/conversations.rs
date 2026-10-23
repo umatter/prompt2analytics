@@ -85,12 +85,17 @@ impl DbConnection {
     /// Update a conversation's title. A title longer than `message_bytes` is
     /// `TooLarge`; with a `session_db_bytes` budget, the bytes the new title
     /// adds count against it (`QuotaExceeded` when they would pass it).
+    /// Runs in the conversation's turn, like every write of its row.
     pub async fn update_conversation_title(
         &self,
         id: &str,
         title: &str,
     ) -> Result<Conversation, DbError> {
         self.check_message_bytes("title", "title", title.len())?;
+        // In the turn, the write cannot conflict with a message add's
+        // counter update, and a delete cannot run between the bytes and the
+        // write.
+        let _turn = self.conversation_turn(id).await;
         if self.tracks_session_bytes() {
             let conv = self.get_conversation(id).await?;
             let added = title.len().saturating_sub(conv.title.len());
@@ -109,12 +114,15 @@ impl DbConnection {
         updated.ok_or_else(|| DbError::NotFound(format!("Conversation not found: {}", id)))
     }
 
-    /// Archive or unarchive a conversation
+    /// Archive or unarchive a conversation, in its turn (like every write of
+    /// its row, so that it cannot conflict with a message add's counter
+    /// update).
     pub async fn set_conversation_archived(
         &self,
         id: &str,
         is_archived: bool,
     ) -> Result<Conversation, DbError> {
+        let _turn = self.conversation_turn(id).await;
         let id_owned = id.to_string();
         let mut result = self
             .db()
@@ -329,6 +337,10 @@ impl DbConnection {
     /// longer than `message_bytes`, and `QuotaExceeded` when the conversation
     /// is full or the content would pass the session's `session_db_bytes`.
     /// Adds, deletes and clears of one conversation take turns.
+    ///
+    /// An error from the conversation's counter and preview update comes
+    /// after the message row was written: the message is stored, and only
+    /// the conversation's `message_count` and preview are stale.
     pub async fn add_message(
         &self,
         conversation_id: &str,
@@ -373,6 +385,10 @@ impl DbConnection {
 
     /// Add a full message object, with the checks of
     /// [`add_message`](Self::add_message).
+    ///
+    /// An error from the conversation's counter and preview update comes
+    /// after the message row was written: the message is stored, and only
+    /// the conversation's `message_count` and preview are stale.
     pub async fn save_message(&self, message: &Message) -> Result<Message, DbError> {
         let _turn = self.conversation_turn(&message.conversation_id).await;
         self.admit_message(&message.conversation_id, message.content.len())
@@ -407,15 +423,29 @@ impl DbConnection {
     /// answer). The content is never refused for size: it is cut at a char
     /// boundary to `message_bytes` and, with a `session_db_bytes` budget, to
     /// the bytes the session has left (possibly to the empty string).
+    ///
+    /// The bytes, the update and the conversation's recount run in the
+    /// conversation's turn, so a delete or clear of the conversation runs
+    /// before them (the message is `NotFound` and nothing is counted) or
+    /// after them (it releases the new content's bytes, and a clear resets
+    /// the preview).
+    /// An error from the conversation's counter and preview update comes
+    /// after the message row was written: the new content is stored, and
+    /// only the conversation's `message_count` and preview are stale.
     pub async fn update_message_content(
         &self,
         message_id: &str,
         content: &str,
     ) -> Result<Message, DbError> {
         let mut content = self.truncate_server_text(content);
+        let conversation_id = self.get_message(message_id).await?.conversation_id;
+        let _turn = self.conversation_turn(&conversation_id).await;
         if self.tracks_session_bytes() {
-            let message = self.get_message(message_id).await?;
-            let conv = self.get_conversation(&message.conversation_id).await?;
+            // Read again in the turn: a clear that ran before it took the
+            // message, and its bytes must not be counted for a write that
+            // finds no row.
+            self.get_message(message_id).await?;
+            let conv = self.get_conversation(&conversation_id).await?;
             content = self.fit_session_bytes(&conv.session_id, content).await?;
         }
         let msg_id_owned = message_id.to_string();
@@ -427,17 +457,15 @@ impl DbConnection {
             .await?;
 
         let updated: Option<Message> = result.take(0)?;
-
-        if let Some(msg) = &updated {
-            // Update conversation metadata with new preview, in the
-            // conversation's turn so that the recount cannot interleave with
-            // a concurrent add's.
-            let _turn = self.conversation_turn(&msg.conversation_id).await;
-            self.update_conversation_after_message(&msg.conversation_id, &content)
-                .await?;
-        }
-
-        updated.ok_or_else(|| DbError::NotFound(format!("Message not found: {}", message_id)))
+        let Some(msg) = updated else {
+            return Err(DbError::NotFound(format!(
+                "Message not found: {}",
+                message_id
+            )));
+        };
+        self.update_conversation_after_message(&msg.conversation_id, &content)
+            .await?;
+        Ok(msg)
     }
 
     /// Get a message by ID
