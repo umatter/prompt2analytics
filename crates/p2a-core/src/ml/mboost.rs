@@ -510,8 +510,9 @@ fn fit_linear_base_learner(
 /// equal RSS, exactly or to within rounding: the two searches round
 /// differently and may break those ties either way. Pseudo-residuals with
 /// repeated values (a binary or count target, above all in the first
-/// iterations) tie exactly, so on such data a different, equally good stump
-/// can be selected, and every later iteration follows from that choice.
+/// iterations) can give candidate stumps exactly equal RSS, so on such data a
+/// different, equally good stump can be selected, and every later iteration
+/// follows from that choice.
 fn fit_tree_base_learner(
     x_col: &ArrayView1<f64>,
     residuals: &ArrayView1<f64>,

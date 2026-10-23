@@ -467,8 +467,9 @@ fn fit_stump_parallel(
             // the quadratic search's split except where two candidates have
             // equal RSS, exactly or to within rounding: the two searches may
             // break such a tie either way. Pseudo-residuals with repeated
-            // values (a binary or count target) tie exactly, so on such data
-            // a different, equally good stump can be chosen
+            // values (a binary or count target) can give candidates exactly
+            // equal RSS, so on such data a different, equally good stump can
+            // be chosen.
             let mut left_sum = 0.0;
             let mut left_count = 0;
             let total_sum: f64 = residuals.iter().sum();

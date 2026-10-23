@@ -445,9 +445,10 @@ impl RegressionTree {
     /// split is the same except where two candidates have equal within-child
     /// sums of squares, exactly or to within rounding: the two searches may
     /// break those ties either way. A response with repeated values (the 0/1
-    /// treatment the propensity ensemble fits, counts, integer outcomes) ties
-    /// exactly, so on such data a different, equally good tree can grow, and
-    /// the propensity scores and CATE draws built on it change with it.
+    /// treatment the propensity ensemble fits, counts, integer outcomes) can
+    /// give candidates exactly equal sums of squares, so on such data a
+    /// different, equally good tree can grow, and the propensity scores and
+    /// CATE draws built on it change with it.
     fn find_best_split(
         &self,
         x: &ArrayView2<f64>,

@@ -435,12 +435,14 @@ impl CausalTree {
     ///
     /// The child means now come from sums accumulated in sorted-x order (the
     /// right child's by subtraction from the node totals) rather than in
-    /// index order. With integer outcomes those sums are exact and both
-    /// searches choose the same split. Otherwise the chosen split is the same
-    /// except where two candidates' criteria are equal, exactly or to within
-    /// rounding: the two searches may break those ties either way, so decimal
-    /// outcomes (say, in tenths) on tied candidates, such as mirror-image
-    /// covariate groups give, can grow a different, equally good tree.
+    /// index order. With integer outcomes whose sums stay below 2^53 (about
+    /// 9e15) in magnitude, as 0/1 outcomes, counts and other moderate
+    /// integers do, those sums are exact and both searches choose the same
+    /// split. Otherwise the chosen split is the same except where two
+    /// candidates' criteria are equal, exactly or to within rounding: the two
+    /// searches may break those ties either way, so decimal outcomes (say, in
+    /// tenths) can grow a different, equally good tree where two candidates
+    /// tie, as they do when two covariate groups mirror each other.
     fn find_best_causal_split(
         &self,
         x: &ArrayView2<f64>,
@@ -1546,7 +1548,7 @@ mod tests {
         }
     }
 
-    /// Reference guard on tie-prone (mirror-image) data. With integer
+    /// Reference guard on tie-prone (mirror-image) data. With small integer
     /// outcomes every sum is exact, so the sweep must choose the old search's
     /// split; with outcomes in tenths it must choose that split or a
     /// different one with the same criterion.
