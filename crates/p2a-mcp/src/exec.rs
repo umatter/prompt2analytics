@@ -731,6 +731,8 @@ impl ToolGovernor {
     /// Run `work` on the blocking pool under the same admission, permits,
     /// budget, deadline and panic handling as a tool call. `work` receives the
     /// call's budget, which is also installed for p2a-core's checkpoints.
+    /// `label` (a tool name) is logged and echoed in errors cut to 64
+    /// characters, as an unknown tool's name is the caller's string.
     pub async fn run_blocking<R, F>(
         &self,
         session: &Arc<Session>,
@@ -741,6 +743,8 @@ impl ToolGovernor {
         R: Send + 'static,
         F: FnOnce(&Budget) -> Result<R, ToolCallError> + Send + 'static,
     {
+        let label = limits::echo(label);
+
         // 1. Memory admission.
         if let Some(limit) = self.cfg.rss_soft_limit_bytes
             && let Some(mem) = p2a_core::get_process_memory()
@@ -1236,6 +1240,27 @@ mod tests {
         let h = gov.health();
         assert_eq!((h.in_flight, h.overdue), (0, 0));
         assert!(h.healthy);
+    }
+
+    #[tokio::test]
+    async fn a_failure_echoes_the_label_cut() {
+        // The label is a tool name, which over /ws is the caller's string up
+        // to the message cap; the error the caller gets carries it cut.
+        let (gov, session) = governor_and_session(ExecConfig::default()).await;
+        let label = "x".repeat(1_000_000);
+        let r: Result<(), _> = gov
+            .run_blocking(&session, &label, |_| panic!("the work fails"))
+            .await;
+        match r {
+            Err(ToolCallError::Internal(m)) => assert_eq!(
+                m,
+                format!(
+                    "tool '{}' failed unexpectedly; the session is still usable",
+                    "x".repeat(64)
+                )
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
