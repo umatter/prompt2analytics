@@ -166,7 +166,11 @@ mod native {
 
             // Ensure the directory exists and is owner-only
             if let Err(e) = ensure_private_dir(&storage_dir) {
-                tracing::warn!("Failed to create storage directory: {}", e);
+                tracing::warn!(
+                    "Failed to create or restrict storage directory {}: {}",
+                    storage_dir.display(),
+                    e
+                );
             }
 
             Self { storage_dir }
