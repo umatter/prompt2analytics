@@ -449,7 +449,9 @@ fn poisson_ci(x: u64, conf_level: f64) -> EconResult<(f64, f64)> {
 
 /// Smallest odds [`find_odds_bound`] resolves. statrs' binomial CDF evaluates its incomplete beta
 /// function at 1 − p and treats an argument within a few ulps of 1 as 1, so below p ≈ 4.4e-16
-/// the tail it returns is 0 or 1 whatever p is.
+/// the tail it returns is 0 or 1 whatever p is. Above that cutoff, 1 − p rounds p to a multiple
+/// of 2^-53 ≈ 1.1e-16, so near ODDS_MIN a bound snaps to a boundary (k + 1/2) · 2^-53 between
+/// them and is resolved only to about 2^-54 / s relative: 5.6% at 1e-15, 2.2e-4 at 2.5e-13.
 const ODDS_MIN: f64 = 1e-15;
 
 /// Largest odds [`find_odds_bound`] resolves. Near p = 1 the 1 − p that statrs works from has an
@@ -496,10 +498,11 @@ fn rate_ratio_ci(x1: u64, x2: u64, n: u64, t1: f64, t2: f64, conf_level: f64) ->
     (lower, upper)
 }
 
-/// The rate ratio r = s·T₂ / T₁ for odds `s` ≥ 0: a bound found by [`find_odds_bound`], or the
-/// count ratio x[0] / x[1] when [`two_sample_estimate`] cannot divide the rates. The product is
-/// formed directly when T₂ / T₁ is a normal number and otherwise from logarithms, so it overflows
-/// or underflows only when the result itself lies outside f64.
+/// The rate ratio r = s·T₂ / T₁ for odds `s` in [0, ∞]: a bound found by [`find_odds_bound`], or
+/// the count ratio x[0] / x[1] when [`two_sample_estimate`] cannot divide the rates. The product
+/// is formed directly when T₂ / T₁ is a normal number and otherwise from logarithms, so it
+/// overflows or underflows only when the result itself lies outside f64; s = 0 gives 0 and
+/// s = ∞ gives ∞ either way.
 fn rate_ratio_from_odds(s: f64, t1: f64, t2: f64) -> f64 {
     let time_ratio = t2 / t1;
     if time_ratio.is_normal() {
@@ -523,14 +526,25 @@ fn rate_ratio_from_odds(s: f64, t1: f64, t2: f64) -> f64 {
 /// start points come from the counts (the estimate x[0] / max(x[1], 1)); the bracketing loops
 /// walk from them no further than [`ODDS_MIN`] and [`ODDS_MAX`], fixed odds whatever the counts
 /// are, and the tail is evaluated at odds clamped to that range. So the search resolves bounds
-/// in [1e-15, 1e15] only: one whose odds lie outside comes back truncated, near the limit it
-/// crossed, without an error. At 95% that happens from totals of about 2.5e13 (x = [1, 1e14]:
-/// lower odds 1e-15, R 2.53e-16), and earlier at higher levels (at 0.9999 the upper odds of
-/// x = [m, 1] pass 1e15 from m ≈ 5e10). Within the range, resolution degrades as s nears 1e15
-/// (see [`ODDS_MAX`]). Apart from these limits, a bound is only as accurate as statrs' binomial
-/// CDF, which degrades as n grows: at n = 1e11 the bounds are off by about 3e-5 relative
-/// (STAT-60 / T3-WP40). Every loop has a fixed iteration cap, and the search returns a finite
-/// s > 0 for any input.
+/// in [1e-15, 1e15] only. A bound beyond that range leaves a bracket whose ends do not straddle
+/// alpha, and the conservative limit comes back instead, without an error: 0 for a lower bound
+/// below 1e-15, [`ODDS_MIN`] for an upper bound below it, [`ODDS_MAX`] (or the estimate, if that
+/// is smaller) for a lower bound above 1e15, and infinity for an upper bound above it. The
+/// interval then still contains the estimate and the true interval; such a limit only widens
+/// it, never inverts it: x = [1, 1e16] gives (0, 1e-15) for R's (2.53e-18, 5.57e-16), and
+/// x = [5e13, 1] an upper bound of infinity for R's 1.97e15. At 95% one bound is beyond the
+/// range from totals of about 2.5e13, and earlier at higher levels (at 0.9999 the upper odds of
+/// x = [m, 1] pass 1e15 from m ≈ 5e10). Within the range, resolution degrades as s nears either
+/// limit (see [`ODDS_MIN`] and [`ODDS_MAX`]): at 0.9999, x = [5e10, 1] has an upper bound of
+/// 9.48e14, 5.2% below R's 9.99975e14. Apart from these limits, a bound is only as accurate as
+/// statrs' binomial CDF, whose incomplete beta function loses digits as n grows. At n = 1e11 the
+/// upper bound is off by about 3e-5 and the lower by 4.7e-4 (x = [1, 1e11]), 3.2e-4 of that from
+/// the CDF and 1.6e-4 from the rounding of 1 − p. At totals of 1e13 to 1e14 the two causes put
+/// bounds up to about 2% off (x = [5e13, 1]: lower bound 1.9% above R's, most of it from the
+/// CDF). Near x[0] = x[1] the CDF fails from totals of about 4e7, and even an in-range interval
+/// can come back inverted: x = [1e8, 1e8] gives (1.0000038, 0.9999962) (STAT-60 / T3-WP40).
+/// Every loop has a fixed iteration cap, and the search returns 0, a finite s > 0 or infinity
+/// for any input.
 fn find_odds_bound(x1: u64, x2: u64, n: u64, alpha: f64, find_lower: bool) -> f64 {
     // Compute the tail probability for given odds s; p = s / (1 + s), that is the null's p at
     // T = [1, 1], from odds kept in the range the binomial CDF resolves.
@@ -595,6 +609,29 @@ fn find_odds_bound(x1: u64, x2: u64, n: u64, alpha: f64, find_lower: bool) -> f6
                 break;
             }
             hi *= 2.0;
+        }
+    }
+
+    // Each loop above stops short of its limit only once its end is on the right side of alpha.
+    // So the bracket fails to straddle alpha only when a loop ran to ODDS_MIN or ODDS_MAX, or
+    // started beyond it, with the bound further out (the lower bound's hi also stops at ten times
+    // the estimate, which a lower bound does not reach). The tail there is evaluated at the
+    // clamped odds, and the bisection would converge on a bracket end. Return the limit on the
+    // conservative side instead, so the interval still holds the estimate and the true interval.
+    // A bound inside the range never gets here, and its bisection is unchanged.
+    if find_lower {
+        if compute_tail_p(lo) > alpha {
+            return 0.0;
+        }
+        if compute_tail_p(hi) < alpha {
+            return ODDS_MAX.min(odds_est);
+        }
+    } else {
+        if compute_tail_p(hi) > alpha {
+            return f64::INFINITY;
+        }
+        if compute_tail_p(lo) < alpha {
+            return ODDS_MIN;
         }
     }
 
@@ -1040,9 +1077,11 @@ mod tests {
     /// PR-24: a rate x[i]/T[i] that overflowed f64 was refused even when the rate ratio, the
     /// estimate, is representable. It is formed as (x[0] / x[1]) · (T[1] / T[0]) then. In both
     /// cases the rate x[1]/T[1] overflows (1e309, 2.1e309). For x = [11, 21] the interval is
-    /// T[1] / T[0] times the one at T = [1, 1]; for x = [1, 1e19] it is not checked, its odds lie
-    /// below what the interval search resolves (see find_odds_bound). T = [1e-308, 1e-308], where
-    /// both rates overflow, is in the test below.
+    /// T[1] / T[0] times the one at T = [1, 1]. For x = [1, 1e19] both odds bounds lie below what
+    /// the interval search resolves (R's are 2.5e-21 and 5.6e-19), so it returns the conservative
+    /// (0, 1e-15), and the interval is (0, 1e-305) around the estimate 1e-309; it used to come
+    /// back inverted, (1.0e-305, 7.6e-306). T = [1e-308, 1e-308], where both rates overflow, is in
+    /// the test below.
     #[test]
     fn test_poisson_two_sample_accepts_overflowing_rate_with_representable_ratio() {
         let run = |x: [u64; 2], t: [f64; 2]| {
@@ -1051,6 +1090,8 @@ mod tests {
         };
         let result = run([1, 10_000_000_000_000_000_000], [1.0, 1e-290]);
         assert_relative(result.estimate, 1e-309, 1e-12, "x = [1, 1e19] estimate");
+        assert_eq!(result.conf_int.0, 0.0, "x = [1, 1e19] lower");
+        assert_relative(result.conf_int.1, 1e-305, 1e-12, "x = [1, 1e19] upper");
         let (result, unit) = (run([11, 21], [1.0, 1e-308]), run([11, 21], [1.0, 1.0]));
         assert_relative(result.estimate, 11.0 / 21.0 * 1e-308, 1e-12, "estimate");
         assert_relative(result.conf_int.0, unit.conf_int.0 * 1e-308, 1e-12, "lower");
@@ -1152,11 +1193,17 @@ mod tests {
     /// 0.9999 gave 1.28e10 (T = [1, 1]) and 1.28e8 (T = [100, 1]), x = [2e5, 1] at 0.99999 gave
     /// 1.024e10, x = [1e8, 1] at 0.99 with T = [100, 1] gave 1.00000001e8, and x = [1, 1e11] and
     /// x = [0, 1e11] with T = [1, 1000] gave 1e-10 and 1e-7. The limits are now the odds the tail
-    /// can resolve, 1e-15 and 1e15. Expected values are R's poisson.test (qbeta). The first four
-    /// come out within 7.6e-7 to 2.3e-6 relative (the bisection stops once the tail is within
-    /// 1e-10 of alpha/2, and near odds of 2e10 the 1 - p that statrs works from keeps about six
-    /// digits), so 1e-5 is asserted. At totals of 1e11 statrs' binomial CDF is itself off: the two
-    /// bounds there are 2.9e-5 and 4.7e-5 from R, so 1e-4 (STAT-60 / T3-WP40).
+    /// can resolve, 1e-15 and 1e15. Expected values are R's qbeta. For the first four, which have
+    /// x[1] = 1, that is qbeta(alpha/2, 1, x[0] + 1), the quantile of 1 - p, equal to the closed
+    /// form 1/q - 1 with (1 - q)^n = 1 - alpha/2; poisson.test forms these bounds from p near 1
+    /// and is 5.1e-7 to 1.9e-6 off them. The four come out 2.8e-7 to 2.6e-6 above. Two things
+    /// limit that. The bisection stops once the tail is within 1e-10 of alpha/2, and the tail is
+    /// about proportional to 1/s here, so that rule bounds the error at about 1e-10 / (alpha/2)
+    /// relative: 2e-8 at 0.99, 2e-6 at 0.9999, 2e-5 at 0.99999. And near odds of 2e10 the 1 - p
+    /// that statrs works from is good to about 1.1e-6 (see ODDS_MAX). So 1e-5 is asserted; for the
+    /// 0.99999 case it holds not by that bound but because the bisection's stopping point is
+    /// deterministic (measured 2.6e-6). At totals of 1e11 statrs' binomial CDF is itself off: the
+    /// two bounds there are 2.9e-5 and 4.7e-5 from R, so 1e-4 (STAT-60 / T3-WP40).
     #[test]
     fn test_poisson_rate_ratio_interval_beyond_old_odds_limits() {
         let upper = |x: [u64; 2], t: [f64; 2], conf_level: f64| {
@@ -1174,10 +1221,10 @@ mod tests {
         within(
             1e-5,
             &[
-                ([1_000_000, 1], [1.0, 1.0], 0.9999, 1.999950986e10),
-                ([1_000_000, 1], [100.0, 1.0], 0.9999, 1.999950986e8),
-                ([200_000, 1], [1.0, 1.0], 0.99999, 4.000017433e10),
-                ([100_000_000, 1], [100.0, 1.0], 0.99, 1.994994187e8),
+                ([1_000_000, 1], [1.0, 1.0], 0.9999, 1.999951999484e10),
+                ([1_000_000, 1], [100.0, 1.0], 0.9999, 1.999951999484e8),
+                ([200_000, 1], [1.0, 1.0], 0.99999, 4.000009999910e10),
+                ([100_000_000, 1], [100.0, 1.0], 0.99, 1.994995842784e8),
             ],
         );
         within(
@@ -1187,6 +1234,58 @@ mod tests {
                 ([0, 100_000_000_000], [1.0, 1000.0], 0.95, 3.688879454e-8),
             ],
         );
+    }
+
+    /// PR-24: a bound whose odds lie outside [1e-15, 1e15], the range the search resolves, came
+    /// back wrong without an error. A bracketing loop had stopped at the limit with the bound
+    /// further out, or its start was already beyond it; the tail there, evaluated at the clamped
+    /// odds, did not straddle alpha / 2, and the bisection converged on a bracket end. Below
+    /// 1e-15 the interval came back inverted, both ends above the estimate: x = [1, 1e16] gave
+    /// (1.0e-15, 7.6e-16) around 1e-16, R (2.53e-18, 5.57e-16). Above 1e15 the lower bound came
+    /// back as the estimate and the upper as the bracket's start, 100 * estimate + 100:
+    /// x = [1e16, 1] gave (1.0e16, 1.0e18), R (1.79e15, 3.95e17), and x = [5e13, 1] an upper bound
+    /// of 5.0e15, R 1.97e15. Where a loop stopped at the limit the bound came back near it, on
+    /// the wrong side: at 0.9999, x = [1, 1e11] gave a lower bound of 1.0e-15, R 5.0e-16, and
+    /// x = [1e11, 1] an upper bound of 1.28e15, R 2.0e15. Such a bound is now the conservative
+    /// limit, 0 or ODDS_MIN below the range and ODDS_MAX or infinity above it, so the interval
+    /// holds both the estimate and R's interval. Expected values are R's qbeta.
+    #[test]
+    fn test_poisson_rate_ratio_interval_beyond_resolved_odds_is_conservative() {
+        let test = |x: [u64; 2], level: f64| {
+            poisson_test(&x, &[1.0, 1.0], 1.0, PoissonAlternative::TwoSided, level)
+                .unwrap_or_else(|e| panic!("x = {x:?}: {e}"))
+        };
+        // Both bounds below 1e-15: x = [3, 1e17] has R's (6.19e-18, 8.77e-17).
+        for x in [[1, 10_000_000_000_000_000], [3, 100_000_000_000_000_000]] {
+            let result = test(x, 0.95);
+            assert_eq!(result.conf_int, (0.0, ODDS_MIN), "x = {x:?}");
+            assert!(result.estimate < ODDS_MIN, "x = {x:?}: {}", result.estimate);
+        }
+        // Both bounds above 1e15: x = [1e17, 1] has R's (1.79e16, 3.95e18).
+        for x in [[10_000_000_000_000_000, 1], [100_000_000_000_000_000, 1]] {
+            let result = test(x, 0.95);
+            assert_eq!(result.conf_int, (ODDS_MAX, f64::INFINITY), "x = {x:?}");
+            assert!(result.estimate > ODDS_MAX, "x = {x:?}: {}", result.estimate);
+        }
+        // One bound beyond the range; the other is resolved and keeps its value.
+        let (lower, upper) = test([1, 100_000_000_000], 0.9999).conf_int;
+        assert_eq!(lower, 0.0, "x = [1, 1e11] lower");
+        assert_relative(upper, 1.2506671286e-10, 1e-4, "x = [1, 1e11] upper");
+        let (lower, upper) = test([100_000_000_000, 1], 0.9999).conf_int;
+        assert_eq!(upper, f64::INFINITY, "x = [1e11, 1] upper");
+        assert_relative(lower, 7.9957326545e9, 1e-4, "x = [1e11, 1] lower");
+        // At 95% the upper bound of x = [m, 1] passes 1e15 from m of about 2.5e13 (R 1.18e15,
+        // 1.97e15 and 3.95e15 here). The resolved lower bounds are 0.5% to 1.9% from R's, which is
+        // how accurate statrs' binomial CDF is at these totals (STAT-60 / T3-WP40), hence 3e-2.
+        for (x, lower_r) in [
+            ([30_000_000_000_000, 1], 5.3844077761e12),
+            ([50_000_000_000_000, 1], 8.9740129602e12),
+            ([100_000_000_000_000, 1], 1.7948025920e13),
+        ] {
+            let (lower, upper) = test(x, 0.95).conf_int;
+            assert_eq!(upper, f64::INFINITY, "x = {x:?}");
+            assert_relative(lower, lower_r, 3e-2, &format!("x = {x:?} lower"));
+        }
     }
 
     /// PR-24: equal time bases at either end of f64 give the test at T = [1, 1], whose values are
