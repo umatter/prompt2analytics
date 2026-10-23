@@ -1054,8 +1054,12 @@ pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
         return Ok(());
     };
     let sessions = &admission.sessions;
-    // Reserve first, so two files decoding at once see each other.
+    // Reserve first, so two files decoding at once see each other, and
+    // record it in the call's admission at once: its guard then releases it
+    // however this future ends, also when it is dropped at the await below
+    // or unwinds from it.
     let reserved = sessions.reserve_data_bytes(added);
+    admission.reserved.fetch_add(added, Ordering::SeqCst);
     // Read without holding a dataset lock (the total takes the registry's).
     let others = sessions
         .total_data_bytes()
@@ -1065,6 +1069,7 @@ pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
         .saturating_add(after)
         .saturating_add(reserved.saturating_sub(added));
     if total > limit {
+        admission.reserved.fetch_sub(added, Ordering::SeqCst);
         sessions.release_data_bytes(added);
         return Err(format!(
             "Loading this file takes at least {} of memory, and the server's dataset memory \
@@ -1075,7 +1080,6 @@ pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
             fmt_bytes(limit)
         ));
     }
-    admission.reserved.fetch_add(added, Ordering::SeqCst);
     Ok(())
 }
 
@@ -1868,6 +1872,32 @@ mod tests {
         assert_eq!(m.reserved_data_bytes(), 0);
         let _second = DatasetAdmission::install(None, total, b, m.clone());
         assert!(admit_dataset("d", six).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_admission_dropped_while_it_waits_leaves_nothing_reserved() {
+        // The admission reserves its bytes against the total before it waits
+        // to read the total. Pre-fix the call's guard learned of the
+        // reservation only after that wait, so a future dropped there (or
+        // unwinding from it) left the bytes reserved for the life of the
+        // process, refusing later files.
+        let m = Arc::new(SessionManager::new(cfg(10, None)));
+        let s = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let guard = DatasetAdmission::install(None, Some(10 << 20), s, m.clone());
+        {
+            // Holding the registry keeps the total from being read.
+            let registry = m.sessions.write().await;
+            let mut admit = std::pin::pin!(admit_dataset("d", 1 << 20));
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(admit.as_mut().poll(&mut cx).is_pending());
+            assert!(m.reserved_data_bytes() >= 1 << 20);
+            drop(registry);
+        }
+        drop(guard);
+        assert_eq!(m.reserved_data_bytes(), 0);
     }
 
     #[tokio::test]
