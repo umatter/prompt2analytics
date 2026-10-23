@@ -39,6 +39,10 @@ mod join;
 mod reshape;
 mod transform;
 
+/// Loop iterations between two cooperative-cancellation checkpoints
+/// ([`crate::resource::checkpoint`]) in the munging loops.
+const CHECKPOINT_EVERY: usize = 65_536;
+
 // Re-export error types
 pub use error::{MungeError, MungeResult};
 

@@ -365,9 +365,11 @@ impl<R: Read + Seek> SasReader<R> {
 
     /// Check the row and column layout against the page geometry: the row
     /// length is between 1 and the page size, the row count fits the pages,
-    /// and every column lies inside the row without overlapping the others.
-    /// A valid file satisfies all of these (columns are disjoint byte ranges
-    /// of a row), and together they bound the cells read by the file size.
+    /// every column has a nonzero width and lies inside the row, and the
+    /// column widths add up to at most the row length. So the bytes read per
+    /// row are bounded by the row length, and the cells read by the file size.
+    /// A valid file satisfies all of these. Columns are not checked for
+    /// disjointness: two overlapping columns read the same bytes of the row.
     fn validate_layout(&self) -> Result<(), SasError> {
         let row_length = self.row_length;
         if row_length == 0 {
@@ -390,7 +392,12 @@ impl<R: Read + Seek> SasReader<R> {
         let mut total_width = 0usize;
         for (i, column) in self.columns.iter().enumerate() {
             let (offset, width) = (column.offset, column.length);
-            if width == 0 || add(offset, width)? > row_length {
+            if width == 0 {
+                return Err(SasError::InvalidFormat(format!(
+                    "column {i} (offset {offset}) has width 0"
+                )));
+            }
+            if add(offset, width)? > row_length {
                 return Err(SasError::InvalidFormat(format!(
                     "column {i} (offset {offset}, width {width}) extends past the row_length \
                      of {row_length}"
@@ -1012,6 +1019,9 @@ mod tests {
         let mut b = create_minimal_sas_file();
         put_i32(&mut b, ATTR2, 12); // offset 12 + width 8 > row_length 16
         assert_invalid(load(b), "extends past");
+        let mut b = create_minimal_sas_file();
+        put_i32(&mut b, ATTR2 + 4, 0); // width 0 at offset 8, inside the row
+        assert_invalid(load(b), "(offset 8) has width 0");
     }
 
     #[test]

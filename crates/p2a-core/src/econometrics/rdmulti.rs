@@ -436,12 +436,6 @@ pub fn run_rd_multi(
         });
     }
 
-    if j == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "At least one cutoff must be specified".to_string(),
-        });
-    }
-
     // Check that cutoff assignments are valid
     let max_cutoff_idx = *cutoff_assignment.iter().max().unwrap_or(&0);
     if max_cutoff_idx >= j {
@@ -1463,11 +1457,25 @@ mod tests {
             None,
             RdMultiConfig {
                 cutoffs: vec![0.0, f64::NAN],
-                ..config
+                ..config.clone()
             },
         );
         assert!(
             matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("cutoff"))
+        );
+        // the config check is the only place that refuses an empty cutoff list
+        let (y, x) = (Array1::<f64>::zeros(4), Array1::<f64>::zeros(4));
+        let r = run_rd_multi(
+            &y.view(),
+            &x.view(),
+            &Array1::<usize>::zeros(4).view(),
+            RdMultiConfig {
+                cutoffs: vec![],
+                ..config
+            },
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message == "At least one cutoff must be specified")
         );
     }
 

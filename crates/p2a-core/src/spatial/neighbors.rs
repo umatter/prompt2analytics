@@ -5,9 +5,17 @@
 //!
 //! k-nearest-neighbour and distance-band neighbours are found with a bucketed k-d tree
 //! (planar coordinates, or unit vectors on the sphere for longitude/latitude), so building
-//! them costs O(n log n + links) instead of visiting all n² pairs. Candidates are always
-//! judged with the exact distance formula, and ties are broken by the lower index, so the
-//! result is the one an all-pairs search gives.
+//! them costs O(n log n + links) for well-spread points instead of visiting all n² pairs.
+//! Coordinates shared by many observations do not make it quadratic, except, for
+//! great-circle bands, when the distance between two such locations lies within the
+//! rounding margin (about 1e-9 relative) of d1 or d2. A k-nearest search also rules a box
+//! out by the lowest index it holds, and a band search skips a box whose points all sit at
+//! the query. In the great-circle exception the box bounds, widened by that margin, cannot
+//! rule the other location out, so every query at one location evaluates every point at
+//! the other; when the distance falls just outside the band none of those evaluations is a
+//! link, so the link cap does not bound the work. Candidates are always judged with the
+//! exact distance formula, and ties are broken by the lower index, so the result is the one
+//! an all-pairs search gives.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -145,7 +153,8 @@ impl Neighbors {
     ///
     /// For each observation, its `k` closest other observations; distance ties are broken by
     /// the lower index, exactly as an all-pairs search with a stable sort would. Runs in
-    /// O(n log n) time for well-spread points (a bucketed k-d tree) and O(n k) memory.
+    /// O(n log n) time for well-spread points (a bucketed k-d tree), also when many
+    /// observations share one location, and O(n k) memory.
     ///
     /// # Errors
     ///
@@ -227,8 +236,9 @@ impl Neighbors {
     /// Distance-band neighbours (Euclidean): pairs with `d1 < distance <= d2`, with input
     /// validation, a cap on the number of links and cooperative cancellation.
     ///
-    /// Runs in O(n log n + links) time for well-spread points (a bucketed k-d tree). The
-    /// result is symmetric and identical to an all-pairs search with the same formula.
+    /// Runs in O(n log n + links) time for well-spread points (a bucketed k-d tree), also
+    /// when many observations share one location. The result is symmetric and identical to
+    /// an all-pairs search with the same formula.
     ///
     /// # Errors
     ///
@@ -252,8 +262,11 @@ impl Neighbors {
     /// Distance-band neighbours for (longitude, latitude) coordinates in degrees, with
     /// great-circle (haversine, R = 6371 km) distances in kilometres.
     ///
-    /// Same contract and complexity as [`Neighbors::try_from_distance`]; additionally a
-    /// latitude outside [-90, 90] is an [`EconError::InvalidSpecification`].
+    /// Same contract as [`Neighbors::try_from_distance`], and the same complexity except
+    /// when two locations, each shared by many observations, lie at a great-circle distance
+    /// within the rounding margin (about 1e-9 relative) of `d1` or `d2`: every query at one
+    /// then evaluates every point at the other (see the module docs). Additionally a latitude
+    /// outside [-90, 90] is an [`EconError::InvalidSpecification`].
     pub fn try_from_distance_longlat(
         coords: &[(f64, f64)],
         d1: f64,
@@ -667,12 +680,19 @@ struct KdNode {
     hi: [f64; 3],
     start: usize,
     end: usize,
+    /// The smallest observation index in `order[start..end]`.
+    min_idx: usize,
+    /// Whether every point has the input coordinates of `order[start]` (compared as given,
+    /// not as tree coordinates).
+    coincident: bool,
     /// Child node ids; `None` for a leaf.
     children: Option<(usize, usize)>,
 }
 
 /// A static, bucketed k-d tree. Every node stores its exact bounding box (minima and
-/// maxima of its points' coordinates), so box bounds never cut off a point.
+/// maxima of its points' coordinates), so box bounds never cut off a point. Splits order
+/// equal coordinates by observation index, so observations that share a location fill
+/// index-contiguous subtrees.
 struct KdTree {
     /// Tree coordinates, indexed by observation.
     points: Vec<[f64; 3]>,
@@ -682,29 +702,35 @@ struct KdTree {
 }
 
 impl KdTree {
-    /// Builds the tree in O(n log n): each node splits on its widest axis at the median.
-    fn build(points: Vec<[f64; 3]>) -> Self {
-        let n = points.len();
+    /// Builds the tree over `metric`'s tree points for `coords` in O(n log n): each node
+    /// splits on its widest axis at the median.
+    fn build(coords: &[(f64, f64)], metric: Metric) -> Self {
+        let n = coords.len();
         let mut tree = KdTree {
-            points,
+            points: coords.iter().map(|&c| metric.point(c)).collect(),
             order: (0..n).collect(),
             nodes: Vec::with_capacity(2 * (n / LEAF_SIZE + 1)),
         };
         if n > 0 {
-            tree.build_node(0, n);
+            tree.build_node(coords, 0, n);
         }
         tree
     }
 
-    fn build_node(&mut self, start: usize, end: usize) -> usize {
+    fn build_node(&mut self, coords: &[(f64, f64)], start: usize, end: usize) -> usize {
         let mut lo = [f64::INFINITY; 3];
         let mut hi = [f64::NEG_INFINITY; 3];
+        let mut min_idx = usize::MAX;
+        let first = coords[self.order[start]];
+        let mut coincident = true;
         for &j in &self.order[start..end] {
             let p = &self.points[j];
             for a in 0..3 {
                 lo[a] = lo[a].min(p[a]);
                 hi[a] = hi[a].max(p[a]);
             }
+            min_idx = min_idx.min(j);
+            coincident &= coords[j] == first;
         }
         let id = self.nodes.len();
         self.nodes.push(KdNode {
@@ -712,6 +738,8 @@ impl KdTree {
             hi,
             start,
             end,
+            min_idx,
+            coincident,
             children: None,
         });
         let len = end - start;
@@ -721,10 +749,11 @@ impl KdTree {
                 .unwrap_or(0);
             let mid = len / 2;
             let points = &self.points;
-            self.order[start..end]
-                .select_nth_unstable_by(mid, |&a, &b| points[a][axis].total_cmp(&points[b][axis]));
-            let left = self.build_node(start, start + mid);
-            let right = self.build_node(start + mid, end);
+            self.order[start..end].select_nth_unstable_by(mid, |&a, &b| {
+                points[a][axis].total_cmp(&points[b][axis]).then(a.cmp(&b))
+            });
+            let left = self.build_node(coords, start, start + mid);
+            let right = self.build_node(coords, start + mid, end);
             self.nodes[id].children = Some((left, right));
         }
         id
@@ -821,7 +850,7 @@ fn knn_lists(coords: &[(f64, f64)], k: usize) -> EconResult<(Vec<Vec<usize>>, Qu
     let metric = Metric::Euclidean;
     let dims = metric.dims();
     let n = coords.len();
-    let tree = KdTree::build(coords.iter().map(|&c| metric.point(c)).collect());
+    let tree = KdTree::build(coords, metric);
     let mut counter = EvalCounter::new()?;
     let mut lists = Vec::with_capacity(n);
     let mut heap: BinaryHeap<Candidate> = BinaryHeap::with_capacity(k + 1);
@@ -835,22 +864,36 @@ fn knn_lists(coords: &[(f64, f64)], k: usize) -> EconResult<(Vec<Vec<usize>>, Qu
             stack.push((0, KdTree::lower_bound(&q, root, dims)));
         }
         while let Some((id, lower)) = stack.pop() {
-            // A box at exactly the current worst distance may still hold a lower-index tie.
-            if heap.len() == k && heap.peek().is_some_and(|worst| lower > worst.dist) {
+            let node = &tree.nodes[id];
+            // Every candidate in the box is at least (lower, min_idx) in the (distance,
+            // index) order, so the box is skipped when that cannot beat the current worst.
+            // A box at exactly the worst distance is still visited if it may hold a
+            // lower-index tie, and only then: on duplicated coordinates every bound is 0.
+            if heap.len() == k
+                && heap.peek().is_some_and(|worst| {
+                    Candidate {
+                        dist: lower,
+                        idx: node.min_idx,
+                    } >= *worst
+                })
+            {
                 continue;
             }
-            let node = &tree.nodes[id];
             match node.children {
                 Some((left, right)) => {
-                    let bl = KdTree::lower_bound(&q, &tree.nodes[left], dims);
-                    let br = KdTree::lower_bound(&q, &tree.nodes[right], dims);
-                    // the nearer child is pushed last, so it is visited first
+                    let least = |child: usize| Candidate {
+                        dist: KdTree::lower_bound(&q, &tree.nodes[child], dims),
+                        idx: tree.nodes[child].min_idx,
+                    };
+                    let (bl, br) = (least(left), least(right));
+                    // the child that may hold the smaller candidate is pushed last, so it
+                    // is visited first
                     if bl <= br {
-                        stack.push((right, br));
-                        stack.push((left, bl));
+                        stack.push((right, br.dist));
+                        stack.push((left, bl.dist));
                     } else {
-                        stack.push((left, bl));
-                        stack.push((right, br));
+                        stack.push((left, bl.dist));
+                        stack.push((right, br.dist));
                     }
                 }
                 None => {
@@ -884,8 +927,9 @@ fn knn_lists(coords: &[(f64, f64)], k: usize) -> EconResult<(Vec<Vec<usize>>, Qu
 }
 
 /// Distance-band neighbours (`d1 < dist <= d2`) of every observation, each list sorted by
-/// index. Expects validated input. Stops with [`EconError::ResourceLimit`] as soon as the
-/// total number of links would exceed `max_links`.
+/// index. Expects validated input: finite coordinates and `0 <= d1 <= d2` (the skip of
+/// boxes at the query relies on `d1 >= 0`). Stops with [`EconError::ResourceLimit`] as soon
+/// as the total number of links would exceed `max_links`.
 fn band_lists(
     coords: &[(f64, f64)],
     metric: Metric,
@@ -893,6 +937,7 @@ fn band_lists(
     d2: f64,
     max_links: Option<usize>,
 ) -> EconResult<(Vec<Vec<usize>>, QueryStats)> {
+    debug_assert!(d1 >= 0.0 && d2 >= d1, "band_lists expects validated bounds");
     let dims = metric.dims();
     let n = coords.len();
     // Box pruning thresholds, in the units of the tree coordinates: prune a box whose lower
@@ -921,7 +966,7 @@ fn band_lists(
         }
     };
 
-    let tree = KdTree::build(coords.iter().map(|&c| metric.point(c)).collect());
+    let tree = KdTree::build(coords, metric);
     let mut counter = EvalCounter::new()?;
     let mut lists = Vec::with_capacity(n);
     let mut total_links = 0usize;
@@ -936,8 +981,13 @@ fn band_lists(
         }
         while let Some(id) = stack.pop() {
             let node = &tree.nodes[id];
+            // A box whose points all have the query's coordinates holds only distances of
+            // exactly 0, never above d1 >= 0. On the sphere `skip_below` cannot rule it out
+            // when d1 is 0 or tiny, so without this check repeated coordinates cost n²
+            // evaluations.
             if KdTree::lower_bound(&q, node, dims) > prune_above
                 || KdTree::upper_bound(&q, node, dims) <= skip_below
+                || (node.coincident && coords[tree.order[node.start]] == coords[i])
             {
                 continue;
             }
@@ -959,7 +1009,8 @@ fn band_lists(
                                 && total_links >= cap
                             {
                                 return Err(EconError::ResourceLimit(format!(
-                                    "the distance band links more than {cap} pairs of observations"
+                                    "the distance band has more than {cap} neighbour links \
+                                     (each pair of observations counts twice)"
                                 )));
                             }
                             total_links += 1;
@@ -1096,8 +1147,10 @@ mod tests {
     fn distance_band_stops_at_the_link_cap() {
         let c = coords();
         let err = Neighbors::try_from_distance(&c, 0.0, 1e9, Some(500)).unwrap_err();
+        // the cap counts directed links, not pairs
         assert!(
-            matches!(&err, EconError::ResourceLimit(m) if m.contains("500")),
+            matches!(&err, EconError::ResourceLimit(m)
+                if m.contains("more than 500 neighbour links") && m.contains("counts twice")),
             "{err}"
         );
         // 30 * 29 links
@@ -1224,6 +1277,104 @@ mod tests {
             "{}",
             stats.dist_evals
         );
+    }
+
+    #[test]
+    fn knn_on_duplicated_coordinates_matches_brute_force() {
+        use rand::seq::SliceRandom;
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(11);
+        let mut c: Vec<(f64, f64)> = (0..300)
+            .map(|_| (rng.gen_range(0.0..100.0), rng.gen_range(0.0..100.0)))
+            .collect();
+        // exact ties
+        c.extend((0..15).flat_map(|i| (0..15).map(move |j| (i as f64, j as f64))));
+        // zero distances
+        let dups = c[..100].to_vec();
+        c.extend(dups);
+        // 2,000 observations at one grid point, at scattered indices
+        c.extend(std::iter::repeat_n((7.0, 7.0), 2_000));
+        c.shuffle(&mut rng);
+        let n = c.len();
+        for k in [1, 5] {
+            assert_eq!(
+                Neighbors::try_from_knn(&c, k).unwrap().as_slice(),
+                knn_brute_force(&c, k).as_slice(),
+                "k={k}"
+            );
+            // all-pairs work would be n * (n - 1)
+            let (_, stats) = knn_lists(&c, k).unwrap();
+            assert!(
+                stats.dist_evals <= 200 * n as u64,
+                "k={k}: {}",
+                stats.dist_evals
+            );
+        }
+    }
+
+    #[test]
+    fn knn_on_one_repeated_location_does_linear_work() {
+        // Deterministic work count: every box has lower bound 0 here, so only the index
+        // order can rule a box out.
+        let n = 20_000;
+        let c = vec![(3.5, -1.25); n];
+        let (lists, stats) = knn_lists(&c, 5).unwrap();
+        assert!(stats.dist_evals <= 200 * n as u64, "{}", stats.dist_evals);
+        // every distance ties, so each row holds the five lowest other indices
+        for (i, row) in lists.iter().enumerate() {
+            let expected: Vec<usize> = (0..6).filter(|&j| j != i).take(5).collect();
+            assert_eq!(row, &expected, "row {i}");
+        }
+        let small = vec![(3.5, -1.25); 300];
+        assert_eq!(knn_lists(&small, 5).unwrap().0, knn_brute_force(&small, 5));
+    }
+
+    #[test]
+    fn band_on_duplicated_coordinates_matches_brute_force() {
+        use rand::seq::SliceRandom;
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(13);
+        let mut c: Vec<(f64, f64)> = (0..800)
+            .map(|_| (rng.gen_range(-180.0..180.0), rng.gen_range(-89.9..89.9)))
+            .collect();
+        // 2,000 observations at one location, at scattered indices
+        c.extend(std::iter::repeat_n((8.55, 47.37), 2_000));
+        c.shuffle(&mut rng);
+        let n = c.len() as u64;
+        for (d1, d2) in [(0.0, 500.0), (0.0, 3_000.0), (100.0, 2_000.0)] {
+            assert_eq!(
+                Neighbors::try_from_distance_longlat(&c, d1, d2, None)
+                    .unwrap()
+                    .as_slice(),
+                distance_brute_force(&c, d1, d2, Metric::GreatCircle).as_slice(),
+                "({d1}, {d2}]"
+            );
+            // all-pairs work would be n * (n - 1)
+            let (lists, stats) = band_lists(&c, Metric::GreatCircle, d1, d2, None).unwrap();
+            let links: u64 = lists.iter().map(|row| row.len() as u64).sum();
+            assert!(
+                stats.dist_evals <= 200 * n + 2 * links,
+                "({d1}, {d2}]: {} evaluations, {links} links",
+                stats.dist_evals
+            );
+        }
+    }
+
+    #[test]
+    fn band_on_one_repeated_location_evaluates_no_distances() {
+        // Deterministic work count. With d1 = 0 the sphere has no lower chord threshold, so
+        // only the coordinates themselves rule out a box of observations at the query.
+        let n = 20_000;
+        let c = vec![(8.55, 47.37); n];
+        for metric in [Metric::GreatCircle, Metric::Euclidean] {
+            let (lists, stats) = band_lists(&c, metric, 0.0, 50.0, None).unwrap();
+            // distance 0 is not above d1 = 0
+            assert!(lists.iter().all(Vec::is_empty), "{metric:?}");
+            // Every point sits at the query, so the root box is skipped before any distance
+            // is computed. On the sphere only the coincidence check does that; in the plane
+            // `skip_below = d1 = 0` does it too.
+            assert_eq!(stats.dist_evals, 0, "{metric:?}");
+        }
     }
 
     #[test]

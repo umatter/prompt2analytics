@@ -1016,16 +1016,11 @@ fn compute_out_sample_variance(
                     }
                 }
 
-                // Re-estimate weights (using simplex by default for LOO); a
-                // failed fit is skipped, a stopped budget ends the estimation.
-                match solve_simplex_weights(&y_train.view(), &x_train.view(), 1000, 1e-8) {
-                    Ok(w_loo) => {
-                        let pred = x.row(i).dot(&w_loo);
-                        let error = y[i] - pred;
-                        cv_errors.push(error * error);
-                    }
-                    Err(e @ EconError::Cancelled(_)) => return Err(e),
-                    Err(_) => {}
+                // Re-estimate weights (using simplex by default for LOO)
+                if let Some(w_loo) = cv_fit_weights(&y_train.view(), &x_train.view())? {
+                    let pred = x.row(i).dot(&w_loo);
+                    let error = y[i] - pred;
+                    cv_errors.push(error * error);
                 }
             }
 
@@ -1041,10 +1036,13 @@ fn compute_out_sample_variance(
 
         VarianceMethod::KFoldCv => {
             // K-fold cross-validation. run_scpi checks 2 <= cv_folds <= t;
-            // the guard below only keeps this private helper panic-free.
-            if cv_folds == 0 {
+            // the guard below repeats the lower bound so that this private
+            // helper is panic-free on its own.
+            if cv_folds < 2 {
                 return Err(EconError::InvalidSpecification {
-                    message: "cv_folds must be at least 2 for K-fold cross-validation".to_string(),
+                    message: format!(
+                        "cv_folds must be at least 2 for K-fold cross-validation (got {cv_folds})"
+                    ),
                 });
             }
             let fold_size = t.div_ceil(cv_folds);
@@ -1074,19 +1072,13 @@ fn compute_out_sample_variance(
                     x_train.row_mut(row_idx).assign(&x.row(orig_idx));
                 }
 
-                // Re-estimate weights; a failed fit skips the fold, a stopped
-                // budget ends the estimation.
-                match solve_simplex_weights(&y_train.view(), &x_train.view(), 1000, 1e-8) {
-                    Ok(w_fold) => {
-                        // Compute test errors
-                        for &test_idx in &test_indices {
-                            let pred = x.row(test_idx).dot(&w_fold);
-                            let error = y[test_idx] - pred;
-                            cv_errors.push(error * error);
-                        }
+                // Re-estimate weights, then compute the test errors
+                if let Some(w_fold) = cv_fit_weights(&y_train.view(), &x_train.view())? {
+                    for &test_idx in &test_indices {
+                        let pred = x.row(test_idx).dot(&w_fold);
+                        let error = y[test_idx] - pred;
+                        cv_errors.push(error * error);
                     }
-                    Err(e @ EconError::Cancelled(_)) => return Err(e),
-                    Err(_) => {}
                 }
             }
 
@@ -1099,6 +1091,20 @@ fn compute_out_sample_variance(
             let cv_mse = cv_errors.iter().sum::<f64>() / cv_errors.len() as f64;
             Ok(cv_mse)
         }
+    }
+}
+
+/// Simplex weights for one cross-validation fit. A fit that fails gives `None`,
+/// and the fold is skipped; a stopped budget (`Cancelled`) is passed on and ends
+/// the variance estimation.
+fn cv_fit_weights(
+    y_train: &ArrayView1<f64>,
+    x_train: &ArrayView2<f64>,
+) -> EconResult<Option<Array1<f64>>> {
+    match solve_simplex_weights(y_train, x_train, 1000, 1e-8) {
+        Ok(w) => Ok(Some(w)),
+        Err(e @ EconError::Cancelled(_)) => Err(e),
+        Err(_) => Ok(None),
     }
 }
 
@@ -1421,8 +1427,9 @@ mod tests {
 
     #[test]
     fn test_scpi_cv_loops_propagate_cancellation() {
-        // The weights for the CV fits come from the solver directly, so the
-        // CV loops must pass the budget error on instead of skipping the fold.
+        // Under a cancelled budget each CV loop stops with Cancelled at its own
+        // checkpoint, before the first fit. How a fit's Cancelled is handled is
+        // tested by test_cv_fit_passes_on_cancellation.
         let (t, d) = generate_test_data();
         let y = t.slice(s![..7]).to_owned();
         let x = d.slice(s![..7, ..]).to_owned();
@@ -1432,6 +1439,52 @@ mod tests {
                 cancelled(|| compute_out_sample_variance(&y.view(), &x.view(), &w.view(), &vm, 3));
             assert!(matches!(r, Err(EconError::Cancelled(_))), "{vm:?}");
         }
+    }
+
+    #[test]
+    fn test_kfold_variance_needs_two_folds() {
+        // run_scpi rejects cv_folds outside 2..=n_pre before this point. The
+        // helper's own guard now matches its message: 1 used to pass it and end
+        // in "No valid CV folds". The message names the value it got
+        let (t, d) = generate_test_data();
+        let y = t.slice(s![..7]).to_owned();
+        let x = d.slice(s![..7, ..]).to_owned();
+        let w = Array1::from_elem(5, 0.2);
+        let var = |k| {
+            compute_out_sample_variance(
+                &y.view(),
+                &x.view(),
+                &w.view(),
+                &VarianceMethod::KFoldCv,
+                k,
+            )
+        };
+        for k in [0usize, 1] {
+            let r = var(k);
+            assert!(
+                matches!(r, Err(EconError::InvalidSpecification { ref message })
+                    if message.contains("at least 2") && message.contains(&format!("(got {k})"))),
+                "k={k}: ok={}",
+                r.is_ok()
+            );
+        }
+        assert!(var(2).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_cv_fit_passes_on_cancellation() {
+        // A CV fit stopped by the budget must end the estimation, not skip the
+        // fold like a fit that fails
+        let (t, d) = generate_test_data();
+        let y = t.slice(s![..6]).to_owned();
+        let x = d.slice(s![..6, ..]).to_owned();
+        let r = cancelled(|| cv_fit_weights(&y.view(), &x.view()));
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+        let w = cv_fit_weights(&y.view(), &x.view())
+            .unwrap()
+            .expect("weights");
+        assert_eq!(w.len(), 5);
+        assert!((w.sum() - 1.0).abs() < 1e-9 && w.iter().all(|&v| v >= 0.0));
     }
 
     #[test]

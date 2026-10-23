@@ -27,6 +27,7 @@
 //! let wide = hconcat(&[&df1, &df2])?;
 //! ```
 
+use super::CHECKPOINT_EVERY;
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
@@ -218,7 +219,7 @@ pub fn estimate_join_rows(
     // that have a match.
     let (mut inner, mut ml, mut mr) = (0u64, 0u64, 0u64);
     for (i, (l, r)) in left_n.into_iter().zip(right_n.into_iter()).enumerate() {
-        if i.is_multiple_of(65_536) {
+        if i.is_multiple_of(CHECKPOINT_EVERY) {
             crate::resource::checkpoint().map_err(|e| MungeError::JoinError(e.to_string()))?;
         }
         let (l, r) = (l.unwrap_or(0), r.unwrap_or(0));

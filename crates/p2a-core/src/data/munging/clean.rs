@@ -4,6 +4,7 @@ use polars::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use super::CHECKPOINT_EVERY;
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 
@@ -874,7 +875,8 @@ pub fn regex_count(
 /// * `dataset` - Source dataset
 /// * `column` - Column to split
 /// * `pattern` - Pattern to split on (regex or literal)
-/// * `max_splits` - Maximum number of splits (creates max_splits + 1 columns)
+/// * `max_splits` - `Some(m)` splits at most `m` times (at most `m + 1`
+///   columns); `None` splits on every match
 /// * `prefix` - Prefix for new column names (columns named prefix_0, prefix_1, etc.)
 ///
 /// # Example
@@ -890,21 +892,7 @@ pub fn str_split(
     prefix: &str,
 ) -> MungeResult<Dataset> {
     let df = dataset.df();
-
-    let col = df.column(column)?;
-    if col.dtype() != &DataType::String {
-        return Err(MungeError::TypeMismatch {
-            column: column.to_string(),
-            expected: "String".to_string(),
-            found: format!("{:?}", col.dtype()),
-        });
-    }
-
-    let re = Regex::new(pattern).map_err(|e| {
-        MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", pattern, e))
-    })?;
-
-    let ca = col.str()?;
+    let (ca, re) = split_input(dataset, column, pattern)?;
     let resource_err = |max_parts: usize, e: crate::errors::EconError| MungeError::InvalidValue {
         column: column.to_string(),
         value: format!("{max_parts} parts"),
@@ -917,7 +905,7 @@ pub fn str_split(
     let mut splits: Vec<Vec<&str>> = Vec::with_capacity(ca.len());
     for (row, opt) in ca.into_iter().enumerate() {
         if row.is_multiple_of(CHECKPOINT_EVERY) {
-            crate::resource::checkpoint().map_err(|e| resource_err(max_parts, e))?;
+            split_checkpoint(column, pattern)?;
         }
         let parts = match opt {
             Some(s) => split_parts(&re, s, max_splits),
@@ -941,7 +929,7 @@ pub fn str_split(
     // Create columns for each split part
     let mut result_df = df.clone();
     for i in 0..max_parts {
-        crate::resource::checkpoint().map_err(|e| resource_err(max_parts, e))?;
+        split_checkpoint(column, pattern)?;
         let col_name = format!("{}_{}", prefix, i);
         let values: StringChunked = splits.iter().map(|parts| parts.get(i).copied()).collect();
         let new_col = values.with_name(col_name.into()).into_column();
@@ -951,8 +939,38 @@ pub fn str_split(
     Ok(Dataset::new(result_df))
 }
 
-/// Loop iterations between two cooperative-cancellation checkpoints.
-const CHECKPOINT_EVERY: usize = 65_536;
+/// The string column `column` and the compiled `pattern`: the input checks
+/// [`str_split`] and [`str_split_part_count`] share.
+fn split_input<'a>(
+    dataset: &'a Dataset,
+    column: &str,
+    pattern: &str,
+) -> MungeResult<(&'a StringChunked, Regex)> {
+    let col = dataset.df().column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let re = Regex::new(pattern).map_err(|e| {
+        MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", pattern, e))
+    })?;
+
+    Ok((col.str()?, re))
+}
+
+/// A cooperative-cancellation checkpoint in [`str_split`] or
+/// [`str_split_part_count`]: both report a stop as the same error.
+fn split_checkpoint(column: &str, pattern: &str) -> MungeResult<()> {
+    crate::resource::checkpoint().map_err(|e| MungeError::InvalidValue {
+        column: column.to_string(),
+        value: pattern.to_string(),
+        reason: e.to_string(),
+    })
+}
 
 /// The parts of `s` split on `re`: at most `max_splits + 1` parts when
 /// `max_splits` is given (saturating), otherwise split on every match.
@@ -983,30 +1001,11 @@ pub fn str_split_part_count(
     pattern: &str,
     max_splits: Option<usize>,
 ) -> MungeResult<usize> {
-    let df = dataset.df();
-
-    let col = df.column(column)?;
-    if col.dtype() != &DataType::String {
-        return Err(MungeError::TypeMismatch {
-            column: column.to_string(),
-            expected: "String".to_string(),
-            found: format!("{:?}", col.dtype()),
-        });
-    }
-
-    let re = Regex::new(pattern).map_err(|e| {
-        MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", pattern, e))
-    })?;
-
-    let ca = col.str()?;
+    let (ca, re) = split_input(dataset, column, pattern)?;
     let mut max_parts = 0;
     for (row, opt) in ca.into_iter().enumerate() {
         if row.is_multiple_of(CHECKPOINT_EVERY) {
-            crate::resource::checkpoint().map_err(|e| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: pattern.to_string(),
-                reason: e.to_string(),
-            })?;
+            split_checkpoint(column, pattern)?;
         }
         if let Some(s) = opt {
             max_parts = max_parts.max(count_parts(&re, s, max_splits));
@@ -1298,6 +1297,24 @@ mod tests {
         let r =
             crate::resource::with_alloc_ceiling(Some(64), || str_split(&rows, "s", ",", None, "p"));
         assert!(err_text(r).contains("limit")); // 10 x 3 cells x 16 bytes
+    }
+
+    #[test]
+    fn str_split_and_part_count_report_a_stop_alike() {
+        let ds = Dataset::new(df!("s" => ["a,b", "c"]).unwrap());
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        let (split, count) =
+            crate::resource::with_budget(crate::resource::Budget::new(None, token), || {
+                (
+                    err_text(str_split(&ds, "s", ",", None, "p")),
+                    str_split_part_count(&ds, "s", ",", None)
+                        .unwrap_err()
+                        .to_string(),
+                )
+            });
+        assert!(split.contains("cancelled"), "{split}");
+        assert_eq!(split, count);
     }
 
     #[test]

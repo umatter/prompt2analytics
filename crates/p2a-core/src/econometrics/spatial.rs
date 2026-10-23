@@ -47,7 +47,8 @@ use crate::linalg::matrix_ops::{matrix_inverse, pseudoinverse, xtx, xty};
 use crate::spatial::SpatialWeights;
 
 /// Refuses an optimiser tolerance that is not finite and positive, and `max_iter == 0`.
-fn validate_optimizer(tol: f64, max_iter: usize) -> EconResult<()> {
+/// Shared by the cross-section estimators here and the spatial panel ones in `splm`.
+pub(crate) fn validate_optimizer(tol: f64, max_iter: usize) -> EconResult<()> {
     if !(tol.is_finite() && tol > 0.0) {
         return Err(EconError::InvalidSpecification {
             message: format!("tol must be a finite positive number, got {tol}"),
@@ -1648,8 +1649,10 @@ fn compute_sem_standard_errors(
 /// The direct effect needs tr((I - ρW)^{-1}), computed exactly from the complex eigenvalues
 /// the fit has already cached (spatialreg's `evalues` route). The total effect needs the sum
 /// of all entries of (I - ρW)^{-1}: n / (1 - ρc) when every row of W sums to c, otherwise
-/// one linear solve (I - ρW) v = 1. The dense inverse is formed only when the eigen
-/// decomposition failed or a sum is not finite.
+/// one linear solve (I - ρW) v = 1. The dense inverse ([`compute_impacts_dense`]) is formed
+/// only when the eigen decomposition failed, the solve (I - ρW) v = 1 failed, or a sum is
+/// not finite. A solve stopped by cancellation or a resource limit returns that error
+/// instead.
 fn compute_impacts(
     beta: &Array1<f64>,
     rho: f64,
@@ -2333,15 +2336,17 @@ mod tests {
         }
     }
 
+    use crate::linalg::matrix_ops::LinalgError;
     use crate::spatial::test_fixtures::{band2, knn3};
     use ndarray::array;
 
+    /// (weights, rho, direct, indirect, total) for beta = c(1, 2, -0.5).
+    type ImpactCase = (SpatialWeights, f64, [f64; 2], [f64; 2], [f64; 2]);
+
     // R 4.3.3 (fixture): S <- solve(diag(n) - rho * W); direct <- beta[-1]*mean(diag(S)); total <- beta[-1]*sum(S)/n
     // W: knn3 or band2 (0, 2] weights, styles "W" (row-standardised) and "B" (binary); beta = c(1, 2, -0.5)
-    #[test]
-    fn sar_impacts_match_r_solve_reference() {
-        #[allow(clippy::type_complexity)]
-        let cases: [(SpatialWeights, f64, [f64; 2], [f64; 2], [f64; 2]); 7] = [
+    fn r_solve_impact_cases() -> [ImpactCase; 7] {
+        [
             // (weights, rho, direct, indirect, total)                       path exercised
             // constant row sums
             (
@@ -2389,7 +2394,9 @@ mod tests {
                 [-0.9729643888739399, 0.24324109721848497],
                 [1.2663700599039887, -0.31659251497599716],
             ),
-            // q = 1.68: dense solve
+            // q = 1.68: dense solve; it returns NaN (faer 0.22.6 full-pivot LU), so the
+            // impacts come from the dense-inverse fallback
+            // (see dense_impacts_fallback_matches_the_trace_route)
             (
                 band2(WeightStyle::Binary),
                 -0.35,
@@ -2397,8 +2404,25 @@ mod tests {
                 [-1.990823153699782, 0.4977057884249455],
                 [1.0628385628958088, -0.2657096407239522],
             ),
-        ];
-        for (mut w, rho, d, i, t) in cases {
+        ]
+    }
+
+    /// Asserts that `imp` holds the case's direct, indirect and total effects within 1e-9.
+    fn assert_impacts(imp: &SpatialImpacts, rho: f64, d: [f64; 2], i: [f64; 2], t: [f64; 2]) {
+        for j in 0..2 {
+            assert!(
+                (imp.direct[j] - d[j]).abs() < 1e-9
+                    && (imp.indirect[j] - i[j]).abs() < 1e-9
+                    && (imp.total[j] - t[j]).abs() < 1e-9,
+                "rho={rho} j={j}: {imp:?}"
+            );
+        }
+        assert!(imp.warnings.is_empty(), "rho={rho}: {:?}", imp.warnings);
+    }
+
+    #[test]
+    fn sar_impacts_match_r_solve_reference() {
+        for (mut w, rho, d, i, t) in r_solve_impact_cases() {
             let imp = compute_impacts(
                 &array![1.0, 2.0, -0.5],
                 rho,
@@ -2406,16 +2430,68 @@ mod tests {
                 &["a".into(), "b".into()],
             )
             .unwrap();
+            assert_impacts(&imp, rho, d, i, t);
+        }
+    }
+
+    #[test]
+    fn dense_impacts_fallback_matches_the_trace_route() {
+        // compute_impacts reaches the dense inverse only when the eigen decomposition fails,
+        // the solve (I - rho W) v = 1 fails (no fixture provokes either), or a sum is not
+        // finite (e.g. rho = 1 with row-standardised W; see
+        // dense_impacts_pseudoinverse_branch_stays_finite). Of the R reference cases only the
+        // last provokes one: its dense LU solve returns NaN (faer 0.22.6's full-pivot LU is
+        // wrong for n >= 16, a known pre-existing defect left to a later tier), so it is
+        // answered by the dense inverse. That inverse's own LU result is NaN for every case
+        // here (n = 30), so the values come from its pseudoinverse branch. The fallback is
+        // called directly so that every case checks it against R.
+        let beta = array![1.0, 2.0, -0.5];
+        let names: [String; 2] = ["a".into(), "b".into()];
+        for (mut w, rho, d, i, t) in r_solve_impact_cases() {
+            let dense = compute_impacts_dense(&beta, rho, &w, &names).unwrap();
+            assert_impacts(&dense, rho, d, i, t);
+            let traced = compute_impacts(&beta, rho, &mut w, &names).unwrap();
             for j in 0..2 {
                 assert!(
-                    (imp.direct[j] - d[j]).abs() < 1e-9
-                        && (imp.indirect[j] - i[j]).abs() < 1e-9
-                        && (imp.total[j] - t[j]).abs() < 1e-9,
-                    "rho={rho} j={j}: {imp:?}"
+                    (dense.direct[j] - traced.direct[j]).abs() < 1e-9
+                        && (dense.indirect[j] - traced.indirect[j]).abs() < 1e-9
+                        && (dense.total[j] - traced.total[j]).abs() < 1e-9,
+                    "rho={rho} j={j}: {dense:?} vs {traced:?}"
                 );
             }
-            assert!(imp.warnings.is_empty());
         }
+    }
+
+    #[test]
+    fn dense_impacts_pseudoinverse_branch_stays_finite() {
+        // With row-standardised W, rho = 1 makes I - rho W singular, so matrix_inverse
+        // reports it ill-conditioned (cond > CONDITION_THRESHOLD) and compute_impacts_dense
+        // takes the SVD pseudoinverse branch. This pins that branch's current output: Ok,
+        // finite effects, and no warning (the missing warning is a T0-WP21 hand-off).
+        let w = knn3(WeightStyle::RowStd);
+        let rho = 1.0;
+        let n = w.n();
+        let i_rho_w = Array2::<f64>::eye(n) - &w.try_to_dense().unwrap() * rho;
+        let lu = matrix_inverse(&i_rho_w.view());
+        assert!(
+            matches!(lu, Err(LinalgError::IllConditioned(_))),
+            "the LU inverse must reject I - W as ill-conditioned for this case to reach the \
+             pseudoinverse branch, got {lu:?}"
+        );
+
+        let beta = array![1.0, 2.0, -0.5];
+        let names: [String; 2] = ["a".into(), "b".into()];
+        let imp = compute_impacts_dense(&beta, rho, &w, &names).unwrap();
+        assert_eq!(imp.direct.len(), 2);
+        for j in 0..2 {
+            assert!(
+                imp.direct[j].is_finite()
+                    && imp.indirect[j].is_finite()
+                    && imp.total[j].is_finite(),
+                "j={j}: {imp:?}"
+            );
+        }
+        assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
     }
 
     /// Relative closeness: `(a - b).abs() <= tol * max(1, |b|)`.
