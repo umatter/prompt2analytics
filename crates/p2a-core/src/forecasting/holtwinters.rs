@@ -138,7 +138,8 @@ impl HoltWintersResult {
 /// `HoltWintersResult` containing fitted values, components, and parameters,
 /// or [`EconError::Cancelled`] when the budget installed with
 /// [`crate::resource::with_budget`] is cancelled or past its deadline (checked
-/// once per optimiser iteration).
+/// once per optimiser iteration; when no smoothing parameter is left to
+/// estimate, no optimiser runs and the budget is not checked).
 ///
 /// # Example
 /// ```ignore
@@ -1406,6 +1407,55 @@ mod tests {
         ));
         // Without a budget nothing changes.
         assert!(holt_winters(&y, config).is_ok());
+    }
+
+    #[test]
+    fn nelder_mead_checkpoints_each_iteration() {
+        // optimize_parameters' objective never looks at the budget, so only
+        // the loop's own checkpoint can stop the search. The test above uses a
+        // budget cancelled before the call, which a single check before the
+        // loop would also stop; this one cancels mid-search.
+        let bounds = [(0.01, 0.99); 2];
+        let init = [0.9, 0.1];
+        let quadratic = |x: &[f64]| (x[0] - 0.3).powi(2) + (x[1] - 0.6).powi(2);
+
+        // With a check on every iteration, at most one iteration's evaluations
+        // follow the cancel (a reflection, a contraction, and a shrink of n
+        // vertices).
+        const CANCEL_AT: usize = 20;
+        let bound = CANCEL_AT + init.len() + 2;
+        let free_evals = std::cell::Cell::new(0usize);
+        let free = |x: &[f64]| {
+            free_evals.set(free_evals.get() + 1);
+            quadratic(x)
+        };
+        let (x, f) = nelder_mead(&init, &bounds, free, 500, 1e-12).unwrap();
+        assert!(
+            f < 1e-6 && (x[0] - 0.3).abs() < 1e-3 && (x[1] - 0.6).abs() < 1e-3,
+            "{x:?} {f}"
+        );
+        // The uncancelled search needs more evaluations than the bound allows,
+        // so the bound below can only hold if the search was stopped.
+        assert!(free_evals.get() > bound, "{} evaluations", free_evals.get());
+
+        let token = crate::resource::CancelToken::new();
+        let evals = std::cell::Cell::new(0usize);
+        let cancelling = |x: &[f64]| {
+            evals.set(evals.get() + 1);
+            if evals.get() == CANCEL_AT {
+                token.cancel();
+            }
+            quadratic(x)
+        };
+        let budget = crate::resource::Budget::new(None, token.clone());
+        let stopped = crate::resource::with_budget(budget, || {
+            nelder_mead(&init, &bounds, cancelling, 500, 1e-12)
+        });
+        assert!(
+            matches!(stopped, Err(EconError::Cancelled(_))),
+            "{stopped:?}"
+        );
+        assert!(evals.get() <= bound, "{} evaluations", evals.get());
     }
 
     #[test]

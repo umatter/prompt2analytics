@@ -473,6 +473,9 @@ pub fn kalman_forecast(
 /// Compute the log-likelihood of observations given a state-space model.
 ///
 /// This is useful for maximum likelihood estimation of model parameters.
+///
+/// Errors as [`kalman_filter`] does, including [`EconError::Cancelled`] on a
+/// stopped budget.
 pub fn kalman_loglik(
     y: &[f64],
     model: &StateSpaceModel,

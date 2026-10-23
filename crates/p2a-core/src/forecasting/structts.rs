@@ -914,6 +914,42 @@ mod tests {
         ));
         let (x, f, _) = nelder_mead_optimize(&objective, &init, 200, 1e-12).unwrap();
         assert!(f < 1e-6 && x.iter().all(|v| v.abs() < 1e-3), "{x:?} {f}");
+
+        // A budget cancelled mid-search. The objective cancels the live token
+        // on its CANCEL_AT-th evaluation. With a check on every iteration, at
+        // most one iteration's evaluations follow the cancel (a reflection, an
+        // expansion or contraction, and a shrink of n vertices). A check made
+        // only before the loop would let the search run on and return Ok.
+        const CANCEL_AT: usize = 20;
+        let bound = CANCEL_AT + init.len() + 2;
+        let free_evals = std::cell::Cell::new(0usize);
+        let free = |x: &[f64]| -> EconResult<f64> {
+            free_evals.set(free_evals.get() + 1);
+            objective(x)
+        };
+        nelder_mead_optimize(&free, &init, 200, 1e-12).unwrap();
+        // The uncancelled search needs more evaluations than the bound allows,
+        // so the bound below can only hold if the search was stopped.
+        assert!(free_evals.get() > bound, "{} evaluations", free_evals.get());
+
+        let token = crate::resource::CancelToken::new();
+        let evals = std::cell::Cell::new(0usize);
+        let cancelling = |x: &[f64]| -> EconResult<f64> {
+            evals.set(evals.get() + 1);
+            if evals.get() == CANCEL_AT {
+                token.cancel();
+            }
+            objective(x)
+        };
+        let budget = crate::resource::Budget::new(None, token.clone());
+        let stopped = crate::resource::with_budget(budget, || {
+            nelder_mead_optimize(&cancelling, &init, 200, 1e-12)
+        });
+        assert!(
+            matches!(stopped, Err(EconError::Cancelled(_))),
+            "{stopped:?}"
+        );
+        assert!(evals.get() <= bound, "{} evaluations", evals.get());
     }
 
     #[test]

@@ -688,6 +688,9 @@ pub fn garch_forecast(
 }
 
 /// Run GARCH from a Dataset (MCP entry point).
+///
+/// Errors as [`garch`] does, including [`EconError::Cancelled`] on a stopped
+/// budget.
 pub fn run_garch(
     data: &[f64],
     p: Option<usize>,
