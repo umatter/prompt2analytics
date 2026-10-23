@@ -69,8 +69,10 @@ const MAX_DEPTH: usize = 4;
 /// the markers that count what was left out once it is spent.
 const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
 
-/// The size of a tool result: content items, text bytes and image data
-/// bytes. The audit log records this instead of any output.
+/// The size of a tool result: content items, text bytes, image data bytes
+/// and the bytes of any other content kind. The audit log records this
+/// instead of any output, and the response cap (`response_bytes`) measures
+/// [`output_bytes`](Self::output_bytes), so the two cannot disagree.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct ResultSummary {
     /// Content items in the result.
@@ -79,9 +81,27 @@ pub struct ResultSummary {
     pub text_bytes: usize,
     /// Bytes of (base64) image data.
     pub image_bytes: usize,
+    /// Bytes of the other MCP content kinds (stdio only; the HTTP result
+    /// type has none): embedded resource text or (base64) blob, (base64)
+    /// audio data, and a resource link's JSON. No tool returns these today,
+    /// so the field is left out of an entry while it is zero.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub other_bytes: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl ResultSummary {
+    /// Bytes of output in the result, whatever its kind: what the
+    /// `response_bytes` budget is checked against.
+    pub fn output_bytes(&self) -> usize {
+        self.text_bytes
+            .saturating_add(self.image_bytes)
+            .saturating_add(self.other_bytes)
+    }
+
     /// The size of a governed call's result.
     #[cfg(feature = "http")]
     pub(crate) fn of_tool_result(result: &crate::transport::http::ToolResult) -> Self {
@@ -99,9 +119,11 @@ impl ResultSummary {
         summary
     }
 
-    /// The size of an MCP tool result (stdio).
+    /// The size of an MCP tool result (stdio). Every content kind is
+    /// counted; the match has no catch-all, so a kind a newer rmcp adds is a
+    /// compile error here rather than output the cap does not see.
     pub(crate) fn of_call_result(result: &rmcp::model::CallToolResult) -> Self {
-        use rmcp::model::RawContent;
+        use rmcp::model::{RawContent, ResourceContents};
         let mut summary = Self {
             content_items: result.content.len(),
             ..Self::default()
@@ -110,7 +132,18 @@ impl ResultSummary {
             match &item.raw {
                 RawContent::Text(text) => summary.text_bytes += text.text.len(),
                 RawContent::Image(image) => summary.image_bytes += image.data.len(),
-                _ => {}
+                RawContent::Audio(audio) => summary.other_bytes += audio.data.len(),
+                RawContent::Resource(embedded) => {
+                    summary.other_bytes += match &embedded.resource {
+                        ResourceContents::TextResourceContents { text, .. } => text.len(),
+                        ResourceContents::BlobResourceContents { blob, .. } => blob.len(),
+                    }
+                }
+                // Metadata only (uri, name, title, icons ...): its JSON is
+                // what the client receives.
+                RawContent::ResourceLink(link) => {
+                    summary.other_bytes += serde_json::to_vec(link).map_or(0, |json| json.len());
+                }
             }
         }
         summary
@@ -817,6 +850,46 @@ mod tests {
     }
 
     #[test]
+    fn call_result_summary_counts_every_content_kind() {
+        use rmcp::model::{
+            Annotated, CallToolResult, Content, RawAudioContent, RawContent, RawResource,
+            ResourceContents,
+        };
+        let link = RawResource::new("file:///data/a.csv", "a.csv");
+        let link_bytes = serde_json::to_vec(&link).unwrap().len();
+        let result = CallToolResult::success(vec![
+            Content::text("abc"),
+            Content::image("aGVsbG8=", "image/png"),
+            Content::embedded_text("str:///t", "x".repeat(300)),
+            Content::resource(ResourceContents::BlobResourceContents {
+                uri: "str:///b".into(),
+                mime_type: None,
+                blob: "y".repeat(40),
+                meta: None,
+            }),
+            Annotated::new(
+                RawContent::Audio(RawAudioContent {
+                    data: "z".repeat(16),
+                    mime_type: "audio/wav".into(),
+                }),
+                None,
+            ),
+            Content::resource_link(link),
+        ]);
+        let s = ResultSummary::of_call_result(&result);
+        assert_eq!(
+            (s.content_items, s.text_bytes, s.image_bytes),
+            (6, 3, 8),
+            "{s:?}"
+        );
+        assert_eq!(s.other_bytes, 300 + 40 + 16 + link_bytes, "{s:?}");
+        assert_eq!(s.output_bytes(), 3 + 8 + s.other_bytes);
+        // Recorded in the entry once it is non-zero.
+        let j = serde_json::to_value(s).unwrap();
+        assert_eq!(j["other_bytes"], s.other_bytes);
+    }
+
+    #[test]
     fn entry_records_sizes_not_content() {
         let e = AuditEntry::new(
             "s1",
@@ -828,7 +901,7 @@ mod tests {
             ResultSummary {
                 content_items: 1,
                 text_bytes: 600,
-                image_bytes: 0,
+                ..ResultSummary::default()
             },
         );
         let j = serde_json::to_value(&e).unwrap();

@@ -719,8 +719,8 @@ impl AnalyticsServer {
     /// which the governor sets on its blocking thread): the tool must exist,
     /// then its cost parameters must be within the catalogue's caps, then the
     /// dataset a `ROW_RULES` tool names must be within its row class. After
-    /// the handler returns, text and image output above the `response_bytes`
-    /// budget replaces the result. A refusal is
+    /// the handler returns, output above the `response_bytes` budget
+    /// replaces the result. A refusal is
     /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`).
     #[cfg(feature = "http")]
     pub async fn call_tool_with_session(
@@ -742,8 +742,8 @@ impl AnalyticsServer {
         // A session-scoped server instance that shares the session's datasets.
         let session_server = Self::with_session(session);
         let result = session_server.dispatch_tool(tool_name, arguments).await?;
-        check_response_size(&limits, tool_name, tool_result_bytes(&result))
-            .map_err(log_and_convert)?;
+        let output_bytes = crate::audit::ResultSummary::of_tool_result(&result).output_bytes();
+        check_response_size(&limits, tool_name, output_bytes).map_err(log_and_convert)?;
         Ok(result)
     }
 
@@ -1353,8 +1353,10 @@ async fn enforce_request_limits(
     Ok(())
 }
 
-/// Refuses a tool result whose text and image output (`bytes`) is above the
-/// `response_bytes` budget (none when limits are off).
+/// Refuses a tool result whose output (`bytes`, from
+/// [`ResultSummary::output_bytes`](crate::audit::ResultSummary::output_bytes),
+/// every content kind) is above the `response_bytes` budget (none when
+/// limits are off).
 #[allow(
     clippy::result_large_err,
     reason = "LimitViolation is WP02's fixed public shape"
@@ -1379,20 +1381,6 @@ fn check_response_size(limits: &Limits, tool: &str, bytes: usize) -> Result<(), 
     })
 }
 
-/// Bytes of text and image data in a governed call's result.
-#[cfg(feature = "http")]
-fn tool_result_bytes(result: &crate::transport::http::ToolResult) -> usize {
-    use crate::transport::http::ContentItem;
-    result
-        .content
-        .iter()
-        .map(|item| match item {
-            ContentItem::Text { text } => text.len(),
-            ContentItem::Image { data, .. } => data.len(),
-        })
-        .sum()
-}
-
 /// Logs a refusal with the knob that would raise the limit (`override_key`
 /// is for operators; the caller sees only the message).
 fn log_violation(v: &LimitViolation) {
@@ -1404,19 +1392,6 @@ fn log_violation(v: &LimitViolation) {
         override_key = v.override_key,
         "request refused by a resource limit"
     );
-}
-
-/// Bytes of text and image data in an MCP tool result (stdio).
-fn call_result_bytes(result: &CallToolResult) -> usize {
-    result
-        .content
-        .iter()
-        .map(|c| match &c.raw {
-            RawContent::Text(text) => text.text.len(),
-            RawContent::Image(image) => image.data.len(),
-            _ => 0,
-        })
-        .sum()
 }
 
 /// Logs a refusal and turns it into the stdio transport's JSON-RPC error:
@@ -1510,7 +1485,8 @@ impl ServerHandler for AnalyticsServer {
                     };
                     (e, code)
                 })?;
-            check_response_size(&limits, &tool, call_result_bytes(&result))
+            let output_bytes = crate::audit::ResultSummary::of_call_result(&result).output_bytes();
+            check_response_size(&limits, &tool, output_bytes)
                 .map_err(|v| (limit_error(v), "limit_exceeded"))?;
             Ok(result)
         }
@@ -1590,6 +1566,26 @@ mod tests {
             .await
             .insert(name.to_string(), dataset);
         server
+    }
+
+    #[test]
+    fn response_cap_counts_embedded_resources() {
+        let limits = Limits::hosted()
+            .with_overrides(&["response_bytes=200".to_string()])
+            .unwrap();
+        let result =
+            CallToolResult::success(vec![Content::embedded_text("str:///t", "x".repeat(300))]);
+        let bytes = crate::audit::ResultSummary::of_call_result(&result).output_bytes();
+        let refused = check_response_size(&limits, "t", bytes);
+        assert!(
+            refused.is_err(),
+            "300 bytes of resource text passed a 200-byte cap"
+        );
+        let v = refused.unwrap_err();
+        assert_eq!(
+            (v.parameter.as_str(), v.requested.as_str()),
+            ("response_bytes", "300")
+        );
     }
 
     /// Helper to extract text from Content (Annotated<RawContent>)
