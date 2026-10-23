@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::resource::try_with_capacity;
+use crate::resource::{checkpoint, try_with_capacity};
 
 /// Type of seasonal component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -866,7 +866,7 @@ fn optimize_parameters(
 
     // Run Nelder-Mead optimization
     let (optimized, _best_sse) =
-        nelder_mead(&initial, &bounds, full_objective, max_iter, tolerance);
+        nelder_mead(&initial, &bounds, full_objective, max_iter, tolerance)?;
 
     // Extract optimized parameters
     let mut result = [alpha, beta, gamma];
@@ -894,14 +894,17 @@ fn optimize_parameters(
 /// * `tol` - Convergence tolerance
 ///
 /// # Returns
-/// Optimized parameters and final function value
+/// Optimized parameters and final function value, or [`EconError::Cancelled`]
+/// when the budget is cancelled or past its deadline (checked once per
+/// iteration; each iteration runs `f`, one filter pass over the series, at
+/// most `initial.len() + 2` times).
 fn nelder_mead<F>(
     initial: &[f64],
     bounds: &[(f64, f64)],
     f: F,
     max_iter: usize,
     tol: f64,
-) -> (Vec<f64>, f64)
+) -> EconResult<(Vec<f64>, f64)>
 where
     F: Fn(&[f64]) -> f64,
 {
@@ -944,6 +947,7 @@ where
     let mut values: Vec<f64> = simplex.iter().map(|v| f(v)).collect();
 
     for _iter in 0..max_iter {
+        checkpoint()?;
         // Sort vertices by function value (best first)
         let mut indices: Vec<usize> = (0..=n).collect();
         indices.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
@@ -959,7 +963,7 @@ where
         // Check convergence: simplex is small enough
         let spread = f_worst - f_best;
         if spread < tol && spread.abs() < tol * f_best.abs().max(1.0) {
-            return (simplex[best_idx].clone(), f_best);
+            return Ok((simplex[best_idx].clone(), f_best));
         }
 
         // Compute centroid of all vertices except worst
@@ -1067,7 +1071,7 @@ where
         .map(|(i, _)| i)
         .unwrap_or(0);
 
-    (simplex[best_idx].clone(), values[best_idx])
+    Ok((simplex[best_idx].clone(), values[best_idx]))
 }
 
 // ============================================================================
@@ -1369,6 +1373,33 @@ mod tests {
             // The difference should be approximately the trend component * 4
             assert!(diff1 > 0.0); // Should be increasing due to trend
         }
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn holt_winters_optimiser_stops_when_the_budget_is_cancelled() {
+        // Before the fix the Nelder-Mead loop (up to max_iter iterations of
+        // O(n) filter passes) never looked at the budget and returned Ok.
+        let period = 4;
+        let pattern = [5.0, -3.0, 2.0, -4.0];
+        let y: Vec<f64> = (0..48)
+            .map(|i| 50.0 + 0.3 * i as f64 + pattern[i % period] + 0.5 * ((i * 7) % 11) as f64)
+            .collect();
+        let config = HoltWintersConfig {
+            period,
+            ..Default::default()
+        };
+        assert!(matches!(
+            cancelled(|| holt_winters(&y, config.clone())),
+            Err(EconError::Cancelled(_))
+        ));
+        // Without a budget nothing changes.
+        assert!(holt_winters(&y, config).is_ok());
     }
 
     #[test]

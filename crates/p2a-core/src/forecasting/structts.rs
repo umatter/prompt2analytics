@@ -15,6 +15,7 @@
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::forecasting::kalman::{StateSpaceModel, kalman_filter, kalman_smoother};
+use crate::resource::checkpoint;
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
@@ -287,18 +288,21 @@ fn optimize_params(
         .map(|&p| (p / y_var).max(1e-10).ln())
         .collect();
 
-    // Objective function: negative log-likelihood with log-transformed params
-    let objective = |log_params: &[f64]| -> f64 {
+    // Objective function: negative log-likelihood with log-transformed params.
+    // A parameter vector the model cannot use scores 1e20; a stopped budget or
+    // a refused allocation stops the fit instead of scoring the vertex.
+    let objective = |log_params: &[f64]| -> EconResult<f64> {
         let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
         match compute_loglik(y, config, &params) {
-            Ok(ll) => -ll,
-            Err(_) => 1e20,
+            Ok(ll) => Ok(-ll),
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => Err(e),
+            Err(_) => Ok(1e20),
         }
     };
 
     // Use Nelder-Mead (simpler and more robust for small parameter counts)
     let (best_log_params, neg_loglik, converged) =
-        nelder_mead_optimize(&objective, &init_log, max_iter, tolerance);
+        nelder_mead_optimize(&objective, &init_log, max_iter, tolerance)?;
 
     // Transform back to original scale
     let best_params: Vec<f64> = best_log_params.iter().map(|&lp| y_var * lp.exp()).collect();
@@ -307,12 +311,16 @@ fn optimize_params(
 }
 
 /// Nelder-Mead simplex optimization for small parameter counts.
+///
+/// Each evaluation of `objective` is a Kalman-filter pass over the series, so
+/// the budget is checked once per iteration (and within each pass by
+/// [`kalman_filter`]); an `Err` from `objective` stops the search.
 fn nelder_mead_optimize(
-    objective: &dyn Fn(&[f64]) -> f64,
+    objective: &dyn Fn(&[f64]) -> EconResult<f64>,
     init: &[f64],
     max_iter: usize,
     tolerance: f64,
-) -> (Vec<f64>, f64, bool) {
+) -> EconResult<(Vec<f64>, f64, bool)> {
     let n = init.len();
 
     // Standard Nelder-Mead parameters
@@ -331,9 +339,13 @@ fn nelder_mead_optimize(
         simplex.push(vertex);
     }
 
-    let mut values: Vec<f64> = simplex.iter().map(|v| objective(v)).collect();
+    let mut values: Vec<f64> = simplex
+        .iter()
+        .map(|v| objective(v))
+        .collect::<EconResult<_>>()?;
 
     for _iter in 0..max_iter {
+        checkpoint()?;
         // Sort vertices by value
         let mut indices: Vec<usize> = (0..=n).collect();
         indices.sort_by(|&a, &b| {
@@ -350,7 +362,7 @@ fn nelder_mead_optimize(
         // Check convergence
         let f_spread = (values[n] - values[0]).abs() / (values[0].abs() + 1e-10);
         if f_spread < tolerance {
-            return (simplex[0].clone(), values[0], true);
+            return Ok((simplex[0].clone(), values[0], true));
         }
 
         // Centroid of all except worst
@@ -368,7 +380,7 @@ fn nelder_mead_optimize(
         let reflected: Vec<f64> = (0..n)
             .map(|j| centroid[j] + alpha * (centroid[j] - simplex[n][j]))
             .collect();
-        let f_reflected = objective(&reflected);
+        let f_reflected = objective(&reflected)?;
 
         if f_reflected < values[n - 1] && f_reflected >= values[0] {
             simplex[n] = reflected;
@@ -378,7 +390,7 @@ fn nelder_mead_optimize(
             let expanded: Vec<f64> = (0..n)
                 .map(|j| centroid[j] + gamma * (reflected[j] - centroid[j]))
                 .collect();
-            let f_expanded = objective(&expanded);
+            let f_expanded = objective(&expanded)?;
 
             if f_expanded < f_reflected {
                 simplex[n] = expanded;
@@ -398,7 +410,7 @@ fn nelder_mead_optimize(
                     .map(|j| centroid[j] - rho * (centroid[j] - simplex[n][j]))
                     .collect()
             };
-            let f_contracted = objective(&contract_point);
+            let f_contracted = objective(&contract_point)?;
 
             let threshold = if f_reflected < values[n] {
                 f_reflected
@@ -415,13 +427,13 @@ fn nelder_mead_optimize(
                     for j in 0..n {
                         simplex[i][j] = best[j] + sigma * (simplex[i][j] - best[j]);
                     }
-                    values[i] = objective(&simplex[i]);
+                    values[i] = objective(&simplex[i])?;
                 }
             }
         }
     }
 
-    (simplex[0].clone(), values[0], false)
+    Ok((simplex[0].clone(), values[0], false))
 }
 
 fn compute_loglik(y: &[f64], config: &StructTsConfig, params: &[f64]) -> EconResult<f64> {
@@ -807,6 +819,31 @@ mod tests {
                 model_type,
                 result.log_likelihood
             );
+        }
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn struct_ts_optimiser_stops_when_the_budget_is_cancelled() {
+        // Before the fix the Nelder-Mead loop over Kalman-filter likelihoods
+        // never looked at the budget and returned Ok under a cancelled one.
+        let y = generate_local_level_data(100, 1.0, 0.5, 7);
+        for model_type in [StructTsType::Level, StructTsType::Trend] {
+            let config = StructTsConfig {
+                model_type,
+                ..Default::default()
+            };
+            assert!(matches!(
+                cancelled(|| struct_ts(&y, config.clone())),
+                Err(EconError::Cancelled(_))
+            ));
+            // Without a budget nothing changes.
+            assert!(struct_ts(&y, config).is_ok());
         }
     }
 
