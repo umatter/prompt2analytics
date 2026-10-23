@@ -24,7 +24,7 @@
 //!   rules below it, or none) is not looked at in any profile. [`struct_paths`] lists the
 //!   structs a tool's rules go into; the audit log replaces one given as an array by its size in
 //!   every profile. A rule path must therefore not go on into a field whose schema admits an
-//!   array.
+//!   array; the schema test in `rules.rs` fails on one that does.
 //! - [`Limits::check_rows`] checks a dataset's height for the tools in [`ROW_RULES`], whose cost
 //!   grows faster than linearly in the number of rows ([`RowClass`]).
 //! - [`Limits::check_budget`] lets a handler check a quantity it computes itself (for example a
@@ -224,7 +224,8 @@ pub enum Rule {
 /// share one `(tool, path)`, and all of them apply. Where a path goes on into a field (`a[]` in
 /// `a[].b`), a request that holds a JSON array there is refused outside the off profile, since
 /// serde would fill that struct by position, and the audit log records only its size
-/// ([`struct_paths`]); do not give such a path to a value that may rightly be an array there.
+/// ([`struct_paths`]); do not give such a path to a value that may rightly be an array there
+/// (the schema test in `rules.rs` names the tool and path of one that may).
 #[derive(Debug, Clone, Copy)]
 pub struct ParamRule {
     /// Tool name, or `"*"` for every tool that has the field and no tool-specific rule for it.

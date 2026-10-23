@@ -2090,6 +2090,95 @@ mod schema_tests {
         }
     }
 
+    /// The schemas at rule path `path` of `root` (a tool's input schema): per segment, the
+    /// field among the properties of the variants so far, then the element schemas once for
+    /// each `[]`.
+    fn schemas_at<'a>(root: &'a Value, path: &str) -> Vec<&'a Value> {
+        let mut at = vec![root];
+        for segment in path.split('.') {
+            let name = segment.trim_end_matches("[]");
+            at = at
+                .iter()
+                .flat_map(|s| expand(root, s).all)
+                .filter_map(|v| v.get("properties")?.get(name))
+                .collect();
+            for _ in 0..(segment.len() - name.len()) / 2 {
+                at = at
+                    .iter()
+                    .flat_map(|s| element_schemas(&expand(root, s).all))
+                    .collect();
+            }
+        }
+        at
+    }
+
+    /// The struct prefixes of `rules` (the part of a non-`Exempt` rule path before a `.`) that
+    /// `schema` does not resolve, or whose schema admits an array, as `path (rule)` lines, and
+    /// how many prefixes were looked at. The hosted check refuses a JSON array at such a
+    /// prefix, and the audit log redacts one, so a valid array there would be refused.
+    fn array_struct_prefixes(schema: &Value, rules: &[&ParamRule]) -> (usize, Vec<String>) {
+        let (mut checked, mut wrong) = (0, Vec::new());
+        for rule in rules {
+            if matches!(rule.rule, Rule::Exempt(_)) {
+                continue;
+            }
+            for (dot, _) in rule.path.match_indices('.') {
+                let prefix = &rule.path[..dot];
+                checked += 1;
+                let at = schemas_at(schema, prefix);
+                if at.is_empty() {
+                    wrong.push(format!("{prefix} (rule {}): no such field", rule.path));
+                } else if at.iter().any(|s| is_array(&expand(schema, s))) {
+                    wrong.push(format!("{prefix} (rule {}): admits an array", rule.path));
+                }
+            }
+        }
+        (checked, wrong)
+    }
+
+    #[test]
+    fn no_struct_a_rule_goes_into_admits_an_array() {
+        let (mut checked, mut wrong) = (0, Vec::new());
+        for (tool, schema) in tools() {
+            let (n, w) = array_struct_prefixes(&schema, &rules_for(&tool));
+            checked += n;
+            wrong.extend(w.into_iter().map(|w| format!("{tool}.{w}")));
+        }
+        assert!(
+            wrong.is_empty(),
+            "a rule path goes on into a field that is not a struct: the hosted check refuses \
+             (and the audit log redacts) a JSON array there, so a valid array would be refused; \
+             rule the field itself, or exempt the path below it:\n{}",
+            wrong.join("\n")
+        );
+        // generate_random_data and generate_report: 18 prefixes of 10 rules.
+        assert!(checked >= 18, "{checked} prefixes");
+        // The check finds a struct that may also be an array (an untagged Vec-or-struct enum)
+        // and a prefix that is not a field; untyped any-JSON passes.
+        let schema = json!({"type": "object", "properties": {
+            "items": {"type": "array", "items": {"anyOf": [
+                {"type": "object", "properties": {"name": {"type": "string"}}},
+                {"type": "array", "items": {"type": "string"}}
+            ]}},
+            "spec": {"description": "any JSON"}
+        }});
+        let rule = |path| ParamRule {
+            tool: "t",
+            path,
+            rule: Rule::Max(Family::StringBytes),
+        };
+        let (items, typo, spec) = (rule("items[].name"), rule("itmes[].name"), rule("spec.v"));
+        let (n, wrong) = array_struct_prefixes(&schema, &[&items, &typo, &spec]);
+        assert_eq!(n, 3);
+        assert_eq!(
+            wrong,
+            [
+                "items[] (rule items[].name): admits an array",
+                "itmes[] (rule itmes[].name): no such field"
+            ]
+        );
+    }
+
     #[test]
     fn small_typical_arguments_pass_for_every_tool_in_hosted_profile() {
         let h = Limits::hosted();
