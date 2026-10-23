@@ -546,9 +546,10 @@ fn edge_buffer(n: usize) -> MungeResult<Vec<f64>> {
 /// that interpolates from a `-inf` lower neighbour is `-inf`. For a finite
 /// upper neighbour that is R's `(1 - h) * lower + h * upper` with `h < 1`,
 /// where polars' formula gives NaN (`-inf + inf`); for a `+inf` upper
-/// neighbour both give NaN. A column without a value that is neither null
-/// nor NaN, or an empty one, gives interior edges of `0.0`, as the per-edge
-/// `unwrap_or(0.0)` did for an all-null column.
+/// neighbour R and polars both give NaN, and this function still returns
+/// `-inf`. A column without a value that is neither null nor NaN, or an empty
+/// one, gives interior edges of `0.0`, as the per-edge `unwrap_or(0.0)` did
+/// for an all-null column.
 ///
 /// A column whose finite values span a range that overflows `f64` is
 /// refused, as `EqualWidth` refuses it, whatever `n`: an interpolation
@@ -1060,6 +1061,19 @@ mod tests {
         let ds = Dataset::new(df!("x" => [NEG, 0.5, POS]).unwrap());
         let out = bin(&ds, "x", BinStrategy::Quantile(4), None).unwrap();
         assert_eq!(labels_of(&out, "x_binned"), idx(&[0, 1, 2]));
+        // The one edge that interpolates between -inf and +inf. R gives NaN for it
+        // (quantile(c(-Inf, Inf), .5, type = 7) is NaN), as does polars' formula; -inf is the
+        // documented choice, and with NaN bin() would refuse the column through its edge guard.
+        let ds = Dataset::new(df!("x" => [NEG, POS]).unwrap());
+        let ca = ds.df().column("x").unwrap().f64().unwrap().clone();
+        assert_eq!(quantile_edges(&ca, "x", 2).unwrap(), vec![NEG, NEG, POS]);
+        assert_eq!(
+            labels_of(
+                &bin(&ds, "x", BinStrategy::Quantile(2), None).unwrap(),
+                "x_binned"
+            ),
+            idx(&[0, 1])
+        );
         // +inf only pushes the top edges to +inf ([-inf, 1.5, 2, inf, inf]), which keeps them sorted.
         let ds = Dataset::new(df!("x" => [1.0, 2.0, POS]).unwrap());
         let out = bin(&ds, "x", BinStrategy::Quantile(4), None).unwrap();
