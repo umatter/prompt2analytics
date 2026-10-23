@@ -636,9 +636,10 @@ pub fn run_chisq_gof(
 ///   cannot be read (`Failed to read a value`).
 /// - [`EconError::InsufficientData`] for a column with fewer than two distinct values (null
 ///   counts as one).
-/// - [`EconError::ResourceLimit`] for a table too large to allocate.
-/// - [`EconError::Computation`] when a row matches no level of its column, because the table
-///   would be missing those rows.
+/// - [`EconError::ResourceLimit`] for a contingency table, or a column's list of levels, too
+///   large to allocate.
+/// - [`EconError::Computation`] when two levels of a column share a row key, or when a row
+///   matches no level of its column, because the table would miscount or miss those rows.
 /// - [`EconError::Cancelled`] when the budget installed for the thread is cancelled or its
 ///   deadline passes (checked through [`resource::checkpoint`]).
 ///
@@ -732,19 +733,10 @@ pub fn run_chisq_independence(
 
     // Levels in sorted order of their text (the order the table has always had), each with the
     // key its rows are matched on
-    let row_levels = sorted_levels(&row_unique.rechunk(), lookup_error)?;
-    let col_levels = sorted_levels(&col_unique.rechunk(), lookup_error)?;
-
-    // Level key -> position in the sorted level order (the first position for equal keys)
-    fn index_of(levels: &[(String, String)]) -> std::collections::HashMap<&str, usize> {
-        let mut index = std::collections::HashMap::with_capacity(levels.len());
-        for (i, (_, key)) in levels.iter().enumerate() {
-            index.entry(key.as_str()).or_insert(i);
-        }
-        index
-    }
-    let row_index = index_of(&row_levels);
-    let col_index = index_of(&col_levels);
+    let row_levels = sorted_levels(&row_unique.rechunk(), row_col, lookup_error)?;
+    let col_levels = sorted_levels(&col_unique.rechunk(), col_col, lookup_error)?;
+    let row_index = level_index(&row_levels, row_col)?;
+    let col_index = level_index(&col_levels, col_col)?;
 
     // Count the rows in one pass (no lazy engine, so no nested async runtime), reusing one key
     // buffer per column
@@ -777,13 +769,15 @@ pub fn run_chisq_independence(
     independence_from_flat(observed, n_rows, n_cols, correct)
 }
 
-/// The levels of a column from its single-chunk `unique()` result, as (Debug text, row key)
+/// The levels of `column` from its single-chunk `unique()` result, as (Debug text, row key)
 /// pairs sorted by the text.
 fn sorted_levels(
     unique: &polars::prelude::Column,
+    column: &str,
     lookup_error: impl Fn(polars::prelude::PolarsError) -> EconError,
 ) -> EconResult<Vec<(String, String)>> {
-    let mut levels: Vec<(String, String)> = resource::try_with_capacity(unique.len(), "levels")?;
+    let mut levels: Vec<(String, String)> =
+        resource::try_with_capacity(unique.len(), &format!("the levels of `{column}`"))?;
     for i in 0..unique.len() {
         let v = unique.get(i).map_err(&lookup_error)?;
         let mut key = String::new();
@@ -792,6 +786,33 @@ fn sorted_levels(
     }
     levels.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(levels)
+}
+
+/// Maps each level's row key to its position in the sorted level order.
+///
+/// Two levels with one key would be counted as one: the second level's row of the table would
+/// stay empty but still count toward the degrees of freedom, so a shared key is an error.
+fn level_index<'a>(
+    levels: &'a [(String, String)],
+    column: &str,
+) -> EconResult<std::collections::HashMap<&'a str, usize>> {
+    use std::collections::hash_map::Entry;
+
+    let mut index = std::collections::HashMap::with_capacity(levels.len());
+    for (i, (_, key)) in levels.iter().enumerate() {
+        match index.entry(key.as_str()) {
+            Entry::Vacant(slot) => {
+                slot.insert(i);
+            }
+            Entry::Occupied(_) => {
+                return Err(EconError::Computation(format!(
+                    "two levels of `{column}` share the row key `{key}`, so their rows cannot be \
+                     told apart"
+                )));
+            }
+        }
+    }
+    Ok(index)
 }
 
 /// Writes the key a value is counted under into `buf`: its Debug text, with two exceptions.
@@ -973,7 +994,7 @@ mod tests {
             .unwrap()
             .cast(&DataType::from_categories(cats))
             .unwrap();
-        let levels = sorted_levels(&g.unique().unwrap().rechunk(), |e| {
+        let levels = sorted_levels(&g.unique().unwrap().rechunk(), "g", |e| {
             EconError::Computation(e.to_string())
         })
         .unwrap();
@@ -1054,6 +1075,46 @@ mod tests {
         assert!(
             matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("contingency table")),
             "{r:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_chisq_independence_names_the_level_list_it_cannot_allocate() {
+        // An ID-like column against a two-level column: the 30 x 2 table (480 bytes) fits under
+        // the ceiling, but the ID column's 30 levels (30 x 48 bytes) do not. Pre-fix, the error
+        // said only "levels would need ...", without naming the column.
+        let id: Vec<i64> = (0..30).collect();
+        let group: Vec<&str> = (0..30)
+            .map(|i| if i % 3 == 0 { "u" } else { "v" })
+            .collect();
+        let dataset = Dataset::new(df!("id" => id, "group" => group).unwrap());
+        let r = resource::with_alloc_ceiling(Some(1024), || {
+            run_chisq_independence(&dataset, "id", "group", false)
+        });
+        assert!(
+            matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("the levels of `id`")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn test_level_index_refuses_two_levels_with_one_row_key() {
+        // Pre-fix, the second level was mapped to the first one's position: its row of the table
+        // stayed empty but still counted toward the degrees of freedom, with no error.
+        let level = |text: &str, key: &str| (text.to_string(), key.to_string());
+        let distinct = [level("String(a)", "a"), level("String(b)", "b")];
+        let index = level_index(&distinct, "g").unwrap();
+        assert_eq!((index["a"], index["b"]), (0, 1));
+
+        let shared = [
+            level("String(a)", "a"),
+            level("String(b)", "k"),
+            level("String(c)", "k"),
+        ];
+        let e = level_index(&shared, "g").unwrap_err();
+        assert!(
+            matches!(&e, EconError::Computation(m) if m.contains("`g`") && m.contains("`k`")),
+            "{e}"
         );
     }
 
