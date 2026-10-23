@@ -24,7 +24,9 @@ use p2a_core::{
     simulation::{ColumnSpec, Distribution, generate_random_data},
 };
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 /// A writer that refuses to pass more than `cap` bytes to `inner`: the shared
 /// byte cap for exports. A write that would take the total past the cap is
@@ -875,6 +877,53 @@ fn shown_name(name: &str) -> String {
     }
 }
 
+thread_local! {
+    /// Whether `server_stats` withholds the process memory on this thread
+    /// (see [`redact_process_memory`]).
+    static REDACT_PROCESS_MEMORY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While the returned guard lives, `server_stats` on this thread reports no
+/// process RSS or virtual size when `redact` is set. The previous setting
+/// comes back on drop, also when unwinding. Not `Send`: it must be dropped on
+/// the thread that created it.
+///
+/// `ToolGovernor::run_blocking` enters one for every governed call from
+/// `ExecConfig::redact_health`, the flag that keeps the process memory out of
+/// `/health` in open public mode. The process figures are process-wide: they
+/// move with every session's load, and the RSS is what the memory admission
+/// limit is checked against, so an unauthenticated visitor polling them could
+/// watch other sessions and time memory-pressure attempts. Outside a governed
+/// call (stdio, which is always local) nothing is withheld.
+pub(crate) fn redact_process_memory(redact: bool) -> ProcessMemoryRedaction {
+    let previous = REDACT_PROCESS_MEMORY.with(|r| r.replace(redact));
+    ProcessMemoryRedaction {
+        previous,
+        _not_send: PhantomData,
+    }
+}
+
+/// The guard of [`redact_process_memory`].
+#[must_use = "the redaction setting ends when this guard is dropped"]
+#[derive(Debug)]
+pub(crate) struct ProcessMemoryRedaction {
+    previous: bool,
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for ProcessMemoryRedaction {
+    fn drop(&mut self) {
+        // `try_with`: never panic while the thread's locals are torn down.
+        let _ = REDACT_PROCESS_MEMORY.try_with(|r| r.set(self.previous));
+    }
+}
+
+/// Whether `server_stats` withholds the process memory on this thread. Fails
+/// closed while the thread's locals are torn down.
+fn process_memory_redacted() -> bool {
+    REDACT_PROCESS_MEMORY.try_with(Cell::get).unwrap_or(true)
+}
+
 #[tool_router(router = utils_router, vis = "pub")]
 impl AnalyticsServer {
     // ========================================================================
@@ -940,7 +989,7 @@ impl AnalyticsServer {
 
     /// Get server memory and performance statistics.
     #[tool(
-        description = "Get memory usage statistics for the analytics server. Shows dataset memory consumption, process memory, and memory trends. Useful for monitoring resource usage with large datasets."
+        description = "Get memory usage statistics for the analytics server. Shows dataset memory consumption, process memory (not reported in open public mode), and memory trends. Useful for monitoring resource usage with large datasets."
     )]
     pub async fn server_stats(
         &self,
@@ -978,8 +1027,11 @@ impl AnalyticsServer {
             profiler.elapsed().as_secs_f64()
         ));
 
-        // Process memory (if available)
-        if let Some(ref proc_mem) = stats.process_memory {
+        // Process memory (if available). Withheld in open public mode, as
+        // `/health` withholds it: see `redact_process_memory`.
+        if process_memory_redacted() {
+            output.push_str("\nProcess memory: not reported in open public mode\n");
+        } else if let Some(ref proc_mem) = stats.process_memory {
             output.push_str(&format!("\nProcess RSS: {}\n", proc_mem.rss_formatted));
             output.push_str(&format!(
                 "Process Virtual: {}\n",
@@ -2152,6 +2204,76 @@ mod tests {
             Some(true),
             "import_session read outside the data root: {}",
             dir.path().display()
+        );
+    }
+
+    /// `server_stats`'s text on a fresh server, under `redact` when given. The
+    /// redaction setting is thread-local, so the handler runs on a
+    /// current-thread runtime built here.
+    fn server_stats_text(redact: Option<bool>) -> String {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = AnalyticsServer::new();
+        let request = ServerStatsRequest {
+            include_datasets: Some(true),
+            include_history: Some(true),
+        };
+        let _redaction = redact.map(redact_process_memory);
+        let result = rt
+            .block_on(server.server_stats(Parameters(request)))
+            .expect("server_stats answers in-band");
+        text(&result)
+    }
+
+    #[test]
+    fn server_stats_withholds_process_memory_when_redacted() {
+        let withheld = server_stats_text(Some(true));
+        assert!(
+            !withheld.contains("Process RSS") && !withheld.contains("Process Virtual"),
+            "{withheld}"
+        );
+        assert!(
+            withheld.contains("Process memory: not reported"),
+            "{withheld}"
+        );
+        // The session's own figures stay.
+        assert!(withheld.contains("Datasets Loaded: 0"), "{withheld}");
+
+        for shown in [server_stats_text(None), server_stats_text(Some(false))] {
+            assert!(!shown.contains("not reported"), "{shown}");
+            if p2a_core::get_process_memory().is_some() {
+                assert!(
+                    shown.contains("Process RSS: ") && shown.contains("Process Virtual: "),
+                    "{shown}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn process_memory_redaction_nests_and_restores() {
+        assert!(!process_memory_redacted(), "nothing is withheld by default");
+        {
+            let _outer = redact_process_memory(true);
+            assert!(process_memory_redacted());
+            {
+                let _inner = redact_process_memory(false);
+                assert!(!process_memory_redacted());
+            }
+            assert!(process_memory_redacted(), "the outer setting comes back");
+        }
+        assert!(!process_memory_redacted());
+
+        let unwound = std::panic::catch_unwind(|| {
+            let _redaction = redact_process_memory(true);
+            panic!("the work fails");
+        });
+        assert!(unwound.is_err());
+        assert!(
+            !process_memory_redacted(),
+            "the setting is restored when unwinding"
         );
     }
 }
