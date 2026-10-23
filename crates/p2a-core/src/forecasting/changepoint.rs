@@ -81,7 +81,8 @@ pub fn detect_changepoints(
 
     let min_seg = min_segment_length.unwrap_or(2).max(2);
 
-    if n < min_seg * 2 {
+    // Saturating: a caller's minimum near usize::MAX must be refused, not wrap.
+    if n < min_seg.saturating_mul(2) {
         return Err(format!(
             "Data length ({}) must be at least 2x minimum segment length ({})",
             n, min_seg
@@ -355,7 +356,7 @@ pub fn binary_segmentation(
         let mut best_segment_idx = 0;
 
         for (idx, &(start, end)) in segments_to_check.iter().enumerate() {
-            if end - start < 2 * min_seg {
+            if end - start < min_seg.saturating_mul(2) {
                 continue;
             }
 
@@ -854,5 +855,20 @@ mod tests {
         let err = cancelled(|| binary_segmentation(&data, Some(5), None, None))
             .expect_err("a cancelled budget must stop binary segmentation");
         assert!(err.contains("cancelled"), "{err}");
+    }
+
+    #[test]
+    fn a_huge_min_segment_length_is_refused_not_overflowed() {
+        // `min_seg * 2` overflowed: a debug build panicked, and a release
+        // build wrapped (to 0 for 2^63, so PELT ran and reported no change).
+        let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
+        for min_seg in [usize::MAX, usize::MAX / 2 + 1] {
+            let err =
+                detect_changepoints(&data, Some(5.0), Some(min_seg), CostFunction::MeanChange)
+                    .expect_err("a minimum segment longer than the series must be refused");
+            assert!(err.contains("minimum segment length"), "{err}");
+            let r = binary_segmentation(&data, Some(5), Some(min_seg), None).unwrap();
+            assert_eq!(r.n_changepoints, 0);
+        }
     }
 }
