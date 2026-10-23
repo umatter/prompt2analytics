@@ -106,6 +106,25 @@ pub fn with_alloc_ceiling<R>(limit: Option<usize>, f: impl FnOnce() -> R) -> R {
 // Checked sizes and fallible allocation
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// The remedy [`check_alloc`] and [`reserve_failed`] end a refusal with,
+/// after `"; "`. [`with_remedy`] replaces it.
+pub(crate) const GENERIC_REMEDY: &str = "use a smaller input";
+
+/// `e` with `remedy` in place of the [`GENERIC_REMEDY`] that [`check_alloc`]
+/// and [`reserve_failed`] end a refusal with, so that a caller can name the
+/// parameter to change. Any other `ResourceLimit` (an [`overflow`]) gains
+/// `remedy` after `"; "`; any other error is unchanged.
+pub(crate) fn with_remedy(e: EconError, remedy: &str) -> EconError {
+    match e {
+        EconError::ResourceLimit(msg) => {
+            let generic = format!("; {GENERIC_REMEDY}");
+            let base = msg.strip_suffix(generic.as_str()).unwrap_or(&msg);
+            EconError::ResourceLimit(format!("{base}; {remedy}"))
+        }
+        other => other,
+    }
+}
+
 /// The [`EconError::ResourceLimit`] for a size computation on `what` that
 /// overflows.
 pub(crate) fn overflow(what: &str) -> EconError {
@@ -135,7 +154,7 @@ pub fn check_alloc<T>(len: usize, what: &str) -> EconResult<()> {
     {
         return Err(EconError::ResourceLimit(format!(
             "{what} would need {}, above this server's per-allocation limit of {}; \
-             use a smaller input",
+             {GENERIC_REMEDY}",
             format_bytes(bytes),
             format_bytes(limit)
         )));
@@ -147,7 +166,7 @@ pub fn check_alloc<T>(len: usize, what: &str) -> EconResult<()> {
 /// `size` bytes for `what` that passed the checks but could not be made.
 pub(crate) fn reserve_failed(what: &str, len: usize, size: usize) -> EconError {
     EconError::ResourceLimit(format!(
-        "{what} would need {}, which could not be allocated; use a smaller input",
+        "{what} would need {}, which could not be allocated; {GENERIC_REMEDY}",
         format_bytes(len.saturating_mul(size))
     ))
 }
@@ -327,6 +346,35 @@ mod tests {
             assert!(try_vec::<f64>(100, 0.0, "grid").is_ok()); // 800 bytes
         });
         assert!(try_vec::<f64>(1000, 0.0, "grid").is_ok()); // override restored
+    }
+
+    #[test]
+    fn with_remedy_replaces_the_generic_remedy() {
+        let remedy = "use a smaller period";
+        let only_remedy = |e: EconError| match e {
+            EconError::ResourceLimit(msg) => {
+                assert!(msg.ends_with(&format!("; {remedy}")), "{msg}");
+                assert_eq!(msg.matches("; use ").count(), 1, "{msg}");
+                assert!(!msg.contains(GENERIC_REMEDY), "{msg}");
+                msg
+            }
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        };
+        // A refusal above the ceiling and a failed reservation both end with
+        // the generic remedy, which the caller's replaces.
+        let refused = with_alloc_ceiling(Some(1024), || check_alloc::<f64>(1000, "grid"));
+        let refused = refused.unwrap_err();
+        assert!(refused.to_string().ends_with(GENERIC_REMEDY), "{refused}");
+        assert!(only_remedy(with_remedy(refused, remedy)).contains("grid"));
+        only_remedy(with_remedy(reserve_failed("grid", 10, 8), remedy));
+        // An overflow keeps its text and gains the remedy.
+        let msg = only_remedy(with_remedy(overflow("grid"), remedy));
+        assert!(msg.contains("grid is too large"), "{msg}");
+        // Other errors pass unchanged.
+        assert!(matches!(
+            with_remedy(EconError::Cancelled("stop".into()), remedy),
+            EconError::Cancelled(m) if m == "stop"
+        ));
     }
 
     #[test]

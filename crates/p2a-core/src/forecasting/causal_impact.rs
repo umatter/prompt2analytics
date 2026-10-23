@@ -41,10 +41,11 @@ use statrs::distribution::{ContinuousCDF, Normal};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::forecasting::kalman::{
-    StateSpaceModel, admit_filter_history, kalman_filter, kalman_forecast, kalman_loglik,
-    with_remedy,
+    StateSpaceModel, admit_filter_history_and_forecast, kalman_filter, kalman_forecast,
+    kalman_loglik,
 };
 use crate::forecasting::structts::nelder_mead_optimize;
+use crate::resource::with_remedy;
 
 /// Configuration for CausalImpact analysis.
 #[derive(Debug, Clone)]
@@ -211,12 +212,14 @@ pub struct CausalImpactResult {
 ///
 /// `CausalImpactResult` with summary, time series, model info, and inference.
 ///
-/// The fit's likelihood evaluations keep no Kalman history; the
+/// The fit's likelihood evaluations keep no Kalman history. The
 /// counterfactual runs [`kalman_filter`] over the pre-period, which keeps
 /// about 16·n_pre·m² bytes, and at least 320 bytes per observation (m = 1 +
-/// an optional slope + `seasonal_period` − 1 seasonal states). That history
-/// is admitted before the fit: [`EconError::ResourceLimit`] when it exceeds
-/// the per-allocation ceiling, naming `seasonal_period` when there is one.
+/// an optional slope + `seasonal_period` − 1 seasonal states), and holds it
+/// while [`kalman_forecast`] runs over the gap and the post-period, 8m + 64
+/// bytes a step (80 at m = 1). The two are admitted as one figure before the
+/// fit: [`EconError::ResourceLimit`] when it exceeds the per-allocation
+/// ceiling, naming `seasonal_period` when there is one.
 /// [`EconError::Cancelled`] once the budget installed with
 /// [`crate::resource::with_budget`] is cancelled or past its deadline.
 ///
@@ -418,11 +421,15 @@ fn run_causal_impact_core(
     let n_pre = pre_end - pre_start + 1;
     let n_post = post_end - post_start + 1;
 
-    // The counterfactual's filter pass keeps its history. Admit it before the
-    // fit, whose likelihood passes keep none, so that a history above the
-    // ceiling is refused before any fitting work.
+    // The counterfactual's filter pass keeps its history and holds it while
+    // the forecast over the gap and the post-period (predict_counterfactual's
+    // horizon) is built. Admit both as one figure before the fit, whose
+    // likelihood passes keep neither, so that a refusal comes before any
+    // fitting work.
     let m = compute_state_dim(config);
-    admit_filter_history(n_pre, m).map_err(|e| with_remedy(e, &history_remedy(config, m)))?;
+    let horizon = (post_start - pre_end - 1).saturating_add(n_post);
+    admit_filter_history_and_forecast(n_pre, m, horizon)
+        .map_err(|e| with_remedy(e, &history_remedy(config, m)))?;
 
     // Step 1: Extract pre-period data for model fitting
     let y_pre: Vec<f64> = y[pre_start..=pre_end].to_vec();
@@ -1137,20 +1144,22 @@ fn compute_state_dim(config: &CausalImpactConfig) -> usize {
     dim
 }
 
-/// What to change when the Kalman history of an `m`-dimensional state is
-/// refused: with a seasonal component the state dimension follows from
-/// `seasonal_period`.
+/// What to change when the Kalman history and forecast of an `m`-dimensional
+/// state are refused: the history grows with the pre-period, the forecast
+/// with the post-period, and with a seasonal component the state dimension
+/// follows from `seasonal_period`.
 fn history_remedy(config: &CausalImpactConfig, m: usize) -> String {
     match config.seasonal_period {
         Some(period) if config.include_trend => format!(
             "with seasonal_period {period} and include_trend the state dimension is \
-             seasonal_period + 1 = {m}; use a smaller seasonal_period or a shorter pre_period"
+             seasonal_period + 1 = {m}; use a smaller seasonal_period or a shorter \
+             pre_period or post_period"
         ),
         Some(period) => format!(
             "with seasonal_period {period} the state dimension is seasonal_period = {m}; \
-             use a smaller seasonal_period or a shorter pre_period"
+             use a smaller seasonal_period or a shorter pre_period or post_period"
         ),
-        None => "use a shorter pre_period".to_string(),
+        None => "use a shorter pre_period or post_period".to_string(),
     }
 }
 
@@ -1719,25 +1728,27 @@ mod tests {
         // The counterfactual's kalman_filter keeps a covariance history that
         // grows with n_pre·m² (m = seasonal_period, + 1 with a trend), so with
         // a large state dimension (a seasonal model with a long period)
-        // memory grew without bound. causal_impact now admits it before the
-        // fit, and the refusal names seasonal_period, which sets m; before,
-        // it named only the state dimension and suggested a smaller input.
+        // memory grew without bound. causal_impact now admits it, with the
+        // forecast, before the fit, and the refusal names seasonal_period,
+        // which sets m. Before the fix this returned Ok under the ceiling.
         let (n_pre, n_post) = (40, 10);
         let (y, time) = generate_causal_impact_data(n_pre, n_post, 2.0, 31);
         let dataset = Dataset::new(df! { "y" => &y, "time" => &time }.unwrap());
         let ceiling = Some(64 << 10);
-        // m = 12: 40 · (16·12² + 96·12 + 176) = 145,280 bytes > 64 KiB;
-        // m = 13 with include_trend: 40 · 4,128 = 165,120 bytes.
+        // m = 12: 40 · (16·12² + 96·12 + 176) + 10 · (8·12 + 64) = 146,880
+        // bytes > 64 KiB; m = 13 with include_trend: 40 · 4,128 + 10 · 168 =
+        // 166,800 bytes.
         for (include_trend, expected) in [
             (
                 false,
                 "with seasonal_period 12 the state dimension is seasonal_period = 12; \
-                 use a smaller seasonal_period or a shorter pre_period",
+                 use a smaller seasonal_period or a shorter pre_period or post_period",
             ),
             (
                 true,
                 "with seasonal_period 12 and include_trend the state dimension is \
-                 seasonal_period + 1 = 13; use a smaller seasonal_period or a shorter pre_period",
+                 seasonal_period + 1 = 13; use a smaller seasonal_period or a shorter \
+                 pre_period or post_period",
             ),
         ] {
             let config = CausalImpactConfig {
@@ -1751,8 +1762,9 @@ mod tests {
                 Err(EconError::ResourceLimit(msg)) => assert!(
                     msg.contains("Kalman filter")
                         && msg.contains("40 observations")
+                        && msg.contains("10-step forecast")
                         && msg.ends_with(expected)
-                        && !msg.contains("smaller input"),
+                        && msg.matches("; use ").count() == 1,
                     "{msg}"
                 ),
                 other => panic!(
@@ -1794,14 +1806,15 @@ mod tests {
             post_period: (n_pre as i64, (n_pre + n_post - 1) as i64),
             ..Default::default()
         };
-        // 1,000 · 320 = 320,000 bytes > 64 KiB (the values: 48,000 bytes).
+        // 1,000 · 320 + 10 · 80 = 320,800 bytes > 64 KiB (the history's
+        // values: 48,000 bytes).
         let refused = crate::resource::with_alloc_ceiling(Some(64 << 10), || {
             causal_impact(&dataset, "y", "time", config.clone())
         });
         match &refused {
             Err(EconError::ResourceLimit(msg)) => assert!(
                 msg.contains("1000 observations and a 1-dimensional state")
-                    && msg.ends_with("; use a shorter pre_period"),
+                    && msg.ends_with("; use a shorter pre_period or post_period"),
                 "{msg}"
             ),
             other => panic!(
@@ -1817,12 +1830,51 @@ mod tests {
     }
 
     #[test]
+    fn causal_impact_admits_the_counterfactual_as_one_figure() {
+        // The counterfactual holds the pre-period's filter history while the
+        // forecast over the post-period is built. With a one-dimensional
+        // state, 100 pre-period rows (32,000 bytes) and 500 post-period rows
+        // (40,000 bytes) each fit 64 KiB, but not together (72,000 bytes).
+        // Before the fix this returned Ok: the history was never admitted
+        // with the forecast, and the forecast was counted by its values
+        // (4,000 bytes).
+        let ceiling = Some(64 << 10);
+        let fit = |n_post: usize| {
+            let n_pre = 100;
+            let (y, time) = generate_causal_impact_data(n_pre, n_post, 2.0, 35);
+            let dataset = Dataset::new(df! { "y" => &y, "time" => &time }.unwrap());
+            let config = CausalImpactConfig {
+                pre_period: (0, (n_pre - 1) as i64),
+                post_period: (n_pre as i64, (n_pre + n_post - 1) as i64),
+                ..Default::default()
+            };
+            crate::resource::with_alloc_ceiling(ceiling, || {
+                causal_impact(&dataset, "y", "time", config)
+            })
+        };
+        match fit(500) {
+            Err(EconError::ResourceLimit(msg)) => assert!(
+                msg.contains("100 observations and a 1-dimensional state")
+                    && msg.contains("500-step forecast")
+                    && msg.ends_with("; use a shorter pre_period or post_period"),
+                "{msg}"
+            ),
+            other => panic!(
+                "expected ResourceLimit, got {:?}",
+                other.as_ref().map(|r| &r.summary)
+            ),
+        }
+        // 32,000 + 300 · 80 = 56,000 bytes fit.
+        assert_eq!(fit(300).unwrap().model.n_post, 300);
+    }
+
+    #[test]
     fn fit_bsts_model_keeps_no_history_and_stops_on_a_stopped_budget() {
         // The objective scored every Err as 1e20, so a stopped budget left
         // the Nelder-Mead search running on 1e20 vertices for max_iter
-        // iterations and returned Ok. Its likelihood passes also kept the
-        // whole Kalman history, so under a ceiling the history exceeds,
-        // every evaluation was refused; they now keep none.
+        // iterations and returned Ok. Its likelihood passes keep no Kalman
+        // history: had they run kalman_filter, which admits its history,
+        // every evaluation under this ceiling would be ResourceLimit.
         let (y, _) = generate_causal_impact_data(40, 0, 0.0, 32);
         let config = seasonal_config(40, 1);
         // The history would be 145,280 bytes, above 64 KiB; the fit keeps

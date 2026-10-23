@@ -486,7 +486,13 @@ pub fn kalman_smoother(
 ///
 /// # Returns
 ///
-/// `KalmanForecastResult` with forecasts and prediction intervals.
+/// `KalmanForecastResult` with forecasts and prediction intervals, or
+/// [`EconError::Cancelled`] when the budget is cancelled or past its deadline
+/// (checked every step). Its state forecasts, nested as the filter's states
+/// are, and its forecasts, variances and standard errors (8m + 64 bytes a
+/// step once m ≥ 2, 80 bytes for m = 1, whose values are only 32) are
+/// admitted before any work: [`EconError::ResourceLimit`] when their size
+/// overflows or exceeds the per-allocation ceiling.
 pub fn kalman_forecast(
     filter_result: &KalmanFilterResult,
     model: &StateSpaceModel,
@@ -503,9 +509,9 @@ pub fn kalman_forecast(
     let n = filter_result.n_obs;
     let m = filter_result.state_dim;
 
-    // The state forecasts hold horizon × m values; admit them before any work.
-    let cells = checked_len(&[horizon, m], WHAT)?;
-    check_alloc::<f64>(cells, WHAT)?;
+    // Admit what the forecast keeps, counted by the bytes its nested Vecs
+    // hold, before any work.
+    admit_bytes(&[history_bytes(horizon, m, FORECAST_STEP, WHAT)?], WHAT)?;
 
     // Forecasting starts from the final filtered state; an empty filter result
     // has none, so indexing `[n - 1]` would underflow/panic.
@@ -582,11 +588,38 @@ pub fn kalman_loglik(
 const MALLOC_CHUNK_OVERHEAD: usize = 16;
 /// glibc's smallest chunk: no buffer takes less, however small.
 const MALLOC_MIN_CHUNK: usize = 32;
-/// Each step of [`kalman_filter`] keeps two (covariance, state) pairs,
-/// predicted and filtered, and two `f64` values, the innovation and its
-/// variance.
-const FILTER_PAIRS: usize = 2;
-const FILTER_SCALARS: usize = 2;
+
+/// What one step of a Kalman pass keeps.
+#[derive(Clone, Copy, Debug)]
+struct Step {
+    /// m × m covariances, each a `Vec<Vec<f64>>`.
+    covs: usize,
+    /// m-vector states, each a `Vec<f64>`.
+    states: usize,
+    /// Single `f64` values, each a slot in an outer `Vec<f64>`.
+    scalars: usize,
+}
+
+/// A [`kalman_filter`] step: the predicted and the filtered covariance and
+/// state, the innovation and its variance.
+const FILTER_STEP: Step = Step {
+    covs: 2,
+    states: 2,
+    scalars: 2,
+};
+/// A [`kalman_smoother`] step: the smoothed covariance and state.
+const SMOOTHER_STEP: Step = Step {
+    covs: 1,
+    states: 1,
+    scalars: 0,
+};
+/// A [`kalman_forecast`] step: the state forecast, and the forecast, its
+/// variance and its standard error.
+const FORECAST_STEP: Step = Step {
+    covs: 0,
+    states: 1,
+    scalars: 3,
+};
 
 fn filter_history_what(n: usize, m: usize) -> String {
     format!(
@@ -602,38 +635,72 @@ fn smoother_history_what(n: usize, m: usize) -> String {
     )
 }
 
+/// `ResourceLimit` unless the byte counts in `parts`, summed, fit the
+/// per-allocation ceiling; `what` names them all.
+fn admit_bytes(parts: &[usize], what: &str) -> EconResult<()> {
+    let total = parts
+        .iter()
+        .try_fold(0usize, |total, &bytes| total.checked_add(bytes))
+        .ok_or_else(|| overflow(what))?;
+    check_alloc::<u8>(total, what)
+}
+
 /// Check that the history [`kalman_filter`] keeps for `n` observations of an
-/// `m`-dimensional state ([`history_bytes`] with two pairs and two scalars a
-/// step) fits the per-allocation ceiling: `ResourceLimit` when it overflows
-/// or does not. Callers that run the filter after other work (an optimiser)
-/// call this first, so that a refused history stops them before that work.
-pub(crate) fn admit_filter_history(n: usize, m: usize) -> EconResult<()> {
+/// `m`-dimensional state ([`history_bytes`] of a [`FILTER_STEP`]) fits the
+/// per-allocation ceiling: `ResourceLimit` when it overflows or does not.
+fn admit_filter_history(n: usize, m: usize) -> EconResult<()> {
     let what = filter_history_what(n, m);
-    check_alloc::<u8>(
-        history_bytes(n, m, FILTER_PAIRS, FILTER_SCALARS, &what)?,
+    admit_bytes(&[history_bytes(n, m, FILTER_STEP, &what)?], &what)
+}
+
+/// [`admit_filter_history`] for the history [`kalman_smoother`] keeps.
+fn admit_smoother_history(n: usize, m: usize) -> EconResult<()> {
+    let what = smoother_history_what(n, m);
+    admit_bytes(&[history_bytes(n, m, SMOOTHER_STEP, &what)?], &what)
+}
+
+/// Check that the histories [`kalman_filter`] and then [`kalman_smoother`]
+/// keep for `n` observations of an `m`-dimensional state fit the
+/// per-allocation ceiling as one figure, since a caller that smooths the
+/// filter's result holds both at once: n·(24m² + 144m + 256) bytes once
+/// m ≥ 2, 472 bytes per step for m = 1. `ResourceLimit` when the sum
+/// overflows or does not fit. Callers that run the passes after other work
+/// (an optimiser) call this first, so that a refusal stops them before that
+/// work; the passes then admit their own histories again.
+pub(crate) fn admit_filter_and_smoother_history(n: usize, m: usize) -> EconResult<()> {
+    let what = format!(
+        "the Kalman filter's and smoother's state and covariance histories for {n} \
+         observations and a {m}-dimensional state"
+    );
+    admit_bytes(
+        &[
+            history_bytes(n, m, FILTER_STEP, &what)?,
+            history_bytes(n, m, SMOOTHER_STEP, &what)?,
+        ],
         &what,
     )
 }
 
-/// [`admit_filter_history`] for the history [`kalman_smoother`] keeps: one
-/// (covariance, state) pair a step.
-pub(crate) fn admit_smoother_history(n: usize, m: usize) -> EconResult<()> {
-    let what = smoother_history_what(n, m);
-    check_alloc::<u8>(history_bytes(n, m, 1, 0, &what)?, &what)
-}
-
-/// `e` with `remedy` in place of the generic "use a smaller input" that
-/// [`check_alloc`] ends a refusal with (appended to any other
-/// `ResourceLimit`), so that a caller can name the parameter that sets the
-/// state dimension; any other error unchanged.
-pub(crate) fn with_remedy(e: EconError, remedy: &str) -> EconError {
-    match e {
-        EconError::ResourceLimit(msg) => {
-            let base = msg.strip_suffix("; use a smaller input").unwrap_or(&msg);
-            EconError::ResourceLimit(format!("{base}; {remedy}"))
-        }
-        other => other,
-    }
+/// [`admit_filter_and_smoother_history`] for a caller that holds the history
+/// [`kalman_filter`] keeps for `n` observations together with a
+/// [`kalman_forecast`] of `horizon` steps from it (8m + 64 bytes a step once
+/// m ≥ 2, 80 bytes for m = 1).
+pub(crate) fn admit_filter_history_and_forecast(
+    n: usize,
+    m: usize,
+    horizon: usize,
+) -> EconResult<()> {
+    let what = format!(
+        "the Kalman filter's state and covariance history for {n} observations \
+         and a {m}-dimensional state, with its {horizon}-step forecast"
+    );
+    admit_bytes(
+        &[
+            history_bytes(n, m, FILTER_STEP, &what)?,
+            history_bytes(horizon, m, FORECAST_STEP, &what)?,
+        ],
+        &what,
+    )
 }
 
 /// The heap bytes a buffer of `bytes` bytes occupies (see
@@ -646,34 +713,32 @@ fn heap_chunk(bytes: usize, what: &str) -> EconResult<usize> {
 }
 
 /// The bytes a Kalman pass keeps over `n` steps of an `m`-dimensional state
-/// when each step stores `pairs` (m × m covariance, m-vector state) pairs and
-/// `scalars` single `f64` values, counted as they are stored: a state is a
-/// `Vec<f64>`, its header a slot in the outer buffer and its m values a heap
-/// buffer of their own; a covariance is a `Vec<Vec<f64>>`, its header a slot
-/// in the outer buffer, a heap buffer of m row headers and m row buffers of m
-/// values each; a scalar is a slot in an outer `Vec<f64>`. Every heap buffer
-/// is charged as [`heap_chunk`] does (the outer buffers' own overhead, at
-/// most a page each, aside). `ResourceLimit` naming `what` when the count
+/// when each step stores what `step` says, counted as it is stored: a state
+/// is a `Vec<f64>`, its header a slot in the outer buffer and its m values a
+/// heap buffer of their own; a covariance is a `Vec<Vec<f64>>`, its header a
+/// slot in the outer buffer, a heap buffer of m row headers and m row buffers
+/// of m values each; a scalar is a slot in an outer `Vec<f64>`. Every heap
+/// buffer is charged as [`heap_chunk`] does (the outer buffers' own overhead,
+/// at most a page each, aside). `ResourceLimit` naming `what` when the count
 /// overflows.
-fn history_bytes(
-    n: usize,
-    m: usize,
-    pairs: usize,
-    scalars: usize,
-    what: &str,
-) -> EconResult<usize> {
+fn history_bytes(n: usize, m: usize, step: Step, what: &str) -> EconResult<usize> {
     let add = |a: usize, b: usize| a.checked_add(b).ok_or_else(|| overflow(what));
     let row = heap_chunk(checked_len(&[m, size_of::<f64>()], what)?, what)?;
     let state = add(size_of::<Vec<f64>>(), row)?;
-    let row_headers = heap_chunk(checked_len(&[m, size_of::<Vec<f64>>()], what)?, what)?;
-    let cov = add(
-        add(size_of::<Vec<Vec<f64>>>(), row_headers)?,
-        checked_len(&[m, row], what)?,
+    let mut per_step = add(
+        checked_len(&[step.states, state], what)?,
+        checked_len(&[step.scalars, size_of::<f64>()], what)?,
     )?;
-    let per_step = add(
-        checked_len(&[pairs, add(cov, state)?], what)?,
-        checked_len(&[scalars, size_of::<f64>()], what)?,
-    )?;
+    // Only a pass that keeps covariances is charged for one, so that a
+    // forecast's count does not overflow on an m × m it never stores.
+    if step.covs > 0 {
+        let row_headers = heap_chunk(checked_len(&[m, size_of::<Vec<f64>>()], what)?, what)?;
+        let cov = add(
+            add(size_of::<Vec<Vec<f64>>>(), row_headers)?,
+            checked_len(&[m, row], what)?,
+        )?;
+        per_step = add(per_step, checked_len(&[step.covs, cov], what)?)?;
+    }
     checked_len(&[n, per_step], what)
 }
 
@@ -1199,36 +1264,118 @@ mod tests {
 
     #[test]
     fn history_bytes_charges_every_heap_buffer() {
-        let bytes = |n, m, pairs, scalars| history_bytes(n, m, pairs, scalars, "t").unwrap();
+        let bytes = |n, m, step| history_bytes(n, m, step, "t").unwrap();
         // m = 1: a state is 24 + 32 bytes, a covariance 24 + 40 + 32.
-        assert_eq!(bytes(1, 1, 2, 2), 320);
-        assert_eq!(bytes(1, 1, 1, 0), 152);
-        assert_eq!(bytes(1000, 1, 2, 2), 320_000);
-        // m ≥ 2: the closed forms the kalman_filter and kalman_smoother docs give.
+        assert_eq!(bytes(1, 1, FILTER_STEP), 320);
+        assert_eq!(bytes(1, 1, SMOOTHER_STEP), 152);
+        assert_eq!(bytes(1, 1, FORECAST_STEP), 80);
+        assert_eq!(bytes(1000, 1, FILTER_STEP), 320_000);
+        // m ≥ 2: the closed forms the kalman_filter, kalman_smoother and
+        // kalman_forecast docs give, and the sum that
+        // admit_filter_and_smoother_history admits.
         for m in [2, 13, 20, 1001] {
-            assert_eq!(bytes(1, m, 2, 2), 16 * m * m + 96 * m + 176, "m = {m}");
-            assert_eq!(bytes(1, m, 1, 0), 8 * m * m + 48 * m + 80, "m = {m}");
+            let filter = bytes(1, m, FILTER_STEP);
+            let smoother = bytes(1, m, SMOOTHER_STEP);
+            assert_eq!(filter, 16 * m * m + 96 * m + 176, "m = {m}");
+            assert_eq!(smoother, 8 * m * m + 48 * m + 80, "m = {m}");
+            assert_eq!(filter + smoother, 24 * m * m + 144 * m + 256, "m = {m}");
+            assert_eq!(bytes(1, m, FORECAST_STEP), 8 * m + 64, "m = {m}");
         }
         // For a large state the overhead is small: within 1% of the values.
         let values = 8 * (2 * (1001 * 1001 + 1001) + 2);
-        let charged = bytes(1, 1001, 2, 2);
+        let charged = bytes(1, 1001, FILTER_STEP);
         assert!(charged > values && (charged as f64) < 1.01 * values as f64);
         // A size that overflows is a ResourceLimit, not a panic or a wrap.
         for (n, m) in [(usize::MAX, 1), (2, usize::MAX / 4), (2, 1 << 31)] {
             assert!(matches!(
-                history_bytes(n, m, 2, 2, "t"),
+                history_bytes(n, m, FILTER_STEP, "t"),
                 Err(EconError::ResourceLimit(_))
             ));
         }
+        // A forecast keeps no covariance, so an m whose m × m overflows is
+        // still counted by its states alone.
+        let m = 1usize << 40;
+        assert!(history_bytes(1, m, FILTER_STEP, "t").is_err());
+        assert_eq!(bytes(1, m, FORECAST_STEP), 8 * m + 64);
+    }
+
+    #[test]
+    fn admissions_sum_the_passes_a_caller_holds_at_once() {
+        let under = |ceiling: usize, f: &dyn Fn() -> EconResult<()>| {
+            crate::resource::with_alloc_ceiling(Some(ceiling), f)
+        };
+        // Filter and smoother, m = 1, n = 150: 48,000 and 22,800 bytes each
+        // fit 64 KiB, but a caller that smooths holds both, 70,800 bytes.
+        // Admitted one at a time, the pair could hold up to about 1.5 times
+        // the ceiling.
+        assert!(under(64 << 10, &|| admit_filter_history(150, 1)).is_ok());
+        assert!(under(64 << 10, &|| admit_smoother_history(150, 1)).is_ok());
+        match under(64 << 10, &|| admit_filter_and_smoother_history(150, 1)) {
+            Err(EconError::ResourceLimit(msg)) => assert!(
+                msg.contains("Kalman filter's and smoother's")
+                    && msg.contains("150 observations and a 1-dimensional state"),
+                "{msg}"
+            ),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        // 130 · 472 = 61,360 bytes fit.
+        assert!(under(64 << 10, &|| admit_filter_and_smoother_history(130, 1)).is_ok());
+
+        // Filter and forecast, m = 1: 100 · 320 = 32,000 and 500 · 80 =
+        // 40,000 bytes each fit 64 KiB; together, 72,000 do not.
+        assert!(under(64 << 10, &|| admit_filter_history(100, 1)).is_ok());
+        match under(64 << 10, &|| admit_filter_history_and_forecast(100, 1, 500)) {
+            Err(EconError::ResourceLimit(msg)) => assert!(
+                msg.contains("100 observations and a 1-dimensional state")
+                    && msg.contains("500-step forecast"),
+                "{msg}"
+            ),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        // 32,000 + 300 · 80 = 56,000 bytes fit.
+        assert!(under(64 << 10, &|| admit_filter_history_and_forecast(100, 1, 300)).is_ok());
+        // A sum that overflows is a ResourceLimit, not a panic or a wrap.
+        assert!(matches!(
+            admit_filter_history_and_forecast(1, 1, usize::MAX / 80),
+            Err(EconError::ResourceLimit(_))
+        ));
+    }
+
+    #[test]
+    fn kalman_forecast_is_admitted_by_the_bytes_it_holds() {
+        // At m = 1 a forecast step keeps 32 bytes of values (the state and
+        // three scalars), but the state is a heap buffer of its own: 80 bytes
+        // are charged. The old admission counted horizon × m values, 8 bytes
+        // a step, so it let through a forecast ten times its figure.
+        let (model, f) = local_level();
+        // 1,000 · 80 = 80,000 bytes > 64 KiB (the old count: 8,000 bytes).
+        match crate::resource::with_alloc_ceiling(Some(64 << 10), || {
+            kalman_forecast(&f, &model, 1000)
+        }) {
+            Err(EconError::ResourceLimit(msg)) => {
+                assert!(msg.contains("Kalman forecast"), "{msg}")
+            }
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        // 800 · 80 = 64,000 bytes fit.
+        let fits = crate::resource::with_alloc_ceiling(Some(64 << 10), || {
+            kalman_forecast(&f, &model, 800)
+        });
+        assert_eq!(fits.unwrap().state_forecasts.len(), 800);
+        // Without a ceiling nothing changes.
+        assert_eq!(
+            kalman_forecast(&f, &model, 1000).unwrap().forecasts.len(),
+            1000
+        );
     }
 
     #[test]
     fn kalman_loglik_keeps_no_history() {
-        // An optimiser needs only the likelihood, but kalman_loglik ran
-        // kalman_filter and kept its whole history, so every evaluation
-        // allocated it, and under a ceiling the history exceeds it was
-        // refused. It now keeps none and returns the same value. Before the
-        // fix the call under the ceiling was ResourceLimit.
+        // An optimiser needs only the likelihood. Had kalman_loglik run
+        // kalman_filter, which admits its history (424,800 bytes here), the
+        // call under this ceiling would be ResourceLimit; it keeps none and
+        // returns the same value. A guard against it going back to the
+        // filter, not a test of the history admission itself.
         let (n, m) = (50, 20);
         let mut y = noisy_walk(n, 13);
         y[4] = f64::NAN;
@@ -1250,34 +1397,6 @@ mod tests {
         assert!(matches!(
             cancelled(|| kalman_loglik(&y, &model, init_state.view(), init_cov.view())),
             Err(EconError::Cancelled(_))
-        ));
-    }
-
-    #[test]
-    fn with_remedy_replaces_the_generic_remedy() {
-        // What check_alloc says when the filter's history is refused...
-        let refused =
-            crate::resource::with_alloc_ceiling(Some(1 << 10), || admit_filter_history(100, 1))
-                .unwrap_err();
-        // ...ends with the caller's remedy instead of "use a smaller input".
-        match with_remedy(refused, "use a shorter series") {
-            EconError::ResourceLimit(msg) => {
-                assert!(msg.ends_with("; use a shorter series"), "{msg}");
-                assert!(!msg.contains("smaller input"), "{msg}");
-                assert!(msg.contains("Kalman filter"), "{msg}");
-            }
-            other => panic!("expected ResourceLimit, got {other:?}"),
-        }
-        // An overflow keeps its text and gains the remedy.
-        let overflowed = admit_filter_history(usize::MAX, 2).unwrap_err();
-        assert!(matches!(
-            with_remedy(overflowed, "use a shorter series"),
-            EconError::ResourceLimit(m) if m.ends_with("overflows; use a shorter series")
-        ));
-        // Other errors pass unchanged.
-        assert!(matches!(
-            with_remedy(EconError::Cancelled("stop".into()), "x"),
-            EconError::Cancelled(m) if m == "stop"
         ));
     }
 
