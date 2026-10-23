@@ -13,15 +13,16 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::http::{ApiResponse, AppState, ContentItem};
+use crate::audit::{AuditEntry, AuditLogger, ResultSummary, sanitize_arguments};
 use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
 use crate::llm::{
-    AnthropicProvider, ChatSlot, ContextManager, LlmError, LlmProvider, LlmSettings, Message,
-    OllamaProvider, OpenAIProvider, ProviderConfig, ProviderType, ToolDefinition, ToolExecutor,
-    build_dataset_context_bounded, check_llm_tool_call, get_system_prompt_with_context,
-    resolve_provider_config, server_key_availability, truncate_str, truncate_tool_result,
-    try_acquire_chat_slot,
+    AnthropicProvider, ChatSlot, ContextManager, INTERNAL_TOOLS, LlmError, LlmProvider,
+    LlmSettings, Message, OllamaProvider, OpenAIProvider, ProviderConfig, ProviderType,
+    ToolDefinition, ToolExecutor, build_dataset_context_bounded, check_llm_tool_call,
+    get_system_prompt_with_context, resolve_provider_config, server_key_availability, truncate_str,
+    truncate_tool_result, try_acquire_chat_slot,
 };
-use crate::session::Session;
+use crate::session::{Session, SessionError, SessionManager};
 
 /// Request for LLM chat.
 #[derive(Debug, Deserialize)]
@@ -68,25 +69,218 @@ pub struct LlmModelsResponse {
     pub models: Vec<String>,
 }
 
+/// Why a chat's session can no longer run tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionGone {
+    /// Deleted or evicted, or replaced by another session under its id.
+    NotFound,
+    /// Idle for longer than the session TTL.
+    Expired,
+}
+
+impl SessionGone {
+    /// The code a refused call carries (as on the websocket).
+    fn code(self) -> &'static str {
+        match self {
+            Self::NotFound => "session_not_found",
+            Self::Expired => "session_expired",
+        }
+    }
+
+    fn status(self) -> StatusCode {
+        match self {
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Expired => StatusCode::GONE,
+        }
+    }
+
+    /// The error of the tool call that found the session gone, and of the
+    /// chat it ends.
+    fn message(self) -> &'static str {
+        match self {
+            Self::NotFound => {
+                "Session not found: it was deleted or evicted while the chat was running. \
+                 Create a session and start again."
+            }
+            Self::Expired => {
+                "Session expired while the chat was running. Create a session and start again."
+            }
+        }
+    }
+
+    /// The answer of the non-streaming chat it ends.
+    fn into_response(self) -> Response {
+        (
+            self.status(),
+            Json(ApiResponse::<()>::error_with_code(
+                self.message(),
+                self.code(),
+                None,
+            )),
+        )
+            .into_response()
+    }
+}
+
+/// Set by the first tool call that finds a chat's session gone.
+#[derive(Default)]
+struct GoneSignal {
+    reason: OnceLock<SessionGone>,
+    notify: tokio::sync::Notify,
+}
+
+/// The session a chat runs its tools on, looked up again in the session
+/// table before each tool call, as an HTTP or websocket tool call is.
+///
+/// A session deleted, evicted or expired since the chat started has left the
+/// table, and with it the session cap and the total dataset quota, which
+/// count only the sessions in it; so does one replaced by a new session
+/// under the same id. Such a session must not run more tools: the first call
+/// that finds it gone records why (`live`), and the chat's driver (`run`)
+/// ends the chat there.
+#[derive(Clone)]
+pub struct ChatSession {
+    sessions: Arc<SessionManager>,
+    session: Arc<Session>,
+    gone: Arc<GoneSignal>,
+}
+
+impl ChatSession {
+    /// The chat on `session`, which `sessions` holds.
+    pub fn new(sessions: Arc<SessionManager>, session: Arc<Session>) -> Self {
+        Self {
+            sessions,
+            session,
+            gone: Arc::default(),
+        }
+    }
+
+    /// The session the chat started on.
+    pub fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+
+    /// The chat's session, when it is still the live session under its id
+    /// (the lookup also refreshes its last access). Otherwise why not, and
+    /// the driver is woken: the first call to find the session gone records
+    /// the reason, and every later call gives it without a lookup.
+    async fn live(&self) -> Result<Arc<Session>, SessionGone> {
+        let gone = match self.gone.reason.get() {
+            Some(gone) => *gone,
+            None => {
+                let found = match self.sessions.get_session(&self.session.id).await {
+                    Ok(live) if Arc::ptr_eq(&live, &self.session) => return Ok(live),
+                    Err(SessionError::Expired) => SessionGone::Expired,
+                    _ => SessionGone::NotFound,
+                };
+                let gone = *self.gone.reason.get_or_init(|| found);
+                tracing::info!(
+                    session_id = %self.session.id,
+                    reason = gone.code(),
+                    "The chat's session is gone; refusing its tool calls and ending the chat"
+                );
+                gone
+            }
+        };
+        self.gone.notify.notify_one();
+        Err(gone)
+    }
+
+    /// Run `chat` until it ends or one of its tool calls finds the session
+    /// gone. In the second case `chat` is dropped at that tool call: the
+    /// refusing call yields once ([`admit_tool_call`]) and this polls the
+    /// signal first, so the tool loop sends the model no further request.
+    async fn run<F: std::future::Future>(&self, chat: F) -> Result<F::Output, SessionGone> {
+        let gone = || self.gone.reason.get().copied();
+        tokio::select! {
+            biased;
+            () = self.gone.notify.notified() => Err(gone().unwrap_or(SessionGone::NotFound)),
+            out = chat => gone().map_or(Ok(out), Err),
+        }
+    }
+}
+
+/// The audit outcome of a tool the assistant may not call although a
+/// handler registers it (an internal tool).
+const NOT_AVAILABLE: &str = "not_available";
+
+/// Admit one tool call the model emitted, before any `ToolStart` event, DB
+/// tool-call row or governor call, and return the session to run it on.
+///
+/// The chat's session must still be live ([`ChatSession::live`]); when it
+/// is gone the call is refused and, after one yield that lets the chat's
+/// driver end the chat here, its error is the reason. The tool must be one
+/// the assistant may call ([`refuse_unless_callable`]): a refusal leaves an
+/// audit entry like the refusals the governor records, with origin
+/// `llm_tool`, the sanitised arguments and outcome `not_available` (an
+/// internal tool) or `unknown_tool`, since a model asking for a tool it was
+/// never offered is what an operator investigating injected instructions
+/// looks for. Either error is the tool's error text.
+///
+/// The routes pass `AppState::audit_logger`, which `build_app` opens for the
+/// governor's audit file: a refusal and the governed calls around it go
+/// through one writer, in call order.
+async fn admit_tool_call(
+    chat: &ChatSession,
+    server: &crate::server::AnalyticsServer,
+    audit: &AuditLogger,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<Arc<Session>, String> {
+    let session = match chat.live().await {
+        Ok(session) => session,
+        Err(gone) => {
+            tokio::task::yield_now().await;
+            return Err(gone.message().to_string());
+        }
+    };
+    if let Err((outcome, refusal)) = refuse_unless_callable(server, name) {
+        tracing::warn!(
+            tool = %truncate_str(name, 64),
+            session_id = %session.id,
+            "Refused a tool call the assistant may not make"
+        );
+        if audit.is_enabled() {
+            let declared = server.declared_parameters(name);
+            let entry = AuditEntry::new(
+                &session.id,
+                CallOrigin::LlmTool.as_str(),
+                name,
+                sanitize_arguments(arguments, &declared),
+                outcome,
+                0,
+                ResultSummary::default(),
+            );
+            audit.log(entry).await;
+        }
+        return Err(refusal);
+    }
+    Ok(session)
+}
+
 /// Internal tool executor that runs the LLM's tool calls through the
 /// governor. A refusal or failure becomes the tool's error text, so the
 /// model can retry with smaller parameters.
 pub struct SessionToolExecutor {
     governor: Arc<ToolGovernor>,
     server: Arc<crate::server::AnalyticsServer>,
-    session: Arc<Session>,
+    chat: ChatSession,
+    audit: Arc<AuditLogger>,
 }
 
 impl SessionToolExecutor {
+    /// An executor for `chat`, recording refused tool calls in `audit`.
     pub fn new(
         governor: Arc<ToolGovernor>,
         server: Arc<crate::server::AnalyticsServer>,
-        session: Arc<Session>,
+        chat: ChatSession,
+        audit: Arc<AuditLogger>,
     ) -> Self {
         Self {
             governor,
             server,
-            session,
+            chat,
+            audit,
         }
     }
 }
@@ -94,7 +288,8 @@ impl SessionToolExecutor {
 #[async_trait::async_trait]
 impl ToolExecutor for SessionToolExecutor {
     async fn execute(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
-        refuse_unless_callable(&self.server, name)?;
+        let session =
+            admit_tool_call(&self.chat, &self.server, &self.audit, name, &arguments).await?;
         tracing::warn!(">>> SessionToolExecutor::execute called for tool: {}", name);
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
@@ -102,7 +297,7 @@ impl ToolExecutor for SessionToolExecutor {
             .governor
             .call(
                 self.server.clone(),
-                self.session.clone(),
+                session,
                 name,
                 arguments,
                 CallOrigin::LlmTool,
@@ -138,16 +333,19 @@ fn llm_callable_tools(server: &crate::server::AnalyticsServer) -> &'static HashS
 }
 
 /// Refuse a model-emitted tool name the assistant may not call: an internal
-/// tool, or one no handler registers. The refusal is the tool's error text.
+/// tool (audit outcome `not_available`), or one no handler registers
+/// (`unknown_tool`). The refusal text is the tool's error text.
 fn refuse_unless_callable(
     server: &crate::server::AnalyticsServer,
     name: &str,
-) -> Result<(), String> {
-    check_llm_tool_call(name, |n| llm_callable_tools(server).contains(n)).inspect_err(|_| {
-        tracing::warn!(
-            tool = %truncate_str(name, 64),
-            "Refused a tool call the assistant may not make"
-        );
+) -> Result<(), (&'static str, String)> {
+    check_llm_tool_call(name, |n| llm_callable_tools(server).contains(n)).map_err(|refusal| {
+        let outcome = if INTERNAL_TOOLS.contains(&name) {
+            NOT_AVAILABLE
+        } else {
+            "unknown_tool"
+        };
+        (outcome, refusal)
     })
 }
 
@@ -375,19 +573,25 @@ pub async fn llm_chat(
 
     // Create provider and tool executor
     let provider = build_provider(provider_config, &settings);
+    let chat = ChatSession::new(state.session_manager.clone(), session);
     let tool_executor = SessionToolExecutor::new(
         state.governor.clone(),
         state.server.clone(),
-        session.clone(),
+        chat.clone(),
+        state.audit_logger.clone(),
     );
 
     tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), "Starting LLM chat");
 
-    // Execute chat
+    // Execute chat; it ends early when its session goes away.
     let start = std::time::Instant::now();
-    let result = provider
-        .chat(&messages, &tools, &tool_executor, request.interpret)
-        .await;
+    let result = match chat
+        .run(provider.chat(&messages, &tools, &tool_executor, request.interpret))
+        .await
+    {
+        Ok(result) => result,
+        Err(gone) => return gone.into_response(),
+    };
     let elapsed = start.elapsed();
 
     match result {
@@ -597,7 +801,8 @@ pub struct ImageData {
 pub struct StreamingToolExecutor {
     governor: Arc<ToolGovernor>,
     server: Arc<crate::server::AnalyticsServer>,
-    session: Arc<Session>,
+    chat: ChatSession,
+    audit: Arc<AuditLogger>,
     sender: tokio::sync::mpsc::Sender<ProgressEvent>,
     /// Database connection for persistence (optional)
     #[cfg(feature = "db")]
@@ -614,16 +819,20 @@ pub struct StreamingToolExecutor {
 }
 
 impl StreamingToolExecutor {
+    /// An executor for `chat` that reports on `sender` and records refused
+    /// tool calls in `audit`.
     pub fn new(
         governor: Arc<ToolGovernor>,
         server: Arc<crate::server::AnalyticsServer>,
-        session: Arc<Session>,
+        chat: ChatSession,
+        audit: Arc<AuditLogger>,
         sender: tokio::sync::mpsc::Sender<ProgressEvent>,
     ) -> Self {
         Self {
             governor,
             server,
-            session,
+            chat,
+            audit,
             sender,
             #[cfg(feature = "db")]
             db: None,
@@ -988,7 +1197,8 @@ impl StreamingToolExecutor {
 impl ToolExecutor for StreamingToolExecutor {
     async fn execute(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
         // Before any ToolStart event, DB tool-call row or governor call.
-        refuse_unless_callable(&self.server, name)?;
+        let session =
+            admit_tool_call(&self.chat, &self.server, &self.audit, name, &arguments).await?;
         tracing::warn!(
             ">>> StreamingToolExecutor::execute called for tool: {}",
             name
@@ -1044,7 +1254,7 @@ impl ToolExecutor for StreamingToolExecutor {
             .governor
             .call(
                 self.server.clone(),
-                self.session.clone(),
+                session,
                 name,
                 arguments,
                 CallOrigin::LlmTool,
@@ -1475,11 +1685,13 @@ async fn run_chat_stream(
     // Create streaming tool executor (the provider is built once the
     // messages are, below)
     // Only the db build reconfigures the executor below.
+    let chat = ChatSession::new(state.session_manager.clone(), session.clone());
     #[cfg_attr(not(feature = "db"), allow(unused_mut))]
     let mut tool_executor = StreamingToolExecutor::new(
         state.governor.clone(),
         state.server.clone(),
-        session.clone(),
+        chat.clone(),
+        state.audit_logger.clone(),
         tx.clone(),
     );
 
@@ -1691,17 +1903,31 @@ async fn run_chat_stream(
         }
     });
 
-    // Execute streaming chat
-    match provider
-        .chat_stream(
+    // Execute streaming chat; it ends early when its session goes away.
+    let streamed = chat
+        .run(provider.chat_stream(
             &messages,
             &tools,
             &tool_executor,
             request.interpret,
             stream_callback,
-        )
-        .await
-    {
+        ))
+        .await;
+    let result = match streamed {
+        Ok(result) => result,
+        Err(gone) => {
+            // Nothing is stored: the session's conversations, messages and
+            // tool calls are deleted with it (the persistent manager's
+            // removal listener).
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: gone.message().to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+    match result {
         Ok(response) => {
             // Update message content in database if persistence is enabled
             #[cfg(feature = "db")]
@@ -1747,11 +1973,12 @@ mod tests {
     use crate::exec::ExecConfig;
     use crate::session::SessionManager;
 
-    /// A governor that refuses every call on memory admission (RSS > 1 byte).
+    /// A governor that refuses every call on memory admission (RSS > 1 byte),
+    /// and a chat on one live session.
     async fn governed_parts() -> (
         Arc<ToolGovernor>,
         Arc<crate::server::AnalyticsServer>,
-        Arc<Session>,
+        ChatSession,
     ) {
         let sessions = Arc::new(SessionManager::new(SessionConfig {
             ttl_minutes: 60,
@@ -1765,18 +1992,23 @@ mod tests {
                 rss_soft_limit_bytes: Some(1),
                 ..Default::default()
             },
-            sessions,
+            sessions.clone(),
         ));
         (
             governor,
             Arc::new(crate::server::AnalyticsServer::new()),
-            session,
+            ChatSession::new(sessions, session),
         )
+    }
+
+    fn no_audit() -> Arc<AuditLogger> {
+        Arc::new(AuditLogger::disabled())
     }
 
     #[tokio::test]
     async fn dataset_context_runs_under_the_governor() {
-        let (governor, _server, session) = governed_parts().await;
+        let (governor, _server, chat) = governed_parts().await;
+        let session = chat.session().clone();
         // No datasets: nothing to summarize, no permit taken, no refusal.
         assert!(matches!(
             governed_dataset_context(&governor, &session, 65_536).await,
@@ -1815,8 +2047,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_tool_executor_is_governed() {
-        let (governor, server, session) = governed_parts().await;
-        let executor = SessionToolExecutor::new(governor, server, session);
+        let (governor, server, chat) = governed_parts().await;
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
         let err = executor
             .execute("list_datasets", serde_json::json!({}))
             .await
@@ -1826,9 +2058,9 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_tool_executor_is_governed() {
-        let (governor, server, session) = governed_parts().await;
+        let (governor, server, chat) = governed_parts().await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let executor = StreamingToolExecutor::new(governor, server, session, tx);
+        let executor = StreamingToolExecutor::new(governor, server, chat, no_audit(), tx);
         let err = executor
             .execute("list_datasets", serde_json::json!({}))
             .await
@@ -1904,7 +2136,7 @@ mod disconnect_tests {
                 queue_wait: Duration::from_secs(300),
                 ..Default::default()
             },
-            sessions,
+            sessions.clone(),
         ));
         let release = Arc::new(AtomicBool::new(false));
         let _release_on_exit = Release(release.clone());
@@ -1931,7 +2163,8 @@ mod disconnect_tests {
         let executor = StreamingToolExecutor::new(
             governor.clone(),
             Arc::new(crate::server::AnalyticsServer::new()),
-            session,
+            ChatSession::new(sessions, session),
+            Arc::new(AuditLogger::disabled()),
             tx.clone(),
         )
         .with_persistence(db.clone(), conv.clone(), msg.clone(), sid.clone());
@@ -2006,8 +2239,15 @@ mod chat_tests {
     use crate::session::SessionManager;
     use crate::tools::limits::Limits;
 
-    /// An admitting governor and one live session.
-    async fn admitting_parts() -> (Arc<ToolGovernor>, Arc<Session>) {
+    /// An admitting governor and a chat on one live session.
+    async fn admitting_parts() -> (Arc<ToolGovernor>, ChatSession) {
+        let (governor, chat, _sessions) = admitting_parts_with_sessions().await;
+        (governor, chat)
+    }
+
+    /// [`admitting_parts`] and the session table the chat's session is in.
+    async fn admitting_parts_with_sessions() -> (Arc<ToolGovernor>, ChatSession, Arc<SessionManager>)
+    {
         let sessions = Arc::new(SessionManager::new(SessionConfig {
             ttl_minutes: 60,
             max_sessions: 10,
@@ -2015,13 +2255,22 @@ mod chat_tests {
         }));
         let id = sessions.create_session(None).await.unwrap();
         let session = sessions.get_session(&id).await.unwrap();
-        let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions));
-        (governor, session)
+        let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions.clone()));
+        (
+            governor,
+            ChatSession::new(sessions.clone(), session),
+            sessions,
+        )
+    }
+
+    fn no_audit() -> Arc<AuditLogger> {
+        Arc::new(AuditLogger::disabled())
     }
 
     #[tokio::test]
     async fn chat_messages_use_the_request_budgets() {
-        let (governor, session) = admitting_parts().await;
+        let (governor, chat) = admitting_parts().await;
+        let session = chat.session().clone();
         let cols: Vec<polars::prelude::Column> = (0..3000)
             .map(|j| {
                 let v: Vec<f64> = (0..3).map(|i| i as f64 * 0.37 + j as f64 * 0.011).collect();
@@ -2190,7 +2439,7 @@ mod chat_tests {
     /// redaction, which read parameters by name.
     #[tokio::test]
     async fn llm_executors_refuse_positional_arguments() {
-        let (governor, session) = admitting_parts().await;
+        let (governor, chat) = admitting_parts().await;
         let server = Arc::new(crate::server::AnalyticsServer::new());
         let args = serde_json::json!(["d", "x,y\n1.0,1.1\n2.0,1.9\n3.0,3.2\n"]);
         let refused = |r: Result<String, String>| {
@@ -2200,15 +2449,127 @@ mod chat_tests {
                 "{err}"
             );
         };
-        let executor = SessionToolExecutor::new(governor.clone(), server.clone(), session.clone());
+        let executor =
+            SessionToolExecutor::new(governor.clone(), server.clone(), chat.clone(), no_audit());
         refused(executor.execute("create_dataset", args.clone()).await);
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let executor = StreamingToolExecutor::new(governor, server, session.clone(), tx);
+        let executor = StreamingToolExecutor::new(governor, server, chat.clone(), no_audit(), tx);
         refused(executor.execute("create_dataset", args).await);
         assert!(
-            session.datasets.read().await.is_empty(),
+            chat.session().datasets.read().await.is_empty(),
             "create_dataset ran"
         );
+    }
+
+    /// The arguments of a `create_dataset` call for a small dataset `d`.
+    fn small_dataset() -> serde_json::Value {
+        serde_json::json!({"name": "d", "csv_content": "x,y\n1.0,1.1\n2.0,1.9\n3.0,3.2\n"})
+    }
+
+    /// Once the chat's session has left the session table (deleted, expired
+    /// or replaced by a new session under its id), both executors refuse
+    /// every tool call before it runs or reports anything: the session no
+    /// longer counts toward the session cap or the total dataset quota.
+    #[tokio::test]
+    async fn llm_executors_refuse_calls_once_the_session_is_gone() {
+        for removal in ["deleted", "expired", "replaced"] {
+            let (governor, chat, sessions) = admitting_parts_with_sessions().await;
+            let id = chat.session().id.clone();
+            let want = match removal {
+                "deleted" => {
+                    sessions.delete_session(&id).await.unwrap();
+                    SessionGone::NotFound
+                }
+                "expired" => {
+                    *chat.session().last_accessed.write().await =
+                        chrono::Utc::now() - chrono::Duration::minutes(61);
+                    SessionGone::Expired
+                }
+                _ => {
+                    sessions.delete_session(&id).await.unwrap();
+                    sessions.adopt(&id, None).await.unwrap();
+                    SessionGone::NotFound
+                }
+            };
+            let server = Arc::new(crate::server::AnalyticsServer::new());
+            let executor = SessionToolExecutor::new(
+                governor.clone(),
+                server.clone(),
+                chat.clone(),
+                no_audit(),
+            );
+            let err = executor
+                .execute("create_dataset", small_dataset())
+                .await
+                .unwrap_err();
+            assert_eq!(err, want.message(), "{removal}");
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            let executor =
+                StreamingToolExecutor::new(governor.clone(), server, chat.clone(), no_audit(), tx);
+            let err = executor
+                .execute("create_dataset", small_dataset())
+                .await
+                .unwrap_err();
+            assert_eq!(err, want.message(), "{removal}");
+            assert!(rx.try_recv().is_err(), "{removal}: an event was sent");
+            assert!(
+                chat.session().datasets.read().await.is_empty(),
+                "{removal}: create_dataset ran on the removed session"
+            );
+            assert_eq!(governor.health().in_flight, 0, "{removal}");
+        }
+    }
+
+    /// The chat's driver ends the chat at the tool call that found the
+    /// session gone: nothing after that call runs (in a tool loop, the next
+    /// provider request), and the chat's result is the reason. A chat whose
+    /// session stays live runs to its end.
+    #[tokio::test]
+    async fn a_chat_ends_at_the_tool_call_that_finds_its_session_gone() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (governor, chat, sessions) = admitting_parts_with_sessions().await;
+        let server = Arc::new(crate::server::AnalyticsServer::new());
+        let executor = SessionToolExecutor::new(governor, server, chat.clone(), no_audit());
+        let id = chat.session().id.clone();
+
+        let finished = chat
+            .run(async {
+                executor
+                    .execute("list_datasets", serde_json::json!({}))
+                    .await
+            })
+            .await;
+        assert!(matches!(finished, Ok(Ok(_))), "{finished:?}");
+
+        let reached = AtomicBool::new(false);
+        let ended = chat
+            .run(async {
+                let first = executor
+                    .execute("list_datasets", serde_json::json!({}))
+                    .await;
+                assert!(first.is_ok(), "{first:?}");
+                sessions.delete_session(&id).await.unwrap();
+                let refused = executor
+                    .execute("list_datasets", serde_json::json!({}))
+                    .await;
+                reached.store(true, Ordering::SeqCst);
+                refused
+            })
+            .await;
+        assert_eq!(ended.unwrap_err(), SessionGone::NotFound);
+        assert!(
+            !reached.load(Ordering::SeqCst),
+            "the chat went on after the refused call"
+        );
+        // Later chats on the same executor end at once with the same reason.
+        let again = chat
+            .run(async {
+                executor
+                    .execute("list_datasets", serde_json::json!({}))
+                    .await
+            })
+            .await;
+        assert_eq!(again.unwrap_err(), SessionGone::NotFound);
     }
 
     /// The argument string of a tool call the model did not finish, as a
@@ -2374,9 +2735,9 @@ mod chat_tests {
     #[tokio::test]
     async fn a_tool_call_whose_argument_string_is_not_json_does_not_run() {
         let (addr, _) = cut_off_tool_call_stub().await;
-        let (governor, session) = admitting_parts().await;
+        let (governor, chat) = admitting_parts().await;
         let server = Arc::new(crate::server::AnalyticsServer::new());
-        let executor = SessionToolExecutor::new(governor, server, session);
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
         let (openai, anthropic) = stub_providers(addr);
         let messages = [Message::user("the ACF of an AR(1) with 0.5, to lag 5")];
         let replies = [
@@ -2433,9 +2794,9 @@ mod chat_tests {
     async fn the_follow_up_request_sends_a_refused_call_back_as_the_api_takes_it() {
         use serde_json::{Value, json};
         let (addr, recorded) = cut_off_tool_call_stub().await;
-        let (governor, session) = admitting_parts().await;
+        let (governor, chat) = admitting_parts().await;
         let server = Arc::new(crate::server::AnalyticsServer::new());
-        let executor = SessionToolExecutor::new(governor, server, session);
+        let executor = SessionToolExecutor::new(governor, server, chat, no_audit());
         let (openai, anthropic) = stub_providers(addr);
         let messages = [Message::user("the ACF of an AR(1) with 0.5, to lag 5")];
         let refused = |content: &Value| {
