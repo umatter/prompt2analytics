@@ -1077,37 +1077,8 @@ pub fn predict_quantiles_at(
 
     check_quantiles(quantiles)?;
 
-    let n_samples = x_new.nrows();
-    let n_quantiles = quantiles.len();
-    let mut predictions = Array2::zeros((n_samples, n_quantiles));
-
-    // We need access to the training y values stored in leaves
-    // Extract them from the first tree's bootstrap (all trees have access to same y)
-    // Note: In a full implementation, we'd store y in the model
-    // For now, we use the leaf indices which reference the original training indices
-
-    for i in 0..n_samples {
-        let row = x_new.row(i);
-
-        // Collect all leaf observation indices across all trees
-        let mut all_leaf_indices: Vec<usize> = Vec::new();
-        for tree in &model.trees {
-            let leaf_indices = tree.get_leaf_indices(&row);
-            all_leaf_indices.extend(leaf_indices);
-        }
-
-        // We need the y values - extract from model's internal storage
-        // Since we don't store y explicitly, we'll need to modify the approach
-        // For now, return error if trying to predict on new data without y
-        if all_leaf_indices.is_empty() {
-            for j in 0..n_quantiles {
-                predictions[[i, j]] = f64::NAN;
-            }
-        }
-    }
-
-    // Note: This implementation currently only works for training data predictions
-    // For true out-of-sample prediction, we need to store y values in the model
+    // The model keeps leaf membership but not the training responses, so no
+    // quantile can be computed here.
     Err("Out-of-sample prediction requires storing training y values. Use predict_quantiles_with_y instead.".to_string())
 }
 
