@@ -676,6 +676,25 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
 ///
 /// * `QuantileRfResult` containing fitted forest and predictions
 ///
+/// # Errors
+///
+/// Returns a message, before any tree is grown, when `x` has fewer than 2 rows
+/// or a different row count from `y`, when `quantiles` is empty or holds a
+/// value outside the open interval (0, 1) (NaN included), when `n_trees` is 0
+/// or `sample_size` is `Some(0)`, and when `x` or `y` holds a non-finite value.
+/// The tree vector and each bootstrap sample are allocated fallibly, so an
+/// `n_trees` or `sample_size` too large to allocate returns a "Resource limit"
+/// message. Once the installed computation budget expires (checked per tree)
+/// it returns the "Computation stopped" message.
+///
+/// # Reproducibility
+///
+/// A fixed `seed` grows the same forest on every run. Where two candidate
+/// splits have exactly equal within-child sums of squares, which a response
+/// with repeated values (counts, integers, Likert scores) can produce, either
+/// equally good split may be taken, so such a forest can differ from the one
+/// v0.1.0 grew for the same seed. Without exact ties the forest is the same.
+///
 /// # Example
 ///
 /// ```
@@ -736,6 +755,11 @@ pub fn quantile_rf(
 }
 
 /// Fit a Quantile Regression Forest with optional feature names.
+///
+/// # Errors
+///
+/// As [`quantile_rf`]; a non-finite feature is named by `feature_names` when
+/// they are given.
 pub fn quantile_rf_with_names(
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
