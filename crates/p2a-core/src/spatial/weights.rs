@@ -340,7 +340,8 @@ impl SpatialWeights {
     /// Eigenvalues are needed for ML estimation to compute log|I - ρW|
     /// and to determine the valid range for ρ.
     ///
-    /// This uses dense matrix operations so is only suitable for moderate n.
+    /// This uses dense matrix operations so is only suitable for moderate n. If the
+    /// decomposition fails, every eigenvalue is reported as 0.
     pub fn eigenvalues(&mut self) -> &Array1<f64> {
         let spectrum = match self.spectrum.take() {
             Some(s) => s,
@@ -370,6 +371,9 @@ impl SpatialWeights {
     /// Eigenvalues of W like [`SpatialWeights::eigenvalues`], but the dense matrix behind
     /// them is allocated fallibly and an installed budget is checked first.
     ///
+    /// If the eigen decomposition fails, the eigenvalues are reported as zeros (the legacy
+    /// behaviour, kept), so log|I - ρW| is 0 and the ρ range is unbounded.
+    ///
     /// # Errors
     ///
     /// [`EconError::ResourceLimit`](crate::errors::EconError::ResourceLimit) when the dense
@@ -380,13 +384,15 @@ impl SpatialWeights {
     }
 
     /// The valid range for ρ like [`SpatialWeights::rho_range`], with the errors of
-    /// [`SpatialWeights::try_eigenvalues`].
+    /// [`SpatialWeights::try_eigenvalues`]. If the eigen decomposition fails, the range is
+    /// (-inf, inf) (see [`SpatialWeights::try_eigenvalues`]).
     pub fn try_rho_range(&mut self) -> EconResult<(f64, f64)> {
         Ok(rho_range_from(self.try_eigenvalues()?))
     }
 
     /// log|I - ρW| like [`SpatialWeights::log_det`], with the errors of
-    /// [`SpatialWeights::try_eigenvalues`].
+    /// [`SpatialWeights::try_eigenvalues`]. If the eigen decomposition fails, it is 0 for
+    /// every ρ (see [`SpatialWeights::try_eigenvalues`]).
     pub fn try_log_det(&mut self, rho: f64) -> EconResult<f64> {
         Ok(log_det_from(self.try_eigenvalues()?, rho))
     }

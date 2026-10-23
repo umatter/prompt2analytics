@@ -1649,8 +1649,10 @@ fn compute_sem_standard_errors(
 /// The direct effect needs tr((I - ρW)^{-1}), computed exactly from the complex eigenvalues
 /// the fit has already cached (spatialreg's `evalues` route). The total effect needs the sum
 /// of all entries of (I - ρW)^{-1}: n / (1 - ρc) when every row of W sums to c, otherwise
-/// one linear solve (I - ρW) v = 1. The dense inverse is formed only when the eigen
-/// decomposition failed or a sum is not finite.
+/// one linear solve (I - ρW) v = 1. The dense inverse ([`compute_impacts_dense`]) is formed
+/// only when the eigen decomposition failed, the solve (I - ρW) v = 1 failed, or a sum is
+/// not finite. A solve stopped by cancellation or a resource limit returns that error
+/// instead.
 fn compute_impacts(
     beta: &Array1<f64>,
     rho: f64,
