@@ -422,11 +422,13 @@ impl QuantileTree {
     /// original row order.
     ///
     /// The chosen split is the one the earlier partition-per-threshold search
-    /// (two-pass child variances) chose, except at exact ties in the
-    /// within-child sum of squares: rounding may break those differently, so a
-    /// response with repeated values (counts, integers, Likert scores) can grow
-    /// a different, equally good tree. Seeded output on continuous data is
-    /// unchanged.
+    /// (two-pass child variances) chose, except where two candidates have
+    /// equal within-child sums of squares, exactly or to within rounding: the
+    /// two searches round differently and may break those ties either way, so
+    /// a response with repeated values (counts, integers, Likert scores) can
+    /// grow a different, equally good tree. Depth is capped separately at
+    /// `MAX_TREE_DEPTH`; see the `# Reproducibility` section of
+    /// [`quantile_rf`].
     fn find_best_split(
         &self,
         x: &ArrayView2<f64>,
@@ -626,6 +628,14 @@ fn bootstrap_sample(
     Ok((bootstrap, oob))
 }
 
+/// Refuse any quantile outside the open interval (0, 1), NaN included.
+fn check_quantiles(quantiles: &[f64]) -> Result<(), String> {
+    match quantiles.iter().find(|&&q| !(q > 0.0 && q < 1.0)) {
+        Some(q) => Err(format!("Quantile {} must be in (0, 1)", q)),
+        None => Ok(()),
+    }
+}
+
 /// Compute empirical quantile from a set of values.
 ///
 /// Uses linear interpolation between order statistics (Type 7 quantile, R default).
@@ -667,6 +677,28 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
 /// # Returns
 ///
 /// * `QuantileRfResult` containing fitted forest and predictions
+///
+/// # Errors
+///
+/// Returns a message, before any tree is grown, when `x` has fewer than 2 rows
+/// or a different row count from `y`, when `quantiles` is empty or holds a
+/// value outside the open interval (0, 1) (NaN included), when `n_trees` is 0
+/// or `sample_size` is `Some(0)`, and when `x` or `y` holds a non-finite value.
+/// The tree vector and each bootstrap sample are allocated fallibly, so an
+/// `n_trees` or `sample_size` too large to allocate returns a "Resource limit"
+/// message. Once the installed computation budget expires (checked per tree)
+/// it returns the "Computation stopped" message.
+///
+/// # Reproducibility
+///
+/// A fixed `seed` grows the same forest on every run. For every input this
+/// release accepts (see `# Errors`), it also grows the forest that releases
+/// v0.1.0 to v0.1.3 grew for that seed, with two exceptions. Where two
+/// candidate splits have equal within-child sums of squares, exactly or to
+/// within rounding (which a response with repeated values such as counts,
+/// integers or Likert scores can produce), either equally good split may be
+/// taken. A tree that those releases grew past depth 512 stops there (see
+/// [`QuantileRfConfig::max_depth`]).
 ///
 /// # Example
 ///
@@ -728,6 +760,11 @@ pub fn quantile_rf(
 }
 
 /// Fit a Quantile Regression Forest with optional feature names.
+///
+/// # Errors
+///
+/// As [`quantile_rf`]; a non-finite feature is named by `feature_names` when
+/// they are given.
 pub fn quantile_rf_with_names(
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
@@ -746,11 +783,7 @@ pub fn quantile_rf_with_names(
     if config.quantiles.is_empty() {
         return Err("Must specify at least one quantile".to_string());
     }
-    for &q in &config.quantiles {
-        if q <= 0.0 || q >= 1.0 {
-            return Err(format!("Quantile {} must be in (0, 1)", q));
-        }
-    }
+    check_quantiles(&config.quantiles)?;
     if config.n_trees == 0 {
         return Err("n_trees must be at least 1".to_string());
     }
@@ -782,12 +815,9 @@ pub fn quantile_rf_with_names(
     let sample_size = config.sample_size.unwrap_or(n_samples);
     let mut rng_state = config.seed.unwrap_or(42);
 
-    // Build forest
+    // Build forest; each tree keeps its own out-of-bag rows.
     let mut trees = resource::try_with_capacity(config.n_trees, "quantile forest trees")
         .map_err(|e| e.to_string())?;
-    let mut all_oob_indices: Vec<Vec<usize>> =
-        resource::try_with_capacity(config.n_trees, "quantile forest trees")
-            .map_err(|e| e.to_string())?;
 
     for _ in 0..config.n_trees {
         resource::checkpoint().map_err(|e| e.to_string())?;
@@ -799,12 +829,11 @@ pub fn quantile_rf_with_names(
             &x,
             &y,
             bootstrap_indices,
-            oob_indices.clone(),
+            oob_indices,
             config,
             &mut rng_state,
         );
 
-        all_oob_indices.push(oob_indices);
         trees.push(tree);
     }
 
@@ -813,7 +842,7 @@ pub fn quantile_rf_with_names(
 
     // Compute OOB predictions and error
     let (oob_predictions, oob_error) = if config.keep_inbag {
-        compute_oob_predictions(&trees, &all_oob_indices, &x, &y, &config.quantiles)
+        compute_oob_predictions(&trees, &x, &y, &config.quantiles)
     } else {
         (None, None)
     };
@@ -875,7 +904,6 @@ fn compute_quantile_predictions(
 /// Compute OOB predictions and error.
 fn compute_oob_predictions(
     trees: &[QuantileTree],
-    all_oob_indices: &[Vec<usize>],
     x: &ArrayView2<f64>,
     y: &ArrayView1<f64>,
     quantiles: &[f64],
@@ -889,8 +917,8 @@ fn compute_oob_predictions(
 
     // Build a map from sample index to trees where it was OOB
     let mut sample_oob_trees: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (tree_idx, oob_indices) in all_oob_indices.iter().enumerate() {
-        for &sample_idx in oob_indices {
+    for (tree_idx, tree) in trees.iter().enumerate() {
+        for &sample_idx in &tree.oob_indices {
             sample_oob_trees
                 .entry(sample_idx)
                 .or_default()
@@ -1015,17 +1043,25 @@ pub fn predict_quantiles(
     predict_quantiles_at(model, x_new, &model.quantiles)
 }
 
-/// Predict at specific quantiles (may differ from training quantiles).
+/// Always errs: QRF needs the training responses to predict; use
+/// [`predict_quantiles_with_y_at`] to predict at chosen quantiles.
 ///
 /// # Arguments
 ///
 /// * `model` - Fitted QuantileRfResult
 /// * `x_new` - New feature matrix (n_samples x n_features)
-/// * `quantiles` - Quantiles to predict (can differ from training)
+/// * `quantiles` - Quantiles to validate (each must be in (0, 1))
 ///
 /// # Returns
 ///
-/// * Matrix of quantile predictions (n_samples x n_quantiles)
+/// * Always `Err`
+///
+/// # Errors
+///
+/// Reports a column count different from the training data, or a quantile
+/// outside the open interval (0, 1) (NaN included), first. Otherwise it returns
+/// the message redirecting to [`predict_quantiles_with_y`]; the variant that
+/// also takes these quantiles is [`predict_quantiles_with_y_at`].
 pub fn predict_quantiles_at(
     model: &QuantileRfResult,
     x_new: ArrayView2<f64>,
@@ -1039,43 +1075,10 @@ pub fn predict_quantiles_at(
         ));
     }
 
-    for &q in quantiles {
-        if q <= 0.0 || q >= 1.0 {
-            return Err(format!("Quantile {} must be in (0, 1)", q));
-        }
-    }
+    check_quantiles(quantiles)?;
 
-    let n_samples = x_new.nrows();
-    let n_quantiles = quantiles.len();
-    let mut predictions = Array2::zeros((n_samples, n_quantiles));
-
-    // We need access to the training y values stored in leaves
-    // Extract them from the first tree's bootstrap (all trees have access to same y)
-    // Note: In a full implementation, we'd store y in the model
-    // For now, we use the leaf indices which reference the original training indices
-
-    for i in 0..n_samples {
-        let row = x_new.row(i);
-
-        // Collect all leaf observation indices across all trees
-        let mut all_leaf_indices: Vec<usize> = Vec::new();
-        for tree in &model.trees {
-            let leaf_indices = tree.get_leaf_indices(&row);
-            all_leaf_indices.extend(leaf_indices);
-        }
-
-        // We need the y values - extract from model's internal storage
-        // Since we don't store y explicitly, we'll need to modify the approach
-        // For now, return error if trying to predict on new data without y
-        if all_leaf_indices.is_empty() {
-            for j in 0..n_quantiles {
-                predictions[[i, j]] = f64::NAN;
-            }
-        }
-    }
-
-    // Note: This implementation currently only works for training data predictions
-    // For true out-of-sample prediction, we need to store y values in the model
+    // The model keeps leaf membership but not the training responses, so no
+    // quantile can be computed here.
     Err("Out-of-sample prediction requires storing training y values. Use predict_quantiles_with_y instead.".to_string())
 }
 
@@ -1093,6 +1096,10 @@ pub fn predict_quantiles_at(
 /// # Returns
 ///
 /// * Matrix of quantile predictions (n_samples x n_quantiles)
+///
+/// # Errors
+///
+/// As [`predict_quantiles_with_y_at`], at the model's fitted quantiles.
 pub fn predict_quantiles_with_y(
     model: &QuantileRfResult,
     x_new: ArrayView2<f64>,
@@ -1102,6 +1109,13 @@ pub fn predict_quantiles_with_y(
 }
 
 /// Predict at specific quantiles with access to training y values.
+///
+/// # Errors
+///
+/// When `x_new` has a different number of columns from the training data,
+/// `y_train` a different length from it or a non-finite value (NaN or
+/// infinite; fitting refuses those too), or a quantile lies outside the open
+/// interval (0, 1), NaN included.
 pub fn predict_quantiles_with_y_at(
     model: &QuantileRfResult,
     x_new: ArrayView2<f64>,
@@ -1124,11 +1138,17 @@ pub fn predict_quantiles_with_y_at(
         ));
     }
 
-    for &q in quantiles {
-        if q <= 0.0 || q >= 1.0 {
-            return Err(format!("Quantile {} must be in (0, 1)", q));
-        }
+    // The pooled leaf responses are sorted with a NaN-blind comparison, so a
+    // non-finite training response would yield NaN or misordered quantiles.
+    let k = y_train.iter().filter(|v| !v.is_finite()).count();
+    if k > 0 {
+        return Err(format!(
+            "Quantile Regression Forest: training y has {k} non-finite values (NaN or infinite); \
+             pass the responses the model was fitted on"
+        ));
     }
+
+    check_quantiles(quantiles)?;
 
     let n_samples = x_new.nrows();
     let n_quantiles = quantiles.len();
@@ -1335,7 +1355,7 @@ mod tests {
 
     /// The partition-per-threshold split search as it was before WT-14, kept as
     /// the reference the running-sum scan must reproduce wherever the
-    /// within-child sums of squares do not tie exactly.
+    /// within-child sums of squares do not tie, exactly or to within rounding.
     fn find_best_split_reference(
         x: &ArrayView2<f64>,
         y: &ArrayView1<f64>,
@@ -1430,8 +1450,9 @@ mod tests {
             r.variable_importance[2],
             r.oob_error.unwrap(),
         ];
-        // Captured from the partition-per-threshold code on continuous data (no
-        // exact SSE ties); must stay bit-identical.
+        // Captured from the partition-per-threshold code on continuous data,
+        // where no SSE tie (exact or to within rounding) breaks differently and
+        // no tree reaches the depth cap; must stay bit-identical.
         const EXPECTED: [u64; 6] = [
             0x401d26720478d36c,
             0xbff92b57a34a5541,
@@ -1501,23 +1522,41 @@ mod tests {
     }
 
     #[test]
-    fn test_qrf_split_tie_may_resolve_differently_from_reference() {
-        // Documents the one place the running-sum scan departs from the old
-        // search: two candidates with exactly equal within-child SSE (32/6 in
-        // units of 0.7^2 here), whose rounded values compare the other way.
+    fn test_qrf_split_tie_picks_one_of_the_tied_splits() {
+        // Two candidates have exactly equal within-child SSE (32/6 in units of
+        // 0.7^2): x <= 0.15 (2 | 6) and x <= 0.95 (6 | 2). Rounding decides which
+        // one a search sees as smaller, so either is a correct answer; the scan
+        // and the old search must each return one of them, equally good.
         let x =
             Array2::from_shape_vec((8, 1), vec![1.1, 1.1, 0.8, 0.0, 0.1, 0.3, 0.2, 0.8]).unwrap();
         let y = Array1::from(vec![0.0, 0.7, 0.0, 0.7, 0.0, 1.4, 1.4, 1.4]);
         let idx: Vec<usize> = (0..8).collect();
         let tree = QuantileTree::new(1);
-        let (f, t, l, r) = tree
-            .find_best_split(&x.view(), &y.view(), &idx, &[0], 1)
-            .unwrap();
-        assert_eq!((f, l.len(), r.len()), (0, 6, 2));
-        assert!((t - 0.95).abs() < 1e-12, "{t}");
-        let (f, t, l, r) = find_best_split_reference(&x.view(), &y.view(), &idx, &[0], 1).unwrap();
-        assert_eq!((f, l.len(), r.len()), (0, 2, 6));
-        assert!((t - 0.15).abs() < 1e-12, "{t}");
+        let sse = |side: &[usize]| compute_variance_reference(&y.view(), side) * side.len() as f64;
+        let tied = [(0.15, 2usize), (0.95, 6usize)];
+        let mut split_sse = Vec::new();
+        for (who, split) in [
+            (
+                "scan",
+                tree.find_best_split(&x.view(), &y.view(), &idx, &[0], 1),
+            ),
+            (
+                "reference",
+                find_best_split_reference(&x.view(), &y.view(), &idx, &[0], 1),
+            ),
+        ] {
+            let (f, t, l, r) = split.unwrap();
+            assert_eq!((f, l.len() + r.len()), (0, 8), "{who}");
+            assert!(
+                tied.iter()
+                    .any(|&(thr, n_left)| (t - thr).abs() < 1e-12 && l.len() == n_left),
+                "{who}: x <= {t} ({} | {}) is not one of the tied splits",
+                l.len(),
+                r.len()
+            );
+            split_sse.push(sse(&l) + sse(&r));
+        }
+        assert!((split_sse[0] - split_sse[1]).abs() < 1e-12, "{split_sse:?}");
     }
 
     /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
@@ -1605,6 +1644,19 @@ mod tests {
             .unwrap_err()
             .contains("Resource limit")
         );
+        // A NaN quantile used to pass `q <= 0.0 || q >= 1.0` and come back as
+        // NaN predictions.
+        for bad in [f64::NAN, 0.0, 1.0] {
+            let err = run(QuantileRfConfig {
+                quantiles: vec![0.5, bad],
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(
+                err.contains(&format!("Quantile {bad} must be in (0, 1)")),
+                "{err}"
+            );
+        }
         let mut xb = x.clone();
         xb[[1, 0]] = f64::NAN;
         assert!(
@@ -1620,6 +1672,65 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("cancelled"), "{err}");
+    }
+
+    #[test]
+    fn test_predict_quantiles_rejects_quantiles_outside_the_unit_interval() {
+        let (x, y) = noisy_regression(40, 2, 3);
+        let model = quantile_rf(
+            x.view(),
+            y.view(),
+            &QuantileRfConfig {
+                n_trees: 5,
+                min_node_size: 2,
+                seed: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let x_new = x.slice(ndarray::s![..3, ..]);
+        // A NaN quantile used to return a matrix of NaN predictions.
+        for bad in [f64::NAN, -0.1, 1.0] {
+            let want = format!("Quantile {bad} must be in (0, 1)");
+            let err =
+                predict_quantiles_with_y_at(&model, x_new, y.view(), &[0.5, bad]).unwrap_err();
+            assert!(err.contains(&want), "with_y_at {bad}: {err}");
+            let err = predict_quantiles_at(&model, x_new, &[bad]).unwrap_err();
+            assert!(err.contains(&want), "at {bad}: {err}");
+        }
+        assert!(predict_quantiles_with_y_at(&model, x_new, y.view(), &[0.5]).is_ok());
+    }
+
+    #[test]
+    fn test_predict_with_y_rejects_non_finite_training_y() {
+        let (x, y) = noisy_regression(40, 2, 5);
+        let model = quantile_rf(
+            x.view(),
+            y.view(),
+            &QuantileRfConfig {
+                n_trees: 5,
+                min_node_size: 2,
+                seed: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let x_new = x.slice(ndarray::s![..3, ..]);
+        // A non-finite training response used to be pooled into the leaves and
+        // came back as NaN or misordered quantiles with no error.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut y_bad = y.clone();
+            y_bad[0] = bad;
+            y_bad[7] = bad;
+            let err = predict_quantiles_with_y_at(&model, x_new, y_bad.view(), &[0.5]).unwrap_err();
+            assert!(
+                err.contains("training y has 2 non-finite values"),
+                "{bad}: {err}"
+            );
+            let err = predict_quantiles_with_y(&model, x_new, y_bad.view()).unwrap_err();
+            assert!(err.contains("non-finite"), "{bad}: {err}");
+        }
+        assert!(predict_quantiles_with_y(&model, x_new, y.view()).is_ok());
     }
 
     #[test]

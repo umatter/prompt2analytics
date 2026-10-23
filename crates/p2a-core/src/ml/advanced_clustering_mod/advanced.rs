@@ -19,9 +19,7 @@
 //! - d > 15: Parallel brute-force (KD-tree degrades in high dimensions)
 
 use crate::errors::{EconError, EconResult};
-use crate::resource::{
-    check_alloc, checked_len, checkpoint, try_vec, try_with_capacity, try_zeros2,
-};
+use crate::resource::{checked_len, checkpoint, try_vec, try_with_capacity, try_zeros2};
 use faer::linalg::solvers::Solve;
 use ndarray::{Array2, ArrayView2, Axis};
 use rand::prelude::*;
@@ -145,6 +143,15 @@ impl std::fmt::Display for KMedoidsResult {
 /// # Returns
 /// * `KMedoidsResult` containing cluster assignments and medoid indices
 ///
+/// # Errors
+///
+/// - `k == 0` or `k > n`.
+/// - `"Resource limit: k-medoids distance matrix ..."` when the `n x n` `f64`
+///   distance matrix exceeds the per-allocation ceiling (or its size
+///   overflows).
+/// - `"Computation stopped: ..."` when the budget is cancelled or expires;
+///   this is checked once per row of the distance matrix.
+///
 /// # References
 ///
 /// - Kaufman, L. and Rousseeuw, P.J. (1990). "Finding Groups in Data".
@@ -165,8 +172,9 @@ pub fn kmedoids(
 
     let max_iter = max_iterations.unwrap_or(100);
 
-    // Compute pairwise distances
-    let distances = compute_distance_matrix(&data);
+    // Pairwise distances: n x n, so allocated through the resource guards
+    // (CLARA calls this with a caller-supplied sample size)
+    let distances = try_distance_matrix(&data, "k-medoids distance matrix")?;
 
     // BUILD phase: Initialize medoids
     let mut medoid_indices = build_medoids(&distances, k, seed);
@@ -4592,7 +4600,8 @@ impl std::fmt::Display for PvClustResult {
 /// * `data` - Data matrix (n_samples x n_features)
 /// * `method` - Linkage method: "average", "single", "complete", "ward"
 /// * `n_boot` - Number of bootstrap replicates (default: 1000)
-/// * `r` - Bootstrap sample sizes as ratios (default: [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4])
+/// * `r` - Bootstrap sample sizes as ratios (default: [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4]);
+///   at least one, each finite and positive
 /// * `au_threshold` - Threshold for significant clusters (default: 0.95)
 /// * `seed` - Random seed
 ///
@@ -4636,6 +4645,9 @@ pub fn pvclust(
     if nboot == 0 {
         return Err("n_boot must be at least 1 (got 0)".to_string());
     }
+    if ratios.is_empty() {
+        return Err("r must contain at least one ratio (got none)".to_string());
+    }
     if let Some(&bad) = ratios.iter().find(|&&r| !(r.is_finite() && r > 0.0)) {
         return Err(format!(
             "r must contain only finite positive ratios (got {bad})"
@@ -4670,8 +4682,6 @@ pub fn pvclust(
 
         // Bootstrap buffers, sized once per scale and refilled per replicate
         let what = "pvclust bootstrap sample";
-        let boot_len = checked_len(&[sample_size, d.max(1)], what).map_err(to_string)?;
-        check_alloc::<f64>(boot_len, what).map_err(to_string)?;
         let mut indices = try_with_capacity::<usize>(sample_size, what).map_err(to_string)?;
         let boot_values = try_vec(
             checked_len(&[sample_size, d], what).map_err(to_string)?,
@@ -5107,6 +5117,16 @@ impl std::fmt::Display for ClaraResult {
 /// # Returns
 /// * `ClaraResult` with cluster assignments and medoids
 ///
+/// # Errors
+///
+/// - `k == 0` or `k > n`, `samples == 0`, or a `sample_size` (after
+///   clamping to `n`) below `k`.
+/// - `"Computation stopped: ..."` when the budget is cancelled or expires
+///   between samples.
+/// - The [`kmedoids`] errors for a sample (its `sample_size x sample_size`
+///   distance matrix over the ceiling, or a cancellation while it is
+///   built), prefixed `"CLARA sample of N rows (sample_size): "`.
+///
 /// # Algorithm
 ///
 /// 1. Draw `samples` random samples of size `sample_size` from the data
@@ -5168,13 +5188,15 @@ pub fn clara(
         let sample_data =
             Array2::from_shape_fn((samp_size, d), |(i, j)| data[[sample_indices[i], j]]);
 
-        // Run PAM on sample
+        // Run PAM on sample; its samp_size x samp_size distance matrix is sized
+        // by sample_size, so an error names that parameter
         let pam_result = kmedoids(
             sample_data.view(),
             k,
             Some(max_iterations),
             Some(rng.r#gen()),
-        )?;
+        )
+        .map_err(|e| format!("CLARA sample of {samp_size} rows (sample_size): {e}"))?;
 
         // Map sample medoid indices back to original data indices
         let medoids: Vec<usize> = pam_result
@@ -8265,6 +8287,12 @@ mod tests {
             .unwrap_err()
             .starts_with("r ")
         );
+        // No scales: every AU p-value would be 0 / 0
+        assert!(
+            pvclust(data.view(), None, Some(5), Some(vec![]), None, Some(1))
+                .unwrap_err()
+                .starts_with("r ")
+        );
         // 6e14 resampled rows: above the x86_64 address space, so the pre-fix run aborts rather than thrashing
         let e = with_alloc_ceiling(Some(1 << 30), || {
             pvclust(data.view(), None, Some(2), Some(vec![1e14]), None, Some(1))
@@ -8682,12 +8710,35 @@ mod tests {
             r.bp_pvalues.iter().sum::<f64>().to_bits(),
         ];
         let au: Vec<u64> = r.au_pvalues[..5].iter().map(|v| v.to_bits()).collect();
-        assert_eq!(
-            (sums, &r.labels[..], &au[..]),
-            (GOLDEN_SUMS, &GOLDEN_LABELS[..], &GOLDEN_AU[..]),
-            "got sums {sums:?}, labels {:?}, au {au:?}",
-            r.labels
-        );
+        let msg = format!("got sums {sums:?}, labels {:?}, au {au:?}", r.labels);
+        // Exact bits only where the constants were captured (x86_64 glibc
+        // Linux with AVX2+FMA, crate::ml::golden_bits_platform): the AU
+        // p-values go through libm's ln and exp, which can differ in the last
+        // ulp elsewhere. One- and two-ulp changes of the scale ratios moved
+        // them by at most 1.2e-13 relative here (and by 2.5e-11 over 2,000
+        // random count vectors), while a changed bootstrap count moves them
+        // by far more than the 1e-9 tolerance used off the reference
+        // platform. The labels and the BP sum (counts / n_boot) are exact
+        // everywhere.
+        assert_eq!(&r.labels[..], &GOLDEN_LABELS[..], "{msg}");
+        assert_eq!(sums[1], GOLDEN_SUMS[1], "{msg}");
+        if crate::ml::golden_bits_platform() {
+            assert_eq!(
+                (sums[0], &au[..]),
+                (GOLDEN_SUMS[0], &GOLDEN_AU[..]),
+                "{msg}"
+            );
+        } else {
+            let want = std::iter::once(GOLDEN_SUMS[0])
+                .chain(GOLDEN_AU)
+                .map(f64::from_bits);
+            let got = std::iter::once(sums[0])
+                .chain(au.iter().copied())
+                .map(f64::from_bits);
+            for (g, w) in got.zip(want) {
+                assert!((g - w).abs() <= 1e-9 * w.abs(), "{msg}");
+            }
+        }
     }
 
     /// R 4.3.3: library(cluster); x <- <the 12 x 2 matrix of test_validate_agnes_heights_match_r>
@@ -8747,6 +8798,28 @@ mod tests {
         })
         .unwrap_err();
         assert!(e.contains("cancelled"), "{e}");
+    }
+
+    #[test]
+    fn kmedoids_distance_matrix_is_fallible_and_cancellable() {
+        let data = three_blobs(100, 3);
+        // 100 x 100 f64 = 80,000 B
+        let e = with_alloc_ceiling(Some(40_000), || kmedoids(data.view(), 3, Some(10), Some(1)))
+            .unwrap_err();
+        assert!(e.contains("k-medoids") && e.contains("limit"), "{e}");
+        let e =
+            with_budget(cancelled(), || kmedoids(data.view(), 3, Some(10), Some(1))).unwrap_err();
+        assert!(e.contains("cancelled"), "{e}");
+        // CLARA's per-sample PAM: a caller-supplied sample_size of n needs the same n x n matrix
+        let e = with_alloc_ceiling(Some(40_000), || {
+            clara(data.view(), 3, Some(1), Some(100), Some(10), Some(1))
+        })
+        .unwrap_err();
+        assert!(
+            e.contains("k-medoids") && e.contains("CLARA") && e.contains("sample_size"),
+            "{e}"
+        );
+        assert!(kmedoids(data.view(), 3, Some(10), Some(1)).is_ok());
     }
 
     #[test]

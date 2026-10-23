@@ -49,12 +49,31 @@
 //! ```
 //!
 //! Each step costs one (k+1) x (k+1) solve and O(n k^2) work; nothing of size n x n is
-//! formed. The bound w >= l holds exactly and exact balance is reached to rounding. The
-//! iteration stops when ||r||_inf <= 1e-14 (1 + ||b||_inf), or <= tolerance (1 + ||b||_inf)
-//! after a full step that kept S. If no feasible weights exist the dual is unbounded: no
-//! ascent direction, a failed line search, diverging multipliers or max_iter steps end the
-//! solve with `EconError::InvalidSpecification` suggesting approximate balance. With
-//! min_weight >= 0 a target mean outside the reweighted group's range is refused up front.
+//! formed. The bound w >= l holds exactly and exact balance is reached to rounding; r is
+//! accumulated with compensated (Neumaier) sums, so its rounding does not grow with n.
+//!
+//! Stopping rule, with tol = tolerance (1 + ||b||_inf):
+//!
+//! - Converged when ||r||_inf <= 1e-14 (1 + ||b||_inf), or ||r||_inf <= tol after a full
+//!   step that kept S.
+//! - If no ascent direction exists, the line search fails or max_iter steps are used up
+//!   while ||r||_inf <= tol, the solve stops there as converged. Only outside that tolerance
+//!   do these cases end it with an error.
+//! - No ascent direction or a failed line search outside tol, and diverging multipliers
+//!   (||mu||_inf > 1e10 (1 + ||mu_0||_inf)), mean that no feasible weights exist (the dual of
+//!   an infeasible problem is unbounded): `EconError::InvalidSpecification` suggesting
+//!   approximate balance.
+//! - max_iter steps outside tol: `EconError::ConvergenceFailure` with
+//!   `iterations = max_iter` and `last_change = ||r||_inf`, since running out of steps says
+//!   nothing about feasibility or about the specification.
+//! - A b, Gram matrix or multiplier that is not finite (magnitudes beyond f64):
+//!   `EconError::Computation`, never a converged result.
+//! - A (k+1) x (k+1) inversion that fails outright (a singular M gets the pseudo-inverse, so
+//!   only a failed decomposition): `EconError::SingularMatrix` at the first step, the
+//!   infeasibility error at later steps.
+//!
+//! Before the solve, with min_weight >= 0 a target mean outside the reweighted group's range
+//! is refused, and in every configuration a target mean that overflows is refused.
 //!
 //! `lambda` in the result is -mu, the multiplier of the KKT system
 //!
@@ -135,18 +154,35 @@ impl fmt::Display for SBWEstimand {
 pub struct SBWConfig {
     /// Target estimand (ATT, ATE, ATC)
     pub estimand: SBWEstimand,
-    /// Tolerance for approximate balance (0 = exact balance)
-    /// Constraints: |Σw_i X_ij / Σw_i - target_j| <= balance_tol
+    /// Balance tolerance; must be finite and >= 0. `0` (the default) selects exact balance,
+    /// solved by the dual Newton method of the module docs. A positive value selects the
+    /// penalised approximate solver, which aims for
+    /// |Σw_i X_ij / Σw_i - target_j| <= balance_tol: it reports convergence only when the
+    /// largest such violation is below `balance_tol + 0.001` (and the gradient norm below
+    /// `tolerance`), but it does not enforce the bound.
     pub balance_tol: f64,
-    /// Minimum weight allowed (default 0 for non-negativity)
+    /// Lower bound l on each reweighted unit's weight (default 0, non-negative weights);
+    /// must be finite. Exact balance holds w_i >= l exactly in the n scale (the weights
+    /// average 1), so there l must be <= 1, and with l >= 0 a target mean outside the
+    /// reweighted group's range is refused. The approximate solver clips its iterate, whose
+    /// weights sum to 1, at l before renormalising, so there l bounds weights in that scale
+    /// and holds only approximately.
     pub min_weight: f64,
     /// Normalize weights to sum to n (true) or 1 (false)
     pub normalize_to_n: bool,
-    /// Maximum iterations for approximate balance solver
+    /// Iteration cap, at least 1. Approximate balance: projected-gradient steps. Exact
+    /// balance: dual Newton steps, the closed-form first step counting as one; running out
+    /// within `tolerance` stops as converged, otherwise it is an
+    /// `EconError::ConvergenceFailure` with `iterations = max_iter`.
     pub max_iter: usize,
-    /// Convergence tolerance for optimization
+    /// Convergence tolerance; must be finite and > 0. Exact balance stops once the balance
+    /// residual satisfies ||r||_inf <= tolerance (1 + ||b||_inf) after a full Newton step
+    /// that kept the set of units off the bound (b = [target means; 1]; see the module docs
+    /// for the other exits). Approximate balance uses it as the threshold on the gradient
+    /// norm.
     pub tolerance: f64,
-    /// Penalty parameter for approximate balance (higher = stricter balance)
+    /// Penalty ρ on the balance violation for approximate balance (higher = stricter
+    /// balance); must be finite and > 0 when `balance_tol > 0`, unused for exact balance.
     pub balance_penalty: f64,
 }
 
@@ -365,12 +401,16 @@ impl fmt::Display for SBWResult {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use p2a_core::econometrics::sbw::{run_sbw, SBWConfig, SBWEstimand};
-/// use ndarray::Array1;
+/// ```
+/// use ndarray::{Array1, array};
+/// use p2a_core::econometrics::{SBWConfig, SBWEstimand, run_sbw};
 ///
+/// // The treated means (1.1, 0.55) are a convex combination of the controls (weights 0.5,
+/// // 0.5, 0), so exact balance (the default, balance_tol = 0) is feasible with non-negative
+/// // weights. Lying inside each control column's range is not enough on its own, but a
+/// // target mean outside that range is never feasible.
 /// let treatment = Array1::from(vec![1.0, 1.0, 0.0, 0.0, 0.0]);
-/// let covariates = ndarray::array![[1.0, 0.5], [1.2, 0.6], [0.5, 0.2], [0.4, 0.3], [0.6, 0.25]];
+/// let covariates = array![[1.0, 0.5], [1.2, 0.6], [0.9, 0.4], [1.3, 0.7], [1.0, 0.6]];
 ///
 /// let config = SBWConfig {
 ///     estimand: SBWEstimand::ATT,
@@ -378,7 +418,9 @@ impl fmt::Display for SBWResult {
 /// };
 ///
 /// let result = run_sbw(&treatment.view(), &covariates.view(), config)?;
+/// assert!(result.converged && result.max_constraint_violation < 1e-10);
 /// println!("ESS: {:.1}", result.effective_sample_size);
+/// # Ok::<(), p2a_core::EconError>(())
 /// ```
 ///
 /// # References
@@ -515,6 +557,17 @@ fn run_sbw_inner(
     let target_means = x_target
         .mean_axis(Axis(0))
         .ok_or_else(|| EconError::Computation("Failed to compute target means".to_string()))?;
+    // Finite covariates can still overflow when summed; an infinite target would make every
+    // relative convergence threshold infinite.
+    for (t, name) in target_means.iter().zip(cov_names) {
+        if !t.is_finite() {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "the target group's mean of covariate {name} is not finite (its values are too large in magnitude to sum in f64); rescale the covariate"
+                ),
+            });
+        }
+    }
 
     // Exact balance with non-negative weights reweights to a convex combination of the
     // reweighted units, so every target mean must lie within that group's range.
@@ -799,8 +852,16 @@ impl SbwDual<'_> {
     }
 }
 
+/// Largest absolute entry, or infinity when any entry is not finite (folding with `f64::max`
+/// alone would drop a NaN and let a NaN residual read as zero, i.e. converged).
 fn inf_norm(v: &Array1<f64>) -> f64 {
-    v.iter().fold(0.0_f64, |a, x| a.max(x.abs()))
+    v.iter().fold(0.0_f64, |a, x| {
+        if x.is_finite() {
+            a.max(x.abs())
+        } else {
+            f64::INFINITY
+        }
+    })
 }
 
 /// Solve SBW with exact balance constraints through the problem's dual.
@@ -825,9 +886,17 @@ fn inf_norm(v: &Array1<f64>) -> f64 {
 ///
 /// Each step is one (k+1) x (k+1) solve and O(n k^2) work; memory is O(n + k^2). When no
 /// bound binds, the first step is the old dense-KKT solution. The bound w >= l holds
-/// exactly. A dual that does not converge (no ascent direction, a failed line search,
-/// diverging multipliers or `max_iter` steps) means no feasible weights exist, and is
-/// `EconError::InvalidSpecification` suggesting approximate balance.
+/// exactly, and r is accumulated with compensated sums.
+///
+/// If no ascent direction exists, the line search fails or `max_iter` steps (mu_0 counts
+/// as one) are used up while ||r||_inf <= tolerance (1 + ||b||_inf), the solve stops there
+/// as converged. Only outside that tolerance do these cases mean an error: no ascent
+/// direction or a failed line search, like diverging multipliers, means no feasible weights
+/// exist and is `EconError::InvalidSpecification` suggesting approximate balance; running
+/// out of `max_iter` is an `EconError::ConvergenceFailure` with `iterations = max_iter` and
+/// `last_change = ||r||_inf`. A non-finite b, Gram matrix or multiplier is
+/// `EconError::Computation`. An inversion that fails outright is `EconError::SingularMatrix`
+/// at the first step and the infeasibility error at later steps.
 ///
 /// Returns weights summing to 1, `lambda = -mu` (the sign convention of the KKT system
 /// `[I A'; A 0][w; lambda] = [0; b]`), convergence, the number of steps (mu_0 counts as
@@ -859,17 +928,30 @@ fn solve_sbw_exact(
             "Exact balance could not be reached: no weights >= {l} on the {n} reweighted units reproduce the target covariate means (the targets may lie outside the reweighted group's range, or covariates may be collinear). Use approximate balance (balance_tol > 0)."
         ),
     };
+    // Every convergence threshold is relative to b_scale and every test reads inf_norm, so
+    // a non-finite b, Gram matrix or multiplier must stop the solve rather than pass a test.
+    let overflow = || {
+        EconError::Computation(
+            "Exact balance failed numerically: the balance system is not finite (covariate or target-mean magnitudes too large for f64). Rescale the covariates.".to_string(),
+        )
+    };
+    if !b_scale.is_finite() {
+        return Err(overflow());
+    }
 
     // First step: the Schur-complement closed form of the unbounded problem.
-    let (m_all_inv, _) =
-        safe_inverse(&dual.gram(None).view()).map_err(|e| EconError::SingularMatrix {
-            context: "SBW balance constraints".to_string(),
-            suggestion: format!(
-                "Balance constraints may be infeasible or redundant. Error: {:?}. \
+    let gram_all = dual.gram(None);
+    if gram_all.iter().any(|v| !v.is_finite()) {
+        return Err(overflow());
+    }
+    let (m_all_inv, _) = safe_inverse(&gram_all.view()).map_err(|e| EconError::SingularMatrix {
+        context: "SBW balance constraints".to_string(),
+        suggestion: format!(
+            "Balance constraints may be infeasible or redundant. Error: {:?}. \
                  Try using approximate balance (balance_tol > 0).",
-                e
-            ),
-        })?;
+            e
+        ),
+    })?;
     let mut mu = m_all_inv.dot(&dual.b);
     let mu0_scale = 1.0 + inf_norm(&mu);
     let mut iterations = 1;
@@ -877,6 +959,10 @@ fn solve_sbw_exact(
 
     loop {
         resource::checkpoint()?;
+        // mu_0 and every update pass through here.
+        if !mu.iter().all(|v| v.is_finite()) {
+            return Err(overflow());
+        }
 
         let (r, free) = dual.residual(&mu);
         let r_inf = inf_norm(&r);
@@ -884,8 +970,25 @@ fn solve_sbw_exact(
         if r_inf <= SBW_EXACT_RESIDUAL * b_scale || (close && full_step_kept_set) {
             break;
         }
-        if iterations >= config.max_iter || inf_norm(&mu) > SBW_DUAL_DIVERGENCE * mu0_scale {
+        if inf_norm(&mu) > SBW_DUAL_DIVERGENCE * mu0_scale {
             return Err(infeasible());
+        }
+        if iterations >= config.max_iter {
+            // Out of steps, like the two exits below: a stop within tolerance is converged,
+            // otherwise the solve is unfinished, which says nothing about feasibility.
+            if close {
+                break;
+            }
+            return Err(EconError::ConvergenceFailure {
+                iterations: config.max_iter,
+                last_change: r_inf,
+                suggestion: format!(
+                    "Exact balance residual {r_inf:.3e} is above the threshold tolerance (1 + ||b||_inf) = {:.3e} (tolerance = {:e}) after max_iter = {} steps; increase max_iter, or use approximate balance (balance_tol > 0) if exact balance may be infeasible.",
+                    config.tolerance * b_scale,
+                    config.tolerance,
+                    config.max_iter
+                ),
+            });
         }
 
         // Newton direction on the current piece (pseudo-inverse when |S| < k + 1 or the
@@ -1516,6 +1619,146 @@ mod tests {
         ];
         let err = run_sbw(&treatment.view(), &covariates.view(), SBWConfig::default()).unwrap_err();
         expect_invalid_spec(err, "balance_tol");
+    }
+
+    #[test]
+    fn test_sbw_exact_max_iter_exhaustion_is_not_infeasibility() {
+        // create_test_data() is feasible and takes five dual steps (mu_0 counts as one): the
+        // bound binds, so steps 1-4 are line-search steps with ||r||_inf = 0.20, 0.10, 0.029,
+        // 0.0023. Running out of steps is not evidence of infeasibility.
+        // It is a convergence failure, and its message shows both the absolute threshold
+        // tolerance (1 + ||b||_inf), here 1e-3 (1 + 1), and the configured tolerance.
+        let (t, x) = create_test_data();
+        let err = run_sbw(
+            &t.view(),
+            &x.view(),
+            SBWConfig {
+                max_iter: 2,
+                tolerance: 1e-3,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        match &err {
+            EconError::ConvergenceFailure {
+                iterations: 2,
+                last_change,
+                suggestion,
+            } => {
+                assert!(
+                    suggestion.contains("max_iter = 2")
+                        && !suggestion.contains("could not be reached"),
+                    "max_iter exhaustion reported as `{suggestion}`"
+                );
+                assert!(
+                    suggestion.contains("(1 + ||b||_inf) = 2.000e-3")
+                        && suggestion.contains("tolerance = 1e-3"),
+                    "threshold and configured tolerance not both shown in `{suggestion}`"
+                );
+                assert!(
+                    last_change.is_finite() && *last_change > 2e-3,
+                    "last_change {last_change} is not the residual outside tolerance"
+                );
+                assert!(
+                    suggestion.contains(&format!("residual {last_change:.3e}")),
+                    "last_change {last_change} is not the residual reported in `{suggestion}`"
+                );
+            }
+            other => panic!("expected ConvergenceFailure after 2 iterations, got {other:?}"),
+        }
+        // With tolerance 1e-2 the fourth step is within tolerance (0.0023 <= 1e-2 (1 + 1)),
+        // so running out of steps there stops as converged, as the other two exits do.
+        let r = run_sbw(
+            &t.view(),
+            &x.view(),
+            SBWConfig {
+                max_iter: 4,
+                tolerance: 1e-2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            r.converged && r.iterations == 4,
+            "converged {}, iterations {}",
+            r.converged,
+            r.iterations
+        );
+        assert!(
+            r.max_constraint_violation < 1e-2,
+            "violation {}",
+            r.max_constraint_violation
+        );
+    }
+
+    fn expect_computation(err: EconError, needle: &str) {
+        match err {
+            EconError::Computation(message) => assert!(
+                message.contains(needle),
+                "message `{message}` does not mention `{needle}`"
+            ),
+            other => panic!("expected Computation mentioning `{needle}`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_inf_norm_is_infinite_on_non_finite_entries() {
+        // folding with f64::max drops NaN, so a NaN residual used to read as 0 (converged)
+        assert_eq!(inf_norm(&array![1.0, f64::NAN, -2.0]), f64::INFINITY);
+        assert_eq!(inf_norm(&array![1.0, f64::NEG_INFINITY]), f64::INFINITY);
+        assert_eq!(inf_norm(&array![1.0, -3.0, 2.0]), 3.0);
+    }
+
+    #[test]
+    fn test_sbw_exact_overflow_is_an_error_not_a_converged_fallback() {
+        // min_weight < 0 skips the range pre-check, so these reach the dual solver.
+        let (t, x) = create_test_data();
+        let negative = || SBWConfig {
+            min_weight: -0.5,
+            ..Default::default()
+        };
+        // Two finite treated values whose sum overflows: the target mean of X1 is +inf. With
+        // min_weight < 0 the exact path returned Ok with converged = true, uniform weights
+        // and an infinite violation, and the approximate path Ok with an infinite violation.
+        let mut x_sum = x.clone();
+        x_sum[[0, 0]] = 1.5e308;
+        x_sum[[1, 0]] = 1.6e308;
+        for cfg in [
+            negative(),
+            SBWConfig::default(),
+            SBWConfig {
+                balance_tol: 0.1,
+                ..negative()
+            },
+        ] {
+            expect_invalid_spec(
+                run_sbw(&t.view(), &x_sum.view(), cfg).unwrap_err(),
+                "covariate X1",
+            );
+        }
+        // The solver itself refuses a non-finite target; it used to return converged = true
+        // after one step with an infinite balance violation.
+        let x_c = x.slice(ndarray::s![10.., ..]).to_owned();
+        let target = array![f64::INFINITY, 0.55];
+        expect_computation(
+            solve_sbw_exact(&x_c.view(), &target.view(), &negative()).unwrap_err(),
+            "magnitude",
+        );
+        // A finite target mean of 1.7e307 overflows the multipliers of the first step (the
+        // old code reached its infeasibility error only because the next, NaN, Gram matrix
+        // failed to invert).
+        let mut x_big = x.clone();
+        x_big[[0, 0]] = 1.7e308;
+        expect_computation(
+            run_sbw(&t.view(), &x_big.view(), negative()).unwrap_err(),
+            "magnitude",
+        );
+        // Covariates of order 1e200 overflow the (k+1) x (k+1) Gram matrix.
+        let x_scaled = x.mapv(|v| v * 1e200);
+        expect_computation(
+            run_sbw(&t.view(), &x_scaled.view(), SBWConfig::default()).unwrap_err(),
+            "magnitude",
+        );
     }
 
     #[test]

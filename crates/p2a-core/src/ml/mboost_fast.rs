@@ -144,7 +144,16 @@ impl std::fmt::Display for FastMboostResult {
     }
 }
 
-/// Train a fast MBoost model
+/// Train a fast MBoost model.
+///
+/// # Errors
+///
+/// - [`EconError::InsufficientData`] when `y.len() != x.nrows()`.
+/// - [`EconError::InvalidSpecification`] for fewer than 2 rows, no predictor
+///   columns, or non-finite values in `x` or `y`.
+/// - [`EconError::ResourceLimit`] / [`EconError::Cancelled`] from the
+///   resource guards: the `m_stop`-sized buffers exceed the allocation
+///   ceiling, or the budget is cancelled or expires.
 pub fn fast_mboost(
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
@@ -170,9 +179,32 @@ pub fn fast_mboost(
             message: "x must have at least one predictor column".to_string(),
         });
     }
+    // NaN would not panic (the sorts use total_cmp) but would boost into NaN
+    // predictions; refuse it as mboost does
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+    if let Some((i, v)) = y.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("y must contain only finite values (row {i} is {v})"),
+        });
+    }
+
+    // A strided y (say, a column of a row-major matrix) has no slice; copy it
+    // once instead
+    let y_owned;
+    let y_slice: &[f64] = match y.as_slice() {
+        Some(s) => s,
+        None => {
+            y_owned = y.to_vec();
+            &y_owned
+        }
+    };
 
     // Initialize offset and predictions
-    let offset = compute_initial_offset(y.as_slice().unwrap(), config.family);
+    let offset = compute_initial_offset(y_slice, config.family);
     let mut predictions = vec![offset; n];
 
     // Pre-compute feature statistics for centering
@@ -191,8 +223,6 @@ pub fn fast_mboost(
 
     let mut learners = try_with_capacity(config.m_stop, "fast mboost learners")?;
     let mut risk = try_with_capacity(config.m_stop, "fast mboost risk path")?;
-
-    let y_slice = y.as_slice().unwrap();
 
     for m in 0..config.m_stop {
         checkpoint()?;
@@ -427,7 +457,10 @@ fn fit_stump_parallel(
             indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
 
             // Find best split point in one sweep: minimising the RSS of a
-            // split is maximising left_sum^2 / left_n + right_sum^2 / right_n
+            // split is maximising left_sum^2 / left_n + right_sum^2 / right_n.
+            // That criterion is accumulated in sort order, so the sweep picks
+            // the quadratic search's split except where two candidates'
+            // criteria agree to within floating-point rounding
             let mut left_sum = 0.0;
             let mut left_count = 0;
             let total_sum: f64 = residuals.iter().sum();
@@ -467,8 +500,9 @@ fn fit_stump_parallel(
                 }
             }
 
-            // RSS of the chosen split, summed exactly as the full search did,
-            // so the cross-feature comparison below sees the same values
+            // RSS of the chosen split, recomputed exactly as the full search
+            // summed it, so for the same split the cross-feature comparison
+            // below sees the same values
             let best_rss = match best_pos {
                 Some(i) => {
                     let mut rss = 0.0;
@@ -812,6 +846,50 @@ mod tests {
             fast_mboost(empty.view(), y.view(), &stump),
             Err(EconError::InvalidSpecification { .. })
         ));
+        // Non-finite data is refused, not boosted into NaN predictions
+        let mut bad_x = x.clone();
+        bad_x[[7, 2]] = f64::NAN;
+        let mut bad_y = y.clone();
+        bad_y[11] = f64::INFINITY;
+        for (xv, yv) in [(bad_x.view(), y.view()), (x.view(), bad_y.view())] {
+            let e = fast_mboost(xv, yv, &stump).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("finite")),
+                "{e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_mboost_accepts_a_strided_y() {
+        // y as a column of a row-major matrix: a valid view whose as_slice()
+        // is None, which used to panic
+        let mut rng = StdRng::seed_from_u64(9);
+        let x = Array2::from_shape_fn((50, 2), |_| rng.r#gen::<f64>());
+        let xy = Array2::from_shape_fn((50, 2), |(i, j)| {
+            if j == 0 {
+                1.5 * x[[i, 0]] + rng.r#gen::<f64>() * 0.1
+            } else {
+                0.0
+            }
+        });
+        let y_strided = xy.column(0);
+        assert!(y_strided.as_slice().is_none());
+        let y_owned = y_strided.to_owned();
+        for learner in [
+            FastMboostLearner::ComponentwiseLinear,
+            FastMboostLearner::Stump,
+        ] {
+            let config = FastMboostConfig {
+                m_stop: 20,
+                base_learner: learner,
+                ..Default::default()
+            };
+            let strided = fast_mboost(x.view(), y_strided, &config).unwrap();
+            let contiguous = fast_mboost(x.view(), y_owned.view(), &config).unwrap();
+            assert_eq!(strided.predictions, contiguous.predictions);
+            assert_eq!(strided.risk, contiguous.risk);
+        }
     }
 
     /// Golden (characterization) test: captured on the code before the

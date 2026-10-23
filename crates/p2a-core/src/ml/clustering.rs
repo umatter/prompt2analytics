@@ -3,7 +3,10 @@
 //! Pure Rust implementations using ndarray.
 //!
 //! DBSCAN uses KD-tree acceleration for O(n log n) average complexity
-//! when dimensionality ≤ 20, with parallel neighborhood queries via rayon.
+//! when dimensionality ≤ 20. On its large-n paths, core points are found
+//! from neighbour counts computed in parallel (rayon); the cluster expansion
+//! then re-queries neighbourhoods serially, so memory is O(n) plus one query
+//! result.
 
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checked_len, checkpoint, current_budget, try_vec};
@@ -366,8 +369,13 @@ const DBSCAN_SMALL_N_THRESHOLD: usize = 500;
 /// - **n < 500**: O(n^2) with pre-computed condensed distance matrix (no KD-tree, no rayon).
 ///   For small datasets the overhead of KD-tree construction and thread pool startup
 ///   exceeds the cost of a brute-force pairwise distance scan.
-/// - **n >= 500, d <= 20**: KD-tree acceleration with parallel neighborhood queries via rayon.
-/// - **d > 20**: O(n^2) naive with parallel pairwise distance computation.
+/// - **n >= 500, d <= 20**: KD-tree radius queries.
+/// - **n >= 500, d > 20**: naive O(n^2) distance scans.
+///
+/// On the two large-n paths no neighbourhood is stored: core points are found
+/// from neighbour counts computed in parallel (rayon), and the cluster
+/// expansion then re-queries each core point's neighbourhood serially, so
+/// memory is O(n) plus one query result.
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)

@@ -223,6 +223,31 @@ pub(crate) fn lcg_random(state: &mut u64) -> usize {
     ((*state >> 33) ^ *state) as usize
 }
 
+/// Whether this test host matches the platform the ML golden (exact-bits)
+/// constants were captured on: x86_64 glibc Linux with AVX2+FMA.
+///
+/// Every code path behind those constants needs both features: glibc picks
+/// its FMA `exp`/`ln` variants only when FMA and AVX2 are usable,
+/// matrixmultiply's `KernelFmaAvx2` needs AVX2 (it falls back to `KernelFma`
+/// without it), nano-gemm's f64 kernels need AVX2 and pulp's x86-v3 path
+/// needs both. Elsewhere the golden tests compare to a tolerance instead.
+///
+/// AVX-512 hosts pass this gate because they run the same x86-v3 kernels:
+/// pulp's `nightly-x86-v4` and gemm's and nano-gemm's `nightly` features are
+/// not enabled. Enabling any of them requires recapturing the constants or
+/// adding `avx512f` to this gate.
+#[cfg(test)]
+pub(crate) fn golden_bits_platform() -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    {
+        false
+    }
+}
+
 pub use adaboost::{
     AdaBoostConfig, AdaBoostLoss, AdaBoostResult, AdaBoostType, adaboost, adaboost_predict,
     adaboost_predict_class, run_adaboost, run_adaboost_default,

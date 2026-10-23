@@ -731,7 +731,9 @@ use serde::{Deserialize, Serialize};
 pub struct CmdscaleResult {
     /// Configuration matrix (n x k). Each row is a point in k-dimensional space.
     pub points: Vec<Vec<f64>>,
-    /// Eigenvalues of the double-centered distance matrix (all n eigenvalues).
+    /// All n eigenvalues of the double-centred matrix B, in descending
+    /// algebraic order as `stats::cmdscale` returns them (negative
+    /// eigenvalues, from non-Euclidean input, come last).
     pub eig: Vec<f64>,
     /// Goodness of fit (GOF) measures.
     /// First value: sum of positive eigenvalues / sum of absolute eigenvalues.
@@ -800,6 +802,15 @@ impl std::fmt::Display for CmdscaleResult {
 ///
 /// # Returns
 /// * `CmdscaleResult` containing the configuration and diagnostics
+///
+/// # Errors
+///
+/// - Fewer than 2 points; a non-square, non-symmetric or non-finite `d`, a
+///   non-zero diagonal or a negative distance; `k = 0`.
+/// - `"Resource limit: ..."` when the `n x n` matrix or the eigensolver's
+///   workspace (about `3 n^2` `f64`) exceeds the per-allocation ceiling.
+/// - `"Computation stopped: ..."` when the budget is cancelled or expires.
+/// - A failed eigendecomposition.
 ///
 /// # Algorithm
 /// 1. Compute squared distance matrix D²
@@ -892,18 +903,37 @@ fn cmdscale_dims(k: Option<usize>, n: usize) -> Result<usize, String> {
 /// matrix in descending order, as `stats::cmdscale` orders them.
 ///
 /// Builds `B = -1/2 H D^2 H` directly from `d` (no separate `D^2` matrix)
-/// and decomposes it with faer's self-adjoint eigensolver. The `n x n`
-/// buffers, including those the eigensolver allocates internally, are
-/// pre-flighted against the allocation ceiling.
+/// and decomposes it with faer's self-adjoint eigensolver
+/// (`faer::linalg::evd::self_adjoint_evd`, the routine and arguments
+/// `Mat::self_adjoint_eigen` uses). Before `B` is built, the `n x n`
+/// matrices (`B` and the eigenvectors) and the eigensolver's workspace, one
+/// buffer the size of a few `n x n` matrices, are pre-flighted against the
+/// allocation ceiling; the workspace is then allocated fallibly from the same
+/// requirement that was checked.
 fn cmdscale_core(
     n: usize,
     d: impl Fn(usize, usize) -> f64,
     k: usize,
 ) -> Result<(Vec<Vec<f64>>, Vec<f64>), String> {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd, self_adjoint_evd_scratch};
+
     let to_string = |e: EconError| e.to_string();
     checkpoint().map_err(to_string)?;
     let what = "cmdscale matrix";
     check_alloc::<f64>(checked_len(&[n, n], what).map_err(to_string)?, what).map_err(to_string)?;
+    // The eigensolver's workspace: checked here, and allocated below from this
+    // same requirement, so the two cannot drift apart
+    let ws = "cmdscale eigensolver workspace";
+    let par = faer::get_global_parallelism();
+    let scratch =
+        self_adjoint_evd_scratch::<f64>(n, ComputeEigenvectors::Yes, par, Default::default());
+    // faer signals an overflowing requirement as StackReq::OVERFLOW (size 0),
+    // which check_alloc would pass
+    if scratch.layout().is_err() {
+        return Err(crate::resource::overflow(ws).to_string());
+    }
+    check_alloc::<u8>(scratch.size_bytes(), ws).map_err(to_string)?;
 
     // Row and column means of D^2, and its grand mean
     let mut row_means = vec![0.0f64; n];
@@ -945,11 +975,21 @@ fn cmdscale_core(
     }
 
     checkpoint().map_err(to_string)?;
-    let evd = b
-        .self_adjoint_eigen(faer::Side::Lower)
-        .map_err(|_| "cmdscale eigendecomposition failed".to_string())?;
-    let values = evd.S().column_vector();
-    let vectors = evd.U();
+    let mut buf = MemBuffer::try_new(scratch)
+        .map_err(|_| crate::resource::reserve_failed(ws, scratch.size_bytes(), 1).to_string())?;
+    let mut vectors = Mat::<f64>::zeros(n, n);
+    let mut s = faer::diag::Diag::<f64>::zeros(n);
+    self_adjoint_evd(
+        b.as_ref(),
+        s.as_mut(),
+        Some(vectors.as_mut()),
+        par,
+        MemStack::new(&mut buf),
+        Default::default(),
+    )
+    .map_err(|_| "cmdscale eigendecomposition failed".to_string())?;
+    drop(buf);
+    let values = s.column_vector();
 
     // Descending algebraic order (faer's own order is not relied on)
     let mut order: Vec<usize> = (0..n).collect();
@@ -1008,6 +1048,14 @@ fn cmdscale_result(
 ///
 /// # Returns
 /// * `CmdscaleResult` containing the configuration
+///
+/// # Errors
+///
+/// - Fewer than 2 rows, a non-finite value in `data`, or `k = 0`.
+/// - `"Resource limit: ..."` when the `n x n` matrix or the eigensolver's
+///   workspace (about `3 n^2` `f64`) exceeds the per-allocation ceiling.
+/// - `"Computation stopped: ..."` when the budget is cancelled or expires.
+/// - A failed eigendecomposition.
 pub fn cmdscale_from_data(
     data: ArrayView2<f64>,
     k: Option<usize>,
@@ -1110,9 +1158,32 @@ mod tests {
         assert!(e.contains("cancelled"), "{e}");
     }
 
+    #[test]
+    fn cmdscale_preflights_the_eigensolver_workspace() {
+        let data = blobs(60, 3, 3);
+        // B and the eigenvectors (60 x 60 f64 = 28,800 B each) fit under this
+        // ceiling; the eigensolver's single workspace buffer does not
+        let e = with_alloc_ceiling(Some(8 * 60 * 60), || {
+            cmdscale_from_data(data.view(), Some(2))
+        })
+        .unwrap_err();
+        assert!(e.contains("eigensolver") && e.contains("limit"), "{e}");
+        assert!(cmdscale_from_data(data.view(), Some(2)).is_ok());
+    }
+
     /// Golden (characterization) test: captured on the code before the
     /// memory refactor (row-wise P, scalar exaggeration, reused Q); every
     /// floating-point operation is preserved, so the bits must not change.
+    ///
+    /// The constants were captured on x86_64 Linux (glibc, AVX2+FMA
+    /// kernels), and only there are the bits compared
+    /// (`crate::ml::golden_bits_platform`). Elsewhere libm's `exp`/`ln` (the
+    /// perplexity search) and the kernels behind the PCA start can differ in
+    /// the last ulp, and the gain updates, which branch on gradient signs,
+    /// amplify that: moving inputs by one to three ulps (496 runs: single
+    /// data entries, all of them, random subsets, the perplexity and the
+    /// learning rate) moved these values by up to 8.1e-4 relative. Other
+    /// targets therefore compare to a relative 1e-2.
     #[test]
     fn tsne_memory_refactor_is_bit_identical() {
         const GOLDEN: [u64; 4] = [
@@ -1155,7 +1226,16 @@ mod tests {
             r.kl_divergence,
         ];
         let bits = got.map(f64::to_bits);
-        assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
+        if crate::ml::golden_bits_platform() {
+            assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
+        } else {
+            for (g, want) in got.iter().zip(GOLDEN.map(f64::from_bits)) {
+                assert!(
+                    (g - want).abs() <= 1e-2 * want.abs(),
+                    "got {bits:?} = {got:?}"
+                );
+            }
+        }
     }
 
     /// R 4.3.3:
