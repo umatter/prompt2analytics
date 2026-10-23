@@ -726,7 +726,9 @@ enum NotAdmitted {
 /// once decoded, and a CSV can decode to several times its size on disk. A
 /// file whose footer cannot be read passes too (the loader reports its
 /// error); one the check will not read (see [`parquet_decoded_bytes`]) is
-/// not loaded.
+/// not loaded, and neither is one whose schema makes the check panic:
+/// polars' schema conversion (`DataType::from_arrow_field`) panics on some
+/// malformed categorical metadata, and the loader runs the same code.
 async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
     let is_parquet = path
         .extension()
@@ -735,14 +737,29 @@ async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
     if !is_parquet || !session::dataset_admission_active() {
         return Ok(());
     }
-    let bound = match parquet_decoded_bytes(path) {
-        Ok(Some(bound)) => bound,
-        Ok(None) => return Ok(()),
-        Err(reason) => return Err(NotAdmitted::Unread(reason)),
+    let bound = match std::panic::catch_unwind(|| parquet_decoded_bytes(path)) {
+        Ok(Ok(Some(bound))) => bound,
+        Ok(Ok(None)) => return Ok(()),
+        Ok(Err(reason)) => return Err(NotAdmitted::Unread(reason)),
+        Err(_) => {
+            tracing::info!("the parquet check panicked reading a file's schema");
+            return Err(NotAdmitted::Unread(
+                "could not read the file's schema".to_string(),
+            ));
+        }
     };
     session::admit_dataset(name, bound.dataset.saturating_add(bound.transient))
         .await
         .map_err(|refusal| NotAdmitted::Quota(session::quota_refusal(refusal)))
+}
+
+/// A file removed when this drops, also when the call unwinds.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// `text` (an error from a loader or writer) with the absolute forms of
@@ -1049,26 +1066,38 @@ impl AnalyticsServer {
                 }
             }
             "parquet" => {
-                // Write to temp file and load (Parquet is binary format)
-                let temp_dir = std::env::temp_dir();
-                let temp_path = temp_dir.join(format!("upload_{}.parquet", uuid::Uuid::new_v4()));
-
-                if let Err(e) =
-                    std::fs::File::create(&temp_path).and_then(|mut f| f.write_all(&decoded))
-                {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to write temp file: {}",
-                        e
-                    ))]));
-                }
+                // Written to a new temporary file and loaded from there
+                // (Parquet is a binary format); the file is removed however
+                // the call ends, a panic in the check or the loader
+                // included.
+                let temp_path =
+                    std::env::temp_dir().join(format!("upload_{}.parquet", uuid::Uuid::new_v4()));
+                let created = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temp_path);
+                let temp = match created {
+                    Ok(mut file) => {
+                        let temp = RemoveOnDrop(temp_path);
+                        if let Err(e) = file.write_all(&decoded) {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Failed to write temp file: {}",
+                                e
+                            ))]));
+                        }
+                        temp
+                    }
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to write temp file: {}",
+                            e
+                        ))]));
+                    }
+                };
 
                 // Refused before decoding when the quotas would refuse the
                 // decoded dataset.
-                let admitted = admit_parquet(&temp_path, &id).await;
-                if admitted.is_err() {
-                    let _ = std::fs::remove_file(&temp_path);
-                }
-                match admitted {
+                match admit_parquet(&temp.0, &id).await {
                     Ok(()) => {}
                     Err(NotAdmitted::Quota(refusal)) => return Err(refusal),
                     Err(NotAdmitted::Unread(reason)) => {
@@ -1077,8 +1106,8 @@ impl AnalyticsServer {
                         ))]));
                     }
                 }
-                let result = DataLoader::load(&temp_path);
-                let _ = std::fs::remove_file(&temp_path); // Clean up temp file
+                let result = DataLoader::load(&temp.0);
+                drop(temp);
 
                 match result {
                     Ok(ds) => ds,

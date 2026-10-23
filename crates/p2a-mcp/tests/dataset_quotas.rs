@@ -714,3 +714,78 @@ async fn a_parquet_file_with_shared_column_chunks_is_not_loaded() {
     let (_, listed) = call(&app, &sid, "list_datasets", json!({})).await;
     assert!(!listed.to_string().contains("shared"), "{listed}");
 }
+
+/// The `upload_*.parquet` files in the server's temporary folder that hold
+/// exactly `bytes`.
+fn uploads_holding(bytes: &[u8]) -> usize {
+    std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("upload_") && name.ends_with(".parquet")
+        })
+        .filter(|entry| std::fs::read(entry.path()).is_ok_and(|held| held == bytes))
+        .count()
+}
+
+#[tokio::test]
+async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behind() {
+    // A categorical column whose polars metadata names a code width that
+    // does not exist: polars' schema conversion panics on it. Pre-fix the
+    // check before decoding was the first to reach that code, and the
+    // unwind skipped the removal of the upload's temporary file, so each
+    // such upload answered a server failure and left a file behind.
+    let dir = data_dir();
+    let path = dir.path().join("schema.parquet");
+    categorical_parquet(&path, "s", 10);
+    rewrite_footer(&path, |footer| {
+        let schema = footer
+            .key_value_metadata
+            .as_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|kv| kv.key == "ARROW:schema")
+            .unwrap();
+        let engine = base64::engine::general_purpose::STANDARD;
+        let mut ipc = engine.decode(schema.value.as_ref().unwrap()).unwrap();
+        let at = ipc.windows(4).position(|w| w == b"u32;").unwrap();
+        ipc[at..at + 4].copy_from_slice(b"u99;");
+        schema.value = Some(engine.encode(ipc));
+    });
+    let bytes = std::fs::read(&path).unwrap();
+    let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let upload = json!({"content": content, "filename": "schema.parquet"});
+
+    // With the quotas the check refuses it cleanly, and nothing is loaded.
+    let (app, _) = app_with_quota(8 * MIB).await;
+    for (tool, args) in [
+        ("upload_dataset", upload.clone()),
+        (
+            "load_dataset",
+            json!({"path": path.to_string_lossy(), "name": "schema"}),
+        ),
+    ] {
+        let sid = new_session(&app).await;
+        let (status, body) = call(&app, &sid, tool, args).await;
+        assert_eq!(status, StatusCode::OK, "{tool}: {body}");
+        assert_eq!(body["data"]["success"], json!(false), "{tool}: {body}");
+        assert!(
+            body.to_string()
+                .contains("could not read the file's schema"),
+            "{tool}: {body}"
+        );
+    }
+    assert_eq!(uploads_holding(&bytes), 0);
+
+    // Without them the loader panics on it; the upload's file is removed
+    // all the same.
+    let (app, _) = build_app_with(&local(), ExecConfig::default())
+        .await
+        .unwrap();
+    let sid = new_session(&app).await;
+    let (status, body) = call(&app, &sid, "upload_dataset", upload).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(uploads_holding(&bytes), 0);
+}
