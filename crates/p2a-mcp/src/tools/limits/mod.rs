@@ -21,7 +21,10 @@
 //!   the struct's path). The governed call path refuses top-level arguments that are not an
 //!   object in every profile as well; in the off profile a nested struct given by position
 //!   still runs, as nothing is checked there. A nested struct no rule goes into (only `Exempt`
-//!   rules below it, or none) is not looked at in any profile.
+//!   rules below it, or none) is not looked at in any profile. [`struct_paths`] lists the
+//!   structs a tool's rules go into; the audit log replaces one given as an array by its size in
+//!   every profile. A rule path must therefore not go on into a field whose schema admits an
+//!   array.
 //! - [`Limits::check_rows`] checks a dataset's height for the tools in [`ROW_RULES`], whose cost
 //!   grows faster than linearly in the number of rows ([`RowClass`]).
 //! - [`Limits::check_budget`] lets a handler check a quantity it computes itself (for example a
@@ -220,8 +223,8 @@ pub enum Rule {
 /// rule for a path replaces every `"*"` rule for the same path for that tool; several rules may
 /// share one `(tool, path)`, and all of them apply. Where a path goes on into a field (`a[]` in
 /// `a[].b`), a request that holds a JSON array there is refused outside the off profile, since
-/// serde would fill that struct by position; do not give such a path to a value that may
-/// rightly be an array there.
+/// serde would fill that struct by position, and the audit log records only its size
+/// ([`struct_paths`]); do not give such a path to a value that may rightly be an array there.
 #[derive(Debug, Clone, Copy)]
 pub struct ParamRule {
     /// Tool name, or `"*"` for every tool that has the field and no tool-specific rule for it.
@@ -648,6 +651,28 @@ fn parse_flag(key: &str, value: &str) -> Result<bool, String> {
 /// tool-specific rule for `tool` (table order).
 pub fn rules_for(tool: &str) -> Vec<&'static ParamRule> {
     select_rules(tool, PARAM_RULES)
+}
+
+/// The nested request structs that the rules for `tool` read fields of, as rule paths: the part
+/// of each non-`Exempt` rule path before a `.` (`columns[]` and `columns[].distribution` for
+/// `columns[].distribution.value`), each once, in [`rules_for`] order. Outside the off profile
+/// [`Limits::check_tool_arguments`] refuses a JSON array at one of them (serde would fill the
+/// struct by field position), and the audit log replaces one by its size in every profile
+/// ([`crate::audit::sanitize_arguments`]), as its values carry no names to be redacted by.
+pub fn struct_paths(tool: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for rule in rules_for(tool) {
+        if matches!(rule.rule, Rule::Exempt(_)) {
+            continue;
+        }
+        for (dot, _) in rule.path.match_indices('.') {
+            let prefix = &rule.path[..dot];
+            if !out.contains(&prefix) {
+                out.push(prefix);
+            }
+        }
+    }
+    out
 }
 
 /// The row rule of `tool`, if its dataset height is limited.

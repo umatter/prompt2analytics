@@ -591,17 +591,25 @@ impl AnalyticsServer {
         self
     }
 
-    /// The top-level parameter names `tool` declares: the `properties` of
-    /// its input schema, empty for an unknown tool. The audit log takes these
-    /// ahead of the keys a tool ignores (`audit::sanitize_arguments`).
-    pub fn declared_parameters(&self, tool: &str) -> Vec<&str> {
-        self.tool_router
+    /// The parameters `tool` declares, for the audit log
+    /// (`audit::sanitize_arguments`): the top-level names, the `properties`
+    /// of its input schema (empty for an unknown tool), which the log takes
+    /// ahead of the keys a tool ignores, and the nested structs its request
+    /// limits read fields of ([`crate::tools::limits::struct_paths`]), which
+    /// the log replaces by their size when they come as JSON arrays.
+    pub fn declared_parameters(&self, tool: &str) -> crate::audit::DeclaredParameters<'_> {
+        let names = self
+            .tool_router
             .map
             .get(tool)
             .and_then(|route| route.attr.input_schema.get("properties"))
             .and_then(serde_json::Value::as_object)
             .map(|properties| properties.keys().map(String::as_str).collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        crate::audit::DeclaredParameters {
+            names,
+            structs: crate::tools::limits::struct_paths(tool),
+        }
     }
 
     /// Create a new AnalyticsServer with existing dataset storage.
@@ -1653,9 +1661,18 @@ mod tests {
     fn declared_parameters_are_the_schema_properties() {
         let server = AnalyticsServer::new();
         let mut sqlite = server.declared_parameters("db_sqlite_query");
-        sqlite.sort_unstable();
-        assert_eq!(sqlite, ["db_path", "name", "query"]);
-        assert!(server.declared_parameters("no_such_tool").is_empty());
+        sqlite.names.sort_unstable();
+        assert_eq!(sqlite.names, ["db_path", "name", "query"]);
+        assert!(sqlite.structs.is_empty());
+        assert_eq!(
+            server.declared_parameters("no_such_tool"),
+            crate::audit::DeclaredParameters::default()
+        );
+        // The structs are the ones the request limits read fields of.
+        let report = server.declared_parameters("generate_report");
+        assert_eq!(report.structs, ["sections[]", "sections[].content[]"]);
+        let random = server.declared_parameters("generate_random_data");
+        assert_eq!(random.structs, ["columns[]", "columns[].distribution"]);
         // No tool keeps a top-level parameter outside `properties`, where the
         // audit log would not see it as declared.
         for tool in server.tool_router.list_all() {

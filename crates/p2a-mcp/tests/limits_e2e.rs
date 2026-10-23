@@ -54,6 +54,43 @@ fn padded_search_arguments() -> serde_json::Value {
     serde_json::Value::Object(args)
 }
 
+/// The data value of the [`positional_struct_arguments`] columns.
+const STRUCT_VALUE: &str = "SECRET-CONSTANT-4f2a";
+
+/// `generate_random_data` arguments with a nested struct given by position,
+/// which serde fills by field position: a column's distribution as
+/// `[tag, value]`, then a whole column as `[name, distribution]`. The data
+/// value they carry (`value` by name) has no name in the request to be
+/// redacted by. Both are refused in the hosted profile and run when off.
+fn positional_struct_arguments() -> [serde_json::Value; 2] {
+    let distribution = serde_json::json!(["constant_string", STRUCT_VALUE]);
+    [
+        serde_json::json!({"n_rows": 5, "name": "g1", "columns": [
+            {"name": "s", "distribution": distribution}
+        ]}),
+        serde_json::json!({"n_rows": 5, "name": "g2", "columns": [["s", distribution]]}),
+    ]
+}
+
+/// The audit `lines` of the [`positional_struct_arguments`] calls, in order,
+/// all with `outcome`: each struct given by position is replaced by its size,
+/// and the data value is nowhere in the log `text`.
+fn assert_positional_structs_redacted(text: &str, lines: &[serde_json::Value], outcome: &str) {
+    assert!(!text.contains(STRUCT_VALUE), "{text}");
+    assert_eq!(lines.len(), 2, "{text}");
+    for line in lines {
+        assert_eq!(line["tool_name"], "generate_random_data", "{line}");
+        assert_eq!(line["outcome"], outcome, "{line}");
+    }
+    let column = &lines[0]["arguments"]["columns"][0];
+    assert_eq!(column["name"], "s", "{text}");
+    assert_eq!(column["distribution"], "[redacted: 2 items]", "{text}");
+    assert_eq!(
+        lines[1]["arguments"]["columns"][0], "[redacted: 2 items]",
+        "{text}"
+    );
+}
+
 /// The audit line of a [`padded_search_arguments`] call kept `query` and
 /// left one padding key out in its place.
 fn assert_query_kept_ahead_of_padding(line: &serde_json::Value) {
@@ -865,6 +902,33 @@ mod http_paths {
         }
     }
 
+    /// A nested struct given by position is audited with its size only,
+    /// in open public mode, where the limits refuse it, and in local mode,
+    /// where it runs (each from the governor's capture site).
+    #[test]
+    fn audit_redacts_nested_structs_given_by_position() {
+        for (open_public, status, outcome) in [(true, 422, "limit_exceeded"), (false, 200, "ok")] {
+            let dir = tempfile::tempdir().unwrap();
+            let base = if open_public {
+                open_public_config()
+            } else {
+                local_config()
+            };
+            let cfg = with_audit(base, &dir);
+            let lines = run(limits::resolve(&cfg).unwrap(), async {
+                let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+                let sid = new_session(&app).await;
+                for args in super::positional_struct_arguments() {
+                    let (got, body) = post_tool(&app, &sid, "generate_random_data", args).await;
+                    assert_eq!(got, status, "{body}");
+                }
+                super::audit_lines(&cfg.audit).await
+            });
+            let text = std::fs::read_to_string(&cfg.audit.path).unwrap();
+            super::assert_positional_structs_redacted(&text, &lines, outcome);
+        }
+    }
+
     /// An Ollama stub on loopback whose answer to the first request of a turn
     /// is one `regression_bootstrap_cov` call for 20,000 replications on
     /// `small`: by name under `http://<addr>/obj`, by position under
@@ -1213,6 +1277,33 @@ mod stdio_path {
         assert_eq!(lines[0]["origin"], "stdio");
         assert_query_kept_ahead_of_padding(&lines[0]);
         drop(logger);
+    }
+
+    /// The stdio `call_tool` redacts a nested struct given by position like
+    /// the governor: refused when hosted, run when off, its value never in
+    /// the entry.
+    #[test]
+    fn stdio_audit_redacts_nested_structs_given_by_position() {
+        use p2a_mcp::audit::AuditLogger;
+        use std::sync::Arc;
+        for (l, refused, outcome) in [
+            (Limits::hosted(), true, "limit_exceeded"),
+            (Limits::off(), false, "ok"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = audit_cfg(&dir);
+            let logger = Arc::new(AuditLogger::new(&cfg).unwrap());
+            for args in positional_struct_arguments() {
+                let server = AnalyticsServer::new().with_audit_logger(logger.clone());
+                let msg = run(l.clone(), stdio_call(server, "generate_random_data", args));
+                assert_eq!(msg.get("error").is_some(), refused, "{msg}");
+                assert_ne!(msg["result"]["isError"], true, "{msg}");
+            }
+            let lines = run(Limits::off(), audit_lines(&cfg));
+            let text = std::fs::read_to_string(&cfg.path).unwrap();
+            assert_positional_structs_redacted(&text, &lines, outcome);
+            drop(logger);
+        }
     }
 
     #[test]

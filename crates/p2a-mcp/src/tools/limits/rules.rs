@@ -612,7 +612,7 @@ pub static ROW_RULES: &[RowRule] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Family, LimitViolation, Limits, Rule, rules_for};
+    use super::super::{Family, LimitViolation, Limits, Rule, rules_for, struct_paths};
     use super::{PARAM_RULES, ROW_RULES};
     use serde_json::{Value, json};
 
@@ -1099,6 +1099,54 @@ mod tests {
             .parameter,
             "columns[].distribution.value"
         );
+    }
+
+    /// Arguments that hold a JSON array at rule path `path`, with one element on each array
+    /// level above it.
+    fn array_at(path: &str) -> Value {
+        let mut value = json!([1]);
+        for segment in path.rsplit('.') {
+            let name = segment.trim_end_matches("[]");
+            for _ in 0..(segment.len() - name.len()) / 2 {
+                value = json!([value]);
+            }
+            value = json!({ name: value });
+        }
+        value
+    }
+
+    /// [`struct_paths`] are the structs the check refuses as JSON arrays, so the audit log
+    /// redacts by size exactly the structs that the hosted profile refuses by position.
+    #[test]
+    fn struct_paths_are_the_structs_the_check_refuses_as_arrays() {
+        let mut tools: Vec<&str> = PARAM_RULES.iter().map(|r| r.tool).collect();
+        tools.sort_unstable();
+        tools.dedup();
+        let mut checked = Vec::new();
+        for tool in tools.into_iter().filter(|t| *t != "*") {
+            for path in struct_paths(tool) {
+                let args = array_at(path);
+                let v = hosted(tool, args.clone()).unwrap_err();
+                assert_eq!(
+                    (v.parameter.as_str(), v.limit.as_str()),
+                    (path, "a JSON object"),
+                    "{tool}: {args}"
+                );
+                checked.push(format!("{tool}.{path}"));
+            }
+        }
+        assert_eq!(
+            checked,
+            [
+                "generate_random_data.columns[]",
+                "generate_random_data.columns[].distribution",
+                "generate_report.sections[]",
+                "generate_report.sections[].content[]",
+            ]
+        );
+        // Only `Exempt` rules go into a synthetic control predictor, so it is no struct here.
+        assert!(struct_paths("synthetic_control").is_empty());
+        assert!(struct_paths("no_such_tool").is_empty());
     }
 
     /// A nested request struct given by position (serde fills it from a JSON array) is refused
