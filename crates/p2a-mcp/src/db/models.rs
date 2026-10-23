@@ -154,11 +154,7 @@ impl Message {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 
     /// Get created_at as chrono DateTime
@@ -230,11 +226,7 @@ impl ToolCall {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 
     /// Mark the tool call as completed successfully
@@ -296,11 +288,7 @@ impl DbSession {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 
     /// Get created_at as chrono DateTime
@@ -355,11 +343,7 @@ impl Settings {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 }
 
@@ -415,11 +399,7 @@ impl DatasetMeta {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 }
 
