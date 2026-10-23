@@ -92,9 +92,10 @@ pub struct DbConnection {
     /// when the session's rows are deleted. Only touched when the budget is
     /// set; shared by clones.
     session_bytes: Arc<Mutex<HashMap<String, u64>>>,
-    /// One lock per conversation that a delete or clear is working on, with
-    /// the number of calls holding or waiting for it (see [`DeleteTurn`]);
-    /// shared by clones.
+    /// One lock per conversation that a delete, clear or message add is
+    /// working on (and per session creating a conversation), with the number
+    /// of calls holding or waiting for it (see [`DeleteTurn`]); shared by
+    /// clones.
     delete_turns: DeleteTurns,
     /// Conversations deleted recently, for
     /// [`delete_recent_orphans`](Self::delete_recent_orphans); shared by
@@ -118,19 +119,25 @@ pub(crate) const MAX_REMEMBERED_DELETES: usize = 100_000;
 
 type DeleteTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
 
-/// One call's turn at deleting a conversation's rows (a conversation delete
-/// or clear); the next call's turn starts when it is dropped.
+/// One call's turn at changing a conversation's rows (a conversation delete
+/// or clear, or a message add), or at creating a conversation in a session
+/// ([`session_turn`](DbConnection::session_turn)); the next call's turn
+/// starts when it is dropped.
 ///
 /// Two deletes of one conversation that run at the same time conflict in
 /// the store: the in-memory engine hands both the same rows (neither
 /// fails), so each would release their bytes from the `session_db_bytes`
 /// counter, and RocksDB fails one of them with a write conflict. Taking
-/// turns makes the later call find nothing instead. The counter is per
-/// process, and so are the turns. An entry leaves the map with its last
-/// holder or waiter, also when a waiting call is cancelled.
+/// turns makes the later call find nothing instead. A message add holds the
+/// turn from its `messages_per_conversation` check until the message is
+/// counted, and a conversation creation holds its session's turn from the
+/// `conversations_per_session` check until the row is written, so concurrent
+/// writes cannot pass a cap together. The counter is per process, and so
+/// are the turns. An entry leaves the map with its last holder or waiter,
+/// also when a waiting call is cancelled.
 pub(crate) struct DeleteTurn {
     turns: DeleteTurns,
-    conversation_id: String,
+    key: String,
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
@@ -142,10 +149,10 @@ impl Drop for DeleteTurn {
             .turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((_, users)) = turns.get_mut(&self.conversation_id) {
+        if let Some((_, users)) = turns.get_mut(&self.key) {
             *users = users.saturating_sub(1);
             if *users == 0 {
-                turns.remove(&self.conversation_id);
+                turns.remove(&self.key);
             }
         }
     }
@@ -380,16 +387,27 @@ impl DbConnection {
         }
     }
 
-    /// Wait for this call's turn at deleting conversation `conversation_id`'s
-    /// rows (see [`DeleteTurn`]).
+    /// Wait for this call's turn at changing conversation
+    /// `conversation_id`'s rows (see [`DeleteTurn`]).
     pub(crate) async fn delete_turn(&self, conversation_id: &str) -> DeleteTurn {
+        self.turn(conversation_id.to_string()).await
+    }
+
+    /// Wait for this call's turn at creating a conversation in session
+    /// `session_id` (see [`DeleteTurn`]). Conversation ids are UUIDs, so
+    /// this key is never a conversation's.
+    pub(crate) async fn session_turn(&self, session_id: &str) -> DeleteTurn {
+        self.turn(format!("session:{session_id}")).await
+    }
+
+    async fn turn(&self, key: String) -> DeleteTurn {
         let lock = {
             let mut turns = self
                 .delete_turns
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let (lock, users) = turns
-                .entry(conversation_id.to_string())
+                .entry(key.clone())
                 .or_insert_with(|| (Arc::new(tokio::sync::Mutex::new(())), 0));
             *users += 1;
             Arc::clone(lock)
@@ -397,7 +415,7 @@ impl DbConnection {
         // Registered before waiting, so a cancelled wait still leaves.
         let mut turn = DeleteTurn {
             turns: Arc::clone(&self.delete_turns),
-            conversation_id: conversation_id.to_string(),
+            key,
             guard: None,
         };
         turn.guard = Some(lock.lock_owned().await);

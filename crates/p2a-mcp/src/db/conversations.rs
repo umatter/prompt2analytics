@@ -27,6 +27,9 @@ impl DbConnection {
     ) -> Result<Conversation, DbError> {
         self.check_memory()?;
         self.check_message_bytes("title", "title", title.len())?;
+        // Creations in one session take turns from the count to the write,
+        // so concurrent ones cannot pass the cap together.
+        let _turn = self.session_turn(session_id).await;
         if let Some(max) = self.limits().conversations_per_session {
             let n = self.count_conversations(session_id).await?;
             if n >= max {
@@ -184,11 +187,13 @@ impl DbConnection {
             self.db()
                 .query("DELETE FROM tool_calls WHERE conversation_id = $id")
                 .bind(id())
-                .await?;
+                .await?
+                .check()?;
             self.db()
                 .query("DELETE FROM messages WHERE conversation_id = $id")
                 .bind(id())
-                .await?;
+                .await?
+                .check()?;
             return Ok(());
         }
         let tool_calls: Vec<ToolCallText> = self
@@ -234,6 +239,11 @@ impl DbConnection {
     /// to, after the store's checks: memory, the conversation must exist
     /// (`NotFound`), `message_bytes` (`TooLarge`), `messages_per_conversation`
     /// and `session_db_bytes` (`QuotaExceeded`; the bytes are counted).
+    ///
+    /// Call it during the conversation's turn
+    /// ([`delete_turn`](DbConnection::delete_turn)) and keep the turn until
+    /// the message is written and counted, so that concurrent adds cannot
+    /// pass `messages_per_conversation` together.
     async fn admit_message(
         &self,
         conversation_id: &str,
@@ -306,6 +316,7 @@ impl DbConnection {
     /// `MemoryPressure` above the RSS soft limit, `TooLarge` for content
     /// longer than `message_bytes`, and `QuotaExceeded` when the conversation
     /// is full or the content would pass the session's `session_db_bytes`.
+    /// Adds, deletes and clears of one conversation take turns.
     pub async fn add_message(
         &self,
         conversation_id: &str,
@@ -320,6 +331,7 @@ impl DbConnection {
                 return Err(DbError::Query(format!("Invalid message role: {}", role)));
             }
         };
+        let _turn = self.delete_turn(conversation_id).await;
         self.admit_message(conversation_id, content.len()).await?;
 
         let msg_id = uuid::Uuid::new_v4().to_string();
@@ -350,6 +362,7 @@ impl DbConnection {
     /// Add a full message object, with the checks of
     /// [`add_message`](Self::add_message).
     pub async fn save_message(&self, message: &Message) -> Result<Message, DbError> {
+        let _turn = self.delete_turn(&message.conversation_id).await;
         self.admit_message(&message.conversation_id, message.content.len())
             .await?;
         let created: Option<Message> = self

@@ -482,6 +482,97 @@ async fn delete_turns_leave_the_map() {
     assert_eq!(db.delete_turns_in_use(), 0);
 }
 
+/// Concurrent posts to a conversation one message below its cap: the count
+/// check and the write take turns, so exactly one of them gets in.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_adds_stop_at_the_message_cap() {
+    let db = limited_db(PersistenceLimits {
+        messages_per_conversation: Some(3),
+        ..Default::default()
+    })
+    .await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    db.add_message(&id, "user", "first").await.unwrap();
+    db.add_message(&id, "assistant", "second").await.unwrap();
+    let saved = Message::user(id.clone(), "saved".into());
+    let (a, b, c, d) = tokio::join!(
+        db.add_message(&id, "user", "a"),
+        db.add_message(&id, "user", "b"),
+        db.add_message(&id, "user", "c"),
+        db.save_message(&saved),
+    );
+    let results = [a.map(|_| ()), b.map(|_| ()), c.map(|_| ()), d.map(|_| ())];
+    assert_eq!(
+        results.iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r.is_ok() || matches!(r, Err(DbError::QuotaExceeded(_)))),
+        "{results:?}"
+    );
+    assert_eq!(db.get_messages(&id).await.unwrap().len(), 3);
+    assert_eq!(db.delete_turns_in_use(), 0);
+}
+
+/// Concurrent creations in a session one conversation below its cap: exactly
+/// one gets in.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_creates_stop_at_the_conversation_cap() {
+    let db = limited_db(PersistenceLimits {
+        conversations_per_session: Some(2),
+        ..Default::default()
+    })
+    .await;
+    db.create_conversation("s1", "first").await.unwrap();
+    let (a, b, c) = tokio::join!(
+        db.create_conversation("s1", "a"),
+        db.create_conversation("s1", "b"),
+        db.create_conversation("s1", "c"),
+    );
+    let results = [a.map(|_| ()), b.map(|_| ()), c.map(|_| ())];
+    assert_eq!(
+        results.iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r.is_ok() || matches!(r, Err(DbError::QuotaExceeded(_)))),
+        "{results:?}"
+    );
+    assert_eq!(db.count_conversations("s1").await.unwrap(), 2);
+    assert_eq!(db.delete_turns_in_use(), 0);
+}
+
+/// Without the byte budget, a failed row delete is reported: the
+/// conversation is not deleted with its messages left behind, and a clear
+/// does not claim success.
+#[tokio::test]
+async fn a_failed_row_delete_is_reported() {
+    let db = test_db().await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    db.add_message(&id, "user", "kept").await.unwrap();
+    // Every delete of a message now fails inside the store.
+    db.db()
+        .query(
+            "DEFINE EVENT refuse_delete ON TABLE messages WHEN $event = 'DELETE' \
+             THEN { THROW 'refused' }",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    assert!(db.delete_conversation(&id).await.is_err());
+    assert!(db.get_conversation(&id).await.is_ok());
+    assert!(db.clear_messages(&id).await.is_err());
+    assert_eq!(db.get_messages(&id).await.unwrap().len(), 1);
+}
+
 /// Store a message for `conversation_id` directly, without the existence
 /// check of `add_message` (a write that raced the conversation's delete, or
 /// a row from before the process started).
