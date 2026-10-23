@@ -2336,6 +2336,7 @@ mod tests {
         }
     }
 
+    use crate::linalg::matrix_ops::LinalgError;
     use crate::spatial::test_fixtures::{band2, knn3};
     use ndarray::array;
 
@@ -2393,7 +2394,9 @@ mod tests {
                 [-0.9729643888739399, 0.24324109721848497],
                 [1.2663700599039887, -0.31659251497599716],
             ),
-            // q = 1.68: dense solve
+            // q = 1.68: dense solve; it returns NaN (faer 0.22.6 full-pivot LU), so the
+            // impacts come from the dense-inverse fallback
+            // (see dense_impacts_fallback_matches_the_trace_route)
             (
                 band2(WeightStyle::Binary),
                 -0.35,
@@ -2433,8 +2436,15 @@ mod tests {
 
     #[test]
     fn dense_impacts_fallback_matches_the_trace_route() {
-        // compute_impacts reaches the dense inverse only when the eigen decomposition or the
-        // solve fails, which no fixture provokes, so the fallback is called directly.
+        // compute_impacts reaches the dense inverse only when the eigen decomposition fails,
+        // the solve (I - rho W) v = 1 fails (no fixture provokes either), or a sum is not
+        // finite (e.g. rho = 1 with row-standardised W; see
+        // dense_impacts_pseudoinverse_branch_stays_finite). Of the R reference cases only the
+        // last provokes one: its dense LU solve returns NaN (faer 0.22.6's full-pivot LU is
+        // wrong for n >= 16, a known pre-existing defect left to a later tier), so it is
+        // answered by the dense inverse. That inverse's own LU result is NaN for every case
+        // here (n = 30), so the values come from its pseudoinverse branch. The fallback is
+        // called directly so that every case checks it against R.
         let beta = array![1.0, 2.0, -0.5];
         let names: [String; 2] = ["a".into(), "b".into()];
         for (mut w, rho, d, i, t) in r_solve_impact_cases() {
@@ -2462,9 +2472,11 @@ mod tests {
         let rho = 1.0;
         let n = w.n();
         let i_rho_w = Array2::<f64>::eye(n) - &w.try_to_dense().unwrap() * rho;
+        let lu = matrix_inverse(&i_rho_w.view());
         assert!(
-            matrix_inverse(&i_rho_w.view()).is_err(),
-            "the LU inverse must fail for this case to reach the pseudoinverse branch"
+            matches!(lu, Err(LinalgError::IllConditioned(_))),
+            "the LU inverse must reject I - W as ill-conditioned for this case to reach the \
+             pseudoinverse branch, got {lu:?}"
         );
 
         let beta = array![1.0, 2.0, -0.5];
