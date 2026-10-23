@@ -322,6 +322,35 @@ impl ToolCall {
         }
         serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
     }
+
+    /// The arguments for a provider API that takes them as a JSON object
+    /// when the call is sent back to it (Anthropic's `tool_use.input`,
+    /// Ollama's `function.arguments`): the arguments when they are an object,
+    /// the empty object otherwise. Arguments that are not an object (text
+    /// that was not JSON, a positional array) belong to a call the tool call
+    /// path refused for that, and its tool result says so; `null` is
+    /// arguments left out, which that path takes as the empty object. Sent as
+    /// they are, they would make the API refuse the whole request, in this
+    /// turn's next iteration and in every later turn rebuilt from the stored
+    /// history, so the model would never read the tool result.
+    pub(crate) fn arguments_object(&self) -> serde_json::Value {
+        match &self.arguments {
+            serde_json::Value::Object(_) => self.arguments.clone(),
+            _ => serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    /// The arguments for a provider API that takes them as text when the
+    /// call is sent back to it (OpenAI's `function.arguments`): the text the
+    /// model sent when it was not JSON (kept as a string by
+    /// [`parse_arguments`](Self::parse_arguments)), the JSON text of any other
+    /// value.
+    pub(crate) fn arguments_text(&self) -> String {
+        match &self.arguments {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        }
+    }
 }
 
 /// Result of executing a tool.
@@ -483,9 +512,49 @@ pub trait LlmProvider: Send + Sync {
 }
 
 #[cfg(test)]
-mod tool_call_tests {
-    use super::ToolCall;
+pub(crate) mod tool_call_tests {
+    use super::{Message, MessageRole, ToolCall};
     use serde_json::{Value, json};
+
+    /// The text of a tool call cut off at the model's token limit.
+    pub(crate) const CUT: &str = r#"{"lag_max": 5"#;
+
+    /// An assistant message with four calls of `timeseries_arma_acf` (ids
+    /// `c0` to `c3`): arguments by name, the text of a cut-off call (which
+    /// [`ToolCall::parse_arguments`] keeps as a string) and a positional
+    /// array, which the tool call path refuses, and `null`, which it takes as
+    /// arguments left out.
+    pub(crate) fn calls_with_every_argument_shape() -> Message {
+        let arguments = [json!({"lag_max": 5}), json!(CUT), json!([5]), Value::Null];
+        Message {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            tool_calls: Some(
+                arguments
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, arguments)| ToolCall {
+                        id: format!("c{i}"),
+                        name: "timeseries_arma_acf".into(),
+                        arguments,
+                    })
+                    .collect(),
+            ),
+            tool_results: None,
+        }
+    }
+
+    #[test]
+    fn arguments_are_sent_back_in_the_shape_each_api_takes() {
+        let calls = calls_with_every_argument_shape().tool_calls.unwrap();
+        let objects: Vec<Value> = calls.iter().map(ToolCall::arguments_object).collect();
+        assert_eq!(
+            objects,
+            [json!({"lag_max": 5}), json!({}), json!({}), json!({})]
+        );
+        let texts: Vec<String> = calls.iter().map(ToolCall::arguments_text).collect();
+        assert_eq!(texts, [r#"{"lag_max":5}"#, CUT, "[5]", "null"]);
+    }
 
     #[test]
     fn argument_text_that_is_not_json_stays_a_string() {

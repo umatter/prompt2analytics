@@ -124,7 +124,7 @@ impl AnthropicProvider {
                             content_blocks.push(AnthropicContentBlock::ToolUse {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
-                                input: tc.arguments.clone(),
+                                input: tc.arguments_object(),
                             });
                         }
 
@@ -932,5 +932,26 @@ mod tests {
         assert_eq!(system, Some("You are a helpful assistant".to_string()));
         assert_eq!(anthropic_messages.len(), 1);
         assert_eq!(anthropic_messages[0].role, "user");
+    }
+
+    #[test]
+    fn tool_use_input_is_always_an_object() {
+        // The Messages API takes `tool_use.input` as an object only; a call
+        // refused for its arguments goes back with the empty one.
+        use crate::llm::provider::tool_call_tests::calls_with_every_argument_shape;
+        let provider = AnthropicProvider::new(ProviderConfig::default());
+        let (_, sent) = provider.to_anthropic_messages(&[calls_with_every_argument_shape()]);
+        let sent = serde_json::to_value(&sent).unwrap();
+        let inputs: Vec<&Value> = sent[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| &block["input"])
+            .collect();
+        let empty = serde_json::json!({});
+        assert_eq!(
+            inputs,
+            [&serde_json::json!({"lag_max": 5}), &empty, &empty, &empty]
+        );
     }
 }

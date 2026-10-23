@@ -118,8 +118,7 @@ impl OpenAIProvider {
                                 r#type: "function".to_string(),
                                 function: OpenAIFunctionCall {
                                     name: tc.name.clone(),
-                                    arguments: serde_json::to_string(&tc.arguments)
-                                        .unwrap_or_default(),
+                                    arguments: tc.arguments_text(),
                                 },
                             })
                             .collect()
@@ -940,5 +939,22 @@ mod tests {
         assert_eq!(openai_messages.len(), 2);
         assert_eq!(openai_messages[0].role, "system");
         assert_eq!(openai_messages[1].role, "user");
+    }
+
+    #[test]
+    fn function_arguments_are_the_text_the_model_sent() {
+        // A call whose text was not JSON goes back as that text, not quoted
+        // as a JSON string; any other value as its JSON text.
+        use crate::llm::provider::tool_call_tests::{CUT, calls_with_every_argument_shape};
+        let provider = OpenAIProvider::new(ProviderConfig::default());
+        let sent = provider.to_openai_messages(&[calls_with_every_argument_shape()]);
+        let arguments: Vec<&str> = sent[0]
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|tc| tc.function.arguments.as_str())
+            .collect();
+        assert_eq!(arguments, [r#"{"lag_max":5}"#, CUT, "[5]", "null"]);
     }
 }

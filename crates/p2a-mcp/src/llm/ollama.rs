@@ -89,7 +89,7 @@ impl OllamaProvider {
                                 .map(|tc| OllamaToolCall {
                                     function: OllamaFunction {
                                         name: tc.name.clone(),
-                                        arguments: tc.arguments.clone(),
+                                        arguments: tc.arguments_object(),
                                     },
                                 })
                                 .collect(),
@@ -781,5 +781,27 @@ mod tests {
         assert_eq!(ollama_messages[0].role, "system");
         assert_eq!(ollama_messages[1].role, "user");
         assert_eq!(ollama_messages[2].role, "assistant");
+    }
+
+    #[test]
+    fn function_arguments_are_always_an_object() {
+        // Ollama takes `function.arguments` as an object; a call refused for
+        // its arguments (also one stored by another provider in the same
+        // conversation) goes back with the empty one.
+        use crate::llm::provider::tool_call_tests::calls_with_every_argument_shape;
+        let provider = OllamaProvider::new(ProviderConfig::default());
+        let sent = provider.to_ollama_messages(&[calls_with_every_argument_shape()]);
+        let arguments: Vec<&Value> = sent[0]
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|tc| &tc.function.arguments)
+            .collect();
+        let empty = serde_json::json!({});
+        assert_eq!(
+            arguments,
+            [&serde_json::json!({"lag_max": 5}), &empty, &empty, &empty]
+        );
     }
 }
