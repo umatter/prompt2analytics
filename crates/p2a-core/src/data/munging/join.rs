@@ -115,12 +115,27 @@ pub struct JoinOptions {
 
 /// Validate the key columns of a join and return the right-hand keys
 /// (`right_on`, or `left_on` when it is `None`).
+///
+/// An empty key list is refused: polars panics when it joins on zero keys.
 fn join_keys<'a>(
     left: &Dataset,
     right: &Dataset,
     left_on: &[&'a str],
     right_on: Option<&[&'a str]>,
 ) -> MungeResult<Vec<&'a str>> {
+    if left_on.is_empty() {
+        return Err(MungeError::JoinError(
+            "a join needs at least one key column, but left_on is empty".to_string(),
+        ));
+    }
+    if right_on.is_some_and(<[&str]>::is_empty) {
+        return Err(MungeError::JoinError(
+            "a join needs at least one key column, but right_on is empty; omit it to join on \
+             the left_on names"
+                .to_string(),
+        ));
+    }
+
     // Validate left_on columns exist
     for col in left_on {
         if left.df().column(col).is_err() {
@@ -665,6 +680,67 @@ mod tests {
         assert!(err_text(cross_join_with(&s, &s, None, &cap(8))).contains('9'));
         assert_eq!(cross_join_with(&s, &s, None, &cap(9)).unwrap().nrows(), 9);
         assert_eq!(cross_join(&s, &s, None).unwrap().nrows(), 9);
+    }
+
+    #[test]
+    fn join_refuses_an_empty_key_list() {
+        // polars panics when it is asked to join on zero keys, so an empty key
+        // list must be refused before it gets there, on every path.
+        let l =
+            Dataset::new(df!("id" => [1i64, 2, 3, 4], "x" => [0.41, 1.37, 2.62, 3.18]).unwrap());
+        let r = Dataset::new(df!("id" => [1i64, 2, 3, 5], "z" => [9.1, 8.4, 6.6, 4.9]).unwrap());
+        let none: &[&str] = &[];
+        let cap = JoinOptions {
+            max_output_rows: Some(1_000),
+        };
+        let names_side = |e: &str, side: &str| {
+            assert!(
+                e.contains("at least one key column") && e.contains(&format!("{side} is empty")),
+                "{side}: {e}"
+            );
+        };
+        for jt in [
+            JoinType::Inner,
+            JoinType::Left,
+            JoinType::Right,
+            JoinType::Full,
+            JoinType::Semi,
+            JoinType::Anti,
+        ] {
+            for right_on in [None, Some(none), Some(&["id"][..])] {
+                names_side(&err_text(join(&l, &r, none, right_on, jt, None)), "left_on");
+                names_side(
+                    &err_text(join_with(&l, &r, none, right_on, jt, None, &cap)),
+                    "left_on",
+                );
+                match estimate_join_rows(&l, &r, none, right_on, jt) {
+                    Err(MungeError::JoinError(e)) => names_side(&e, "left_on"),
+                    other => panic!("{jt:?}: expected a JoinError, got {other:?}"),
+                }
+            }
+            names_side(
+                &err_text(join(&l, &r, &["id"], Some(none), jt, None)),
+                "right_on",
+            );
+            match estimate_join_rows(&l, &r, &["id"], Some(none), jt) {
+                Err(MungeError::JoinError(e)) => names_side(&e, "right_on"),
+                other => panic!("{jt:?}: expected a JoinError, got {other:?}"),
+            }
+        }
+        // The named wrappers go through the same check.
+        names_side(&err_text(left_join(&l, &r, none, None, None)), "left_on");
+        names_side(&err_text(right_join(&l, &r, none, None, None)), "left_on");
+        names_side(&err_text(inner_join(&l, &r, none, None, None)), "left_on");
+        names_side(&err_text(full_join(&l, &r, none, None, None)), "left_on");
+        names_side(&err_text(anti_join(&l, &r, none, None)), "left_on");
+        names_side(&err_text(semi_join(&l, &r, none, None)), "left_on");
+        // One named key still joins.
+        assert_eq!(
+            join(&l, &r, &["id"], None, JoinType::Inner, None)
+                .unwrap()
+                .nrows(),
+            3
+        );
     }
 
     fn make_orders() -> Dataset {
