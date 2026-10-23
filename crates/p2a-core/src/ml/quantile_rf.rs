@@ -1134,7 +1134,8 @@ pub fn predict_quantiles_with_y(
 /// # Errors
 ///
 /// When `x_new` has a different number of columns from the training data,
-/// `y_train` a different length from it, or a quantile lies outside the open
+/// `y_train` a different length from it or a non-finite value (NaN or
+/// infinite; fitting refuses those too), or a quantile lies outside the open
 /// interval (0, 1), NaN included.
 pub fn predict_quantiles_with_y_at(
     model: &QuantileRfResult,
@@ -1155,6 +1156,16 @@ pub fn predict_quantiles_with_y_at(
             "Training y length {} doesn't match model n_obs {}",
             y_train.len(),
             model.n_obs
+        ));
+    }
+
+    // The pooled leaf responses are sorted with a NaN-blind comparison, so a
+    // non-finite training response would yield NaN or misordered quantiles.
+    let k = y_train.iter().filter(|v| !v.is_finite()).count();
+    if k > 0 {
+        return Err(format!(
+            "Quantile Regression Forest: training y has {k} non-finite values (NaN or infinite); \
+             pass the responses the model was fitted on"
         ));
     }
 
@@ -1708,6 +1719,38 @@ mod tests {
             assert!(err.contains(&want), "at {bad}: {err}");
         }
         assert!(predict_quantiles_with_y_at(&model, x_new, y.view(), &[0.5]).is_ok());
+    }
+
+    #[test]
+    fn test_predict_with_y_rejects_non_finite_training_y() {
+        let (x, y) = noisy_regression(40, 2, 5);
+        let model = quantile_rf(
+            x.view(),
+            y.view(),
+            &QuantileRfConfig {
+                n_trees: 5,
+                min_node_size: 2,
+                seed: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let x_new = x.slice(ndarray::s![..3, ..]);
+        // A non-finite training response used to be pooled into the leaves and
+        // came back as NaN or misordered quantiles with no error.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut y_bad = y.clone();
+            y_bad[0] = bad;
+            y_bad[7] = bad;
+            let err = predict_quantiles_with_y_at(&model, x_new, y_bad.view(), &[0.5]).unwrap_err();
+            assert!(
+                err.contains("training y has 2 non-finite values"),
+                "{bad}: {err}"
+            );
+            let err = predict_quantiles_with_y(&model, x_new, y_bad.view()).unwrap_err();
+            assert!(err.contains("non-finite"), "{bad}: {err}");
+        }
+        assert!(predict_quantiles_with_y(&model, x_new, y.view()).is_ok());
     }
 
     #[test]
