@@ -278,6 +278,13 @@ pub fn checkpoint() -> EconResult<()> {
     })
 }
 
+/// Iterations between budget checks for a loop whose body costs about
+/// `work` operations, so that the budget is checked about every 65,536
+/// operations.
+pub(crate) fn checkpoint_stride(work: usize) -> usize {
+    (65_536 / work.max(1)).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +366,14 @@ mod tests {
         assert!(checkpoint().is_ok());
         let _ = std::panic::catch_unwind(|| with_budget(Budget::unlimited(), || panic!("boom")));
         assert!(current_budget().is_none());
+    }
+
+    #[test]
+    fn checkpoint_stride_targets_65536_operations() {
+        assert_eq!(checkpoint_stride(0), 65_536);
+        assert_eq!(checkpoint_stride(1), 65_536);
+        assert_eq!(checkpoint_stride(5), 13_107);
+        assert_eq!(checkpoint_stride(70_000), 1);
     }
 
     #[test]

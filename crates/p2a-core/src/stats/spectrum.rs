@@ -26,7 +26,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::resource::{checkpoint, try_with_capacity};
+use crate::resource::{checkpoint, checkpoint_stride, try_with_capacity};
 
 fn size_overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
@@ -272,10 +272,11 @@ impl fmt::Display for SpectrumResult {
 /// # Errors
 ///
 /// - [`EconError::InsufficientData`] for fewer than 4 observations.
-/// - [`EconError::InvalidSpecification`] for a taper outside `[0, 0.5]`; for
-///   NaN or infinite values in `x`, or a non-finite `pad_ratio`; for an even or
-///   zero span; for spans whose combined kernel is not shorter than the padded
-///   series, `2 * Σ floor(span / 2) >= n_used` (R's `kernapply` rule, which
+/// - [`EconError::InvalidSpecification`] for a taper that is NaN or outside
+///   `[0, 0.5]`; for NaN or infinite values in `x`, or a non-finite
+///   `pad_ratio`; for an even or zero span; for spans whose combined kernel
+///   (`2M + 1` ordinates) is longer than the padded series,
+///   `2 * Σ floor(span / 2) >= n_used` (R's `kernapply` rule, which
 ///   `spec.pgram` applies); and for a series so large in magnitude that its
 ///   periodogram overflows.
 /// - [`EconError::ResourceLimit`] when the padded length `n_used` overflows or
@@ -308,7 +309,8 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
     }
 
     // Validate config
-    if config.taper < 0.0 || config.taper > 0.5 {
+    // `contains` also rejects NaN, for which both `< 0.0` and `> 0.5` are false.
+    if !(0.0..=0.5).contains(&config.taper) {
         return Err(EconError::InvalidSpecification {
             message: format!("Taper must be in [0, 0.5], got {}", config.taper),
         });
@@ -557,8 +559,9 @@ fn apply_daniell_smoothing(periodogram: &[f64], spans: &[usize]) -> EconResult<V
 /// Check smoothing spans against the (padded) series length `n_used`.
 ///
 /// Every span must be a positive odd integer, and the combined modified
-/// Daniell kernel must be shorter than the series. This is R's `kernapply`
-/// rule: with `M` the sum of the half-widths `span / 2`, `2 * M < n_used`.
+/// Daniell kernel (`2M + 1` ordinates) must be no longer than the series. This
+/// is R's `kernapply` rule: with `M` the sum of the half-widths `span / 2`,
+/// `2 * M < n_used`.
 fn validate_spans(spans: &[usize], n_used: usize) -> EconResult<()> {
     for &span in spans {
         if span < 1 || span % 2 == 0 {
@@ -679,7 +682,7 @@ fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
 /// # Arguments
 ///
 /// * `x` - Time series data
-/// * `order` - AR order (if None, selected by AIC)
+/// * `order` - AR order (if None, selected by AIC); clamped to `1..=n/2 - 1`
 /// * `n_freq` - Number of frequency points (default: 500)
 ///
 /// # Mathematical Details
@@ -693,8 +696,9 @@ fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
 /// # Errors
 ///
 /// - [`EconError::InsufficientData`] for fewer than 4 observations.
-/// - [`EconError::InvalidSpecification`] for a series with zero variance, or
-///   when no AR order up to the maximum gives a positive innovation variance.
+/// - [`EconError::InvalidSpecification`] for a series with zero variance, or,
+///   when `order` is `None` and the order is selected by AIC, when no AR order
+///   from 0 to the maximum gives a positive innovation variance.
 /// - [`EconError::ResourceLimit`] when the `n_freq`-point grid cannot be
 ///   allocated (the per-allocation ceiling included).
 /// - [`EconError::Cancelled`] when the budget checked through [`checkpoint`]
@@ -753,13 +757,6 @@ pub fn spectrum_ar(
         taper: 0.0,
         detrend: true,
     })
-}
-
-/// Iterations between budget checks for a loop whose body costs about
-/// `work` operations, so that the budget is checked about every 65,536
-/// operations.
-fn checkpoint_stride(work: usize) -> usize {
-    (65_536 / work.max(1)).max(1)
 }
 
 /// The AR spectral density `σ² / |1 - Σ_k φ_k exp(-2πi f k)|²` at the
@@ -1541,6 +1538,15 @@ mod tests {
             spectrum(&x, huge),
             Err(EconError::ResourceLimit(_))
         ));
+        // A NaN taper failed both range comparisons and was used as no taper.
+        let nan_taper = SpectrumConfig {
+            taper: f64::NAN,
+            ..Default::default()
+        };
+        assert!(matches!(
+            spectrum(&x, nan_taper),
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 
     #[test]
@@ -1631,9 +1637,6 @@ mod tests {
             cancelled(|| ar_spectrum_grid(&phi, 1.0, 4)),
             Err(EconError::Cancelled(_))
         ));
-        assert_eq!(checkpoint_stride(0), 65_536);
-        assert_eq!(checkpoint_stride(5), 13_107);
-        assert_eq!(checkpoint_stride(70_000), 1);
         // Without a budget the grid is computed as before.
         let (freq, spec) = ar_spectrum_grid(&[0.5], 2.0, 4).unwrap();
         assert_eq!(freq, vec![0.125, 0.25, 0.375, 0.5]);

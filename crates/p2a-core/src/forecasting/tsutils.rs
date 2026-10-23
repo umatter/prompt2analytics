@@ -56,17 +56,12 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
-use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_with_capacity};
+use crate::resource::{
+    check_alloc, checked_len, checkpoint, checkpoint_stride, try_vec, try_with_capacity,
+};
 
 fn size_overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
-}
-
-/// Iterations between budget checks for a loop whose body costs about
-/// `work` operations, so that the budget is checked about every 65,536
-/// operations.
-fn checkpoint_stride(work: usize) -> usize {
-    (65_536 / work.max(1)).max(1)
 }
 
 // ============================================================================
@@ -1320,8 +1315,8 @@ pub struct ArimaSimResult {
 /// - [`EconError::ResourceLimit`] when `n` plus the burn-in overflows or the
 ///   series is too large to allocate (the per-allocation ceiling included).
 /// - [`EconError::Cancelled`] when the budget checked through [`checkpoint`]
-///   is cancelled or past its deadline, during the ARMA recursion or between
-///   integration passes.
+///   is cancelled or past its deadline, during the ARMA recursion or before
+///   each integration pass.
 ///
 /// # Example
 ///
