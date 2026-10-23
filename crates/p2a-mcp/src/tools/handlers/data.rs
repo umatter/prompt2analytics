@@ -150,30 +150,50 @@ impl Serialize for CellJson<'_> {
 }
 
 /// The least the dataset quotas will charge for the parquet file at `path`
-/// once it is decoded, read from its footer before anything is decoded: each
-/// column's values at their in-memory width, a list's from the entries the
-/// footer counts below it (see [`least_value_bytes`]), plus the dataset's
-/// structure. A small file can declare hundreds of millions of rows, or one
-/// row holding a list of as many values (one value run-length encoded), and
-/// the quotas only see a dataset once it is built. `None` when the footer
-/// cannot be read; the loader then reports the file's error.
+/// once it is decoded, read from its footer and page headers before
+/// anything is decoded: each column's values at their in-memory width, a
+/// list's from the entries counted below it (see [`least_value_bytes`]),
+/// plus the dataset's structure. A small file can declare hundreds of
+/// millions of rows, or one row holding a list of as many values (one value
+/// run-length encoded), and the quotas only see a dataset once it is built.
+/// `None` when the footer cannot be read; the loader then reports the
+/// file's error.
 ///
-/// The footer is taken at its word: a file whose footer understates its rows
-/// or its columns' entries is decoded as it is and charged after.
+/// The counts are the ones the decoder follows, not the footer's summary of
+/// them: the rows are each row group's own (polars decodes those and never
+/// reads the file-level count), and a leaf column's entries and page bytes
+/// are what the page headers declare over the pages the decoder reads (see
+/// [`read_chunk_pages`]) where that is more than the column chunk's
+/// footer entry says. So a footer that understates either is still charged
+/// what decoding the file allocates.
 fn parquet_decoded_bytes(path: &Path) -> Option<u64> {
     let mut reader = ParquetReader::new(std::fs::File::open(path).ok()?);
-    let rows = reader.num_rows().ok()? as u64;
     let metadata = std::sync::Arc::clone(reader.get_metadata().ok()?);
-    // What the footer says about each leaf column under the top-level column
+    let rows = metadata
+        .row_groups
+        .iter()
+        .map(|group| group.num_rows() as u64)
+        .fold(0u64, u64::saturating_add);
+    // A second handle for the page headers: the reader keeps its own.
+    let file = std::fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+    let mut pages = std::io::BufReader::new(file);
+    // What is known about each leaf column under the top-level column
     // `root`, summed over the row groups, in the order of the file's columns,
     // which is the order of the column's leaves.
-    let leaves_of = |root: &str| {
+    let mut leaves_of = |root: &str| {
         let mut leaves: Vec<LeafChunks> = Vec::new();
         for group in &metadata.row_groups {
             let chunks = group.columns_under_root_iter(root).into_iter().flatten();
             for (i, chunk) in chunks.enumerate() {
-                let entries = u64::try_from(chunk.num_values()).unwrap_or(0);
-                let page_bytes = u64::try_from(chunk.uncompressed_size()).unwrap_or(0);
+                let read =
+                    read_chunk_pages(&mut pages, chunk.byte_range(), chunk.num_values(), file_len);
+                let entries = u64::try_from(chunk.num_values())
+                    .unwrap_or(0)
+                    .max(read.entries);
+                let page_bytes = u64::try_from(chunk.uncompressed_size())
+                    .unwrap_or(0)
+                    .max(read.page_bytes);
                 if i == leaves.len() {
                     leaves.push(LeafChunks::default());
                 }
@@ -194,14 +214,96 @@ fn parquet_decoded_bytes(path: &Path) -> Option<u64> {
     Some(values.saturating_add(structure))
 }
 
-/// What a parquet footer says about one leaf column, summed over the row
+/// What is known about one leaf column before decoding, summed over the row
 /// groups.
 #[derive(Clone, Copy, Default)]
 struct LeafChunks {
     /// Its entries: values, nulls, and empty or null lists above them.
     entries: u64,
-    /// Its pages' uncompressed size (headers, levels and values).
+    /// Its pages' uncompressed size.
     page_bytes: u64,
+}
+
+/// What the page headers of one column chunk declare.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ChunkPages {
+    /// The entries of its data pages.
+    entries: u64,
+    /// The uncompressed size of its pages, dictionary page included.
+    page_bytes: u64,
+}
+
+/// Read the page headers of the column chunk at `range` of a parquet file
+/// of `file_len` bytes, as polars' page reader (`PageReader`) does before
+/// it decodes the chunk, without decompressing or decoding anything: from
+/// the chunk's start, a header and then a page at a time, while the data
+/// pages' declared entries sum to less than `declared` (the chunk's footer
+/// entry, signed as the reader keeps it; the reader counts a whole page at
+/// a time, so the last page it reads can hold far more). It stops where the
+/// reader fails: a header that does not parse, a page type it does not
+/// read, a page without its type's header, or a page past the chunk's end.
+/// Headers are parsed with no more than the chunk's bytes, so a header
+/// cannot make this allocate more.
+fn read_chunk_pages(
+    file: &mut std::io::BufReader<std::fs::File>,
+    range: std::ops::Range<u64>,
+    declared: i64,
+    file_len: u64,
+) -> ChunkPages {
+    use polars_parquet_format::thrift::protocol::TCompactInputProtocol;
+    use polars_parquet_format::{PageHeader, PageType};
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut read = ChunkPages::default();
+    let end = range.end.min(file_len);
+    if range.start >= end || file.seek(SeekFrom::Start(range.start)).is_err() {
+        return read;
+    }
+    let mut left = end - range.start;
+    // The reader's own tally, which a negative page count lowers.
+    let mut seen = 0i64;
+    while seen < declared {
+        let mut chunk = (&mut *file).take(left);
+        let header = {
+            let limit = usize::try_from(left).unwrap_or(usize::MAX);
+            let mut input = TCompactInputProtocol::new(&mut chunk, limit);
+            PageHeader::read_from_in_protocol(&mut input)
+        };
+        left = chunk.limit();
+        let Ok(header) = header else {
+            break;
+        };
+        let entries = match header.type_ {
+            PageType::DATA_PAGE => header.data_page_header.as_ref().map(|h| h.num_values),
+            PageType::DATA_PAGE_V2 => header.data_page_header_v2.as_ref().map(|h| h.num_values),
+            PageType::DICTIONARY_PAGE => header.dictionary_page_header.as_ref().map(|_| 0),
+            _ => None,
+        };
+        let (Some(entries), Ok(size)) = (entries, u64::try_from(header.compressed_page_size))
+        else {
+            break;
+        };
+        if size > left {
+            break;
+        }
+        seen = seen.saturating_add(i64::from(entries));
+        read.entries = read
+            .entries
+            .saturating_add(u64::try_from(entries).unwrap_or(0));
+        read.page_bytes = read
+            .page_bytes
+            .saturating_add(u64::try_from(header.uncompressed_page_size).unwrap_or(0));
+        // `size` is at most `left`, which came from two u64 file offsets
+        // the footer stores as i64.
+        let Ok(skip) = i64::try_from(size) else {
+            break;
+        };
+        if file.seek_relative(skip).is_err() {
+            break;
+        }
+        left -= size;
+    }
+    read
 }
 
 /// How many values a column, or a part of a nested one, holds, for
@@ -1025,6 +1127,150 @@ mod tests {
             let (charge, bound) = loaded_charge_and_bound(&mut one);
             assert!(bound <= charge, "{name}: bound {bound} > charge {charge}");
         }
+    }
+
+    /// Rewrite the footer of the parquet file at `path` with `edit`, leaving
+    /// its pages where they are.
+    fn rewrite_footer(path: &Path, edit: impl FnOnce(&mut polars_parquet_format::FileMetaData)) {
+        use polars_parquet_format::thrift::protocol::{
+            TCompactInputProtocol, TCompactOutputProtocol,
+        };
+        let bytes = std::fs::read(path).unwrap();
+        let n = bytes.len();
+        assert_eq!(&bytes[n - 4..], b"PAR1");
+        let len = u32::from_le_bytes(bytes[n - 8..n - 4].try_into().unwrap()) as usize;
+        let start = n - 8 - len;
+        let mut input = TCompactInputProtocol::new(&bytes[start..n - 8], usize::MAX);
+        let mut footer =
+            polars_parquet_format::FileMetaData::read_from_in_protocol(&mut input).unwrap();
+        edit(&mut footer);
+        let mut written = Vec::new();
+        footer
+            .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut written))
+            .unwrap();
+        let mut out = bytes[..start].to_vec();
+        out.extend_from_slice(&written);
+        out.extend_from_slice(&u32::try_from(written.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(b"PAR1");
+        std::fs::write(path, out).unwrap();
+    }
+
+    /// Write `df` as a parquet file of `rows_per_group` rows per row group
+    /// at `path`.
+    fn write_parquet(df: &mut DataFrame, path: &Path, rows_per_group: usize) {
+        p2a_core::polars::prelude::ParquetWriter::new(std::fs::File::create(path).unwrap())
+            .with_row_group_size(Some(rows_per_group))
+            .finish(df)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_footer_that_understates_rows_or_entries_does_not_lower_the_bound() {
+        use p2a_core::polars::prelude::{NamedFrom, Series};
+        let dir = tempfile::tempdir().unwrap();
+        // Rows: polars decodes each row group's own count, never the
+        // file-level one, which the bound used to take.
+        let flat = dir.path().join("flat.parquet");
+        let values: Vec<f64> = (0..300_000).map(|i| (i % 89) as f64 * 0.31 + 0.2).collect();
+        let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
+        write_parquet(&mut df, &flat, 100_000);
+        let honest = parquet_decoded_bytes(&flat).unwrap();
+        assert!(honest >= 8 * 300_000, "{honest}");
+        rewrite_footer(&flat, |footer| footer.num_rows = 1);
+        assert_eq!(parquet_decoded_bytes(&flat), Some(honest));
+        // Entries: a chunk is decoded a page at a time until the pages have
+        // given the chunk's count, so a chunk that says it holds one entry
+        // is still decoded through its first page, here all 500,000 values
+        // of one row's list.
+        let lists = dir.path().join("lists.parquet");
+        let inner = Series::new(
+            "".into(),
+            (0..500_000)
+                .map(|i| (i % 13) as f64 + 0.5)
+                .collect::<Vec<_>>(),
+        );
+        let mut df = DataFrame::new(vec![Series::new("l".into(), [inner]).into()]).unwrap();
+        write_parquet(&mut df, &lists, 1);
+        let honest = parquet_decoded_bytes(&lists).unwrap();
+        assert!(honest >= 8 * 499_999, "{honest}");
+        rewrite_footer(&lists, |footer| {
+            for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                let meta = chunk.meta_data.as_mut().unwrap();
+                meta.num_values = 1;
+                // A footer can understate the pages' size too.
+                meta.total_uncompressed_size = 1;
+            }
+        });
+        assert_eq!(parquet_decoded_bytes(&lists), Some(honest));
+        // Pages: a text column is charged at least its pages uncompressed,
+        // which a footer can understate; the page headers say what the
+        // decoder decompresses.
+        let text = dir.path().join("text.parquet");
+        let long = Series::new(
+            "s".into(),
+            (0..2_000).map(|i| format!("{i:01000}")).collect::<Vec<_>>(),
+        );
+        let mut df = DataFrame::new(vec![long.into()]).unwrap();
+        write_parquet(&mut df, &text, 2_000);
+        rewrite_footer(&text, |footer| {
+            for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                chunk.meta_data.as_mut().unwrap().total_uncompressed_size = 1;
+            }
+        });
+        let bound = parquet_decoded_bytes(&text).unwrap();
+        assert!(bound >= 2_000 * 1_000, "{bound}");
+    }
+
+    #[test]
+    fn the_page_headers_give_each_chunk_the_entries_its_footer_does() {
+        // On a file polars wrote, the walk over the page headers ends where
+        // the chunk's footer count says, with the same count, for flat,
+        // nested and dictionary-encoded columns over several row groups.
+        use p2a_core::polars::prelude::{NamedFrom, Series};
+        let rows = 30_000usize;
+        let floats = Series::new(
+            "f".into(),
+            (0..rows)
+                .map(|i| (i % 5 != 0).then_some(i as f64 * 0.7 + 0.1))
+                .collect::<Vec<_>>(),
+        );
+        let text = Series::new(
+            "s".into(),
+            (0..rows)
+                .map(|i| format!("v{}", i % 300))
+                .collect::<Vec<_>>(),
+        );
+        let lists = Series::new(
+            "l".into(),
+            (0..rows)
+                .map(|i| Series::new("".into(), vec![i as i32 + 1; i % 4]))
+                .collect::<Vec<_>>(),
+        );
+        let mut df = DataFrame::new(vec![floats.into(), text.into(), lists.into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.parquet");
+        write_parquet(&mut df, &path, 7_000);
+        let metadata = std::sync::Arc::clone(
+            ParquetReader::new(std::fs::File::open(&path).unwrap())
+                .get_metadata()
+                .unwrap(),
+        );
+        let file = std::fs::File::open(&path).unwrap();
+        let file_len = file.metadata().unwrap().len();
+        let mut pages = std::io::BufReader::new(file);
+        let mut chunks = 0;
+        for group in &metadata.row_groups {
+            for chunk in group.parquet_columns() {
+                let read =
+                    read_chunk_pages(&mut pages, chunk.byte_range(), chunk.num_values(), file_len);
+                assert_eq!(read.entries, chunk.num_values() as u64);
+                assert!(read.page_bytes > 0);
+                assert!(read.page_bytes <= chunk.uncompressed_size() as u64);
+                chunks += 1;
+            }
+        }
+        assert!(metadata.row_groups.len() > 1);
+        assert_eq!(chunks, metadata.row_groups.len() * 3);
     }
 
     #[test]

@@ -18,6 +18,8 @@ use p2a_mcp::transport::http::{AppState, build_app_with};
 use polars::prelude::{
     CategoricalPhysical, Categories, DataFrame, DataType, NamedFrom, ParquetWriter, Series,
 };
+use polars_parquet_format::FileMetaData;
+use polars_parquet_format::thrift::protocol::{TCompactInputProtocol, TCompactOutputProtocol};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -363,6 +365,89 @@ async fn a_one_row_list_parquet_past_the_quota_is_refused_before_it_is_decoded()
         listed.to_string().contains("No datasets currently loaded"),
         "{listed}"
     );
+}
+
+/// Rewrite the footer of the parquet file at `path` with `edit`. The pages
+/// stay where they are, so the file decodes as before wherever the decoder
+/// does not follow the edited fields.
+fn rewrite_footer(path: &Path, edit: impl FnOnce(&mut FileMetaData)) {
+    let bytes = std::fs::read(path).unwrap();
+    let n = bytes.len();
+    assert_eq!(&bytes[n - 4..], b"PAR1");
+    let len = u32::from_le_bytes(bytes[n - 8..n - 4].try_into().unwrap()) as usize;
+    let start = n - 8 - len;
+    let mut input = TCompactInputProtocol::new(&bytes[start..n - 8], usize::MAX);
+    let mut footer = FileMetaData::read_from_in_protocol(&mut input).unwrap();
+    edit(&mut footer);
+    let mut written = Vec::new();
+    footer
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut written))
+        .unwrap();
+    let mut out = bytes[..start].to_vec();
+    out.extend_from_slice(&written);
+    out.extend_from_slice(&u32::try_from(written.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(b"PAR1");
+    std::fs::write(path, out).unwrap();
+}
+
+/// Upload the parquet file at `path` and load it from its path, each time
+/// into a fresh session of a server with an 8 MiB session quota, and check
+/// that both are refused before anything is decoded.
+async fn refused_before_decoding_by_upload_and_load(path: &Path) {
+    let content = base64::engine::general_purpose::STANDARD.encode(std::fs::read(path).unwrap());
+    let (app, _) = app_with_quota(8 * MIB).await;
+    let calls = [
+        (
+            "upload_dataset",
+            json!({"content": content, "filename": "lies.parquet"}),
+        ),
+        (
+            "load_dataset",
+            json!({"path": path.to_string_lossy(), "name": "lies"}),
+        ),
+    ];
+    for (tool, args) in calls {
+        let sid = new_session(&app).await;
+        let (status, body) = call(&app, &sid, tool, args).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{tool}: {body}");
+        assert_eq!(body["code"], json!("quota_exceeded"), "{tool}: {body}");
+        assert!(
+            error_text(&body).contains("Nothing was loaded"),
+            "{tool}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_parquet_footer_that_understates_its_rows_is_refused_before_decoding() {
+    // The file-level row count says one row; polars decodes the rows each
+    // row group declares (4,000,000, 32 MB). Pre-fix the check before
+    // decoding read the file-level count, so the file was decoded in full
+    // and only then undone ("The change was undone").
+    let dir = data_dir();
+    let path = dir.path().join("rows.parquet");
+    constant_parquet(&path, 4_000_000);
+    rewrite_footer(&path, |footer| footer.num_rows = 1);
+    refused_before_decoding_by_upload_and_load(&path).await;
+}
+
+#[tokio::test]
+async fn a_parquet_footer_that_understates_a_chunks_entries_is_refused_before_decoding() {
+    // One row holding a list of 4,000,000 values (16 MB decoded), whose
+    // column chunk says it holds one entry. polars reads a chunk's pages
+    // until their headers have given it that many entries, a page at a
+    // time, so it still decodes the first page and all 4,000,000 values in
+    // it. Pre-fix the check before decoding took the chunk's count, so the
+    // file was decoded in full and only then undone.
+    let dir = data_dir();
+    let path = dir.path().join("entries.parquet");
+    one_row_list_parquet(&path, 4_000_000);
+    rewrite_footer(&path, |footer| {
+        for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+            chunk.meta_data.as_mut().unwrap().num_values = 1;
+        }
+    });
+    refused_before_decoding_by_upload_and_load(&path).await;
 }
 
 /// A parquet file whose column `k` is a dictionary of `labels` distinct
