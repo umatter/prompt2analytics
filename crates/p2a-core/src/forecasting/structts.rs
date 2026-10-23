@@ -122,6 +122,11 @@ pub struct StructTsCoefficients {
 /// [`EconError::Cancelled`] when the budget installed with
 /// [`crate::resource::with_budget`] is cancelled or past its deadline (checked
 /// once per optimiser iteration and within each Kalman-filter pass).
+///
+/// Each Kalman-filter pass keeps about 2·n·m² values (m = 1, 2, or period + 1
+/// for BSM); [`EconError::ResourceLimit`] when that history exceeds the
+/// per-allocation ceiling (see [`kalman_filter`]), at the first likelihood
+/// evaluation.
 pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult> {
     let n = y.len();
 
@@ -296,9 +301,9 @@ fn optimize_params(
 
     // Objective function: negative log-likelihood with log-transformed params.
     // A parameter vector the model cannot use scores 1e20. A stopped budget
-    // stops the fit instead of scoring the vertex; so would a ResourceLimit,
-    // which this path cannot raise yet (kalman_filter's allocations are
-    // infallible).
+    // stops the fit instead of scoring the vertex, and so does a
+    // ResourceLimit: kalman_filter refuses a state and covariance history
+    // above the per-allocation ceiling before its first step.
     let objective = |log_params: &[f64]| -> EconResult<f64> {
         let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
         match compute_loglik(y, config, &params) {
@@ -322,8 +327,9 @@ fn optimize_params(
 ///
 /// Each evaluation of `objective` is a Kalman-filter pass over the series, so
 /// the budget is checked once per iteration (and within each pass by
-/// [`kalman_filter`]); an `Err` from `objective` stops the search.
-fn nelder_mead_optimize(
+/// [`kalman_filter`]); an `Err` from `objective` stops the search. CausalImpact
+/// fits its BSTS variances with this optimiser too.
+pub(crate) fn nelder_mead_optimize(
     objective: &dyn Fn(&[f64]) -> EconResult<f64>,
     init: &[f64],
     max_iter: usize,
@@ -950,6 +956,57 @@ mod tests {
             "{stopped:?}"
         );
         assert!(evals.get() <= bound, "{} evaluations", evals.get());
+    }
+
+    fn seasonal_series(n: usize, period: usize, seed: u64) -> Vec<f64> {
+        let noise = generate_local_level_data(n, 0.2, 0.5, seed);
+        (0..n)
+            .map(|t| {
+                let season = 6.0 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
+                noise[t] + 0.1 * t as f64 + season
+            })
+            .collect()
+    }
+
+    #[test]
+    fn struct_ts_refuses_a_kalman_history_above_the_allocation_ceiling() {
+        // Each likelihood evaluation runs kalman_filter, whose covariance
+        // history grows with n·m² (m = period + 1 for BSM). At the hosted cap
+        // (period 1000, 2400 rows) the server's memory grew until the
+        // deadline. The filter now admits its history before the first step,
+        // and the objective passes the ResourceLimit through, so the fit
+        // stops at the first evaluation. Before the fix both calls below ran
+        // the whole fit and returned Ok.
+        let (n, period) = (48, 12);
+        let y = seasonal_series(n, period, 3);
+        let config = StructTsConfig {
+            model_type: StructTsType::BSM,
+            period: Some(period),
+            ..Default::default()
+        };
+        // 2 · 48 · (13² + 13 + 1) · 8 bytes = 140,544 bytes > 64 KiB.
+        let ceiling = Some(64 << 10);
+        let refused =
+            crate::resource::with_alloc_ceiling(ceiling, || struct_ts(&y, config.clone()));
+        assert!(
+            matches!(&refused, Err(EconError::ResourceLimit(m)) if m.contains("Kalman filter")),
+            "{refused:?}"
+        );
+        // The optimiser itself (no final pass) stops on the refusal instead
+        // of scoring every vertex 1e20.
+        let (init, _) = initialize_params(&config, sample_variance(&y));
+        let stopped = crate::resource::with_alloc_ceiling(ceiling, || {
+            optimize_params(&y, &config, init, config.max_iter, config.tolerance)
+        });
+        assert!(
+            matches!(stopped, Err(EconError::ResourceLimit(_))),
+            "{stopped:?}"
+        );
+        // The hosted ceiling (256 MiB) leaves an ordinary monthly BSM alone.
+        let fitted = crate::resource::with_alloc_ceiling(Some(256 << 20), || {
+            struct_ts(&seasonal_series(240, period, 4), config.clone())
+        });
+        assert_eq!(fitted.unwrap().n_obs, 240);
     }
 
     #[test]

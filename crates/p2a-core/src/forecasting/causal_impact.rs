@@ -41,6 +41,7 @@ use statrs::distribution::{ContinuousCDF, Normal};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::forecasting::kalman::{StateSpaceModel, kalman_filter, kalman_forecast};
+use crate::forecasting::structts::nelder_mead_optimize;
 
 /// Configuration for CausalImpact analysis.
 #[derive(Debug, Clone)]
@@ -206,6 +207,13 @@ pub struct CausalImpactResult {
 /// # Returns
 ///
 /// `CausalImpactResult` with summary, time series, model info, and inference.
+///
+/// The fit and the counterfactual run [`kalman_filter`] over the pre-period,
+/// which keeps about 2·n_pre·m² values (m = 1 + an optional slope +
+/// `seasonal_period` − 1 seasonal states): [`EconError::ResourceLimit`] when
+/// that history exceeds the per-allocation ceiling, at the first likelihood
+/// evaluation, and [`EconError::Cancelled`] once the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline.
 ///
 /// # Example
 ///
@@ -628,12 +636,17 @@ fn fit_bsts_model(
     // Following Harvey (1990) and R's CausalImpact defaults
     let init_params = initialize_variance_params(y_var, config);
 
-    // Optimize using Nelder-Mead
-    let objective = |log_params: &[f64]| -> f64 {
+    // Optimize using Nelder-Mead. A parameter vector the model cannot use
+    // scores 1e20. A stopped budget stops the fit instead of scoring the
+    // vertex, and so does a ResourceLimit: kalman_filter refuses a state and
+    // covariance history above the per-allocation ceiling before its first
+    // step, and every later evaluation would be refused the same way.
+    let objective = |log_params: &[f64]| -> EconResult<f64> {
         let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
         match compute_bsts_loglik(&y_for_bsts, &params, config) {
-            Ok(ll) => -ll,
-            Err(_) => 1e20,
+            Ok(ll) => Ok(-ll),
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => Err(e),
+            Err(_) => Ok(1e20),
         }
     };
 
@@ -644,7 +657,7 @@ fn fit_bsts_model(
         .collect();
 
     let (best_log_params, neg_loglik, _converged) =
-        nelder_mead_optimize(&objective, &init_log, config.max_iter, config.tolerance);
+        nelder_mead_optimize(&objective, &init_log, config.max_iter, config.tolerance)?;
 
     // Transform back
     let best_params: Vec<f64> = best_log_params.iter().map(|&lp| y_var * lp.exp()).collect();
@@ -1141,115 +1154,6 @@ fn sample_variance(y: &[f64]) -> f64 {
     }
     let mean = y.iter().sum::<f64>() / n;
     y.iter().map(|&yi| (yi - mean).powi(2)).sum::<f64>() / (n - 1.0)
-}
-
-/// Nelder-Mead optimization (copied from structts.rs for consistency).
-fn nelder_mead_optimize(
-    objective: &dyn Fn(&[f64]) -> f64,
-    init: &[f64],
-    max_iter: usize,
-    tolerance: f64,
-) -> (Vec<f64>, f64, bool) {
-    let n = init.len();
-
-    let alpha = 1.0;
-    let gamma = 2.0;
-    let rho = 0.5;
-    let sigma = 0.5;
-
-    let mut simplex: Vec<Vec<f64>> = Vec::with_capacity(n + 1);
-    simplex.push(init.to_vec());
-
-    for i in 0..n {
-        let mut vertex = init.to_vec();
-        vertex[i] += 0.5;
-        simplex.push(vertex);
-    }
-
-    let mut values: Vec<f64> = simplex.iter().map(|v| objective(v)).collect();
-
-    for _iter in 0..max_iter {
-        let mut indices: Vec<usize> = (0..=n).collect();
-        indices.sort_by(|&a, &b| {
-            values[a]
-                .partial_cmp(&values[b])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let sorted_simplex: Vec<Vec<f64>> = indices.iter().map(|&i| simplex[i].clone()).collect();
-        let sorted_values: Vec<f64> = indices.iter().map(|&i| values[i]).collect();
-        simplex = sorted_simplex;
-        values = sorted_values;
-
-        let f_spread = (values[n] - values[0]).abs() / (values[0].abs() + 1e-10);
-        if f_spread < tolerance {
-            return (simplex[0].clone(), values[0], true);
-        }
-
-        let mut centroid = vec![0.0; n];
-        for i in 0..n {
-            for j in 0..n {
-                centroid[j] += simplex[i][j];
-            }
-        }
-        for c in centroid.iter_mut() {
-            *c /= n as f64;
-        }
-
-        let reflected: Vec<f64> = (0..n)
-            .map(|j| centroid[j] + alpha * (centroid[j] - simplex[n][j]))
-            .collect();
-        let f_reflected = objective(&reflected);
-
-        if f_reflected < values[n - 1] && f_reflected >= values[0] {
-            simplex[n] = reflected;
-            values[n] = f_reflected;
-        } else if f_reflected < values[0] {
-            let expanded: Vec<f64> = (0..n)
-                .map(|j| centroid[j] + gamma * (reflected[j] - centroid[j]))
-                .collect();
-            let f_expanded = objective(&expanded);
-
-            if f_expanded < f_reflected {
-                simplex[n] = expanded;
-                values[n] = f_expanded;
-            } else {
-                simplex[n] = reflected;
-                values[n] = f_reflected;
-            }
-        } else {
-            let contract_point: Vec<f64> = if f_reflected < values[n] {
-                (0..n)
-                    .map(|j| centroid[j] + rho * (reflected[j] - centroid[j]))
-                    .collect()
-            } else {
-                (0..n)
-                    .map(|j| centroid[j] - rho * (centroid[j] - simplex[n][j]))
-                    .collect()
-            };
-            let f_contracted = objective(&contract_point);
-
-            let threshold = if f_reflected < values[n] {
-                f_reflected
-            } else {
-                values[n]
-            };
-            if f_contracted < threshold {
-                simplex[n] = contract_point;
-                values[n] = f_contracted;
-            } else {
-                let best = simplex[0].clone();
-                for i in 1..=n {
-                    for j in 0..n {
-                        simplex[i][j] = best[j] + sigma * (simplex[i][j] - best[j]);
-                    }
-                    values[i] = objective(&simplex[i]);
-                }
-            }
-        }
-    }
-
-    (simplex[0].clone(), values[0], false)
 }
 
 // Helper functions for array conversions
@@ -1762,5 +1666,81 @@ mod tests {
         assert_eq!(result.series.predicted_upper.len(), n);
         assert_eq!(result.series.point_effect.len(), n);
         assert_eq!(result.series.cumulative_effect.len(), n);
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    /// A seasonal (period 12) configuration over `n_pre` pre-period rows.
+    fn seasonal_config(n_pre: usize, n_post: usize) -> CausalImpactConfig {
+        CausalImpactConfig {
+            pre_period: (0, (n_pre - 1) as i64),
+            post_period: (n_pre as i64, (n_pre + n_post - 1) as i64),
+            seasonal_period: Some(12),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn causal_impact_refuses_a_kalman_history_above_the_allocation_ceiling() {
+        // The fit and the counterfactual run kalman_filter, whose covariance
+        // history grows with n_pre·m² (m = seasonal_period, + 1 with a trend).
+        // At the hosted cap (seasonal_period 1000) the server's memory grew
+        // until the deadline. The filter now admits its history up front.
+        // Before the fix this returned Ok under the ceiling.
+        let (n_pre, n_post) = (40, 10);
+        let (y, time) = generate_causal_impact_data(n_pre, n_post, 2.0, 31);
+        let dataset = Dataset::new(df! { "y" => &y, "time" => &time }.unwrap());
+        // 2 · 40 · (12² + 12 + 1) · 8 bytes = 100,480 bytes > 64 KiB.
+        let refused = crate::resource::with_alloc_ceiling(Some(64 << 10), || {
+            causal_impact(&dataset, "y", "time", seasonal_config(n_pre, n_post))
+        });
+        assert!(
+            matches!(&refused, Err(EconError::ResourceLimit(m)) if m.contains("Kalman filter")),
+            "{:?}",
+            refused.map(|r| r.summary)
+        );
+        // The hosted ceiling (256 MiB) leaves an ordinary seasonal model alone.
+        let fitted = crate::resource::with_alloc_ceiling(Some(256 << 20), || {
+            causal_impact(&dataset, "y", "time", seasonal_config(n_pre, n_post))
+        });
+        assert_eq!(fitted.unwrap().model.n_pre, n_pre);
+    }
+
+    #[test]
+    fn fit_bsts_model_stops_on_a_refused_history_or_a_stopped_budget() {
+        // The objective scored every Err as 1e20, so a refused covariance
+        // history (or a stopped budget) left the Nelder-Mead search running
+        // on 1e20 vertices for max_iter iterations and returned Ok; only the
+        // counterfactual's own filter call surfaced the error afterwards.
+        let (y, _) = generate_causal_impact_data(40, 0, 0.0, 32);
+        let config = seasonal_config(40, 1);
+        let refused = crate::resource::with_alloc_ceiling(Some(64 << 10), || {
+            fit_bsts_model(&y, None, &config)
+        });
+        assert!(
+            matches!(refused, Err(EconError::ResourceLimit(_))),
+            "{refused:?}"
+        );
+        assert!(matches!(
+            cancelled(|| fit_bsts_model(&y, None, &config)),
+            Err(EconError::Cancelled(_))
+        ));
+        // With no iterations the loop never runs, so this pins the
+        // objective's pass-through alone: the initial simplex must not score
+        // a cancelled likelihood as 1e20.
+        let no_iterations = CausalImpactConfig {
+            max_iter: 0,
+            ..config.clone()
+        };
+        assert!(matches!(
+            cancelled(|| fit_bsts_model(&y, None, &no_iterations)),
+            Err(EconError::Cancelled(_))
+        ));
+        // Without a budget or a ceiling nothing changes.
+        assert!(fit_bsts_model(&y, None, &config).is_ok());
     }
 }
