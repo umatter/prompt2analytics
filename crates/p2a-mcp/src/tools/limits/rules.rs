@@ -1851,8 +1851,8 @@ mod schema_tests {
         /// Float elements of an array, recorded at the element path like
         /// [`Kind::IntegerElems`] and classified the same way.
         FloatElems,
-        /// A map whose values are integers, arrays, objects or any JSON. No rule path can
-        /// address map values, so only `Exempt` classifies it.
+        /// A map whose values are integers, floats, arrays, objects or any JSON. No rule path
+        /// can address map values, so only `Exempt` classifies it.
         MapValues,
         /// A field or element that can hold any JSON: a variant of its schema says nothing about
         /// its value (a `serde_json::Value`, also as one arm of an untagged enum), or its schema
@@ -2016,6 +2016,8 @@ mod schema_tests {
                 "legacy": {"type": "array",
                            "items": [{"type": "string"}, {"$ref": "#/$defs/Lens"}]},
                 "reps": {"type": "object", "additionalProperties": {"type": "integer"}},
+                // a map of floats (`HashMap<String, f64>`) needs a decision like one of integers
+                "fmap": {"type": "object", "additionalProperties": {"type": "number"}},
                 "names": {"type": "object", "additionalProperties": {"type": "string"}},
                 "tables": {"type": "array",
                            "items": {"type": "object", "additionalProperties": {"type": "array"}}},
@@ -2075,6 +2077,7 @@ mod schema_tests {
                 ("cycle", Kind::TooDeep),
                 ("dangling", Kind::Untyped),
                 ("flat", Kind::MapValues),
+                ("fmap", Kind::MapValues),
                 ("grid", Kind::Array),
                 ("grid[]", Kind::Array),
                 ("grid[][]", Kind::IntegerElems),
@@ -2434,7 +2437,7 @@ mod schema_tests {
     }
 
     /// Records [`Kind::MapValues`] at `path` when a schema among `variants_of` is a map (its
-    /// [`map_value_schemas`]) whose values are integers, arrays, objects or any JSON, and
+    /// [`map_value_schemas`]) whose values are integers, floats, arrays, objects or any JSON, and
     /// [`Kind::TooDeep`] when the walk cannot see what they are.
     fn map_values(root: &Value, variants_of: &[&Value], path: &str, out: &mut Vec<(String, Kind)>) {
         for values in map_value_schemas(variants_of) {
@@ -2448,7 +2451,12 @@ mod schema_tests {
                     .all
                     .iter()
                     .any(|v| v.get("properties").is_some() || !map_value_schemas(&[*v]).is_empty());
-            if vvs.untyped || vts.contains(&"integer") || is_array(&vvs) || object {
+            if vvs.untyped
+                || vts.contains(&"integer")
+                || vts.contains(&"number")
+                || is_array(&vvs)
+                || object
+            {
                 push(out, path, Kind::MapValues);
             }
         }

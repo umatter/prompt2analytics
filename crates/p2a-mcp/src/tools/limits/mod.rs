@@ -59,10 +59,10 @@
 //! untagged enum with a `Value` arm, or a field whose schema refers to a definition the test
 //! cannot find. Give each of its cost sub-fields a rule of its own by path, because the schema
 //! does not list them and the test cannot find them. A rule path cannot address the values of a
-//! map (`HashMap`, `BTreeMap`), so a map whose values are integers, arrays, objects or any JSON
-//! can only be `Exempt`; give a cost field a struct or a list instead. A map at the top level of
-//! a request (a `#[serde(flatten)]` map) cannot even be exempted, because a rule path is never
-//! empty, so the test fails on it whatever its values. Do not give a cost field a
+//! map (`HashMap`, `BTreeMap`), so a map whose values are integers, floats, arrays, objects or
+//! any JSON can only be `Exempt`; give a cost field a struct or a list instead. A map at the top
+//! level of a request (a `#[serde(flatten)]` map) cannot even be exempted, because a rule path is
+//! never empty, so the test fails on it whatever its values. Do not give a cost field a
 //! `#[serde(alias = ...)]`. If one is unavoidable, add the same rule for the alias name, because
 //! the schema, and so the schema test, does not list aliases.
 //!
