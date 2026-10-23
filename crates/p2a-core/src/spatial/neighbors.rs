@@ -919,8 +919,9 @@ fn knn_lists(coords: &[(f64, f64)], k: usize) -> EconResult<(Vec<Vec<usize>>, Qu
 }
 
 /// Distance-band neighbours (`d1 < dist <= d2`) of every observation, each list sorted by
-/// index. Expects validated input. Stops with [`EconError::ResourceLimit`] as soon as the
-/// total number of links would exceed `max_links`.
+/// index. Expects validated input: finite coordinates and `0 <= d1 <= d2` (the skip of
+/// boxes at the query relies on `d1 >= 0`). Stops with [`EconError::ResourceLimit`] as soon
+/// as the total number of links would exceed `max_links`.
 fn band_lists(
     coords: &[(f64, f64)],
     metric: Metric,
@@ -928,6 +929,7 @@ fn band_lists(
     d2: f64,
     max_links: Option<usize>,
 ) -> EconResult<(Vec<Vec<usize>>, QueryStats)> {
+    debug_assert!(d1 >= 0.0 && d2 >= d1, "band_lists expects validated bounds");
     let dims = metric.dims();
     let n = coords.len();
     // Box pruning thresholds, in the units of the tree coordinates: prune a box whose lower
@@ -1360,11 +1362,10 @@ mod tests {
             let (lists, stats) = band_lists(&c, metric, 0.0, 50.0, None).unwrap();
             // distance 0 is not above d1 = 0
             assert!(lists.iter().all(Vec::is_empty), "{metric:?}");
-            assert!(
-                stats.dist_evals <= 200 * n as u64,
-                "{metric:?}: {}",
-                stats.dist_evals
-            );
+            // Every point sits at the query, so the root box is skipped before any distance
+            // is computed. On the sphere only the coincidence check does that; in the plane
+            // `skip_below = d1 = 0` does it too.
+            assert_eq!(stats.dist_evals, 0, "{metric:?}");
         }
     }
 
