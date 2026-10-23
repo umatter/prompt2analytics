@@ -695,7 +695,7 @@ impl ToolGovernor {
                     // refreshed here: a later call that changes nothing
                     // relies on it (`Quotas::enforce`).
                     if quotas.any() && !checked.get() {
-                        handle.block_on(s.refresh_data_bytes());
+                        refresh_after_call(&handle, &s.id, s.refresh_data_bytes());
                     }
                     if let Some((audit, arguments)) = audit {
                         let (outcome, summary) = match &ran {
@@ -875,6 +875,26 @@ fn result_outcome(result: &ToolResult, budget: &Budget) -> &'static str {
         }
     } else {
         "tool_error"
+    }
+}
+
+/// Run `refresh`, the refresh of session `session_id`'s cached dataset
+/// charge after a call that did not reach its quota check, on `handle`.
+/// Charging walks whatever the failed call left in the datasets; a panic
+/// there is logged and the cache left as it was, so the call's audit entry
+/// and its own outcome (its panic included) still follow.
+fn refresh_after_call(
+    handle: &tokio::runtime::Handle,
+    session_id: &str,
+    refresh: impl std::future::Future<Output = u64>,
+) {
+    let refreshed = std::panic::catch_unwind(AssertUnwindSafe(|| handle.block_on(refresh)));
+    if refreshed.is_err() {
+        tracing::error!(
+            session_id,
+            "charging the session's datasets after a call that did not finish panicked; the \
+             cached charge is left as it was"
+        );
     }
 }
 
@@ -1200,6 +1220,23 @@ mod tests {
             let code = e.code();
             assert_eq!(e.after_deadline(60).code(), code);
         }
+    }
+
+    #[test]
+    fn a_panic_while_charging_after_a_failed_call_does_not_unwind() {
+        // The refresh after a call that panicked or passed its deadline
+        // charges whatever the call left behind. Pre-fix it ran outside the
+        // call's catch_unwind, so a panic there skipped the audit entry and
+        // replaced the call's own panic.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let charging = std::thread::spawn(move || {
+            refresh_after_call(&handle, "s", async { panic!("charging failed") });
+            refresh_after_call(&handle, "s", async { 7 });
+        });
+        assert!(charging.join().is_ok());
     }
 
     #[test]
