@@ -2,7 +2,12 @@
 //!
 //! Run with: `cargo test -p p2a-mcp --features full db_tests`
 
+use std::collections::HashMap;
+
+use surrealdb::error::Db as SurrealDbError;
+
 use super::connection::{DbConnection, DbError, PersistenceLimits, truncate_to};
+use super::conversations::failed_statement;
 use super::models::{Message, MessageRole, ToolCall};
 
 /// Helper to create an in-memory database for testing
@@ -712,12 +717,104 @@ async fn engine_db(engine: &str, dir: &std::path::Path, limits: PersistenceLimit
 
 /// The error of a clear or delete that a store event refused names the
 /// event's own message, not the "query was not executed" that the store
-/// reports for the statements before the one that failed.
+/// reports for the other statements of the transaction.
 fn assert_refused(engine: &str, error: DbError) {
     assert!(
         error.to_string().contains("refused"),
         "{engine}: the failing statement's error is reported: {error}"
     );
+}
+
+/// What [`failed_statement`] picks from the errors `make` builds, once for
+/// each of several maps of them. `take_errors` returns a `HashMap`, and two
+/// maps of the same entries iterate in different orders, so a pick that
+/// depended on that order would differ between the maps.
+fn failed_statements(make: &[(usize, fn() -> SurrealDbError)]) -> Vec<Option<surrealdb::Error>> {
+    (0..16)
+        .map(|_| {
+            let errors: HashMap<usize, surrealdb::Error> = make
+                .iter()
+                .map(|(index, error)| (*index, surrealdb::Error::Db(error())))
+                .collect();
+            failed_statement(errors)
+        })
+        .collect()
+}
+
+/// A transaction's failed statement is told apart from the
+/// `QueryNotExecuted` the store gives the statements before and after it,
+/// whatever the order the map of errors iterates in.
+#[test]
+fn failed_statement_picks_the_cause_over_the_not_executed() {
+    for picked in failed_statements(&[
+        (0, || SurrealDbError::QueryNotExecuted),
+        (1, || SurrealDbError::Thrown("refused".to_string())),
+        (2, || SurrealDbError::QueryNotExecuted),
+    ]) {
+        assert!(
+            matches!(
+                &picked,
+                Some(surrealdb::Error::Db(SurrealDbError::Thrown(message))) if message == "refused"
+            ),
+            "{picked:?}"
+        );
+    }
+}
+
+/// When no error is a plain `QueryNotExecuted` (a failed commit, which gives
+/// each statement a `QueryNotExecutedDetail`; a cancelled or timed-out
+/// transaction), the lowest index wins.
+#[test]
+fn failed_statement_takes_the_lowest_index_among_causes() {
+    for picked in failed_statements(&[
+        (0, || SurrealDbError::QueryNotExecutedDetail {
+            message: "a".to_string(),
+        }),
+        (1, || SurrealDbError::QueryNotExecutedDetail {
+            message: "b".to_string(),
+        }),
+    ]) {
+        assert!(
+            matches!(
+                &picked,
+                Some(surrealdb::Error::Db(SurrealDbError::QueryNotExecutedDetail { message }))
+                    if message == "a"
+            ),
+            "{picked:?}"
+        );
+    }
+    for picked in failed_statements(&[
+        (0, || SurrealDbError::QueryTimedout),
+        (1, || SurrealDbError::QueryTimedout),
+    ]) {
+        assert!(
+            matches!(
+                picked,
+                Some(surrealdb::Error::Db(SurrealDbError::QueryTimedout))
+            ),
+            "{picked:?}"
+        );
+    }
+}
+
+/// Only `QueryNotExecuted` errors still give an error (all alike, so which
+/// index is returned cannot be seen in it), and no errors give none.
+#[test]
+fn failed_statement_with_no_cause_or_no_error() {
+    for picked in failed_statements(&[
+        (0, || SurrealDbError::QueryNotExecuted),
+        (1, || SurrealDbError::QueryNotExecuted),
+        (2, || SurrealDbError::QueryNotExecuted),
+    ]) {
+        assert!(
+            matches!(
+                picked,
+                Some(surrealdb::Error::Db(SurrealDbError::QueryNotExecuted))
+            ),
+            "{picked:?}"
+        );
+    }
+    assert!(failed_statements(&[]).iter().all(Option::is_none));
 }
 
 /// A clear is one transaction. When its last step, the counter reset, fails

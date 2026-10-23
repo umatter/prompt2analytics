@@ -557,12 +557,18 @@ async fn run_to_end<T: Send + 'static>(
 /// The error a transaction's failed statement reported, from the
 /// [`take_errors`](surrealdb::Response::take_errors) of its response; `None`
 /// when no statement failed. When a statement inside `BEGIN`/`COMMIT`
-/// fails, the store replaces the results of the statements before it with
-/// `QueryNotExecuted` and keeps the cause only at the failing statement, so
-/// this is the lowest-indexed error that is not `QueryNotExecuted`, or the
-/// lowest-indexed error when all are (a failed commit carries its cause in
-/// each).
-fn failed_statement(errors: HashMap<usize, surrealdb::Error>) -> Option<surrealdb::Error> {
+/// fails, the store replaces the results of the other statements, before
+/// and after the failing one, with `QueryNotExecuted` and keeps the cause
+/// only at the failing statement, so this is the lowest-indexed error that
+/// is not `QueryNotExecuted` (the lowest-indexed error when all are). A
+/// failed commit gives every statement a `QueryNotExecutedDetail` that
+/// carries the cause, and a cancelled or timed-out transaction gives each
+/// `QueryCancelled` or `QueryTimedout`; this returns the first of them as
+/// is. `take_errors` returns a `HashMap`, so the index, not the order of
+/// iteration, decides.
+pub(super) fn failed_statement(
+    errors: HashMap<usize, surrealdb::Error>,
+) -> Option<surrealdb::Error> {
     errors
         .into_iter()
         .min_by_key(|(index, error)| {
