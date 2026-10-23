@@ -6,9 +6,9 @@
 //! - Model statistics footer (N, R², F-stat)
 //!
 //! Model names, captions and variable names are plain text: LaTeX special
-//! characters in them (`\ { } _ % & # $ ^ ~ < > |`, and a `[` or `*` at the
-//! start of the text) are escaped and control characters become spaces, so
-//! pass no LaTeX markup. Labels are restricted to `[A-Za-z0-9:._-]`.
+//! characters in them (`\ { } _ % & # $ ^ ~ < > |`, and a `[` or `*` that
+//! opens the text, after any leading spaces) are escaped and control
+//! characters become spaces, so pass no LaTeX markup. Labels are restricted to `[A-Za-z0-9:._-]`.
 
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
@@ -276,19 +276,21 @@ fn significance_stars(level: &SignificanceLevel) -> String {
 /// A chain of replacements would re-escape the braces that
 /// `\textbackslash{}` introduces. Control characters become spaces.
 ///
-/// Text whose first character after any spaces is `[` or `*` gets a leading
-/// `{}`: the row break `\\` before a cell skips spaces looking for an
-/// optional `*` or `[`, so such a cell would otherwise break the table
-/// (`[`) or lose its first character (`*`).
+/// Text whose first character after any spaces is `[` or `*` gets `{}`
+/// directly before that character: the row break `\\` before a cell skips
+/// spaces looking for an optional `*` or `[`, so such a cell would otherwise
+/// break the table (`[`) or lose its first character (`*`). Leading spaces
+/// stay ahead of the `{}`, where the cell's `\ignorespaces` still drops them.
 fn escape_latex(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
-    if s.chars()
-        .find(|&c| c != ' ' && !c.is_control())
-        .is_some_and(|c| matches!(c, '[' | '*'))
-    {
-        out.push_str("{}");
-    }
+    let mut guarded = false;
     for c in s.chars() {
+        if !guarded && c != ' ' && !c.is_control() {
+            guarded = true;
+            if matches!(c, '[' | '*') {
+                out.push_str("{}");
+            }
+        }
         match c {
             '\\' => out.push_str("\\textbackslash{}"),
             '{' => out.push_str("\\{"),
@@ -550,11 +552,13 @@ mod tests {
     #[test]
     fn test_escape_latex_guards_leading_bracket_and_star() {
         // `\\` looks past spaces for `*` or `[`, so a cell that opens with
-        // either (after any leading spaces) gets an empty group in front.
+        // either (after any leading spaces) gets an empty group directly in
+        // front of it; leading spaces stay ahead of the group, where the
+        // cell's `\ignorespaces` still drops them.
         assert_eq!(escape_latex("[x]"), "{}[x]");
         assert_eq!(escape_latex("*z"), "{}*z");
-        assert_eq!(escape_latex("  [x]"), "{}  [x]");
-        assert_eq!(escape_latex("\t*z"), "{} *z");
+        assert_eq!(escape_latex("  [x]"), "  {}[x]");
+        assert_eq!(escape_latex("\t*z"), " {}*z");
         assert_eq!(escape_latex("[_x]"), "{}[\\_x]");
         // a bracket or star anywhere else is left alone
         assert_eq!(escape_latex("a[1]"), "a[1]");
