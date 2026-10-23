@@ -748,14 +748,14 @@ async fn reload_session_datasets(
                             quotas,
                         ))
                     }
-                    Err(error) => Err(error),
+                    Err(error) => Err(error.to_string()),
                 };
                 match loaded {
                     Ok(()) => result.succeeded.push(source.name),
                     Err(error) => result.failed.push(ReloadFailure {
                         name: source.name,
                         source_path: source.source_path,
-                        error: error.to_string(),
+                        error,
                     }),
                 }
             }

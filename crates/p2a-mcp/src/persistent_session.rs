@@ -698,7 +698,9 @@ pub struct DatasetQuotas {
 /// Insert a reloaded `dataset` as `name` into `session` unless it would push
 /// the session past `quotas.per_session` (its datasets with this one in
 /// place of any dataset of the same name) or all sessions past
-/// `quotas.total` (their cached dataset bytes). The error is a fixed text.
+/// `quotas.total` (their cached dataset bytes). A refusal names the size the
+/// datasets would reach and the limit, as a tool call's quota refusal does;
+/// it holds no server path.
 ///
 /// Call it while holding the session's governor permit: the quota rollback
 /// of a tool call assumes one change of a session's datasets at a time.
@@ -708,7 +710,7 @@ pub async fn insert_reloaded_dataset(
     name: String,
     dataset: p2a_core::data::Dataset,
     quotas: DatasetQuotas,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     let added = dataset.df().estimated_size() as u64;
     // Read before taking the session's dataset lock: the total takes the
     // registry's lock, which is never awaited under a dataset lock.
@@ -726,14 +728,24 @@ pub async fn insert_reloaded_dataset(
     let after = crate::session::datasets_bytes(&datasets)
         .saturating_sub(replaced)
         .saturating_add(added);
-    if quotas.per_session.is_some_and(|limit| after > limit) {
-        return Err(RELOAD_SESSION_QUOTA);
-    }
-    if quotas
-        .total
-        .is_some_and(|limit| others.saturating_add(after) > limit)
+    if let Some(limit) = quotas.per_session
+        && after > limit
     {
-        return Err(RELOAD_SERVER_QUOTA);
+        return Err(format!(
+            "this session's datasets would use {} (limit {} per session)",
+            fmt_bytes(after),
+            fmt_bytes(limit)
+        ));
+    }
+    let total = others.saturating_add(after);
+    if let Some(limit) = quotas.total
+        && total > limit
+    {
+        return Err(format!(
+            "the server's dataset memory would reach {} (limit {})",
+            fmt_bytes(total),
+            fmt_bytes(limit)
+        ));
     }
     tracing::info!(dataset = %name, "Reloaded dataset from file");
     datasets.insert(name, dataset);
@@ -751,8 +763,11 @@ const MESSAGE_NOT_FOUND: &str = "Message not found";
 const RELOAD_NO_SOURCE: &str = "no source path stored";
 const RELOAD_OUTSIDE_JAIL: &str = "path is not inside this session's data directory";
 const RELOAD_LOAD_FAILED: &str = "the file could not be loaded";
-const RELOAD_SESSION_QUOTA: &str = "the session's dataset quota is full";
-const RELOAD_SERVER_QUOTA: &str = "the server's dataset memory is full";
+
+/// `bytes` as the governor's quota refusals print them.
+fn fmt_bytes(bytes: u64) -> String {
+    p2a_core::memory::format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
+}
 
 /// What one [`PersistentSessionManager::sweep`] did.
 #[derive(Debug, Default, Clone, Copy)]
@@ -1408,7 +1423,7 @@ mod tests {
             name: &str,
             offset: f64,
             quotas: DatasetQuotas,
-        ) -> Result<(), &'static str> {
+        ) -> Result<(), String> {
             insert_reloaded_dataset(s, sm, name.to_string(), ds(1000, offset), quotas).await
         }
 
@@ -1429,11 +1444,25 @@ mod tests {
 
         assert_eq!(put(&a, &sm, "x", 0.1, q).await, Ok(()));
         assert_eq!(put(&a, &sm, "y", 0.2, q).await, Ok(()));
-        assert_eq!(put(&a, &sm, "z", 0.3, q).await, Err(RELOAD_SESSION_QUOTA));
+        // The refusals name the size the datasets would reach and the limit.
+        let refused = put(&a, &sm, "z", 0.3, q).await.unwrap_err();
+        let (three, two) = (
+            p2a_core::memory::format_bytes(3 * one as usize),
+            p2a_core::memory::format_bytes(2 * one as usize),
+        );
+        assert!(
+            refused.contains(&format!("would use {three} (limit {two} per session)")),
+            "{refused}"
+        );
         assert_eq!(put(&a, &sm, "x", 0.4, q).await, Ok(())); // replaces x
         assert_eq!(a.data_bytes(), 2 * one);
         assert_eq!(put(&b, &sm, "x", 0.5, q).await, Ok(()));
-        assert_eq!(put(&b, &sm, "y", 0.6, q).await, Err(RELOAD_SERVER_QUOTA));
+        let refused = put(&b, &sm, "y", 0.6, q).await.unwrap_err();
+        let four = p2a_core::memory::format_bytes(4 * one as usize);
+        assert!(
+            refused.contains(&format!("would reach {four} (limit {three})")),
+            "{refused}"
+        );
         assert_eq!(sm.total_data_bytes().await, 3 * one);
         assert!(!a.datasets.read().await.contains_key("z"));
         assert!(!b.datasets.read().await.contains_key("y"));

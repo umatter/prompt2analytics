@@ -286,8 +286,13 @@ async fn reload_respects_the_session_dataset_quota() {
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["data"]["succeeded"], json!(["first"]), "{body}");
     assert_eq!(body["data"]["failed"][0]["name"], "second", "{body}");
-    assert_eq!(
-        body["data"]["failed"][0]["error"], "the session's dataset quota is full",
+    // The refusal names the per-session limit.
+    let error = body["data"]["failed"][0]["error"]
+        .as_str()
+        .unwrap_or_default();
+    let limit = p2a_core::memory::format_bytes(1 << 20);
+    assert!(
+        error.contains(&format!("(limit {limit} per session)")),
         "{body}"
     );
     let session = state.session_manager.get_session(&sid).await.unwrap();
