@@ -57,10 +57,11 @@ Infeasible exact balance is an error (`InvalidSpecification`, suggesting
 `balance_tol > 0`), as R `sbw` refuses it too: with `min_weight >= 0` a target mean outside
 the reweighted group's range is refused up front, and otherwise no ascent direction or a
 failed line search outside the tolerance, or diverging multipliers, mean that no feasible
-weights exist. Running out of `max_iter` outside the tolerance is a separate
-`InvalidSpecification` that names `max_iter`; it says nothing about feasibility. A target
-mean that overflows is refused up front, and a non-finite Gram matrix or multiplier
-(covariates too large for f64) is a `Computation` error, never a converged result.
+weights exist. Running out of `max_iter` outside the tolerance is a `ConvergenceFailure`
+(`iterations = max_iter`, `last_change` the balance residual); it says nothing about
+feasibility. A target mean that overflows is refused up front, and a non-finite Gram matrix
+or multiplier (covariates too large for f64) is a `Computation` error, never a converged
+result.
 
 Before October 2026 the exact path inverted the dense (n+k+1) x (n+k+1) system of the
 equality-constrained problem, then clipped negative weights at `min_weight` and renormalised.

@@ -63,10 +63,14 @@
 //!   (||mu||_inf > 1e10 (1 + ||mu_0||_inf)), mean that no feasible weights exist (the dual of
 //!   an infeasible problem is unbounded): `EconError::InvalidSpecification` suggesting
 //!   approximate balance.
-//! - max_iter steps outside tol: `EconError::InvalidSpecification` naming max_iter, since
-//!   running out of steps says nothing about feasibility.
+//! - max_iter steps outside tol: `EconError::ConvergenceFailure` with
+//!   `iterations = max_iter` and `last_change = ||r||_inf`, since running out of steps says
+//!   nothing about feasibility or about the specification.
 //! - A b, Gram matrix or multiplier that is not finite (magnitudes beyond f64):
 //!   `EconError::Computation`, never a converged result.
+//! - A (k+1) x (k+1) inversion that fails outright (a singular M gets the pseudo-inverse, so
+//!   only a failed decomposition): `EconError::SingularMatrix` at the first step, the
+//!   infeasibility error at later steps.
 //!
 //! Before the solve, with min_weight >= 0 a target mean outside the reweighted group's range
 //! is refused, and in every configuration a target mean that overflows is refused.
@@ -169,12 +173,13 @@ pub struct SBWConfig {
     /// Iteration cap, at least 1. Approximate balance: projected-gradient steps. Exact
     /// balance: dual Newton steps, the closed-form first step counting as one; running out
     /// within `tolerance` stops as converged, otherwise it is an
-    /// `EconError::InvalidSpecification` naming `max_iter`.
+    /// `EconError::ConvergenceFailure` with `iterations = max_iter`.
     pub max_iter: usize,
     /// Convergence tolerance; must be finite and > 0. Exact balance stops once the balance
     /// residual satisfies ||r||_inf <= tolerance (1 + ||b||_inf) after a full Newton step
-    /// (b = [target means; 1]; see the module docs for every exit). Approximate balance
-    /// uses it as the threshold on the gradient norm.
+    /// that kept the set of units off the bound (b = [target means; 1]; see the module docs
+    /// for the other exits). Approximate balance uses it as the threshold on the gradient
+    /// norm.
     pub tolerance: f64,
     /// Penalty ρ on the balance violation for approximate balance (higher = stricter
     /// balance); must be finite and > 0 when `balance_tol > 0`, unused for exact balance.
@@ -400,8 +405,10 @@ impl fmt::Display for SBWResult {
 /// use ndarray::{Array1, array};
 /// use p2a_core::econometrics::{SBWConfig, SBWEstimand, run_sbw};
 ///
-/// // The treated means (1.1, 0.55) lie inside the controls' ranges, so exact balance (the
-/// // default, balance_tol = 0) is feasible with non-negative weights.
+/// // The treated means (1.1, 0.55) are a convex combination of the controls (weights 0.5,
+/// // 0.5, 0), so exact balance (the default, balance_tol = 0) is feasible with non-negative
+/// // weights. Lying inside each control column's range is not enough on its own, but a
+/// // target mean outside that range is never feasible.
 /// let treatment = Array1::from(vec![1.0, 1.0, 0.0, 0.0, 0.0]);
 /// let covariates = array![[1.0, 0.5], [1.2, 0.6], [0.9, 0.4], [1.3, 0.7], [1.0, 0.6]];
 ///
@@ -886,8 +893,10 @@ fn inf_norm(v: &Array1<f64>) -> f64 {
 /// as converged. Only outside that tolerance do these cases mean an error: no ascent
 /// direction or a failed line search, like diverging multipliers, means no feasible weights
 /// exist and is `EconError::InvalidSpecification` suggesting approximate balance; running
-/// out of `max_iter` is an `InvalidSpecification` naming `max_iter`. A non-finite b, Gram
-/// matrix or multiplier is `EconError::Computation`.
+/// out of `max_iter` is an `EconError::ConvergenceFailure` with `iterations = max_iter` and
+/// `last_change = ||r||_inf`. A non-finite b, Gram matrix or multiplier is
+/// `EconError::Computation`. An inversion that fails outright is `EconError::SingularMatrix`
+/// at the first step and the infeasibility error at later steps.
 ///
 /// Returns weights summing to 1, `lambda = -mu` (the sign convention of the KKT system
 /// `[I A'; A 0][w; lambda] = [0; b]`), convergence, the number of steps (mu_0 counts as
@@ -970,11 +979,14 @@ fn solve_sbw_exact(
             if close {
                 break;
             }
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Exact balance did not converge within max_iter = {} steps (balance residual {r_inf:.3e}, tolerance {:.3e}). Increase max_iter, or use approximate balance (balance_tol > 0) if exact balance may be infeasible.",
-                    config.max_iter,
-                    config.tolerance * b_scale
+            return Err(EconError::ConvergenceFailure {
+                iterations: config.max_iter,
+                last_change: r_inf,
+                suggestion: format!(
+                    "exact balance residual {r_inf:.3e} is above the threshold tolerance (1 + ||b||_inf) = {:.3e} (tolerance = {}) after max_iter = {} steps; increase max_iter, or use approximate balance (balance_tol > 0) if exact balance may be infeasible",
+                    config.tolerance * b_scale,
+                    config.tolerance,
+                    config.max_iter
                 ),
             });
         }
@@ -1614,22 +1626,41 @@ mod tests {
         // create_test_data() is feasible and takes five dual steps (mu_0 counts as one): the
         // bound binds, so steps 1-4 are line-search steps with ||r||_inf = 0.20, 0.10, 0.029,
         // 0.0023. Running out of steps is not evidence of infeasibility.
+        // It is a convergence failure, and its message shows both the absolute threshold
+        // tolerance (1 + ||b||_inf), here 1e-3 (1 + 1), and the configured tolerance.
         let (t, x) = create_test_data();
         let err = run_sbw(
             &t.view(),
             &x.view(),
             SBWConfig {
                 max_iter: 2,
+                tolerance: 1e-3,
                 ..Default::default()
             },
         )
         .unwrap_err();
         match &err {
-            EconError::InvalidSpecification { message } => assert!(
-                message.contains("max_iter = 2") && !message.contains("could not be reached"),
-                "max_iter exhaustion reported as `{message}`"
-            ),
-            other => panic!("expected InvalidSpecification naming max_iter, got {other:?}"),
+            EconError::ConvergenceFailure {
+                iterations: 2,
+                last_change,
+                suggestion,
+            } => {
+                assert!(
+                    suggestion.contains("max_iter = 2")
+                        && !suggestion.contains("could not be reached"),
+                    "max_iter exhaustion reported as `{suggestion}`"
+                );
+                assert!(
+                    suggestion.contains("(1 + ||b||_inf) = 2.000e-3")
+                        && suggestion.contains("tolerance = 0.001"),
+                    "threshold and configured tolerance not both shown in `{suggestion}`"
+                );
+                assert!(
+                    last_change.is_finite() && *last_change > 2e-3,
+                    "last_change {last_change} is not the residual outside tolerance"
+                );
+            }
+            other => panic!("expected ConvergenceFailure after 2 iterations, got {other:?}"),
         }
         // With tolerance 1e-2 the fourth step is within tolerance (0.0023 <= 1e-2 (1 + 1)),
         // so running out of steps there stops as converged, as the other two exits do.
