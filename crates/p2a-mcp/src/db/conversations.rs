@@ -132,7 +132,7 @@ impl DbConnection {
     /// counter (also when a later step fails). Deletes and clears of one
     /// conversation take turns.
     pub async fn delete_conversation(&self, id: &str) -> Result<(), DbError> {
-        let _turn = self.delete_turn(id).await;
+        let _turn = self.conversation_turn(id).await;
         // A write racing this delete, or a step below that fails, can leave
         // rows behind; the next orphan sweeps look for them.
         self.note_conversation_deleted(id);
@@ -174,7 +174,7 @@ impl DbConnection {
     /// With `measure`, each delete returns the rows it removed (`RETURN
     /// BEFORE`) and their text bytes and messages are counted; a delete that
     /// runs after another one finds nothing. Callers hold the conversation's
-    /// [`DeleteTurn`](super::connection::DeleteTurn), so two deletes never run
+    /// [`StoreTurn`](super::connection::StoreTurn), so two deletes never run
     /// at the same time. Without `measure` nothing is returned or counted.
     async fn delete_conversation_rows(
         &self,
@@ -220,7 +220,7 @@ impl DbConnection {
     /// `id` lowers. `None` without the budget, when the conversation does not
     /// exist, or when the session's counter is not seeded when the delete
     /// starts (seeding then reads what is left, so nothing is released).
-    /// Call it during the delete's [`DeleteTurn`](super::connection::DeleteTurn).
+    /// Call it during the delete's [`StoreTurn`](super::connection::StoreTurn).
     async fn counted_owner(&self, id: &str) -> Result<Option<String>, DbError> {
         if !self.tracks_session_bytes() {
             return Ok(None);
@@ -241,7 +241,7 @@ impl DbConnection {
     /// and `session_db_bytes` (`QuotaExceeded`; the bytes are counted).
     ///
     /// Call it during the conversation's turn
-    /// ([`delete_turn`](DbConnection::delete_turn)) and keep the turn until
+    /// ([`conversation_turn`](DbConnection::conversation_turn)) and keep the turn until
     /// the message is written and counted, so that concurrent adds cannot
     /// pass `messages_per_conversation` together.
     async fn admit_message(
@@ -331,7 +331,7 @@ impl DbConnection {
                 return Err(DbError::Query(format!("Invalid message role: {}", role)));
             }
         };
-        let _turn = self.delete_turn(conversation_id).await;
+        let _turn = self.conversation_turn(conversation_id).await;
         self.admit_message(conversation_id, content.len()).await?;
 
         let msg_id = uuid::Uuid::new_v4().to_string();
@@ -362,7 +362,7 @@ impl DbConnection {
     /// Add a full message object, with the checks of
     /// [`add_message`](Self::add_message).
     pub async fn save_message(&self, message: &Message) -> Result<Message, DbError> {
-        let _turn = self.delete_turn(&message.conversation_id).await;
+        let _turn = self.conversation_turn(&message.conversation_id).await;
         self.admit_message(&message.conversation_id, message.content.len())
             .await?;
         let created: Option<Message> = self
@@ -436,7 +436,7 @@ impl DbConnection {
     /// from the session's counter (also when a later step fails). Deletes
     /// and clears of one conversation take turns.
     pub async fn clear_messages(&self, conversation_id: &str) -> Result<u32, DbError> {
-        let _turn = self.delete_turn(conversation_id).await;
+        let _turn = self.conversation_turn(conversation_id).await;
         let deleted_count = match self.counted_owner(conversation_id).await? {
             Some(session_id) => {
                 let mut removed = Removed::default();

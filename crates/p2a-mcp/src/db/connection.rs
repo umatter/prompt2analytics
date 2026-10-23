@@ -92,11 +92,10 @@ pub struct DbConnection {
     /// when the session's rows are deleted. Only touched when the budget is
     /// set; shared by clones.
     session_bytes: Arc<Mutex<HashMap<String, u64>>>,
-    /// One lock per conversation that a delete, clear or message add is
-    /// working on (and per session creating a conversation), with the number
-    /// of calls holding or waiting for it (see [`DeleteTurn`]); shared by
-    /// clones.
-    delete_turns: DeleteTurns,
+    /// One lock per conversation whose rows a call is changing (and per
+    /// session creating a conversation), with the number of calls holding or
+    /// waiting for it (see [`StoreTurn`]); shared by clones.
+    store_turns: StoreTurns,
     /// Conversations deleted recently, for
     /// [`delete_recent_orphans`](Self::delete_recent_orphans); shared by
     /// clones.
@@ -117,12 +116,13 @@ struct DeletedConversations {
 /// this the next sweep scans the messages and tool calls in full.
 pub(crate) const MAX_REMEMBERED_DELETES: usize = 100_000;
 
-type DeleteTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
+type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
 
 /// One call's turn at changing a conversation's rows (a conversation delete
-/// or clear, or a message add), or at creating a conversation in a session
-/// ([`session_turn`](DbConnection::session_turn)); the next call's turn
-/// starts when it is dropped.
+/// or clear, or a message add:
+/// [`conversation_turn`](DbConnection::conversation_turn)), or at creating a
+/// conversation in a session ([`session_turn`](DbConnection::session_turn));
+/// the next call's turn starts when it is dropped.
 ///
 /// Two deletes of one conversation that run at the same time conflict in
 /// the store: the in-memory engine hands both the same rows (neither
@@ -135,13 +135,13 @@ type DeleteTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize
 /// writes cannot pass a cap together. The counter is per process, and so
 /// are the turns. An entry leaves the map with its last holder or waiter,
 /// also when a waiting call is cancelled.
-pub(crate) struct DeleteTurn {
-    turns: DeleteTurns,
+pub(crate) struct StoreTurn {
+    turns: StoreTurns,
     key: String,
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
-impl Drop for DeleteTurn {
+impl Drop for StoreTurn {
     fn drop(&mut self) {
         // Let the next call in before giving up the entry.
         self.guard.take();
@@ -226,7 +226,7 @@ impl DbConnection {
             db: Arc::new(db),
             limits: PersistenceLimits::default(),
             session_bytes: Arc::new(Mutex::new(HashMap::new())),
-            delete_turns: Arc::new(Mutex::new(HashMap::new())),
+            store_turns: Arc::new(Mutex::new(HashMap::new())),
             deleted_conversations: Arc::new(Mutex::new(DeletedConversations::default())),
         })
     }
@@ -378,7 +378,7 @@ impl DbConnection {
     /// Subtract `n` deleted bytes from the session's counter, if it is
     /// seeded (an unseeded counter reads the store when it is seeded).
     /// `n` must be what the caller's own statements removed during the
-    /// conversation's [`DeleteTurn`], so that no row is released twice.
+    /// conversation's [`StoreTurn`], so that no row is released twice.
     pub(crate) fn release_session_bytes(&self, session_id: &str, n: u64) {
         if self.limits.session_db_bytes.is_some()
             && let Some(used) = self.session_bytes_map().get_mut(session_id)
@@ -388,22 +388,22 @@ impl DbConnection {
     }
 
     /// Wait for this call's turn at changing conversation
-    /// `conversation_id`'s rows (see [`DeleteTurn`]).
-    pub(crate) async fn delete_turn(&self, conversation_id: &str) -> DeleteTurn {
+    /// `conversation_id`'s rows (see [`StoreTurn`]).
+    pub(crate) async fn conversation_turn(&self, conversation_id: &str) -> StoreTurn {
         self.turn(conversation_id.to_string()).await
     }
 
     /// Wait for this call's turn at creating a conversation in session
-    /// `session_id` (see [`DeleteTurn`]). Conversation ids are UUIDs, so
+    /// `session_id` (see [`StoreTurn`]). Conversation ids are UUIDs, so
     /// this key is never a conversation's.
-    pub(crate) async fn session_turn(&self, session_id: &str) -> DeleteTurn {
+    pub(crate) async fn session_turn(&self, session_id: &str) -> StoreTurn {
         self.turn(format!("session:{session_id}")).await
     }
 
-    async fn turn(&self, key: String) -> DeleteTurn {
+    async fn turn(&self, key: String) -> StoreTurn {
         let lock = {
             let mut turns = self
-                .delete_turns
+                .store_turns
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let (lock, users) = turns
@@ -413,8 +413,8 @@ impl DbConnection {
             Arc::clone(lock)
         };
         // Registered before waiting, so a cancelled wait still leaves.
-        let mut turn = DeleteTurn {
-            turns: Arc::clone(&self.delete_turns),
+        let mut turn = StoreTurn {
+            turns: Arc::clone(&self.store_turns),
             key,
             guard: None,
         };
@@ -454,10 +454,10 @@ impl DbConnection {
         Some(ids)
     }
 
-    /// Conversations with a delete turn held or awaited.
+    /// Conversations and sessions with a store turn held or awaited.
     #[cfg(test)]
-    pub(crate) fn delete_turns_in_use(&self) -> usize {
-        self.delete_turns
+    pub(crate) fn store_turns_in_use(&self) -> usize {
+        self.store_turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len()
@@ -618,7 +618,7 @@ impl Clone for DbConnection {
             db: Arc::clone(&self.db),
             limits: self.limits,
             session_bytes: Arc::clone(&self.session_bytes),
-            delete_turns: Arc::clone(&self.delete_turns),
+            store_turns: Arc::clone(&self.store_turns),
             deleted_conversations: Arc::clone(&self.deleted_conversations),
         }
     }

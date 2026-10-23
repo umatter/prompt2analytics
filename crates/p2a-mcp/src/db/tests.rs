@@ -427,7 +427,7 @@ async fn concurrent_deletes_release_a_conversations_bytes_once() {
     assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
     assert_counter_matches_store(&db, "s1").await;
     assert!(db.get_messages(&cleared).await.unwrap().is_empty());
-    assert_eq!(db.delete_turns_in_use(), 0);
+    assert_eq!(db.store_turns_in_use(), 0);
 }
 
 /// Without the byte budget, on RocksDB (which fails one of two conflicting
@@ -453,33 +453,33 @@ async fn parallel_deletes_on_rocksdb_do_not_conflict() {
         let (a, b) = tokio::join!(db.clear_messages(&cleared), db.clear_messages(&cleared));
         assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
     }
-    assert_eq!(db.delete_turns_in_use(), 0);
+    assert_eq!(db.store_turns_in_use(), 0);
 }
 
-/// A delete turn leaves the map with its last holder or waiter, also when
+/// A store turn leaves the map with its last holder or waiter, also when
 /// the waiting call is cancelled.
 #[tokio::test]
-async fn delete_turns_leave_the_map() {
+async fn store_turns_leave_the_map() {
     let db = limited_db(PersistenceLimits {
         session_db_bytes: Some(100),
         ..Default::default()
     })
     .await;
-    let first = db.delete_turn("c").await;
+    let first = db.conversation_turn("c").await;
     {
-        let waiting = db.delete_turn("c");
+        let waiting = db.conversation_turn("c");
         tokio::pin!(waiting);
         // It cannot finish while `first` is held; the wait is then cancelled.
         let polled = tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting).await;
         assert!(polled.is_err());
     }
-    assert_eq!(db.delete_turns_in_use(), 1);
+    assert_eq!(db.store_turns_in_use(), 1);
     drop(first);
-    assert_eq!(db.delete_turns_in_use(), 0);
-    let again = db.delete_turn("c").await;
-    assert_eq!(db.delete_turns_in_use(), 1);
+    assert_eq!(db.store_turns_in_use(), 0);
+    let again = db.conversation_turn("c").await;
+    assert_eq!(db.store_turns_in_use(), 1);
     drop(again);
-    assert_eq!(db.delete_turns_in_use(), 0);
+    assert_eq!(db.store_turns_in_use(), 0);
 }
 
 /// Concurrent posts to a conversation one message below its cap: the count
@@ -514,7 +514,7 @@ async fn concurrent_adds_stop_at_the_message_cap() {
         "{results:?}"
     );
     assert_eq!(db.get_messages(&id).await.unwrap().len(), 3);
-    assert_eq!(db.delete_turns_in_use(), 0);
+    assert_eq!(db.store_turns_in_use(), 0);
 }
 
 /// Concurrent creations in a session one conversation below its cap: exactly
@@ -545,7 +545,7 @@ async fn concurrent_creates_stop_at_the_conversation_cap() {
         "{results:?}"
     );
     assert_eq!(db.count_conversations("s1").await.unwrap(), 2);
-    assert_eq!(db.delete_turns_in_use(), 0);
+    assert_eq!(db.store_turns_in_use(), 0);
 }
 
 /// Without the byte budget, a failed row delete is reported: the
