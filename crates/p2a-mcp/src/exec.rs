@@ -59,7 +59,7 @@ use crate::config::{
     AuditConfig, DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting, available_cpus,
 };
 use crate::server::AnalyticsServer;
-use crate::session::{Session, SessionManager, datasets_bytes};
+use crate::session::{Session, SessionManager, datasets_bytes, fmt_bytes};
 use crate::tools::limits::{self, LimitViolation};
 use crate::transport::http::{ApiResponse, ToolResult};
 
@@ -917,10 +917,6 @@ impl Quotas {
             }
         }
     }
-}
-
-fn fmt_bytes(bytes: u64) -> String {
-    format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
 }
 
 /// Exits the process when the governor stays unhealthy (every permit held by

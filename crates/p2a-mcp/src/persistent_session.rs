@@ -13,7 +13,8 @@ use crate::db::{
     PersistenceLimits, Settings,
 };
 use crate::session::{
-    DatasetStore, Session, SessionError, SessionId, SessionManager, is_past_ttl, is_session_id,
+    DatasetStore, Session, SessionError, SessionId, SessionManager, fmt_bytes, is_past_ttl,
+    is_session_id,
 };
 use std::sync::Arc;
 
@@ -763,11 +764,6 @@ const MESSAGE_NOT_FOUND: &str = "Message not found";
 const RELOAD_NO_SOURCE: &str = "no source path stored";
 const RELOAD_OUTSIDE_JAIL: &str = "path is not inside this session's data directory";
 const RELOAD_LOAD_FAILED: &str = "the file could not be loaded";
-
-/// `bytes` as the governor's quota refusals print them.
-fn fmt_bytes(bytes: u64) -> String {
-    p2a_core::memory::format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
-}
 
 /// What one [`PersistentSessionManager::sweep`] did.
 #[derive(Debug, Default, Clone, Copy)]

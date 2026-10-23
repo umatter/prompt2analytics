@@ -150,6 +150,14 @@ pub fn datasets_bytes(map: &HashMap<String, Dataset>) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
+/// `bytes` as the dataset quota refusals print them: the tool governor's
+/// (`exec`) and a dataset reload's (`persistent_session`), one format for
+/// both.
+#[cfg(any(feature = "http", feature = "db"))]
+pub(crate) fn fmt_bytes(bytes: u64) -> String {
+    p2a_core::memory::format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
+}
+
 /// Whether a session last accessed at `last_accessed` has expired at `now`
 /// under `ttl_minutes`: more whole minutes have elapsed than the TTL. The
 /// comparison is signed, so a `last_accessed` in the future (clock skew, a
