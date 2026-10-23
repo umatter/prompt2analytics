@@ -786,12 +786,9 @@ pub fn quantile_rf_with_names(
     let sample_size = config.sample_size.unwrap_or(n_samples);
     let mut rng_state = config.seed.unwrap_or(42);
 
-    // Build forest
+    // Build forest; each tree keeps its own out-of-bag rows.
     let mut trees = resource::try_with_capacity(config.n_trees, "quantile forest trees")
         .map_err(|e| e.to_string())?;
-    let mut all_oob_indices: Vec<Vec<usize>> =
-        resource::try_with_capacity(config.n_trees, "quantile forest trees")
-            .map_err(|e| e.to_string())?;
 
     for _ in 0..config.n_trees {
         resource::checkpoint().map_err(|e| e.to_string())?;
@@ -803,12 +800,11 @@ pub fn quantile_rf_with_names(
             &x,
             &y,
             bootstrap_indices,
-            oob_indices.clone(),
+            oob_indices,
             config,
             &mut rng_state,
         );
 
-        all_oob_indices.push(oob_indices);
         trees.push(tree);
     }
 
@@ -817,7 +813,7 @@ pub fn quantile_rf_with_names(
 
     // Compute OOB predictions and error
     let (oob_predictions, oob_error) = if config.keep_inbag {
-        compute_oob_predictions(&trees, &all_oob_indices, &x, &y, &config.quantiles)
+        compute_oob_predictions(&trees, &x, &y, &config.quantiles)
     } else {
         (None, None)
     };
@@ -879,7 +875,6 @@ fn compute_quantile_predictions(
 /// Compute OOB predictions and error.
 fn compute_oob_predictions(
     trees: &[QuantileTree],
-    all_oob_indices: &[Vec<usize>],
     x: &ArrayView2<f64>,
     y: &ArrayView1<f64>,
     quantiles: &[f64],
@@ -893,8 +888,8 @@ fn compute_oob_predictions(
 
     // Build a map from sample index to trees where it was OOB
     let mut sample_oob_trees: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (tree_idx, oob_indices) in all_oob_indices.iter().enumerate() {
-        for &sample_idx in oob_indices {
+    for (tree_idx, tree) in trees.iter().enumerate() {
+        for &sample_idx in &tree.oob_indices {
             sample_oob_trees
                 .entry(sample_idx)
                 .or_default()
