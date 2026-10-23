@@ -347,8 +347,9 @@ pub struct ContextConfig {
     pub max_tool_result_length: usize,
     /// Byte cap on the history sent to the model (`llm_history_bytes`);
     /// `None` means no byte cap. A latest turn that alone passes it is cut
-    /// to fit; only tool-call names and arguments are never cut, so a turn
-    /// whose tool calls alone pass the cap is sent over it.
+    /// to fit. Tool-call names and arguments are never cut and no text is
+    /// cut below 128 bytes, so a turn is sent over the cap only when its
+    /// tool calls leave less than 128 bytes per text.
     pub history_byte_cap: Option<usize>,
     /// Whether the token budget of `max_tokens` applies (a model whose
     /// context window is known).
@@ -477,7 +478,9 @@ fn tool_call_bytes(m: &Message) -> usize {
 /// [`message_bytes`] total is at most `cap`. Tool-call names and arguments
 /// are never cut and come off the cap first; the pieces of text share what
 /// is left, the shorter ones kept whole and the longer ones cut to an equal
-/// share of the rest. Over the cap only when the tool calls alone are.
+/// share of the rest. No text is cut below 128 bytes, the smallest cut that
+/// keeps the truncation note (a shorter text is kept whole), so the turn is
+/// over the cap only when its tool calls leave less than 128 bytes per text.
 fn fit_turn_to_bytes(turn: &mut [Message], cap: usize) {
     if turn.iter().map(message_bytes).sum::<usize>() <= cap {
         return;
@@ -494,11 +497,11 @@ fn fit_turn_to_bytes(turn: &mut [Message], cap: usize) {
     let mut left = cap.saturating_sub(calls);
     let n = texts.len();
     for (done, (text, what)) in texts.into_iter().enumerate() {
-        let share = left / (n - done);
+        let share = (left / (n - done)).max(text.len().min(128));
         if text.len() > share {
             *text = truncate_with_note(text, share, what);
         }
-        left -= text.len();
+        left = left.saturating_sub(text.len());
     }
 }
 
@@ -674,8 +677,9 @@ impl ContextManager {
     /// `k` fits, only the latest turn is kept, with its tool results cut to
     /// 500 bytes and, if it is still over the byte cap, its message texts and
     /// tool results cut to share what the cap leaves after its tool-call
-    /// names and arguments, which are never cut. The token budget is not
-    /// applied to that turn.
+    /// names and arguments, which are never cut. No text is cut below 128
+    /// bytes, so that turn passes the cap only when its tool calls leave less
+    /// than 128 bytes per text. The token budget is not applied to that turn.
     pub fn process_history(
         &mut self,
         messages: Vec<Message>,
@@ -1210,6 +1214,57 @@ mod tests {
             let len = out.messages[i].content.len();
             assert!((4_000..=5_000).contains(&len), "message {i}: {len}");
         }
+
+        // Tool-call arguments alone larger than the cap: nothing is left to
+        // share, yet no text is emptied; each is cut to at most 128 bytes
+        // with its note, so the turn passes the cap only by those floors.
+        let call = crate::llm::ToolCall {
+            id: "c1".into(),
+            name: "load_dataset".into(),
+            arguments: serde_json::json!({
+                "name": "d",
+                "csv_content": format!("x,y\n{}", "1.1,2.3\n".repeat(400)),
+            }),
+        };
+        let h = vec![
+            Message::user(format!("u: {}", "x".repeat(1_000))),
+            Message::assistant_with_tools("", vec![call]),
+            Message::tool_result(vec![LlmToolResult {
+                tool_call_id: "c1".into(),
+                content: format!("r: {}", "z".repeat(1_000)),
+                is_error: false,
+            }]),
+            Message::assistant(format!("a: {}", "y".repeat(1_000))),
+        ];
+        let cap = 1_000;
+        assert!(tool_call_bytes(&h[1]) > cap);
+        let mut cm = ContextManager::new(ContextConfig {
+            history_byte_cap: Some(cap),
+            token_budget: false,
+            ..Default::default()
+        });
+        let out = cm.process_history(h, "sys");
+        assert_eq!(out.messages.len(), 4);
+        assert!(
+            out.messages[1].tool_calls.as_ref().unwrap()[0].arguments["csv_content"]
+                .as_str()
+                .is_some_and(|s| s.len() > cap)
+        );
+        for (i, start) in [(0, "u: xxx"), (3, "a: yyy")] {
+            let text = &out.messages[i].content;
+            assert!(text.starts_with(start), "message {i}: {text:?}");
+            assert!(text.len() <= 128, "message {i}: {}", text.len());
+            assert!(
+                text.contains("[Message truncated: showing the first"),
+                "message {i}: {text:?}"
+            );
+        }
+        let result = &out.messages[2].tool_results.as_ref().unwrap()[0].content;
+        assert!(
+            result.starts_with("r: zzz") && result.len() <= 128,
+            "{result:?}"
+        );
+        assert!(result.contains("[Result truncated: showing the first"));
     }
 
     #[test]
