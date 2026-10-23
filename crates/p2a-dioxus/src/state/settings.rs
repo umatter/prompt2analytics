@@ -209,6 +209,9 @@ fn default_openrouter_model() -> String {
 impl Settings {
     /// Load settings from platform-appropriate storage.
     /// On native platforms, also checks environment variables for API keys.
+    /// If the stored settings still hold a key equal to its environment
+    /// variable (written by an older version), they are rewritten at once
+    /// without it; see `load_from`.
     /// Publishes the backend access token for ApiClient and the chat stream.
     pub fn load() -> Self {
         let storage = create_storage();

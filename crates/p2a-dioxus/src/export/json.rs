@@ -13,7 +13,7 @@ use super::types::{
 /// Shortest id that is redacted from exported text. Session and
 /// conversation ids are UUIDs (36 bytes); the floor keeps a degenerate id
 /// from blanking out ordinary words.
-const MIN_REDACTED_SESSION_ID_LEN: usize = 16;
+const MIN_REDACTED_ID_LEN: usize = 16;
 
 /// Export a conversation and its messages to JSON format.
 ///
@@ -45,8 +45,7 @@ pub fn export_to_json(
 }
 
 /// Replace every occurrence of each id in the serialized export with
-/// `[redacted]`. Ids shorter than [`MIN_REDACTED_SESSION_ID_LEN`] are left
-/// alone.
+/// `[redacted]`. Ids shorter than [`MIN_REDACTED_ID_LEN`] are left alone.
 ///
 /// Each id is matched in its JSON-escaped form, which is how it appears
 /// inside the serialized strings; for a UUID that is the id itself. Longer
@@ -55,7 +54,7 @@ fn redact_ids(mut json: String, ids: &[&str]) -> String {
     let mut ids: Vec<&str> = ids
         .iter()
         .copied()
-        .filter(|id| id.len() >= MIN_REDACTED_SESSION_ID_LEN)
+        .filter(|id| id.len() >= MIN_REDACTED_ID_LEN)
         .collect();
     ids.sort_by_key(|id| std::cmp::Reverse(id.len()));
     for id in ids {
