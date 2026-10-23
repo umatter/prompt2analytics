@@ -591,6 +591,19 @@ impl AnalyticsServer {
         self
     }
 
+    /// The top-level parameter names `tool` declares: the `properties` of
+    /// its input schema, empty for an unknown tool. The audit log takes these
+    /// ahead of the keys a tool ignores (`audit::sanitize_arguments`).
+    pub fn declared_parameters(&self, tool: &str) -> Vec<&str> {
+        self.tool_router
+            .map
+            .get(tool)
+            .and_then(|route| route.attr.input_schema.get("properties"))
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| properties.keys().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
     /// Create a new AnalyticsServer with existing dataset storage.
     /// Used for HTTP transport where each session has its own dataset store.
     #[cfg(feature = "http")]
@@ -1458,11 +1471,10 @@ impl ServerHandler for AnalyticsServer {
         // request unchanged.
         let had_arguments = request.arguments.is_some();
         let args = serde_json::Value::Object(request.arguments.take().unwrap_or_default());
-        let audit = self
-            .audit
-            .as_deref()
-            .filter(|a| a.is_enabled())
-            .map(|a| (a, crate::audit::sanitize_arguments(&args)));
+        let audit = self.audit.as_deref().filter(|a| a.is_enabled()).map(|a| {
+            let declared = self.declared_parameters(&tool);
+            (a, crate::audit::sanitize_arguments(&args, &declared))
+        });
         let checked = if known {
             enforce_request_limits(&limits, &tool, &args, &self.datasets).await
         } else {
@@ -1612,6 +1624,25 @@ mod tests {
         );
         assert!(v.message.contains("was kept"), "{}", v.message);
         assert!(v.message.contains("Ask for less output"), "{}", v.message);
+    }
+
+    #[test]
+    fn declared_parameters_are_the_schema_properties() {
+        let server = AnalyticsServer::new();
+        let mut sqlite = server.declared_parameters("db_sqlite_query");
+        sqlite.sort_unstable();
+        assert_eq!(sqlite, ["db_path", "name", "query"]);
+        assert!(server.declared_parameters("no_such_tool").is_empty());
+        // No tool keeps a top-level parameter outside `properties`, where the
+        // audit log would not see it as declared.
+        for tool in server.tool_router.list_all() {
+            let schema = &tool.input_schema;
+            let hidden: Vec<&str> = ["$ref", "allOf", "anyOf", "oneOf"]
+                .into_iter()
+                .filter(|k| schema.contains_key(*k))
+                .collect();
+            assert!(hidden.is_empty(), "{}: {hidden:?}", tool.name);
+        }
     }
 
     /// Helper to extract text from Content (Annotated<RawContent>)

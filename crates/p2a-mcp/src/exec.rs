@@ -613,11 +613,15 @@ impl ToolGovernor {
             let tool_name = tool.to_string();
             let s = Arc::clone(&session);
             // Sanitised before the arguments move into the call, and only when
-            // auditing. One copy is for a refusal before the work starts.
-            let audit = self
-                .audit
-                .is_enabled()
-                .then(|| (Arc::clone(&self.audit), sanitize_arguments(&args)));
+            // auditing, with the tool's declared parameters taken first. One
+            // copy is for a refusal before the work starts.
+            let audit = self.audit.is_enabled().then(|| {
+                let declared = server.declared_parameters(tool);
+                (
+                    Arc::clone(&self.audit),
+                    sanitize_arguments(&args, &declared),
+                )
+            });
             let refusal_arguments = audit.as_ref().map(|(_, arguments)| arguments.clone());
             let outcome = self
                 .run_blocking(&session, tool, move |budget| {
