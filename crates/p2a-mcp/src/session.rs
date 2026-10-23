@@ -745,7 +745,7 @@ mod tests {
 
         let a = m.create_session(None).await.unwrap();
         m.delete_session(&a).await.unwrap();
-        assert_eq!(rx.recv().await.unwrap(), a);
+        assert_eq!(rx.try_recv().unwrap(), a);
 
         let b = m.create_session(None).await.unwrap();
         backdate(&m, &b, 65).await;
@@ -753,17 +753,17 @@ mod tests {
             m.get_session(&b).await,
             Err(SessionError::Expired)
         ));
-        assert_eq!(rx.recv().await.unwrap(), b);
+        assert_eq!(rx.try_recv().unwrap(), b);
 
         let c = m.create_session(None).await.unwrap();
         backdate(&m, &c, 65).await;
         assert_eq!(m.cleanup_expired().await, 1);
-        assert_eq!(rx.recv().await.unwrap(), c);
+        assert_eq!(rx.try_recv().unwrap(), c);
 
         let d = m.create_session(None).await.unwrap();
         backdate(&m, &d, 11).await;
         m.create_session(None).await.unwrap(); // evicts d
-        assert_eq!(rx.recv().await.unwrap(), d);
+        assert_eq!(rx.try_recv().unwrap(), d);
 
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }

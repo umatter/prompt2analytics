@@ -172,7 +172,13 @@ async fn reload_restores_datasets_into_the_live_session() {
         .unwrap();
     let inside_csv = inside.path().join("d.csv");
     std::fs::write(&inside_csv, "x,y\n1,1.1\n2,1.9\n3,3.2\n").unwrap();
-    let outside_csv = std::env::temp_dir().join("p2a-wp07-outside.csv");
+    // Removed when `outside` drops at the end of the test.
+    let outside = tempfile::Builder::new()
+        .prefix("p2a-wp07-outside-")
+        .suffix(".csv")
+        .tempfile_in(std::env::temp_dir())
+        .unwrap();
+    let outside_csv = outside.path().to_path_buf();
     std::fs::write(&outside_csv, "x,y\n1,1.1\n2,1.9\n3,3.2\n").unwrap();
     assert!(!outside_csv.canonicalize().unwrap().starts_with(&root));
 
@@ -335,9 +341,10 @@ async fn get_session_answers_capacity_when_adoption_finds_the_registry_full() {
     let (r, state) = app(cfg).await;
     new_session(&r).await;
     let stored = uuid::Uuid::new_v4().to_string();
+    // A row accessed now, so it is within the TTL.
     pm(&state)
         .db()
-        .set_session_last_accessed(&stored, chrono::Utc::now())
+        .upsert_session(&p2a_mcp::db::DbSession::new(stored.clone(), None))
         .await
         .unwrap();
 
