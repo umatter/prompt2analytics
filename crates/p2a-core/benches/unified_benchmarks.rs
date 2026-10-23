@@ -2670,7 +2670,10 @@ fn main() {
     }
 
     // GLS (slower - use slow_config)
-    // Cap at n=1000: GLS with AR1 creates n×n correlation matrix, O(n³) — matches R benchmark
+    // Cap at n=1000 to match the R benchmark, which caps nlme::gls with corAR1 there.
+    // The Rust AR(1) fit itself is a Prais-Winsten transform, O(n p), with no n×n
+    // matrix; review the cap together with the R side when the paper benchmarks
+    // are regenerated.
     for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));

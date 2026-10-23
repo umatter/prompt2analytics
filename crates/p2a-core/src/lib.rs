@@ -58,7 +58,7 @@
 //! |--------|-------------|----------|
 //! | **OLS** | Ordinary least squares with HC0-HC3 robust SEs | [`run_ols`] |
 //! | **Clustered SE** | Clustered standard errors | [`run_ols_clustered`] |
-//! | **GLS** | Generalized least squares (AR1, MA1, ARMA) | [`run_gls`] |
+//! | **GLS** | Generalized least squares (AR(1), compound symmetry or identity; `gls()` also takes a known Omega) | [`run_gls`] |
 //! | **Quantile Reg** | Quantile/median regression | [`run_quantreg`] |
 //! | **LOESS** | Local polynomial regression | [`run_loess`] |
 //! | **NLS** | Nonlinear least squares | [`run_nls`] |
