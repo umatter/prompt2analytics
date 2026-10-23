@@ -20,7 +20,9 @@
 //! with mode 0600 and rotates by size ([`RotationPolicy`], `P2A_AUDIT_MAX_MB`,
 //! default 50 MiB, `0` disables), keeping `<path>.1` to `<path>.3`. When the
 //! file is removed or moved away outside the server, the next entry starts a
-//! new file at the path and the numbered files are left as they are. Entries
+//! new file at the path and the numbered files are left as they are. The
+//! writer flushes whenever its queue runs empty, and the stdio transport and
+//! `transport::http::serve` write out the queue before they return; entries
 //! still queued when the process is killed are lost.
 
 use chrono::{DateTime, Utc};

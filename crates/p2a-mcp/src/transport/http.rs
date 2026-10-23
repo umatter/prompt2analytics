@@ -248,6 +248,8 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 /// Then it validates the configuration again, so no caller can skip the
 /// guard, builds the app, installs the process-wide policies (allocation
 /// ceiling, session directories) and serves it with graceful shutdown.
+/// Before it returns, the audit entries of the calls it answered are
+/// written out.
 /// It does not install the request limits or apply `--limit-override`
 /// (`P2A_LIMIT_OVERRIDES`); `transport::start_transport` does that before it
 /// calls `start_http_transport`. A caller that uses `serve` directly gets the
@@ -274,13 +276,23 @@ pub async fn serve(
         spawn_stuck_watchdog(state.governor.clone(), limit);
     }
 
-    axum::serve(listener, app)
+    let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)))
+        .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)));
+    // Write out the queued audit entries before returning, so a caller that
+    // exits right after a graceful shutdown keeps them. `state.audit_logger`
+    // and the governor's logger are one writer: both are opened for
+    // `config.audit` (`ExecConfig::from_config`), and `AuditLogger::new`
+    // returns the existing writer for a path.
+    state.audit_logger.flush().await;
+    served
 }
 
 /// Start the HTTP transport: [`bind`], then [`serve`] until the process ends.
+/// There is no shutdown signal here: the binary serves until it is killed,
+/// so its audit entries are as safe as the writer's own flush whenever its
+/// queue runs empty (see [`crate::audit`]).
 pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> {
     let listener = bind(config).await?;
     serve(listener, config.clone(), std::future::pending()).await

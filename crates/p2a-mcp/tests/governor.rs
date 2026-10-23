@@ -159,6 +159,66 @@ async fn serve_follows_the_socket_it_is_given() {
     assert!(e.to_string().contains("requires an access token"), "{e}");
 }
 
+/// One HTTP/1.1 POST to a served socket (`Host: localhost`, the connection
+/// closed after the answer); the JSON body of a 2xx answer.
+async fn raw_post(addr: std::net::SocketAddr, uri: &str, body: &Value) -> Value {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let body = body.to_string();
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "POST {uri} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).await.unwrap();
+    let (head, json) = answer.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 2"), "{head}");
+    serde_json::from_str(json).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_writes_out_the_audit_queue_before_it_returns() {
+    // A caller that exits right after a graceful shutdown keeps the audit
+    // entries of every call the server answered.
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let mut cfg = http_cfg("127.0.0.1:0", None, false);
+    cfg.audit = p2a_mcp::config::AuditConfig {
+        enabled: true,
+        path: log.to_string_lossy().into_owned(),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(p2a_mcp::transport::http::serve(listener, cfg, async {
+        let _ = stopped.await;
+    }));
+
+    let created = raw_post(addr, "/api/sessions", &json!({})).await;
+    let sid = created["data"]["session_id"].as_str().unwrap().to_string();
+    let call = json!({"session_id": sid, "arguments": {}});
+    for _ in 0..20 {
+        raw_post(addr, "/api/tools/list_datasets", &call).await;
+    }
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
+
+    // Read at once, with no flush of our own.
+    let lines: Vec<Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 20);
+    assert!(
+        lines
+            .iter()
+            .all(|l| l["tool_name"] == "list_datasets" && l["origin"] == "http")
+    );
+}
+
 /// `ServerConfig::default()` bound to `addr`, with the transport left at its
 /// default (stdio): what a library caller who only sets the address passes.
 fn default_transport_cfg(addr: &str) -> ServerConfig {
