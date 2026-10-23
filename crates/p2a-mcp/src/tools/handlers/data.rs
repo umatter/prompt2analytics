@@ -17,11 +17,15 @@ use rmcp::{
 
 use crate::path_jail;
 use crate::server::AnalyticsServer;
+use crate::session;
 use crate::tools::handlers::utils::CappedWriter;
 use crate::tools::requests::data::*;
 
 use p2a_core::data::{DataLoader, Dataset, DatasetInfo};
-use p2a_core::polars::prelude::{AnyValue, Column, CsvWriter, DataFrame, ParquetWriter, SerWriter};
+use p2a_core::polars::prelude::{
+    AnyValue, CategoricalPhysical, Column, CsvWriter, DataFrame, DataType, ParquetReader,
+    ParquetWriter, SerReader, SerWriter,
+};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
 /// Rows serialised between two cancellation checkpoints in a JSON export.
@@ -145,6 +149,86 @@ impl Serialize for CellJson<'_> {
     }
 }
 
+/// The least the dataset quotas will charge for the parquet file at `path`
+/// once it is decoded, read from its footer before anything is decoded: each
+/// column's values at their in-memory width for the rows the footer declares,
+/// or the pages' uncompressed size where that is more (a dictionary page of
+/// long labels), plus the dataset's structure. A small file can declare
+/// hundreds of millions of rows (one value run-length encoded), and the
+/// quotas only see a dataset once it is built. `None` when the footer cannot
+/// be read; the loader then reports the file's error.
+fn parquet_decoded_bytes(path: &Path) -> Option<u64> {
+    let mut reader = ParquetReader::new(std::fs::File::open(path).ok()?);
+    let rows = reader.num_rows().ok()? as u64;
+    let pages = reader
+        .get_metadata()
+        .ok()?
+        .row_groups
+        .iter()
+        .fold(0u64, |bytes, group| {
+            bytes.saturating_add(group.total_byte_size() as u64)
+        });
+    let schema = reader.schema().ok()?;
+    let values = schema.iter_values().fold(0u64, |bytes, field| {
+        bytes.saturating_add(least_value_bytes(&DataType::from_arrow_field(field), rows))
+    });
+    let structure = session::structure_bytes(schema.iter_names().map(|name| name.as_str()));
+    Some(values.max(pages).saturating_add(structure))
+}
+
+/// The least memory `rows` values of `dtype` take in polars: the physical
+/// width (a view per String or Binary value, a code per Categorical one,
+/// offsets per list). Types without a fixed floor count nothing.
+fn least_value_bytes(dtype: &DataType, rows: u64) -> u64 {
+    let width = |bytes: u64| bytes.saturating_mul(rows);
+    match dtype {
+        DataType::Boolean => rows.div_ceil(8),
+        DataType::Int8 | DataType::UInt8 => width(1),
+        DataType::Int16 | DataType::UInt16 => width(2),
+        DataType::Int32 | DataType::UInt32 | DataType::Float32 | DataType::Date => width(4),
+        DataType::Int64
+        | DataType::UInt64
+        | DataType::Float64
+        | DataType::Datetime(_, _)
+        | DataType::Duration(_)
+        | DataType::Time => width(8),
+        DataType::Int128 | DataType::Decimal(_, _) => width(16),
+        DataType::String | DataType::Binary => width(session::VIEW_BYTES),
+        DataType::Categorical(_, _) | DataType::Enum(_, _) => match dtype.cat_physical() {
+            Ok(CategoricalPhysical::U8) => width(1),
+            Ok(CategoricalPhysical::U16) => width(2),
+            Ok(CategoricalPhysical::U32) => width(4),
+            Err(_) => 0,
+        },
+        DataType::List(_) => width(8),
+        DataType::Array(inner, size) => least_value_bytes(inner, rows.saturating_mul(*size as u64)),
+        DataType::Struct(fields) => fields.iter().fold(0u64, |bytes, field| {
+            bytes.saturating_add(least_value_bytes(field.dtype(), rows))
+        }),
+        _ => 0,
+    }
+}
+
+/// Refuse, before decoding it, a parquet file at `path` that the dataset
+/// quotas would refuse once it was loaded as `name` (see
+/// [`session::admit_dataset`]). Other formats, and calls without quotas,
+/// pass.
+async fn admit_parquet(path: &Path, name: &str) -> Result<(), McpError> {
+    let is_parquet = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_lowercase().as_str(), "parquet" | "pq"));
+    if !is_parquet || !session::dataset_admission_active() {
+        return Ok(());
+    }
+    let Some(at_least) = parquet_decoded_bytes(path) else {
+        return Ok(());
+    };
+    session::admit_dataset(name, at_least)
+        .await
+        .map_err(session::quota_refusal)
+}
+
 /// `text` (an error from a loader or writer) with the absolute forms of
 /// `path` and its folder replaced by their [`path_jail::display_path`] forms,
 /// so no server path reaches the caller.
@@ -250,6 +334,18 @@ impl AnalyticsServer {
             }
         }
 
+        // Generate an ID for the dataset
+        let id = request.name.unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("dataset")
+                .to_string()
+        });
+
+        // A parquet file the dataset quotas would refuse is refused before
+        // it is decoded.
+        admit_parquet(&path, &id).await?;
+
         // Load the dataset
         let dataset = match DataLoader::load(&path) {
             Ok(ds) => ds,
@@ -260,14 +356,6 @@ impl AnalyticsServer {
                 ))]));
             }
         };
-
-        // Generate an ID for the dataset
-        let id = request.name.unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("dataset")
-                .to_string()
-        });
 
         // Get info before moving
         let info: DatasetInfo = (&dataset).into();
@@ -405,6 +493,14 @@ impl AnalyticsServer {
         let path = PathBuf::from(&request.filename);
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("csv");
 
+        // Generate ID
+        let id = request.name.unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("uploaded")
+                .to_string()
+        });
+
         // Load based on format
         let dataset = match extension.to_lowercase().as_str() {
             "csv" => {
@@ -442,7 +538,15 @@ impl AnalyticsServer {
                     ))]));
                 }
 
-                let result = DataLoader::load(&temp_path);
+                // Refused before decoding when the quotas would refuse the
+                // decoded dataset.
+                let result = match admit_parquet(&temp_path, &id).await {
+                    Ok(()) => DataLoader::load(&temp_path),
+                    Err(refusal) => {
+                        let _ = std::fs::remove_file(&temp_path);
+                        return Err(refusal);
+                    }
+                };
                 let _ = std::fs::remove_file(&temp_path); // Clean up temp file
 
                 match result {
@@ -462,14 +566,6 @@ impl AnalyticsServer {
                 ))]));
             }
         };
-
-        // Generate ID
-        let id = request.name.unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("uploaded")
-                .to_string()
-        });
 
         // Get info
         let info: DatasetInfo = (&dataset).into();

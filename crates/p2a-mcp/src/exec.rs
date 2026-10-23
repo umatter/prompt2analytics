@@ -59,7 +59,9 @@ use crate::config::{
     AuditConfig, DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting, available_cpus,
 };
 use crate::server::AnalyticsServer;
-use crate::session::{Session, SessionManager, datasets_bytes, fmt_bytes};
+use crate::session::{
+    DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager, datasets_bytes, fmt_bytes,
+};
 use crate::tools::limits::{self, LimitViolation};
 use crate::transport::http::{ApiResponse, ToolResult};
 
@@ -338,11 +340,14 @@ impl ToolCallError {
     /// Map a handler's `ErrorData`. The handlers report a caller's mistake
     /// (a missing column, a bad parameter combination) as either
     /// `INVALID_PARAMS` or `INVALID_REQUEST`; both stay the caller's problem
-    /// (400 `invalid_arguments`). Any other code is a server-side failure
-    /// (500 `internal`).
+    /// (400 `invalid_arguments`). A dataset quota refusal made before the
+    /// dataset was built ([`DATASET_QUOTA_EXCEEDED`]) is `quota_exceeded`.
+    /// Any other code is a server-side failure (500 `internal`).
     pub fn from_handler_error(tool: &str, e: rmcp::ErrorData) -> Self {
         if e.code == ErrorCode::INVALID_PARAMS || e.code == ErrorCode::INVALID_REQUEST {
             Self::InvalidArguments(e.message.to_string())
+        } else if e.code == DATASET_QUOTA_EXCEEDED {
+            Self::QuotaExceeded(e.message.to_string())
         } else {
             Self::Internal(format!("Tool '{tool}' failed: {}", e.message))
         }
@@ -638,6 +643,17 @@ impl ToolGovernor {
                     // The entry is written where the work ends, also when the
                     // deadline answer was already sent or the work panicked.
                     let ran = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        // Checks made before a dataset is built (a file's
+                        // decoded size) read the quotas from here; what the
+                        // call reserves is released after its quota check.
+                        let _admission = quotas.any().then(|| {
+                            DatasetAdmission::install(
+                                quotas.per_session,
+                                quotas.total,
+                                Arc::clone(&s),
+                                Arc::clone(&sessions),
+                            )
+                        });
                         handle.block_on(async {
                             let snapshot = if quotas.any() {
                                 Some(s.datasets.read().await.clone())
@@ -1105,6 +1121,16 @@ mod tests {
         );
         let e = ToolCallError::from_handler_error("t", rmcp::ErrorData::internal_error("x", None));
         assert!(matches!(&e, ToolCallError::Internal(m) if m.contains("Tool 't' failed")));
+        // A quota refusal made before a dataset was built is the quota's.
+        let e = ToolCallError::from_handler_error(
+            "load_dataset",
+            crate::session::quota_refusal("too big".into()),
+        );
+        assert!(
+            matches!(&e, ToolCallError::QuotaExceeded(m) if m == "too big"),
+            "{e:?}"
+        );
+        assert_eq!((e.status().as_u16(), e.code()), (422, "quota_exceeded"));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! allowing multiple users to work independently.
 
 use chrono::{DateTime, Utc};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -188,7 +189,7 @@ const COLUMN_OVERHEAD_BYTES: u64 = 1536;
 /// Times each byte of a column or dataset name is charged.
 const NAME_BYTE_COPIES: u64 = 4;
 /// Bytes of one String or Binary view (polars' `View`): the least a value
-/// takes.
+/// takes, which the check before a file is decoded counts.
 pub const VIEW_BYTES: u64 = 16;
 /// Bytes charged per String or Binary value: its view and the allocation
 /// slack measured around it.
@@ -467,9 +468,8 @@ fn lock<T>(m: &StdMutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// `bytes` as the dataset quota refusals print them: the tool governor's
-/// (`exec`) and a dataset reload's (`persistent_session`), one format for
-/// both.
-#[cfg(any(feature = "http", feature = "db"))]
+/// (`exec`), a dataset reload's (`persistent_session`) and the check before
+/// a file is decoded ([`admit_dataset`]), one format for all.
 pub(crate) fn fmt_bytes(bytes: u64) -> String {
     p2a_core::memory::format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
 }
@@ -560,6 +560,8 @@ pub struct SessionManager {
     config: SessionConfig,
     /// Every removal (delete, expiry, cleanup, eviction) is sent here.
     removals: broadcast::Sender<SessionId>,
+    /// Dataset bytes reserved by files being decoded ([`admit_dataset`]).
+    reserved_data_bytes: AtomicU64,
 }
 
 impl SessionManager {
@@ -570,6 +572,7 @@ impl SessionManager {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             config,
             removals,
+            reserved_data_bytes: AtomicU64::new(0),
         }
     }
 
@@ -814,6 +817,170 @@ impl SessionManager {
             .iter()
             .fold(total, |t, m| t.saturating_add(mapping_label_bytes(m)))
     }
+
+    /// Dataset bytes reserved by files being decoded.
+    pub fn reserved_data_bytes(&self) -> u64 {
+        self.reserved_data_bytes.load(Ordering::SeqCst)
+    }
+
+    /// Reserve `bytes` for a file being decoded; returns everything reserved
+    /// now, these bytes included.
+    fn reserve_data_bytes(&self, bytes: u64) -> u64 {
+        let before = self
+            .reserved_data_bytes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |r| {
+                Some(r.saturating_add(bytes))
+            })
+            .unwrap_or(0);
+        before.saturating_add(bytes)
+    }
+
+    /// Release `bytes` of a reservation.
+    fn release_data_bytes(&self, bytes: u64) {
+        let _ = self
+            .reserved_data_bytes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |r| {
+                Some(r.saturating_sub(bytes))
+            });
+    }
+}
+
+/// The handler error code of a dataset-quota refusal made before a dataset
+/// was built ([`admit_dataset`]); the governor answers it as
+/// `quota_exceeded`, as it does a quota refusal after the call.
+pub const DATASET_QUOTA_EXCEEDED: rmcp::model::ErrorCode = rmcp::model::ErrorCode(-32001);
+
+/// A handler's quota refusal: `message` with [`DATASET_QUOTA_EXCEEDED`].
+pub fn quota_refusal(message: String) -> rmcp::ErrorData {
+    rmcp::ErrorData::new(DATASET_QUOTA_EXCEEDED, message, None)
+}
+
+/// The dataset quotas of the governed tool call running on this thread, for
+/// checks made before a dataset is built ([`admit_dataset`]). The quotas
+/// themselves are checked after the call, on what it built; a file whose
+/// decoded size alone passes them would allocate all of it first.
+#[derive(Debug)]
+pub struct DatasetAdmission {
+    per_session: Option<u64>,
+    total: Option<u64>,
+    session: Arc<Session>,
+    sessions: Arc<SessionManager>,
+    /// What this call has reserved.
+    reserved: AtomicU64,
+}
+
+thread_local! {
+    static ADMISSION: RefCell<Option<Arc<DatasetAdmission>>> = const { RefCell::new(None) };
+}
+
+impl DatasetAdmission {
+    /// Install the quotas of a call of `session` on this thread until the
+    /// returned guard is dropped (after the call's own quota check).
+    pub fn install(
+        per_session: Option<u64>,
+        total: Option<u64>,
+        session: Arc<Session>,
+        sessions: Arc<SessionManager>,
+    ) -> AdmissionGuard {
+        let admission = Arc::new(Self {
+            per_session,
+            total,
+            session,
+            sessions,
+            reserved: AtomicU64::new(0),
+        });
+        let previous = ADMISSION.with(|a| a.replace(Some(Arc::clone(&admission))));
+        AdmissionGuard {
+            admission,
+            previous,
+        }
+    }
+}
+
+/// Keeps a call's [`DatasetAdmission`] installed; dropping it uninstalls it
+/// and releases what the call reserved.
+#[derive(Debug)]
+pub struct AdmissionGuard {
+    admission: Arc<DatasetAdmission>,
+    previous: Option<Arc<DatasetAdmission>>,
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ADMISSION.with(|a| *a.borrow_mut() = previous);
+        let reserved = self.admission.reserved.swap(0, Ordering::SeqCst);
+        self.admission.sessions.release_data_bytes(reserved);
+    }
+}
+
+/// Whether a governed call's dataset quotas are installed on this thread.
+pub fn dataset_admission_active() -> bool {
+    ADMISSION.with(|a| a.borrow().is_some())
+}
+
+/// Admit a dataset that will be stored as `name` and charged at least
+/// `at_least` bytes (for a file, what decoding it must allocate), before it
+/// is built. It is refused when the session's datasets, with it in place of
+/// any dataset of that name, would pass the session quota, or when the
+/// server's datasets and the files other calls are decoding would pass the
+/// total. An admitted dataset is reserved against the total until the call
+/// ends, so files decoding at once in different sessions cannot together
+/// pass it. Without installed quotas (stdio, limits off) it admits
+/// everything.
+pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
+    let Some(admission) = ADMISSION.with(|a| a.borrow().clone()) else {
+        return Ok(());
+    };
+    let added = at_least.saturating_add(name_bytes(name.len()));
+    let held = {
+        let datasets = admission.session.datasets.read().await;
+        datasets_bytes_of(
+            datasets
+                .iter()
+                .filter(|(held, _)| held.as_str() != name)
+                .map(|(held, d)| (held.as_str(), d)),
+        )
+    };
+    let after = held.saturating_add(added);
+    if let Some(limit) = admission.per_session
+        && after > limit
+    {
+        return Err(format!(
+            "This file takes at least {} in memory once loaded, so this session's datasets \
+             would use {} (limit {} per session). Nothing was loaded; load a smaller file or \
+             start a new session.",
+            fmt_bytes(added),
+            fmt_bytes(after),
+            fmt_bytes(limit)
+        ));
+    }
+    let sessions = &admission.sessions;
+    // Reserve first, so two files decoding at once see each other.
+    let reserved = sessions.reserve_data_bytes(added);
+    if let Some(limit) = admission.total {
+        // Read without holding a dataset lock (the total takes the registry's).
+        let others = sessions
+            .total_data_bytes()
+            .await
+            .saturating_sub(admission.session.data_bytes());
+        let total = others
+            .saturating_add(after)
+            .saturating_add(reserved.saturating_sub(added));
+        if total > limit {
+            sessions.release_data_bytes(added);
+            return Err(format!(
+                "This file takes at least {} in memory once loaded, and the server's dataset \
+                 memory would reach {} (limit {}). Nothing was loaded; try again later or load \
+                 a smaller file.",
+                fmt_bytes(added),
+                fmt_bytes(total),
+                fmt_bytes(limit)
+            ));
+        }
+    }
+    admission.reserved.fetch_add(added, Ordering::SeqCst);
+    Ok(())
 }
 
 /// Session management errors.
@@ -1402,6 +1569,63 @@ mod tests {
         sa.refresh_data_bytes().await;
         let none = m.total_data_bytes().await;
         assert!(none < 16 * 1024, "none {none}");
+    }
+
+    #[tokio::test]
+    async fn admission_charges_a_dataset_in_place_of_its_name() {
+        let m = Arc::new(SessionManager::new(cfg(10, None)));
+        let s = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let df =
+            df! {"x" => (0..100_000).map(|i| i as f64 * 0.5 + 0.1).collect::<Vec<_>>()}.unwrap();
+        s.datasets
+            .write()
+            .await
+            .insert("x".into(), Dataset::new(df));
+        let held = s.refresh_data_bytes().await;
+        let limit = held + held / 2;
+        let _admission = DatasetAdmission::install(Some(limit), None, s.clone(), m.clone());
+        // Loading "x" again replaces it; a second dataset of that size does not fit.
+        assert!(admit_dataset("x", held).await.is_ok());
+        let refusal = admit_dataset("y", held).await.unwrap_err();
+        assert!(refusal.contains("per session"), "{refusal}");
+    }
+
+    #[tokio::test]
+    async fn admissions_reserve_against_the_total_until_their_call_ends() {
+        // Two sessions decoding at once: what one reserved counts against
+        // the other's admission until the first call ends.
+        let m = Arc::new(SessionManager::new(cfg(10, None)));
+        let a = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let b = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let total = Some(10 << 20);
+        let six = 6 << 20;
+        let first = DatasetAdmission::install(None, total, a.clone(), m.clone());
+        admit_dataset("d", six).await.unwrap();
+        assert!(m.reserved_data_bytes() >= six);
+        {
+            let _second = DatasetAdmission::install(None, total, b.clone(), m.clone());
+            let refusal = admit_dataset("d", six).await.unwrap_err();
+            assert!(refusal.contains("server's dataset memory"), "{refusal}");
+        }
+        drop(first);
+        assert_eq!(m.reserved_data_bytes(), 0);
+        let _second = DatasetAdmission::install(None, total, b, m.clone());
+        assert!(admit_dataset("d", six).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn without_installed_quotas_everything_is_admitted() {
+        assert!(!dataset_admission_active());
+        assert!(admit_dataset("d", u64::MAX).await.is_ok());
     }
 
     /// Drive `f` on this thread without a Tokio runtime. Uncontended tokio

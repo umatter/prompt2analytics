@@ -1,5 +1,6 @@
 //! The governor's dataset quotas against what datasets really cost (PR-03):
-//! wide frames, many small frames and categorical labels.
+//! wide frames, many small frames, categorical labels, and parquet files
+//! whose decoded size the footer gives away before anything is decoded.
 //!
 //! Servers are built in-process and driven with `tower::ServiceExt::oneshot`.
 #![cfg(feature = "http")]
@@ -204,12 +205,103 @@ fn write_parquet(df: &mut DataFrame, path: &Path) {
     ParquetWriter::new(file).finish(df).unwrap();
 }
 
+/// A parquet file of `rows` copies of one float: a few kilobytes on disk,
+/// 8 bytes a row once decoded.
+fn constant_parquet(path: &Path, rows: usize) {
+    let mut df = DataFrame::new(vec![Series::new("x".into(), vec![1.5f64; rows]).into()]).unwrap();
+    write_parquet(&mut df, path);
+}
+
 /// A folder inside the data root for one test, removed when it drops.
 fn data_dir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(".p2a-pr03-")
         .tempdir_in(allowed_data_root().unwrap())
         .unwrap()
+}
+
+/// `body`'s refusal text.
+fn error_text(body: &Value) -> &str {
+    body["error"].as_str().unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_parquet_upload_past_the_quota_is_refused_before_it_is_decoded() {
+    // 4,000,000 rows of one float: a small file, 32 MB once decoded. Pre-fix
+    // the upload was decoded in full and only then undone by the quota
+    // ("The change was undone"), so a larger file of the same kind could
+    // exhaust the server's memory before the quota saw it.
+    let dir = data_dir();
+    let path = dir.path().join("bomb.parquet");
+    constant_parquet(&path, 4_000_000);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.len() < 512 * 1024, "{} bytes", bytes.len());
+
+    let (app, _) = app_with_quota(8 * MIB).await;
+    let sid = new_session(&app).await;
+    let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let (status, body) = call(
+        &app,
+        &sid,
+        "upload_dataset",
+        json!({"content": content, "filename": "bomb.parquet"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], json!("quota_exceeded"), "{body}");
+    assert!(error_text(&body).contains("Nothing was loaded"), "{body}");
+    let (_, listed) = call(&app, &sid, "list_datasets", json!({})).await;
+    assert!(!listed.to_string().contains("bomb"), "{listed}");
+}
+
+#[tokio::test]
+async fn a_parquet_load_past_the_quota_is_refused_before_it_is_decoded() {
+    let dir = data_dir();
+    let path = dir.path().join("bomb.parquet");
+    constant_parquet(&path, 4_000_000);
+
+    let (app, _) = app_with_quota(8 * MIB).await;
+    let sid = new_session(&app).await;
+    let (status, body) = call(
+        &app,
+        &sid,
+        "load_dataset",
+        json!({"path": path.to_string_lossy(), "name": "bomb"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], json!("quota_exceeded"), "{body}");
+    assert!(error_text(&body).contains("Nothing was loaded"), "{body}");
+}
+
+#[tokio::test]
+async fn parquet_files_inside_the_quota_load_and_replace_by_name() {
+    // 300,000 noisy rows: 2.4 MB decoded. Two fit a 6 MiB quota, a third
+    // does not, and loading one again under a name already held replaces it.
+    let dir = data_dir();
+    let path = dir.path().join("fits.parquet");
+    let values: Vec<f64> = (0..300_000).map(|i| (i % 97) as f64 * 0.37 + 0.1).collect();
+    let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
+    write_parquet(&mut df, &path);
+
+    let (app, _) = app_with_quota(6 * MIB).await;
+    let sid = new_session(&app).await;
+    let load = |name: &'static str| {
+        call(
+            &app,
+            &sid,
+            "load_dataset",
+            json!({"path": path.to_string_lossy(), "name": name}),
+        )
+    };
+    for name in ["a", "b", "a", "b"] {
+        let (status, body) = load(name).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        assert_eq!(body["data"]["success"], json!(true), "{name}: {body}");
+    }
+    let (status, body) = load("c").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], json!("quota_exceeded"), "{body}");
 }
 
 /// A parquet file whose column `k` is a dictionary of `labels` distinct
