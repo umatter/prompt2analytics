@@ -2337,12 +2337,13 @@ mod tests {
     use crate::spatial::test_fixtures::{band2, knn3};
     use ndarray::array;
 
+    /// (weights, rho, direct, indirect, total) for beta = c(1, 2, -0.5).
+    type ImpactCase = (SpatialWeights, f64, [f64; 2], [f64; 2], [f64; 2]);
+
     // R 4.3.3 (fixture): S <- solve(diag(n) - rho * W); direct <- beta[-1]*mean(diag(S)); total <- beta[-1]*sum(S)/n
     // W: knn3 or band2 (0, 2] weights, styles "W" (row-standardised) and "B" (binary); beta = c(1, 2, -0.5)
-    #[test]
-    fn sar_impacts_match_r_solve_reference() {
-        #[allow(clippy::type_complexity)]
-        let cases: [(SpatialWeights, f64, [f64; 2], [f64; 2], [f64; 2]); 7] = [
+    fn r_solve_impact_cases() -> [ImpactCase; 7] {
+        [
             // (weights, rho, direct, indirect, total)                       path exercised
             // constant row sums
             (
@@ -2398,8 +2399,25 @@ mod tests {
                 [-1.990823153699782, 0.4977057884249455],
                 [1.0628385628958088, -0.2657096407239522],
             ),
-        ];
-        for (mut w, rho, d, i, t) in cases {
+        ]
+    }
+
+    /// Asserts that `imp` holds the case's direct, indirect and total effects within 1e-9.
+    fn assert_impacts(imp: &SpatialImpacts, rho: f64, d: [f64; 2], i: [f64; 2], t: [f64; 2]) {
+        for j in 0..2 {
+            assert!(
+                (imp.direct[j] - d[j]).abs() < 1e-9
+                    && (imp.indirect[j] - i[j]).abs() < 1e-9
+                    && (imp.total[j] - t[j]).abs() < 1e-9,
+                "rho={rho} j={j}: {imp:?}"
+            );
+        }
+        assert!(imp.warnings.is_empty(), "rho={rho}: {:?}", imp.warnings);
+    }
+
+    #[test]
+    fn sar_impacts_match_r_solve_reference() {
+        for (mut w, rho, d, i, t) in r_solve_impact_cases() {
             let imp = compute_impacts(
                 &array![1.0, 2.0, -0.5],
                 rho,
@@ -2407,15 +2425,28 @@ mod tests {
                 &["a".into(), "b".into()],
             )
             .unwrap();
+            assert_impacts(&imp, rho, d, i, t);
+        }
+    }
+
+    #[test]
+    fn dense_impacts_fallback_matches_the_trace_route() {
+        // compute_impacts reaches the dense inverse only when the eigen decomposition or the
+        // solve fails, which no fixture provokes, so the fallback is called directly.
+        let beta = array![1.0, 2.0, -0.5];
+        let names: [String; 2] = ["a".into(), "b".into()];
+        for (mut w, rho, d, i, t) in r_solve_impact_cases() {
+            let dense = compute_impacts_dense(&beta, rho, &w, &names).unwrap();
+            assert_impacts(&dense, rho, d, i, t);
+            let traced = compute_impacts(&beta, rho, &mut w, &names).unwrap();
             for j in 0..2 {
                 assert!(
-                    (imp.direct[j] - d[j]).abs() < 1e-9
-                        && (imp.indirect[j] - i[j]).abs() < 1e-9
-                        && (imp.total[j] - t[j]).abs() < 1e-9,
-                    "rho={rho} j={j}: {imp:?}"
+                    (dense.direct[j] - traced.direct[j]).abs() < 1e-9
+                        && (dense.indirect[j] - traced.indirect[j]).abs() < 1e-9
+                        && (dense.total[j] - traced.total[j]).abs() < 1e-9,
+                    "rho={rho} j={j}: {dense:?} vs {traced:?}"
                 );
             }
-            assert!(imp.warnings.is_empty());
         }
     }
 
