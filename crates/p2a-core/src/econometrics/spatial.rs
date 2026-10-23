@@ -47,7 +47,8 @@ use crate::linalg::matrix_ops::{matrix_inverse, pseudoinverse, xtx, xty};
 use crate::spatial::SpatialWeights;
 
 /// Refuses an optimiser tolerance that is not finite and positive, and `max_iter == 0`.
-fn validate_optimizer(tol: f64, max_iter: usize) -> EconResult<()> {
+/// Shared by the cross-section estimators here and the spatial panel ones in `splm`.
+pub(crate) fn validate_optimizer(tol: f64, max_iter: usize) -> EconResult<()> {
     if !(tol.is_finite() && tol > 0.0) {
         return Err(EconError::InvalidSpecification {
             message: format!("tol must be a finite positive number, got {tol}"),

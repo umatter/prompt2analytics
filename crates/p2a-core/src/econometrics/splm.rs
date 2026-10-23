@@ -41,6 +41,7 @@ use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::HashMap;
 use std::fmt;
 
+use super::spatial::validate_optimizer;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, xtx, xty};
@@ -751,21 +752,6 @@ pub fn run_spgm(
 // ============================================================================
 // Internal Helper Functions
 // ============================================================================
-
-/// Reject optimiser settings that make the line searches meaningless.
-fn validate_optimizer(tol: f64, max_iter: usize) -> EconResult<()> {
-    if !(tol.is_finite() && tol > 0.0) {
-        return Err(EconError::InvalidSpecification {
-            message: format!("tol must be a finite positive number, got {tol}"),
-        });
-    }
-    if max_iter == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "max_iter must be at least 1".to_string(),
-        });
-    }
-    Ok(())
-}
 
 /// Extract and organize panel data from dataset.
 fn extract_panel_data(
