@@ -700,7 +700,6 @@ impl ContextManager {
             };
         }
 
-        let lines: Vec<String> = turns.iter().map(|t| summarize_messages(t)).collect();
         let mut suffix_bytes = vec![0usize; n + 1];
         let mut suffix_tokens = vec![0usize; n + 1];
         for i in (0..n).rev() {
@@ -713,17 +712,23 @@ impl ContextManager {
         let available = self.budget.available_for_history();
         let header_chars = SUMMARY_HEADER.chars().count();
         let ack_tokens = 4 + estimate_tokens_for_chars(SUMMARY_ACK.chars().count());
-        // Running size of the summary text of the first k turns.
-        let (mut text_bytes, mut text_chars, mut nonempty) = (0usize, 0usize, 0usize);
+        // The non-empty summary lines of the first k turns, built only as k
+        // grows (none when the history fits as it is), and their running
+        // size.
+        let mut lines: Vec<String> = Vec::new();
+        let (mut text_bytes, mut text_chars) = (0usize, 0usize);
         let mut chosen = None;
         for k in 0..n {
-            if k > 0 && !lines[k - 1].is_empty() {
-                let sep = usize::from(nonempty > 0);
-                text_bytes += sep + lines[k - 1].len();
-                text_chars += sep + lines[k - 1].chars().count();
-                nonempty += 1;
+            if k > 0 {
+                let line = summarize_messages(&turns[k - 1]);
+                if !line.is_empty() {
+                    let sep = usize::from(!lines.is_empty());
+                    text_bytes += sep + line.len();
+                    text_chars += sep + line.chars().count();
+                    lines.push(line);
+                }
             }
-            let (summary_bytes, summary_tokens) = if nonempty == 0 {
+            let (summary_bytes, summary_tokens) = if lines.is_empty() {
                 (0, 0)
             } else {
                 (
@@ -762,12 +767,8 @@ impl ContextManager {
             };
         };
 
-        let summary_text = lines[..k]
-            .iter()
-            .filter(|l| !l.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
+        // The loop stopped at k, so `lines` holds exactly the first k turns'.
+        let summary_text = lines.join("\n");
         let mut final_messages = Vec::new();
         if !summary_text.is_empty() {
             final_messages.push(Message::user(format!("{SUMMARY_HEADER}{summary_text}")));
@@ -1116,6 +1117,13 @@ mod tests {
             })
             .collect();
         let last = h.last().unwrap().content.clone();
+        // The summary: the non-empty lines of the six oldest turns.
+        let expected = split_turns(h.clone())[..6]
+            .iter()
+            .map(|t| summarize_messages(t))
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut cm = ContextManager::new(ContextConfig {
             history_byte_cap: Some(10_200),
             token_budget: false,
@@ -1123,6 +1131,7 @@ mod tests {
         });
         let out = cm.process_history(h, "sys");
         assert_eq!(out.turns_summarized, 6);
+        assert_eq!(out.summary.as_deref(), Some(expected.as_str()));
         assert!(
             out.messages[0]
                 .content
