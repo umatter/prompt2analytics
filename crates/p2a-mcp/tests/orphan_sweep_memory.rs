@@ -145,9 +145,16 @@ async fn insert_orphan_tool_call(db: &DbConnection, conversation_id: &str) {
 
 /// The full sweep reads neither the messages and tool calls of conversations
 /// that exist nor the settings of sessions that exist: it allocates less
-/// than half of their bytes, where reading each of them once would allocate
-/// all of them. It still finds the orphans before, between, after and next
-/// to the conversations that exist.
+/// than a quarter of their bytes (it allocates about 13 percent of them).
+/// The bound guards each of three tables on its own: the 32 MiB of
+/// messages, the 8 MiB of tool-call arguments and the 8 MiB of settings
+/// strings. A grouped scan allocates about 2.1 times the bytes it reads, so
+/// reading only the live tool calls, or only the live settings, takes the
+/// sweep to about twice the bound. Dataset metadata (none is stored here)
+/// and the conversation rows (read for their ids; see
+/// `full_orphan_sweep_holds_one_sessions_conversation_rows_at_a_time`) are
+/// not guarded by it. The sweep still finds the orphans before, between,
+/// after and next to the conversations that exist.
 #[tokio::test]
 async fn full_orphan_sweep_does_not_read_the_rows_of_live_owners() {
     let _turn = TURN.lock().await;
@@ -211,7 +218,7 @@ async fn full_orphan_sweep_does_not_read_the_rows_of_live_owners() {
     let sweep = measure(db.delete_orphans()).await;
     assert_eq!(sweep.out.unwrap(), 2 * orphan_owners.len());
     assert!(
-        sweep.allocated < (stored / 2) as u64,
+        sweep.allocated < (stored / 4) as u64,
         "the sweep allocated {} bytes with {stored} bytes stored for live owners",
         sweep.allocated
     );
