@@ -18,7 +18,7 @@ use crate::forecasting::kalman::{
     StateSpaceModel, admit_filter_and_smoother_history, kalman_filter, kalman_loglik,
     kalman_smoother,
 };
-use crate::resource::{checkpoint, with_remedy};
+use crate::resource::{checkpoint, try_zeros2, with_remedy};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +45,8 @@ pub enum StructTsType {
 pub struct StructTsConfig {
     /// Model type.
     pub model_type: StructTsType,
-    /// Seasonal period (only used for BSM).
+    /// Seasonal period, only used for BSM (12 when unset): at least 2, and at
+    /// most half the series, since StructTS needs two full seasons.
     pub period: Option<usize>,
     /// Fixed variance parameters (None means estimate).
     /// Order: [level, slope, seasonal, observation]
@@ -132,7 +133,16 @@ pub struct StructTsCoefficients {
 /// admitted as one figure before the optimiser starts, about 24·n·m² bytes
 /// (n·(24m² + 144m + 256) once m ≥ 2, 472 bytes per observation at m = 1):
 /// [`EconError::ResourceLimit`] when it exceeds the per-allocation ceiling,
-/// naming `period` for BSM.
+/// naming `period` for BSM. The BSM's transition matrix and initial state
+/// covariance (m × m) are allocated fallibly: a [`EconError::ResourceLimit`]
+/// naming `period` when they cannot be.
+///
+/// A BSM `period` (12 when unset) must be at least 2, as in R ("frequency
+/// must be a positive integer >= 2 for BSM"), and the series must hold two
+/// full seasons, 2 · period observations:
+/// [`EconError::InvalidSpecification`] for a period below 2 or one whose two
+/// seasons overflow, [`EconError::InsufficientData`] for a series shorter
+/// than two seasons. The level and trend models ignore `period`.
 pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult> {
     let n = y.len();
 
@@ -144,20 +154,10 @@ pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult
         });
     }
 
-    // Validate BSM configuration
+    // Validate BSM configuration: 2 <= period <= n / 2, before anything is
+    // sized by it.
     if config.model_type == StructTsType::BSM {
-        let period = config.period.unwrap_or(12);
-        if n < 2 * period {
-            return Err(EconError::InsufficientData {
-                required: 2 * period,
-                provided: n,
-                context: format!(
-                    "BSM with period {} requires at least {} observations",
-                    period,
-                    2 * period
-                ),
-            });
-        }
+        check_bsm_period(bsm_period(&config), n)?;
     }
 
     // The final pass holds the filter's and the smoother's histories at once.
@@ -179,7 +179,7 @@ pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult
     // Build final model and get smoothed states
     let model = build_model(&config, &opt_params)?;
     let init_state = initialize_state(&config, y);
-    let init_cov = initialize_covariance(&config, y_var);
+    let init_cov = initialize_covariance(&config, y_var)?;
 
     let filter_result = kalman_filter(y, &model, init_state.view(), init_cov.view())?;
     let smooth_result = kalman_smoother(&filter_result, &model)?;
@@ -270,16 +270,60 @@ pub fn run_struct_ts(
 
 // Helper functions
 
+/// The BSM seasonal period when [`StructTsConfig::period`] is unset.
+const DEFAULT_BSM_PERIOD: usize = 12;
+
+/// The BSM seasonal period of `config`: its `period`, or
+/// [`DEFAULT_BSM_PERIOD`] when unset. The one place the default is applied,
+/// so that the validation, the state dimension and the remedies agree.
+fn bsm_period(config: &StructTsConfig) -> usize {
+    config.period.unwrap_or(DEFAULT_BSM_PERIOD)
+}
+
+/// `Ok` when a BSM with seasonal `period` can be fitted to `n` observations:
+/// a cycle of at least two seasons, and two full cycles in the series. The
+/// product 2 · period is checked, so a huge period is refused rather than
+/// overflowing (a panic in a debug build, a wrap that passes in release).
+fn check_bsm_period(period: usize, n: usize) -> EconResult<()> {
+    if period < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "BSM period must be at least 2, got {period}: a seasonal cycle has at least \
+                 two seasons; use the trend model for a series without seasonality"
+            ),
+        });
+    }
+    match period.checked_mul(2) {
+        Some(required) if n >= required => Ok(()),
+        Some(required) => Err(EconError::InsufficientData {
+            required,
+            provided: n,
+            context: format!(
+                "BSM with period {period} requires at least {required} observations; with {n} \
+                 observations period must be at most {}",
+                n / 2
+            ),
+        }),
+        None => Err(EconError::InvalidSpecification {
+            message: format!(
+                "BSM period {period} is too large: StructTS needs two full seasons, \
+                 2 · period observations, so with {n} observations period must be at most {}",
+                n / 2
+            ),
+        }),
+    }
+}
+
 /// The state dimension of the model for `config`, the one figure that
 /// [`build_model`], [`initialize_state`], [`initialize_covariance`] and the
-/// history admission in [`struct_ts`] all use. Saturating, so that the
-/// admission, which runs first, cannot panic on a huge `period`.
+/// history admission in [`struct_ts`] all use. [`struct_ts`] checks the BSM
+/// period first; saturating all the same, so that no use can panic on it.
 fn state_dim(config: &StructTsConfig) -> usize {
     match config.model_type {
         StructTsType::Level => 1,
         StructTsType::Trend => 2,
         // level + slope + (period - 1) seasonal states
-        StructTsType::BSM => config.period.unwrap_or(12).saturating_add(1),
+        StructTsType::BSM => bsm_period(config).saturating_add(1),
     }
 }
 
@@ -288,12 +332,35 @@ fn state_dim(config: &StructTsConfig) -> usize {
 fn history_remedy(config: &StructTsConfig, m: usize) -> String {
     match config.model_type {
         StructTsType::BSM => format!(
-            "with period {} the state dimension is period + 1 = {m}; use a smaller \
-             period or a shorter series",
-            config.period.unwrap_or(12)
+            "{}; use a smaller period or a shorter series",
+            bsm_dim_note(config, m)
         ),
         StructTsType::Level | StructTsType::Trend => "use a shorter series".to_string(),
     }
+}
+
+/// How `config`'s BSM `period` sets the state dimension `m`, for a remedy.
+/// The one wording [`history_remedy`] and [`bsm_square`] share, with the
+/// period read through [`bsm_period`], so the two remedies cannot drift apart.
+fn bsm_dim_note(config: &StructTsConfig, m: usize) -> String {
+    format!(
+        "with period {} the state dimension is period + 1 = {m}",
+        bsm_period(config)
+    )
+}
+
+/// An m × m zero matrix of the BSM, `what` it is, allocated fallibly: a
+/// [`EconError::ResourceLimit`] that names `period` and `m` when its size
+/// overflows, exceeds the per-allocation ceiling or cannot be allocated.
+/// `what` is static and the remedy is formatted only on a refusal, so the
+/// likelihood passes of the search allocate no text.
+fn bsm_square(config: &StructTsConfig, m: usize, what: &'static str) -> EconResult<Array2<f64>> {
+    try_zeros2(m, m, what).map_err(|e| {
+        with_remedy(
+            e,
+            &format!("{}; use a smaller period", bsm_dim_note(config, m)),
+        )
+    })
 }
 
 fn sample_variance(y: &[f64]) -> f64 {
@@ -342,8 +409,9 @@ fn optimize_params(
     // Objective function: negative log-likelihood with log-transformed params.
     // A parameter vector the model cannot use scores 1e20. A stopped budget
     // stops the fit instead of scoring the vertex, and so would a
-    // ResourceLimit, which the likelihood pass does not raise: it keeps no
-    // Kalman history (struct_ts admits the final pass's before the search).
+    // ResourceLimit, which the likelihood pass raises only when its m × m
+    // transition or initial covariance cannot be allocated (it keeps no
+    // Kalman history; struct_ts admits the final pass's before the search).
     let objective = |log_params: &[f64]| -> EconResult<f64> {
         let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
         match compute_loglik(y, config, &params) {
@@ -494,7 +562,7 @@ fn compute_loglik(y: &[f64], config: &StructTsConfig, params: &[f64]) -> EconRes
     let model = build_model(config, params)?;
     let y_var = sample_variance(y);
     let init_state = initialize_state(config, y);
-    let init_cov = initialize_covariance(config, y_var);
+    let init_cov = initialize_covariance(config, y_var)?;
 
     kalman_loglik(y, &model, init_state.view(), init_cov.view())
 }
@@ -529,7 +597,7 @@ fn build_model(config: &StructTsConfig, params: &[f64]) -> EconResult<StateSpace
             let m = state_dim(config); // level + slope + (period-1) seasonal states
 
             // Transition matrix
-            let mut transition = Array2::zeros((m, m));
+            let mut transition = bsm_square(config, m, "the BSM transition matrix")?;
             // Level: μ_{t+1} = μ_t + ν_t
             transition[[0, 0]] = 1.0;
             transition[[0, 1]] = 1.0;
@@ -596,9 +664,15 @@ fn initialize_state(config: &StructTsConfig, y: &[f64]) -> Array1<f64> {
     }
 }
 
-fn initialize_covariance(config: &StructTsConfig, y_var: f64) -> Array2<f64> {
+fn initialize_covariance(config: &StructTsConfig, y_var: f64) -> EconResult<Array2<f64>> {
     // Use diffuse initialization (large variance)
-    Array2::from_diag(&Array1::from_elem(state_dim(config), y_var * 10.0))
+    let m = state_dim(config);
+    let mut cov = match config.model_type {
+        StructTsType::BSM => bsm_square(config, m, "the BSM initial state covariance")?,
+        StructTsType::Level | StructTsType::Trend => Array2::zeros((m, m)),
+    };
+    cov.diag_mut().fill(y_var * 10.0);
+    Ok(cov)
 }
 
 fn extract_components(
@@ -1144,8 +1218,157 @@ mod tests {
             assert_eq!(state_dim(&config), m, "{model_type:?} {period:?}");
             assert_eq!(build_model(&config, &params).unwrap().state_dim(), m);
             assert_eq!(initialize_state(&config, &y).len(), m);
-            assert_eq!(initialize_covariance(&config, y_var).dim(), (m, m));
+            assert_eq!(initialize_covariance(&config, y_var).unwrap().dim(), (m, m));
         }
+    }
+
+    fn bsm(period: usize) -> StructTsConfig {
+        StructTsConfig {
+            model_type: StructTsType::BSM,
+            period: Some(period),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn struct_ts_refuses_a_bsm_period_below_two() {
+        // A seasonal cycle has at least two seasons, as R's StructTS requires
+        // ("frequency must be a positive integer >= 2 for BSM"). Period 0
+        // and 1 passed the n >= 2 · period check, and build_model then
+        // indexed past its matrices: [0, 1] of a 1 × 1 transition for period
+        // 0, observation[2] of a 2-vector for period 1. Before the fix both
+        // panicked.
+        let y = seasonal_series(48, 12, 29);
+        for period in [0, 1] {
+            match struct_ts(&y, bsm(period)) {
+                Err(EconError::InvalidSpecification { message }) => assert!(
+                    message.starts_with(&format!("BSM period must be at least 2, got {period}")),
+                    "{message}"
+                ),
+                other => panic!("expected InvalidSpecification for period {period}, got {other:?}"),
+            }
+        }
+        // Period 2 is a model.
+        assert_eq!(struct_ts(&y, bsm(2)).unwrap().n_obs, 48);
+        // The level and trend models have no seasonal component and ignore
+        // period, so period 0 is not refused there.
+        for model_type in [StructTsType::Level, StructTsType::Trend] {
+            let config = StructTsConfig {
+                model_type,
+                period: Some(0),
+                ..Default::default()
+            };
+            assert_eq!(struct_ts(&y, config).unwrap().n_obs, 48, "{model_type:?}");
+        }
+    }
+
+    #[test]
+    fn struct_ts_refuses_a_bsm_period_whose_two_seasons_overflow() {
+        // StructTS needs two full seasons, 2 · period observations. That
+        // product was unchecked: for period > usize::MAX / 2 it panicked in a
+        // debug build, and in a release build it wrapped to a small number
+        // that a short series passes. Before the fix this panicked.
+        let y = seasonal_series(48, 12, 31);
+        let period = usize::MAX / 2 + 1;
+        match struct_ts(&y, bsm(period)) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.starts_with(&format!("BSM period {period} is too large"))
+                    && message.ends_with("with 48 observations period must be at most 24"),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        // A period that needs more than the series holds is refused as before,
+        // and the refusal now names the bound on period, as the overflow's
+        // does. Before the fix the context stopped at the observations.
+        match struct_ts(&y, bsm(25)) {
+            Err(EconError::InsufficientData {
+                required,
+                provided,
+                context,
+            }) => {
+                assert_eq!((required, provided), (50, 48));
+                assert_eq!(
+                    context,
+                    "BSM with period 25 requires at least 50 observations; with 48 \
+                     observations period must be at most 24"
+                );
+            }
+            other => panic!("expected InsufficientData, got {other:?}"),
+        }
+        // The largest period whose two seasons fit in usize takes the same
+        // InsufficientData refusal, not the overflow's.
+        match struct_ts(&y, bsm(usize::MAX / 2)) {
+            Err(EconError::InsufficientData { context, .. }) => assert!(
+                context.ends_with("; with 48 observations period must be at most 24"),
+                "{context}"
+            ),
+            other => panic!("expected InsufficientData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bsm_model_matrices_are_allocated_fallibly() {
+        // build_model allocated the m × m transition with Array2::zeros, and
+        // initialize_covariance the m × m prior with from_diag (m = period +
+        // 1). Both are infallible: a matrix the allocator cannot provide
+        // aborted the process, and one whose size overflows panicked. With
+        // no ceiling (CLI, library) period <= n / 2 still lets a long series
+        // ask for an m × m beyond memory. Both are now a ResourceLimit that
+        // names period. Before the fix the refusal below returned Ok and the
+        // overflow panicked.
+        let y_var = 4.0;
+        let (params, _) = initialize_params(&bsm(12), y_var);
+        let remedy =
+            "; with period 12 the state dimension is period + 1 = 13; use a smaller period";
+        // 8 · 13² = 1,352 bytes > 1 KiB.
+        let ceiling = Some(1 << 10);
+        match crate::resource::with_alloc_ceiling(ceiling, || build_model(&bsm(12), &params)) {
+            Err(EconError::ResourceLimit(msg)) => assert!(
+                msg.starts_with("the BSM transition matrix would need")
+                    && msg.ends_with(remedy)
+                    && msg.matches("; use ").count() == 1,
+                "{msg}"
+            ),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        match crate::resource::with_alloc_ceiling(ceiling, || {
+            initialize_covariance(&bsm(12), y_var)
+        }) {
+            Err(EconError::ResourceLimit(msg)) => assert!(
+                msg.starts_with("the BSM initial state covariance would need")
+                    && msg.ends_with(remedy),
+                "{msg}"
+            ),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        // An unset period is the default 12 in the remedy too.
+        let default_period = StructTsConfig {
+            model_type: StructTsType::BSM,
+            ..Default::default()
+        };
+        match crate::resource::with_alloc_ceiling(ceiling, || {
+            initialize_covariance(&default_period, y_var)
+        }) {
+            Err(EconError::ResourceLimit(msg)) => assert!(msg.ends_with(remedy), "{msg}"),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        // An m × m whose size overflows is refused before any allocation.
+        let huge = bsm(usize::MAX / 4);
+        assert!(matches!(
+            build_model(&huge, &params),
+            Err(EconError::ResourceLimit(msg)) if msg.contains("overflows")
+        ));
+        assert!(matches!(
+            initialize_covariance(&huge, y_var),
+            Err(EconError::ResourceLimit(msg)) if msg.contains("overflows")
+        ));
+        // Without a ceiling the prior is the diagonal it was.
+        let prior = initialize_covariance(&bsm(12), y_var).unwrap();
+        assert_eq!(
+            prior,
+            Array2::from_diag(&Array1::from_elem(13, y_var * 10.0))
+        );
     }
 
     #[test]

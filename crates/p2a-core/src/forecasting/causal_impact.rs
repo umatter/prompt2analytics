@@ -45,7 +45,7 @@ use crate::forecasting::kalman::{
     kalman_loglik,
 };
 use crate::forecasting::structts::nelder_mead_optimize;
-use crate::resource::with_remedy;
+use crate::resource::{try_zeros2, with_remedy};
 
 /// Configuration for CausalImpact analysis.
 #[derive(Debug, Clone)]
@@ -58,7 +58,9 @@ pub struct CausalImpactConfig {
     pub control_series: Option<Vec<String>>,
     /// Significance level for credible intervals (default 0.05 for 95% CI).
     pub alpha: f64,
-    /// Seasonal period (if the data has seasonality).
+    /// Seasonal period (if the data has seasonality): at least 2, and at most
+    /// the number of pre-period observations, so that the pre-period holds a
+    /// full season.
     pub seasonal_period: Option<usize>,
     /// Whether to include a trend component.
     pub include_trend: bool,
@@ -219,7 +221,12 @@ pub struct CausalImpactResult {
 /// while [`kalman_forecast`] runs over the gap and the post-period, 8m + 64
 /// bytes a step (80 at m = 1). The two are admitted as one figure before the
 /// fit: [`EconError::ResourceLimit`] when it exceeds the per-allocation
-/// ceiling, naming `seasonal_period` when there is one.
+/// ceiling, naming `seasonal_period` when there is one. The seasonal model's
+/// transition matrix and initial state covariance (m × m) are allocated
+/// fallibly: a [`EconError::ResourceLimit`] naming `seasonal_period` when
+/// they cannot be.
+/// [`EconError::InvalidSpecification`] for a `seasonal_period` below 2 or
+/// longer than the pre-period, checked before anything is sized by it.
 /// [`EconError::Cancelled`] once the budget installed with
 /// [`crate::resource::with_budget`] is cancelled or past its deadline.
 ///
@@ -365,6 +372,9 @@ pub fn causal_impact(
             context: "CausalImpact requires at least 10 pre-period observations".to_string(),
         });
     }
+    if let Some(period) = config.seasonal_period {
+        check_seasonal_period(period, n_pre)?;
+    }
 
     // Run the core algorithm
     run_causal_impact_core(
@@ -451,7 +461,7 @@ fn run_causal_impact_core(
     // For post-period, we predict the counterfactual
     let y_var = sample_variance(&y_pre);
     let init_state = initialize_state(&y_pre, config);
-    let init_cov = initialize_covariance(y_var, config);
+    let init_cov = initialize_covariance(y_var, config)?;
 
     // For prediction, we need to extend the observation series with NaN for post-period
     // and use the control series (if any) as known inputs
@@ -656,8 +666,9 @@ fn fit_bsts_model(
 
     // Optimize using Nelder-Mead. A parameter vector the model cannot use
     // scores 1e20. A stopped budget stops the fit instead of scoring the
-    // vertex, and so would a ResourceLimit, which the likelihood pass does
-    // not raise: it keeps no Kalman history (causal_impact admits the
+    // vertex, and so would a ResourceLimit, which the likelihood pass raises
+    // only when its m × m transition or initial covariance cannot be
+    // allocated (it keeps no Kalman history; causal_impact admits the
     // counterfactual's before the fit).
     let objective = |log_params: &[f64]| -> EconResult<f64> {
         let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
@@ -816,9 +827,10 @@ fn build_state_space_model(
         }
 
         // Local level with seasonality
-        (None, Some(seas_v), Some(period)) => {
-            let m = 1 + period - 1; // level + (period-1) seasonal states
-            let mut transition = Array2::zeros((m, m));
+        (None, Some(seas_v), Some(_)) => {
+            let m = compute_state_dim(config); // level + (period-1) seasonal states
+            let mut transition =
+                seasonal_square(config, m, "the seasonal model's transition matrix")?;
 
             // Level: μ_{t+1} = μ_t
             transition[[0, 0]] = 1.0;
@@ -857,10 +869,11 @@ fn build_state_space_model(
         }
 
         // Full BSM: level + trend + seasonality
-        (Some(slope_v), Some(seas_v), Some(period)) => {
-            let m = 2 + period - 1; // level + slope + (period-1) seasonal states
+        (Some(slope_v), Some(seas_v), Some(_)) => {
+            let m = compute_state_dim(config); // level + slope + (period-1) seasonal states
 
-            let mut transition = Array2::zeros((m, m));
+            let mut transition =
+                seasonal_square(config, m, "the seasonal model's transition matrix")?;
             // Level: μ_{t+1} = μ_t + ν_t
             transition[[0, 0]] = 1.0;
             transition[[0, 1]] = 1.0;
@@ -968,7 +981,7 @@ fn compute_bsts_loglik(y: &[f64], params: &[f64], config: &CausalImpactConfig) -
     let ssm = build_state_space_model(params, None, config)?;
     let y_var = sample_variance(y);
     let init_state = initialize_state(y, config);
-    let init_cov = initialize_covariance(y_var, config);
+    let init_cov = initialize_covariance(y_var, config)?;
 
     kalman_loglik(y, &ssm, init_state.view(), init_cov.view())
 }
@@ -1119,17 +1132,26 @@ fn initialize_state(y: &[f64], config: &CausalImpactConfig) -> Array1<f64> {
 }
 
 /// Initialize covariance for Kalman filter.
-fn initialize_covariance(y_var: f64, config: &CausalImpactConfig) -> Array2<f64> {
+fn initialize_covariance(y_var: f64, config: &CausalImpactConfig) -> EconResult<Array2<f64>> {
     let state_dim = compute_state_dim(config);
 
     // Diffuse initialization
-    Array2::from_diag(&Array1::from_elem(state_dim, y_var * 10.0))
+    let mut cov = match config.seasonal_period {
+        Some(_) => seasonal_square(
+            config,
+            state_dim,
+            "the seasonal model's initial state covariance",
+        )?,
+        None => Array2::zeros((state_dim, state_dim)),
+    };
+    cov.diag_mut().fill(y_var * 10.0);
+    Ok(cov)
 }
 
 /// Compute state dimension based on config.
 ///
-/// Saturating, so that the history admission, which runs before any other
-/// use of `seasonal_period`, cannot panic on it.
+/// [`causal_impact`] checks `seasonal_period` first; saturating all the same,
+/// so that no use can panic on it.
 fn compute_state_dim(config: &CausalImpactConfig) -> usize {
     let mut dim: usize = 1; // Level
 
@@ -1149,18 +1171,73 @@ fn compute_state_dim(config: &CausalImpactConfig) -> usize {
 /// with the post-period, and with a seasonal component the state dimension
 /// follows from `seasonal_period`.
 fn history_remedy(config: &CausalImpactConfig, m: usize) -> String {
-    match config.seasonal_period {
-        Some(period) if config.include_trend => format!(
-            "with seasonal_period {period} and include_trend the state dimension is \
-             seasonal_period + 1 = {m}; use a smaller seasonal_period or a shorter \
-             pre_period or post_period"
-        ),
-        Some(period) => format!(
-            "with seasonal_period {period} the state dimension is seasonal_period = {m}; \
-             use a smaller seasonal_period or a shorter pre_period or post_period"
-        ),
+    match seasonal_dim_note(config, m) {
+        Some(note) => {
+            format!("{note}; use a smaller seasonal_period or a shorter pre_period or post_period")
+        }
         None => "use a shorter pre_period or post_period".to_string(),
     }
+}
+
+/// How `config`'s `seasonal_period` sets the state dimension `m`, for a
+/// remedy, or `None` without a seasonal component. The period is read from
+/// `config`, so the note cannot describe a different one from the model that
+/// was sized.
+fn seasonal_dim_note(config: &CausalImpactConfig, m: usize) -> Option<String> {
+    config.seasonal_period.map(|period| {
+        if config.include_trend {
+            format!(
+                "with seasonal_period {period} and include_trend the state dimension is \
+                 seasonal_period + 1 = {m}"
+            )
+        } else {
+            format!("with seasonal_period {period} the state dimension is seasonal_period = {m}")
+        }
+    })
+}
+
+/// `Ok` when a seasonal component with `period` seasons can be fitted to a
+/// pre-period of `n_pre` observations: a cycle of at least two seasons, and
+/// at least one full cycle in the pre-period. This bounds the state
+/// dimension by the data before any m × m matrix is sized by it.
+fn check_seasonal_period(period: usize, n_pre: usize) -> EconResult<()> {
+    if period < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "seasonal_period must be at least 2, got {period}: a seasonal cycle has at \
+                 least two seasons; omit seasonal_period for a series without seasonality"
+            ),
+        });
+    }
+    if period > n_pre {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "seasonal_period {period} is longer than the pre-period ({n_pre} observations): \
+                 the pre-period must hold at least one full season, so seasonal_period must \
+                 be at most {n_pre}; use a smaller seasonal_period or a longer pre_period"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// An m × m zero matrix of a seasonal model, `what` it is, allocated
+/// fallibly: a [`EconError::ResourceLimit`] that names `seasonal_period` and
+/// `m` when its size overflows, exceeds the per-allocation ceiling or cannot
+/// be allocated. `what` is static and the remedy is formatted only on a
+/// refusal, so the likelihood passes of the fit allocate no text.
+fn seasonal_square(
+    config: &CausalImpactConfig,
+    m: usize,
+    what: &'static str,
+) -> EconResult<Array2<f64>> {
+    try_zeros2(m, m, what).map_err(|e| {
+        let remedy = seasonal_dim_note(config, m).map_or_else(
+            || "use a smaller seasonal_period".to_string(),
+            |note| format!("{note}; use a smaller seasonal_period"),
+        );
+        with_remedy(e, &remedy)
+    })
 }
 
 /// Count number of parameters for AIC/BIC.
@@ -1866,6 +1943,248 @@ mod tests {
         }
         // 32,000 + 300 · 80 = 56,000 bytes fit.
         assert_eq!(fit(300).unwrap().model.n_post, 300);
+    }
+
+    /// Fits CausalImpact to `n_pre` + `n_post` rows of noisy data with
+    /// `seasonal_period` and `include_trend`.
+    fn seasonal_fit(
+        n_pre: usize,
+        n_post: usize,
+        seasonal_period: usize,
+        include_trend: bool,
+        seed: u64,
+    ) -> EconResult<CausalImpactResult> {
+        let (y, time) = generate_causal_impact_data(n_pre, n_post, 2.0, seed);
+        let dataset = Dataset::new(df! { "y" => &y, "time" => &time }.unwrap());
+        let config = CausalImpactConfig {
+            seasonal_period: Some(seasonal_period),
+            include_trend,
+            ..seasonal_config(n_pre, n_post)
+        };
+        causal_impact(&dataset, "y", "time", config)
+    }
+
+    #[test]
+    fn causal_impact_refuses_a_seasonal_period_below_two() {
+        // A seasonal cycle has at least two seasons. With seasonal_period 0
+        // or 1 build_state_space_model indexed past its matrices: [0, 0] of a
+        // 0 × 0 transition and observation[1] of a 1-vector, or with a trend
+        // [0, 1] of a 1 × 1 and observation[2] of a 2-vector. Before the fix
+        // all four panicked.
+        for include_trend in [false, true] {
+            for period in [0, 1] {
+                match seasonal_fit(40, 10, period, include_trend, 37) {
+                    Err(EconError::InvalidSpecification { message }) => assert!(
+                        message.starts_with(&format!(
+                            "seasonal_period must be at least 2, got {period}"
+                        )),
+                        "{message}"
+                    ),
+                    other => panic!(
+                        "expected InvalidSpecification for seasonal_period {period}, got {:?}",
+                        other.map(|r| r.summary)
+                    ),
+                }
+            }
+            // seasonal_period 2 is a model.
+            assert_eq!(
+                seasonal_fit(40, 10, 2, include_trend, 37)
+                    .unwrap()
+                    .model
+                    .n_pre,
+                40
+            );
+        }
+    }
+
+    #[test]
+    fn causal_impact_refuses_a_seasonal_period_longer_than_the_pre_period() {
+        // seasonal_period was never checked against the pre-period: one
+        // longer than it fit a model in which no full season is observed,
+        // and with no allocation ceiling (stdio, desktop, library) a huge one
+        // passed the history admission and aborted the process in the m × m
+        // Array2::zeros of build_state_space_model. The pre-period must now
+        // hold at least one full season. Before the fix the refusal of 21
+        // returned Ok.
+        //
+        // usize::MAX pins the order: the period is checked before the
+        // history admission and before any m × m is sized by it. Before the
+        // fix compute_state_dim saturated and the admission refused it with
+        // a ResourceLimit; it must be the named InvalidSpecification.
+        let (n_pre, n_post) = (20, 5);
+        for include_trend in [false, true] {
+            for period in [21, usize::MAX] {
+                match seasonal_fit(n_pre, n_post, period, include_trend, 39) {
+                    Err(EconError::InvalidSpecification { message }) => assert!(
+                        message.starts_with(&format!(
+                            "seasonal_period {period} is longer than the pre-period \
+                             (20 observations)"
+                        )) && message.contains("seasonal_period must be at most 20"),
+                        "{message}"
+                    ),
+                    other => panic!(
+                        "expected InvalidSpecification for seasonal_period {period}, got {:?}",
+                        other.map(|r| r.summary)
+                    ),
+                }
+            }
+            // One full season in the pre-period is enough.
+            assert_eq!(
+                seasonal_fit(n_pre, n_post, n_pre, include_trend, 39)
+                    .unwrap()
+                    .model
+                    .n_pre,
+                n_pre
+            );
+        }
+    }
+
+    #[test]
+    fn bsts_model_matrices_are_allocated_fallibly() {
+        // build_state_space_model allocated the m × m transition with
+        // Array2::zeros, and initialize_covariance the m × m prior with
+        // from_diag. Both are infallible: a matrix the allocator cannot
+        // provide aborted the process, and one whose size overflows panicked.
+        // Both are now a ResourceLimit that names seasonal_period. Before the
+        // fix the refusals below returned Ok and the overflow panicked.
+        let y_var = 4.0;
+        // 8 · 12² = 1,152 bytes and 8 · 13² = 1,352 bytes > 1 KiB.
+        let ceiling = Some(1 << 10);
+        for (include_trend, m, remedy) in [
+            (
+                false,
+                12,
+                "; with seasonal_period 12 the state dimension is seasonal_period = 12; \
+                 use a smaller seasonal_period",
+            ),
+            (
+                true,
+                13,
+                "; with seasonal_period 12 and include_trend the state dimension is \
+                 seasonal_period + 1 = 13; use a smaller seasonal_period",
+            ),
+        ] {
+            let config = CausalImpactConfig {
+                include_trend,
+                ..seasonal_config(40, 10)
+            };
+            let params = initialize_variance_params(y_var, &config);
+            // The model is sized by compute_state_dim, so the remedy below is
+            // checked against the dimension the code computes.
+            assert_eq!(compute_state_dim(&config), m, "{config:?}");
+            match crate::resource::with_alloc_ceiling(ceiling, || {
+                build_state_space_model(&params, None, &config)
+            }) {
+                Err(EconError::ResourceLimit(msg)) => assert!(
+                    msg.starts_with("the seasonal model's transition matrix would need")
+                        && msg.ends_with(remedy)
+                        && msg.matches("; use ").count() == 1,
+                    "{msg}"
+                ),
+                other => panic!("expected ResourceLimit, got {other:?}"),
+            }
+            match crate::resource::with_alloc_ceiling(ceiling, || {
+                initialize_covariance(y_var, &config)
+            }) {
+                Err(EconError::ResourceLimit(msg)) => assert!(
+                    msg.starts_with("the seasonal model's initial state covariance would need")
+                        && msg.ends_with(remedy),
+                    "{msg}"
+                ),
+                other => panic!("expected ResourceLimit, got {other:?}"),
+            }
+            // An m × m whose size overflows is refused before any allocation.
+            let huge = CausalImpactConfig {
+                seasonal_period: Some(usize::MAX / 4),
+                ..config.clone()
+            };
+            assert!(matches!(
+                build_state_space_model(&params, None, &huge),
+                Err(EconError::ResourceLimit(msg)) if msg.contains("overflows")
+            ));
+            assert!(matches!(
+                initialize_covariance(y_var, &huge),
+                Err(EconError::ResourceLimit(msg)) if msg.contains("overflows")
+            ));
+            // Without a ceiling the prior is the diagonal it was.
+            assert_eq!(
+                initialize_covariance(y_var, &config).unwrap(),
+                Array2::from_diag(&Array1::from_elem(m, y_var * 10.0))
+            );
+        }
+    }
+
+    #[test]
+    fn remedies_without_a_seasonal_component_name_no_period() {
+        // seasonal_dim_note fell back to period 0 when the configuration had
+        // no seasonal component, so a refused seasonal_square read "with
+        // seasonal_period 0 the state dimension is seasonal_period = 1". The
+        // note is now absent without a period and the remedy names none.
+        for include_trend in [false, true] {
+            let config = CausalImpactConfig {
+                include_trend,
+                seasonal_period: None,
+                ..seasonal_config(40, 10)
+            };
+            let m = compute_state_dim(&config);
+            assert_eq!(seasonal_dim_note(&config, m), None, "{config:?}");
+            assert_eq!(
+                history_remedy(&config, m),
+                "use a shorter pre_period or post_period"
+            );
+            // 8 · 1² and 8 · 2² bytes are both above a 4-byte ceiling.
+            match crate::resource::with_alloc_ceiling(Some(4), || {
+                seasonal_square(&config, m, "the seasonal model's transition matrix")
+            }) {
+                Err(EconError::ResourceLimit(msg)) => assert!(
+                    msg.ends_with("; use a smaller seasonal_period")
+                        && !msg.contains("seasonal_period 0")
+                        && !msg.contains("state dimension"),
+                    "{msg}"
+                ),
+                other => panic!("expected ResourceLimit, got {other:?}"),
+            }
+        }
+        // With a period the note is the one both remedies carry.
+        let seasonal = seasonal_config(40, 10);
+        let m = compute_state_dim(&seasonal);
+        let note = seasonal_dim_note(&seasonal, m).unwrap();
+        assert_eq!(
+            note,
+            "with seasonal_period 12 the state dimension is seasonal_period = 12"
+        );
+        assert_eq!(
+            history_remedy(&seasonal, m),
+            format!("{note}; use a smaller seasonal_period or a shorter pre_period or post_period")
+        );
+    }
+
+    #[test]
+    fn compute_state_dim_is_the_dimension_of_the_model_that_runs() {
+        // The admission sizes the history by compute_state_dim; the filter
+        // runs the model build_state_space_model builds, from
+        // initialize_state and initialize_covariance. All four must agree.
+        let (y, _) = generate_causal_impact_data(40, 0, 0.0, 41);
+        for (include_trend, seasonal_period, m) in [
+            (false, None, 1),
+            (true, None, 2),
+            (false, Some(2), 2),
+            (false, Some(12), 12),
+            (true, Some(2), 3),
+            (true, Some(12), 13),
+        ] {
+            let config = CausalImpactConfig {
+                include_trend,
+                seasonal_period,
+                ..seasonal_config(40, 10)
+            };
+            let params = initialize_variance_params(4.0, &config);
+            assert_eq!(compute_state_dim(&config), m, "{config:?}");
+            let model = build_state_space_model(&params, None, &config).unwrap();
+            assert_eq!(model.state_dim(), m, "{config:?}");
+            assert_eq!(initialize_state(&y, &config).len(), m);
+            assert_eq!(initialize_covariance(4.0, &config).unwrap().dim(), (m, m));
+        }
     }
 
     #[test]
