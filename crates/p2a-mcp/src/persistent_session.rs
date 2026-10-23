@@ -769,7 +769,6 @@ pub async fn insert_reloaded_dataset(
     dataset: p2a_core::data::Dataset,
     quotas: DatasetQuotas,
 ) -> Result<(), String> {
-    let added = dataset.df().estimated_size() as u64;
     // Read before taking the session's dataset lock: the total takes the
     // registry's lock, which is never awaited under a dataset lock.
     let others = match quotas.total {
@@ -780,12 +779,14 @@ pub async fn insert_reloaded_dataset(
         None => 0,
     };
     let mut datasets = session.datasets.write().await;
-    let replaced = datasets
-        .get(&name)
-        .map_or(0, |d| d.df().estimated_size() as u64);
-    let after = crate::session::datasets_bytes(&datasets)
-        .saturating_sub(replaced)
-        .saturating_add(added);
+    // The session's charge with this dataset in place of any of its name.
+    let after = crate::session::datasets_bytes_of(
+        datasets
+            .iter()
+            .filter(|(held, _)| **held != name)
+            .map(|(held, d)| (held.as_str(), d))
+            .chain(std::iter::once((name.as_str(), &dataset))),
+    );
     if let Some(limit) = quotas.per_session
         && after > limit
     {
@@ -1594,7 +1595,9 @@ mod tests {
             insert_reloaded_dataset(s, sm, name.to_string(), ds(1000, offset), quotas).await
         }
 
-        let one = ds(1000, 0.25).df().estimated_size() as u64;
+        // What one of these datasets is charged; the names x, y and z have
+        // the same length, so each is charged the same.
+        let one = crate::session::datasets_bytes_of([("x", &ds(1000, 0.25))]);
         let sm = registry(60);
         let a = sm
             .get_session(&sm.create_session(None).await.unwrap())

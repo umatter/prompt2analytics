@@ -7,11 +7,15 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock, PoisonError, Weak};
 use tokio::sync::{RwLock, Semaphore, broadcast};
 use uuid::Uuid;
 
 use p2a_core::data::Dataset;
+use p2a_core::polars::prelude::{
+    CategoricalMapping, ChunkedArray, DataFrame, DataType, FrozenCategories, PolarsNumericType,
+    PolarsResult, Series,
+};
 
 use crate::config::SessionConfig;
 
@@ -38,6 +42,8 @@ pub struct Session {
     active_calls: AtomicUsize,
     /// Cached in-memory size of `datasets`, in bytes.
     data_bytes: AtomicU64,
+    /// The shared-mapping part of `data_bytes`, cached with it.
+    shared_labels: StdMutex<SharedLabels>,
 }
 
 impl fmt::Debug for Session {
@@ -64,6 +70,7 @@ impl Session {
             exec_slots: OnceLock::new(),
             active_calls: AtomicUsize::new(0),
             data_bytes: AtomicU64::new(0),
+            shared_labels: StdMutex::new(SharedLabels::default()),
         }
     }
 
@@ -123,9 +130,16 @@ impl Session {
 
     /// Recompute the size of this session's datasets, cache it and return it.
     pub async fn refresh_data_bytes(&self) -> u64 {
-        let bytes = datasets_bytes(&*self.datasets.read().await);
-        self.data_bytes.store(bytes, Ordering::SeqCst);
-        bytes
+        let charge = {
+            let datasets = self.datasets.read().await;
+            datasets_charge(datasets.iter().map(|(name, d)| (name.as_str(), d)))
+        };
+        *lock(&self.shared_labels) = SharedLabels {
+            bytes: charge.shared_labels,
+            mappings: charge.mappings,
+        };
+        self.data_bytes.store(charge.bytes, Ordering::SeqCst);
+        charge.bytes
     }
 }
 
@@ -141,13 +155,315 @@ impl Drop for ActiveCallGuard {
     }
 }
 
-/// The in-memory size of a dataset map: the sum of each DataFrame's
-/// `estimated_size()` (which, unlike `p2a_core::estimate_dataset_memory`,
-/// counts string buffers).
+// What the dataset quotas charge.
+//
+// The quotas are meant to bound the memory a session's datasets take, so
+// they charge what polars' `estimated_size()` (value buffers only) leaves
+// out:
+// - the structure every dataset and column costs whatever its length (the
+//   `Series`, field, arrow array header and schema entry; the map entry,
+//   frame and cached schema), names included; on a 1-row frame it is nearly
+//   all of the cost;
+// - the 16-byte view of every String and Binary value: polars sizes a view
+//   column by its text, so null strings, and short ones a view holds inline,
+//   counted nothing;
+// - the labels of Categorical and Enum columns, which live in the column's
+//   mapping (`estimated_size()` counts the codes). Parquet dictionary<string>
+//   columns load as Categorical, all into one process-wide mapping.
+// The constants come from RSS growth measured on a release build of the
+// hosted server (PR-03, glibc malloc, polars 0.52, 12 cores): per column
+// 760 B (1 x 500 generated frames), about 1,100-1,250 B (1 x 12,001 pivots,
+// 1 x 12,000 CSV uploads), 2.5 B more per byte of column name; 2.5 KB per
+// 1 x 1 dataset; 16.4 B per 8-byte String value and 16.9 B per null one
+// (loads of 2,000,000-row files, against the 16 B of a view); and for
+// Categorical labels loaded from parquet 1.2-1.4 times their text for
+// 1,000-byte labels and 130 B more than their text for 8-byte ones (a
+// dictionary column holds its labels twice while it loads, and the allocator
+// keeps the freed copy). Each charge is at or above these figures.
+
+/// Bytes charged per dataset on top of its columns.
+const DATASET_OVERHEAD_BYTES: u64 = 4096;
+/// Bytes charged per column on top of its values.
+const COLUMN_OVERHEAD_BYTES: u64 = 1536;
+/// Times each byte of a column or dataset name is charged.
+const NAME_BYTE_COPIES: u64 = 4;
+/// Bytes of one String or Binary view (polars' `View`): the least a value
+/// takes.
+pub const VIEW_BYTES: u64 = 16;
+/// Bytes charged per String or Binary value: its view and the allocation
+/// slack measured around it.
+const VIEW_CHARGE_BYTES: u64 = 18;
+/// Bytes charged per category label on top of its text: its slots in the
+/// mapping (hash table entry, id-to-label entry, allocation rounding).
+const LABEL_OVERHEAD_BYTES: u64 = 160;
+
+/// What the dataset quotas charge for some datasets.
+#[derive(Debug, Default)]
+pub struct DataCharge {
+    /// The bytes charged.
+    pub bytes: u64,
+    /// The part of `bytes` that is labels of Categorical columns, whose
+    /// mappings other columns, also other sessions', can share.
+    shared_labels: u64,
+    /// Those mappings, each once.
+    mappings: Vec<Weak<CategoricalMapping>>,
+}
+
+impl DataCharge {
+    fn add(&mut self, bytes: u64) {
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+
+    /// Charge one frame: its structure and each column.
+    fn add_frame(&mut self, df: &DataFrame) {
+        self.add(structure_bytes(
+            df.get_columns().iter().map(|c| c.name().as_str()),
+        ));
+        for column in df.get_columns() {
+            self.add_series(column.as_materialized_series());
+        }
+    }
+
+    /// Charge one column's values (and, recursively, a nested column's).
+    fn add_series(&mut self, s: &Series) {
+        match s.dtype() {
+            DataType::String => {
+                if let Ok(ca) = s.str() {
+                    let nulls = ca.null_count() > 0;
+                    for arr in ca.downcast_iter() {
+                        let bytes =
+                            view_bytes(arr.len(), arr.total_buffer_len(), arr.total_bytes_len());
+                        self.add(bytes.saturating_add(validity_bytes(arr.len(), nulls)));
+                    }
+                }
+            }
+            DataType::Binary => {
+                if let Ok(ca) = s.binary() {
+                    let nulls = ca.null_count() > 0;
+                    for arr in ca.downcast_iter() {
+                        let bytes =
+                            view_bytes(arr.len(), arr.total_buffer_len(), arr.total_bytes_len());
+                        self.add(bytes.saturating_add(validity_bytes(arr.len(), nulls)));
+                    }
+                }
+            }
+            DataType::List(_) => {
+                if let Ok(ca) = s.list() {
+                    for arr in ca.downcast_iter() {
+                        let offsets = (arr.len() as u64).saturating_add(1).saturating_mul(8);
+                        self.add(
+                            offsets.saturating_add(validity_bytes(
+                                arr.len(),
+                                arr.validity().is_some(),
+                            )),
+                        );
+                    }
+                    self.add_series(&ca.get_inner());
+                }
+            }
+            DataType::Array(_, _) => {
+                if let Ok(ca) = s.array() {
+                    for arr in ca.downcast_iter() {
+                        self.add(validity_bytes(arr.len(), arr.validity().is_some()));
+                    }
+                    self.add_series(&ca.get_inner());
+                }
+            }
+            DataType::Struct(_) => {
+                if let Ok(ca) = s.struct_() {
+                    for arr in ca.downcast_iter() {
+                        self.add(validity_bytes(arr.len(), arr.validity().is_some()));
+                    }
+                    for field in ca.fields_as_series() {
+                        self.add_series(&field);
+                    }
+                }
+            }
+            DataType::Categorical(_, mapping) => {
+                self.add(s.estimated_size() as u64);
+                let labels = used_label_bytes(s, mapping);
+                self.add(labels);
+                self.shared_labels = self.shared_labels.saturating_add(labels);
+                let weak = Arc::downgrade(mapping);
+                if !self.mappings.iter().any(|m| m.ptr_eq(&weak)) {
+                    self.mappings.push(weak);
+                }
+            }
+            DataType::Enum(frozen, _) => {
+                self.add(s.estimated_size() as u64);
+                self.add(frozen_label_bytes(frozen));
+            }
+            _ => self.add(s.estimated_size() as u64),
+        }
+    }
+}
+
+/// The charge for the structure of a dataset whose columns are named
+/// `columns`: the per-dataset and per-column overhead and the column names.
+pub fn structure_bytes<'a>(columns: impl IntoIterator<Item = &'a str>) -> u64 {
+    columns
+        .into_iter()
+        .fold(DATASET_OVERHEAD_BYTES, |bytes, name| {
+            bytes
+                .saturating_add(COLUMN_OVERHEAD_BYTES)
+                .saturating_add(name_bytes(name.len()))
+        })
+}
+
+/// The charge for a name of `len` bytes.
+fn name_bytes(len: usize) -> u64 {
+    NAME_BYTE_COPIES.saturating_mul(len as u64)
+}
+
+/// A validity bitmap of `len` values, when there is one.
+fn validity_bytes(len: usize, present: bool) -> u64 {
+    if present { len.div_ceil(8) as u64 } else { 0 }
+}
+
+/// A view array of `len` values: a view each, and the text kept out of line.
+/// That text is the array's buffers, but no more than the text its values
+/// hold: a slice or filter shares its source's buffers, which the source is
+/// already charged for.
+fn view_bytes(len: usize, buffer_len: usize, text_len: usize) -> u64 {
+    VIEW_CHARGE_BYTES
+        .saturating_mul(len as u64)
+        .saturating_add(buffer_len.min(text_len) as u64)
+}
+
+/// The labels the codes of the Categorical column `s` use in `mapping`,
+/// each once. The mapping can hold far more (all parquet dictionary columns
+/// share the global one), so the codes are what decides.
+fn used_label_bytes(s: &Series, mapping: &CategoricalMapping) -> u64 {
+    let upper = mapping.num_cats_upper_bound();
+    if upper == 0 || s.is_empty() {
+        return 0;
+    }
+    let mut used = vec![0u64; upper.div_ceil(64)];
+    let physical = s.to_physical_repr();
+    match physical.dtype() {
+        DataType::UInt8 => mark_codes(physical.u8(), &mut used, upper),
+        DataType::UInt16 => mark_codes(physical.u16(), &mut used, upper),
+        DataType::UInt32 => mark_codes(physical.u32(), &mut used, upper),
+        _ => {}
+    }
+    let mut bytes = 0u64;
+    for (word_index, &word) in used.iter().enumerate() {
+        let mut word = word;
+        while word != 0 {
+            let code = word_index * 64 + word.trailing_zeros() as usize;
+            word &= word - 1;
+            let label = u32::try_from(code)
+                .ok()
+                .and_then(|code| mapping.cat_to_str(code))
+                .map_or(0, str::len);
+            bytes = bytes.saturating_add(label_bytes(label));
+        }
+    }
+    bytes
+}
+
+/// Set the bit of every code of the non-null values of `codes` below `upper`
+/// (a null slot's code is arbitrary).
+fn mark_codes<T>(codes: PolarsResult<&ChunkedArray<T>>, used: &mut [u64], upper: usize)
+where
+    T: PolarsNumericType,
+    T::Native: Into<u64>,
+{
+    let Ok(codes) = codes else {
+        return;
+    };
+    let mut mark = |code: T::Native| {
+        if let Ok(code) = usize::try_from(code.into())
+            && code < upper
+        {
+            used[code / 64] |= 1 << (code % 64);
+        }
+    };
+    for arr in codes.downcast_iter() {
+        if arr.validity().is_none_or(|v| v.unset_bits() == 0) {
+            arr.values().iter().for_each(|&code| mark(code));
+        } else {
+            arr.iter().flatten().for_each(|&code| mark(code));
+        }
+    }
+}
+
+/// The categories an Enum dtype owns: its label array (views and text) and
+/// the mapping's copy of each label.
+fn frozen_label_bytes(frozen: &FrozenCategories) -> u64 {
+    let labels = frozen.categories();
+    let text = labels.total_bytes_len() as u64;
+    view_bytes(
+        labels.len(),
+        labels.total_buffer_len(),
+        labels.total_bytes_len(),
+    )
+    .saturating_add(label_bytes(0).saturating_mul(labels.len() as u64))
+    .saturating_add(text.saturating_add(text / 2))
+}
+
+/// The charge for a category label of `len` bytes: its text once and a half
+/// (what loading it costs, see above) and its slots in the mapping.
+fn label_bytes(len: usize) -> u64 {
+    let len = len as u64;
+    len.saturating_add(len / 2)
+        .saturating_add(LABEL_OVERHEAD_BYTES)
+}
+
+/// Every label `mapping` holds, used or not: what it takes in memory.
+fn mapping_label_bytes(mapping: &CategoricalMapping) -> u64 {
+    (0..mapping.num_cats_upper_bound()).fold(0u64, |bytes, code| {
+        let label = u32::try_from(code)
+            .ok()
+            .and_then(|code| mapping.cat_to_str(code))
+            .map_or(0, str::len);
+        bytes.saturating_add(label_bytes(label))
+    })
+}
+
+/// What the dataset quotas charge for one frame: its values (String and
+/// Binary views and Categorical and Enum labels included) and its
+/// structure (see [`structure_bytes`]).
+pub fn dataset_bytes(df: &DataFrame) -> u64 {
+    let mut charge = DataCharge::default();
+    charge.add_frame(df);
+    charge.bytes
+}
+
+/// What the dataset quotas charge for a dataset map: [`datasets_bytes_of`]
+/// over its entries.
 pub fn datasets_bytes(map: &HashMap<String, Dataset>) -> u64 {
-    map.values()
-        .map(|d| d.df().estimated_size() as u64)
-        .fold(0u64, u64::saturating_add)
+    datasets_charge(map.iter().map(|(name, d)| (name.as_str(), d))).bytes
+}
+
+/// What the dataset quotas charge for the datasets `entries` (name and
+/// dataset): each frame's [`dataset_bytes`] plus its name.
+pub fn datasets_bytes_of<'a>(entries: impl IntoIterator<Item = (&'a str, &'a Dataset)>) -> u64 {
+    datasets_charge(entries).bytes
+}
+
+/// [`datasets_bytes_of`] with the shared-mapping detail the server total
+/// needs.
+pub fn datasets_charge<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a Dataset)>,
+) -> DataCharge {
+    let mut charge = DataCharge::default();
+    for (name, dataset) in entries {
+        charge.add(name_bytes(name.len()));
+        charge.add_frame(dataset.df());
+    }
+    charge
+}
+
+/// The shared-mapping part of a session's cached charge.
+#[derive(Debug, Default)]
+struct SharedLabels {
+    bytes: u64,
+    mappings: Vec<Weak<CategoricalMapping>>,
+}
+
+fn lock<T>(m: &StdMutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// `bytes` as the dataset quota refusals print them: the tool governor's
@@ -475,16 +791,28 @@ impl SessionManager {
         self.sessions.read().await.len()
     }
 
-    /// The cached dataset bytes of every session, summed. This takes only the
+    /// The cached dataset bytes of every session, summed, with the labels
+    /// of shared categorical mappings counted once each and in full. A label
+    /// stays in its mapping while any column of the mapping lives, also after
+    /// the dataset that brought it is gone, so the labels a session is
+    /// charged for are not all the labels in memory. This takes only the
     /// map's read lock and never a session's dataset lock, so a quota check
     /// does not wait behind another session's long write.
     pub async fn total_data_bytes(&self) -> u64 {
-        self.sessions
-            .read()
-            .await
-            .values()
-            .map(|s| s.data_bytes())
-            .fold(0u64, u64::saturating_add)
+        let mut total = 0u64;
+        let mut mappings: Vec<Arc<CategoricalMapping>> = Vec::new();
+        for session in self.sessions.read().await.values() {
+            let shared = lock(&session.shared_labels);
+            total = total.saturating_add(session.data_bytes().saturating_sub(shared.bytes));
+            for mapping in shared.mappings.iter().filter_map(Weak::upgrade) {
+                if !mappings.iter().any(|m| Arc::ptr_eq(m, &mapping)) {
+                    mappings.push(mapping);
+                }
+            }
+        }
+        mappings
+            .iter()
+            .fold(total, |t, m| t.saturating_add(mapping_label_bytes(m)))
     }
 }
 
@@ -848,6 +1176,232 @@ mod tests {
         assert!(ba >= 8000 && bb >= 24000);
         assert_eq!(sa.data_bytes(), ba);
         assert_eq!(m.total_data_bytes().await, ba + bb);
+    }
+
+    /// A dataset map with `datasets` under the names `d0`, `d1`, ...
+    fn map_of(datasets: Vec<DataFrame>) -> HashMap<String, Dataset> {
+        datasets
+            .into_iter()
+            .enumerate()
+            .map(|(i, df)| (format!("d{i}"), Dataset::new(df)))
+            .collect()
+    }
+
+    /// One row of `n` float columns whose names are `prefix` plus the index.
+    fn one_row_frame(n: usize, prefix: &str) -> DataFrame {
+        let columns: Vec<Column> = (0..n)
+            .map(|i| Column::new(format!("{prefix}{i}").into(), &[i as f64 + 0.25]))
+            .collect();
+        DataFrame::new(columns).unwrap()
+    }
+
+    // The RSS a 1-row column, a 1-x-1 dataset and a byte of column name
+    // were measured to cost on a release build of the hosted server
+    // (PR-03): 760 B per column (1 x 500 generated frames), 1,250 B (1 x
+    // 12,000 CSV uploads), 2.5 KB per 1-x-1 dataset, 2.54 B per name byte
+    // (1,000-byte against 10-byte pivot names).
+    const RSS_PER_COLUMN: u64 = 1250;
+    const RSS_PER_DATASET: u64 = 2520;
+    const RSS_PER_NAME_BYTE: f64 = 2.54;
+
+    #[test]
+    fn wide_frames_are_charged_what_their_columns_cost() {
+        // A 1 x 2,000 frame: estimated_size() sees 16 kB of values, but each
+        // column costs about a kilobyte of structure (Series, field, arrow
+        // header, schema entry). Pre-fix the quota charged the 16 kB, so a
+        // session could hold hundreds of thousands of columns in its quota.
+        let df = one_row_frame(2000, "c");
+        let values = df.estimated_size() as u64;
+        let charged = datasets_bytes(&map_of(vec![df]));
+        assert!(
+            charged >= 2000 * RSS_PER_COLUMN,
+            "charged {charged}, values {values}"
+        );
+    }
+
+    #[test]
+    fn many_small_datasets_are_charged_what_they_cost() {
+        let frames = (0..100).map(|_| one_row_frame(1, "x")).collect();
+        let charged = datasets_bytes(&map_of(frames));
+        assert!(charged >= 100 * RSS_PER_DATASET, "charged {charged}");
+    }
+
+    #[test]
+    fn long_column_names_are_charged() {
+        // munge_pivot names each output column after a cell value, and a
+        // CSV header can carry any names: 200 columns with 1,000-byte names
+        // cost about 510 kB more than the same columns named c0..c199.
+        let short = datasets_bytes(&map_of(vec![one_row_frame(200, "c")]));
+        let long = datasets_bytes(&map_of(vec![one_row_frame(200, &"n".repeat(1000))]));
+        let names = 200.0 * 1000.0 * RSS_PER_NAME_BYTE;
+        assert!(
+            long.saturating_sub(short) as f64 >= names,
+            "long {long}, short {short}"
+        );
+    }
+
+    #[test]
+    fn values_still_dominate_a_tall_frame() {
+        // The overheads are per column and per dataset, not per value: a
+        // 100,000 x 2 frame is charged within a few kilobytes of its values.
+        let df = df! {
+            "x" => (0..100_000).map(|i| i as f64 * 0.5 + 0.1).collect::<Vec<_>>(),
+            "y" => (0..100_000).map(|i| (i % 7) as f64 - 0.3).collect::<Vec<_>>(),
+        }
+        .unwrap();
+        let values = df.estimated_size() as u64;
+        let charged = datasets_bytes(&map_of(vec![df]));
+        assert!(
+            charged >= values && charged - values < 16 * 1024,
+            "charged {charged}, values {values}"
+        );
+    }
+
+    /// What the quotas charge for a dataset of the one column `s`.
+    fn charge_of(s: Series) -> u64 {
+        datasets_bytes(&map_of(vec![DataFrame::new(vec![s.into()]).unwrap()]))
+    }
+
+    #[test]
+    fn null_and_short_strings_are_charged_their_views() {
+        // polars sizes a String column by its text, but every value also
+        // takes a 16-byte view, which holds a short string itself: 100,000
+        // null or one-byte strings cost 1.6 MB and were charged 0 or 100 kB.
+        let n = 100_000usize;
+        let nulls = Series::new("s".into(), vec![None::<&str>; n]);
+        let short = Series::new(
+            "s".into(),
+            (0..n).map(|i| ["a", "b"][i % 2]).collect::<Vec<_>>(),
+        );
+        for s in [nulls, short] {
+            let charged = charge_of(s);
+            assert!(charged >= 16 * n as u64, "charged {charged}");
+        }
+    }
+
+    #[test]
+    fn long_strings_are_charged_their_text_and_views_once() {
+        let n = 10_000usize;
+        let s = Series::new(
+            "s".into(),
+            (0..n).map(|i| format!("{i:0100}")).collect::<Vec<_>>(),
+        );
+        let (views, text) = (16 * n as u64, 100 * n as u64);
+        let charged = charge_of(s);
+        assert!(
+            charged >= views + text && charged < views + text + 64 * 1024,
+            "charged {charged}"
+        );
+    }
+
+    #[test]
+    fn strings_inside_lists_are_charged_their_views() {
+        // 1,000 lists of 50 empty strings: 800 kB of views.
+        let lists: Vec<Series> = (0..1000)
+            .map(|_| Series::new("".into(), vec![""; 50]))
+            .collect();
+        let charged = charge_of(Series::new("l".into(), lists));
+        assert!(charged >= 16 * 50_000, "charged {charged}");
+    }
+
+    /// `labels` distinct labels of `len` bytes as a Categorical column of a
+    /// Categories of its own (the tests run in parallel, so none of them
+    /// uses the process-wide one).
+    fn categorical(labels: usize, len: usize) -> Series {
+        let values: Vec<String> = (0..labels).map(|i| format!("{i:0len$}")).collect();
+        let dtype =
+            DataType::from_categories(Categories::random("".into(), CategoricalPhysical::U32));
+        Series::new("k".into(), values).cast(&dtype).unwrap()
+    }
+
+    #[test]
+    fn categorical_labels_are_charged() {
+        // A Categorical column's estimated_size() counts its codes; its
+        // labels live in the mapping. A parquet dictionary<string> column
+        // loads as Categorical, so pre-fix 2,000 labels of 500 bytes (1 MB)
+        // were charged 8 kB while the same text as a String column was
+        // charged in full.
+        let cat = categorical(2000, 500);
+        let string = charge_of(cat.cast(&DataType::String).unwrap());
+        let charged = charge_of(cat);
+        assert!(charged >= 2000 * 500, "categorical {charged}");
+        assert!(
+            2 * charged >= string,
+            "categorical {charged}, string {string}"
+        );
+    }
+
+    #[test]
+    fn a_categorical_column_is_charged_the_labels_it_uses() {
+        // Every column of a Categories shares its mapping (all parquet
+        // dictionary columns share the global one), so a column is charged
+        // the labels its codes use, not the whole mapping.
+        let all = categorical(2000, 500);
+        let first = all.slice(0, 1);
+        let (full, single) = (charge_of(all), charge_of(first));
+        assert!(
+            full >= 2000 * 500 && single < 16 * 1024,
+            "full {full}, single {single}"
+        );
+    }
+
+    #[test]
+    fn enum_categories_are_charged() {
+        // An Enum dtype owns its categories whichever of them the column
+        // uses: a 1-row column of an Enum of 1,000 300-byte categories.
+        let cats: Vec<String> = (0..1000).map(|i| format!("{i:0300}")).collect();
+        let frozen = FrozenCategories::new(cats.iter().map(String::as_str)).unwrap();
+        let s = Series::new("e".into(), [cats[0].as_str()])
+            .cast(&DataType::from_frozen_categories(frozen))
+            .unwrap();
+        let charged = charge_of(s);
+        assert!(charged >= 1000 * 300, "charged {charged}");
+    }
+
+    #[tokio::test]
+    async fn total_counts_labels_left_in_a_shared_mapping() {
+        // A label stays in its mapping while any column of the mapping
+        // lives. A session that loads labels and drops them again leaves
+        // them in memory while another session holds a column of the same
+        // mapping (every parquet dictionary column uses the global one), so
+        // the server total counts each mapping's labels once, whoever holds
+        // them.
+        let m = SessionManager::new(cfg(10, None));
+        let (a, b) = (
+            m.create_session(None).await.unwrap(),
+            m.create_session(None).await.unwrap(),
+        );
+        let (sa, sb) = (
+            m.get_session(&a).await.unwrap(),
+            m.get_session(&b).await.unwrap(),
+        );
+        let labels = categorical(2000, 500);
+        let anchor = labels.slice(0, 1);
+        let frame = |s: Series| Dataset::new(DataFrame::new(vec![s.into()]).unwrap());
+        sa.datasets.write().await.insert("a".into(), frame(anchor));
+        sb.datasets.write().await.insert("l".into(), frame(labels));
+        sa.refresh_data_bytes().await;
+        sb.refresh_data_bytes().await;
+        let both = m.total_data_bytes().await;
+        assert!(
+            both >= 2000 * 500 && both < sa.data_bytes() + sb.data_bytes(),
+            "both {both}: the labels count once"
+        );
+
+        sb.datasets.write().await.clear();
+        sb.refresh_data_bytes().await;
+        let left = m.total_data_bytes().await;
+        assert!(
+            left >= 2000 * 500,
+            "left {left}, session charges {} + {}",
+            sa.data_bytes(),
+            sb.data_bytes()
+        );
+
+        sa.datasets.write().await.clear();
+        sa.refresh_data_bytes().await;
+        let none = m.total_data_bytes().await;
+        assert!(none < 16 * 1024, "none {none}");
     }
 
     /// Drive `f` on this thread without a Tokio runtime. Uncontended tokio
