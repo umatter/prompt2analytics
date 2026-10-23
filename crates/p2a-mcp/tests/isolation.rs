@@ -699,7 +699,12 @@ async fn import_session_refuses_files_above_the_import_limit() {
     )
     .await;
     assert!(!ok, "a session file above the import limit was imported");
-    assert!(msg.contains("import limit"), "{msg}");
+    // Refused by the size check before the file is opened, not by the
+    // parser's budget (whose message also names the import limit).
+    assert!(
+        msg.contains("is larger than this server's import limit of 32768 bytes"),
+        "{msg}"
+    );
     assert!(!msg.contains(root_str()), "leaks the root: {msg}");
     // Refused before anything was replaced.
     let (ok, msg) = call(&app, &s, "head_dataset", json!({"dataset": "private"})).await;
