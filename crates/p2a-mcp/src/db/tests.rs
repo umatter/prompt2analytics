@@ -695,22 +695,52 @@ async fn assert_conversation_whole(db: &DbConnection, id: &str) {
     assert_eq!(db.get_conversation(id).await.unwrap().message_count, 21);
 }
 
+/// The two engines the rollback tests run on: in memory, and RocksDB (whose
+/// rollback is an optimistic transaction's cancel).
+const ENGINES: [&str; 2] = ["memory", "rocksdb"];
+
+/// A store on `engine` (one of [`ENGINES`]; RocksDB in `dir`) with `limits`.
+async fn engine_db(engine: &str, dir: &std::path::Path, limits: PersistenceLimits) -> DbConnection {
+    match engine {
+        "memory" => limited_db(limits).await,
+        _ => DbConnection::connect_rocksdb(dir.join("db"))
+            .await
+            .unwrap()
+            .with_limits(limits),
+    }
+}
+
+/// The error of a clear or delete that a store event refused names the
+/// event's own message, not the "query was not executed" that the store
+/// reports for the statements before the one that failed.
+fn assert_refused(engine: &str, error: DbError) {
+    assert!(
+        error.to_string().contains("refused"),
+        "{engine}: the failing statement's error is reported: {error}"
+    );
+}
+
 /// A clear is one transaction. When its last step, the counter reset, fails
 /// (standing in for the process stopping between the row deletes and the
 /// reset), the rows are not deleted either, with and without the byte
-/// budget: before, the messages went and `message_count` kept the old count.
+/// budget, in memory and on RocksDB: before, the messages went and
+/// `message_count` kept the old count. The error is the failed statement's.
 #[tokio::test]
 async fn a_clear_that_stops_part_way_deletes_nothing() {
-    for session_db_bytes in [None, Some(100_000)] {
-        let db = limited_db(PersistenceLimits {
+    for (engine, session_db_bytes) in ENGINES
+        .into_iter()
+        .flat_map(|engine| [(engine, None), (engine, Some(100_000))])
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = PersistenceLimits {
             session_db_bytes,
             ..Default::default()
-        })
-        .await;
+        };
+        let db = engine_db(engine, dir.path(), limits).await;
         let id = filled_conversation(&db, "s1", "kept").await;
         refuse_conversation_writes(&db, Some("UPDATE")).await;
 
-        assert!(db.clear_messages(&id).await.is_err());
+        assert_refused(engine, db.clear_messages(&id).await.unwrap_err());
         assert_conversation_whole(&db, &id).await;
         if session_db_bytes.is_some() {
             assert_counter_matches_store(&db, "s1").await;
@@ -731,20 +761,25 @@ async fn a_clear_that_stops_part_way_deletes_nothing() {
 
 /// A conversation delete is one transaction. When its last step, deleting
 /// the conversation row, fails, its messages and tool calls are not deleted
-/// either: before, they went and the conversation stayed listed with its old
-/// `message_count`.
+/// either, in memory and on RocksDB: before, they went and the conversation
+/// stayed listed with its old `message_count`. The error is the failed
+/// statement's.
 #[tokio::test]
 async fn a_delete_that_stops_part_way_deletes_nothing() {
-    for session_db_bytes in [None, Some(100_000)] {
-        let db = limited_db(PersistenceLimits {
+    for (engine, session_db_bytes) in ENGINES
+        .into_iter()
+        .flat_map(|engine| [(engine, None), (engine, Some(100_000))])
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = PersistenceLimits {
             session_db_bytes,
             ..Default::default()
-        })
-        .await;
+        };
+        let db = engine_db(engine, dir.path(), limits).await;
         let id = filled_conversation(&db, "s1", "kept").await;
         refuse_conversation_writes(&db, Some("DELETE")).await;
 
-        assert!(db.delete_conversation(&id).await.is_err());
+        assert_refused(engine, db.delete_conversation(&id).await.unwrap_err());
         assert_conversation_whole(&db, &id).await;
         if session_db_bytes.is_some() {
             assert_counter_matches_store(&db, "s1").await;
@@ -765,55 +800,153 @@ async fn a_delete_that_stops_part_way_deletes_nothing() {
     }
 }
 
-/// A clear or delete whose caller is dropped part way (an HTTP client that
-/// disconnects; the store still finishes the statement it was sent) leaves
-/// the conversation's `message_count` in step with its rows. Before, the
-/// call was dropped between the message delete and the counter reset (or
-/// the row delete), and the conversation kept its old count with no
-/// messages. The outcome does not depend on timing: had the call been
-/// dropped before it reached the store, nothing would have changed.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_dropped_clear_or_delete_leaves_the_count_in_step() {
-    let db = test_db().await;
-    // Each message delete takes a while, so the call is still waiting for
-    // the store when it is dropped.
+/// Conversation `id`'s `message_count` (0 once its row is deleted) and the
+/// message rows it holds, read in one transaction, so both come from one
+/// snapshot of the store.
+async fn listed_and_stored(db: &DbConnection, id: &str) -> (i64, i64) {
+    #[derive(serde::Deserialize)]
+    struct CountRow {
+        count: i64,
+    }
+    let mut response = db
+        .db()
+        .query("BEGIN TRANSACTION")
+        .query("SELECT VALUE message_count FROM $conv")
+        .query("SELECT count() FROM messages WHERE conversation_id = $id GROUP ALL")
+        .query("COMMIT TRANSACTION")
+        .bind(("conv", surrealdb::RecordId::from(("conversations", id))))
+        .bind(("id", id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let listed: Vec<i64> = response.take(0).unwrap();
+    let stored: Option<CountRow> = response.take(1).unwrap();
+    (
+        listed.first().copied().unwrap_or(0),
+        stored.map_or(0, |row| row.count),
+    )
+}
+
+/// Make each message delete take a while (a store event sleeps), so that a
+/// clear or delete of [`filled_conversation`]'s 21 messages is still running
+/// in the store when its caller is dropped.
+async fn slow_message_deletes(db: &DbConnection) {
     db.db()
         .query("DEFINE EVENT slow ON TABLE messages WHEN $event = 'DELETE' THEN { sleep(20ms) }")
         .await
         .unwrap()
         .check()
         .unwrap();
-    let mut out_of_step = Vec::new();
-    for op in ["clear", "delete"] {
-        let id = filled_conversation(&db, "s1", op).await;
-        let call = async {
-            if op == "clear" {
-                db.clear_messages(&id).await.map(|_| ())
-            } else {
-                db.delete_conversation(&id).await
-            }
-        };
-        let dropped = tokio::time::timeout(std::time::Duration::from_millis(100), call).await;
-        assert!(dropped.is_err(), "{op} finished before it was dropped");
-        // Wait (a bounded number of polls) for the store to finish.
-        for _ in 0..500 {
-            if db.count_messages(&id).await.unwrap() == 0 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+}
+
+/// Start a clear (`op` "clear") or a delete of conversation `id` and drop the
+/// call while the store runs it ([`slow_message_deletes`]).
+async fn drop_part_way(db: &DbConnection, op: &str, id: &str) {
+    let call = async {
+        if op == "clear" {
+            db.clear_messages(id).await.map(|_| ())
+        } else {
+            db.delete_conversation(id).await
         }
-        let stored = db.count_messages(&id).await.unwrap();
-        let listed = match db.get_conversation(&id).await {
-            Ok(conv) => usize::try_from(conv.message_count).unwrap(),
-            Err(DbError::NotFound(_)) => 0,
-            Err(e) => panic!("{op}: {e}"),
+    };
+    let dropped = tokio::time::timeout(std::time::Duration::from_millis(100), call).await;
+    assert!(dropped.is_err(), "{op} finished before it was dropped");
+}
+
+/// A clear or delete whose caller is dropped part way (an HTTP client that
+/// disconnects; the store still finishes the query it was sent) leaves the
+/// conversation's `message_count` in step with its rows and, with the byte
+/// budget, the session's counter in step with the store, and gives up its
+/// turn once the store is done. While the clear and delete were separate
+/// statements, the call was dropped between the message delete and the
+/// counter reset (or the row delete), and the conversation kept its old
+/// count with no messages. While the call ran in its caller's future, the
+/// transaction finished but the bytes it removed were never released, so
+/// the counter stayed above the store (and the turn ended with the caller,
+/// while the store still ran the transaction).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_clear_or_delete_leaves_the_count_in_step() {
+    let mut out_of_step = Vec::new();
+    for session_db_bytes in [None, Some(100_000)] {
+        let db = limited_db(PersistenceLimits {
+            session_db_bytes,
+            ..Default::default()
+        })
+        .await;
+        slow_message_deletes(&db).await;
+        let pass = if session_db_bytes.is_some() {
+            "budgeted"
+        } else {
+            "unbudgeted"
         };
-        if listed != stored {
-            out_of_step.push(format!("{op}: listed {listed}, stored {stored}"));
+        for op in ["clear", "delete"] {
+            let id = filled_conversation(&db, "s1", op).await;
+            drop_part_way(&db, op, &id).await;
+            // Wait (a bounded number of polls) for the store to commit the
+            // message delete, and then for the conversation's turn: the
+            // call holds it until it has released the bytes it removed.
+            for _ in 0..500 {
+                if listed_and_stored(&db, &id).await.1 == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            drop(db.conversation_turn(&id).await);
+            let (listed, stored) = listed_and_stored(&db, &id).await;
+            if listed != stored {
+                out_of_step.push(format!("{pass} {op}: listed {listed}, stored {stored}"));
+            }
+            if session_db_bytes.is_some() {
+                let in_store = db.session_stored_bytes("s1").await.unwrap();
+                let counted = db.session_bytes_entry("s1");
+                if counted != Some(in_store) {
+                    out_of_step.push(format!(
+                        "{pass} {op}: counted {counted:?} bytes, stored {in_store}"
+                    ));
+                }
+            }
+            assert_eq!(db.store_turns_in_use(), 0);
         }
     }
     assert!(out_of_step.is_empty(), "{out_of_step:?}");
-    assert_eq!(db.store_turns_in_use(), 0);
+}
+
+/// A clear or delete sent again at once after its first call was dropped
+/// (a client that disconnects and retries) waits for the first one, which
+/// keeps the conversation's turn until the store has finished, and then
+/// finds nothing: on RocksDB, which fails one of two conflicting
+/// transactions, it does not fail on a write conflict. Before, the turn
+/// ended with the dropped caller, the retry ran alongside the transaction
+/// still in the store, and one of them failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_after_a_dropped_clear_or_delete_waits_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = PersistenceLimits {
+        session_db_bytes: Some(100_000),
+        ..Default::default()
+    };
+    let db = engine_db("rocksdb", dir.path(), limits).await;
+    slow_message_deletes(&db).await;
+    for op in ["clear", "delete"] {
+        let id = filled_conversation(&db, "s1", op).await;
+        drop_part_way(&db, op, &id).await;
+        if op == "clear" {
+            let retried = db.clear_messages(&id).await;
+            assert!(matches!(retried, Ok(0)), "clear retried: {retried:?}");
+            let conv = db.get_conversation(&id).await.unwrap();
+            assert_eq!((conv.message_count, conv.last_message_preview), (0, None));
+        } else {
+            let retried = db.delete_conversation(&id).await;
+            assert!(
+                matches!(retried, Err(DbError::NotFound(_))),
+                "delete retried: {retried:?}"
+            );
+        }
+        assert_eq!(listed_and_stored(&db, &id).await, (0, 0), "{op}");
+        assert_counter_matches_store(&db, "s1").await;
+        assert_eq!(db.store_turns_in_use(), 0);
+    }
 }
 
 /// Whether `n` calls hold or wait for store turn `key`, polled a bounded

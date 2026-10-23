@@ -1,5 +1,7 @@
 //! Conversation CRUD operations
 
+use std::collections::HashMap;
+
 use chrono::Utc;
 use surrealdb::RecordId;
 use surrealdb::sql::Datetime;
@@ -141,23 +143,33 @@ impl DbConnection {
     /// deleted. With a `session_db_bytes` budget, the bytes this call
     /// removed are released from the session's counter. Deletes and clears
     /// of one conversation take turns.
+    ///
+    /// The delete runs in a task of its own ([`run_to_end`]), which a caller
+    /// dropped part way (an HTTP client that disconnects) does not stop: it
+    /// holds the conversation's turn until the store has finished and the
+    /// bytes it removed are released.
     pub async fn delete_conversation(&self, id: &str) -> Result<(), DbError> {
-        let _turn = self.conversation_turn(id).await;
-        // A write racing this delete can leave rows behind; the next orphan
-        // sweeps look for them.
-        self.note_conversation_deleted(id);
-        let owner = self.counted_owner(id).await?;
-        let removed = self
-            .delete_conversation_rows(id, Finish::DeleteConversation, owner.is_some())
-            .await?;
-        if let Some(session_id) = &owner {
-            self.release_session_bytes(session_id, removed.bytes);
-        }
-        if removed.conversation {
-            Ok(())
-        } else {
-            Err(DbError::NotFound(format!("Conversation not found: {}", id)))
-        }
+        let db = self.clone();
+        let id = id.to_string();
+        run_to_end(async move {
+            let _turn = db.conversation_turn(&id).await;
+            // A write racing this delete can leave rows behind; the next
+            // orphan sweeps look for them.
+            db.note_conversation_deleted(&id);
+            let owner = db.counted_owner(&id).await?;
+            let removed = db
+                .delete_conversation_rows(&id, Finish::DeleteConversation, owner.is_some())
+                .await?;
+            if let Some(session_id) = &owner {
+                db.release_session_bytes(session_id, removed.bytes);
+            }
+            if removed.conversation {
+                Ok(())
+            } else {
+                Err(DbError::NotFound(format!("Conversation not found: {}", id)))
+            }
+        })
+        .await
     }
 
     /// Delete the tool calls and then the messages of conversation `id` and
@@ -167,25 +179,34 @@ impl DbConnection {
     /// store runs the query, has therefore done all of it or none of it, and
     /// the conversation's `message_count` never outlives its messages. An
     /// error means that nothing was deleted, unless it came from reading back
-    /// the rows of a transaction that committed.
+    /// the rows of a transaction that committed; a statement that failed
+    /// inside the transaction is reported by its own error
+    /// ([`failed_statement`]).
     ///
     /// With `measure`, the deletes return the rows they removed (`RETURN
     /// BEFORE`) and their messages and text bytes are counted (the title's
     /// too when the conversation row is deleted); without it only whether the
     /// conversation row was deleted is returned. Callers hold the
-    /// conversation's [`StoreTurn`](super::connection::StoreTurn), so two of
-    /// these never run on one conversation at the same time, and the later
-    /// one finds nothing.
+    /// conversation's [`StoreTurn`](super::connection::StoreTurn) until this
+    /// returns, in a task the caller's drop does not stop ([`run_to_end`]),
+    /// so two of these never run on one conversation at the same time, and
+    /// the later one finds nothing.
     async fn delete_conversation_rows(
         &self,
         id: &str,
         finish: Finish,
         measure: bool,
     ) -> Result<Removed, DbError> {
-        let rows = if measure {
-            "RETURN BEFORE"
+        let (tool_calls, messages) = if measure {
+            (
+                "DELETE FROM tool_calls WHERE conversation_id = $id RETURN BEFORE",
+                "DELETE FROM messages WHERE conversation_id = $id RETURN BEFORE",
+            )
         } else {
-            "RETURN NONE"
+            (
+                "DELETE FROM tool_calls WHERE conversation_id = $id RETURN NONE",
+                "DELETE FROM messages WHERE conversation_id = $id RETURN NONE",
+            )
         };
         let finish_statement = match finish {
             Finish::ResetCounters => {
@@ -196,17 +217,17 @@ impl DbConnection {
         };
         let mut response = self
             .db()
-            .query(format!(
-                "BEGIN TRANSACTION;
-                 DELETE FROM tool_calls WHERE conversation_id = $id {rows};
-                 DELETE FROM messages WHERE conversation_id = $id {rows};
-                 {finish_statement};
-                 COMMIT TRANSACTION;"
-            ))
+            .query("BEGIN TRANSACTION")
+            .query(tool_calls)
+            .query(messages)
+            .query(finish_statement)
+            .query("COMMIT TRANSACTION")
             .bind(("id", id.to_string()))
             .bind(("conv", RecordId::from(("conversations", id))))
-            .await?
-            .check()?;
+            .await?;
+        if let Some(error) = failed_statement(response.take_errors()) {
+            return Err(error.into());
+        }
 
         // Committed: BEGIN and COMMIT return nothing, so the three
         // statements' results are 0, 1 and 2.
@@ -488,23 +509,70 @@ impl DbConnection {
     /// `session_db_bytes` budget, the bytes this call removed are released
     /// from the session's counter. Deletes and clears of one conversation
     /// take turns.
+    ///
+    /// Like [`delete_conversation`](Self::delete_conversation), the clear
+    /// runs in a task of its own ([`run_to_end`]), so a dropped caller
+    /// neither ends its turn nor skips the release of its bytes.
     pub async fn clear_messages(&self, conversation_id: &str) -> Result<u32, DbError> {
-        let _turn = self.conversation_turn(conversation_id).await;
-        let owner = self.counted_owner(conversation_id).await?;
-        // Unmeasured, the delete returns no rows: count them first (in the
-        // turn, so no add of this process lands in between).
-        let counted = match owner {
-            Some(_) => None,
-            None => Some(self.count_messages(conversation_id).await?),
-        };
-        let removed = self
-            .delete_conversation_rows(conversation_id, Finish::ResetCounters, owner.is_some())
-            .await?;
-        if let Some(session_id) = &owner {
-            self.release_session_bytes(session_id, removed.bytes);
-        }
-        Ok(u32::try_from(counted.unwrap_or(removed.messages)).unwrap_or(u32::MAX))
+        let db = self.clone();
+        let id = conversation_id.to_string();
+        run_to_end(async move {
+            let _turn = db.conversation_turn(&id).await;
+            let owner = db.counted_owner(&id).await?;
+            // Unmeasured, the delete returns no rows: count them first (in
+            // the turn, so no add of this process lands in between).
+            let counted = match owner {
+                Some(_) => None,
+                None => Some(db.count_messages(&id).await?),
+            };
+            let removed = db
+                .delete_conversation_rows(&id, Finish::ResetCounters, owner.is_some())
+                .await?;
+            if let Some(session_id) = &owner {
+                db.release_session_bytes(session_id, removed.bytes);
+            }
+            Ok(u32::try_from(counted.unwrap_or(removed.messages)).unwrap_or(u32::MAX))
+        })
+        .await
     }
+}
+
+/// Run `work`, a conversation delete or clear, in a task of its own and wait
+/// for it. The store runs a query it was sent to its end even when the
+/// caller is dropped (its engine runs each query in a task); running the
+/// rest of the call in a task too keeps the conversation's
+/// [`StoreTurn`](super::connection::StoreTurn) held, and the release of the
+/// removed bytes from the `session_db_bytes` counter done, until the store
+/// has finished, even when the caller (an HTTP client that disconnects) is
+/// dropped. A task that panicked or was cancelled (the runtime shutting
+/// down) is a `Query` error.
+async fn run_to_end<T: Send + 'static>(
+    work: impl Future<Output = Result<T, DbError>> + Send + 'static,
+) -> Result<T, DbError> {
+    tokio::spawn(work)
+        .await
+        .map_err(|e| DbError::Query(format!("conversation delete or clear task failed: {e}")))?
+}
+
+/// The error a transaction's failed statement reported, from the
+/// [`take_errors`](surrealdb::Response::take_errors) of its response; `None`
+/// when no statement failed. When a statement inside `BEGIN`/`COMMIT`
+/// fails, the store replaces the results of the statements before it with
+/// `QueryNotExecuted` and keeps the cause only at the failing statement, so
+/// this is the lowest-indexed error that is not `QueryNotExecuted`, or the
+/// lowest-indexed error when all are (a failed commit carries its cause in
+/// each).
+fn failed_statement(errors: HashMap<usize, surrealdb::Error>) -> Option<surrealdb::Error> {
+    errors
+        .into_iter()
+        .min_by_key(|(index, error)| {
+            let not_executed = matches!(
+                error,
+                surrealdb::Error::Db(surrealdb::error::Db::QueryNotExecuted)
+            );
+            (not_executed, *index)
+        })
+        .map(|(_, error)| error)
 }
 
 /// What [`delete_conversation_rows`](DbConnection::delete_conversation_rows)
