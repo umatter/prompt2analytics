@@ -13,6 +13,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::mboost::check_step_size;
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, try_with_capacity};
 
@@ -21,7 +22,9 @@ use crate::resource::{checkpoint, try_with_capacity};
 pub struct FastMboostConfig {
     /// Number of boosting iterations
     pub m_stop: usize,
-    /// Learning rate (nu) - shrinkage parameter
+    /// Learning rate (nu) - shrinkage parameter. Must be finite and in
+    /// (0, 1], as for [`mboost`](fn@crate::ml::mboost); [`fast_mboost`] refuses
+    /// other values.
     pub nu: f64,
     /// Base learner type
     pub base_learner: FastMboostLearner,
@@ -150,7 +153,8 @@ impl std::fmt::Display for FastMboostResult {
 ///
 /// - [`EconError::InsufficientData`] when `y.len() != x.nrows()`.
 /// - [`EconError::InvalidSpecification`] for fewer than 2 rows, no predictor
-///   columns, or non-finite values in `x` or `y`.
+///   columns, non-finite values in `x` or `y`, or a step size `nu` that is
+///   not finite or lies outside (0, 1].
 /// - [`EconError::ResourceLimit`] / [`EconError::Cancelled`] from the
 ///   resource guards: the `m_stop`-sized buffers exceed the allocation
 ///   ceiling, or the budget is cancelled or expires.
@@ -191,6 +195,7 @@ pub fn fast_mboost(
             message: format!("y must contain only finite values (row {i} is {v})"),
         });
     }
+    check_step_size(config.nu)?;
 
     // A strided y (say, a column of a row-major matrix) has no slice; copy it
     // once instead
@@ -857,6 +862,59 @@ mod tests {
                 matches!(&e, EconError::InvalidSpecification { message } if message.contains("finite")),
                 "{e:?}"
             );
+        }
+    }
+
+    #[test]
+    fn fast_mboost_refuses_a_step_size_outside_zero_one() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let x = Array2::from_shape_fn((40, 2), |_| rng.r#gen::<f64>());
+        let y: Array1<f64> =
+            x.column(0).mapv(|v| 2.0 * v) + Array1::from_shape_fn(40, |_| rng.r#gen::<f64>() * 0.1);
+        let learners = [
+            FastMboostLearner::ComponentwiseLinear,
+            FastMboostLearner::Stump,
+            FastMboostLearner::Tree { max_depth: 2 },
+        ];
+        for learner in learners {
+            let bad = [
+                0.0,
+                -0.0,
+                -1.0,
+                1.0 + 1e-9,
+                2.0,
+                95.0,
+                1e300,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ];
+            for nu in bad {
+                let config = FastMboostConfig {
+                    m_stop: 5,
+                    nu,
+                    base_learner: learner.clone(),
+                    ..Default::default()
+                };
+                let e = fast_mboost(x.view(), y.view(), &config).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message }
+                        if message.contains("nu") && message.contains("(0, 1]")),
+                    "{learner:?}, nu = {nu:?}: {e}"
+                );
+            }
+            for nu in [1e-6, 0.5, 1.0] {
+                let config = FastMboostConfig {
+                    m_stop: 5,
+                    nu,
+                    base_learner: learner.clone(),
+                    ..Default::default()
+                };
+                assert!(
+                    fast_mboost(x.view(), y.view(), &config).is_ok(),
+                    "nu = {nu}"
+                );
+            }
         }
     }
 

@@ -146,7 +146,9 @@ pub struct MboostConfig {
 
     /// Learning rate / step length (default: 0.1).
     /// Smaller values require more iterations but often improve generalization.
-    /// Typical range: 0.01 to 0.5.
+    /// Typical range: 0.01 to 0.5. Must be finite and in (0, 1], the range
+    /// R's mboost documents; [`mboost`] and [`mboost_cv`] refuse other values
+    /// with [`EconError::InvalidSpecification`].
     pub nu: f64,
 
     /// Loss function family (default: Gaussian).
@@ -640,6 +642,21 @@ fn check_mboost_inputs(x: &ArrayView2<f64>, y: &ArrayView1<f64>) -> EconResult<(
     Ok(())
 }
 
+/// Refuses a step size `nu` outside `(0, 1]`, the range mboost documents for
+/// it. At 0 every update is scaled away and an intercept-only model would be
+/// reported as fitted; a negative step climbs the loss; above 1 the updates
+/// overshoot (at 2 the linear learner oscillates in place, beyond that the
+/// fit diverges). Shared with `fast_mboost`.
+pub(super) fn check_step_size(nu: f64) -> EconResult<()> {
+    if nu.is_finite() && nu > 0.0 && nu <= 1.0 {
+        Ok(())
+    } else {
+        Err(EconError::InvalidSpecification {
+            message: format!("nu must be a finite step size in (0, 1]; got {nu:?}"),
+        })
+    }
+}
+
 /// `mstop + 1`, the length of the loss and CV-error paths.
 fn mstop_plus_one(mstop: usize) -> EconResult<usize> {
     mstop.checked_add(1).ok_or_else(|| {
@@ -683,6 +700,7 @@ pub fn mboost(
     config: &MboostConfig,
 ) -> EconResult<MboostResult> {
     check_mboost_inputs(&x, &y)?;
+    check_step_size(config.nu)?;
     let n_samples = x.nrows();
     let n_features = x.ncols();
     let iters_plus_one = mstop_plus_one(config.mstop)?;
@@ -887,6 +905,7 @@ pub fn mboost_cv(
     config: &MboostConfig,
 ) -> EconResult<MboostResult> {
     check_mboost_inputs(&x, &y)?;
+    check_step_size(config.nu)?;
     let n_folds = config.cv_folds.unwrap_or(5);
     let n_samples = x.nrows();
 
@@ -1292,6 +1311,62 @@ mod tests {
             matches!(&e, EconError::InvalidSpecification { message } if message.contains("finite")),
             "{e}"
         );
+    }
+
+    #[test]
+    fn mboost_refuses_a_step_size_outside_zero_one() {
+        let (x, y) = noisy_data(30, 2, 13);
+        for base_learner in [MboostBaseLearner::Linear, MboostBaseLearner::Tree] {
+            let bad = [
+                0.0,
+                -0.0,
+                -1.0,
+                1.0 + 1e-9,
+                2.0,
+                95.0,
+                1e300,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ];
+            for nu in bad {
+                let cfg = MboostConfig {
+                    mstop: 5,
+                    nu,
+                    base_learner,
+                    ..Default::default()
+                };
+                let cv = MboostConfig {
+                    cv_folds: Some(3),
+                    ..cfg.clone()
+                };
+                for (what, r) in [
+                    ("mboost", mboost(x.view(), y.view(), &cfg)),
+                    ("mboost_cv", mboost_cv(x.view(), y.view(), &cv)),
+                ] {
+                    let e = r.unwrap_err();
+                    assert!(
+                        matches!(&e, EconError::InvalidSpecification { message }
+                            if message.contains("nu") && message.contains("(0, 1]")),
+                        "{what}, {base_learner}, nu = {nu:?}: {e}"
+                    );
+                }
+            }
+            for nu in [1e-6, 0.5, 1.0] {
+                let cfg = MboostConfig {
+                    mstop: 5,
+                    nu,
+                    base_learner,
+                    ..Default::default()
+                };
+                let cv = MboostConfig {
+                    cv_folds: Some(3),
+                    ..cfg.clone()
+                };
+                assert!(mboost(x.view(), y.view(), &cfg).is_ok(), "nu = {nu}");
+                assert!(mboost_cv(x.view(), y.view(), &cv).is_ok(), "nu = {nu}");
+            }
+        }
     }
 
     /// Golden (characterization) test: captured on the code before the
