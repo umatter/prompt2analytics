@@ -674,6 +674,148 @@ async fn a_failed_counter_write_is_reported() {
     assert_eq!(db.store_turns_in_use(), 0);
 }
 
+/// Make every `what` ('UPDATE' or 'DELETE') of a conversation row fail
+/// inside the store, or (`None`) let them through again.
+async fn refuse_conversation_writes(db: &DbConnection, what: Option<&str>) {
+    let query = match what {
+        Some(what) => format!(
+            "DEFINE EVENT refuse ON TABLE conversations WHEN $event = '{what}' \
+             THEN {{ THROW 'refused' }}"
+        ),
+        None => "REMOVE EVENT refuse ON TABLE conversations".to_string(),
+    };
+    db.db().query(query).await.unwrap().check().unwrap();
+}
+
+/// Conversation `id` (made by [`filled_conversation`]) still holds its 21
+/// messages and its tool call, and its `message_count` says so.
+async fn assert_conversation_whole(db: &DbConnection, id: &str) {
+    assert_eq!(db.count_messages(id).await.unwrap(), 21);
+    assert_eq!(rows_in(db, "tool_calls").await, 1);
+    assert_eq!(db.get_conversation(id).await.unwrap().message_count, 21);
+}
+
+/// A clear is one transaction. When its last step, the counter reset, fails
+/// (standing in for the process stopping between the row deletes and the
+/// reset), the rows are not deleted either, with and without the byte
+/// budget: before, the messages went and `message_count` kept the old count.
+#[tokio::test]
+async fn a_clear_that_stops_part_way_deletes_nothing() {
+    for session_db_bytes in [None, Some(100_000)] {
+        let db = limited_db(PersistenceLimits {
+            session_db_bytes,
+            ..Default::default()
+        })
+        .await;
+        let id = filled_conversation(&db, "s1", "kept").await;
+        refuse_conversation_writes(&db, Some("UPDATE")).await;
+
+        assert!(db.clear_messages(&id).await.is_err());
+        assert_conversation_whole(&db, &id).await;
+        if session_db_bytes.is_some() {
+            assert_counter_matches_store(&db, "s1").await;
+        }
+
+        refuse_conversation_writes(&db, None).await;
+        assert_eq!(db.clear_messages(&id).await.unwrap(), 21);
+        assert_eq!(db.count_messages(&id).await.unwrap(), 0);
+        assert_eq!(rows_in(&db, "tool_calls").await, 0);
+        let conv = db.get_conversation(&id).await.unwrap();
+        assert_eq!((conv.message_count, conv.last_message_preview), (0, None));
+        if session_db_bytes.is_some() {
+            assert_counter_matches_store(&db, "s1").await;
+        }
+        assert_eq!(db.store_turns_in_use(), 0);
+    }
+}
+
+/// A conversation delete is one transaction. When its last step, deleting
+/// the conversation row, fails, its messages and tool calls are not deleted
+/// either: before, they went and the conversation stayed listed with its old
+/// `message_count`.
+#[tokio::test]
+async fn a_delete_that_stops_part_way_deletes_nothing() {
+    for session_db_bytes in [None, Some(100_000)] {
+        let db = limited_db(PersistenceLimits {
+            session_db_bytes,
+            ..Default::default()
+        })
+        .await;
+        let id = filled_conversation(&db, "s1", "kept").await;
+        refuse_conversation_writes(&db, Some("DELETE")).await;
+
+        assert!(db.delete_conversation(&id).await.is_err());
+        assert_conversation_whole(&db, &id).await;
+        if session_db_bytes.is_some() {
+            assert_counter_matches_store(&db, "s1").await;
+        }
+
+        refuse_conversation_writes(&db, None).await;
+        db.delete_conversation(&id).await.unwrap();
+        assert!(matches!(
+            db.get_conversation(&id).await,
+            Err(DbError::NotFound(_))
+        ));
+        assert_eq!(rows_in(&db, "messages").await, 0);
+        assert_eq!(rows_in(&db, "tool_calls").await, 0);
+        if session_db_bytes.is_some() {
+            assert_counter_matches_store(&db, "s1").await;
+        }
+        assert_eq!(db.store_turns_in_use(), 0);
+    }
+}
+
+/// A clear or delete whose caller is dropped part way (an HTTP client that
+/// disconnects; the store still finishes the statement it was sent) leaves
+/// the conversation's `message_count` in step with its rows. Before, the
+/// call was dropped between the message delete and the counter reset (or
+/// the row delete), and the conversation kept its old count with no
+/// messages. The outcome does not depend on timing: had the call been
+/// dropped before it reached the store, nothing would have changed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_clear_or_delete_leaves_the_count_in_step() {
+    let db = test_db().await;
+    // Each message delete takes a while, so the call is still waiting for
+    // the store when it is dropped.
+    db.db()
+        .query("DEFINE EVENT slow ON TABLE messages WHEN $event = 'DELETE' THEN { sleep(20ms) }")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let mut out_of_step = Vec::new();
+    for op in ["clear", "delete"] {
+        let id = filled_conversation(&db, "s1", op).await;
+        let call = async {
+            if op == "clear" {
+                db.clear_messages(&id).await.map(|_| ())
+            } else {
+                db.delete_conversation(&id).await
+            }
+        };
+        let dropped = tokio::time::timeout(std::time::Duration::from_millis(100), call).await;
+        assert!(dropped.is_err(), "{op} finished before it was dropped");
+        // Wait (a bounded number of polls) for the store to finish.
+        for _ in 0..500 {
+            if db.count_messages(&id).await.unwrap() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let stored = db.count_messages(&id).await.unwrap();
+        let listed = match db.get_conversation(&id).await {
+            Ok(conv) => usize::try_from(conv.message_count).unwrap(),
+            Err(DbError::NotFound(_)) => 0,
+            Err(e) => panic!("{op}: {e}"),
+        };
+        if listed != stored {
+            out_of_step.push(format!("{op}: listed {listed}, stored {stored}"));
+        }
+    }
+    assert!(out_of_step.is_empty(), "{out_of_step:?}");
+    assert_eq!(db.store_turns_in_use(), 0);
+}
+
 /// Whether `n` calls hold or wait for store turn `key`, polled a bounded
 /// number of times (no timing assertion: a slow machine only polls longer).
 async fn turn_has_users(db: &DbConnection, key: &str, n: usize) -> bool {

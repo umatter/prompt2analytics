@@ -135,93 +135,99 @@ impl DbConnection {
         updated.ok_or_else(|| DbError::NotFound(format!("Conversation not found: {}", id)))
     }
 
-    /// Delete a conversation and all its messages. With a `session_db_bytes`
-    /// budget, the bytes this call removed are released from the session's
-    /// counter (also when a later step fails). Deletes and clears of one
-    /// conversation take turns.
+    /// Delete a conversation and all its messages and tool calls, in one
+    /// transaction (see [`delete_conversation_rows`](Self::delete_conversation_rows)):
+    /// when the store fails it, or the process stops during it, nothing is
+    /// deleted. With a `session_db_bytes` budget, the bytes this call
+    /// removed are released from the session's counter. Deletes and clears
+    /// of one conversation take turns.
     pub async fn delete_conversation(&self, id: &str) -> Result<(), DbError> {
         let _turn = self.conversation_turn(id).await;
-        // A write racing this delete, or a step below that fails, can leave
-        // rows behind; the next orphan sweeps look for them.
+        // A write racing this delete can leave rows behind; the next orphan
+        // sweeps look for them.
         self.note_conversation_deleted(id);
         let owner = self.counted_owner(id).await?;
-        let mut removed = Removed::default();
-        let outcome = self
-            .delete_conversation_and_rows(id, owner.is_some(), &mut removed)
-            .await;
+        let removed = self
+            .delete_conversation_rows(id, Finish::DeleteConversation, owner.is_some())
+            .await?;
         if let Some(session_id) = &owner {
             self.release_session_bytes(session_id, removed.bytes);
         }
-        if outcome? {
+        if removed.conversation {
             Ok(())
         } else {
             Err(DbError::NotFound(format!("Conversation not found: {}", id)))
         }
     }
 
-    /// Delete conversation `id`'s tool calls, messages and row, in that
-    /// order, adding what each step removed to `removed` (the title counts
-    /// only when the row was there to delete). Whether the row existed.
-    async fn delete_conversation_and_rows(
-        &self,
-        id: &str,
-        measure: bool,
-        removed: &mut Removed,
-    ) -> Result<bool, DbError> {
-        self.delete_conversation_rows(id, measure, removed).await?;
-        let deleted: Option<Conversation> = self.db().delete(("conversations", id)).await?;
-        if let Some(conv) = &deleted {
-            removed.bytes = removed.bytes.saturating_add(conv.title.len() as u64);
-        }
-        Ok(deleted.is_some())
-    }
-
-    /// Delete the tool calls and then the messages of conversation `id`,
-    /// adding what each statement removed to `removed` once it committed.
+    /// Delete the tool calls and then the messages of conversation `id` and
+    /// then, in the same transaction, `finish` it: reset its counters (a
+    /// clear) or delete its row (a conversation delete). A call stopped part
+    /// way, by the process dying or by its caller being dropped while the
+    /// store runs the query, has therefore done all of it or none of it, and
+    /// the conversation's `message_count` never outlives its messages. An
+    /// error means that nothing was deleted, unless it came from reading back
+    /// the rows of a transaction that committed.
     ///
-    /// With `measure`, each delete returns the rows it removed (`RETURN
-    /// BEFORE`) and their text bytes and messages are counted; a delete that
-    /// runs after another one finds nothing. Callers hold the conversation's
-    /// [`StoreTurn`](super::connection::StoreTurn), so two deletes never run
-    /// at the same time. Without `measure` nothing is returned or counted.
+    /// With `measure`, the deletes return the rows they removed (`RETURN
+    /// BEFORE`) and their messages and text bytes are counted (the title's
+    /// too when the conversation row is deleted); without it only whether the
+    /// conversation row was deleted is returned. Callers hold the
+    /// conversation's [`StoreTurn`](super::connection::StoreTurn), so two of
+    /// these never run on one conversation at the same time, and the later
+    /// one finds nothing.
     async fn delete_conversation_rows(
         &self,
         id: &str,
+        finish: Finish,
         measure: bool,
-        removed: &mut Removed,
-    ) -> Result<(), DbError> {
-        let id = || ("id", id.to_string());
-        if !measure {
-            self.db()
-                .query("DELETE FROM tool_calls WHERE conversation_id = $id")
-                .bind(id())
-                .await?
-                .check()?;
-            self.db()
-                .query("DELETE FROM messages WHERE conversation_id = $id")
-                .bind(id())
-                .await?
-                .check()?;
-            return Ok(());
+    ) -> Result<Removed, DbError> {
+        let rows = if measure {
+            "RETURN BEFORE"
+        } else {
+            "RETURN NONE"
+        };
+        let finish_statement = match finish {
+            Finish::ResetCounters => {
+                "UPDATE conversations SET message_count = 0, last_message_preview = NONE, \
+                 updated_at = time::now() WHERE id = $conv RETURN NONE"
+            }
+            Finish::DeleteConversation => "DELETE $conv RETURN BEFORE",
+        };
+        let mut response = self
+            .db()
+            .query(format!(
+                "BEGIN TRANSACTION;
+                 DELETE FROM tool_calls WHERE conversation_id = $id {rows};
+                 DELETE FROM messages WHERE conversation_id = $id {rows};
+                 {finish_statement};
+                 COMMIT TRANSACTION;"
+            ))
+            .bind(("id", id.to_string()))
+            .bind(("conv", RecordId::from(("conversations", id))))
+            .await?
+            .check()?;
+
+        // Committed: BEGIN and COMMIT return nothing, so the three
+        // statements' results are 0, 1 and 2.
+        let mut removed = Removed::default();
+        if measure {
+            let tool_calls: Vec<ToolCallText> = response.take(0)?;
+            let messages: Vec<MessageText> = response.take(1)?;
+            removed.messages = messages.len();
+            removed.bytes =
+                tool_call_text_bytes(&tool_calls).saturating_add(message_text_bytes(&messages));
         }
-        let tool_calls: Vec<ToolCallText> = self
-            .db()
-            .query("DELETE FROM tool_calls WHERE conversation_id = $id RETURN BEFORE")
-            .bind(id())
-            .await?
-            .take(0)?;
-        removed.bytes = removed
-            .bytes
-            .saturating_add(tool_call_text_bytes(&tool_calls));
-        let messages: Vec<MessageText> = self
-            .db()
-            .query("DELETE FROM messages WHERE conversation_id = $id RETURN BEFORE")
-            .bind(id())
-            .await?
-            .take(0)?;
-        removed.messages = messages.len();
-        removed.bytes = removed.bytes.saturating_add(message_text_bytes(&messages));
-        Ok(())
+        if let Finish::DeleteConversation = finish {
+            let deleted: Option<Conversation> = response.take(2)?;
+            if let Some(conv) = deleted {
+                removed.conversation = true;
+                if measure {
+                    removed.bytes = removed.bytes.saturating_add(conv.title.len() as u64);
+                }
+            }
+        }
+        Ok(removed)
     }
 
     /// The session whose `session_db_bytes` counter a delete in conversation
@@ -474,48 +480,51 @@ impl DbConnection {
         msg.ok_or_else(|| DbError::NotFound(format!("Message not found: {}", message_id)))
     }
 
-    /// Delete all messages in a conversation; returns how many. With a
+    /// Delete all messages (and tool calls) in a conversation and reset its
+    /// `message_count` and preview, in one transaction (see
+    /// [`delete_conversation_rows`](Self::delete_conversation_rows)): when
+    /// the store fails it, or the process stops during it, nothing is
+    /// deleted. Returns how many messages went. With a
     /// `session_db_bytes` budget, the bytes this call removed are released
-    /// from the session's counter (also when a later step fails). Deletes
-    /// and clears of one conversation take turns.
+    /// from the session's counter. Deletes and clears of one conversation
+    /// take turns.
     pub async fn clear_messages(&self, conversation_id: &str) -> Result<u32, DbError> {
         let _turn = self.conversation_turn(conversation_id).await;
-        let deleted_count = match self.counted_owner(conversation_id).await? {
-            Some(session_id) => {
-                let mut removed = Removed::default();
-                let outcome = self
-                    .delete_conversation_rows(conversation_id, true, &mut removed)
-                    .await;
-                self.release_session_bytes(&session_id, removed.bytes);
-                outcome?;
-                u32::try_from(removed.messages).unwrap_or(u32::MAX)
-            }
-            None => {
-                // Count messages before deletion
-                let count = self.count_messages(conversation_id).await?;
-                self.delete_conversation_rows(conversation_id, false, &mut Removed::default())
-                    .await?;
-                u32::try_from(count).unwrap_or(u32::MAX)
-            }
+        let owner = self.counted_owner(conversation_id).await?;
+        // Unmeasured, the delete returns no rows: count them first (in the
+        // turn, so no add of this process lands in between).
+        let counted = match owner {
+            Some(_) => None,
+            None => Some(self.count_messages(conversation_id).await?),
         };
-
-        // Reset conversation counters
-        let conv_id = conversation_id.to_string();
-        self.db()
-            .query("UPDATE conversations SET message_count = 0, last_message_preview = NONE, updated_at = time::now() WHERE id = $id")
-            .bind(("id", RecordId::from(("conversations", conv_id.as_str()))))
-            .await?
-            .check()?;
-
-        Ok(deleted_count)
+        let removed = self
+            .delete_conversation_rows(conversation_id, Finish::ResetCounters, owner.is_some())
+            .await?;
+        if let Some(session_id) = &owner {
+            self.release_session_bytes(session_id, removed.bytes);
+        }
+        Ok(u32::try_from(counted.unwrap_or(removed.messages)).unwrap_or(u32::MAX))
     }
+}
+
+/// What [`delete_conversation_rows`](DbConnection::delete_conversation_rows)
+/// does after deleting a conversation's tool calls and messages, in the same
+/// transaction.
+#[derive(Debug, Clone, Copy)]
+enum Finish {
+    /// Reset the conversation's `message_count` and preview (a clear).
+    ResetCounters,
+    /// Delete the conversation row (a conversation delete).
+    DeleteConversation,
 }
 
 /// What deleting a conversation's rows removed: the messages and the text
 /// bytes (contents, tool-call texts and, for a whole conversation, its
-/// title) that the `session_db_bytes` budget counts.
+/// title) that the `session_db_bytes` budget counts, and whether the
+/// conversation row was deleted.
 #[derive(Debug, Default)]
 struct Removed {
     messages: usize,
     bytes: u64,
+    conversation: bool,
 }
