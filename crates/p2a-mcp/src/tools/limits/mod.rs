@@ -5,10 +5,10 @@
 //! [`Limits::off`] is the default for local use (stdio, CLI-style HTTP, the embedded desktop
 //! server). It has no family cap, no row cap, no minimum tolerance and no `Option` budget, so it
 //! checks nothing: every request that deserialises is accepted. [`Limits::hosted`] is the profile
-//! of the public no-login deployment. Its values are those of the Tier 0 design (section 4), and
-//! every hosted cap is at least 1.5 times the default of the tool fields it bounds, so default
-//! requests are never refused. [`Limits::with_overrides`] adjusts either profile from
-//! `key=value` pairs (`P2A_LIMIT_OVERRIDES`); [`Limits::known_keys`] lists the valid keys.
+//! of the public no-login deployment. Every hosted cap is at least 1.5 times the default of the
+//! tool fields it bounds, so default requests are never refused. [`Limits::with_overrides`]
+//! adjusts either profile from `key=value` pairs (`P2A_LIMIT_OVERRIDES`); [`Limits::known_keys`]
+//! lists the valid keys.
 //!
 //! # What is checked
 //!
@@ -55,10 +55,10 @@
 //! blocking thread), stdio calls in the server's `ServerHandler::call_tool`. Handlers read named
 //! budgets through [`current`]. Until something is installed, [`current`] returns the off profile.
 
-// `LimitViolation` (five `String`s and a `&'static str`) is the error type of the published
-// limits API that T0-WP06 to T0-WP20 compile against. It is built only when a request is
-// refused, once per tool call at most, so the size of `Result<(), LimitViolation>` does not
-// matter here and boxing it would change that API.
+// `LimitViolation` (five `String`s and a `&'static str`) is the stable error type of this API,
+// which the handlers use. It is built only when a request is refused, once per tool call at
+// most, so the size of `Result<(), LimitViolation>` does not matter here and boxing it would
+// change that API.
 #![allow(
     clippy::result_large_err,
     reason = "LimitViolation is the fixed, rarely constructed error type of the limits API"
@@ -73,63 +73,94 @@ use serde_json::Value;
 mod rules;
 pub use rules::{PARAM_RULES, ROW_RULES};
 
-/// A family of cost parameters that share one cap (for example every bootstrap replication count).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Family {
+/// Generates [`Family`], [`Family::ALL`], [`Family::key`] and `Family::hosted_cap` from one list
+/// (`Variant => "key", hosted cap;`), so that the enum, its list of variants and its keys and
+/// caps cannot drift apart.
+macro_rules! families {
+    ($($(#[$attr:meta])* $variant:ident => $key:literal, $cap:expr;)*) => {
+        /// A family of cost parameters that share one cap (for example every bootstrap
+        /// replication count).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Family {
+            $($(#[$attr])* $variant,)*
+        }
+
+        impl Family {
+            /// Every family, in declaration order.
+            pub const ALL: &'static [Family] = &[$(Family::$variant,)*];
+
+            /// The family's override key, also shown in refusals (for example `replications`).
+            pub fn key(self) -> &'static str {
+                match self {
+                    $(Family::$variant => $key,)*
+                }
+            }
+
+            /// The family's cap in the hosted profile.
+            fn hosted_cap(self) -> u64 {
+                match self {
+                    $(Family::$variant => $cap,)*
+                }
+            }
+        }
+    };
+}
+
+families! {
     /// Bootstrap and permutation replications.
-    Replications,
+    Replications => "replications", 10_000;
     /// Monte Carlo simulation sizes.
-    SimulationSize,
+    SimulationSize => "simulation_size", 100_000;
     /// Trees of a forest or committee members.
-    Trees,
+    Trees => "trees", 5_000;
     /// Boosting rounds and additive terms.
-    BoostingIterations,
+    BoostingIterations => "boosting_iterations", 10_000;
     /// MCMC or simulation draws, burn-in included.
-    McmcDraws,
+    McmcDraws => "mcmc_draws", 20_000;
     /// Cross-validation folds.
-    Folds,
+    Folds => "folds", 20;
     /// Iteration limits of optimisers.
-    Iterations,
+    Iterations => "iterations", 100_000;
     /// Random restarts.
-    Restarts,
+    Restarts => "restarts", 100;
     /// Grid sizes (density grids, lambda paths, MTE grids).
-    GridPoints,
+    GridPoints => "grid_points", 10_000;
     /// Histogram and binning bins.
-    Bins,
+    Bins => "bins", 1_000;
     /// Lags, lag orders and seasonal periods.
-    Lags,
+    Lags => "lags", 1_000;
     /// Forecast and response horizons.
-    Horizon,
+    Horizon => "horizon", 5_000;
     /// Polynomial and ARMA model orders.
-    ModelOrder,
+    ModelOrder => "model_order", 20;
     /// Integer kernel bandwidths (HAC, Driscoll-Kraay, GMM, sphet).
-    Bandwidth,
+    Bandwidth => "bandwidth", 1_000;
     /// Smoother span and window widths.
-    SpanWidth,
+    SpanWidth => "span_width", 1_001;
     /// Components, factors, ranks and clusters.
-    Components,
+    Components => "components", 500;
     /// Nearest-neighbour counts.
-    Neighbors,
+    Neighbors => "neighbors", 100;
     /// Rows a tool generates or samples.
-    GeneratedRows,
+    GeneratedRows => "generated_rows", 1_000_000;
     /// Image width or height in pixels.
-    ImageDimension,
+    ImageDimension => "image_dimension", 4_000;
     /// Lists of names (columns, covariates, ...) and other short lists.
-    ListLength,
+    ListLength => "list_length", 500;
     /// Numeric arrays passed by the caller.
-    ArrayLength,
+    ArrayLength => "array_length", 100_000;
     /// Byte length of caller strings that are stored, repeated or compiled.
-    StringBytes,
+    StringBytes => "string_bytes", 4_096;
     /// Recursion depth of tree builders.
-    TreeDepth,
+    TreeDepth => "tree_depth", 100;
 }
 
 /// Number of families; the length of [`Family::ALL`].
-const FAMILY_COUNT: usize = 23;
+const FAMILY_COUNT: usize = Family::ALL.len();
 
-// `Family::ALL` lists every family once, in declaration order, so `family as usize` indexes it.
+// `families!` lists the variants in declaration order and gives none an explicit discriminant,
+// so `family as usize` is the family's position in `Family::ALL` and indexes the caps array.
 const _: () = {
-    assert!(Family::ALL.len() == FAMILY_COUNT);
     let mut i = 0;
     while i < FAMILY_COUNT {
         assert!(Family::ALL[i] as usize == i);
@@ -138,91 +169,6 @@ const _: () = {
 };
 
 impl Family {
-    /// Every family, in declaration order.
-    pub const ALL: &'static [Family] = &[
-        Family::Replications,
-        Family::SimulationSize,
-        Family::Trees,
-        Family::BoostingIterations,
-        Family::McmcDraws,
-        Family::Folds,
-        Family::Iterations,
-        Family::Restarts,
-        Family::GridPoints,
-        Family::Bins,
-        Family::Lags,
-        Family::Horizon,
-        Family::ModelOrder,
-        Family::Bandwidth,
-        Family::SpanWidth,
-        Family::Components,
-        Family::Neighbors,
-        Family::GeneratedRows,
-        Family::ImageDimension,
-        Family::ListLength,
-        Family::ArrayLength,
-        Family::StringBytes,
-        Family::TreeDepth,
-    ];
-
-    /// The family's override key, also shown in refusals (for example `replications`).
-    pub fn key(self) -> &'static str {
-        match self {
-            Family::Replications => "replications",
-            Family::SimulationSize => "simulation_size",
-            Family::Trees => "trees",
-            Family::BoostingIterations => "boosting_iterations",
-            Family::McmcDraws => "mcmc_draws",
-            Family::Folds => "folds",
-            Family::Iterations => "iterations",
-            Family::Restarts => "restarts",
-            Family::GridPoints => "grid_points",
-            Family::Bins => "bins",
-            Family::Lags => "lags",
-            Family::Horizon => "horizon",
-            Family::ModelOrder => "model_order",
-            Family::Bandwidth => "bandwidth",
-            Family::SpanWidth => "span_width",
-            Family::Components => "components",
-            Family::Neighbors => "neighbors",
-            Family::GeneratedRows => "generated_rows",
-            Family::ImageDimension => "image_dimension",
-            Family::ListLength => "list_length",
-            Family::ArrayLength => "array_length",
-            Family::StringBytes => "string_bytes",
-            Family::TreeDepth => "tree_depth",
-        }
-    }
-
-    /// The family's cap in the hosted profile.
-    fn hosted_cap(self) -> u64 {
-        match self {
-            Family::Replications => 10_000,
-            Family::SimulationSize => 100_000,
-            Family::Trees => 5_000,
-            Family::BoostingIterations => 10_000,
-            Family::McmcDraws => 20_000,
-            Family::Folds => 20,
-            Family::Iterations => 100_000,
-            Family::Restarts => 100,
-            Family::GridPoints => 10_000,
-            Family::Bins => 1_000,
-            Family::Lags => 1_000,
-            Family::Horizon => 5_000,
-            Family::ModelOrder => 20,
-            Family::Bandwidth => 1_000,
-            Family::SpanWidth => 1_001,
-            Family::Components => 500,
-            Family::Neighbors => 100,
-            Family::GeneratedRows => 1_000_000,
-            Family::ImageDimension => 4_000,
-            Family::ListLength => 500,
-            Family::ArrayLength => 100_000,
-            Family::StringBytes => 4_096,
-            Family::TreeDepth => 100,
-        }
-    }
-
     /// Position in [`Family::ALL`] (declaration order), used to index the caps array.
     fn index(self) -> usize {
         self as usize
@@ -491,7 +437,7 @@ impl Limits {
         }
     }
 
-    /// The profile of the public no-login deployment (Tier 0 design, section 4).
+    /// The profile of the public no-login deployment.
     pub fn hosted() -> Self {
         const MIB: u64 = 1024 * 1024;
         let mut caps = [None; FAMILY_COUNT];
@@ -723,12 +669,13 @@ pub struct LimitViolation {
 const ECHO_CHARS: usize = 64;
 
 /// Cuts a caller string to [`ECHO_CHARS`] characters (at a char boundary, never mid-character).
+/// The result borrows from `s`, so echoing allocates nothing.
 ///
 /// Handlers use it for every caller-supplied name they echo in a refusal.
-pub(crate) fn echo(s: &str) -> String {
+pub(crate) fn echo(s: &str) -> &str {
     match s.char_indices().nth(ECHO_CHARS) {
-        Some((end, _)) => s[..end].to_string(),
-        None => s.to_string(),
+        Some((end, _)) => &s[..end],
+        None => s,
     }
 }
 
@@ -766,14 +713,18 @@ fn expand<'v>(value: &'v Value, depth: usize, rest: Option<&str>, out: &mut Vec<
 
 /// True when a JSON number exceeds `cap` by absolute value.
 fn number_exceeds(n: &serde_json::Number, cap: u64) -> bool {
-    if let Some(u) = n.as_u64() {
-        u > cap
-    } else if let Some(i) = n.as_i64() {
-        i.unsigned_abs() > cap
-    } else if let Some(f) = n.as_f64() {
-        f.abs() > cap as f64
-    } else {
-        false
+    magnitude_exceeds(n.as_u64(), n.as_i64(), n.as_f64(), cap)
+}
+
+/// [`number_exceeds`] on the number's `u64`, `i64` and `f64` readings. A number with none of
+/// them exceeds every cap, so the check fails closed.
+fn magnitude_exceeds(u: Option<u64>, i: Option<i64>, f: Option<f64>, cap: u64) -> bool {
+    match (u, i, f) {
+        (Some(u), _, _) => u > cap,
+        (None, Some(i), _) => i.unsigned_abs() > cap,
+        (None, None, Some(f)) => f.abs() > cap as f64,
+        // Reachable only with serde_json's `arbitrary_precision` feature (for example 1e400).
+        (None, None, None) => true,
     }
 }
 
@@ -808,7 +759,7 @@ impl Limits {
                  {cap} rows, for example with munge_sample.",
                 rule.class.reason()
             ),
-            tool,
+            tool: tool.to_string(),
             parameter: rule.dataset_field.to_string(),
             requested: n_rows.to_string(),
             limit: cap.to_string(),
@@ -833,7 +784,7 @@ impl Limits {
                         "This request to `{tool}` needs {requested} ({knob}), which exceeds this \
                          server's limit of {limit}. Use a smaller request."
                     ),
-                    tool,
+                    tool: tool.to_string(),
                     parameter: knob.to_string(),
                     requested: requested.to_string(),
                     limit: limit.to_string(),
@@ -853,30 +804,30 @@ impl Limits {
         if self.is_off() || !args.is_object() {
             return Ok(());
         }
+        let tool_echo = echo(tool);
         let mut values = Vec::new();
         for rule in select_rules(tool, rules) {
             values.clear();
             resolve_path(args, rule.path, &mut values);
             for value in &values {
-                self.check_value(tool, rule, value)?;
+                self.check_value(tool_echo, rule, value)?;
             }
         }
         Ok(())
     }
 
-    /// Applies one rule to one resolved value.
+    /// Applies one rule to one resolved value; `tool_echo` is the tool name as [`echo`] cut it.
     fn check_value(
         &self,
-        tool: &str,
+        tool_echo: &str,
         rule: &ParamRule,
         value: &Value,
     ) -> Result<(), LimitViolation> {
         let path = rule.path;
-        let tool_echo = echo(tool);
         let violation =
             |requested: String, limit: String, override_key: &'static str, message: String| {
                 Err(LimitViolation {
-                    tool: echo(tool),
+                    tool: tool_echo.to_string(),
                     parameter: path.to_string(),
                     requested,
                     limit,
@@ -945,7 +896,7 @@ impl Limits {
                         if !seen.insert(name) {
                             let name = echo(name);
                             return violation(
-                                name.clone(),
+                                name.to_string(),
                                 "no duplicates".to_string(),
                                 key,
                                 format!(
@@ -1207,6 +1158,33 @@ mod tests {
         assert!(h.check_with("t", &json!({"reps": "1e30"}), T).is_ok());
         // not an object
         assert!(h.check_with("t", &json!([1, 2]), T).is_ok());
+    }
+
+    #[test]
+    fn a_number_without_a_u64_i64_or_f64_reading_exceeds_every_cap() {
+        // Only serde_json's `arbitrary_precision` feature produces such a number (1e400); the
+        // check must refuse it rather than let it through.
+        assert!(magnitude_exceeds(None, None, None, u64::MAX));
+        assert!(magnitude_exceeds(Some(11), Some(11), Some(11.0), 10));
+        assert!(!magnitude_exceeds(Some(10), Some(10), Some(10.0), 10));
+        assert!(magnitude_exceeds(None, Some(-11), Some(-11.0), 10));
+        assert!(!magnitude_exceeds(None, None, Some(-9.5), 10));
+    }
+
+    #[test]
+    fn refusals_echo_at_most_64_characters_of_the_tool_name() {
+        let h = Limits::hosted();
+        let long = "t".repeat(100);
+        let v = h
+            .check_with(&long, &json!({"reps": 10_001}), T)
+            .unwrap_err();
+        assert_eq!(v.tool, "t".repeat(64));
+        assert!(v.message.contains(&format!("`{}`", "t".repeat(64))));
+        assert!(!v.message.contains(&"t".repeat(65)), "{}", v.message);
+        // a short name is echoed whole, borrowed from the caller's string
+        let short = "regression_ols";
+        assert!(std::ptr::eq(echo(short), short));
+        assert_eq!(echo(&"é".repeat(65)), "é".repeat(64));
     }
 
     #[test]
@@ -1638,6 +1616,10 @@ mod tests {
     fn every_known_key_is_settable() {
         const BOOLS: &[&str] = &["llm_server_keys", "llm_allow_loopback", "sql_freeform"];
         let keys = Limits::known_keys();
+        // `set` tries the family keys first, so a named budget sharing a family key could never
+        // be set.
+        let unique: HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len(), "duplicate limit keys in {keys:?}");
         for f in Family::ALL {
             assert!(keys.contains(&f.key()));
         }
