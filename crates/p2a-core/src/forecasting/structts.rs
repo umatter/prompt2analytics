@@ -14,8 +14,11 @@
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::forecasting::kalman::{StateSpaceModel, kalman_filter, kalman_smoother};
-use crate::resource::checkpoint;
+use crate::forecasting::kalman::{
+    StateSpaceModel, admit_filter_and_smoother_history, kalman_filter, kalman_loglik,
+    kalman_smoother,
+};
+use crate::resource::{checkpoint, with_remedy};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +125,14 @@ pub struct StructTsCoefficients {
 /// [`EconError::Cancelled`] when the budget installed with
 /// [`crate::resource::with_budget`] is cancelled or past its deadline (checked
 /// once per optimiser iteration and within each Kalman-filter pass).
+///
+/// The likelihood evaluations keep no Kalman history; the final pass holds
+/// the filter's and the smoother's at once (see [`kalman_filter`] and
+/// [`kalman_smoother`]), m = 1, 2, or period + 1 for BSM. The two are
+/// admitted as one figure before the optimiser starts, about 24·n·m² bytes
+/// (n·(24m² + 144m + 256) once m ≥ 2, 472 bytes per observation at m = 1):
+/// [`EconError::ResourceLimit`] when it exceeds the per-allocation ceiling,
+/// naming `period` for BSM.
 pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult> {
     let n = y.len();
 
@@ -148,6 +159,14 @@ pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult
             });
         }
     }
+
+    // The final pass holds the filter's and the smoother's histories at once.
+    // Admit them as one figure before the optimiser, whose likelihood passes
+    // keep none, so that a history above the ceiling is refused before any
+    // fitting work.
+    let m = state_dim(&config);
+    admit_filter_and_smoother_history(n, m)
+        .map_err(|e| with_remedy(e, &history_remedy(&config, m)))?;
 
     // Initialize variance parameters
     let y_var = sample_variance(y);
@@ -251,6 +270,32 @@ pub fn run_struct_ts(
 
 // Helper functions
 
+/// The state dimension of the model for `config`, the one figure that
+/// [`build_model`], [`initialize_state`], [`initialize_covariance`] and the
+/// history admission in [`struct_ts`] all use. Saturating, so that the
+/// admission, which runs first, cannot panic on a huge `period`.
+fn state_dim(config: &StructTsConfig) -> usize {
+    match config.model_type {
+        StructTsType::Level => 1,
+        StructTsType::Trend => 2,
+        // level + slope + (period - 1) seasonal states
+        StructTsType::BSM => config.period.unwrap_or(12).saturating_add(1),
+    }
+}
+
+/// What to change when the Kalman history of an `m`-dimensional state is
+/// refused: for BSM the state dimension follows from `period`.
+fn history_remedy(config: &StructTsConfig, m: usize) -> String {
+    match config.model_type {
+        StructTsType::BSM => format!(
+            "with period {} the state dimension is period + 1 = {m}; use a smaller \
+             period or a shorter series",
+            config.period.unwrap_or(12)
+        ),
+        StructTsType::Level | StructTsType::Trend => "use a shorter series".to_string(),
+    }
+}
+
 fn sample_variance(y: &[f64]) -> f64 {
     let n = y.len() as f64;
     let mean = y.iter().sum::<f64>() / n;
@@ -296,9 +341,9 @@ fn optimize_params(
 
     // Objective function: negative log-likelihood with log-transformed params.
     // A parameter vector the model cannot use scores 1e20. A stopped budget
-    // stops the fit instead of scoring the vertex; so would a ResourceLimit,
-    // which this path cannot raise yet (kalman_filter's allocations are
-    // infallible).
+    // stops the fit instead of scoring the vertex, and so would a
+    // ResourceLimit, which the likelihood pass does not raise: it keeps no
+    // Kalman history (struct_ts admits the final pass's before the search).
     let objective = |log_params: &[f64]| -> EconResult<f64> {
         let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
         match compute_loglik(y, config, &params) {
@@ -322,8 +367,9 @@ fn optimize_params(
 ///
 /// Each evaluation of `objective` is a Kalman-filter pass over the series, so
 /// the budget is checked once per iteration (and within each pass by
-/// [`kalman_filter`]); an `Err` from `objective` stops the search.
-fn nelder_mead_optimize(
+/// [`kalman_loglik`]); an `Err` from `objective` stops the search. CausalImpact
+/// fits its BSTS variances with this optimiser too.
+pub(crate) fn nelder_mead_optimize(
     objective: &dyn Fn(&[f64]) -> EconResult<f64>,
     init: &[f64],
     max_iter: usize,
@@ -450,8 +496,7 @@ fn compute_loglik(y: &[f64], config: &StructTsConfig, params: &[f64]) -> EconRes
     let init_state = initialize_state(config, y);
     let init_cov = initialize_covariance(config, y_var);
 
-    let result = kalman_filter(y, &model, init_state.view(), init_cov.view())?;
-    Ok(result.log_likelihood)
+    kalman_loglik(y, &model, init_state.view(), init_cov.view())
 }
 
 fn build_model(config: &StructTsConfig, params: &[f64]) -> EconResult<StateSpaceModel> {
@@ -481,8 +526,7 @@ fn build_model(config: &StructTsConfig, params: &[f64]) -> EconResult<StateSpace
             StateSpaceModel::new(transition, observation, selection, state_cov, obs_var)
         }
         StructTsType::BSM => {
-            let period = config.period.unwrap_or(12);
-            let m = 2 + period - 1; // level + slope + (period-1) seasonal states
+            let m = state_dim(config); // level + slope + (period-1) seasonal states
 
             // Transition matrix
             let mut transition = Array2::zeros((m, m));
@@ -543,9 +587,7 @@ fn initialize_state(config: &StructTsConfig, y: &[f64]) -> Array1<f64> {
             Array1::from_vec(vec![y[0], slope])
         }
         StructTsType::BSM => {
-            let period = config.period.unwrap_or(12);
-            let m = 2 + period - 1;
-            let mut state = Array1::zeros(m);
+            let mut state = Array1::zeros(state_dim(config));
             state[0] = y[0]; // Level
             state[1] = if y.len() > 1 { y[1] - y[0] } else { 0.0 }; // Slope
             // Seasonal initialized to zero
@@ -555,14 +597,8 @@ fn initialize_state(config: &StructTsConfig, y: &[f64]) -> Array1<f64> {
 }
 
 fn initialize_covariance(config: &StructTsConfig, y_var: f64) -> Array2<f64> {
-    let m = match config.model_type {
-        StructTsType::Level => 1,
-        StructTsType::Trend => 2,
-        StructTsType::BSM => 2 + config.period.unwrap_or(12) - 1,
-    };
-
     // Use diffuse initialization (large variance)
-    Array2::from_diag(&Array1::from_elem(m, y_var * 10.0))
+    Array2::from_diag(&Array1::from_elem(state_dim(config), y_var * 10.0))
 }
 
 fn extract_components(
@@ -950,6 +986,166 @@ mod tests {
             "{stopped:?}"
         );
         assert!(evals.get() <= bound, "{} evaluations", evals.get());
+    }
+
+    fn seasonal_series(n: usize, period: usize, seed: u64) -> Vec<f64> {
+        let noise = generate_local_level_data(n, 0.2, 0.5, seed);
+        (0..n)
+            .map(|t| {
+                let season = 6.0 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
+                noise[t] + 0.1 * t as f64 + season
+            })
+            .collect()
+    }
+
+    #[test]
+    fn struct_ts_refuses_a_kalman_history_above_the_allocation_ceiling() {
+        // The Kalman filter's and smoother's histories grow with n·m²
+        // (m = period + 1 for BSM), so with a large state dimension (a
+        // seasonal model with a long period) memory grew without bound.
+        // struct_ts now admits both, as one figure, before the optimiser, and
+        // the refusal names the period that sets m. Before the fix this
+        // returned Ok under the ceiling.
+        let (n, period) = (48, 12);
+        let y = seasonal_series(n, period, 3);
+        let config = StructTsConfig {
+            model_type: StructTsType::BSM,
+            period: Some(period),
+            ..Default::default()
+        };
+        // Filter and smoother together: 48 · (24·13² + 144·13 + 256) =
+        // 296,832 bytes > 64 KiB.
+        let ceiling = Some(64 << 10);
+        let refused =
+            crate::resource::with_alloc_ceiling(ceiling, || struct_ts(&y, config.clone()));
+        match &refused {
+            Err(EconError::ResourceLimit(msg)) => assert!(
+                msg.contains("Kalman filter's and smoother's")
+                    && msg.contains("with period 12 the state dimension is period + 1 = 13")
+                    && msg.ends_with("; use a smaller period or a shorter series")
+                    && msg.matches("; use ").count() == 1,
+                "{msg}"
+            ),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        // The refusal comes before the optimiser: under a stopped budget it
+        // is still the ResourceLimit, so no likelihood pass ran first.
+        let refused_first = cancelled(|| {
+            crate::resource::with_alloc_ceiling(ceiling, || struct_ts(&y, config.clone()))
+        });
+        assert!(
+            matches!(refused_first, Err(EconError::ResourceLimit(_))),
+            "{refused_first:?}"
+        );
+        // The likelihood passes keep no history, so the optimiser itself runs
+        // under the ceiling and finds exactly what it finds without one. Had
+        // they run kalman_filter, which admits its history (198,144 bytes
+        // here), every evaluation would be ResourceLimit under this ceiling.
+        let (init, _) = initialize_params(&config, sample_variance(&y));
+        let bounded = crate::resource::with_alloc_ceiling(ceiling, || {
+            optimize_params(&y, &config, init.clone(), config.max_iter, config.tolerance)
+        });
+        let unbounded = optimize_params(&y, &config, init, config.max_iter, config.tolerance);
+        assert_eq!(bounded.unwrap(), unbounded.unwrap());
+        // The hosted ceiling (256 MiB) leaves an ordinary monthly BSM alone.
+        let fitted = crate::resource::with_alloc_ceiling(Some(256 << 20), || {
+            struct_ts(&seasonal_series(240, period, 4), config.clone())
+        });
+        assert_eq!(fitted.unwrap().n_obs, 240);
+    }
+
+    #[test]
+    fn struct_ts_admits_a_small_state_history_by_its_bytes() {
+        // A local level model keeps a one-dimensional state: 48 bytes of
+        // values per filter step and 16 per smoother step, but its nested
+        // Vecs hold several times that, so counting values admitted a long
+        // series' history far past the ceiling. Before the fix both
+        // refusals below returned Ok.
+        let y = generate_local_level_data(1000, 1.0, 0.5, 17);
+        let fit = |model_type, ceiling: usize, y: &[f64]| {
+            let config = StructTsConfig {
+                model_type,
+                ..Default::default()
+            };
+            crate::resource::with_alloc_ceiling(Some(ceiling), || struct_ts(y, config))
+        };
+        // Filter and smoother together. Level: 1,000 · 472 = 472,000 bytes
+        // > 64 KiB (the values: 64,000). Trend: 1,000 · (24·2² + 144·2 +
+        // 256) = 640,000 bytes > 256 KiB (the values: 160,000).
+        for (model_type, ceiling, m) in [
+            (StructTsType::Level, 64 << 10, 1),
+            (StructTsType::Trend, 256 << 10, 2),
+        ] {
+            match fit(model_type, ceiling, &y) {
+                Err(EconError::ResourceLimit(msg)) => assert!(
+                    msg.contains(&format!("1000 observations and a {m}-dimensional state"))
+                        && msg.ends_with("; use a shorter series"),
+                    "{msg}"
+                ),
+                other => panic!("expected ResourceLimit for {model_type:?}, got {other:?}"),
+            }
+        }
+        // 100 rows (100 · 472 = 47,200 bytes) fit under 64 KiB.
+        assert_eq!(
+            fit(StructTsType::Level, 64 << 10, &y[..100]).unwrap().n_obs,
+            100
+        );
+    }
+
+    #[test]
+    fn struct_ts_admits_the_final_pass_as_one_figure() {
+        // The final pass holds the filter's history while the smoother builds
+        // its own. Level, 150 rows: 48,000 and 22,800 bytes each fit 64 KiB,
+        // 70,800 together do not. Before the fix, which admits the two as one
+        // figure, this returned Ok; one at a time, a final pass could hold up
+        // to about 1.5 times the ceiling.
+        let y = generate_local_level_data(150, 1.0, 0.5, 19);
+        let config = StructTsConfig::default();
+        let refused =
+            crate::resource::with_alloc_ceiling(Some(64 << 10), || struct_ts(&y, config.clone()));
+        match refused {
+            Err(EconError::ResourceLimit(msg)) => assert!(
+                msg.contains("Kalman filter's and smoother's")
+                    && msg.contains("150 observations and a 1-dimensional state")
+                    && msg.ends_with("; use a shorter series"),
+                "{msg}"
+            ),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        // 130 rows (61,360 bytes) fit.
+        let fitted = crate::resource::with_alloc_ceiling(Some(64 << 10), || {
+            struct_ts(&y[..130], config.clone())
+        });
+        assert_eq!(fitted.unwrap().n_obs, 130);
+        // Without a ceiling nothing changes.
+        assert_eq!(struct_ts(&y, config).unwrap().n_obs, 150);
+    }
+
+    #[test]
+    fn state_dim_is_the_dimension_of_the_model_that_runs() {
+        // The admission sizes the history by state_dim; the filter runs the
+        // model build_model builds, from initialize_state and
+        // initialize_covariance. All four must agree.
+        let y = seasonal_series(48, 12, 23);
+        let y_var = sample_variance(&y);
+        for (model_type, period, m) in [
+            (StructTsType::Level, None, 1),
+            (StructTsType::Trend, None, 2),
+            (StructTsType::BSM, Some(4), 5),
+            (StructTsType::BSM, Some(12), 13),
+            (StructTsType::BSM, None, 13),
+        ] {
+            let config = StructTsConfig {
+                model_type,
+                period,
+                ..Default::default()
+            };
+            let (params, _) = initialize_params(&config, y_var);
+            assert_eq!(state_dim(&config), m, "{model_type:?} {period:?}");
+            assert_eq!(build_model(&config, &params).unwrap().state_dim(), m);
+            assert_eq!(initialize_state(&config, &y).len(), m);
+            assert_eq!(initialize_covariance(&config, y_var).dim(), (m, m));
+        }
     }
 
     #[test]
