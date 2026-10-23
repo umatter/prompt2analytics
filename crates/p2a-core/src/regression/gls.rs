@@ -741,6 +741,7 @@ mod tests {
             CorrelationStructure::AR1 { rho: -0.7 },
             CorrelationStructure::CompoundSymmetry { rho: 0.5 },
             CorrelationStructure::CompoundSymmetry { rho: -0.03 },
+            CorrelationStructure::Identity,
         ] {
             let omega = dense_correlation_matrix(n, &corr);
             let (b_ref, se_ref, sigma_ref) = dense_gls_reference(&y, &x, &omega);
