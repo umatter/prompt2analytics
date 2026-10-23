@@ -95,21 +95,23 @@ impl std::fmt::Display for PoissonTestResult {
 /// incomplete gamma series whose index starts at the count and grows by 1.0 in `f64`. From about
 /// 2^53 on, adding 1.0 no longer changes the index and the series never finishes, a loop no
 /// deadline can interrupt. 2^52 leaves the index room to grow exactly; a test at the bound itself
-/// still takes seconds. The two-sample test does not use that series: its p-value and interval
-/// use the binomial CDF, whose continued fraction statrs stops after 140 terms, and every loop of
-/// its interval search has a fixed iteration cap. Its counts only need a total that fits in
-/// `u64`; that the test returns says nothing about its accuracy at large totals.
-pub const MAX_ONE_SAMPLE_COUNT: u64 = 1 << 52;
+/// still takes seconds. The bound guarantees only that the call returns: the interval can be NaN
+/// from about 2e6 and the p-value drifts from about 2^40 (STAT-60 / T3-WP40). The two-sample test
+/// does not use that series: its p-value and interval use the binomial CDF, whose continued
+/// fraction statrs stops after 140 terms, and every loop of its interval search has a fixed
+/// iteration cap. Its counts only need a total that fits in `u64`; that the test returns says
+/// nothing about its accuracy at large totals.
+pub const POISSON_MAX_ONE_SAMPLE_COUNT: u64 = 1 << 52;
 
-/// Refuse a one-sample count above [`MAX_ONE_SAMPLE_COUNT`] before statrs sees it.
+/// Refuse a one-sample count above [`POISSON_MAX_ONE_SAMPLE_COUNT`] before statrs sees it.
 fn check_one_sample_count(x: u64) -> EconResult<()> {
-    if x > MAX_ONE_SAMPLE_COUNT {
+    if x > POISSON_MAX_ONE_SAMPLE_COUNT {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "x[0] = {x} is above the largest event count the one-sample exact Poisson test \
-                 supports ({MAX_ONE_SAMPLE_COUNT} = 2^52); beyond it the incomplete gamma series \
-                 behind the Poisson CDF and the exact interval cannot advance in f64 and does not \
-                 finish"
+                 supports ({POISSON_MAX_ONE_SAMPLE_COUNT} = 2^52); beyond it the incomplete \
+                 gamma series behind the Poisson CDF and the exact interval cannot advance in f64 \
+                 and does not finish"
             ),
         });
     }
@@ -128,9 +130,24 @@ fn total_count(x1: u64, x2: u64) -> EconResult<u64> {
         })
 }
 
+/// The two-sample null's p = r·T₁ / (r·T₁ + T₂) for finite, positive `r`, `t1` and `t2`.
+///
+/// The direct form is used whenever r·T₁ > 0 and the denominator is finite, so every p in that
+/// range is computed as before. Otherwise it is 1 / (1 + T₂ / (r·T₁)) with the ratio formed from
+/// logarithms; its exponential overflows only for a p below 1 / `f64::MAX`, which then comes out
+/// as 0.
+fn null_success_probability(r: f64, t1: f64, t2: f64) -> f64 {
+    let r_t1 = r * t1;
+    let denominator = r_t1 + t2;
+    if r_t1 > 0.0 && denominator.is_finite() {
+        r_t1 / denominator
+    } else {
+        1.0 / (1.0 + (t2.ln() - t1.ln() - r.ln()).exp())
+    }
+}
+
 /// The two-sample null is X₁ | n ~ Binomial(n, p) with p = r·T₁ / (r·T₁ + T₂). Refuse an `r * T[0]`
-/// that is not finite and > 0 (p would be NaN, or 0 although r and T[0] are > 0) and a
-/// denominator that overflows (p would be 0 whatever the true value).
+/// that is not finite and > 0 (p would be NaN, or 0 although r and T[0] are > 0).
 fn two_sample_null_p(r: f64, t1: f64, t2: f64) -> EconResult<f64> {
     let r_t1 = r * t1;
     if !(r_t1.is_finite() && r_t1 > 0.0) {
@@ -138,19 +155,12 @@ fn two_sample_null_p(r: f64, t1: f64, t2: f64) -> EconResult<f64> {
             message: format!("r * T[0] = {r:?} * {t1:?} = {r_t1:?} must be finite and > 0"),
         });
     }
-    let denominator = r_t1 + t2;
-    if !denominator.is_finite() {
-        return Err(EconError::InvalidSpecification {
-            message: format!("r * T[0] + T[1] = {r_t1:?} + {t2:?} overflows f64"),
-        });
-    }
-    Ok(r_t1 / denominator)
+    Ok(null_success_probability(r, t1, t2))
 }
 
-/// The two-sample estimate is the ratio of the rates x[i] / T[i], and the interval search starts
-/// from it. Refuse a rate that overflows f64 and, when x[1] > 0, a ratio that does: the estimate
-/// would be infinite or NaN, and the upper bound's search would start at infinity.
-fn check_two_sample_rates(x1: u64, x2: u64, t1: f64, t2: f64) -> EconResult<()> {
+/// The two-sample estimate, the ratio of the rates x[i] / T[i], or infinity when x[1] = 0. Refuse
+/// a rate that overflows f64 and, when x[1] > 0, a ratio that does.
+fn two_sample_estimate(x1: u64, x2: u64, t1: f64, t2: f64) -> EconResult<f64> {
     let refuse = |what: String| EconError::InvalidSpecification {
         message: format!("x = [{x1}, {x2}], T = [{t1:?}, {t2:?}]: {what} overflows f64"),
     };
@@ -162,12 +172,16 @@ fn check_two_sample_rates(x1: u64, x2: u64, t1: f64, t2: f64) -> EconResult<()> 
     if !rate2.is_finite() {
         return Err(refuse(format!("the rate x[1]/T[1] = {x2}/{t2:?}")));
     }
-    if x2 > 0 && !(rate1 / rate2).is_finite() {
+    if x2 == 0 {
+        return Ok(f64::INFINITY);
+    }
+    let ratio = rate1 / rate2;
+    if !ratio.is_finite() {
         return Err(refuse(format!(
             "the rate ratio (x[0]/T[0]) / (x[1]/T[1]) = ({x1}/{t1:?}) / ({x2}/{t2:?})"
         )));
     }
-    Ok(())
+    Ok(ratio)
 }
 
 /// Perform exact Poisson test.
@@ -194,12 +208,11 @@ fn check_two_sample_rates(x1: u64, x2: u64, t1: f64, t2: f64) -> EconResult<()> 
 /// - `x` does not have length 1 or 2, or `t` has a different length;
 /// - a time base in `t`, or `r`, is not finite and > 0;
 /// - `conf_level` is not strictly between 0 and 1;
-/// - one-sample: the count is above [`MAX_ONE_SAMPLE_COUNT`], or the expected count `r * T` is not
-///   finite and > 0 (it overflows, or underflows to 0);
+/// - one-sample: the count is above [`POISSON_MAX_ONE_SAMPLE_COUNT`], or the expected count
+///   `r * T` is not finite and > 0 (it overflows, or underflows to 0);
 /// - two-sample: the total `x[0] + x[1]` does not fit in `u64`; `r * T[0]` is not finite and
-///   positive, or `r * T[0] + T[1]` overflows `f64`; a rate `x[0] / T[0]` or `x[1] / T[1]`
-///   overflows `f64`, or, when `x[1]` is not 0, so does the rate ratio
-///   `(x[0] / T[0]) / (x[1] / T[1])`.
+///   positive; a rate `x[0] / T[0]` or `x[1] / T[1]` overflows `f64`, or, when `x[1]` is not 0,
+///   so does the rate ratio `(x[0] / T[0]) / (x[1] / T[1])`.
 ///
 /// `EconError::Computation` when a chi-squared distribution for the one-sample interval cannot be
 /// built.
@@ -245,19 +258,19 @@ pub fn poisson_test(
     // reach statrs and panic there (Gamma::inverse_cdf, the incomplete gamma function).
     if let Some(&ti) = t.iter().find(|&&ti| !(ti.is_finite() && ti > 0.0)) {
         return Err(EconError::InvalidSpecification {
-            message: format!("time base T must be finite and > 0, got {ti}"),
+            message: format!("time base T must be finite and > 0, got {ti:?}"),
         });
     }
 
     if !(r.is_finite() && r > 0.0) {
         return Err(EconError::InvalidSpecification {
-            message: format!("rate (ratio) r must be finite and > 0, got {r}"),
+            message: format!("rate (ratio) r must be finite and > 0, got {r:?}"),
         });
     }
 
     if !(conf_level > 0.0 && conf_level < 1.0) {
         return Err(EconError::InvalidSpecification {
-            message: format!("conf_level must be strictly between 0 and 1, got {conf_level}"),
+            message: format!("conf_level must be strictly between 0 and 1, got {conf_level:?}"),
         });
     }
 
@@ -349,7 +362,7 @@ fn poisson_test_two_sample(
     // X₁ | (X₁ + X₂ = n) ~ Binomial(n, p)
     // where p = λ₁T₁ / (λ₁T₁ + λ₂T₂) = rT₁ / (rT₁ + T₂)
     let p = two_sample_null_p(r, t1, t2)?;
-    check_two_sample_rates(x1, x2, t1, t2)?;
+    let estimate = two_sample_estimate(x1, x2, t1, t2)?;
 
     // Expected value of X₁ under H₀
     let expected = n as f64 * p;
@@ -387,16 +400,7 @@ fn poisson_test_two_sample(
         }
     };
 
-    // Rate ratio estimate
-    let rate1 = x1 as f64 / t1;
-    let rate2 = x2 as f64 / t2;
-    let estimate = if rate2 > 0.0 {
-        rate1 / rate2
-    } else {
-        f64::INFINITY
-    };
-
-    // Confidence interval for rate ratio using profile likelihood
+    // Exact conditional confidence interval for the rate ratio
     let conf_int = rate_ratio_ci(x1, x2, n, t1, t2, conf_level);
 
     Ok(PoissonTestResult {
@@ -416,7 +420,7 @@ fn poisson_test_two_sample(
 /// Compute confidence interval for Poisson count using exact method.
 ///
 /// Uses the relationship between Poisson and chi-squared/gamma distributions.
-/// `poisson_test` keeps `x` at or below [`MAX_ONE_SAMPLE_COUNT`]; `x + 1` is still checked
+/// `poisson_test` keeps `x` at or below [`POISSON_MAX_ONE_SAMPLE_COUNT`]; `x + 1` is still checked
 /// before any distribution is built.
 fn poisson_ci(x: u64, conf_level: f64) -> EconResult<(f64, f64)> {
     use statrs::distribution::ChiSquared;
@@ -452,16 +456,17 @@ fn poisson_ci(x: u64, conf_level: f64) -> EconResult<(f64, f64)> {
     Ok((lower, upper))
 }
 
-/// Cap on each bracketing loop in [`find_rate_ratio_bound`]. The longest finite walk is the upper
-/// bound's: halving from `f64::MAX` (about 2^1024) down to its 1e-10 floor (about 2^-33) takes
-/// 1058 steps; the other loops need at most a few dozen. The cap therefore leaves every search
-/// from a finite start as it was and only stops one that cannot finish.
-const MAX_BRACKET_STEPS: usize = 1100;
+/// Cap on each bracketing loop in [`find_odds_bound`]. The search starts from the estimate
+/// x[0] / max(x[1], 1), which is 0 or lies in [2^-64, 2^64]; its longest walk, the upper bound's
+/// halving from 2^64 down to its 1e-10 floor, takes 98 steps, and the other loops need at most
+/// 27. The cap leaves every search as it is and only guarantees that each loop ends.
+const MAX_BRACKET_STEPS: usize = 128;
 
 /// Compute confidence interval for rate ratio.
 ///
-/// Uses exact conditional method based on binomial distribution. `n` is `x1 + x2`, checked by
-/// the caller.
+/// Uses the exact conditional method: given n = x1 + x2 (checked by the caller), X₁ is binomial
+/// with odds p / (1 - p) = r·T₁ / T₂. The bounds are searched on those odds, which depend on the
+/// counts and `conf_level` only, and then multiplied by T₂ / T₁, as R's `poisson.test` does.
 fn rate_ratio_ci(x1: u64, x2: u64, n: u64, t1: f64, t2: f64, conf_level: f64) -> (f64, f64) {
     let alpha = 1.0 - conf_level;
 
@@ -476,46 +481,49 @@ fn rate_ratio_ci(x1: u64, x2: u64, n: u64, t1: f64, t2: f64, conf_level: f64) ->
     let lower = if x1 == 0 {
         0.0
     } else {
-        find_rate_ratio_bound(x1, x2, n, t1, t2, alpha / 2.0, true)
+        rate_ratio_from_odds(find_odds_bound(x1, x2, n, alpha / 2.0, true), t1, t2)
     };
 
     // Upper bound: find r such that P(X₁ <= x₁ | H₀: ratio=r) = alpha/2
     let upper = if x2 == 0 {
         f64::INFINITY
     } else {
-        find_rate_ratio_bound(x1, x2, n, t1, t2, alpha / 2.0, false)
+        rate_ratio_from_odds(find_odds_bound(x1, x2, n, alpha / 2.0, false), t1, t2)
     };
 
     (lower, upper)
 }
 
-/// Find rate ratio bound using bisection search.
+/// The rate ratio r = s·T₂ / T₁ for odds `s` > 0 found by [`find_odds_bound`]. The product is
+/// formed directly when T₂ / T₁ is a normal number and otherwise from logarithms, so it overflows
+/// or underflows only when the bound itself lies outside f64.
+fn rate_ratio_from_odds(s: f64, t1: f64, t2: f64) -> f64 {
+    let time_ratio = t2 / t1;
+    if time_ratio.is_normal() {
+        s * time_ratio
+    } else {
+        (s.ln() + t2.ln() - t1.ln()).exp()
+    }
+}
+
+/// Find a bound on the odds s = p / (1 - p) of X₁ | n by bisection.
 ///
-/// For the lower bound, we find r such that P(X₁ >= x₁ | H₀: ratio=r) = alpha
-/// As r increases, P(X₁ >= x₁) increases, so we want to find the smallest r
+/// For the lower bound, we find s such that P(X₁ >= x₁ | s) = alpha
+/// As s increases, P(X₁ >= x₁) increases, so we want to find the smallest s
 /// where this probability just reaches alpha.
 ///
-/// For the upper bound, we find r such that P(X₁ <= x₁ | H₀: ratio=r) = alpha
-/// As r increases, P(X₁ <= x₁) decreases, so we want to find the largest r
+/// For the upper bound, we find s such that P(X₁ <= x₁ | s) = alpha
+/// As s increases, P(X₁ <= x₁) decreases, so we want to find the largest s
 /// where this probability just reaches alpha.
 ///
-/// `n` is `x1 + x2`, checked by the caller.
-///
-/// Every loop has a fixed iteration cap, so the search returns for any input. `poisson_test`
-/// refuses rates whose ratio overflows; called with one anyway, the upper bound's search starts
-/// at infinity and returns infinity.
-fn find_rate_ratio_bound(
-    x1: u64,
-    x2: u64,
-    n: u64,
-    t1: f64,
-    t2: f64,
-    alpha: f64,
-    find_lower: bool,
-) -> f64 {
-    // Compute the tail probability for a given rate ratio r
-    let compute_tail_p = |r: f64| -> f64 {
-        let p = r * t1 / (r * t1 + t2);
+/// `n` is `x1 + x2`, checked by the caller. The odds do not depend on the time bases, so the
+/// start points and floors below are on the scale of the counts whatever T is; every loop has a
+/// fixed iteration cap, and the search returns a finite s > 0 for any input.
+fn find_odds_bound(x1: u64, x2: u64, n: u64, alpha: f64, find_lower: bool) -> f64 {
+    // Compute the tail probability for given odds s; p = s / (1 + s), that is the null's p at
+    // T = [1, 1].
+    let compute_tail_p = |s: f64| -> f64 {
+        let p = null_success_probability(s, 1.0, 1.0);
         // Ensure p is in valid range
         let p = p.clamp(1e-15, 1.0 - 1e-15);
         if let Ok(binom) = Binomial::new(p, n) {
@@ -537,21 +545,19 @@ fn find_rate_ratio_bound(
         }
     };
 
-    // Initial estimate for the rate ratio
-    let rate_ratio_est = (x1 as f64 / t1) / (x2.max(1) as f64 / t2);
+    // Initial estimate for the odds
+    let odds_est = x1 as f64 / x2.max(1) as f64;
 
     // Set up initial bounds
     let (mut lo, mut hi) = if find_lower {
         // For lower CI: search between very small value and the point estimate
-        (1e-10, rate_ratio_est.max(1e-5))
+        (1e-10, odds_est.max(1e-5))
     } else {
         // For upper CI: search between point estimate and a large value
-        (rate_ratio_est.max(1e-10), rate_ratio_est * 100.0 + 100.0)
+        (odds_est.max(1e-10), odds_est * 100.0 + 100.0)
     };
 
-    // Expand bounds if needed to bracket the solution. Each loop runs at most
-    // MAX_BRACKET_STEPS times: an end point at infinity no longer moves when halved, and the
-    // upper bound's search used to halve one forever.
+    // Expand bounds if needed to bracket the solution, each loop at most MAX_BRACKET_STEPS times.
     if find_lower {
         // For lower bound: need compute_tail_p(lo) < alpha < compute_tail_p(hi)
         for _ in 0..MAX_BRACKET_STEPS {
@@ -561,7 +567,7 @@ fn find_rate_ratio_bound(
             lo /= 10.0;
         }
         for _ in 0..MAX_BRACKET_STEPS {
-            if !(hi < rate_ratio_est * 10.0 && compute_tail_p(hi) < alpha) {
+            if !(hi < odds_est * 10.0 && compute_tail_p(hi) < alpha) {
                 break;
             }
             hi *= 2.0;
@@ -569,7 +575,7 @@ fn find_rate_ratio_bound(
     } else {
         // For upper bound: need compute_tail_p(hi) < alpha < compute_tail_p(lo)
         for _ in 0..MAX_BRACKET_STEPS {
-            if !(lo.is_finite() && lo > 1e-10 && compute_tail_p(lo) < alpha) {
+            if !(lo > 1e-10 && compute_tail_p(lo) < alpha) {
                 break;
             }
             lo /= 2.0;
@@ -592,18 +598,18 @@ fn find_rate_ratio_bound(
         }
 
         if find_lower {
-            // For lower bound: P increases with r
-            // If P(mid) > alpha, we need smaller r: hi = mid
-            // If P(mid) < alpha, we need larger r: lo = mid
+            // For lower bound: P increases with s
+            // If P(mid) > alpha, we need smaller s: hi = mid
+            // If P(mid) < alpha, we need larger s: lo = mid
             if p > alpha {
                 hi = mid;
             } else {
                 lo = mid;
             }
         } else {
-            // For upper bound: P decreases with r
-            // If P(mid) > alpha, we need larger r: lo = mid
-            // If P(mid) < alpha, we need smaller r: hi = mid
+            // For upper bound: P decreases with s
+            // If P(mid) > alpha, we need larger s: lo = mid
+            // If P(mid) < alpha, we need smaller s: hi = mid
             if p > alpha {
                 lo = mid;
             } else {
@@ -832,6 +838,10 @@ mod tests {
             result.conf_int.0,
             result.conf_int.1
         );
+
+        // R: 95 percent confidence interval 0.858426403391639 4.27726594365407
+        assert_relative(result.conf_int.0, 0.858426403391639, 1e-7, "CI lower vs R");
+        assert_relative(result.conf_int.1, 4.27726594365407, 1e-7, "CI upper vs R");
     }
 
     fn refusal(x: &[u64], t: &[f64], r: f64, conf_level: f64) -> String {
@@ -879,7 +889,7 @@ mod tests {
     #[test]
     fn test_poisson_one_sample_refuses_counts_above_bound() {
         for x in [
-            MAX_ONE_SAMPLE_COUNT + 1,
+            POISSON_MAX_ONE_SAMPLE_COUNT + 1,
             (1 << 53) - 2,
             1 << 53,
             (1 << 53) + 2,
@@ -889,7 +899,7 @@ mod tests {
             let message = refusal(&[x], &[3.5], 1.0, 0.95);
             assert!(message.contains(&format!("x[0] = {x}")), "{message}");
             assert!(
-                message.contains(&MAX_ONE_SAMPLE_COUNT.to_string()),
+                message.contains(&POISSON_MAX_ONE_SAMPLE_COUNT.to_string()),
                 "{message}"
             );
         }
@@ -899,10 +909,13 @@ mod tests {
     #[test]
     fn test_poisson_one_sample_bound_is_inclusive() {
         // Re-exported next to poisson_test, so callers (PR-01m's MCP cap) can name it.
-        assert_eq!(crate::stats::MAX_ONE_SAMPLE_COUNT, 4_503_599_627_370_496);
-        assert!(check_one_sample_count(MAX_ONE_SAMPLE_COUNT).is_ok());
+        assert_eq!(
+            crate::stats::POISSON_MAX_ONE_SAMPLE_COUNT,
+            4_503_599_627_370_496
+        );
+        assert!(check_one_sample_count(POISSON_MAX_ONE_SAMPLE_COUNT).is_ok());
         assert!(check_one_sample_count(0).is_ok());
-        assert!(check_one_sample_count(MAX_ONE_SAMPLE_COUNT + 1).is_err());
+        assert!(check_one_sample_count(POISSON_MAX_ONE_SAMPLE_COUNT + 1).is_err());
     }
 
     /// FU-1: poisson_ci checks x + 1 before any distribution is built and no longer unwraps
@@ -942,6 +955,13 @@ mod tests {
                 assert!(message.contains("r must be finite and > 0"), "{message}");
             }
         }
+        // Debug formatting: Display wrote these as 301- and 21-digit numbers.
+        let message = refusal(&[10], &[5.0], -1e300, 0.95);
+        assert!(message.contains("got -1e300"), "{message}");
+        let message = refusal(&[10], &[-1e300], 1.0, 0.95);
+        assert!(message.contains("got -1e300"), "{message}");
+        let message = refusal(&[10], &[5.0], 1.0, 1e20);
+        assert!(message.contains("got 1e20"), "{message}");
         let message = refusal(&[10], &[1e200], 1e200, 0.95);
         assert!(message.contains("r * T"), "{message}");
         // One-sample: an expected count that underflows to 0 used to surface as statrs' "Invalid
@@ -954,45 +974,147 @@ mod tests {
             let message = refusal(&x, &[1e200, 1.0], 1e200, 0.95);
             assert!(message.contains("r * T[0] = 1e200 * 1e200"), "{message}");
         }
-        // Two-sample: r * T[0] + T[1] overflowing made p = 0 silently (the true p here is 1/2).
-        let message = refusal(&[11, 21], &[1e308, 1e308], 1.0, 0.95);
-        assert!(message.contains("r * T[0] + T[1]"), "{message}");
+        // Two-sample: r * T[0] underflowing to 0 would make the null's p 0 although r and T[0]
+        // are > 0.
+        let message = refusal(&[11, 21], &[1e-200, 1.0], 1e-200, 0.95);
+        assert!(message.contains("r * T[0] = 1e-200 * 1e-200"), "{message}");
     }
 
-    /// Round-2 review of PR-24: the rate ratio's interval search started from the point estimate.
-    /// When (x[0]/T[0]) / (x[1]/T[1]) overflowed f64, the upper bound's bracketing started at
+    /// PR-24: the rate ratio's interval search started from the point estimate. When
+    /// (x[0]/T[0]) / (x[1]/T[1]) overflowed f64, the upper bound's bracketing started at
     /// infinity, where halving does not move, and never returned; every T here is finite and > 0,
-    /// so the T check let it through. Refused before any statrs call now.
+    /// so the T check let it through. Refused before any statrs call now. Each case pins one of
+    /// the three refusals by its own fragment.
     #[test]
     fn test_poisson_two_sample_refuses_overflowing_rates() {
-        for (x, t) in [
-            ([1, 1], [1e-160, 1e160]),
-            ([11, 21], [1e-300, 1e300]),
-            ([10_000_000_000_000_000_000, 1], [1e-290, 1.0]),
+        for (x, t, fragment) in [
+            ([1, 1], [1e-160, 1e160], "the rate ratio"),
+            ([11, 21], [1e-300, 1e300], "the rate ratio"),
+            (
+                [10_000_000_000_000_000_000, 1],
+                [1e-290, 1.0],
+                "the rate x[0]/T[0]",
+            ),
+            (
+                [1, 10_000_000_000_000_000_000],
+                [1.0, 1e-290],
+                "the rate x[1]/T[1]",
+            ),
         ] {
             let message = refusal(&x, &t, 1.0, 0.95);
+            assert!(message.contains(fragment), "{message}");
             assert!(message.contains("overflows f64"), "{message}");
             assert!(message.contains(&format!("x = {x:?}")), "{message}");
             assert!(message.contains(&format!("T = {t:?}")), "{message}");
         }
     }
 
-    /// Round-2 review of PR-24: find_rate_ratio_bound has to return however it is called. With an
-    /// infinite starting estimate the upper bound's bracketing used to halve infinity forever.
-    /// Here the true bounds overflow f64 too, so infinity is the right answer.
+    /// PR-24: the interval search has to return however it is called. Its start used to be the
+    /// rate-ratio estimate, and from an infinite one the upper bound's bracketing halved infinity
+    /// forever. poisson_test refuses these time bases; called anyway, the search runs on the
+    /// odds, which do not depend on T, and only the bound itself overflows: for x = [1, 1] it is
+    /// 1e320 times (0.0127, 78.5), and for x = [5, 0] the lower bound is 1e310 times 0.916.
     #[test]
-    fn test_find_rate_ratio_bound_returns_from_infinite_start() {
+    fn test_rate_ratio_ci_overflows_only_with_the_bound() {
         for (x1, x2, t1, t2) in [(1, 1, 1e-160, 1e160), (11, 21, 1e-300, 1e300)] {
-            let upper = find_rate_ratio_bound(x1, x2, x1 + x2, t1, t2, 0.025, false);
             assert_eq!(
-                upper,
-                f64::INFINITY,
+                rate_ratio_ci(x1, x2, x1 + x2, t1, t2, 0.95),
+                (f64::INFINITY, f64::INFINITY),
                 "x = [{x1}, {x2}], T = [{t1:?}, {t2:?}]"
             );
         }
-        // With x[1] = 0 the lower bound's search starts from x[0] * T[1] / T[0], infinite here.
-        let lower = find_rate_ratio_bound(5, 0, 5, 1e-300, 1e10, 0.025, true);
-        assert_eq!(lower, f64::INFINITY);
+        assert_eq!(
+            rate_ratio_ci(5, 0, 5, 1e-300, 1e10, 0.95),
+            (f64::INFINITY, f64::INFINITY)
+        );
+    }
+
+    fn interval(x: [u64; 2], t: [f64; 2]) -> (f64, f64) {
+        poisson_test(&x, &t, 1.0, PoissonAlternative::TwoSided, 0.95)
+            .unwrap_or_else(|e| panic!("x = {x:?}, T = {t:?}: {e}"))
+            .conf_int
+    }
+
+    fn assert_relative(got: f64, want: f64, tolerance: f64, what: &str) {
+        assert!(
+            got.is_finite() && ((got - want) / want).abs() <= tolerance,
+            "{what}: got {got:e}, want {want:e}"
+        );
+    }
+
+    /// PR-24: the rate ratio's interval was searched on r itself, from fixed start points
+    /// (1e-10; the estimate * 100 + 100), with the null's p formed as r * T[0] / (r * T[0] + T[1]).
+    /// At time bases near the top of f64 the product, the sum and the start points overflowed, and
+    /// the bounds came back wrong without an error. p depends on r only through the odds
+    /// r * T[0] / T[1], so the interval at T is T[1] / T[0] times the one at T = [1, 1]. Expected
+    /// values are R's poisson.test, which computes the interval that way.
+    #[test]
+    fn test_poisson_rate_ratio_interval_at_extreme_time_bases() {
+        // Same p-value and estimate (1.336) as T = [1, 0.7]; the interval was (1.7977, 1.7977).
+        let (lower, upper) = interval([21, 11], [1e308, 7e307]);
+        let (lower_unit, upper_unit) = interval([21, 11], [1.0, 0.7]);
+        assert_relative(lower, lower_unit, 1e-8, "x = [21, 11] lower");
+        assert_relative(upper, upper_unit, 1e-8, "x = [21, 11] upper");
+        assert_relative(lower_unit, 0.61596006297173, 1e-7, "R lower");
+        assert_relative(upper_unit, 3.06913322981517, 1e-7, "R upper");
+        // These lower bounds were infinite, above estimates of 1e308 and infinity.
+        let lower = interval([1, 1], [1.0, 1e308]).0;
+        assert_relative(lower, 0.0127393670836666e308, 1e-7, "x = [1, 1] lower");
+        let lower = interval([100, 0], [1.0, 5e306]).0;
+        assert_relative(lower, 26.6115770646767 * 5e306, 1e-7, "x = [100, 0] lower");
+        // Both bounds were infinite; they bracket the estimate 1e308.
+        let (lower, upper) = interval([1000, 1000], [1e-154, 1e154]);
+        assert!(lower < 1e308 && 1e308 < upper, "({lower:e}, {upper:e})");
+        assert_relative(lower, 9.15160512192926e307, 1e-7, "x = [1000, 1000] lower");
+        assert_relative(upper, 1.09270448918713e308, 1e-7, "x = [1000, 1000] upper");
+        // The lower bound was infinite; it is 1e298 times the one at T = [1e-10, 1].
+        let lower = interval([5, 0], [1e-298, 1e10]).0;
+        let lower_unit = interval([5, 0], [1e-10, 1.0]).0;
+        assert_relative(lower, 1e298 * lower_unit, 1e-6, "x = [5, 0] lower");
+    }
+
+    /// PR-24: the same fixed start points broke the interval at ratios of time bases well inside
+    /// f64. The upper bound's search never went below 1e-10, so at T = [1e12, 1] it returned 1e-10
+    /// for a bound of 7.85e-11; its doubling stopped at 1e10, so at T = [1, 1e9] it returned
+    /// 1.34e10 for a bound of 3.9e10. Expected values are R's poisson.test. Where T[1] / T[0]
+    /// itself overflows (1e310) or is subnormal (1e-310), the bounds are still T[1] / T[0] times
+    /// the odds bounds.
+    #[test]
+    fn test_poisson_rate_ratio_interval_scales_with_time_bases() {
+        let (lower, upper) = interval([1, 1], [1e12, 1.0]);
+        assert_relative(lower, 1.27393670836666e-14, 1e-7, "T = [1e12, 1] lower");
+        assert_relative(upper, 7.84968353162628e-11, 1e-7, "T = [1e12, 1] upper");
+        let (lower, upper) = interval([0, 1], [1.0, 1e9]);
+        assert_eq!(lower, 0.0);
+        assert_relative(upper, 3.9e10, 1e-7, "T = [1, 1e9] upper");
+        for (x, t, t_unit, factor) in [
+            ([1, 1000], [1e-10, 1e300], [1e-10, 1.0], 1e300),
+            ([10_000, 1], [1e300, 1e-10], [1.0, 1e-10], 1e-300),
+        ] {
+            let ((lower, upper), (lower_unit, upper_unit)) = (interval(x, t), interval(x, t_unit));
+            let what = format!("T = {t:?}");
+            assert_relative(lower, lower_unit * factor, 1e-10, &what);
+            assert_relative(upper, upper_unit * factor, 1e-10, &what);
+        }
+    }
+
+    /// PR-24: an r * T[0] + T[1] that overflowed f64 was refused (and before that made the null's
+    /// p 0). p is formed from logarithms there now, so T = [1e308, 1e308] gives the test at
+    /// T = [1, 1], whose values are R's poisson.test(c(11, 21), c(1, 1)).
+    #[test]
+    fn test_poisson_two_sample_null_p_survives_overflowing_denominator() {
+        let run = |t: [f64; 2]| {
+            poisson_test(&[11, 21], &t, 1.0, PoissonAlternative::TwoSided, 0.95).unwrap()
+        };
+        let (large, unit) = (run([1e308, 1e308]), run([1.0, 1.0]));
+        assert_eq!(large.parameter, 16.0);
+        assert_eq!(large.parameter, unit.parameter);
+        assert_eq!(large.p_value, unit.p_value);
+        assert_eq!(large.conf_int, unit.conf_int);
+        assert_relative(large.estimate, 11.0 / 21.0, 1e-12, "estimate");
+        assert_relative(unit.p_value, 0.110184165183455, 1e-9, "p-value vs R");
+        assert_relative(unit.conf_int.0, 0.228077423684261, 1e-7, "lower vs R");
+        assert_relative(unit.conf_int.1, 1.13643731482008, 1e-7, "upper vs R");
     }
 
     #[test]
