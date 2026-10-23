@@ -41,8 +41,8 @@
 //! - On the first scoped use in a process, UUID-named entries already under
 //!   `sessions/` (left by an earlier process) are removed; other names are
 //!   left alone. [`remove_session_dir`] removes a session's directory when
-//!   the session goes, and from then on (for the next 65,536 session
-//!   removals) the directory is not created again for that id: a call that
+//!   the session goes, and from then on (until 65,536 more sessions have been
+//!   removed) the directory is not created again for that id: a call that
 //!   was still queued or running when its session went is refused ("needs a
 //!   session") instead of leaving a directory behind that nothing would
 //!   remove.
@@ -422,7 +422,7 @@ static SESSION_DIRS: AtomicBool = AtomicBool::new(false);
 static PURGE: Once = Once::new();
 
 /// How many removed sessions [`REMOVED_SESSIONS`] remembers: the most recent
-/// 65,536, about 3 MiB at most.
+/// 65,536, a few MiB at most (the hash table can double once under churn).
 const MAX_REMOVED_SESSIONS: usize = 1 << 16;
 
 /// Session ids (as UUIDs) whose directory has been removed, at most `cap` of
@@ -484,15 +484,15 @@ impl RemovedSessions {
 /// matters while a call for a removed session is still queued or running.
 /// It keeps the last [`MAX_REMOVED_SESSIONS`] removals so that a loop of
 /// session creations and deletions cannot grow it without bound. The cost is
-/// that a call which first resolves a path more than that many removals after
-/// its session went can create the directory again, and it then stays (within
-/// `session_disk_bytes`) until the next process purges it. The set is a
-/// backstop until the governor refuses to run a call whose session is no
-/// longer in the `SessionManager` table (a hand-off to the T0-WP01/T0-WP07
-/// owners of `exec.rs` and `session.rs`); once that holds, it is needed only
-/// for calls already running when their session goes, and can be pruned by
-/// age instead of by count: of entries older than `queue_wait` + deadline +
-/// `exec::DEADLINE_GRACE`, as long as overdue work is also refused file access.
+/// that a call for a removed session that resolves a path once that many more
+/// sessions have been removed can create the directory again, and it then
+/// stays (within `session_disk_bytes`) until the next process purges it. The
+/// set is a backstop until the governor refuses to run a call whose session
+/// is no longer in the `SessionManager` table; once that holds, it is needed
+/// only for calls already running when their session goes, and can be pruned
+/// by age instead of by count (dropping entries older than `queue_wait` +
+/// deadline + `exec::DEADLINE_GRACE`), provided overdue work is also refused
+/// file access.
 static REMOVED_SESSIONS: LazyLock<Mutex<RemovedSessions>> =
     LazyLock::new(|| Mutex::new(RemovedSessions::new(MAX_REMOVED_SESSIONS)));
 
@@ -573,8 +573,8 @@ pub fn current_session_scope() -> Option<String> {
 /// directory does not exist. Links inside the directory are removed, never
 /// followed. From then on the directory is not created again for this id
 /// (also when it never existed), so a call that runs after its session went
-/// cannot use files; the id is remembered for the next 65,536 session
-/// removals.
+/// cannot use files; the id is remembered until 65,536 more sessions have
+/// been removed.
 pub fn remove_session_dir(session_id: &str) -> std::io::Result<()> {
     if !SESSION_DIRS.load(Ordering::SeqCst) {
         return Ok(());
@@ -978,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_session_dir_is_never_recreated() {
+    fn a_removed_session_dir_is_not_recreated_while_remembered() {
         let (_t, data) = tmp_root();
         let id = fresh_id();
         let dir = active_root_for(&data, true, Some(&id)).unwrap();
@@ -1029,7 +1029,8 @@ mod tests {
 
     #[test]
     fn session_uuid_accepts_only_the_canonical_form() {
-        let id = fresh_id();
+        // A fixed id with letters a-f, so its uppercase form differs from it.
+        let id = "6f1c0b9e-3a4d-4c2b-9e7f-0a1b2c3d4e5f".to_string();
         assert_eq!(
             session_uuid(&id),
             Some(uuid::Uuid::parse_str(&id).unwrap().as_u128())
