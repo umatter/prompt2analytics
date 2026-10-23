@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use surrealdb::RecordId;
 use surrealdb::sql::Datetime;
 
-use super::connection::{DbConnection, DbError};
+use super::connection::{DbConnection, DbError, failed_statement};
 use super::models::{DbSession, Settings, key_string};
 
 /// One row of `SELECT count() ... GROUP ALL`.
@@ -754,7 +754,8 @@ impl DbConnection {
     /// (SurrealDB counts a `SELECT count() ... GROUP ALL` whose condition is
     /// a range of one index, or its column `IN` an array, by the keys,
     /// without reading a row). `inside` must be the distinct owners of the
-    /// range that are to be kept.
+    /// range that are to be kept. A count that fails is reported by its own
+    /// error ([`failed_statement`]).
     async fn unowned_rows(
         &self,
         table: &str,
@@ -776,8 +777,10 @@ impl DbConnection {
             .query("COMMIT TRANSACTION")
             .bind(span.bounds())
             .bind(("inside", inside))
-            .await?
-            .check()?;
+            .await?;
+        if let Some(error) = failed_statement(result.take_errors()) {
+            return Err(error.into());
+        }
         let count =
             |row: Option<CountRow>| row.map_or(0, |c| usize::try_from(c.count).unwrap_or(0));
         let in_range = count(result.take(0)?);

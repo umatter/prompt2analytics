@@ -6,8 +6,7 @@ use std::collections::HashMap;
 
 use surrealdb::error::Db as SurrealDbError;
 
-use super::connection::{DbConnection, DbError, PersistenceLimits, truncate_to};
-use super::conversations::failed_statement;
+use super::connection::{DbConnection, DbError, PersistenceLimits, failed_statement, truncate_to};
 use super::models::{Message, MessageRole, ToolCall};
 
 /// Helper to create an in-memory database for testing
@@ -827,6 +826,65 @@ fn failed_statement_with_no_cause_or_no_error() {
         );
     }
     assert!(failed_statements(&[]).iter().all(Option::is_none));
+}
+
+/// The layout [`failed_statement`] relies on, from the store itself: in a
+/// `BEGIN`/`COMMIT` query of two counts with a failing statement between
+/// them, both counts report `QueryNotExecuted`, so `Response::check` (the
+/// first error by index; what the orphan sweep's range counts used) gives
+/// that and loses the cause, while `failed_statement` gives the cause. In
+/// memory and on RocksDB.
+#[tokio::test]
+async fn a_transactions_failed_statement_is_found_behind_not_executed() {
+    for engine in ENGINES {
+        let dir = tempfile::tempdir().unwrap();
+        let db = engine_db(engine, dir.path(), PersistenceLimits::default()).await;
+        let id = filled_conversation(&db, "s1", "kept").await;
+        let transaction = || {
+            db.db()
+                .query("BEGIN TRANSACTION")
+                .query("SELECT count() FROM messages WHERE conversation_id = $id GROUP ALL")
+                .query("THROW 'refused'")
+                .query("SELECT count() FROM messages WHERE conversation_id = $id GROUP ALL")
+                .query("COMMIT TRANSACTION")
+                .bind(("id", id.clone()))
+        };
+
+        let checked = transaction().await.unwrap().check().unwrap_err();
+        assert!(
+            matches!(
+                checked,
+                surrealdb::Error::Db(SurrealDbError::QueryNotExecuted)
+            ),
+            "{engine:?}: check: {checked:?}"
+        );
+
+        let mut response = transaction().await.unwrap();
+        let errors = response.take_errors();
+        let not_executed: Vec<usize> = errors
+            .iter()
+            .filter(|(_, error)| {
+                matches!(
+                    error,
+                    surrealdb::Error::Db(SurrealDbError::QueryNotExecuted)
+                )
+            })
+            .map(|(index, _)| *index)
+            .collect();
+        assert_eq!(
+            (errors.len(), not_executed.len()),
+            (3, 2),
+            "{engine:?}: {errors:?}"
+        );
+        let picked = failed_statement(errors);
+        assert!(
+            matches!(
+                &picked,
+                Some(surrealdb::Error::Db(SurrealDbError::Thrown(message))) if message == "refused"
+            ),
+            "{engine:?}: failed_statement: {picked:?}"
+        );
+    }
 }
 
 /// A clear is one transaction. When its last step, the counter reset, fails

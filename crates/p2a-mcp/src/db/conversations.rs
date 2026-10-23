@@ -1,12 +1,10 @@
 //! Conversation CRUD operations
 
-use std::collections::HashMap;
-
 use chrono::Utc;
 use surrealdb::RecordId;
 use surrealdb::sql::Datetime;
 
-use super::connection::{DbConnection, DbError};
+use super::connection::{DbConnection, DbError, failed_statement};
 use super::models::{Conversation, ConversationWithMessages, Message, MessageRole};
 use super::sessions::{MessageText, ToolCallText, message_text_bytes, tool_call_text_bytes};
 
@@ -552,33 +550,6 @@ async fn run_to_end<T: Send + 'static>(
     tokio::spawn(work)
         .await
         .map_err(|e| DbError::Query(format!("conversation delete or clear task failed: {e}")))?
-}
-
-/// The error a transaction's failed statement reported, from the
-/// [`take_errors`](surrealdb::Response::take_errors) of its response; `None`
-/// when no statement failed. When a statement inside `BEGIN`/`COMMIT`
-/// fails, the store replaces the results of the other statements, before
-/// and after the failing one, with `QueryNotExecuted` and keeps the cause
-/// only at the failing statement, so this is the lowest-indexed error that
-/// is not `QueryNotExecuted` (the lowest-indexed error when all are). A
-/// failed commit gives every statement a `QueryNotExecutedDetail` that
-/// carries the cause, and a cancelled or timed-out transaction gives each
-/// `QueryCancelled` or `QueryTimedout`; this returns the first of them as
-/// is. `take_errors` returns a `HashMap`, so the index, not the order of
-/// iteration, decides.
-pub(super) fn failed_statement(
-    errors: HashMap<usize, surrealdb::Error>,
-) -> Option<surrealdb::Error> {
-    errors
-        .into_iter()
-        .min_by_key(|(index, error)| {
-            let not_executed = matches!(
-                error,
-                surrealdb::Error::Db(surrealdb::error::Db::QueryNotExecuted)
-            );
-            (not_executed, *index)
-        })
-        .map(|(_, error)| error)
 }
 
 /// What [`delete_conversation_rows`](DbConnection::delete_conversation_rows)
