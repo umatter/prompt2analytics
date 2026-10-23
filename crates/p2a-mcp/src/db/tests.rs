@@ -700,15 +700,27 @@ async fn assert_conversation_whole(db: &DbConnection, id: &str) {
     assert_eq!(db.get_conversation(id).await.unwrap().message_count, 21);
 }
 
-/// The two engines the rollback tests run on: in memory, and RocksDB (whose
-/// rollback is an optimistic transaction's cancel).
-const ENGINES: [&str; 2] = ["memory", "rocksdb"];
+/// A store engine the transaction tests run on.
+#[derive(Debug, Clone, Copy)]
+enum Engine {
+    /// In memory.
+    Memory,
+    /// RocksDB, whose rollback is an optimistic transaction's cancel.
+    RocksDb,
+}
 
-/// A store on `engine` (one of [`ENGINES`]; RocksDB in `dir`) with `limits`.
-async fn engine_db(engine: &str, dir: &std::path::Path, limits: PersistenceLimits) -> DbConnection {
+/// The engines the rollback tests run on.
+const ENGINES: [Engine; 2] = [Engine::Memory, Engine::RocksDb];
+
+/// A store on `engine` (RocksDB in `dir`) with `limits`.
+async fn engine_db(
+    engine: Engine,
+    dir: &std::path::Path,
+    limits: PersistenceLimits,
+) -> DbConnection {
     match engine {
-        "memory" => limited_db(limits).await,
-        _ => DbConnection::connect_rocksdb(dir.join("db"))
+        Engine::Memory => limited_db(limits).await,
+        Engine::RocksDb => DbConnection::connect_rocksdb(dir.join("db"))
             .await
             .unwrap()
             .with_limits(limits),
@@ -718,10 +730,10 @@ async fn engine_db(engine: &str, dir: &std::path::Path, limits: PersistenceLimit
 /// The error of a clear or delete that a store event refused names the
 /// event's own message, not the "query was not executed" that the store
 /// reports for the other statements of the transaction.
-fn assert_refused(engine: &str, error: DbError) {
+fn assert_refused(engine: Engine, error: DbError) {
     assert!(
         error.to_string().contains("refused"),
-        "{engine}: the failing statement's error is reported: {error}"
+        "{engine:?}: the failing statement's error is reported: {error}"
     );
 }
 
@@ -937,18 +949,26 @@ async fn slow_message_deletes(db: &DbConnection) {
         .unwrap();
 }
 
-/// Start a clear (`op` "clear") or a delete of conversation `id` and drop the
-/// call while the store runs it ([`slow_message_deletes`]).
-async fn drop_part_way(db: &DbConnection, op: &str, id: &str) {
+/// What the dropped-call tests do to a conversation.
+#[derive(Debug, Clone, Copy)]
+enum Op {
+    /// Clear its messages ([`DbConnection::clear_messages`]).
+    Clear,
+    /// Delete it ([`DbConnection::delete_conversation`]).
+    Delete,
+}
+
+/// Start `op` on conversation `id` and drop the call while the store runs
+/// it ([`slow_message_deletes`]).
+async fn drop_part_way(db: &DbConnection, op: Op, id: &str) {
     let call = async {
-        if op == "clear" {
-            db.clear_messages(id).await.map(|_| ())
-        } else {
-            db.delete_conversation(id).await
+        match op {
+            Op::Clear => db.clear_messages(id).await.map(|_| ()),
+            Op::Delete => db.delete_conversation(id).await,
         }
     };
     let dropped = tokio::time::timeout(std::time::Duration::from_millis(100), call).await;
-    assert!(dropped.is_err(), "{op} finished before it was dropped");
+    assert!(dropped.is_err(), "{op:?} finished before it was dropped");
 }
 
 /// A clear or delete whose caller is dropped part way (an HTTP client that
@@ -977,8 +997,8 @@ async fn a_dropped_clear_or_delete_leaves_the_count_in_step() {
         } else {
             "unbudgeted"
         };
-        for op in ["clear", "delete"] {
-            let id = filled_conversation(&db, "s1", op).await;
+        for op in [Op::Clear, Op::Delete] {
+            let id = filled_conversation(&db, "s1", &format!("{op:?}")).await;
             drop_part_way(&db, op, &id).await;
             // Wait (a bounded number of polls) for the store to commit the
             // message delete, and then for the conversation's turn: the
@@ -992,14 +1012,14 @@ async fn a_dropped_clear_or_delete_leaves_the_count_in_step() {
             drop(db.conversation_turn(&id).await);
             let (listed, stored) = listed_and_stored(&db, &id).await;
             if listed != stored {
-                out_of_step.push(format!("{pass} {op}: listed {listed}, stored {stored}"));
+                out_of_step.push(format!("{pass} {op:?}: listed {listed}, stored {stored}"));
             }
             if session_db_bytes.is_some() {
                 let in_store = db.session_stored_bytes("s1").await.unwrap();
                 let counted = db.session_bytes_entry("s1");
                 if counted != Some(in_store) {
                     out_of_step.push(format!(
-                        "{pass} {op}: counted {counted:?} bytes, stored {in_store}"
+                        "{pass} {op:?}: counted {counted:?} bytes, stored {in_store}"
                     ));
                 }
             }
@@ -1023,24 +1043,27 @@ async fn a_retry_after_a_dropped_clear_or_delete_waits_for_it() {
         session_db_bytes: Some(100_000),
         ..Default::default()
     };
-    let db = engine_db("rocksdb", dir.path(), limits).await;
+    let db = engine_db(Engine::RocksDb, dir.path(), limits).await;
     slow_message_deletes(&db).await;
-    for op in ["clear", "delete"] {
-        let id = filled_conversation(&db, "s1", op).await;
+    for op in [Op::Clear, Op::Delete] {
+        let id = filled_conversation(&db, "s1", &format!("{op:?}")).await;
         drop_part_way(&db, op, &id).await;
-        if op == "clear" {
-            let retried = db.clear_messages(&id).await;
-            assert!(matches!(retried, Ok(0)), "clear retried: {retried:?}");
-            let conv = db.get_conversation(&id).await.unwrap();
-            assert_eq!((conv.message_count, conv.last_message_preview), (0, None));
-        } else {
-            let retried = db.delete_conversation(&id).await;
-            assert!(
-                matches!(retried, Err(DbError::NotFound(_))),
-                "delete retried: {retried:?}"
-            );
+        match op {
+            Op::Clear => {
+                let retried = db.clear_messages(&id).await;
+                assert!(matches!(retried, Ok(0)), "clear retried: {retried:?}");
+                let conv = db.get_conversation(&id).await.unwrap();
+                assert_eq!((conv.message_count, conv.last_message_preview), (0, None));
+            }
+            Op::Delete => {
+                let retried = db.delete_conversation(&id).await;
+                assert!(
+                    matches!(retried, Err(DbError::NotFound(_))),
+                    "delete retried: {retried:?}"
+                );
+            }
         }
-        assert_eq!(listed_and_stored(&db, &id).await, (0, 0), "{op}");
+        assert_eq!(listed_and_stored(&db, &id).await, (0, 0), "{op:?}");
         assert_counter_matches_store(&db, "s1").await;
         assert_eq!(db.store_turns_in_use(), 0);
     }
