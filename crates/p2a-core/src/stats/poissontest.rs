@@ -89,6 +89,43 @@ impl std::fmt::Display for PoissonTestResult {
     }
 }
 
+/// Largest event count the one-sample test accepts: 2^52 = 4_503_599_627_370_496.
+///
+/// statrs evaluates the Poisson CDF and the chi-squared quantiles of the exact interval with an
+/// incomplete gamma series whose index starts at the count and grows by 1.0 in `f64`. From about
+/// 2^53 on, adding 1.0 no longer changes the index and the series never finishes, a loop no
+/// deadline can interrupt. 2^52 leaves the index room to grow exactly; a test at the bound itself
+/// still takes seconds. The two-sample test has no such loop (statrs caps its incomplete beta
+/// iterations); its counts only need a total that fits in `u64`.
+pub const MAX_ONE_SAMPLE_COUNT: u64 = 1 << 52;
+
+/// Refuse a one-sample count above [`MAX_ONE_SAMPLE_COUNT`] before statrs sees it.
+fn check_one_sample_count(x: u64) -> EconResult<()> {
+    if x > MAX_ONE_SAMPLE_COUNT {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "x[0] = {x} is above the largest event count the one-sample exact Poisson test \
+                 supports ({MAX_ONE_SAMPLE_COUNT} = 2^52); beyond it the incomplete gamma series \
+                 behind the Poisson CDF and the exact interval cannot advance in f64 and does not \
+                 finish"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The two-sample test conditions on x[0] + x[1]; refuse a total that does not fit in `u64`.
+fn total_count(x1: u64, x2: u64) -> EconResult<u64> {
+    x1.checked_add(x2)
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: format!(
+                "x = [{x1}, {x2}]: the total x[0] + x[1] exceeds the largest count a 64-bit \
+                 integer holds ({}); the two-sample test conditions on this total",
+                u64::MAX
+            ),
+        })
+}
+
 /// Perform exact Poisson test.
 ///
 /// # Arguments
@@ -106,6 +143,13 @@ impl std::fmt::Display for PoissonTestResult {
 /// # Two-Sample Test
 ///
 /// Tests H₀: λ₁/λ₂ = r where X₁ ~ Poisson(λ₁T₁), X₂ ~ Poisson(λ₂T₂).
+///
+/// # Errors
+///
+/// `EconError::InvalidSpecification` when `x` does not have length 1 or 2 or `t` a different
+/// length; when a time base in `t` or `r` is not finite and > 0, or `r * T` overflows (one-sample);
+/// when `conf_level` is not strictly between 0 and 1; when a one-sample count is above
+/// [`MAX_ONE_SAMPLE_COUNT`]; and when the two counts' total does not fit in `u64`.
 ///
 /// # Example
 ///
@@ -144,25 +188,28 @@ pub fn poisson_test(
         });
     }
 
-    if t.iter().any(|&ti| ti <= 0.0) {
+    // Each check is written so that NaN fails it. A NaN conf_level and an infinite T or r used to
+    // reach statrs and panic there (Gamma::inverse_cdf, the incomplete gamma function).
+    if let Some(&ti) = t.iter().find(|&&ti| !(ti.is_finite() && ti > 0.0)) {
         return Err(EconError::InvalidSpecification {
-            message: "Time bases (T) must be positive".to_string(),
+            message: format!("time base T must be finite and > 0, got {ti}"),
         });
     }
 
-    if r <= 0.0 {
+    if !(r.is_finite() && r > 0.0) {
         return Err(EconError::InvalidSpecification {
-            message: "Hypothesized rate/ratio (r) must be positive".to_string(),
+            message: format!("rate (ratio) r must be finite and > 0, got {r}"),
         });
     }
 
-    if conf_level <= 0.0 || conf_level >= 1.0 {
+    if !(conf_level > 0.0 && conf_level < 1.0) {
         return Err(EconError::InvalidSpecification {
-            message: "Confidence level must be between 0 and 1".to_string(),
+            message: format!("conf_level must be strictly between 0 and 1, got {conf_level}"),
         });
     }
 
     if x.len() == 1 {
+        check_one_sample_count(x[0])?;
         poisson_test_one_sample(x[0], t[0], r, alternative, conf_level)
     } else {
         poisson_test_two_sample(x[0], x[1], t[0], t[1], r, alternative, conf_level)
@@ -179,6 +226,12 @@ fn poisson_test_one_sample(
 ) -> EconResult<PoissonTestResult> {
     // Expected count under H₀
     let expected = r * t;
+    if !expected.is_finite() {
+        // statrs accepts an infinite Poisson mean and then panics in its CDF.
+        return Err(EconError::InvalidSpecification {
+            message: format!("the expected count r * T = {r} * {t} overflows f64"),
+        });
+    }
 
     // Create Poisson distribution under H₀
     let pois = Poisson::new(expected).map_err(|_| EconError::InvalidSpecification {
@@ -207,7 +260,7 @@ fn poisson_test_one_sample(
     let estimate = x as f64 / t;
 
     // Confidence interval for the rate
-    let (ci_lower, ci_upper) = poisson_ci(x, conf_level);
+    let (ci_lower, ci_upper) = poisson_ci(x, conf_level)?;
     let conf_int = (ci_lower / t, ci_upper / t);
 
     Ok(PoissonTestResult {
@@ -234,7 +287,7 @@ fn poisson_test_two_sample(
     alternative: PoissonAlternative,
     conf_level: f64,
 ) -> EconResult<PoissonTestResult> {
-    let n = x1 + x2;
+    let n = total_count(x1, x2)?;
 
     // Under H₀: λ₁/λ₂ = r
     // X₁ | (X₁ + X₂ = n) ~ Binomial(n, p)
@@ -287,7 +340,7 @@ fn poisson_test_two_sample(
     };
 
     // Confidence interval for rate ratio using profile likelihood
-    let conf_int = rate_ratio_ci(x1, x2, t1, t2, conf_level);
+    let conf_int = rate_ratio_ci(x1, x2, n, t1, t2, conf_level);
 
     Ok(PoissonTestResult {
         method: "Comparison of Poisson rates".to_string(),
@@ -306,8 +359,23 @@ fn poisson_test_two_sample(
 /// Compute confidence interval for Poisson count using exact method.
 ///
 /// Uses the relationship between Poisson and chi-squared/gamma distributions.
-fn poisson_ci(x: u64, conf_level: f64) -> (f64, f64) {
+/// `poisson_test` keeps `x` at or below [`MAX_ONE_SAMPLE_COUNT`]; `x + 1` is still checked
+/// before any distribution is built.
+fn poisson_ci(x: u64, conf_level: f64) -> EconResult<(f64, f64)> {
     use statrs::distribution::ChiSquared;
+
+    let x_plus_1 = x
+        .checked_add(1)
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: format!("x = {x}: x + 1 (the upper bound's shape) overflows a 64-bit count"),
+        })?;
+    let chi_squared = |df: f64| {
+        ChiSquared::new(df).map_err(|e| {
+            EconError::Computation(format!(
+                "chi-squared distribution with {df} degrees of freedom: {e}"
+            ))
+        })
+    };
 
     let alpha = 1.0 - conf_level;
 
@@ -315,23 +383,21 @@ fn poisson_ci(x: u64, conf_level: f64) -> (f64, f64) {
     let lower = if x == 0 {
         0.0
     } else {
-        let chi_lower = ChiSquared::new(2.0 * x as f64).unwrap();
-        chi_lower.inverse_cdf(alpha / 2.0) / 2.0
+        chi_squared(2.0 * x as f64)?.inverse_cdf(alpha / 2.0) / 2.0
     };
 
     // Upper bound: chi-squared quantile
-    let chi_upper = ChiSquared::new(2.0 * (x + 1) as f64).unwrap();
-    let upper = chi_upper.inverse_cdf(1.0 - alpha / 2.0) / 2.0;
+    let upper = chi_squared(2.0 * x_plus_1 as f64)?.inverse_cdf(1.0 - alpha / 2.0) / 2.0;
 
-    (lower, upper)
+    Ok((lower, upper))
 }
 
 /// Compute confidence interval for rate ratio.
 ///
-/// Uses exact conditional method based on binomial distribution.
-fn rate_ratio_ci(x1: u64, x2: u64, t1: f64, t2: f64, conf_level: f64) -> (f64, f64) {
+/// Uses exact conditional method based on binomial distribution. `n` is `x1 + x2`, checked by
+/// the caller.
+fn rate_ratio_ci(x1: u64, x2: u64, n: u64, t1: f64, t2: f64, conf_level: f64) -> (f64, f64) {
     let alpha = 1.0 - conf_level;
-    let n = x1 + x2;
 
     if n == 0 {
         return (0.0, f64::INFINITY);
@@ -344,14 +410,14 @@ fn rate_ratio_ci(x1: u64, x2: u64, t1: f64, t2: f64, conf_level: f64) -> (f64, f
     let lower = if x1 == 0 {
         0.0
     } else {
-        find_rate_ratio_bound(x1, x2, t1, t2, alpha / 2.0, true)
+        find_rate_ratio_bound(x1, x2, n, t1, t2, alpha / 2.0, true)
     };
 
     // Upper bound: find r such that P(X₁ <= x₁ | H₀: ratio=r) = alpha/2
     let upper = if x2 == 0 {
         f64::INFINITY
     } else {
-        find_rate_ratio_bound(x1, x2, t1, t2, alpha / 2.0, false)
+        find_rate_ratio_bound(x1, x2, n, t1, t2, alpha / 2.0, false)
     };
 
     (lower, upper)
@@ -366,9 +432,17 @@ fn rate_ratio_ci(x1: u64, x2: u64, t1: f64, t2: f64, conf_level: f64) -> (f64, f
 /// For the upper bound, we find r such that P(X₁ <= x₁ | H₀: ratio=r) = alpha
 /// As r increases, P(X₁ <= x₁) decreases, so we want to find the largest r
 /// where this probability just reaches alpha.
-fn find_rate_ratio_bound(x1: u64, x2: u64, t1: f64, t2: f64, alpha: f64, find_lower: bool) -> f64 {
-    let n = x1 + x2;
-
+///
+/// `n` is `x1 + x2`, checked by the caller.
+fn find_rate_ratio_bound(
+    x1: u64,
+    x2: u64,
+    n: u64,
+    t1: f64,
+    t2: f64,
+    alpha: f64,
+    find_lower: bool,
+) -> f64 {
     // Compute the tail probability for a given rate ratio r
     let compute_tail_p = |r: f64| -> f64 {
         let p = r * t1 / (r * t1 + t2);
@@ -514,7 +588,7 @@ mod tests {
     #[test]
     fn test_poisson_ci() {
         // Test CI computation for known values
-        let (lower, upper) = poisson_ci(10, 0.95);
+        let (lower, upper) = poisson_ci(10, 0.95).unwrap();
         println!("Poisson CI for x=10: ({:.4}, {:.4})", lower, upper);
 
         // For x=10, 95% CI should be approximately (4.8, 18.4)
@@ -674,6 +748,109 @@ mod tests {
             result.conf_int.0,
             result.conf_int.1
         );
+    }
+
+    fn refusal(x: &[u64], t: &[f64], r: f64, conf_level: f64) -> String {
+        match poisson_test(x, t, r, PoissonAlternative::TwoSided, conf_level) {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("x = {x:?}, t = {t:?}, r = {r}, conf_level = {conf_level}: {other:?}"),
+        }
+    }
+
+    /// FU-1: the two-sample test conditions on x[0] + x[1]. A total that does not fit in u64 used
+    /// to panic in debug builds ("attempt to add with overflow") and wrap in release builds.
+    #[test]
+    fn test_poisson_two_sample_refuses_overflowing_total() {
+        for x in [
+            [u64::MAX, 1],
+            [1, u64::MAX],
+            [1 << 63, 1 << 63],
+            [u64::MAX, u64::MAX],
+        ] {
+            let message = refusal(&x, &[1.0, 2.5], 1.0, 0.95);
+            assert!(message.contains("x[0] + x[1]"), "{message}");
+            assert!(message.contains(&x[0].to_string()), "{message}");
+            assert!(message.contains(&u64::MAX.to_string()), "{message}");
+        }
+    }
+
+    /// The total may be u64::MAX itself; the two-sample path has no loop that depends on the counts
+    /// (bisection and bracketing are capped), so it returns.
+    #[test]
+    fn test_poisson_two_sample_accepts_largest_total() {
+        for x in [[u64::MAX - 1, 1], [u64::MAX, 0], [0, u64::MAX]] {
+            let result = poisson_test(&x, &[1.0, 2.5], 1.0, PoissonAlternative::TwoSided, 0.95);
+            assert!(result.is_ok(), "x = {x:?}: {result:?}");
+        }
+    }
+
+    /// FU-1: a one-sample count above 2^52 is refused before statrs is called. Above about 2^53
+    /// the incomplete gamma series behind the Poisson CDF and the chi-squared quantiles stops
+    /// advancing and never returns (u64::MAX, u64::MAX - 1 and 2^53 - 2 all hung); u64::MAX would
+    /// also overflow x + 1 in the interval.
+    #[test]
+    fn test_poisson_one_sample_refuses_counts_above_bound() {
+        for x in [
+            MAX_ONE_SAMPLE_COUNT + 1,
+            (1 << 53) - 2,
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
+            let message = refusal(&[x], &[3.5], 1.0, 0.95);
+            assert!(message.contains(&format!("x[0] = {x}")), "{message}");
+            assert!(
+                message.contains(&MAX_ONE_SAMPLE_COUNT.to_string()),
+                "{message}"
+            );
+        }
+    }
+
+    /// The bound is inclusive. Checked on the validation step: a full test at 2^52 takes seconds.
+    #[test]
+    fn test_poisson_one_sample_bound_is_inclusive() {
+        assert_eq!(MAX_ONE_SAMPLE_COUNT, 4_503_599_627_370_496);
+        assert!(check_one_sample_count(MAX_ONE_SAMPLE_COUNT).is_ok());
+        assert!(check_one_sample_count(0).is_ok());
+        assert!(check_one_sample_count(MAX_ONE_SAMPLE_COUNT + 1).is_err());
+    }
+
+    /// FU-1: poisson_ci checks x + 1 before any distribution is built and no longer unwraps
+    /// ChiSquared::new.
+    #[test]
+    fn test_poisson_ci_refuses_overflowing_count() {
+        let e = poisson_ci(u64::MAX, 0.95).unwrap_err().to_string();
+        assert!(e.contains("x + 1"), "{e}");
+        let (lower, upper) = poisson_ci(0, 0.95).unwrap();
+        assert_eq!(lower, 0.0);
+        assert!(upper > 3.68 && upper < 3.69, "{upper}"); // qgamma(0.975, 1) = 3.688879
+    }
+
+    /// Non-finite or out-of-range T, r and conf_level used to reach statrs and panic there
+    /// (conf_level NaN in Gamma::inverse_cdf; T or r infinite, or r * T overflowing, in the
+    /// incomplete gamma function). The wording matches T3-WP40's planned validation.
+    #[test]
+    fn test_poisson_refuses_non_finite_parameters() {
+        for level in [f64::NAN, 95.0, 1.0, 0.0] {
+            let message = refusal(&[10], &[5.0], 1.0, level);
+            assert!(message.contains("conf_level"), "{message}");
+        }
+        for t in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0] {
+            for (x, ts) in [(vec![10], vec![t]), (vec![11, 21], vec![800.0, t])] {
+                let message = refusal(&x, &ts, 1.0, 0.95);
+                assert!(
+                    message.contains("time base T must be finite and > 0"),
+                    "{message}"
+                );
+            }
+        }
+        for r in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            for (x, ts) in [(vec![10], vec![5.0]), (vec![11, 21], vec![800.0, 3011.0])] {
+                let message = refusal(&x, &ts, r, 0.95);
+                assert!(message.contains("r must be finite and > 0"), "{message}");
+            }
+        }
+        let message = refusal(&[10], &[1e200], 1e200, 0.95);
+        assert!(message.contains("r * T"), "{message}");
     }
 
     #[test]
