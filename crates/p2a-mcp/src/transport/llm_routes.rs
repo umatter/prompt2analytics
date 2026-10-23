@@ -1394,7 +1394,7 @@ async fn run_chat_stream(
     // Resolve the provider (egress policy, key policy, iteration clamp)
     // before any database write or provider request.
     let provider_config = match resolve_provider_config(
-        request.provider.clone(),
+        request.provider,
         request.max_tool_iterations,
         &settings,
         &server_env,
@@ -1624,11 +1624,13 @@ async fn run_chat_stream(
     #[cfg(not(feature = "db"))]
     let retrieved_history: Vec<Message> = Vec::new();
 
-    // Determine which history to use: client-provided takes precedence
+    // Determine which history to use: client-provided takes precedence.
+    // The request's history and message move into the context; neither is
+    // used again.
     let history_to_use = if request.history.is_empty() {
         retrieved_history
     } else {
-        request.history.clone()
+        request.history
     };
 
     // The bounded dataset block (built under the governor), the history
@@ -1637,7 +1639,7 @@ async fn run_chat_stream(
         &state.governor,
         &session,
         history_to_use,
-        request.message.clone(),
+        request.message,
         &tools,
         &provider_config,
         &settings,
