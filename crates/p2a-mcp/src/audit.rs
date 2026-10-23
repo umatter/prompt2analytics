@@ -26,8 +26,10 @@
 //! new file at the path and the numbered files are left as they are; that
 //! new file is created exclusively, so a symlink planted at the path is never
 //! followed. The writer flushes whenever its queue runs empty, and the stdio
-//! transport and `transport::http::serve` write out the queue before they
-//! return; entries still queued when the process is killed are lost.
+//! transport and `transport::http::serve` write out every entry queued by the
+//! time they return (a call still running after its deadline answer is
+//! logged when its work ends); entries still queued when the process is
+//! killed are lost.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -425,7 +427,11 @@ impl Writer {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Entry(entry) => self.write_entry(&entry),
+            Msg::Entry(entry) => {
+                #[cfg(test)]
+                gate::wait(&self.path);
+                self.write_entry(&entry);
+            }
             Msg::Flush(reply) => {
                 self.flush();
                 let _ = reply.send(());
@@ -564,6 +570,66 @@ impl Writer {
                 path = %self.path.display(),
                 "audit log write failed"
             );
+        }
+    }
+}
+
+/// Test hook: while a test holds a log's path, its writer waits before each
+/// entry, so the test decides when queued entries are written.
+#[cfg(test)]
+pub(crate) mod gate {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
+
+    /// `true` while the gate is closed.
+    type Shared = Arc<(Mutex<bool>, Condvar)>;
+
+    static GATES: LazyLock<Mutex<HashMap<PathBuf, Shared>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// A closed gate for one log path; dropping it opens the gate.
+    pub(crate) struct Held {
+        path: PathBuf,
+        shared: Shared,
+    }
+
+    /// Closes the gate of the log at `path` until the guard drops.
+    pub(crate) fn hold(path: &Path) -> Held {
+        let path = std::path::absolute(path).expect("an absolute path");
+        let shared: Shared = Arc::new((Mutex::new(true), Condvar::new()));
+        GATES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.clone(), Arc::clone(&shared));
+        Held { path, shared }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            GATES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&self.path);
+            let (closed, opened) = &*self.shared;
+            *closed.lock().unwrap_or_else(PoisonError::into_inner) = false;
+            opened.notify_all();
+        }
+    }
+
+    /// Waits while the gate of the log at `path` (absolute) is closed.
+    pub(super) fn wait(path: &Path) {
+        let shared = GATES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
+            .cloned();
+        if let Some(shared) = shared {
+            let (closed, opened) = &*shared;
+            let mut closed = closed.lock().unwrap_or_else(PoisonError::into_inner);
+            while *closed {
+                closed = opened.wait(closed).unwrap_or_else(PoisonError::into_inner);
+            }
         }
     }
 }

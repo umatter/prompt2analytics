@@ -248,8 +248,8 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 /// Then it validates the configuration again, so no caller can skip the
 /// guard, builds the app, installs the process-wide policies (allocation
 /// ceiling, session directories) and serves it with graceful shutdown.
-/// Before it returns, the audit entries of the calls it answered are
-/// written out.
+/// Before it returns, every audit entry queued by then is written out; a call
+/// still running after its deadline answer is logged when its work ends.
 /// It does not install the request limits or apply `--limit-override`
 /// (`P2A_LIMIT_OVERRIDES`); `transport::start_transport` does that before it
 /// calls `start_http_transport`. A caller that uses `serve` directly gets the
@@ -281,10 +281,11 @@ pub async fn serve(
         .await
         .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)));
     // Write out the queued audit entries before returning, so a caller that
-    // exits right after a graceful shutdown keeps them. `state.audit_logger`
-    // and the governor's logger are one writer: both are opened for
-    // `config.audit` (`ExecConfig::from_config`), and `AuditLogger::new`
-    // returns the existing writer for a path.
+    // exits right after a graceful shutdown keeps them. The governor's logger
+    // holds the entries of every tool call; `state.audit_logger` is opened
+    // for the same `config.audit` and is normally the same writer, flushed
+    // as well in case an embedder logged through it.
+    state.governor.flush_audit().await;
     state.audit_logger.flush().await;
     served
 }
@@ -586,6 +587,85 @@ async fn health_check(State(state): State<AppState>) -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod serve_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// One HTTP/1.1 POST to `addr` (`Host: localhost`, the connection closed
+    /// after the answer); the JSON body of a 2xx answer.
+    async fn post(addr: std::net::SocketAddr, uri: &str, body: &Value) -> Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body = body.to_string();
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "POST {uri} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.unwrap();
+        let (head, json) = answer.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 2"), "{head}");
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_returns_only_after_the_queued_audit_entries_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("audit.log");
+        let mut config = ServerConfig {
+            transport: TransportType::Http,
+            ..Default::default()
+        };
+        config.audit = crate::config::AuditConfig {
+            enabled: true,
+            path: log.to_string_lossy().into_owned(),
+        };
+        // The writer of this log keeps every entry in its queue until
+        // `held` drops.
+        let held = crate::audit::gate::hold(&log);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let mut server = tokio::spawn(serve(listener, config, async {
+            let _ = stopped.await;
+        }));
+
+        let created = post(addr, "/api/sessions", &json!({})).await;
+        let sid = created["data"]["session_id"].as_str().unwrap().to_string();
+        let call = json!({"session_id": sid, "arguments": {}});
+        for _ in 0..5 {
+            post(addr, "/api/tools/list_datasets", &call).await;
+        }
+        stop.send(()).unwrap();
+        // While the entries are held, serve cannot return. With the gate
+        // closed this holds however long the wait is, so it cannot fail on a
+        // slow machine.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut server)
+                .await
+                .is_err(),
+            "serve returned with its audit entries still queued"
+        );
+        drop(held);
+        server.await.unwrap().unwrap();
+
+        let text = std::fs::read_to_string(&log).unwrap();
+        let entries: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 5, "{text}");
+        assert!(
+            entries
+                .iter()
+                .all(|e| e["tool_name"] == "list_datasets" && e["session_id"] == sid.as_str())
+        );
+    }
 }
 
 #[cfg(all(test, feature = "db"))]

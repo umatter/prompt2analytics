@@ -545,6 +545,14 @@ impl ToolGovernor {
         &self.cfg
     }
 
+    /// Resolves once every audit entry the governor queued before it is
+    /// written and flushed (at once when auditing is off). An entry of a
+    /// call still running after its deadline answer is queued only when its
+    /// work ends.
+    pub async fn flush_audit(&self) {
+        self.audit.flush().await;
+    }
+
     /// In-flight and overdue work, capacity and process memory. With
     /// `redact_health` (open public mode) `rss_bytes` is `None`.
     pub fn health(&self) -> GovernorHealth {

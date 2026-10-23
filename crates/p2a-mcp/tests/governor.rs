@@ -182,13 +182,15 @@ async fn raw_post(addr: std::net::SocketAddr, uri: &str, body: &Value) -> Value 
 async fn serve_writes_out_the_audit_queue_before_it_returns() {
     // A caller that exits right after a graceful shutdown keeps the audit
     // entries of every call the server answered.
+    use p2a_mcp::audit::{AuditEntry, AuditLogger, ResultSummary};
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");
-    let mut cfg = http_cfg("127.0.0.1:0", None, false);
-    cfg.audit = p2a_mcp::config::AuditConfig {
+    let audit = p2a_mcp::config::AuditConfig {
         enabled: true,
         path: log.to_string_lossy().into_owned(),
     };
+    let mut cfg = http_cfg("127.0.0.1:0", None, false);
+    cfg.audit = audit.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -202,21 +204,39 @@ async fn serve_writes_out_the_audit_queue_before_it_returns() {
     for _ in 0..20 {
         raw_post(addr, "/api/tools/list_datasets", &call).await;
     }
+    // Work for the flush at shutdown: one more entry, 32 MiB of arguments
+    // (an entry stores its arguments as given), queued through a second
+    // handle on the server's writer (the path is absolute, so
+    // `AuditLogger::new` returns that writer) and not flushed here.
+    let big = 32 << 20;
+    let second = AuditLogger::new(&audit).unwrap();
+    second
+        .log(AuditEntry::new(
+            "last",
+            "http",
+            "list_datasets",
+            Value::String("x".repeat(big)),
+            "ok",
+            0,
+            ResultSummary::default(),
+        ))
+        .await;
     stop.send(()).unwrap();
     server.await.unwrap().unwrap();
 
-    // Read at once, with no flush of our own.
-    let lines: Vec<Value> = std::fs::read_to_string(&log)
-        .unwrap()
+    // Read at once, with no flush of our own: an ordering check, no timing.
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.ends_with('\n'), "the last entry was cut short");
+    let lines: Vec<Value> = text
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 20);
-    assert!(
-        lines
-            .iter()
-            .all(|l| l["tool_name"] == "list_datasets" && l["origin"] == "http")
-    );
+    assert_eq!(lines.len(), 21);
+    assert!(lines[..20].iter().all(|l| l["tool_name"] == "list_datasets"
+        && l["origin"] == "http"
+        && l["session_id"] == sid.as_str()));
+    assert_eq!(lines[20]["session_id"], "last");
+    assert_eq!(lines[20]["arguments"].as_str().map(str::len), Some(big));
 }
 
 /// `ServerConfig::default()` bound to `addr`, with the transport left at its
