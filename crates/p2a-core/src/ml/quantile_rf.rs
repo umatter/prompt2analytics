@@ -689,11 +689,13 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
 ///
 /// # Reproducibility
 ///
-/// A fixed `seed` grows the same forest on every run. Where two candidate
-/// splits have exactly equal within-child sums of squares, which a response
-/// with repeated values (counts, integers, Likert scores) can produce, either
-/// equally good split may be taken, so such a forest can differ from the one
-/// v0.1.0 grew for the same seed. Without exact ties the forest is the same.
+/// A fixed `seed` grows the same forest on every run. It also grows the forest
+/// that releases up to v0.1.3 grew for that seed, with two exceptions. Where
+/// two candidate splits have equal within-child sums of squares, exactly or to
+/// within rounding (which a response with repeated values such as counts,
+/// integers or Likert scores can produce), either equally good split may be
+/// taken. A tree that would grow past depth 512 now stops there (see
+/// [`QuantileRfConfig::max_depth`]).
 ///
 /// # Example
 ///
@@ -1048,7 +1050,14 @@ pub fn predict_quantiles(
 ///
 /// # Returns
 ///
-/// * Matrix of quantile predictions (n_samples x n_quantiles)
+/// * Always `Err`
+///
+/// # Errors
+///
+/// Reports a column count different from the training data, or a quantile
+/// outside the open interval (0, 1) (NaN included), first. Otherwise it returns
+/// the message redirecting to [`predict_quantiles_with_y`]; the variant that
+/// also takes these quantiles is [`predict_quantiles_with_y_at`].
 pub fn predict_quantiles_at(
     model: &QuantileRfResult,
     x_new: ArrayView2<f64>,
