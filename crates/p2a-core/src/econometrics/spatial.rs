@@ -2452,6 +2452,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dense_impacts_pseudoinverse_branch_stays_finite() {
+        // With row-standardised W, rho = 1 makes I - rho W singular, so matrix_inverse
+        // reports it ill-conditioned (cond > CONDITION_THRESHOLD) and compute_impacts_dense
+        // takes the SVD pseudoinverse branch. This pins that branch's current output: Ok,
+        // finite effects, and no warning (the missing warning is a T0-WP21 hand-off).
+        let w = knn3(WeightStyle::RowStd);
+        let rho = 1.0;
+        let n = w.n();
+        let i_rho_w = Array2::<f64>::eye(n) - &w.try_to_dense().unwrap() * rho;
+        assert!(
+            matrix_inverse(&i_rho_w.view()).is_err(),
+            "the LU inverse must fail for this case to reach the pseudoinverse branch"
+        );
+
+        let beta = array![1.0, 2.0, -0.5];
+        let names: [String; 2] = ["a".into(), "b".into()];
+        let imp = compute_impacts_dense(&beta, rho, &w, &names).unwrap();
+        assert_eq!(imp.direct.len(), 2);
+        for j in 0..2 {
+            assert!(
+                imp.direct[j].is_finite()
+                    && imp.indirect[j].is_finite()
+                    && imp.total[j].is_finite(),
+                "j={j}: {imp:?}"
+            );
+        }
+        assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
+    }
+
     /// Relative closeness: `(a - b).abs() <= tol * max(1, |b|)`.
     fn assert_rel(a: f64, b: f64, tol: f64, what: &str) {
         assert!(
