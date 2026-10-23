@@ -9,11 +9,11 @@
 # PR touches Cargo.lock alone and needs no code change: 1.x minors and patches,
 # and patches of 0.x crates. Breaking upgrades (a new major, or a new minor of a
 # 0.x crate, which Cargo treats as breaking) are not proposed and stay manual.
-# Dependabot labels updates by the version string, so a 0.x minor counts as
-# "minor" here even though Cargo treats it as breaking. The
-# `ignore` rules therefore name both semver-major and semver-minor for the crates
-# CLAUDE.md pins (ndarray 0.16, polars 0.52, faer 0.22, rand 0.8 with rand_distr
-# 0.4 and rand_chacha 0.3), so they stay put even if the strategy changes.
+# Dependabot labels a 0.x minor as "minor" by its version string, so the
+# `ignore` rules name both semver-major and semver-minor for the crates held
+# to one release line: ndarray 0.16, polars 0.52 and faer 0.22 (pinned in
+# CLAUDE.md) and rand 0.8 with rand_distr 0.4 and rand_chacha 0.3. They stay
+# put even if the strategy changes.
 #
 # Version updates only reach direct dependencies. Most advisories arrive
 # transitively (rustls via reqwest, ammonia via surrealdb), so the weekly
