@@ -833,6 +833,15 @@ fn predict_one(node: &CtreeNode, x: &ArrayView1<f64>) -> f64 {
 ///
 /// CtreeResult containing the fitted tree and diagnostics.
 ///
+/// # Errors
+///
+/// `Computation` for fewer than 2 rows, when `x` and `y` differ in length, or
+/// when `mincriterion` is not strictly inside (0, 1), NaN included;
+/// `InvalidSpecification` when `x` or `y` holds a non-finite value or
+/// `maxdepth` exceeds 62 (`usize::BITS - 2` on 64-bit targets, since node ids
+/// double at each level); `Cancelled` once the installed computation budget
+/// expires (checked per node).
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -1192,6 +1201,24 @@ mod tests {
             yb[5] = bad;
             let err = ctree(x.view(), yb.view(), &cfg).unwrap_err().to_string();
             assert!(err.contains("non-finite"), "y {bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_ctree_rejects_mincriterion_outside_the_unit_interval() {
+        // NaN used to pass the range check and silently grow a stump, since
+        // no p-value is below 1 - NaN.
+        let (x, y, _) = rpart_reference_data();
+        for bad in [f64::NAN, 0.0, 1.0, f64::INFINITY] {
+            let cfg = CtreeConfig {
+                mincriterion: bad,
+                ..Default::default()
+            };
+            let err = ctree(x.view(), y.view(), &cfg).unwrap_err().to_string();
+            assert!(
+                err.contains("mincriterion must be between 0 and 1"),
+                "{bad}: {err}"
+            );
         }
     }
 
