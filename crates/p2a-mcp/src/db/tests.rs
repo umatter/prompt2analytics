@@ -849,6 +849,141 @@ async fn recent_orphan_sweep_scans_in_full_after_too_many_deletes() {
     assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
 }
 
+/// Owner values around the sorted `known` ones that none of them equals:
+/// the empty string, values before and after all of them, and for each a
+/// prefix and two extensions (which sort right after it).
+fn owners_around(known: &[String]) -> Vec<String> {
+    let mut out = vec![String::new(), "0".to_string(), "zzzz".to_string()];
+    for k in known {
+        out.push(k[..k.len() / 2].to_string());
+        out.push(format!("{k}0"));
+        out.push(format!("{k}~"));
+    }
+    out.sort();
+    out.dedup();
+    out.retain(|o| !known.contains(o));
+    out
+}
+
+/// Rows of `table`.
+async fn rows_in(db: &DbConnection, table: &str) -> usize {
+    #[derive(serde::Deserialize)]
+    struct Count {
+        count: usize,
+    }
+    let mut result = db
+        .db()
+        .query(format!("SELECT count() FROM {table} GROUP ALL"))
+        .await
+        .unwrap();
+    let count: Option<Count> = result.take(0).unwrap();
+    count.map_or(0, |c| c.count)
+}
+
+/// A tool call stored for `conversation_id` without any check.
+async fn insert_raw_tool_call(db: &DbConnection, conversation_id: &str) {
+    let t = ToolCall::new("m".into(), conversation_id.into(), "t".into(), "{}".into());
+    let _: Option<ToolCall> = db.db().create(t.id.clone()).content(t).await.unwrap();
+}
+
+/// See [`full_orphan_sweep_finds_orphans_between_the_owners_that_exist`].
+async fn check_orphans_between_owners(db: &DbConnection) {
+    let now = chrono::Utc::now();
+    let live: Vec<String> = ["m1", "s1", "s2"].map(String::from).to_vec();
+    let mut conversations = Vec::new();
+    for s in &live {
+        db.set_session_last_accessed(s, now).await.unwrap();
+    }
+    // Every session, with a row or not, gets settings, dataset metadata and
+    // a conversation with a message and a tool call.
+    let rowless = owners_around(&live);
+    for s in live.iter().chain(&rowless) {
+        if !s.is_empty() {
+            // The settings row's key is the session id.
+            db.get_or_create_settings(s).await.unwrap();
+        }
+        let meta = super::models::DatasetMeta::new(
+            s.clone(),
+            "d".into(),
+            "csv".into(),
+            2,
+            1,
+            vec!["x".into()],
+        );
+        db.save_dataset_meta(&meta).await.unwrap();
+        let id = db.create_conversation(s, "t").await.unwrap().id_string();
+        let msg = db.add_message(&id, "user", "1.25").await.unwrap();
+        let call = ToolCall::new(msg.id_string(), id.clone(), "t".into(), "{}".into());
+        db.create_tool_call(&call).await.unwrap();
+        if live.contains(s) {
+            conversations.push(id);
+        }
+    }
+    // More orphans in one gap than the sweep deletes per statement.
+    for _ in 0..(2 * super::sessions::ORPHAN_BATCH + 3) {
+        db.create_conversation("zzzz", "t").await.unwrap();
+    }
+    conversations.sort();
+    let orphan_owners = owners_around(&conversations);
+    for owner in &orphan_owners {
+        insert_raw_message(db, owner).await;
+        insert_raw_tool_call(db, owner).await;
+    }
+    for _ in 0..(2 * super::sessions::ORPHAN_BATCH + 5) {
+        insert_raw_message(db, "zzzz").await;
+    }
+
+    let deleted = db.delete_orphans().await.unwrap();
+    // The rowless sessions' conversations (their messages and tool calls go
+    // with them uncounted), settings and dataset metadata, and the orphaned
+    // messages and tool calls.
+    let rowless_settings = rowless.iter().filter(|s| !s.is_empty()).count();
+    let expected = rowless.len()
+        + (2 * super::sessions::ORPHAN_BATCH + 3)
+        + rowless_settings
+        + rowless.len()
+        + 2 * orphan_owners.len()
+        + (2 * super::sessions::ORPHAN_BATCH + 5);
+    assert_eq!(deleted, expected);
+    for table in [
+        "sessions",
+        "settings",
+        "dataset_meta",
+        "conversations",
+        "messages",
+        "tool_calls",
+    ] {
+        assert_eq!(rows_in(db, table).await, live.len(), "{table}");
+    }
+    for id in &conversations {
+        assert_eq!(db.get_messages(id).await.unwrap().len(), 1);
+        let calls = db.get_tool_calls_for_conversation(id).await.unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+    for s in &live {
+        assert_eq!(db.get_datasets_for_session(s).await.unwrap().len(), 1);
+        let settings: Option<super::models::Settings> =
+            db.db().select(("settings", s.as_str())).await.unwrap();
+        assert!(settings.is_some(), "{s}");
+    }
+    assert_eq!(db.delete_orphans().await.unwrap(), 0);
+}
+
+/// The full sweep finds the orphans of every table wherever their owner
+/// falls among the owners that exist (before, between and after them, a
+/// prefix or an extension of one, the empty string), also more of them in
+/// one gap than it deletes per statement, and keeps every row of an owner
+/// that exists; on both engines.
+#[tokio::test]
+async fn full_orphan_sweep_finds_orphans_between_the_owners_that_exist() {
+    check_orphans_between_owners(&test_db().await).await;
+    let dir = tempfile::tempdir().unwrap();
+    let db = DbConnection::connect_rocksdb(dir.path().join("db"))
+        .await
+        .unwrap();
+    check_orphans_between_owners(&db).await;
+}
+
 #[tokio::test]
 async fn session_rows_by_last_access() {
     let db = test_db().await;
