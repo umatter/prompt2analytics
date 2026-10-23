@@ -96,12 +96,6 @@ where
     Ok((deleted, GapEnd::Bound))
 }
 
-/// A row's record id, and nothing else of it.
-#[derive(serde::Deserialize)]
-struct IdRow {
-    id: RecordId,
-}
-
 /// A conversation the orphan sweep deletes: its id and its session.
 #[derive(serde::Deserialize)]
 struct ConversationOwner {
@@ -638,11 +632,11 @@ impl DbConnection {
         for session_id in session_ids.iter().filter(|id| !id.contains('\0')) {
             let mut result = self
                 .db()
-                .query("SELECT id FROM conversations WHERE session_id = $session_id")
+                .query("SELECT VALUE id FROM conversations WHERE session_id = $session_id")
                 .bind(("session_id", session_id.clone()))
                 .await?;
-            let rows: Vec<IdRow> = result.take(0)?;
-            ids.extend(rows.iter().map(|row| key_string(&row.id)));
+            let rows: Vec<RecordId> = result.take(0)?;
+            ids.extend(rows.iter().map(key_string));
         }
         Ok(ids)
     }
