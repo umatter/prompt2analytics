@@ -45,14 +45,22 @@ mu  <- mu + t M^-1 r(mu)             t = 1 when the step keeps S, otherwise Armi
 ```
 
 Each step is one (k+1) x (k+1) solve and O(n k^2) work, with O(n + k^2) memory; no n x n
-matrix is formed. The bound w >= l holds exactly and exact balance is reached to rounding.
-`lambda` is reported as -mu.
+matrix is formed. The bound w >= l holds exactly and exact balance is reached to rounding;
+the residual r is accumulated with compensated (Neumaier) sums. `lambda` is reported as -mu.
+
+The solve converges when ||r||_inf <= 1e-14 (1 + ||b||_inf), or <= `tolerance` (1 + ||b||_inf)
+after a full step that kept S. If no ascent direction exists, the line search fails or
+`max_iter` steps (mu_0 counts as one) are used up while ||r||_inf <= `tolerance` (1 + ||b||_inf),
+the solve stops there as converged. Only outside that tolerance do these cases mean an error.
 
 Infeasible exact balance is an error (`InvalidSpecification`, suggesting
 `balance_tol > 0`), as R `sbw` refuses it too: with `min_weight >= 0` a target mean outside
-the reweighted group's range is refused up front, and otherwise a dual that does not converge
-(no ascent direction, a failed line search, diverging multipliers or `max_iter` steps) means
-that no feasible weights exist.
+the reweighted group's range is refused up front, and otherwise no ascent direction or a
+failed line search outside the tolerance, or diverging multipliers, mean that no feasible
+weights exist. Running out of `max_iter` outside the tolerance is a separate
+`InvalidSpecification` that names `max_iter`; it says nothing about feasibility. A target
+mean that overflows is refused up front, and a non-finite Gram matrix or multiplier
+(covariates too large for f64) is a `Computation` error, never a converged result.
 
 Before October 2026 the exact path inverted the dense (n+k+1) x (n+k+1) system of the
 equality-constrained problem, then clipped negative weights at `min_weight` and renormalised.
@@ -157,6 +165,13 @@ Further exact-balance checks in the same module:
 - `test_sbw_exact_infeasible_is_an_error`: ATC on the Test Case 1 data is infeasible (the
   control mean of x2, 0.474, is below every treated x2) and is refused, as by R sbw.
 - `test_sbw_exact_large_n_is_tractable`: 2,000 treated and 20,000 controls with binding bounds.
+- `test_sbw_exact_max_iter_exhaustion_is_not_infeasibility`: Test Case 1 with `max_iter = 2`
+  is an error naming `max_iter`, not the infeasibility verdict; with `max_iter = 4` and
+  `tolerance = 1e-2` the fourth step is within tolerance and the solve stops as converged.
+- `test_sbw_exact_overflow_is_an_error_not_a_converged_fallback`: an overflowing target mean,
+  a target that overflows the multipliers and covariates of order 1e200 are errors. With
+  `min_weight < 0` the first used to return uniform weights reported as converged, and the
+  last a singular-matrix error that blamed the constraints.
 
 ### Test Case 2: Approximate Balance
 
