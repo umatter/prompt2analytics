@@ -529,12 +529,15 @@ fn compute_cv_score(
 ///
 /// Uses banded matrix representation for O(n) complexity per solve.
 /// The penalty matrix for natural cubic splines is pentadiagonal (bandwidth 2).
+/// Checks the cancellation budget first, so a fit with `spar` or `lambda`
+/// given, which runs no search loop, honours it too.
 fn fit_smoothing_spline(
     penalty: &PentaPenalty,
     y: &[f64],
     weights: &[f64],
     lambda: f64,
 ) -> EconResult<(Vec<f64>, f64, Vec<f64>)> {
+    resource::checkpoint()?;
     let n = y.len();
 
     // Extract banded structure from penalty matrix
@@ -843,12 +846,28 @@ mod tests {
     #[test]
     fn test_smooth_spline_stops_when_cancelled() {
         let x: Vec<f64> = (0..60).map(|i| i as f64 * 0.1).collect();
-        let y: Vec<f64> = x.iter().map(|v| v.sin()).collect();
-        let e = resource::with_budget(cancelled(), || {
-            smooth_spline(&x, &y, SmoothSplineConfig::with_cv(true))
-        })
-        .unwrap_err();
-        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v.sin() + 0.1 * ((i * 7919 % 101) as f64 / 101.0 - 0.5))
+            .collect();
+        // Every way of choosing lambda, including the two that run no search loop
+        for (label, config) in [
+            ("gcv", SmoothSplineConfig::with_cv(true)),
+            ("df", SmoothSplineConfig::with_df(6.0)),
+            ("spar", SmoothSplineConfig::with_spar(0.5)),
+            (
+                "lambda",
+                SmoothSplineConfig {
+                    lambda: Some(0.01),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let e =
+                resource::with_budget(cancelled(), || smooth_spline(&x, &y, config)).unwrap_err();
+            assert!(matches!(e, EconError::Cancelled(_)), "{label}: {e:?}");
+        }
     }
 
     #[test]

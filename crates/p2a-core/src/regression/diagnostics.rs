@@ -2284,6 +2284,35 @@ mod tests {
     }
 
     #[test]
+    fn test_reset_stops_when_cancelled() {
+        let cancelled = || {
+            let t = resource::CancelToken::new();
+            t.cancel();
+            resource::Budget::new(None, t)
+        };
+        let ds = create_test_dataset();
+        for reset_type in [ResetType::Fitted, ResetType::Regressor] {
+            let e = resource::with_budget(cancelled(), || {
+                reset_test(&ds, "y", &["x1", "x2"], &[2, 3], reset_type)
+            })
+            .unwrap_err();
+            assert!(
+                matches!(e, EconError::Cancelled(_)),
+                "{reset_type:?}: {e:?}"
+            );
+        }
+        // The OLS fit is done outside the budget, so this reaches RESET's own checkpoint
+        let ols = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let x = DesignMatrix::from_dataframe(ds.df(), &["x1"], true).unwrap();
+        let y = DesignMatrix::extract_column(ds.df(), "y").unwrap();
+        let e = resource::with_budget(cancelled(), || {
+            reset_test_from_ols(&ols, &x.view(), &y, &[2, 3], ResetType::Fitted)
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    #[test]
     fn test_reset_from_ols_deduplicates_and_bounds_powers() {
         let ds = create_test_dataset();
         let ols = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
