@@ -478,8 +478,9 @@ mod tests {
         }
     }
 
-    /// A connection state on `governor`'s config, authenticated to a new
-    /// session, with that session and the message channel.
+    /// A connection state whose governor runs on `exec`, authenticated to a
+    /// new session; returns the state, that session and the message
+    /// channel's two ends.
     async fn authenticated(
         exec: crate::exec::ExecConfig,
     ) -> (
