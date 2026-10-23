@@ -1286,7 +1286,14 @@ pub async fn llm_chat_stream(
 /// and, in db builds, what it left unfinished is closed in `db`: the
 /// assistant message whose id is in `placeholder` is marked stopped, and
 /// each of its tool calls still pending or running is failed, since the
-/// dropped future will never finish it.
+/// dropped future will not go on to finish it.
+///
+/// Dropping `chat` does not cancel a write it had already handed to the
+/// database: SurrealDB's embedded router runs each request in a task of its
+/// own, so such a write can still land after this cleanup. A completion or
+/// failure then replaces the stopped error. A tool-call row whose create the
+/// database already received when the chat was dropped is still written,
+/// and in the rare case it lands after this cleanup's read it stays Running.
 async fn run_chat_task<F: std::future::Future<Output = ()>>(
     tx: &tokio::sync::mpsc::Sender<ProgressEvent>,
     chat: F,
@@ -1901,10 +1908,12 @@ mod disconnect_tests {
         ));
         let release = Arc::new(AtomicBool::new(false));
         let _release_on_exit = Release(release.clone());
-        let rel = release.clone();
+        let holding = Arc::new(AtomicBool::new(false));
+        let (rel, held) = (release.clone(), holding.clone());
         let (g, s) = (governor.clone(), session.clone());
         let holder = tokio::spawn(async move {
             g.run_blocking(&s, "hold", move |_budget| {
+                held.store(true, Ordering::SeqCst);
                 while !rel.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -1912,6 +1921,14 @@ mod disconnect_tests {
             })
             .await
         });
+        // Wait (bounded) until the holder has the permit, so the governed
+        // call below cannot take it first.
+        let mut waited = 0;
+        while !holding.load(Ordering::SeqCst) {
+            assert!(waited < 2_000, "the permit holder never started");
+            waited += 1;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(100);
         let executor = StreamingToolExecutor::new(
@@ -1963,6 +1980,7 @@ mod disconnect_tests {
             "{calls:?}"
         );
         let stopped: Vec<_> = calls.iter().filter(|tc| tc.id_string() != done).collect();
+        assert_eq!(stopped.len(), 1);
         assert_eq!(stopped[0].status, ToolCallStatus::Error);
         assert_eq!(stopped[0].error.as_deref(), Some(STOPPED_TOOL_CALL));
         assert!(stopped[0].duration_ms.is_some_and(|ms| ms >= 0));
