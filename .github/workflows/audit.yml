@@ -43,14 +43,14 @@ jobs:
       # --locked: test the committed Cargo.lock, the graph cargo audit reads.
       - name: Check exemption preconditions
         run: |
-          # RUSTSEC-2026-0235 affects every rkyv below 0.8.17, so look for any
-          # compiled version of rkyv, not only 0.7.46.
+          # RUSTSEC-2026-0235 affects rkyv 0.7.0-pre.2 through 0.8.16, so look for any
+          # compiled version in that range, not only 0.7.46.
           if ! compiled=$(cargo tree --locked --workspace --all-features --target all \
               -e normal,build --prefix none --format '{p}'); then
             echo "::error::cargo tree failed, so the RUSTSEC-2026-0235 (rkyv) exemption cannot be checked."
             exit 1
           fi
-          if grep -E '^rkyv v' <<<"$compiled"; then
+          if grep -E '^rkyv v0\.(7\.|8\.([0-9]|1[0-6])([^0-9]|$))' <<<"$compiled"; then
             echo "::error::The RUSTSEC-2026-0235 exemption no longer holds: rkyv is compiled, not lockfile-only."
             exit 1
           fi
@@ -82,7 +82,7 @@ jobs:
       #
       # Cargo.lock lists more than is compiled: an optional dependency named in a
       # weak feature (`dep?/feature`) is locked even when nothing enables it.
-      # "Lockfile-only" below means no version of the crate appears in
+      # "Lockfile-only" below means no affected version of the crate appears in
       # `cargo tree --workspace --all-features --target all -e normal,build`.
       #
       #   RUSTSEC-2026-0189  rmcp 0.8.5: DNS rebinding in the Streamable HTTP
