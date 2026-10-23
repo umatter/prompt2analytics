@@ -325,13 +325,13 @@ enum Slots {
 const OFFSET_BYTES: u64 = 8;
 
 /// The least memory the values of `dtype` take in polars, for `slots` of it,
-/// from what the footer says about each leaf column (`leaves`, consumed in
-/// order, one per leaf).
+/// from what the footer and page headers say about each leaf column
+/// (`leaves`, consumed in order, one per leaf; see [`parquet_decoded_bytes`]).
 ///
 /// A leaf column's value takes its physical width (a view per String or
 /// Binary value, a code per Categorical one); a list its offsets, plus what
-/// its values take. A list's values are counted from the entries the footer
-/// gives for each leaf column below it: past the outermost list's slots (one
+/// its values take. A list's values are counted from the entries counted
+/// for each leaf column below it: past the outermost list's slots (one
 /// entry each at most when empty or null), each entry is a value or an empty
 /// list below, which take the leaf's width or an offset, so the least of the
 /// two is counted. Below two lists an empty inner list is an entry of each
@@ -954,8 +954,7 @@ mod tests {
     use serde_json::json;
 
     /// [`least_value_bytes`] of a whole column of `rows` rows whose leaf
-    /// columns have `entries` entries in the footer, and `page_bytes` of
-    /// pages each.
+    /// columns have `entries` entries, and `page_bytes` of pages each.
     fn least_with_pages(dtype: &DataType, rows: u64, entries: &[u64], page_bytes: u64) -> u64 {
         let mut leaves = entries.iter().map(|&entries| LeafChunks {
             entries,
