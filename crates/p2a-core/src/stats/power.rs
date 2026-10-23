@@ -14,8 +14,11 @@
 //! A significance level reaches the critical value as 1 - sig_level
 //! (1 - sig_level / 2 when two-sided), which rounds it to a multiple of 2^-53:
 //! by up to 1.1e-8 (relative) at sig_level = 1e-8 and 1.1e-4 at 1e-12. Levels
-//! at or below 2^-53 (about 1.1e-16), where it rounds to 1 and the critical
-//! value would be infinite, are refused.
+//! at or below 2^-53 (about 1.1e-16), where 1 - sig_level / 2 rounds to 1 and
+//! a two-sided critical value would be infinite, are refused in every test.
+//! (A one-sided level, 1 - sig_level, is exact at 2^-53 and gives a finite
+//! critical value at any level above 2^-54, but below 2^-53 it is off by up
+//! to 100%.)
 
 use crate::errors::{EconError, EconResult};
 use crate::resource::checkpoint;
@@ -48,22 +51,27 @@ fn require_finite_at_least(name: &str, value: f64, min: f64) -> EconResult<()> {
     }
 }
 
-/// The significance level must be greater than this, 2^-53 (about 1.1e-16):
-/// at or below it 1 - sig_level / 2 rounds to 1, the critical value is
-/// infinite, and every finite non-centrality would get a power of 0.
+/// The significance level must be greater than this, 2^-53 (about 1.1e-16),
+/// in every test. At or below it 1 - sig_level / 2 rounds to 1, so a
+/// two-sided critical value is infinite and every finite non-centrality would
+/// get a power of 0; 1 - sig_level rounds to 1 - 2^-53 or 1, so a one-sided
+/// (or ANOVA) level is off by up to 100% (2^-54 < sig_level < 2^-53) or its
+/// critical value is infinite as well (sig_level <= 2^-54).
 const MIN_SIG_LEVEL: f64 = f64::EPSILON / 2.0;
 
-/// `Err` unless `sig_level` lies strictly between [`MIN_SIG_LEVEL`] and 1.
+/// `Err` unless `sig_level` lies strictly between [`MIN_SIG_LEVEL`] and 1
+/// (NaN fails both comparisons).
 fn require_sig_level(sig_level: f64) -> EconResult<()> {
-    require_open_unit("sig_level", sig_level)?;
-    if sig_level > MIN_SIG_LEVEL {
+    if sig_level > MIN_SIG_LEVEL && sig_level < 1.0 {
         Ok(())
     } else {
         Err(EconError::InvalidSpecification {
             message: format!(
-                "sig_level must be greater than {MIN_SIG_LEVEL:?} (2^-53: at or below it \
-                 1 - sig_level / 2 rounds to 1 and the critical value is infinite), \
-                 got {sig_level:?}"
+                "sig_level must be between {MIN_SIG_LEVEL:?} (2^-53) and 1 (exclusive), \
+                 got {sig_level:?}: every test uses this floor, since at or below 2^-53, \
+                 1 - sig_level / 2 rounds to 1 (an infinite two-sided critical value) \
+                 and 1 - sig_level to 1 - 2^-53 or 1 (a one-sided level off by up to \
+                 100%, or an infinite critical value)"
             ),
         })
     }
@@ -499,8 +507,10 @@ pub struct PowerTTestResult {
 /// - `sd` is not finite or not greater than 0, or, when solving for `delta`,
 ///   above `f64::MAX / 10` (the search runs up to `10 * sd`);
 /// - `sig_level` is not strictly between 2^-53 (about 1.1e-16) and 1 (NaN
-///   included): at or below 2^-53, 1 - sig_level / 2 rounds to 1 and the
-///   critical value would be infinite;
+///   included), for either alternative: at or below 2^-53, 1 - sig_level / 2
+///   rounds to 1 and a two-sided critical value would be infinite, and
+///   1 - sig_level rounds to 1 - 2^-53 or 1, so a one-sided level would be
+///   off by up to 100% or its critical value infinite;
 /// - `power` is not strictly between 0 and 1 (NaN included).
 ///
 /// [`EconError::Cancelled`] when the cooperative-cancellation budget
@@ -812,8 +822,10 @@ pub struct PowerPropTestResult {
 /// - `p2` is `None`, or not exactly one of `n` and `power` is `None`;
 /// - `p1`, `p2` or `power` is not strictly between 0 and 1 (NaN included);
 /// - `sig_level` is not strictly between 2^-53 (about 1.1e-16) and 1 (NaN
-///   included): at or below 2^-53, 1 - sig_level / 2 rounds to 1 and the
-///   critical value would be infinite;
+///   included), for either alternative: at or below 2^-53, 1 - sig_level / 2
+///   rounds to 1 and a two-sided critical value would be infinite, and
+///   1 - sig_level rounds to 1 - 2^-53 or 1, so a one-sided level would be
+///   off by up to 100% or its critical value infinite;
 /// - `n` is not finite or is below 1.
 ///
 /// [`EconError::Cancelled`] when the cooperative-cancellation budget
@@ -1005,8 +1017,9 @@ pub struct PowerAnovaTestResult {
 /// - `between_var` is not finite or is negative;
 /// - `within_var` is not finite or not greater than 0;
 /// - `sig_level` is not strictly between 2^-53 (about 1.1e-16) and 1 (NaN
-///   included): at or below 2^-53, as in [`power_t_test`] and
-///   [`power_prop_test`], the critical value can be infinite;
+///   included), the floor of [`power_t_test`] and [`power_prop_test`]: at or
+///   below 2^-53, 1 - sig_level rounds to 1 - 2^-53 or 1, so the level would
+///   be off by up to 100% or the critical value infinite;
 /// - `power` is not strictly between 0 and 1 (NaN included).
 ///
 /// [`EconError::Cancelled`] when the cooperative-cancellation budget
@@ -1722,18 +1735,21 @@ mod tests {
 
     #[test]
     fn test_validate_power_t_test_infinite_non_centrality_is_full_power() {
-        // R: power.t.test(n = 1e300, delta = 1, sd = 1e-300, sig.level = s,
-        // strict = TRUE)$power == 1, for s = 0.05 and for the smallest level
-        // accepted, just above 2^-53. The non-centrality, sqrt(n / 2) delta / sd,
-        // is beyond f64::MAX, and the power is its limit. (At sig_level = 1e-17
-        // the critical value is infinite as well, and the power once came out
-        // there as inf - inf = NaN, clamped to 0. Levels at or below 2^-53 are
-        // now refused, see
+        // R: power.t.test(n = 1e300, delta = d, sd = 1e-300, sig.level = s,
+        // alternative = a, strict = TRUE)$power == 1 for d = 1 and -1 two-sided
+        // and d = 1 one-sided, at s = 0.05 and at the smallest level accepted,
+        // just above 2^-53 (s = 2^-53 * (1 + 2^-52)). The non-centrality,
+        // sqrt(n / 2) delta / sd, is beyond f64::MAX, and the power is its
+        // limit. (At sig_level = 1e-17 the critical value is infinite as well,
+        // and the power once came out there as inf - inf = NaN, clamped to 0.
+        // Levels at or below 2^-53 are now refused, see
         // test_power_functions_refuse_a_sig_level_at_or_below_2_pow_minus_53.)
+        // The one-sided delta = -1 case has no R counterpart, see
+        // test_power_t_test_one_sided_negative_delta_tests_the_lower_tail.
         let cases = [
             (1.0, PowerAlternative::TwoSided),
+            (-1.0, PowerAlternative::TwoSided),
             (1.0, PowerAlternative::OneSided),
-            (-1.0, PowerAlternative::OneSided),
         ];
         for (delta, alternative) in cases {
             for sig_level in [MIN_SIG_LEVEL.next_up(), 0.05] {
@@ -1756,13 +1772,56 @@ mod tests {
     }
 
     #[test]
+    fn test_power_t_test_one_sided_negative_delta_tests_the_lower_tail() {
+        // This library runs a one-sided test in the direction of delta: the
+        // lower tail for delta < 0, so a negative delta has the power of its
+        // absolute value. R's power.t.test tests the upper tail whatever the
+        // sign of delta, and gives 0 at an infinite non-centrality
+        // (power.t.test(n = 1e300, delta = -1, sd = 1e-300,
+        // alternative = "one.sided", strict = TRUE)$power) and 1.0e-6 at
+        // n = 20, delta = -1. These assertions pin this library's convention,
+        // not R's value.
+        let one_sided = |n: f64, delta: f64, sd: f64, sig_level: f64| {
+            power_t_test(
+                Some(n),
+                Some(delta),
+                Some(sd),
+                Some(sig_level),
+                None,
+                TTestType::TwoSample,
+                PowerAlternative::OneSided,
+            )
+            .unwrap()
+            .power
+        };
+        for sig_level in [MIN_SIG_LEVEL.next_up(), 0.05] {
+            assert_eq!(
+                one_sided(1e300, -1.0, 1e-300, sig_level),
+                1.0,
+                "sig {sig_level}"
+            );
+        }
+        // below and above df = 100, where the non-central t approximation changes
+        for (n, sd) in [(20.0, 1.0), (50.0, 2.5), (200.0, 3.0)] {
+            let lower = one_sided(n, -1.0, sd, 0.05);
+            let upper = one_sided(n, 1.0, sd, 0.05);
+            assert!(
+                (lower - upper).abs() < 1e-12,
+                "n = {n}, sd = {sd}: {lower} vs {upper}"
+            );
+            assert!(lower > 0.05 && lower < 1.0, "n = {n}, sd = {sd}: {lower}");
+        }
+    }
+
+    #[test]
     fn test_validate_power_t_test_non_centrality_beside_an_underflowing_standard_error() {
         // The standard error sd sqrt(2 / n) underflows to 0 at sd = 1e-174 and
         // n = 1e300, but the non-centrality sqrt(n / 2) delta / sd is 3.5:
         // dividing delta by the underflowed standard error used to give an
         // infinite non-centrality and a power of 1.
-        // R: power.t.test(n = 1e300, delta = 5e-324, sd = 1e-174, type = t,
-        // strict = TRUE)$power
+        // R: power.t.test(n = 1e300, delta = 5e-324, sd = 1e-174,
+        // type = "two.sample", strict = TRUE)$power is 0.9374369283402233, and
+        // with type = "one.sample" or type = "paired" 0.99856201278583712.
         let cases = [
             (TTestType::TwoSample, 0.937_436_928_340_223_3),
             (TTestType::OneSample, 0.998_562_012_785_837_1),
@@ -1789,40 +1848,68 @@ mod tests {
 
     #[test]
     fn test_power_functions_refuse_a_sig_level_at_or_below_2_pow_minus_53() {
-        // At or below 2^-53, 1 - sig_level / 2 rounds to 1, the critical value
-        // is infinite, and the power came out as 0 for any finite
-        // non-centrality (R: power.prop.test(n = 1e300, p1 = 0.3, p2 = 0.5,
-        // sig.level = 1e-300)$power is 1).
-        let limit = "greater than 1.1102230246251565e-16";
+        // At or below 2^-53, 1 - sig_level / 2 rounds to 1, a two-sided
+        // critical value is infinite, and the power came out as 0 for any
+        // finite non-centrality (R: power.prop.test(n = 1e300, p1 = 0.3,
+        // p2 = 0.5, sig.level = 1e-300)$power is 1). One-sided tests and the
+        // ANOVA (1 - sig_level) have the same floor. Every path is checked:
+        // compute power, solve for n and, for the t test, solve for delta.
+        let limit = "between 1.1102230246251565e-16 (2^-53) and 1 (exclusive)";
         let two = PowerAlternative::TwoSided;
-        for sig in [1e-300, 1e-17, MIN_SIG_LEVEL] {
-            let t = power_t_test(
-                Some(1e6),
-                Some(1.0),
-                Some(1.0),
-                Some(sig),
-                None,
-                TTestType::TwoSample,
-                two,
-            );
-            assert_refused_containing(t, "sig_level", limit);
-            let t_n = power_t_test(
-                None,
-                Some(1.0),
-                Some(1.0),
-                Some(sig),
-                Some(0.8),
-                TTestType::OneSample,
-                PowerAlternative::OneSided,
-            );
-            assert_refused_containing(t_n, "sig_level", limit);
-            let prop = power_prop_test(Some(1e300), 0.3, Some(0.5), Some(sig), None, two);
-            assert_refused_containing(prop, "sig_level", limit);
-            let prop_n = power_prop_test(None, 0.3, Some(0.5), Some(sig), Some(0.8), two);
-            assert_refused_containing(prop_n, "sig_level", limit);
+        let one = PowerAlternative::OneSided;
+        // 0 and below, inside (0, 2^-53], and 2^-53 itself
+        for sig in [-0.1, 0.0, 1e-300, 1e-17, MIN_SIG_LEVEL] {
+            for alternative in [two, one] {
+                let t = power_t_test(
+                    Some(1e6),
+                    Some(1.0),
+                    Some(1.0),
+                    Some(sig),
+                    None,
+                    TTestType::TwoSample,
+                    alternative,
+                );
+                assert_refused_containing(t, "sig_level", limit);
+                let t_n = power_t_test(
+                    None,
+                    Some(1.0),
+                    Some(1.0),
+                    Some(sig),
+                    Some(0.8),
+                    TTestType::OneSample,
+                    alternative,
+                );
+                assert_refused_containing(t_n, "sig_level", limit);
+                let t_delta = power_t_test(
+                    Some(50.0),
+                    None,
+                    Some(1.0),
+                    Some(sig),
+                    Some(0.8),
+                    TTestType::TwoSample,
+                    alternative,
+                );
+                assert_refused_containing(t_delta, "sig_level", limit);
+                let prop =
+                    power_prop_test(Some(1e300), 0.3, Some(0.5), Some(sig), None, alternative);
+                assert_refused_containing(prop, "sig_level", limit);
+                let prop_n =
+                    power_prop_test(None, 0.3, Some(0.5), Some(sig), Some(0.8), alternative);
+                assert_refused_containing(prop_n, "sig_level", limit);
+            }
             let anova = power_anova_test(3, Some(1e6), 0.25, 1.0, Some(sig), None);
             assert_refused_containing(anova, "sig_level", limit);
+            let anova_n = power_anova_test(3, None, 0.25, 1.0, Some(sig), Some(0.8));
+            assert_refused_containing(anova_n, "sig_level", limit);
         }
+        // The message gives the value and the reason for both kinds of test
+        assert_refused_containing(
+            power_anova_test(3, Some(20.0), 0.25, 1.0, Some(0.0), None),
+            "sig_level",
+            "got 0.0: every test uses this floor, since at or below 2^-53, \
+             1 - sig_level / 2 rounds to 1 (an infinite two-sided critical value) \
+             and 1 - sig_level to 1 - 2^-53 or 1",
+        );
         // Just above the limit the critical values are finite (tail 2^-53),
         // and a large effect still has full power
         let sig = MIN_SIG_LEVEL.next_up();
@@ -2031,8 +2118,8 @@ mod tests {
 
     #[test]
     fn test_t_cdf_at_infinite_x() {
-        // An infinite x (the critical value of a sig_level at or below 2^-53,
-        // which the power functions now refuse) used to give NaN in the
+        // An infinite x (the critical value of a two-sided sig_level at or
+        // below 2^-53, which the power functions now refuse) used to give NaN in the
         // large-df expansion.
         for df in [5.0, 1e7] {
             assert_eq!(t_cdf(f64::INFINITY, df).unwrap(), 1.0, "df = {df}");
