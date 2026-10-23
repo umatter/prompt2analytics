@@ -424,6 +424,12 @@ static PURGE: Once = Once::new();
 /// How many removed sessions [`REMOVED_SESSIONS`] remembers: the most recent
 /// 65,536, a few MiB at most (the hash table can double once under churn).
 const MAX_REMOVED_SESSIONS: usize = 1 << 16;
+// The module doc, `remove_session_dir`'s doc and the one above state this cap
+// as a literal (rustdoc cannot link a private constant from a public item).
+const _: () = assert!(
+    MAX_REMOVED_SESSIONS == 65_536,
+    "update the 65,536 in the path_jail module, remove_session_dir and MAX_REMOVED_SESSIONS docs"
+);
 
 /// Session ids (as UUIDs) whose directory has been removed, at most `cap` of
 /// them: past the cap, the id removed longest ago is forgotten first. An id
