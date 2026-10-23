@@ -1171,29 +1171,29 @@ fn compute_state_dim(config: &CausalImpactConfig) -> usize {
 /// with the post-period, and with a seasonal component the state dimension
 /// follows from `seasonal_period`.
 fn history_remedy(config: &CausalImpactConfig, m: usize) -> String {
-    match config.seasonal_period {
-        Some(_) => format!(
-            "{}; use a smaller seasonal_period or a shorter pre_period or post_period",
-            seasonal_dim_note(config, m)
-        ),
+    match seasonal_dim_note(config, m) {
+        Some(note) => {
+            format!("{note}; use a smaller seasonal_period or a shorter pre_period or post_period")
+        }
         None => "use a shorter pre_period or post_period".to_string(),
     }
 }
 
 /// How `config`'s `seasonal_period` sets the state dimension `m`, for a
-/// remedy. The period is read from `config`, so the note cannot describe a
-/// different one from the model that was sized; only configurations with a
-/// seasonal component reach it.
-fn seasonal_dim_note(config: &CausalImpactConfig, m: usize) -> String {
-    let period = config.seasonal_period.unwrap_or_default();
-    if config.include_trend {
-        format!(
-            "with seasonal_period {period} and include_trend the state dimension is \
-             seasonal_period + 1 = {m}"
-        )
-    } else {
-        format!("with seasonal_period {period} the state dimension is seasonal_period = {m}")
-    }
+/// remedy, or `None` without a seasonal component. The period is read from
+/// `config`, so the note cannot describe a different one from the model that
+/// was sized.
+fn seasonal_dim_note(config: &CausalImpactConfig, m: usize) -> Option<String> {
+    config.seasonal_period.map(|period| {
+        if config.include_trend {
+            format!(
+                "with seasonal_period {period} and include_trend the state dimension is \
+                 seasonal_period + 1 = {m}"
+            )
+        } else {
+            format!("with seasonal_period {period} the state dimension is seasonal_period = {m}")
+        }
+    })
 }
 
 /// `Ok` when a seasonal component with `period` seasons can be fitted to a
@@ -1232,13 +1232,11 @@ fn seasonal_square(
     what: &'static str,
 ) -> EconResult<Array2<f64>> {
     try_zeros2(m, m, what).map_err(|e| {
-        with_remedy(
-            e,
-            &format!(
-                "{}; use a smaller seasonal_period",
-                seasonal_dim_note(config, m)
-            ),
-        )
+        let remedy = seasonal_dim_note(config, m).map_or_else(
+            || "use a smaller seasonal_period".to_string(),
+            |note| format!("{note}; use a smaller seasonal_period"),
+        );
+        with_remedy(e, &remedy)
     })
 }
 
@@ -2071,7 +2069,9 @@ mod tests {
                 ..seasonal_config(40, 10)
             };
             let params = initialize_variance_params(y_var, &config);
-            assert!(remedy.contains(&format!("= {m};")), "{remedy}");
+            // The model is sized by compute_state_dim, so the remedy below is
+            // checked against the dimension the code computes.
+            assert_eq!(compute_state_dim(&config), m, "{config:?}");
             match crate::resource::with_alloc_ceiling(ceiling, || {
                 build_state_space_model(&params, None, &config)
             }) {
@@ -2112,6 +2112,51 @@ mod tests {
                 Array2::from_diag(&Array1::from_elem(m, y_var * 10.0))
             );
         }
+    }
+
+    #[test]
+    fn remedies_without_a_seasonal_component_name_no_period() {
+        // seasonal_dim_note fell back to period 0 when the configuration had
+        // no seasonal component, so a refused seasonal_square read "with
+        // seasonal_period 0 the state dimension is seasonal_period = 1". The
+        // note is now absent without a period and the remedy names none.
+        for include_trend in [false, true] {
+            let config = CausalImpactConfig {
+                include_trend,
+                seasonal_period: None,
+                ..seasonal_config(40, 10)
+            };
+            let m = compute_state_dim(&config);
+            assert_eq!(seasonal_dim_note(&config, m), None, "{config:?}");
+            assert_eq!(
+                history_remedy(&config, m),
+                "use a shorter pre_period or post_period"
+            );
+            // 8 · 1² and 8 · 2² bytes are both above a 4-byte ceiling.
+            match crate::resource::with_alloc_ceiling(Some(4), || {
+                seasonal_square(&config, m, "the seasonal model's transition matrix")
+            }) {
+                Err(EconError::ResourceLimit(msg)) => assert!(
+                    msg.ends_with("; use a smaller seasonal_period")
+                        && !msg.contains("seasonal_period 0")
+                        && !msg.contains("state dimension"),
+                    "{msg}"
+                ),
+                other => panic!("expected ResourceLimit, got {other:?}"),
+            }
+        }
+        // With a period the note is the one both remedies carry.
+        let seasonal = seasonal_config(40, 10);
+        let m = compute_state_dim(&seasonal);
+        let note = seasonal_dim_note(&seasonal, m).unwrap();
+        assert_eq!(
+            note,
+            "with seasonal_period 12 the state dimension is seasonal_period = 12"
+        );
+        assert_eq!(
+            history_remedy(&seasonal, m),
+            format!("{note}; use a smaller seasonal_period or a shorter pre_period or post_period")
+        );
     }
 
     #[test]

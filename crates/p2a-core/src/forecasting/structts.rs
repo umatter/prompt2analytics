@@ -332,12 +332,21 @@ fn state_dim(config: &StructTsConfig) -> usize {
 fn history_remedy(config: &StructTsConfig, m: usize) -> String {
     match config.model_type {
         StructTsType::BSM => format!(
-            "with period {} the state dimension is period + 1 = {m}; use a smaller \
-             period or a shorter series",
-            bsm_period(config)
+            "{}; use a smaller period or a shorter series",
+            bsm_dim_note(config, m)
         ),
         StructTsType::Level | StructTsType::Trend => "use a shorter series".to_string(),
     }
+}
+
+/// How `config`'s BSM `period` sets the state dimension `m`, for a remedy.
+/// The one wording [`history_remedy`] and [`bsm_square`] share, with the
+/// period read through [`bsm_period`], so the two remedies cannot drift apart.
+fn bsm_dim_note(config: &StructTsConfig, m: usize) -> String {
+    format!(
+        "with period {} the state dimension is period + 1 = {m}",
+        bsm_period(config)
+    )
 }
 
 /// An m × m zero matrix of the BSM, `what` it is, allocated fallibly: a
@@ -349,10 +358,7 @@ fn bsm_square(config: &StructTsConfig, m: usize, what: &'static str) -> EconResu
     try_zeros2(m, m, what).map_err(|e| {
         with_remedy(
             e,
-            &format!(
-                "with period {} the state dimension is period + 1 = {m}; use a smaller period",
-                bsm_period(config)
-            ),
+            &format!("{}; use a smaller period", bsm_dim_note(config, m)),
         )
     })
 }
