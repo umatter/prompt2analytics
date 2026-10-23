@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock, PoisonError, Weak};
 use tokio::sync::{RwLock, Semaphore, broadcast};
@@ -135,11 +136,15 @@ impl Session {
             let datasets = self.datasets.read().await;
             datasets_charge(datasets.iter().map(|(name, d)| (name.as_str(), d)))
         };
-        *lock(&self.shared_labels) = SharedLabels {
+        // Both under the mutex, which the server total reads them under, so
+        // it never pairs one charge's shared part with another's bytes.
+        let mut shared = lock(&self.shared_labels);
+        *shared = SharedLabels {
             bytes: charge.shared_labels,
             mappings: charge.mappings,
         };
         self.data_bytes.store(charge.bytes, Ordering::SeqCst);
+        drop(shared);
         charge.bytes
     }
 }
@@ -975,16 +980,22 @@ impl DatasetAdmission {
         AdmissionGuard {
             admission,
             previous,
+            _thread_bound: PhantomData,
         }
     }
 }
 
 /// Keeps a call's [`DatasetAdmission`] installed; dropping it uninstalls it
 /// and releases what the call reserved.
+///
+/// It must be dropped on the thread that installed it, since it restores
+/// that thread's admission; it is therefore neither `Send` nor `Sync`, so
+/// it cannot be held across an `.await` of a multi-threaded runtime.
 #[derive(Debug)]
 pub struct AdmissionGuard {
     admission: Arc<DatasetAdmission>,
     previous: Option<Arc<DatasetAdmission>>,
+    _thread_bound: PhantomData<*const ()>,
 }
 
 impl Drop for AdmissionGuard {
@@ -1037,29 +1048,32 @@ pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
             fmt_bytes(limit)
         ));
     }
+    // The reservation only serves the total, so without one nothing is
+    // reserved.
+    let Some(limit) = admission.total else {
+        return Ok(());
+    };
     let sessions = &admission.sessions;
     // Reserve first, so two files decoding at once see each other.
     let reserved = sessions.reserve_data_bytes(added);
-    if let Some(limit) = admission.total {
-        // Read without holding a dataset lock (the total takes the registry's).
-        let others = sessions
-            .total_data_bytes()
-            .await
-            .saturating_sub(admission.session.data_bytes());
-        let total = others
-            .saturating_add(after)
-            .saturating_add(reserved.saturating_sub(added));
-        if total > limit {
-            sessions.release_data_bytes(added);
-            return Err(format!(
-                "This file takes at least {} in memory once loaded, and the server's dataset \
-                 memory would reach {} (limit {}). Nothing was loaded; try again later or load \
-                 a smaller file.",
-                fmt_bytes(added),
-                fmt_bytes(total),
-                fmt_bytes(limit)
-            ));
-        }
+    // Read without holding a dataset lock (the total takes the registry's).
+    let others = sessions
+        .total_data_bytes()
+        .await
+        .saturating_sub(admission.session.data_bytes());
+    let total = others
+        .saturating_add(after)
+        .saturating_add(reserved.saturating_sub(added));
+    if total > limit {
+        sessions.release_data_bytes(added);
+        return Err(format!(
+            "This file takes at least {} in memory once loaded, and the server's dataset \
+             memory would reach {} (limit {}). Nothing was loaded; try again later or load a \
+             smaller file.",
+            fmt_bytes(added),
+            fmt_bytes(total),
+            fmt_bytes(limit)
+        ));
     }
     admission.reserved.fetch_add(added, Ordering::SeqCst);
     Ok(())
@@ -1493,6 +1507,9 @@ mod tests {
     fn values_still_dominate_a_tall_frame() {
         // The overheads are per column and per dataset, not per value: a
         // 100,000 x 2 frame is charged within a few kilobytes of its values.
+        // A regression guard, not evidence of the fix: the old charge
+        // (`estimated_size()` alone) passes it too, and it keeps the new
+        // overheads from growing with the rows.
         let df = df! {
             "x" => (0..100_000).map(|i| i as f64 * 0.5 + 0.1).collect::<Vec<_>>(),
             "y" => (0..100_000).map(|i| (i % 7) as f64 - 0.3).collect::<Vec<_>>(),
@@ -1851,6 +1868,33 @@ mod tests {
         assert_eq!(m.reserved_data_bytes(), 0);
         let _second = DatasetAdmission::install(None, total, b, m.clone());
         assert!(admit_dataset("d", six).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn without_a_total_nothing_is_reserved() {
+        // The reservation only serves the server total; with a session quota
+        // alone an admitted file reserves nothing.
+        let m = Arc::new(SessionManager::new(cfg(10, None)));
+        let s = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let _admission = DatasetAdmission::install(Some(10 << 20), None, s, m.clone());
+        admit_dataset("d", 6 << 20).await.unwrap();
+        assert_eq!(m.reserved_data_bytes(), 0);
+    }
+
+    #[test]
+    fn an_admission_guard_stays_on_its_thread() {
+        // The guard restores its thread's admission when dropped, so it must
+        // not be `Send`. This only compiles when it is not: for a `Send`
+        // type both impls apply and the call is ambiguous.
+        trait AmbiguousIfSend<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+        <AdmissionGuard as AmbiguousIfSend<_>>::check();
     }
 
     #[tokio::test]

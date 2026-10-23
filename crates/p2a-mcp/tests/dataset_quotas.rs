@@ -280,6 +280,9 @@ async fn a_parquet_load_past_the_quota_is_refused_before_it_is_decoded() {
 async fn parquet_files_inside_the_quota_load_and_replace_by_name() {
     // 300,000 noisy rows: 2.4 MB decoded. Two fit a 6 MiB quota, a third
     // does not, and loading one again under a name already held replaces it.
+    // A regression guard, not evidence of the check before decoding: without
+    // that check the files load too and the quota undoes the third after it.
+    // It keeps the check from refusing a file that replaces one by name.
     let dir = data_dir();
     let path = dir.path().join("fits.parquet");
     let values: Vec<f64> = (0..300_000).map(|i| (i % 97) as f64 * 0.37 + 0.1).collect();
