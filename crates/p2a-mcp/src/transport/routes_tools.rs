@@ -28,6 +28,17 @@ pub struct CallToolRequest {
 #[cfg(feature = "db")]
 const METADATA_TOOLS: [&str; 3] = ["load_dataset", "upload_dataset", "create_dataset"];
 
+/// The two arguments the dataset-metadata capture reads, `path` and
+/// `filename`, copied without the rest of the call's payload. A missing
+/// field becomes null, which the capture reads as absent.
+#[cfg(any(test, all(feature = "db", feature = "llm")))]
+fn capture_fields(arguments: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "path": arguments.get("path"),
+        "filename": arguments.get("filename"),
+    })
+}
+
 /// List available tools.
 pub(crate) async fn list_tools(State(state): State<AppState>) -> impl IntoResponse {
     let tools = state.server.list_tools();
@@ -72,12 +83,13 @@ pub(crate) async fn call_tool(
     };
 
     // The arguments move into the call. The metadata capture below is the
-    // only reader after it, so only a call it will capture keeps a copy (a
-    // create_dataset csv_content can be the whole request body).
+    // only reader after it, so only a call it will capture keeps a copy, and
+    // only of the fields it reads (a create_dataset csv_content or an
+    // upload_dataset content can be the whole request body).
     #[cfg(all(feature = "db", feature = "llm"))]
     let capture_arguments = (state.persistent_manager.is_some()
         && METADATA_TOOLS.contains(&name.as_str()))
-    .then(|| arguments.clone());
+    .then(|| capture_fields(&arguments));
 
     let tool_result = state
         .governor
@@ -130,5 +142,29 @@ pub(crate) async fn call_tool(
             (StatusCode::OK, Json(ApiResponse::success(result))).into_response()
         }
         Err(e) => e.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture_fields;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn the_capture_copy_holds_only_path_and_filename() {
+        let upload = json!({"name": "d", "filename": "d.csv", "content": "x".repeat(1 << 20)});
+        assert_eq!(
+            capture_fields(&upload),
+            json!({"path": null, "filename": "d.csv"})
+        );
+        let load = json!({"path": "data/a.csv", "name": "a"});
+        let copy = capture_fields(&load);
+        assert_eq!(copy, json!({"path": "data/a.csv", "filename": null}));
+        // Read as the capture reads it: null is the same as absent.
+        assert_eq!(copy.get("filename").and_then(Value::as_str), None);
+        assert_eq!(
+            capture_fields(&Value::Null),
+            json!({"path": null, "filename": null})
+        );
     }
 }
