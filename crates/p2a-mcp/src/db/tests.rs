@@ -773,8 +773,10 @@ fn failed_statement_picks_the_cause_over_the_not_executed() {
 }
 
 /// When no error is a plain `QueryNotExecuted` (a failed commit, which gives
-/// each statement a `QueryNotExecutedDetail`; a cancelled or timed-out
-/// transaction), the lowest index wins.
+/// each statement a `QueryNotExecutedDetail`; a transaction cancelled or
+/// timed out between statements, which gives the statements that ran
+/// `QueryCancelled` and the rest `QueryCancelled` or `QueryTimedout`), the
+/// lowest index wins, so a timeout comes back as `QueryCancelled`.
 #[test]
 fn failed_statement_takes_the_lowest_index_among_causes() {
     for picked in failed_statements(&[
@@ -802,6 +804,20 @@ fn failed_statement_takes_the_lowest_index_among_causes() {
             matches!(
                 picked,
                 Some(surrealdb::Error::Db(SurrealDbError::QueryTimedout))
+            ),
+            "{picked:?}"
+        );
+    }
+    // A timeout found after the first statement ran: that one is cancelled.
+    for picked in failed_statements(&[
+        (0, || SurrealDbError::QueryCancelled),
+        (1, || SurrealDbError::QueryTimedout),
+        (2, || SurrealDbError::QueryTimedout),
+    ]) {
+        assert!(
+            matches!(
+                picked,
+                Some(surrealdb::Error::Db(SurrealDbError::QueryCancelled))
             ),
             "{picked:?}"
         );

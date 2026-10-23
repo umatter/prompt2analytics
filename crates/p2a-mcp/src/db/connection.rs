@@ -203,9 +203,12 @@ pub(crate) fn truncate_to(s: &str, limit: usize) -> String {
 /// by index instead, which hides the cause behind a `QueryNotExecuted`
 /// whenever a statement other than the first fails. A failed commit gives
 /// every statement a `QueryNotExecutedDetail` that carries the cause, and a
-/// cancelled or timed-out transaction gives each `QueryCancelled` or
-/// `QueryTimedout`; this returns the first of them as is. `take_errors`
-/// returns a `HashMap`, so the index, not the order of iteration, decides.
+/// transaction cancelled or timed out between statements gives the
+/// statements that ran `QueryCancelled` and the rest `QueryCancelled` or
+/// `QueryTimedout`, so a timeout can come back as `QueryCancelled` (this
+/// server sets no query or transaction timeout); this returns the first of
+/// them as is. `take_errors` returns a `HashMap`, so the index, not the
+/// order of iteration, decides.
 pub(super) fn failed_statement(
     errors: HashMap<usize, surrealdb::Error>,
 ) -> Option<surrealdb::Error> {
