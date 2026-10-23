@@ -16,7 +16,9 @@
 //!
 //! k-nearest-neighbour and distance-band neighbours are built with a k-d tree in
 //! O(n log n + links) time for well-spread points, with the same result as an all-pairs
-//! search; coordinates shared by many observations do not make it quadratic. The
+//! search; coordinates shared by many observations do not make it quadratic, except, for
+//! great-circle bands, when the distance between two such locations lies within the
+//! rounding margin (about 1e-9 relative) of d1 or d2. The
 //! `Neighbors::try_from_knn`, `try_from_distance` and `try_from_distance_longlat`
 //! constructors also validate their input and stop when an installed
 //! [`Budget`](crate::resource::Budget) expires, and the distance-band ones take a cap on
@@ -27,8 +29,8 @@
 //! total impact forms a dense I - ρW as well when it needs the solve (I - ρW) v = 1 (the
 //! rows of W do not all have one sum) and the Neumann series is ruled out (|ρ| times the
 //! spectral radius of W is at least 0.99, which binary weights often reach) or does not
-//! settle. If the eigen decomposition or that solve fails, the impacts fall back to the
-//! dense inverse of I - ρW.
+//! settle. If the eigen decomposition or that solve fails, or a sum is not finite, the
+//! impacts fall back to the dense inverse of I - ρW.
 //!
 //! # Example
 //!

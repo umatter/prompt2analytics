@@ -6,11 +6,16 @@
 //! k-nearest-neighbour and distance-band neighbours are found with a bucketed k-d tree
 //! (planar coordinates, or unit vectors on the sphere for longitude/latitude), so building
 //! them costs O(n log n + links) for well-spread points instead of visiting all n² pairs.
-//! Coordinates shared by many observations do not make it quadratic: a k-nearest search
-//! also rules a box out by the lowest index it holds, and a band search skips a box whose
-//! points all sit at the query. Candidates are always judged with the exact distance
-//! formula, and ties are broken by the lower index, so the result is the one an all-pairs
-//! search gives.
+//! Coordinates shared by many observations do not make it quadratic, except, for
+//! great-circle bands, when the distance between two such locations lies within the
+//! rounding margin (about 1e-9 relative) of d1 or d2. A k-nearest search also rules a box
+//! out by the lowest index it holds, and a band search skips a box whose points all sit at
+//! the query. In the great-circle exception the box bounds, widened by that margin, cannot
+//! rule the other location out, so every query at one location evaluates every point at
+//! the other; when the distance falls just outside the band none of those evaluations is a
+//! link, so the link cap does not bound the work. Candidates are always judged with the
+//! exact distance formula, and ties are broken by the lower index, so the result is the one
+//! an all-pairs search gives.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -257,8 +262,11 @@ impl Neighbors {
     /// Distance-band neighbours for (longitude, latitude) coordinates in degrees, with
     /// great-circle (haversine, R = 6371 km) distances in kilometres.
     ///
-    /// Same contract and complexity as [`Neighbors::try_from_distance`]; additionally a
-    /// latitude outside [-90, 90] is an [`EconError::InvalidSpecification`].
+    /// Same contract as [`Neighbors::try_from_distance`], and the same complexity except
+    /// when two locations, each shared by many observations, lie at a great-circle distance
+    /// within the rounding margin (about 1e-9 relative) of `d1` or `d2`: every query at one
+    /// then evaluates every point at the other (see the module docs). Additionally a latitude
+    /// outside [-90, 90] is an [`EconError::InvalidSpecification`].
     pub fn try_from_distance_longlat(
         coords: &[(f64, f64)],
         d1: f64,
@@ -1353,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn band_on_one_repeated_location_does_linear_work() {
+    fn band_on_one_repeated_location_evaluates_no_distances() {
         // Deterministic work count. With d1 = 0 the sphere has no lower chord threshold, so
         // only the coordinates themselves rule out a box of observations at the query.
         let n = 20_000;
