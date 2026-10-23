@@ -431,7 +431,7 @@ fn client_builder(access_token: Option<&str>) -> anyhow::Result<reqwest::ClientB
     let mut value =
         reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
             anyhow::anyhow!(
-                "the access token contains characters that cannot be sent in an HTTP header"
+                "--access-token / P2A_ACCESS_TOKEN contains characters that cannot be sent in an HTTP header (visible ASCII only)"
             )
         })?;
     value.set_sensitive(true);
@@ -483,22 +483,53 @@ fn unauthorized_message(token_sent: bool) -> &'static str {
     }
 }
 
-/// The lines printed when the session cannot be created. Only an
+/// What to print when the session cannot be created.
+#[derive(Debug)]
+struct ConnectHint {
+    /// The first line.
+    headline: String,
+    /// The lines after it.
+    details: Vec<String>,
+    /// Whether [`START_SERVER_COMMAND`] follows the details, indented.
+    start_command: bool,
+}
+
+impl ConnectHint {
+    /// The hint as plain lines, the start command included.
+    fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::with_capacity(self.details.len() + 2);
+        lines.push(self.headline.clone());
+        lines.extend(self.details.iter().cloned());
+        if self.start_command {
+            lines.push(format!("  {START_SERVER_COMMAND}"));
+        }
+        lines
+    }
+}
+
+/// The hint printed when the session cannot be created. Only an
 /// unreachable server gets the "start the server" advice.
-fn connect_failure_hint(err: &ConnectError) -> Vec<String> {
+fn connect_failure_hint(err: &ConnectError) -> ConnectHint {
     match err {
-        ConnectError::Unreachable(_) => vec![
-            "Could not connect to p2a-mcp server.".to_string(),
-            format!("  {err}"),
-            String::new(),
-            "Start the server first:".to_string(),
-            format!("  {START_SERVER_COMMAND}"),
-        ],
-        ConnectError::Unauthorized { token_sent } => vec![
-            "The p2a-mcp server refused the request (HTTP 401).".to_string(),
-            format!("  {}", unauthorized_message(*token_sent)),
-        ],
-        ConnectError::Http { .. } | ConnectError::BadResponse(_) => vec![err.to_string()],
+        ConnectError::Unreachable(_) => ConnectHint {
+            headline: "Could not connect to p2a-mcp server.".to_string(),
+            details: vec![
+                format!("  {err}"),
+                String::new(),
+                "Start the server first:".to_string(),
+            ],
+            start_command: true,
+        },
+        ConnectError::Unauthorized { token_sent } => ConnectHint {
+            headline: "The p2a-mcp server refused the request (HTTP 401).".to_string(),
+            details: vec![format!("  {}", unauthorized_message(*token_sent))],
+            start_command: false,
+        },
+        ConnectError::Http { .. } | ConnectError::BadResponse(_) => ConnectHint {
+            headline: err.to_string(),
+            details: Vec::new(),
+            start_command: false,
+        },
     }
 }
 
@@ -520,16 +551,13 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
     let session_id = match create_session(&client, base_url, token_sent).await {
         Ok(id) => id,
         Err(err) => {
-            let mut lines = connect_failure_hint(&err).into_iter();
-            if let Some(first) = lines.next() {
-                eprintln!("{}", first.red().bold());
+            let hint = connect_failure_hint(&err);
+            eprintln!("{}", hint.headline.red().bold());
+            for line in &hint.details {
+                eprintln!("{line}");
             }
-            for line in lines {
-                if line.trim() == START_SERVER_COMMAND {
-                    eprintln!("  {}", START_SERVER_COMMAND.bright_cyan());
-                } else {
-                    eprintln!("{line}");
-                }
+            if hint.start_command {
+                eprintln!("  {}", START_SERVER_COMMAND.bright_cyan());
             }
             return Err(anyhow::Error::new(err));
         }
@@ -930,7 +958,9 @@ mod tests {
             matches!(err, ConnectError::Unauthorized { token_sent: false }),
             "{err:?}"
         );
-        let hint = connect_failure_hint(&err).join("\n");
+        let hint = connect_failure_hint(&err);
+        assert!(!hint.start_command, "{hint:?}");
+        let hint = hint.lines().join("\n");
         assert!(
             hint.contains("--access-token") && hint.contains("P2A_ACCESS_TOKEN"),
             "{hint}"
@@ -951,7 +981,9 @@ mod tests {
             err,
             ConnectError::Unauthorized { token_sent: true }
         ));
-        assert!(connect_failure_hint(&err).join("\n").contains("rejected"));
+        let hint = connect_failure_hint(&err);
+        assert!(!hint.start_command, "{hint:?}");
+        assert!(hint.lines().join("\n").contains("rejected"));
     }
 
     #[tokio::test]
@@ -967,11 +999,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ConnectError::Unreachable(_)), "{err:?}");
-        assert!(
-            connect_failure_hint(&err)
-                .join("\n")
-                .contains("Start the server first")
+        let hint = connect_failure_hint(&err);
+        assert!(hint.start_command, "{hint:?}");
+        let lines = hint.lines();
+        assert!(lines.join("\n").contains("Start the server first"));
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(format!("  {START_SERVER_COMMAND}").as_str())
         );
+        // The command is printed (highlighted) by run() from the flag, so
+        // the details never carry it as text.
+        assert!(
+            !hint
+                .details
+                .iter()
+                .any(|l| l.contains(START_SERVER_COMMAND))
+        );
+    }
+
+    #[test]
+    fn other_failures_get_a_single_line_and_no_start_command() {
+        for err in [
+            ConnectError::Http { status: 503 },
+            ConnectError::BadResponse("missing session_id".into()),
+        ] {
+            let hint = connect_failure_hint(&err);
+            assert!(!hint.start_command, "{hint:?}");
+            assert_eq!(hint.lines(), vec![err.to_string()]);
+        }
     }
 
     #[test]
@@ -988,6 +1043,13 @@ mod tests {
 
     #[test]
     fn token_with_control_characters_is_refused_before_sending() {
-        assert!(build_http_client(Some("bad\r\ntoken")).is_err());
+        let err = build_http_client(Some("bad\r\ntoken"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "--access-token / P2A_ACCESS_TOKEN contains characters that cannot be sent in an HTTP header (visible ASCII only)",
+            "the message names the source and never the value"
+        );
     }
 }
