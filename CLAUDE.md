@@ -614,13 +614,15 @@ async fn my_tool(
 
 3. Import the request type in the handler module and ensure it's re-exported from `tools/requests/mod.rs`
 
-4. Classify every integer, array and tolerance field of the request struct in `tools/limits/rules.rs`:
+4. Classify every integer, float and array field of the request struct, and the numeric elements
+   of its arrays (at `a[]`), in `tools/limits/rules.rs`:
    a `Max(Family)`, `ArrayLen`, `ArrayElemMax`, `UniqueList`, `SquareLen` or `Tolerance` rule, or
    `Exempt("reason")` when the field is not a cost parameter. The exhaustiveness test
    (`every_cost_property_of_every_tool_is_classified`, built with the `http` feature, so CI runs it)
    fails otherwise.
 
-5. Add a `ROW_RULES` entry when the method needs O(n²) memory or O(n³) time in the dataset's rows.
+5. Add a `ROW_RULES` entry when the method needs O(n²) memory or O(n²) or O(n³) time in the
+   dataset's rows.
 
 HTTP-side code never calls `call_tool_with_session` directly: it goes through `ToolGovernor::call`
 (or `ToolGovernor::run_blocking` for non-tool blocking work), which is where deadlines, slots,

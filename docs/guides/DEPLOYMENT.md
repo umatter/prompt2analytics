@@ -169,10 +169,10 @@ not continuously; the stdio transport has no deadline, slots or quotas.
 
 ### Request limits
 
-`crates/p2a-mcp/src/tools/limits/` classifies every integer, array and
-tolerance field of every tool. When limits are set (the hosted profile, or
-overrides), each call's JSON arguments are checked before they are
-deserialised, on the HTTP, LLM, websocket and stdio paths.
+`crates/p2a-mcp/src/tools/limits/` classifies every integer, float and array
+field of every tool, and the numbers inside array fields. When limits are set
+(the hosted profile, or overrides), each call's JSON arguments are checked
+before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
 
 - **Families.** 25 families of cost parameters (replications, trees,
   iterations, folds, grid points, lags, components, list lengths, ...) each
