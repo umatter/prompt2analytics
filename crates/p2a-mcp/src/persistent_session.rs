@@ -729,6 +729,12 @@ pub struct ReloadSource {
 /// inside the session's path-jail scope (`ToolGovernor::run_blocking` does
 /// both). The error is a fixed text without server paths; the details are
 /// logged at debug level.
+///
+/// The file is decoded in full before [`insert_reloaded_dataset`] charges
+/// it against the quotas: unlike `load_dataset` and `upload_dataset`, a
+/// reload runs no `session::admit_dataset` check on a parquet file's
+/// decoded size first, so a file replaced at a stored path since it was
+/// loaded is bounded only after decoding (known residual of PR-03).
 pub fn load_reload_source(source: &ReloadSource) -> Result<p2a_core::data::Dataset, &'static str> {
     let name = &source.name;
     match crate::path_jail::validate_data_path(&source.source_path) {

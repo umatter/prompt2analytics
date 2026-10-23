@@ -422,15 +422,6 @@ fn mapping_label_bytes(mapping: &CategoricalMapping) -> u64 {
     })
 }
 
-/// What the dataset quotas charge for one frame: its values (String and
-/// Binary views and Categorical and Enum labels included) and its
-/// structure (see [`structure_bytes`]).
-pub fn dataset_bytes(df: &DataFrame) -> u64 {
-    let mut charge = DataCharge::default();
-    charge.add_frame(df);
-    charge.bytes
-}
-
 /// What the dataset quotas charge for a dataset map: [`datasets_bytes_of`]
 /// over its entries.
 pub fn datasets_bytes(map: &HashMap<String, Dataset>) -> u64 {
@@ -438,7 +429,9 @@ pub fn datasets_bytes(map: &HashMap<String, Dataset>) -> u64 {
 }
 
 /// What the dataset quotas charge for the datasets `entries` (name and
-/// dataset): each frame's [`dataset_bytes`] plus its name.
+/// dataset): each name, and each frame's values (String and Binary views
+/// and Categorical and Enum labels included) and structure (see
+/// [`structure_bytes`]).
 pub fn datasets_bytes_of<'a>(entries: impl IntoIterator<Item = (&'a str, &'a Dataset)>) -> u64 {
     datasets_charge(entries).bytes
 }
@@ -848,6 +841,10 @@ impl SessionManager {
 /// The handler error code of a dataset-quota refusal made before a dataset
 /// was built ([`admit_dataset`]); the governor answers it as
 /// `quota_exceeded`, as it does a quota refusal after the call.
+///
+/// Reserved for those refusals: build them with [`quota_refusal`], and
+/// never return this code for anything else, since every handler error
+/// carrying it is answered `quota_exceeded`.
 pub const DATASET_QUOTA_EXCEEDED: rmcp::model::ErrorCode = rmcp::model::ErrorCode(-32001);
 
 /// A handler's quota refusal: `message` with [`DATASET_QUOTA_EXCEEDED`].
