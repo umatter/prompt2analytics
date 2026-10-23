@@ -423,17 +423,27 @@ const START_SERVER_COMMAND: &str =
 /// Client builder with the backend access token, if any, as a default
 /// `Authorization: Bearer <token>` header marked sensitive (so it is never
 /// shown in debug output). A blank token means none.
+///
+/// The trimmed token may contain only visible ASCII (`'!'..='~'`), the rule
+/// the Dioxus app's `normalize_access_token` applies. `HeaderValue` alone
+/// would also accept inner spaces, tabs and non-ASCII bytes, which the
+/// server then rejects as a wrong token.
 fn client_builder(access_token: Option<&str>) -> anyhow::Result<reqwest::ClientBuilder> {
     let builder = reqwest::Client::builder();
     let Some(token) = access_token.map(str::trim).filter(|t| !t.is_empty()) else {
         return Ok(builder);
     };
-    let mut value =
-        reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
-            anyhow::anyhow!(
-                "--access-token / P2A_ACCESS_TOKEN contains characters that cannot be sent in an HTTP header (visible ASCII only)"
-            )
-        })?;
+    let unsendable = || {
+        anyhow::anyhow!(
+            "--access-token / P2A_ACCESS_TOKEN contains characters that cannot be sent in an HTTP header (visible ASCII only)"
+        )
+    };
+    if !token.chars().all(|c| ('!'..='~').contains(&c)) {
+        return Err(unsendable());
+    }
+    // Backstop: the check above already rules out every value this rejects.
+    let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| unsendable())?;
     value.set_sensitive(true);
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(reqwest::header::AUTHORIZATION, value);
@@ -495,7 +505,9 @@ struct ConnectHint {
 }
 
 impl ConnectHint {
-    /// The hint as plain lines, the start command included.
+    /// The hint as plain lines, the start command (indented) included. This
+    /// is the text [`ConnectHint::eprint`] prints, so the tests that check
+    /// it check what `run()` shows.
     fn lines(&self) -> Vec<String> {
         let mut lines = Vec::with_capacity(self.details.len() + 2);
         lines.push(self.headline.clone());
@@ -504,6 +516,24 @@ impl ConnectHint {
             lines.push(format!("  {START_SERVER_COMMAND}"));
         }
         lines
+    }
+
+    /// Print [`ConnectHint::lines`] to stderr, the headline red and bold and
+    /// the start command, when there is one, cyan.
+    fn eprint(&self) {
+        let lines = self.lines();
+        // With a start command there are at least two lines, so the
+        // command is never the headline.
+        let command_line = self.start_command.then(|| lines.len() - 1);
+        for (i, line) in lines.iter().enumerate() {
+            if i == 0 {
+                eprintln!("{}", line.red().bold());
+            } else if Some(i) == command_line {
+                eprintln!("{}", line.bright_cyan());
+            } else {
+                eprintln!("{line}");
+            }
+        }
     }
 }
 
@@ -551,14 +581,7 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
     let session_id = match create_session(&client, base_url, token_sent).await {
         Ok(id) => id,
         Err(err) => {
-            let hint = connect_failure_hint(&err);
-            eprintln!("{}", hint.headline.red().bold());
-            for line in &hint.details {
-                eprintln!("{line}");
-            }
-            if hint.start_command {
-                eprintln!("  {}", START_SERVER_COMMAND.bright_cyan());
-            }
+            connect_failure_hint(&err).eprint();
             return Err(anyhow::Error::new(err));
         }
     };
@@ -1007,7 +1030,7 @@ mod tests {
             lines.last().map(String::as_str),
             Some(format!("  {START_SERVER_COMMAND}").as_str())
         );
-        // The command is printed (highlighted) by run() from the flag, so
+        // The command line comes from the flag (eprint() highlights it), so
         // the details never carry it as text.
         assert!(
             !hint
@@ -1051,5 +1074,23 @@ mod tests {
             "--access-token / P2A_ACCESS_TOKEN contains characters that cannot be sent in an HTTP header (visible ASCII only)",
             "the message names the source and never the value"
         );
+    }
+
+    /// Non-ASCII characters, inner spaces and tabs pass `HeaderValue`'s own
+    /// check, but the server reads the header as visible ASCII and the
+    /// Dioxus app accepts only `'!'..='~'`, so they are refused here too.
+    #[test]
+    fn token_outside_visible_ascii_is_refused_before_sending() {
+        for token in ["tök", "a b", "a\tb", "x\u{7f}y"] {
+            let err = build_http_client(Some(token)).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                "--access-token / P2A_ACCESS_TOKEN contains characters that cannot be sent in an HTTP header (visible ASCII only)",
+                "{token:?}"
+            );
+            assert!(!err.contains(token), "{token:?}");
+        }
+        // Surrounding whitespace is trimmed, not refused.
+        assert!(build_http_client(Some("  ok-token\t")).is_ok());
     }
 }
