@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock, PoisonError, Weak};
@@ -208,6 +208,11 @@ pub struct DataCharge {
     shared_labels: u64,
     /// Those mappings, each once.
     mappings: Vec<Weak<CategoricalMapping>>,
+    /// The addresses of `mappings`, so each column's mapping is looked up in
+    /// constant time: a parquet column can name a Categories of its own, so
+    /// a frame can bring as many mappings as columns. An address stays
+    /// unique while the charge lives, since its columns hold the mappings.
+    mapping_addresses: HashSet<usize>,
 }
 
 impl DataCharge {
@@ -285,9 +290,8 @@ impl DataCharge {
                 let labels = used_label_bytes(s, mapping);
                 self.add(labels);
                 self.shared_labels = self.shared_labels.saturating_add(labels);
-                let weak = Arc::downgrade(mapping);
-                if !self.mappings.iter().any(|m| m.ptr_eq(&weak)) {
-                    self.mappings.push(weak);
+                if self.mapping_addresses.insert(mapping_address(mapping)) {
+                    self.mappings.push(Arc::downgrade(mapping));
                 }
             }
             DataType::Enum(frozen, _) => {
@@ -334,38 +338,62 @@ fn view_bytes(len: usize, buffer_len: usize, text_len: usize) -> u64 {
 /// The labels the codes of the Categorical column `s` use in `mapping`,
 /// each once. The mapping can hold far more (all parquet dictionary columns
 /// share the global one), so the codes are what decides.
+///
+/// A column with many values marks its codes in a bitmap of the mapping's
+/// size; a column with fewer values than a 64th of the mapping's labels
+/// sorts its codes instead, so a short column of a large mapping costs its
+/// own length, not the mapping's.
 fn used_label_bytes(s: &Series, mapping: &CategoricalMapping) -> u64 {
     let upper = mapping.num_cats_upper_bound();
-    if upper == 0 || s.is_empty() {
+    let values = s.len() - s.null_count();
+    if upper == 0 || values == 0 {
         return 0;
     }
-    let mut used = vec![0u64; upper.div_ceil(64)];
+    let label_of = |code: usize| {
+        let label = u32::try_from(code)
+            .ok()
+            .and_then(|code| mapping.cat_to_str(code))
+            .map_or(0, str::len);
+        label_bytes(label)
+    };
     let physical = s.to_physical_repr();
-    match physical.dtype() {
-        DataType::UInt8 => mark_codes(physical.u8(), &mut used, upper),
-        DataType::UInt16 => mark_codes(physical.u16(), &mut used, upper),
-        DataType::UInt32 => mark_codes(physical.u32(), &mut used, upper),
-        _ => {}
+    if values < upper / 64 {
+        let mut codes = Vec::with_capacity(values);
+        for_each_code(&physical, upper, |code| codes.push(code));
+        codes.sort_unstable();
+        codes.dedup();
+        return codes
+            .into_iter()
+            .fold(0u64, |bytes, code| bytes.saturating_add(label_of(code)));
     }
+    let mut used = vec![0u64; upper.div_ceil(64)];
+    for_each_code(&physical, upper, |code| used[code / 64] |= 1 << (code % 64));
     let mut bytes = 0u64;
     for (word_index, &word) in used.iter().enumerate() {
         let mut word = word;
         while word != 0 {
             let code = word_index * 64 + word.trailing_zeros() as usize;
             word &= word - 1;
-            let label = u32::try_from(code)
-                .ok()
-                .and_then(|code| mapping.cat_to_str(code))
-                .map_or(0, str::len);
-            bytes = bytes.saturating_add(label_bytes(label));
+            bytes = bytes.saturating_add(label_of(code));
         }
     }
     bytes
 }
 
-/// Set the bit of every code of the non-null values of `codes` below `upper`
-/// (a null slot's code is arbitrary).
-fn mark_codes<T>(codes: PolarsResult<&ChunkedArray<T>>, used: &mut [u64], upper: usize)
+/// Call `f` with every code below `upper` of the non-null values of the
+/// physical (code) column of a Categorical column (a null slot's code is
+/// arbitrary).
+fn for_each_code(physical: &Series, upper: usize, f: impl FnMut(usize)) {
+    match physical.dtype() {
+        DataType::UInt8 => codes_of(physical.u8(), upper, f),
+        DataType::UInt16 => codes_of(physical.u16(), upper, f),
+        DataType::UInt32 => codes_of(physical.u32(), upper, f),
+        _ => {}
+    }
+}
+
+/// [`for_each_code`] over one code type.
+fn codes_of<T>(codes: PolarsResult<&ChunkedArray<T>>, upper: usize, mut f: impl FnMut(usize))
 where
     T: PolarsNumericType,
     T::Native: Into<u64>,
@@ -373,18 +401,18 @@ where
     let Ok(codes) = codes else {
         return;
     };
-    let mut mark = |code: T::Native| {
+    let mut visit = |code: T::Native| {
         if let Ok(code) = usize::try_from(code.into())
             && code < upper
         {
-            used[code / 64] |= 1 << (code % 64);
+            f(code);
         }
     };
     for arr in codes.downcast_iter() {
         if arr.validity().is_none_or(|v| v.unset_bits() == 0) {
-            arr.values().iter().for_each(|&code| mark(code));
+            arr.values().iter().for_each(|&code| visit(code));
         } else {
-            arr.iter().flatten().for_each(|&code| mark(code));
+            arr.iter().flatten().for_each(|&code| visit(code));
         }
     }
 }
@@ -411,15 +439,52 @@ fn label_bytes(len: usize) -> u64 {
         .saturating_add(LABEL_OVERHEAD_BYTES)
 }
 
-/// Every label `mapping` holds, used or not: what it takes in memory.
-fn mapping_label_bytes(mapping: &CategoricalMapping) -> u64 {
-    (0..mapping.num_cats_upper_bound()).fold(0u64, |bytes, code| {
-        let label = u32::try_from(code)
-            .ok()
-            .and_then(|code| mapping.cat_to_str(code))
-            .map_or(0, str::len);
-        bytes.saturating_add(label_bytes(label))
-    })
+/// The address of a mapping, which identifies it while it is held.
+fn mapping_address(mapping: &Arc<CategoricalMapping>) -> usize {
+    Arc::as_ptr(mapping) as usize
+}
+
+/// What a mapping's labels take in memory, counted so far: a mapping only
+/// grows (labels get the next code and are never removed), so the next
+/// count starts where this one ended.
+#[derive(Debug)]
+struct LabelCount {
+    /// The mapping. Holding it keeps its address from being reused, so the
+    /// count found at a live mapping's address is that mapping's.
+    mapping: Weak<CategoricalMapping>,
+    /// The codes counted: every code below this had its label.
+    counted: usize,
+    /// What the labels of those codes take.
+    bytes: u64,
+}
+
+impl LabelCount {
+    /// Every label `mapping` holds, used or not: what it takes in memory.
+    /// Counts the labels added since the last call. A code whose label is
+    /// still being inserted (polars hands out codes before it stores their
+    /// labels) is charged as an empty label now and counted again next
+    /// time.
+    fn update(&mut self, mapping: &CategoricalMapping) -> u64 {
+        let upper = mapping.num_cats_upper_bound();
+        let mut bytes = self.bytes;
+        let mut complete = true;
+        for code in self.counted..upper {
+            let label = u32::try_from(code)
+                .ok()
+                .and_then(|code| mapping.cat_to_str(code));
+            if label.is_none() && complete {
+                complete = false;
+                self.counted = code;
+                self.bytes = bytes;
+            }
+            bytes = bytes.saturating_add(label_bytes(label.map_or(0, str::len)));
+        }
+        if complete {
+            self.counted = self.counted.max(upper);
+            self.bytes = bytes;
+        }
+        bytes
+    }
 }
 
 /// What the dataset quotas charge for a dataset map: [`datasets_bytes_of`]
@@ -555,6 +620,9 @@ pub struct SessionManager {
     removals: broadcast::Sender<SessionId>,
     /// Dataset bytes reserved by files being decoded ([`admit_dataset`]).
     reserved_data_bytes: AtomicU64,
+    /// The labels counted so far of each shared categorical mapping, by
+    /// address, for [`total_data_bytes`](Self::total_data_bytes).
+    label_counts: StdMutex<HashMap<usize, LabelCount>>,
 }
 
 impl SessionManager {
@@ -566,6 +634,7 @@ impl SessionManager {
             config,
             removals,
             reserved_data_bytes: AtomicU64::new(0),
+            label_counts: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -791,24 +860,40 @@ impl SessionManager {
     /// of shared categorical mappings counted once each and in full. A label
     /// stays in its mapping while any column of the mapping lives, also after
     /// the dataset that brought it is gone, so the labels a session is
-    /// charged for are not all the labels in memory. This takes only the
-    /// map's read lock and never a session's dataset lock, so a quota check
-    /// does not wait behind another session's long write.
+    /// charged for are not all the labels in memory. This holds the map's
+    /// read lock only to list the sessions and never takes a session's
+    /// dataset lock, so a quota check neither waits behind another session's
+    /// long write nor holds up session creation. Its cost grows with the
+    /// mappings in use and the labels added since the last call, not with
+    /// every label held.
     pub async fn total_data_bytes(&self) -> u64 {
+        let sessions: Vec<Arc<Session>> = self.sessions.read().await.values().cloned().collect();
         let mut total = 0u64;
+        let mut addresses = HashSet::new();
         let mut mappings: Vec<Arc<CategoricalMapping>> = Vec::new();
-        for session in self.sessions.read().await.values() {
+        for session in &sessions {
             let shared = lock(&session.shared_labels);
             total = total.saturating_add(session.data_bytes().saturating_sub(shared.bytes));
             for mapping in shared.mappings.iter().filter_map(Weak::upgrade) {
-                if !mappings.iter().any(|m| Arc::ptr_eq(m, &mapping)) {
+                if addresses.insert(mapping_address(&mapping)) {
                     mappings.push(mapping);
                 }
             }
         }
-        mappings
-            .iter()
-            .fold(total, |t, m| t.saturating_add(mapping_label_bytes(m)))
+        let mut counts = lock(&self.label_counts);
+        // Forget mappings nobody holds any more (their addresses can then be
+        // reused).
+        counts.retain(|_, count| count.mapping.strong_count() > 0);
+        mappings.iter().fold(total, |total, mapping| {
+            let count = counts
+                .entry(mapping_address(mapping))
+                .or_insert_with(|| LabelCount {
+                    mapping: Arc::downgrade(mapping),
+                    counted: 0,
+                    bytes: 0,
+                });
+            total.saturating_add(count.update(mapping))
+        })
     }
 
     /// Dataset bytes reserved by files being decoded.
@@ -1507,6 +1592,155 @@ mod tests {
             full >= 2000 * 500 && single < 16 * 1024,
             "full {full}, single {single}"
         );
+    }
+
+    /// A frame of `n` one-row Categorical columns, each of a Categories of
+    /// its own (a parquet column can name one in its field metadata), with
+    /// one label of 8 bytes each.
+    fn own_mapping_columns(n: usize) -> DataFrame {
+        let columns: Vec<Column> = (0..n)
+            .map(|i| {
+                let dtype = DataType::from_categories(Categories::random(
+                    "".into(),
+                    CategoricalPhysical::U32,
+                ));
+                Series::new(format!("c{i}").into(), [format!("{i:08}")])
+                    .cast(&dtype)
+                    .unwrap()
+                    .into()
+            })
+            .collect();
+        DataFrame::new(columns).unwrap()
+    }
+
+    #[test]
+    fn each_columns_own_mapping_is_charged_once() {
+        // Every column brings its own mapping, and a second column of one
+        // of them adds nothing to the mapping list. The mappings used to be
+        // deduplicated with a scan of the list per column, quadratic in
+        // their number; a set of their addresses makes it linear.
+        let n = 20_000;
+        let mut df = own_mapping_columns(n);
+        let again = df.column("c7").unwrap().clone().with_name("again".into());
+        df.with_column(again).unwrap();
+        let datasets = HashMap::from([("d".to_string(), Dataset::new(df))]);
+        let started = std::time::Instant::now();
+        let charge = datasets_charge(datasets.iter().map(|(name, d)| (name.as_str(), d)));
+        let elapsed = started.elapsed();
+        assert_eq!(charge.mappings.len(), n);
+        assert_eq!(charge.mapping_addresses.len(), n);
+        let per_column = COLUMN_OVERHEAD_BYTES + label_bytes(8);
+        assert!(
+            charge.bytes >= n as u64 * per_column,
+            "charged {}",
+            charge.bytes
+        );
+        assert_eq!(charge.shared_labels, (n as u64 + 1) * label_bytes(8));
+        // The scan compared each column's mapping with every one listed
+        // before it, 2 x 10^8 comparisons here; the set makes it one lookup
+        // per column.
+        if !cfg!(debug_assertions) {
+            assert!(
+                elapsed < std::time::Duration::from_millis(250),
+                "{elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_column_of_a_large_mapping_is_charged_the_labels_it_uses() {
+        // A column with fewer values than a 64th of its mapping's labels
+        // sorts its codes instead of marking them in a bitmap of the
+        // mapping's size; it is charged the same: each label it uses once.
+        let all = categorical(100_000, 20);
+        let one = all.slice(5, 1);
+        assert_eq!(
+            used_label_bytes(&one, mapping_of(&one)),
+            label_bytes(20),
+            "one row"
+        );
+        // Repeated codes and nulls among a few values.
+        let some = Series::new(
+            "k".into(),
+            [Some(format!("{:020}", 3)), None, Some(format!("{:020}", 3))],
+        )
+        .cast(all.dtype())
+        .unwrap()
+        .append(&all.slice(40, 2))
+        .unwrap()
+        .clone();
+        assert_eq!(
+            used_label_bytes(&some, mapping_of(&some)),
+            3 * label_bytes(20)
+        );
+        // A long column takes the bitmap and agrees.
+        let long = all.slice(0, 10_000);
+        assert_eq!(
+            used_label_bytes(&long, mapping_of(&long)),
+            10_000 * label_bytes(20)
+        );
+    }
+
+    /// The mapping of the Categorical column `s`.
+    fn mapping_of(s: &Series) -> &CategoricalMapping {
+        match s.dtype() {
+            DataType::Categorical(_, mapping) => mapping,
+            other => panic!("not categorical: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn label_counts_resume_where_they_ended() {
+        let cats = Categories::random("".into(), CategoricalPhysical::U32);
+        let dtype = DataType::from_categories(cats);
+        let labels = |range: std::ops::Range<usize>| {
+            Series::new(
+                "k".into(),
+                range.map(|i| format!("{i:010}")).collect::<Vec<_>>(),
+            )
+            .cast(&dtype)
+            .unwrap()
+        };
+        let first = labels(0..1000);
+        let mapping = match first.dtype() {
+            DataType::Categorical(_, mapping) => Arc::clone(mapping),
+            other => panic!("{other:?}"),
+        };
+        let mut count = LabelCount {
+            mapping: Arc::downgrade(&mapping),
+            counted: 0,
+            bytes: 0,
+        };
+        assert_eq!(count.update(&mapping), 1000 * label_bytes(10));
+        assert_eq!(count.counted, 1000);
+        assert_eq!(count.update(&mapping), 1000 * label_bytes(10));
+        let _more = labels(500..1500);
+        assert_eq!(count.update(&mapping), 1500 * label_bytes(10));
+        assert_eq!(count.counted, 1500);
+    }
+
+    #[tokio::test]
+    async fn the_total_counts_mappings_once_across_calls_and_forgets_dropped_ones() {
+        let m = SessionManager::new(cfg(10, None));
+        let s = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let df = own_mapping_columns(300);
+        s.datasets
+            .write()
+            .await
+            .insert("d".into(), Dataset::new(df));
+        let held = s.refresh_data_bytes().await;
+        let total = m.total_data_bytes().await;
+        // The session's labels, once in its own charge and once per mapping.
+        assert_eq!(total, held);
+        assert_eq!(m.total_data_bytes().await, total);
+        assert_eq!(lock(&m.label_counts).len(), 300);
+        s.datasets.write().await.clear();
+        s.refresh_data_bytes().await;
+        assert!(m.total_data_bytes().await < 16 * 1024);
+        assert!(lock(&m.label_counts).is_empty());
     }
 
     #[test]
