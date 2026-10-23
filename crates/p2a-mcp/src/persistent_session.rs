@@ -395,6 +395,24 @@ impl PersistentSessionManager {
         Some(self.sweep_in_turn().await)
     }
 
+    /// The sweep the background tasks run: skipped while another sweep is
+    /// running, which does what this one would (a sweep queued behind it
+    /// would rotate the memory of recently deleted conversations a second
+    /// time within moments). A failure is logged. Whether a sweep ran.
+    async fn background_sweep(&self) -> bool {
+        match self.sweep_unless_running().await {
+            Some(Ok(_)) => true,
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "Conversation-store sweep failed");
+                true
+            }
+            None => {
+                tracing::debug!("A conversation-store sweep is already running; skipping this one");
+                false
+            }
+        }
+    }
+
     /// The body of [`sweep`](Self::sweep); the caller holds `sweep_lock`.
     async fn sweep_in_turn(&self) -> Result<SweepStats, PersistentSessionError> {
         let mut stats = SweepStats::default();
@@ -448,8 +466,8 @@ impl PersistentSessionManager {
     /// adoptable row back. A session still live without a row (its
     /// registration failed) gets one, so that the orphan step keeps its
     /// settings and dataset metadata; if it leaves the registry while that
-    /// row is written, the row is deleted again
-    /// ([`delete_rows_unless_live`](Self::delete_rows_unless_live)).
+    /// row is written, the row is deleted again, also when a later row's
+    /// write fails ([`write_missing_rows`](Self::write_missing_rows)).
     async fn flush_last_accessed(
         &self,
         snapshot: Vec<(SessionId, chrono::DateTime<chrono::Utc>)>,
@@ -467,14 +485,46 @@ impl PersistentSessionManager {
             return Ok(());
         }
         let live = self.live_ids().await;
+        self.write_missing_rows(missing, &live, stats).await
+    }
+
+    /// The second half of [`flush_last_accessed`](Self::flush_last_accessed):
+    /// write a row for each session in `missing` that is in `live` (the
+    /// registry as it was read just before), then delete again the rows of
+    /// those that have left the registry since
+    /// ([`delete_rows_unless_live`](Self::delete_rows_unless_live)).
+    ///
+    /// A failed write stops the loop, but the rows written before it still
+    /// get that check before the write's error is returned, so a store error
+    /// cannot leave a departed session with an adoptable row.
+    async fn write_missing_rows(
+        &self,
+        missing: Vec<(SessionId, chrono::DateTime<chrono::Utc>)>,
+        live: &std::collections::HashSet<SessionId>,
+        stats: &mut SweepStats,
+    ) -> Result<(), PersistentSessionError> {
         let mut created = Vec::new();
+        let mut failed = None;
         for (id, at) in missing {
-            if live.contains(&id) {
-                self.db.set_session_last_accessed(&id, at).await?;
-                created.push(id);
+            if !live.contains(&id) {
+                continue;
+            }
+            match self.db.set_session_last_accessed(&id, at).await {
+                Ok(()) => created.push(id),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
             }
         }
-        self.delete_rows_unless_live(created, stats).await
+        let checked = self.delete_rows_unless_live(created, stats).await;
+        let Some(e) = failed else {
+            return checked;
+        };
+        if let Err(also) = checked {
+            tracing::warn!(error = %also, "Failed to delete a row the sweep wrote for a departed session");
+        }
+        Err(e.into())
     }
 
     /// Of the sessions in `created`, whose rows the sweep has just written,
@@ -518,11 +568,14 @@ impl PersistentSessionManager {
     ///
     /// - A listener on [`SessionManager::subscribe_removals`] deletes the
     ///   rows of every session that leaves the registry (deleted, expired,
-    ///   evicted). When it falls behind it runs a [`sweep`](Self::sweep),
-    ///   unless one is already running.
+    ///   evicted). When it falls behind it runs a [`sweep`](Self::sweep).
     /// - A timer runs a sweep at start (the one that scans every row for
     ///   orphans) and then every 30 s per TTL minute, clamped to
     ///   60 s ..= 600 s.
+    ///
+    /// Neither waits for a sweep that is already running: that sweep does
+    /// the work (including the first full orphan scan if no sweep has done
+    /// it yet), and the timer's next tick comes a full period later.
     pub fn start_background_tasks(self: &Arc<Self>) {
         use tokio::sync::broadcast::error::RecvError;
 
@@ -543,13 +596,7 @@ impl PersistentSessionManager {
                             missed,
                             "Session removal listener fell behind; sweeping the store"
                         );
-                        match pm.sweep_unless_running().await {
-                            Some(Ok(_)) => {}
-                            Some(Err(e)) => {
-                                tracing::warn!(error = %e, "Conversation-store sweep failed");
-                            }
-                            None => tracing::debug!("A sweep is already running"),
-                        }
+                        pm.background_sweep().await;
                     }
                     Err(RecvError::Closed) => break,
                 }
@@ -564,9 +611,7 @@ impl PersistentSessionManager {
             loop {
                 tick.tick().await;
                 let Some(pm) = weak.upgrade() else { break };
-                if let Err(e) = pm.sweep().await {
-                    tracing::warn!(error = %e, "Conversation-store sweep failed");
-                }
+                pm.background_sweep().await;
             }
         });
     }
@@ -1324,6 +1369,39 @@ mod tests {
         assert!(pm.sweep_unless_running().await.is_some_and(|r| r.is_ok()));
     }
 
+    /// The background tasks' sweep (the timer's and the lagging listener's)
+    /// does not queue behind a running sweep, which would rotate the memory
+    /// of recently deleted conversations twice in a row: it skips at once.
+    #[tokio::test]
+    async fn background_sweeps_skip_while_one_runs() {
+        let pm = manager().await;
+        let ghost = Message::user("ghost".into(), "orphan".into());
+        let ghost_id = ghost.id_string();
+        let _: Option<Message> = pm
+            .db()
+            .db()
+            .create(ghost.id.clone())
+            .content(ghost)
+            .await
+            .unwrap();
+        let running = pm.sweep_lock.lock().await;
+        // Polled once: a sweep that waited for the lock held here would be
+        // pending, and the test fails instead of hanging.
+        let mut sweep = std::pin::pin!(pm.background_sweep());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            sweep.as_mut().poll(&mut cx),
+            std::task::Poll::Ready(false)
+        ));
+        drop(running);
+        assert!(pm.db().get_message(&ghost_id).await.is_ok()); // not swept
+        assert!(pm.background_sweep().await);
+        assert!(matches!(
+            pm.db().get_message(&ghost_id).await,
+            Err(DbError::NotFound(_))
+        ));
+    }
+
     /// A row the sweep wrote for a session that has left the registry since
     /// is deleted again; the row of a session that is still live is kept.
     #[tokio::test]
@@ -1344,6 +1422,44 @@ mod tests {
         assert_eq!((stats.refreshed, stats.departed_deleted), (1, 1));
         assert!(pm.db().get_session(&live).await.unwrap().is_some());
         assert!(pm.db().get_session(&departed).await.unwrap().is_none());
+    }
+
+    /// When the sweep fails to write a missing row, the rows it wrote before
+    /// still get the departure check: a session that left the registry after
+    /// the live check keeps no adoptable row, and the write's error is
+    /// reported.
+    #[tokio::test]
+    async fn a_failed_row_write_still_deletes_a_departed_sessions_row() {
+        let pm = manager().await;
+        // Both were live when the registry was read; `departed` has left it
+        // since, and the row of `refused` (still live) cannot be written.
+        let departed = uuid::Uuid::new_v4().to_string();
+        let refused = pm.sessions().create_session(None).await.unwrap();
+        pm.db()
+            .db()
+            .query(format!(
+                "DEFINE EVENT refuse_row ON TABLE sessions \
+                 WHEN $event = 'CREATE' AND $after.id = type::thing('sessions', '{refused}') \
+                 THEN {{ THROW 'refused' }}"
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let live: std::collections::HashSet<SessionId> = [departed.clone(), refused.clone()].into();
+        let now = chrono::Utc::now();
+        let mut stats = SweepStats::default();
+        let written = pm
+            .write_missing_rows(
+                vec![(departed.clone(), now), (refused.clone(), now)],
+                &live,
+                &mut stats,
+            )
+            .await;
+        assert!(written.is_err());
+        assert_eq!((stats.refreshed, stats.departed_deleted), (0, 1));
+        assert!(pm.db().get_session(&departed).await.unwrap().is_none());
+        assert!(pm.db().get_session(&refused).await.unwrap().is_none());
     }
 
     #[tokio::test]
