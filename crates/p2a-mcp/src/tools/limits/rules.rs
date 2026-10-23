@@ -354,7 +354,14 @@ pub static PARAM_RULES: &[ParamRule] = {
             Exempt("event counts used only in closed-form distribution functions"),
         ),
         p("hypothesis_poisson", "t", ArrayLen(ListLength)),
-        p("hypothesis_poisson", "r", Exempt(NULL_VALUE)),
+        p(
+            "hypothesis_poisson",
+            "r",
+            Exempt(
+                "hypothesised rate or rate ratio; it sets the parameter of the Poisson or \
+                 binomial distribution whose CDF gives the p-value",
+            ),
+        ),
         p("hypothesis_poisson", "t[]", Exempt(ARRAY_VALUE)),
         p(
             "hypothesis_prop_trend_test",
@@ -478,7 +485,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p(
             "negbin",
             "init_theta",
-            Exempt("starting dispersion; the fit's iteration limit does not depend on it"),
+            Exempt("ignored by core: run_negbin does not use a starting dispersion"),
         ),
         p("power_anova_test", "groups", Max(DesignGroups)),
         p("power_anova_test", "n", Max(PowerSampleSize)),
