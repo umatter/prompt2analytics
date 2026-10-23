@@ -173,9 +173,8 @@ pub const INTERNAL_TOOLS: &[&str] = &[
 /// Names in [`INTERNAL_TOOLS`] are refused even when registered (they are
 /// never offered to the model), and so are names no handler registers
 /// (`is_registered`). Registered analytical tools outside the advertised
-/// subset stay callable: the model can find them through the search
-/// meta-tools' descriptions. The refusal is a tool error the model can act
-/// on; the name in it is cut to 64 bytes on a char boundary.
+/// subset stay callable. The refusal is a tool error the model can act on;
+/// the name in it is cut to 64 bytes on a char boundary.
 pub fn check_llm_tool_call(name: &str, is_registered: impl Fn(&str) -> bool) -> Result<(), String> {
     let shown = super::context::truncate_str(name, 64);
     if INTERNAL_TOOLS.contains(&name) {
