@@ -720,7 +720,10 @@ mod tests {
     async fn adopt_respects_capacity_and_ids() {
         let m = SessionManager::new(cfg(1, None));
         let a = m.create_session(None).await.unwrap();
-        let id2 = Uuid::new_v4().to_string();
+        // A fixed id with letters a-f, so its uppercase form below differs
+        // from it; a random UUID can be all digits, which made that variant
+        // adopt the live session.
+        let id2 = "6f1c0b9e-3a4d-4c2b-9e7f-0a1b2c3d4e5f".to_string();
         assert!(matches!(
             m.adopt(&id2, None).await,
             Err(SessionError::MaxSessionsReached)
