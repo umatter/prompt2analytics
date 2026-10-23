@@ -1055,15 +1055,21 @@ impl Limits {
                     return Ok(());
                 }
                 let key = family.key();
-                violation(
-                    n.to_string(),
-                    cap.to_string(),
-                    key,
+                let requested = n.to_string();
+                // The cap bounds the magnitude, so "smaller" would point a negative value the
+                // wrong way.
+                let message = if requested.starts_with('-') {
+                    format!(
+                        "Parameter `{path}` = {n} is outside this server's limit of ±{cap} ({key}) \
+                         for `{tool_echo}`. Use a value of smaller magnitude."
+                    )
+                } else {
                     format!(
                         "Parameter `{path}` = {n} exceeds this server's limit of {cap} ({key}) for \
                          `{tool_echo}`. Use a smaller value."
-                    ),
-                )
+                    )
+                };
+                violation(requested, cap.to_string(), key, message)
             }
             Rule::ArrayLen(family) | Rule::UniqueList(family) => {
                 let (Some(cap), Some(items)) = (self.cap(family), value.as_array()) else {
@@ -1108,15 +1114,21 @@ impl Limits {
                 let key = family.key();
                 for n in items.iter().filter_map(Value::as_number) {
                     if number_exceeds(n, cap) {
-                        return violation(
-                            n.to_string(),
-                            cap.to_string(),
-                            key,
+                        let requested = n.to_string();
+                        // As for `Max`: the cap bounds the magnitude.
+                        let message = if requested.starts_with('-') {
+                            format!(
+                                "Parameter `{path}` contains {n}, which is outside this server's \
+                                 limit of ±{cap} ({key}) for `{tool_echo}`. Use values of smaller \
+                                 magnitude."
+                            )
+                        } else {
                             format!(
                                 "Parameter `{path}` contains {n}, which exceeds this server's limit \
                                  of {cap} ({key}) for `{tool_echo}`. Use smaller values."
-                            ),
-                        );
+                            )
+                        };
+                        return violation(requested, cap.to_string(), key, message);
                     }
                 }
                 Ok(())
@@ -1335,8 +1347,25 @@ mod tests {
                 .requested,
             json!(1e30).to_string()
         );
-        // absolute value
-        assert!(h.check_with("t", &json!({"reps": -10_001}), T).is_err());
+        // absolute value; a negative value is told to shrink in magnitude, not to get smaller
+        let v = h
+            .check_with(
+                "mediation_analysis",
+                &json!({"reps": -1_000_000_000_000i64}),
+                T,
+            )
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            "Parameter `reps` = -1000000000000 is outside this server's limit of ±10000 (replications) for `mediation_analysis`. Use a value of smaller magnitude."
+        );
+        assert_eq!(
+            (v.requested.as_str(), v.limit.as_str(), v.override_key),
+            ("-1000000000000", "10000", "replications")
+        );
+        let v = h.check_with("t", &json!({"reps": -10_001}), T).unwrap_err();
+        assert!(v.message.contains("limit of ±10000"), "{}", v.message);
+        assert!(h.check_with("t", &json!({"reps": -10_000}), T).is_ok());
         assert!(
             h.check_with("t", &json!({"reps": null, "other": 1e30}), T)
                 .is_ok()
@@ -1693,6 +1722,15 @@ mod tests {
             "{}",
             v.message
         );
+        assert!(h.check_with("t", &json!({"spans": [3, -1001]}), T).is_ok());
+        let v = h
+            .check_with("timeseries_spectrum", &json!({"spans": [3, -1003]}), T)
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            "Parameter `spans` contains -1003, which is outside this server's limit of ±1001 (span_width) for `timeseries_spectrum`. Use values of smaller magnitude."
+        );
+        assert_eq!((v.requested.as_str(), v.limit.as_str()), ("-1003", "1001"));
         assert!(h.check_with("t", &json!({"free": 1e300}), T).is_ok());
     }
 

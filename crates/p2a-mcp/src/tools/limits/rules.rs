@@ -1706,15 +1706,31 @@ mod tests {
                 (*param, *key, *cap),
                 "{tool}: {args}"
             );
+            // The cap bounds the magnitude, and a negative value is told so.
+            let limit = if v.requested.starts_with('-') {
+                format!("±{cap}")
+            } else {
+                cap.to_string()
+            };
             assert!(
                 v.message.starts_with(&format!("Parameter `{param}` = "))
                     && v.message
-                        .contains(&format!("limit of {cap} ({key}) for `{tool}`")),
+                        .contains(&format!("limit of {limit} ({key}) for `{tool}`")),
                 "{}",
                 v.message
             );
             assert!(Limits::off().check_tool_arguments(tool, args).is_ok());
         }
+        assert_eq!(
+            hosted("power_t_test", json!({"n": -1e300, "delta": 1.0}))
+                .unwrap_err()
+                .message,
+            format!(
+                "Parameter `n` = {} is outside this server's limit of ±1000000 \
+                 (power_sample_size) for `power_t_test`. Use a value of smaller magnitude.",
+                json!(-1e300)
+            )
+        );
         // Up to the caps everything passes, including every n the solvers can return (their
         // bisection searches n in [2, 1e6]) and a solve for n with the most groups allowed.
         for args in [
