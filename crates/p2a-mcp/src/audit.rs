@@ -9,7 +9,13 @@
 //!   such as `csv_content` or `filter_value`) are replaced by their size,
 //!   other strings and object keys are cut to 200 bytes, arrays to 20
 //!   elements, objects to 64 keys, nesting to 4 levels and the whole to about
-//!   16 KiB, so an entry stays small whatever the request carried. The
+//!   16 KiB, so an entry stays small whatever the request carried; top-level
+//!   arguments that are not an object (positional values, which every call
+//!   path refuses) are replaced by their size as a whole, and so is a nested
+//!   struct that the request limits read fields of given by position (a JSON
+//!   array at `columns[]` or `sections[]`, say; see
+//!   [`DeclaredParameters::structs`]), whose values have no keys to redact
+//!   by. The
 //!   parameters the tool's schema declares are taken first (`query` and
 //!   `pattern` ahead of the rest), so the key cap and the size bound fall on
 //!   the other keys before them; a value passed under a serde alias (such as
@@ -660,10 +666,26 @@ pub(crate) mod gate {
     }
 }
 
+/// What the audit sanitiser knows of a tool's parameters, from
+/// [`AnalyticsServer::declared_parameters`](crate::server::AnalyticsServer::declared_parameters)
+/// (empty for an unknown tool).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclaredParameters<'a> {
+    /// The top-level parameter names: the `properties` of the tool's input
+    /// schema.
+    pub names: Vec<&'a str>,
+    /// The nested request structs the request limits read fields of, as
+    /// rule paths (`columns[]`, `columns[].distribution`;
+    /// [`limits::struct_paths`](crate::tools::limits::struct_paths)). A
+    /// JSON array at one of them is the struct given by position, which
+    /// serde fills by field position and whose data values therefore carry
+    /// no key to be redacted by.
+    pub structs: Vec<&'a str>,
+}
+
 /// Sanitise tool arguments for the audit log. `declared` names the tool's
-/// top-level parameters, the `properties` of its input schema
-/// ([`AnalyticsServer::declared_parameters`](crate::server::AnalyticsServer::declared_parameters);
-/// empty for an unknown tool).
+/// top-level parameters and the nested structs its request limits go into
+/// ([`DeclaredParameters`]).
 ///
 /// [`REDACT_KEYS`] are replaced by their size at any depth; other strings
 /// and object keys longer than 200 bytes are cut at a char boundary and
@@ -690,27 +712,89 @@ pub(crate) mod gate {
 /// kept, or spelled like the `"[+n more keys]"` marker, is left out and
 /// counted by the marker, so no kept value is overwritten and the marker is
 /// always the sanitiser's own.
-pub fn sanitize_arguments(args: &Value, declared: &[&str]) -> Value {
+///
+/// Arguments that are not an object are replaced by their size like a
+/// [`REDACT_KEYS`] value (`"[redacted: 5 items]"` for an array): positional
+/// values have no names to redact by, and every call path refuses them
+/// (`AnalyticsServer::call_tool_with_session`), so their entry needs only
+/// their shape. `null`, arguments left out, stays `null`. Below the top
+/// level the same holds for a JSON array at one of `declared.structs`: a
+/// nested struct given by position, which the request limits refuse
+/// outside the off profile and which runs when they are off. Any other
+/// nested array is sanitised as an array (cut, bounded and depth-capped as
+/// above), because nothing here tells a struct no limit reads from a list of
+/// values.
+pub fn sanitize_arguments(args: &Value, declared: &DeclaredParameters) -> Value {
     let mut budget = MAX_ARGUMENT_BYTES;
-    // A top-level value always fits: a container needs 3 bytes, a scalar at
-    // most a few KiB.
+    let root = At {
+        structs: &declared.structs,
+        path: Some(""),
+    };
     match args {
-        Value::Object(map) => sanitize_object(map, 1, declared, &mut budget),
-        other => sanitize_value(other, 1, &mut budget),
+        // A top-level object always fits: it needs 3 bytes.
+        Value::Object(map) => {
+            sanitize_object(map, 1, &declared.names, root, &mut budget).unwrap_or(Value::Null)
+        }
+        Value::Null => Value::Null,
+        other => redact(other),
     }
-    .unwrap_or(Value::Null)
 }
 
-/// The sanitised `value`, charged to `budget` (bytes of JSON left), or
-/// `None`, with `budget` unchanged, when it does not fit.
-fn sanitize_value(value: &Value, level: usize, budget: &mut usize) -> Option<Value> {
+/// Where a value sits, for the struct check: the tool's struct paths
+/// ([`DeclaredParameters::structs`]) and the value's own path in rule-path
+/// form (`a`, `a.b`, `a[]`; the root is `""`), or `None` once no struct path
+/// is or continues it, so paths are built only along the structs.
+#[derive(Clone, Copy)]
+struct At<'p> {
+    structs: &'p [&'p str],
+    path: Option<&'p str>,
+}
+
+impl At<'_> {
+    /// The path of the value at `key` of the object here, or of an element
+    /// of the array here for `None`, when a struct path is or continues it.
+    fn child(&self, key: Option<&str>) -> Option<String> {
+        let path = self.path?;
+        let (sep, key) = match key {
+            Some(key) if path.is_empty() => ("", key),
+            Some(key) => (".", key),
+            None => ("[]", ""),
+        };
+        let on_the_way = |s: &&str| {
+            s.strip_prefix(path)
+                .and_then(|rest| rest.strip_prefix(sep))
+                .and_then(|rest| rest.strip_prefix(key))
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '[']))
+        };
+        self.structs
+            .iter()
+            .any(on_the_way)
+            .then(|| format!("{path}{sep}{key}"))
+    }
+
+    /// True at a struct path.
+    fn is_struct(&self) -> bool {
+        self.path.is_some_and(|p| self.structs.contains(&p))
+    }
+}
+
+/// The sanitised `value` at `at`, charged to `budget` (bytes of JSON left),
+/// or `None`, with `budget` unchanged, when it does not fit.
+fn sanitize_value(value: &Value, level: usize, at: At, budget: &mut usize) -> Option<Value> {
     match value {
-        Value::Object(map) if level <= MAX_DEPTH => sanitize_object(map, level, &[], budget),
+        // A struct given by position: its size only.
+        Value::Array(_) if at.is_struct() => scalar(redact(value), budget),
+        Value::Object(map) if level <= MAX_DEPTH => sanitize_object(map, level, &[], at, budget),
         Value::Array(items) if level <= MAX_DEPTH => {
             *budget = budget.checked_sub(3)?;
+            let element = at.child(None);
+            let at = At {
+                structs: at.structs,
+                path: element.as_deref(),
+            };
             let mut kept = Vec::new();
             for v in items.iter().take(MAX_ARRAY_ITEMS) {
-                let Some(v) = sanitize_value(v, level + 1, budget) else {
+                let Some(v) = sanitize_value(v, level + 1, at, budget) else {
                     break;
                 };
                 kept.push(v);
@@ -728,7 +812,7 @@ fn sanitize_value(value: &Value, level: usize, budget: &mut usize) -> Option<Val
     }
 }
 
-/// The sanitised object `map` at `level`, charged to `budget` like
+/// The sanitised object `map` at `level` and `at`, charged to `budget` like
 /// [`sanitize_value`]. The keys in `declared` come first, in [`key_rank`]
 /// order and by name within a rank; the others follow in map order (sorted
 /// by key, or the order the request was sent in where serde_json's
@@ -739,6 +823,7 @@ fn sanitize_object(
     map: &serde_json::Map<String, Value>,
     level: usize,
     declared: &[&str],
+    at: At,
     budget: &mut usize,
 ) -> Option<Value> {
     // Braces and a separator.
@@ -773,7 +858,12 @@ fn sanitize_object(
         let v = if REDACT_KEYS.contains(&key.as_str()) {
             scalar(redact(v), &mut left)
         } else {
-            sanitize_value(v, level + 1, &mut left)
+            let child = at.child(Some(key));
+            let at = At {
+                structs: at.structs,
+                path: child.as_deref(),
+            };
+            sanitize_value(v, level + 1, at, &mut left)
         };
         let Some(v) = v else {
             break;
@@ -874,6 +964,19 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// A tool that declares the top-level parameters `names` and no struct.
+    fn names<'a>(names: &[&'a str]) -> DeclaredParameters<'a> {
+        DeclaredParameters {
+            names: names.to_vec(),
+            structs: Vec::new(),
+        }
+    }
+
+    /// An unknown tool: nothing declared.
+    fn none() -> DeclaredParameters<'static> {
+        DeclaredParameters::default()
+    }
+
     #[test]
     fn test_sanitize_arguments() {
         let args = serde_json::json!({
@@ -885,7 +988,7 @@ mod tests {
             }
         });
 
-        let sanitized = sanitize_arguments(&args, &[]);
+        let sanitized = sanitize_arguments(&args, &none());
 
         assert_eq!(sanitized["dataset"], "test.csv");
         assert_eq!(sanitized["content"], "[redacted: 46 bytes]");
@@ -898,7 +1001,7 @@ mod tests {
         let args = serde_json::json!({"name": "pii",
             "csv_content": "email,income\nalice@example.org,51000\nbob@example.org,73000\n",
             "filter_value": "alice@example.org", "column": "email"});
-        let s = sanitize_arguments(&args, &[]);
+        let s = sanitize_arguments(&args, &none());
         assert_eq!(s["csv_content"], "[redacted: 59 bytes]");
         assert_eq!(s["filter_value"], "[redacted: 17 bytes]");
         assert_eq!(s["column"], "email");
@@ -909,14 +1012,14 @@ mod tests {
     fn sanitize_truncates_on_a_char_boundary() {
         // 'é' spans bytes 199..201; 211 bytes in all.
         let long = format!("{}é{}", "a".repeat(199), "b".repeat(10));
-        let s = sanitize_arguments(&serde_json::json!({ "title": long }), &[]);
+        let s = sanitize_arguments(&serde_json::json!({ "title": long }), &none());
         assert_eq!(
             s["title"],
             format!("{}...[truncated 211 bytes]", "a".repeat(199))
         );
         // A 3-byte character straddling the cut (box drawing, as in polars tables).
         let table = format!("{}│{}", "x".repeat(199), "y".repeat(5));
-        let s = sanitize_arguments(&serde_json::json!({ "title": table }), &[]);
+        let s = sanitize_arguments(&serde_json::json!({ "title": table }), &none());
         assert_eq!(
             s["title"],
             format!("{}...[truncated 207 bytes]", "x".repeat(199))
@@ -928,14 +1031,14 @@ mod tests {
         let s = sanitize_arguments(
             &serde_json::json!({"x": (0..100).collect::<Vec<i32>>(),
             "a": {"b": {"c": {"d": {"e": 1}}}}}),
-            &[],
+            &none(),
         );
         assert_eq!(s["x"].as_array().unwrap().len(), 21);
         assert_eq!(s["x"][20], "[+80 more]");
         // top-level object = level 1; a container at level 5+ becomes "[nested]"
         assert_eq!(s["a"]["b"]["c"]["d"], "[nested]");
         // scalars and short strings pass through
-        let s = sanitize_arguments(&serde_json::json!({"n": 3, "ok": true, "z": null}), &[]);
+        let s = sanitize_arguments(&serde_json::json!({"n": 3, "ok": true, "z": null}), &none());
         assert_eq!(s, serde_json::json!({"n": 3, "ok": true, "z": null}));
     }
 
@@ -947,18 +1050,112 @@ mod tests {
             "rows": [[1, 2], [3, 4]],
             "query": "SELECT * FROM t WHERE x = 1",
             }),
-            &[],
+            &none(),
         );
         assert_eq!(s["operations"][0]["value"], "[redacted]");
         assert_eq!(s["operations"][1]["values"], "[redacted: 3 items]");
         assert_eq!(s["rows"], "[redacted: 2 items]");
         assert_eq!(s["query"], "SELECT * FROM t WHERE x = 1");
-        // a non-object top level is sanitised the same way
-        let long = "q".repeat(300);
+    }
+
+    #[test]
+    fn sanitize_redacts_positional_arguments() {
+        // Positional (array) arguments have no names to redact by: the
+        // `csv_content` or filter `value` they carry would be logged in
+        // clear. The governed call path refuses them; their entry records
+        // only their size.
+        let filter = serde_json::json!(["small", "cat", "eq", "SECRET-ARR", "f2"]);
+        assert_eq!(sanitize_arguments(&filter, &none()), "[redacted: 5 items]");
+        let create = serde_json::json!(["pii", "email,income\nalice@example.org,51000\n"]);
         assert_eq!(
-            sanitize_arguments(&Value::String(long), &[]),
-            format!("{}...[truncated 300 bytes]", "q".repeat(200))
+            sanitize_arguments(&create, &names(&["name", "csv_content"])),
+            "[redacted: 2 items]"
         );
+        // Any other top level that is not an object, likewise.
+        assert_eq!(
+            sanitize_arguments(&Value::String("q".repeat(300)), &none()),
+            "[redacted: 300 bytes]"
+        );
+        assert_eq!(
+            sanitize_arguments(&serde_json::json!(51000), &none()),
+            "[redacted]"
+        );
+        assert_eq!(
+            sanitize_arguments(&Value::Bool(true), &none()),
+            "[redacted]"
+        );
+        // Arguments left out stay null.
+        assert_eq!(sanitize_arguments(&Value::Null, &none()), Value::Null);
+    }
+
+    #[test]
+    fn sanitize_redacts_nested_structs_given_by_position() {
+        // A struct the request limits read fields of, given as an array, is
+        // filled by position: the data value in it has no key to redact by.
+        let random = DeclaredParameters {
+            names: vec!["columns", "n_rows"],
+            structs: vec!["columns[]", "columns[].distribution"],
+        };
+        let by_name = serde_json::json!({"type": "constant_string", "value": "SECRET-C"});
+        let args = serde_json::json!({"n_rows": 5, "columns": [
+            {"name": "s", "distribution": ["constant_string", "SECRET-A"]},
+            ["t", {"type": "constant_string", "value": "SECRET-B"}],
+            {"name": "u", "distribution": by_name},
+            {"name": "c", "distribution": {"type": "categorical", "categories": ["a", "b"]}},
+        ]});
+        let s = sanitize_arguments(&args, &random);
+        assert!(!s.to_string().contains("SECRET"), "{s}");
+        assert_eq!(
+            s["columns"][0],
+            serde_json::json!({"name": "s", "distribution": "[redacted: 2 items]"})
+        );
+        assert_eq!(s["columns"][1], "[redacted: 2 items]");
+        // By name the value is redacted by its key; the list of columns is a
+        // list, kept, and the categories (at level 5) are past the depth cap
+        // as before.
+        assert_eq!(
+            s["columns"][2]["distribution"]["value"],
+            "[redacted: 8 bytes]"
+        );
+        assert_eq!(s["columns"].as_array().map(Vec::len), Some(4), "{s}");
+        assert_eq!(s["columns"][3]["distribution"]["categories"], "[nested]");
+        assert_eq!(s["n_rows"], 5);
+        // Without the struct paths the positional value is only cut, as in
+        // any list of values.
+        let s = sanitize_arguments(&args, &names(&["columns", "n_rows"]));
+        assert!(s.to_string().contains("SECRET-A"), "{s}");
+
+        // A report section by position. Its `content` is redacted by name
+        // whatever its items are.
+        let report = DeclaredParameters {
+            names: vec!["sections", "title"],
+            structs: vec!["sections[]", "sections[].content[]"],
+        };
+        let table = serde_json::json!(["table", null, null, ["h"], [["SECRET-D"]]]);
+        let args = serde_json::json!({"title": "t", "sections": [
+            {"title": "s", "content": [table]},
+            ["s2", [{"content_type": "text", "text": "SECRET-E"}]],
+        ]});
+        let s = sanitize_arguments(&args, &report);
+        assert!(!s.to_string().contains("SECRET"), "{s}");
+        assert_eq!(s["sections"][0]["content"], "[redacted: 1 items]");
+        assert_eq!(s["sections"][1], "[redacted: 2 items]");
+        // Past the depth cap too: a struct at level 5 is redacted where any
+        // other container becomes "[nested]".
+        let deep = DeclaredParameters {
+            names: vec!["items"],
+            structs: vec!["items[]", "items[].parts[]"],
+        };
+        let args = serde_json::json!({"items": [{"parts": [["SECRET-F"], {"n": 1}]}]});
+        let s = sanitize_arguments(&args, &deep);
+        assert_eq!(
+            s["items"][0]["parts"],
+            serde_json::json!(["[redacted: 1 items]", "[nested]"])
+        );
+        // A key spelled like a struct path counts as one, which only
+        // redacts more (no tool has such a parameter).
+        let s = sanitize_arguments(&serde_json::json!({"items[]": ["x"]}), &deep);
+        assert_eq!(s["items[]"], "[redacted: 1 items]");
     }
 
     #[test]
@@ -1000,7 +1197,7 @@ mod tests {
         let mut args = serde_json::Map::new();
         args.insert("wide".to_string(), Value::Object(wide));
         args.insert(long_key, Value::from(1));
-        let s = sanitize_arguments(&Value::Object(args), &[]);
+        let s = sanitize_arguments(&Value::Object(args), &none());
 
         let kept = s["wide"].as_object().unwrap();
         assert_eq!(kept.len(), MAX_OBJECT_KEYS + 1);
@@ -1036,19 +1233,19 @@ mod tests {
         let mut args = padding_keys();
         args.insert("query".into(), "select 1".into());
         let args = Value::Object(args);
-        let s = sanitize_arguments(&args, &["query"]);
+        let s = sanitize_arguments(&args, &names(&["query"]));
         assert_eq!(s["query"], "select 1", "{s}");
         assert_eq!(left_out_and_kept(&s), (1, MAX_OBJECT_KEYS));
-        // Without the declared list (a call site passing `&[]`) the padding,
+        // Without the declared names (a call site passing none) the padding,
         // first in key order and inserted first, takes the cap. The e2e tests
         // in tests/limits_e2e.rs send these arguments through each call site.
-        let undeclared = sanitize_arguments(&args, &[]);
+        let undeclared = sanitize_arguments(&args, &none());
         assert!(undeclared.get("query").is_none(), "{undeclared}");
         assert_eq!(left_out_and_kept(&undeclared), (1, MAX_OBJECT_KEYS));
         // One undeclared key with about 24 KB of escapes would fill the
         // byte budget.
         let args = serde_json::json!({"a": vec!["\u{1}".repeat(200); 20], "query": "select 1"});
-        let s = sanitize_arguments(&args, &["query"]);
+        let s = sanitize_arguments(&args, &names(&["query"]));
         assert_eq!(s["query"], "select 1", "{s}");
         let a = s["a"].as_array().unwrap();
         assert!(a.len() < 20 && a.last().unwrap().as_str().unwrap().starts_with("[+"));
@@ -1060,7 +1257,9 @@ mod tests {
         let server = crate::server::AnalyticsServer::new();
         let declared = server.declared_parameters("db_sqlite_query");
         assert!(
-            ["db_path", "query"].iter().all(|p| declared.contains(p)),
+            ["db_path", "query"]
+                .iter()
+                .all(|p| declared.names.contains(p)),
             "{declared:?}"
         );
         // Both paddings at once: a 20 x 20 array of 200-byte strings (about
@@ -1086,7 +1285,7 @@ mod tests {
         // 8000 short strings (about 48 KB) in a parameter that sorts first.
         let cube = serde_json::json!(vec![vec![vec!["abc"; 20]; 20]; 20]);
         let args = serde_json::json!({"columns": cube, "name": "out"});
-        let s = sanitize_arguments(&args, &["columns", "name"]);
+        let s = sanitize_arguments(&args, &names(&["columns", "name"]));
         assert_eq!(s["name"], "out", "{s}");
         assert!(s["columns"].is_array());
         assert!(s.to_string().len() <= MAX_ARGUMENT_BYTES + 256);
@@ -1099,7 +1298,7 @@ mod tests {
         let mut args = serde_json::Map::new();
         args.insert(format!("{head}{}", "a".repeat(100)), Value::from(1));
         args.insert(format!("{head}{}", "b".repeat(100)), Value::from(2));
-        let s = sanitize_arguments(&Value::Object(args), &[]);
+        let s = sanitize_arguments(&Value::Object(args), &none());
         let mut expected = serde_json::Map::new();
         expected.insert(format!("{head}...[truncated 300 bytes]"), Value::from(1));
         expected.insert("[+1 more keys]".into(), Value::Null);
@@ -1107,7 +1306,7 @@ mod tests {
         // A caller's key can neither replace the marker nor pass for one.
         let s = sanitize_arguments(
             &serde_json::json!({"[+1 more keys]": "x", "[+9 more keys]": null, "b": 1}),
-            &[],
+            &none(),
         );
         assert_eq!(s, serde_json::json!({"b": 1, "[+2 more keys]": null}));
     }
@@ -1125,7 +1324,7 @@ mod tests {
                 .collect();
             let input = Value::Object(outer);
             assert!(input.to_string().len() > 1_000_000);
-            let s = sanitize_arguments(&input, &[]);
+            let s = sanitize_arguments(&input, &none());
             let len = s.to_string().len();
             assert!(
                 len <= MAX_ARGUMENT_BYTES + 256,
@@ -1146,7 +1345,7 @@ mod tests {
         for _ in 0..4 {
             v = Value::Array(vec![v; 20]);
         }
-        let len = sanitize_arguments(&serde_json::json!({ "x": v }), &[])
+        let len = sanitize_arguments(&serde_json::json!({ "x": v }), &none())
             .to_string()
             .len();
         assert!(len <= MAX_ARGUMENT_BYTES + 256, "{len} bytes");
@@ -1248,7 +1447,7 @@ mod tests {
             "s1",
             "http",
             "head_dataset",
-            sanitize_arguments(&serde_json::json!({"dataset": "pii"}), &[]),
+            sanitize_arguments(&serde_json::json!({"dataset": "pii"}), &none()),
             "ok",
             3,
             ResultSummary {
@@ -1284,7 +1483,7 @@ mod tests {
             "test-session",
             "llm_tool",
             "load_dataset",
-            sanitize_arguments(&serde_json::json!({"path": "/data/test.csv"}), &[]),
+            sanitize_arguments(&serde_json::json!({"path": "/data/test.csv"}), &none()),
             "ok",
             150,
             ResultSummary::default(),

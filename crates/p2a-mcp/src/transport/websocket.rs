@@ -478,6 +478,145 @@ mod tests {
         }
     }
 
+    /// A connection state whose governor runs on `exec`, authenticated to a
+    /// new session; returns the state, that session and the message
+    /// channel's two ends.
+    async fn authenticated(
+        exec: crate::exec::ExecConfig,
+    ) -> (
+        WsState,
+        Arc<Session>,
+        mpsc::Sender<ServerMessage>,
+        mpsc::Receiver<ServerMessage>,
+    ) {
+        use crate::config::SessionConfig;
+
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let session_id = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&session_id).await.unwrap();
+        let governor = Arc::new(ToolGovernor::new(exec, sessions.clone()));
+        let mut state = WsState::new(Arc::new(AnalyticsServer::new()), sessions, governor);
+        let (tx, mut rx) = mpsc::channel(8);
+        handle_client_message(&mut state, ClientMessage::Auth { session_id }, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::AuthResult { success: true, .. })
+        ));
+        (state, session, tx, rx)
+    }
+
+    #[tokio::test]
+    async fn positional_arguments_are_refused() {
+        // `set_seed` by position: a derived request struct would take the
+        // array, past the request limits and the audit redaction, which read
+        // parameters by name.
+        let (mut state, session, tx, mut rx) = authenticated(Default::default()).await;
+        let tool = ClientMessage::Tool {
+            id: "t1".into(),
+            name: "set_seed".into(),
+            args: serde_json::json!([42]),
+        };
+        handle_client_message(&mut state, tool, &tx).await.unwrap();
+        match rx.recv().await {
+            Some(ServerMessage::Error { id, code, message }) => {
+                assert_eq!(id, "t1");
+                assert_eq!(code.as_deref(), Some("invalid_arguments"));
+                assert!(
+                    message.starts_with("The arguments of `set_seed` are an array"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a coded error, got {other:?}"),
+        }
+        assert_eq!(*session.global_seed.read().await, None, "set_seed ran");
+    }
+
+    /// The tool name of a message is the caller's string, up to the message
+    /// cap (32 MiB by default): the refusal echoes it cut.
+    #[tokio::test]
+    async fn a_long_tool_name_is_echoed_cut() {
+        let (mut state, _session, tx, mut rx) = authenticated(Default::default()).await;
+        let tool = ClientMessage::Tool {
+            id: "t1".into(),
+            name: "x".repeat(1_000_000),
+            args: serde_json::json!({}),
+        };
+        handle_client_message(&mut state, tool, &tx).await.unwrap();
+        match rx.recv().await {
+            Some(ServerMessage::Error { code, message, .. }) => {
+                assert_eq!(code.as_deref(), Some("unknown_tool"));
+                assert_eq!(message, format!("Unknown tool: {}", "x".repeat(64)));
+            }
+            other => panic!("expected a coded error, got {other:?}"),
+        }
+    }
+
+    /// A shared buffer the log lines of a test subscriber go to.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The governor's `tool_call` span carries the tool name into every log
+    /// line inside the call, such as a memory-pressure refusal (a soft
+    /// limit of one byte refuses every call): the name is recorded cut.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_long_tool_name_is_logged_cut() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let exec = crate::exec::ExecConfig {
+            rss_soft_limit_bytes: Some(1),
+            ..Default::default()
+        };
+        let (mut state, _session, tx, mut rx) = authenticated(exec).await;
+        let tool = ClientMessage::Tool {
+            id: "t1".into(),
+            name: "x".repeat(1_000_000),
+            args: serde_json::json!({}),
+        };
+        // A test on another thread may have registered the span's callsite
+        // while only the global no-op subscriber existed, caching it as
+        // disabled: recompute every callsite's interest with this
+        // subscriber in place.
+        tracing::callsite::rebuild_interest_cache();
+        handle_client_message(&mut state, tool, &tx).await.unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::Error { code: Some(code), .. }) if code == "memory_pressure"
+        ));
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let refusal = log
+            .lines()
+            .find(|l| l.contains("process memory is above the soft limit"))
+            .unwrap_or_else(|| panic!("no refusal logged: {log}"));
+        assert!(
+            refusal.contains(&format!("tool=\"{}\"", "x".repeat(64))),
+            "{refusal}"
+        );
+        assert!(refusal.len() < 1_000, "{} bytes", refusal.len());
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn tool_message_is_governed() {

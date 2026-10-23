@@ -14,6 +14,17 @@
 //!
 //! - [`Limits::check_tool_arguments`] checks a tool call's JSON arguments against
 //!   [`PARAM_RULES`]: each rule maps a `(tool, path)` to a cost [`Family`] (or another [`Rule`]).
+//!   Rules address parameters by name, but a derived request struct also takes a JSON array,
+//!   filling its fields by position. Outside the off profile the check therefore refuses
+//!   arguments that are not a JSON object (`parameter` `arguments`), and a nested struct a
+//!   rule path goes into (`sections[]` for `sections[].content`) given as an array (`parameter`
+//!   the struct's path). The governed call path refuses top-level arguments that are not an
+//!   object in every profile as well; in the off profile a nested struct given by position
+//!   still runs, as nothing is checked there. A nested struct no rule goes into (only `Exempt`
+//!   rules below it, or none) is not looked at in any profile. [`struct_paths`] lists the
+//!   structs a tool's rules go into; the audit log replaces one given as an array by its size in
+//!   every profile. A rule path must therefore not go on into a field whose schema admits an
+//!   array; the schema test in `rules.rs` fails on one that does.
 //! - [`Limits::check_rows`] checks a dataset's height for the tools in [`ROW_RULES`], whose cost
 //!   grows faster than linearly in the number of rows ([`RowClass`]).
 //! - [`Limits::check_budget`] lets a handler check a quantity it computes itself (for example a
@@ -210,7 +221,11 @@ pub enum Rule {
 /// A path is segments separated by `.`; each segment is a field name followed by zero or more
 /// `[]` (each element of an array): `a`, `a[]`, `a[].b`, `a[].b.c[]`, `a[][]`. A tool-specific
 /// rule for a path replaces every `"*"` rule for the same path for that tool; several rules may
-/// share one `(tool, path)`, and all of them apply.
+/// share one `(tool, path)`, and all of them apply. Where a path goes on into a field (`a[]` in
+/// `a[].b`), a request that holds a JSON array there is refused outside the off profile, since
+/// serde would fill that struct by position, and the audit log records only its size
+/// ([`struct_paths`]); do not give such a path to a value that may rightly be an array there
+/// (the schema test in `rules.rs` names the tool and path of one that may).
 #[derive(Debug, Clone, Copy)]
 pub struct ParamRule {
     /// Tool name, or `"*"` for every tool that has the field and no tool-specific rule for it.
@@ -639,6 +654,28 @@ pub fn rules_for(tool: &str) -> Vec<&'static ParamRule> {
     select_rules(tool, PARAM_RULES)
 }
 
+/// The nested request structs that the rules for `tool` read fields of, as rule paths: the part
+/// of each non-`Exempt` rule path before a `.` (`columns[]` and `columns[].distribution` for
+/// `columns[].distribution.value`), each once, in [`rules_for`] order. Outside the off profile
+/// [`Limits::check_tool_arguments`] refuses a JSON array at one of them (serde would fill the
+/// struct by field position), and the audit log replaces one by its size in every profile
+/// ([`crate::audit::sanitize_arguments`]), as its values carry no names to be redacted by.
+pub fn struct_paths(tool: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for rule in rules_for(tool) {
+        if matches!(rule.rule, Rule::Exempt(_)) {
+            continue;
+        }
+        for (dot, _) in rule.path.match_indices('.') {
+            let prefix = &rule.path[..dot];
+            if !out.contains(&prefix) {
+                out.push(prefix);
+            }
+        }
+    }
+    out
+}
+
 /// The row rule of `tool`, if its dataset height is limited.
 pub fn row_rule(tool: &str) -> Option<&'static RowRule> {
     ROW_RULES.iter().find(|r| r.tool == tool)
@@ -662,13 +699,16 @@ fn select_rules<'a>(tool: &str, rules: &'a [ParamRule]) -> Vec<&'a ParamRule> {
 pub struct LimitViolation {
     /// The tool that was called.
     pub tool: String,
-    /// The rule path, `dataset_field` (row limits) or budget key that was exceeded.
+    /// The rule path, `dataset_field` (row limits) or budget key that was exceeded
+    /// (`arguments` for arguments that are not a JSON object, the struct's path, such as
+    /// `sections[]`, for a nested struct given as a JSON array).
     pub parameter: String,
     /// What the request asked for.
     pub requested: String,
     /// The limit that applies.
     pub limit: String,
-    /// The `P2A_LIMIT_OVERRIDES` key that raises the limit.
+    /// The `P2A_LIMIT_OVERRIDES` key that raises the limit; empty when no override lifts the
+    /// refusal (arguments, or a nested struct, that are not a JSON object).
     pub override_key: &'static str,
     /// The refusal shown to the caller.
     pub message: String,
@@ -690,8 +730,20 @@ pub(crate) fn echo(s: &str) -> &str {
 
 /// Collects every non-null value `path` resolves to inside `value` (path grammar: see
 /// [`ParamRule`]). A missing key, `null` or a type that does not fit a segment (`[]` on a
-/// non-array, a field on a non-object) yields nothing.
-fn resolve_path<'v>(value: &'v Value, path: &str, out: &mut Vec<&'v Value>) {
+/// non-array, a field on a scalar) yields nothing, because serde refuses that shape itself.
+///
+/// A field on an array is an error: serde fills a struct from a JSON array by field position,
+/// so the values there would reach the handler unchecked. The error is the part of `path` that
+/// the array was to resolve (a suffix of `path` after a `.`, or `path` itself when `value` is
+/// an array).
+fn resolve_path<'v, 'p>(
+    value: &'v Value,
+    path: &'p str,
+    out: &mut Vec<&'v Value>,
+) -> Result<(), &'p str> {
+    if value.is_array() {
+        return Err(path);
+    }
     let (segment, rest) = match path.split_once('.') {
         Some((segment, rest)) => (segment, Some(rest)),
         None => (path, None),
@@ -703,20 +755,45 @@ fn resolve_path<'v>(value: &'v Value, path: &str, out: &mut Vec<&'v Value>) {
         depth += 1;
     }
     if let Some(field) = value.as_object().and_then(|o| o.get(name)) {
-        expand(field, depth, rest, out);
+        expand(field, depth, rest, out)?;
     }
+    Ok(())
 }
 
 /// Descends `depth` array levels from `value`, then resolves `rest` (or collects the value).
-fn expand<'v>(value: &'v Value, depth: usize, rest: Option<&str>, out: &mut Vec<&'v Value>) {
+/// The error is [`resolve_path`]'s.
+fn expand<'v, 'p>(
+    value: &'v Value,
+    depth: usize,
+    rest: Option<&'p str>,
+    out: &mut Vec<&'v Value>,
+) -> Result<(), &'p str> {
     if depth > 0 {
         for item in value.as_array().into_iter().flatten() {
-            expand(item, depth - 1, rest, out);
+            expand(item, depth - 1, rest, out)?;
         }
     } else if let Some(rest) = rest {
-        resolve_path(value, rest, out);
+        resolve_path(value, rest, out)?;
     } else if !value.is_null() {
         out.push(value);
+    }
+    Ok(())
+}
+
+/// The refusal of a nested struct at `parameter` (a rule path's prefix, such as `sections[]`)
+/// given as a JSON array; `tool_echo` is the tool name as [`echo`] cut it.
+fn positional_struct_violation(tool_echo: &str, parameter: &str) -> LimitViolation {
+    LimitViolation {
+        tool: tool_echo.to_string(),
+        parameter: parameter.to_string(),
+        requested: "an array".to_string(),
+        limit: "a JSON object".to_string(),
+        override_key: "",
+        message: format!(
+            "Parameter `{parameter}` of `{tool_echo}` is an array, but it must be a JSON object \
+             that names each field. Send each value under its field name, as the tool's input \
+             schema lists them."
+        ),
     }
 }
 
@@ -766,9 +843,45 @@ fn tolerance_refusal(path: &str, shown: &str, readable: bool, min: f64, tool_ech
     }
 }
 
+/// What a tool call's arguments are when they are not the JSON object every tool takes:
+/// `Some("an array")`, `Some("a string")`, `Some("a number")` or `Some("a boolean")`; `None` for
+/// an object, and for `null`, which is arguments left out (the empty object).
+///
+/// A derived request struct deserialises a JSON array too, filling its fields in declaration
+/// order, so top-level positional arguments would reach a handler past every check that reads
+/// parameters by name: this catalogue, the row classes and the audit redaction's
+/// [`REDACT_KEYS`](crate::audit::REDACT_KEYS). The governed call path
+/// (`AnalyticsServer::call_tool_with_session`) refuses them in every profile with
+/// [`non_object_message`]; stdio receives arguments as an object map only. This looks at the
+/// top level only: [`Limits::check_tool_arguments`] refuses a nested struct given by position
+/// where a rule goes into it.
+pub(crate) fn non_object_kind(args: &Value) -> Option<&'static str> {
+    match args {
+        Value::Object(_) | Value::Null => None,
+        Value::Array(_) => Some("an array"),
+        Value::String(_) => Some("a string"),
+        Value::Number(_) => Some("a number"),
+        Value::Bool(_) => Some("a boolean"),
+    }
+}
+
+/// The refusal of `tool`'s arguments when they are `kind` (from [`non_object_kind`]).
+pub(crate) fn non_object_message(tool: &str, kind: &str) -> String {
+    format!(
+        "The arguments of `{}` are {kind}, but tool arguments must be a JSON object that names \
+         each parameter. Send each value under its parameter name, as the tool's input schema \
+         lists them.",
+        echo(tool)
+    )
+}
+
 impl Limits {
     /// Checks a tool call's JSON arguments against [`PARAM_RULES`]; returns the first violation
-    /// in [`rules_for`] order. Arguments that are not an object, and the off profile, pass.
+    /// in [`rules_for`] order. The off profile passes everything. Otherwise arguments that are
+    /// not an object ([`non_object_kind`]; `null` passes as the empty object) are refused with
+    /// `parameter` `arguments`, because no rule could resolve against them, and so is a nested
+    /// struct that a rule's path goes into when it is a JSON array (`parameter` its path, such
+    /// as `sections[]`): serde would fill it by field position, past the rules on its fields.
     pub fn check_tool_arguments(&self, tool: &str, args: &Value) -> Result<(), LimitViolation> {
         self.check_with(tool, args, PARAM_RULES)
     }
@@ -839,10 +952,21 @@ impl Limits {
         args: &Value,
         rules: &[ParamRule],
     ) -> Result<(), LimitViolation> {
-        if self.is_off() || !args.is_object() {
+        if self.is_off() {
             return Ok(());
         }
         let tool_echo = echo(tool);
+        // Fail closed: every rule path is a name, which only an object can resolve.
+        if let Some(kind) = non_object_kind(args) {
+            return Err(LimitViolation {
+                tool: tool_echo.to_string(),
+                parameter: "arguments".to_string(),
+                requested: kind.to_string(),
+                limit: "a JSON object".to_string(),
+                override_key: "",
+                message: non_object_message(tool, kind),
+            });
+        }
         let mut values = Vec::new();
         for rule in select_rules(tool, rules) {
             // An `Exempt` checks nothing. It is selected only so that a tool-specific one shadows
@@ -852,7 +976,16 @@ impl Limits {
                 continue;
             }
             values.clear();
-            resolve_path(args, rule.path, &mut values);
+            if let Err(rest) = resolve_path(args, rule.path, &mut values) {
+                // `args` is an object here, so `rest` follows a `.` in the path: what comes
+                // before it is the struct that was given by position.
+                let parameter = rule
+                    .path
+                    .strip_suffix(rest)
+                    .and_then(|p| p.strip_suffix('.'))
+                    .unwrap_or(rule.path);
+                return Err(positional_struct_violation(tool_echo, parameter));
+            }
             for value in &values {
                 self.check_value(tool_echo, rule, value)?;
             }
@@ -1195,8 +1328,135 @@ mod tests {
         );
         // not a number: serde's job
         assert!(h.check_with("t", &json!({"reps": "1e30"}), T).is_ok());
-        // not an object
-        assert!(h.check_with("t", &json!([1, 2]), T).is_ok());
+        // not an object: refused (see `arguments_that_are_not_an_object_are_refused`)
+        assert!(h.check_with("t", &json!([1, 2]), T).is_err());
+    }
+
+    #[test]
+    fn arguments_that_are_not_an_object_are_refused() {
+        // A derived request struct deserialises a JSON array too, filling its fields by
+        // position, so positional arguments must not pass a check that reads them by name.
+        let h = Limits::hosted();
+        for (args, kind) in [
+            (json!(["small", "y", ["x"], 20_000, "pairs", 1]), "an array"),
+            (json!("small"), "a string"),
+            (json!(20_000), "a number"),
+            (json!(true), "a boolean"),
+        ] {
+            let v = h
+                .check_tool_arguments("regression_bootstrap_cov", &args)
+                .unwrap_err();
+            assert_eq!(
+                (
+                    v.tool.as_str(),
+                    v.parameter.as_str(),
+                    v.requested.as_str(),
+                    v.limit.as_str(),
+                ),
+                (
+                    "regression_bootstrap_cov",
+                    "arguments",
+                    kind,
+                    "a JSON object"
+                ),
+                "{args}"
+            );
+            assert_eq!(
+                v.message,
+                format!(
+                    "The arguments of `regression_bootstrap_cov` are {kind}, but tool arguments \
+                     must be a JSON object that names each parameter. Send each value under its \
+                     parameter name, as the tool's input schema lists them."
+                ),
+                "{args}"
+            );
+        }
+        // `null` is arguments left out, the empty object.
+        assert!(h.check_tool_arguments("t", &Value::Null).is_ok());
+        // The off profile checks nothing; the governed call path refuses the shape in every
+        // profile (`AnalyticsServer::call_tool_with_session`).
+        assert!(Limits::off().check_tool_arguments("t", &json!([1])).is_ok());
+        // The tool name is echoed cut, like every other echo.
+        let v = h
+            .check_tool_arguments(&"t".repeat(10_000), &json!([1]))
+            .unwrap_err();
+        assert_eq!(v.tool.len(), ECHO_CHARS);
+        assert!(v.message.len() < 300, "{}", v.message);
+    }
+
+    #[test]
+    fn a_nested_struct_given_by_position_is_refused() {
+        // serde fills a nested request struct from a JSON array by field position too, so a rule
+        // that goes on into a field must not find nothing there and pass.
+        let h = Limits::hosted();
+        let long = "x".repeat(5_000);
+        let cats: Vec<String> = (0..501).map(|i| i.to_string()).collect();
+        for (args, parameter) in [
+            // `items[]` by position: `items[].name` and `items[].spec.cats` cannot resolve.
+            (json!({"items": [[long.clone()]]}), "items[]"),
+            (
+                json!({"items": [{"name": "ok"}, [long.clone()]]}),
+                "items[]",
+            ),
+            // `items[].spec` by position inside an element given by name.
+            (
+                json!({"items": [{"name": "ok", "spec": [cats]}]}),
+                "items[].spec",
+            ),
+        ] {
+            let v = h.check_with("t", &args, T).unwrap_err();
+            assert_eq!(
+                (
+                    v.tool.as_str(),
+                    v.parameter.as_str(),
+                    v.requested.as_str(),
+                    v.limit.as_str(),
+                    v.override_key,
+                ),
+                ("t", parameter, "an array", "a JSON object", ""),
+                "{args}"
+            );
+            assert_eq!(
+                v.message,
+                format!(
+                    "Parameter `{parameter}` of `t` is an array, but it must be a JSON object \
+                     that names each field. Send each value under its field name, as the tool's \
+                     input schema lists them."
+                ),
+                "{args}"
+            );
+        }
+        // The same values by name are checked (and these pass).
+        let by_name = json!({"items": [{"name": "ok", "spec": {"cats": ["a"]}}]});
+        assert!(h.check_with("t", &by_name, T).is_ok());
+        // A scalar or null where a struct belongs cannot be deserialised into one: serde's job.
+        for args in [
+            json!({"items": ["x", 1, true, null]}),
+            json!({"items": [{"spec": "x"}]}),
+        ] {
+            assert!(h.check_with("t", &args, T).is_ok(), "{args}");
+        }
+        // An array at the end of a path, or in an element position, is a value, not a struct.
+        assert!(h.check_with("t", &json!({"grid": [[1, 2]]}), T).is_ok());
+        // An `Exempt` path is never resolved, so it refuses nothing.
+        let free = &[ParamRule {
+            tool: "*",
+            path: "free[].a",
+            rule: Rule::Exempt("test"),
+        }];
+        assert!(h.check_with("t", &json!({"free": [[1]]}), free).is_ok());
+        // The off profile checks nothing.
+        assert!(
+            Limits::off()
+                .check_with("t", &json!({"items": [[long]]}), T)
+                .is_ok()
+        );
+        // The tool name is echoed cut.
+        let v = h
+            .check_with(&"t".repeat(10_000), &json!({"items": [[1]]}), T)
+            .unwrap_err();
+        assert_eq!(v.tool.len(), ECHO_CHARS);
+        assert!(v.message.len() < 300, "{}", v.message);
     }
 
     #[test]

@@ -612,7 +612,7 @@ pub static ROW_RULES: &[RowRule] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Family, LimitViolation, Limits, Rule, rules_for};
+    use super::super::{Family, LimitViolation, Limits, Rule, rules_for, struct_paths};
     use super::{PARAM_RULES, ROW_RULES};
     use serde_json::{Value, json};
 
@@ -1099,6 +1099,120 @@ mod tests {
             .parameter,
             "columns[].distribution.value"
         );
+    }
+
+    /// Arguments that hold a JSON array at rule path `path`, with one element on each array
+    /// level above it.
+    fn array_at(path: &str) -> Value {
+        let mut value = json!([1]);
+        for segment in path.rsplit('.') {
+            let name = segment.trim_end_matches("[]");
+            for _ in 0..(segment.len() - name.len()) / 2 {
+                value = json!([value]);
+            }
+            value = json!({ name: value });
+        }
+        value
+    }
+
+    /// [`struct_paths`] are the structs the check refuses as JSON arrays, so the audit log
+    /// redacts by size exactly the structs that the hosted profile refuses by position.
+    #[test]
+    fn struct_paths_are_the_structs_the_check_refuses_as_arrays() {
+        let mut tools: Vec<&str> = PARAM_RULES.iter().map(|r| r.tool).collect();
+        tools.sort_unstable();
+        tools.dedup();
+        let mut checked = Vec::new();
+        for tool in tools.into_iter().filter(|t| *t != "*") {
+            for path in struct_paths(tool) {
+                let args = array_at(path);
+                let v = hosted(tool, args.clone()).unwrap_err();
+                assert_eq!(
+                    (v.parameter.as_str(), v.limit.as_str()),
+                    (path, "a JSON object"),
+                    "{tool}: {args}"
+                );
+                checked.push(format!("{tool}.{path}"));
+            }
+        }
+        assert_eq!(
+            checked,
+            [
+                "generate_random_data.columns[]",
+                "generate_random_data.columns[].distribution",
+                "generate_report.sections[]",
+                "generate_report.sections[].content[]",
+            ]
+        );
+        // Only `Exempt` rules go into a synthetic control predictor, so it is no struct here.
+        assert!(struct_paths("synthetic_control").is_empty());
+        assert!(struct_paths("no_such_tool").is_empty());
+    }
+
+    /// A nested request struct given by position (serde fills it from a JSON array) is refused
+    /// in the hosted profile instead of passing the rules that address its fields by name; the
+    /// same values by name are checked as before.
+    #[test]
+    fn nested_structs_given_by_position_are_refused_in_hosted_profile() {
+        let items: Vec<Value> = (0..501).map(|i| json!(i.to_string())).collect();
+        let text = |t: &str| json!({"content_type": "text", "text": t});
+        // By name: the content cap applies; a valid section is accepted.
+        assert_eq!(
+            hosted(
+                "generate_report",
+                json!({"title": "t", "sections": [{"title": "s", "content": items}]})
+            )
+            .unwrap_err()
+            .parameter,
+            "sections[].content"
+        );
+        let valid = json!({"title": "t", "sections": [{"title": "s", "content": [text("hello")]}]});
+        assert!(hosted("generate_report", valid).is_ok());
+        let cases: &[(&str, Value, &str)] = &[
+            // The section by position, with 501 content items.
+            (
+                "generate_report",
+                json!({"title": "t", "sections": [["s", items]]}),
+                "sections[]",
+            ),
+            // A content item by position inside a section given by name.
+            (
+                "generate_report",
+                json!({"title": "t", "sections": [
+                    {"title": "s", "content": [text("ok"), ["table", null, null, ["h"], [["r"]]]]}
+                ]}),
+                "sections[].content[]",
+            ),
+            // A column by position, and a distribution by position (its tag first).
+            (
+                "generate_random_data",
+                json!({"n_rows": 10, "columns": [["s".repeat(5_000), {"type": "normal"}]]}),
+                "columns[]",
+            ),
+            (
+                "generate_random_data",
+                json!({"n_rows": 10, "columns": [
+                    {"name": "s", "distribution": ["constant_string", "x".repeat(5_000)]}
+                ]}),
+                "columns[].distribution",
+            ),
+        ];
+        for (tool, args, parameter) in cases {
+            let v = hosted(tool, args.clone()).unwrap_err();
+            assert_eq!(
+                (v.parameter.as_str(), v.limit.as_str(), v.override_key),
+                (*parameter, "a JSON object", ""),
+                "{tool}: {}",
+                v.message
+            );
+            assert!(
+                v.message
+                    .starts_with(&format!("Parameter `{parameter}` of `{tool}` is an array")),
+                "{}",
+                v.message
+            );
+            assert!(Limits::off().check_tool_arguments(tool, args).is_ok());
+        }
     }
 
     /// Every hosted cap is at least 1.5x the tool's default (handler or core default).
@@ -1974,6 +2088,95 @@ mod schema_tests {
                 rr.tool
             );
         }
+    }
+
+    /// The schemas at rule path `path` of `root` (a tool's input schema): per segment, the
+    /// field among the properties of the variants so far, then the element schemas once for
+    /// each `[]`.
+    fn schemas_at<'a>(root: &'a Value, path: &str) -> Vec<&'a Value> {
+        let mut at = vec![root];
+        for segment in path.split('.') {
+            let name = segment.trim_end_matches("[]");
+            at = at
+                .iter()
+                .flat_map(|s| expand(root, s).all)
+                .filter_map(|v| v.get("properties")?.get(name))
+                .collect();
+            for _ in 0..(segment.len() - name.len()) / 2 {
+                at = at
+                    .iter()
+                    .flat_map(|s| element_schemas(&expand(root, s).all))
+                    .collect();
+            }
+        }
+        at
+    }
+
+    /// The struct prefixes of `rules` (the part of a non-`Exempt` rule path before a `.`) that
+    /// `schema` does not resolve, or whose schema admits an array, as `path (rule)` lines, and
+    /// how many prefixes were looked at. The hosted check refuses a JSON array at such a
+    /// prefix, and the audit log redacts one, so a valid array there would be refused.
+    fn array_struct_prefixes(schema: &Value, rules: &[&ParamRule]) -> (usize, Vec<String>) {
+        let (mut checked, mut wrong) = (0, Vec::new());
+        for rule in rules {
+            if matches!(rule.rule, Rule::Exempt(_)) {
+                continue;
+            }
+            for (dot, _) in rule.path.match_indices('.') {
+                let prefix = &rule.path[..dot];
+                checked += 1;
+                let at = schemas_at(schema, prefix);
+                if at.is_empty() {
+                    wrong.push(format!("{prefix} (rule {}): no such field", rule.path));
+                } else if at.iter().any(|s| is_array(&expand(schema, s))) {
+                    wrong.push(format!("{prefix} (rule {}): admits an array", rule.path));
+                }
+            }
+        }
+        (checked, wrong)
+    }
+
+    #[test]
+    fn no_struct_a_rule_goes_into_admits_an_array() {
+        let (mut checked, mut wrong) = (0, Vec::new());
+        for (tool, schema) in tools() {
+            let (n, w) = array_struct_prefixes(&schema, &rules_for(&tool));
+            checked += n;
+            wrong.extend(w.into_iter().map(|w| format!("{tool}.{w}")));
+        }
+        assert!(
+            wrong.is_empty(),
+            "a rule path goes on into a field that is not a struct: the hosted check refuses \
+             (and the audit log redacts) a JSON array there, so a valid array would be refused; \
+             rule the field itself, or exempt the path below it:\n{}",
+            wrong.join("\n")
+        );
+        // generate_random_data and generate_report: 18 prefixes of 10 rules.
+        assert!(checked >= 18, "{checked} prefixes");
+        // The check finds a struct that may also be an array (an untagged Vec-or-struct enum)
+        // and a prefix that is not a field; untyped any-JSON passes.
+        let schema = json!({"type": "object", "properties": {
+            "items": {"type": "array", "items": {"anyOf": [
+                {"type": "object", "properties": {"name": {"type": "string"}}},
+                {"type": "array", "items": {"type": "string"}}
+            ]}},
+            "spec": {"description": "any JSON"}
+        }});
+        let rule = |path| ParamRule {
+            tool: "t",
+            path,
+            rule: Rule::Max(Family::StringBytes),
+        };
+        let (items, typo, spec) = (rule("items[].name"), rule("itmes[].name"), rule("spec.v"));
+        let (n, wrong) = array_struct_prefixes(&schema, &[&items, &typo, &spec]);
+        assert_eq!(n, 3);
+        assert_eq!(
+            wrong,
+            [
+                "items[] (rule items[].name): admits an array",
+                "itmes[] (rule itmes[].name): no such field"
+            ]
+        );
     }
 
     #[test]

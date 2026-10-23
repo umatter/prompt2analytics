@@ -237,6 +237,8 @@ POST /api/tools/{tool_name}
 
 Paths resolve inside the server's data directory (`P2A_DATA_ROOT`), and in open public mode inside the session's own directory; a relative path is the normal form.
 
+`arguments` is a JSON object that names each parameter, as the tool's input schema lists them; leaving it out, or sending `null`, is the empty object. Any other value, such as the values in a JSON array by position, answers 400 `invalid_arguments` before the tool runs. The `args` of a WebSocket `tool` message are refused the same way (an `error` with code `invalid_arguments`), and so is a tool call a model makes in the chat loop (the model gets the refusal as the tool's error). In the chat loop an argument string that is not JSON, such as one cut off at the model's token limit, is refused as a string instead of running with the tool's defaults; an empty one is the empty object. With request limits on (the hosted profile), an object inside the arguments that the limits read fields of, such as a `generate_report` section, must be an object too: sent as an array it answers 422 `limit_exceeded`, with `details.parameter` its path (`sections[]`) and `details.limit` `a JSON object`.
+
 **Response** (captured):
 ```json
 {"success":true,"data":{"success":true,"content":[{"type":"text","text":"Successfully loaded dataset 'sales'\n\nDimensions: 5 rows x 3 columns\n\nColumns:\n  - price (f64): 0 nulls (0.0%)\n  - sqft (i64): 0 nulls (0.0%)\n  - bedrooms (i64): 0 nulls (0.0%)"}]}}

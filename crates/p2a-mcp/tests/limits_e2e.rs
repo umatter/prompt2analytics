@@ -54,6 +54,43 @@ fn padded_search_arguments() -> serde_json::Value {
     serde_json::Value::Object(args)
 }
 
+/// The data value of the [`positional_struct_arguments`] columns.
+const STRUCT_VALUE: &str = "SECRET-CONSTANT-4f2a";
+
+/// `generate_random_data` arguments with a nested struct given by position,
+/// which serde fills by field position: a column's distribution as
+/// `[tag, value]`, then a whole column as `[name, distribution]`. The data
+/// value they carry (`value` by name) has no name in the request to be
+/// redacted by. Both are refused in the hosted profile and run when off.
+fn positional_struct_arguments() -> [serde_json::Value; 2] {
+    let distribution = serde_json::json!(["constant_string", STRUCT_VALUE]);
+    [
+        serde_json::json!({"n_rows": 5, "name": "g1", "columns": [
+            {"name": "s", "distribution": distribution}
+        ]}),
+        serde_json::json!({"n_rows": 5, "name": "g2", "columns": [["s", distribution]]}),
+    ]
+}
+
+/// The audit `lines` of the [`positional_struct_arguments`] calls, in order,
+/// all with `outcome`: each struct given by position is replaced by its size,
+/// and the data value is nowhere in the log `text`.
+fn assert_positional_structs_redacted(text: &str, lines: &[serde_json::Value], outcome: &str) {
+    assert!(!text.contains(STRUCT_VALUE), "{text}");
+    assert_eq!(lines.len(), 2, "{text}");
+    for line in lines {
+        assert_eq!(line["tool_name"], "generate_random_data", "{line}");
+        assert_eq!(line["outcome"], outcome, "{line}");
+    }
+    let column = &lines[0]["arguments"]["columns"][0];
+    assert_eq!(column["name"], "s", "{text}");
+    assert_eq!(column["distribution"], "[redacted: 2 items]", "{text}");
+    assert_eq!(
+        lines[1]["arguments"]["columns"][0], "[redacted: 2 items]",
+        "{text}"
+    );
+}
+
 /// The audit line of a [`padded_search_arguments`] call kept `query` and
 /// left one padding key out in its place.
 fn assert_query_kept_ahead_of_padding(line: &serde_json::Value) {
@@ -669,6 +706,341 @@ mod http_paths {
         assert_eq!(lines[0]["duration_ms"], 0);
     }
 
+    /// Positional (array) arguments, which a derived request struct would
+    /// deserialise by field position. The first two are above a hosted cap
+    /// when sent by name: the replications cap, and the dense row class at
+    /// `dense_rows=50` on a 60-row dataset.
+    fn positional_cases() -> [(&'static str, Value); 3] {
+        [
+            (
+                "regression_bootstrap_cov",
+                json!(["small", "y", ["x1"], 20_000, "pairs", 1]),
+            ),
+            (
+                "ml_hierarchical",
+                json!(["small", ["x1", "x2"], 2, null, "ward"]),
+            ),
+            ("set_seed", json!([42])),
+        ]
+    }
+
+    /// The refusal of positional arguments names the tool and what it got.
+    fn assert_positional_refusal(tool: &str, error: &str) {
+        let start = format!(
+            "The arguments of `{tool}` are an array, but tool arguments must be a JSON object"
+        );
+        assert!(error.starts_with(&start), "{tool}: {error}");
+    }
+
+    /// Every positional case is refused (400 `invalid_arguments`) on the
+    /// HTTP route and on the governed LLM-tool and WebSocket origins, and
+    /// none of them runs (no global seed is set).
+    async fn assert_positional_arguments_refused(app: &Router, state: &AppState, sid: &str) {
+        use p2a_mcp::exec::{CallOrigin, ToolCallError};
+        let session = state.session_manager.get_session(sid).await.unwrap();
+        for (tool, args) in positional_cases() {
+            let (status, body) = post_tool(app, sid, tool, args.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{tool}: {body}");
+            assert_eq!(body["code"], "invalid_arguments", "{tool}: {body}");
+            assert_positional_refusal(tool, body["error"].as_str().unwrap());
+            for origin in [CallOrigin::LlmTool, CallOrigin::WebSocket] {
+                let called = state
+                    .governor
+                    .call(
+                        state.server.clone(),
+                        session.clone(),
+                        tool,
+                        args.clone(),
+                        origin,
+                    )
+                    .await;
+                match called {
+                    Err(ToolCallError::InvalidArguments(e)) => assert_positional_refusal(tool, &e),
+                    other => panic!("{tool} from {origin:?}: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(*session.global_seed.read().await, None, "set_seed ran");
+    }
+
+    #[test]
+    fn positional_arguments_are_refused_on_every_governed_path() {
+        let cfg = open_public_config();
+        let l = Limits::hosted()
+            .with_overrides(&["dense_rows=50".to_string()])
+            .unwrap();
+        run(l, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            insert_dataset(&state, &sid, "small", 60).await;
+            // Control: the same values by name are refused by the limits.
+            let by_name = [
+                (
+                    "regression_bootstrap_cov",
+                    json!({"dataset": "small", "y": "y", "x": ["x1"], "n_boot": 20_000}),
+                ),
+                (
+                    "ml_hierarchical",
+                    json!({"dataset": "small", "columns": ["x1", "x2"], "n_clusters": 2}),
+                ),
+            ];
+            for (tool, args) in by_name {
+                let (status, body) = post_tool(&app, &sid, tool, args).await;
+                assert_eq!(status, 422, "{tool}: {body}");
+                assert_eq!(body["code"], "limit_exceeded", "{tool}: {body}");
+            }
+            assert_positional_arguments_refused(&app, &state, &sid).await;
+        });
+    }
+
+    #[test]
+    fn positional_arguments_are_refused_when_limits_are_off() {
+        // Tool arguments are a JSON object in every profile, as over stdio.
+        let cfg = local_config();
+        run(Limits::off(), async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            insert_dataset(&state, &sid, "small", 60).await;
+            assert_positional_arguments_refused(&app, &state, &sid).await;
+        });
+    }
+
+    /// A nested request struct sent by position (a `generate_report`
+    /// section as an array) is refused in open public mode, naming its path,
+    /// instead of passing the caps on its fields; by name the same 501
+    /// content items are refused by the content cap, and a valid section
+    /// runs.
+    #[test]
+    fn nested_structs_by_position_are_refused_in_open_public_mode() {
+        let cfg = open_public_config();
+        run(limits::resolve(&cfg).unwrap(), async {
+            let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let items: Vec<Value> = (0..501)
+                .map(|i| json!({"content_type": "text", "text": format!("Paragraph {i}.")}))
+                .collect();
+            for (args, parameter, limit) in [
+                (
+                    json!({"title": "t", "sections": [{"title": "s", "content": items}]}),
+                    "sections[].content",
+                    "500",
+                ),
+                (
+                    json!({"title": "t", "sections": [["s", items]]}),
+                    "sections[]",
+                    "a JSON object",
+                ),
+            ] {
+                let (status, body) = post_tool(&app, &sid, "generate_report", args).await;
+                assert_eq!(status, 422, "{body}");
+                assert_eq!(body["code"], "limit_exceeded", "{body}");
+                assert_eq!(body["details"]["parameter"], parameter, "{body}");
+                assert_eq!(body["details"]["limit"], limit, "{body}");
+            }
+            let text = json!({"content_type": "text", "text": "The estimate is 0.42."});
+            let valid = json!({"title": "t", "sections": [{"title": "s", "content": [text]}]});
+            let (status, body) = post_tool(&app, &sid, "generate_report", valid).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["success"], true, "{body}");
+        });
+    }
+
+    #[test]
+    fn absent_arguments_are_the_empty_object() {
+        let cfg = local_config();
+        run(Limits::off(), async {
+            let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            // No `arguments` key: a tool whose parameters are all optional
+            // runs, as over stdio, and so does a tool without parameters.
+            for tool in ["get_seed", "list_datasets"] {
+                let request = post(&format!("/api/tools/{tool}"), json!({"session_id": sid}));
+                let (status, body) = send(&app, request).await;
+                assert_eq!(status, 200, "{tool}: {body}");
+                assert_eq!(body["data"]["success"], true, "{tool}: {body}");
+            }
+        });
+    }
+
+    /// A refused positional call is audited with its size only: its values
+    /// have no parameter names to be redacted by.
+    #[test]
+    fn audit_redacts_positional_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = with_audit(local_config(), &dir);
+        let lines = run(Limits::off(), async {
+            let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let csv = "email,income\nalice@example.org,51000\nbob@example.org,73000\n";
+            let (status, body) = post_tool(&app, &sid, "create_dataset", json!(["pii", csv])).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            let (status, body) = post_tool(
+                &app,
+                &sid,
+                "munge_filter",
+                json!(["pii", "email", "eq", "alice@example.org", "f"]),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            super::audit_lines(&cfg.audit).await
+        });
+        let text = std::fs::read_to_string(&cfg.audit.path).unwrap();
+        assert!(!text.contains("alice@example.org"), "{text}");
+        assert!(!text.contains("51000"), "{text}");
+        assert_eq!(lines.len(), 2, "{text}");
+        for (line, (tool, items)) in lines
+            .iter()
+            .zip([("create_dataset", 2), ("munge_filter", 5)])
+        {
+            assert_eq!(line["tool_name"], tool, "{line}");
+            assert_eq!(line["outcome"], "invalid_arguments", "{line}");
+            assert_eq!(
+                line["arguments"],
+                format!("[redacted: {items} items]"),
+                "{line}"
+            );
+        }
+    }
+
+    /// A nested struct given by position is audited with its size only,
+    /// in open public mode, where the limits refuse it, and in local mode,
+    /// where it runs (each from the governor's capture site).
+    #[test]
+    fn audit_redacts_nested_structs_given_by_position() {
+        for (open_public, status, outcome) in [(true, 422, "limit_exceeded"), (false, 200, "ok")] {
+            let dir = tempfile::tempdir().unwrap();
+            let base = if open_public {
+                open_public_config()
+            } else {
+                local_config()
+            };
+            let cfg = with_audit(base, &dir);
+            let lines = run(limits::resolve(&cfg).unwrap(), async {
+                let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+                let sid = new_session(&app).await;
+                for args in super::positional_struct_arguments() {
+                    let (got, body) = post_tool(&app, &sid, "generate_random_data", args).await;
+                    assert_eq!(got, status, "{body}");
+                }
+                super::audit_lines(&cfg.audit).await
+            });
+            let text = std::fs::read_to_string(&cfg.audit.path).unwrap();
+            super::assert_positional_structs_redacted(&text, &lines, outcome);
+        }
+    }
+
+    /// An Ollama stub on loopback whose answer to the first request of a turn
+    /// is one `regression_bootstrap_cov` call for 20,000 replications on
+    /// `small`: by name under `http://<addr>/obj`, by position under
+    /// `http://<addr>/arr`. A request that carries a tool result gets a plain
+    /// answer.
+    #[cfg(feature = "llm")]
+    async fn bootstrap_stub() -> std::net::SocketAddr {
+        fn answer(by_position: bool, request: Value) -> axum::Json<Value> {
+            let answered = request["messages"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|m| m["role"] == "tool"));
+            if answered {
+                return axum::Json(json!({
+                    "message": {"role": "assistant", "content": "done"},
+                    "done": true
+                }));
+            }
+            let arguments = if by_position {
+                json!(["small", "y", ["x1"], 20_000, "pairs", 1])
+            } else {
+                json!({"dataset": "small", "y": "y", "x": ["x1"], "n_boot": 20_000, "seed": 1})
+            };
+            axum::Json(json!({
+                "message": {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "regression_bootstrap_cov", "arguments": arguments}}
+                ]},
+                "done": true
+            }))
+        }
+        let router = Router::new()
+            .route(
+                "/obj/api/chat",
+                axum::routing::post(
+                    |axum::Json(r): axum::Json<Value>| async move { answer(false, r) },
+                ),
+            )
+            .route(
+                "/arr/api/chat",
+                axum::routing::post(
+                    |axum::Json(r): axum::Json<Value>| async move { answer(true, r) },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
+    }
+
+    /// The LLM tool loop end to end, on both chat routes: a model's tool call
+    /// by name is refused by the hosted replications cap, and the same call
+    /// with positional arguments (as an OpenAI argument string such as
+    /// `"[\"small\", ...]"` parses, or as Ollama and Anthropic pass a value
+    /// through) is refused for its shape instead of running.
+    #[cfg(feature = "llm")]
+    #[test]
+    fn llm_chat_refuses_positional_tool_arguments() {
+        let cfg = local_config();
+        // Hosted, with loopback allowed so that the provider reaches the stub.
+        let l = Limits::hosted()
+            .with_overrides(&["llm_allow_loopback=true".to_string()])
+            .unwrap();
+        run(l, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            insert_dataset(&state, &sid, "small", 60).await;
+            let addr = bootstrap_stub().await;
+            let chat = |shape: &str| {
+                json!({
+                    "session_id": sid, "message": "bootstrap it", "interpret": false,
+                    "provider": {"provider_type": "ollama", "model": "stub",
+                                 "base_url": format!("http://{addr}/{shape}")}
+                })
+            };
+            let positional = "The arguments of `regression_bootstrap_cov` are an array, but tool \
+                              arguments must be a JSON object";
+            for (shape, refusal) in [
+                (
+                    "obj",
+                    "Parameter `n_boot` = 20000 exceeds this server's limit of 10000",
+                ),
+                ("arr", positional),
+            ] {
+                let (status, body) = send(&app, post("/api/llm/chat", chat(shape))).await;
+                assert_eq!(status, StatusCode::OK, "{shape}: {body}");
+                let results = &body["data"]["message"]["tool_results"];
+                assert_eq!(results.as_array().map(Vec::len), Some(1), "{shape}: {body}");
+                assert_eq!(results[0]["is_error"], true, "{shape}: {body}");
+                let content = results[0]["content"].as_str().unwrap();
+                assert!(content.contains(refusal), "{shape}: {content}");
+            }
+            // The streaming route runs the other executor.
+            let resp = app
+                .clone()
+                .oneshot(post("/api/llm/chat/stream", chat("arr")))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                axum::body::to_bytes(resp.into_body(), usize::MAX),
+            )
+            .await
+            .expect("the stream ends")
+            .unwrap();
+            let stream = String::from_utf8_lossy(&bytes);
+            assert!(stream.contains(positional), "{stream}");
+            assert!(!stream.contains("Replications: 20000"), "{stream}");
+        });
+    }
+
     #[test]
     fn x1_local_mode_is_unlimited() {
         // The local default (limits off) runs a value above the hosted cap.
@@ -905,6 +1277,33 @@ mod stdio_path {
         assert_eq!(lines[0]["origin"], "stdio");
         assert_query_kept_ahead_of_padding(&lines[0]);
         drop(logger);
+    }
+
+    /// The stdio `call_tool` redacts a nested struct given by position like
+    /// the governor: refused when hosted, run when off, its value never in
+    /// the entry.
+    #[test]
+    fn stdio_audit_redacts_nested_structs_given_by_position() {
+        use p2a_mcp::audit::AuditLogger;
+        use std::sync::Arc;
+        for (l, refused, outcome) in [
+            (Limits::hosted(), true, "limit_exceeded"),
+            (Limits::off(), false, "ok"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = audit_cfg(&dir);
+            let logger = Arc::new(AuditLogger::new(&cfg).unwrap());
+            for args in positional_struct_arguments() {
+                let server = AnalyticsServer::new().with_audit_logger(logger.clone());
+                let msg = run(l.clone(), stdio_call(server, "generate_random_data", args));
+                assert_eq!(msg.get("error").is_some(), refused, "{msg}");
+                assert_ne!(msg["result"]["isError"], true, "{msg}");
+            }
+            let lines = run(Limits::off(), audit_lines(&cfg));
+            let text = std::fs::read_to_string(&cfg.path).unwrap();
+            assert_positional_structs_redacted(&text, &lines, outcome);
+            drop(logger);
+        }
     }
 
     #[test]

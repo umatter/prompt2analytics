@@ -54,6 +54,16 @@ impl OpenAIProvider {
         }
     }
 
+    /// A provider on `client` instead of the guarded one, for tests that answer from a stub on
+    /// loopback, which the egress guard admits for Ollama only.
+    #[cfg(test)]
+    pub(crate) fn with_client(config: ProviderConfig, client: Client) -> Self {
+        Self {
+            client: Some(client),
+            ..Self::with_settings(config, &LlmSettings::current())
+        }
+    }
+
     /// The HTTP client, or `NotAvailable` when it could not be built.
     fn client(&self) -> Result<&Client, LlmError> {
         self.client.as_ref().ok_or_else(|| {
@@ -108,8 +118,7 @@ impl OpenAIProvider {
                                 r#type: "function".to_string(),
                                 function: OpenAIFunctionCall {
                                     name: tc.name.clone(),
-                                    arguments: serde_json::to_string(&tc.arguments)
-                                        .unwrap_or_default(),
+                                    arguments: tc.arguments_text(),
                                 },
                             })
                             .collect()
@@ -368,9 +377,7 @@ impl OpenAIProvider {
         let tool_calls = choice.message.tool_calls.map(|tcs| {
             tcs.into_iter()
                 .map(|tc| {
-                    // Parse arguments from JSON string
-                    let arguments: Value =
-                        serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
+                    let arguments = ToolCall::parse_arguments(&tc.function.arguments);
                     ToolCall {
                         id: tc.id,
                         name: tc.function.name,
@@ -505,7 +512,7 @@ impl OpenAIProvider {
             let mut calls: Vec<(usize, ToolCall)> = tool_calls_map
                 .into_iter()
                 .map(|(idx, (id, name, arguments))| {
-                    let args: Value = serde_json::from_str(&arguments).unwrap_or(Value::Null);
+                    let args = ToolCall::parse_arguments(&arguments);
                     (
                         idx,
                         ToolCall {
@@ -932,5 +939,22 @@ mod tests {
         assert_eq!(openai_messages.len(), 2);
         assert_eq!(openai_messages[0].role, "system");
         assert_eq!(openai_messages[1].role, "user");
+    }
+
+    #[test]
+    fn function_arguments_are_the_text_the_model_sent() {
+        // A call whose text was not JSON goes back as that text, not quoted
+        // as a JSON string; any other value as its JSON text.
+        use crate::llm::provider::tool_call_tests::{CUT, calls_with_every_argument_shape};
+        let provider = OpenAIProvider::new(ProviderConfig::default());
+        let sent = provider.to_openai_messages(&[calls_with_every_argument_shape()]);
+        let arguments: Vec<&str> = sent[0]
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|tc| tc.function.arguments.as_str())
+            .collect();
+        assert_eq!(arguments, [r#"{"lag_max":5}"#, CUT, "[5]", "null"]);
     }
 }
