@@ -480,7 +480,7 @@ Row classes and tolerance (Off: none):
 |---|---|---|
 | `dense_rows` | dataset rows for `ml_hierarchical`, `ml_cutree`, `ml_dbscan`, `regression_smooth_spline` | 5,000 |
 | `cubic_rows` | dataset rows for `ml_tsne`, `ml_cmdscale`, `sar_model`, `sem_model`, `sar_probit_model`, `sem_probit_model`, `spatial_panel_ml`, `spatial_panel_gmm` | 2,000 |
-| `quadratic_rows` | dataset rows for `propensity_matching`, `heterogeneity_test`, `ml_svm`, `regression_loess` | 50,000 |
+| `quadratic_rows` | dataset rows for `propensity_matching`, `heterogeneity_test`, `ml_svm`, `regression_loess`, `ts_changepoint` | 50,000 |
 | `min_tolerance` | smallest convergence tolerance (`tol`, `eps`, ...) | 1e-15 |
 
 Named budgets:

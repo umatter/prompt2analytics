@@ -812,8 +812,8 @@ pub static PARAM_RULES: &[ParamRule] = {
             "ts_changepoint",
             "penalty",
             Exempt(
-                "changepoint penalty; a large value only stops PELT's pruning, the O(n^2) worst \
-                 case that data without changes reach at the default",
+                "changepoint penalty; PELT's work is at most quadratic in the rows whatever its \
+                 value, and quadratic_rows bounds the rows",
             ),
         ),
         p("ts_garch_fit", "p", Max(ModelOrder)),
@@ -895,6 +895,11 @@ pub static ROW_RULES: &[RowRule] = &[
     row("ml_svm", RowClass::Quadratic),
     // Quadratic: each of the n points is fitted on its ceil(span * n) nearest neighbours.
     row("regression_loess", RowClass::Quadratic),
+    // Quadratic: at each t PELT examines every candidate changepoint that survived pruning, and
+    // on a series without changes, or under a large penalty, it prunes none, so its work is
+    // O(n^2) with no checkpoint. Binary segmentation (at most 10 changepoints, one scan each)
+    // is linear and shares the rule.
+    row("ts_changepoint", RowClass::Quadratic),
 ];
 
 #[cfg(test)]
@@ -1711,6 +1716,35 @@ mod tests {
         }
     }
 
+    /// PELT's work is quadratic in the rows when it prunes nothing, so `ts_changepoint` is
+    /// row-limited by the quadratic class in the hosted profile and not at all when limits are
+    /// off.
+    #[test]
+    fn ts_changepoint_rows_are_capped_by_the_quadratic_class() {
+        let h = Limits::hosted();
+        let v = h.check_rows("ts_changepoint", 50_001, 1).unwrap_err();
+        assert_eq!(
+            (
+                v.parameter.as_str(),
+                v.requested.as_str(),
+                v.limit.as_str(),
+                v.override_key
+            ),
+            ("dataset", "50001", "50000", "quadratic_rows")
+        );
+        assert!(
+            v.message
+                .contains("`ts_changepoint` has 50001 rows and 1 columns")
+                && v.message.contains("at most 50000 rows"),
+            "{}",
+            v.message
+        );
+        assert!(h.check_rows("ts_changepoint", 50_000, 1).is_ok());
+        for rows in [50_000, 50_001] {
+            assert!(Limits::off().check_rows("ts_changepoint", rows, 1).is_ok());
+        }
+    }
+
     #[test]
     fn every_capped_scalar_rule_refuses_1e15_and_off_accepts_it() {
         for r in PARAM_RULES {
@@ -1760,7 +1794,7 @@ mod tests {
                 "{tool}.{path} needs a length rule"
             );
         }
-        assert_eq!(ROW_RULES.len(), 16);
+        assert_eq!(ROW_RULES.len(), 17);
     }
 }
 
