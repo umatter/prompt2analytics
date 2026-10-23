@@ -370,6 +370,91 @@ async fn deleting_a_conversation_releases_its_bytes_without_a_reseed() {
     assert_eq!(db.session_bytes_entry("s1"), None);
 }
 
+/// How far the session's byte counter is from what the store holds, as a
+/// failure text (`None` when they agree).
+async fn counter_gap(db: &DbConnection, session_id: &str) -> Option<String> {
+    let stored = db.session_stored_bytes(session_id).await.unwrap();
+    let counted = db.session_bytes_entry(session_id);
+    (counted != Some(stored)).then(|| format!("counted {counted:?} bytes, stored {stored}"))
+}
+
+/// A write of an existing tool call counts only the bytes its texts add over
+/// the stored texts they replace: an update that keeps the arguments does
+/// not count them again, a result or error that replaces another counts the
+/// difference, and near the budget the stored texts' bytes are room for
+/// their replacements. Before, every update counted all the texts it wrote,
+/// so the counter rose above the store with each one, and an update that
+/// kept the arguments of a session at its budget cut them to nothing.
+#[tokio::test]
+async fn tool_call_writes_count_only_the_bytes_they_add() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1000),
+        ..Default::default()
+    })
+    .await;
+    let c = db.create_conversation("s1", "t").await.unwrap();
+    let m = db
+        .add_message(&c.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let call = ToolCall::new(
+        m.id_string(),
+        c.id_string(),
+        "regression_ols".into(),
+        "a".repeat(40),
+    );
+    let call = db.create_tool_call(&call).await.unwrap();
+    let id = call.id_string();
+    let mut problems = Vec::new();
+    let mut step = async |what: &str| {
+        if let Some(gap) = counter_gap(&db, "s1").await {
+            problems.push(format!("{what}: {gap}"));
+        }
+    };
+    step("create").await;
+
+    let mut kept = call.clone();
+    kept.result = Some("r".repeat(10));
+    db.update_tool_call(&kept).await.unwrap();
+    step("an update that keeps the arguments").await;
+    db.complete_tool_call(&id, &"s".repeat(20), 3)
+        .await
+        .unwrap();
+    step("a result that replaces another").await;
+    db.fail_tool_call(&id, &"e".repeat(5), 3).await.unwrap();
+    step("an error").await;
+    db.mark_tool_call_running(&id).await.unwrap();
+    step("a status change").await;
+    let mut emptied = db.get_tool_call(&id).await.unwrap();
+    (emptied.arguments, emptied.result, emptied.error) = ("b".repeat(10), None, None);
+    db.update_tool_call(&emptied).await.unwrap();
+    step("an update that drops the texts").await;
+    assert!(problems.is_empty(), "{problems:#?}");
+
+    // A session at its budget: the stored arguments are room for themselves.
+    let full = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100),
+        ..Default::default()
+    })
+    .await;
+    let c = full.create_conversation("s1", "t").await.unwrap(); // 1
+    let m = full
+        .add_message(&c.id_string(), "assistant", "")
+        .await
+        .unwrap();
+    let call = ToolCall::new(
+        m.id_string(),
+        c.id_string(),
+        "regression_ols".into(),
+        "x".repeat(99),
+    );
+    let mut call = full.create_tool_call(&call).await.unwrap(); // 100
+    call.status = super::models::ToolCallStatus::Running;
+    let updated = full.update_tool_call(&call).await.unwrap();
+    assert_eq!(updated.arguments, "x".repeat(99));
+    assert_eq!(counter_gap(&full, "s1").await, None);
+}
+
 /// A conversation of `session_id` holding twenty messages and a tool call;
 /// returns its id.
 async fn filled_conversation(db: &DbConnection, session_id: &str, title: &str) -> String {
@@ -1277,6 +1362,197 @@ async fn title_and_archive_writes_take_the_conversations_turn() {
     let conv = db.get_conversation(&id).await.unwrap();
     assert_eq!((conv.title.as_str(), conv.is_archived), ("renamed", true));
     assert_eq!(db.store_turns_in_use(), 0);
+}
+
+/// The writes of an existing tool-call row.
+#[derive(Debug, Clone, Copy)]
+enum ToolCallWrite {
+    /// [`DbConnection::update_tool_call`].
+    Update,
+    /// [`DbConnection::mark_tool_call_running`].
+    Running,
+    /// [`DbConnection::complete_tool_call`].
+    Complete,
+    /// [`DbConnection::fail_tool_call`].
+    Fail,
+}
+
+impl ToolCallWrite {
+    const ALL: [ToolCallWrite; 4] = [Self::Update, Self::Running, Self::Complete, Self::Fail];
+
+    /// Run this write on `call`.
+    async fn run(self, db: &DbConnection, call: &ToolCall) -> Result<ToolCall, DbError> {
+        let id = call.id_string();
+        match self {
+            Self::Update => {
+                let mut done = call.clone();
+                done.complete("updated".into());
+                db.update_tool_call(&done).await
+            }
+            Self::Running => db.mark_tool_call_running(&id).await,
+            Self::Complete => db.complete_tool_call(&id, "ok", 3).await,
+            Self::Fail => db.fail_tool_call(&id, "failed", 3).await,
+        }
+    }
+
+    /// Run this write on `call` in a task of its own.
+    fn spawn(
+        self,
+        db: &DbConnection,
+        call: &ToolCall,
+    ) -> tokio::task::JoinHandle<Result<ToolCall, DbError>> {
+        let (db, call) = (db.clone(), call.clone());
+        tokio::spawn(async move { self.run(&db, &call).await })
+    }
+}
+
+/// The one tool call of conversation `id` (made by [`filled_conversation`]).
+async fn only_tool_call(db: &DbConnection, id: &str) -> ToolCall {
+    let mut calls = db.get_tool_calls_for_conversation(id).await.unwrap();
+    assert_eq!(calls.len(), 1);
+    calls.remove(0)
+}
+
+/// A tool-call write sent while a clear of its conversation runs in the
+/// store (a chat stream finishing a tool call while its client clears the
+/// conversation) waits for the clear's turn and then finds the row gone
+/// (`NotFound`, and nothing counted against the byte budget): on RocksDB,
+/// which fails one of two conflicting transactions, the clear does not
+/// fail. Before, the tool-call writes took no turn, the write committed on
+/// a row the clear's transaction had deleted, and the clear failed whole on
+/// a write conflict.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_write_during_a_clear_waits_for_it() {
+    let mut problems = Vec::new();
+    for session_db_bytes in [None, Some(100_000)] {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = PersistenceLimits {
+            session_db_bytes,
+            ..Default::default()
+        };
+        let db = engine_db(Engine::RocksDb, dir.path(), limits).await;
+        slow_message_deletes(&db).await;
+        for write in ToolCallWrite::ALL {
+            let case = format!("{write:?} (budget {session_db_bytes:?})");
+            let id = filled_conversation(&db, "s1", &format!("{write:?}")).await;
+            let call = only_tool_call(&db, &id).await;
+            let clear = tokio::spawn({
+                let (db, id) = (db.clone(), id.clone());
+                async move { db.clear_messages(&id).await }
+            });
+            assert!(turn_has_users(&db, &id, 1).await);
+            // Let the clear send its transaction, which then runs through 21
+            // slow message deletes. What the write and the clear return does
+            // not depend on this pause; without it, the write could commit
+            // before the transaction starts and not conflict without its turn.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let written = write.spawn(&db, &call).await.unwrap();
+            let cleared = clear.await.unwrap();
+            if !matches!(cleared, Ok(21)) {
+                problems.push(format!("{case}: clear: {cleared:?}"));
+            }
+            if !matches!(written, Err(DbError::NotFound(_))) {
+                problems.push(format!("{case}: write: {written:?}"));
+            }
+            let left = db.get_tool_calls_for_conversation(&id).await.unwrap();
+            if !left.is_empty() {
+                problems.push(format!("{case}: {} tool calls left", left.len()));
+            }
+            if session_db_bytes.is_some() {
+                let stored = db.session_stored_bytes("s1").await.unwrap();
+                let counted = db.session_bytes_entry("s1");
+                if counted != Some(stored) {
+                    problems.push(format!(
+                        "{case}: counted {counted:?} bytes, stored {stored}"
+                    ));
+                }
+            }
+            assert_eq!(db.store_turns_in_use(), 0);
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// A tool-call write holds its conversation's turn until the store has
+/// written it, also when its caller is dropped part way (a chat stream
+/// whose client disconnects): a clear sent meanwhile waits for it, and both
+/// succeed on RocksDB, with the byte counter in step with the store. Before,
+/// the write took no turn, and the clear's transaction, which then ran
+/// alongside it, failed on a write conflict when it committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clear_during_a_tool_call_write_waits_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = PersistenceLimits {
+        session_db_bytes: Some(100_000),
+        ..Default::default()
+    };
+    let db = engine_db(Engine::RocksDb, dir.path(), limits).await;
+    // The clear's transaction outlasts the write's, so a write that ran
+    // alongside it commits while it is still open.
+    slow_writes(&db, "tool_calls", "UPDATE", 300).await;
+    slow_message_deletes(&db).await;
+    for write in ToolCallWrite::ALL {
+        // Waited for.
+        let id = filled_conversation(&db, "s1", &format!("{write:?}")).await;
+        let call = only_tool_call(&db, &id).await;
+        let written = write.spawn(&db, &call);
+        assert!(
+            turn_has_users(&db, &id, 1).await,
+            "{write:?} takes its conversation's turn"
+        );
+        let cleared = db.clear_messages(&id).await;
+        let written = written.await.unwrap();
+        assert!(written.is_ok(), "{write:?}: write: {written:?}");
+        assert!(matches!(cleared, Ok(21)), "{write:?}: clear: {cleared:?}");
+        assert_eq!(rows_in(&db, "tool_calls").await, 0, "{write:?}");
+        assert_counter_matches_store(&db, "s1").await;
+        assert_eq!(db.store_turns_in_use(), 0);
+
+        // Dropped part way.
+        let id = filled_conversation(&db, "s1", &format!("dropped {write:?}")).await;
+        let call = only_tool_call(&db, &id).await;
+        drop_while_running(write, write.run(&db, &call)).await;
+        let cleared = db.clear_messages(&id).await;
+        assert!(
+            matches!(cleared, Ok(21)),
+            "dropped {write:?}: clear: {cleared:?}"
+        );
+        assert_eq!(rows_in(&db, "tool_calls").await, 0, "dropped {write:?}");
+        assert_counter_matches_store(&db, "s1").await;
+        assert_eq!(db.store_turns_in_use(), 0);
+    }
+}
+
+/// A tool-call create sent while its conversation's delete runs in the
+/// store waits for the delete's turn and is then `NotFound`, so no tool call
+/// is left behind for the orphan sweep. Before, the create checked that the
+/// conversation existed outside the turn, while the delete had not yet
+/// committed, and wrote its row after the delete's had gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_create_during_a_delete_leaves_no_row() {
+    for engine in ENGINES {
+        let dir = tempfile::tempdir().unwrap();
+        let db = engine_db(engine, dir.path(), PersistenceLimits::default()).await;
+        slow_message_deletes(&db).await;
+        let id = filled_conversation(&db, "s1", "gone").await;
+        let message_id = db.get_messages(&id).await.unwrap()[0].id_string();
+        let delete = tokio::spawn({
+            let (db, id) = (db.clone(), id.clone());
+            async move { db.delete_conversation(&id).await }
+        });
+        assert!(turn_has_users(&db, &id, 1).await);
+        // As in a_tool_call_write_during_a_clear_waits_for_it.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let call = ToolCall::new(message_id, id.clone(), "regression_ols".into(), "{}".into());
+        let created = db.create_tool_call(&call).await;
+        delete.await.unwrap().unwrap();
+        assert!(
+            matches!(created, Err(DbError::NotFound(_))),
+            "{engine:?}: create: {created:?}"
+        );
+        assert_eq!(rows_in(&db, "tool_calls").await, 0, "{engine:?}");
+        assert_eq!(db.store_turns_in_use(), 0);
+    }
 }
 
 /// A message add or save, or a conversation creation, whose caller is

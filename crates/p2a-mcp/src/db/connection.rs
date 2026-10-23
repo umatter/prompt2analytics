@@ -119,33 +119,37 @@ pub(crate) const MAX_REMEMBERED_DELETES: usize = 100_000;
 
 type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
 
-/// One call's turn at changing a conversation's rows (a conversation delete
-/// or clear, a message add or content update, or a title or archive change:
+/// One call's turn at changing a conversation's rows (a conversation delete or
+/// clear, a message add or content update, a title or archive change, or a
+/// tool-call create, update or status change:
 /// [`conversation_turn`](DbConnection::conversation_turn)), or at creating a
 /// conversation in a session ([`session_turn`](DbConnection::session_turn));
 /// the next call's turn starts when it is dropped.
 ///
-/// Two deletes of one conversation that run at the same time conflict in
-/// the store: the in-memory engine hands both the same rows (neither
-/// fails), so each would release their bytes from the `session_db_bytes`
-/// counter, and RocksDB fails one of them with a write conflict. Taking
-/// turns makes the later call find nothing instead. Every write of an
-/// existing conversation's row takes its turn, so the counter update after a
-/// message add or content update never loses a write conflict to another
-/// write of that row in this process. A message add holds the turn from its
+/// Two deletes of one conversation that run at the same time conflict in the
+/// store: the in-memory engine hands both the same rows (neither fails), so
+/// each would release their bytes from the `session_db_bytes` counter, and
+/// RocksDB fails one of them with a write conflict. Taking turns makes the
+/// later call find nothing instead. Every write of an existing conversation's
+/// row takes its turn, so the counter update after a message add or content
+/// update never loses a write conflict to another write of that row in this
+/// process. Message adds and content updates and tool-call creates, updates
+/// and status changes take it too, so none commits on a row while a delete or
+/// clear deletes it (on RocksDB that would fail the delete or clear whole with
+/// a write conflict). A message add holds the turn from its
 /// `messages_per_conversation` check until the message is written, and a
 /// conversation creation holds its session's turn from the
 /// `conversations_per_session` check until the row is written, so concurrent
-/// writes cannot pass a cap together. Both checks count the rows in the
-/// store under the turn (`count_messages`, `count_conversations`): the
-/// conversation's stored `message_count` is a display counter, recounted
-/// under the turn after each message add or content update, and never what
-/// a cap is checked against. A message add, a content update and a title
-/// change count their bytes against `session_db_bytes` and write them in the
-/// conversation's turn, so a delete or clear never runs between the count
-/// and the write. The byte counter is per process, and so are the turns. An
-/// entry leaves the map with its last holder or waiter, also when a waiting
-/// call is cancelled.
+/// writes cannot pass a cap together. Both checks count the rows in the store
+/// under the turn (`count_messages`, `count_conversations`): the
+/// conversation's stored `message_count` is a display counter, recounted under
+/// the turn after each message add or content update, and never what a cap is
+/// checked against. A message add, a content update, a title change and a
+/// tool-call write (create, update, result or error) count their bytes against
+/// `session_db_bytes` and write them in the conversation's turn, so a delete
+/// or clear never runs between the count and the write. The byte counter is
+/// per process, and so are the turns. An entry leaves the map with its last
+/// holder or waiter, also when a waiting call is cancelled.
 ///
 /// Every call that takes a turn holds it in a task of its own
 /// ([`run_to_end`]) until the store has finished the writes made in it. The
@@ -414,18 +418,45 @@ impl DbConnection {
         session_id: &str,
         text: String,
     ) -> Result<String, DbError> {
+        let mut fitted = self.fit_session_texts(session_id, vec![text], 0).await?;
+        Ok(fitted.pop().unwrap_or_default())
+    }
+
+    /// Server-produced `texts`, of a write that replaces stored texts of
+    /// `replaced` bytes, cut in order to the bytes the session has left under
+    /// `session_db_bytes` plus `replaced` (each possibly to the empty string)
+    /// and counted; never refused. `texts` unchanged without the budget. The
+    /// counter holds the replaced texts too until the caller, once the write
+    /// has replaced them, releases their bytes
+    /// ([`release_session_bytes`](Self::release_session_bytes)); a write that
+    /// fails leaves both counted. Call it, the write and the release in the
+    /// conversation's [`StoreTurn`], so that no delete or clear releases the
+    /// replaced texts in between.
+    pub(crate) async fn fit_session_texts(
+        &self,
+        session_id: &str,
+        texts: Vec<String>,
+        replaced: u64,
+    ) -> Result<Vec<String>, DbError> {
         let Some(limit) = self.limits.session_db_bytes else {
-            return Ok(text);
+            return Ok(texts);
         };
         self.with_session_bytes(session_id, |used| {
-            let room = usize::try_from(limit.saturating_sub(*used)).unwrap_or(usize::MAX);
-            let stored = if text.len() > room {
-                truncate_to(&text, room)
-            } else {
-                text
-            };
-            *used = used.saturating_add(stored.len() as u64);
-            stored
+            let mut room = limit.saturating_sub(*used).saturating_add(replaced);
+            texts
+                .into_iter()
+                .map(|text| {
+                    let fits = usize::try_from(room).unwrap_or(usize::MAX);
+                    let stored = if text.len() > fits {
+                        truncate_to(&text, fits)
+                    } else {
+                        text
+                    };
+                    room = room.saturating_sub(stored.len() as u64);
+                    *used = used.saturating_add(stored.len() as u64);
+                    stored
+                })
+                .collect()
         })
         .await
     }

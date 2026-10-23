@@ -199,13 +199,19 @@ impl DbConnection {
     /// ([`failed_statement`]).
     ///
     /// With `measure`, the deletes return the rows they removed (`RETURN
-    /// BEFORE`) and their messages and text bytes are counted (the title's
-    /// too when the conversation row is deleted); without it only whether the
+    /// BEFORE`) and their messages and text bytes are counted (the title's too
+    /// when the conversation row is deleted); without it only whether the
     /// conversation row was deleted is returned. Callers hold the
     /// conversation's [`StoreTurn`](super::connection::StoreTurn) until this
-    /// returns, in a task the caller's drop does not stop ([`run_to_end`]),
-    /// so two of these never run on one conversation at the same time, and
-    /// the later one finds nothing.
+    /// returns, in a task the caller's drop does not stop ([`run_to_end`]), so
+    /// two of these never run on one conversation at the same time, and the
+    /// later one finds nothing. Every other write of the conversation's rows
+    /// (a message add or content update, a title or archive change, a
+    /// tool-call create, update or status change) takes that turn too and
+    /// holds it until the store has finished, so none commits on a row while
+    /// this transaction deletes it: on RocksDB, which validates an optimistic
+    /// transaction's writes when it commits, one that did would fail this
+    /// whole with a write-conflict error (nothing deleted; a retry succeeds).
     async fn delete_conversation_rows(
         &self,
         id: &str,
