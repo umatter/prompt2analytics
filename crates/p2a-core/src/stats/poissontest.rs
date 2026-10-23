@@ -471,6 +471,17 @@ const MAX_BRACKET_STEPS: usize = 128;
 /// Uses the exact conditional method: given n = x1 + x2 (checked by the caller), X₁ is binomial
 /// with odds p / (1 - p) = r·T₁ / T₂. The bounds are searched on those odds, which depend on the
 /// counts and `conf_level` only, and then multiplied by T₂ / T₁, as R's `poisson.test` does.
+///
+/// When both counts are > 0, exact tails put the lower odds bound strictly below the count ratio
+/// x[0] / x[1] and the upper strictly above it: at p = x[0] / n the binomial's mean x[0] is also
+/// its median, so both tails at x[0] are at least 1/2, more than alpha / 2. A bound from
+/// [`find_odds_bound`] at or beyond the count ratio on the wrong side therefore means that statrs'
+/// CDF misjudged the tail (near x[0] = x[1] from totals of about 4e7, for any counts from about
+/// 3e14), and it is widened to 0 (lower) or infinity (upper). So, for every input, the odds
+/// interval contains x[0] / x[1] and is never inverted, and the interval returned, those odds
+/// times T₂ / T₁, contains the estimate. It need not contain the true interval: x = [2e7, 2e7]
+/// gives (0, 1.00062) for R's (0.99938, 1.00062), and x = [5e15, 1] gives (1e15, ∞) for R's
+/// (8.97e14, 1.97e17).
 fn rate_ratio_ci(x1: u64, x2: u64, n: u64, t1: f64, t2: f64, conf_level: f64) -> (f64, f64) {
     let alpha = 1.0 - conf_level;
 
@@ -482,20 +493,34 @@ fn rate_ratio_ci(x1: u64, x2: u64, n: u64, t1: f64, t2: f64, conf_level: f64) ->
     // The p-value equals alpha/2 at the CI bounds
 
     // Lower bound: find r such that P(X₁ >= x₁ | H₀: ratio=r) = alpha/2
-    let lower = if x1 == 0 {
+    let mut lower = if x1 == 0 {
         0.0
     } else {
-        rate_ratio_from_odds(find_odds_bound(x1, x2, n, alpha / 2.0, true), t1, t2)
+        find_odds_bound(x1, x2, n, alpha / 2.0, true)
     };
 
     // Upper bound: find r such that P(X₁ <= x₁ | H₀: ratio=r) = alpha/2
-    let upper = if x2 == 0 {
+    let mut upper = if x2 == 0 {
         f64::INFINITY
     } else {
-        rate_ratio_from_odds(find_odds_bound(x1, x2, n, alpha / 2.0, false), t1, t2)
+        find_odds_bound(x1, x2, n, alpha / 2.0, false)
     };
 
-    (lower, upper)
+    // A bound on the wrong side of the count ratio comes only from a misjudged tail (see above).
+    if x1 > 0 && x2 > 0 {
+        let odds_est = x1 as f64 / x2 as f64;
+        if lower >= odds_est {
+            lower = 0.0;
+        }
+        if upper <= odds_est {
+            upper = f64::INFINITY;
+        }
+    }
+
+    (
+        rate_ratio_from_odds(lower, t1, t2),
+        rate_ratio_from_odds(upper, t1, t2),
+    )
 }
 
 /// The rate ratio r = s·T₂ / T₁ for odds `s` in [0, ∞]: a bound found by [`find_odds_bound`], or
@@ -526,23 +551,55 @@ fn rate_ratio_from_odds(s: f64, t1: f64, t2: f64) -> f64 {
 /// start points come from the counts (the estimate x[0] / max(x[1], 1)); the bracketing loops
 /// walk from them no further than [`ODDS_MIN`] and [`ODDS_MAX`], fixed odds whatever the counts
 /// are, and the tail is evaluated at odds clamped to that range. So the search resolves bounds
-/// in [1e-15, 1e15] only. A bound beyond that range leaves a bracket whose ends do not straddle
-/// alpha, and the conservative limit comes back instead, without an error: 0 for a lower bound
-/// below 1e-15, [`ODDS_MIN`] for an upper bound below it, [`ODDS_MAX`] (or the estimate, if that
-/// is smaller) for a lower bound above 1e15, and infinity for an upper bound above it. The
-/// interval then still contains the estimate and the true interval; such a limit only widens
-/// it, never inverts it: x = [1, 1e16] gives (0, 1e-15) for R's (2.53e-18, 5.57e-16), and
-/// x = [5e13, 1] an upper bound of infinity for R's 1.97e15. At 95% one bound is beyond the
-/// range from totals of about 2.5e13, and earlier at higher levels (at 0.9999 the upper odds of
-/// x = [m, 1] pass 1e15 from m ≈ 5e10). Within the range, resolution degrades as s nears either
-/// limit (see [`ODDS_MIN`] and [`ODDS_MAX`]): at 0.9999, x = [5e10, 1] has an upper bound of
-/// 9.48e14, 5.2% below R's 9.99975e14. Apart from these limits, a bound is only as accurate as
-/// statrs' binomial CDF, whose incomplete beta function loses digits as n grows. At n = 1e11 the
-/// upper bound is off by about 3e-5 and the lower by 4.7e-4 (x = [1, 1e11]), 3.2e-4 of that from
-/// the CDF and 1.6e-4 from the rounding of 1 − p. At totals of 1e13 to 1e14 the two causes put
-/// bounds up to about 2% off (x = [5e13, 1]: lower bound 1.9% above R's, most of it from the
-/// CDF). Near x[0] = x[1] the CDF fails from totals of about 4e7, and even an in-range interval
-/// can come back inverted: x = [1e8, 1e8] gives (1.0000038, 0.9999962) (STAT-60 / T3-WP40).
+/// in [1e-15, 1e15] only. At 95% a bound can lie beyond that range from totals of about 2.5e13
+/// (x = [m, 1] or [1, m]; for x[1] = 0 or x[0] = 0, from about 3.7e15), and earlier at higher
+/// levels (at 0.9999 the upper odds of x = [m, 1] pass 1e15 from m ≈ 5e10).
+///
+/// A bound beyond the range leaves a bracket whose ends do not straddle alpha, and a limit comes
+/// back instead, without an error: 0 for a lower bound below 1e-15, [`ODDS_MIN`] for an upper
+/// bound below it, [`ODDS_MAX`] for a lower bound above 1e15, and infinity for an upper bound
+/// above it. The limit lies on the conservative side of the true bound, so it never inverts the
+/// interval and the interval still contains the estimate, as long as statrs' tail at the limit
+/// is on the right side of alpha. It is at totals up to about 1e13: x = [1, 1e10] at 0.999999
+/// gives a lower bound of 0 for R's 5.0e-17, and x = [1e10, 1] an upper bound of infinity for
+/// R's 2.0e16. At larger totals a bound within the CDF's error (below) of a limit can come back
+/// near the limit on either side of the true bound, and from about 3e14 a limit can come back
+/// for a bound well inside the range. The other bound keeps the search's own error and can lie
+/// inside the true interval (x = [3e13, 1]: lower bound 1.35% above R's). A lower bound comes
+/// back as x[0] / max(x[1], 1) instead of [`ODDS_MAX`] when that is smaller. With x[1] > 0 that
+/// is the estimate, and it happens only when the CDF misjudges the tail, since an accurate one
+/// puts the lower bound below the estimate ([`rate_ratio_ci`] then widens it to 0).
+///
+/// Within the range four things limit a bound:
+/// - Resolution degrades as s nears either limit (see [`ODDS_MIN`] and [`ODDS_MAX`]): at 0.9999,
+///   x = [5e10, 1] has an upper bound of 9.48e14, 5.2% below R's 9.99975e14.
+/// - The bisection stops once the tail is within 1e-10 · alpha of alpha, or once the bracket is
+///   narrower than 1e-10 · (hi + lo + 1e-10). The second rule is coarser than 1e-10 relative only
+///   for odds below about 1e-10, where it is still finer than the resolution near [`ODDS_MIN`].
+/// - The lower bound's tail is 1 − F(x[0] − 1), and statrs' CDF F is close to 1 there and keeps
+///   only 2^-53 absolute, so that tail is good only to about 2^-54 / alpha relative. That matters
+///   only at levels close to 1: at conf_level 1 − 2e-12, x = [5, 5] has a lower bound 6.5e-6
+///   above R's, and an upper bound 2e-11 off.
+/// - Otherwise a bound is only as accurate as statrs' binomial CDF, whose incomplete beta
+///   function loses digits as n grows. At n = 1e11 the upper bound is off by about 3e-5 and the
+///   lower by 4.7e-4 (x = [1, 1e11]), 3.2e-4 of that from the CDF and 1.6e-4 from the rounding of
+///   1 − p. At totals of 3e13 to 1e14 bounds are up to about 2% off when x[0] or x[1] is 1
+///   (x = [5e13, 1]: lower bound 1.85% above R's), and more when a count is 0: about 2.5% at
+///   3e13, 8% at 5e13 and 7% at 1e14 (x = [0, 5e13]: upper bound 8% below R's).
+///
+/// Near x[0] = x[1] from totals of about 4e7, and for any counts from about 2e14 (a zero count)
+/// or 3e14, statrs' binomial CDF is off by tens of percent or more, and the result is unreliable
+/// in every direction (STAT-60 / T3-WP40):
+/// - bounds inside the range are tens of percent off (x = [0, 2e14]: upper bound 25% below R's;
+///   x = [1, 3e14]: upper bound 28% above; x = [1e15, 1]: lower bound 30% above);
+/// - from about 3e14 the limit returns above fire for bounds inside the range, and the limit is
+///   then not conservative (x = [5e15, 1]: lower bound 1e15, R 8.97e14; x = [0, 3e15]: upper
+///   bound 1e-15, R 1.23e-15; x = [3e14, 0]: lower bound 3e14, which is x[0], R 8.1e13);
+/// - a bound can come back on the wrong side of the estimate, which would invert the interval or
+///   leave the estimate outside it (x = [1e8, 1e8]: (1.0000038, 0.9999962); x = [1, 5e15]:
+///   (5.6e-15, 1e-15) around 2e-16; x = [1000, 1e15]: (9.25e-13, 9.54e-13) around 1e-12).
+///   [`rate_ratio_ci`] widens such a bound to 0 or infinity.
+///
 /// Every loop has a fixed iteration cap, and the search returns 0, a finite s > 0 or infinity
 /// for any input.
 fn find_odds_bound(x1: u64, x2: u64, n: u64, alpha: f64, find_lower: bool) -> f64 {
@@ -617,8 +674,11 @@ fn find_odds_bound(x1: u64, x2: u64, n: u64, alpha: f64, find_lower: bool) -> f6
     // started beyond it, with the bound further out (the lower bound's hi also stops at ten times
     // the estimate, which a lower bound does not reach). The tail there is evaluated at the
     // clamped odds, and the bisection would converge on a bracket end. Return the limit on the
-    // conservative side instead, so the interval still holds the estimate and the true interval.
-    // A bound inside the range never gets here, and its bisection is unchanged.
+    // conservative side instead, so the limit side lies outside the true bound. With exact tails
+    // a bound inside the range never gets here. Where statrs' tail is off (by percents from
+    // totals of about 3e13, by tens of percent from about 2e14) a bound inside the range near a
+    // limit can, and from about 3e14 one well inside it can too; the limit returned is then not
+    // conservative.
     if find_lower {
         if compute_tail_p(lo) > alpha {
             return 0.0;
@@ -640,7 +700,7 @@ fn find_odds_bound(x1: u64, x2: u64, n: u64, alpha: f64, find_lower: bool) -> f6
         let mid = (lo + hi) / 2.0;
         let p = compute_tail_p(mid);
 
-        if (p - alpha).abs() < 1e-10 {
+        if (p - alpha).abs() <= 1e-10 * alpha {
             return mid;
         }
 
@@ -1196,14 +1256,15 @@ mod tests {
     /// can resolve, 1e-15 and 1e15. Expected values are R's qbeta. For the first four, which have
     /// x[1] = 1, that is qbeta(alpha/2, 1, x[0] + 1), the quantile of 1 - p, equal to the closed
     /// form 1/q - 1 with (1 - q)^n = 1 - alpha/2; poisson.test forms these bounds from p near 1
-    /// and is 5.1e-7 to 1.9e-6 off them. The four come out 2.8e-7 to 2.6e-6 above. Two things
-    /// limit that. The bisection stops once the tail is within 1e-10 of alpha/2, and the tail is
-    /// about proportional to 1/s here, so that rule bounds the error at about 1e-10 / (alpha/2)
-    /// relative: 2e-8 at 0.99, 2e-6 at 0.9999, 2e-5 at 0.99999. And near odds of 2e10 the 1 - p
-    /// that statrs works from is good to about 1.1e-6 (see ODDS_MAX). So 1e-5 is asserted; for the
-    /// 0.99999 case it holds not by that bound but because the bisection's stopping point is
-    /// deterministic (measured 2.6e-6). At totals of 1e11 statrs' binomial CDF is itself off: the
-    /// two bounds there are 2.9e-5 and 4.7e-5 from R, so 1e-4 (STAT-60 / T3-WP40).
+    /// and is 5.1e-7 to 1.9e-6 off them. The four come out 2.8e-7 to 6.0e-7 off, one of them
+    /// below. They are limited by the 1 - p that statrs works from, good near odds s to about
+    /// 5.6e-17 * (1 + s) relative (see ODDS_MAX): 1.1e-6 at 2e10, 2.2e-6 at 4e10. So 1e-5 is
+    /// asserted. (The bisection used to stop once the tail was within 1e-10 of alpha/2, which
+    /// bounded the error only at about 1e-10 / (alpha/2) relative, 2e-5 at 0.99999, and the four
+    /// came out 2.8e-7 to 2.6e-6 above; the rule is relative now, see
+    /// test_validate_poisson_rate_ratio_interval_at_levels_near_one.) At totals of 1e11 statrs'
+    /// binomial CDF is itself off: the two bounds there are 2.9e-5 and 4.7e-5 from R, so 1e-4
+    /// (STAT-60 / T3-WP40).
     #[test]
     fn test_poisson_rate_ratio_interval_beyond_old_odds_limits() {
         let upper = |x: [u64; 2], t: [f64; 2], conf_level: f64| {
@@ -1246,28 +1307,50 @@ mod tests {
     /// x = [1e16, 1] gave (1.0e16, 1.0e18), R (1.79e15, 3.95e17), and x = [5e13, 1] an upper bound
     /// of 5.0e15, R 1.97e15. Where a loop stopped at the limit the bound came back near it, on
     /// the wrong side: at 0.9999, x = [1, 1e11] gave a lower bound of 1.0e-15, R 5.0e-16, and
-    /// x = [1e11, 1] an upper bound of 1.28e15, R 2.0e15. Such a bound is now the conservative
-    /// limit, 0 or ODDS_MIN below the range and ODDS_MAX or infinity above it, so the interval
-    /// holds both the estimate and R's interval. Expected values are R's qbeta.
+    /// x = [1e11, 1] an upper bound of 1.28e15, R 2.0e15. Such a bound is now the limit, 0 or
+    /// ODDS_MIN below the range and ODDS_MAX or infinity above it, so the limit lies outside R's
+    /// bound and the interval contains the estimate; the resolved bound matches R's to the
+    /// asserted tolerance. That holds while statrs' tail at the limit is on the right side of
+    /// alpha / 2, which it is at totals up to about 1e13: x = [1, 1e10] and [1e10, 1] at 0.999999
+    /// are such cases. Expected values are R's qbeta, and for x[1] = 1 or x[0] = 1 the closed form
+    /// it agrees with.
     #[test]
     fn test_poisson_rate_ratio_interval_beyond_resolved_odds_is_conservative() {
         let test = |x: [u64; 2], level: f64| {
             poisson_test(&x, &[1.0, 1.0], 1.0, PoissonAlternative::TwoSided, level)
                 .unwrap_or_else(|e| panic!("x = {x:?}: {e}"))
         };
+        // One bound beyond the range at a total where statrs' CDF is accurate: R's lower bound of
+        // x = [1, 1e10] is 5.0e-17 and its upper bound of x = [1e10, 1] 2.0e16. The resolved
+        // bounds are 3.0e-7 from R's (the CDF at n = 1e10), hence 1e-6.
+        let (lower, upper) = test([1, 10_000_000_000], 0.999999).conf_int;
+        assert_eq!(lower, 0.0, "x = [1, 1e10] lower");
+        assert_relative(upper, 1.742221502680587e-9, 1e-6, "x = [1, 1e10] upper");
+        let (lower, upper) = test([10_000_000_000, 1], 0.999999).conf_int;
+        assert_eq!(upper, f64::INFINITY, "x = [1e10, 1] upper");
+        assert_relative(lower, 5.739798288916748e8, 1e-6, "x = [1e10, 1] lower");
+        // Totals of 1e16 and 1e17 are beyond where statrs' CDF is accurate. These cases come out
+        // as the limits because its tails at the limits happen to fall on the right side of
+        // alpha / 2 there; exact tails would give the same, since the true bounds lie beyond the
+        // range too. So they pin that result, and a change to the tail or the range (T3-WP40)
+        // has to revisit them. At 5e15 to 9e15 statrs' tails fall on the wrong side, and
+        // x = [1, 5e15] and [5e15, 1] came back inverted (see
+        // test_poisson_rate_ratio_interval_contains_the_estimate).
         // Both bounds below 1e-15: x = [3, 1e17] has R's (6.19e-18, 8.77e-17).
         for x in [[1, 10_000_000_000_000_000], [3, 100_000_000_000_000_000]] {
             let result = test(x, 0.95);
             assert_eq!(result.conf_int, (0.0, ODDS_MIN), "x = {x:?}");
             assert!(result.estimate < ODDS_MIN, "x = {x:?}: {}", result.estimate);
         }
-        // Both bounds above 1e15: x = [1e17, 1] has R's (1.79e16, 3.95e18).
+        // Both bounds above 1e15: for x = [1e17, 1] the closed form gives (1.79e16, 3.95e18). (R
+        // itself loses the 1 in 1e17 + 1 and computes the bounds of x = [1e17, 0].)
         for x in [[10_000_000_000_000_000, 1], [100_000_000_000_000_000, 1]] {
             let result = test(x, 0.95);
             assert_eq!(result.conf_int, (ODDS_MAX, f64::INFINITY), "x = {x:?}");
             assert!(result.estimate > ODDS_MAX, "x = {x:?}: {}", result.estimate);
         }
-        // One bound beyond the range; the other is resolved and keeps its value.
+        // One bound beyond the range; the other is resolved and keeps its value. Both resolved
+        // bounds are 1.2e-5 from R's, inside R's interval (the CDF at n = 1e11).
         let (lower, upper) = test([1, 100_000_000_000], 0.9999).conf_int;
         assert_eq!(lower, 0.0, "x = [1, 1e11] lower");
         assert_relative(upper, 1.2506671286e-10, 1e-4, "x = [1, 1e11] upper");
@@ -1277,6 +1360,7 @@ mod tests {
         // At 95% the upper bound of x = [m, 1] passes 1e15 from m of about 2.5e13 (R 1.18e15,
         // 1.97e15 and 3.95e15 here). The resolved lower bounds are 0.5% to 1.9% from R's, which is
         // how accurate statrs' binomial CDF is at these totals (STAT-60 / T3-WP40), hence 3e-2.
+        // Two of them (3e13, 5e13) lie above R's, inside its interval.
         for (x, lower_r) in [
             ([30_000_000_000_000, 1], 5.3844077761e12),
             ([50_000_000_000_000, 1], 8.9740129602e12),
@@ -1285,6 +1369,100 @@ mod tests {
             let (lower, upper) = test(x, 0.95).conf_int;
             assert_eq!(upper, f64::INFINITY, "x = {x:?}");
             assert_relative(lower, lower_r, 3e-2, &format!("x = {x:?} lower"));
+        }
+    }
+
+    /// PR-24: near x[0] = x[1] from totals of about 4e7, and for any counts from about 3e14,
+    /// statrs' binomial CDF misjudges the tail, and the interval search returned a bound on the
+    /// wrong side of the estimate. The interval came back inverted or without the estimate in it:
+    /// x = [1, 5e15] gave (5.6e-15, 1e-15) around 2e-16, x = [5e15, 1] (1e15, 1.8e14) around 5e15,
+    /// x = [1000, 1e15] (9.25e-13, 9.54e-13) around 1e-12, x = [2e7, 2e7] (1.0000009, 1.00062)
+    /// around 1 and x = [1e8, 1e8] (1.0000038, 0.9999962). Exact tails never put a bound on that
+    /// side (see rate_ratio_ci), so such a bound is widened to 0 or infinity now, and the interval
+    /// contains the estimate and is not inverted. It need not contain R's interval, and which
+    /// bound is widened depends on statrs' errors, which a T3-WP40 tail fix may change, so only
+    /// the containment is asserted, for T = [1, 1] and T = [1, 3], plus the one bound statrs gets
+    /// right in a case near x[0] = x[1] (x = [2e7, 2e7]: R's upper bound 1.000620037177023).
+    #[test]
+    fn test_poisson_rate_ratio_interval_contains_the_estimate() {
+        for x in [
+            [1, 5_000_000_000_000_000],
+            [5_000_000_000_000_000, 1],
+            [1000, 1_000_000_000_000_000],
+            [1000, 500_000_000_000_000],
+            [300_000_000_000_000, 1],
+            [1, 7_000_000_000_000_000],
+            [7_000_000_000_000_000, 1],
+            [10, 10_000_000_000_000_000],
+            [100_000_000_000_000_000, 99],
+            [20_000_000, 20_000_000],
+            [100_000_000, 100_000_000],
+        ] {
+            for t in [[1.0, 1.0], [1.0, 3.0]] {
+                let result = poisson_test(&x, &t, 1.0, PoissonAlternative::TwoSided, 0.95)
+                    .unwrap_or_else(|e| panic!("x = {x:?}, T = {t:?}: {e}"));
+                let ((lower, upper), estimate) = (result.conf_int, result.estimate);
+                assert!(
+                    lower <= estimate && estimate <= upper,
+                    "x = {x:?}, T = {t:?}: ({lower:e}, {upper:e}) around {estimate:e}"
+                );
+            }
+        }
+        let upper = interval([20_000_000, 20_000_000], [1.0, 1.0]).1;
+        assert_relative(upper, 1.000620037177023, 1e-9, "x = [2e7, 2e7] upper");
+    }
+
+    /// PR-24: the bisection stopped once the tail was within 1e-10 of alpha / 2, an absolute rule
+    /// that bounds a bound's error only at about 1e-10 / (alpha / 2) relative. At levels close to
+    /// 1 that outweighed everything else: at conf_level 1 - 1e-12, x = [5, 5] gave (0.00195,
+    /// 800.5) for R's (0.00115, 870.1), both bounds inside R's interval, and at 1 - 1e-9 it gave
+    /// (0.00464, 225.4) and x = [50, 30] (0.4102, 8.136). The rule is relative now, within
+    /// 1e-10 * alpha / 2. Expected values are R's qbeta (on p for the lower bound, on 1 - p for
+    /// the upper). What limits these bounds now is the lower bound's tail, 1 - F(x[0] - 1) with
+    /// statrs' F close to 1, which keeps only 2^-53 absolute (see find_odds_bound). At 1 - 1e-12
+    /// and 1 - 1e-9, alpha / 2 lies halfway between multiples of 2^-53, so the rounding of
+    /// 1 - F still decides the comparison with alpha / 2 correctly, and the bounds are within
+    /// 4e-11 of R's. At 1 - 2e-12 it lies on one, and the lower bound is 6.5e-6 above R's, hence
+    /// 1e-5 there.
+    #[test]
+    fn test_validate_poisson_rate_ratio_interval_at_levels_near_one() {
+        for (x, level, lower_r, upper_r, lower_tolerance) in [
+            (
+                [5, 5],
+                1.0 - 1e-12,
+                1.149281586913931e-3,
+                870.1087804645126,
+                1e-6,
+            ),
+            (
+                [5, 5],
+                1.0 - 1e-9,
+                4.604373078948037e-3,
+                217.1848333863663,
+                1e-6,
+            ),
+            (
+                [50, 30],
+                1.0 - 1e-9,
+                0.4076236485346079,
+                8.139273793300017,
+                1e-6,
+            ),
+            (
+                [5, 5],
+                1.0 - 2e-12,
+                1.320591987988113e-3,
+                757.2361555240643,
+                1e-5,
+            ),
+        ] {
+            let (lower, upper) =
+                poisson_test(&x, &[1.0, 1.0], 1.0, PoissonAlternative::TwoSided, level)
+                    .unwrap_or_else(|e| panic!("x = {x:?}, conf_level = {level}: {e}"))
+                    .conf_int;
+            let what = format!("x = {x:?}, conf_level = {level}");
+            assert_relative(lower, lower_r, lower_tolerance, &format!("{what}: lower"));
+            assert_relative(upper, upper_r, 1e-6, &format!("{what}: upper"));
         }
     }
 
