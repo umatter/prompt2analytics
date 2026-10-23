@@ -999,7 +999,8 @@ fn band_lists(
                                 && total_links >= cap
                             {
                                 return Err(EconError::ResourceLimit(format!(
-                                    "the distance band links more than {cap} pairs of observations"
+                                    "the distance band has more than {cap} neighbour links \
+                                     (each pair of observations counts twice)"
                                 )));
                             }
                             total_links += 1;
@@ -1136,8 +1137,10 @@ mod tests {
     fn distance_band_stops_at_the_link_cap() {
         let c = coords();
         let err = Neighbors::try_from_distance(&c, 0.0, 1e9, Some(500)).unwrap_err();
+        // the cap counts directed links, not pairs
         assert!(
-            matches!(&err, EconError::ResourceLimit(m) if m.contains("500")),
+            matches!(&err, EconError::ResourceLimit(m)
+                if m.contains("more than 500 neighbour links") && m.contains("counts twice")),
             "{err}"
         );
         // 30 * 29 links
