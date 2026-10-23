@@ -422,11 +422,13 @@ impl QuantileTree {
     /// original row order.
     ///
     /// The chosen split is the one the earlier partition-per-threshold search
-    /// (two-pass child variances) chose, except at exact ties in the
-    /// within-child sum of squares: rounding may break those differently, so a
-    /// response with repeated values (counts, integers, Likert scores) can grow
-    /// a different, equally good tree. Seeded output on continuous data is
-    /// unchanged.
+    /// (two-pass child variances) chose, except where two candidates have
+    /// equal within-child sums of squares, exactly or to within rounding: the
+    /// two searches round differently and may break those ties either way, so
+    /// a response with repeated values (counts, integers, Likert scores) can
+    /// grow a different, equally good tree. Depth is capped separately at
+    /// `MAX_TREE_DEPTH`; see the `# Reproducibility` section of
+    /// [`quantile_rf`].
     fn find_best_split(
         &self,
         x: &ArrayView2<f64>,
@@ -689,12 +691,13 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
 ///
 /// # Reproducibility
 ///
-/// A fixed `seed` grows the same forest on every run. It also grows the forest
-/// that releases up to v0.1.3 grew for that seed, with two exceptions. Where
-/// two candidate splits have equal within-child sums of squares, exactly or to
+/// A fixed `seed` grows the same forest on every run. For every input this
+/// release accepts (see `# Errors`), it also grows the forest that releases
+/// v0.1.0 to v0.1.3 grew for that seed, with two exceptions. Where two
+/// candidate splits have equal within-child sums of squares, exactly or to
 /// within rounding (which a response with repeated values such as counts,
 /// integers or Likert scores can produce), either equally good split may be
-/// taken. A tree that would grow past depth 512 now stops there (see
+/// taken. A tree that those releases grew past depth 512 stops there (see
 /// [`QuantileRfConfig::max_depth`]).
 ///
 /// # Example
@@ -1040,13 +1043,14 @@ pub fn predict_quantiles(
     predict_quantiles_at(model, x_new, &model.quantiles)
 }
 
-/// Predict at specific quantiles (may differ from training quantiles).
+/// Always errs: QRF needs the training responses to predict; use
+/// [`predict_quantiles_with_y_at`] to predict at chosen quantiles.
 ///
 /// # Arguments
 ///
 /// * `model` - Fitted QuantileRfResult
 /// * `x_new` - New feature matrix (n_samples x n_features)
-/// * `quantiles` - Quantiles to predict (can differ from training)
+/// * `quantiles` - Quantiles to validate (each must be in (0, 1))
 ///
 /// # Returns
 ///
@@ -1121,6 +1125,10 @@ pub fn predict_quantiles_at(
 /// # Returns
 ///
 /// * Matrix of quantile predictions (n_samples x n_quantiles)
+///
+/// # Errors
+///
+/// As [`predict_quantiles_with_y_at`], at the model's fitted quantiles.
 pub fn predict_quantiles_with_y(
     model: &QuantileRfResult,
     x_new: ArrayView2<f64>,
@@ -1376,7 +1384,7 @@ mod tests {
 
     /// The partition-per-threshold split search as it was before WT-14, kept as
     /// the reference the running-sum scan must reproduce wherever the
-    /// within-child sums of squares do not tie exactly.
+    /// within-child sums of squares do not tie, exactly or to within rounding.
     fn find_best_split_reference(
         x: &ArrayView2<f64>,
         y: &ArrayView1<f64>,
@@ -1471,8 +1479,9 @@ mod tests {
             r.variable_importance[2],
             r.oob_error.unwrap(),
         ];
-        // Captured from the partition-per-threshold code on continuous data (no
-        // exact SSE ties); must stay bit-identical.
+        // Captured from the partition-per-threshold code on continuous data,
+        // where no SSE tie (exact or to within rounding) breaks differently and
+        // no tree reaches the depth cap; must stay bit-identical.
         const EXPECTED: [u64; 6] = [
             0x401d26720478d36c,
             0xbff92b57a34a5541,
