@@ -53,6 +53,16 @@ impl AnthropicProvider {
         }
     }
 
+    /// A provider on `client` instead of the guarded one, for tests that answer from a stub on
+    /// loopback, which the egress guard admits for Ollama only.
+    #[cfg(test)]
+    pub(crate) fn with_client(config: ProviderConfig, client: Client) -> Self {
+        Self {
+            client: Some(client),
+            ..Self::with_settings(config, &LlmSettings::current())
+        }
+    }
+
     /// The HTTP client, or `NotAvailable` when it could not be built.
     fn client(&self) -> Result<&Client, LlmError> {
         self.client.as_ref().ok_or_else(|| {
@@ -494,8 +504,8 @@ impl AnthropicProvider {
                             AnthropicStreamEvent::ContentBlockStop { .. } => {
                                 // If we were building a tool call, finalize it
                                 if !current_tool_id.is_empty() {
-                                    let input: Value = serde_json::from_str(&current_tool_input)
-                                        .unwrap_or(Value::Null);
+                                    // Empty for a tool without parameters.
+                                    let input = ToolCall::parse_arguments(&current_tool_input);
                                     tool_calls.push(ToolCall {
                                         id: current_tool_id.clone(),
                                         name: current_tool_name.clone(),

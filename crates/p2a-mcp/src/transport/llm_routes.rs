@@ -2210,4 +2210,160 @@ mod chat_tests {
             "create_dataset ran"
         );
     }
+
+    /// The argument string of a tool call the model did not finish, as a
+    /// reply cut off at its token limit leaves it.
+    const CUT_ARGUMENTS: &str = r#"{"ar": [0.5], "lag_max": 5"#;
+
+    /// A loopback stub of the OpenAI and Anthropic APIs that answers with
+    /// two tool calls: `timeseries_arma_acf` with [`CUT_ARGUMENTS`], and
+    /// `list_datasets` with an empty argument string (a call without
+    /// parameters). OpenAI's answer is streamed when the request asks for a
+    /// stream; Anthropic's is always streamed.
+    async fn cut_off_tool_call_stub() -> std::net::SocketAddr {
+        use axum::response::{IntoResponse, Response};
+        use serde_json::{Value, json};
+
+        fn sse(events: &[Value], done: bool) -> Response {
+            let mut body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+            if done {
+                body.push_str("data: [DONE]\n\n");
+            }
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                body,
+            )
+                .into_response()
+        }
+        let (head, tail) = CUT_ARGUMENTS.split_at(13);
+        let openai = move |axum::Json(request): axum::Json<Value>| async move {
+            if request["stream"] == true {
+                let delta = |index: usize, id: Value, name: Value, arguments: &str| {
+                    json!({"choices": [{"delta": {"tool_calls": [{
+                        "index": index, "id": id,
+                        "function": {"name": name, "arguments": arguments}
+                    }]}}]})
+                };
+                return sse(
+                    &[
+                        delta(0, json!("c1"), json!("timeseries_arma_acf"), head),
+                        delta(0, Value::Null, Value::Null, tail),
+                        delta(1, json!("c2"), json!("list_datasets"), ""),
+                    ],
+                    true,
+                );
+            }
+            let call = |id: &str, name: &str, arguments: &str| {
+                json!({"id": id, "type": "function",
+                       "function": {"name": name, "arguments": arguments}})
+            };
+            axum::Json(
+                json!({"choices": [{"message": {"content": null, "tool_calls": [
+                    call("c1", "timeseries_arma_acf", CUT_ARGUMENTS),
+                    call("c2", "list_datasets", ""),
+                ]}}]}),
+            )
+            .into_response()
+        };
+        let anthropic = move |_request: axum::body::Bytes| async move {
+            let start = |index: usize, id: &str, name: &str| {
+                json!({"type": "content_block_start", "index": index,
+                       "content_block": {"type": "tool_use", "id": id, "name": name, "input": {}}})
+            };
+            let input = |partial: &str| {
+                json!({"type": "content_block_delta", "index": 0,
+                       "delta": {"type": "input_json_delta", "partial_json": partial}})
+            };
+            let stop = |index: usize| json!({"type": "content_block_stop", "index": index});
+            sse(
+                &[
+                    json!({"type": "message_start", "message": {}}),
+                    start(0, "t1", "timeseries_arma_acf"),
+                    input(head),
+                    input(tail),
+                    stop(0),
+                    start(1, "t2", "list_datasets"),
+                    stop(1),
+                    json!({"type": "message_stop"}),
+                ],
+                false,
+            )
+        };
+        let router = axum::Router::new()
+            .route("/chat/completions", axum::routing::post(openai))
+            .route("/v1/messages", axum::routing::post(anthropic));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
+    }
+
+    /// A tool call whose argument string is not JSON (OpenAI's
+    /// `function.arguments` and Anthropic's streamed input are text) is
+    /// refused for its shape on the OpenAI call, the OpenAI stream and the
+    /// Anthropic stream; it must not run with the tool's defaults and
+    /// report success. An empty argument string is a call without
+    /// parameters, and runs.
+    #[tokio::test]
+    async fn a_tool_call_whose_argument_string_is_not_json_does_not_run() {
+        let addr = cut_off_tool_call_stub().await;
+        let (governor, session) = admitting_parts().await;
+        let server = Arc::new(crate::server::AnalyticsServer::new());
+        let executor = SessionToolExecutor::new(governor, server, session);
+        let config = |provider_type| ProviderConfig {
+            provider_type,
+            api_key: Some("k".into()),
+            base_url: Some(format!("http://{addr}")),
+            model: "stub".into(),
+            ..Default::default()
+        };
+        let openai =
+            OpenAIProvider::with_client(config(ProviderType::OpenAI), reqwest::Client::new());
+        let anthropic =
+            AnthropicProvider::with_client(config(ProviderType::Anthropic), reqwest::Client::new());
+        let messages = [Message::user("the ACF of an AR(1) with 0.5, to lag 5")];
+        let replies = [
+            (
+                "openai",
+                openai.chat(&messages, &[], &executor, false).await,
+            ),
+            (
+                "openai stream",
+                openai
+                    .chat_stream(&messages, &[], &executor, false, Box::new(|_| {}))
+                    .await,
+            ),
+            (
+                "anthropic stream",
+                anthropic
+                    .chat_stream(&messages, &[], &executor, false, Box::new(|_| {}))
+                    .await,
+            ),
+        ];
+        for (path, reply) in replies {
+            let reply = reply.unwrap_or_else(|e| panic!("{path}: {e}"));
+            let calls = reply.tool_calls.clone().unwrap_or_default();
+            let results = reply.tool_results.clone().unwrap_or_default();
+            assert_eq!((calls.len(), results.len()), (2, 2), "{path}: {reply:?}");
+            // The unfinished call is refused, and keeps the text the model sent.
+            assert!(
+                results[0].is_error
+                    && results[0]
+                        .content
+                        .contains("The arguments of `timeseries_arma_acf` are a string"),
+                "{path}: {}",
+                results[0].content
+            );
+            assert_eq!(
+                calls[0].arguments,
+                serde_json::Value::String(CUT_ARGUMENTS.to_string()),
+                "{path}"
+            );
+            // An empty argument string is the empty object, and the call runs.
+            assert!(!results[1].is_error, "{path}: {}", results[1].content);
+            assert_eq!(calls[1].arguments, serde_json::json!({}), "{path}");
+        }
+    }
 }

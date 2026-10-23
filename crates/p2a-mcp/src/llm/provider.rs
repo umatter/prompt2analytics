@@ -308,6 +308,22 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+impl ToolCall {
+    /// The arguments of a tool call that a provider sends as text (OpenAI's
+    /// `function.arguments`, Anthropic's streamed input): the JSON value the
+    /// text holds, or the empty object when it is empty or blank (a call
+    /// without parameters). Text that is not JSON, such as a reply cut off
+    /// at its token limit, stays a string: the tool call path refuses it as
+    /// not a JSON object, so an unfinished call never runs with the tool's
+    /// defaults.
+    pub(crate) fn parse_arguments(raw: &str) -> serde_json::Value {
+        if raw.trim().is_empty() {
+            return serde_json::Value::Object(serde_json::Map::new());
+        }
+        serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+    }
+}
+
 /// Result of executing a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
@@ -464,6 +480,34 @@ pub trait LlmProvider: Send + Sync {
         interpret: bool,
         callback: Box<dyn Fn(StreamChunk) + Send + Sync>,
     ) -> Result<Message, LlmError>;
+}
+
+#[cfg(test)]
+mod tool_call_tests {
+    use super::ToolCall;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn argument_text_that_is_not_json_stays_a_string() {
+        // Empty or blank: a call without parameters.
+        for blank in ["", " ", "\n\t "] {
+            assert_eq!(ToolCall::parse_arguments(blank), json!({}), "{blank:?}");
+        }
+        assert_eq!(
+            ToolCall::parse_arguments(r#"{"lag_max": 5}"#),
+            json!({"lag_max": 5})
+        );
+        // Not JSON (cut off, or prose): kept as the text, never `null`.
+        for text in [r#"{"lag_max": 5"#, "lag_max = 5", "{"] {
+            assert_eq!(
+                ToolCall::parse_arguments(text),
+                Value::String(text.to_string())
+            );
+        }
+        // JSON that is not an object is the value; the tool call path refuses it.
+        assert_eq!(ToolCall::parse_arguments("[1, 2]"), json!([1, 2]));
+        assert_eq!(ToolCall::parse_arguments("null"), Value::Null);
+    }
 }
 
 #[cfg(test)]
