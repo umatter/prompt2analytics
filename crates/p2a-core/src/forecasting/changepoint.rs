@@ -62,6 +62,11 @@ pub enum CostFunction {
 ///
 /// # Returns
 /// * `ChangepointResult` with detected changepoints and segment statistics
+///
+/// # Errors
+/// Fails on a series too short for the minimum segment length, and when the
+/// budget installed with [`crate::resource::with_budget`] is cancelled or past
+/// its deadline.
 pub fn detect_changepoints(
     data: &[f64],
     penalty: Option<f64>,
@@ -100,7 +105,7 @@ pub fn detect_changepoints(
     let (cum_sum, cum_sum_sq) = compute_cumulative_sums(data);
 
     // PELT algorithm
-    let changepoints = pelt(data, &cum_sum, &cum_sum_sq, pen, min_seg, cost_function);
+    let changepoints = pelt(data, &cum_sum, &cum_sum_sq, pen, min_seg, cost_function)?;
 
     // Compute segment statistics
     let segments = compute_segment_stats(data, &changepoints);
@@ -180,7 +185,11 @@ fn segment_cost(
     }
 }
 
-/// PELT (Pruned Exact Linear Time) algorithm for multiple changepoint detection
+/// PELT (Pruned Exact Linear Time) algorithm for multiple changepoint detection.
+///
+/// When pruning removes no candidate (as with a large penalty), the work is
+/// quadratic in the length of the series, so the budget installed by the
+/// caller is checked at every step.
 fn pelt(
     data: &[f64],
     cum_sum: &[f64],
@@ -188,7 +197,7 @@ fn pelt(
     penalty: f64,
     min_seg: usize,
     cost_function: CostFunction,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, String> {
     let n = data.len();
 
     // F[t] = minimum cost of segmenting data[0..t]
@@ -202,6 +211,9 @@ fn pelt(
     let mut r: Vec<usize> = vec![0];
 
     for t in min_seg..=n {
+        // One step costs O(|R|), so a check every step is negligible.
+        crate::resource::checkpoint().map_err(|e| e.to_string())?;
+
         // Find the best last changepoint for position t
         let mut best_cost = f64::INFINITY;
         let mut best_cp = None;
@@ -248,7 +260,7 @@ fn pelt(
     }
 
     changepoints.reverse();
-    changepoints
+    Ok(changepoints)
 }
 
 /// Compute statistics for each segment
@@ -308,6 +320,10 @@ fn compute_total_cost(data: &[f64], changepoints: &[usize], cost_function: CostF
 
 /// Binary segmentation algorithm (simpler alternative to PELT)
 /// Recursively finds the single best changepoint in each segment
+///
+/// # Errors
+/// Fails on a series of fewer than 2 points, and when the budget installed
+/// with [`crate::resource::with_budget`] is cancelled or past its deadline.
 pub fn binary_segmentation(
     data: &[f64],
     max_changepoints: Option<usize>,
@@ -330,6 +346,9 @@ pub fn binary_segmentation(
     let mut segments_to_check: Vec<(usize, usize)> = vec![(0, n)];
 
     while !segments_to_check.is_empty() && changepoints.len() < max_cp {
+        // Each pass scans the whole series once.
+        crate::resource::checkpoint().map_err(|e| e.to_string())?;
+
         // Find segment with best potential changepoint
         let mut best_gain = threshold;
         let mut best_cp = None;
@@ -803,5 +822,37 @@ mod tests {
         // Should run successfully
         assert!(result.method.contains("mean and variance"));
         assert!(result.total_cost.is_finite());
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn pelt_stops_when_the_budget_is_cancelled() {
+        // Before the fix pelt() never looked at the budget, so a call past its
+        // deadline ran to the end of its quadratic scan and returned Ok.
+        let data = create_mean_shift_data(2_000, 2_000, 0.0, 0.0, 1.0);
+        for cost in [
+            CostFunction::MeanChange,
+            CostFunction::VarianceChange,
+            CostFunction::MeanAndVariance,
+        ] {
+            assert!(detect_changepoints(&data, None, None, cost).is_ok());
+            let err = cancelled(|| detect_changepoints(&data, None, None, cost))
+                .expect_err("a cancelled budget must stop PELT");
+            assert!(err.contains("cancelled"), "{cost:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn binary_segmentation_stops_when_the_budget_is_cancelled() {
+        let data = create_mean_shift_data(2_000, 2_000, 0.0, 0.0, 1.0);
+        assert!(binary_segmentation(&data, Some(5), None, None).is_ok());
+        let err = cancelled(|| binary_segmentation(&data, Some(5), None, None))
+            .expect_err("a cancelled budget must stop binary segmentation");
+        assert!(err.contains("cancelled"), "{err}");
     }
 }
