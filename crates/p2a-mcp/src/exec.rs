@@ -609,7 +609,14 @@ impl ToolGovernor {
         args: serde_json::Value,
         origin: CallOrigin,
     ) -> Result<ToolResult, ToolCallError> {
-        let span = tracing::info_span!("tool_call", tool, ?origin, session_id = %session.id);
+        // An unknown tool's name is the caller's string (up to the WebSocket
+        // message cap); every log line inside the call carries it, cut.
+        let span = tracing::info_span!(
+            "tool_call",
+            tool = limits::echo(tool),
+            ?origin,
+            session_id = %session.id
+        );
         async {
             let handle = tokio::runtime::Handle::current();
             let sessions = Arc::clone(&self.sessions);

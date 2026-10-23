@@ -556,6 +556,66 @@ mod tests {
         }
     }
 
+    /// A shared buffer the log lines of a test subscriber go to.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The governor's `tool_call` span carries the tool name into every log
+    /// line inside the call, such as a memory-pressure refusal (a soft
+    /// limit of one byte refuses every call): the name is recorded cut.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_long_tool_name_is_logged_cut() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let exec = crate::exec::ExecConfig {
+            rss_soft_limit_bytes: Some(1),
+            ..Default::default()
+        };
+        let (mut state, _session, tx, mut rx) = authenticated(exec).await;
+        let tool = ClientMessage::Tool {
+            id: "t1".into(),
+            name: "x".repeat(1_000_000),
+            args: serde_json::json!({}),
+        };
+        // A test on another thread may have registered the span's callsite
+        // while only the global no-op subscriber existed, caching it as
+        // disabled: recompute every callsite's interest with this
+        // subscriber in place.
+        tracing::callsite::rebuild_interest_cache();
+        handle_client_message(&mut state, tool, &tx).await.unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::Error { code: Some(code), .. }) if code == "memory_pressure"
+        ));
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let refusal = log
+            .lines()
+            .find(|l| l.contains("process memory is above the soft limit"))
+            .unwrap_or_else(|| panic!("no refusal logged: {log}"));
+        assert!(
+            refusal.contains(&format!("tool=\"{}\"", "x".repeat(64))),
+            "{refusal}"
+        );
+        assert!(refusal.len() < 1_000, "{} bytes", refusal.len());
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn tool_message_is_governed() {
