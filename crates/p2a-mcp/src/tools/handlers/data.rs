@@ -312,11 +312,12 @@ fn read_chunk_pages(
 enum Slots {
     /// No list above: the rows, times the sizes of the arrays above.
     Known(u64),
-    /// Below a list: unknown, but each entry the footer counts for a leaf
-    /// column below is a value of it, an empty or null list below the
-    /// outermost one, or one of the outermost list's slots, whose number
-    /// this holds.
-    BelowList(u64),
+    /// Below a list: unknown, but each entry counted for a leaf column below
+    /// is a value of it, an empty or null list below the outermost one, or
+    /// one of the outermost list's slots, whose number `outer` holds.
+    /// `nested` is set below a second list, where an empty inner list is an
+    /// entry of every leaf column below it.
+    BelowList { outer: u64, nested: bool },
 }
 
 /// Bytes of a list's offset: the least an empty list below another one
@@ -333,9 +334,12 @@ const OFFSET_BYTES: u64 = 8;
 /// gives for each leaf column below it: past the outermost list's slots (one
 /// entry each at most when empty or null), each entry is a value or an empty
 /// list below, which take the leaf's width or an offset, so the least of the
-/// two is counted. A struct inside a list inside a list therefore counts an
-/// empty inner list once per field (at most an offset each) where it takes
-/// one offset. A text or categorical leaf takes at least its pages (long
+/// two is counted. Below two lists an empty inner list is an entry of each
+/// leaf column of a struct inside it, though it takes one offset, so the
+/// sum over the struct's fields would count it once per field; such a
+/// struct counts the most any one of its fields does instead, which is
+/// still a lower bound (and still counts a field that holds many values).
+/// A text or categorical leaf takes at least its pages (long
 /// strings, a dictionary of long labels): the quotas charge more for each
 /// value and label than its pages hold. Types without a fixed floor count
 /// nothing.
@@ -350,26 +354,49 @@ fn least_value_bytes(
             Slots::Known(0) => least_value_bytes(inner, slots, leaves),
             Slots::Known(n) => OFFSET_BYTES
                 .saturating_mul(n)
-                .saturating_add(least_value_bytes(inner, Slots::BelowList(n), leaves)),
-            Slots::BelowList(_) => least_value_bytes(inner, slots, leaves),
+                .saturating_add(least_value_bytes(
+                    inner,
+                    Slots::BelowList {
+                        outer: n,
+                        nested: false,
+                    },
+                    leaves,
+                )),
+            Slots::BelowList { outer, .. } => least_value_bytes(
+                inner,
+                Slots::BelowList {
+                    outer,
+                    nested: true,
+                },
+                leaves,
+            ),
         },
         DataType::Array(inner, size) => match slots {
             Slots::Known(n) => {
                 least_value_bytes(inner, Slots::Known(n.saturating_mul(*size as u64)), leaves)
             }
             // An empty or null array of size zero is an entry without values.
-            Slots::BelowList(_) if *size == 0 => least_value_bytes(inner, Slots::Known(0), leaves),
-            Slots::BelowList(_) => least_value_bytes(inner, slots, leaves),
+            Slots::BelowList { .. } if *size == 0 => {
+                least_value_bytes(inner, Slots::Known(0), leaves)
+            }
+            Slots::BelowList { .. } => least_value_bytes(inner, slots, leaves),
         },
-        DataType::Struct(fields) => fields.iter().fold(0u64, |bytes, field| {
-            bytes.saturating_add(least_value_bytes(field.dtype(), slots, leaves))
-        }),
+        DataType::Struct(fields) => {
+            // Every field consumes its own leaves, whichever bound is kept.
+            let bounds = fields
+                .iter()
+                .map(|field| least_value_bytes(field.dtype(), slots, leaves));
+            match slots {
+                Slots::BelowList { nested: true, .. } => bounds.fold(0u64, u64::max),
+                _ => bounds.fold(0u64, u64::saturating_add),
+            }
+        }
         leaf => {
             let chunks = leaves.next().unwrap_or_default();
             let values = match slots {
                 Slots::Known(0) => return 0,
                 Slots::Known(n) => leaf_value_bytes(leaf, n),
-                Slots::BelowList(outer) => {
+                Slots::BelowList { outer, .. } => {
                     let values = chunks.entries.saturating_sub(outer);
                     leaf_value_bytes(leaf, values).min(OFFSET_BYTES.saturating_mul(values))
                 }
@@ -981,6 +1008,23 @@ mod tests {
         let empty = DataType::Array(Box::new(DataType::Float64), 0);
         assert_eq!(least(&empty, 4, &[4]), 0);
         assert_eq!(least(&list(empty), 1, &[5]), 8);
+        // Below two lists an empty inner list is an entry of every field of
+        // a struct in it but takes one offset, so the struct counts its
+        // largest field rather than the sum (which counted 8 + 32 + 32 + 4).
+        let deep = list(list(fields(&[
+            ("a", DataType::Float64),
+            ("b", DataType::Float64),
+            ("c", DataType::UInt8),
+        ])));
+        assert_eq!(least(&deep, 1, &[5, 5, 5]), 8 + 8 * 4);
+        assert_eq!(least(&deep, 1, &[5, 9, 5]), 8 + 8 * 8);
+        // A struct in one list still sums its fields, and so does a struct
+        // above the inner list.
+        let above = list(fields(&[
+            ("l", list(DataType::Float64)),
+            ("f", DataType::Float64),
+        ]));
+        assert_eq!(least(&above, 1, &[5, 3]), 8 + 8 * 4 + 8 * 2);
         // A struct beside lists: each field consumes its own leaves.
         let mixed = fields(&[
             ("l", list(DataType::Int64)),
@@ -1028,7 +1072,8 @@ mod tests {
     fn the_bound_before_decoding_stays_below_what_the_quotas_charge_after() {
         use p2a_core::polars::prelude::{IntoSeries, ListChunked, NamedFrom, Series};
         // Lists with nulls, empty lists and null values, a list of lists
-        // with empty inner lists, a list of structs, an array and a list of
+        // with empty inner lists, a list of structs, a list of lists of
+        // structs with empty inner lists, an array and a list of
         // categoricals: the check before decoding must not refuse a file the
         // quotas would hold once it is loaded, and must count the values the
         // lists hold, not 8 bytes a row.
@@ -1080,6 +1125,27 @@ mod tests {
                 Some(s)
             })
             .collect();
+        // Lists of lists of a struct of 20 floats, a third of them holding
+        // five empty inner lists: the parquet leaf of every field counts
+        // each empty inner list, which takes one offset.
+        let struct_of = |n: usize, seed: usize| -> Series {
+            let fields: Vec<Series> = (0..20)
+                .map(|f| floats(n, (seed * 7 + f) as f64 * 0.1).with_name(format!("f{f}").into()))
+                .collect();
+            p2a_core::polars::prelude::StructChunked::from_series("".into(), n, fields.iter())
+                .unwrap()
+                .into_series()
+        };
+        let deep: ListChunked = (0..rows)
+            .map(|i| {
+                let inner: ListChunked = if i % 3 == 0 {
+                    (0..5).map(|_| Some(struct_of(0, i))).collect()
+                } else {
+                    std::iter::once(Some(struct_of(i % 4, i))).collect()
+                };
+                Some(inner.into_series())
+            })
+            .collect();
         let cat = DataType::from_categories(p2a_core::polars::prelude::Categories::random(
             "".into(),
             CategoricalPhysical::U32,
@@ -1103,6 +1169,7 @@ mod tests {
             nested.into_series().with_name("nested".into()).into(),
             structs.into_series().with_name("structs".into()).into(),
             cats.into_series().with_name("cats".into()).into(),
+            deep.into_series().with_name("deep".into()).into(),
             array.into(),
             floats(rows, 0.1).with_name("flat".into()).into(),
         ])
@@ -1122,7 +1189,7 @@ mod tests {
         );
 
         // Each column alone, too.
-        for name in ["lists", "nested", "structs", "cats", "arr"] {
+        for name in ["lists", "nested", "structs", "cats", "deep", "arr"] {
             let mut one = df.select([name]).unwrap();
             let (charge, bound) = loaded_charge_and_bound(&mut one);
             assert!(bound <= charge, "{name}: bound {bound} > charge {charge}");
