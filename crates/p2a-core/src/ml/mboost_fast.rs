@@ -464,8 +464,11 @@ fn fit_stump_parallel(
             // Find best split point in one sweep: minimising the RSS of a
             // split is maximising left_sum^2 / left_n + right_sum^2 / right_n.
             // That criterion is accumulated in sort order, so the sweep picks
-            // the quadratic search's split except where two candidates'
-            // criteria agree to within floating-point rounding
+            // the quadratic search's split except where two candidates have
+            // equal RSS, exactly or to within rounding: the two searches may
+            // break such a tie either way. Pseudo-residuals with repeated
+            // values (a binary or count target) tie exactly, so on such data
+            // a different, equally good stump can be chosen
             let mut left_sum = 0.0;
             let mut left_count = 0;
             let total_sum: f64 = residuals.iter().sum();
@@ -950,8 +953,35 @@ mod tests {
         }
     }
 
+    /// Two stumps with exactly equal RSS, 2/3: on y = 0, 1, 0, 0 centred by
+    /// its mean, x <= 0.5 (1 | 3) and x <= 2 (3 | 1) are mirror images.
+    /// Rounding decides which one a search sees as smaller, so either is a
+    /// correct answer; the sweep must return one of them, with that RSS.
+    #[test]
+    fn fast_stump_tie_takes_one_of_the_tied_splits() {
+        let x = Array2::from_shape_vec((4, 1), vec![1.0, 1.0, 3.0, 0.0]).unwrap();
+        let y = [0.0, 1.0, 0.0, 0.0];
+        let mean = y.iter().sum::<f64>() / 4.0;
+        let r: Vec<f64> = y.iter().map(|v| v - mean).collect();
+        let (learner, update) = fit_stump_parallel(x.view(), &r, 1);
+        let FittedLearner::Stump {
+            feature, threshold, ..
+        } = &learner
+        else {
+            panic!("not a stump: {learner:?}");
+        };
+        assert_eq!(*feature, 0);
+        assert!(
+            *threshold == 0.5 || *threshold == 2.0,
+            "threshold {threshold}"
+        );
+        let rss: f64 = r.iter().zip(&update).map(|(a, b)| (a - b).powi(2)).sum();
+        assert!((rss - 2.0 / 3.0).abs() < 1e-12, "rss {rss}");
+    }
+
     /// Golden (characterization) test: captured on the code before the
-    /// stump sweep; it must pass before and after that change.
+    /// stump sweep, on continuous data where no RSS tie breaks differently;
+    /// it must pass before and after that change.
     #[test]
     fn fast_mboost_stump_unchanged_by_the_sweep() {
         const GOLDEN: [u64; 3] = [

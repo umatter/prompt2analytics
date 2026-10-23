@@ -438,11 +438,16 @@ impl RegressionTree {
     /// values are sorted once and the thresholds (midpoints of consecutive
     /// distinct values, ascending) are swept with a pointer that adds every
     /// observation with `x <= threshold` to the left, the partition the
-    /// re-partitioning search this replaces used. The score is accumulated in
-    /// sorted-x order, where that search summed each child's squares around
-    /// its mean in index order, so the chosen split is the same except where
-    /// two candidates' scores agree to within floating-point rounding. `x`
-    /// must be finite.
+    /// re-partitioning search this replaces used. `x` must be finite.
+    ///
+    /// The score is accumulated in sorted-x order, where that search summed
+    /// each child's squares around its mean in index order, so the chosen
+    /// split is the same except where two candidates have equal within-child
+    /// sums of squares, exactly or to within rounding: the two searches may
+    /// break those ties either way. A response with repeated values (the 0/1
+    /// treatment the propensity ensemble fits, counts, integer outcomes) ties
+    /// exactly, so on such data a different, equally good tree can grow, and
+    /// the propensity scores and CATE draws built on it change with it.
     fn find_best_split(
         &self,
         x: &ArrayView2<f64>,
@@ -1429,8 +1434,7 @@ mod tests {
     }
 
     /// Verbatim copy of `find_best_split` and `compute_split_mse` before the
-    /// sorted sweep, kept as the reference for
-    /// `regression_split_sweep_matches_naive_reference`.
+    /// sorted sweep, kept as the reference for the split sweep's guard tests.
     fn naive_find_best_split(
         min_node_size: usize,
         x: &ArrayView2<f64>,
@@ -1487,8 +1491,93 @@ mod tests {
         best_split
     }
 
-    /// Reference guard: the sorted sweep must choose the same split as the
-    /// re-partitioning search it replaced.
+    /// Within-child sum of squares of `split` over `idx`, two-pass; NaN for
+    /// no split.
+    fn split_sse(
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        idx: &[usize],
+        split: Option<(usize, f64)>,
+    ) -> f64 {
+        let Some((feature, threshold)) = split else {
+            return f64::NAN;
+        };
+        let (left, right): (Vec<usize>, Vec<usize>) =
+            idx.iter().partition(|&&i| x[[i, feature]] <= threshold);
+        let ss = |side: &[usize]| {
+            let mean = side.iter().map(|&i| y[i]).sum::<f64>() / side.len() as f64;
+            side.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>()
+        };
+        ss(&left) + ss(&right)
+    }
+
+    /// Two splits with exactly equal within-child SSE, 0.8: on this 0/1
+    /// response x <= 0.5 (1 | 5) and x <= 2 (5 | 1) are mirror images.
+    /// Rounding decides which one a search sees as better, so either is a
+    /// correct answer; the sweep and the old search must each return one.
+    #[test]
+    fn regression_split_tie_takes_one_of_the_tied_splits() {
+        let x = Array2::from_shape_vec((6, 1), vec![1.0, 1.0, 1.0, 1.0, 3.0, 0.0]).unwrap();
+        let y = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let idx: Vec<usize> = (0..6).collect();
+        let tree = RegressionTree {
+            n_features: 1,
+            ..RegressionTree::new(4, 1, 1)
+        };
+        for (who, split) in [
+            (
+                "sweep",
+                tree.find_best_split(&x.view(), &y.view(), &idx, &[0]),
+            ),
+            (
+                "reference",
+                naive_find_best_split(1, &x.view(), &y.view(), &idx, &[0]),
+            ),
+        ] {
+            assert!(
+                matches!(split, Some((0, t)) if t == 0.5 || t == 2.0),
+                "{who}: {split:?}"
+            );
+            let sse = split_sse(&x, &y, &idx, split);
+            assert!((sse - 0.8).abs() < 1e-12, "{who}: SSE {sse}");
+        }
+    }
+
+    /// Reference guard on tie-prone data: covariates on a few levels and a
+    /// 0/1 response, as the propensity ensemble sees. The sweep must choose
+    /// the old search's split or a different one with the same within-child
+    /// SSE.
+    #[test]
+    fn regression_split_sweep_on_a_binary_response_matches_or_ties_the_reference() {
+        let mut s = 2026u64;
+        for rep in 0..2000 {
+            let n = 6 + lcg_random(&mut s) % 40;
+            let p = 1 + lcg_random(&mut s) % 2;
+            let levels = 2 + lcg_random(&mut s) % 5;
+            let min_node_size = [1usize, 3, 5][lcg_random(&mut s) % 3];
+            let x = Array2::from_shape_fn((n, p), |_| (lcg_random(&mut s) % levels) as f64);
+            let y = Array1::from_shape_fn(n, |_| (lcg_random(&mut s) % 2) as f64);
+            let idx: Vec<usize> = (0..n).collect();
+            let features: Vec<usize> = (0..p).collect();
+            let tree = RegressionTree {
+                n_features: p,
+                ..RegressionTree::new(4, min_node_size, p)
+            };
+            let got = tree.find_best_split(&x.view(), &y.view(), &idx, &features);
+            let want = naive_find_best_split(min_node_size, &x.view(), &y.view(), &idx, &features);
+            if got != want {
+                let (a, b) = (split_sse(&x, &y, &idx, got), split_sse(&x, &y, &idx, want));
+                assert!(
+                    (a - b).abs() <= 1e-12 * b.max(1.0),
+                    "rep={rep}: {got:?} SSE {a} vs {want:?} SSE {b}"
+                );
+            }
+        }
+    }
+
+    /// Reference guard on a continuous response (no exact SSE ties): the
+    /// sorted sweep must choose the same split as the re-partitioning search
+    /// it replaced.
     #[test]
     fn regression_split_sweep_matches_naive_reference() {
         let (y, _w, x) = generate_test_data(400, 77); // x on a 0.01 grid: many tied values
@@ -1514,7 +1603,9 @@ mod tests {
     }
 
     /// Golden (characterization) test: captured on the code before the
-    /// sweep and the pre-allocated draw matrix; it passes before and after.
+    /// sweep and the pre-allocated draw matrix, on a continuous outcome and
+    /// without the propensity ensemble, so no SSE tie breaks differently; it
+    /// passes before and after.
     #[test]
     fn bart_causal_outputs_unchanged_by_the_sweep() {
         const GOLDEN: [u64; 5] = [
