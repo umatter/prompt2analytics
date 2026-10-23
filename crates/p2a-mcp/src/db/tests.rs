@@ -803,7 +803,7 @@ async fn insert_raw_message(db: &DbConnection, conversation_id: &str) {
 /// The recent orphan sweep deletes what is left for a deleted conversation
 /// for two sweeps, through the index and without scanning the tables; a
 /// conversation that still exists is left alone, and rows of one this
-/// process never deleted need the full scan.
+/// process never deleted need the full sweep.
 #[tokio::test]
 async fn recent_orphan_sweep_follows_deleted_conversations() {
     let db = test_db().await;
@@ -830,13 +830,13 @@ async fn recent_orphan_sweep_follows_deleted_conversations() {
     assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
     assert_eq!(db.get_messages(&kept.id_string()).await.unwrap().len(), 1);
 
-    // The full scan finds the rest: the row from before and the last one.
+    // The full sweep finds the rest: the row from before and the last one.
     assert_eq!(db.delete_orphans().await.unwrap(), 2);
     assert_eq!(db.get_messages(&kept.id_string()).await.unwrap().len(), 1);
 }
 
 /// More deleted conversations than are remembered: the next recent sweep
-/// scans in full.
+/// is a full one.
 #[tokio::test]
 async fn recent_orphan_sweep_scans_in_full_after_too_many_deletes() {
     let db = test_db().await;
