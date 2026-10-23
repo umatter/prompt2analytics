@@ -67,15 +67,7 @@ pub(crate) async fn create_session(
         match validate_user_id(request.user_id) {
             Ok(user_id) => user_id,
             Err(message) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::<()>::error_with_code(
-                        message,
-                        "invalid_arguments",
-                        None,
-                    )),
-                )
-                    .into_response();
+                return error_with(StatusCode::BAD_REQUEST, &message, "invalid_arguments");
             }
         }
     };
@@ -183,40 +175,37 @@ pub(crate) async fn get_session(State(state): State<AppState>, Path(id): Path<St
     }
 }
 
-/// Delete a session. With persistence, its rows are deleted before the
-/// answer (a stored session that is no longer live is deleted too).
+/// Delete a session: 204, 404 `not_found` when it does not exist, and 500
+/// `internal` with a generic text when deleting fails (the details are
+/// logged). With persistence, its rows are deleted before the answer (a
+/// stored session that is no longer live is deleted too).
 pub(crate) async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> Response {
+    let not_found = || error_with(StatusCode::NOT_FOUND, "Session not found", "not_found");
+    let internal = |error: &dyn std::fmt::Display| {
+        tracing::warn!(session_id = %id, error = %error, "Failed to delete session");
+        error_with(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+            "internal",
+        )
+    };
+    let deleted = || (StatusCode::NO_CONTENT, Json(ApiResponse::success(()))).into_response();
     #[cfg(feature = "db")]
     if let Some(pm) = &state.persistent_manager {
         use crate::persistent_session::PersistentSessionError;
         return match pm.delete_session(&id).await {
-            Ok(()) => (StatusCode::NO_CONTENT, Json(ApiResponse::success(()))),
-            Err(PersistentSessionError::Session(SessionError::NotFound)) => (
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("Session not found")),
-            ),
-            Err(e) => {
-                tracing::warn!(session_id = %id, error = %e, "Failed to delete session");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::error("internal error")),
-                )
-            }
+            Ok(()) => deleted(),
+            Err(PersistentSessionError::Session(SessionError::NotFound)) => not_found(),
+            Err(e) => internal(&e),
         };
     }
     match state.session_manager.delete_session(&id).await {
-        Ok(()) => (StatusCode::NO_CONTENT, Json(ApiResponse::success(()))),
-        Err(SessionError::NotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Session not found")),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(e.to_string())),
-        ),
+        Ok(()) => deleted(),
+        Err(SessionError::NotFound) => not_found(),
+        Err(e) => internal(&e),
     }
 }
 
@@ -356,4 +345,32 @@ pub(crate) async fn list_files(Query(query): Query<ListFilesQuery>) -> impl Into
             entries,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use tower::ServiceExt;
+
+    /// Deleting a session that does not exist answers 404 with the code
+    /// `not_found` that `GET /api/sessions/{id}` uses, with persistence (the
+    /// `db` feature) and without.
+    #[tokio::test]
+    async fn deleting_an_unknown_session_is_not_found_with_a_code() {
+        let (app, _state) = super::super::http::build_app(&crate::config::ServerConfig::default())
+            .await
+            .unwrap();
+        let req = Request::delete(format!("/api/sessions/{}", uuid::Uuid::new_v4()))
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "not_found", "{body}");
+    }
 }
