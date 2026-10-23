@@ -13,7 +13,8 @@ use crate::db::{
     PersistenceLimits, Settings,
 };
 use crate::session::{
-    DatasetStore, Session, SessionError, SessionId, SessionManager, is_past_ttl, is_session_id,
+    DatasetStore, Session, SessionError, SessionId, SessionManager, fmt_bytes, is_past_ttl,
+    is_session_id,
 };
 use std::sync::Arc;
 
@@ -30,6 +31,8 @@ pub struct PersistentSessionManager {
     db: Arc<DbConnection>,
     /// Whether a sweep has scanned the messages and tool calls in full.
     full_orphan_scan_done: std::sync::atomic::AtomicBool,
+    /// Held for the whole of a sweep, so two never run at once.
+    sweep_lock: tokio::sync::Mutex<()>,
 }
 
 #[cfg(feature = "db")]
@@ -59,6 +62,7 @@ impl PersistentSessionManager {
             sessions,
             db: Arc::new(db.with_limits(limits)),
             full_orphan_scan_done: std::sync::atomic::AtomicBool::new(false),
+            sweep_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -366,8 +370,9 @@ impl PersistentSessionManager {
 
     /// Bring the store in line with the live registry:
     ///
-    /// 1. write each live session's own `last_accessed` to its row (creating
-    ///    a missing row);
+    /// 1. write each live session's own `last_accessed` to its row (see
+    ///    [`flush_last_accessed`](Self::flush_last_accessed): an existing row
+    ///    is updated, a live session without a row gets one);
     /// 2. delete the rows of every session that is not live and whose row was
     ///    last accessed longer ago than the TTL (the whole-minute rule the
     ///    live table uses);
@@ -376,12 +381,43 @@ impl PersistentSessionManager {
     ///    only the rows of recently deleted conversations
     ///    (`DbConnection::delete_recent_orphans`), so a periodic sweep does
     ///    not read every message of the store.
+    ///
+    /// Sweeps take turns: this waits for a sweep that is already running.
     pub async fn sweep(&self) -> Result<SweepStats, PersistentSessionError> {
-        let mut stats = SweepStats::default();
-        for (id, at) in self.sessions.live_last_accessed().await {
-            self.db.set_session_last_accessed(&id, at).await?;
-            stats.refreshed += 1;
+        let _turn = self.sweep_lock.lock().await;
+        self.sweep_in_turn().await
+    }
+
+    /// [`sweep`](Self::sweep), unless a sweep is running already (`None`):
+    /// a second one would only repeat its scans.
+    async fn sweep_unless_running(&self) -> Option<Result<SweepStats, PersistentSessionError>> {
+        let _turn = self.sweep_lock.try_lock().ok()?;
+        Some(self.sweep_in_turn().await)
+    }
+
+    /// The sweep the background tasks run: skipped while another sweep is
+    /// running, which does what this one would (a sweep queued behind it
+    /// would rotate the memory of recently deleted conversations a second
+    /// time within moments). A failure is logged. Whether a sweep ran.
+    async fn background_sweep(&self) -> bool {
+        match self.sweep_unless_running().await {
+            Some(Ok(_)) => true,
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "Conversation-store sweep failed");
+                true
+            }
+            None => {
+                tracing::debug!("A conversation-store sweep is already running; skipping this one");
+                false
+            }
         }
+    }
+
+    /// The body of [`sweep`](Self::sweep); the caller holds `sweep_lock`.
+    async fn sweep_in_turn(&self) -> Result<SweepStats, PersistentSessionError> {
+        let mut stats = SweepStats::default();
+        let snapshot = self.sessions.live_last_accessed().await;
+        self.flush_last_accessed(snapshot, &mut stats).await?;
 
         // A row is past the TTL once more whole minutes than the TTL have
         // elapsed (`is_past_ttl`), i.e. at least ttl + 1 minutes. A TTL too
@@ -392,13 +428,7 @@ impl PersistentSessionManager {
             .and_then(chrono::Duration::try_minutes)
             .and_then(|ttl| chrono::Utc::now().checked_sub_signed(ttl));
         if let Some(cutoff) = cutoff {
-            let live: std::collections::HashSet<SessionId> = self
-                .sessions
-                .live_last_accessed()
-                .await
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect();
+            let live = self.live_ids().await;
             for id in self.db.session_ids_last_accessed_before(cutoff).await? {
                 if live.contains(&id) {
                     continue;
@@ -416,15 +446,132 @@ impl PersistentSessionManager {
             self.full_orphan_scan_done.store(true, Ordering::SeqCst);
             deleted
         };
-        if stats.expired_deleted > 0 || stats.orphans_deleted > 0 {
+        if stats.expired_deleted > 0 || stats.orphans_deleted > 0 || stats.departed_deleted > 0 {
             tracing::info!(
                 refreshed = stats.refreshed,
                 expired_deleted = stats.expired_deleted,
+                departed_deleted = stats.departed_deleted,
                 orphans_deleted = stats.orphans_deleted,
                 "Swept the conversation store"
             );
         }
         Ok(stats)
+    }
+
+    /// Step 1 of a sweep: write each live session's `last_accessed` in
+    /// `snapshot` to its row.
+    ///
+    /// Only an existing row is updated, so a session that left the registry
+    /// after the snapshot was taken, and whose rows were deleted, gets no
+    /// adoptable row back. A session still live without a row (its
+    /// registration failed) gets one, so that the orphan step keeps its
+    /// settings and dataset metadata; if it leaves the registry while that
+    /// row is written, the row is deleted again, also when a later row's
+    /// write fails ([`write_missing_rows`](Self::write_missing_rows)).
+    async fn flush_last_accessed(
+        &self,
+        snapshot: Vec<(SessionId, chrono::DateTime<chrono::Utc>)>,
+        stats: &mut SweepStats,
+    ) -> Result<(), PersistentSessionError> {
+        let mut missing = Vec::new();
+        for (id, at) in snapshot {
+            if self.db.refresh_session_last_accessed(&id, at).await? {
+                stats.refreshed += 1;
+            } else {
+                missing.push((id, at));
+            }
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let live = self.live_ids().await;
+        self.write_missing_rows(missing, &live, stats).await
+    }
+
+    /// The second half of [`flush_last_accessed`](Self::flush_last_accessed):
+    /// write a row for each session in `missing` that is in `live` (the
+    /// registry as it was read just before), then delete again the rows of
+    /// those that have left the registry since
+    /// ([`delete_rows_unless_live`](Self::delete_rows_unless_live)).
+    ///
+    /// A failed write stops the loop, but the rows written before it still
+    /// get that check before the write's error is returned, so a failed row
+    /// write cannot leave a departed session with an adoptable row; a failed
+    /// delete is reported.
+    async fn write_missing_rows(
+        &self,
+        missing: Vec<(SessionId, chrono::DateTime<chrono::Utc>)>,
+        live: &std::collections::HashSet<SessionId>,
+        stats: &mut SweepStats,
+    ) -> Result<(), PersistentSessionError> {
+        let mut created = Vec::new();
+        let mut failed = None;
+        for (id, at) in missing {
+            if !live.contains(&id) {
+                continue;
+            }
+            match self.db.set_session_last_accessed(&id, at).await {
+                Ok(()) => created.push(id),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        let checked = self.delete_rows_unless_live(created, stats).await;
+        let Some(e) = failed else {
+            return checked;
+        };
+        if let Err(also) = checked {
+            tracing::warn!(error = %also, "Failed to delete a row the sweep wrote for a departed session");
+        }
+        Err(e.into())
+    }
+
+    /// Of the sessions in `created`, whose rows the sweep has just written,
+    /// delete the rows of those that are no longer live: their removal's own
+    /// delete may have run before the row was written. The others count as
+    /// refreshed. A session still live now has any later removal's delete
+    /// run after the write.
+    ///
+    /// A failed delete does not stop the others: the first error is
+    /// returned once every departed session's delete was tried (later ones
+    /// are logged), and `departed_deleted` counts the deletes that succeeded.
+    async fn delete_rows_unless_live(
+        &self,
+        created: Vec<SessionId>,
+        stats: &mut SweepStats,
+    ) -> Result<(), PersistentSessionError> {
+        if created.is_empty() {
+            return Ok(());
+        }
+        let live = self.live_ids().await;
+        let mut first_err = None;
+        for id in created {
+            if live.contains(&id) {
+                stats.refreshed += 1;
+                continue;
+            }
+            match self.db.delete_session(&id).await {
+                Ok(()) => stats.departed_deleted += 1,
+                Err(e) if first_err.is_none() => first_err = Some(e),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "Failed to delete a row the sweep wrote for a departed session"
+                ),
+            }
+        }
+        first_err.map_or(Ok(()), |e| Err(e.into()))
+    }
+
+    /// The ids of the live sessions.
+    async fn live_ids(&self) -> std::collections::HashSet<SessionId> {
+        self.sessions
+            .live_last_accessed()
+            .await
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// Start the two tasks that keep the store in line with the live
@@ -437,6 +584,10 @@ impl PersistentSessionManager {
     /// - A timer runs a sweep at start (the one that scans every row for
     ///   orphans) and then every 30 s per TTL minute, clamped to
     ///   60 s ..= 600 s.
+    ///
+    /// Neither waits for a sweep that is already running: that sweep does
+    /// the work (including the first full orphan scan if no sweep has done
+    /// it yet), and the timer's next tick comes a full period later.
     pub fn start_background_tasks(self: &Arc<Self>) {
         use tokio::sync::broadcast::error::RecvError;
 
@@ -457,9 +608,7 @@ impl PersistentSessionManager {
                             missed,
                             "Session removal listener fell behind; sweeping the store"
                         );
-                        if let Err(e) = pm.sweep().await {
-                            tracing::warn!(error = %e, "Conversation-store sweep failed");
-                        }
+                        pm.background_sweep().await;
                     }
                     Err(RecvError::Closed) => break,
                 }
@@ -474,9 +623,7 @@ impl PersistentSessionManager {
             loop {
                 tick.tick().await;
                 let Some(pm) = weak.upgrade() else { break };
-                if let Err(e) = pm.sweep().await {
-                    tracing::warn!(error = %e, "Conversation-store sweep failed");
-                }
+                pm.background_sweep().await;
             }
         });
     }
@@ -609,7 +756,9 @@ pub struct DatasetQuotas {
 /// Insert a reloaded `dataset` as `name` into `session` unless it would push
 /// the session past `quotas.per_session` (its datasets with this one in
 /// place of any dataset of the same name) or all sessions past
-/// `quotas.total` (their cached dataset bytes). The error is a fixed text.
+/// `quotas.total` (their cached dataset bytes). A refusal names the size the
+/// datasets would reach and the limit, as a tool call's quota refusal does;
+/// it holds no server path.
 ///
 /// Call it while holding the session's governor permit: the quota rollback
 /// of a tool call assumes one change of a session's datasets at a time.
@@ -619,7 +768,7 @@ pub async fn insert_reloaded_dataset(
     name: String,
     dataset: p2a_core::data::Dataset,
     quotas: DatasetQuotas,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     let added = dataset.df().estimated_size() as u64;
     // Read before taking the session's dataset lock: the total takes the
     // registry's lock, which is never awaited under a dataset lock.
@@ -637,14 +786,24 @@ pub async fn insert_reloaded_dataset(
     let after = crate::session::datasets_bytes(&datasets)
         .saturating_sub(replaced)
         .saturating_add(added);
-    if quotas.per_session.is_some_and(|limit| after > limit) {
-        return Err(RELOAD_SESSION_QUOTA);
-    }
-    if quotas
-        .total
-        .is_some_and(|limit| others.saturating_add(after) > limit)
+    if let Some(limit) = quotas.per_session
+        && after > limit
     {
-        return Err(RELOAD_SERVER_QUOTA);
+        return Err(format!(
+            "this session's datasets would use {} (limit {} per session)",
+            fmt_bytes(after),
+            fmt_bytes(limit)
+        ));
+    }
+    let total = others.saturating_add(after);
+    if let Some(limit) = quotas.total
+        && total > limit
+    {
+        return Err(format!(
+            "the server's dataset memory would reach {} (limit {})",
+            fmt_bytes(total),
+            fmt_bytes(limit)
+        ));
     }
     tracing::info!(dataset = %name, "Reloaded dataset from file");
     datasets.insert(name, dataset);
@@ -662,8 +821,6 @@ const MESSAGE_NOT_FOUND: &str = "Message not found";
 const RELOAD_NO_SOURCE: &str = "no source path stored";
 const RELOAD_OUTSIDE_JAIL: &str = "path is not inside this session's data directory";
 const RELOAD_LOAD_FAILED: &str = "the file could not be loaded";
-const RELOAD_SESSION_QUOTA: &str = "the session's dataset quota is full";
-const RELOAD_SERVER_QUOTA: &str = "the server's dataset memory is full";
 
 /// What one [`PersistentSessionManager::sweep`] did.
 #[derive(Debug, Default, Clone, Copy)]
@@ -672,6 +829,9 @@ pub struct SweepStats {
     pub refreshed: usize,
     /// Sessions past the TTL, not live, whose rows were deleted.
     pub expired_deleted: usize,
+    /// Sessions that left the registry while the sweep wrote their missing
+    /// row; that row was deleted again.
+    pub departed_deleted: usize,
     /// Orphaned rows deleted.
     pub orphans_deleted: usize,
 }
@@ -787,10 +947,6 @@ pub enum PersistentSessionError {
     #[cfg(feature = "db")]
     #[error("Database error: {0}")]
     Database(#[from] DbError),
-
-    /// A failure inside the server (a panicked worker); the text is generic.
-    #[error("Internal error: {0}")]
-    Internal(String),
 }
 
 #[cfg(test)]
@@ -1166,6 +1322,205 @@ mod tests {
         assert!(db.get_messages(&conv.id_string()).await.unwrap().is_empty());
     }
 
+    /// A session that leaves the registry after a sweep took its snapshot,
+    /// and whose rows were deleted, gets no row back from the flush, so it
+    /// cannot be adopted again.
+    #[tokio::test]
+    async fn sweep_flush_does_not_bring_back_a_deleted_session() {
+        let pm = manager().await;
+        let sid = pm.create_session(None).await.unwrap();
+        let snapshot = pm.sessions().live_last_accessed().await;
+        pm.delete_session(&sid).await.unwrap();
+
+        let mut stats = SweepStats::default();
+        pm.flush_last_accessed(snapshot, &mut stats).await.unwrap();
+        assert!(pm.db().get_session(&sid).await.unwrap().is_none());
+        assert!(matches!(
+            pm.get_session(&sid).await,
+            Err(PersistentSessionError::Session(SessionError::NotFound))
+        ));
+        assert_eq!(stats.refreshed, 0);
+    }
+
+    /// A live session without a row (its registration failed) gets one from
+    /// the sweep, before the orphan step could delete its settings.
+    #[tokio::test]
+    async fn sweep_gives_a_live_session_without_a_row_one() {
+        let pm = manager().await;
+        let sid = pm.sessions().create_session(None).await.unwrap();
+        pm.db().get_or_create_settings(&sid).await.unwrap();
+
+        let stats = pm.sweep().await.unwrap();
+        assert_eq!(stats.refreshed, 1, "{stats:?}");
+        assert!(pm.db().get_session(&sid).await.unwrap().is_some());
+        let row: Option<Settings> = pm
+            .db()
+            .db()
+            .select(("settings", sid.as_str()))
+            .await
+            .unwrap();
+        assert!(row.is_some());
+    }
+
+    /// Two sweeps never run at once: of two started together, one scans
+    /// every row for orphans and the other, after it, finds nothing left.
+    #[tokio::test]
+    async fn concurrent_sweeps_take_turns() {
+        let pm = manager().await;
+        for i in 0..3 {
+            let m = Message::user(format!("ghost-{i}"), "orphan".into());
+            let _: Option<Message> = pm.db().db().create(m.id.clone()).content(m).await.unwrap();
+        }
+        let (a, b) = tokio::join!(pm.sweep(), pm.sweep());
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.orphans_deleted + b.orphans_deleted, 3, "{a:?} / {b:?}");
+        // The listener's catch-up sweep is skipped while one is running.
+        let running = pm.sweep_lock.lock().await;
+        assert!(pm.sweep_unless_running().await.is_none());
+        drop(running);
+        assert!(pm.sweep_unless_running().await.is_some_and(|r| r.is_ok()));
+    }
+
+    /// The background tasks' sweep (the timer's and the lagging listener's)
+    /// does not queue behind a running sweep, which would rotate the memory
+    /// of recently deleted conversations twice in a row: it skips at once.
+    #[tokio::test]
+    async fn background_sweeps_skip_while_one_runs() {
+        let pm = manager().await;
+        let ghost = Message::user("ghost".into(), "orphan".into());
+        let ghost_id = ghost.id_string();
+        let _: Option<Message> = pm
+            .db()
+            .db()
+            .create(ghost.id.clone())
+            .content(ghost)
+            .await
+            .unwrap();
+        let running = pm.sweep_lock.lock().await;
+        // Polled once: a sweep that waited for the lock held here would be
+        // pending, and the test fails instead of hanging.
+        let mut sweep = std::pin::pin!(pm.background_sweep());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            sweep.as_mut().poll(&mut cx),
+            std::task::Poll::Ready(false)
+        ));
+        drop(running);
+        assert!(pm.db().get_message(&ghost_id).await.is_ok()); // not swept
+        assert!(pm.background_sweep().await);
+        assert!(matches!(
+            pm.db().get_message(&ghost_id).await,
+            Err(DbError::NotFound(_))
+        ));
+    }
+
+    /// A row the sweep wrote for a session that has left the registry since
+    /// is deleted again; the row of a session that is still live is kept.
+    #[tokio::test]
+    async fn rows_written_for_departed_sessions_are_deleted() {
+        let pm = manager().await;
+        let live = pm.sessions().create_session(None).await.unwrap();
+        let departed = uuid::Uuid::new_v4().to_string();
+        for id in [&live, &departed] {
+            pm.db()
+                .set_session_last_accessed(id, chrono::Utc::now())
+                .await
+                .unwrap();
+        }
+        let mut stats = SweepStats::default();
+        pm.delete_rows_unless_live(vec![live.clone(), departed.clone()], &mut stats)
+            .await
+            .unwrap();
+        assert_eq!((stats.refreshed, stats.departed_deleted), (1, 1));
+        assert!(pm.db().get_session(&live).await.unwrap().is_some());
+        assert!(pm.db().get_session(&departed).await.unwrap().is_none());
+    }
+
+    /// A failed delete of one departed session's row does not stop the
+    /// others: the later departed session keeps no adoptable row, and the
+    /// error is reported.
+    #[tokio::test]
+    async fn a_failed_departed_delete_still_deletes_the_others() {
+        let pm = manager().await;
+        let (refused, departed) = (
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        for id in [&refused, &departed] {
+            pm.db()
+                .set_session_last_accessed(id, chrono::Utc::now())
+                .await
+                .unwrap();
+        }
+        // `refused`'s delete fails at its dataset metadata.
+        let meta = crate::db::DatasetMeta::new(
+            refused.clone(),
+            "d".into(),
+            "csv".into(),
+            3,
+            1,
+            vec!["x".into()],
+        );
+        pm.db().save_dataset_meta(&meta).await.unwrap();
+        pm.db()
+            .db()
+            .query(
+                "DEFINE EVENT refuse_meta ON TABLE dataset_meta WHEN $event = 'DELETE' \
+                 THEN { THROW 'refused' }",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let mut stats = SweepStats::default();
+        let checked = pm
+            .delete_rows_unless_live(vec![refused.clone(), departed.clone()], &mut stats)
+            .await;
+        assert!(checked.is_err());
+        assert_eq!((stats.refreshed, stats.departed_deleted), (0, 1));
+        assert!(pm.db().get_session(&refused).await.unwrap().is_some());
+        assert!(pm.db().get_session(&departed).await.unwrap().is_none());
+    }
+
+    /// When the sweep fails to write a missing row, the rows it wrote before
+    /// still get the departure check: a session that left the registry after
+    /// the live check keeps no adoptable row, and the write's error is
+    /// reported.
+    #[tokio::test]
+    async fn a_failed_row_write_still_deletes_a_departed_sessions_row() {
+        let pm = manager().await;
+        // Both were live when the registry was read; `departed` has left it
+        // since, and the row of `refused` (still live) cannot be written.
+        let departed = uuid::Uuid::new_v4().to_string();
+        let refused = pm.sessions().create_session(None).await.unwrap();
+        pm.db()
+            .db()
+            .query(format!(
+                "DEFINE EVENT refuse_row ON TABLE sessions \
+                 WHEN $event = 'CREATE' AND $after.id = type::thing('sessions', '{refused}') \
+                 THEN {{ THROW 'refused' }}"
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let live: std::collections::HashSet<SessionId> = [departed.clone(), refused.clone()].into();
+        let now = chrono::Utc::now();
+        let mut stats = SweepStats::default();
+        let written = pm
+            .write_missing_rows(
+                vec![(departed.clone(), now), (refused.clone(), now)],
+                &live,
+                &mut stats,
+            )
+            .await;
+        assert!(written.is_err());
+        assert_eq!((stats.refreshed, stats.departed_deleted), (0, 1));
+        assert!(pm.db().get_session(&departed).await.unwrap().is_none());
+        assert!(pm.db().get_session(&refused).await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn removal_notification_deletes_rows() {
         let pm = Arc::new(manager().await);
@@ -1235,7 +1590,7 @@ mod tests {
             name: &str,
             offset: f64,
             quotas: DatasetQuotas,
-        ) -> Result<(), &'static str> {
+        ) -> Result<(), String> {
             insert_reloaded_dataset(s, sm, name.to_string(), ds(1000, offset), quotas).await
         }
 
@@ -1256,11 +1611,25 @@ mod tests {
 
         assert_eq!(put(&a, &sm, "x", 0.1, q).await, Ok(()));
         assert_eq!(put(&a, &sm, "y", 0.2, q).await, Ok(()));
-        assert_eq!(put(&a, &sm, "z", 0.3, q).await, Err(RELOAD_SESSION_QUOTA));
+        // The refusals name the size the datasets would reach and the limit.
+        let refused = put(&a, &sm, "z", 0.3, q).await.unwrap_err();
+        let (three, two) = (
+            p2a_core::memory::format_bytes(3 * one as usize),
+            p2a_core::memory::format_bytes(2 * one as usize),
+        );
+        assert!(
+            refused.contains(&format!("would use {three} (limit {two} per session)")),
+            "{refused}"
+        );
         assert_eq!(put(&a, &sm, "x", 0.4, q).await, Ok(())); // replaces x
         assert_eq!(a.data_bytes(), 2 * one);
         assert_eq!(put(&b, &sm, "x", 0.5, q).await, Ok(()));
-        assert_eq!(put(&b, &sm, "y", 0.6, q).await, Err(RELOAD_SERVER_QUOTA));
+        let refused = put(&b, &sm, "y", 0.6, q).await.unwrap_err();
+        let four = p2a_core::memory::format_bytes(4 * one as usize);
+        assert!(
+            refused.contains(&format!("would reach {four} (limit {three})")),
+            "{refused}"
+        );
         assert_eq!(sm.total_data_bytes().await, 3 * one);
         assert!(!a.datasets.read().await.contains_key("z"));
         assert!(!b.datasets.read().await.contains_key("y"));

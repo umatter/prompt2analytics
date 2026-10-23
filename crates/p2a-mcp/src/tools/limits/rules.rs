@@ -26,10 +26,10 @@ const fn row(tool: &'static str, class: RowClass) -> RowRule {
 //    index in another.
 // 3. Every `Exempt` states why the field costs nothing (it selects, indexes or shrinks work, or a
 //    closed-form formula uses it). The schema test in this file requires every integer field,
-//    every array field and every `tol`/`eps` float field of every tool to be matched here.
-//
-// The list covers every integer property, every array property and every `tol`/`eps` float of
-// the tool schemas at d6a3a3b.
+//    every array field (arrays nested in arrays and tuples included), the integer elements of
+//    every array (at the element path `a[]`), every untyped (any-JSON) field and every
+//    `tol`/`eps` float field of every tool to be matched here; the module documentation
+//    (`Classifying a new request field`) says which rules match which.
 
 /// Every classified request field (see the classification rules above).
 pub static PARAM_RULES: &[ParamRule] = {
@@ -218,6 +218,14 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("generate_random_data", "columns[].name", Max(StringBytes)),
         p(
             "generate_random_data",
+            "columns[].distribution",
+            Exempt(
+                "free-form distribution object; its cost fields categories, weights and value are \
+                 ruled separately",
+            ),
+        ),
+        p(
+            "generate_random_data",
             "columns[].distribution.categories",
             ArrayLen(ArrayLength),
         ),
@@ -262,6 +270,13 @@ pub static PARAM_RULES: &[ParamRule] = {
             "sections[].content[].stats",
             ArrayLen(ListLength),
         ),
+        p(
+            "generate_report",
+            "sections[].content[].stats[]",
+            Exempt(
+                "[key, value] pair; the handler reads the first two strings and ignores the rest",
+            ),
+        ),
         p("gformula", "time_points", Max(ListLength)),
         p(
             "gformula",
@@ -286,6 +301,11 @@ pub static PARAM_RULES: &[ParamRule] = {
             Exempt("cell count in a closed-form statistic"),
         ),
         p("hypothesis_poisson", "x", ArrayLen(ListLength)),
+        p(
+            "hypothesis_poisson",
+            "x[]",
+            Exempt("event counts used only in closed-form distribution functions"),
+        ),
         p("hypothesis_poisson", "t", ArrayLen(ListLength)),
         p(
             "hypothesis_prop_trend_test",
@@ -317,12 +337,24 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("munge_bin", "labels[]", Max(StringBytes)),
         p("munge_cast", "casts", ArrayLen(ListLength)),
         p(
+            "munge_cast",
+            "casts[]",
+            Exempt("[column, dtype] pair; the handler refuses any other length"),
+        ),
+        p(
             "munge_diff",
             "periods",
             Exempt("polars shift; cost is bounded by the column length"),
         ),
         p("munge_filter", "value", Max(StringBytes)),
         p("munge_group_by", "aggs", ArrayLen(ListLength)),
+        p(
+            "munge_group_by",
+            "aggs[]",
+            Exempt(
+                "[column, function] pair; the handler reads the first two strings and ignores the rest",
+            ),
+        ),
         p("munge_join", "suffix", Max(StringBytes)),
         p(
             "munge_lag_lead",
@@ -332,6 +364,11 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("munge_mutate", "left", Max(StringBytes)),
         p("munge_mutate", "right", Max(StringBytes)),
         p("munge_rename", "renames", ArrayLen(ListLength)),
+        p(
+            "munge_rename",
+            "renames[]",
+            Exempt("[old, new] pair; the handler reads the first two strings and ignores the rest"),
+        ),
         p("munge_sample", "n", Max(GeneratedRows)),
         p(
             "power_anova_test",
@@ -381,6 +418,11 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("stats_loglin", "eps", Tolerance),
         p("stats_loglin", "margins", ArrayLen(ListLength)),
         p("stats_loglin", "margins[]", ArrayLen(ListLength)),
+        p(
+            "stats_loglin",
+            "margins[][]",
+            Exempt("factor indices, each checked against the number of factors"),
+        ),
         p("stats_se_contrast", "contrasts", ArrayLen(ListLength)),
         p("stats_se_contrast", "contrasts[]", ArrayLen(ListLength)),
         p("str_concat", "columns", ArrayLen(ListLength)),
@@ -419,12 +461,22 @@ pub static PARAM_RULES: &[ParamRule] = {
         p(
             "synthetic_control",
             "predictors[].time_window",
-            Exempt("[start, end] pair of time values"),
+            Exempt("[start, end] pair; serde refuses any other length"),
+        ),
+        p(
+            "synthetic_control",
+            "predictors[].time_window[]",
+            Exempt("time value that selects rows"),
         ),
         p(
             "synthetic_control",
             "optimization_window",
-            Exempt("[start, end] pair of time values"),
+            Exempt("[start, end] pair; serde refuses any other length"),
+        ),
+        p(
+            "synthetic_control",
+            "optimization_window[]",
+            Exempt("time value that selects rows"),
         ),
         p(
             "synthetic_control",
@@ -496,45 +548,65 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("ts_varma", "p", Max(ModelOrder)),
         p("ts_varma", "q", Max(ModelOrder)),
         p("viz_dendrogram", "linkage_matrix", SquareLen),
+        p(
+            "viz_dendrogram",
+            "linkage_matrix[]",
+            Exempt("linkage row; the handler reads the first four values and ignores the rest"),
+        ),
         p("viz_dendrogram", "labels", ArrayLen(ArrayLength)),
     ]
 };
 
 /// Tools whose dataset height is limited, by [`RowClass`]. All take the dataset in `dataset`.
 ///
-/// Deliberately not row-limited, because their wave-2 packages remove the superlinear cost:
-/// `hypothesis_cor_test` (Kendall), `stats_ecdf`, `timeseries_cpgram`, `ml_ctree`,
-/// `treatment_twang`, `treatment_sbw`, `bacon_decomp`, `regression_gls` (AR(1) and CS closed
-/// forms; a user-supplied correlation relies on the per-allocation ceiling), `panel_gls`,
-/// `moran_test`, `spatial_lm_tests_tool` and `spatial_neighbors`.
+/// Deliberately not row-limited, because their cost is close to linear in the row count:
+/// `hypothesis_cor_test` (Kendall's tau by sort and merge), `stats_ecdf` (evaluation by binary
+/// search), `timeseries_cpgram` (an FFT periodogram), `ml_ctree` (splits from one sort and
+/// running sums), `treatment_twang` (features sorted once, stumps swept with prefix sums),
+/// `treatment_sbw` (solved in the dimension of the balance constraints), `bacon_decomp` (cell
+/// sums, no dense design), `regression_gls` (O(n) whitening for each of its correlation
+/// structures), `panel_gls` (a T x T covariance with T at most N, linear work per entity),
+/// `moran_test` and `spatial_lm_tests_tool` (traces from the sparse W) and `spatial_neighbors`
+/// (a k-d tree, bounded by `spatial_links`).
 pub static ROW_RULES: &[RowRule] = &[
-    // Dense: clustering.rs:829-830 keeps the condensed n(n-1)/2 f64 distance matrix.
+    // Dense: `hierarchical` keeps the condensed n(n-1)/2 f64 distance matrix; `ml_cutree` builds
+    // the same tree before cutting it.
     row("ml_hierarchical", RowClass::Dense),
     row("ml_cutree", RowClass::Dense),
-    // Dense: neighbour lists of up to n^2 indices (ML-23).
+    // Dense class: each neighbourhood query can return all n rows, so clustering takes O(n^2)
+    // time when eps covers the data (memory is O(n)).
     row("ml_dbscan", RowClass::Dense),
-    // Dense: smooth_spline.rs:377 allocates the n x n penalty `vec![vec![0.0; n]; n]`.
+    // The penalty is stored as bands and each solve is O(n), so neither memory nor time grows
+    // with n^2; the Dense row cap is kept as a conservative bound.
     row("regression_smooth_spline", RowClass::Dense),
-    // Cubic: reduction.rs:474/582/641/690 builds several n x n matrices per iteration.
+    // Cubic: exact t-SNE (no Barnes-Hut) keeps the n x n affinity and similarity matrices and
+    // does O(n^2) work per iteration.
     row("ml_tsne", RowClass::Cubic),
-    // Cubic: reduction.rs:912/934/1004 builds three n x n matrices plus an O(n^3) eigensolve.
+    // Cubic: `cmdscale` double-centres an n x n matrix and runs a full O(n^3) eigensolve on it.
     row("ml_cmdscale", RowClass::Cubic),
-    // Cubic: weights.rs:320 computes dense eigenvalues of W (R parity, `method = "eigen"`).
+    // Cubic: the log-determinant uses the eigenvalues of the dense n x n W
+    // (`SpatialWeights::try_eigenvalues`; R parity, `method = "eigen"`).
     row("sar_model", RowClass::Cubic),
     row("sem_model", RowClass::Cubic),
-    // Cubic: spatialprobit.rs:401 uses a dense W; the impacts do dense n^3 products per draw.
+    // Cubic: the range of the spatial parameter comes from the eigenvalues of the dense W
+    // (`try_rho_range`); the sampler and the impacts run on the sparse W.
     row("sar_probit_model", RowClass::Cubic),
     row("sem_probit_model", RowClass::Cubic),
-    // Cubic: splm.rs:1793 builds the dense NT x NT projection `P_Z`.
+    // Cubic: the spatial-lag models and the within spatial-error model take the eigenvalues of
+    // the dense N x N W of the entities.
     row("spatial_panel_ml", RowClass::Cubic),
+    // The GMM estimator forms P_Z X in O(NT k) memory instead of the NT x NT projection and needs
+    // no eigenvalues; the Cubic row cap is kept as a conservative bound.
     row("spatial_panel_gmm", RowClass::Cubic),
     // Quadratic: nearest-neighbour search over all controls.
     row("propensity_matching", RowClass::Quadratic),
-    // Quadratic: O(B n^2) matching permutations (ECON-10).
+    // Quadratic: with matching, each of the B permutations compares every unit with every unit
+    // of the other group, O(B n^2).
     row("heterogeneity_test", RowClass::Quadratic),
-    // Quadratic: SMO over all pairs (ML-39; still O(n^2) after T0-WP15's error cache).
+    // Quadratic: an SMO sweep examines each of the n rows, and every step it takes updates the
+    // cached errors of all n rows.
     row("ml_svm", RowClass::Quadratic),
-    // Quadratic: loess.rs:240-290 fits each point on its span * n nearest neighbours.
+    // Quadratic: each of the n points is fitted on its ceil(span * n) nearest neighbours.
     row("regression_loess", RowClass::Quadratic),
 ];
 
@@ -609,15 +681,14 @@ mod tests {
         }
     }
 
-    /// Request values reproduced as process aborts or endless loops in the review (X-1, TOOL-1,
-    /// CAUS-3/4/6/8, ECON-9/10/18, ML-3/4/39, REG-1/2, SPAT-21, STAT-7/9/43, TS-3, TOOL-2,
-    /// DATA-3/5).
+    /// Values far above each family cap are refused in the hosted profile, naming the parameter
+    /// and the override key, and accepted when limits are off.
     #[test]
-    fn reviewed_abort_and_hang_values_are_refused_in_hosted_profile() {
+    fn values_far_above_each_cap_are_refused_in_hosted_profile() {
         let cases: &[(&str, Value, &str, &str)] = &[
             (
                 "timeseries_arma_to_ma",
-                json!({"lag_max": 10_000_000_000u64, "ar": [0.5], "ma": [0.3]}),
+                json!({"lag_max": 10_000_000_000u64}),
                 "lag_max",
                 "lags",
             ),
@@ -743,7 +814,7 @@ mod tests {
             ),
             (
                 "scpi",
-                json!({"variance_method": "kfold_cv", "cv_folds": 1_000_000_000_000_000_000u64}),
+                json!({"cv_folds": 1_000_000_000_000_000_000u64}),
                 "cv_folds",
                 "folds",
             ),
@@ -953,7 +1024,7 @@ mod tests {
             ),
             (
                 "viz_dendrogram",
-                json!({"width": 65_536, "height": 65_536}),
+                json!({"width": 65_536}),
                 "width",
                 "image_dimension",
             ),
@@ -984,7 +1055,7 @@ mod tests {
             );
             assert!(Limits::off().check_tool_arguments(tool, args).is_ok());
         }
-        // TOOL-2 / STAT-43 / STAT-70 / DATA-5: shape-driven allocations
+        // shape-driven sizes: square results, duplicate names, array lengths, string bytes
         assert_eq!(
             hosted("linalg_toeplitz", json!({"column": vec![1.0; 1_001]}))
                 .unwrap_err()
@@ -1175,6 +1246,16 @@ mod tests {
                 .iter()
                 .all(|r| !(r.path == "x" && r.tool == "*"))
         );
+        // The element Exempts of these arrays (`x[]`, `margins[][]`) do not bound their length;
+        // these rules do.
+        for (tool, path) in [("hypothesis_poisson", "x"), ("stats_loglin", "margins[]")] {
+            assert!(
+                rules_for(tool)
+                    .iter()
+                    .any(|r| r.path == path && matches!(r.rule, Rule::ArrayLen(_))),
+                "{tool}.{path} needs a length rule"
+            );
+        }
         assert_eq!(ROW_RULES.len(), 16);
     }
 }
@@ -1182,51 +1263,435 @@ mod tests {
 /// Fail-closed guarantee: every cost-bearing field of every registered tool has a rule.
 #[cfg(all(test, feature = "http"))]
 mod schema_tests {
-    use super::super::{Limits, Rule, rules_for};
+    use super::super::{Family, Limits, ParamRule, Rule, rules_for};
     use super::{PARAM_RULES, ROW_RULES};
     use crate::server::AnalyticsServer;
     use serde_json::{Value, json};
 
+    /// What a schema walk found at a path, and so which rules can classify it.
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum Kind {
+        /// An integer field.
         Integer,
+        /// A float field whose name contains `tol` or `eps`.
         Tolerance,
+        /// An array: a field, an element of an array (`a[]`) or a tuple.
         Array,
+        /// Integer elements of an array, recorded at the element path (`a[]` for the elements of
+        /// the array `a`), so that a rule for them is never mistaken for the array's length rule.
+        IntegerElems,
+        /// A map whose values are integers, arrays, objects or any JSON. No rule path can
+        /// address map values, so only `Exempt` classifies it.
+        MapValues,
+        /// A field or element that can hold any JSON: a variant of its schema says nothing about
+        /// its value (a `serde_json::Value`, also as one arm of an untagged enum), or its schema
+        /// refers to a definition the walk cannot find. Only `Exempt` classifies it; its cost
+        /// sub-fields need rules of their own by path, because the schema does not list them.
+        Untyped,
+        /// A path nested deeper than [`MAX_DEPTH`], or whose schema leads through more than
+        /// [`MAX_REF_HOPS`] references and variants, where the walk stopped. No rule classifies
+        /// it, so the schema test fails instead of skipping what lies below.
+        TooDeep,
+    }
+
+    /// True when `rule`, on the path where the walk found `kind`, checks that value (or exempts
+    /// it). `Max(StringBytes)` checks only strings. `ArrayElemMax` sits on the array's path, not
+    /// on the element path of [`Kind::IntegerElems`]; [`classified`] handles it.
+    fn classifies(kind: Kind, rule: Rule) -> bool {
+        match (kind, rule) {
+            (Kind::TooDeep, _) => false,
+            (_, Rule::Exempt(_)) => true,
+            (Kind::Integer | Kind::IntegerElems | Kind::Tolerance, Rule::Max(f)) => {
+                f != Family::StringBytes
+            }
+            (Kind::Tolerance, Rule::Tolerance) => true,
+            (Kind::Array, Rule::ArrayLen(_) | Rule::UniqueList(_) | Rule::SquareLen) => true,
+            _ => false,
+        }
+    }
+
+    /// True when one of a tool's `rules` classifies `kind` at `path`: a rule on `path` itself
+    /// ([`classifies`]) or, for the integer elements at `a[]`, `ArrayElemMax` on the array `a`.
+    /// Nothing classifies the empty path, where [`cost_properties`] records what the root of a
+    /// schema needs.
+    fn classified(rules: &[&ParamRule], path: &str, kind: Kind) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        let on_path = rules
+            .iter()
+            .any(|r| r.path == path && classifies(kind, r.rule));
+        let by_array = kind == Kind::IntegerElems
+            && path.strip_suffix("[]").is_some_and(|array| {
+                rules
+                    .iter()
+                    .any(|r| r.path == array && matches!(r.rule, Rule::ArrayElemMax(_)))
+            });
+        on_path || by_array
+    }
+
+    #[test]
+    fn classification_matches_what_check_value_checks() {
+        use Family::{Lags, ListLength, StringBytes};
+        assert!(classifies(Kind::Integer, Rule::Max(Lags)));
+        assert!(!classifies(Kind::Integer, Rule::Max(StringBytes)));
+        assert!(classifies(Kind::Tolerance, Rule::Tolerance));
+        assert!(classifies(Kind::Tolerance, Rule::Max(Lags)));
+        assert!(!classifies(Kind::Tolerance, Rule::Max(StringBytes)));
+        assert!(classifies(Kind::Array, Rule::ArrayLen(ListLength)));
+        assert!(classifies(Kind::Array, Rule::UniqueList(ListLength)));
+        assert!(classifies(Kind::Array, Rule::SquareLen));
+        assert!(!classifies(Kind::Array, Rule::ArrayElemMax(Lags)));
+        assert!(classifies(Kind::IntegerElems, Rule::Max(Lags)));
+        assert!(!classifies(Kind::IntegerElems, Rule::Max(StringBytes)));
+        assert!(!classifies(Kind::IntegerElems, Rule::ArrayLen(ListLength)));
+        assert!(!classifies(Kind::MapValues, Rule::ArrayLen(ListLength)));
+        assert!(!classifies(Kind::Untyped, Rule::Max(Lags)));
+        for kind in [
+            Kind::Integer,
+            Kind::Tolerance,
+            Kind::Array,
+            Kind::IntegerElems,
+            Kind::MapValues,
+            Kind::Untyped,
+        ] {
+            assert!(classifies(kind, Rule::Exempt("reviewed")));
+        }
+        assert!(!classifies(Kind::TooDeep, Rule::Exempt("reviewed")));
+
+        // An element rule classifies the elements only, never the array's length.
+        let at = |path, rule| ParamRule {
+            tool: "t",
+            path,
+            rule,
+        };
+        let elem_max = [at("a", Rule::ArrayElemMax(Lags))];
+        let elem_exempt = [at("a[]", Rule::Exempt("reviewed"))];
+        let elem_cap = [at("a[]", Rule::Max(Lags))];
+        for table in [&elem_max, &elem_exempt, &elem_cap] {
+            let rules: Vec<&ParamRule> = table.iter().collect();
+            assert!(classified(&rules, "a[]", Kind::IntegerElems), "{table:?}");
+            assert!(!classified(&rules, "a", Kind::Array), "{table:?}");
+        }
+        let length = [at("a", Rule::ArrayLen(ListLength))];
+        let rules: Vec<&ParamRule> = length.iter().collect();
+        assert!(classified(&rules, "a", Kind::Array));
+        assert!(!classified(&rules, "a[]", Kind::IntegerElems));
+        // `ArrayElemMax` on `a[]` covers the integers of the inner arrays, at `a[][]`
+        let inner = [at("a[]", Rule::ArrayElemMax(Lags))];
+        let rules: Vec<&ParamRule> = inner.iter().collect();
+        assert!(classified(&rules, "a[][]", Kind::IntegerElems));
+        assert!(!classified(&rules, "a[]", Kind::IntegerElems));
+
+        // The runtime agrees: StringBytes ignores numbers, ArrayElemMax ignores an array's
+        // length, and a Max on `a[]` checks each element.
+        let h = Limits::hosted();
+        let t = &[ParamRule {
+            tool: "*",
+            path: "n",
+            rule: Rule::Max(StringBytes),
+        }];
+        assert!(h.check_with("t", &json!({"n": 1e30}), t).is_ok());
+        let t = &[ParamRule {
+            tool: "*",
+            path: "a",
+            rule: Rule::ArrayElemMax(Lags),
+        }];
+        assert!(
+            h.check_with("t", &json!({"a": vec![1; 100_000]}), t)
+                .is_ok()
+        );
+        let t = &[ParamRule {
+            tool: "*",
+            path: "a[]",
+            rule: Rule::Max(Lags),
+        }];
+        assert!(h.check_with("t", &json!({"a": [1, 1_000]}), t).is_ok());
+        assert!(h.check_with("t", &json!({"a": [1, 1_001]}), t).is_err());
+    }
+
+    #[test]
+    fn walker_reports_nested_arrays_tuple_elements_and_maps() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "counts": {"type": "array", "items": {"type": "integer"}},
+                "pairs": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+                "grid": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+                "window": {"type": "array",
+                           "prefixItems": [{"type": "integer"}, {"type": "integer"}]},
+                "legacy": {"type": "array",
+                           "items": [{"type": "string"}, {"$ref": "#/$defs/Lens"}]},
+                "reps": {"type": "object", "additionalProperties": {"type": "integer"}},
+                "names": {"type": "object", "additionalProperties": {"type": "string"}},
+                "tables": {"type": "array",
+                           "items": {"type": "object", "additionalProperties": {"type": "array"}}},
+                "closed": {"type": "object", "additionalProperties": false,
+                           "properties": {"k": {"type": ["integer", "null"]}}},
+                "spec": true,
+                "options": {"description": "any JSON"},
+                "anys": {"type": "array", "items": true},
+                "anymap": {"type": "object", "additionalProperties": true},
+                "pair": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}],
+                         "items": false},
+                "level": {"enum": ["low", "high"]},
+                // an untagged enum with a `Value` arm: the typed arm does not hide the other
+                "mixed": {"anyOf": [{"type": "integer"}, true]},
+                // an `Option<Struct>` whose definition is missing: the null arm does not hide it
+                "dangling": {"anyOf": [{"$ref": "#/$defs/Missing"}, {"type": "null"}]},
+                // the same `Option` with a definition, as rmcp's AddNullable writes the null arm
+                "maybe": {"anyOf": [{"$ref": "#/$defs/Lens"}, {"const": null, "nullable": true}]},
+                // a reference cycle: the walk stops after MAX_REF_HOPS and says so
+                "cycle": {"$ref": "#/$defs/Cycle"},
+                // properties, elements and map values are walked whatever the `type`
+                "untyped_object": {"properties": {"k": {"type": "integer"}}},
+                "untyped_list": {"items": {"type": "integer"}},
+                "untyped_map": {"additionalProperties": {"items": {"type": "string"}}},
+                // a flattened map next to a subschema
+                "flat": {"type": "object", "allOf": [{"$ref": "#/$defs/Closed"}],
+                         "unevaluatedProperties": {"type": "integer"}},
+                // a variant below a typed schema is constrained by it
+                "narrowed": {"type": "object", "anyOf": [{"required": ["k"]}, true],
+                             "properties": {"k": {"type": "integer"}}},
+                "never": false
+            },
+            "$defs": {
+                "Lens": {"type": "array", "items": {"type": "integer"}},
+                "Cycle": {"$ref": "#/$defs/Cycle"},
+                "Closed": {"type": "object", "properties": {}}
+            }
+        });
+        let mut found = cost_properties(&schema);
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let found: Vec<(&str, Kind)> = found.iter().map(|(p, k)| (p.as_str(), *k)).collect();
+        assert_eq!(
+            found,
+            [
+                ("anymap", Kind::MapValues),
+                ("anys", Kind::Array),
+                ("anys[]", Kind::Untyped),
+                ("closed.k", Kind::Integer),
+                ("counts", Kind::Array),
+                ("counts[]", Kind::IntegerElems),
+                ("cycle", Kind::TooDeep),
+                ("dangling", Kind::Untyped),
+                ("flat", Kind::MapValues),
+                ("grid", Kind::Array),
+                ("grid[]", Kind::Array),
+                ("grid[][]", Kind::IntegerElems),
+                ("legacy", Kind::Array),
+                ("legacy[]", Kind::Array),
+                ("legacy[][]", Kind::IntegerElems),
+                ("maybe", Kind::Array),
+                ("maybe[]", Kind::IntegerElems),
+                ("mixed", Kind::Untyped),
+                ("mixed", Kind::Integer),
+                ("narrowed.k", Kind::Integer),
+                ("options", Kind::Untyped),
+                ("pair", Kind::Array),
+                ("pairs", Kind::Array),
+                ("pairs[]", Kind::Array),
+                ("reps", Kind::MapValues),
+                ("spec", Kind::Untyped),
+                ("tables", Kind::Array),
+                ("tables[]", Kind::MapValues),
+                ("untyped_list", Kind::Array),
+                ("untyped_list[]", Kind::IntegerElems),
+                ("untyped_map", Kind::MapValues),
+                ("untyped_object.k", Kind::Integer),
+                ("window", Kind::Array),
+                ("window[]", Kind::IntegerElems),
+            ]
+        );
+    }
+
+    #[test]
+    fn walker_reports_a_map_or_any_json_at_the_root_and_no_rule_classifies_it() {
+        let fields = json!({"n": {"type": "integer"}});
+        let at_root = |extra: Value| {
+            let mut schema = json!({"type": "object", "properties": fields});
+            if let (Some(o), Value::Object(extra)) = (schema.as_object_mut(), extra) {
+                o.extend(extra);
+            }
+            let mut found = cost_properties(&schema);
+            found.retain(|(p, _)| p.is_empty());
+            found.into_iter().map(|(_, k)| k).collect::<Vec<_>>()
+        };
+        // a flattened map at the root, whatever its values
+        assert_eq!(
+            at_root(json!({"additionalProperties": {"type": "integer"}})),
+            [Kind::MapValues]
+        );
+        assert_eq!(
+            at_root(json!({"additionalProperties": {"type": "string"}})),
+            [Kind::MapValues]
+        );
+        assert_eq!(
+            at_root(json!({"additionalProperties": true})),
+            [Kind::MapValues]
+        );
+        assert_eq!(
+            at_root(json!({"unevaluatedProperties": true})),
+            [Kind::MapValues]
+        );
+        // `deny_unknown_fields`, and the usual struct, add nothing
+        assert!(at_root(json!({"additionalProperties": false})).is_empty());
+        assert!(at_root(json!({})).is_empty());
+        // a root that is any JSON, or that the walk cannot see
+        assert_eq!(
+            cost_properties(&json!(true)),
+            [(String::new(), Kind::Untyped)]
+        );
+        assert_eq!(
+            cost_properties(&json!({"$ref": "#/components/Args"})),
+            [(String::new(), Kind::Untyped)]
+        );
+        let cycle = json!({"$ref": "#/$defs/A", "$defs": {"A": {"$ref": "#/$defs/A"}}});
+        assert_eq!(cost_properties(&cycle), [(String::new(), Kind::TooDeep)]);
+        // the fields beside a root map are still walked
+        let schema = json!({"type": "object", "properties": fields, "additionalProperties": true});
+        assert!(cost_properties(&schema).contains(&("n".to_string(), Kind::Integer)));
+        // not even an Exempt classifies the root
+        let exempt = ParamRule {
+            tool: "t",
+            path: "",
+            rule: Rule::Exempt("reviewed"),
+        };
+        for kind in [Kind::MapValues, Kind::Untyped] {
+            assert!(!classified(&[&exempt], "", kind));
+        }
+    }
+
+    #[test]
+    fn walker_records_a_path_nested_too_deep_and_no_rule_classifies_it() {
+        // A recursive type nests without end; the walk stops below MAX_DEPTH and says so.
+        let schema = json!({
+            "type": "object",
+            "properties": {"node": {"$ref": "#/$defs/Node"}},
+            "$defs": {"Node": {"type": "object", "properties": {
+                "reps": {"type": "integer"},
+                "child": {"anyOf": [{"$ref": "#/$defs/Node"}, {"type": "null"}]}
+            }}}
+        });
+        let found = cost_properties(&schema);
+        let mut deep: Vec<&str> = found
+            .iter()
+            .filter(|(_, k)| *k == Kind::TooDeep)
+            .map(|(p, _)| p.as_str())
+            .collect();
+        deep.sort_unstable();
+        let last = format!("node{}.", ".child".repeat(MAX_DEPTH));
+        assert_eq!(deep, [format!("{last}child"), format!("{last}reps")]);
+        // the levels above are walked as usual
+        assert!(found.contains(&(
+            format!("node{}.reps", ".child".repeat(MAX_DEPTH - 1)),
+            Kind::Integer
+        )));
+        // not even an Exempt classifies a path the walk did not finish
+        let path: &'static str = deep[0].to_string().leak();
+        let exempt = ParamRule {
+            tool: "t",
+            path,
+            rule: Rule::Exempt("reviewed"),
+        };
+        assert!(!classified(&[&exempt], path, Kind::TooDeep));
     }
 
     /// Most `$ref` hops followed from one schema.
     const MAX_REF_HOPS: usize = 16;
-    /// Deepest nesting of object and array-of-object properties walked.
+    /// Deepest nesting of objects and arrays walked. Each object property and each array level
+    /// takes one level; a value nested deeper is recorded as [`Kind::TooDeep`].
     const MAX_DEPTH: usize = 8;
 
-    /// Collects `schema` and every schema it stands for: `$ref` targets (`#/definitions/...` and
-    /// `#/$defs/...`, resolved against `root`) and `anyOf` / `oneOf` / `allOf` variants.
-    fn variants<'a>(root: &'a Value, schema: &'a Value, hops: usize, out: &mut Vec<&'a Value>) {
+    /// A schema and every schema it stands for, as [`variants`] collects them.
+    #[derive(Default)]
+    struct Variants<'a> {
+        /// The schema, its `$ref` targets and its `anyOf` / `oneOf` / `allOf` variants.
+        all: Vec<&'a Value>,
+        /// True when a leaf (a variant with no `anyOf`, `oneOf` or `allOf` and no `$ref` that
+        /// resolves) says nothing about its value, and nothing above it does ([`says_what`]), or
+        /// when a `$ref` does not resolve: any JSON can reach the value that way, whatever the
+        /// other variants say.
+        untyped: bool,
+        /// True when the walk stopped after [`MAX_REF_HOPS`], so variants may be missing.
+        too_deep: bool,
+    }
+
+    /// True when a schema by itself says what its value is: it has a `type`, `enum` or `const`,
+    /// lists properties, elements or map values (which [`record`] then walks), or it is `false`
+    /// (no value at all). `true`, `{}` and a schema with only a description accept any JSON.
+    fn says_what(schema: &Value) -> bool {
+        const KEYS: [&str; 8] = [
+            "type",
+            "enum",
+            "const",
+            "properties",
+            "items",
+            "prefixItems",
+            "additionalProperties",
+            "unevaluatedProperties",
+        ];
+        match schema {
+            Value::Bool(any) => !any,
+            Value::Object(o) => KEYS.iter().any(|k| o.contains_key(*k)),
+            _ => false,
+        }
+    }
+
+    /// The target of a `$ref` (`#/definitions/...` or `#/$defs/...`, resolved against `root`).
+    fn resolve<'a>(root: &'a Value, reference: &Value) -> Option<&'a Value> {
+        let reference = reference.as_str()?;
+        let (defs, name) = if let Some(name) = reference.strip_prefix("#/definitions/") {
+            ("definitions", name)
+        } else {
+            ("$defs", reference.strip_prefix("#/$defs/")?)
+        };
+        root.get(defs)?.get(name)
+    }
+
+    /// The variants `schema` stands for, resolved against `root`.
+    fn expand<'a>(root: &'a Value, schema: &'a Value) -> Variants<'a> {
+        let mut out = Variants::default();
+        variants(root, schema, 0, false, &mut out);
+        out
+    }
+
+    /// Adds `schema` and the schemas it stands for to `out`. `typed_above` is true when a schema
+    /// that leads here says what the value is, which then constrains this one as well.
+    fn variants<'a>(
+        root: &'a Value,
+        schema: &'a Value,
+        hops: usize,
+        typed_above: bool,
+        out: &mut Variants<'a>,
+    ) {
         if hops > MAX_REF_HOPS {
+            out.too_deep = true;
             return;
         }
-        out.push(schema);
-        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
-            let target = if let Some(name) = reference.strip_prefix("#/definitions/") {
-                &root["definitions"][name]
-            } else if let Some(name) = reference.strip_prefix("#/$defs/") {
-                &root["$defs"][name]
-            } else {
-                &Value::Null
-            };
-            if !target.is_null() {
-                variants(root, target, hops + 1, out);
+        out.all.push(schema);
+        let typed = typed_above || says_what(schema);
+        let mut leaf = true;
+        if let Some(reference) = schema.get("$ref") {
+            match resolve(root, reference) {
+                Some(target) => {
+                    leaf = false;
+                    variants(root, target, hops + 1, typed, out);
+                }
+                // what lies behind it is unknown, so it may be anything
+                None => out.untyped = true,
             }
         }
         for key in ["anyOf", "oneOf", "allOf"] {
-            for variant in schema
-                .get(key)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                variants(root, variant, hops + 1, out);
+            if let Some(list) = schema.get(key).and_then(Value::as_array) {
+                leaf = false;
+                for variant in list {
+                    variants(root, variant, hops + 1, typed, out);
+                }
             }
+        }
+        if leaf && !typed {
+            out.untyped = true;
         }
     }
 
@@ -1244,55 +1709,169 @@ mod schema_tests {
         out
     }
 
-    fn walk(
+    /// True when a variant describes an array: by its `type`, or by `items` or `prefixItems`
+    /// given without one.
+    fn is_array(vs: &Variants) -> bool {
+        types(&vs.all).contains(&"array")
+            || vs
+                .all
+                .iter()
+                .any(|v| v.get("items").is_some() || v.get("prefixItems").is_some())
+    }
+
+    /// The schemas a map's values must match: `additionalProperties`, or the
+    /// `unevaluatedProperties` that schemars writes for a flattened map next to subschemas,
+    /// unless it is `false` (no keys beyond the listed properties).
+    fn map_value_schemas<'a>(variants_of: &[&'a Value]) -> Vec<&'a Value> {
+        variants_of
+            .iter()
+            .flat_map(|v| ["additionalProperties", "unevaluatedProperties"].map(|k| v.get(k)))
+            .flatten()
+            .filter(|values| !matches!(values, Value::Bool(false)))
+            .collect()
+    }
+
+    fn push(out: &mut Vec<(String, Kind)>, path: &str, kind: Kind) {
+        if !out.iter().any(|(p, k)| p == path && *k == kind) {
+            out.push((path.to_string(), kind));
+        }
+    }
+
+    /// The element schemas of an array: `items` (one schema, `true` for any JSON, or a list of
+    /// tuple positions) and `prefixItems` (tuple positions). `items: false` (no elements beyond
+    /// the tuple positions) describes none.
+    fn element_schemas<'a>(variants: &[&'a Value]) -> Vec<&'a Value> {
+        let mut out = Vec::new();
+        for v in variants {
+            match v.get("items") {
+                Some(Value::Array(positions)) => out.extend(positions),
+                Some(items @ (Value::Object(_) | Value::Bool(true))) => out.push(items),
+                _ => {}
+            }
+            out.extend(
+                v.get("prefixItems")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        out
+    }
+
+    /// Records the properties of the object schemas among `variants` under `prefix`.
+    fn walk_properties(
         root: &Value,
-        schema: &Value,
+        variants_of: &[&Value],
         prefix: &str,
         depth: usize,
         out: &mut Vec<(String, Kind)>,
     ) {
-        if depth > MAX_DEPTH {
-            return;
-        }
-        let mut own = Vec::new();
-        variants(root, schema, 0, &mut own);
-        for props in own
+        for props in variants_of
             .iter()
             .filter_map(|v| v.get("properties").and_then(Value::as_object))
         {
             for (name, prop) in props {
-                let path = format!("{prefix}{name}");
-                let mut pvs = Vec::new();
-                variants(root, prop, 0, &mut pvs);
-                let ts = types(&pvs);
-                let mut push = |kind: Kind| {
-                    if !out.iter().any(|(p, k)| *p == path && *k == kind) {
-                        out.push((path.clone(), kind));
-                    }
-                };
-                if ts.contains(&"integer") {
-                    push(Kind::Integer);
-                }
-                if ts.contains(&"number") && (name.contains("tol") || name.contains("eps")) {
-                    push(Kind::Tolerance);
-                }
-                if ts.contains(&"array") {
-                    push(Kind::Array);
-                    for items in pvs.iter().filter_map(|v| v.get("items")) {
-                        walk(root, items, &format!("{path}[]."), depth + 1, out);
-                    }
-                }
-                if ts.contains(&"object") {
-                    walk(root, prop, &format!("{path}."), depth + 1, out);
-                }
+                record(
+                    root,
+                    prop,
+                    &format!("{prefix}{name}"),
+                    Some(name),
+                    depth,
+                    out,
+                );
+            }
+        }
+    }
+
+    /// Records what the value at `path`, described by `schema`, needs: its integers, an array
+    /// (and what its elements need, at `{path}[]`), the properties of an object (under
+    /// `{path}.`) and map values, [`Kind::Untyped`], or [`Kind::TooDeep`] when the walk cannot
+    /// see all of it. Properties, elements and map values are walked whenever a variant lists
+    /// them, whatever its `type`. `name` is the field name of a property and `None` for an
+    /// array element, whose integers are [`Kind::IntegerElems`] and which is never a tolerance
+    /// (that check goes by field name).
+    fn record(
+        root: &Value,
+        schema: &Value,
+        path: &str,
+        name: Option<&str>,
+        depth: usize,
+        out: &mut Vec<(String, Kind)>,
+    ) {
+        if depth > MAX_DEPTH {
+            push(out, path, Kind::TooDeep);
+            return;
+        }
+        let vs = expand(root, schema);
+        if vs.too_deep {
+            push(out, path, Kind::TooDeep);
+        }
+        if vs.untyped {
+            push(out, path, Kind::Untyped);
+        }
+        let ts = types(&vs.all);
+        if ts.contains(&"integer") {
+            let kind = if name.is_some() {
+                Kind::Integer
+            } else {
+                Kind::IntegerElems
+            };
+            push(out, path, kind);
+        }
+        if ts.contains(&"number") && name.is_some_and(|n| n.contains("tol") || n.contains("eps")) {
+            push(out, path, Kind::Tolerance);
+        }
+        if is_array(&vs) {
+            push(out, path, Kind::Array);
+            let elements = format!("{path}[]");
+            for item in element_schemas(&vs.all) {
+                record(root, item, &elements, None, depth + 1, out);
+            }
+        }
+        walk_properties(root, &vs.all, &format!("{path}."), depth + 1, out);
+        map_values(root, &vs.all, path, out);
+    }
+
+    /// Records [`Kind::MapValues`] at `path` when a schema among `variants_of` is a map (its
+    /// [`map_value_schemas`]) whose values are integers, arrays, objects or any JSON, and
+    /// [`Kind::TooDeep`] when the walk cannot see what they are.
+    fn map_values(root: &Value, variants_of: &[&Value], path: &str, out: &mut Vec<(String, Kind)>) {
+        for values in map_value_schemas(variants_of) {
+            let vvs = expand(root, values);
+            if vvs.too_deep {
+                push(out, path, Kind::TooDeep);
+            }
+            let vts = types(&vvs.all);
+            let object = vts.contains(&"object")
+                || vvs
+                    .all
+                    .iter()
+                    .any(|v| v.get("properties").is_some() || !map_value_schemas(&[*v]).is_empty());
+            if vvs.untyped || vts.contains(&"integer") || is_array(&vvs) || object {
+                push(out, path, Kind::MapValues);
             }
         }
     }
 
     /// Walks one tool's input schema and returns every (path, kind) that must be classified.
+    ///
+    /// What the root itself needs is recorded at the empty path, which no rule can classify (a
+    /// rule path is never empty, [`classified`]): a root that may be any JSON or that the walk
+    /// cannot see, and a map at the root (a `#[serde(flatten)]` map) whatever its values, since
+    /// its keys are request fields the schema does not name.
     fn cost_properties(schema: &Value) -> Vec<(String, Kind)> {
+        let root = expand(schema, schema);
         let mut out = Vec::new();
-        walk(schema, schema, "", 0, &mut out);
+        if root.too_deep {
+            push(&mut out, "", Kind::TooDeep);
+        }
+        if root.untyped {
+            push(&mut out, "", Kind::Untyped);
+        }
+        if !map_value_schemas(&root.all).is_empty() {
+            push(&mut out, "", Kind::MapValues);
+        }
+        walk_properties(schema, &root.all, "", 0, &mut out);
         out
     }
 
@@ -1308,7 +1887,8 @@ mod schema_tests {
     fn every_cost_property_of_every_tool_is_classified() {
         let tools = tools();
         assert!(tools.len() >= 250, "walker saw {} tools", tools.len());
-        let (mut ints, mut arrays, mut tols, mut missing) = (0, 0, 0, Vec::new());
+        let (mut ints, mut arrays, mut tols, mut elems, mut maps, mut untyped) = (0, 0, 0, 0, 0, 0);
+        let mut missing = Vec::new();
         for (tool, schema) in &tools {
             let rules = rules_for(tool);
             for (path, kind) in cost_properties(schema) {
@@ -1316,42 +1896,39 @@ mod schema_tests {
                     Kind::Integer => ints += 1,
                     Kind::Array => arrays += 1,
                     Kind::Tolerance => tols += 1,
+                    Kind::IntegerElems => elems += 1,
+                    Kind::MapValues => maps += 1,
+                    Kind::Untyped => untyped += 1,
+                    Kind::TooDeep => {}
                 }
-                let ok = rules.iter().filter(|r| r.path == path).any(|r| {
-                    matches!(
-                        (kind, r.rule),
-                        (_, Rule::Exempt(_))
-                            | (Kind::Integer, Rule::Max(_))
-                            | (Kind::Tolerance, Rule::Tolerance | Rule::Max(_))
-                            | (
-                                Kind::Array,
-                                Rule::ArrayLen(_)
-                                    | Rule::ArrayElemMax(_)
-                                    | Rule::UniqueList(_)
-                                    | Rule::SquareLen,
-                            )
-                    )
-                });
-                if !ok {
-                    missing.push(format!("{tool}.{path} ({kind:?})"));
+                if !classified(&rules, &path, kind) {
+                    let at = if path.is_empty() { "<root>" } else { &path };
+                    missing.push(format!("{tool}.{at} ({kind:?})"));
                 }
             }
         }
         assert!(
             missing.is_empty(),
             "request fields without a limits rule (add a ParamRule or a reasoned Exempt in \
-             tools/limits/rules.rs):\n{}",
+             tools/limits/rules.rs; the limits module documentation says which rule fits which \
+             kind; TooDeep means the walk stopped at MAX_DEPTH or MAX_REF_HOPS, and <root> \
+             that the request itself is a map or any JSON, which no rule can classify):\n{}",
             missing.join("\n")
         );
         eprintln!(
-            "schema walker: {} tools, {ints} integer, {arrays} array, {tols} tolerance fields",
+            "schema walker: {} tools, {ints} integer, {arrays} array, {tols} tolerance, {elems} \
+             integer-element, {maps} map and {untyped} untyped fields",
             tools.len()
         );
-        // Sanity: a schema format change must not silently hide properties
-        // (counts at d6a3a3b: 191 / 199 / 10).
+        // Sanity: a schema format change must not silently hide properties (the walker saw
+        // 191 integer, 207 array, 10 tolerance, 7 integer-element and 1 untyped field when it
+        // learned element paths and untyped fields). Untyped fields have no floor: giving the
+        // last `serde_json::Value` request field a type would be an improvement, and
+        // `walker_reports_nested_arrays_tuple_elements_and_maps` shows they are found.
         assert!(
-            ints >= 150 && arrays >= 150 && tols >= 8,
-            "walker saw {ints} integer, {arrays} array, {tols} tolerance fields"
+            ints >= 150 && arrays >= 150 && tols >= 8 && elems >= 5,
+            "walker saw {ints} integer, {arrays} array, {tols} tolerance and {elems} \
+             integer-element fields"
         );
     }
 
@@ -1405,17 +1982,24 @@ mod schema_tests {
         for (tool, schema) in tools() {
             let mut args = serde_json::Map::new();
             for (path, kind) in cost_properties(&schema) {
-                if path.contains(['.', '[']) {
+                // top-level fields, and the integer elements of a top-level array (`a[]`), which
+                // the walk records after the array and whose value replaces the empty one
+                let (field, value) = match kind {
+                    Kind::Integer => (path.as_str(), json!(1)),
+                    Kind::Tolerance => (path.as_str(), json!(1e-6)),
+                    Kind::Array => (path.as_str(), json!([])),
+                    Kind::IntegerElems => match path.strip_suffix("[]") {
+                        Some(array) => (array, json!([1])),
+                        None => continue,
+                    },
+                    Kind::MapValues => (path.as_str(), json!({})),
+                    Kind::Untyped | Kind::TooDeep => continue,
+                };
+                // nested paths, and the root's own entries at the empty path
+                if field.is_empty() || field.contains(['.', '[']) {
                     continue;
                 }
-                args.insert(
-                    path,
-                    match kind {
-                        Kind::Integer => json!(1),
-                        Kind::Tolerance => json!(1e-6),
-                        Kind::Array => json!([]),
-                    },
-                );
+                args.insert(field.to_string(), value);
             }
             let args = Value::Object(args);
             assert!(

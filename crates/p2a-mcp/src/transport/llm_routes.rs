@@ -1230,8 +1230,9 @@ async fn run_until_client_gone<F: std::future::Future>(
 /// The chat runs in its own task for as long as the client listens: when
 /// the SSE stream is dropped (the client disconnected), the chat future is
 /// dropped, and with it the provider request and any in-flight governed
-/// tool call, whose guard cancels the tool. The session's chat slot is held
-/// until the task ends.
+/// tool call, whose guard cancels the tool; the stored message and tool
+/// calls are closed as stopped ([`run_chat_task`]). The session's chat
+/// slot is held until the task ends.
 pub async fn llm_chat_stream(
     State(state): State<AppState>,
     Json(request): Json<LlmChatRequest>,
@@ -1250,17 +1251,14 @@ pub async fn llm_chat_stream(
     tokio::spawn(async move {
         let _slot = slot;
         let chat = run_chat_stream(state, request, settings, tx.clone(), placeholder.clone());
-        if run_until_client_gone(&tx, chat).await.is_none() {
-            tracing::info!("The chat stream's client disconnected; the chat was stopped");
+        run_chat_task(
+            &tx,
+            chat,
             #[cfg(feature = "db")]
-            if let (Some(db), Some(msg_id)) = (&db, placeholder.get())
-                && let Err(e) = db
-                    .update_message_content(msg_id, "[Stopped: the client disconnected]")
-                    .await
-            {
-                tracing::warn!("Failed to mark the stopped message: {}", e);
-            }
-        }
+            db,
+            &placeholder,
+        )
+        .await;
     });
 
     // Create SSE stream from receiver
@@ -1281,6 +1279,75 @@ pub async fn llm_chat_stream(
     axum::response::sse::Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response()
+}
+
+/// The task of [`llm_chat_stream`]: `chat` runs for as long as the client
+/// listens on `tx`. When the client disconnects first, `chat` is dropped
+/// and, in db builds, what it left unfinished is closed in `db`: the
+/// assistant message whose id is in `placeholder` is marked stopped, and
+/// each of its tool calls still pending or running is failed, since the
+/// dropped future will not go on to finish it.
+///
+/// Dropping `chat` does not cancel a write it had already handed to the
+/// database: SurrealDB's embedded router runs each request in a task of its
+/// own, so such a write can still land after this cleanup. A completion or
+/// failure then replaces the stopped error. A tool-call row whose create the
+/// database already received when the chat was dropped is still written,
+/// and in the rare case it lands after this cleanup's read it stays Running.
+async fn run_chat_task<F: std::future::Future<Output = ()>>(
+    tx: &tokio::sync::mpsc::Sender<ProgressEvent>,
+    chat: F,
+    #[cfg(feature = "db")] db: Option<Arc<crate::db::DbConnection>>,
+    placeholder: &OnceLock<String>,
+) {
+    if run_until_client_gone(tx, chat).await.is_some() {
+        return;
+    }
+    tracing::info!("The chat stream's client disconnected; the chat was stopped");
+    #[cfg(feature = "db")]
+    if let (Some(db), Some(msg_id)) = (&db, placeholder.get()) {
+        stop_unfinished_chat(db, msg_id).await;
+    }
+    #[cfg(not(feature = "db"))]
+    let _ = placeholder;
+}
+
+/// Error text of a tool call the client's disconnect stopped.
+#[cfg(feature = "db")]
+const STOPPED_TOOL_CALL: &str = "stopped: the client disconnected";
+
+/// Mark assistant message `msg_id` stopped and fail its tool calls that are
+/// still pending or running (see [`run_chat_task`]). Failures are logged.
+#[cfg(feature = "db")]
+async fn stop_unfinished_chat(db: &crate::db::DbConnection, msg_id: &str) {
+    use crate::db::ToolCallStatus;
+    if let Err(e) = db
+        .update_message_content(msg_id, "[Stopped: the client disconnected]")
+        .await
+    {
+        tracing::warn!("Failed to mark the stopped message: {}", e);
+    }
+    let calls = match db.get_tool_calls_for_message(msg_id).await {
+        Ok(calls) => calls,
+        Err(e) => {
+            tracing::warn!("Failed to read the stopped message's tool calls: {}", e);
+            return;
+        }
+    };
+    for tc in calls
+        .iter()
+        .filter(|tc| matches!(tc.status, ToolCallStatus::Pending | ToolCallStatus::Running))
+    {
+        let started: chrono::DateTime<chrono::Utc> = tc.started_at.clone().into();
+        let elapsed_ms = (chrono::Utc::now() - started).num_milliseconds().max(0);
+        let duration_ms = i32::try_from(elapsed_ms).unwrap_or(i32::MAX);
+        if let Err(e) = db
+            .fail_tool_call(&tc.id_string(), STOPPED_TOOL_CALL, duration_ms)
+            .await
+        {
+            tracing::warn!("Failed to mark a stopped tool call: {}", e);
+        }
+    }
 }
 
 /// The streaming chat: everything [`llm_chat_stream`] runs in its task,
@@ -1334,7 +1401,7 @@ async fn run_chat_stream(
     // Resolve the provider (egress policy, key policy, iteration clamp)
     // before any database write or provider request.
     let provider_config = match resolve_provider_config(
-        request.provider.clone(),
+        request.provider,
         request.max_tool_iterations,
         &settings,
         &server_env,
@@ -1564,11 +1631,13 @@ async fn run_chat_stream(
     #[cfg(not(feature = "db"))]
     let retrieved_history: Vec<Message> = Vec::new();
 
-    // Determine which history to use: client-provided takes precedence
+    // Determine which history to use: client-provided takes precedence.
+    // The request's history and message move into the context; neither is
+    // used again.
     let history_to_use = if request.history.is_empty() {
         retrieved_history
     } else {
-        request.history.clone()
+        request.history
     };
 
     // The bounded dataset block (built under the governor), the history
@@ -1577,7 +1646,7 @@ async fn run_chat_stream(
         &state.governor,
         &session,
         history_to_use,
-        request.message.clone(),
+        request.message,
         &tools,
         &provider_config,
         &settings,
@@ -1773,6 +1842,157 @@ mod tests {
         }
         let text = tool_end.expect("a ToolEnd event with a result");
         assert!(text.starts_with("Error:"), "{text}");
+    }
+}
+
+/// The chat task's disconnect path against an in-memory database.
+#[cfg(all(test, feature = "db"))]
+mod disconnect_tests {
+    use super::*;
+    use crate::config::SessionConfig;
+    use crate::db::{DbConnection, ToolCallStatus};
+    use crate::exec::ExecConfig;
+    use crate::session::SessionManager;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// Sets its flag when dropped, so the permit holder below always ends,
+    /// even when an assertion fails first.
+    struct Release(Arc<AtomicBool>);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_mid_tool_fails_the_running_tool_call() {
+        let db = Arc::new(DbConnection::connect_memory().await.unwrap());
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let sid = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&sid).await.unwrap();
+        let conv = db.create_conversation(&sid, "t").await.unwrap().id_string();
+        let msg = db
+            .add_message(&conv, "assistant", "")
+            .await
+            .unwrap()
+            .id_string();
+        // A finished call of the same message stays as it is.
+        let done = db
+            .create_tool_call(&crate::db::ToolCall::new(
+                msg.clone(),
+                conv.clone(),
+                "list_datasets".into(),
+                "{}".into(),
+            ))
+            .await
+            .unwrap()
+            .id_string();
+        db.complete_tool_call(&done, "ok", 3).await.unwrap();
+
+        // One permit, held, so the governed call waits in the queue with
+        // its row already Running.
+        let governor = Arc::new(ToolGovernor::new(
+            ExecConfig {
+                concurrency: 1,
+                session_concurrency: 1,
+                queue_wait: Duration::from_secs(300),
+                ..Default::default()
+            },
+            sessions,
+        ));
+        let release = Arc::new(AtomicBool::new(false));
+        let _release_on_exit = Release(release.clone());
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let rel = release.clone();
+        let (g, s) = (governor.clone(), session.clone());
+        let holder = tokio::spawn(async move {
+            g.run_blocking(&s, "hold", move |_budget| {
+                let _ = held_tx.send(());
+                while !rel.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(())
+            })
+            .await
+        });
+        // The holder has the permit before the governed call below is
+        // spawned, so that call cannot take it first. Should run_blocking
+        // return without running the closure, the sender is dropped and
+        // this fails at once instead of hanging.
+        held_rx.await.expect("the permit holder never started");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(100);
+        let executor = StreamingToolExecutor::new(
+            governor.clone(),
+            Arc::new(crate::server::AnalyticsServer::new()),
+            session,
+            tx.clone(),
+        )
+        .with_persistence(db.clone(), conv.clone(), msg.clone(), sid.clone());
+        let placeholder = Arc::new(OnceLock::new());
+        placeholder.set(msg.clone()).unwrap();
+        let (task_db, task_placeholder) = (db.clone(), placeholder.clone());
+        let task = tokio::spawn(async move {
+            let chat = async move {
+                let _ = executor
+                    .execute("list_datasets", serde_json::json!({}))
+                    .await;
+            };
+            run_chat_task(&tx, chat, Some(task_db), &task_placeholder).await;
+        });
+
+        // Wait (bounded) until the governed call's row is Running.
+        let running = |calls: &[crate::db::ToolCall]| {
+            calls
+                .iter()
+                .filter(|tc| tc.status == ToolCallStatus::Running)
+                .count()
+        };
+        let mut waited = 0;
+        while running(&db.get_tool_calls_for_message(&msg).await.unwrap()) == 0 {
+            assert!(waited < 500, "the tool call never started");
+            waited += 1;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // The client goes away mid-tool.
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("the chat task ends once the client is gone")
+            .unwrap();
+
+        let calls = db.get_tool_calls_for_message(&msg).await.unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            calls
+                .iter()
+                .all(|tc| !matches!(tc.status, ToolCallStatus::Pending | ToolCallStatus::Running)),
+            "{calls:?}"
+        );
+        let stopped: Vec<_> = calls.iter().filter(|tc| tc.id_string() != done).collect();
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0].status, ToolCallStatus::Error);
+        assert_eq!(stopped[0].error.as_deref(), Some(STOPPED_TOOL_CALL));
+        assert!(stopped[0].duration_ms.is_some_and(|ms| ms >= 0));
+        let finished = calls.iter().find(|tc| tc.id_string() == done).unwrap();
+        assert_eq!(
+            (&finished.status, finished.result.as_deref()),
+            (&ToolCallStatus::Success, Some("ok"))
+        );
+        assert_eq!(
+            db.get_message(&msg).await.unwrap().content,
+            "[Stopped: the client disconnected]"
+        );
+
+        release.store(true, Ordering::SeqCst);
+        assert!(holder.await.unwrap().is_ok());
     }
 }
 

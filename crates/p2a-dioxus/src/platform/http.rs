@@ -28,8 +28,17 @@ pub fn normalize_access_token(raw: &str) -> Option<String> {
 }
 
 /// Publish the backend access token; an empty or invalid token clears it.
+///
+/// An invalid one (for example from a hand-edited settings file) is logged
+/// as a warning, never with its value, so that requests going out without a
+/// token while Settings still shows one are explained.
 pub fn set_backend_access_token(token: Option<&str>) {
     let normalized = token.and_then(normalize_access_token);
+    if normalized.is_none() && token.is_some_and(|t| !t.trim().is_empty()) {
+        tracing::warn!(
+            "Backend access token ignored: it may contain only visible ASCII characters"
+        );
+    }
     *BACKEND_ACCESS_TOKEN
         .write()
         .unwrap_or_else(PoisonError::into_inner) = normalized;
@@ -413,14 +422,74 @@ mod tests {
         assert_eq!(http_status_message(503, false), "HTTP error: 503");
     }
 
+    /// Records the message of every WARN event on the thread it is the
+    /// default subscriber of.
+    #[derive(Clone, Default)]
+    struct WarnCapture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl WarnCapture {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    struct MessageVisitor<'a>(&'a mut String);
+
+    impl tracing::field::Visit for MessageVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                *self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl tracing::Subscriber for WarnCapture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut message = String::new();
+                event.record(&mut MessageVisitor(&mut message));
+                self.0.lock().unwrap().push(message);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
     #[test]
     fn backend_token_store_round_trip() {
         // the only test that touches the global
-        set_backend_access_token(Some("  t0k  "));
-        assert_eq!(backend_access_token().as_deref(), Some("t0k"));
-        set_backend_access_token(Some("bad\ntoken"));
-        assert_eq!(backend_access_token(), None);
-        set_backend_access_token(None);
-        assert_eq!(backend_access_token(), None);
+        let warnings = WarnCapture::default();
+        tracing::subscriber::with_default(warnings.clone(), || {
+            set_backend_access_token(Some("  t0k  "));
+            assert_eq!(backend_access_token().as_deref(), Some("t0k"));
+            assert!(warnings.take().is_empty());
+
+            // A non-empty but invalid token is cleared, with a warning that
+            // does not carry the value.
+            set_backend_access_token(Some("bad\ntoken"));
+            assert_eq!(backend_access_token(), None);
+            let warned = warnings.take();
+            assert_eq!(warned.len(), 1, "{warned:?}");
+            assert!(
+                warned[0].contains("Backend access token ignored"),
+                "{warned:?}"
+            );
+            assert!(!warned[0].contains("bad"), "{warned:?}");
+
+            // No token at all is not worth a warning.
+            for none in [None, Some(""), Some("   ")] {
+                set_backend_access_token(none);
+                assert_eq!(backend_access_token(), None);
+            }
+            assert!(warnings.take().is_empty());
+        });
     }
 }

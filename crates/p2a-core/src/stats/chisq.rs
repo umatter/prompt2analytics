@@ -391,9 +391,9 @@ pub fn chisq_test_independence(table: &[Vec<f64>], correct: bool) -> EconResult<
         });
     }
 
-    // A `Vec<Vec>` passes a per-allocation ceiling row by row, so check the total first
+    // A `Vec<Vec>` passes a per-allocation ceiling row by row, so the total is checked here, by
+    // the fallible allocation of the flat table
     let cells = resource::checked_len(&[n_rows, n_cols], "contingency table")?;
-    resource::check_alloc::<f64>(cells, "contingency table")?;
     let mut observed: Vec<f64> = resource::try_with_capacity(cells, "contingency table")?;
     for row in table {
         observed.extend_from_slice(row);
@@ -630,8 +630,18 @@ pub fn run_chisq_gof(
 ///
 /// # Errors
 ///
-/// A missing column, a struct column, a column with fewer than two distinct values (null counts
-/// as one), a table too large to allocate, and cancellation through [`resource::checkpoint`].
+/// - [`EconError::ColumnNotFound`] for a missing column.
+/// - [`EconError::InvalidSpecification`] for a struct, list or array column, when a column's
+///   distinct values cannot be computed (`Failed to get unique ... values`), or when a value
+///   cannot be read (`Failed to read a value`).
+/// - [`EconError::InsufficientData`] for a column with fewer than two distinct values (null
+///   counts as one).
+/// - [`EconError::ResourceLimit`] for a contingency table, or a column's list of levels, too
+///   large to allocate.
+/// - [`EconError::Computation`] when two levels of a column share a row key, or when a row
+///   matches no level of its column, because the table would miscount or miss those rows.
+/// - [`EconError::Cancelled`] when the budget installed for the thread is cancelled or its
+///   deadline passes (checked through [`resource::checkpoint`]).
 ///
 /// # Example
 ///
@@ -666,17 +676,23 @@ pub fn run_chisq_independence(
         available: available_cols,
     })?;
 
-    // Rows are keyed on the text of their value, and a struct value's text prints its whole
-    // array (O(n) per row); struct levels never matched their rows either
+    // Rows are keyed on the text of their value. A struct value's text prints its whole array
+    // (O(n) per row), and struct levels never matched their rows either. A list or array value's
+    // text keeps only its first and last elements once it is longer than POLARS_FMT_MAX_ROWS,
+    // so two distinct values could share a key and their rows be counted under one level.
     for (name, column) in [(row_col, row_series), (col_col, col_series)] {
-        if matches!(column.dtype(), DataType::Struct(_)) {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "column `{name}` holds structs; the chi-squared test of independence needs \
-                     categorical or numeric columns"
-                ),
-            });
-        }
+        let kind = match column.dtype() {
+            DataType::Struct(_) => "structs",
+            DataType::List(_) => "lists",
+            DataType::Array(_, _) => "arrays",
+            _ => continue,
+        };
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "column `{name}` holds {kind}; the chi-squared test of independence needs \
+                 columns of scalar values (strings, numbers, categories or dates)"
+            ),
+        });
     }
 
     // Get unique values
@@ -702,6 +718,11 @@ pub fn run_chisq_independence(
         });
     }
 
+    // A flat, fallibly allocated r x c table of counts, refused before the rechunks and the level
+    // lists: two ID-like columns would otherwise rechunk both columns and build 4n Strings first
+    let cells = resource::checked_len(&[n_rows, n_cols], "contingency table")?;
+    let mut observed: Vec<f64> = resource::try_vec(cells, 0.0, "contingency table")?;
+
     // Random access is O(1) only on a single chunk, and a frame built by stacking (munge_concat)
     // keeps one chunk per part, so rechunk each column once before the per-row reads
     let row_series = row_series.rechunk();
@@ -712,24 +733,10 @@ pub fn run_chisq_independence(
 
     // Levels in sorted order of their text (the order the table has always had), each with the
     // key its rows are matched on
-    let row_levels = sorted_levels(&row_unique.rechunk(), lookup_error)?;
-    let col_levels = sorted_levels(&col_unique.rechunk(), lookup_error)?;
-
-    // A flat, fallibly allocated r x c table of counts
-    let cells = resource::checked_len(&[n_rows, n_cols], "contingency table")?;
-    resource::check_alloc::<f64>(cells, "contingency table")?;
-    let mut observed: Vec<f64> = resource::try_vec(cells, 0.0, "contingency table")?;
-
-    // Level key -> position in the sorted level order (the first position for equal keys)
-    fn index_of(levels: &[(String, String)]) -> std::collections::HashMap<&str, usize> {
-        let mut index = std::collections::HashMap::with_capacity(levels.len());
-        for (i, (_, key)) in levels.iter().enumerate() {
-            index.entry(key.as_str()).or_insert(i);
-        }
-        index
-    }
-    let row_index = index_of(&row_levels);
-    let col_index = index_of(&col_levels);
+    let row_levels = sorted_levels(&row_unique.rechunk(), row_col, lookup_error)?;
+    let col_levels = sorted_levels(&col_unique.rechunk(), col_col, lookup_error)?;
+    let row_index = level_index(&row_levels, row_col)?;
+    let col_index = level_index(&col_levels, col_col)?;
 
     // Count the rows in one pass (no lazy engine, so no nested async runtime), reusing one key
     // buffer per column
@@ -762,13 +769,15 @@ pub fn run_chisq_independence(
     independence_from_flat(observed, n_rows, n_cols, correct)
 }
 
-/// The levels of a column from its single-chunk `unique()` result, as (Debug text, row key)
+/// The levels of `column` from its single-chunk `unique()` result, as (Debug text, row key)
 /// pairs sorted by the text.
 fn sorted_levels(
     unique: &polars::prelude::Column,
+    column: &str,
     lookup_error: impl Fn(polars::prelude::PolarsError) -> EconError,
 ) -> EconResult<Vec<(String, String)>> {
-    let mut levels: Vec<(String, String)> = resource::try_with_capacity(unique.len(), "levels")?;
+    let mut levels: Vec<(String, String)> =
+        resource::try_with_capacity(unique.len(), &format!("the levels of `{column}`"))?;
     for i in 0..unique.len() {
         let v = unique.get(i).map_err(&lookup_error)?;
         let mut key = String::new();
@@ -779,8 +788,43 @@ fn sorted_levels(
     Ok(levels)
 }
 
-/// Writes the key a value is counted under into `buf`: its Debug text, with a float zero written
-/// as `0.0` whatever its sign, because `unique()` merges `0.0` and `-0.0` into one level.
+/// Maps each level's row key to its position in the sorted level order.
+///
+/// Two levels with one key would be counted as one: the second level's row of the table would
+/// stay empty but still count toward the degrees of freedom, so a shared key is an error.
+fn level_index<'a>(
+    levels: &'a [(String, String)],
+    column: &str,
+) -> EconResult<std::collections::HashMap<&'a str, usize>> {
+    use std::collections::hash_map::Entry;
+
+    let mut index = std::collections::HashMap::with_capacity(levels.len());
+    for (i, (_, key)) in levels.iter().enumerate() {
+        match index.entry(key.as_str()) {
+            Entry::Vacant(slot) => {
+                slot.insert(i);
+            }
+            Entry::Occupied(_) => {
+                return Err(EconError::Computation(format!(
+                    "two levels of `{column}` share the row key `{key}`, so their rows cannot be \
+                     told apart"
+                )));
+            }
+        }
+    }
+    Ok(index)
+}
+
+/// Writes the key a value is counted under into `buf`: its Debug text, with two exceptions.
+///
+/// - A float zero is written as `0.0` whatever its sign, because `unique()` merges `0.0` and
+///   `-0.0` into one level.
+/// - A categorical or enum value is written as its category id alone. Its Debug text also prints
+///   the shared mapping's upper bound, which grows whenever a category is inserted into that
+///   mapping (for the process-wide one, by any other request), so a key built from it could
+///   change between building the levels and counting the rows. The sort text in
+///   [`sorted_levels`] keeps the full Debug text: two distinct ids differ before the mapping is
+///   printed, so the level order does not depend on it.
 fn write_level_key(buf: &mut String, v: &polars::prelude::AnyValue<'_>) {
     use polars::prelude::AnyValue;
     use std::fmt::Write as _;
@@ -790,6 +834,10 @@ fn write_level_key(buf: &mut String, v: &polars::prelude::AnyValue<'_>) {
     let _ = match *v {
         AnyValue::Float64(x) => write!(buf, "{:?}", AnyValue::Float64(x + 0.0)),
         AnyValue::Float32(x) => write!(buf, "{:?}", AnyValue::Float32(x + 0.0)),
+        AnyValue::Categorical(idx, _) | AnyValue::CategoricalOwned(idx, _) => {
+            write!(buf, "Categorical({idx})")
+        }
+        AnyValue::Enum(idx, _) | AnyValue::EnumOwned(idx, _) => write!(buf, "Enum({idx})"),
         ref other => write!(buf, "{other:?}"),
     };
 }
@@ -896,6 +944,176 @@ mod tests {
         let e = run_chisq_independence(&Dataset::new(df), "s", "h", true).unwrap_err();
         assert!(
             matches!(&e, EconError::InvalidSpecification { message } if message.contains("struct")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_run_chisq_independence_refuses_list_and_array_columns() {
+        // The text of a list value prints only its first and last five elements once it has more
+        // than POLARS_FMT_MAX_ROWS (default 10). Pre-fix, these two distinct lists of 12, which
+        // differ only in the middle, got one key: all 40 rows were counted under the first level
+        // and the test returned p = 1 with no error
+        let a: Vec<i64> = (0..12).collect();
+        let mut b = a.clone();
+        b[5] = 105;
+        b[6] = 106;
+        let lists: Vec<Series> = (0..40)
+            .map(|i| Series::new("".into(), if i % 3 == 0 { &a } else { &b }))
+            .collect();
+        let list = Series::new("l".into(), lists);
+        assert!(matches!(list.dtype(), DataType::List(_)));
+        let array = list
+            .cast(&DataType::Array(Box::new(DataType::Int64), 12))
+            .unwrap()
+            .with_name("arr".into());
+        let mut df = gh_dataset().df().clone();
+        df.with_column(list).unwrap();
+        df.with_column(array).unwrap();
+        let dataset = Dataset::new(df);
+        for name in ["l", "arr"] {
+            let e = run_chisq_independence(&dataset, name, "h", true).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message }
+                    if message.contains(&format!("`{name}`")) && message.contains("scalar")),
+                "{name}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_categorical_row_keys_survive_inserts_into_the_mapping() {
+        // The Debug text of a categorical value prints its mapping's upper bound, which grows
+        // whenever a category is inserted into that mapping; for the process-wide mapping, any
+        // other request can do that. Pre-fix, rows were keyed on that text, so an insert between
+        // building the levels and counting the rows made the rows miss their levels.
+        let cats = Categories::random("".into(), CategoricalPhysical::U32);
+        let g = gh_dataset()
+            .df()
+            .column("g")
+            .unwrap()
+            .cast(&DataType::from_categories(cats))
+            .unwrap();
+        let levels = sorted_levels(&g.unique().unwrap().rechunk(), "g", |e| {
+            EconError::Computation(e.to_string())
+        })
+        .unwrap();
+        g.dtype()
+            .cat_mapping()
+            .unwrap()
+            .insert_cat("inserted by another request")
+            .unwrap();
+        let mut key = String::new();
+        for i in [0, 39] {
+            write_level_key(&mut key, &g.get(i).unwrap());
+            assert!(
+                levels.iter().any(|(_, k)| *k == key),
+                "row {i} key {key} matches no level of {levels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_run_chisq_independence_on_categorical_and_enum_columns_against_r() {
+        // Local categories (not the process-wide mapping), so the category ids, and with them
+        // the level order, follow first appearance: a, b and x, y, z
+        let categorical =
+            || DataType::from_categories(Categories::random("".into(), CategoricalPhysical::U32));
+        let enums = |levels: &[&str]| {
+            DataType::from_frozen_categories(FrozenCategories::new(levels.iter().copied()).unwrap())
+        };
+        let base = gh_dataset().df().clone();
+        for (g_type, h_type) in [
+            (categorical(), categorical()),
+            (enums(&["a", "b"]), enums(&["x", "y", "z"])),
+        ] {
+            let mut df = base.clone();
+            df.with_column(base.column("g").unwrap().cast(&g_type).unwrap())
+                .unwrap();
+            df.with_column(base.column("h").unwrap().cast(&h_type).unwrap())
+                .unwrap();
+            // R: chisq.test(table(factor(g), factor(h))) -> X-squared = 2.0277056277056276, df = 2,
+            // p = 0.36281841143824806
+            let r = run_chisq_independence(&Dataset::new(df), "g", "h", true).unwrap();
+            assert!(
+                (r.statistic - 2.0277056277056276).abs() < 1e-10,
+                "{g_type:?}/{h_type:?}"
+            );
+            assert!(
+                (r.p_value - 0.36281841143824806).abs() < 1e-10,
+                "{g_type:?}/{h_type:?}"
+            );
+            assert_eq!(
+                (r.df, r.n_rows, r.n_cols),
+                (2, Some(2), Some(3)),
+                "{g_type:?}/{h_type:?}"
+            );
+            assert_eq!(
+                r.observed,
+                vec![7.0, 5.0, 8.0, 4.0, 9.0, 7.0],
+                "{g_type:?}/{h_type:?}"
+            );
+            assert_eq!(
+                r.expected,
+                vec![5.5, 7.0, 7.5, 5.5, 7.0, 7.5],
+                "{g_type:?}/{h_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_chisq_independence_refuses_the_table_before_building_levels() {
+        // Two ID-like columns give an r x c table the ceiling refuses. Pre-fix, both columns were
+        // rechunked and their levels built (two Strings per level) first, and the refusal came
+        // from the level list (40 levels x 48 bytes > 1024) instead of the table.
+        let a: Vec<i64> = (0..40).collect();
+        let b: Vec<i64> = (0..40).map(|i| (i * 7) % 40).collect();
+        let dataset = Dataset::new(df!("a" => a, "b" => b).unwrap());
+        let r = resource::with_alloc_ceiling(Some(1024), || {
+            run_chisq_independence(&dataset, "a", "b", false)
+        });
+        assert!(
+            matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("contingency table")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_chisq_independence_names_the_level_list_it_cannot_allocate() {
+        // An ID-like column against a two-level column: the 30 x 2 table (480 bytes) fits under
+        // the ceiling, but the ID column's 30 levels (30 x 48 bytes) do not. Pre-fix, the error
+        // said only "levels would need ...", without naming the column.
+        let id: Vec<i64> = (0..30).collect();
+        let group: Vec<&str> = (0..30)
+            .map(|i| if i % 3 == 0 { "u" } else { "v" })
+            .collect();
+        let dataset = Dataset::new(df!("id" => id, "group" => group).unwrap());
+        let r = resource::with_alloc_ceiling(Some(1024), || {
+            run_chisq_independence(&dataset, "id", "group", false)
+        });
+        assert!(
+            matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("the levels of `id`")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn test_level_index_refuses_two_levels_with_one_row_key() {
+        // Pre-fix, the second level was mapped to the first one's position: its row of the table
+        // stayed empty but still counted toward the degrees of freedom, with no error.
+        let level = |text: &str, key: &str| (text.to_string(), key.to_string());
+        let distinct = [level("String(a)", "a"), level("String(b)", "b")];
+        let index = level_index(&distinct, "g").unwrap();
+        assert_eq!((index["a"], index["b"]), (0, 1));
+
+        let shared = [
+            level("String(a)", "a"),
+            level("String(b)", "k"),
+            level("String(c)", "k"),
+        ];
+        let e = level_index(&shared, "g").unwrap_err();
+        assert!(
+            matches!(&e, EconError::Computation(m) if m.contains("`g`") && m.contains("`k`")),
             "{e}"
         );
     }

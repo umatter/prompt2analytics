@@ -193,10 +193,12 @@ fn write_dataset(w: &mut BoundedLines, name: &str, ds: &Dataset) -> (bool, bool)
     )) {
         return (true, false);
     }
-    // Written with the planned count, which is the longest form; rewritten
-    // below with the count actually listed (never longer).
+    // Written in its longest form, "first {planned} of {width}", even when
+    // every column is planned; rewritten below with the count actually
+    // listed, which is never longer, so the rewrite never eats into the
+    // notes' reserve.
     let columns_at = w.out.len() + usize::from(!w.out.is_empty());
-    let planned_line = columns_header(planned, width);
+    let planned_line = format!("- Columns (first {planned} of {width}):");
     if !w.try_line(&planned_line) {
         return (true, false);
     }
@@ -344,7 +346,10 @@ pub struct ContextConfig {
     /// Maximum length (bytes) of a single tool result in the history
     pub max_tool_result_length: usize,
     /// Byte cap on the history sent to the model (`llm_history_bytes`);
-    /// `None` means no byte cap.
+    /// `None` means no byte cap. A latest turn that alone passes it is cut
+    /// to fit. Tool-call names and arguments are never cut and no text is
+    /// cut below 128 bytes, so a turn is sent over the cap only when its
+    /// tool calls leave less than 128 bytes per text.
     pub history_byte_cap: Option<usize>,
     /// Whether the token budget of `max_tokens` applies (a model whose
     /// context window is known).
@@ -370,6 +375,11 @@ impl Default for ContextConfig {
 /// kept text, else at a char boundary. Below 128 bytes there is no room for
 /// the note and the result is simply cut ([`truncate_str`]).
 pub fn truncate_tool_result(result: &str, max_length: usize) -> String {
+    truncate_with_note(result, max_length, "Result")
+}
+
+/// [`truncate_tool_result`] with `what` naming the text in the note.
+fn truncate_with_note(result: &str, max_length: usize, what: &str) -> String {
     if result.len() <= max_length {
         return result.to_string();
     }
@@ -378,7 +388,7 @@ pub fn truncate_tool_result(result: &str, max_length: usize) -> String {
     }
     let total = result.len();
     let note = |kept: usize| {
-        format!("...\n\n[Result truncated: showing the first {kept} of {total} bytes]")
+        format!("...\n\n[{what} truncated: showing the first {kept} of {total} bytes]")
     };
     // The note with `total` in both places is the longest it can get.
     let head = truncate_str(result, max_length.saturating_sub(note(total).len()));
@@ -447,16 +457,52 @@ pub fn summarize_tool_call(tool_name: &str, arguments: &serde_json::Value, resul
 /// The byte measure of the history budget: message text, tool-call names
 /// and arguments, and tool-result text.
 fn message_bytes(m: &Message) -> usize {
-    let calls: usize = m.tool_calls.as_ref().map_or(0, |tcs| {
-        tcs.iter()
-            .map(|tc| tc.name.len() + tc.arguments.to_string().len())
-            .sum()
-    });
     let results: usize = m
         .tool_results
         .as_ref()
         .map_or(0, |trs| trs.iter().map(|tr| tr.content.len()).sum());
-    m.content.len() + calls + results
+    m.content.len() + tool_call_bytes(m) + results
+}
+
+/// The tool-call names and arguments of `m` in the history budget's byte
+/// measure.
+fn tool_call_bytes(m: &Message) -> usize {
+    m.tool_calls.as_ref().map_or(0, |tcs| {
+        tcs.iter()
+            .map(|tc| tc.name.len() + tc.arguments.to_string().len())
+            .sum()
+    })
+}
+
+/// Cut the text of `turn` (message contents and tool results) so that its
+/// [`message_bytes`] total is at most `cap`. Tool-call names and arguments
+/// are never cut and come off the cap first; the pieces of text share what
+/// is left, the shorter ones kept whole and the longer ones cut to an equal
+/// share of the rest. No text is cut below 128 bytes, the smallest cut that
+/// keeps the truncation note (a shorter text is kept whole), so the turn is
+/// over the cap only when its tool calls leave less than 128 bytes per text.
+fn fit_turn_to_bytes(turn: &mut [Message], cap: usize) {
+    if turn.iter().map(message_bytes).sum::<usize>() <= cap {
+        return;
+    }
+    let calls: usize = turn.iter().map(tool_call_bytes).sum();
+    let mut texts: Vec<(&mut String, &str)> = Vec::new();
+    for m in turn.iter_mut() {
+        texts.push((&mut m.content, "Message"));
+        if let Some(results) = m.tool_results.as_mut() {
+            texts.extend(results.iter_mut().map(|r| (&mut r.content, "Result")));
+        }
+    }
+    texts.sort_by_key(|(t, _)| t.len());
+    let mut left = cap.saturating_sub(calls);
+    let n = texts.len();
+    for (done, (text, what)) in texts.into_iter().enumerate() {
+        let share = (left / (n - done)).max(text.len().min(128));
+        if text.len() > share {
+            *text = truncate_with_note(text, share, what);
+        }
+        left = left.saturating_sub(text.len());
+    }
 }
 
 /// The bytes of tool-result text over `messages`.
@@ -571,7 +617,8 @@ pub(crate) fn push_tool_results_for_model(
 /// and, for a model with a known context window, the token budget left after
 /// the system prompt, the tool definitions and the response reserve. When it
 /// does not, the oldest turns are replaced by a one-message summary, as few
-/// as needed.
+/// as needed; when even the latest turn alone does not fit, it is sent
+/// alone, cut to the byte cap (see [`ContextManager::process_history`]).
 pub struct ContextManager {
     config: ContextConfig,
     budget: ContextBudget,
@@ -628,7 +675,11 @@ impl ContextManager {
     /// number `k` of oldest turns is summarized such that the summary plus
     /// the remaining turns fit both the byte cap and the token budget. If no
     /// `k` fits, only the latest turn is kept, with its tool results cut to
-    /// 500 bytes.
+    /// 500 bytes and, if it is still over the byte cap, its message texts and
+    /// tool results cut to share what the cap leaves after its tool-call
+    /// names and arguments, which are never cut. No text is cut below 128
+    /// bytes, so that turn passes the cap only when its tool calls leave less
+    /// than 128 bytes per text. The token budget is not applied to that turn.
     pub fn process_history(
         &mut self,
         messages: Vec<Message>,
@@ -653,7 +704,6 @@ impl ContextManager {
             };
         }
 
-        let lines: Vec<String> = turns.iter().map(|t| summarize_messages(t)).collect();
         let mut suffix_bytes = vec![0usize; n + 1];
         let mut suffix_tokens = vec![0usize; n + 1];
         for i in (0..n).rev() {
@@ -666,17 +716,23 @@ impl ContextManager {
         let available = self.budget.available_for_history();
         let header_chars = SUMMARY_HEADER.chars().count();
         let ack_tokens = 4 + estimate_tokens_for_chars(SUMMARY_ACK.chars().count());
-        // Running size of the summary text of the first k turns.
-        let (mut text_bytes, mut text_chars, mut nonempty) = (0usize, 0usize, 0usize);
+        // The non-empty summary lines of the first k turns, built only as k
+        // grows (none when the history fits as it is), and their running
+        // size.
+        let mut lines: Vec<String> = Vec::new();
+        let (mut text_bytes, mut text_chars) = (0usize, 0usize);
         let mut chosen = None;
         for k in 0..n {
-            if k > 0 && !lines[k - 1].is_empty() {
-                let sep = usize::from(nonempty > 0);
-                text_bytes += sep + lines[k - 1].len();
-                text_chars += sep + lines[k - 1].chars().count();
-                nonempty += 1;
+            if k > 0 {
+                let line = summarize_messages(&turns[k - 1]);
+                if !line.is_empty() {
+                    let sep = usize::from(!lines.is_empty());
+                    text_bytes += sep + line.len();
+                    text_chars += sep + line.chars().count();
+                    lines.push(line);
+                }
             }
-            let (summary_bytes, summary_tokens) = if nonempty == 0 {
+            let (summary_bytes, summary_tokens) = if lines.is_empty() {
                 (0, 0)
             } else {
                 (
@@ -697,12 +753,15 @@ impl ContextManager {
         }
 
         let Some(k) = chosen else {
-            let last: Vec<Message> = turns
+            let mut last: Vec<Message> = turns
                 .pop()
                 .unwrap_or_default()
                 .into_iter()
                 .map(|m| cap_tool_results(m, LAST_TURN_TOOL_RESULT_BYTES))
                 .collect();
+            if let Some(cap) = self.config.history_byte_cap {
+                fit_turn_to_bytes(&mut last, cap);
+            }
             self.budget.set_history(&last);
             return ProcessedContext {
                 messages: last,
@@ -712,12 +771,8 @@ impl ContextManager {
             };
         };
 
-        let summary_text = lines[..k]
-            .iter()
-            .filter(|l| !l.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
+        // The loop stopped at k, so `lines` holds exactly the first k turns'.
+        let summary_text = lines.join("\n");
         let mut final_messages = Vec::new();
         if !summary_text.is_empty() {
             final_messages.push(Message::user(format!("{SUMMARY_HEADER}{summary_text}")));
@@ -990,6 +1045,45 @@ mod tests {
     }
 
     #[test]
+    fn cut_short_column_list_keeps_the_note_reserve() {
+        // A frame of at most 60 columns whose listing the budget cuts short:
+        // its header is rewritten to "first L of W", and at every budget the
+        // lines before the notes leave NOTE_RESERVE free, as try_line
+        // promises.
+        let m = HashMap::from([("d".to_string(), Dataset::new(df_with_cols(10)))]);
+        let full = build_dataset_context_bounded(&m, 65_536).unwrap();
+        assert!(full.contains("\n- Columns:\n"), "{full}");
+        let mut cut = 0;
+        for max in 0..full.len() + 2 * NOTE_RESERVE {
+            let ctx = build_dataset_context_bounded(&m, max).unwrap();
+            assert!(ctx.len() <= max, "max {max}: {}", ctx.len());
+            if !ctx.contains("- Columns") {
+                continue;
+            }
+            let body = ctx.find("\n  - ... and ").unwrap_or(ctx.len());
+            assert!(
+                body + NOTE_RESERVE <= max,
+                "max {max}: {body} bytes before the notes"
+            );
+            let listed = ctx.lines().filter(|l| l.starts_with("  - \"c")).count();
+            if listed < 10 {
+                cut += 1;
+                assert!(
+                    ctx.contains(&format!("\n- Columns (first {listed} of 10):\n")),
+                    "max {max}: {ctx}"
+                );
+                assert!(
+                    ctx.contains(&format!("and {} more columns", 10 - listed)),
+                    "max {max}: {ctx}"
+                );
+            } else {
+                assert!(ctx.contains("\n- Columns:\n"), "max {max}: {ctx}");
+            }
+        }
+        assert!(cut > 0);
+    }
+
+    #[test]
     fn history_within_budget_is_unchanged() {
         let h: Vec<Message> = (0..6)
             .flat_map(|i| {
@@ -1027,6 +1121,13 @@ mod tests {
             })
             .collect();
         let last = h.last().unwrap().content.clone();
+        // The summary: the non-empty lines of the six oldest turns.
+        let expected = split_turns(h.clone())[..6]
+            .iter()
+            .map(|t| summarize_messages(t))
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut cm = ContextManager::new(ContextConfig {
             history_byte_cap: Some(10_200),
             token_budget: false,
@@ -1034,6 +1135,7 @@ mod tests {
         });
         let out = cm.process_history(h, "sys");
         assert_eq!(out.turns_summarized, 6);
+        assert_eq!(out.summary.as_deref(), Some(expected.as_str()));
         assert!(
             out.messages[0]
                 .content
@@ -1042,6 +1144,127 @@ mod tests {
         assert_eq!(out.messages[1].role, MessageRole::Assistant);
         assert_eq!(out.messages.last().unwrap().content, last);
         assert!(hb(&out.messages) <= 10_200);
+    }
+
+    #[test]
+    fn latest_turn_alone_is_cut_to_the_byte_cap() {
+        // One 200 KB turn under a 128 KiB cap: no k fits, so the turn is
+        // kept alone, with its text cut until the history fits the cap.
+        let cap = 131_072;
+        let h = vec![
+            Message::user(format!("u: {}", "x".repeat(150_000))),
+            Message::assistant(format!("a: {}", "y".repeat(50_000))),
+        ];
+        let mut cm = ContextManager::new(ContextConfig {
+            history_byte_cap: Some(cap),
+            token_budget: false,
+            ..Default::default()
+        });
+        let out = cm.process_history(h, "sys");
+        assert_eq!((out.messages.len(), out.turns_summarized), (2, 0));
+        assert!(hb(&out.messages) <= cap, "{}", hb(&out.messages));
+        // The reply fits its share and stays whole; the question takes the
+        // rest of the cap.
+        assert_eq!(out.messages[1].content.len(), 50_003);
+        let q = &out.messages[0].content;
+        assert!(q.starts_with("u: xxx") && q.len() > 80_000, "{}", q.len());
+        assert!(
+            q.contains("[Message truncated: showing the first"),
+            "{q:.80}"
+        );
+
+        // With tool calls: their names and arguments are never cut, the
+        // tool results are cut to 500 bytes, and the multibyte text shares
+        // what the cap leaves.
+        let call = crate::llm::ToolCall {
+            id: "c1".into(),
+            name: "regression_ols".into(),
+            arguments: serde_json::json!({"dataset": "d", "y": "y", "x": ["x"]}),
+        };
+        let h = vec![
+            Message::user(format!("a{}", "é".repeat(20_000))),
+            Message::assistant_with_tools("", vec![call]),
+            Message::tool_result(vec![LlmToolResult {
+                tool_call_id: "c1".into(),
+                content: format!("a{}", "ö".repeat(5_000)),
+                is_error: false,
+            }]),
+            Message::assistant(format!("a{}", "ü".repeat(20_000))),
+        ];
+        let cap = 10_000;
+        let mut cm = ContextManager::new(ContextConfig {
+            history_byte_cap: Some(cap),
+            token_budget: false,
+            ..Default::default()
+        });
+        let out = cm.process_history(h, "sys");
+        assert_eq!(out.messages.len(), 4);
+        assert!(hb(&out.messages) <= cap, "{}", hb(&out.messages));
+        assert_eq!(
+            out.messages[1].tool_calls.as_ref().unwrap()[0].name,
+            "regression_ols"
+        );
+        let result = &out.messages[2].tool_results.as_ref().unwrap()[0].content;
+        assert!(
+            result.len() <= LAST_TURN_TOOL_RESULT_BYTES,
+            "{}",
+            result.len()
+        );
+        for i in [0, 3] {
+            let len = out.messages[i].content.len();
+            assert!((4_000..=5_000).contains(&len), "message {i}: {len}");
+        }
+
+        // Tool-call arguments alone larger than the cap: nothing is left to
+        // share, yet no text is emptied; each is cut to at most 128 bytes
+        // with its note, so the turn passes the cap only by those floors.
+        let call = crate::llm::ToolCall {
+            id: "c1".into(),
+            name: "load_dataset".into(),
+            arguments: serde_json::json!({
+                "name": "d",
+                "csv_content": format!("x,y\n{}", "1.1,2.3\n".repeat(400)),
+            }),
+        };
+        let h = vec![
+            Message::user(format!("u: {}", "x".repeat(1_000))),
+            Message::assistant_with_tools("", vec![call]),
+            Message::tool_result(vec![LlmToolResult {
+                tool_call_id: "c1".into(),
+                content: format!("r: {}", "z".repeat(1_000)),
+                is_error: false,
+            }]),
+            Message::assistant(format!("a: {}", "y".repeat(1_000))),
+        ];
+        let cap = 1_000;
+        assert!(tool_call_bytes(&h[1]) > cap);
+        let mut cm = ContextManager::new(ContextConfig {
+            history_byte_cap: Some(cap),
+            token_budget: false,
+            ..Default::default()
+        });
+        let out = cm.process_history(h, "sys");
+        assert_eq!(out.messages.len(), 4);
+        assert!(
+            out.messages[1].tool_calls.as_ref().unwrap()[0].arguments["csv_content"]
+                .as_str()
+                .is_some_and(|s| s.len() > cap)
+        );
+        for (i, start) in [(0, "u: xxx"), (3, "a: yyy")] {
+            let text = &out.messages[i].content;
+            assert!(text.starts_with(start), "message {i}: {text:?}");
+            assert!(text.len() <= 128, "message {i}: {}", text.len());
+            assert!(
+                text.contains("[Message truncated: showing the first"),
+                "message {i}: {text:?}"
+            );
+        }
+        let result = &out.messages[2].tool_results.as_ref().unwrap()[0].content;
+        assert!(
+            result.starts_with("r: zzz") && result.len() <= 128,
+            "{result:?}"
+        );
+        assert!(result.contains("[Result truncated: showing the first"));
     }
 
     #[test]

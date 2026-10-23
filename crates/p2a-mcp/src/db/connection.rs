@@ -92,10 +92,10 @@ pub struct DbConnection {
     /// when the session's rows are deleted. Only touched when the budget is
     /// set; shared by clones.
     session_bytes: Arc<Mutex<HashMap<String, u64>>>,
-    /// One lock per conversation that a delete or clear is working on, with
-    /// the number of calls holding or waiting for it (see [`DeleteTurn`]);
-    /// shared by clones.
-    delete_turns: DeleteTurns,
+    /// One lock per conversation whose rows a call is changing (and per
+    /// session creating a conversation), with the number of calls holding or
+    /// waiting for it (see [`StoreTurn`]); shared by clones.
+    store_turns: StoreTurns,
     /// Conversations deleted recently, for
     /// [`delete_recent_orphans`](Self::delete_recent_orphans); shared by
     /// clones.
@@ -116,25 +116,42 @@ struct DeletedConversations {
 /// this the next sweep scans the messages and tool calls in full.
 pub(crate) const MAX_REMEMBERED_DELETES: usize = 100_000;
 
-type DeleteTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
+type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
 
-/// One call's turn at deleting a conversation's rows (a conversation delete
-/// or clear); the next call's turn starts when it is dropped.
+/// One call's turn at changing a conversation's rows (a conversation delete
+/// or clear, a message add or content update, or a title or archive change:
+/// [`conversation_turn`](DbConnection::conversation_turn)), or at creating a
+/// conversation in a session ([`session_turn`](DbConnection::session_turn));
+/// the next call's turn starts when it is dropped.
 ///
 /// Two deletes of one conversation that run at the same time conflict in
 /// the store: the in-memory engine hands both the same rows (neither
 /// fails), so each would release their bytes from the `session_db_bytes`
 /// counter, and RocksDB fails one of them with a write conflict. Taking
-/// turns makes the later call find nothing instead. The counter is per
-/// process, and so are the turns. An entry leaves the map with its last
-/// holder or waiter, also when a waiting call is cancelled.
-pub(crate) struct DeleteTurn {
-    turns: DeleteTurns,
-    conversation_id: String,
+/// turns makes the later call find nothing instead. Every write of an
+/// existing conversation's row takes its turn, so the counter update after a
+/// message add or content update never loses a write conflict to another
+/// write of that row in this process. A message add holds the turn from its
+/// `messages_per_conversation` check until the message is written, and a
+/// conversation creation holds its session's turn from the
+/// `conversations_per_session` check until the row is written, so concurrent
+/// writes cannot pass a cap together. Both checks count the rows in the
+/// store under the turn (`count_messages`, `count_conversations`): the
+/// conversation's stored `message_count` is a display counter, recounted
+/// under the turn after each message add or content update, and never what
+/// a cap is checked against. A message add, a content update and a title
+/// change count their bytes against `session_db_bytes` and write them in the
+/// conversation's turn, so a delete or clear never runs between the count
+/// and the write. The byte counter is per process, and so are the turns. An
+/// entry leaves the map with its last holder or waiter, also when a waiting
+/// call is cancelled.
+pub(crate) struct StoreTurn {
+    turns: StoreTurns,
+    key: String,
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
-impl Drop for DeleteTurn {
+impl Drop for StoreTurn {
     fn drop(&mut self) {
         // Let the next call in before giving up the entry.
         self.guard.take();
@@ -142,10 +159,10 @@ impl Drop for DeleteTurn {
             .turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((_, users)) = turns.get_mut(&self.conversation_id) {
+        if let Some((_, users)) = turns.get_mut(&self.key) {
             *users = users.saturating_sub(1);
             if *users == 0 {
-                turns.remove(&self.conversation_id);
+                turns.remove(&self.key);
             }
         }
     }
@@ -219,7 +236,7 @@ impl DbConnection {
             db: Arc::new(db),
             limits: PersistenceLimits::default(),
             session_bytes: Arc::new(Mutex::new(HashMap::new())),
-            delete_turns: Arc::new(Mutex::new(HashMap::new())),
+            store_turns: Arc::new(Mutex::new(HashMap::new())),
             deleted_conversations: Arc::new(Mutex::new(DeletedConversations::default())),
         })
     }
@@ -371,7 +388,7 @@ impl DbConnection {
     /// Subtract `n` deleted bytes from the session's counter, if it is
     /// seeded (an unseeded counter reads the store when it is seeded).
     /// `n` must be what the caller's own statements removed during the
-    /// conversation's [`DeleteTurn`], so that no row is released twice.
+    /// conversation's [`StoreTurn`], so that no row is released twice.
     pub(crate) fn release_session_bytes(&self, session_id: &str, n: u64) {
         if self.limits.session_db_bytes.is_some()
             && let Some(used) = self.session_bytes_map().get_mut(session_id)
@@ -380,24 +397,35 @@ impl DbConnection {
         }
     }
 
-    /// Wait for this call's turn at deleting conversation `conversation_id`'s
-    /// rows (see [`DeleteTurn`]).
-    pub(crate) async fn delete_turn(&self, conversation_id: &str) -> DeleteTurn {
+    /// Wait for this call's turn at changing conversation
+    /// `conversation_id`'s rows (see [`StoreTurn`]).
+    pub(crate) async fn conversation_turn(&self, conversation_id: &str) -> StoreTurn {
+        self.turn(conversation_id.to_string()).await
+    }
+
+    /// Wait for this call's turn at creating a conversation in session
+    /// `session_id` (see [`StoreTurn`]). Conversation ids are UUIDs, so
+    /// this key is never a conversation's.
+    pub(crate) async fn session_turn(&self, session_id: &str) -> StoreTurn {
+        self.turn(format!("session:{session_id}")).await
+    }
+
+    async fn turn(&self, key: String) -> StoreTurn {
         let lock = {
             let mut turns = self
-                .delete_turns
+                .store_turns
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let (lock, users) = turns
-                .entry(conversation_id.to_string())
+                .entry(key.clone())
                 .or_insert_with(|| (Arc::new(tokio::sync::Mutex::new(())), 0));
             *users += 1;
             Arc::clone(lock)
         };
         // Registered before waiting, so a cancelled wait still leaves.
-        let mut turn = DeleteTurn {
-            turns: Arc::clone(&self.delete_turns),
-            conversation_id: conversation_id.to_string(),
+        let mut turn = StoreTurn {
+            turns: Arc::clone(&self.store_turns),
+            key,
             guard: None,
         };
         turn.guard = Some(lock.lock_owned().await);
@@ -436,13 +464,24 @@ impl DbConnection {
         Some(ids)
     }
 
-    /// Conversations with a delete turn held or awaited.
+    /// Conversations and sessions with a store turn held or awaited.
     #[cfg(test)]
-    pub(crate) fn delete_turns_in_use(&self) -> usize {
-        self.delete_turns
+    pub(crate) fn store_turns_in_use(&self) -> usize {
+        self.store_turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len()
+    }
+
+    /// The calls holding or waiting for the store turn `key` (a conversation
+    /// id, or `session:<id>`); 0 when none is.
+    #[cfg(test)]
+    pub(crate) fn store_turn_users(&self, key: &str) -> usize {
+        self.store_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .map_or(0, |(_, users)| *users)
     }
 
     /// Whether the `session_db_bytes` budget is set.
@@ -600,7 +639,7 @@ impl Clone for DbConnection {
             db: Arc::clone(&self.db),
             limits: self.limits,
             session_bytes: Arc::clone(&self.session_bytes),
-            delete_turns: Arc::clone(&self.delete_turns),
+            store_turns: Arc::clone(&self.store_turns),
             deleted_conversations: Arc::clone(&self.deleted_conversations),
         }
     }

@@ -53,24 +53,12 @@ pub struct AppState {
     pub governor: Arc<ToolGovernor>,
 }
 
-/// `config` with its transport set to HTTP. Everything in this module serves
-/// HTTP, and `ServerConfig`'s default transport is stdio, which reads as
-/// local mode with no bind guard; so `bind`, `serve` and the app builders
-/// derive the deployment mode, resource profile and bind guard from the HTTP
-/// settings whatever `config.transport` says.
-fn as_http(config: &ServerConfig) -> ServerConfig {
-    ServerConfig {
-        transport: TransportType::Http,
-        ..config.clone()
-    }
-}
-
 /// Build the shared state and the router for `config`, with the governor
 /// settings resolved from it (`ExecConfig::from_config`). The configuration
-/// is read as an HTTP one whatever its `transport` field says.
+/// is read as an HTTP one whatever its `transport` field says
+/// (`ServerConfig::as_http`).
 pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), TransportError> {
-    let config = as_http(config);
-    build_app_with(&config, ExecConfig::from_config(&config)).await
+    build_app_with(config, ExecConfig::from_config(config)).await
 }
 
 /// Build the shared state and the router for `config` with explicit governor
@@ -87,7 +75,7 @@ pub async fn build_app_with(
     config: &ServerConfig,
     exec: ExecConfig,
 ) -> Result<(Router, AppState), TransportError> {
-    let config = &as_http(config);
+    let config = &config.as_http();
     // Resolved before anything is spawned, so a bad override refuses the
     // start without leaving tasks behind.
     #[cfg(feature = "db")]
@@ -241,7 +229,8 @@ async fn init_persistence(
 /// `config.transport` says, including the stdio default of
 /// `ServerConfig::default()`.
 pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListener> {
-    as_http(config)
+    config
+        .as_http()
         .validate()
         .map_err(|e| TransportError::Config(e.to_string()))?;
     let addr = config.http.addr;
@@ -259,6 +248,14 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 /// Then it validates the configuration again, so no caller can skip the
 /// guard, builds the app, installs the process-wide policies (allocation
 /// ceiling, session directories) and serves it with graceful shutdown.
+/// Before it returns, every audit entry queued by then is written out; a call
+/// still running after its deadline answer is logged when its work ends.
+/// It does not install the request limits or apply `--limit-override`
+/// (`P2A_LIMIT_OVERRIDES`); `transport::start_transport` does that before it
+/// calls `start_http_transport`. A caller that uses `serve` directly gets the
+/// off profile's request limits, whatever the governor's resource profile,
+/// unless it first calls
+/// `tools::limits::install(tools::limits::resolve(&config)?)`.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     mut config: ServerConfig,
@@ -279,13 +276,24 @@ pub async fn serve(
         spawn_stuck_watchdog(state.governor.clone(), limit);
     }
 
-    axum::serve(listener, app)
+    let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)))
+        .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)));
+    // Write out the queued audit entries before returning, so a caller that
+    // exits right after a graceful shutdown keeps them. The governor's logger
+    // holds the entries of every tool call; `state.audit_logger` is opened
+    // for the same `config.audit` and is normally the same writer, flushed
+    // as well in case an embedder logged through it.
+    state.governor.flush_audit().await;
+    state.audit_logger.flush().await;
+    served
 }
 
 /// Start the HTTP transport: [`bind`], then [`serve`] until the process ends.
+/// There is no shutdown signal here: the binary serves until it is killed,
+/// so its audit entries are as safe as the writer's own flush whenever its
+/// queue runs empty (see [`crate::audit`]).
 pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> {
     let listener = bind(config).await?;
     serve(listener, config.clone(), std::future::pending()).await
@@ -323,8 +331,10 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig) {
         && exec.session_concurrency > 1
     {
         tracing::warn!(
-            "dataset quotas are configured with --session-concurrency > 1; a refused call is \
-             undone by restoring the session's datasets, which assumes one call per session"
+            "dataset quotas are configured with --session-concurrency \
+             (P2A_SESSION_CONCURRENCY) above 1: a call refused by a dataset quota restores the \
+             session's datasets as they were when it started, which removes datasets that \
+             another concurrent call in the same session added and reverts the ones it replaced"
         );
     }
     if exec.rss_soft_limit_bytes.is_some() && p2a_core::get_process_memory().is_none() {
@@ -333,7 +343,6 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig) {
              not report the process memory; memory admission is disabled"
         );
     }
-    config.warn_unapplied_limit_overrides();
     tracing::info!(
         "Starting HTTP transport on {addr} (mode {mode:?}, resource profile {:?}, \
          tool concurrency {}, deadline {:?})",
@@ -369,7 +378,7 @@ fn spawn_stuck_watchdog(governor: Arc<ToolGovernor>, limit: Duration) {
 /// `state.persistent_manager` is set. The routes and middleware follow the
 /// HTTP deployment mode of `config` whatever its `transport` field says.
 pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
-    let config = &as_http(config);
+    let config = &config.as_http();
     #[cfg(feature = "db")]
     let persistent_manager = state.persistent_manager.clone();
     let governor = Arc::clone(&state.governor);
@@ -578,6 +587,96 @@ async fn health_check(State(state): State<AppState>) -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod serve_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// One HTTP/1.1 POST to `addr` (`Host: localhost`, the connection closed
+    /// after the answer); the JSON body of a 2xx answer.
+    async fn post(addr: std::net::SocketAddr, uri: &str, body: &Value) -> Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body = body.to_string();
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "POST {uri} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.unwrap();
+        let (head, json) = answer.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 2"), "{head}");
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_returns_only_after_the_queued_audit_entries_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("audit.log");
+        let mut config = ServerConfig {
+            transport: TransportType::Http,
+            ..Default::default()
+        };
+        config.audit = crate::config::AuditConfig {
+            enabled: true,
+            path: log.to_string_lossy().into_owned(),
+        };
+        // The writer of this log keeps every entry in its queue until
+        // `held` drops.
+        let held = crate::audit::gate::hold(&log);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // `serve` installs process-wide policies (the p2a-core allocation
+        // ceiling, the session-directory switch) in this test process, which
+        // the other lib tests share. Resolved as `serve` resolves them (at
+        // the bound address), they must be the defaults.
+        let mut bound = config.clone();
+        bound.http.addr = addr;
+        let exec = crate::exec::ExecConfig::from_config(&bound);
+        assert!(
+            exec.alloc_ceiling_bytes.is_none() && !exec.session_dirs,
+            "serve would install a non-default process policy in the shared test process"
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let mut server = tokio::spawn(serve(listener, config, async {
+            let _ = stopped.await;
+        }));
+
+        let created = post(addr, "/api/sessions", &json!({})).await;
+        let sid = created["data"]["session_id"].as_str().unwrap().to_string();
+        let call = json!({"session_id": sid, "arguments": {}});
+        for _ in 0..5 {
+            post(addr, "/api/tools/list_datasets", &call).await;
+        }
+        stop.send(()).unwrap();
+        // While the entries are held, serve cannot return. With the gate
+        // closed this holds however long the wait is, so it cannot fail on a
+        // slow machine.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut server)
+                .await
+                .is_err(),
+            "serve returned with its audit entries still queued"
+        );
+        drop(held);
+        server.await.unwrap().unwrap();
+
+        let text = std::fs::read_to_string(&log).unwrap();
+        let entries: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 5, "{text}");
+        assert!(
+            entries
+                .iter()
+                .all(|e| e["tool_name"] == "list_datasets" && e["session_id"] == sid.as_str())
+        );
+    }
 }
 
 #[cfg(all(test, feature = "db"))]

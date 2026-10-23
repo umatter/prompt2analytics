@@ -147,10 +147,12 @@ fn require_finite(what: &str, value: f64) -> Result<(), GenerationError> {
 impl Distribution {
     /// Validate distribution parameters.
     ///
-    /// Every parameter must be finite. In addition: a uniform range must be
-    /// non-empty and its width representable, a Poisson mean must lie in
-    /// `(0, 1e13]`, a binomial `n` in `1..=2^53`, probabilities in `[0, 1]`,
-    /// and categorical weights non-negative with a finite, positive sum.
+    /// Every distribution parameter (other than a constant column's value)
+    /// must be finite. In addition: a uniform range must be non-empty and
+    /// its width representable, normal and exponential scale parameters
+    /// positive, a Poisson mean in `(0, 1e13]`, a binomial `n` in `1..=2^53`,
+    /// probabilities in `[0, 1]`, and categorical weights non-negative with
+    /// a finite, positive sum.
     pub fn validate(&self) -> Result<(), GenerationError> {
         match self {
             Distribution::Uniform { min, max } => {

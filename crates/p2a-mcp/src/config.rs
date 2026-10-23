@@ -209,7 +209,7 @@ pub struct CliArgs {
     )]
     pub limit_overrides: Vec<String>,
 
-    /// Async runtime worker threads (default: max(2, CPUs)).
+    /// Async runtime worker threads (default: max(2, CPUs); at most 1024).
     #[arg(long, env = "P2A_WORKER_THREADS")]
     pub worker_threads: Option<usize>,
 
@@ -217,7 +217,8 @@ pub struct CliArgs {
     #[arg(long, env = "P2A_TOOL_CONCURRENCY")]
     pub tool_concurrency: Option<usize>,
 
-    /// Tool calls that may run at once in one session (default: CPUs; hosted: 1).
+    /// Tool calls that may run at once in one session (default: CPUs, or 1
+    /// when a dataset quota applies; hosted: 1).
     #[arg(long, env = "P2A_SESSION_CONCURRENCY")]
     pub session_concurrency: Option<usize>,
 
@@ -410,6 +411,11 @@ const HOSTED_MAX_ALLOC_MB: u64 = 256;
 const MAX_KNOB_SECS: u64 = 31_536_000;
 /// Largest accepted session eviction threshold, in minutes (one year).
 const MAX_EVICT_IDLE_MINUTES: u64 = 525_600;
+/// Largest accepted `--worker-threads`. Async workers only serve requests
+/// (tool work runs on the blocking pool), so far fewer are ever useful; the
+/// bound turns a typo into an error that names the flag instead of a panic
+/// in tokio's runtime builder when the OS refuses to spawn the threads.
+const MAX_WORKER_THREADS: usize = 1024;
 
 /// MiB to bytes as `usize`, saturating.
 fn mib_to_usize(mb: u64) -> usize {
@@ -485,6 +491,21 @@ impl ServerConfig {
         Ok(config)
     }
 
+    /// This configuration with its transport set to HTTP. `ServerConfig`'s
+    /// default transport is stdio, which reads as local mode with no bind
+    /// guard; so the HTTP start paths (`transport::http::bind`, `serve`, the
+    /// app builders and `create_router`) and the governor resolver
+    /// (`exec::ExecConfig::from_config`) derive the deployment mode, resource
+    /// profile and bind guard from the HTTP settings whatever `transport`
+    /// says.
+    #[cfg(feature = "http")]
+    pub(crate) fn as_http(&self) -> ServerConfig {
+        ServerConfig {
+            transport: TransportType::Http,
+            ..self.clone()
+        }
+    }
+
     /// The deployment mode: stdio (or a build without the `http` feature) is
     /// always [`DeploymentMode::Local`]; HTTP follows
     /// `HttpConfig::deployment_mode`.
@@ -508,8 +529,9 @@ impl ServerConfig {
     }
 
     /// Startup refusals: the bind guard, `P2A_LIMITS=off` in open public mode,
-    /// zero threads or concurrency, and governor knobs too large to apply
-    /// (each refusal names the flag, its environment variable and the bound).
+    /// zero threads or concurrency, more than `MAX_WORKER_THREADS` worker
+    /// threads, and governor knobs too large to apply (each refusal names the
+    /// flag, its environment variable and the bound).
     pub fn validate(&self) -> anyhow::Result<()> {
         #[cfg(feature = "http")]
         if self.transport == TransportType::Http {
@@ -521,8 +543,9 @@ impl ServerConfig {
             anyhow::bail!(
                 "P2A_LIMITS=off (--limits off) is not allowed for an open public server \
                  (no access token): the hosted resource profile always applies there. \
-                 Raise individual governor limits with their flags instead (for example \
-                 --tool-timeout-secs or --session-data-mb)."
+                 Raise individual request limits with --limit-override \
+                 (P2A_LIMIT_OVERRIDES) and governor limits with their flags instead (for \
+                 example --tool-timeout-secs or --session-data-mb)."
             );
         }
         for (flag, value) in [
@@ -542,6 +565,15 @@ impl ServerConfig {
             if value == Some(0) {
                 anyhow::bail!("{flag} must be at least 1");
             }
+        }
+        if self
+            .exec
+            .worker_threads
+            .is_some_and(|n| n > MAX_WORKER_THREADS)
+        {
+            anyhow::bail!(
+                "--worker-threads (P2A_WORKER_THREADS) must be at most {MAX_WORKER_THREADS}"
+            );
         }
         let max_permits = tokio::sync::Semaphore::MAX_PERMITS;
         for (flag, value) in [
@@ -627,35 +659,6 @@ impl ServerConfig {
                 (self.resource_profile() == ResourceProfile::Hosted)
                     .then_some(HOSTED_EVICT_IDLE_MINUTES)
             }),
-        }
-    }
-
-    /// The keys of the `--limit-override` (`P2A_LIMIT_OVERRIDES`) entries,
-    /// empty entries skipped.
-    pub(crate) fn limit_override_keys(&self) -> Vec<String> {
-        self.limits
-            .overrides
-            .iter()
-            .map(|entry| entry.split_once('=').map_or(entry.as_str(), |(key, _)| key))
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// Log the keys of the configured request-limit overrides. Called at
-    /// startup by the HTTP transport. `transport::start_transport` applies
-    /// the overrides through `tools::limits::resolve` before any transport
-    /// starts (an unknown key fails startup there), so this only names them.
-    /// The name is kept from the build in which the overrides were not yet
-    /// applied, because the HTTP startup code still calls it.
-    pub(crate) fn warn_unapplied_limit_overrides(&self) {
-        let keys = self.limit_override_keys();
-        if !keys.is_empty() {
-            tracing::info!(
-                "--limit-override (P2A_LIMIT_OVERRIDES) sets: {}",
-                keys.join(", ")
-            );
         }
     }
 }
@@ -861,7 +864,6 @@ mod open_mode_tests {
         assert_eq!(c.worker_threads(), 3);
         assert_eq!(c.session.evict_idle_minutes, None); // resolved where the app is built
         assert_eq!(c.resolved_evict_idle_minutes(), Some(10)); // the hosted default
-        assert_eq!(c.limit_override_keys(), vec!["replications", "folds"]);
     }
 
     #[test]
@@ -885,31 +887,28 @@ mod open_mode_tests {
     }
 
     #[test]
-    fn limit_override_keys_skip_empty_entries() {
-        let mut c = cfg("127.0.0.1:8080", None, false);
-        assert!(c.limit_override_keys().is_empty());
-        c.limits.overrides = vec![
-            String::new(),
-            " dense_rows = 100".into(),
-            "bare".into(),
-            "=5".into(),
-        ];
-        assert_eq!(c.limit_override_keys(), vec!["dense_rows", "bare"]);
-    }
-
-    #[test]
-    fn off_refusal_does_not_point_at_unapplied_overrides() {
+    fn off_refusal_points_at_limit_overrides() {
         let mut c = cfg("0.0.0.0:8080", None, true);
         c.limits.profile = Some(ResourceProfile::Off);
         let e = c.validate().unwrap_err().to_string();
-        assert!(!e.contains("P2A_LIMIT_OVERRIDES"), "{e}");
+        assert!(e.contains("--limit-override (P2A_LIMIT_OVERRIDES)"), "{e}");
     }
 
     #[test]
     fn out_of_range_knobs_are_refused() {
         let max_permits = tokio::sync::Semaphore::MAX_PERMITS;
         type Set = fn(&mut ServerConfig);
-        let refused: [(Set, &str, &str); 6] = [
+        let refused: [(Set, &str, &str); 8] = [
+            (
+                |c| c.exec.worker_threads = Some(1025),
+                "--worker-threads (P2A_WORKER_THREADS)",
+                "1024",
+            ),
+            (
+                |c| c.exec.worker_threads = Some(usize::MAX),
+                "--worker-threads (P2A_WORKER_THREADS)",
+                "1024",
+            ),
             (
                 |c| c.exec.tool_timeout_secs = Some(31_536_001),
                 "--tool-timeout-secs (P2A_TOOL_TIMEOUT_SECS)",
@@ -966,6 +965,7 @@ mod open_mode_tests {
         );
         // The bounds themselves are accepted.
         let mut c = cfg("127.0.0.1:8080", None, false);
+        c.exec.worker_threads = Some(1024);
         c.exec.tool_timeout_secs = Some(31_536_000);
         c.exec.stuck_exit_secs = Some(31_536_000);
         c.exec.tool_queue_wait_secs = Some(31_536_000);

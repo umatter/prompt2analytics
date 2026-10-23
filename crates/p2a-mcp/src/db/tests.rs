@@ -427,7 +427,7 @@ async fn concurrent_deletes_release_a_conversations_bytes_once() {
     assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
     assert_counter_matches_store(&db, "s1").await;
     assert!(db.get_messages(&cleared).await.unwrap().is_empty());
-    assert_eq!(db.delete_turns_in_use(), 0);
+    assert_eq!(db.store_turns_in_use(), 0);
 }
 
 /// Without the byte budget, on RocksDB (which fails one of two conflicting
@@ -453,33 +453,343 @@ async fn parallel_deletes_on_rocksdb_do_not_conflict() {
         let (a, b) = tokio::join!(db.clear_messages(&cleared), db.clear_messages(&cleared));
         assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
     }
-    assert_eq!(db.delete_turns_in_use(), 0);
+    assert_eq!(db.store_turns_in_use(), 0);
 }
 
-/// A delete turn leaves the map with its last holder or waiter, also when
+/// A store turn leaves the map with its last holder or waiter, also when
 /// the waiting call is cancelled.
 #[tokio::test]
-async fn delete_turns_leave_the_map() {
+async fn store_turns_leave_the_map() {
     let db = limited_db(PersistenceLimits {
         session_db_bytes: Some(100),
         ..Default::default()
     })
     .await;
-    let first = db.delete_turn("c").await;
+    let first = db.conversation_turn("c").await;
     {
-        let waiting = db.delete_turn("c");
+        let waiting = db.conversation_turn("c");
         tokio::pin!(waiting);
         // It cannot finish while `first` is held; the wait is then cancelled.
         let polled = tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting).await;
         assert!(polled.is_err());
     }
-    assert_eq!(db.delete_turns_in_use(), 1);
+    assert_eq!(db.store_turns_in_use(), 1);
     drop(first);
-    assert_eq!(db.delete_turns_in_use(), 0);
-    let again = db.delete_turn("c").await;
-    assert_eq!(db.delete_turns_in_use(), 1);
+    assert_eq!(db.store_turns_in_use(), 0);
+    let again = db.conversation_turn("c").await;
+    assert_eq!(db.store_turns_in_use(), 1);
     drop(again);
-    assert_eq!(db.delete_turns_in_use(), 0);
+    assert_eq!(db.store_turns_in_use(), 0);
+}
+
+/// Concurrent posts to a conversation one message below its cap: the count
+/// check and the write take turns, so exactly one of them gets in.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_adds_stop_at_the_message_cap() {
+    let db = limited_db(PersistenceLimits {
+        messages_per_conversation: Some(3),
+        ..Default::default()
+    })
+    .await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    db.add_message(&id, "user", "first").await.unwrap();
+    db.add_message(&id, "assistant", "second").await.unwrap();
+    let saved = Message::user(id.clone(), "saved".into());
+    let (a, b, c, d) = tokio::join!(
+        db.add_message(&id, "user", "a"),
+        db.add_message(&id, "user", "b"),
+        db.add_message(&id, "user", "c"),
+        db.save_message(&saved),
+    );
+    let results = [a.map(|_| ()), b.map(|_| ()), c.map(|_| ()), d.map(|_| ())];
+    assert_eq!(
+        results.iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r.is_ok() || matches!(r, Err(DbError::QuotaExceeded(_)))),
+        "{results:?}"
+    );
+    assert_eq!(db.get_messages(&id).await.unwrap().len(), 3);
+    assert_eq!(db.store_turns_in_use(), 0);
+}
+
+/// Concurrent creations in a session one conversation below its cap: exactly
+/// one gets in.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_creates_stop_at_the_conversation_cap() {
+    let db = limited_db(PersistenceLimits {
+        conversations_per_session: Some(2),
+        ..Default::default()
+    })
+    .await;
+    db.create_conversation("s1", "first").await.unwrap();
+    let (a, b, c) = tokio::join!(
+        db.create_conversation("s1", "a"),
+        db.create_conversation("s1", "b"),
+        db.create_conversation("s1", "c"),
+    );
+    let results = [a.map(|_| ()), b.map(|_| ()), c.map(|_| ())];
+    assert_eq!(
+        results.iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r.is_ok() || matches!(r, Err(DbError::QuotaExceeded(_)))),
+        "{results:?}"
+    );
+    assert_eq!(db.count_conversations("s1").await.unwrap(), 2);
+    assert_eq!(db.store_turns_in_use(), 0);
+}
+
+/// Without the byte budget, a failed row delete is reported: the
+/// conversation is not deleted with its messages left behind, and a clear
+/// does not claim success.
+#[tokio::test]
+async fn a_failed_row_delete_is_reported() {
+    let db = test_db().await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    db.add_message(&id, "user", "kept").await.unwrap();
+    // Every delete of a message now fails inside the store.
+    db.db()
+        .query(
+            "DEFINE EVENT refuse_delete ON TABLE messages WHEN $event = 'DELETE' \
+             THEN { THROW 'refused' }",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    assert!(db.delete_conversation(&id).await.is_err());
+    assert!(db.get_conversation(&id).await.is_ok());
+    assert!(db.clear_messages(&id).await.is_err());
+    assert_eq!(db.get_messages(&id).await.unwrap().len(), 1);
+}
+
+/// A failed delete of a session's dataset metadata is reported, and the
+/// session row stays: DELETE /api/sessions/{id} does not answer 204 while
+/// the metadata (with its source path) is left behind.
+#[tokio::test]
+async fn a_failed_dataset_meta_delete_keeps_the_session() {
+    let db = test_db().await;
+    db.set_session_last_accessed("s1", chrono::Utc::now())
+        .await
+        .unwrap();
+    let meta = super::models::DatasetMeta::new(
+        "s1".into(),
+        "d".into(),
+        "csv".into(),
+        3,
+        1,
+        vec!["x".into()],
+    );
+    db.save_dataset_meta(&meta).await.unwrap();
+    db.db()
+        .query(
+            "DEFINE EVENT refuse_delete ON TABLE dataset_meta WHEN $event = 'DELETE' \
+             THEN { THROW 'refused' }",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    assert!(db.delete_session("s1").await.is_err());
+    assert!(db.get_session("s1").await.unwrap().is_some());
+    assert_eq!(db.get_datasets_for_session("s1").await.unwrap().len(), 1);
+}
+
+/// The message cap counts the conversation's message rows, not its stored
+/// `message_count`: a counter left one or more below the truth (a recount
+/// that lost a write) does not let a message past the cap.
+#[tokio::test]
+async fn the_message_cap_counts_the_stored_messages() {
+    let db = limited_db(PersistenceLimits {
+        messages_per_conversation: Some(2),
+        ..Default::default()
+    })
+    .await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    db.add_message(&id, "user", "first").await.unwrap();
+    db.add_message(&id, "assistant", "second").await.unwrap();
+    db.db()
+        .query("UPDATE conversations SET message_count = 0 WHERE id = $id")
+        .bind((
+            "id",
+            surrealdb::RecordId::from(("conversations", id.as_str())),
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(db.get_conversation(&id).await.unwrap().message_count, 0);
+
+    assert!(matches!(
+        db.add_message(&id, "user", "third").await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+    let saved = Message::user(id.clone(), "saved".into());
+    assert!(matches!(
+        db.save_message(&saved).await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+    assert_eq!(db.count_messages(&id).await.unwrap(), 2);
+}
+
+/// A failed write of a conversation's counters is reported: a message add,
+/// a content update and a clear do not answer Ok when the conversation row
+/// cannot be updated. The error comes after the message row was written, so
+/// the failed add's message is stored.
+#[tokio::test]
+async fn a_failed_counter_write_is_reported() {
+    let db = test_db().await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    let kept = db.add_message(&id, "user", "kept").await.unwrap();
+    // Every update of a conversation row now fails inside the store.
+    db.db()
+        .query(
+            "DEFINE EVENT refuse_update ON TABLE conversations WHEN $event = 'UPDATE' \
+             THEN { THROW 'refused' }",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    assert!(db.add_message(&id, "user", "more").await.is_err());
+    assert_eq!(db.count_messages(&id).await.unwrap(), 2);
+    assert!(
+        db.update_message_content(&kept.id_string(), "changed")
+            .await
+            .is_err()
+    );
+    assert!(db.clear_messages(&id).await.is_err());
+    assert_eq!(db.store_turns_in_use(), 0);
+}
+
+/// Whether `n` calls hold or wait for store turn `key`, polled a bounded
+/// number of times (no timing assertion: a slow machine only polls longer).
+async fn turn_has_users(db: &DbConnection, key: &str, n: usize) -> bool {
+    for _ in 0..500 {
+        if db.store_turn_users(key) == n {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// A content update runs in the conversation's turn: while another call
+/// holds the turn, the update waits for it with neither the message row nor
+/// the conversation's counters changed, and both change once it has run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_content_update_recounts_in_the_conversations_turn() {
+    let db = test_db().await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    let message_id = db
+        .add_message(&id, "user", "kept")
+        .await
+        .unwrap()
+        .id_string();
+
+    let turn = db.conversation_turn(&id).await;
+    let update = tokio::spawn({
+        let (db, message_id) = (db.clone(), message_id.clone());
+        async move { db.update_message_content(&message_id, "changed").await }
+    });
+    // The update is waiting for the turn held here.
+    assert!(turn_has_users(&db, &id, 2).await);
+    assert_eq!(db.get_message(&message_id).await.unwrap().content, "kept");
+    let conv = db.get_conversation(&id).await.unwrap();
+    assert_eq!(conv.last_message_preview.as_deref(), Some("kept"));
+
+    drop(turn);
+    update.await.unwrap().unwrap();
+    assert_eq!(
+        db.get_message(&message_id).await.unwrap().content,
+        "changed"
+    );
+    let conv = db.get_conversation(&id).await.unwrap();
+    assert_eq!(conv.last_message_preview.as_deref(), Some("changed"));
+    assert_eq!(conv.message_count, 1);
+}
+
+/// With the byte budget, a content update whose message went before its
+/// turn (a clear that ran between the update's read and its turn) is
+/// `NotFound` and counts no bytes for the write that found no row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_content_update_after_a_clear_counts_no_bytes() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1000),
+        ..Default::default()
+    })
+    .await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    // The server's empty placeholder for its answer.
+    let message_id = db
+        .add_message(&id, "assistant", "")
+        .await
+        .unwrap()
+        .id_string();
+    assert_counter_matches_store(&db, "s1").await; // seeded
+
+    let turn = db.conversation_turn(&id).await;
+    let update = tokio::spawn({
+        let (db, message_id) = (db.clone(), message_id.clone());
+        async move {
+            db.update_message_content(&message_id, "a final answer")
+                .await
+        }
+    });
+    assert!(turn_has_users(&db, &id, 2).await);
+    // The clear's delete, in the turn the update waits for (the placeholder
+    // held no bytes, so there is nothing to release).
+    let _: Option<Message> = db
+        .db()
+        .delete(("messages", message_id.as_str()))
+        .await
+        .unwrap();
+    drop(turn);
+
+    assert!(matches!(update.await.unwrap(), Err(DbError::NotFound(_))));
+    assert_counter_matches_store(&db, "s1").await;
+}
+
+/// A title change and an archive take the conversation's turn, like every
+/// write of its row: while another call holds it, both wait with the row
+/// unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn title_and_archive_writes_take_the_conversations_turn() {
+    let db = test_db().await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+
+    let turn = db.conversation_turn(&id).await;
+    let title = tokio::spawn({
+        let (db, id) = (db.clone(), id.clone());
+        async move { db.update_conversation_title(&id, "renamed").await }
+    });
+    assert!(turn_has_users(&db, &id, 2).await);
+    let archive = tokio::spawn({
+        let (db, id) = (db.clone(), id.clone());
+        async move { db.set_conversation_archived(&id, true).await }
+    });
+    assert!(turn_has_users(&db, &id, 3).await);
+    let conv = db.get_conversation(&id).await.unwrap();
+    assert_eq!((conv.title.as_str(), conv.is_archived), ("t", false));
+
+    drop(turn);
+    title.await.unwrap().unwrap();
+    archive.await.unwrap().unwrap();
+    let conv = db.get_conversation(&id).await.unwrap();
+    assert_eq!((conv.title.as_str(), conv.is_archived), ("renamed", true));
+    assert_eq!(db.store_turns_in_use(), 0);
 }
 
 /// Store a message for `conversation_id` directly, without the existence
@@ -554,6 +864,22 @@ async fn session_rows_by_last_access() {
     assert_eq!(stale, vec!["old".to_string()]);
     let row = db.get_session("new").await.unwrap().unwrap();
     let drift = row.last_accessed_chrono().signed_duration_since(now);
+    assert!(drift.num_milliseconds().abs() < 1, "{drift}");
+}
+
+/// The sweep's refresh updates an existing row and never creates one.
+#[tokio::test]
+async fn refreshing_last_access_never_creates_a_row() {
+    let db = test_db().await;
+    let at = chrono::Utc::now();
+    assert!(!db.refresh_session_last_accessed("gone", at).await.unwrap());
+    assert!(db.get_session("gone").await.unwrap().is_none());
+    db.set_session_last_accessed("here", at - chrono::Duration::hours(1))
+        .await
+        .unwrap();
+    assert!(db.refresh_session_last_accessed("here", at).await.unwrap());
+    let row = db.get_session("here").await.unwrap().unwrap();
+    let drift = row.last_accessed_chrono().signed_duration_since(at);
     assert!(drift.num_milliseconds().abs() < 1, "{drift}");
 }
 

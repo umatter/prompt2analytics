@@ -41,10 +41,11 @@
 //! - On the first scoped use in a process, UUID-named entries already under
 //!   `sessions/` (left by an earlier process) are removed; other names are
 //!   left alone. [`remove_session_dir`] removes a session's directory when
-//!   the session goes, and from then on the directory is never created again
-//!   for that id: a call that was still queued or running when its session
-//!   went is refused ("needs a session") instead of leaving a directory
-//!   behind that nothing would remove.
+//!   the session goes, and from then on (until 65,536 more sessions have been
+//!   removed) the directory is not created again for that id: a call that
+//!   was still queued or running when its session went is refused ("needs a
+//!   session") instead of leaving a directory behind that nothing would
+//!   remove.
 //! - Without an active scope every path is refused ("needs a session")
 //!   rather than falling back to the shared root. Handlers must therefore not
 //!   validate paths from threads or tasks they spawn: those have no scope.
@@ -53,7 +54,7 @@
 //!   refuses a write that would take the directory past it.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -420,20 +421,91 @@ static SESSION_DIRS: AtomicBool = AtomicBool::new(false);
 /// Removes stale session directories once, on the first scoped use.
 static PURGE: Once = Once::new();
 
-/// Sessions whose directory [`remove_session_dir`] has removed (as UUIDs),
-/// whose directory must therefore never be created again. A session id is a
-/// fresh random UUID that is never reused, so an id stays here until the
-/// process exits: 16 bytes (plus the set's overhead) per removed session.
-/// [`session_dir_in`] checks the set and creates the directory under this
-/// lock, and [`remove_session_dir_in`] marks the id under it before removing
-/// anything, so a creation either happens before the mark (and is removed)
-/// or is refused.
-static REMOVED_SESSIONS: LazyLock<Mutex<HashSet<u128>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+/// How many removed sessions [`REMOVED_SESSIONS`] remembers: the most recent
+/// 65,536, a few MiB at most (the hash table can double once under churn).
+const MAX_REMOVED_SESSIONS: usize = 1 << 16;
+// The module doc, `remove_session_dir`'s doc and the one above state this cap
+// as a literal (rustdoc cannot link a private constant from a public item).
+const _: () = assert!(
+    MAX_REMOVED_SESSIONS == 65_536,
+    "update the 65,536 in the path_jail module, remove_session_dir and MAX_REMOVED_SESSIONS docs"
+);
+
+/// Session ids (as UUIDs) whose directory has been removed, at most `cap` of
+/// them: past the cap, the id removed longest ago is forgotten first. An id
+/// is inserted once; inserting it again changes nothing.
+#[derive(Debug)]
+struct RemovedSessions {
+    ids: HashSet<u128>,
+    /// The ids in `ids`, removed longest ago first.
+    order: VecDeque<u128>,
+    cap: usize,
+}
+
+impl RemovedSessions {
+    /// An empty set that remembers at most `cap` ids (at least one).
+    fn new(cap: usize) -> Self {
+        Self {
+            ids: HashSet::new(),
+            order: VecDeque::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    fn contains(&self, id: u128) -> bool {
+        self.ids.contains(&id)
+    }
+
+    /// Remember `id`, first forgetting the oldest id when the set is full (so
+    /// the order never grows past the cap). The set is updated before the
+    /// order is, so an update stopped part-way can only leave an id
+    /// remembered longer, never forget one early.
+    fn insert(&mut self, id: u128) {
+        if !self.ids.insert(id) {
+            return;
+        }
+        while self.order.len() >= self.cap {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.ids.remove(&oldest);
+        }
+        self.order.push_back(id);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+}
+
+/// Sessions whose directory [`remove_session_dir`] has removed, whose
+/// directory must therefore not be created again. [`session_dir_in`] checks
+/// the set and creates the directory under this lock, and
+/// [`remove_session_dir_in`] marks the id under it before removing anything,
+/// so a creation either happens before the mark (and is removed) or is
+/// refused.
+///
+/// Session ids are fresh random UUIDs that are never reused, so the set only
+/// matters while a call for a removed session is still queued or running.
+/// It keeps the last [`MAX_REMOVED_SESSIONS`] removals so that a loop of
+/// session creations and deletions cannot grow it without bound. The cost is
+/// that a call for a removed session that resolves a path once that many more
+/// sessions have been removed can create the directory again, and it then
+/// stays (within `session_disk_bytes`) until the next process purges it. The
+/// set is a backstop until the governor refuses to run a call whose session
+/// is no longer in the `SessionManager` table; once that holds, it is needed
+/// only for calls already running when their session goes, and can be pruned
+/// by age instead of by count (dropping entries older than `queue_wait` +
+/// deadline + `exec::DEADLINE_GRACE`), provided overdue work is also refused
+/// file access.
+static REMOVED_SESSIONS: LazyLock<Mutex<RemovedSessions>> =
+    LazyLock::new(|| Mutex::new(RemovedSessions::new(MAX_REMOVED_SESSIONS)));
 
 /// The removed-session set, also after a panic elsewhere while it was held
-/// (it is only ever inserted into, so it cannot be left inconsistent).
-fn removed_sessions() -> MutexGuard<'static, HashSet<u128>> {
+/// (see [`RemovedSessions::insert`]: a partial update only remembers an id
+/// longer).
+fn removed_sessions() -> MutexGuard<'static, RemovedSessions> {
     REMOVED_SESSIONS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -507,7 +579,8 @@ pub fn current_session_scope() -> Option<String> {
 /// directory does not exist. Links inside the directory are removed, never
 /// followed. From then on the directory is not created again for this id
 /// (also when it never existed), so a call that runs after its session went
-/// cannot use files.
+/// cannot use files; the id is remembered until 65,536 more sessions have
+/// been removed.
 pub fn remove_session_dir(session_id: &str) -> std::io::Result<()> {
     if !SESSION_DIRS.load(Ordering::SeqCst) {
         return Ok(());
@@ -521,7 +594,11 @@ pub fn remove_session_dir(session_id: &str) -> std::io::Result<()> {
 fn session_uuid(id: &str) -> Option<u128> {
     uuid::Uuid::parse_str(id)
         .ok()
-        .filter(|u| u.hyphenated().to_string() == id)
+        .filter(|u| {
+            u.hyphenated()
+                .encode_lower(&mut uuid::Uuid::encode_buffer())
+                == id
+        })
         .map(|u| u.as_u128())
 }
 
@@ -581,7 +658,7 @@ fn session_dir_in(data_root: &Path, id: &str) -> Result<PathBuf, String> {
     {
         // Check and create under the lock the removal marks the id under.
         let removed = removed_sessions();
-        if removed.contains(&uuid) {
+        if removed.contains(uuid) {
             return Err("this session has ended; file access needs a session".to_string());
         }
         builder.create(&dir).map_err(|e| cannot_prepare(&dir, &e))?;
@@ -647,7 +724,7 @@ fn purge_stale_session_dirs_in(data_root: &Path) -> usize {
 const REMOVE_ATTEMPTS: usize = 4;
 
 /// Remove `<data_root>/sessions/<id>` (see [`remove_session_dir`]) and mark
-/// the id so that [`session_dir_in`] never creates the directory again.
+/// the id so that [`session_dir_in`] does not create the directory again.
 fn remove_session_dir_in(data_root: &Path, id: &str) -> std::io::Result<()> {
     let Some(uuid) = session_uuid(id) else {
         return Ok(());
@@ -907,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_session_dir_is_never_recreated() {
+    fn a_removed_session_dir_is_not_recreated_while_remembered() {
         let (_t, data) = tmp_root();
         let id = fresh_id();
         let dir = active_root_for(&data, true, Some(&id)).unwrap();
@@ -928,6 +1005,51 @@ mod tests {
         assert!(fs::symlink_metadata(data.join("sessions").join(&unused)).is_err());
         // Other sessions are unaffected.
         assert!(active_root_for(&data, true, Some(&fresh_id())).is_ok());
+    }
+
+    /// The removed-session set is bounded: a create/delete loop cannot grow it
+    /// past its cap, and it forgets the id removed longest ago first. A local
+    /// set, so the global one the other tests rely on is not flushed.
+    #[test]
+    fn the_removed_session_set_keeps_only_the_latest_removals() {
+        let mut removed = RemovedSessions::new(MAX_REMOVED_SESSIONS);
+        let cap = MAX_REMOVED_SESSIONS as u128;
+        for id in 0..=cap {
+            removed.insert(id);
+        }
+        assert_eq!(removed.len(), MAX_REMOVED_SESSIONS);
+        assert_eq!(removed.order.len(), MAX_REMOVED_SESSIONS);
+        assert!(!removed.contains(0), "the oldest id is still remembered");
+        assert!(removed.contains(1) && removed.contains(cap));
+
+        // An id inserted again neither grows the set nor moves in the order.
+        let mut small = RemovedSessions::new(3);
+        for id in [10, 11, 12, 10] {
+            small.insert(id);
+        }
+        assert_eq!((small.len(), small.order.len()), (3, 3));
+        small.insert(13);
+        assert!(!small.contains(10), "a repeated insert moved the id");
+        assert!(small.contains(11) && small.contains(12) && small.contains(13));
+    }
+
+    #[test]
+    fn session_uuid_accepts_only_the_canonical_form() {
+        // A fixed id with letters a-f, so its uppercase form differs from it.
+        let id = "6f1c0b9e-3a4d-4c2b-9e7f-0a1b2c3d4e5f".to_string();
+        assert_eq!(
+            session_uuid(&id),
+            Some(uuid::Uuid::parse_str(&id).unwrap().as_u128())
+        );
+        for other in [
+            id.to_uppercase(),
+            id.replace('-', ""),
+            format!("{{{id}}}"),
+            format!("urn:uuid:{id}"),
+            String::new(),
+        ] {
+            assert_eq!(session_uuid(&other), None, "{other}");
+        }
     }
 
     #[test]

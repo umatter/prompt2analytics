@@ -591,6 +591,19 @@ impl AnalyticsServer {
         self
     }
 
+    /// The top-level parameter names `tool` declares: the `properties` of
+    /// its input schema, empty for an unknown tool. The audit log takes these
+    /// ahead of the keys a tool ignores (`audit::sanitize_arguments`).
+    pub fn declared_parameters(&self, tool: &str) -> Vec<&str> {
+        self.tool_router
+            .map
+            .get(tool)
+            .and_then(|route| route.attr.input_schema.get("properties"))
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| properties.keys().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
     /// Create a new AnalyticsServer with existing dataset storage.
     /// Used for HTTP transport where each session has its own dataset store.
     #[cfg(feature = "http")]
@@ -700,21 +713,32 @@ impl AnalyticsServer {
     /// Dispatches to all registered tool handler methods directly, bypassing the
     /// ToolRouter (which requires a Peer that cannot be constructed outside rmcp).
     ///
-    /// Only `exec::ToolGovernor::call` calls this, so every HTTP-side tool
-    /// call runs under the governor. In-crate HTTP-side code must go through
-    /// `exec::ToolGovernor::call`; direct calls are for tests and embedders.
-    /// Unknown names, unparsable arguments and handler errors come back as
-    /// `ToolCallError`; a tool's own error result is an `Ok` with
-    /// `success == false`.
+    /// Within this crate only `exec::ToolGovernor::call` calls this, so every
+    /// HTTP-side tool call runs under the governor. A direct call (integration
+    /// tests, embedders) runs on the caller's task and skips everything the
+    /// governor adds: memory admission, the session and global permits, the
+    /// blocking pool, the deadline and cancellation budget, panic isolation,
+    /// the session directory scope (with session directories on, file tools
+    /// are refused without it), the in-flight registry (`/health` and the
+    /// stuck watchdog do not count it), the session's active-call mark (which
+    /// keeps a running session from eviction and expiry), the `touch` on
+    /// success, the dataset quotas and the audit entry. The request limits
+    /// below still apply. Unknown names, unparsable arguments and handler
+    /// errors come back as `ToolCallError`; a tool's own error result is an
+    /// `Ok` with `success == false`.
     ///
     /// Before the arguments are deserialised, the call is checked against
     /// the request limits in force on this thread (`tools::limits::current`,
     /// which the governor sets on its blocking thread): the tool must exist,
     /// then its cost parameters must be within the catalogue's caps, then the
     /// dataset a `ROW_RULES` tool names must be within its row class. After
-    /// the handler returns, text and image output above the `response_bytes`
-    /// budget replaces the result. A refusal is
-    /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`).
+    /// the handler returns, output above the `response_bytes` budget
+    /// replaces the result. A refusal is
+    /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`). The response
+    /// cap comes after the work, so a call refused by it has made its
+    /// changes (a created or modified dataset stays, unless the governor's
+    /// dataset quota undoes it and answers with the quota refusal instead),
+    /// and its message says so.
     #[cfg(feature = "http")]
     pub async fn call_tool_with_session(
         &self,
@@ -735,8 +759,8 @@ impl AnalyticsServer {
         // A session-scoped server instance that shares the session's datasets.
         let session_server = Self::with_session(session);
         let result = session_server.dispatch_tool(tool_name, arguments).await?;
-        check_response_size(&limits, tool_name, tool_result_bytes(&result))
-            .map_err(log_and_convert)?;
+        let output_bytes = crate::audit::ResultSummary::of_tool_result(&result).output_bytes();
+        check_response_size(&limits, tool_name, output_bytes).map_err(log_and_convert)?;
         Ok(result)
     }
 
@@ -1346,8 +1370,10 @@ async fn enforce_request_limits(
     Ok(())
 }
 
-/// Refuses a tool result whose text and image output (`bytes`) is above the
-/// `response_bytes` budget (none when limits are off).
+/// Refuses a tool result whose output (`bytes`, from
+/// [`ResultSummary::output_bytes`](crate::audit::ResultSummary::output_bytes),
+/// every content kind) is above the `response_bytes` budget (none when
+/// limits are off).
 #[allow(
     clippy::result_large_err,
     reason = "LimitViolation is WP02's fixed public shape"
@@ -1365,25 +1391,14 @@ fn check_response_size(limits: &Limits, tool: &str, bytes: usize) -> Result<(), 
         requested: bytes.to_string(),
         limit: max.to_string(),
         override_key: "response_bytes",
+        // The handler has run: say so, so a caller does not retry a change
+        // that was already made.
         message: format!(
-            "The output of `{tool}` is {bytes} bytes, above this server's limit of {max} bytes \
-             per response. Ask for less output, for example fewer rows, columns or grid points."
+            "`{tool}` ran, but its output is {bytes} bytes, above this server's limit of {max} \
+             bytes per response; any change it made, for example to the session's datasets, was \
+             kept. Ask for less output, for example fewer rows, columns or grid points."
         ),
     })
-}
-
-/// Bytes of text and image data in a governed call's result.
-#[cfg(feature = "http")]
-fn tool_result_bytes(result: &crate::transport::http::ToolResult) -> usize {
-    use crate::transport::http::ContentItem;
-    result
-        .content
-        .iter()
-        .map(|item| match item {
-            ContentItem::Text { text } => text.len(),
-            ContentItem::Image { data, .. } => data.len(),
-        })
-        .sum()
 }
 
 /// Logs a refusal with the knob that would raise the limit (`override_key`
@@ -1397,19 +1412,6 @@ fn log_violation(v: &LimitViolation) {
         override_key = v.override_key,
         "request refused by a resource limit"
     );
-}
-
-/// Bytes of text and image data in an MCP tool result (stdio).
-fn call_result_bytes(result: &CallToolResult) -> usize {
-    result
-        .content
-        .iter()
-        .map(|c| match &c.raw {
-            RawContent::Text(text) => text.text.len(),
-            RawContent::Image(image) => image.data.len(),
-            _ => 0,
-        })
-        .sum()
 }
 
 /// Logs a refusal and turns it into the stdio transport's JSON-RPC error:
@@ -1469,11 +1471,10 @@ impl ServerHandler for AnalyticsServer {
         // request unchanged.
         let had_arguments = request.arguments.is_some();
         let args = serde_json::Value::Object(request.arguments.take().unwrap_or_default());
-        let audit = self
-            .audit
-            .as_deref()
-            .filter(|a| a.is_enabled())
-            .map(|a| (a, crate::audit::sanitize_arguments(&args)));
+        let audit = self.audit.as_deref().filter(|a| a.is_enabled()).map(|a| {
+            let declared = self.declared_parameters(&tool);
+            (a, crate::audit::sanitize_arguments(&args, &declared))
+        });
         let checked = if known {
             enforce_request_limits(&limits, &tool, &args, &self.datasets).await
         } else {
@@ -1503,7 +1504,8 @@ impl ServerHandler for AnalyticsServer {
                     };
                     (e, code)
                 })?;
-            check_response_size(&limits, &tool, call_result_bytes(&result))
+            let output_bytes = crate::audit::ResultSummary::of_call_result(&result).output_bytes();
+            check_response_size(&limits, &tool, output_bytes)
                 .map_err(|v| (limit_error(v), "limit_exceeded"))?;
             Ok(result)
         }
@@ -1583,6 +1585,64 @@ mod tests {
             .await
             .insert(name.to_string(), dataset);
         server
+    }
+
+    #[test]
+    fn response_cap_counts_embedded_resources() {
+        let limits = Limits::hosted()
+            .with_overrides(&["response_bytes=200".to_string()])
+            .unwrap();
+        let result =
+            CallToolResult::success(vec![Content::embedded_text("str:///t", "x".repeat(300))]);
+        let bytes = crate::audit::ResultSummary::of_call_result(&result).output_bytes();
+        let refused = check_response_size(&limits, "t", bytes);
+        assert!(
+            refused.is_err(),
+            "300 bytes of resource text passed a 200-byte cap"
+        );
+        let v = refused.unwrap_err();
+        assert_eq!(
+            (v.parameter.as_str(), v.requested.as_str()),
+            ("response_bytes", "300")
+        );
+    }
+
+    #[test]
+    fn response_cap_message_says_the_call_ran() {
+        // The cap is checked after the handler ran: a state-changing tool
+        // must not read as if nothing happened (a retry would then fail with
+        // "already exists" or apply the change twice).
+        let limits = Limits::hosted()
+            .with_overrides(&["response_bytes=10".to_string()])
+            .unwrap();
+        let v = check_response_size(&limits, "create_dataset", 11).unwrap_err();
+        assert!(
+            v.message
+                .starts_with("`create_dataset` ran, but its output is 11 bytes"),
+            "{}",
+            v.message
+        );
+        assert!(v.message.contains("was kept"), "{}", v.message);
+        assert!(v.message.contains("Ask for less output"), "{}", v.message);
+    }
+
+    #[test]
+    fn declared_parameters_are_the_schema_properties() {
+        let server = AnalyticsServer::new();
+        let mut sqlite = server.declared_parameters("db_sqlite_query");
+        sqlite.sort_unstable();
+        assert_eq!(sqlite, ["db_path", "name", "query"]);
+        assert!(server.declared_parameters("no_such_tool").is_empty());
+        // No tool keeps a top-level parameter outside `properties`, where the
+        // audit log would not see it as declared.
+        for tool in server.tool_router.list_all() {
+            let schema = &tool.input_schema;
+            let hidden: Vec<&str> = ["$ref", "allOf", "anyOf", "oneOf"]
+                .into_iter()
+                .filter(|k| schema.contains_key(*k))
+                .collect();
+            assert!(hidden.is_empty(), "{}: {hidden:?}", tool.name);
+        }
     }
 
     /// Helper to extract text from Content (Annotated<RawContent>)

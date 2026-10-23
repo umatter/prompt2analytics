@@ -6,7 +6,9 @@
 //!
 //! 1. memory admission (refuse while the process RSS is above a soft limit);
 //! 2. a per-session and a global permit, within one bounded queue wait;
-//! 3. execution on tokio's blocking pool, so the async runtime keeps serving
+//! 3. execution on tokio's blocking pool inside the session's directory scope
+//!    (`path_jail::enter_session_scope`; with session directories on, file
+//!    tools are refused outside one), so the async runtime keeps serving
 //!    `/health`, SSE keep-alives and other visitors;
 //! 4. a per-call [`Budget`] installed for p2a-core's cooperative
 //!    [`resource::checkpoint`]s, cancelled at the deadline and when the
@@ -57,7 +59,7 @@ use crate::config::{
     AuditConfig, DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting, available_cpus,
 };
 use crate::server::AnalyticsServer;
-use crate::session::{Session, SessionManager, datasets_bytes};
+use crate::session::{Session, SessionManager, datasets_bytes, fmt_bytes};
 use crate::tools::limits::{self, LimitViolation};
 use crate::transport::http::{ApiResponse, ToolResult};
 
@@ -136,11 +138,28 @@ fn zero_is_none(explicit: Option<u64>, default: Option<u64>) -> Option<u64> {
 impl ExecConfig {
     /// Resolve the governor settings from the configured knobs and the
     /// resource profile. Explicit knobs override the profile default.
+    ///
+    /// `cfg` is read as an HTTP configuration whatever its `transport` says
+    /// (`ServerConfig::as_http`), like the router built from it, so the
+    /// deployment mode and resource profile here are the ones the router
+    /// serves.
+    ///
+    /// When a dataset quota applies, the session concurrency defaults to 1
+    /// in every profile: a call refused by a quota restores the session's
+    /// datasets as they were when it started, which would undo what another
+    /// concurrent call in the same session did. An explicit
+    /// `--session-concurrency` is kept.
     pub fn from_config(cfg: &ServerConfig) -> Self {
+        let cfg = &cfg.as_http();
         let hosted = cfg.resource_profile() == ResourceProfile::Hosted;
         let cpus = available_cpus();
         let exec = &cfg.exec;
         let pick = |hosted_value: u64| hosted.then_some(hosted_value);
+        let session_data_bytes =
+            zero_is_none(exec.session_data_mb, pick(200)).map(|mb| mb.saturating_mul(MIB));
+        let total_data_bytes =
+            zero_is_none(exec.total_data_mb, pick(500)).map(|mb| mb.saturating_mul(MIB));
+        let quotas = session_data_bytes.is_some() || total_data_bytes.is_some();
         Self {
             concurrency: exec
                 .tool_concurrency
@@ -149,7 +168,7 @@ impl ExecConfig {
             session_concurrency: exec
                 .session_concurrency
                 .filter(|&n| n > 0)
-                .unwrap_or(if hosted { 1 } else { cpus.max(1) }),
+                .unwrap_or(if hosted || quotas { 1 } else { cpus.max(1) }),
             queue_wait: Duration::from_secs(exec.tool_queue_wait_secs.unwrap_or(if hosted {
                 10
             } else {
@@ -159,10 +178,8 @@ impl ExecConfig {
             stuck_exit: zero_is_none(exec.stuck_exit_secs, pick(300)).map(Duration::from_secs),
             rss_soft_limit_bytes: zero_is_none(exec.memory_soft_limit_mb, pick(700))
                 .map(|mb| mb.saturating_mul(MIB)),
-            session_data_bytes: zero_is_none(exec.session_data_mb, pick(200))
-                .map(|mb| mb.saturating_mul(MIB)),
-            total_data_bytes: zero_is_none(exec.total_data_mb, pick(500))
-                .map(|mb| mb.saturating_mul(MIB)),
+            session_data_bytes,
+            total_data_bytes,
             alloc_ceiling_bytes: cfg.alloc_ceiling_bytes(),
             session_dirs: match cfg.http.session_dirs {
                 SessionDirsSetting::Auto => cfg.deployment_mode() == DeploymentMode::OpenPublic,
@@ -528,6 +545,14 @@ impl ToolGovernor {
         &self.cfg
     }
 
+    /// Resolves once every audit entry the governor queued before it is
+    /// written and flushed (at once when auditing is off). An entry of a
+    /// call still running after its deadline answer is queued only when its
+    /// work ends.
+    pub async fn flush_audit(&self) {
+        self.audit.flush().await;
+    }
+
     /// In-flight and overdue work, capacity and process memory. With
     /// `redact_health` (open public mode) `rss_bytes` is `None`.
     pub fn health(&self) -> GovernorHealth {
@@ -596,11 +621,15 @@ impl ToolGovernor {
             let tool_name = tool.to_string();
             let s = Arc::clone(&session);
             // Sanitised before the arguments move into the call, and only when
-            // auditing. One copy is for a refusal before the work starts.
-            let audit = self
-                .audit
-                .is_enabled()
-                .then(|| (Arc::clone(&self.audit), sanitize_arguments(&args)));
+            // auditing, with the tool's declared parameters taken first. One
+            // copy is for a refusal before the work starts.
+            let audit = self.audit.is_enabled().then(|| {
+                let declared = server.declared_parameters(tool);
+                (
+                    Arc::clone(&self.audit),
+                    sanitize_arguments(&args, &declared),
+                )
+            });
             let refusal_arguments = audit.as_ref().map(|(_, arguments)| arguments.clone());
             let outcome = self
                 .run_blocking(&session, tool, move |budget| {
@@ -840,7 +869,9 @@ impl Quotas {
 
     /// Refuse a call that grew the session's datasets past a quota, restoring
     /// `snapshot`. A call that does not grow the data is never refused. The
-    /// rollback assumes one call per session at a time.
+    /// rollback assumes one call per session at a time, which is why
+    /// `ExecConfig::from_config` defaults the session concurrency to 1 when a
+    /// quota applies.
     async fn enforce(
         &self,
         session: &Session,
@@ -886,10 +917,6 @@ impl Quotas {
             }
         }
     }
-}
-
-fn fmt_bytes(bytes: u64) -> String {
-    format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
 }
 
 /// Exits the process when the governor stays unhealthy (every permit held by
@@ -1116,7 +1143,13 @@ mod tests {
         // The session permit frees after half the wait; the global one only
         // after the whole wait. With one shared deadline the call is refused;
         // with a fresh wait per permit it would have got the global permit.
-        let wait = Duration::from_secs(2);
+        //
+        // The margins are deliberate. Shared deadline at 4 s, global release
+        // at 5 s, fresh per-permit deadline at 6 s: a runtime stalled for up
+        // to a second (a loaded CI runner) cannot let the 4 s timeout and the
+        // 5 s release fire in one timer tick, where tokio's Timeout would
+        // poll the acquire first and get the permit.
+        let wait = Duration::from_secs(4);
         let session_slots = Arc::new(Semaphore::new(1));
         let global = Arc::new(Semaphore::new(1));
         let session_held = Arc::clone(&session_slots).acquire_owned().await.unwrap();
@@ -1245,6 +1278,41 @@ mod tests {
             assert!(!c.session_dirs);
             assert!(!c.redact_health);
         }
+    }
+
+    #[test]
+    fn exec_config_reads_the_config_as_http() {
+        // The default transport is stdio, which on its own reads as local
+        // mode; the governor resolves the HTTP deployment mode, as the router
+        // built from the same config does.
+        let mut c = ServerConfig::default();
+        c.http.addr = "0.0.0.0:8080".parse().unwrap();
+        c.http.allow_unauthenticated = true;
+        let e = ExecConfig::from_config(&c);
+        assert_eq!(e.deadline, Some(Duration::from_secs(60)));
+        assert_eq!(e.session_data_bytes, Some(200 << 20));
+        assert!(e.redact_health);
+    }
+
+    #[test]
+    fn a_dataset_quota_defaults_to_one_call_per_session() {
+        let mut c = http_cfg("127.0.0.1:8080", None, false);
+        c.exec.session_data_mb = Some(1);
+        assert_eq!(ExecConfig::from_config(&c).session_concurrency, 1);
+        let mut c = http_cfg("127.0.0.1:8080", None, false);
+        c.exec.total_data_mb = Some(1);
+        assert_eq!(ExecConfig::from_config(&c).session_concurrency, 1);
+        // An explicit value is kept.
+        c.exec.session_concurrency = Some(4);
+        assert_eq!(ExecConfig::from_config(&c).session_concurrency, 4);
+        // An explicit 0 is no quota, so the Off default stays.
+        let mut c = http_cfg("127.0.0.1:8080", None, false);
+        c.exec.session_data_mb = Some(0);
+        c.exec.total_data_mb = Some(0);
+        assert_eq!(
+            ExecConfig::from_config(&c).session_concurrency,
+            available_cpus().max(1)
+        );
     }
 
     #[test]

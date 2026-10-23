@@ -304,31 +304,48 @@ impl ImportState {
 }
 
 /// Parse a session file in one streaming pass, straight into typed column
-/// vectors, without a `serde_json::Value` tree for the document. At most
-/// `budget` bytes (values, plus the text of string cells and names, plus the
-/// one element being read) are held at a time.
+/// vectors, without a `serde_json::Value` tree for the document. The bytes
+/// charged (values, the text of string cells and names, map entries, and the
+/// one element being read) stay within `budget`; allocator and container
+/// growth slack (vector capacity, hash-map buckets) is not charged, so peak
+/// memory is a small constant multiple of it.
+///
+/// The input is read only up to `budget` bytes, and a longer input is
+/// refused once the byte past the budget has been read. serde_json buffers
+/// each string token whole before it is charged, so without this cut-off one
+/// long string could outgrow the budget; it also covers a file that grows
+/// after `import_session` has checked its size.
 fn parse_session_json(
     reader: impl std::io::Read,
     budget: Option<u64>,
 ) -> Result<Vec<(String, ParsedDataset)>, String> {
     use serde::de::DeserializeSeed;
+    use std::io::Read as _;
     let state = ImportState {
         used: std::cell::Cell::new(0),
         budget,
         stop: std::cell::RefCell::new(None),
     };
-    let mut de = serde_json::Deserializer::from_reader(reader);
-    let parsed = TopSeed(&state)
-        .deserialize(&mut de)
-        .and_then(|datasets| de.end().map(|()| datasets));
-    match parsed {
-        Ok(Some(datasets)) => Ok(datasets),
-        Ok(None) => Err("Invalid session file: missing 'datasets'".to_string()),
-        Err(e) => Err(match state.stop.borrow_mut().take() {
-            Some(reason) => reason,
-            None if e.is_io() => format!("Failed to read the session file: {e}"),
-            None => format!("Invalid session file: {e}"),
-        }),
+    // One byte past the budget is let through: reading it is what shows the
+    // input is longer than the budget, rather than an input that just ends.
+    let mut capped = reader.take(budget.map_or(u64::MAX, |b| b.saturating_add(1)));
+    let parsed = {
+        let mut de = serde_json::Deserializer::from_reader(&mut capped);
+        TopSeed(&state)
+            .deserialize(&mut de)
+            .and_then(|datasets| de.end().map(|()| datasets))
+    };
+    let stopped = state.stop.borrow_mut().take();
+    let read_past_budget = budget.filter(|_| capped.limit() == 0);
+    match (parsed, stopped, read_past_budget) {
+        (Err(_), Some(reason), _) => Err(reason),
+        (_, _, Some(budget)) => Err(format!(
+            "the session file is larger than this server's import limit of {budget} bytes"
+        )),
+        (Ok(Some(datasets)), ..) => Ok(datasets),
+        (Ok(None), ..) => Err("Invalid session file: missing 'datasets'".to_string()),
+        (Err(e), ..) if e.is_io() => Err(format!("Failed to read the session file: {e}")),
+        (Err(e), ..) => Err(format!("Invalid session file: {e}")),
     }
 }
 
@@ -1410,7 +1427,8 @@ impl AnalyticsServer {
         };
 
         // Size-checked before the file is opened, then parsed in one
-        // streaming pass under the same budget; nothing in the session
+        // streaming pass under the same budget, which also stops reading at
+        // the budget if the file has grown since; nothing in the session
         // changes until the whole file has been read.
         let budget = crate::tools::limits::current().export_bytes;
         if let Some(cap) = budget {
@@ -1879,6 +1897,29 @@ mod tests {
         assert!(err.contains("import limit"), "{err}");
         // The same file passes with room to spare.
         assert!(parse_session_json(json.as_bytes(), Some(10_000_000)).is_ok());
+    }
+
+    #[test]
+    fn streaming_import_reads_no_further_than_its_byte_budget() {
+        // Input that charges almost nothing is still cut off at the budget:
+        // exactly `budget` bytes pass, one more is refused.
+        let padded = format!("{:<1000}", r#"{"datasets":{}}"#);
+        assert_eq!(padded.len(), 1_000);
+        assert!(parse_session_json(padded.as_bytes(), Some(1_000)).is_ok());
+        let err = parse_session_json(padded.as_bytes(), Some(999)).unwrap_err();
+        assert!(err.contains("is larger than"), "{err}");
+        assert!(err.contains("import limit of 999 bytes"), "{err}");
+        // One string cell longer than the budget is refused at the reader,
+        // before serde_json has buffered the whole token.
+        let long_cell = format!(
+            r#"{{"datasets":{{"a":{{"data":{{"x":["{}"]}}}}}}}}"#,
+            "q".repeat(10_000)
+        );
+        let err = parse_session_json(long_cell.as_bytes(), Some(1_000)).unwrap_err();
+        assert!(err.contains("is larger than"), "{err}");
+        // Without a budget the same inputs parse.
+        assert!(parse_session_json(padded.as_bytes(), None).is_ok());
+        assert!(parse_session_json(long_cell.as_bytes(), None).is_ok());
     }
 
     #[test]

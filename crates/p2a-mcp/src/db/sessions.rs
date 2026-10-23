@@ -87,13 +87,13 @@ impl DbConnection {
         Ok(())
     }
 
-    /// Set a session row's `last_accessed` to `at` (the live session's own
-    /// value, flushed by the sweep). A missing row is created.
-    pub async fn set_session_last_accessed(
+    /// Set a session row's `last_accessed` to `at` if the row exists; never
+    /// creates one. Whether the row existed.
+    pub async fn refresh_session_last_accessed(
         &self,
         id: &str,
         at: DateTime<Utc>,
-    ) -> Result<(), DbError> {
+    ) -> Result<bool, DbError> {
         let mut result = self
             .db()
             .query("UPDATE $id SET last_accessed = $at RETURN AFTER")
@@ -101,7 +101,17 @@ impl DbConnection {
             .bind(("at", Datetime::from(at)))
             .await?;
         let updated: Vec<DbSession> = result.take(0)?;
-        if updated.is_empty() {
+        Ok(!updated.is_empty())
+    }
+
+    /// Set a session row's `last_accessed` to `at`. A missing row is
+    /// created.
+    pub async fn set_session_last_accessed(
+        &self,
+        id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbError> {
+        if !self.refresh_session_last_accessed(id, at).await? {
             let mut row = DbSession::new(id.to_string(), None);
             row.last_accessed = Datetime::from(at);
             self.upsert_session(&row).await?;
@@ -186,12 +196,14 @@ impl DbConnection {
         // Delete settings
         let _: Option<Settings> = self.db().delete(("settings", id)).await?;
 
-        // Delete dataset metadata
+        // Delete dataset metadata. A failed delete is an error: the session
+        // row below must not go while its dataset metadata stays.
         let id_owned = id.to_string();
         self.db()
             .query("DELETE FROM dataset_meta WHERE session_id = $id")
             .bind(("id", id_owned))
-            .await?;
+            .await?
+            .check()?;
 
         // Delete session
         let _: Option<DbSession> = self.db().delete(("sessions", id)).await?;

@@ -282,8 +282,9 @@ pub fn loglin(
 /// One IPF step: scale `fit` so that its `margin` matches the observed table's, and return the
 /// largest deviation left in that margin afterwards.
 ///
-/// A step walks the whole table three times and a model may list hundreds of margins, so the
-/// budget is checked before each step, not only once per IPF iteration.
+/// A step walks the whole table four times (the observed margin, the fitted margin, the scaling
+/// and the refitted margin) and a model may list hundreds of margins, so the budget is checked
+/// before each step, not only once per IPF iteration.
 fn fit_one_margin(
     table: &[f64],
     fit: &mut [f64],

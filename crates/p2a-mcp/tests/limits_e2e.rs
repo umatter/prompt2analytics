@@ -43,6 +43,31 @@ async fn audit_lines(cfg: &p2a_mcp::config::AuditConfig) -> Vec<serde_json::Valu
         .collect()
 }
 
+/// `search_tools` arguments with 64 padding keys, `"a00"` to `"a63"`, ahead
+/// of its declared `query`: first in key order, and inserted first, so also
+/// first where serde_json keeps the order a request was sent in.
+fn padded_search_arguments() -> serde_json::Value {
+    let mut args: serde_json::Map<String, serde_json::Value> = (0..64)
+        .map(|i| (format!("a{i:02}"), serde_json::Value::from(0)))
+        .collect();
+    args.insert("query".into(), "regression".into());
+    serde_json::Value::Object(args)
+}
+
+/// The audit line of a [`padded_search_arguments`] call kept `query` and
+/// left one padding key out in its place.
+fn assert_query_kept_ahead_of_padding(line: &serde_json::Value) {
+    assert_eq!(line["tool_name"], "search_tools", "{line}");
+    assert_eq!(line["outcome"], "ok", "{line}");
+    let arguments = line["arguments"].as_object().unwrap();
+    assert_eq!(arguments.get("query"), Some(&"regression".into()), "{line}");
+    assert_eq!(
+        arguments.get("[+1 more keys]"),
+        Some(&serde_json::Value::Null),
+        "{line}"
+    );
+}
+
 #[cfg(feature = "http")]
 mod http_paths {
     use super::*;
@@ -600,6 +625,25 @@ mod http_paths {
         assert_eq!(line["arguments"]["lag_max"], ABSURD);
     }
 
+    /// The governor's call site passes the tool's declared parameters to the
+    /// sanitiser: padding cannot push `query` out of the entry.
+    #[test]
+    fn audit_keeps_a_declared_parameter_ahead_of_padding() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = with_audit(local_config(), &dir);
+        let lines = run(Limits::off(), async {
+            let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let (status, body) =
+                post_tool(&app, &sid, "search_tools", super::padded_search_arguments()).await;
+            assert_eq!(status, 200, "{body}");
+            super::audit_lines(&cfg.audit).await
+        });
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert_eq!(lines[0]["origin"], "http");
+        super::assert_query_kept_ahead_of_padding(&lines[0]);
+    }
+
     /// A refusal before the work starts (memory admission; Linux reports the
     /// process memory) is written once, by the governor's async side.
     #[cfg(target_os = "linux")]
@@ -837,6 +881,29 @@ mod stdio_path {
             ["limit_exceeded", "unknown_tool", "invalid_arguments"]
         );
         assert!(lines.iter().all(|l| l["success"] == false));
+        drop(logger);
+    }
+
+    /// The stdio `call_tool` passes the tool's declared parameters to the
+    /// sanitiser: padding cannot push `query` out of the entry.
+    #[test]
+    fn stdio_audit_keeps_a_declared_parameter_ahead_of_padding() {
+        use p2a_mcp::audit::AuditLogger;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = audit_cfg(&dir);
+        let logger = Arc::new(AuditLogger::new(&cfg).unwrap());
+        let server = AnalyticsServer::new().with_audit_logger(logger.clone());
+        let msg = run(
+            Limits::off(),
+            stdio_call(server, "search_tools", padded_search_arguments()),
+        );
+        assert!(msg.get("error").is_none(), "{msg}");
+        assert_ne!(msg["result"]["isError"], true, "{msg}");
+        let lines = run(Limits::off(), audit_lines(&cfg));
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert_eq!(lines[0]["origin"], "stdio");
+        assert_query_kept_ahead_of_padding(&lines[0]);
         drop(logger);
     }
 

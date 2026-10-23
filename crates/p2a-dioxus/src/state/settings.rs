@@ -8,7 +8,8 @@
 //! environment variables `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and
 //! `OPENROUTER_API_KEY` when no key was typed in. Keys from the environment
 //! are used but never saved: [`Settings::save`] persists
-//! [`Settings::to_persisted`], which drops them.
+//! [`Settings::to_persisted`], which drops them. A copy that an older version
+//! wrote to the settings file is removed when the settings are loaded.
 
 use crate::api::ProviderConfig;
 use crate::platform::{StorageBackend, create_storage, is_native};
@@ -208,9 +209,32 @@ fn default_openrouter_model() -> String {
 impl Settings {
     /// Load settings from platform-appropriate storage.
     /// On native platforms, also checks environment variables for API keys.
+    /// If the stored settings still hold a key equal to its environment
+    /// variable (written by an older version), they are rewritten at once
+    /// without it; see `load_from`.
     /// Publishes the backend access token for ApiClient and the chat stream.
     pub fn load() -> Self {
         let storage = create_storage();
+        // On native platforms, populate API keys from environment variables if not set
+        let env = is_native().then_some(|var: &str| std::env::var(var).ok());
+        let settings = Self::load_from(&storage, env);
+
+        // Publish the backend access token for ApiClient and the chat stream.
+        crate::platform::set_backend_access_token(Some(&settings.backend_access_token));
+
+        settings
+    }
+
+    /// Read the settings from `storage` and, when `env` is given, fill API
+    /// keys from the environment through it.
+    ///
+    /// If that turns a stored key into an environment key (an older version
+    /// wrote the environment key to disk in plain text), the stored copy is
+    /// rewritten at once without it, rather than at the user's next save.
+    fn load_from<S: StorageBackend>(
+        storage: &S,
+        env: Option<impl Fn(&str) -> Option<String>>,
+    ) -> Self {
         let mut settings = match storage.get::<Self>(SETTINGS_KEY) {
             Ok(settings) => {
                 tracing::info!("Loaded settings from storage");
@@ -224,13 +248,13 @@ impl Settings {
 
         settings.mark_stored_keys();
 
-        // On native platforms, populate API keys from environment variables if not set
-        if is_native() {
-            settings.populate_from_env();
+        if let Some(lookup) = env {
+            tracing::info!("Checking environment variables for API keys...");
+            if settings.populate_from_env_with(lookup) {
+                tracing::info!("Rewriting settings without the stored environment key");
+                settings.write_to(storage);
+            }
         }
-
-        // Publish the backend access token for ApiClient and the chat stream.
-        crate::platform::set_backend_access_token(Some(&settings.backend_access_token));
 
         settings
     }
@@ -294,9 +318,13 @@ impl Settings {
     /// An empty key takes the environment value and is marked
     /// `Environment`. A stored key equal to the environment value is also
     /// marked `Environment`: that is a key an older version copied to disk,
-    /// and the next save removes it. Any other key is left alone. Values are
+    /// and any save now leaves it out. Any other key is left alone. Values are
     /// never logged, only their length.
-    fn populate_from_env_with(&mut self, lookup: impl Fn(&str) -> Option<String>) {
+    ///
+    /// Returns true when a stored key was reclassified that way, i.e. when
+    /// the stored settings still hold a key that must not be on disk.
+    fn populate_from_env_with(&mut self, lookup: impl Fn(&str) -> Option<String>) -> bool {
+        let mut reclassified = false;
         for provider in KEYED_PROVIDERS {
             let Some(var) = provider.env_var() else {
                 continue;
@@ -313,6 +341,7 @@ impl Settings {
                 }
                 Some(value) if *key == value => {
                     tracing::info!("Stored key equals {var}; it will not be saved again");
+                    reclassified |= *source == KeySource::User;
                     *source = KeySource::Environment;
                 }
                 Some(_) => {
@@ -323,33 +352,24 @@ impl Settings {
                 }
             }
         }
-    }
-
-    /// Populate API keys from environment variables if not already set.
-    /// This only works on native platforms (desktop/mobile).
-    #[cfg(not(target_arch = "wasm32"))]
-    fn populate_from_env(&mut self) {
-        tracing::info!("Checking environment variables for API keys...");
-        self.populate_from_env_with(|k| std::env::var(k).ok());
-    }
-
-    /// No-op on web platform
-    #[cfg(target_arch = "wasm32")]
-    fn populate_from_env(&mut self) {
-        // Environment variables not available on web
+        reclassified
     }
 
     /// Save settings to platform-appropriate storage. Keys read from the
     /// environment are not written. Also publishes the backend access token
     /// for ApiClient and the chat stream.
     pub fn save(&self) {
-        let storage = create_storage();
+        self.write_to(&create_storage());
+        crate::platform::set_backend_access_token(Some(&self.backend_access_token));
+    }
+
+    /// Write [`Settings::to_persisted`] to `storage`, logging a failure.
+    fn write_to<S: StorageBackend>(&self, storage: &S) {
         if let Err(e) = storage.set(SETTINGS_KEY, &self.to_persisted()) {
             tracing::error!("Failed to save settings: {}", e);
         } else {
             tracing::info!("Settings saved to storage");
         }
-        crate::platform::set_backend_access_token(Some(&self.backend_access_token));
     }
 
     /// Convert to ProviderConfig for API requests. `None` when no provider
@@ -570,6 +590,130 @@ mod tests {
                 .unwrap()
                 .contains("sk-ant-from-env")
         );
+    }
+
+    #[test]
+    fn populate_reports_only_a_reclassified_stored_key() {
+        let leaked_env = env(&[("ANTHROPIC_API_KEY", "sk-ant-from-env")]);
+
+        // Old-version leak: the stored key equals the environment value.
+        let mut s = Settings {
+            anthropic_api_key: "sk-ant-from-env".into(),
+            ..Settings::default()
+        };
+        s.mark_stored_keys();
+        assert!(s.populate_from_env_with(&leaked_env));
+
+        // No change on disk needed: an empty key filled from the
+        // environment, a typed key that differs, no environment at all, and
+        // a second pass over already reclassified settings.
+        assert!(!Settings::default().populate_from_env_with(&leaked_env));
+        let mut typed = Settings {
+            anthropic_api_key: "sk-ant-typed".into(),
+            ..Settings::default()
+        };
+        typed.mark_stored_keys();
+        assert!(!typed.populate_from_env_with(&leaked_env));
+        let mut stored = s.clone();
+        assert!(!stored.populate_from_env_with(&leaked_env));
+        let mut no_env = Settings {
+            openai_api_key: "sk-oai-typed".into(),
+            ..Settings::default()
+        };
+        no_env.mark_stored_keys();
+        assert!(!no_env.populate_from_env_with(env(&[])));
+    }
+
+    /// Storage held in memory, standing in for the settings file.
+    #[derive(Default)]
+    struct MemoryStorage(std::cell::RefCell<std::collections::HashMap<String, String>>);
+
+    impl StorageBackend for MemoryStorage {
+        fn get<T: serde::de::DeserializeOwned>(
+            &self,
+            key: &str,
+        ) -> Result<T, crate::platform::StorageError> {
+            let map = self.0.borrow();
+            let raw = map
+                .get(key)
+                .ok_or_else(|| crate::platform::StorageError(format!("no {key}")))?;
+            serde_json::from_str(raw).map_err(|e| crate::platform::StorageError(e.to_string()))
+        }
+
+        fn set<T: Serialize>(
+            &self,
+            key: &str,
+            value: &T,
+        ) -> Result<(), crate::platform::StorageError> {
+            let raw = serde_json::to_string(value)
+                .map_err(|e| crate::platform::StorageError(e.to_string()))?;
+            self.0.borrow_mut().insert(key.to_string(), raw);
+            Ok(())
+        }
+
+        fn remove(&self, key: &str) -> Result<(), crate::platform::StorageError> {
+            self.0.borrow_mut().remove(key);
+            Ok(())
+        }
+
+        fn contains_key(&self, key: &str) -> bool {
+            self.0.borrow().contains_key(key)
+        }
+    }
+
+    #[test]
+    fn load_rewrites_settings_that_hold_a_leaked_env_key() {
+        let storage = MemoryStorage::default();
+        let mut leaked = serde_json::to_value(Settings::default()).unwrap();
+        leaked["anthropic_api_key"] = "sk-ant-from-env".into();
+        leaked["openai_api_key"] = "sk-oai-typed".into();
+        storage.set(SETTINGS_KEY, &leaked).unwrap();
+
+        let s = Settings::load_from(
+            &storage,
+            Some(env(&[("ANTHROPIC_API_KEY", "sk-ant-from-env")])),
+        );
+        assert_eq!(
+            s.anthropic_api_key, "sk-ant-from-env",
+            "the key is still used"
+        );
+        let on_disk = storage.0.borrow()[SETTINGS_KEY].clone();
+        assert!(!on_disk.contains("sk-ant-from-env"), "{on_disk}");
+        assert!(on_disk.contains("sk-oai-typed"), "{on_disk}");
+    }
+
+    #[test]
+    fn load_leaves_storage_alone_when_nothing_leaked() {
+        let storage = MemoryStorage::default();
+        let mut typed = serde_json::to_value(Settings::default()).unwrap();
+        typed["anthropic_api_key"] = "sk-ant-typed".into();
+        let before = serde_json::to_string(&typed).unwrap();
+        storage
+            .0
+            .borrow_mut()
+            .insert(SETTINGS_KEY.into(), before.clone());
+
+        let s = Settings::load_from(&storage, Some(env(&[("ANTHROPIC_API_KEY", "sk-ant-env")])));
+        assert_eq!(s.key_source(Provider::Anthropic), KeySource::User);
+        assert_eq!(
+            storage.0.borrow()[SETTINGS_KEY],
+            before,
+            "storage was rewritten"
+        );
+
+        // Without an environment (the web build) a stored key is never
+        // touched, even if it would match.
+        let web = MemoryStorage::default();
+        let mut leaked = serde_json::to_value(Settings::default()).unwrap();
+        leaked["anthropic_api_key"] = "sk-ant-from-env".into();
+        let before = serde_json::to_string(&leaked).unwrap();
+        web.0
+            .borrow_mut()
+            .insert(SETTINGS_KEY.into(), before.clone());
+        let none: Option<fn(&str) -> Option<String>> = None;
+        let s = Settings::load_from(&web, none);
+        assert_eq!(s.key_source(Provider::Anthropic), KeySource::User);
+        assert_eq!(web.0.borrow()[SETTINGS_KEY], before);
     }
 
     #[test]

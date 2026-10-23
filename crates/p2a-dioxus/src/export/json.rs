@@ -10,18 +10,20 @@ use super::types::{
     ExportedToolCall, JsonExportOptions,
 };
 
-/// Shortest session id that is redacted from exported text. Session ids are
-/// UUIDs (36 bytes); the floor keeps a degenerate id from blanking out
-/// ordinary words.
-const MIN_REDACTED_SESSION_ID_LEN: usize = 16;
+/// Shortest id that is redacted from exported text. Session and
+/// conversation ids are UUIDs (36 bytes); the floor keeps a degenerate id
+/// from blanking out ordinary words.
+const MIN_REDACTED_ID_LEN: usize = 16;
 
 /// Export a conversation and its messages to JSON format.
 ///
-/// The export is meant to be shared, so it carries no live identifiers: the
-/// session id (the only credential for a visitor's datasets on the open
-/// demo) is never written, and any occurrence of it in message text, tool
-/// arguments or results is replaced by `[redacted]`. The conversation and
-/// message ids are export-local, not the server's.
+/// The export is meant to be shared, so it carries no live identifiers:
+/// neither the session id (the only credential for a visitor's datasets on
+/// the open demo) nor the backend conversation id (which alone grants
+/// read, update and delete on that conversation) is written, and any
+/// occurrence of either in message text, tool arguments or results is
+/// replaced by `[redacted]`. The conversation and message ids are
+/// export-local, not the server's.
 pub fn export_to_json(
     conversation: Option<&Conversation>,
     messages: &[ChatMessage],
@@ -36,21 +38,34 @@ pub fn export_to_json(
     }
     .map_err(|e| format!("JSON serialization error: {}", e))?;
 
-    Ok(redact_session_id(
-        json,
-        conversation.map(|c| c.session_id.as_str()),
-    ))
+    let ids = conversation
+        .map(|c| [c.session_id.as_str(), c.id.as_str()])
+        .unwrap_or_default();
+    Ok(redact_ids(json, &ids))
 }
 
-/// Replace every occurrence of the session id in the serialized export.
+/// Replace every occurrence of each id in the serialized export with
+/// `[redacted]`. Ids shorter than [`MIN_REDACTED_ID_LEN`] are left alone.
 ///
-/// Safe on serialized JSON because a session id is a UUID and contains no
-/// JSON metacharacters.
-fn redact_session_id(json: String, session_id: Option<&str>) -> String {
-    match session_id {
-        Some(sid) if sid.len() >= MIN_REDACTED_SESSION_ID_LEN => json.replace(sid, "[redacted]"),
-        _ => json,
+/// Each id is matched in its JSON-escaped form, which is how it appears
+/// inside the serialized strings; for a UUID that is the id itself. Longer
+/// ids go first, so an id that contains another is not left half-redacted.
+fn redact_ids(mut json: String, ids: &[&str]) -> String {
+    let mut ids: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| id.len() >= MIN_REDACTED_ID_LEN)
+        .collect();
+    ids.sort_by_key(|id| std::cmp::Reverse(id.len()));
+    for id in ids {
+        let quoted = serde_json::to_string(id).unwrap_or_default();
+        let escaped = quoted
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(id);
+        json = json.replace(escaped, "[redacted]");
     }
+    json
 }
 
 /// Build the exported conversation structure
@@ -177,8 +192,9 @@ mod tests {
     #[test]
     fn json_export_omits_session_and_backend_ids() {
         let sid = "b01dc9ce-1111-2222-3333-444455556666";
+        let conv_id = "c0a7e1d2-aaaa-bbbb-cccc-ddddeeeeffff";
         let conv = Conversation {
-            id: "conv-backend-7f3a".into(),
+            id: conv_id.into(),
             session_id: sid.into(),
             title: "Wage study".into(),
             created_at: "2026-10-01T00:00:00Z".into(),
@@ -197,7 +213,7 @@ mod tests {
             id: "call_1".into(),
             name: "head_dataset".into(),
             arguments: serde_json::json!({"dataset": "wages"}),
-            result: Some("ok".into()),
+            result: Some(format!("{{\"conversation_id\": \"{conv_id}\"}}")),
             success: Some(true),
             is_expanded: false,
         });
@@ -209,7 +225,7 @@ mod tests {
         let json = export_to_json(Some(&conv), &[user, asst], &opts).unwrap();
         for leaked in [
             sid,
-            "conv-backend-7f3a",
+            conv_id,
             "msg-backend-42",
             "msg-backend-43",
             "session_id",
@@ -222,6 +238,25 @@ mod tests {
         assert_eq!(v["messages"][1]["id"], "msg-2");
         assert_eq!(v["messages"][1]["content"], "session [redacted] is active");
         assert_eq!(v["messages"][1]["tool_calls"][0]["name"], "head_dataset");
+        assert_eq!(
+            v["messages"][1]["tool_calls"][0]["result"],
+            "{\"conversation_id\": \"[redacted]\"}"
+        );
+    }
+
+    #[test]
+    fn redact_ids_handles_short_nested_and_escaped_ids() {
+        let long = "0123456789abcdef-long";
+        let inner = "0123456789abcdef";
+        let json = serde_json::to_string(&serde_json::json!({
+            "a": format!("{long} / {inner} / short"),
+            "b": "id\"with-a-quote-xyz",
+        }))
+        .unwrap();
+        let out = redact_ids(json, &[inner, "short", long, "id\"with-a-quote-xyz"]);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["a"], "[redacted] / [redacted] / short");
+        assert_eq!(v["b"], "[redacted]");
     }
 
     #[test]

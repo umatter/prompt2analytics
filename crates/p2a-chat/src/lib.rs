@@ -156,7 +156,7 @@ pub struct ChatArgs {
     #[arg(long, env = "P2A_API_KEY", hide_env_values = true)]
     pub api_key: Option<String>,
 
-    /// Bearer token for a p2a-mcp server started with --access-token
+    /// Bearer token for a p2a-mcp server started with --access-token (visible ASCII, no spaces)
     #[arg(long, env = "P2A_ACCESS_TOKEN", hide_env_values = true)]
     pub access_token: Option<String>,
 
@@ -420,20 +420,33 @@ fn save_image(base64_data: &str, path: &std::path::Path) -> anyhow::Result<()> {
 const START_SERVER_COMMAND: &str =
     "cargo run -p p2a-mcp --features full -- --transport http --port 8080";
 
+/// The error for an access token that breaks the visible-ASCII rule. It
+/// states the rule, in the Dioxus app's wording, and never the value.
+const ACCESS_TOKEN_RULE_ERROR: &str = "--access-token / P2A_ACCESS_TOKEN may contain only visible ASCII characters ('!' to '~'), no spaces or tabs";
+
 /// Client builder with the backend access token, if any, as a default
 /// `Authorization: Bearer <token>` header marked sensitive (so it is never
 /// shown in debug output). A blank token means none.
+///
+/// The trimmed token may contain only visible ASCII (`'!'..='~'`), so that
+/// p2a-chat accepts exactly the tokens the Dioxus app's
+/// `normalize_access_token` accepts. `HeaderValue` alone would also accept
+/// inner spaces, tabs and non-ASCII bytes. Of those, only non-ASCII bytes
+/// fail on the server, which cannot read such a header value at all; inner
+/// spaces and tabs it would compare literally with its configured token.
+/// They are refused here so that both clients accept the same tokens.
 fn client_builder(access_token: Option<&str>) -> anyhow::Result<reqwest::ClientBuilder> {
     let builder = reqwest::Client::builder();
     let Some(token) = access_token.map(str::trim).filter(|t| !t.is_empty()) else {
         return Ok(builder);
     };
-    let mut value =
-        reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
-            anyhow::anyhow!(
-                "the access token contains characters that cannot be sent in an HTTP header"
-            )
-        })?;
+    let unsendable = || anyhow::Error::msg(ACCESS_TOKEN_RULE_ERROR);
+    if !token.chars().all(|c| ('!'..='~').contains(&c)) {
+        return Err(unsendable());
+    }
+    // Backstop: the check above already rules out every value this rejects.
+    let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| unsendable())?;
     value.set_sensitive(true);
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(reqwest::header::AUTHORIZATION, value);
@@ -483,22 +496,73 @@ fn unauthorized_message(token_sent: bool) -> &'static str {
     }
 }
 
-/// The lines printed when the session cannot be created. Only an
+/// What to print when the session cannot be created.
+#[derive(Debug)]
+struct ConnectHint {
+    /// The first line.
+    headline: String,
+    /// The lines after it.
+    details: Vec<String>,
+    /// Whether [`START_SERVER_COMMAND`] follows the details, indented.
+    start_command: bool,
+}
+
+impl ConnectHint {
+    /// The hint as plain lines, the start command (indented) included. This
+    /// is the text [`ConnectHint::eprint`] prints, so the tests that check
+    /// it check what `run()` shows.
+    fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::with_capacity(self.details.len() + 2);
+        lines.push(self.headline.clone());
+        lines.extend(self.details.iter().cloned());
+        if self.start_command {
+            lines.push(format!("  {START_SERVER_COMMAND}"));
+        }
+        lines
+    }
+
+    /// Print [`ConnectHint::lines`] to stderr, the headline red and bold and
+    /// the start command, when there is one, cyan.
+    fn eprint(&self) {
+        let lines = self.lines();
+        // With a start command there are at least two lines, so the
+        // command is never the headline.
+        let command_line = self.start_command.then(|| lines.len() - 1);
+        for (i, line) in lines.iter().enumerate() {
+            if i == 0 {
+                eprintln!("{}", line.red().bold());
+            } else if Some(i) == command_line {
+                eprintln!("{}", line.bright_cyan());
+            } else {
+                eprintln!("{line}");
+            }
+        }
+    }
+}
+
+/// The hint printed when the session cannot be created. Only an
 /// unreachable server gets the "start the server" advice.
-fn connect_failure_hint(err: &ConnectError) -> Vec<String> {
+fn connect_failure_hint(err: &ConnectError) -> ConnectHint {
     match err {
-        ConnectError::Unreachable(_) => vec![
-            "Could not connect to p2a-mcp server.".to_string(),
-            format!("  {err}"),
-            String::new(),
-            "Start the server first:".to_string(),
-            format!("  {START_SERVER_COMMAND}"),
-        ],
-        ConnectError::Unauthorized { token_sent } => vec![
-            "The p2a-mcp server refused the request (HTTP 401).".to_string(),
-            format!("  {}", unauthorized_message(*token_sent)),
-        ],
-        ConnectError::Http { .. } | ConnectError::BadResponse(_) => vec![err.to_string()],
+        ConnectError::Unreachable(_) => ConnectHint {
+            headline: "Could not connect to p2a-mcp server.".to_string(),
+            details: vec![
+                format!("  {err}"),
+                String::new(),
+                "Start the server first:".to_string(),
+            ],
+            start_command: true,
+        },
+        ConnectError::Unauthorized { token_sent } => ConnectHint {
+            headline: "The p2a-mcp server refused the request (HTTP 401).".to_string(),
+            details: vec![format!("  {}", unauthorized_message(*token_sent))],
+            start_command: false,
+        },
+        ConnectError::Http { .. } | ConnectError::BadResponse(_) => ConnectHint {
+            headline: err.to_string(),
+            details: Vec::new(),
+            start_command: false,
+        },
     }
 }
 
@@ -520,17 +584,7 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
     let session_id = match create_session(&client, base_url, token_sent).await {
         Ok(id) => id,
         Err(err) => {
-            let mut lines = connect_failure_hint(&err).into_iter();
-            if let Some(first) = lines.next() {
-                eprintln!("{}", first.red().bold());
-            }
-            for line in lines {
-                if line.trim() == START_SERVER_COMMAND {
-                    eprintln!("  {}", START_SERVER_COMMAND.bright_cyan());
-                } else {
-                    eprintln!("{line}");
-                }
-            }
+            connect_failure_hint(&err).eprint();
             return Err(anyhow::Error::new(err));
         }
     };
@@ -930,7 +984,9 @@ mod tests {
             matches!(err, ConnectError::Unauthorized { token_sent: false }),
             "{err:?}"
         );
-        let hint = connect_failure_hint(&err).join("\n");
+        let hint = connect_failure_hint(&err);
+        assert!(!hint.start_command, "{hint:?}");
+        let hint = hint.lines().join("\n");
         assert!(
             hint.contains("--access-token") && hint.contains("P2A_ACCESS_TOKEN"),
             "{hint}"
@@ -951,7 +1007,9 @@ mod tests {
             err,
             ConnectError::Unauthorized { token_sent: true }
         ));
-        assert!(connect_failure_hint(&err).join("\n").contains("rejected"));
+        let hint = connect_failure_hint(&err);
+        assert!(!hint.start_command, "{hint:?}");
+        assert!(hint.lines().join("\n").contains("rejected"));
     }
 
     #[tokio::test]
@@ -967,11 +1025,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ConnectError::Unreachable(_)), "{err:?}");
-        assert!(
-            connect_failure_hint(&err)
-                .join("\n")
-                .contains("Start the server first")
+        let hint = connect_failure_hint(&err);
+        assert!(hint.start_command, "{hint:?}");
+        let lines = hint.lines();
+        assert!(lines.join("\n").contains("Start the server first"));
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(format!("  {START_SERVER_COMMAND}").as_str())
         );
+        // The command line comes from the flag (eprint() highlights it), so
+        // the details never carry it as text.
+        assert!(
+            !hint
+                .details
+                .iter()
+                .any(|l| l.contains(START_SERVER_COMMAND))
+        );
+    }
+
+    #[test]
+    fn other_failures_get_a_single_line_and_no_start_command() {
+        for err in [
+            ConnectError::Http { status: 503 },
+            ConnectError::BadResponse("missing session_id".into()),
+        ] {
+            let hint = connect_failure_hint(&err);
+            assert!(!hint.start_command, "{hint:?}");
+            assert_eq!(hint.lines(), vec![err.to_string()]);
+        }
     }
 
     #[test]
@@ -982,12 +1063,44 @@ mod tests {
             let arg = cmd.get_arguments().find(|a| a.get_id() == id).unwrap();
             assert!(arg.is_hide_env_values_set(), "{id}");
         }
+        let help = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "access_token")
+            .and_then(|a| a.get_help())
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            help.contains("visible ASCII, no spaces"),
+            "the help states the token rule: {help:?}"
+        );
         let args = ChatArgs::try_parse_from(["p2a-chat", "--access-token", "t0k"]).unwrap();
         assert_eq!(args.access_token.as_deref(), Some("t0k"));
     }
 
     #[test]
     fn token_with_control_characters_is_refused_before_sending() {
-        assert!(build_http_client(Some("bad\r\ntoken")).is_err());
+        let err = build_http_client(Some("bad\r\ntoken"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err, ACCESS_TOKEN_RULE_ERROR,
+            "the message names the source and never the value"
+        );
+    }
+
+    /// Non-ASCII characters, inner spaces and tabs all pass
+    /// `HeaderValue::from_str`. Of the three, the server's `to_str` rejects
+    /// only non-ASCII; inner spaces and tabs it would compare literally. The
+    /// client refuses all three to accept exactly the tokens the Dioxus app
+    /// accepts. DEL, also in the list, already fails `HeaderValue::from_str`.
+    #[test]
+    fn token_outside_visible_ascii_is_refused_before_sending() {
+        for token in ["tök", "a b", "a\tb", "x\u{7f}y"] {
+            let err = build_http_client(Some(token)).unwrap_err().to_string();
+            assert_eq!(err, ACCESS_TOKEN_RULE_ERROR, "{token:?}");
+            assert!(!err.contains(token), "{token:?}");
+        }
+        // Surrounding whitespace is trimmed, not refused.
+        assert!(build_http_client(Some("  ok-token\t")).is_ok());
     }
 }

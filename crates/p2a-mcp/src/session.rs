@@ -150,6 +150,14 @@ pub fn datasets_bytes(map: &HashMap<String, Dataset>) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
+/// `bytes` as the dataset quota refusals print them: the tool governor's
+/// (`exec`) and a dataset reload's (`persistent_session`), one format for
+/// both.
+#[cfg(any(feature = "http", feature = "db"))]
+pub(crate) fn fmt_bytes(bytes: u64) -> String {
+    p2a_core::memory::format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
+}
+
 /// Whether a session last accessed at `last_accessed` has expired at `now`
 /// under `ttl_minutes`: more whole minutes have elapsed than the TTL. The
 /// comparison is signed, so a `last_accessed` in the future (clock skew, a
@@ -187,7 +195,7 @@ pub fn validate_user_id(raw: Option<String>) -> Result<Option<String>, String> {
 /// Whether `id` has the form of a session id: a UUID in the hyphenated
 /// lower-case form `SessionManager::create_session` produces.
 pub(crate) fn is_session_id(id: &str) -> bool {
-    Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id)
+    Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().encode_lower(&mut Uuid::encode_buffer()) == id)
 }
 
 /// Session information for API responses.
@@ -215,6 +223,13 @@ pub enum RemovalReason {
 /// sees `RecvError::Lagged` and is expected to resynchronise (the persistent
 /// manager runs a sweep).
 const REMOVAL_CHANNEL_CAPACITY: usize = 1024;
+
+/// Remove a removed session's data directory, logging a failure.
+fn remove_session_dir_logged(id: &str) {
+    if let Err(e) = crate::path_jail::remove_session_dir(id) {
+        tracing::warn!(session_id = %id, error = %e, "Failed to remove session directory");
+    }
+}
 
 /// Manages all active sessions.
 ///
@@ -425,17 +440,22 @@ impl SessionManager {
     /// The single hook every removal path (delete, expiry, cleanup, eviction)
     /// calls once the session has left the table. It tells the removal
     /// subscribers (the persistent manager deletes the session's rows) and
-    /// removes the session's data directory off the async runtime.
+    /// removes the session's data directory: on tokio's blocking pool inside
+    /// a runtime, inline outside one. Every async method of the manager only
+    /// awaits tokio's runtime-agnostic locks, so any executor can poll it;
+    /// `start_cleanup_task`, a plain function that spawns a tokio task, is the
+    /// only method that needs a runtime.
     fn session_removed(&self, id: &str, reason: RemovalReason) {
         tracing::debug!(session_id = %id, ?reason, "Session removed");
         // An error only means that nobody is subscribed.
         let _ = self.removals.send(id.to_string());
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = crate::path_jail::remove_session_dir(&id) {
-                tracing::warn!(session_id = %id, error = %e, "Failed to remove session directory");
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(move || remove_session_dir_logged(&id));
             }
-        });
+            Err(_) => remove_session_dir_logged(&id),
+        }
     }
 
     /// Start background cleanup task.
@@ -700,7 +720,10 @@ mod tests {
     async fn adopt_respects_capacity_and_ids() {
         let m = SessionManager::new(cfg(1, None));
         let a = m.create_session(None).await.unwrap();
-        let id2 = Uuid::new_v4().to_string();
+        // A fixed id with letters a-f, so its uppercase form below differs
+        // from it; a random UUID can be all digits, which made that variant
+        // adopt the live session.
+        let id2 = "6f1c0b9e-3a4d-4c2b-9e7f-0a1b2c3d4e5f".to_string();
         assert!(matches!(
             m.adopt(&id2, None).await,
             Err(SessionError::MaxSessionsReached)
@@ -733,7 +756,7 @@ mod tests {
 
         let a = m.create_session(None).await.unwrap();
         m.delete_session(&a).await.unwrap();
-        assert_eq!(rx.recv().await.unwrap(), a);
+        assert_eq!(rx.try_recv().unwrap(), a);
 
         let b = m.create_session(None).await.unwrap();
         backdate(&m, &b, 65).await;
@@ -741,17 +764,17 @@ mod tests {
             m.get_session(&b).await,
             Err(SessionError::Expired)
         ));
-        assert_eq!(rx.recv().await.unwrap(), b);
+        assert_eq!(rx.try_recv().unwrap(), b);
 
         let c = m.create_session(None).await.unwrap();
         backdate(&m, &c, 65).await;
         assert_eq!(m.cleanup_expired().await, 1);
-        assert_eq!(rx.recv().await.unwrap(), c);
+        assert_eq!(rx.try_recv().unwrap(), c);
 
         let d = m.create_session(None).await.unwrap();
         backdate(&m, &d, 11).await;
         m.create_session(None).await.unwrap(); // evicts d
-        assert_eq!(rx.recv().await.unwrap(), d);
+        assert_eq!(rx.try_recv().unwrap(), d);
 
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
@@ -825,5 +848,37 @@ mod tests {
         assert!(ba >= 8000 && bb >= 24000);
         assert_eq!(sa.data_bytes(), ba);
         assert_eq!(m.total_data_bytes().await, ba + bb);
+    }
+
+    /// Drive `f` on this thread without a Tokio runtime. Uncontended tokio
+    /// locks are ready on their first poll, so one poll with a no-op waker
+    /// is enough; a future that is not ready then would never be woken, so
+    /// the helper panics instead of spinning.
+    fn block_on_without_runtime<F: std::future::Future>(f: F) -> F::Output {
+        let mut f = std::pin::pin!(f);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match f.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(v) => v,
+            std::task::Poll::Pending => panic!(
+                "future was not ready on its first poll; it needs a runtime or hit a contended lock"
+            ),
+        }
+    }
+
+    #[test]
+    fn removal_paths_work_outside_a_tokio_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let m = SessionManager::new(cfg(1, Some(10)));
+        let mut removals = m.subscribe_removals();
+        // Deletion.
+        let a = block_on_without_runtime(m.create_session(None)).unwrap();
+        block_on_without_runtime(m.delete_session(&a)).unwrap();
+        assert_eq!(removals.try_recv().unwrap(), a);
+        // Eviction when the table is full.
+        let b = block_on_without_runtime(m.create_session(None)).unwrap();
+        block_on_without_runtime(backdate(&m, &b, 11));
+        let c = block_on_without_runtime(m.create_session(None)).unwrap();
+        assert_eq!(removals.try_recv().unwrap(), b);
+        assert!(block_on_without_runtime(m.get_session(&c)).is_ok());
     }
 }

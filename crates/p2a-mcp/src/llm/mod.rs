@@ -81,7 +81,11 @@ pub struct LlmSettings {
     /// `llm_context_bytes`: the dataset block in the system prompt.
     pub context_bytes: usize,
     /// `llm_history_bytes`: the conversation history sent to the model, and
-    /// the tool results kept in one tool loop.
+    /// the tool results kept in one tool loop. Tool-call names and arguments
+    /// in the history are never cut to fit it and no text is cut below 128
+    /// bytes, so the history passes it only when the latest turn's tool
+    /// calls leave less than 128 bytes per text (see
+    /// [`ContextConfig::history_byte_cap`]).
     pub history_bytes: usize,
     /// `llm_streams_per_session`: concurrent chat requests per session
     /// (`None` = unlimited).

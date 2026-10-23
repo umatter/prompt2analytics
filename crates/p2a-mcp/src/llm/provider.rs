@@ -173,8 +173,8 @@ pub fn resolve_provider_config(
         let name = provider_name(cfg.provider_type);
         if !settings.server_keys {
             return Err(format!(
-                "Provide an API key for {name} in the provider settings; this server does not \
-                 supply one."
+                "Provide an API key for {name} in the provider settings (api_key); this server \
+                 does not supply one."
             ));
         }
         if !is_default_endpoint(cfg.provider_type, cfg.base_url.as_deref()) {
@@ -650,10 +650,11 @@ mod key_policy_tests {
     #[test]
     fn hosted_profile_never_uses_server_keys() {
         let h = LlmSettings::from_limits(&Limits::hosted(), None);
-        assert!(
+        let e =
             resolve_provider_config(Some(cfg(ProviderType::OpenAI, None, None)), None, &h, &env)
-                .is_err()
-        );
+                .unwrap_err();
+        // The refusal names the parameter, like the other key refusals.
+        assert!(e.contains("api_key") && !e.contains("SENTINEL"), "{e}");
         assert!(
             resolve_provider_config(
                 Some(cfg(ProviderType::OpenAI, None, Some("caller"))),
