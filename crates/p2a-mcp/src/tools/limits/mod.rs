@@ -173,6 +173,14 @@ families! {
     StringBytes => "string_bytes", 4_096;
     /// Recursion depth of tree builders.
     TreeDepth => "tree_depth", 100;
+    /// Per-group sample sizes a power calculation is given (the float `n` of the `power_*`
+    /// tools). The cap is the top of the bracket in which those tools solve for `n`, so every
+    /// sample size they can return is accepted.
+    SampleSize => "sample_size", 1_000_000;
+    /// Groups of a planned design (`power_anova_test` `groups`). With [`Family::SampleSize`] it
+    /// bounds the F distribution's degrees of freedom, `groups * (n - 1)`, also when `n` is
+    /// solved for.
+    DesignGroups => "design_groups", 10;
 }
 
 /// Number of families; the length of [`Family::ALL`].
@@ -1788,6 +1796,8 @@ mod tests {
             (Family::ArrayLength, "array_length", 100_000),
             (Family::StringBytes, "string_bytes", 4_096),
             (Family::TreeDepth, "tree_depth", 100),
+            (Family::SampleSize, "sample_size", 1_000_000),
+            (Family::DesignGroups, "design_groups", 10),
         ];
         assert_eq!(Family::ALL.len(), expect.len());
         for &(f, key, cap) in expect {

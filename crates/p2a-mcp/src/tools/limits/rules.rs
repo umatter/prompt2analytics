@@ -370,11 +370,10 @@ pub static PARAM_RULES: &[ParamRule] = {
             Exempt("[old, new] pair; the handler reads the first two strings and ignores the rest"),
         ),
         p("munge_sample", "n", Max(GeneratedRows)),
-        p(
-            "power_anova_test",
-            "groups",
-            Exempt("number of groups in a closed-form power formula"),
-        ),
+        p("power_anova_test", "groups", Max(DesignGroups)),
+        p("power_anova_test", "n", Max(SampleSize)),
+        p("power_prop_test", "n", Max(SampleSize)),
+        p("power_t_test", "n", Max(SampleSize)),
         p(
             "preview_cleaning",
             "sample_size",
@@ -645,6 +644,8 @@ mod tests {
         (Family::ArrayLength, "stats_spline", "xout"),
         (Family::StringBytes, "str_regex_count", "pattern"),
         (Family::TreeDepth, "ml_random_forest", "max_depth"),
+        (Family::SampleSize, "power_t_test", "n"),
+        (Family::DesignGroups, "power_anova_test", "groups"),
     ];
 
     fn value_of_size(f: Family, n: u64) -> Value {
@@ -1318,6 +1319,107 @@ mod tests {
             ("ml_dbscan", "eps", 1e-30),
         ] {
             assert!(hosted(tool, json!({ field: v })).is_ok(), "{tool}.{field}");
+        }
+    }
+
+    /// The float sample size `n` of the power tools and the group count of `power_anova_test`
+    /// are capped in the hosted profile: the refusal names the parameter, the cap and its
+    /// override key; every value up to the cap (fractional, negative or written as an integer)
+    /// passes; nothing is refused when limits are off.
+    #[test]
+    fn power_sample_sizes_and_groups_are_capped_in_hosted_profile() {
+        let cases: &[(&str, &str, Value, &str, &str)] = &[
+            (
+                "power_t_test",
+                "n",
+                json!({"n": 1e7, "delta": 1.0, "sd": 1.0, "sig_level": 0.05}),
+                "sample_size",
+                "1000000",
+            ),
+            (
+                "power_t_test",
+                "n",
+                json!({"n": 1e300, "delta": 1.0}),
+                "sample_size",
+                "1000000",
+            ),
+            (
+                "power_t_test",
+                "n",
+                json!({"n": -1e300, "delta": 1.0}),
+                "sample_size",
+                "1000000",
+            ),
+            (
+                "power_t_test",
+                "n",
+                json!({"n": 1_000_001, "delta": 1.0}),
+                "sample_size",
+                "1000000",
+            ),
+            (
+                "power_prop_test",
+                "n",
+                json!({"n": 1e9, "p1": 0.3, "p2": 0.5}),
+                "sample_size",
+                "1000000",
+            ),
+            (
+                "power_anova_test",
+                "n",
+                json!({"groups": 3, "n": 1e7, "between_var": 0.25, "within_var": 1.0}),
+                "sample_size",
+                "1000000",
+            ),
+            (
+                "power_anova_test",
+                "groups",
+                json!({"groups": 95, "between_var": 1.0, "within_var": 3.0, "power": 0.8}),
+                "design_groups",
+                "10",
+            ),
+            (
+                "power_anova_test",
+                "groups",
+                json!({"groups": u64::MAX, "n": 10, "between_var": 1.0}),
+                "design_groups",
+                "10",
+            ),
+        ];
+        for (tool, param, args, key, cap) in cases {
+            let v = hosted(tool, args.clone()).expect_err(tool);
+            assert_eq!(
+                (v.parameter.as_str(), v.override_key, v.limit.as_str()),
+                (*param, *key, *cap),
+                "{tool}: {args}"
+            );
+            assert!(
+                v.message.starts_with(&format!("Parameter `{param}` = "))
+                    && v.message
+                        .contains(&format!("limit of {cap} ({key}) for `{tool}`")),
+                "{}",
+                v.message
+            );
+            assert!(Limits::off().check_tool_arguments(tool, args).is_ok());
+        }
+        // Up to the caps everything passes, including every n the solvers can return (their
+        // bisection searches n in [2, 1e6]) and a solve for n with the most groups allowed.
+        for args in [
+            json!({"n": 1e6, "delta": 1.0}),
+            json!({"n": 999_999.5, "delta": 1.0}),
+            json!({"n": -1e6, "delta": 1.0}),
+            json!({"n": 2, "delta": 0.5, "sd": 1.0, "sig_level": 0.05}),
+            json!({"delta": 0.5, "power": 0.8}),
+        ] {
+            assert!(hosted("power_t_test", args.clone()).is_ok(), "{args}");
+        }
+        assert!(hosted("power_prop_test", json!({"n": 1e6, "p1": 0.3, "p2": 0.5})).is_ok());
+        for args in [
+            json!({"groups": 10, "n": 1e6, "between_var": 1.0, "within_var": 3.0}),
+            json!({"groups": 10, "between_var": 0.0, "within_var": 1.0, "power": 0.8}),
+            json!({"groups": 2, "n": 5.5, "between_var": 1.0}),
+        ] {
+            assert!(hosted("power_anova_test", args.clone()).is_ok(), "{args}");
         }
     }
 
