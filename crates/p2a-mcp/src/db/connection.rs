@@ -108,12 +108,13 @@ pub struct DbConnection {
 struct DeletedConversations {
     current: std::collections::HashSet<String>,
     previous: std::collections::HashSet<String>,
-    /// More were deleted than are remembered; the next sweep scans in full.
+    /// More were deleted than are remembered; the next sweep is a full one.
     overflowed: bool,
 }
 
 /// Recently deleted conversations remembered for the orphan sweep; past
-/// this the next sweep scans the messages and tool calls in full.
+/// this the next sweep is a full one
+/// ([`delete_orphans`](DbConnection::delete_orphans)).
 pub(crate) const MAX_REMEMBERED_DELETES: usize = 100_000;
 
 type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
@@ -452,7 +453,7 @@ impl DbConnection {
 
     /// The conversations deleted since the sweep before the last one, and
     /// the start of the next sweep's memory; `None` when more were deleted
-    /// than are remembered (the caller scans in full).
+    /// than are remembered (the caller sweeps in full).
     pub(crate) fn take_deleted_conversations(&self) -> Option<std::collections::HashSet<String>> {
         let mut deleted = self.deleted_conversations_map();
         let current = std::mem::take(&mut deleted.current);

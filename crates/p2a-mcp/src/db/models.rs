@@ -10,6 +10,18 @@ use serde::{Deserialize, Serialize};
 use surrealdb::RecordId;
 use surrealdb::sql::Datetime;
 
+/// The key part of a record id as the rows that point at the record store it
+/// (a message's `conversation_id`, for one), without SurrealDB's formatting.
+pub(super) fn key_string(id: &RecordId) -> String {
+    // RecordIdKey.to_string() may wrap string IDs in angle brackets ⟨⟩
+    // We need to extract the raw string value
+    let key_str = id.key().to_string();
+    key_str
+        .trim_start_matches('⟨')
+        .trim_end_matches('⟩')
+        .to_string()
+}
+
 /// A conversation (chat session)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
@@ -50,13 +62,7 @@ impl Conversation {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        // RecordIdKey.to_string() may wrap string IDs in angle brackets ⟨⟩
-        // We need to extract the raw string value
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 
     /// Get created_at as chrono DateTime
@@ -148,11 +154,7 @@ impl Message {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 
     /// Get created_at as chrono DateTime
@@ -224,11 +226,7 @@ impl ToolCall {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 
     /// Mark the tool call as completed successfully
@@ -290,11 +288,7 @@ impl DbSession {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 
     /// Get created_at as chrono DateTime
@@ -349,11 +343,7 @@ impl Settings {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 }
 
@@ -409,11 +399,7 @@ impl DatasetMeta {
 
     /// Get the ID as a string (just the key part, without SurrealDB formatting)
     pub fn id_string(&self) -> String {
-        let key_str = self.id.key().to_string();
-        key_str
-            .trim_start_matches('⟨')
-            .trim_end_matches('⟩')
-            .to_string()
+        key_string(&self.id)
     }
 }
 

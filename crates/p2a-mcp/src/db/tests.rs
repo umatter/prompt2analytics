@@ -803,7 +803,7 @@ async fn insert_raw_message(db: &DbConnection, conversation_id: &str) {
 /// The recent orphan sweep deletes what is left for a deleted conversation
 /// for two sweeps, through the index and without scanning the tables; a
 /// conversation that still exists is left alone, and rows of one this
-/// process never deleted need the full scan.
+/// process never deleted need the full sweep.
 #[tokio::test]
 async fn recent_orphan_sweep_follows_deleted_conversations() {
     let db = test_db().await;
@@ -830,13 +830,13 @@ async fn recent_orphan_sweep_follows_deleted_conversations() {
     assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
     assert_eq!(db.get_messages(&kept.id_string()).await.unwrap().len(), 1);
 
-    // The full scan finds the rest: the row from before and the last one.
+    // The full sweep finds the rest: the row from before and the last one.
     assert_eq!(db.delete_orphans().await.unwrap(), 2);
     assert_eq!(db.get_messages(&kept.id_string()).await.unwrap().len(), 1);
 }
 
 /// More deleted conversations than are remembered: the next recent sweep
-/// scans in full.
+/// is a full one.
 #[tokio::test]
 async fn recent_orphan_sweep_scans_in_full_after_too_many_deletes() {
     let db = test_db().await;
@@ -847,6 +847,250 @@ async fn recent_orphan_sweep_scans_in_full_after_too_many_deletes() {
     }
     assert_eq!(db.delete_recent_orphans().await.unwrap(), 1);
     assert_eq!(db.delete_recent_orphans().await.unwrap(), 0);
+}
+
+/// Owner values around the sorted `known` ones that none of them equals:
+/// the empty string, values before and after all of them, and for each a
+/// prefix and two extensions (which sort right after it).
+fn owners_around(known: &[String]) -> Vec<String> {
+    let mut out = vec![String::new(), "0".to_string(), "zzzz".to_string()];
+    for k in known {
+        out.push(k[..k.len() / 2].to_string());
+        out.push(format!("{k}0"));
+        out.push(format!("{k}~"));
+    }
+    out.sort();
+    out.dedup();
+    out.retain(|o| !known.contains(o));
+    out
+}
+
+/// Rows of `table`.
+async fn rows_in(db: &DbConnection, table: &str) -> usize {
+    #[derive(serde::Deserialize)]
+    struct Count {
+        count: usize,
+    }
+    let mut result = db
+        .db()
+        .query(format!("SELECT count() FROM {table} GROUP ALL"))
+        .await
+        .unwrap();
+    let count: Option<Count> = result.take(0).unwrap();
+    count.map_or(0, |c| c.count)
+}
+
+/// A tool call stored for `conversation_id` without any check.
+async fn insert_raw_tool_call(db: &DbConnection, conversation_id: &str) {
+    let t = ToolCall::new("m".into(), conversation_id.into(), "t".into(), "{}".into());
+    let _: Option<ToolCall> = db.db().create(t.id.clone()).content(t).await.unwrap();
+}
+
+/// See [`full_orphan_sweep_finds_orphans_between_the_owners_that_exist`].
+async fn check_orphans_between_owners(db: &DbConnection) {
+    let now = chrono::Utc::now();
+    let live: Vec<String> = ["m1", "s1", "s2"].map(String::from).to_vec();
+    let mut conversations = Vec::new();
+    for s in &live {
+        db.set_session_last_accessed(s, now).await.unwrap();
+    }
+    // Every session, with a row or not, gets settings, dataset metadata and
+    // a conversation with a message and a tool call.
+    let rowless = owners_around(&live);
+    for s in live.iter().chain(&rowless) {
+        if !s.is_empty() {
+            // The settings row's key is the session id.
+            db.get_or_create_settings(s).await.unwrap();
+        }
+        let meta = super::models::DatasetMeta::new(
+            s.clone(),
+            "d".into(),
+            "csv".into(),
+            2,
+            1,
+            vec!["x".into()],
+        );
+        db.save_dataset_meta(&meta).await.unwrap();
+        let id = db.create_conversation(s, "t").await.unwrap().id_string();
+        let msg = db.add_message(&id, "user", "1.25").await.unwrap();
+        let call = ToolCall::new(msg.id_string(), id.clone(), "t".into(), "{}".into());
+        db.create_tool_call(&call).await.unwrap();
+        if live.contains(s) {
+            conversations.push(id);
+        }
+    }
+    // More orphans in one gap than the sweep deletes per statement.
+    for _ in 0..(2 * super::sessions::ORPHAN_BATCH + 3) {
+        db.create_conversation("zzzz", "t").await.unwrap();
+    }
+    conversations.sort();
+    let orphan_owners = owners_around(&conversations);
+    for owner in &orphan_owners {
+        insert_raw_message(db, owner).await;
+        insert_raw_tool_call(db, owner).await;
+    }
+    for _ in 0..(2 * super::sessions::ORPHAN_BATCH + 5) {
+        insert_raw_message(db, "zzzz").await;
+    }
+
+    let deleted = db.delete_orphans().await.unwrap();
+    // The rowless sessions' conversations (their messages and tool calls go
+    // with them uncounted), settings and dataset metadata, and the orphaned
+    // messages and tool calls.
+    let rowless_settings = rowless.iter().filter(|s| !s.is_empty()).count();
+    let expected = rowless.len()
+        + (2 * super::sessions::ORPHAN_BATCH + 3)
+        + rowless_settings
+        + rowless.len()
+        + 2 * orphan_owners.len()
+        + (2 * super::sessions::ORPHAN_BATCH + 5);
+    assert_eq!(deleted, expected);
+    for table in [
+        "sessions",
+        "settings",
+        "dataset_meta",
+        "conversations",
+        "messages",
+        "tool_calls",
+    ] {
+        assert_eq!(rows_in(db, table).await, live.len(), "{table}");
+    }
+    for id in &conversations {
+        assert_eq!(db.get_messages(id).await.unwrap().len(), 1);
+        let calls = db.get_tool_calls_for_conversation(id).await.unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+    for s in &live {
+        assert_eq!(db.get_datasets_for_session(s).await.unwrap().len(), 1);
+        let settings: Option<super::models::Settings> =
+            db.db().select(("settings", s.as_str())).await.unwrap();
+        assert!(settings.is_some(), "{s}");
+    }
+    assert_eq!(db.delete_orphans().await.unwrap(), 0);
+}
+
+/// The full sweep finds the orphans of every table wherever their owner
+/// falls among the owners that exist (before, between and after them, a
+/// prefix or an extension of one, the empty string), also more of them in
+/// one gap than it deletes per statement, and keeps every row of an owner
+/// that exists; on both engines.
+#[tokio::test]
+async fn full_orphan_sweep_finds_orphans_between_the_owners_that_exist() {
+    check_orphans_between_owners(&test_db().await).await;
+    let dir = tempfile::tempdir().unwrap();
+    let db = DbConnection::connect_rocksdb(dir.path().join("db"))
+        .await
+        .unwrap();
+    check_orphans_between_owners(&db).await;
+}
+
+/// What `tracing` writes while a subscriber made with it is the thread's
+/// default.
+#[derive(Clone, Default)]
+pub(super) struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Logs {
+    /// A subscriber that writes WARN and above to these logs.
+    pub(super) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+        tracing_subscriber::fmt()
+            .with_writer(self.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish()
+    }
+
+    pub(super) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+    type Writer = Logs;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Store `n` conversations of the rowless session "no-row" whose keys do not
+/// survive `key_string` (the server writes UUID keys only), so that
+/// `delete_conversation` cannot find them by the id the sweep reads.
+async fn insert_odd_key_conversations(db: &DbConnection, n: usize) {
+    use super::models::{Conversation, key_string};
+    for i in 0..n {
+        let key = format!("odd⟩{i:03}");
+        let mut conv = Conversation::new("no-row".into(), "t".into());
+        conv.id = surrealdb::RecordId::from(("conversations", key.as_str()));
+        assert_ne!(key_string(&conv.id), key);
+        let _: Option<Conversation> = db.db().create(conv.id.clone()).content(conv).await.unwrap();
+    }
+}
+
+/// Run an orphan sweep (in full or of recent deletes) that must delete
+/// nothing, and return the warnings it logged about conversations.
+async fn sweep_warnings(db: &DbConnection, full: bool) -> Vec<String> {
+    let logs = Logs::default();
+    let deleted = {
+        let _default = tracing::subscriber::set_default(logs.subscriber());
+        if full {
+            db.delete_orphans().await.unwrap()
+        } else {
+            db.delete_recent_orphans().await.unwrap()
+        }
+    };
+    assert_eq!(deleted, 0);
+    logs.text()
+        .lines()
+        .filter(|line| line.contains("WARN") && line.contains("conversations"))
+        .map(String::from)
+        .collect()
+}
+
+/// Conversations of a session without a row that `delete_conversation`
+/// cannot find by the id the sweep reads for them are not read again batch
+/// after batch until the batch bound: a full batch of them ends their gap
+/// with a warning, and the rows stay. Every sweep reads them first again
+/// and says so again, so the warning does not send anyone to wait for a
+/// later sweep. A short batch of them is reported too.
+#[tokio::test]
+async fn full_orphan_sweep_stops_at_a_batch_it_cannot_delete() {
+    use super::sessions::ORPHAN_BATCH;
+
+    let db = test_db().await;
+    insert_odd_key_conversations(&db, ORPHAN_BATCH + 3).await;
+    for full in [true, false] {
+        let warnings = sweep_warnings(&db, full).await;
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert!(
+            w.contains("could not delete") && w.contains("every sweep"),
+            "{w}"
+        );
+        assert!(w.contains("by hand") && !w.contains("wait"), "{w}");
+        let fields = format!("rows={} deleted=0", ORPHAN_BATCH + 3);
+        assert!(w.contains(&fields), "{w}");
+    }
+    assert_eq!(rows_in(&db, "conversations").await, ORPHAN_BATCH + 3);
+
+    let db = test_db().await;
+    insert_odd_key_conversations(&db, 3).await;
+    let warnings = sweep_warnings(&db, true).await;
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let w = &warnings[0];
+    assert!(w.contains("could not delete"), "{w}");
+    assert!(w.contains("rows=3 deleted=0 left=3"), "{w}");
+    assert_eq!(rows_in(&db, "conversations").await, 3);
 }
 
 #[tokio::test]
