@@ -441,8 +441,9 @@ impl CausalTree {
     /// split. Otherwise the chosen split is the same except where two
     /// candidates' criteria are equal, exactly or to within rounding: the two
     /// searches may break those ties either way, so decimal outcomes (say, in
-    /// tenths) can grow a different, equally good tree where two candidates
-    /// tie, as they do when two covariate groups mirror each other.
+    /// tenths) can take the other, equally good split where two candidates
+    /// tie, as they do when two covariate groups mirror each other, and the
+    /// tree then grows differently below it.
     fn find_best_causal_split(
         &self,
         x: &ArrayView2<f64>,
