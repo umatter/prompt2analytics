@@ -209,9 +209,11 @@ fn whiten(
     resource::checkpoint()?;
     let n = y.len();
     match structure {
-        // P = I: a plain copy, allocated fallibly like every other X*
+        // P = I: a plain copy, allocated fallibly like every other X*. The buffer
+        // takes x's own shape, so the copy cannot mismatch whatever the caller checked.
         CorrelationStructure::Identity => {
-            let mut x_star = resource::try_zeros2(n, x.ncols(), WHITENED_DESIGN)?;
+            let (rows, cols) = x.dim();
+            let mut x_star = resource::try_zeros2(rows, cols, WHITENED_DESIGN)?;
             x_star.assign(x);
             Ok((y.to_owned(), x_star))
         }
