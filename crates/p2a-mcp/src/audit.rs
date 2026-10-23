@@ -9,7 +9,9 @@
 //!   such as `csv_content` or `filter_value`) are replaced by their size,
 //!   other strings and object keys are cut to 200 bytes, arrays to 20
 //!   elements, objects to 64 keys, nesting to 4 levels and the whole to about
-//!   16 KiB, so an entry stays small whatever the request carried. The
+//!   16 KiB, so an entry stays small whatever the request carried; arguments
+//!   that are not an object (positional values, which every call path
+//!   refuses) are replaced by their size as a whole. The
 //!   parameters the tool's schema declares are taken first (`query` and
 //!   `pattern` ahead of the rest), so the key cap and the size bound fall on
 //!   the other keys before them; a value passed under a serde alias (such as
@@ -690,15 +692,20 @@ pub(crate) mod gate {
 /// kept, or spelled like the `"[+n more keys]"` marker, is left out and
 /// counted by the marker, so no kept value is overwritten and the marker is
 /// always the sanitiser's own.
+///
+/// Arguments that are not an object are replaced by their size like a
+/// [`REDACT_KEYS`] value (`"[redacted: 5 items]"` for an array): positional
+/// values have no names to redact by, and every call path refuses them
+/// (`AnalyticsServer::call_tool_with_session`), so their entry needs only
+/// their shape. `null`, arguments left out, stays `null`.
 pub fn sanitize_arguments(args: &Value, declared: &[&str]) -> Value {
     let mut budget = MAX_ARGUMENT_BYTES;
-    // A top-level value always fits: a container needs 3 bytes, a scalar at
-    // most a few KiB.
     match args {
-        Value::Object(map) => sanitize_object(map, 1, declared, &mut budget),
-        other => sanitize_value(other, 1, &mut budget),
+        // A top-level object always fits: it needs 3 bytes.
+        Value::Object(map) => sanitize_object(map, 1, declared, &mut budget).unwrap_or(Value::Null),
+        Value::Null => Value::Null,
+        other => redact(other),
     }
-    .unwrap_or(Value::Null)
 }
 
 /// The sanitised `value`, charged to `budget` (bytes of JSON left), or
@@ -953,12 +960,33 @@ mod tests {
         assert_eq!(s["operations"][1]["values"], "[redacted: 3 items]");
         assert_eq!(s["rows"], "[redacted: 2 items]");
         assert_eq!(s["query"], "SELECT * FROM t WHERE x = 1");
-        // a non-object top level is sanitised the same way
-        let long = "q".repeat(300);
+    }
+
+    #[test]
+    fn sanitize_redacts_positional_arguments() {
+        // Positional (array) arguments have no names to redact by: the
+        // `csv_content` or filter `value` they carry would be logged in
+        // clear. The governed call path refuses them; their entry records
+        // only their size.
+        let filter = serde_json::json!(["small", "cat", "eq", "SECRET-ARR", "f2"]);
+        assert_eq!(sanitize_arguments(&filter, &[]), "[redacted: 5 items]");
+        let create = serde_json::json!(["pii", "email,income\nalice@example.org,51000\n"]);
         assert_eq!(
-            sanitize_arguments(&Value::String(long), &[]),
-            format!("{}...[truncated 300 bytes]", "q".repeat(200))
+            sanitize_arguments(&create, &["name", "csv_content"]),
+            "[redacted: 2 items]"
         );
+        // Any other top level that is not an object, likewise.
+        assert_eq!(
+            sanitize_arguments(&Value::String("q".repeat(300)), &[]),
+            "[redacted: 300 bytes]"
+        );
+        assert_eq!(
+            sanitize_arguments(&serde_json::json!(51000), &[]),
+            "[redacted]"
+        );
+        assert_eq!(sanitize_arguments(&Value::Bool(true), &[]), "[redacted]");
+        // Arguments left out stay null.
+        assert_eq!(sanitize_arguments(&Value::Null, &[]), Value::Null);
     }
 
     #[test]

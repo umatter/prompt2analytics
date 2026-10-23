@@ -2181,4 +2181,33 @@ mod chat_tests {
             assert_eq!(llm_error_status(&e), want, "{e}");
         }
     }
+
+    /// A model's tool call whose arguments are a positional array (an
+    /// OpenAI argument string such as `"[\"d\", \"x,y\\n...\"]"` parses to
+    /// one, Ollama and Anthropic pass their value through) is refused by
+    /// both executors and does not run: a derived request struct would take
+    /// the array by field position, past the request limits and the audit
+    /// redaction, which read parameters by name.
+    #[tokio::test]
+    async fn llm_executors_refuse_positional_arguments() {
+        let (governor, session) = admitting_parts().await;
+        let server = Arc::new(crate::server::AnalyticsServer::new());
+        let args = serde_json::json!(["d", "x,y\n1.0,1.1\n2.0,1.9\n3.0,3.2\n"]);
+        let refused = |r: Result<String, String>| {
+            let err = r.expect_err("positional arguments ran");
+            assert!(
+                err.starts_with("The arguments of `create_dataset` are an array"),
+                "{err}"
+            );
+        };
+        let executor = SessionToolExecutor::new(governor.clone(), server.clone(), session.clone());
+        refused(executor.execute("create_dataset", args.clone()).await);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let executor = StreamingToolExecutor::new(governor, server, session.clone(), tx);
+        refused(executor.execute("create_dataset", args).await);
+        assert!(
+            session.datasets.read().await.is_empty(),
+            "create_dataset ran"
+        );
+    }
 }

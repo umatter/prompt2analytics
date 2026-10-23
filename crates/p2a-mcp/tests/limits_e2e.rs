@@ -669,6 +669,162 @@ mod http_paths {
         assert_eq!(lines[0]["duration_ms"], 0);
     }
 
+    /// Positional (array) arguments, which a derived request struct would
+    /// deserialise by field position. The first two are above a hosted cap
+    /// when sent by name: the replications cap, and the dense row class at
+    /// `dense_rows=50` on a 60-row dataset.
+    fn positional_cases() -> [(&'static str, Value); 3] {
+        [
+            (
+                "regression_bootstrap_cov",
+                json!(["small", "y", ["x1"], 20_000, "pairs", 1]),
+            ),
+            (
+                "ml_hierarchical",
+                json!(["small", ["x1", "x2"], 2, null, "ward"]),
+            ),
+            ("set_seed", json!([42])),
+        ]
+    }
+
+    /// The refusal of positional arguments names the tool and what it got.
+    fn assert_positional_refusal(tool: &str, error: &str) {
+        let start = format!(
+            "The arguments of `{tool}` are an array, but tool arguments must be a JSON object"
+        );
+        assert!(error.starts_with(&start), "{tool}: {error}");
+    }
+
+    /// Every positional case is refused (400 `invalid_arguments`) on the
+    /// HTTP route and on the governed LLM-tool and WebSocket origins, and
+    /// none of them runs (no global seed is set).
+    async fn assert_positional_arguments_refused(app: &Router, state: &AppState, sid: &str) {
+        use p2a_mcp::exec::{CallOrigin, ToolCallError};
+        let session = state.session_manager.get_session(sid).await.unwrap();
+        for (tool, args) in positional_cases() {
+            let (status, body) = post_tool(app, sid, tool, args.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{tool}: {body}");
+            assert_eq!(body["code"], "invalid_arguments", "{tool}: {body}");
+            assert_positional_refusal(tool, body["error"].as_str().unwrap());
+            for origin in [CallOrigin::LlmTool, CallOrigin::WebSocket] {
+                let called = state
+                    .governor
+                    .call(
+                        state.server.clone(),
+                        session.clone(),
+                        tool,
+                        args.clone(),
+                        origin,
+                    )
+                    .await;
+                match called {
+                    Err(ToolCallError::InvalidArguments(e)) => assert_positional_refusal(tool, &e),
+                    other => panic!("{tool} from {origin:?}: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(*session.global_seed.read().await, None, "set_seed ran");
+    }
+
+    #[test]
+    fn positional_arguments_are_refused_on_every_governed_path() {
+        let cfg = open_public_config();
+        let l = Limits::hosted()
+            .with_overrides(&["dense_rows=50".to_string()])
+            .unwrap();
+        run(l, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            insert_dataset(&state, &sid, "small", 60).await;
+            // Control: the same values by name are refused by the limits.
+            let by_name = [
+                (
+                    "regression_bootstrap_cov",
+                    json!({"dataset": "small", "y": "y", "x": ["x1"], "n_boot": 20_000}),
+                ),
+                (
+                    "ml_hierarchical",
+                    json!({"dataset": "small", "columns": ["x1", "x2"], "n_clusters": 2}),
+                ),
+            ];
+            for (tool, args) in by_name {
+                let (status, body) = post_tool(&app, &sid, tool, args).await;
+                assert_eq!(status, 422, "{tool}: {body}");
+                assert_eq!(body["code"], "limit_exceeded", "{tool}: {body}");
+            }
+            assert_positional_arguments_refused(&app, &state, &sid).await;
+        });
+    }
+
+    #[test]
+    fn positional_arguments_are_refused_when_limits_are_off() {
+        // Tool arguments are a JSON object in every profile, as over stdio.
+        let cfg = local_config();
+        run(Limits::off(), async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            insert_dataset(&state, &sid, "small", 60).await;
+            assert_positional_arguments_refused(&app, &state, &sid).await;
+        });
+    }
+
+    #[test]
+    fn absent_arguments_are_the_empty_object() {
+        let cfg = local_config();
+        run(Limits::off(), async {
+            let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            // No `arguments` key: a tool whose parameters are all optional
+            // runs, as over stdio, and so does a tool without parameters.
+            for tool in ["get_seed", "list_datasets"] {
+                let request = post(&format!("/api/tools/{tool}"), json!({"session_id": sid}));
+                let (status, body) = send(&app, request).await;
+                assert_eq!(status, 200, "{tool}: {body}");
+                assert_eq!(body["data"]["success"], true, "{tool}: {body}");
+            }
+        });
+    }
+
+    /// A refused positional call is audited with its size only: its values
+    /// have no parameter names to be redacted by.
+    #[test]
+    fn audit_redacts_positional_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = with_audit(local_config(), &dir);
+        let lines = run(Limits::off(), async {
+            let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let csv = "email,income\nalice@example.org,51000\nbob@example.org,73000\n";
+            let (status, body) = post_tool(&app, &sid, "create_dataset", json!(["pii", csv])).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            let (status, body) = post_tool(
+                &app,
+                &sid,
+                "munge_filter",
+                json!(["pii", "email", "eq", "alice@example.org", "f"]),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            super::audit_lines(&cfg.audit).await
+        });
+        let text = std::fs::read_to_string(&cfg.audit.path).unwrap();
+        assert!(!text.contains("alice@example.org"), "{text}");
+        assert!(!text.contains("51000"), "{text}");
+        assert_eq!(lines.len(), 2, "{text}");
+        for (line, (tool, items)) in lines
+            .iter()
+            .zip([("create_dataset", 2), ("munge_filter", 5)])
+        {
+            assert_eq!(line["tool_name"], tool, "{line}");
+            assert_eq!(line["outcome"], "invalid_arguments", "{line}");
+            assert_eq!(
+                line["arguments"],
+                format!("[redacted: {items} items]"),
+                "{line}"
+            );
+        }
+    }
+
     #[test]
     fn x1_local_mode_is_unlimited() {
         // The local default (limits off) runs a value above the hosted cap.

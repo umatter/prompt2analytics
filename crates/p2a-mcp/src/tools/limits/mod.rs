@@ -14,6 +14,9 @@
 //!
 //! - [`Limits::check_tool_arguments`] checks a tool call's JSON arguments against
 //!   [`PARAM_RULES`]: each rule maps a `(tool, path)` to a cost [`Family`] (or another [`Rule`]).
+//!   Rules address parameters by name, so arguments that are not a JSON object are refused
+//!   outside the off profile; the governed call path refuses them in every profile, because a
+//!   derived request struct would also take a JSON array, by field position.
 //! - [`Limits::check_rows`] checks a dataset's height for the tools in [`ROW_RULES`], whose cost
 //!   grows faster than linearly in the number of rows ([`RowClass`]).
 //! - [`Limits::check_budget`] lets a handler check a quantity it computes itself (for example a
@@ -662,13 +665,15 @@ fn select_rules<'a>(tool: &str, rules: &'a [ParamRule]) -> Vec<&'a ParamRule> {
 pub struct LimitViolation {
     /// The tool that was called.
     pub tool: String,
-    /// The rule path, `dataset_field` (row limits) or budget key that was exceeded.
+    /// The rule path, `dataset_field` (row limits) or budget key that was exceeded
+    /// (`arguments` for arguments that are not a JSON object).
     pub parameter: String,
     /// What the request asked for.
     pub requested: String,
     /// The limit that applies.
     pub limit: String,
-    /// The `P2A_LIMIT_OVERRIDES` key that raises the limit.
+    /// The `P2A_LIMIT_OVERRIDES` key that raises the limit; empty when no override lifts the
+    /// refusal (arguments that are not a JSON object).
     pub override_key: &'static str,
     /// The refusal shown to the caller.
     pub message: String,
@@ -766,9 +771,40 @@ fn tolerance_refusal(path: &str, shown: &str, readable: bool, min: f64, tool_ech
     }
 }
 
+/// What a tool call's arguments are when they are not the JSON object every tool takes:
+/// `Some("an array")`, `Some("a string")`, `Some("a number")` or `Some("a boolean")`; `None` for
+/// an object, and for `null`, which is arguments left out (the empty object).
+///
+/// A derived request struct deserialises a JSON array too, filling its fields in declaration
+/// order, so positional arguments would reach a handler past every check that reads parameters
+/// by name: this catalogue, the row classes and the audit redaction. The governed call path
+/// (`AnalyticsServer::call_tool_with_session`) refuses them in every profile with
+/// [`non_object_message`]; stdio receives arguments as an object map only.
+pub(crate) fn non_object_kind(args: &Value) -> Option<&'static str> {
+    match args {
+        Value::Object(_) | Value::Null => None,
+        Value::Array(_) => Some("an array"),
+        Value::String(_) => Some("a string"),
+        Value::Number(_) => Some("a number"),
+        Value::Bool(_) => Some("a boolean"),
+    }
+}
+
+/// The refusal of `tool`'s arguments when they are `kind` (from [`non_object_kind`]).
+pub(crate) fn non_object_message(tool: &str, kind: &str) -> String {
+    format!(
+        "The arguments of `{}` are {kind}, but tool arguments must be a JSON object that names \
+         each parameter. Send each value under its parameter name, as the tool's input schema \
+         lists them.",
+        echo(tool)
+    )
+}
+
 impl Limits {
     /// Checks a tool call's JSON arguments against [`PARAM_RULES`]; returns the first violation
-    /// in [`rules_for`] order. Arguments that are not an object, and the off profile, pass.
+    /// in [`rules_for`] order. The off profile passes everything. Otherwise arguments that are
+    /// not an object ([`non_object_kind`]; `null` passes as the empty object) are refused with
+    /// `parameter` `arguments`, because no rule could resolve against them.
     pub fn check_tool_arguments(&self, tool: &str, args: &Value) -> Result<(), LimitViolation> {
         self.check_with(tool, args, PARAM_RULES)
     }
@@ -839,10 +875,21 @@ impl Limits {
         args: &Value,
         rules: &[ParamRule],
     ) -> Result<(), LimitViolation> {
-        if self.is_off() || !args.is_object() {
+        if self.is_off() {
             return Ok(());
         }
         let tool_echo = echo(tool);
+        // Fail closed: every rule path is a name, which only an object can resolve.
+        if let Some(kind) = non_object_kind(args) {
+            return Err(LimitViolation {
+                tool: tool_echo.to_string(),
+                parameter: "arguments".to_string(),
+                requested: kind.to_string(),
+                limit: "a JSON object".to_string(),
+                override_key: "",
+                message: non_object_message(tool, kind),
+            });
+        }
         let mut values = Vec::new();
         for rule in select_rules(tool, rules) {
             // An `Exempt` checks nothing. It is selected only so that a tool-specific one shadows
@@ -1195,8 +1242,60 @@ mod tests {
         );
         // not a number: serde's job
         assert!(h.check_with("t", &json!({"reps": "1e30"}), T).is_ok());
-        // not an object
-        assert!(h.check_with("t", &json!([1, 2]), T).is_ok());
+        // not an object: refused (see `arguments_that_are_not_an_object_are_refused`)
+        assert!(h.check_with("t", &json!([1, 2]), T).is_err());
+    }
+
+    #[test]
+    fn arguments_that_are_not_an_object_are_refused() {
+        // A derived request struct deserialises a JSON array too, filling its fields by
+        // position, so positional arguments must not pass a check that reads them by name.
+        let h = Limits::hosted();
+        for (args, kind) in [
+            (json!(["small", "y", ["x"], 20_000, "pairs", 1]), "an array"),
+            (json!("small"), "a string"),
+            (json!(20_000), "a number"),
+            (json!(true), "a boolean"),
+        ] {
+            let v = h
+                .check_tool_arguments("regression_bootstrap_cov", &args)
+                .unwrap_err();
+            assert_eq!(
+                (
+                    v.tool.as_str(),
+                    v.parameter.as_str(),
+                    v.requested.as_str(),
+                    v.limit.as_str(),
+                ),
+                (
+                    "regression_bootstrap_cov",
+                    "arguments",
+                    kind,
+                    "a JSON object"
+                ),
+                "{args}"
+            );
+            assert_eq!(
+                v.message,
+                format!(
+                    "The arguments of `regression_bootstrap_cov` are {kind}, but tool arguments \
+                     must be a JSON object that names each parameter. Send each value under its \
+                     parameter name, as the tool's input schema lists them."
+                ),
+                "{args}"
+            );
+        }
+        // `null` is arguments left out, the empty object.
+        assert!(h.check_tool_arguments("t", &Value::Null).is_ok());
+        // The off profile checks nothing; the governed call path refuses the shape in every
+        // profile (`AnalyticsServer::call_tool_with_session`).
+        assert!(Limits::off().check_tool_arguments("t", &json!([1])).is_ok());
+        // The tool name is echoed cut, like every other echo.
+        let v = h
+            .check_tool_arguments(&"t".repeat(10_000), &json!([1]))
+            .unwrap_err();
+        assert_eq!(v.tool.len(), ECHO_CHARS);
+        assert!(v.message.len() < 300, "{}", v.message);
     }
 
     #[test]

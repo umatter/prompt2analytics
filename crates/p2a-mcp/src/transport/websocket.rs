@@ -478,6 +478,84 @@ mod tests {
         }
     }
 
+    /// A connection state on `governor`'s config, authenticated to a new
+    /// session, with that session and the message channel.
+    async fn authenticated(
+        exec: crate::exec::ExecConfig,
+    ) -> (
+        WsState,
+        Arc<Session>,
+        mpsc::Sender<ServerMessage>,
+        mpsc::Receiver<ServerMessage>,
+    ) {
+        use crate::config::SessionConfig;
+
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let session_id = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&session_id).await.unwrap();
+        let governor = Arc::new(ToolGovernor::new(exec, sessions.clone()));
+        let mut state = WsState::new(Arc::new(AnalyticsServer::new()), sessions, governor);
+        let (tx, mut rx) = mpsc::channel(8);
+        handle_client_message(&mut state, ClientMessage::Auth { session_id }, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::AuthResult { success: true, .. })
+        ));
+        (state, session, tx, rx)
+    }
+
+    #[tokio::test]
+    async fn positional_arguments_are_refused() {
+        // `set_seed` by position: a derived request struct would take the
+        // array, past the request limits and the audit redaction, which read
+        // parameters by name.
+        let (mut state, session, tx, mut rx) = authenticated(Default::default()).await;
+        let tool = ClientMessage::Tool {
+            id: "t1".into(),
+            name: "set_seed".into(),
+            args: serde_json::json!([42]),
+        };
+        handle_client_message(&mut state, tool, &tx).await.unwrap();
+        match rx.recv().await {
+            Some(ServerMessage::Error { id, code, message }) => {
+                assert_eq!(id, "t1");
+                assert_eq!(code.as_deref(), Some("invalid_arguments"));
+                assert!(
+                    message.starts_with("The arguments of `set_seed` are an array"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a coded error, got {other:?}"),
+        }
+        assert_eq!(*session.global_seed.read().await, None, "set_seed ran");
+    }
+
+    /// The tool name of a message is the caller's string, up to the message
+    /// cap (32 MiB by default): the refusal echoes it cut.
+    #[tokio::test]
+    async fn a_long_tool_name_is_echoed_cut() {
+        let (mut state, _session, tx, mut rx) = authenticated(Default::default()).await;
+        let tool = ClientMessage::Tool {
+            id: "t1".into(),
+            name: "x".repeat(1_000_000),
+            args: serde_json::json!({}),
+        };
+        handle_client_message(&mut state, tool, &tx).await.unwrap();
+        match rx.recv().await {
+            Some(ServerMessage::Error { code, message, .. }) => {
+                assert_eq!(code.as_deref(), Some("unknown_tool"));
+                assert_eq!(message, format!("Unknown tool: {}", "x".repeat(64)));
+            }
+            other => panic!("expected a coded error, got {other:?}"),
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn tool_message_is_governed() {

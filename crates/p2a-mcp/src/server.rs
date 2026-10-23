@@ -729,9 +729,15 @@ impl AnalyticsServer {
     ///
     /// Before the arguments are deserialised, the call is checked against
     /// the request limits in force on this thread (`tools::limits::current`,
-    /// which the governor sets on its blocking thread): the tool must exist,
-    /// then its cost parameters must be within the catalogue's caps, then the
-    /// dataset a `ROW_RULES` tool names must be within its row class. After
+    /// which the governor sets on its blocking thread): the tool must exist
+    /// (an unknown name is echoed cut, as it may be a WebSocket message's
+    /// whole payload), its arguments must be a JSON object (`null`, arguments
+    /// left out, is the empty object, as over stdio; anything else is
+    /// `InvalidArguments` in every profile, because a derived request struct
+    /// would also take a JSON array by field position, past every check that
+    /// reads parameters by name), then its cost parameters must be within the
+    /// catalogue's caps, then the dataset a `ROW_RULES` tool names must be
+    /// within its row class. After
     /// the handler returns, output above the `response_bytes` budget
     /// replaces the result. A refusal is
     /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`). The response
@@ -749,7 +755,18 @@ impl AnalyticsServer {
         use crate::exec::ToolCallError;
 
         if !self.tool_router.has_route(tool_name) {
-            return Err(ToolCallError::UnknownTool(tool_name.to_string()));
+            return Err(ToolCallError::UnknownTool(
+                crate::tools::limits::echo(tool_name).to_string(),
+            ));
+        }
+        let arguments = match arguments {
+            serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
+            other => other,
+        };
+        if let Some(kind) = crate::tools::limits::non_object_kind(&arguments) {
+            return Err(ToolCallError::InvalidArguments(
+                crate::tools::limits::non_object_message(tool_name, kind),
+            ));
         }
         let limits = crate::tools::limits::current();
         enforce_request_limits(&limits, tool_name, &arguments, &session.datasets)
@@ -1149,7 +1166,9 @@ impl AnalyticsServer {
         dispatch!("tool_info" => crate::tools::handlers::search::ToolInfoRequest => tool_info);
 
         // If no tool matched, return an error
-        Err(ToolCallError::UnknownTool(tool_name.to_string()))
+        Err(ToolCallError::UnknownTool(
+            crate::tools::limits::echo(tool_name).to_string(),
+        ))
     }
 
     // ========================================================================
@@ -1643,6 +1662,102 @@ mod tests {
                 .collect();
             assert!(hidden.is_empty(), "{}: {hidden:?}", tool.name);
         }
+    }
+
+    /// Positional arguments, which a derived request struct would take by
+    /// field position past the checks that read parameters by name, are
+    /// refused on the governed path in both profiles; `set_seed` must not run.
+    #[cfg(feature = "http")]
+    #[test]
+    fn governed_path_refuses_arguments_that_are_not_an_object() {
+        use crate::exec::ToolCallError;
+        use crate::session::Session;
+
+        for limits in [Limits::off(), Limits::hosted()] {
+            // The limits are this thread's for the whole runtime.
+            crate::tools::limits::with_limits(limits, || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let session = Session::new("shape".into(), None);
+                        let server = AnalyticsServer::with_session(&session);
+                        for (args, kind) in [
+                            (serde_json::json!([42]), "an array"),
+                            (serde_json::json!("42"), "a string"),
+                            (serde_json::json!(42), "a number"),
+                            (serde_json::json!(false), "a boolean"),
+                        ] {
+                            let refused = server
+                                .call_tool_with_session("set_seed", args.clone(), &session)
+                                .await;
+                            match refused {
+                                Err(ToolCallError::InvalidArguments(m)) => assert_eq!(
+                                    m,
+                                    format!(
+                                        "The arguments of `set_seed` are {kind}, but tool \
+                                         arguments must be a JSON object that names each \
+                                         parameter. Send each value under its parameter name, \
+                                         as the tool's input schema lists them."
+                                    )
+                                ),
+                                other => panic!("{args}: {other:?}"),
+                            }
+                        }
+                        assert_eq!(*session.global_seed.read().await, None, "set_seed ran");
+                        // The object form runs.
+                        let ran = server
+                            .call_tool_with_session(
+                                "set_seed",
+                                serde_json::json!({"seed": 42}),
+                                &session,
+                            )
+                            .await
+                            .unwrap();
+                        assert!(ran.success, "{ran:?}");
+                        assert_eq!(*session.global_seed.read().await, Some(42));
+                    });
+            });
+        }
+    }
+
+    /// Arguments left out (`null`) are the empty object, as over stdio: a
+    /// tool whose parameters are all optional runs.
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn governed_path_takes_absent_arguments_as_the_empty_object() {
+        let session = crate::session::Session::new("absent".into(), None);
+        let server = AnalyticsServer::with_session(&session);
+        for tool in ["get_seed", "list_datasets"] {
+            let r = server
+                .call_tool_with_session(tool, serde_json::Value::Null, &session)
+                .await
+                .unwrap_or_else(|e| panic!("{tool}: {e:?}"));
+            assert!(r.success, "{tool}: {r:?}");
+        }
+    }
+
+    /// An unknown tool's name is the caller's string (up to the WebSocket
+    /// message cap): the refusal echoes it cut.
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn unknown_tool_refusal_echoes_a_bounded_name() {
+        use crate::exec::ToolCallError;
+        let session = crate::session::Session::new("unknown".into(), None);
+        let server = AnalyticsServer::with_session(&session);
+        let name = "x".repeat(1_000_000);
+        let e = server
+            .call_tool_with_session(&name, serde_json::json!({}), &session)
+            .await
+            .expect_err("an unknown tool ran");
+        assert!(matches!(e, ToolCallError::UnknownTool(_)), "{e:?}");
+        assert_eq!(e.to_string(), format!("Unknown tool: {}", "x".repeat(64)));
+        let e = server
+            .call_tool_with_session("no_such_tool", serde_json::json!({}), &session)
+            .await
+            .expect_err("an unknown tool ran");
+        assert_eq!(e.to_string(), "Unknown tool: no_such_tool");
     }
 
     /// Helper to extract text from Content (Annotated<RawContent>)
