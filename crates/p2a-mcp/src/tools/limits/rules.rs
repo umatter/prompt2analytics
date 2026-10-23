@@ -1101,6 +1101,72 @@ mod tests {
         );
     }
 
+    /// A nested request struct given by position (serde fills it from a JSON array) is refused
+    /// in the hosted profile instead of passing the rules that address its fields by name; the
+    /// same values by name are checked as before.
+    #[test]
+    fn nested_structs_given_by_position_are_refused_in_hosted_profile() {
+        let items: Vec<Value> = (0..501).map(|i| json!(i.to_string())).collect();
+        let text = |t: &str| json!({"content_type": "text", "text": t});
+        // By name: the content cap applies; a valid section is accepted.
+        assert_eq!(
+            hosted(
+                "generate_report",
+                json!({"title": "t", "sections": [{"title": "s", "content": items}]})
+            )
+            .unwrap_err()
+            .parameter,
+            "sections[].content"
+        );
+        let valid = json!({"title": "t", "sections": [{"title": "s", "content": [text("hello")]}]});
+        assert!(hosted("generate_report", valid).is_ok());
+        let cases: &[(&str, Value, &str)] = &[
+            // The section by position, with 501 content items.
+            (
+                "generate_report",
+                json!({"title": "t", "sections": [["s", items]]}),
+                "sections[]",
+            ),
+            // A content item by position inside a section given by name.
+            (
+                "generate_report",
+                json!({"title": "t", "sections": [
+                    {"title": "s", "content": [text("ok"), ["table", null, null, ["h"], [["r"]]]]}
+                ]}),
+                "sections[].content[]",
+            ),
+            // A column by position, and a distribution by position (its tag first).
+            (
+                "generate_random_data",
+                json!({"n_rows": 10, "columns": [["s".repeat(5_000), {"type": "normal"}]]}),
+                "columns[]",
+            ),
+            (
+                "generate_random_data",
+                json!({"n_rows": 10, "columns": [
+                    {"name": "s", "distribution": ["constant_string", "x".repeat(5_000)]}
+                ]}),
+                "columns[].distribution",
+            ),
+        ];
+        for (tool, args, parameter) in cases {
+            let v = hosted(tool, args.clone()).unwrap_err();
+            assert_eq!(
+                (v.parameter.as_str(), v.limit.as_str(), v.override_key),
+                (*parameter, "a JSON object", ""),
+                "{tool}: {}",
+                v.message
+            );
+            assert!(
+                v.message
+                    .starts_with(&format!("Parameter `{parameter}` of `{tool}` is an array")),
+                "{}",
+                v.message
+            );
+            assert!(Limits::off().check_tool_arguments(tool, args).is_ok());
+        }
+    }
+
     /// Every hosted cap is at least 1.5x the tool's default (handler or core default).
     #[test]
     fn hosted_caps_accept_one_and_a_half_times_every_default() {

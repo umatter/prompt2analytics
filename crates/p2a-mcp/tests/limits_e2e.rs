@@ -768,6 +768,46 @@ mod http_paths {
         });
     }
 
+    /// A nested request struct sent by position (a `generate_report`
+    /// section as an array) is refused in open public mode, naming its path,
+    /// instead of passing the caps on its fields; by name the same 501
+    /// content items are refused by the content cap, and a valid section
+    /// runs.
+    #[test]
+    fn nested_structs_by_position_are_refused_in_open_public_mode() {
+        let cfg = open_public_config();
+        run(limits::resolve(&cfg).unwrap(), async {
+            let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let items: Vec<Value> = (0..501)
+                .map(|i| json!({"content_type": "text", "text": format!("Paragraph {i}.")}))
+                .collect();
+            for (args, parameter, limit) in [
+                (
+                    json!({"title": "t", "sections": [{"title": "s", "content": items}]}),
+                    "sections[].content",
+                    "500",
+                ),
+                (
+                    json!({"title": "t", "sections": [["s", items]]}),
+                    "sections[]",
+                    "a JSON object",
+                ),
+            ] {
+                let (status, body) = post_tool(&app, &sid, "generate_report", args).await;
+                assert_eq!(status, 422, "{body}");
+                assert_eq!(body["code"], "limit_exceeded", "{body}");
+                assert_eq!(body["details"]["parameter"], parameter, "{body}");
+                assert_eq!(body["details"]["limit"], limit, "{body}");
+            }
+            let text = json!({"content_type": "text", "text": "The estimate is 0.42."});
+            let valid = json!({"title": "t", "sections": [{"title": "s", "content": [text]}]});
+            let (status, body) = post_tool(&app, &sid, "generate_report", valid).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["success"], true, "{body}");
+        });
+    }
+
     #[test]
     fn absent_arguments_are_the_empty_object() {
         let cfg = local_config();

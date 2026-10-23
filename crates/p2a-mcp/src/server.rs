@@ -734,10 +734,14 @@ impl AnalyticsServer {
     /// whole payload), its arguments must be a JSON object (`null`, arguments
     /// left out, is the empty object, as over stdio; anything else is
     /// `InvalidArguments` in every profile, because a derived request struct
-    /// would also take a JSON array by field position, past every check that
-    /// reads parameters by name), then its cost parameters must be within the
-    /// catalogue's caps, then the dataset a `ROW_RULES` tool names must be
-    /// within its row class. After
+    /// would also take a top-level JSON array by field position, past the
+    /// limit checks, the row-class lookup and the audit redaction, which read
+    /// parameters by name), then its cost parameters must be within the
+    /// catalogue's caps (outside the off profile this also refuses, as
+    /// `LimitExceeded`, a nested struct the catalogue has rules inside given
+    /// as a JSON array; the audit entry of such a call is bounded by the
+    /// sanitiser's size and depth caps, not redacted by name), then the
+    /// dataset a `ROW_RULES` tool names must be within its row class. After
     /// the handler returns, output above the `response_bytes` budget
     /// replaces the result. A refusal is
     /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`). The response
@@ -1664,9 +1668,10 @@ mod tests {
         }
     }
 
-    /// Positional arguments, which a derived request struct would take by
-    /// field position past the checks that read parameters by name, are
-    /// refused on the governed path in both profiles; `set_seed` must not run.
+    /// Top-level arguments that are not an object (a derived request struct
+    /// would take an array by field position, past the checks that read
+    /// parameters by name) are refused on the governed path in both
+    /// profiles; `set_seed` must not run.
     #[cfg(feature = "http")]
     #[test]
     fn governed_path_refuses_arguments_that_are_not_an_object() {

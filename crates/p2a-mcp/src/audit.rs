@@ -9,9 +9,12 @@
 //!   such as `csv_content` or `filter_value`) are replaced by their size,
 //!   other strings and object keys are cut to 200 bytes, arrays to 20
 //!   elements, objects to 64 keys, nesting to 4 levels and the whole to about
-//!   16 KiB, so an entry stays small whatever the request carried; arguments
-//!   that are not an object (positional values, which every call path
-//!   refuses) are replaced by their size as a whole. The
+//!   16 KiB, so an entry stays small whatever the request carried; top-level
+//!   arguments that are not an object (positional values, which every call
+//!   path refuses) are replaced by their size as a whole. A nested struct
+//!   given by position (a JSON array where the schema has an object) has no
+//!   keys to redact by, so its values are only cut and bounded like other
+//!   array elements. The
 //!   parameters the tool's schema declares are taken first (`query` and
 //!   `pattern` ahead of the rest), so the key cap and the size bound fall on
 //!   the other keys before them; a value passed under a serde alias (such as
@@ -697,7 +700,10 @@ pub(crate) mod gate {
 /// [`REDACT_KEYS`] value (`"[redacted: 5 items]"` for an array): positional
 /// values have no names to redact by, and every call path refuses them
 /// (`AnalyticsServer::call_tool_with_session`), so their entry needs only
-/// their shape. `null`, arguments left out, stays `null`.
+/// their shape. `null`, arguments left out, stays `null`. This applies to
+/// the top level only: a nested struct sent as a JSON array is sanitised as
+/// an array (cut, bounded and depth-capped as above), because nothing here
+/// tells it from a list of values.
 pub fn sanitize_arguments(args: &Value, declared: &[&str]) -> Value {
     let mut budget = MAX_ARGUMENT_BYTES;
     match args {
