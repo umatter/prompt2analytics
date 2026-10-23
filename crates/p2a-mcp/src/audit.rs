@@ -23,10 +23,11 @@
 //! with mode 0600 and rotates by size ([`RotationPolicy`], `P2A_AUDIT_MAX_MB`,
 //! default 50 MiB, `0` disables), keeping `<path>.1` to `<path>.3`. When the
 //! file is removed or moved away outside the server, the next entry starts a
-//! new file at the path and the numbered files are left as they are. The
-//! writer flushes whenever its queue runs empty, and the stdio transport and
-//! `transport::http::serve` write out the queue before they return; entries
-//! still queued when the process is killed are lost.
+//! new file at the path and the numbered files are left as they are; that
+//! new file is created exclusively, so a symlink planted at the path is never
+//! followed. The writer flushes whenever its queue runs empty, and the stdio
+//! transport and `transport::http::serve` write out the queue before they
+//! return; entries still queued when the process is killed are lost.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -368,17 +369,27 @@ impl AuditLogger {
     }
 }
 
-/// Opens the log for appending, creating it private to the owner (0600) on
-/// Unix.
+/// Opens the log for appending at startup, creating it private to the owner
+/// (0600) on Unix.
 fn open_log(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
+    log_options(OpenOptions::new().create(true)).open(path)
+}
+
+/// Creates a new log for appending, private to the owner (0600) on Unix.
+/// Fails with `AlreadyExists` when anything is at `path`, a symlink included
+/// (`O_CREAT | O_EXCL` does not follow it).
+fn create_log(path: &Path) -> std::io::Result<File> {
+    log_options(OpenOptions::new().create_new(true)).open(path)
+}
+
+fn log_options(options: &mut OpenOptions) -> &mut OpenOptions {
+    options.append(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path)
+    options
 }
 
 /// `<path>.<k>`.
@@ -471,13 +482,16 @@ impl Writer {
         }
     }
 
-    /// Makes a newly opened `self.path` the file at hand. On failure the
-    /// error is counted, writing continues in the file at hand and the size
-    /// count restarts, so the next rotation waits for another `max_bytes`.
+    /// Makes a new file at `self.path`, which the caller found empty, the
+    /// file at hand. The file is created exclusively: whatever appeared at
+    /// the path since the check, a symlink included, is refused rather than
+    /// opened or followed. On failure the error is counted, writing continues
+    /// in the file at hand and the size count restarts, so the next rotation
+    /// waits for another `max_bytes`.
     fn reopen(&mut self) -> bool {
-        match open_log(&self.path) {
+        match create_log(&self.path) {
             Ok(file) => {
-                self.size = file.metadata().map_or(0, |m| m.len());
+                self.size = 0;
                 self.file = BufWriter::new(file);
                 true
             }
@@ -1361,6 +1375,38 @@ mod tests {
             assert_eq!(&std::fs::read_to_string(numbered(&path, k)).unwrap(), text);
         }
         assert_eq!(ids_in(&path), [200, 201, 202]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_log_never_follows_a_symlink_planted_at_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, "untouched\n").unwrap();
+        let policy = RotationPolicy {
+            max_bytes: None,
+            keep: 3,
+        };
+        let mut writer = writer_at(&path, policy);
+        writer.write_entry(&entry(0));
+        writer.flush();
+        // The log is removed, and a symlink appears at its path between the
+        // writer's check and its open of a new file.
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(!writer.reopen());
+        assert_eq!(writer.io_errors, 1);
+        // Later entries go to the file at hand; the link is left as it is.
+        writer.write_entry(&entry(1));
+        writer.flush();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched\n");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[tokio::test]
