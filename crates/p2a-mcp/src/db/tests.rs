@@ -573,6 +573,39 @@ async fn a_failed_row_delete_is_reported() {
     assert_eq!(db.get_messages(&id).await.unwrap().len(), 1);
 }
 
+/// A failed delete of a session's dataset metadata is reported, and the
+/// session row stays: DELETE /api/sessions/{id} does not answer 204 while
+/// the metadata (with its source path) is left behind.
+#[tokio::test]
+async fn a_failed_dataset_meta_delete_keeps_the_session() {
+    let db = test_db().await;
+    db.set_session_last_accessed("s1", chrono::Utc::now())
+        .await
+        .unwrap();
+    let meta = super::models::DatasetMeta::new(
+        "s1".into(),
+        "d".into(),
+        "csv".into(),
+        3,
+        1,
+        vec!["x".into()],
+    );
+    db.save_dataset_meta(&meta).await.unwrap();
+    db.db()
+        .query(
+            "DEFINE EVENT refuse_delete ON TABLE dataset_meta WHEN $event = 'DELETE' \
+             THEN { THROW 'refused' }",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    assert!(db.delete_session("s1").await.is_err());
+    assert!(db.get_session("s1").await.unwrap().is_some());
+    assert_eq!(db.get_datasets_for_session("s1").await.unwrap().len(), 1);
+}
+
 /// Store a message for `conversation_id` directly, without the existence
 /// check of `add_message` (a write that raced the conversation's delete, or
 /// a row from before the process started).

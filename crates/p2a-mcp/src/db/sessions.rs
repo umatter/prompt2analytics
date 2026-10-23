@@ -196,12 +196,14 @@ impl DbConnection {
         // Delete settings
         let _: Option<Settings> = self.db().delete(("settings", id)).await?;
 
-        // Delete dataset metadata
+        // Delete dataset metadata. A failed delete is an error: the session
+        // row below must not go while its dataset metadata stays.
         let id_owned = id.to_string();
         self.db()
             .query("DELETE FROM dataset_meta WHERE session_id = $id")
             .bind(("id", id_owned))
-            .await?;
+            .await?
+            .check()?;
 
         // Delete session
         let _: Option<DbSession> = self.db().delete(("sessions", id)).await?;
