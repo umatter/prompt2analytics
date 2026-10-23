@@ -1011,16 +1011,35 @@ async fn listed_and_stored(db: &DbConnection, id: &str) -> (i64, i64) {
     )
 }
 
-/// Make each message delete take a while (a store event sleeps), so that a
-/// clear or delete of [`filled_conversation`]'s 21 messages is still running
-/// in the store when its caller is dropped.
-async fn slow_message_deletes(db: &DbConnection) {
+/// Make each `event` ('CREATE', 'UPDATE' or 'DELETE') of a `table` row take
+/// `ms` milliseconds longer (a store event sleeps), so that a write is still
+/// running in the store when the test acts on it.
+async fn slow_writes(db: &DbConnection, table: &str, event: &str, ms: u64) {
     db.db()
-        .query("DEFINE EVENT slow ON TABLE messages WHEN $event = 'DELETE' THEN { sleep(20ms) }")
+        .query(format!(
+            "DEFINE EVENT slow_{} ON TABLE {table} WHEN $event = '{event}' \
+             THEN {{ sleep({ms}ms) }}",
+            event.to_lowercase()
+        ))
         .await
         .unwrap()
         .check()
         .unwrap();
+}
+
+/// Make each message delete take a while, so that a clear or delete of
+/// [`filled_conversation`]'s 21 messages is still running in the store when
+/// its caller is dropped.
+async fn slow_message_deletes(db: &DbConnection) {
+    slow_writes(db, "messages", "DELETE", 20).await;
+}
+
+/// Drop `call` (named `what` in the failure) while the store runs it: it
+/// must not have finished after 100 ms (a [`slow_writes`] event makes it
+/// last longer).
+async fn drop_while_running(what: impl std::fmt::Debug, call: impl Future) {
+    let dropped = tokio::time::timeout(std::time::Duration::from_millis(100), call).await;
+    assert!(dropped.is_err(), "{what:?} finished before it was dropped");
 }
 
 /// What the dropped-call tests do to a conversation.
@@ -1041,8 +1060,7 @@ async fn drop_part_way(db: &DbConnection, op: Op, id: &str) {
             Op::Delete => db.delete_conversation(id).await,
         }
     };
-    let dropped = tokio::time::timeout(std::time::Duration::from_millis(100), call).await;
-    assert!(dropped.is_err(), "{op:?} finished before it was dropped");
+    drop_while_running(op, call).await;
 }
 
 /// A clear or delete whose caller is dropped part way (an HTTP client that
@@ -1259,6 +1277,70 @@ async fn title_and_archive_writes_take_the_conversations_turn() {
     let conv = db.get_conversation(&id).await.unwrap();
     assert_eq!((conv.title.as_str(), conv.is_archived), ("renamed", true));
     assert_eq!(db.store_turns_in_use(), 0);
+}
+
+/// A message add or save, or a conversation creation, whose caller is
+/// dropped while the store writes its row (an HTTP client that disconnects)
+/// keeps its turn until the store has written the row and, for a message,
+/// the conversation's `message_count`: the same call sent at once after it,
+/// one row below the cap, counts the dropped call's row and is refused, in
+/// memory and on RocksDB. Before, the turn ended with the dropped caller,
+/// the next call counted the rows before the dropped call's row was
+/// committed, and both got in, one past the cap (and the dropped add's
+/// `message_count` update never ran).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_after_a_dropped_add_or_create_finds_the_cap_reached() {
+    let mut outcomes = Vec::new();
+    for engine in ENGINES {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = PersistenceLimits {
+            messages_per_conversation: Some(3),
+            conversations_per_session: Some(3),
+            ..Default::default()
+        };
+        let db = engine_db(engine, dir.path(), limits).await;
+        let mut ids = Vec::new();
+        for title in ["added", "saved"] {
+            let id = db
+                .create_conversation("s1", title)
+                .await
+                .unwrap()
+                .id_string();
+            db.add_message(&id, "user", "first").await.unwrap();
+            db.add_message(&id, "assistant", "second").await.unwrap();
+            ids.push(id);
+        }
+        slow_writes(&db, "messages", "CREATE", 200).await;
+        slow_writes(&db, "conversations", "CREATE", 200).await;
+
+        let added = &ids[0];
+        drop_while_running("add", db.add_message(added, "user", "dropped")).await;
+        let refused = db.add_message(added, "user", "refused").await.map(|_| ());
+        let counts = listed_and_stored(&db, added).await;
+        outcomes.push((engine, "add", refused, counts));
+
+        let saved = &ids[1];
+        let dropped = Message::user(saved.clone(), "dropped".into());
+        drop_while_running("save", db.save_message(&dropped)).await;
+        let refused = db
+            .save_message(&Message::user(saved.clone(), "refused".into()))
+            .await
+            .map(|_| ());
+        let counts = listed_and_stored(&db, saved).await;
+        outcomes.push((engine, "save", refused, counts));
+
+        drop_while_running("create", db.create_conversation("s1", "dropped")).await;
+        let refused = db.create_conversation("s1", "refused").await.map(|_| ());
+        let stored = db.count_conversations("s1").await.unwrap() as i64;
+        outcomes.push((engine, "create", refused, (stored, stored)));
+        assert_eq!(db.store_turns_in_use(), 0);
+    }
+    // Left: the cases whose second call was not refused, or that do not
+    // store (and list) three rows.
+    outcomes.retain(|(_, _, refused, counts)| {
+        !matches!(refused, Err(DbError::QuotaExceeded(_))) || *counts != (3, 3)
+    });
+    assert!(outcomes.is_empty(), "{outcomes:#?}");
 }
 
 /// Store a message for `conversation_id` directly, without the existence

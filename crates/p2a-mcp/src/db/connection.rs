@@ -136,7 +136,11 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// `messages_per_conversation` check until the message is written, and a
 /// conversation creation holds its session's turn from the
 /// `conversations_per_session` check until the row is written, so concurrent
-/// writes cannot pass a cap together. Both checks count the rows in the
+/// writes cannot pass a cap together. Both run in a task of their own
+/// ([`run_to_end`]), as a conversation delete or clear does, so a caller
+/// dropped while the store writes does not end the turn before the store is
+/// done (the store finishes a query it was sent; the next call would count
+/// the rows before that row is committed). Both checks count the rows in the
 /// store under the turn (`count_messages`, `count_conversations`): the
 /// conversation's stored `message_count` is a display counter, recounted
 /// under the turn after each message add or content update, and never what
@@ -167,6 +171,23 @@ impl Drop for StoreTurn {
             }
         }
     }
+}
+
+/// Run `work`, a call that takes a [`StoreTurn`] and writes in it, in a task
+/// of its own and wait for it. The store runs a query it was sent to its end
+/// even when the caller is dropped (its engine runs each query in a task);
+/// running the rest of the call in a task too keeps the turn held, and what
+/// the call does after its writes (the conversation's counter update after
+/// a message add, the release of a delete's bytes from the
+/// `session_db_bytes` counter) done, until the store has finished, even
+/// when the caller (an HTTP client that disconnects) is dropped. A task that
+/// panicked or was cancelled (the runtime shutting down) is a `Query` error.
+pub(super) async fn run_to_end<T: Send + 'static>(
+    work: impl Future<Output = Result<T, DbError>> + Send + 'static,
+) -> Result<T, DbError> {
+    tokio::spawn(work)
+        .await
+        .map_err(|e| DbError::Query(format!("conversation store task failed: {e}")))?
 }
 
 /// Appended to text the store shortens.

@@ -4,7 +4,7 @@ use chrono::Utc;
 use surrealdb::RecordId;
 use surrealdb::sql::Datetime;
 
-use super::connection::{DbConnection, DbError, failed_statement};
+use super::connection::{DbConnection, DbError, failed_statement, run_to_end};
 use super::models::{Conversation, ConversationWithMessages, Message, MessageRole};
 use super::sessions::{MessageText, ToolCallText, message_text_bytes, tool_call_text_bytes};
 
@@ -20,6 +20,11 @@ impl DbConnection {
     /// for a title longer than `message_bytes`, and `QuotaExceeded` when the
     /// session already holds `conversations_per_session` conversations or
     /// the title would pass its `session_db_bytes` budget.
+    ///
+    /// Creations in one session take turns from the count to the write, in
+    /// a task a dropped caller does not stop ([`run_to_end`]), so concurrent
+    /// ones cannot pass the cap together, also when one's caller is dropped
+    /// while the store writes its row.
     pub async fn create_conversation(
         &self,
         session_id: &str,
@@ -27,26 +32,28 @@ impl DbConnection {
     ) -> Result<Conversation, DbError> {
         self.check_memory()?;
         self.check_message_bytes("title", "title", title.len())?;
-        // Creations in one session take turns from the count to the write,
-        // so concurrent ones cannot pass the cap together.
-        let _turn = self.session_turn(session_id).await;
-        if let Some(max) = self.limits().conversations_per_session {
-            let n = self.count_conversations(session_id).await?;
-            if n >= max {
-                return Err(DbError::QuotaExceeded(format!(
-                    "this session already has {n} conversations, the most this server keeps; \
-                     delete one first"
-                )));
+        let db = self.clone();
+        let (session_id, title) = (session_id.to_string(), title.to_string());
+        run_to_end(async move {
+            let _turn = db.session_turn(&session_id).await;
+            if let Some(max) = db.limits().conversations_per_session {
+                let n = db.count_conversations(&session_id).await?;
+                if n >= max {
+                    return Err(DbError::QuotaExceeded(format!(
+                        "this session already has {n} conversations, the most this server \
+                         keeps; delete one first"
+                    )));
+                }
             }
-        }
-        self.reserve_session_bytes(session_id, title.len() as u64)
-            .await?;
+            db.reserve_session_bytes(&session_id, title.len() as u64)
+                .await?;
 
-        let conv = Conversation::new(session_id.to_string(), title.to_string());
-
-        let created: Option<Conversation> = self.db().create(conv.id.clone()).content(conv).await?;
-
-        created.ok_or_else(|| DbError::Query("Failed to create conversation".to_string()))
+            let conv = Conversation::new(session_id, title);
+            let created: Option<Conversation> =
+                db.db().create(conv.id.clone()).content(conv).await?;
+            created.ok_or_else(|| DbError::Query("Failed to create conversation".to_string()))
+        })
+        .await
     }
 
     /// Get a conversation by ID
@@ -363,6 +370,12 @@ impl DbConnection {
     /// is full or the content would pass the session's `session_db_bytes`.
     /// Adds, deletes and clears of one conversation take turns.
     ///
+    /// The add holds the conversation's turn from its
+    /// `messages_per_conversation` check through the write and the
+    /// conversation's counter update, in a task a dropped caller does not
+    /// stop ([`run_to_end`]): an add sent after one whose caller was dropped
+    /// while the store wrote its row waits for it and counts that row.
+    ///
     /// An error from the conversation's counter and preview update comes
     /// after the message row was written: the message is stored, and only
     /// the conversation's `message_count` and preview are stale.
@@ -380,9 +393,6 @@ impl DbConnection {
                 return Err(DbError::Query(format!("Invalid message role: {}", role)));
             }
         };
-        let _turn = self.conversation_turn(conversation_id).await;
-        self.admit_message(conversation_id, content.len()).await?;
-
         let msg_id = uuid::Uuid::new_v4().to_string();
         let message = Message {
             id: RecordId::from(("messages", msg_id.as_str())),
@@ -394,41 +404,45 @@ impl DbConnection {
             model: None,
             finish_reason: None,
         };
-
-        let created: Option<Message> = self
-            .db()
-            .create(message.id.clone())
-            .content(message)
-            .await?;
-
-        // Update conversation metadata
-        self.update_conversation_after_message(conversation_id, content)
-            .await?;
-
-        created.ok_or_else(|| DbError::Query("Failed to create message".to_string()))
+        self.store_message(message, "Failed to create message")
+            .await
     }
 
-    /// Add a full message object, with the checks of
+    /// Add a full message object, with the checks and the turn of
     /// [`add_message`](Self::add_message).
     ///
     /// An error from the conversation's counter and preview update comes
     /// after the message row was written: the message is stored, and only
     /// the conversation's `message_count` and preview are stale.
     pub async fn save_message(&self, message: &Message) -> Result<Message, DbError> {
-        let _turn = self.conversation_turn(&message.conversation_id).await;
-        self.admit_message(&message.conversation_id, message.content.len())
-            .await?;
-        let created: Option<Message> = self
-            .db()
-            .create(message.id.clone())
-            .content(message.clone())
-            .await?;
+        self.store_message(message.clone(), "Failed to save message")
+            .await
+    }
 
-        // Update conversation metadata
-        self.update_conversation_after_message(&message.conversation_id, &message.content)
-            .await?;
+    /// Admit `message` ([`admit_message`](Self::admit_message)), write it and
+    /// update its conversation's counter and preview, in the conversation's
+    /// turn and in a task a dropped caller does not stop ([`run_to_end`]).
+    /// `missing` is the error text when the store returns no row.
+    async fn store_message(&self, message: Message, missing: &str) -> Result<Message, DbError> {
+        let db = self.clone();
+        let missing = missing.to_string();
+        run_to_end(async move {
+            let conversation_id = message.conversation_id.clone();
+            let _turn = db.conversation_turn(&conversation_id).await;
+            db.admit_message(&conversation_id, message.content.len())
+                .await?;
+            let created: Option<Message> =
+                db.db().create(message.id.clone()).content(message).await?;
+            let Some(created) = created else {
+                return Err(DbError::Query(missing));
+            };
 
-        created.ok_or_else(|| DbError::Query("Failed to save message".to_string()))
+            // Update conversation metadata
+            db.update_conversation_after_message(&conversation_id, &created.content)
+                .await?;
+            Ok(created)
+        })
+        .await
     }
 
     /// Get all messages for a conversation
@@ -533,23 +547,6 @@ impl DbConnection {
         })
         .await
     }
-}
-
-/// Run `work`, a conversation delete or clear, in a task of its own and wait
-/// for it. The store runs a query it was sent to its end even when the
-/// caller is dropped (its engine runs each query in a task); running the
-/// rest of the call in a task too keeps the conversation's
-/// [`StoreTurn`](super::connection::StoreTurn) held, and the release of the
-/// removed bytes from the `session_db_bytes` counter done, until the store
-/// has finished, even when the caller (an HTTP client that disconnects) is
-/// dropped. A task that panicked or was cancelled (the runtime shutting
-/// down) is a `Query` error.
-async fn run_to_end<T: Send + 'static>(
-    work: impl Future<Output = Result<T, DbError>> + Send + 'static,
-) -> Result<T, DbError> {
-    tokio::spawn(work)
-        .await
-        .map_err(|e| DbError::Query(format!("conversation delete or clear task failed: {e}")))?
 }
 
 /// What [`delete_conversation_rows`](DbConnection::delete_conversation_rows)
