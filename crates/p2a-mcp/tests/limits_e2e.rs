@@ -825,6 +825,118 @@ mod http_paths {
         }
     }
 
+    /// An Ollama stub on loopback whose answer to the first request of a turn
+    /// is one `regression_bootstrap_cov` call for 20,000 replications on
+    /// `small`: by name under `http://<addr>/obj`, by position under
+    /// `http://<addr>/arr`. A request that carries a tool result gets a plain
+    /// answer.
+    #[cfg(feature = "llm")]
+    async fn bootstrap_stub() -> std::net::SocketAddr {
+        fn answer(by_position: bool, request: Value) -> axum::Json<Value> {
+            let answered = request["messages"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|m| m["role"] == "tool"));
+            if answered {
+                return axum::Json(json!({
+                    "message": {"role": "assistant", "content": "done"},
+                    "done": true
+                }));
+            }
+            let arguments = if by_position {
+                json!(["small", "y", ["x1"], 20_000, "pairs", 1])
+            } else {
+                json!({"dataset": "small", "y": "y", "x": ["x1"], "n_boot": 20_000, "seed": 1})
+            };
+            axum::Json(json!({
+                "message": {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "regression_bootstrap_cov", "arguments": arguments}}
+                ]},
+                "done": true
+            }))
+        }
+        let router = Router::new()
+            .route(
+                "/obj/api/chat",
+                axum::routing::post(
+                    |axum::Json(r): axum::Json<Value>| async move { answer(false, r) },
+                ),
+            )
+            .route(
+                "/arr/api/chat",
+                axum::routing::post(
+                    |axum::Json(r): axum::Json<Value>| async move { answer(true, r) },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
+    }
+
+    /// The LLM tool loop end to end, on both chat routes: a model's tool call
+    /// by name is refused by the hosted replications cap, and the same call
+    /// with positional arguments (as an OpenAI argument string such as
+    /// `"[\"small\", ...]"` parses, or as Ollama and Anthropic pass a value
+    /// through) is refused for its shape instead of running.
+    #[cfg(feature = "llm")]
+    #[test]
+    fn llm_chat_refuses_positional_tool_arguments() {
+        let cfg = local_config();
+        // Hosted, with loopback allowed so that the provider reaches the stub.
+        let l = Limits::hosted()
+            .with_overrides(&["llm_allow_loopback=true".to_string()])
+            .unwrap();
+        run(l, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            insert_dataset(&state, &sid, "small", 60).await;
+            let addr = bootstrap_stub().await;
+            let chat = |shape: &str| {
+                json!({
+                    "session_id": sid, "message": "bootstrap it", "interpret": false,
+                    "provider": {"provider_type": "ollama", "model": "stub",
+                                 "base_url": format!("http://{addr}/{shape}")}
+                })
+            };
+            let positional = "The arguments of `regression_bootstrap_cov` are an array, but tool \
+                              arguments must be a JSON object";
+            for (shape, refusal) in [
+                (
+                    "obj",
+                    "Parameter `n_boot` = 20000 exceeds this server's limit of 10000",
+                ),
+                ("arr", positional),
+            ] {
+                let (status, body) = send(&app, post("/api/llm/chat", chat(shape))).await;
+                assert_eq!(status, StatusCode::OK, "{shape}: {body}");
+                let results = &body["data"]["message"]["tool_results"];
+                assert_eq!(results.as_array().map(Vec::len), Some(1), "{shape}: {body}");
+                assert_eq!(results[0]["is_error"], true, "{shape}: {body}");
+                let content = results[0]["content"].as_str().unwrap();
+                assert!(content.contains(refusal), "{shape}: {content}");
+            }
+            // The streaming route runs the other executor.
+            let resp = app
+                .clone()
+                .oneshot(post("/api/llm/chat/stream", chat("arr")))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                axum::body::to_bytes(resp.into_body(), usize::MAX),
+            )
+            .await
+            .expect("the stream ends")
+            .unwrap();
+            let stream = String::from_utf8_lossy(&bytes);
+            assert!(stream.contains(positional), "{stream}");
+            assert!(!stream.contains("Replications: 20000"), "{stream}");
+        });
+    }
+
     #[test]
     fn x1_local_mode_is_unlimited() {
         // The local default (limits off) runs a value above the hosted cap.
