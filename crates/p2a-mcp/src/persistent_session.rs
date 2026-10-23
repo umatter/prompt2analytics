@@ -894,10 +894,6 @@ pub enum PersistentSessionError {
     #[cfg(feature = "db")]
     #[error("Database error: {0}")]
     Database(#[from] DbError),
-
-    /// A failure inside the server (a panicked worker); the text is generic.
-    #[error("Internal error: {0}")]
-    Internal(String),
 }
 
 #[cfg(test)]
