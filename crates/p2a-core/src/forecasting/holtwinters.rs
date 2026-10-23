@@ -135,7 +135,10 @@ impl HoltWintersResult {
 /// * `config` - Configuration for the model
 ///
 /// # Returns
-/// `HoltWintersResult` containing fitted values, components, and parameters.
+/// `HoltWintersResult` containing fitted values, components, and parameters,
+/// or [`EconError::Cancelled`] when the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline (checked
+/// once per optimiser iteration).
 ///
 /// # Example
 /// ```ignore
@@ -376,6 +379,9 @@ pub fn holt_winters_forecast(result: &HoltWintersResult, h: usize) -> EconResult
 /// * `alpha` - Level smoothing parameter (None = optimize)
 /// * `beta` - Trend smoothing parameter (None = optimize, Some(0) = no trend)
 /// * `gamma` - Seasonal smoothing parameter (None = optimize, Some(0) = no seasonal)
+///
+/// # Returns
+/// As [`holt_winters`], including [`EconError::Cancelled`] on a stopped budget.
 pub fn run_holt_winters(
     dataset: &Dataset,
     column: &str,

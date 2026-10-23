@@ -104,11 +104,12 @@ pub struct ArimaForecastResult {
 /// * `q` - MA order (number of moving average terms)
 ///
 /// # Returns
-/// `ArimaResult` containing fitted model parameters, or
-/// [`EconError::Cancelled`] when the budget installed with
-/// [`crate::resource::with_budget`] is already cancelled or past its deadline
-/// when the fit would start. The fit itself is the `arima` crate's L-BFGS
-/// loop, which never reaches a checkpoint: once started it runs to the end.
+/// `ArimaResult` containing fitted model parameters, or an error wrapping
+/// [`EconError::Cancelled`] (recover it with `err.downcast_ref::<EconError>()`)
+/// when the budget installed with [`crate::resource::with_budget`] is already
+/// cancelled or past its deadline when the fit would start. The fit itself is
+/// the `arima` crate's L-BFGS loop, which never reaches a checkpoint: once
+/// started it runs to the end.
 pub fn run_arima(
     dataset: &Dataset,
     column: &str,
@@ -235,7 +236,11 @@ pub fn run_arima(
 /// * `horizon` - Number of steps to forecast
 ///
 /// # Returns
-/// `ArimaForecastResult` containing forecasted values.
+/// `ArimaForecastResult` containing forecasted values, or an error wrapping
+/// [`EconError::Cancelled`] when the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline. The
+/// check is inherited from [`run_arima`] and happens only before the fit
+/// starts; the fit and the forecast that follows run uninterrupted.
 pub fn forecast_arima(
     dataset: &Dataset,
     column: &str,

@@ -118,7 +118,10 @@ pub struct StructTsCoefficients {
 ///
 /// # Returns
 ///
-/// `StructTsResult` with fitted model and components.
+/// `StructTsResult` with fitted model and components, or
+/// [`EconError::Cancelled`] when the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline (checked
+/// once per optimiser iteration and within each Kalman-filter pass).
 pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult> {
     let n = y.len();
 
@@ -208,6 +211,9 @@ pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult
 }
 
 /// Convenience function to run StructTS on a Dataset.
+///
+/// Errors as [`struct_ts`] does, including [`EconError::Cancelled`] on a
+/// stopped budget.
 pub fn run_struct_ts(
     dataset: &Dataset,
     column: &str,
@@ -289,8 +295,10 @@ fn optimize_params(
         .collect();
 
     // Objective function: negative log-likelihood with log-transformed params.
-    // A parameter vector the model cannot use scores 1e20; a stopped budget or
-    // a refused allocation stops the fit instead of scoring the vertex.
+    // A parameter vector the model cannot use scores 1e20. A stopped budget
+    // stops the fit instead of scoring the vertex; so would a ResourceLimit,
+    // which this path cannot raise yet (kalman_filter's allocations are
+    // infallible).
     let objective = |log_params: &[f64]| -> EconResult<f64> {
         let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
         match compute_loglik(y, config, &params) {
@@ -845,6 +853,67 @@ mod tests {
             // Without a budget nothing changes.
             assert!(struct_ts(&y, config).is_ok());
         }
+    }
+
+    #[test]
+    fn struct_ts_optimiser_itself_stops_when_the_budget_is_cancelled() {
+        // struct_ts would also stop at its final kalman_filter call, so the
+        // test above passes on the filter's own checkpoint. Call the optimiser
+        // directly (no final pass): with neither the per-iteration checkpoint
+        // nor the Cancelled pass-through in the objective, every vertex scores
+        // 1e20 and the search returns Ok as converged.
+        let y = generate_local_level_data(48, 1.0, 0.5, 11);
+        for (model_type, period) in [
+            (StructTsType::Level, None),
+            (StructTsType::Trend, None),
+            (StructTsType::BSM, Some(4)),
+        ] {
+            let config = StructTsConfig {
+                model_type,
+                period,
+                ..Default::default()
+            };
+            let (init, _) = initialize_params(&config, sample_variance(&y));
+            assert!(
+                matches!(
+                    cancelled(|| optimize_params(
+                        &y,
+                        &config,
+                        init.clone(),
+                        config.max_iter,
+                        config.tolerance
+                    )),
+                    Err(EconError::Cancelled(_))
+                ),
+                "{model_type:?}"
+            );
+            // With no iterations the loop's checkpoint never runs, so this
+            // pins the objective's pass-through alone: the initial simplex
+            // must not score a cancelled likelihood as 1e20.
+            assert!(
+                matches!(
+                    cancelled(|| optimize_params(&y, &config, init.clone(), 0, config.tolerance)),
+                    Err(EconError::Cancelled(_))
+                ),
+                "{model_type:?}"
+            );
+            // Without a budget nothing changes.
+            assert!(optimize_params(&y, &config, init, config.max_iter, config.tolerance).is_ok());
+        }
+    }
+
+    #[test]
+    fn nelder_mead_optimize_checkpoints_each_iteration() {
+        // The objective never looks at the budget, so only the loop's own
+        // checkpoint can stop the search.
+        let objective = |x: &[f64]| -> EconResult<f64> { Ok(x.iter().map(|v| v * v).sum()) };
+        let init = [1.0, -2.0];
+        assert!(matches!(
+            cancelled(|| nelder_mead_optimize(&objective, &init, 200, 1e-12)),
+            Err(EconError::Cancelled(_))
+        ));
+        let (x, f, _) = nelder_mead_optimize(&objective, &init, 200, 1e-12).unwrap();
+        assert!(f < 1e-6 && x.iter().all(|v| v.abs() < 1e-3), "{x:?} {f}");
     }
 
     #[test]
