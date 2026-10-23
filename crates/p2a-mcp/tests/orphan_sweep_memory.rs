@@ -15,6 +15,10 @@
 //! value SurrealDB reads from the store is decoded there, while RocksDB's
 //! own buffers and caches (C++) are not counted. The tests take turns
 //! (`TURN`) for their whole run, setup included.
+//!
+//! Run with `cargo test -p p2a-mcp --features full --test orphan_sweep_memory`.
+//! CI does not: its feature set for p2a-mcp leaves out `db`, which compiles
+//! this file to an empty test binary.
 #![cfg(feature = "db")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
