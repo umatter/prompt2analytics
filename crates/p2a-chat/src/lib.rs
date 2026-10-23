@@ -156,7 +156,7 @@ pub struct ChatArgs {
     #[arg(long, env = "P2A_API_KEY", hide_env_values = true)]
     pub api_key: Option<String>,
 
-    /// Bearer token for a p2a-mcp server started with --access-token
+    /// Bearer token for a p2a-mcp server started with --access-token (visible ASCII, no spaces)
     #[arg(long, env = "P2A_ACCESS_TOKEN", hide_env_values = true)]
     pub access_token: Option<String>,
 
@@ -420,24 +420,27 @@ fn save_image(base64_data: &str, path: &std::path::Path) -> anyhow::Result<()> {
 const START_SERVER_COMMAND: &str =
     "cargo run -p p2a-mcp --features full -- --transport http --port 8080";
 
+/// The error for an access token that breaks the visible-ASCII rule. It
+/// states the rule, in the Dioxus app's wording, and never the value.
+const ACCESS_TOKEN_RULE_ERROR: &str = "--access-token / P2A_ACCESS_TOKEN may contain only visible ASCII characters ('!' to '~'), no spaces or tabs";
+
 /// Client builder with the backend access token, if any, as a default
 /// `Authorization: Bearer <token>` header marked sensitive (so it is never
 /// shown in debug output). A blank token means none.
 ///
-/// The trimmed token may contain only visible ASCII (`'!'..='~'`), the rule
-/// the Dioxus app's `normalize_access_token` applies. `HeaderValue` alone
-/// would also accept inner spaces, tabs and non-ASCII bytes, which the
-/// server then rejects as a wrong token.
+/// The trimmed token may contain only visible ASCII (`'!'..='~'`), so that
+/// p2a-chat accepts exactly the tokens the Dioxus app's
+/// `normalize_access_token` accepts. `HeaderValue` alone would also accept
+/// inner spaces, tabs and non-ASCII bytes. Of those, only non-ASCII bytes
+/// fail on the server, which cannot read such a header value at all; inner
+/// spaces and tabs it would compare literally with its configured token.
+/// They are refused here so that both clients accept the same tokens.
 fn client_builder(access_token: Option<&str>) -> anyhow::Result<reqwest::ClientBuilder> {
     let builder = reqwest::Client::builder();
     let Some(token) = access_token.map(str::trim).filter(|t| !t.is_empty()) else {
         return Ok(builder);
     };
-    let unsendable = || {
-        anyhow::anyhow!(
-            "--access-token / P2A_ACCESS_TOKEN contains characters that cannot be sent in an HTTP header (visible ASCII only)"
-        )
-    };
+    let unsendable = || anyhow::Error::msg(ACCESS_TOKEN_RULE_ERROR);
     if !token.chars().all(|c| ('!'..='~').contains(&c)) {
         return Err(unsendable());
     }
@@ -1060,6 +1063,16 @@ mod tests {
             let arg = cmd.get_arguments().find(|a| a.get_id() == id).unwrap();
             assert!(arg.is_hide_env_values_set(), "{id}");
         }
+        let help = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "access_token")
+            .and_then(|a| a.get_help())
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            help.contains("visible ASCII, no spaces"),
+            "the help states the token rule: {help:?}"
+        );
         let args = ChatArgs::try_parse_from(["p2a-chat", "--access-token", "t0k"]).unwrap();
         assert_eq!(args.access_token.as_deref(), Some("t0k"));
     }
@@ -1070,24 +1083,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(
-            err,
-            "--access-token / P2A_ACCESS_TOKEN contains characters that cannot be sent in an HTTP header (visible ASCII only)",
+            err, ACCESS_TOKEN_RULE_ERROR,
             "the message names the source and never the value"
         );
     }
 
-    /// Non-ASCII characters, inner spaces and tabs pass `HeaderValue`'s own
-    /// check, but the server reads the header as visible ASCII and the
-    /// Dioxus app accepts only `'!'..='~'`, so they are refused here too.
+    /// Non-ASCII characters, inner spaces and tabs all pass
+    /// `HeaderValue::from_str`. Of the three, the server's `to_str` rejects
+    /// only non-ASCII; inner spaces and tabs it would compare literally. The
+    /// client refuses all three to accept exactly the tokens the Dioxus app
+    /// accepts. DEL, also in the list, already fails `HeaderValue::from_str`.
     #[test]
     fn token_outside_visible_ascii_is_refused_before_sending() {
         for token in ["tök", "a b", "a\tb", "x\u{7f}y"] {
             let err = build_http_client(Some(token)).unwrap_err().to_string();
-            assert_eq!(
-                err,
-                "--access-token / P2A_ACCESS_TOKEN contains characters that cannot be sent in an HTTP header (visible ASCII only)",
-                "{token:?}"
-            );
+            assert_eq!(err, ACCESS_TOKEN_RULE_ERROR, "{token:?}");
             assert!(!err.contains(token), "{token:?}");
         }
         // Surrounding whitespace is trimmed, not refused.
