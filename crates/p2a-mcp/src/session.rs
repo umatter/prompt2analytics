@@ -195,7 +195,7 @@ pub fn validate_user_id(raw: Option<String>) -> Result<Option<String>, String> {
 /// Whether `id` has the form of a session id: a UUID in the hyphenated
 /// lower-case form `SessionManager::create_session` produces.
 pub(crate) fn is_session_id(id: &str) -> bool {
-    Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id)
+    Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().encode_lower(&mut Uuid::encode_buffer()) == id)
 }
 
 /// Session information for API responses.

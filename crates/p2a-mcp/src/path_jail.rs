@@ -588,7 +588,11 @@ pub fn remove_session_dir(session_id: &str) -> std::io::Result<()> {
 fn session_uuid(id: &str) -> Option<u128> {
     uuid::Uuid::parse_str(id)
         .ok()
-        .filter(|u| u.hyphenated().to_string() == id)
+        .filter(|u| {
+            u.hyphenated()
+                .encode_lower(&mut uuid::Uuid::encode_buffer())
+                == id
+        })
         .map(|u| u.as_u128())
 }
 
@@ -1021,6 +1025,24 @@ mod tests {
         small.insert(13);
         assert!(!small.contains(10), "a repeated insert moved the id");
         assert!(small.contains(11) && small.contains(12) && small.contains(13));
+    }
+
+    #[test]
+    fn session_uuid_accepts_only_the_canonical_form() {
+        let id = fresh_id();
+        assert_eq!(
+            session_uuid(&id),
+            Some(uuid::Uuid::parse_str(&id).unwrap().as_u128())
+        );
+        for other in [
+            id.to_uppercase(),
+            id.replace('-', ""),
+            format!("{{{id}}}"),
+            format!("urn:uuid:{id}"),
+            String::new(),
+        ] {
+            assert_eq!(session_uuid(&other), None, "{other}");
+        }
     }
 
     #[test]
