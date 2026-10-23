@@ -31,44 +31,77 @@ enum OrphanScan {
 pub(super) const ORPHAN_BATCH: usize = 32;
 
 /// One batch of a gap's orphans: the rows read (at most [`ORPHAN_BATCH`])
-/// and, of those, the rows deleted.
+/// and, of those, the rows deleted. The others could not be deleted by the
+/// key read for them: not found by it, or deleted meanwhile (conversations
+/// only; see
+/// [`delete_orphaned_conversations`](DbConnection::delete_orphaned_conversations)).
 #[derive(Debug, Clone, Copy)]
 struct Batch {
     read: usize,
     deleted: usize,
 }
 
-/// How the batches of one gap ended ([`drain_gap`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GapEnd {
-    /// A batch came back short: it held the last rows of the gap that
-    /// match.
-    Drained,
-    /// A full batch of which no row could be deleted; reading again would
-    /// read the same rows.
-    Stuck,
-    /// The batches the gap's count allows were read, and the last was full.
-    Bound,
+/// The sweeps that look at a table's gaps, and so the one that takes up
+/// the orphans a sweep had to leave in them.
+#[derive(Debug, Clone, Copy)]
+enum SweptBy {
+    /// Every sweep, periodic ones included: conversations, settings and
+    /// dataset metadata.
+    Every,
+    /// Full sweeps only: messages and tool calls. A full sweep is the first
+    /// one after a start, or one that follows more conversation deletes
+    /// than are remembered
+    /// ([`delete_recent_orphans`](DbConnection::delete_recent_orphans)).
+    Full,
+}
+
+impl SweptBy {
+    /// The sweep that next looks at the gap.
+    fn next(self) -> &'static str {
+        match self {
+            Self::Every => "the next sweep",
+            Self::Full => "the next full sweep (normally at the next start)",
+        }
+    }
+
+    /// The sweeps that look at the gap again.
+    fn each(self) -> &'static str {
+        match self {
+            Self::Every => "every sweep",
+            Self::Full => "every full sweep",
+        }
+    }
 }
 
 /// Delete the orphans of one gap of `table`, a batch at a time
 /// (`next_batch` reads up to [`ORPHAN_BATCH`] of them and deletes what it
-/// can), until a batch comes back short; the rows deleted, and how it ended.
+/// can), until a batch comes back short; the rows deleted.
 ///
 /// The gap held `rows` rows when it was counted, and each batch is deleted
 /// before the next is read, so the rows that match only decrease and
 /// `rows.div_ceil(ORPHAN_BATCH) + 1` batches drain the gap. Two things keep
-/// it from draining: rows that match written into the gap after its count,
-/// and a full batch of which nothing could be deleted (conversations that
-/// `delete_conversation` cannot find by the key read for them), which every
-/// further read would return again. This then stops, at the bound or at
-/// once, and logs it; what is left waits for the next full sweep, at the
-/// next start (later sweeps follow recent deletes only).
+/// it from draining, and each is logged with the gap's `rows` and the rows
+/// `deleted` from it (never with an owner's id):
+///
+/// - Rows that match written into the gap after its count. This stops at
+///   the bound, and what is left waits for the next sweep that looks at the
+///   gap ([`SweptBy`]): the next sweep for conversations, settings and
+///   dataset metadata, the next full sweep (normally at the next start) for
+///   messages and tool calls.
+/// - Rows that cannot be deleted by the key read for them ([`Batch`]). A
+///   full batch of them stops this at once: the gap's reads return rows in
+///   index order, so every further read, by this sweep or a later one,
+///   returns the same rows first. Those rows, and every orphan after them
+///   in the gap, stay until they are removed by hand. A short batch with
+///   such rows still ends the gap, and those still stored stay too. Every
+///   sweep that looks at the gap reads them again and logs this again; for
+///   conversations that is each periodic sweep, not only the one at start.
 async fn drain_gap<F, Fut>(
     table: &str,
+    swept_by: SweptBy,
     rows: usize,
     mut next_batch: F,
-) -> Result<(usize, GapEnd), DbError>
+) -> Result<usize, DbError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Batch, DbError>>,
@@ -78,22 +111,41 @@ where
         let batch = next_batch().await?;
         deleted += batch.deleted;
         if batch.read < ORPHAN_BATCH {
-            return Ok((deleted, GapEnd::Drained));
+            if batch.deleted < batch.read {
+                tracing::warn!(
+                    table,
+                    rows,
+                    deleted,
+                    left = batch.read - batch.deleted,
+                    "orphan sweep could not delete some orphaned rows of a gap by the key read \
+                     for them; those still stored stay until removed by hand, and {} reports \
+                     them again",
+                    swept_by.each()
+                );
+            }
+            return Ok(deleted);
         }
         if batch.deleted == 0 {
             tracing::warn!(
                 table,
-                "orphan sweep could not delete a whole batch of orphaned rows; \
-                 the rest of their gap waits for the next full sweep"
+                rows,
+                deleted,
+                "orphan sweep could not delete a whole batch of orphaned rows by the key read \
+                 for them; {} reads the same batch first and reports it again, and it stays, \
+                 with the orphans after it in its gap, until removed by hand",
+                swept_by.each()
             );
-            return Ok((deleted, GapEnd::Stuck));
+            return Ok(deleted);
         }
     }
     tracing::warn!(
         table,
-        "orphan sweep stopped at its batch bound; remaining orphans wait for the next full sweep"
+        rows,
+        deleted,
+        "orphan sweep stopped at its batch bound; remaining orphans wait for {}",
+        swept_by.next()
     );
-    Ok((deleted, GapEnd::Bound))
+    Ok(deleted)
 }
 
 /// A conversation the orphan sweep deletes: its id and its session.
@@ -500,17 +552,23 @@ impl DbConnection {
             .gaps_with_rows("conversations", "session_id", &session_ids)
             .await?
         {
-            let (n, _) = drain_gap("conversations", rows, || {
+            deleted += drain_gap("conversations", SweptBy::Every, rows, || {
                 self.delete_orphaned_conversations(gap, &started)
             })
             .await?;
-            deleted += n;
         }
 
         // Settings and dataset metadata of sessions without a row.
         for (table, stamp) in [("settings", "updated_at"), ("dataset_meta", "loaded_at")] {
             deleted += self
-                .delete_unowned(table, "session_id", stamp, &session_ids, &started)
+                .delete_unowned(
+                    table,
+                    "session_id",
+                    stamp,
+                    &session_ids,
+                    &started,
+                    SweptBy::Every,
+                )
                 .await?;
         }
 
@@ -534,8 +592,12 @@ impl DbConnection {
             None => {
                 // Read after the deletes above, so every conversation left
                 // that is older than `started` has a session in
-                // `session_ids`. One that does not (a session whose row was
-                // written after `session_ids` was read) is younger than
+                // `session_ids`, unless the conversation pass above stopped
+                // at a gap it could not drain; the messages and tool calls
+                // of the orphaned conversations it left are then deleted
+                // here, while their rows stay. Any other conversation
+                // without a session in `session_ids` (a session whose row
+                // was written after `session_ids` was read) is younger than
                 // `started`, and so are its messages and tool calls, which
                 // the `stamp` condition keeps.
                 let conversation_ids = self.conversation_ids_of(&session_ids).await?;
@@ -547,6 +609,7 @@ impl DbConnection {
                             stamp,
                             &conversation_ids,
                             &started,
+                            SweptBy::Full,
                         )
                         .await?;
                 }
@@ -728,6 +791,7 @@ impl DbConnection {
     /// owners in `known` that hold rows are found through the index on
     /// `owner` ([`gaps_with_rows`](Self::gaps_with_rows)); only the rows in
     /// those gaps are read, [`ORPHAN_BATCH`] per statement, to delete them.
+    /// `swept_by` names the sweeps that look at `table` ([`drain_gap`]).
     async fn delete_unowned(
         &self,
         table: &str,
@@ -735,6 +799,7 @@ impl DbConnection {
         stamp: &str,
         known: &HashSet<String>,
         started: &Datetime,
+        swept_by: SweptBy,
     ) -> Result<usize, DbError> {
         let mut deleted = 0usize;
         for (gap, rows) in self.gaps_with_rows(table, owner, known).await? {
@@ -743,9 +808,10 @@ impl DbConnection {
                  LIMIT {ORPHAN_BATCH}",
                 gap.condition(owner)
             );
-            let (n, _) =
-                drain_gap(table, rows, || self.delete_selected(&select, gap, started)).await?;
-            deleted += n;
+            deleted += drain_gap(table, swept_by, rows, || {
+                self.delete_selected(&select, gap, started)
+            })
+            .await?;
         }
         Ok(deleted)
     }
@@ -950,24 +1016,23 @@ mod tests {
         assert_eq!(all[0].bounds().lo, "");
     }
 
-    /// What [`drain`] saw: the rows deleted, how the gap ended, the batches
-    /// read and the warnings logged.
+    /// What [`drain`] saw: the rows deleted, the batches read and the
+    /// warnings logged.
     #[derive(Debug)]
     struct Drain {
         deleted: usize,
-        end: GapEnd,
         batches: usize,
         warnings: Vec<String>,
     }
 
-    /// `drain_gap` over batches that read `reads[i]` rows (a full batch
-    /// past the end of `reads`) and delete all they read, except batch
-    /// `stuck`, which deletes nothing.
-    async fn drain(rows: usize, reads: &[usize], stuck: Option<usize>) -> Drain {
+    /// `drain_gap` of table "t" over batches that read `reads[i]` rows (a
+    /// full batch past the end of `reads`) and delete all they read, except
+    /// batch `stuck`, which deletes nothing.
+    async fn drain(swept_by: SweptBy, rows: usize, reads: &[usize], stuck: Option<usize>) -> Drain {
         let logs = super::super::tests::Logs::default();
         let _default = tracing::subscriber::set_default(logs.subscriber());
         let mut batches = 0usize;
-        let (deleted, end) = drain_gap("t", rows, || {
+        let deleted = drain_gap("t", swept_by, rows, || {
             let i = batches;
             batches += 1;
             let read = reads.get(i).copied().unwrap_or(ORPHAN_BATCH);
@@ -984,7 +1049,6 @@ mod tests {
             .collect();
         Drain {
             deleted,
-            end,
             batches,
             warnings,
         }
@@ -992,7 +1056,8 @@ mod tests {
 
     /// A gap is read until a batch comes back short, and no further than
     /// its count allows (one batch more than its rows fill): a gap that
-    /// still returns full batches then is left with a warning.
+    /// still returns full batches then is left with a warning that names
+    /// the sweep that looks at the gap next.
     #[tokio::test]
     async fn drain_gap_stops_at_a_short_batch_or_its_bound() {
         let b = ORPHAN_BATCH;
@@ -1002,46 +1067,59 @@ mod tests {
             // Exactly full batches: the empty read after them ends the gap.
             (2 * b, vec![b, b, 0]),
         ] {
-            let d = drain(rows, &reads, None).await;
+            let d = drain(SweptBy::Every, rows, &reads, None).await;
             let read: usize = reads.iter().sum();
-            assert_eq!(
-                (d.deleted, d.end, d.batches),
-                (read, GapEnd::Drained, reads.len())
-            );
+            assert_eq!((d.deleted, d.batches), (read, reads.len()));
             assert!(d.warnings.is_empty(), "{:?}", d.warnings);
         }
         // Rows that keep coming (written after the count): 2 + 1 batches for
         // a count of b + 1, 1 for an empty count, then the bound.
-        for (rows, batches) in [(b + 1, 3), (0, 1)] {
-            let d = drain(rows, &[], None).await;
-            assert_eq!(
-                (d.deleted, d.end, d.batches),
-                (batches * b, GapEnd::Bound, batches)
-            );
-            assert_eq!(d.warnings.len(), 1, "{:?}", d.warnings);
-            assert!(d.warnings[0].contains("batch bound"), "{}", d.warnings[0]);
-            assert!(d.warnings[0].contains("table=\"t\""), "{}", d.warnings[0]);
+        for (swept_by, next) in [
+            (SweptBy::Every, "wait for the next sweep"),
+            (SweptBy::Full, "wait for the next full sweep"),
+        ] {
+            for (rows, batches) in [(b + 1, 3), (0, 1)] {
+                let d = drain(swept_by, rows, &[], None).await;
+                assert_eq!((d.deleted, d.batches), (batches * b, batches));
+                assert_eq!(d.warnings.len(), 1, "{:?}", d.warnings);
+                let w = &d.warnings[0];
+                assert!(w.contains("batch bound") && w.contains(next), "{w}");
+                assert!(w.contains("table=\"t\""), "{w}");
+                let fields = format!("rows={rows} deleted={}", batches * b);
+                assert!(w.contains(&fields), "{w}");
+            }
         }
     }
 
     /// A full batch of which nothing could be deleted ends the gap at once,
-    /// with a warning, instead of being read again; a short one ends it as
-    /// drained.
+    /// with a warning, instead of being read again; later sweeps would read
+    /// the same batch first, so the warning sends no one to wait for them.
+    /// A short batch with rows it could not delete ends the gap too, and
+    /// also says so.
     #[tokio::test]
     async fn drain_gap_stops_at_a_full_batch_it_could_not_delete() {
         let b = ORPHAN_BATCH;
-        let d = drain(10 * b, &[b, b, b], Some(1)).await;
-        assert_eq!((d.deleted, d.end, d.batches), (b, GapEnd::Stuck, 2));
-        assert_eq!(d.warnings.len(), 1, "{:?}", d.warnings);
-        assert!(
-            d.warnings[0].contains("could not delete"),
-            "{}",
-            d.warnings[0]
-        );
+        for (swept_by, each) in [
+            (SweptBy::Every, "every sweep"),
+            (SweptBy::Full, "every full sweep"),
+        ] {
+            let d = drain(swept_by, 10 * b, &[b, b, b], Some(1)).await;
+            assert_eq!((d.deleted, d.batches), (b, 2));
+            assert_eq!(d.warnings.len(), 1, "{:?}", d.warnings);
+            let w = &d.warnings[0];
+            assert!(w.contains("could not delete") && w.contains(each), "{w}");
+            assert!(w.contains(&format!("rows={} deleted={b}", 10 * b)), "{w}");
+            assert!(w.contains("by hand") && !w.contains("wait"), "{w}");
 
-        let d = drain(10 * b, &[3], Some(0)).await;
-        assert_eq!((d.deleted, d.end, d.batches), (0, GapEnd::Drained, 1));
-        assert!(d.warnings.is_empty(), "{:?}", d.warnings);
+            let d = drain(swept_by, 10 * b, &[3], Some(0)).await;
+            assert_eq!((d.deleted, d.batches), (0, 1));
+            assert_eq!(d.warnings.len(), 1, "{:?}", d.warnings);
+            let w = &d.warnings[0];
+            assert!(w.contains("could not delete") && w.contains(each), "{w}");
+            let fields = format!("rows={} deleted=0 left=3", 10 * b);
+            assert!(w.contains(&fields), "{w}");
+            assert!(w.contains("by hand") && !w.contains("wait"), "{w}");
+        }
     }
 
     /// An owner with a NUL byte is no bound (SurrealDB strings cannot hold

@@ -1023,39 +1023,74 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
     }
 }
 
-/// Conversations of a session without a row that `delete_conversation`
-/// cannot find by the id the sweep reads for them (their keys do not
-/// survive `key_string`; the server writes UUID keys only) are not read
-/// again batch after batch until the batch bound: a full batch of them ends
-/// their gap with a warning, and the rows stay.
-#[tokio::test]
-async fn full_orphan_sweep_stops_at_a_batch_it_cannot_delete() {
+/// Store `n` conversations of the rowless session "no-row" whose keys do not
+/// survive `key_string` (the server writes UUID keys only), so that
+/// `delete_conversation` cannot find them by the id the sweep reads.
+async fn insert_odd_key_conversations(db: &DbConnection, n: usize) {
     use super::models::{Conversation, key_string};
-    use super::sessions::ORPHAN_BATCH;
-
-    let db = test_db().await;
-    for n in 0..ORPHAN_BATCH + 3 {
-        let key = format!("odd⟩{n:03}");
+    for i in 0..n {
+        let key = format!("odd⟩{i:03}");
         let mut conv = Conversation::new("no-row".into(), "t".into());
         conv.id = surrealdb::RecordId::from(("conversations", key.as_str()));
         assert_ne!(key_string(&conv.id), key);
         let _: Option<Conversation> = db.db().create(conv.id.clone()).content(conv).await.unwrap();
     }
+}
 
+/// Run an orphan sweep (in full or of recent deletes) that must delete
+/// nothing, and return the warnings it logged about conversations.
+async fn sweep_warnings(db: &DbConnection, full: bool) -> Vec<String> {
     let logs = Logs::default();
     let deleted = {
         let _default = tracing::subscriber::set_default(logs.subscriber());
-        db.delete_orphans().await.unwrap()
+        if full {
+            db.delete_orphans().await.unwrap()
+        } else {
+            db.delete_recent_orphans().await.unwrap()
+        }
     };
     assert_eq!(deleted, 0);
-    assert_eq!(rows_in(&db, "conversations").await, ORPHAN_BATCH + 3);
-    let text = logs.text();
-    let warnings: Vec<&str> = text
+    logs.text()
         .lines()
         .filter(|line| line.contains("WARN") && line.contains("conversations"))
-        .collect();
-    assert_eq!(warnings.len(), 1, "{text}");
-    assert!(warnings[0].contains("could not delete"), "{}", warnings[0]);
+        .map(String::from)
+        .collect()
+}
+
+/// Conversations of a session without a row that `delete_conversation`
+/// cannot find by the id the sweep reads for them are not read again batch
+/// after batch until the batch bound: a full batch of them ends their gap
+/// with a warning, and the rows stay. Every sweep reads them first again
+/// and says so again, so the warning does not send anyone to wait for a
+/// later sweep. A short batch of them is reported too.
+#[tokio::test]
+async fn full_orphan_sweep_stops_at_a_batch_it_cannot_delete() {
+    use super::sessions::ORPHAN_BATCH;
+
+    let db = test_db().await;
+    insert_odd_key_conversations(&db, ORPHAN_BATCH + 3).await;
+    for full in [true, false] {
+        let warnings = sweep_warnings(&db, full).await;
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert!(
+            w.contains("could not delete") && w.contains("every sweep"),
+            "{w}"
+        );
+        assert!(w.contains("by hand") && !w.contains("wait"), "{w}");
+        let fields = format!("rows={} deleted=0", ORPHAN_BATCH + 3);
+        assert!(w.contains(&fields), "{w}");
+    }
+    assert_eq!(rows_in(&db, "conversations").await, ORPHAN_BATCH + 3);
+
+    let db = test_db().await;
+    insert_odd_key_conversations(&db, 3).await;
+    let warnings = sweep_warnings(&db, true).await;
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let w = &warnings[0];
+    assert!(w.contains("could not delete"), "{w}");
+    assert!(w.contains("rows=3 deleted=0 left=3"), "{w}");
+    assert_eq!(rows_in(&db, "conversations").await, 3);
 }
 
 #[tokio::test]
