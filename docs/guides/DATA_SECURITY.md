@@ -128,9 +128,11 @@ files they produce load plotly.js and MathJax from public CDNs
 The audit log is off unless the server runs with `P2A_AUDIT_LOG=true` (or
 `--audit-log`; the variable accepts only `true` or `false`, so `1` is rejected
 at startup). When it is on, it writes one JSON line per executed tool call on
-every path, with `origin` `http`, `llm_tool`, `websocket` or `stdio`, and one
+every path, with `origin` `http`, `llm_tool`, `websocket` or `stdio`, one
 line for each call refused at admission (memory pressure, a busy session or a
-busy server).
+busy server), and one for each tool call of the assistant that is refused
+before it runs: `not_available` for an internal tool it is never offered,
+`unknown_tool` for a name no tool has.
 
 Each entry records the timestamp, `session_id`, `origin`, `tool_name`, the
 sanitised `arguments`, `success`, `outcome` (`ok`, `tool_error`, `cancelled` or a

@@ -260,6 +260,8 @@ Every call runs under the server's execution governor. An unknown session answer
 
 Both chat routes take a slot of the session for as long as they run. In the hosted profile a session runs one chat request at a time (`llm_streams_per_session`); a second answers 429 with `code` `session_busy` and `Retry-After: 2`.
 
+The session is looked up again before each tool call the model makes, as for `POST /api/tools/{name}`. Once it has been deleted, evicted or has expired, that call does not run and the chat ends there: `/api/llm/chat` answers 404 with `code` `session_not_found` (410 `session_expired`), and the stream ends with an `error` event ("Session not found: ..." / "Session expired ..."). A tool the assistant may not call (an internal tool, or a name no tool has) is refused as that tool's error text, and the chat goes on.
+
 ### Non-Streaming Chat
 ```
 POST /api/llm/chat
