@@ -304,9 +304,11 @@ impl ImportState {
 }
 
 /// Parse a session file in one streaming pass, straight into typed column
-/// vectors, without a `serde_json::Value` tree for the document. At most
-/// `budget` bytes (values, plus the text of string cells and names, plus the
-/// one element being read) are held at a time.
+/// vectors, without a `serde_json::Value` tree for the document. The bytes
+/// charged (values, the text of string cells and names, map entries, and the
+/// one element being read) stay within `budget`; allocator and container
+/// growth slack (vector capacity, hash-map buckets) is not charged, so peak
+/// memory is a small constant multiple of it.
 fn parse_session_json(
     reader: impl std::io::Read,
     budget: Option<u64>,
