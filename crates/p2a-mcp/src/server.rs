@@ -721,7 +721,11 @@ impl AnalyticsServer {
     /// dataset a `ROW_RULES` tool names must be within its row class. After
     /// the handler returns, output above the `response_bytes` budget
     /// replaces the result. A refusal is
-    /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`).
+    /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`). The response
+    /// cap comes after the work, so a call refused by it has made its
+    /// changes (a created or modified dataset stays, unless the governor's
+    /// dataset quota undoes it and answers with the quota refusal instead),
+    /// and its message says so.
     #[cfg(feature = "http")]
     pub async fn call_tool_with_session(
         &self,
@@ -1374,9 +1378,12 @@ fn check_response_size(limits: &Limits, tool: &str, bytes: usize) -> Result<(), 
         requested: bytes.to_string(),
         limit: max.to_string(),
         override_key: "response_bytes",
+        // The handler has run: say so, so a caller does not retry a change
+        // that was already made.
         message: format!(
-            "The output of `{tool}` is {bytes} bytes, above this server's limit of {max} bytes \
-             per response. Ask for less output, for example fewer rows, columns or grid points."
+            "`{tool}` ran, but its output is {bytes} bytes, above this server's limit of {max} \
+             bytes per response; any change it made, for example to the session's datasets, was \
+             kept. Ask for less output, for example fewer rows, columns or grid points."
         ),
     })
 }
@@ -1586,6 +1593,25 @@ mod tests {
             (v.parameter.as_str(), v.requested.as_str()),
             ("response_bytes", "300")
         );
+    }
+
+    #[test]
+    fn response_cap_message_says_the_call_ran() {
+        // The cap is checked after the handler ran: a state-changing tool
+        // must not read as if nothing happened (a retry would then fail with
+        // "already exists" or apply the change twice).
+        let limits = Limits::hosted()
+            .with_overrides(&["response_bytes=10".to_string()])
+            .unwrap();
+        let v = check_response_size(&limits, "create_dataset", 11).unwrap_err();
+        assert!(
+            v.message
+                .starts_with("`create_dataset` ran, but its output is 11 bytes"),
+            "{}",
+            v.message
+        );
+        assert!(v.message.contains("was kept"), "{}", v.message);
+        assert!(v.message.contains("Ask for less output"), "{}", v.message);
     }
 
     /// Helper to extract text from Content (Annotated<RawContent>)
