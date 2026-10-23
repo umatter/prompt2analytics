@@ -631,14 +631,16 @@ pub fn run_chisq_gof(
 /// # Errors
 ///
 /// - [`EconError::ColumnNotFound`] for a missing column.
-/// - [`EconError::InvalidSpecification`] for a struct column, or when a value cannot be read
-///   (`Failed to read a value`).
+/// - [`EconError::InvalidSpecification`] for a struct, list or array column, when a column's
+///   distinct values cannot be computed (`Failed to get unique ... values`), or when a value
+///   cannot be read (`Failed to read a value`).
 /// - [`EconError::InsufficientData`] for a column with fewer than two distinct values (null
 ///   counts as one).
 /// - [`EconError::ResourceLimit`] for a table too large to allocate.
 /// - [`EconError::Computation`] when a row matches no level of its column, because the table
 ///   would be missing those rows.
-/// - Cancellation through [`resource::checkpoint`].
+/// - [`EconError::Cancelled`] when the budget installed for the thread is cancelled or its
+///   deadline passes (checked through [`resource::checkpoint`]).
 ///
 /// # Example
 ///
@@ -673,17 +675,23 @@ pub fn run_chisq_independence(
         available: available_cols,
     })?;
 
-    // Rows are keyed on the text of their value, and a struct value's text prints its whole
-    // array (O(n) per row); struct levels never matched their rows either
+    // Rows are keyed on the text of their value. A struct value's text prints its whole array
+    // (O(n) per row), and struct levels never matched their rows either. A list or array value's
+    // text keeps only its first and last elements once it is longer than POLARS_FMT_MAX_ROWS,
+    // so two distinct values could share a key and their rows be counted under one level.
     for (name, column) in [(row_col, row_series), (col_col, col_series)] {
-        if matches!(column.dtype(), DataType::Struct(_)) {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "column `{name}` holds structs; the chi-squared test of independence needs \
-                     columns of scalar values (strings, numbers, categories or dates)"
-                ),
-            });
-        }
+        let kind = match column.dtype() {
+            DataType::Struct(_) => "structs",
+            DataType::List(_) => "lists",
+            DataType::Array(_, _) => "arrays",
+            _ => continue,
+        };
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "column `{name}` holds {kind}; the chi-squared test of independence needs \
+                 columns of scalar values (strings, numbers, categories or dates)"
+            ),
+        });
     }
 
     // Get unique values
@@ -709,8 +717,8 @@ pub fn run_chisq_independence(
         });
     }
 
-    // A flat, fallibly allocated r x c table of counts, refused before any per-row or per-level
-    // work: two ID-like columns would otherwise rechunk both columns and build 4n Strings first
+    // A flat, fallibly allocated r x c table of counts, refused before the rechunks and the level
+    // lists: two ID-like columns would otherwise rechunk both columns and build 4n Strings first
     let cells = resource::checked_len(&[n_rows, n_cols], "contingency table")?;
     let mut observed: Vec<f64> = resource::try_vec(cells, 0.0, "contingency table")?;
 
@@ -920,6 +928,39 @@ mod tests {
     }
 
     #[test]
+    fn test_run_chisq_independence_refuses_list_and_array_columns() {
+        // The text of a list value prints only its first and last five elements once it has more
+        // than POLARS_FMT_MAX_ROWS (default 10). Pre-fix, these two distinct lists of 12, which
+        // differ only in the middle, got one key: all 40 rows were counted under the first level
+        // and the test returned p = 1 with no error
+        let a: Vec<i64> = (0..12).collect();
+        let mut b = a.clone();
+        b[5] = 105;
+        b[6] = 106;
+        let lists: Vec<Series> = (0..40)
+            .map(|i| Series::new("".into(), if i % 3 == 0 { &a } else { &b }))
+            .collect();
+        let list = Series::new("l".into(), lists);
+        assert!(matches!(list.dtype(), DataType::List(_)));
+        let array = list
+            .cast(&DataType::Array(Box::new(DataType::Int64), 12))
+            .unwrap()
+            .with_name("arr".into());
+        let mut df = gh_dataset().df().clone();
+        df.with_column(list).unwrap();
+        df.with_column(array).unwrap();
+        let dataset = Dataset::new(df);
+        for name in ["l", "arr"] {
+            let e = run_chisq_independence(&dataset, name, "h", true).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message }
+                    if message.contains(&format!("`{name}`")) && message.contains("scalar")),
+                "{name}: {e}"
+            );
+        }
+    }
+
+    #[test]
     fn test_categorical_row_keys_survive_inserts_into_the_mapping() {
         // The Debug text of a categorical value prints its mapping's upper bound, which grows
         // whenever a category is inserted into that mapping; for the process-wide mapping, any
@@ -975,12 +1016,27 @@ mod tests {
             let r = run_chisq_independence(&Dataset::new(df), "g", "h", true).unwrap();
             assert!(
                 (r.statistic - 2.0277056277056276).abs() < 1e-10,
-                "{g_type:?}"
+                "{g_type:?}/{h_type:?}"
             );
-            assert!((r.p_value - 0.36281841143824806).abs() < 1e-10);
-            assert_eq!((r.df, r.n_rows, r.n_cols), (2, Some(2), Some(3)));
-            assert_eq!(r.observed, vec![7.0, 5.0, 8.0, 4.0, 9.0, 7.0]);
-            assert_eq!(r.expected, vec![5.5, 7.0, 7.5, 5.5, 7.0, 7.5]);
+            assert!(
+                (r.p_value - 0.36281841143824806).abs() < 1e-10,
+                "{g_type:?}/{h_type:?}"
+            );
+            assert_eq!(
+                (r.df, r.n_rows, r.n_cols),
+                (2, Some(2), Some(3)),
+                "{g_type:?}/{h_type:?}"
+            );
+            assert_eq!(
+                r.observed,
+                vec![7.0, 5.0, 8.0, 4.0, 9.0, 7.0],
+                "{g_type:?}/{h_type:?}"
+            );
+            assert_eq!(
+                r.expected,
+                vec![5.5, 7.0, 7.5, 5.5, 7.0, 7.5],
+                "{g_type:?}/{h_type:?}"
+            );
         }
     }
 
