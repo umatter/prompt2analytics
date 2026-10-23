@@ -69,10 +69,18 @@ impl JoinType {
 ///
 /// * `left` - Left dataset
 /// * `right` - Right dataset
-/// * `left_on` - Column names to join on from left dataset
-/// * `right_on` - Column names to join on from right dataset (if None, uses left_on)
+/// * `left_on` - Column names to join on from left dataset; at least one (an
+///   empty list is refused with [`MungeError::JoinError`])
+/// * `right_on` - Column names to join on from right dataset (if None, uses
+///   left_on; must not be empty when given, so `Some(&[])` is refused)
 /// * `join_type` - Type of join (Left, Right, Inner, Full, Anti, Semi)
 /// * `suffix` - Suffix for duplicate column names from right dataset
+///
+/// # Errors
+///
+/// [`MungeError::JoinError`] for an empty `left_on`, a `right_on` of
+/// `Some(&[])`, or `left_on` and `right_on` of different lengths;
+/// [`MungeError::ColumnNotFound`] for a key missing from its dataset.
 ///
 /// # Example
 ///
@@ -128,7 +136,7 @@ fn join_keys<'a>(
             "a join needs at least one key column, but left_on is empty".to_string(),
         ));
     }
-    if right_on.is_some_and(<[&str]>::is_empty) {
+    if matches!(right_on, Some([])) {
         return Err(MungeError::JoinError(
             "a join needs at least one key column, but right_on is empty; omit it to join on \
              the left_on names"
@@ -173,6 +181,11 @@ fn join_keys<'a>(
 /// group-bys and a join of the two count tables; the data are not joined).
 ///
 /// Null keys never match, as in [`join`]. The count saturates at `u64::MAX`.
+///
+/// # Errors
+///
+/// The keys are validated as in [`join`]: an empty `left_on`, or a
+/// `right_on` of `Some(&[])`, returns [`MungeError::JoinError`].
 ///
 /// # Example
 ///
@@ -263,6 +276,12 @@ pub fn estimate_join_rows(
 /// [`estimate_join_rows`] first and a join above the ceiling is refused with
 /// [`MungeError::JoinError`] naming both numbers. Without a ceiling this is
 /// exactly [`join`].
+///
+/// # Errors
+///
+/// The keys are validated as in [`join`] before any estimate or join runs:
+/// an empty `left_on`, or a `right_on` of `Some(&[])`, returns
+/// [`MungeError::JoinError`].
 pub fn join_with(
     left: &Dataset,
     right: &Dataset,
