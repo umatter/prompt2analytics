@@ -205,9 +205,9 @@ const LABEL_OVERHEAD_BYTES: u64 = 160;
 
 /// What the dataset quotas charge for some datasets.
 #[derive(Debug, Default)]
-pub struct DataCharge {
+struct DataCharge {
     /// The bytes charged.
-    pub bytes: u64,
+    bytes: u64,
     /// The part of `bytes` that is labels of Categorical columns, whose
     /// mappings other columns, also other sessions', can share.
     shared_labels: u64,
@@ -508,9 +508,7 @@ pub fn datasets_bytes_of<'a>(entries: impl IntoIterator<Item = (&'a str, &'a Dat
 
 /// [`datasets_bytes_of`] with the shared-mapping detail the server total
 /// needs.
-pub fn datasets_charge<'a>(
-    entries: impl IntoIterator<Item = (&'a str, &'a Dataset)>,
-) -> DataCharge {
+fn datasets_charge<'a>(entries: impl IntoIterator<Item = (&'a str, &'a Dataset)>) -> DataCharge {
     let mut charge = DataCharge::default();
     for (name, dataset) in entries {
         charge.add(name_bytes(name.len()));
@@ -902,7 +900,8 @@ impl SessionManager {
     }
 
     /// Dataset bytes reserved by files being decoded.
-    pub fn reserved_data_bytes(&self) -> u64 {
+    #[cfg(test)]
+    fn reserved_data_bytes(&self) -> u64 {
         self.reserved_data_bytes.load(Ordering::SeqCst)
     }
 
