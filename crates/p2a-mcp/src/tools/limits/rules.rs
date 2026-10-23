@@ -576,9 +576,8 @@ pub static ROW_RULES: &[RowRule] = &[
     // Dense class: each neighbourhood query can return all n rows, so clustering takes O(n^2)
     // time when eps covers the data (memory is O(n)).
     row("ml_dbscan", RowClass::Dense),
-    // The penalty is stored as bands and each solve is O(n) since the banded rewrite, so neither
-    // memory nor time grows with n^2; kept in the Dense class as in the design table, re-audit
-    // pending.
+    // The penalty is stored as bands and each solve is O(n), so neither memory nor time grows
+    // with n^2; the Dense row cap is kept as a conservative bound.
     row("regression_smooth_spline", RowClass::Dense),
     // Cubic: exact t-SNE (no Barnes-Hut) keeps the n x n affinity and similarity matrices and
     // does O(n^2) work per iteration.
@@ -597,7 +596,7 @@ pub static ROW_RULES: &[RowRule] = &[
     // the dense N x N W of the entities.
     row("spatial_panel_ml", RowClass::Cubic),
     // The GMM estimator forms P_Z X in O(NT k) memory instead of the NT x NT projection and needs
-    // no eigenvalues; kept in the Cubic class as in the design table, re-audit pending.
+    // no eigenvalues; the Cubic row cap is kept as a conservative bound.
     row("spatial_panel_gmm", RowClass::Cubic),
     // Quadratic: nearest-neighbour search over all controls.
     row("propensity_matching", RowClass::Quadratic),
@@ -1284,11 +1283,13 @@ mod schema_tests {
         /// A map whose values are integers, arrays, objects or any JSON. No rule path can
         /// address map values, so only `Exempt` classifies it.
         MapValues,
-        /// A field or element whose schema has no `type`, `enum` or `const` (a
-        /// `serde_json::Value`): any JSON. Only `Exempt` classifies it; its cost sub-fields need
-        /// rules of their own by path, because the schema does not list them.
+        /// A field or element that can hold any JSON: a variant of its schema says nothing about
+        /// its value (a `serde_json::Value`, also as one arm of an untagged enum), or its schema
+        /// refers to a definition the walk cannot find. Only `Exempt` classifies it; its cost
+        /// sub-fields need rules of their own by path, because the schema does not list them.
         Untyped,
-        /// A path nested deeper than [`MAX_DEPTH`], where the walk stopped. No rule classifies
+        /// A path nested deeper than [`MAX_DEPTH`], or whose schema leads through more than
+        /// [`MAX_REF_HOPS`] references and variants, where the walk stopped. No rule classifies
         /// it, so the schema test fails instead of skipping what lies below.
         TooDeep,
     }
@@ -1311,7 +1312,12 @@ mod schema_tests {
 
     /// True when one of a tool's `rules` classifies `kind` at `path`: a rule on `path` itself
     /// ([`classifies`]) or, for the integer elements at `a[]`, `ArrayElemMax` on the array `a`.
+    /// Nothing classifies the empty path, where [`cost_properties`] records what the root of a
+    /// schema needs.
     fn classified(rules: &[&ParamRule], path: &str, kind: Kind) -> bool {
+        if path.is_empty() {
+            return false;
+        }
         let on_path = rules
             .iter()
             .any(|r| r.path == path && classifies(kind, r.rule));
@@ -1428,9 +1434,32 @@ mod schema_tests {
                 "anymap": {"type": "object", "additionalProperties": true},
                 "pair": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}],
                          "items": false},
-                "level": {"enum": ["low", "high"]}
+                "level": {"enum": ["low", "high"]},
+                // an untagged enum with a `Value` arm: the typed arm does not hide the other
+                "mixed": {"anyOf": [{"type": "integer"}, true]},
+                // an `Option<Struct>` whose definition is missing: the null arm does not hide it
+                "dangling": {"anyOf": [{"$ref": "#/$defs/Missing"}, {"type": "null"}]},
+                // the same `Option` with a definition, as rmcp's AddNullable writes the null arm
+                "maybe": {"anyOf": [{"$ref": "#/$defs/Lens"}, {"const": null, "nullable": true}]},
+                // a reference cycle: the walk stops after MAX_REF_HOPS and says so
+                "cycle": {"$ref": "#/$defs/Cycle"},
+                // properties, elements and map values are walked whatever the `type`
+                "untyped_object": {"properties": {"k": {"type": "integer"}}},
+                "untyped_list": {"items": {"type": "integer"}},
+                "untyped_map": {"additionalProperties": {"items": {"type": "string"}}},
+                // a flattened map next to a subschema
+                "flat": {"type": "object", "allOf": [{"$ref": "#/$defs/Closed"}],
+                         "unevaluatedProperties": {"type": "integer"}},
+                // a variant below a typed schema is constrained by it
+                "narrowed": {"type": "object", "anyOf": [{"required": ["k"]}, true],
+                             "properties": {"k": {"type": "integer"}}},
+                "never": false
             },
-            "$defs": {"Lens": {"type": "array", "items": {"type": "integer"}}}
+            "$defs": {
+                "Lens": {"type": "array", "items": {"type": "integer"}},
+                "Cycle": {"$ref": "#/$defs/Cycle"},
+                "Closed": {"type": "object", "properties": {}}
+            }
         });
         let mut found = cost_properties(&schema);
         found.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1444,12 +1473,20 @@ mod schema_tests {
                 ("closed.k", Kind::Integer),
                 ("counts", Kind::Array),
                 ("counts[]", Kind::IntegerElems),
+                ("cycle", Kind::TooDeep),
+                ("dangling", Kind::Untyped),
+                ("flat", Kind::MapValues),
                 ("grid", Kind::Array),
                 ("grid[]", Kind::Array),
                 ("grid[][]", Kind::IntegerElems),
                 ("legacy", Kind::Array),
                 ("legacy[]", Kind::Array),
                 ("legacy[][]", Kind::IntegerElems),
+                ("maybe", Kind::Array),
+                ("maybe[]", Kind::IntegerElems),
+                ("mixed", Kind::Untyped),
+                ("mixed", Kind::Integer),
+                ("narrowed.k", Kind::Integer),
                 ("options", Kind::Untyped),
                 ("pair", Kind::Array),
                 ("pairs", Kind::Array),
@@ -1458,10 +1495,71 @@ mod schema_tests {
                 ("spec", Kind::Untyped),
                 ("tables", Kind::Array),
                 ("tables[]", Kind::MapValues),
+                ("untyped_list", Kind::Array),
+                ("untyped_list[]", Kind::IntegerElems),
+                ("untyped_map", Kind::MapValues),
+                ("untyped_object.k", Kind::Integer),
                 ("window", Kind::Array),
                 ("window[]", Kind::IntegerElems),
             ]
         );
+    }
+
+    #[test]
+    fn walker_reports_a_map_or_any_json_at_the_root_and_no_rule_classifies_it() {
+        let fields = json!({"n": {"type": "integer"}});
+        let at_root = |extra: Value| {
+            let mut schema = json!({"type": "object", "properties": fields});
+            if let (Some(o), Value::Object(extra)) = (schema.as_object_mut(), extra) {
+                o.extend(extra);
+            }
+            let mut found = cost_properties(&schema);
+            found.retain(|(p, _)| p.is_empty());
+            found.into_iter().map(|(_, k)| k).collect::<Vec<_>>()
+        };
+        // a flattened map at the root, whatever its values
+        assert_eq!(
+            at_root(json!({"additionalProperties": {"type": "integer"}})),
+            [Kind::MapValues]
+        );
+        assert_eq!(
+            at_root(json!({"additionalProperties": {"type": "string"}})),
+            [Kind::MapValues]
+        );
+        assert_eq!(
+            at_root(json!({"additionalProperties": true})),
+            [Kind::MapValues]
+        );
+        assert_eq!(
+            at_root(json!({"unevaluatedProperties": true})),
+            [Kind::MapValues]
+        );
+        // `deny_unknown_fields`, and the usual struct, add nothing
+        assert!(at_root(json!({"additionalProperties": false})).is_empty());
+        assert!(at_root(json!({})).is_empty());
+        // a root that is any JSON, or that the walk cannot see
+        assert_eq!(
+            cost_properties(&json!(true)),
+            [(String::new(), Kind::Untyped)]
+        );
+        assert_eq!(
+            cost_properties(&json!({"$ref": "#/components/Args"})),
+            [(String::new(), Kind::Untyped)]
+        );
+        let cycle = json!({"$ref": "#/$defs/A", "$defs": {"A": {"$ref": "#/$defs/A"}}});
+        assert_eq!(cost_properties(&cycle), [(String::new(), Kind::TooDeep)]);
+        // the fields beside a root map are still walked
+        let schema = json!({"type": "object", "properties": fields, "additionalProperties": true});
+        assert!(cost_properties(&schema).contains(&("n".to_string(), Kind::Integer)));
+        // not even an Exempt classifies the root
+        let exempt = ParamRule {
+            tool: "t",
+            path: "",
+            rule: Rule::Exempt("reviewed"),
+        };
+        for kind in [Kind::MapValues, Kind::Untyped] {
+            assert!(!classified(&[&exempt], "", kind));
+        }
     }
 
     #[test]
@@ -1505,34 +1603,95 @@ mod schema_tests {
     /// takes one level; a value nested deeper is recorded as [`Kind::TooDeep`].
     const MAX_DEPTH: usize = 8;
 
-    /// Collects `schema` and every schema it stands for: `$ref` targets (`#/definitions/...` and
-    /// `#/$defs/...`, resolved against `root`) and `anyOf` / `oneOf` / `allOf` variants.
-    fn variants<'a>(root: &'a Value, schema: &'a Value, hops: usize, out: &mut Vec<&'a Value>) {
+    /// A schema and every schema it stands for, as [`variants`] collects them.
+    #[derive(Default)]
+    struct Variants<'a> {
+        /// The schema, its `$ref` targets and its `anyOf` / `oneOf` / `allOf` variants.
+        all: Vec<&'a Value>,
+        /// True when a leaf (a variant with no `anyOf`, `oneOf` or `allOf` and no `$ref` that
+        /// resolves) says nothing about its value, and nothing above it does ([`says_what`]), or
+        /// when a `$ref` does not resolve: any JSON can reach the value that way, whatever the
+        /// other variants say.
+        untyped: bool,
+        /// True when the walk stopped after [`MAX_REF_HOPS`], so variants may be missing.
+        too_deep: bool,
+    }
+
+    /// True when a schema by itself says what its value is: it has a `type`, `enum` or `const`,
+    /// lists properties, elements or map values (which [`record`] then walks), or it is `false`
+    /// (no value at all). `true`, `{}` and a schema with only a description accept any JSON.
+    fn says_what(schema: &Value) -> bool {
+        const KEYS: [&str; 8] = [
+            "type",
+            "enum",
+            "const",
+            "properties",
+            "items",
+            "prefixItems",
+            "additionalProperties",
+            "unevaluatedProperties",
+        ];
+        match schema {
+            Value::Bool(any) => !any,
+            Value::Object(o) => KEYS.iter().any(|k| o.contains_key(*k)),
+            _ => false,
+        }
+    }
+
+    /// The target of a `$ref` (`#/definitions/...` or `#/$defs/...`, resolved against `root`).
+    fn resolve<'a>(root: &'a Value, reference: &Value) -> Option<&'a Value> {
+        let reference = reference.as_str()?;
+        let (defs, name) = if let Some(name) = reference.strip_prefix("#/definitions/") {
+            ("definitions", name)
+        } else {
+            ("$defs", reference.strip_prefix("#/$defs/")?)
+        };
+        root.get(defs)?.get(name)
+    }
+
+    /// The variants `schema` stands for, resolved against `root`.
+    fn expand<'a>(root: &'a Value, schema: &'a Value) -> Variants<'a> {
+        let mut out = Variants::default();
+        variants(root, schema, 0, false, &mut out);
+        out
+    }
+
+    /// Adds `schema` and the schemas it stands for to `out`. `typed_above` is true when a schema
+    /// that leads here says what the value is, which then constrains this one as well.
+    fn variants<'a>(
+        root: &'a Value,
+        schema: &'a Value,
+        hops: usize,
+        typed_above: bool,
+        out: &mut Variants<'a>,
+    ) {
         if hops > MAX_REF_HOPS {
+            out.too_deep = true;
             return;
         }
-        out.push(schema);
-        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
-            let target = if let Some(name) = reference.strip_prefix("#/definitions/") {
-                &root["definitions"][name]
-            } else if let Some(name) = reference.strip_prefix("#/$defs/") {
-                &root["$defs"][name]
-            } else {
-                &Value::Null
-            };
-            if !target.is_null() {
-                variants(root, target, hops + 1, out);
+        out.all.push(schema);
+        let typed = typed_above || says_what(schema);
+        let mut leaf = true;
+        if let Some(reference) = schema.get("$ref") {
+            match resolve(root, reference) {
+                Some(target) => {
+                    leaf = false;
+                    variants(root, target, hops + 1, typed, out);
+                }
+                // what lies behind it is unknown, so it may be anything
+                None => out.untyped = true,
             }
         }
         for key in ["anyOf", "oneOf", "allOf"] {
-            for variant in schema
-                .get(key)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                variants(root, variant, hops + 1, out);
+            if let Some(list) = schema.get(key).and_then(Value::as_array) {
+                leaf = false;
+                for variant in list {
+                    variants(root, variant, hops + 1, typed, out);
+                }
             }
+        }
+        if leaf && !typed {
+            out.untyped = true;
         }
     }
 
@@ -1550,12 +1709,26 @@ mod schema_tests {
         out
     }
 
-    /// True when no variant says what the value is (no `type`, `enum` or `const`): the schema
-    /// of a `serde_json::Value` (`true` or `{}`), which accepts any JSON.
-    fn untyped(variants: &[&Value]) -> bool {
-        !variants
+    /// True when a variant describes an array: by its `type`, or by `items` or `prefixItems`
+    /// given without one.
+    fn is_array(vs: &Variants) -> bool {
+        types(&vs.all).contains(&"array")
+            || vs
+                .all
+                .iter()
+                .any(|v| v.get("items").is_some() || v.get("prefixItems").is_some())
+    }
+
+    /// The schemas a map's values must match: `additionalProperties`, or the
+    /// `unevaluatedProperties` that schemars writes for a flattened map next to subschemas,
+    /// unless it is `false` (no keys beyond the listed properties).
+    fn map_value_schemas<'a>(variants_of: &[&'a Value]) -> Vec<&'a Value> {
+        variants_of
             .iter()
-            .any(|v| ["type", "enum", "const"].iter().any(|k| v.get(k).is_some()))
+            .flat_map(|v| ["additionalProperties", "unevaluatedProperties"].map(|k| v.get(k)))
+            .flatten()
+            .filter(|values| !matches!(values, Value::Bool(false)))
+            .collect()
     }
 
     fn push(out: &mut Vec<(String, Kind)>, path: &str, kind: Kind) {
@@ -1612,9 +1785,11 @@ mod schema_tests {
 
     /// Records what the value at `path`, described by `schema`, needs: its integers, an array
     /// (and what its elements need, at `{path}[]`), the properties of an object (under
-    /// `{path}.`) and map values, or [`Kind::Untyped`]. `name` is the field name of a property
-    /// and `None` for an array element, whose integers are [`Kind::IntegerElems`] and which is
-    /// never a tolerance (that check goes by field name).
+    /// `{path}.`) and map values, [`Kind::Untyped`], or [`Kind::TooDeep`] when the walk cannot
+    /// see all of it. Properties, elements and map values are walked whenever a variant lists
+    /// them, whatever its `type`. `name` is the field name of a property and `None` for an
+    /// array element, whose integers are [`Kind::IntegerElems`] and which is never a tolerance
+    /// (that check goes by field name).
     fn record(
         root: &Value,
         schema: &Value,
@@ -1627,12 +1802,14 @@ mod schema_tests {
             push(out, path, Kind::TooDeep);
             return;
         }
-        let mut vs = Vec::new();
-        variants(root, schema, 0, &mut vs);
-        if untyped(&vs) {
+        let vs = expand(root, schema);
+        if vs.too_deep {
+            push(out, path, Kind::TooDeep);
+        }
+        if vs.untyped {
             push(out, path, Kind::Untyped);
         }
-        let ts = types(&vs);
+        let ts = types(&vs.all);
         if ts.contains(&"integer") {
             let kind = if name.is_some() {
                 Kind::Integer
@@ -1644,47 +1821,57 @@ mod schema_tests {
         if ts.contains(&"number") && name.is_some_and(|n| n.contains("tol") || n.contains("eps")) {
             push(out, path, Kind::Tolerance);
         }
-        if ts.contains(&"array") {
+        if is_array(&vs) {
             push(out, path, Kind::Array);
             let elements = format!("{path}[]");
-            for item in element_schemas(&vs) {
+            for item in element_schemas(&vs.all) {
                 record(root, item, &elements, None, depth + 1, out);
             }
         }
-        if ts.contains(&"object") {
-            walk_properties(root, &vs, &format!("{path}."), depth + 1, out);
-            map_values(root, &vs, path, out);
-        }
+        walk_properties(root, &vs.all, &format!("{path}."), depth + 1, out);
+        map_values(root, &vs.all, path, out);
     }
 
-    /// Records [`Kind::MapValues`] at `path` when an object schema among `variants_of` is a map
-    /// (`additionalProperties` given as a schema) whose values are integers, arrays, objects or
-    /// any JSON.
+    /// Records [`Kind::MapValues`] at `path` when a schema among `variants_of` is a map (its
+    /// [`map_value_schemas`]) whose values are integers, arrays, objects or any JSON, and
+    /// [`Kind::TooDeep`] when the walk cannot see what they are.
     fn map_values(root: &Value, variants_of: &[&Value], path: &str, out: &mut Vec<(String, Kind)>) {
-        for values in variants_of
-            .iter()
-            .filter_map(|v| v.get("additionalProperties"))
-            .filter(|values| !matches!(values, Value::Bool(false)))
-        {
-            let mut vvs = Vec::new();
-            variants(root, values, 0, &mut vvs);
-            let vts = types(&vvs);
-            if untyped(&vvs)
-                || ["integer", "array", "object"]
+        for values in map_value_schemas(variants_of) {
+            let vvs = expand(root, values);
+            if vvs.too_deep {
+                push(out, path, Kind::TooDeep);
+            }
+            let vts = types(&vvs.all);
+            let object = vts.contains(&"object")
+                || vvs
+                    .all
                     .iter()
-                    .any(|t| vts.contains(t))
-            {
+                    .any(|v| v.get("properties").is_some() || !map_value_schemas(&[*v]).is_empty());
+            if vvs.untyped || vts.contains(&"integer") || is_array(&vvs) || object {
                 push(out, path, Kind::MapValues);
             }
         }
     }
 
     /// Walks one tool's input schema and returns every (path, kind) that must be classified.
+    ///
+    /// What the root itself needs is recorded at the empty path, which no rule can classify (a
+    /// rule path is never empty, [`classified`]): a root that may be any JSON or that the walk
+    /// cannot see, and a map at the root (a `#[serde(flatten)]` map) whatever its values, since
+    /// its keys are request fields the schema does not name.
     fn cost_properties(schema: &Value) -> Vec<(String, Kind)> {
-        let mut root = Vec::new();
-        variants(schema, schema, 0, &mut root);
+        let root = expand(schema, schema);
         let mut out = Vec::new();
-        walk_properties(schema, &root, "", 0, &mut out);
+        if root.too_deep {
+            push(&mut out, "", Kind::TooDeep);
+        }
+        if root.untyped {
+            push(&mut out, "", Kind::Untyped);
+        }
+        if !map_value_schemas(&root.all).is_empty() {
+            push(&mut out, "", Kind::MapValues);
+        }
+        walk_properties(schema, &root.all, "", 0, &mut out);
         out
     }
 
@@ -1715,7 +1902,8 @@ mod schema_tests {
                     Kind::TooDeep => {}
                 }
                 if !classified(&rules, &path, kind) {
-                    missing.push(format!("{tool}.{path} ({kind:?})"));
+                    let at = if path.is_empty() { "<root>" } else { &path };
+                    missing.push(format!("{tool}.{at} ({kind:?})"));
                 }
             }
         }
@@ -1723,7 +1911,8 @@ mod schema_tests {
             missing.is_empty(),
             "request fields without a limits rule (add a ParamRule or a reasoned Exempt in \
              tools/limits/rules.rs; the limits module documentation says which rule fits which \
-             kind; TooDeep means the walk stopped at MAX_DEPTH):\n{}",
+             kind; TooDeep means the walk stopped at MAX_DEPTH or MAX_REF_HOPS, and <root> \
+             that the request itself is a map or any JSON, which no rule can classify):\n{}",
             missing.join("\n")
         );
         eprintln!(
@@ -1733,11 +1922,13 @@ mod schema_tests {
         );
         // Sanity: a schema format change must not silently hide properties (the walker saw
         // 191 integer, 207 array, 10 tolerance, 7 integer-element and 1 untyped field when it
-        // learned element paths and untyped fields).
+        // learned element paths and untyped fields). Untyped fields have no floor: giving the
+        // last `serde_json::Value` request field a type would be an improvement, and
+        // `walker_reports_nested_arrays_tuple_elements_and_maps` shows they are found.
         assert!(
-            ints >= 150 && arrays >= 150 && tols >= 8 && elems >= 5 && untyped >= 1,
-            "walker saw {ints} integer, {arrays} array, {tols} tolerance, {elems} \
-             integer-element and {untyped} untyped fields"
+            ints >= 150 && arrays >= 150 && tols >= 8 && elems >= 5,
+            "walker saw {ints} integer, {arrays} array, {tols} tolerance and {elems} \
+             integer-element fields"
         );
     }
 
@@ -1804,7 +1995,8 @@ mod schema_tests {
                     Kind::MapValues => (path.as_str(), json!({})),
                     Kind::Untyped | Kind::TooDeep => continue,
                 };
-                if field.contains(['.', '[']) {
+                // nested paths, and the root's own entries at the empty path
+                if field.is_empty() || field.contains(['.', '[']) {
                     continue;
                 }
                 args.insert(field.to_string(), value);

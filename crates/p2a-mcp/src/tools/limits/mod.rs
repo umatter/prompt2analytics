@@ -41,14 +41,17 @@
 //! Add a [`ParamRule`] to `PARAM_RULES` in `rules.rs`: a generic `"*"` rule when the field name
 //! means the same thing in every tool, a tool-specific rule otherwise. The schema test in
 //! `rules.rs` (built with the `http` feature) fails and names each unclassified `(tool, path)`.
-//! It also fails on a field nested more than eight objects or arrays deep, below which it does
-//! not look, rather than skip it.
+//! It also fails, rather than skipping the field, when a field is nested deeper than the walk
+//! goes (`MAX_DEPTH` in the schema test, eight levels of objects or arrays).
 //!
-//! A field whose schema has no type (a `serde_json::Value`, which accepts any JSON) can only be
-//! `Exempt`; give each of its cost sub-fields a rule of its own by path, because the schema does
-//! not list them and the test cannot find them. A rule path cannot address the values of a map
-//! (`HashMap`, `BTreeMap`), so a map whose values are integers, arrays, objects or any JSON can
-//! only be `Exempt`; give a cost field a struct or a list instead. Do not give a cost field a
+//! A field that can hold any JSON can only be `Exempt`: a `serde_json::Value`, but also an
+//! untagged enum with a `Value` arm, or a field whose schema refers to a definition the test
+//! cannot find. Give each of its cost sub-fields a rule of its own by path, because the schema
+//! does not list them and the test cannot find them. A rule path cannot address the values of a
+//! map (`HashMap`, `BTreeMap`), so a map whose values are integers, arrays, objects or any JSON
+//! can only be `Exempt`; give a cost field a struct or a list instead. A map at the top level of
+//! a request (a `#[serde(flatten)]` map) cannot even be exempted, because a rule path is never
+//! empty, so the test fails on it whatever its values. Do not give a cost field a
 //! `#[serde(alias = ...)]`. If one is unavoidable, add the same rule for the alias name, because
 //! the schema, and so the schema test, does not list aliases.
 //!
@@ -734,14 +737,32 @@ fn magnitude_exceeds(u: Option<u64>, i: Option<i64>, f: Option<f64>, cap: u64) -
     }
 }
 
-/// True when a tolerance, given as the number's `f64` reading, is below `min`. A number with no
-/// `f64` reading is below every minimum, so the check fails closed.
+/// True when a tolerance, given as the number's `f64` reading, is refused against `min`: below
+/// it, NaN, or without an `f64` reading, so that the check fails closed.
 fn below_min_tolerance(f: Option<f64>, min: f64) -> bool {
     match f {
         Some(x) if x >= min => false,
         // `None` is reachable only with serde_json's `arbitrary_precision` feature (for example
-        // -1e400). A NaN reading, which JSON cannot produce, is refused as well.
+        // 1e400 or -1e400, which have no finite reading); `tolerance_refusal` words it so. A
+        // NaN reading, which JSON cannot produce, is refused as well.
         _ => true,
+    }
+}
+
+/// The refusal of the tolerance `shown` (the number as the request wrote it) at `path`.
+/// `readable` is false for a number with no `f64` reading, which may lie above the minimum as
+/// well as below it, so the message says it cannot be read instead.
+fn tolerance_refusal(path: &str, shown: &str, readable: bool, min: f64, tool_echo: &str) -> String {
+    if readable {
+        format!(
+            "Parameter `{path}` = {shown} is below this server's minimum of {min:e} \
+             (min_tolerance) for `{tool_echo}`. Use a larger tolerance such as 1e-8."
+        )
+    } else {
+        format!(
+            "Parameter `{path}` = {shown} cannot be read as a finite number by this server \
+             (min_tolerance) for `{tool_echo}`. Use a tolerance such as 1e-8."
+        )
     }
 }
 
@@ -824,6 +845,12 @@ impl Limits {
         let tool_echo = echo(tool);
         let mut values = Vec::new();
         for rule in select_rules(tool, rules) {
+            // An `Exempt` checks nothing. It is selected only so that a tool-specific one shadows
+            // a generic rule on its path; resolving it would walk every element of an exempt
+            // array path for no effect.
+            if matches!(rule.rule, Rule::Exempt(_)) {
+                continue;
+            }
             values.clear();
             resolve_path(args, rule.path, &mut values);
             for value in &values {
@@ -950,18 +977,13 @@ impl Limits {
                 let (Some(min), Some(n)) = (self.min_tolerance, value.as_number()) else {
                     return Ok(());
                 };
-                if !below_min_tolerance(n.as_f64(), min) {
+                let reading = n.as_f64();
+                if !below_min_tolerance(reading, min) {
                     return Ok(());
                 }
-                violation(
-                    n.to_string(),
-                    format!("{min:e}"),
-                    "min_tolerance",
-                    format!(
-                        "Parameter `{path}` = {n} is below this server's minimum of {min:e} \
-                         (min_tolerance) for `{tool_echo}`. Use a larger tolerance such as 1e-8."
-                    ),
-                )
+                let shown = n.to_string();
+                let message = tolerance_refusal(path, &shown, reading.is_some(), min, tool_echo);
+                violation(shown, format!("{min:e}"), "min_tolerance", message)
             }
             Rule::SquareLen => {
                 let (Some(cells), Some(items)) = (self.table_cells, value.as_array()) else {
@@ -1202,6 +1224,72 @@ mod tests {
         // the hosted minimum itself is accepted
         let h = Limits::hosted();
         assert!(h.check_with("t", &json!({"tol": 1e-15}), T).is_ok());
+    }
+
+    #[test]
+    fn a_tolerance_without_an_f64_reading_is_not_called_below_the_minimum() {
+        // 1e400 has no f64 reading either, and it is not below the minimum.
+        let unreadable = tolerance_refusal("tol", "1e400", false, 1e-15, "t");
+        assert!(
+            unreadable.contains("cannot be read as a finite number")
+                && !unreadable.contains("below"),
+            "{unreadable}"
+        );
+        let below = tolerance_refusal("tol", "1e-16", true, 1e-15, "t");
+        assert_eq!(
+            below,
+            "Parameter `tol` = 1e-16 is below this server's minimum of 1e-15 (min_tolerance) for \
+             `t`. Use a larger tolerance such as 1e-8."
+        );
+        // the refusal of a readable tolerance is that message
+        let v = Limits::hosted()
+            .check_with("t", &json!({"tol": 1e-16}), T)
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            tolerance_refusal("tol", &json!(1e-16).to_string(), true, 1e-15, "t")
+        );
+    }
+
+    #[test]
+    fn tool_specific_exempt_replaces_generic_rule_for_that_path() {
+        let table = &[
+            ParamRule {
+                tool: "*",
+                path: "reps",
+                rule: Rule::Max(Family::Replications),
+            },
+            ParamRule {
+                tool: "free",
+                path: "reps",
+                rule: Rule::Exempt("test"),
+            },
+            ParamRule {
+                tool: "*",
+                path: "grid[]",
+                rule: Rule::Exempt("test"),
+            },
+        ];
+        let h = Limits::hosted();
+        assert!(h.check_with("t", &json!({"reps": 10_001}), table).is_err());
+        assert!(
+            h.check_with("free", &json!({"reps": 10_001}), table)
+                .is_ok()
+        );
+        // an Exempt on an element path checks nothing
+        let grid = json!({"grid": vec![vec![1e30; 3]; 1_000]});
+        assert!(h.check_with("t", &grid, table).is_ok());
+        // check_with skips an Exempt, but it is still selected, and so shadows the generic rule
+        let selected = select_rules("free", table);
+        let on_reps = |r: &&ParamRule| r.path == "reps";
+        assert!(
+            selected
+                .iter()
+                .copied()
+                .filter(on_reps)
+                .all(|r| matches!(r.rule, Rule::Exempt(_)))
+        );
+        assert_eq!(selected.iter().copied().filter(on_reps).count(), 1);
     }
 
     #[test]
