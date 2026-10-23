@@ -130,9 +130,11 @@ The audit log is off unless the server runs with `P2A_AUDIT_LOG=true` (or
 at startup). When it is on, it writes one JSON line per executed tool call on
 every path, with `origin` `http`, `llm_tool`, `websocket` or `stdio`, one
 line for each call refused at admission (memory pressure, a busy session or a
-busy server), and one for each tool call of the assistant that is refused
-before it runs: `not_available` for an internal tool it is never offered,
-`unknown_tool` for a name no tool has.
+busy server), and one for each tool call of the assistant refused because it
+may not call that tool: `not_available` for an internal tool it is never
+offered, `unknown_tool` for a name no tool has. A call refused because its
+session no longer exists (on any path, including a chat whose session was
+removed while it ran) is not audited.
 
 Each entry records the timestamp, `session_id`, `origin`, `tool_name`, the
 sanitised `arguments`, `success`, `outcome` (`ok`, `tool_error`, `cancelled` or a
