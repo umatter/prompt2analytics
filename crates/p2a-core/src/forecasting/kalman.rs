@@ -16,7 +16,9 @@
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
-use crate::resource::{check_alloc, checked_len, checkpoint, checkpoint_stride, try_with_capacity};
+use crate::resource::{
+    check_alloc, checked_len, checkpoint, checkpoint_stride, overflow, try_with_capacity,
+};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
@@ -189,6 +191,12 @@ pub struct KalmanForecastResult {
 /// or [`EconError::Cancelled`] when the budget installed with
 /// [`crate::resource::with_budget`] is cancelled or past its deadline (checked
 /// about every 65,536 operations of the O(m³) steps).
+///
+/// The result keeps every step's predicted and filtered state and covariance,
+/// 2·n·(m² + m + 1) values for n observations and an m-dimensional state. That
+/// history is admitted as a whole before the first step: it is
+/// [`EconError::ResourceLimit`] when its size overflows or exceeds the
+/// per-allocation ceiling ([`crate::resource::set_alloc_ceiling_bytes`]).
 pub fn kalman_filter(
     y: &[f64],
     model: &StateSpaceModel,
@@ -219,13 +227,24 @@ pub fn kalman_filter(
         });
     }
 
+    // Every step stores P_{t|t-1} and P_{t|t}, both state vectors, the
+    // innovation and its variance. Admit the whole history before any work:
+    // the nested Vecs grow one m-vector at a time, so no single allocation
+    // would ever reach the per-allocation ceiling while the total grows
+    // without bound.
+    let what = format!(
+        "the Kalman filter's state and covariance history for {n} observations \
+         and a {m}-dimensional state"
+    );
+    check_alloc::<f64>(history_len(n, m, 2, 2, &what)?, &what)?;
+
     // Storage
-    let mut filtered_states = Vec::with_capacity(n);
-    let mut filtered_covs = Vec::with_capacity(n);
-    let mut predicted_states = Vec::with_capacity(n);
-    let mut predicted_covs = Vec::with_capacity(n);
-    let mut innovations = Vec::with_capacity(n);
-    let mut innovation_vars = Vec::with_capacity(n);
+    let mut filtered_states = try_with_capacity(n, &what)?;
+    let mut filtered_covs = try_with_capacity(n, &what)?;
+    let mut predicted_states = try_with_capacity(n, &what)?;
+    let mut predicted_covs = try_with_capacity(n, &what)?;
+    let mut innovations = try_with_capacity(n, &what)?;
+    let mut innovation_vars = try_with_capacity(n, &what)?;
 
     // Pre-compute R Q R'
     let state_dist_cov = model.state_disturbance_cov();
@@ -324,7 +343,9 @@ pub fn kalman_filter(
 ///
 /// `KalmanSmootherResult` with smoothed states and covariances, or
 /// [`EconError::Cancelled`] when the budget is cancelled or past its deadline
-/// (checked as in [`kalman_filter`]).
+/// (checked as in [`kalman_filter`]). Its n·(m² + m) values are admitted
+/// before any work, as the filter's history is: [`EconError::ResourceLimit`]
+/// when their size overflows or exceeds the per-allocation ceiling.
 pub fn kalman_smoother(
     filter_result: &KalmanFilterResult,
     model: &StateSpaceModel,
@@ -342,12 +363,21 @@ pub fn kalman_smoother(
         });
     }
 
-    let mut smoothed_states = vec![vec![0.0; m]; n];
-    let mut smoothed_covs = vec![vec![vec![0.0; m]; m]; n];
+    // α_{t|n} and P_{t|n} for every step: admit them before any work.
+    let what = format!(
+        "the Kalman smoother's state and covariance history for {n} observations \
+         and a {m}-dimensional state"
+    );
+    check_alloc::<f64>(history_len(n, m, 1, 0, &what)?, &what)?;
+
+    // Built backward from t = n - 1 and reversed at the end, so nothing of
+    // size n·m² is allocated or zero-filled before the first checkpoint.
+    let mut smoothed_states: Vec<Vec<f64>> = try_with_capacity(n, &what)?;
+    let mut smoothed_covs: Vec<Vec<Vec<f64>>> = try_with_capacity(n, &what)?;
 
     // Initialize with final filtered values
-    smoothed_states[n - 1] = filter_result.filtered_states[n - 1].clone();
-    smoothed_covs[n - 1] = filter_result.filtered_covs[n - 1].clone();
+    smoothed_states.push(filter_result.filtered_states[n - 1].clone());
+    smoothed_covs.push(filter_result.filtered_covs[n - 1].clone());
 
     // Backward recursion; each step costs O(m³) (a matrix inverse and products)
     let stride = checkpoint_stride(m.saturating_mul(m).saturating_mul(m));
@@ -359,8 +389,9 @@ pub fn kalman_smoother(
         let filtered_cov = nested_vec_to_array2(&filter_result.filtered_covs[t]);
         let predicted_state_next = vec_to_array1(&filter_result.predicted_states[t + 1]);
         let predicted_cov_next = nested_vec_to_array2(&filter_result.predicted_covs[t + 1]);
-        let smoothed_state_next = vec_to_array1(&smoothed_states[t + 1]);
-        let smoothed_cov_next = nested_vec_to_array2(&smoothed_covs[t + 1]);
+        // α_{t+1|n} and P_{t+1|n} were pushed last, at index `step`.
+        let smoothed_state_next = vec_to_array1(&smoothed_states[step]);
+        let smoothed_cov_next = nested_vec_to_array2(&smoothed_covs[step]);
 
         // Compute smoother gain
         // L = P_{t|t} T' P_{t+1|t}^{-1}
@@ -380,9 +411,13 @@ pub fn kalman_smoother(
         let cov_diff = &smoothed_cov_next - &predicted_cov_next;
         let smoothed_cov = &filtered_cov + &smoother_gain.dot(&cov_diff).dot(&smoother_gain.t());
 
-        smoothed_states[t] = smoothed_state.to_vec();
-        smoothed_covs[t] = array2_to_nested_vec(&smoothed_cov);
+        smoothed_states.push(smoothed_state.to_vec());
+        smoothed_covs.push(array2_to_nested_vec(&smoothed_cov));
     }
+
+    // Back to time order: index t holds α_{t|n} and P_{t|n}.
+    smoothed_states.reverse();
+    smoothed_covs.reverse();
 
     Ok(KalmanSmootherResult {
         smoothed_states,
@@ -487,6 +522,20 @@ pub fn kalman_loglik(
 }
 
 // Helper functions
+
+/// The number of `f64` values a Kalman pass keeps over `n` steps of an
+/// `m`-dimensional state when each step stores `pairs` (m × m covariance,
+/// m-vector state) pairs and `scalars` single values; `ResourceLimit` naming
+/// `what` when the count overflows.
+fn history_len(n: usize, m: usize, pairs: usize, scalars: usize, what: &str) -> EconResult<usize> {
+    let pair = checked_len(&[m, m], what)?
+        .checked_add(m)
+        .ok_or_else(|| overflow(what))?;
+    let per_step = checked_len(&[pairs, pair], what)?
+        .checked_add(scalars)
+        .ok_or_else(|| overflow(what))?;
+    checked_len(&[n, per_step], what)
+}
 
 fn outer_product(a: &Array1<f64>, b: &Array1<f64>) -> Array2<f64> {
     let m = a.len();
@@ -870,5 +919,174 @@ mod tests {
             Err(EconError::Cancelled(_))
         ));
         assert!(kalman_smoother(&f, &model).is_ok());
+    }
+
+    /// `m` independent random-walk states whose sum is observed with noise.
+    fn summed_random_walks(m: usize) -> StateSpaceModel {
+        StateSpaceModel::new(
+            Array2::eye(m),
+            Array1::from_elem(m, 1.0),
+            Array2::eye(m),
+            Array2::eye(m) * 0.1,
+            0.5,
+        )
+        .unwrap()
+    }
+
+    fn noisy_walk(n: usize, seed: u64) -> Vec<f64> {
+        use rand::{Rng, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut level = 3.0;
+        (0..n)
+            .map(|_| {
+                level += rng.r#gen::<f64>() - 0.5;
+                level + 0.7 * (rng.r#gen::<f64>() - 0.5)
+            })
+            .collect()
+    }
+
+    fn filter_summed_walks(y: &[f64], m: usize) -> EconResult<KalmanFilterResult> {
+        let model = summed_random_walks(m);
+        let init_state = Array1::zeros(m);
+        let init_cov = Array2::eye(m) * 10.0;
+        kalman_filter(y, &model, init_state.view(), init_cov.view())
+    }
+
+    #[test]
+    fn kalman_filter_admits_its_covariance_history_before_the_loop() {
+        // The filter keeps P_{t|t-1} and P_{t|t} for every step, 2·n·m² values,
+        // in nested Vecs that no allocation guard saw: at the hosted StructTS
+        // cap (BSM, period 1000, 2400 rows) the server's memory grew by tens
+        // of MB/s until the deadline. Under a per-allocation ceiling the history is now
+        // admitted (or refused) as a whole before the first step; before the
+        // fix this returned Ok.
+        let (n, m) = (50, 20);
+        let y = noisy_walk(n, 5);
+        // 2 · 50 · (20² + 20 + 1) · 8 bytes = 336,800 bytes > 64 KiB.
+        let refused =
+            crate::resource::with_alloc_ceiling(Some(64 << 10), || filter_summed_walks(&y, m));
+        match refused {
+            Err(EconError::ResourceLimit(msg)) => assert!(
+                msg.contains("Kalman filter")
+                    && msg.contains("50 observations")
+                    && msg.contains("20-dimensional state"),
+                "{msg}"
+            ),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        // A history under the ceiling (2 · 5 · 421 · 8 = 33,680 bytes) runs.
+        let short =
+            crate::resource::with_alloc_ceiling(Some(64 << 10), || filter_summed_walks(&y[..5], m));
+        assert_eq!(short.unwrap().filtered_covs.len(), 5);
+        // Without a ceiling nothing changes.
+        assert!(filter_summed_walks(&y, m).is_ok());
+    }
+
+    #[test]
+    fn kalman_smoother_admits_its_covariance_history_before_allocating() {
+        // The smoother zero-filled n·m² values with `vec!` before its first
+        // step. Before the fix this returned Ok under the ceiling.
+        let (n, m) = (50, 20);
+        let model = summed_random_walks(m);
+        let f = filter_summed_walks(&noisy_walk(n, 9), m).unwrap();
+        // 50 · (20² + 20) · 8 bytes = 168,000 bytes > 64 KiB.
+        let refused =
+            crate::resource::with_alloc_ceiling(Some(64 << 10), || kalman_smoother(&f, &model));
+        match refused {
+            Err(EconError::ResourceLimit(msg)) => assert!(
+                msg.contains("Kalman smoother") && msg.contains("50 observations"),
+                "{msg}"
+            ),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        assert!(
+            crate::resource::with_alloc_ceiling(Some(256 << 10), || kalman_smoother(&f, &model))
+                .is_ok()
+        );
+    }
+
+    /// The smoother as it was before it built its output backward: forward
+    /// indexed into zero-filled n·m² buffers.
+    fn reference_smoother(f: &KalmanFilterResult, model: &StateSpaceModel) -> KalmanSmootherResult {
+        let (n, m) = (f.n_obs, f.state_dim);
+        let mut states = vec![vec![0.0; m]; n];
+        let mut covs = vec![vec![vec![0.0; m]; m]; n];
+        states[n - 1] = f.filtered_states[n - 1].clone();
+        covs[n - 1] = f.filtered_covs[n - 1].clone();
+        for t in (0..n - 1).rev() {
+            let filtered_state = vec_to_array1(&f.filtered_states[t]);
+            let filtered_cov = nested_vec_to_array2(&f.filtered_covs[t]);
+            let predicted_state_next = vec_to_array1(&f.predicted_states[t + 1]);
+            let predicted_cov_next = nested_vec_to_array2(&f.predicted_covs[t + 1]);
+            let smoothed_state_next = vec_to_array1(&states[t + 1]);
+            let smoothed_cov_next = nested_vec_to_array2(&covs[t + 1]);
+            let (pred_cov_inv, _) = safe_inverse(&predicted_cov_next.view()).unwrap();
+            let gain = filtered_cov.dot(&model.transition.t()).dot(&pred_cov_inv);
+            let state =
+                &filtered_state + &gain.dot(&(&smoothed_state_next - &predicted_state_next));
+            let cov = &filtered_cov
+                + &gain
+                    .dot(&(&smoothed_cov_next - &predicted_cov_next))
+                    .dot(&gain.t());
+            states[t] = state.to_vec();
+            covs[t] = array2_to_nested_vec(&cov);
+        }
+        KalmanSmootherResult {
+            smoothed_states: states,
+            smoothed_covs: covs,
+            n_obs: n,
+            state_dim: m,
+        }
+    }
+
+    #[test]
+    fn kalman_smoother_matches_the_forward_indexed_reference() {
+        // The smoother now builds its output backward and reverses it instead
+        // of zero-filling n·m² values up front; the numbers must not change.
+        let trend = StateSpaceModel::new(
+            array![[1.0, 1.0], [0.0, 1.0]],
+            array![1.0, 0.0],
+            Array2::eye(2),
+            array![[0.1, 0.0], [0.0, 0.01]],
+            0.2,
+        )
+        .unwrap();
+        let mut y = noisy_walk(40, 21);
+        y[7] = f64::NAN;
+        y[8] = f64::NAN;
+        let trend_f = kalman_filter(
+            &y,
+            &trend,
+            array![y[0], 0.0].view(),
+            (Array2::eye(2) * 5.0).view(),
+        )
+        .unwrap();
+        let walks = summed_random_walks(6);
+        let walks_f = filter_summed_walks(&noisy_walk(30, 22), 6).unwrap();
+        let single_f = filter_summed_walks(&[1.3], 1).unwrap();
+        for (f, model) in [
+            (&trend_f, &trend),
+            (&walks_f, &walks),
+            (&single_f, &summed_random_walks(1)),
+        ] {
+            let got = kalman_smoother(f, model).unwrap();
+            let want = reference_smoother(f, model);
+            assert_eq!((got.n_obs, got.state_dim), (want.n_obs, want.state_dim));
+            assert_eq!(got.smoothed_states.len(), want.smoothed_states.len());
+            assert_eq!(got.smoothed_covs.len(), want.smoothed_covs.len());
+            for (a, b) in got.smoothed_states.iter().zip(&want.smoothed_states) {
+                for (x, z) in a.iter().zip(b) {
+                    assert!((x - z).abs() <= 1e-12, "{x} vs {z}");
+                }
+            }
+            for (a, b) in got.smoothed_covs.iter().zip(&want.smoothed_covs) {
+                for (ra, rb) in a.iter().zip(b) {
+                    for (x, z) in ra.iter().zip(rb) {
+                        assert!((x - z).abs() <= 1e-12, "{x} vs {z}");
+                    }
+                }
+            }
+        }
     }
 }
