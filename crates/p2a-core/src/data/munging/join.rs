@@ -80,7 +80,9 @@ impl JoinType {
 ///
 /// [`MungeError::JoinError`] for an empty `left_on`, a `right_on` of
 /// `Some(&[])`, or `left_on` and `right_on` of different lengths;
-/// [`MungeError::ColumnNotFound`] for a key missing from its dataset.
+/// [`MungeError::ColumnNotFound`] for a key missing from its dataset; any
+/// error polars raises while joining, such as key columns of different data
+/// types, is also returned as [`MungeError::JoinError`].
 ///
 /// # Example
 ///
@@ -184,8 +186,11 @@ fn join_keys<'a>(
 ///
 /// # Errors
 ///
-/// The keys are validated as in [`join`]: an empty `left_on`, or a
-/// `right_on` of `Some(&[])`, returns [`MungeError::JoinError`].
+/// Key errors as in [`join`] (empty, mismatched-length or missing keys).
+/// [`MungeError::JoinError`] when polars rejects the per-key count (a
+/// group-by, or the join of the two count tables, for example on key columns
+/// of different data types), or when the active resource budget's checkpoint
+/// stops the count (deadline or cancellation).
 ///
 /// # Example
 ///
@@ -279,9 +284,10 @@ pub fn estimate_join_rows(
 ///
 /// # Errors
 ///
-/// The keys are validated as in [`join`] before any estimate or join runs:
-/// an empty `left_on`, or a `right_on` of `Some(&[])`, returns
-/// [`MungeError::JoinError`].
+/// As in [`join`], with the keys checked before any estimate or join runs.
+/// With `opts.max_output_rows` set, also the errors of
+/// [`estimate_join_rows`], and [`MungeError::JoinError`] for a result above
+/// the ceiling.
 pub fn join_with(
     left: &Dataset,
     right: &Dataset,
@@ -327,6 +333,11 @@ pub fn join_with(
 
 /// Left join: Keep all rows from left, matching rows from right.
 ///
+/// # Errors
+///
+/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
+/// empty `left_on`.
+///
 /// # Example
 ///
 /// ```ignore
@@ -343,6 +354,11 @@ pub fn left_join(
 }
 
 /// Right join: Keep all rows from right, matching rows from left.
+///
+/// # Errors
+///
+/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
+/// empty `left_on`.
 ///
 /// # Example
 ///
@@ -361,6 +377,11 @@ pub fn right_join(
 
 /// Inner join: Keep only rows that match in both datasets.
 ///
+/// # Errors
+///
+/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
+/// empty `left_on`.
+///
 /// # Example
 ///
 /// ```ignore
@@ -377,6 +398,11 @@ pub fn inner_join(
 }
 
 /// Full (outer) join: Keep all rows from both datasets.
+///
+/// # Errors
+///
+/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
+/// empty `left_on`.
 ///
 /// # Example
 ///
@@ -395,6 +421,11 @@ pub fn full_join(
 
 /// Anti join: Keep rows from left that have NO match in right.
 ///
+/// # Errors
+///
+/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
+/// empty `left_on`.
+///
 /// # Example
 ///
 /// ```ignore
@@ -411,6 +442,11 @@ pub fn anti_join(
 }
 
 /// Semi join: Keep rows from left that have a match in right (no right columns added).
+///
+/// # Errors
+///
+/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
+/// empty `left_on`.
 ///
 /// # Example
 ///
@@ -760,6 +796,76 @@ mod tests {
                 .nrows(),
             3
         );
+    }
+
+    #[test]
+    fn join_errors_past_key_validation_are_join_errors() {
+        // The # Errors sections of join, estimate_join_rows and join_with name
+        // these paths; each one must come back as a JoinError, not a panic.
+        let l =
+            Dataset::new(df!("id" => [1i64, 2, 3, 4], "x" => [0.41, 1.37, 2.62, 3.18]).unwrap());
+        let r_str =
+            Dataset::new(df!("id" => ["1", "2", "3", "5"], "z" => [9.1, 8.4, 6.6, 4.9]).unwrap());
+        let r_f64 =
+            Dataset::new(df!("id" => [1.5, 2.5, 3.5, 5.5], "z" => [9.1, 8.4, 6.6, 4.9]).unwrap());
+        let r = Dataset::new(df!("id" => [1i64, 2, 3, 5], "z" => [9.1, 8.4, 6.6, 4.9]).unwrap());
+        let cap = |n| JoinOptions {
+            max_output_rows: Some(n),
+        };
+        let is_join_err = |res: MungeResult<Dataset>, what: &str| match res {
+            Err(MungeError::JoinError(_)) => {}
+            Err(e) => panic!("{what}: expected a JoinError, got {e}"),
+            Ok(_) => panic!("{what}: expected a JoinError, got a dataset"),
+        };
+
+        // Key columns of different data types: polars refuses the join.
+        for (rd, kind) in [(&r_str, "str"), (&r_f64, "f64")] {
+            is_join_err(join(&l, rd, &["id"], None, JoinType::Inner, None), kind);
+            is_join_err(
+                join_with(&l, rd, &["id"], None, JoinType::Inner, None, &cap(1_000)),
+                kind,
+            );
+            assert!(
+                matches!(
+                    estimate_join_rows(&l, rd, &["id"], None, JoinType::Inner),
+                    Err(MungeError::JoinError(_))
+                ),
+                "{kind}"
+            );
+        }
+
+        // Keys of different lengths.
+        is_join_err(
+            join(&l, &r, &["id", "x"], Some(&["id"]), JoinType::Left, None),
+            "length",
+        );
+
+        // A result above the ceiling (3 matched rows, ceiling 2).
+        is_join_err(
+            join_with(&l, &r, &["id"], None, JoinType::Inner, None, &cap(2)),
+            "ceiling",
+        );
+
+        // A cancelled budget stops the count, and with it a ceilinged join;
+        // without a ceiling no count runs and the join still completes.
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), || {
+            assert!(matches!(
+                estimate_join_rows(&l, &r, &["id"], None, JoinType::Inner),
+                Err(MungeError::JoinError(_))
+            ));
+            is_join_err(
+                join_with(&l, &r, &["id"], None, JoinType::Inner, None, &cap(1_000)),
+                "cancelled",
+            );
+            assert_eq!(
+                join(&l, &r, &["id"], None, JoinType::Inner, None)
+                    .unwrap()
+                    .nrows(),
+                3
+            );
+        });
     }
 
     fn make_orders() -> Dataset {
