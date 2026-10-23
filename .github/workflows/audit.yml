@@ -43,8 +43,8 @@ jobs:
       # --locked: test the committed Cargo.lock, the graph cargo audit reads.
       - name: Check exemption preconditions
         run: |
-          # RUSTSEC-2026-0235 affects rkyv 0.7.0-pre.2 through 0.8.16, so look for any
-          # compiled version in that range, not only 0.7.46.
+          # RUSTSEC-2026-0235 affects rkyv 0.7.0-pre.2 through 0.8.16, so look
+          # for any compiled version in that range, not only 0.7.46.
           if ! compiled=$(cargo tree --locked --workspace --all-features --target all \
               -e normal,build --prefix none --format '{p}'); then
             echo "::error::cargo tree failed, so the RUSTSEC-2026-0235 (rkyv) exemption cannot be checked."
@@ -71,10 +71,11 @@ jobs:
       # cargo audit exits non-zero on vulnerabilities. (It exits 0 on unmaintained,
       # unsound and yanked crates, which it reports as warnings.)
       #
-      # Exemptions live here, as flags, rather than in .cargo/audit.toml: .cargo/
-      # is gitignored, so a config file there never reaches CI and the job would
-      # stay red while looking configured. Each entry needs a reason and a
-      # condition for re-checking it; delete an entry as soon as it stops being
+      # Exemptions live here, as flags, rather than in .cargo/audit.toml:
+      # .cargo/ is gitignored, so a config file there never reaches CI and the
+      # job would stay red while looking configured. Each entry needs a reason
+      # and a condition for re-checking it; delete an entry, and its check in
+      # "Check exemption preconditions" if it has one, as soon as it stops being
       # true. A permanently red audit is one nobody reads, so an advisory that
       # does not apply here is exempted with its reason rather than left failing
       # the job. The "Check exemption preconditions" step above tests the rkyv
@@ -88,10 +89,11 @@ jobs:
       #   RUSTSEC-2026-0189  rmcp 0.8.5: DNS rebinding in the Streamable HTTP
       #     server transport, fixed in rmcp 1.4.0 (a breaking upgrade). Not
       #     compiled here: rmcp resolves to base64, default, macros, server,
-      #     transport-async-rw and transport-io, so the streamable-http transport
-      #     is absent. p2a-mcp's HTTP surface is its own axum server;
+      #     transport-async-rw and transport-io, so the streamable-http
+      #     transport is absent. p2a-mcp's HTTP surface is its own axum server;
       #     DNS-rebinding protection for it belongs there, not in rmcp. Re-check
-      #     if rmcp's features change; delete when rmcp >= 1.4.
+      #     if rmcp's features change; delete it, and the rmcp check above, when
+      #     rmcp >= 1.4.
       #
       #   RUSTSEC-2026-0235  rkyv 0.7.46: lockfile-only. rust_decimal names it in
       #     the weak feature `rkyv?/std`, but nothing enables rust_decimal's
