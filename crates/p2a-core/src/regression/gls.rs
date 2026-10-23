@@ -198,9 +198,9 @@ pub fn gls(
 
 /// Whitened data `(P y, P X)` for a whitening matrix `P` with `P'P = Ω⁻¹`.
 ///
-/// Any such `P` turns GLS into OLS on the transformed data. Every structure
-/// checks the cancellation budget first, including the identity, which
-/// otherwise runs no loop that would.
+/// Any such `P` turns GLS into OLS on the transformed data. Checks the
+/// cancellation budget before any structure-specific work (rho validation,
+/// the Cholesky factor, or the copy).
 fn whiten(
     y: &ArrayView1<f64>,
     x: &ArrayView2<f64>,
@@ -209,8 +209,12 @@ fn whiten(
     resource::checkpoint()?;
     let n = y.len();
     match structure {
-        // P = I: a plain copy, made through whiten_columns so it is fallible too
-        CorrelationStructure::Identity => Ok((y.to_owned(), whiten_columns(x, |_| Ok(()))?)),
+        // P = I: a plain copy, allocated fallibly like every other X*
+        CorrelationStructure::Identity => {
+            let mut x_star = resource::try_zeros2(n, x.ncols(), WHITENED_DESIGN)?;
+            x_star.assign(x);
+            Ok((y.to_owned(), x_star))
+        }
         CorrelationStructure::AR1 { rho } => {
             let rho = *rho;
             if !rho.is_finite() || rho.abs() >= 1.0 {
@@ -278,6 +282,9 @@ fn whiten(
     }
 }
 
+/// Allocation label for the whitened design `X*`, shared by every structure.
+const WHITENED_DESIGN: &str = "GLS whitened design";
+
 /// Apply a whitening transform to each column of `x`, checking the
 /// cancellation budget once per column. The output is allocated fallibly.
 fn whiten_columns(
@@ -285,7 +292,7 @@ fn whiten_columns(
     mut transform: impl FnMut(&mut [f64]) -> EconResult<()>,
 ) -> EconResult<Array2<f64>> {
     let (n, p) = x.dim();
-    let mut x_star = resource::try_zeros2(n, p, "GLS whitened design")?;
+    let mut x_star = resource::try_zeros2(n, p, WHITENED_DESIGN)?;
     let mut col = vec![0.0; n];
     for j in 0..p {
         resource::checkpoint()?;
