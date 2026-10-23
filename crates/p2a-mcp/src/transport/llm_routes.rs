@@ -1908,12 +1908,12 @@ mod disconnect_tests {
         ));
         let release = Arc::new(AtomicBool::new(false));
         let _release_on_exit = Release(release.clone());
-        let holding = Arc::new(AtomicBool::new(false));
-        let (rel, held) = (release.clone(), holding.clone());
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let rel = release.clone();
         let (g, s) = (governor.clone(), session.clone());
         let holder = tokio::spawn(async move {
             g.run_blocking(&s, "hold", move |_budget| {
-                held.store(true, Ordering::SeqCst);
+                let _ = held_tx.send(());
                 while !rel.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -1921,14 +1921,11 @@ mod disconnect_tests {
             })
             .await
         });
-        // Wait (bounded) until the holder has the permit, so the governed
-        // call below cannot take it first.
-        let mut waited = 0;
-        while !holding.load(Ordering::SeqCst) {
-            assert!(waited < 2_000, "the permit holder never started");
-            waited += 1;
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        // The holder has the permit before the governed call below is
+        // spawned, so that call cannot take it first. Should run_blocking
+        // return without running the closure, the sender is dropped and
+        // this fails at once instead of hanging.
+        held_rx.await.expect("the permit holder never started");
 
         let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(100);
         let executor = StreamingToolExecutor::new(
