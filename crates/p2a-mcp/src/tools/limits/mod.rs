@@ -25,12 +25,26 @@
 //!
 //! # Classifying a new request field
 //!
-//! Every integer field, every array field and every float field whose name contains `tol` or
-//! `eps` of every registered tool must be matched by a rule. Add a [`ParamRule`] to
-//! `PARAM_RULES` in `rules.rs`: a generic `"*"` rule when the field name means the same thing in
-//! every tool, a tool-specific rule otherwise, or `Rule::Exempt` with the reason the field costs
-//! nothing. The schema test in `rules.rs` (built with the `http` feature) fails and names each
-//! unclassified `(tool, path)`.
+//! These request fields of every registered tool must be matched by a rule:
+//!
+//! - an integer field, by [`Rule::Max`] with a numeric family (not [`Family::StringBytes`]);
+//! - a float field whose name contains `tol` or `eps`, by [`Rule::Tolerance`] or a numeric
+//!   [`Rule::Max`];
+//! - an array field, an array element that is itself an array (`a[]`) or a tuple, by
+//!   [`Rule::ArrayLen`], [`Rule::UniqueList`] or [`Rule::SquareLen`];
+//! - the integer elements of an array (`Vec<usize>`, a tuple of integers), by
+//!   [`Rule::ArrayElemMax`] on the array's path;
+//! - any of these, alternatively, by `Rule::Exempt` with the reason the value costs nothing.
+//!
+//! Add a [`ParamRule`] to `PARAM_RULES` in `rules.rs`: a generic `"*"` rule when the field name
+//! means the same thing in every tool, a tool-specific rule otherwise. The schema test in
+//! `rules.rs` (built with the `http` feature) fails and names each unclassified `(tool, path)`.
+//!
+//! A rule path cannot address the values of a map (`HashMap`, `BTreeMap`), so a map whose values
+//! are integers, arrays or objects can only be `Exempt`; give a cost field a struct or a list
+//! instead. Do not give a cost field a `#[serde(alias = ...)]`. If one is unavoidable, add the
+//! same rule for the alias name, because the schema, and so the schema test, does not list
+//! aliases.
 //!
 //! # Installation
 //!

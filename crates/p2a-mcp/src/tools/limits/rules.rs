@@ -26,10 +26,9 @@ const fn row(tool: &'static str, class: RowClass) -> RowRule {
 //    index in another.
 // 3. Every `Exempt` states why the field costs nothing (it selects, indexes or shrinks work, or a
 //    closed-form formula uses it). The schema test in this file requires every integer field,
-//    every array field and every `tol`/`eps` float field of every tool to be matched here.
-//
-// The list covers every integer property, every array property and every `tol`/`eps` float of
-// the tool schemas at d6a3a3b.
+//    every array field (arrays nested in arrays and tuples included), the integer elements of
+//    every array and every `tol`/`eps` float field of every tool to be matched here; the module
+//    documentation (`Classifying a new request field`) says which rules match which.
 
 /// Every classified request field (see the classification rules above).
 pub static PARAM_RULES: &[ParamRule] = {
@@ -262,6 +261,13 @@ pub static PARAM_RULES: &[ParamRule] = {
             "sections[].content[].stats",
             ArrayLen(ListLength),
         ),
+        p(
+            "generate_report",
+            "sections[].content[].stats[]",
+            Exempt(
+                "[key, value] pair; the handler reads the first two strings and ignores the rest",
+            ),
+        ),
         p("gformula", "time_points", Max(ListLength)),
         p(
             "gformula",
@@ -286,6 +292,11 @@ pub static PARAM_RULES: &[ParamRule] = {
             Exempt("cell count in a closed-form statistic"),
         ),
         p("hypothesis_poisson", "x", ArrayLen(ListLength)),
+        p(
+            "hypothesis_poisson",
+            "x",
+            Exempt("event counts used only in closed-form distribution functions"),
+        ),
         p("hypothesis_poisson", "t", ArrayLen(ListLength)),
         p(
             "hypothesis_prop_trend_test",
@@ -317,12 +328,24 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("munge_bin", "labels[]", Max(StringBytes)),
         p("munge_cast", "casts", ArrayLen(ListLength)),
         p(
+            "munge_cast",
+            "casts[]",
+            Exempt("[column, dtype] pair; the handler refuses any other length"),
+        ),
+        p(
             "munge_diff",
             "periods",
             Exempt("polars shift; cost is bounded by the column length"),
         ),
         p("munge_filter", "value", Max(StringBytes)),
         p("munge_group_by", "aggs", ArrayLen(ListLength)),
+        p(
+            "munge_group_by",
+            "aggs[]",
+            Exempt(
+                "[column, function] pair; the handler reads the first two strings and ignores the rest",
+            ),
+        ),
         p("munge_join", "suffix", Max(StringBytes)),
         p(
             "munge_lag_lead",
@@ -332,6 +355,11 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("munge_mutate", "left", Max(StringBytes)),
         p("munge_mutate", "right", Max(StringBytes)),
         p("munge_rename", "renames", ArrayLen(ListLength)),
+        p(
+            "munge_rename",
+            "renames[]",
+            Exempt("[old, new] pair; the handler reads the first two strings and ignores the rest"),
+        ),
         p("munge_sample", "n", Max(GeneratedRows)),
         p(
             "power_anova_test",
@@ -381,6 +409,11 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("stats_loglin", "eps", Tolerance),
         p("stats_loglin", "margins", ArrayLen(ListLength)),
         p("stats_loglin", "margins[]", ArrayLen(ListLength)),
+        p(
+            "stats_loglin",
+            "margins[]",
+            Exempt("factor indices, each checked against the number of factors"),
+        ),
         p("stats_se_contrast", "contrasts", ArrayLen(ListLength)),
         p("stats_se_contrast", "contrasts[]", ArrayLen(ListLength)),
         p("str_concat", "columns", ArrayLen(ListLength)),
@@ -496,22 +529,32 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("ts_varma", "p", Max(ModelOrder)),
         p("ts_varma", "q", Max(ModelOrder)),
         p("viz_dendrogram", "linkage_matrix", SquareLen),
+        p(
+            "viz_dendrogram",
+            "linkage_matrix[]",
+            Exempt("linkage row; the handler reads the first four values and ignores the rest"),
+        ),
         p("viz_dendrogram", "labels", ArrayLen(ArrayLength)),
     ]
 };
 
 /// Tools whose dataset height is limited, by [`RowClass`]. All take the dataset in `dataset`.
 ///
-/// Deliberately not row-limited, because their wave-2 packages remove the superlinear cost:
-/// `hypothesis_cor_test` (Kendall), `stats_ecdf`, `timeseries_cpgram`, `ml_ctree`,
-/// `treatment_twang`, `treatment_sbw`, `bacon_decomp`, `regression_gls` (AR(1) and CS closed
-/// forms; a user-supplied correlation relies on the per-allocation ceiling), `panel_gls`,
-/// `moran_test`, `spatial_lm_tests_tool` and `spatial_neighbors`.
+/// Deliberately not row-limited, because their cost is close to linear in the row count:
+/// `hypothesis_cor_test` (Kendall's tau by sort and merge), `stats_ecdf` (evaluation by binary
+/// search), `timeseries_cpgram` (an FFT periodogram), `ml_ctree` (splits from one sort and
+/// running sums), `treatment_twang` (features sorted once, stumps swept with prefix sums),
+/// `treatment_sbw` (solved in the dimension of the balance constraints), `bacon_decomp` (cell
+/// sums, no dense design), `regression_gls` (O(n) whitening for each of its correlation
+/// structures), `panel_gls` (a T x T covariance with T at most N, linear work per entity),
+/// `moran_test` and `spatial_lm_tests_tool` (traces from the sparse W) and `spatial_neighbors`
+/// (a k-d tree, bounded by `spatial_links`).
 pub static ROW_RULES: &[RowRule] = &[
     // Dense: clustering.rs:829-830 keeps the condensed n(n-1)/2 f64 distance matrix.
     row("ml_hierarchical", RowClass::Dense),
     row("ml_cutree", RowClass::Dense),
-    // Dense: neighbour lists of up to n^2 indices (ML-23).
+    // Dense class: each neighbourhood query can return all n rows, so clustering takes O(n^2)
+    // time when eps covers the data (memory is O(n)).
     row("ml_dbscan", RowClass::Dense),
     // Dense: smooth_spline.rs:377 allocates the n x n penalty `vec![vec![0.0; n]; n]`.
     row("regression_smooth_spline", RowClass::Dense),
@@ -530,9 +573,11 @@ pub static ROW_RULES: &[RowRule] = &[
     row("spatial_panel_gmm", RowClass::Cubic),
     // Quadratic: nearest-neighbour search over all controls.
     row("propensity_matching", RowClass::Quadratic),
-    // Quadratic: O(B n^2) matching permutations (ECON-10).
+    // Quadratic: with matching, each of the B permutations compares every unit with every unit
+    // of the other group, O(B n^2).
     row("heterogeneity_test", RowClass::Quadratic),
-    // Quadratic: SMO over all pairs (ML-39; still O(n^2) after T0-WP15's error cache).
+    // Quadratic: an SMO sweep examines each of the n rows, and every step it takes updates the
+    // cached errors of all n rows.
     row("ml_svm", RowClass::Quadratic),
     // Quadratic: loess.rs:240-290 fits each point on its span * n nearest neighbours.
     row("regression_loess", RowClass::Quadratic),
@@ -609,15 +654,14 @@ mod tests {
         }
     }
 
-    /// Request values reproduced as process aborts or endless loops in the review (X-1, TOOL-1,
-    /// CAUS-3/4/6/8, ECON-9/10/18, ML-3/4/39, REG-1/2, SPAT-21, STAT-7/9/43, TS-3, TOOL-2,
-    /// DATA-3/5).
+    /// Values far above each family cap are refused in the hosted profile, naming the parameter
+    /// and the override key, and accepted when limits are off.
     #[test]
-    fn reviewed_abort_and_hang_values_are_refused_in_hosted_profile() {
+    fn values_far_above_each_cap_are_refused_in_hosted_profile() {
         let cases: &[(&str, Value, &str, &str)] = &[
             (
                 "timeseries_arma_to_ma",
-                json!({"lag_max": 10_000_000_000u64, "ar": [0.5], "ma": [0.3]}),
+                json!({"lag_max": 10_000_000_000u64}),
                 "lag_max",
                 "lags",
             ),
@@ -743,7 +787,7 @@ mod tests {
             ),
             (
                 "scpi",
-                json!({"variance_method": "kfold_cv", "cv_folds": 1_000_000_000_000_000_000u64}),
+                json!({"cv_folds": 1_000_000_000_000_000_000u64}),
                 "cv_folds",
                 "folds",
             ),
@@ -953,7 +997,7 @@ mod tests {
             ),
             (
                 "viz_dendrogram",
-                json!({"width": 65_536, "height": 65_536}),
+                json!({"width": 65_536}),
                 "width",
                 "image_dimension",
             ),
@@ -984,7 +1028,7 @@ mod tests {
             );
             assert!(Limits::off().check_tool_arguments(tool, args).is_ok());
         }
-        // TOOL-2 / STAT-43 / STAT-70 / DATA-5: shape-driven allocations
+        // shape-driven sizes: square results, duplicate names, array lengths, string bytes
         assert_eq!(
             hosted("linalg_toeplitz", json!({"column": vec![1.0; 1_001]}))
                 .unwrap_err()
@@ -1182,16 +1226,129 @@ mod tests {
 /// Fail-closed guarantee: every cost-bearing field of every registered tool has a rule.
 #[cfg(all(test, feature = "http"))]
 mod schema_tests {
-    use super::super::{Limits, Rule, rules_for};
+    use super::super::{Family, Limits, Rule, rules_for};
     use super::{PARAM_RULES, ROW_RULES};
     use crate::server::AnalyticsServer;
     use serde_json::{Value, json};
 
+    /// What a schema walk found at a path, and so which rules can classify it.
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum Kind {
+        /// An integer field.
         Integer,
+        /// A float field whose name contains `tol` or `eps`.
         Tolerance,
+        /// An array: a field, an element of an array (`a[]`) or a tuple.
         Array,
+        /// The integer elements of the array at the path.
+        IntegerElems,
+        /// A map whose values are integers, arrays or objects. No rule path can address map
+        /// values, so only `Exempt` classifies it.
+        MapValues,
+    }
+
+    /// True when `rule`, on the path where the walk found `kind`, checks that value (or exempts
+    /// it). `Max(StringBytes)` checks only strings, `ArrayElemMax` only the elements of an array.
+    fn classifies(kind: Kind, rule: Rule) -> bool {
+        match (kind, rule) {
+            (_, Rule::Exempt(_)) => true,
+            (Kind::Integer, Rule::Max(f)) => f != Family::StringBytes,
+            (Kind::Tolerance, Rule::Tolerance) => true,
+            (Kind::Tolerance, Rule::Max(f)) => f != Family::StringBytes,
+            (Kind::Array, Rule::ArrayLen(_) | Rule::UniqueList(_) | Rule::SquareLen) => true,
+            (Kind::IntegerElems, Rule::ArrayElemMax(_)) => true,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn classification_matches_what_check_value_checks() {
+        use Family::{Lags, ListLength, StringBytes};
+        assert!(classifies(Kind::Integer, Rule::Max(Lags)));
+        assert!(!classifies(Kind::Integer, Rule::Max(StringBytes)));
+        assert!(classifies(Kind::Tolerance, Rule::Tolerance));
+        assert!(classifies(Kind::Tolerance, Rule::Max(Lags)));
+        assert!(!classifies(Kind::Tolerance, Rule::Max(StringBytes)));
+        assert!(classifies(Kind::Array, Rule::ArrayLen(ListLength)));
+        assert!(classifies(Kind::Array, Rule::UniqueList(ListLength)));
+        assert!(classifies(Kind::Array, Rule::SquareLen));
+        assert!(!classifies(Kind::Array, Rule::ArrayElemMax(Lags)));
+        assert!(classifies(Kind::IntegerElems, Rule::ArrayElemMax(Lags)));
+        assert!(!classifies(Kind::IntegerElems, Rule::ArrayLen(ListLength)));
+        assert!(!classifies(Kind::MapValues, Rule::ArrayLen(ListLength)));
+        for kind in [
+            Kind::Integer,
+            Kind::Tolerance,
+            Kind::Array,
+            Kind::IntegerElems,
+            Kind::MapValues,
+        ] {
+            assert!(classifies(kind, Rule::Exempt("reviewed")));
+        }
+        // the runtime agrees: StringBytes ignores numbers, ArrayElemMax ignores an array's length
+        let h = Limits::hosted();
+        let t = &[super::super::ParamRule {
+            tool: "*",
+            path: "n",
+            rule: Rule::Max(StringBytes),
+        }];
+        assert!(h.check_with("t", &json!({"n": 1e30}), t).is_ok());
+        let t = &[super::super::ParamRule {
+            tool: "*",
+            path: "a",
+            rule: Rule::ArrayElemMax(Lags),
+        }];
+        assert!(
+            h.check_with("t", &json!({"a": vec![1; 100_000]}), t)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn walker_reports_nested_arrays_tuple_elements_and_maps() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "counts": {"type": "array", "items": {"type": "integer"}},
+                "pairs": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+                "grid": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+                "window": {"type": "array",
+                           "prefixItems": [{"type": "integer"}, {"type": "integer"}]},
+                "legacy": {"type": "array",
+                           "items": [{"type": "string"}, {"$ref": "#/$defs/Lens"}]},
+                "reps": {"type": "object", "additionalProperties": {"type": "integer"}},
+                "names": {"type": "object", "additionalProperties": {"type": "string"}},
+                "tables": {"type": "array",
+                           "items": {"type": "object", "additionalProperties": {"type": "array"}}},
+                "closed": {"type": "object", "additionalProperties": false,
+                           "properties": {"k": {"type": ["integer", "null"]}}}
+            },
+            "$defs": {"Lens": {"type": "array", "items": {"type": "integer"}}}
+        });
+        let mut found = cost_properties(&schema);
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let found: Vec<(&str, Kind)> = found.iter().map(|(p, k)| (p.as_str(), *k)).collect();
+        assert_eq!(
+            found,
+            [
+                ("closed.k", Kind::Integer),
+                ("counts", Kind::Array),
+                ("counts", Kind::IntegerElems),
+                ("grid", Kind::Array),
+                ("grid[]", Kind::Array),
+                ("grid[]", Kind::IntegerElems),
+                ("legacy", Kind::Array),
+                ("legacy[]", Kind::Array),
+                ("legacy[]", Kind::IntegerElems),
+                ("pairs", Kind::Array),
+                ("pairs[]", Kind::Array),
+                ("reps", Kind::MapValues),
+                ("tables", Kind::Array),
+                ("tables[]", Kind::MapValues),
+                ("window", Kind::Array),
+                ("window", Kind::IntegerElems),
+            ]
+        );
     }
 
     /// Most `$ref` hops followed from one schema.
@@ -1244,6 +1401,34 @@ mod schema_tests {
         out
     }
 
+    fn push(out: &mut Vec<(String, Kind)>, path: &str, kind: Kind) {
+        if !out.iter().any(|(p, k)| p == path && *k == kind) {
+            out.push((path.to_string(), kind));
+        }
+    }
+
+    /// The element schemas of an array: `items` (one schema, or a list of tuple positions) and
+    /// `prefixItems` (tuple positions).
+    fn element_schemas<'a>(variants: &[&'a Value]) -> Vec<&'a Value> {
+        let mut out = Vec::new();
+        for v in variants {
+            match v.get("items") {
+                Some(Value::Array(positions)) => out.extend(positions),
+                Some(items @ Value::Object(_)) => out.push(items),
+                _ => {}
+            }
+            out.extend(
+                v.get("prefixItems")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        out
+    }
+
+    /// Records the object properties of `schema` (and maps, see [`Kind::MapValues`]) under
+    /// `prefix`.
     fn walk(
         root: &Value,
         schema: &Value,
@@ -1265,27 +1450,74 @@ mod schema_tests {
                 let mut pvs = Vec::new();
                 variants(root, prop, 0, &mut pvs);
                 let ts = types(&pvs);
-                let mut push = |kind: Kind| {
-                    if !out.iter().any(|(p, k)| *p == path && *k == kind) {
-                        out.push((path.clone(), kind));
-                    }
-                };
                 if ts.contains(&"integer") {
-                    push(Kind::Integer);
+                    push(out, &path, Kind::Integer);
                 }
                 if ts.contains(&"number") && (name.contains("tol") || name.contains("eps")) {
-                    push(Kind::Tolerance);
+                    push(out, &path, Kind::Tolerance);
                 }
                 if ts.contains(&"array") {
-                    push(Kind::Array);
-                    for items in pvs.iter().filter_map(|v| v.get("items")) {
-                        walk(root, items, &format!("{path}[]."), depth + 1, out);
+                    push(out, &path, Kind::Array);
+                    for item in element_schemas(&pvs) {
+                        walk_elements(root, item, &path, depth + 1, out);
                     }
                 }
                 if ts.contains(&"object") {
                     walk(root, prop, &format!("{path}."), depth + 1, out);
+                    map_values(root, &pvs, &path, out);
                 }
             }
+        }
+    }
+
+    /// Records [`Kind::MapValues`] at `path` when an object schema among `variants` is a map
+    /// (`additionalProperties` given as a schema) whose values are integers, arrays or objects.
+    fn map_values(root: &Value, variants_of: &[&Value], path: &str, out: &mut Vec<(String, Kind)>) {
+        for values in variants_of
+            .iter()
+            .filter_map(|v| v.get("additionalProperties"))
+        {
+            let mut vvs = Vec::new();
+            variants(root, values, 0, &mut vvs);
+            let vts = types(&vvs);
+            if ["integer", "array", "object"]
+                .iter()
+                .any(|t| vts.contains(t))
+            {
+                push(out, path, Kind::MapValues);
+            }
+        }
+    }
+
+    /// Records what the elements of the array at `path` (each described by `item`) need: their
+    /// integer values ([`Kind::IntegerElems`] on `path`), an inner array (`{path}[]`) or the
+    /// properties of an object element (under `{path}[].`).
+    fn walk_elements(
+        root: &Value,
+        item: &Value,
+        path: &str,
+        depth: usize,
+        out: &mut Vec<(String, Kind)>,
+    ) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let mut ivs = Vec::new();
+        variants(root, item, 0, &mut ivs);
+        let ts = types(&ivs);
+        if ts.contains(&"integer") {
+            push(out, path, Kind::IntegerElems);
+        }
+        if ts.contains(&"array") {
+            let inner = format!("{path}[]");
+            push(out, &inner, Kind::Array);
+            for inner_item in element_schemas(&ivs) {
+                walk_elements(root, inner_item, &inner, depth + 1, out);
+            }
+        }
+        if ts.contains(&"object") {
+            walk(root, item, &format!("{path}[]."), depth + 1, out);
+            map_values(root, &ivs, &format!("{path}[]"), out);
         }
     }
 
@@ -1308,7 +1540,8 @@ mod schema_tests {
     fn every_cost_property_of_every_tool_is_classified() {
         let tools = tools();
         assert!(tools.len() >= 250, "walker saw {} tools", tools.len());
-        let (mut ints, mut arrays, mut tols, mut missing) = (0, 0, 0, Vec::new());
+        let (mut ints, mut arrays, mut tols, mut elems, mut maps) = (0, 0, 0, 0, 0);
+        let mut missing = Vec::new();
         for (tool, schema) in &tools {
             let rules = rules_for(tool);
             for (path, kind) in cost_properties(schema) {
@@ -1316,22 +1549,13 @@ mod schema_tests {
                     Kind::Integer => ints += 1,
                     Kind::Array => arrays += 1,
                     Kind::Tolerance => tols += 1,
+                    Kind::IntegerElems => elems += 1,
+                    Kind::MapValues => maps += 1,
                 }
-                let ok = rules.iter().filter(|r| r.path == path).any(|r| {
-                    matches!(
-                        (kind, r.rule),
-                        (_, Rule::Exempt(_))
-                            | (Kind::Integer, Rule::Max(_))
-                            | (Kind::Tolerance, Rule::Tolerance | Rule::Max(_))
-                            | (
-                                Kind::Array,
-                                Rule::ArrayLen(_)
-                                    | Rule::ArrayElemMax(_)
-                                    | Rule::UniqueList(_)
-                                    | Rule::SquareLen,
-                            )
-                    )
-                });
+                let ok = rules
+                    .iter()
+                    .filter(|r| r.path == path)
+                    .any(|r| classifies(kind, r.rule));
                 if !ok {
                     missing.push(format!("{tool}.{path} ({kind:?})"));
                 }
@@ -1340,18 +1564,22 @@ mod schema_tests {
         assert!(
             missing.is_empty(),
             "request fields without a limits rule (add a ParamRule or a reasoned Exempt in \
-             tools/limits/rules.rs):\n{}",
+             tools/limits/rules.rs; the limits module documentation says which rule fits which \
+             kind):\n{}",
             missing.join("\n")
         );
         eprintln!(
-            "schema walker: {} tools, {ints} integer, {arrays} array, {tols} tolerance fields",
+            "schema walker: {} tools, {ints} integer, {arrays} array, {tols} tolerance, {elems} \
+             integer-element and {maps} map fields",
             tools.len()
         );
-        // Sanity: a schema format change must not silently hide properties
-        // (counts at d6a3a3b: 191 / 199 / 10).
+        // Sanity: a schema format change must not silently hide properties (the walker saw
+        // 191 integer, 207 array, 10 tolerance and 7 integer-element fields when it learned
+        // nested arrays and tuples).
         assert!(
-            ints >= 150 && arrays >= 150 && tols >= 8,
-            "walker saw {ints} integer, {arrays} array, {tols} tolerance fields"
+            ints >= 150 && arrays >= 150 && tols >= 8 && elems >= 5,
+            "walker saw {ints} integer, {arrays} array, {tols} tolerance, {elems} \
+             integer-element fields"
         );
     }
 
@@ -1408,12 +1636,15 @@ mod schema_tests {
                 if path.contains(['.', '[']) {
                     continue;
                 }
+                // `IntegerElems` follows `Array` for the same path and replaces its value.
                 args.insert(
                     path,
                     match kind {
                         Kind::Integer => json!(1),
                         Kind::Tolerance => json!(1e-6),
                         Kind::Array => json!([]),
+                        Kind::IntegerElems => json!([1]),
+                        Kind::MapValues => json!({}),
                     },
                 );
             }
