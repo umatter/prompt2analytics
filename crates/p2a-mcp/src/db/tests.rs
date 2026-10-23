@@ -1343,6 +1343,93 @@ async fn a_write_after_a_dropped_add_or_create_finds_the_cap_reached() {
     assert!(outcomes.is_empty(), "{outcomes:#?}");
 }
 
+/// How [`a_clear_after_a_dropped_write_waits_for_it`] changes a
+/// conversation before its clear.
+#[derive(Debug, Clone, Copy)]
+enum RowWrite {
+    /// [`DbConnection::update_conversation_title`].
+    Title,
+    /// [`DbConnection::set_conversation_archived`].
+    Archive,
+    /// [`DbConnection::update_message_content`].
+    Content,
+}
+
+/// A title change, an archive or a content update whose caller is dropped
+/// while the store writes it keeps the conversation's turn until the store
+/// is done: a clear sent at once after it waits for it and succeeds on
+/// RocksDB, the write lands, and the byte counter stays in step with the
+/// store. Before, the turn ended with the dropped caller, and the clear's
+/// transaction ran alongside the write still in the store and failed on a
+/// write conflict when it committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clear_after_a_dropped_write_waits_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = PersistenceLimits {
+        session_db_bytes: Some(100_000),
+        ..Default::default()
+    };
+    let db = engine_db(Engine::RocksDb, dir.path(), limits).await;
+    let writes = [RowWrite::Title, RowWrite::Archive, RowWrite::Content];
+    let mut ids = Vec::new();
+    for write in writes {
+        ids.push(filled_conversation(&db, "s1", &format!("{write:?}")).await);
+    }
+    // The clear's own counter reset sleeps as well, so its transaction is
+    // still open when a write that ran alongside it commits.
+    slow_writes(&db, "conversations", "UPDATE", 200).await;
+    slow_writes(&db, "messages", "UPDATE", 200).await;
+    let mut problems = Vec::new();
+    for (write, id) in writes.into_iter().zip(&ids) {
+        // The content update fills the server's empty placeholder for its
+        // answer, as a chat stream does.
+        let placeholder = db.get_messages(id).await.unwrap();
+        let placeholder = placeholder.iter().find(|m| m.content.is_empty()).unwrap();
+        let message_id = placeholder.id_string();
+        let call = async {
+            match write {
+                RowWrite::Title => db
+                    .update_conversation_title(id, "renamed")
+                    .await
+                    .map(|_| ()),
+                RowWrite::Archive => db.set_conversation_archived(id, true).await.map(|_| ()),
+                RowWrite::Content => db
+                    .update_message_content(&message_id, "a final answer")
+                    .await
+                    .map(|_| ()),
+            }
+        };
+        drop_while_running(write, call).await;
+        let cleared = db.clear_messages(id).await;
+        if !matches!(cleared, Ok(21)) {
+            problems.push(format!("{write:?}: clear: {cleared:?}"));
+        }
+        let conv = db.get_conversation(id).await.unwrap();
+        let landed = match write {
+            RowWrite::Title => conv.title == "renamed",
+            RowWrite::Archive => conv.is_archived,
+            RowWrite::Content => true,
+        };
+        if !landed {
+            problems.push(format!("{write:?}: the write was lost"));
+        }
+        let listed = (conv.message_count, conv.last_message_preview);
+        let stored = db.count_messages(id).await.unwrap();
+        if listed != (0, None) || stored != 0 {
+            problems.push(format!("{write:?}: listed {listed:?}, stored {stored}"));
+        }
+        let in_store = db.session_stored_bytes("s1").await.unwrap();
+        let counted = db.session_bytes_entry("s1");
+        if counted != Some(in_store) {
+            problems.push(format!(
+                "{write:?}: counted {counted:?} bytes, stored {in_store}"
+            ));
+        }
+        assert_eq!(db.store_turns_in_use(), 0);
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
 /// Store a message for `conversation_id` directly, without the existence
 /// check of `add_message` (a write that raced the conversation's delete, or
 /// a row from before the process started).

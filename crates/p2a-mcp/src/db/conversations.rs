@@ -92,54 +92,64 @@ impl DbConnection {
     /// Update a conversation's title. A title longer than `message_bytes` is
     /// `TooLarge`; with a `session_db_bytes` budget, the bytes the new title
     /// adds count against it (`QuotaExceeded` when they would pass it).
-    /// Runs in the conversation's turn, like every write of its row.
+    /// Runs in the conversation's turn, like every write of its row, in a
+    /// task a dropped caller does not stop ([`run_to_end`]).
     pub async fn update_conversation_title(
         &self,
         id: &str,
         title: &str,
     ) -> Result<Conversation, DbError> {
         self.check_message_bytes("title", "title", title.len())?;
-        // In the turn, the write cannot conflict with a message add's
-        // counter update, and a delete cannot run between the bytes and the
-        // write.
-        let _turn = self.conversation_turn(id).await;
-        if self.tracks_session_bytes() {
-            let conv = self.get_conversation(id).await?;
-            let added = title.len().saturating_sub(conv.title.len());
-            self.reserve_session_bytes(&conv.session_id, added as u64)
+        let db = self.clone();
+        let (id, title) = (id.to_string(), title.to_string());
+        run_to_end(async move {
+            // In the turn, the write cannot conflict with a message add's
+            // counter update, and a delete cannot run between the bytes and
+            // the write.
+            let _turn = db.conversation_turn(&id).await;
+            if db.tracks_session_bytes() {
+                let conv = db.get_conversation(&id).await?;
+                let added = title.len().saturating_sub(conv.title.len());
+                db.reserve_session_bytes(&conv.session_id, added as u64)
+                    .await?;
+            }
+            let mut result = db
+                .db()
+                .query("UPDATE conversations SET title = $title, updated_at = time::now() WHERE id = $id RETURN AFTER")
+                .bind(("id", RecordId::from(("conversations", id.as_str()))))
+                .bind(("title", title))
                 .await?;
-        }
-        let id_owned = id.to_string();
-        let mut result = self
-            .db()
-            .query("UPDATE conversations SET title = $title, updated_at = time::now() WHERE id = $id RETURN AFTER")
-            .bind(("id", RecordId::from(("conversations", id_owned.as_str()))))
-            .bind(("title", title.to_string()))
-            .await?;
 
-        let updated: Option<Conversation> = result.take(0)?;
-        updated.ok_or_else(|| DbError::NotFound(format!("Conversation not found: {}", id)))
+            let updated: Option<Conversation> = result.take(0)?;
+            updated.ok_or_else(|| DbError::NotFound(format!("Conversation not found: {}", id)))
+        })
+        .await
     }
 
     /// Archive or unarchive a conversation, in its turn (like every write of
     /// its row, so that it cannot conflict with a message add's counter
-    /// update).
+    /// update) and in a task a dropped caller does not stop
+    /// ([`run_to_end`]).
     pub async fn set_conversation_archived(
         &self,
         id: &str,
         is_archived: bool,
     ) -> Result<Conversation, DbError> {
-        let _turn = self.conversation_turn(id).await;
-        let id_owned = id.to_string();
-        let mut result = self
-            .db()
-            .query("UPDATE conversations SET is_archived = $archived, updated_at = time::now() WHERE id = $id RETURN AFTER")
-            .bind(("id", RecordId::from(("conversations", id_owned.as_str()))))
-            .bind(("archived", is_archived))
-            .await?;
+        let db = self.clone();
+        let id = id.to_string();
+        run_to_end(async move {
+            let _turn = db.conversation_turn(&id).await;
+            let mut result = db
+                .db()
+                .query("UPDATE conversations SET is_archived = $archived, updated_at = time::now() WHERE id = $id RETURN AFTER")
+                .bind(("id", RecordId::from(("conversations", id.as_str()))))
+                .bind(("archived", is_archived))
+                .await?;
 
-        let updated: Option<Conversation> = result.take(0)?;
-        updated.ok_or_else(|| DbError::NotFound(format!("Conversation not found: {}", id)))
+            let updated: Option<Conversation> = result.take(0)?;
+            updated.ok_or_else(|| DbError::NotFound(format!("Conversation not found: {}", id)))
+        })
+        .await
     }
 
     /// Delete a conversation and all its messages and tool calls, in one
@@ -464,10 +474,12 @@ impl DbConnection {
     /// the bytes the session has left (possibly to the empty string).
     ///
     /// The bytes, the update and the conversation's recount run in the
-    /// conversation's turn, so a delete or clear of the conversation runs
+    /// conversation's turn, in a task a dropped caller does not stop
+    /// ([`run_to_end`]), so a delete or clear of the conversation runs
     /// before them (the message is `NotFound` and nothing is counted) or
     /// after them (it releases the new content's bytes, and a clear resets
     /// the preview).
+    ///
     /// An error from the conversation's counter and preview update comes
     /// after the message row was written: the new content is stored, and
     /// only the conversation's `message_count` and preview are stale.
@@ -478,33 +490,37 @@ impl DbConnection {
     ) -> Result<Message, DbError> {
         let mut content = self.truncate_server_text(content);
         let conversation_id = self.get_message(message_id).await?.conversation_id;
-        let _turn = self.conversation_turn(&conversation_id).await;
-        if self.tracks_session_bytes() {
-            // Read again in the turn: a clear that ran before it took the
-            // message, and its bytes must not be counted for a write that
-            // finds no row.
-            self.get_message(message_id).await?;
-            let conv = self.get_conversation(&conversation_id).await?;
-            content = self.fit_session_bytes(&conv.session_id, content).await?;
-        }
-        let msg_id_owned = message_id.to_string();
-        let mut result = self
-            .db()
-            .query("UPDATE messages SET content = $content WHERE id = $id RETURN AFTER")
-            .bind(("id", RecordId::from(("messages", msg_id_owned.as_str()))))
-            .bind(("content", content.clone()))
-            .await?;
+        let db = self.clone();
+        let message_id = message_id.to_string();
+        run_to_end(async move {
+            let _turn = db.conversation_turn(&conversation_id).await;
+            if db.tracks_session_bytes() {
+                // Read again in the turn: a clear that ran before it took the
+                // message, and its bytes must not be counted for a write that
+                // finds no row.
+                db.get_message(&message_id).await?;
+                let conv = db.get_conversation(&conversation_id).await?;
+                content = db.fit_session_bytes(&conv.session_id, content).await?;
+            }
+            let mut result = db
+                .db()
+                .query("UPDATE messages SET content = $content WHERE id = $id RETURN AFTER")
+                .bind(("id", RecordId::from(("messages", message_id.as_str()))))
+                .bind(("content", content))
+                .await?;
 
-        let updated: Option<Message> = result.take(0)?;
-        let Some(msg) = updated else {
-            return Err(DbError::NotFound(format!(
-                "Message not found: {}",
-                message_id
-            )));
-        };
-        self.update_conversation_after_message(&msg.conversation_id, &content)
-            .await?;
-        Ok(msg)
+            let updated: Option<Message> = result.take(0)?;
+            let Some(msg) = updated else {
+                return Err(DbError::NotFound(format!(
+                    "Message not found: {}",
+                    message_id
+                )));
+            };
+            db.update_conversation_after_message(&msg.conversation_id, &msg.content)
+                .await?;
+            Ok(msg)
+        })
+        .await
     }
 
     /// Get a message by ID

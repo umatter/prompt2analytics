@@ -136,11 +136,7 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// `messages_per_conversation` check until the message is written, and a
 /// conversation creation holds its session's turn from the
 /// `conversations_per_session` check until the row is written, so concurrent
-/// writes cannot pass a cap together. Both run in a task of their own
-/// ([`run_to_end`]), as a conversation delete or clear does, so a caller
-/// dropped while the store writes does not end the turn before the store is
-/// done (the store finishes a query it was sent; the next call would count
-/// the rows before that row is committed). Both checks count the rows in the
+/// writes cannot pass a cap together. Both checks count the rows in the
 /// store under the turn (`count_messages`, `count_conversations`): the
 /// conversation's stored `message_count` is a display counter, recounted
 /// under the turn after each message add or content update, and never what
@@ -150,6 +146,14 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// and the write. The byte counter is per process, and so are the turns. An
 /// entry leaves the map with its last holder or waiter, also when a waiting
 /// call is cancelled.
+///
+/// Every call that takes a turn holds it in a task of its own
+/// ([`run_to_end`]) until the store has finished the writes made in it. The
+/// store finishes a query it was sent even when the caller is dropped (an
+/// HTTP client that disconnects), so a turn that ended with the caller would
+/// let the next call count the rows before the dropped call's row is
+/// committed, or run its transaction alongside the dropped call's write
+/// (on RocksDB, one of the two then fails on a write conflict).
 pub(crate) struct StoreTurn {
     turns: StoreTurns,
     key: String,
