@@ -240,9 +240,12 @@ impl DbConnection {
     /// (`NotFound`), `message_bytes` (`TooLarge`), `messages_per_conversation`
     /// and `session_db_bytes` (`QuotaExceeded`; the bytes are counted).
     ///
-    /// Call it during the conversation's turn
-    /// ([`conversation_turn`](DbConnection::conversation_turn)) and keep the turn until
-    /// the message is written and counted, so that concurrent adds cannot
+    /// The `messages_per_conversation` check counts the conversation's
+    /// message rows ([`count_messages`](Self::count_messages)); the stored
+    /// `message_count` is only what the conversation list shows. Call it
+    /// during the conversation's turn
+    /// ([`conversation_turn`](DbConnection::conversation_turn)) and keep the
+    /// turn until the message is written, so that concurrent adds cannot
     /// pass `messages_per_conversation` together.
     async fn admit_message(
         &self,
@@ -253,7 +256,7 @@ impl DbConnection {
         let conv = self.get_conversation(conversation_id).await?;
         self.check_message_bytes("message", "message", content_len)?;
         if let Some(max) = self.limits().messages_per_conversation {
-            let n = usize::try_from(conv.message_count).unwrap_or(0);
+            let n = self.count_messages(conversation_id).await?;
             if n >= max {
                 return Err(DbError::QuotaExceeded(format!(
                     "this conversation already has {n} messages, the most this server keeps; \
@@ -266,28 +269,36 @@ impl DbConnection {
         Ok(conv)
     }
 
-    /// Update conversation metadata after adding a message
+    /// The number of message rows conversation `conversation_id` holds, as
+    /// the store counts them now; a failed count is an error.
+    pub(crate) async fn count_messages(&self, conversation_id: &str) -> Result<usize, DbError> {
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            count: i64,
+        }
+        let mut result = self
+            .db()
+            .query("SELECT count() FROM messages WHERE conversation_id = $id GROUP ALL")
+            .bind(("id", conversation_id.to_string()))
+            .await?
+            .check()?;
+        let count: Option<CountResult> = result.take(0)?;
+        Ok(count.map_or(0, |c| usize::try_from(c.count).unwrap_or(0)))
+    }
+
+    /// Update conversation metadata after a message was added or changed:
+    /// the stored `message_count` (a recount) and the preview. Call it
+    /// during the conversation's turn
+    /// ([`conversation_turn`](DbConnection::conversation_turn)), so that the
+    /// recount and its write are not interleaved with another call's; a
+    /// failed recount or write is an error.
     pub(crate) async fn update_conversation_after_message(
         &self,
         conversation_id: &str,
         message_preview: &str,
     ) -> Result<(), DbError> {
-        let conv_id_owned = conversation_id.to_string();
-
-        // Get current message count
-        let mut result = self
-            .db()
-            .query("SELECT count() FROM messages WHERE conversation_id = $id GROUP ALL")
-            .bind(("id", conv_id_owned))
-            .await?;
-
-        #[derive(serde::Deserialize)]
-        struct CountResult {
-            count: i64,
-        }
-
-        let count: Option<CountResult> = result.take(0)?;
-        let message_count = count.map(|c| c.count as i32).unwrap_or(0);
+        let message_count =
+            i32::try_from(self.count_messages(conversation_id).await?).unwrap_or(i32::MAX);
 
         // Truncate preview if needed
         let preview = if message_preview.len() > 100 {
@@ -303,7 +314,8 @@ impl DbConnection {
             .bind(("id", RecordId::from(("conversations", conv_id.as_str()))))
             .bind(("count", message_count))
             .bind(("preview", preview))
-            .await?;
+            .await?
+            .check()?;
 
         Ok(())
     }
@@ -417,7 +429,10 @@ impl DbConnection {
         let updated: Option<Message> = result.take(0)?;
 
         if let Some(msg) = &updated {
-            // Update conversation metadata with new preview
+            // Update conversation metadata with new preview, in the
+            // conversation's turn so that the recount cannot interleave with
+            // a concurrent add's.
+            let _turn = self.conversation_turn(&msg.conversation_id).await;
             self.update_conversation_after_message(&msg.conversation_id, &content)
                 .await?;
         }
@@ -449,19 +464,10 @@ impl DbConnection {
             }
             None => {
                 // Count messages before deletion
-                #[derive(serde::Deserialize)]
-                struct CountResult {
-                    count: i64,
-                }
-                let mut result = self
-                    .db()
-                    .query("SELECT count() FROM messages WHERE conversation_id = $id GROUP ALL")
-                    .bind(("id", conversation_id.to_string()))
-                    .await?;
-                let count: Option<CountResult> = result.take(0)?;
+                let count = self.count_messages(conversation_id).await?;
                 self.delete_conversation_rows(conversation_id, false, &mut Removed::default())
                     .await?;
-                count.map(|c| c.count as u32).unwrap_or(0)
+                u32::try_from(count).unwrap_or(u32::MAX)
             }
         };
 
@@ -470,7 +476,8 @@ impl DbConnection {
         self.db()
             .query("UPDATE conversations SET message_count = 0, last_message_preview = NONE, updated_at = time::now() WHERE id = $id")
             .bind(("id", RecordId::from(("conversations", conv_id.as_str()))))
-            .await?;
+            .await?
+            .check()?;
 
         Ok(deleted_count)
     }

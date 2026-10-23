@@ -606,6 +606,110 @@ async fn a_failed_dataset_meta_delete_keeps_the_session() {
     assert_eq!(db.get_datasets_for_session("s1").await.unwrap().len(), 1);
 }
 
+/// The message cap counts the conversation's message rows, not its stored
+/// `message_count`: a counter left one or more below the truth (a recount
+/// that lost a write) does not let a message past the cap.
+#[tokio::test]
+async fn the_message_cap_counts_the_stored_messages() {
+    let db = limited_db(PersistenceLimits {
+        messages_per_conversation: Some(2),
+        ..Default::default()
+    })
+    .await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    db.add_message(&id, "user", "first").await.unwrap();
+    db.add_message(&id, "assistant", "second").await.unwrap();
+    db.db()
+        .query("UPDATE conversations SET message_count = 0 WHERE id = $id")
+        .bind((
+            "id",
+            surrealdb::RecordId::from(("conversations", id.as_str())),
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(db.get_conversation(&id).await.unwrap().message_count, 0);
+
+    assert!(matches!(
+        db.add_message(&id, "user", "third").await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+    let saved = Message::user(id.clone(), "saved".into());
+    assert!(matches!(
+        db.save_message(&saved).await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+    assert_eq!(db.count_messages(&id).await.unwrap(), 2);
+}
+
+/// A failed write of a conversation's counters is reported: a message add,
+/// a content update and a clear do not answer Ok when the conversation row
+/// cannot be updated.
+#[tokio::test]
+async fn a_failed_counter_write_is_reported() {
+    let db = test_db().await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    let kept = db.add_message(&id, "user", "kept").await.unwrap();
+    // Every update of a conversation row now fails inside the store.
+    db.db()
+        .query(
+            "DEFINE EVENT refuse_update ON TABLE conversations WHEN $event = 'UPDATE' \
+             THEN { THROW 'refused' }",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    assert!(db.add_message(&id, "user", "more").await.is_err());
+    assert!(
+        db.update_message_content(&kept.id_string(), "changed")
+            .await
+            .is_err()
+    );
+    assert!(db.clear_messages(&id).await.is_err());
+    assert_eq!(db.store_turns_in_use(), 0);
+}
+
+/// A content update recounts the conversation in its turn: while another
+/// call holds the turn, the message row changes but the conversation's
+/// counters wait.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_content_update_recounts_in_the_conversations_turn() {
+    let db = test_db().await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    let message_id = db
+        .add_message(&id, "user", "kept")
+        .await
+        .unwrap()
+        .id_string();
+
+    let turn = db.conversation_turn(&id).await;
+    let update = tokio::spawn({
+        let (db, message_id) = (db.clone(), message_id.clone());
+        async move { db.update_message_content(&message_id, "changed").await }
+    });
+    // Poll until the message row has changed (bounded; no timing assertion).
+    let mut changed = false;
+    for _ in 0..500 {
+        if db.get_message(&message_id).await.unwrap().content == "changed" {
+            changed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(changed);
+    let conv = db.get_conversation(&id).await.unwrap();
+    assert_eq!(conv.last_message_preview.as_deref(), Some("kept"));
+
+    drop(turn);
+    update.await.unwrap().unwrap();
+    let conv = db.get_conversation(&id).await.unwrap();
+    assert_eq!(conv.last_message_preview.as_deref(), Some("changed"));
+    assert_eq!(conv.message_count, 1);
+}
+
 /// Store a message for `conversation_id` directly, without the existence
 /// check of `add_message` (a write that raced the conversation's delete, or
 /// a row from before the process started).

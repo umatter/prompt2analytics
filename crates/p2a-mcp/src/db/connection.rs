@@ -130,11 +130,15 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// counter, and RocksDB fails one of them with a write conflict. Taking
 /// turns makes the later call find nothing instead. A message add holds the
 /// turn from its `messages_per_conversation` check until the message is
-/// counted, and a conversation creation holds its session's turn from the
+/// written, and a conversation creation holds its session's turn from the
 /// `conversations_per_session` check until the row is written, so concurrent
-/// writes cannot pass a cap together. The counter is per process, and so
-/// are the turns. An entry leaves the map with its last holder or waiter,
-/// also when a waiting call is cancelled.
+/// writes cannot pass a cap together. Both checks count the rows in the
+/// store under the turn (`count_messages`, `count_conversations`): the
+/// conversation's stored `message_count` is a display counter, recounted
+/// under the turn after each message add or content update, and never what
+/// a cap is checked against. The byte counter is per process, and so are
+/// the turns. An entry leaves the map with its last holder or waiter, also
+/// when a waiting call is cancelled.
 pub(crate) struct StoreTurn {
     turns: StoreTurns,
     key: String,
