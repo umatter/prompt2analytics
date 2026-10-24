@@ -715,6 +715,58 @@ async fn a_parquet_file_with_shared_column_chunks_is_not_loaded() {
     assert!(!listed.to_string().contains("shared"), "{listed}");
 }
 
+#[tokio::test]
+async fn a_parquet_chunk_that_declares_a_negative_count_is_not_loaded() {
+    // A struct of booleans whose column chunk's footer count is negative.
+    // polars takes the count as an unsigned size and reserves room for that
+    // many values before it decodes a nested chunk; in a release build the
+    // allocation fails and the process aborts. Pre-fix the check before
+    // decoding counted the chunk as empty and admitted the file. It is
+    // refused as unreadable, through both tools, and nothing is loaded.
+    use polars::prelude::{IntoSeries, StructChunked};
+    let dir = data_dir();
+    let path = dir.path().join("negative.parquet");
+    let flags = Series::new("b".into(), [true, false, true, true]);
+    let s = StructChunked::from_series("s".into(), 4, [flags].iter())
+        .unwrap()
+        .into_series();
+    let mut df = DataFrame::new(vec![s.into()]).unwrap();
+    write_parquet(&mut df, &path);
+    rewrite_footer(&path, |footer| {
+        for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+            chunk.meta_data.as_mut().unwrap().num_values = -1;
+        }
+    });
+    let content = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&path).unwrap());
+    let (app, _) = app_with_quota(8 * MIB).await;
+    for (tool, args) in [
+        (
+            "upload_dataset",
+            json!({"content": content, "filename": "negative.parquet"}),
+        ),
+        (
+            "load_dataset",
+            json!({"path": path.to_string_lossy(), "name": "negative"}),
+        ),
+    ] {
+        let sid = new_session(&app).await;
+        let (status, body) = call(&app, &sid, tool, args).await;
+        assert_eq!(status, StatusCode::OK, "{tool}: {body}");
+        assert_eq!(body["data"]["success"], json!(false), "{tool}: {body}");
+        let text = body.to_string();
+        assert!(
+            text.contains("declares a negative number of values"),
+            "{tool}: {body}"
+        );
+        assert!(text.contains("Nothing was loaded"), "{tool}: {body}");
+        let (_, listed) = call(&app, &sid, "list_datasets", json!({})).await;
+        assert!(
+            listed.to_string().contains("No datasets currently loaded"),
+            "{tool}: {listed}"
+        );
+    }
+}
+
 /// The `upload_*.parquet` files in the server's temporary folder that hold
 /// exactly `bytes`.
 fn uploads_holding(bytes: &[u8]) -> usize {

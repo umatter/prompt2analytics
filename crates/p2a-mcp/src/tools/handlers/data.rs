@@ -157,8 +157,10 @@ struct DecodedBound {
     /// The least the dataset quotas charge for the dataset once it is
     /// decoded.
     dataset: u64,
-    /// The decoder's own buffers on top of the dataset while it decodes,
-    /// freed once the file is loaded (see [`chunk_transient`]).
+    /// The decoder's own buffers on top of the dataset while it decodes:
+    /// what it decompresses and decodes into, freed once the file is
+    /// loaded, and the room it reserves for a nested chunk's declared
+    /// entries (see [`chunk_transient`]).
     transient: u64,
 }
 
@@ -187,8 +189,10 @@ struct DecodedBound {
 ///
 /// `Ok(None)` when the footer cannot be read; the loader then reports the
 /// file's error. `Err` says why the file is not read: its column chunks
-/// overlap or pass its end (see [`check_chunk_ranges`]), or the call was
-/// cancelled or passed its deadline while the page headers were read.
+/// overlap or pass its end (see [`check_chunk_ranges`]), one of them
+/// declares a negative number of values (see [`check_chunk_counts`]), or
+/// the call was cancelled or passed its deadline while the page headers
+/// were read.
 fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
     let Ok(file) = std::fs::File::open(path) else {
         return Ok(None);
@@ -214,6 +218,12 @@ fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
             .flat_map(|group| group.byte_ranges_iter()),
         file_len,
     )?;
+    check_chunk_counts(
+        metadata
+            .row_groups
+            .iter()
+            .flat_map(|group| group.parquet_columns().iter().map(|c| c.num_values())),
+    )?;
     let columns: Vec<(&str, DataType)> = schema
         .iter_values()
         .map(|field| (field.name.as_str(), DataType::from_arrow_field(field)))
@@ -231,10 +241,10 @@ fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
             let chunks = group.columns_under_root_iter(name).into_iter().flatten();
             for (i, chunk) in chunks.enumerate() {
                 let read = walk.chunk(chunk.byte_range(), chunk.num_values())?;
+                // Not negative: check_chunk_counts refused the file.
+                let declared = u64::try_from(chunk.num_values()).unwrap_or(0);
                 leaves.push(LeafChunks {
-                    entries: u64::try_from(chunk.num_values())
-                        .unwrap_or(0)
-                        .max(read.entries),
+                    entries: declared.max(read.entries),
                     page_bytes: u64::try_from(chunk.uncompressed_size())
                         .unwrap_or(0)
                         .max(read.page_bytes),
@@ -248,6 +258,7 @@ fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
                     leaf_types.get(i).copied(),
                     codec != polars_parquet_format::CompressionCodec::UNCOMPRESSED,
                     dtype.is_nested(),
+                    declared,
                 ));
             }
             dataset = dataset.saturating_add(least_value_bytes(
@@ -262,6 +273,19 @@ fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
         dataset: dataset.saturating_add(structure),
         transient: largest_sum(transients, decode_threads()),
     }))
+}
+
+/// Refuse a file a column chunk of which declares a negative number of
+/// values (`counts`, the chunks' footer entries). No writer produces one:
+/// polars' page reader converts the count to an unsigned size as it is
+/// (`PageReader::total_num_values`), and before it decodes a nested
+/// column's chunk reserves room for that many values, nearly `usize::MAX`
+/// of them.
+fn check_chunk_counts(mut counts: impl Iterator<Item = i64>) -> Result<(), String> {
+    if counts.any(|count| count < 0) {
+        return Err("a column chunk of the file declares a negative number of values".to_string());
+    }
+    Ok(())
 }
 
 /// Refuse a file of `file_len` bytes whose column chunks (their byte
@@ -333,29 +357,42 @@ struct ChunkPages {
 const LEVEL_BYTES: u64 = 4;
 
 /// The decoder's own buffers while it decodes one column chunk, from what
-/// its page headers declare (`read`), for the leaf type `leaf` (`None` when
-/// the schema has fewer leaves than the footer has columns, counted as
-/// text), freed once the chunk is decoded. polars sizes each from what the
-/// headers declare before it decompresses or decodes the page, so a page
-/// that declares gigabytes gets them, whatever it holds:
+/// its page headers declare (`read`) and its footer entry declares
+/// (`declared`), for the leaf type `leaf` (`None` when the schema has fewer
+/// leaves than the footer has columns, counted as text). polars sizes each
+/// from what the headers or the footer declare before it decompresses or
+/// decodes a page, so a chunk that declares gigabytes gets them, whatever
+/// it holds:
 /// - a compressed chunk's pages are decompressed into buffers of the size
 ///   their headers declare, zero-filled first (so resident): one for the
 ///   data pages, reused and grown to the largest, and one for the
 ///   dictionary page;
 /// - the dictionary is decoded whole, whatever the rows: room for each
 ///   entry its header declares at the leaf's width (a view for text,
-///   Categorical included) and a byte, and a text dictionary's bytes copied
-///   out of its page;
+///   Categorical included), a text dictionary's bytes copied out of its
+///   page, and the byte per declared entry that reading the dictionary page
+///   reserves for every leaf type (`BasicDecompressor::read_dict_page`'s
+///   `Vec::with_capacity`);
 /// - a nested column's pages have their levels decoded whole, into buffers
-///   grown to the page with the most entries.
+///   grown to the page with the most entries;
+/// - a nested column's chunk has room reserved for the entries its footer
+///   declares, at the leaf's width and a validity bit each, before any of
+///   its pages is decoded (`collect_nested`), and its values grow to the
+///   entries its pages declare where those are more. That room becomes the
+///   decoded chunk, but it is reserved whatever the column holds once
+///   loaded (an array of size zero holds no values), so it counts here
+///   rather than in the dataset's part. A flat column's reservation is
+///   bounded by its rows, which the dataset's part counts.
 ///
 /// These count for every leaf type, fixed-width ones included, whose
-/// dataset charge does not grow with their pages.
+/// dataset charge does not grow with their pages. Only the decompression
+/// and decoding buffers are freed once the chunk is decoded.
 fn chunk_transient(
     read: &ChunkPages,
     leaf: Option<&DataType>,
     compressed: bool,
     nested: bool,
+    declared: u64,
 ) -> u64 {
     let decompressed = if compressed {
         read.largest_page.saturating_add(read.dict_bytes)
@@ -371,7 +408,9 @@ fn chunk_transient(
             | DataType::Categorical(_, _)
             | DataType::Enum(_, _),
         ) => (session::VIEW_BYTES, true),
-        // polars decodes no dictionary for a Boolean column.
+        // polars builds no dictionary for a Boolean column, but still
+        // reserves a byte per declared entry when it reads the dictionary
+        // page (`read_dict_page`).
         Some(DataType::Boolean) => (0, false),
         Some(other) => (leaf_value_bytes(other, 1), false),
     };
@@ -379,14 +418,23 @@ fn chunk_transient(
         .saturating_add(1)
         .saturating_mul(read.dict_entries)
         .saturating_add(if text { read.dict_bytes } else { 0 });
-    let levels = if nested {
-        LEVEL_BYTES.saturating_mul(read.most_page_entries)
+    let (levels, reserved) = if nested {
+        let entries = declared.max(read.entries);
+        let values = match leaf {
+            Some(leaf) => leaf_value_bytes(leaf, entries),
+            None => session::VIEW_BYTES.saturating_mul(entries),
+        };
+        (
+            LEVEL_BYTES.saturating_mul(read.most_page_entries),
+            values.saturating_add(entries.div_ceil(8)),
+        )
     } else {
-        0
+        (0, 0)
     };
     decompressed
         .saturating_add(dictionary)
         .saturating_add(levels)
+        .saturating_add(reserved)
 }
 
 /// The sum of the `k` largest of `values`.
@@ -570,7 +618,10 @@ enum Slots {
     /// footer count before it decodes it, and an honest chunk declares no
     /// more entries than this.
     Known(u64),
-    /// Below an array of size zero: no values, whatever the entries.
+    /// Below an array of size zero: no values, whatever the entries. The
+    /// room polars reserves for the entries such a chunk declares is
+    /// counted with the decoder's buffers (see [`chunk_transient`]), so
+    /// nothing is lost by counting none here.
     Empty,
     /// Below a list: unknown, but each entry counted for a leaf column below
     /// is a value of it, an empty or null list below the outermost one, or
@@ -1400,9 +1451,9 @@ mod tests {
             ..ChunkPages::default()
         };
         let f64 = Some(&DataType::Float64);
-        assert_eq!(chunk_transient(&pages, f64, true, false), 1000);
+        assert_eq!(chunk_transient(&pages, f64, true, false, 2), 1000);
         // Uncompressed pages are decoded where they lie in the file.
-        assert_eq!(chunk_transient(&pages, f64, false, false), 0);
+        assert_eq!(chunk_transient(&pages, f64, false, false, 2), 0);
         // A dictionary page: its decompression buffer, and its entries
         // decoded at their width (and a byte each).
         let dict = ChunkPages {
@@ -1411,22 +1462,54 @@ mod tests {
             ..pages
         };
         assert_eq!(
-            chunk_transient(&dict, f64, true, false),
+            chunk_transient(&dict, f64, true, false, 2),
             1000 + 5000 + 9 * 600
         );
-        assert_eq!(chunk_transient(&dict, f64, false, false), 9 * 600);
+        assert_eq!(chunk_transient(&dict, f64, false, false, 2), 9 * 600);
         // A text dictionary is decoded into views, its bytes copied out.
         let text = Some(&DataType::String);
-        assert_eq!(chunk_transient(&dict, text, false, false), 17 * 600 + 5000);
-        assert_eq!(chunk_transient(&dict, None, false, false), 17 * 600 + 5000);
-        // A nested column's levels, two u16 per entry of its largest page.
+        assert_eq!(
+            chunk_transient(&dict, text, false, false, 2),
+            17 * 600 + 5000
+        );
+        assert_eq!(
+            chunk_transient(&dict, None, false, false, 2),
+            17 * 600 + 5000
+        );
+        // A Boolean dictionary is not decoded, but reading it reserves a
+        // byte per entry.
+        let flag = Some(&DataType::Boolean);
+        assert_eq!(chunk_transient(&dict, flag, false, false, 2), 600);
+        // A nested column's levels, two u16 per entry of its largest page,
+        // and the room reserved for its entries: two bitmaps for booleans.
         let levels = ChunkPages {
+            entries: 1 << 20,
             most_page_entries: 1 << 20,
             ..ChunkPages::default()
         };
-        let flag = Some(&DataType::Boolean);
-        assert_eq!(chunk_transient(&levels, flag, false, true), 4 << 20);
-        assert_eq!(chunk_transient(&levels, flag, false, false), 0);
+        assert_eq!(
+            chunk_transient(&levels, flag, false, true, 1 << 20),
+            (4 << 20) + (2 << 17)
+        );
+        assert_eq!(chunk_transient(&levels, flag, false, false, 1 << 20), 0);
+        // The room is reserved for the footer's count before the pages are
+        // read, and grows to the pages' entries: the more of the two. Pre-fix
+        // neither counted here.
+        let none = ChunkPages::default();
+        assert_eq!(
+            chunk_transient(&none, f64, false, true, 1 << 30),
+            (8 << 30) + (1 << 27)
+        );
+        assert_eq!(
+            chunk_transient(&levels, f64, false, true, 0),
+            (4 << 20) + (8 << 20) + (1 << 17)
+        );
+        assert_eq!(
+            chunk_transient(&none, None, false, true, 1 << 10),
+            16 * 1024 + 128
+        );
+        // A flat column's reservation is bounded by its rows.
+        assert_eq!(chunk_transient(&none, f64, false, false, 1 << 30), 0);
         // The chunks decoded at once: the largest, as many as threads.
         assert_eq!(largest_sum(vec![5, 1, 9, 3], 2), 14);
         assert_eq!(largest_sum(vec![5, 1], 8), 6);
@@ -1714,6 +1797,81 @@ mod tests {
     }
 
     #[test]
+    fn a_chunk_that_declares_a_negative_count_is_not_read() {
+        // polars converts a column chunk's footer count to usize as it is
+        // (`PageReader::total_num_values`) and, for a nested column,
+        // reserves room for that many values before it decodes the chunk:
+        // for a struct of booleans, two bitmaps of nearly 2^64 bits, a
+        // request the allocator cannot meet, which aborts the process.
+        // Pre-fix the walk counted such a chunk as holding no entries.
+        use p2a_core::polars::prelude::{IntoSeries, NamedFrom, Series, StructChunked};
+        let flags = Series::new("b".into(), [true, false, true]);
+        let s = StructChunked::from_series("s".into(), 3, [flags].iter())
+            .unwrap()
+            .into_series();
+        let mut df = DataFrame::new(vec![s.into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("negative.parquet");
+        write_parquet(&mut df, &path, 3);
+        assert!(parquet_decoded_bytes(&path).unwrap().is_some());
+        rewrite_footer(&path, |footer| {
+            for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                chunk.meta_data.as_mut().unwrap().num_values = -1;
+            }
+        });
+        let reason = parquet_decoded_bytes(&path).unwrap_err();
+        assert_eq!(
+            reason,
+            "a column chunk of the file declares a negative number of values"
+        );
+    }
+
+    /// A parquet file of `rows` rows at `path` whose column `a` is an array
+    /// of size zero of floats.
+    fn empty_arrays_parquet(path: &Path, rows: usize) {
+        use p2a_core::polars::prelude::{IntoSeries, ListChunked, Series};
+        let lists: ListChunked = (0..rows)
+            .map(|_| Some(Series::new_empty("".into(), &DataType::Float64)))
+            .collect();
+        let arrays = lists
+            .into_series()
+            .cast(&DataType::Array(Box::new(DataType::Float64), 0))
+            .unwrap()
+            .with_name("a".into());
+        let mut df = DataFrame::new(vec![arrays.into()]).unwrap();
+        write_parquet(&mut df, path, rows);
+    }
+
+    #[test]
+    fn a_nested_chunk_reserves_the_entries_its_footer_declares() {
+        // An array of size zero holds no values, whatever its chunk says,
+        // but polars still reserves room for the chunk's footer count at
+        // the leaf's width (and a validity bit each) before it decodes it
+        // (`collect_nested`). Pre-fix nothing counted that reservation, so
+        // a small file whose chunk declares billions of entries passed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.parquet");
+        empty_arrays_parquet(&path, 1_000);
+        // An honest file of them is small before and after.
+        let honest = bound_of(&path);
+        assert!(honest.dataset + honest.transient < 1 << 20, "{honest:?}");
+        let loaded = DataLoader::load(&path).unwrap();
+        assert_eq!(
+            loaded.df().dtypes(),
+            [DataType::Array(Box::new(DataType::Float64), 0)]
+        );
+        let charge = session::datasets_bytes_of([("d", &loaded)]);
+        assert!(honest.dataset <= charge, "{honest:?} > {charge}");
+        rewrite_footer(&path, |footer| {
+            for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                chunk.meta_data.as_mut().unwrap().num_values = 1 << 31;
+            }
+        });
+        let bound = bound_of(&path);
+        assert!(bound.transient >= 8 << 31, "{bound:?}");
+    }
+
+    #[test]
     fn the_page_headers_give_each_chunk_the_entries_its_footer_does() {
         // On a file polars wrote, the walk over the page headers ends where
         // the chunk's footer count says, with the same count, for flat,
@@ -1802,22 +1960,25 @@ mod tests {
         long_labels_parquet(&path, 2_000);
         let honest = bound_of(&path);
         assert!(honest.dataset >= 2_000 * 1_000, "{honest:?}");
-        for declared in [0, -5] {
-            rewrite_footer(&path, |footer| {
-                for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
-                    let meta = chunk.meta_data.as_mut().unwrap();
-                    meta.num_values = declared;
-                    meta.total_uncompressed_size = 1;
-                }
-            });
-            let bound = bound_of(&path);
-            assert!(bound.dataset >= 2_000 * 1_000, "{declared}: {bound:?}");
-            // Its decoded labels and their views, too.
-            assert!(
-                bound.transient >= 2_000 * (1_000 + 16),
-                "{declared}: {bound:?}"
-            );
-        }
+        rewrite_footer(&path, |footer| {
+            for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                let meta = chunk.meta_data.as_mut().unwrap();
+                meta.num_values = 0;
+                meta.total_uncompressed_size = 1;
+            }
+        });
+        let bound = bound_of(&path);
+        assert!(bound.dataset >= 2_000 * 1_000, "{bound:?}");
+        // Its decoded labels and their views, too.
+        assert!(bound.transient >= 2_000 * (1_000 + 16), "{bound:?}");
+        // A negative count is not read at all (see
+        // a_chunk_that_declares_a_negative_count_is_not_read).
+        rewrite_footer(&path, |footer| {
+            for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                chunk.meta_data.as_mut().unwrap().num_values = -5;
+            }
+        });
+        assert!(parquet_decoded_bytes(&path).is_err());
     }
 
     #[test]
