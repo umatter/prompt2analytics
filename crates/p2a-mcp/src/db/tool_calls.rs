@@ -23,10 +23,11 @@ impl DbConnection {
     /// The existence check, the bytes and the write run in the
     /// conversation's [`StoreTurn`](super::connection::StoreTurn), in a task
     /// a dropped caller does not stop ([`run_to_end`]), like a tool call's
-    /// update and status changes. A delete or clear of the conversation runs
-    /// wholly before such a write (which then finds no conversation or no
-    /// row: `NotFound`, and nothing counted) or wholly after it, never
-    /// alongside it: on RocksDB, which validates an optimistic transaction's
+    /// update and status changes; a call dropped while it waits for the turn
+    /// does nothing. A delete or clear of the conversation runs wholly
+    /// before such a write (which then finds no conversation or no row:
+    /// `NotFound`, and nothing counted) or wholly after it, never alongside
+    /// it: on RocksDB, which validates an optimistic transaction's
     /// writes when it commits, a tool-call write committed on a row a
     /// clear's transaction deletes would fail the clear whole on a write
     /// conflict.
@@ -34,8 +35,8 @@ impl DbConnection {
         self.check_memory()?;
         let db = self.clone();
         let tool_call = tool_call.clone();
-        run_to_end(async move {
-            let _turn = db.conversation_turn(&tool_call.conversation_id).await;
+        let turn = db.conversation_turn(&tool_call.conversation_id).await;
+        run_to_end(turn, async move {
             let conv = db.get_conversation(&tool_call.conversation_id).await?;
             let tool_call = db
                 .fit_tool_call_texts(&conv.session_id, tool_call, 0)
@@ -61,9 +62,9 @@ impl DbConnection {
     pub async fn update_tool_call(&self, tool_call: &ToolCall) -> Result<ToolCall, DbError> {
         let db = self.clone();
         let tool_call = tool_call.clone();
-        run_to_end(async move {
+        let turn = db.conversation_turn(&tool_call.conversation_id).await;
+        run_to_end(turn, async move {
             let id = tool_call.id_string();
-            let _turn = db.conversation_turn(&tool_call.conversation_id).await;
             let stored = db.get_tool_call(&id).await?;
             if stored.conversation_id != tool_call.conversation_id {
                 return Err(DbError::NotFound(format!(
@@ -152,8 +153,8 @@ impl DbConnection {
         let conversation_id = self.get_tool_call(id).await?.conversation_id;
         let db = self.clone();
         let id = id.to_string();
-        run_to_end(async move {
-            let _turn = db.conversation_turn(&conversation_id).await;
+        let turn = db.conversation_turn(&conversation_id).await;
+        run_to_end(turn, async move {
             let (status, text, duration_ms) = match change {
                 StatusChange::Running => (ToolCallStatus::Running, None, None),
                 StatusChange::Finished {

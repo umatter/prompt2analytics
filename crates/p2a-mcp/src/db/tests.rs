@@ -1154,10 +1154,23 @@ async fn slow_message_deletes(db: &DbConnection) {
     slow_writes(db, "messages", "DELETE", 20).await;
 }
 
-/// Drop `call` (named `what` in the failure) while the store runs it: it
-/// must not have finished after 100 ms (a [`slow_writes`] event makes it
-/// last longer).
-async fn drop_while_running(what: impl std::fmt::Debug, call: impl Future) {
+/// Drop `call` (named `what` in the failure) while the store runs it: the
+/// call must first hold store turn `key` (a conversation id, or
+/// `session:<id>` for a creation) and then not have finished 100 ms later (a
+/// [`slow_writes`] event makes it last longer). A call dropped before it
+/// holds its turn does nothing, which would leave the dropped-part-way path
+/// untested.
+async fn drop_while_running(
+    db: &DbConnection,
+    key: &str,
+    what: impl std::fmt::Debug,
+    call: impl Future,
+) {
+    let mut call = std::pin::pin!(call);
+    tokio::select! {
+        _ = &mut call => panic!("{what:?} finished before it was seen holding its turn"),
+        held = turn_has_users(db, key, 1) => assert!(held, "{what:?} never held its turn"),
+    }
     let dropped = tokio::time::timeout(std::time::Duration::from_millis(100), call).await;
     assert!(dropped.is_err(), "{what:?} finished before it was dropped");
 }
@@ -1180,7 +1193,7 @@ async fn drop_part_way(db: &DbConnection, op: Op, id: &str) {
             Op::Delete => db.delete_conversation(id).await,
         }
     };
-    drop_while_running(op, call).await;
+    drop_while_running(db, id, op, call).await;
 }
 
 /// A clear or delete whose caller is dropped part way (an HTTP client that
@@ -1546,7 +1559,7 @@ async fn a_clear_during_a_tool_call_write_waits_for_it() {
         // Dropped part way.
         let id = filled_conversation(&db, "s1", &format!("dropped {write:?}")).await;
         let call = only_tool_call(&db, &id).await;
-        drop_while_running(write, write.run(&db, &call)).await;
+        drop_while_running(&db, &id, write, write.run(&db, &call)).await;
         let cleared = db.clear_messages(&id).await;
         assert!(
             matches!(cleared, Ok(21)),
@@ -1625,14 +1638,14 @@ async fn a_write_after_a_dropped_add_or_create_finds_the_cap_reached() {
         slow_writes(&db, "conversations", "CREATE", 200).await;
 
         let added = &ids[0];
-        drop_while_running("add", db.add_message(added, "user", "dropped")).await;
+        drop_while_running(&db, added, "add", db.add_message(added, "user", "dropped")).await;
         let refused = db.add_message(added, "user", "refused").await.map(|_| ());
         let counts = listed_and_stored(&db, added).await;
         outcomes.push((engine, "add", refused, counts));
 
         let saved = &ids[1];
         let dropped = Message::user(saved.clone(), "dropped".into());
-        drop_while_running("save", db.save_message(&dropped)).await;
+        drop_while_running(&db, saved, "save", db.save_message(&dropped)).await;
         let refused = db
             .save_message(&Message::user(saved.clone(), "refused".into()))
             .await
@@ -1640,7 +1653,8 @@ async fn a_write_after_a_dropped_add_or_create_finds_the_cap_reached() {
         let counts = listed_and_stored(&db, saved).await;
         outcomes.push((engine, "save", refused, counts));
 
-        drop_while_running("create", db.create_conversation("s1", "dropped")).await;
+        let create = db.create_conversation("s1", "dropped");
+        drop_while_running(&db, "session:s1", "create", create).await;
         let refused = db.create_conversation("s1", "refused").await.map(|_| ());
         let stored = db.count_conversations("s1").await.unwrap() as i64;
         outcomes.push((engine, "create", refused, (stored, stored)));
@@ -1710,7 +1724,7 @@ async fn a_clear_after_a_dropped_write_waits_for_it() {
                     .map(|_| ()),
             }
         };
-        drop_while_running(write, call).await;
+        drop_while_running(&db, id, write, call).await;
         let cleared = db.clear_messages(id).await;
         if !matches!(cleared, Ok(21)) {
             problems.push(format!("{write:?}: clear: {cleared:?}"));
@@ -1739,6 +1753,228 @@ async fn a_clear_after_a_dropped_write_waits_for_it() {
         assert_eq!(db.store_turns_in_use(), 0);
     }
     assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// A write sent while another call holds the store turn it needs, in
+/// [`a_call_dropped_while_it_waits_for_its_turn_does_nothing`].
+#[derive(Debug, Clone, Copy)]
+enum Waiter {
+    /// [`DbConnection::add_message`].
+    Add,
+    /// [`DbConnection::save_message`].
+    Save,
+    /// [`DbConnection::create_conversation`], which waits for its session's
+    /// turn.
+    Create,
+    /// [`DbConnection::update_conversation_title`].
+    Title,
+    /// [`DbConnection::set_conversation_archived`].
+    Archive,
+    /// [`DbConnection::update_message_content`].
+    Content,
+    /// [`DbConnection::create_tool_call`].
+    CreateToolCall,
+    /// A write of the existing tool call.
+    ToolCall(ToolCallWrite),
+    /// [`DbConnection::clear_messages`].
+    Clear,
+    /// [`DbConnection::delete_conversation`].
+    Delete,
+}
+
+impl Waiter {
+    /// Every call that takes a turn, the clear and the delete last: a
+    /// dropped call that still ran once its turn came would otherwise take
+    /// the rows the later ones write.
+    const ALL: [Waiter; 13] = [
+        Self::Add,
+        Self::Save,
+        Self::Create,
+        Self::Title,
+        Self::Archive,
+        Self::Content,
+        Self::CreateToolCall,
+        Self::ToolCall(ToolCallWrite::Update),
+        Self::ToolCall(ToolCallWrite::Running),
+        Self::ToolCall(ToolCallWrite::Complete),
+        Self::ToolCall(ToolCallWrite::Fail),
+        Self::Clear,
+        Self::Delete,
+    ];
+
+    /// The store turn this call waits for, in conversation `id` of session
+    /// `s1`.
+    fn key(self, id: &str) -> String {
+        match self {
+            Self::Create => "session:s1".to_string(),
+            _ => id.to_string(),
+        }
+    }
+
+    /// Run this call on conversation `id` of session `s1` (made by
+    /// [`filled_conversation`]), whose tool call is `call`.
+    async fn run(self, db: &DbConnection, id: &str, call: &ToolCall) -> Result<(), DbError> {
+        match self {
+            Self::Add => db.add_message(id, "user", "waited").await.map(|_| ()),
+            Self::Save => db
+                .save_message(&Message::user(id.into(), "waited".into()))
+                .await
+                .map(|_| ()),
+            Self::Create => db.create_conversation("s1", "waited").await.map(|_| ()),
+            Self::Title => db.update_conversation_title(id, "waited").await.map(|_| ()),
+            Self::Archive => db.set_conversation_archived(id, true).await.map(|_| ()),
+            Self::Content => db
+                .update_message_content(&call.message_id, "waited")
+                .await
+                .map(|_| ()),
+            Self::CreateToolCall => {
+                let new = ToolCall::new(
+                    call.message_id.clone(),
+                    id.into(),
+                    "regression_ols".into(),
+                    "{}".into(),
+                );
+                db.create_tool_call(&new).await.map(|_| ())
+            }
+            Self::ToolCall(write) => write.run(db, call).await.map(|_| ()),
+            Self::Clear => db.clear_messages(id).await.map(|_| ()),
+            Self::Delete => db.delete_conversation(id).await,
+        }
+    }
+}
+
+/// Session `s1`'s conversations with their messages and tool calls, and its
+/// byte counter, as text to compare.
+async fn session_state(db: &DbConnection) -> String {
+    let mut state = Vec::new();
+    for conv in db.list_conversations("s1").await.unwrap() {
+        let id = conv.id_string();
+        let messages = db.get_messages(&id).await.unwrap();
+        let calls = db.get_tool_calls_for_conversation(&id).await.unwrap();
+        state.push(format!("{conv:?}\n{messages:?}\n{calls:?}"));
+    }
+    format!("{state:#?}\ncounted {:?}", db.session_bytes_entry("s1"))
+}
+
+/// Whether every store turn has left the map, polled a bounded number of
+/// times (no timing assertion: a slow machine only polls longer).
+async fn turns_released(db: &DbConnection) -> bool {
+    for _ in 0..500 {
+        if db.store_turns_in_use() == 0 {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// A call dropped while it waits for its store turn (an HTTP client that
+/// disconnects before its turn comes) does nothing, for every call that
+/// takes a turn: once the turn is free, no row and no byte count has
+/// changed. Before, each call waited for its turn inside the task it
+/// spawned, which the caller's drop did not stop: the task kept the call's
+/// payload while it waited and then ran the whole write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_dropped_while_it_waits_for_its_turn_does_nothing() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100_000),
+        ..Default::default()
+    })
+    .await;
+    let id = filled_conversation(&db, "s1", "kept").await;
+    let call = only_tool_call(&db, &id).await;
+    let mut problems = Vec::new();
+    for waiter in Waiter::ALL {
+        let before = session_state(&db).await;
+        let key = waiter.key(&id);
+        let held = match waiter {
+            Waiter::Create => db.session_turn("s1").await,
+            _ => db.conversation_turn(&id).await,
+        };
+        {
+            let mut waiting = std::pin::pin!(waiter.run(&db, &id, &call));
+            tokio::select! {
+                done = &mut waiting => panic!("{waiter:?} finished while its turn was held: {done:?}"),
+                queued = turn_has_users(&db, &key, 2) => {
+                    assert!(queued, "{waiter:?} never waited for its turn");
+                }
+            }
+            // It cannot finish while the turn is held; it is dropped waiting.
+            let waited =
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting).await;
+            assert!(
+                waited.is_err(),
+                "{waiter:?} finished while its turn was held"
+            );
+        }
+        drop(held);
+        assert!(turns_released(&db).await, "{waiter:?}: a turn stays in use");
+        let after = session_state(&db).await;
+        if after != before {
+            problems.push(format!(
+                "{waiter:?} changed the store:\n{before}\n->\n{after}"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n\n"));
+}
+
+/// `future` polled once, with a waker that does nothing: `Ready` when it
+/// finished without waiting for anything.
+fn poll_once<F: Future>(future: F) -> std::task::Poll<F::Output> {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    future.as_mut().poll(&mut cx)
+}
+
+/// A message add or save refused for its size, or because the server is low
+/// on memory, is refused before it waits for the conversation's turn: while
+/// another call holds the turn, the refusal comes at the first poll, and
+/// the refused message never joins the turn's queue. Before, the size and
+/// memory checks ran in the turn, so a refused message waited behind the
+/// call holding it, its content kept until the refusal.
+#[tokio::test]
+async fn a_message_refused_for_size_or_memory_does_not_wait_for_its_turn() {
+    use std::task::Poll;
+
+    let db = limited_db(PersistenceLimits {
+        message_bytes: Some(8),
+        ..Default::default()
+    })
+    .await;
+    let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+    let held = db.conversation_turn(&id).await;
+    let too_large = Message::user(id.clone(), "123456789".into());
+    let refused = [
+        poll_once(db.add_message(&id, "user", "123456789")),
+        poll_once(db.save_message(&too_large)),
+    ];
+    for refusal in &refused {
+        assert!(
+            matches!(refusal, Poll::Ready(Err(DbError::TooLarge(_)))),
+            "{refusal:?}"
+        );
+    }
+    if p2a_core::get_process_memory().is_some() {
+        let low = db.clone().with_limits(PersistenceLimits {
+            rss_soft_limit_bytes: Some(1),
+            ..Default::default()
+        });
+        let refused = [
+            poll_once(low.add_message(&id, "user", "x")),
+            poll_once(low.save_message(&Message::user(id.clone(), "x".into()))),
+        ];
+        for refusal in &refused {
+            assert!(
+                matches!(refusal, Poll::Ready(Err(DbError::MemoryPressure))),
+                "{refusal:?}"
+            );
+        }
+    }
+    assert_eq!(db.store_turn_users(&id), 1, "a refused message is queued");
+    drop(held);
+    assert!(turns_released(&db).await);
+    assert_eq!(rows_in(&db, "messages").await, 0);
 }
 
 /// Store a message for `conversation_id` directly, without the existence

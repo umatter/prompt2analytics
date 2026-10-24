@@ -124,7 +124,8 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// tool-call create, update or status change:
 /// [`conversation_turn`](DbConnection::conversation_turn)), or at creating a
 /// conversation in a session ([`session_turn`](DbConnection::session_turn));
-/// the next call's turn starts when it is dropped.
+/// the next call's turn starts when it is dropped. It is `Send` and
+/// `'static`, so the task of [`run_to_end`] can own it.
 ///
 /// Two deletes of one conversation that run at the same time conflict in the
 /// store: the in-memory engine hands both the same rows (neither fails), so
@@ -151,13 +152,16 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// per process, and so are the turns. An entry leaves the map with its last
 /// holder or waiter, also when a waiting call is cancelled.
 ///
-/// Every call that takes a turn holds it in a task of its own
-/// ([`run_to_end`]) until the store has finished the writes made in it. The
-/// store finishes a query it was sent even when the caller is dropped (an
-/// HTTP client that disconnects), so a turn that ended with the caller would
-/// let the next call count the rows before the dropped call's row is
-/// committed, or run its transaction alongside the dropped call's write
-/// (on RocksDB, one of the two then fails on a write conflict).
+/// Every call that takes a turn waits for it in its caller and then moves it
+/// into a task of its own ([`run_to_end`]), which holds it until the store
+/// has finished the writes made in it. A call dropped while it waits for its
+/// turn (an HTTP client that disconnects before the turn comes) leaves the
+/// queue having done nothing, so the calls queued for a turn are never more
+/// than the callers still waiting. The store finishes a query it was sent
+/// even when the caller is dropped, so a turn that ended with the caller
+/// would let the next call count the rows before the dropped call's row is
+/// committed, or run its transaction alongside the dropped call's write (on
+/// RocksDB, one of the two then fails on a write conflict).
 pub(crate) struct StoreTurn {
     turns: StoreTurns,
     key: String,
@@ -181,21 +185,34 @@ impl Drop for StoreTurn {
     }
 }
 
-/// Run `work`, a call that takes a [`StoreTurn`] and writes in it, in a task
-/// of its own and wait for it. The store runs a query it was sent to its end
-/// even when the caller is dropped (its engine runs each query in a task);
-/// running the rest of the call in a task too keeps the turn held, and what
-/// the call does after its writes (the conversation's counter update after
-/// a message add, the release of a delete's bytes from the
-/// `session_db_bytes` counter) done, until the store has finished, even
-/// when the caller (an HTTP client that disconnects) is dropped. A task that
-/// panicked or was cancelled (the runtime shutting down) is a `Query` error.
-pub(super) async fn run_to_end<T: Send + 'static>(
+/// Move `turn`, the [`StoreTurn`] the caller waited for, and `work`, the
+/// writes the call makes in it, into a task of their own, and wait for it.
+/// The task starts when this is called, not when the returned future is
+/// first polled, so the turn passes from the caller to the task with no
+/// await in between, and it ends once `work` has finished.
+///
+/// Waiting for the turn in the caller means that a call dropped while it
+/// waits does nothing. The store runs a query it was sent to its end even
+/// when the caller is dropped (its engine runs each query in a task).
+/// Running the call in a task as well keeps the turn held until the store
+/// has finished, and makes sure the steps after its writes still run (the
+/// conversation's counter update after a message add, the release of a
+/// delete's bytes from the `session_db_bytes` counter), even when the
+/// caller (an HTTP client that disconnects) is dropped. A task that panicked
+/// or was cancelled (the runtime shutting down) is a `Query` error.
+pub(super) fn run_to_end<T: Send + 'static>(
+    turn: StoreTurn,
     work: impl Future<Output = Result<T, DbError>> + Send + 'static,
-) -> Result<T, DbError> {
-    tokio::spawn(work)
-        .await
-        .map_err(|e| DbError::Query(format!("conversation store task failed: {e}")))?
+) -> impl Future<Output = Result<T, DbError>> + Send {
+    let task = tokio::spawn(async move {
+        let done = work.await;
+        drop(turn);
+        done
+    });
+    async move {
+        task.await
+            .map_err(|e| DbError::Query(format!("conversation store task failed: {e}")))?
+    }
 }
 
 /// Appended to text the store shortens.

@@ -24,7 +24,8 @@ impl DbConnection {
     /// Creations in one session take turns from the count to the write, in
     /// a task a dropped caller does not stop ([`run_to_end`]), so concurrent
     /// ones cannot pass the cap together, also when one's caller is dropped
-    /// while the store writes its row.
+    /// while the store writes its row. A creation dropped while it waits for
+    /// its turn does nothing.
     pub async fn create_conversation(
         &self,
         session_id: &str,
@@ -34,8 +35,8 @@ impl DbConnection {
         self.check_message_bytes("title", "title", title.len())?;
         let db = self.clone();
         let (session_id, title) = (session_id.to_string(), title.to_string());
-        run_to_end(async move {
-            let _turn = db.session_turn(&session_id).await;
+        let turn = db.session_turn(&session_id).await;
+        run_to_end(turn, async move {
             if let Some(max) = db.limits().conversations_per_session {
                 let n = db.count_conversations(&session_id).await?;
                 if n >= max {
@@ -102,11 +103,10 @@ impl DbConnection {
         self.check_message_bytes("title", "title", title.len())?;
         let db = self.clone();
         let (id, title) = (id.to_string(), title.to_string());
-        run_to_end(async move {
-            // In the turn, the write cannot conflict with a message add's
-            // counter update, and a delete cannot run between the bytes and
-            // the write.
-            let _turn = db.conversation_turn(&id).await;
+        // In the turn, the write cannot conflict with a message add's counter
+        // update, and a delete cannot run between the bytes and the write.
+        let turn = db.conversation_turn(&id).await;
+        run_to_end(turn, async move {
             if db.tracks_session_bytes() {
                 let conv = db.get_conversation(&id).await?;
                 let added = title.len().saturating_sub(conv.title.len());
@@ -137,8 +137,8 @@ impl DbConnection {
     ) -> Result<Conversation, DbError> {
         let db = self.clone();
         let id = id.to_string();
-        run_to_end(async move {
-            let _turn = db.conversation_turn(&id).await;
+        let turn = db.conversation_turn(&id).await;
+        run_to_end(turn, async move {
             let mut result = db
                 .db()
                 .query("UPDATE conversations SET is_archived = $archived, updated_at = time::now() WHERE id = $id RETURN AFTER")
@@ -162,12 +162,13 @@ impl DbConnection {
     /// The delete runs in a task of its own ([`run_to_end`]), which a caller
     /// dropped part way (an HTTP client that disconnects) does not stop: it
     /// holds the conversation's turn until the store has finished and the
-    /// bytes it removed are released.
+    /// bytes it removed are released. A delete dropped while it waits for
+    /// its turn does nothing.
     pub async fn delete_conversation(&self, id: &str) -> Result<(), DbError> {
         let db = self.clone();
         let id = id.to_string();
-        run_to_end(async move {
-            let _turn = db.conversation_turn(&id).await;
+        let turn = db.conversation_turn(&id).await;
+        run_to_end(turn, async move {
             // A write racing this delete can leave rows behind; the next
             // orphan sweeps look for them.
             db.note_conversation_deleted(&id);
@@ -292,9 +293,11 @@ impl DbConnection {
     }
 
     /// The conversation a client-posted message of `content_len` bytes goes
-    /// to, after the store's checks: memory, the conversation must exist
-    /// (`NotFound`), `message_bytes` (`TooLarge`), `messages_per_conversation`
-    /// and `session_db_bytes` (`QuotaExceeded`; the bytes are counted).
+    /// to, after the store's checks in the turn: memory again (it can rise
+    /// while the call waits), the conversation must exist (`NotFound`),
+    /// `messages_per_conversation` and `session_db_bytes` (`QuotaExceeded`;
+    /// the bytes are counted). `message_bytes` and memory are checked before
+    /// the turn ([`store_message`](Self::store_message)).
     ///
     /// The `messages_per_conversation` check counts the conversation's
     /// message rows ([`count_messages`](Self::count_messages)); the stored
@@ -310,7 +313,6 @@ impl DbConnection {
     ) -> Result<Conversation, DbError> {
         self.check_memory()?;
         let conv = self.get_conversation(conversation_id).await?;
-        self.check_message_bytes("message", "message", content_len)?;
         if let Some(max) = self.limits().messages_per_conversation {
             let n = self.count_messages(conversation_id).await?;
             if n >= max {
@@ -390,7 +392,9 @@ impl DbConnection {
     /// `messages_per_conversation` check through the write and the
     /// conversation's counter update, in a task a dropped caller does not
     /// stop ([`run_to_end`]): an add sent after one whose caller was dropped
-    /// while the store wrote its row waits for it and counts that row.
+    /// while the store wrote its row waits for it and counts that row. An
+    /// add dropped while it waits for its turn does nothing, and one refused
+    /// for memory or size does not wait.
     ///
     /// An error from the conversation's counter and preview update comes
     /// after the message row was written: the message is stored, and only
@@ -439,18 +443,26 @@ impl DbConnection {
     /// update its conversation's counter and preview, in the conversation's
     /// turn and in a task a dropped caller does not stop ([`run_to_end`]).
     /// `missing` is the error text when the store returns no row.
-    async fn store_message(&self, message: Message, missing: &str) -> Result<Message, DbError> {
+    ///
+    /// The cheap refusals (memory, `message_bytes`) come before the call
+    /// waits for its turn, so a refused message never waits in the queue.
+    async fn store_message(
+        &self,
+        message: Message,
+        missing: &'static str,
+    ) -> Result<Message, DbError> {
+        self.check_memory()?;
+        self.check_message_bytes("message", "message", message.content.len())?;
         let db = self.clone();
-        let missing = missing.to_string();
-        run_to_end(async move {
-            let conversation_id = message.conversation_id.clone();
-            let _turn = db.conversation_turn(&conversation_id).await;
+        let conversation_id = message.conversation_id.clone();
+        let turn = db.conversation_turn(&conversation_id).await;
+        run_to_end(turn, async move {
             db.admit_message(&conversation_id, message.content.len())
                 .await?;
             let created: Option<Message> =
                 db.db().create(message.id.clone()).content(message).await?;
             let Some(created) = created else {
-                return Err(DbError::Query(missing));
+                return Err(DbError::Query(missing.to_string()));
             };
 
             // Update conversation metadata
@@ -500,8 +512,8 @@ impl DbConnection {
         let conversation_id = self.get_message(message_id).await?.conversation_id;
         let db = self.clone();
         let message_id = message_id.to_string();
-        run_to_end(async move {
-            let _turn = db.conversation_turn(&conversation_id).await;
+        let turn = db.conversation_turn(&conversation_id).await;
+        run_to_end(turn, async move {
             let mut session_id = String::new();
             let mut replaced = 0;
             if db.tracks_session_bytes() {
@@ -555,13 +567,15 @@ impl DbConnection {
     /// take turns.
     ///
     /// Like [`delete_conversation`](Self::delete_conversation), the clear
-    /// runs in a task of its own ([`run_to_end`]), so a dropped caller
-    /// neither ends its turn nor skips the release of its bytes.
+    /// runs in a task of its own ([`run_to_end`]), so a caller dropped once
+    /// the clear holds its turn neither ends the turn nor skips the release
+    /// of its bytes, and one dropped while it waits for the turn does
+    /// nothing.
     pub async fn clear_messages(&self, conversation_id: &str) -> Result<u32, DbError> {
         let db = self.clone();
         let id = conversation_id.to_string();
-        run_to_end(async move {
-            let _turn = db.conversation_turn(&id).await;
+        let turn = db.conversation_turn(&id).await;
+        run_to_end(turn, async move {
             let owner = db.counted_owner(&id).await?;
             // Unmeasured, the delete returns no rows: count them first (in
             // the turn, so no add of this process lands in between).
