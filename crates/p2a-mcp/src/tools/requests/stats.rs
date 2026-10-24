@@ -462,7 +462,9 @@ pub struct IsoregRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PowerAnovaTestRequest {
     /// Number of groups
-    #[schemars(description = "Number of groups. Leave None to solve for minimum groups.")]
+    #[schemars(
+        description = "Number of groups (at least 2; required). In the hosted profile at most the server's design_groups limit (10 by default)."
+    )]
     pub groups: Option<usize>,
 
     /// Sample size per group
