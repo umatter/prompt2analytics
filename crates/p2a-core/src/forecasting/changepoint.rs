@@ -422,6 +422,12 @@ pub fn binary_segmentation(
 ///
 /// This is a convenience wrapper that extracts the column data from a Dataset
 /// and runs the changepoint detection algorithm.
+///
+/// # Errors
+/// Fails when `column` is missing or not numeric (f64 or i64), on fewer than
+/// 4 observations, and with every error of [`detect_changepoints`], including
+/// a cancelled or expired budget installed with
+/// [`crate::resource::with_budget`].
 pub fn run_changepoint(
     dataset: &Dataset,
     column: &str,
@@ -460,6 +466,12 @@ pub fn run_changepoint(
 }
 
 /// Run binary segmentation changepoint detection on a dataset column.
+///
+/// # Errors
+/// Fails when `column` is missing or not numeric (f64 or i64), on fewer than
+/// 4 observations, and with every error of [`binary_segmentation`], including
+/// a cancelled or expired budget installed with
+/// [`crate::resource::with_budget`].
 pub fn run_binary_segmentation(
     dataset: &Dataset,
     column: &str,
