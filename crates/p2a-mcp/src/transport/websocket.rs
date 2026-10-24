@@ -584,6 +584,13 @@ mod tests {
             .with_max_level(tracing::Level::INFO)
             .with_writer(move || writer.clone())
             .finish();
+        // While this subscriber is the only dispatcher registered, tracing
+        // takes the interest of a callsite that another thread registers
+        // from that thread's default alone (none, so disabled for good),
+        // such as the refusal's when `tool_message_is_governed` runs at the
+        // same time. A second registered dispatcher makes every registration
+        // ask all of them, this subscriber included.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let _guard = tracing::subscriber::set_default(subscriber);
         let exec = crate::exec::ExecConfig {
             rss_soft_limit_bytes: Some(1),
