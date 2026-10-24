@@ -762,6 +762,13 @@ impl Drop for RemoveOnDrop {
     }
 }
 
+/// Load the uploaded parquet file at `path`, a temporary file of the
+/// server's; the loader's error comes without server paths (see
+/// [`without_server_paths`]).
+fn load_parquet_upload(path: &Path) -> Result<Dataset, String> {
+    DataLoader::load(path).map_err(|e| without_server_paths(&e.to_string(), path))
+}
+
 /// `text` (an error from a loader or writer) with the absolute forms of
 /// `path` and its folder replaced by their [`path_jail::display_path`] forms,
 /// so no server path reaches the caller.
@@ -1106,15 +1113,14 @@ impl AnalyticsServer {
                         ))]));
                     }
                 }
-                let result = DataLoader::load(&temp.0);
+                let result = load_parquet_upload(&temp.0);
                 drop(temp);
 
                 match result {
                     Ok(ds) => ds,
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Failed to parse Parquet: {}",
-                            e
+                            "Failed to parse Parquet: {e}"
                         ))]));
                     }
                 }
@@ -1812,6 +1818,24 @@ mod tests {
                 "{declared}: {bound:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_uploads_load_error_names_no_server_path() {
+        // The loader names the file it could not read; the upload's message
+        // passed that on with the temporary file's absolute path.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("upload_gone.parquet");
+        let Err(raw) = DataLoader::load(&missing) else {
+            panic!("a missing file loaded");
+        };
+        let folder = dir.path().display().to_string();
+        assert!(raw.to_string().contains(&folder), "{raw}");
+        let Err(shown) = load_parquet_upload(&missing) else {
+            panic!("a missing file loaded");
+        };
+        assert!(!shown.contains(&folder), "{shown}");
+        assert!(shown.contains("upload_gone.parquet"), "{shown}");
     }
 
     #[test]
