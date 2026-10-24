@@ -730,7 +730,8 @@ impl AnalyticsServer {
     /// are refused without it), the in-flight registry (`/health` and the
     /// stuck watchdog do not count it), the session's active-call mark (which
     /// keeps a running session from eviction and expiry), the `touch` on
-    /// success, the dataset quotas and the audit entry. The request limits
+    /// success, the dataset quotas, the open public process-memory redaction
+    /// of `server_stats` and the audit entry. The request limits
     /// below still apply. Unknown names, unparsable arguments and handler
     /// errors come back as `ToolCallError`; a tool's own error result is an
     /// `Ok` with `success == false`.
