@@ -1058,8 +1058,15 @@ impl AnalyticsServer {
             for ds in &stats.datasets {
                 output.push_str(&format!(
                     "{:<30} {:>12} {:>10} {:>10}\n",
-                    if ds.name.len() > 28 {
-                        format!("{}...", &ds.name[..25])
+                    // Counted and cut in chars: a byte cut can fall inside a
+                    // multi-byte character of a caller-chosen name.
+                    if ds.name.chars().count() > 28 {
+                        let cut = ds
+                            .name
+                            .char_indices()
+                            .nth(25)
+                            .map_or(ds.name.len(), |(i, _)| i);
+                        format!("{}...", &ds.name[..cut])
                     } else {
                         ds.name.clone()
                     },
@@ -2275,6 +2282,37 @@ mod tests {
             !process_memory_redacted(),
             "the setting is restored when unwinding"
         );
+    }
+
+    /// The per-dataset table cuts a long name on a char boundary. It sliced
+    /// the name by byte, which panicked when the cut fell inside a multi-byte
+    /// character.
+    #[tokio::test]
+    async fn server_stats_cuts_a_long_dataset_name_on_a_char_boundary() {
+        // 20 chars in 40 bytes: kept whole. 30 chars: cut to 25 and "...".
+        let short = "é".repeat(20);
+        let long = "é".repeat(30);
+        let server = AnalyticsServer::new();
+        {
+            let mut datasets = server.datasets.write().await;
+            for (name, x) in [(&short, [1.1, 1.9, 3.2]), (&long, [0.4, 2.2, 2.9])] {
+                let df = df! { "x" => x }.unwrap();
+                datasets.insert(name.clone(), Dataset::new(df));
+            }
+        }
+
+        let result = server
+            .server_stats(Parameters(ServerStatsRequest {
+                include_datasets: Some(true),
+                include_history: Some(false),
+            }))
+            .await
+            .expect("server_stats answers in-band");
+        let shown = text(&result);
+        assert_ne!(result.is_error, Some(true), "{shown}");
+        assert!(shown.contains(&format!("{short} ")), "{shown}");
+        assert!(shown.contains(&format!("{}...", "é".repeat(25))), "{shown}");
+        assert!(!shown.contains(&long), "{shown}");
     }
 
     /// The governed path (`POST /api/tools/server_stats` and every other
