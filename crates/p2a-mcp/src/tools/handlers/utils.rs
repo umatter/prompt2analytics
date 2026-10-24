@@ -877,6 +877,16 @@ fn shown_name(name: &str) -> String {
     }
 }
 
+/// A dataset name for `server_stats`'s 30-wide table: a name of more than 28
+/// characters is cut to 25 and "...". Counted and cut in chars, since a byte
+/// cut can fall inside a multi-byte character of a caller-chosen name.
+fn table_name(name: &str) -> String {
+    match (name.char_indices().nth(28), name.char_indices().nth(25)) {
+        (Some(_), Some((cut, _))) => format!("{}...", &name[..cut]),
+        _ => name.to_string(),
+    }
+}
+
 thread_local! {
     /// Whether `server_stats` withholds the process memory on this thread
     /// (see [`redact_process_memory`]).
@@ -1060,18 +1070,7 @@ impl AnalyticsServer {
             for ds in &stats.datasets {
                 output.push_str(&format!(
                     "{:<30} {:>12} {:>10} {:>10}\n",
-                    // Counted and cut in chars: a byte cut can fall inside a
-                    // multi-byte character of a caller-chosen name.
-                    if ds.name.chars().count() > 28 {
-                        let cut = ds
-                            .name
-                            .char_indices()
-                            .nth(25)
-                            .map_or(ds.name.len(), |(i, _)| i);
-                        format!("{}...", &ds.name[..cut])
-                    } else {
-                        ds.name.clone()
-                    },
+                    table_name(&ds.name),
                     ds.memory_formatted,
                     ds.rows,
                     ds.columns
@@ -2315,6 +2314,31 @@ mod tests {
         assert!(shown.contains(&format!("{short} ")), "{shown}");
         assert!(shown.contains(&format!("{}...", "é".repeat(25))), "{shown}");
         assert!(!shown.contains(&long), "{shown}");
+    }
+
+    /// `table_name` keeps a name of up to 28 chars whole and cuts a longer
+    /// one to 25 chars and "...", counting chars, not bytes.
+    #[test]
+    fn table_name_cuts_above_28_chars() {
+        assert_eq!(table_name(""), "");
+        for name in [
+            "a".repeat(28),
+            "é".repeat(28),
+            format!("{}€", "b".repeat(27)),
+        ] {
+            assert_eq!(table_name(&name), name, "28 chars stay whole");
+        }
+        assert_eq!(
+            table_name(&"a".repeat(29)),
+            format!("{}...", "a".repeat(25))
+        );
+        assert_eq!(
+            table_name(&"é".repeat(29)),
+            format!("{}...", "é".repeat(25))
+        );
+        // The cut lands right after a 3-byte char at char 24.
+        let mixed = format!("{}€{}", "c".repeat(24), "d".repeat(10));
+        assert_eq!(table_name(&mixed), format!("{}€...", "c".repeat(24)));
     }
 
     /// The governed path (`POST /api/tools/server_stats` and every other
