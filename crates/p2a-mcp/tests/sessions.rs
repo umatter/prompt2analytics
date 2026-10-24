@@ -369,6 +369,106 @@ fn reload_refuses_a_source_above_load_file_bytes() {
     });
 }
 
+/// Only `load_dataset` records the file it loaded as a dataset's source. A
+/// `path` argument to `upload_dataset` or `create_dataset`, which neither
+/// tool reads, is not stored, so a reload skips those datasets instead of
+/// replacing them with that file.
+#[cfg(feature = "llm")]
+#[tokio::test]
+async fn only_load_dataset_records_a_source_path() {
+    use base64::Engine;
+
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let root = allowed_data_root().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-pr12-")
+        .tempdir_in(&root)
+        .unwrap();
+    std::fs::write(dir.path().join("file.csv"), noisy_csv(50, 2)).unwrap();
+    let file = dir
+        .path()
+        .strip_prefix(&root)
+        .unwrap()
+        .join("file.csv")
+        .to_string_lossy()
+        .into_owned();
+    let small = noisy_csv(3, 5);
+    let calls = [
+        ("load_dataset", json!({"path": file, "name": "loaded"})),
+        (
+            "upload_dataset",
+            json!({
+                "content": base64::engine::general_purpose::STANDARD.encode(&small),
+                "filename": "small.csv",
+                "name": "uploaded",
+                "path": file,
+            }),
+        ),
+        (
+            "create_dataset",
+            json!({"csv_content": small, "name": "created", "path": file}),
+        ),
+    ];
+    for (tool, arguments) in calls {
+        let (st, body) = call(
+            &r,
+            "POST",
+            &format!("/api/tools/{tool}"),
+            Some(&sid),
+            Some(json!({"session_id": sid, "arguments": arguments})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{tool}: {body}");
+        assert_eq!(body["data"]["success"], true, "{tool}: {body}");
+    }
+
+    let (st, body) = call(
+        &r,
+        "GET",
+        &format!("/api/sessions/{sid}/datasets"),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let source = |name: &str| {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .map(|d| d["source_path"].clone())
+    };
+    assert_eq!(source("loaded"), Some(json!(file)), "{body}");
+    assert_eq!(source("uploaded"), Some(Value::Null), "{body}");
+    assert_eq!(source("created"), Some(Value::Null), "{body}");
+
+    let (st, body) = call(
+        &r,
+        "POST",
+        &format!("/api/sessions/{sid}/datasets/reload"),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["succeeded"], json!(["loaded"]), "{body}");
+    let mut skipped: Vec<&str> = body["data"]["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    skipped.sort_unstable();
+    assert_eq!(skipped, ["created", "uploaded"], "{body}");
+    let session = state.session_manager.get_session(&sid).await.unwrap();
+    let datasets = session.datasets.read().await;
+    for name in ["uploaded", "created"] {
+        assert_eq!(datasets[name].nrows(), 3, "{name}");
+    }
+}
+
 /// A reload is admitted like a tool call: above the memory soft limit it is
 /// refused with the governor's 503.
 #[tokio::test]
