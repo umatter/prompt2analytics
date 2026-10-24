@@ -14,23 +14,24 @@ use super::models::{ToolCall, ToolCallStatus};
 impl DbConnection {
     // ==================== Tool Call Operations ====================
 
-    /// Create a new tool call record. Its conversation must exist
-    /// (`NotFound`), and it is refused with `MemoryPressure` above the RSS
-    /// soft limit. Its texts are cut at a char boundary to `message_bytes`
-    /// and to the bytes the session has left under `session_db_bytes`, never
-    /// refused.
+    /// Create a new tool call record. Its conversation must exist, and its
+    /// message must exist in that conversation (`NotFound` otherwise), and it
+    /// is refused with `MemoryPressure` above the RSS soft limit. Its texts
+    /// are cut at a char boundary to `message_bytes` and to the bytes the
+    /// session has left under `session_db_bytes`, never refused.
     ///
-    /// The existence check, the bytes and the write run in the
+    /// The existence checks, the bytes and the write run in the
     /// conversation's [`StoreTurn`](super::connection::StoreTurn), in a task
     /// a dropped caller does not stop ([`run_to_end`]), like a tool call's
     /// update and status changes; a call dropped while it waits for the turn
     /// does nothing. A delete or clear of the conversation runs wholly
-    /// before such a write (which then finds no conversation or no row:
-    /// `NotFound`, and nothing counted) or wholly after it, never alongside
-    /// it: on RocksDB, which validates an optimistic transaction's
-    /// writes when it commits, a tool-call write committed on a row a
-    /// clear's transaction deletes would fail the clear whole on a write
-    /// conflict.
+    /// before such a write or wholly after it, never alongside it: on
+    /// RocksDB, which validates an optimistic transaction's writes when it
+    /// commits, a tool-call write committed on a row a clear's transaction
+    /// deletes would fail the clear whole on a write conflict. A write that
+    /// comes after a delete finds no conversation, and one after a clear
+    /// finds no message or, for an update or status change, no row: it is
+    /// `NotFound`, and nothing is counted or stored.
     pub async fn create_tool_call(&self, tool_call: &ToolCall) -> Result<ToolCall, DbError> {
         self.check_memory()?;
         let db = self.clone();
@@ -38,6 +39,16 @@ impl DbConnection {
         let turn = db.conversation_turn(&tool_call.conversation_id).await;
         run_to_end(turn, async move {
             let conv = db.get_conversation(&tool_call.conversation_id).await?;
+            // A clear that ran first left the conversation but took the
+            // message; a row stored for it would only be counted, never
+            // shown, until the next clear or delete.
+            let message = db.get_message(&tool_call.message_id).await?;
+            if message.conversation_id != tool_call.conversation_id {
+                return Err(DbError::NotFound(format!(
+                    "Message not found in conversation {}: {}",
+                    tool_call.conversation_id, tool_call.message_id
+                )));
+            }
             let tool_call = db
                 .fit_tool_call_texts(&conv.session_id, tool_call, 0)
                 .await?;

@@ -1571,36 +1571,91 @@ async fn a_clear_during_a_tool_call_write_waits_for_it() {
     }
 }
 
-/// A tool-call create sent while its conversation's delete runs in the
-/// store waits for the delete's turn and is then `NotFound`, so no tool call
-/// is left behind for the orphan sweep. Before, the create checked that the
-/// conversation existed outside the turn, while the delete had not yet
-/// committed, and wrote its row after the delete's had gone.
+/// A tool-call create sent while a delete or clear of its conversation runs
+/// in the store waits for that call's turn and is then `NotFound`: after a
+/// delete the conversation is gone, after a clear the create's message is.
+/// No tool call is left behind, neither for the orphan sweep nor, after a
+/// clear, counted against the byte budget for a message nothing displays.
+/// Before the create took the turn, it checked that the conversation existed
+/// while the delete had not yet committed and wrote its row after the
+/// delete's had gone; before it checked its message, a create after a clear
+/// found the conversation and stored its row.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_tool_call_create_during_a_delete_leaves_no_row() {
+async fn a_tool_call_create_during_a_clear_or_delete_leaves_no_row() {
+    let mut problems = Vec::new();
     for engine in ENGINES {
-        let dir = tempfile::tempdir().unwrap();
-        let db = engine_db(engine, dir.path(), PersistenceLimits::default()).await;
-        slow_message_deletes(&db).await;
-        let id = filled_conversation(&db, "s1", "gone").await;
-        let message_id = db.get_messages(&id).await.unwrap()[0].id_string();
-        let delete = tokio::spawn({
-            let (db, id) = (db.clone(), id.clone());
-            async move { db.delete_conversation(&id).await }
-        });
-        assert!(turn_has_users(&db, &id, 1).await);
-        // As in a_tool_call_write_during_a_clear_waits_for_it.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let call = ToolCall::new(message_id, id.clone(), "regression_ols".into(), "{}".into());
+        for op in [Op::Clear, Op::Delete] {
+            let case = format!("{engine:?} {op:?}");
+            let dir = tempfile::tempdir().unwrap();
+            let limits = PersistenceLimits {
+                session_db_bytes: Some(100_000),
+                ..Default::default()
+            };
+            let db = engine_db(engine, dir.path(), limits).await;
+            slow_message_deletes(&db).await;
+            let id = filled_conversation(&db, "s1", "gone").await;
+            let message_id = db.get_messages(&id).await.unwrap()[0].id_string();
+            let running = tokio::spawn({
+                let (db, id) = (db.clone(), id.clone());
+                async move {
+                    match op {
+                        Op::Clear => db.clear_messages(&id).await.map(|_| ()),
+                        Op::Delete => db.delete_conversation(&id).await,
+                    }
+                }
+            });
+            assert!(turn_has_users(&db, &id, 1).await, "{case}");
+            // As in a_tool_call_write_during_a_clear_waits_for_it.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let call = ToolCall::new(message_id, id.clone(), "regression_ols".into(), "{}".into());
+            let created = db.create_tool_call(&call).await;
+            running.await.unwrap().unwrap();
+            if !matches!(created, Err(DbError::NotFound(_))) {
+                problems.push(format!("{case}: create: {created:?}"));
+            }
+            let left = rows_in(&db, "tool_calls").await;
+            if left != 0 {
+                problems.push(format!("{case}: {left} tool calls left"));
+            }
+            if let Some(gap) = counter_gap(&db, "s1").await {
+                problems.push(format!("{case}: {gap}"));
+            }
+            assert_eq!(db.store_turns_in_use(), 0);
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// A tool call is created only for a message of its own conversation: one
+/// whose message does not exist, or belongs to another conversation, is
+/// `NotFound`, with no row stored and nothing counted.
+#[tokio::test]
+async fn a_tool_call_create_needs_its_message_in_its_conversation() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1000),
+        ..Default::default()
+    })
+    .await;
+    let a = db.create_conversation("s1", "a").await.unwrap().id_string();
+    let b = db.create_conversation("s1", "b").await.unwrap().id_string();
+    let in_b = db
+        .add_message(&b, "assistant", "")
+        .await
+        .unwrap()
+        .id_string();
+    for (case, message_id) in [
+        ("a missing", "no-such-message".to_string()),
+        ("another conversation's", in_b),
+    ] {
+        let call = ToolCall::new(message_id, a.clone(), "regression_ols".into(), "{}".into());
         let created = db.create_tool_call(&call).await;
-        delete.await.unwrap().unwrap();
         assert!(
             matches!(created, Err(DbError::NotFound(_))),
-            "{engine:?}: create: {created:?}"
+            "{case} message: {created:?}"
         );
-        assert_eq!(rows_in(&db, "tool_calls").await, 0, "{engine:?}");
-        assert_eq!(db.store_turns_in_use(), 0);
     }
+    assert_eq!(rows_in(&db, "tool_calls").await, 0);
+    assert_eq!(counter_gap(&db, "s1").await, None);
 }
 
 /// A message add or save, or a conversation creation, whose caller is
