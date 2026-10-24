@@ -797,6 +797,8 @@ A websocket for tool calls. It exists only when the server is built with the `we
 
 A connection authenticates once with `auth`; each `tool` message then runs under the same governor and request limits as `POST /api/tools/{name}`, and the session is looked up again for every call. An `error` carries a `code` when a tool message is refused: a governor or limit code from the table below (`unknown_tool`, `limit_exceeded`, `session_busy`, ...), or `session_not_found` / `session_expired` when the authenticated session has gone. Messages and frames are capped at the HTTP body cap (`P2A_MAX_HTTP_BODY_MB`). An edge rate limiter counts the whole connection as one request.
 
+A connection handles one message at a time, in the order they arrive, and keeps reading while it does. A close frame, or a connection that drops, cancels the tool call it is running, as a disconnect cancels `POST /api/tools/{name}`: the work stops at its next checkpoint, and the call's audit entry has the outcome `cancelled`. Protocol pings and `ping` messages are answered at once, also while a call runs. Other messages wait their turn, at most 16 of them and at most the body cap in bytes together; one more is refused at once with an `error` whose `code` is `connection_busy`, and can be sent again once the waiting messages are answered.
+
 Captured exchange (`>` sent, `<` received):
 
 ```
