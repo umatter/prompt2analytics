@@ -477,7 +477,9 @@ impl DbConnection {
     /// Update the content of an existing message (the server's final
     /// answer). The content is never refused for size: it is cut at a char
     /// boundary to `message_bytes` and, with a `session_db_bytes` budget, to
-    /// the bytes the session has left (possibly to the empty string).
+    /// the bytes the session has left (possibly to the empty string), with
+    /// the bytes of the content it replaces as room: only what it adds over
+    /// that content counts.
     ///
     /// The bytes, the update and the conversation's recount run in the
     /// conversation's turn, in a task a dropped caller does not stop
@@ -500,13 +502,20 @@ impl DbConnection {
         let message_id = message_id.to_string();
         run_to_end(async move {
             let _turn = db.conversation_turn(&conversation_id).await;
+            let mut session_id = String::new();
+            let mut replaced = 0;
             if db.tracks_session_bytes() {
                 // Read again in the turn: a clear that ran before it took the
                 // message, and its bytes must not be counted for a write that
-                // finds no row.
-                db.get_message(&message_id).await?;
-                let conv = db.get_conversation(&conversation_id).await?;
-                content = db.fit_session_bytes(&conv.session_id, content).await?;
+                // finds no row. The content it replaces is room for the new
+                // one, released once the write has replaced it.
+                let stored = db.get_message(&message_id).await?;
+                session_id = db.get_conversation(&conversation_id).await?.session_id;
+                replaced = stored.content.len() as u64;
+                let mut fitted = db
+                    .fit_session_texts(&session_id, vec![content], replaced)
+                    .await?;
+                content = fitted.pop().unwrap_or_default();
             }
             let mut result = db
                 .db()
@@ -522,6 +531,7 @@ impl DbConnection {
                     message_id
                 )));
             };
+            db.release_session_bytes(&session_id, replaced);
             db.update_conversation_after_message(&msg.conversation_id, &msg.content)
                 .await?;
             Ok(msg)

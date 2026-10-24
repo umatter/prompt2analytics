@@ -410,18 +410,6 @@ impl DbConnection {
         .await?
     }
 
-    /// Server-produced `text` cut to the bytes the session has left under
-    /// `session_db_bytes` (possibly to the empty string) and counted; never
-    /// refused. `text` unchanged without the budget.
-    pub(crate) async fn fit_session_bytes(
-        &self,
-        session_id: &str,
-        text: String,
-    ) -> Result<String, DbError> {
-        let mut fitted = self.fit_session_texts(session_id, vec![text], 0).await?;
-        Ok(fitted.pop().unwrap_or_default())
-    }
-
     /// Server-produced `texts`, of a write that replaces stored texts of
     /// `replaced` bytes, cut in order to the bytes the session has left under
     /// `session_db_bytes` plus `replaced` (each possibly to the empty string)

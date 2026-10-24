@@ -378,6 +378,41 @@ async fn counter_gap(db: &DbConnection, session_id: &str) -> Option<String> {
     (counted != Some(stored)).then(|| format!("counted {counted:?} bytes, stored {stored}"))
 }
 
+/// A content update counts only the bytes it adds over the content it
+/// replaces, which is room for the new one: at the budget, a content of the
+/// same size is kept whole, a shorter one frees the difference, and the
+/// counter stays in step with the store. Before, the update counted the new
+/// content on top of the old, so it was cut to the room left beside the old
+/// content, and the counter stayed above the store by the old content's
+/// bytes, refusing a message the session had room for.
+#[tokio::test]
+async fn a_content_update_counts_only_the_bytes_it_adds() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100),
+        ..Default::default()
+    })
+    .await;
+    let c = db.create_conversation("s1", "t").await.unwrap(); // 1
+    let m = db
+        .add_message(&c.id_string(), "assistant", &"a".repeat(60))
+        .await
+        .unwrap(); // 61
+    let same = db
+        .update_message_content(&m.id_string(), &"b".repeat(60))
+        .await
+        .unwrap();
+    assert_eq!(same.content, "b".repeat(60));
+    assert_eq!(counter_gap(&db, "s1").await, None);
+    db.update_message_content(&m.id_string(), &"c".repeat(10))
+        .await
+        .unwrap(); // 11
+    assert_eq!(counter_gap(&db, "s1").await, None);
+    db.add_message(&c.id_string(), "user", &"d".repeat(89))
+        .await
+        .unwrap(); // exactly 100
+    assert_eq!(counter_gap(&db, "s1").await, None);
+}
+
 /// A write of an existing tool call counts only the bytes its texts add over
 /// the stored texts they replace: an update that keeps the arguments does
 /// not count them again, a result or error that replaces another counts the
