@@ -10,6 +10,7 @@ use surrealdb::RecordId;
 
 use super::connection::{DbConnection, DbError, run_to_end};
 use super::models::{ToolCall, ToolCallStatus};
+use super::sessions::tool_call_texts_len;
 
 impl DbConnection {
     // ==================== Tool Call Operations ====================
@@ -84,7 +85,11 @@ impl DbConnection {
                 )));
             }
             let session_id = db.tool_call_session(&stored.conversation_id).await?;
-            let replaced = text_bytes(&stored);
+            let replaced = tool_call_texts_len(
+                &stored.arguments,
+                stored.result.as_deref(),
+                stored.error.as_deref(),
+            );
             let tool_call = db
                 .fit_tool_call_texts(&session_id, tool_call, replaced)
                 .await?;
@@ -381,13 +386,4 @@ impl TextField {
             TextField::Error => tool_call.error.as_deref(),
         }
     }
-}
-
-/// The bytes of `tool_call`'s texts (arguments, result, error) that the
-/// `session_db_bytes` budget counts.
-fn text_bytes(tool_call: &ToolCall) -> u64 {
-    let len = |s: &str| s.len() as u64;
-    len(&tool_call.arguments)
-        .saturating_add(tool_call.result.as_deref().map_or(0, len))
-        .saturating_add(tool_call.error.as_deref().map_or(0, len))
 }

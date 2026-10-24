@@ -265,14 +265,24 @@ pub(super) fn message_text_bytes(rows: &[MessageText]) -> u64 {
 
 /// UTF-8 bytes of the tool calls' arguments, results and errors.
 pub(super) fn tool_call_text_bytes(rows: &[ToolCallText]) -> u64 {
-    let len = |s: &str| s.len() as u64;
     rows.iter()
-        .map(|t| {
-            len(&t.arguments)
-                .saturating_add(t.result.as_deref().map_or(0, len))
-                .saturating_add(t.error.as_deref().map_or(0, len))
-        })
+        .map(|t| tool_call_texts_len(&t.arguments, t.result.as_deref(), t.error.as_deref()))
         .fold(0u64, u64::saturating_add)
+}
+
+/// The bytes of one tool call's texts that the `session_db_bytes` budget
+/// counts: its arguments, result and error. The one definition for both
+/// sides of the counter, the writes that count bytes and the seed and
+/// deletes that read what is stored, so the two cannot drift apart.
+pub(super) fn tool_call_texts_len(
+    arguments: &str,
+    result: Option<&str>,
+    error: Option<&str>,
+) -> u64 {
+    let len = |s: &str| s.len() as u64;
+    len(arguments)
+        .saturating_add(result.map_or(0, len))
+        .saturating_add(error.map_or(0, len))
 }
 
 impl DbConnection {
