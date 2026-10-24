@@ -91,10 +91,11 @@ impl DbConnection {
     }
 
     /// Update a conversation's title. A title longer than `message_bytes` is
-    /// `TooLarge`; with a `session_db_bytes` budget, the bytes the new title
-    /// adds count against it (`QuotaExceeded` when they would pass it).
-    /// Runs in the conversation's turn, like every write of its row, in a
-    /// task a dropped caller does not stop ([`run_to_end`]).
+    /// `TooLarge`; with a `session_db_bytes` budget, the bytes a longer title
+    /// adds count against it (`QuotaExceeded` when they would pass it), and
+    /// those a shorter one frees are released once it is written. Runs in
+    /// the conversation's turn, like every write of its row, in a task a
+    /// dropped caller does not stop ([`run_to_end`]).
     pub async fn update_conversation_title(
         &self,
         id: &str,
@@ -107,11 +108,16 @@ impl DbConnection {
         // update, and a delete cannot run between the bytes and the write.
         let turn = db.conversation_turn(&id).await;
         run_to_end(turn, async move {
+            // The session and the bytes a shorter title frees, released once
+            // the write has replaced the stored title.
+            let mut freed = None;
             if db.tracks_session_bytes() {
                 let conv = db.get_conversation(&id).await?;
                 let added = title.len().saturating_sub(conv.title.len());
                 db.reserve_session_bytes(&conv.session_id, added as u64)
                     .await?;
+                let shorter_by = conv.title.len().saturating_sub(title.len());
+                freed = Some((conv.session_id, shorter_by as u64));
             }
             let mut result = db
                 .db()
@@ -121,7 +127,12 @@ impl DbConnection {
                 .await?;
 
             let updated: Option<Conversation> = result.take(0)?;
-            updated.ok_or_else(|| DbError::NotFound(format!("Conversation not found: {}", id)))
+            let updated = updated
+                .ok_or_else(|| DbError::NotFound(format!("Conversation not found: {}", id)))?;
+            if let Some((session_id, bytes)) = freed {
+                db.release_session_bytes(&session_id, bytes);
+            }
+            Ok(updated)
         })
         .await
     }

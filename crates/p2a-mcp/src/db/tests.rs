@@ -413,6 +413,47 @@ async fn a_content_update_counts_only_the_bytes_it_adds() {
     assert_eq!(counter_gap(&db, "s1").await, None);
 }
 
+/// A title change counts the bytes a longer title adds and releases those a
+/// shorter one frees, so renaming back and forth keeps the session's byte
+/// counter in step with the store, and the freed bytes are the session's
+/// again. Before, a shorter title released nothing, and each long, short,
+/// long cycle raised the counter by the difference until the session
+/// refused writes it had room for.
+#[tokio::test]
+async fn a_shorter_title_releases_the_bytes_it_frees() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100),
+        ..Default::default()
+    })
+    .await;
+    let id = db
+        .create_conversation("s1", &"t".repeat(40))
+        .await
+        .unwrap()
+        .id_string();
+    let mut problems = Vec::new();
+    for (step, title) in [
+        ("shorter", "u".to_string()),
+        ("longer", "v".repeat(40)),
+        ("shorter again", "w".to_string()),
+        ("longer again", "x".repeat(40)),
+        ("short", "y".to_string()),
+    ] {
+        match db.update_conversation_title(&id, &title).await {
+            Ok(_) => {
+                if let Some(gap) = counter_gap(&db, "s1").await {
+                    problems.push(format!("{step}: {gap}"));
+                }
+            }
+            Err(e) => problems.push(format!("{step}: {e}")),
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+    // The title holds 1 byte, so a message of 99 fills the budget exactly.
+    db.add_message(&id, "user", &"m".repeat(99)).await.unwrap();
+    assert_eq!(counter_gap(&db, "s1").await, None);
+}
+
 /// A write of an existing tool call counts only the bytes its texts add over
 /// the stored texts they replace: an update that keeps the arguments does
 /// not count them again, a result or error that replaces another counts the
