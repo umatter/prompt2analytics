@@ -923,8 +923,9 @@ pub static ROW_RULES: &[RowRule] = &[
     row("regression_loess", RowClass::Quadratic),
     // Quadratic: at each t PELT examines every candidate changepoint that survived pruning, and
     // on a series without changes, or under a large penalty, it prunes none, so its work is
-    // O(n^2) with no checkpoint. Binary segmentation (at most 10 changepoints, one scan each)
-    // is linear and shares the rule.
+    // O(n^2). PELT checks the call's budget at every step, so an overrun ends at the deadline;
+    // the row cap keeps the default arguments well inside it. Binary segmentation (at most 10
+    // changepoints, one scan each) is linear and shares the rule.
     row("ts_changepoint", RowClass::Quadratic),
 ];
 
