@@ -323,8 +323,9 @@ fn compute_total_cost(data: &[f64], changepoints: &[usize], cost_function: CostF
 /// Recursively finds the single best changepoint in each segment
 ///
 /// # Errors
-/// Fails on a series of fewer than 2 points, and when the budget installed
-/// with [`crate::resource::with_budget`] is cancelled or past its deadline.
+/// Fails on a series of fewer than 2 points, on a series too short for two
+/// segments of the minimum segment length, and when the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline.
 pub fn binary_segmentation(
     data: &[f64],
     max_changepoints: Option<usize>,
@@ -338,6 +339,17 @@ pub fn binary_segmentation(
     }
 
     let min_seg = min_segment_length.unwrap_or(2).max(2);
+
+    // As in detect_changepoints: a series that cannot hold two segments is
+    // refused, not reported as having no changepoint. Saturating, so that a
+    // minimum near usize::MAX is refused instead of wrapping.
+    if n < min_seg.saturating_mul(2) {
+        return Err(format!(
+            "Data length ({}) must be at least 2x minimum segment length ({})",
+            n, min_seg
+        ));
+    }
+
     let max_cp = max_changepoints.unwrap_or(10);
     let threshold = significance_threshold.unwrap_or(0.0);
 
@@ -867,8 +879,29 @@ mod tests {
                 detect_changepoints(&data, Some(5.0), Some(min_seg), CostFunction::MeanChange)
                     .expect_err("a minimum segment longer than the series must be refused");
             assert!(err.contains("minimum segment length"), "{err}");
-            let r = binary_segmentation(&data, Some(5), Some(min_seg), None).unwrap();
-            assert_eq!(r.n_changepoints, 0);
+            let err = binary_segmentation(&data, Some(5), Some(min_seg), None)
+                .expect_err("a minimum segment longer than the series must be refused");
+            assert!(err.contains("minimum segment length"), "{err}");
         }
+    }
+
+    #[test]
+    fn binary_segmentation_refuses_a_series_shorter_than_two_minimum_segments() {
+        // Binary segmentation skipped every segment shorter than two minimum
+        // segments, so it answered "no changepoints" for a series it never
+        // examined, where PELT refuses the same input.
+        let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
+        let err = binary_segmentation(&data, Some(5), Some(51), None)
+            .expect_err("100 points cannot hold two segments of 51");
+        assert!(
+            err.contains("Data length (100) must be at least 2x minimum segment length (51)"),
+            "{err}"
+        );
+        let pelt_err = detect_changepoints(&data, Some(5.0), Some(51), CostFunction::MeanChange)
+            .expect_err("PELT refuses it too");
+        assert_eq!(err, pelt_err);
+        // Two segments of 50 fit exactly; the shift sits at their boundary.
+        let r = binary_segmentation(&data, Some(5), Some(50), None).unwrap();
+        assert_eq!(r.changepoints, vec![50]);
     }
 }
