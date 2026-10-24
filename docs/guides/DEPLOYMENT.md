@@ -277,8 +277,8 @@ HTTP), and they never depend on the resource profile:
   with the session, and directories left by an earlier process are purged at
   the first file access after a restart. A session's directory holds at most
   `session_disk_bytes` (hosted 64 MiB).
-- **Sizes.** `load_dataset` refuses a file larger than `load_file_bytes` (hosted
-  64 MiB) before parsing it; `export_dataset`, `export_session` and
+- **Sizes.** `load_dataset` and the dataset reload route refuse a file larger
+  than `load_file_bytes` (hosted 64 MiB) before parsing it; `export_dataset`, `export_session` and
   `import_session` are bounded by `export_bytes` (hosted 64 MiB).
 - **Messages** show paths relative to the data root, never absolute server
   paths.
@@ -495,7 +495,7 @@ Named budgets:
 | `generated_cells` | cells `generate_random_data` produces | 10,000,000 | none |
 | `generated_bytes` | estimated bytes of generated data | 200 MiB | none |
 | `export_bytes` | `export_dataset`, `export_session` and `import_session` sizes | 64 MiB | none |
-| `load_file_bytes` | size of the file `load_dataset` reads, checked before parsing | 64 MiB | none |
+| `load_file_bytes` | size of the file `load_dataset` or a dataset reload reads, checked before parsing | 64 MiB | none |
 | `response_bytes` | one tool's text and image output | 16 MiB | none |
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |

@@ -26,7 +26,7 @@ Every path a tool receives goes through the path jail (`crates/p2a-mcp/src/path_
 - a path whose final component is a symbolic link is refused, whether the link is live or dangling;
 - writes go to a temporary file beside the target and are renamed into place, so a link planted at the target is replaced, never followed;
 - in open public mode each session is confined to its own directory, `<data root>/sessions/<session id>/`, with a disk quota (`session_disk_bytes`, 64 MiB hosted);
-- maximum file size: `load_dataset` refuses a file larger than `load_file_bytes` before parsing it (64 MiB in the hosted profile, no limit when limits are off, settable in any mode with `P2A_LIMIT_OVERRIDES=load_file_bytes=<bytes>`);
+- maximum file size: `load_dataset` and the dataset reload route (`POST /api/sessions/{id}/datasets/reload`) refuse a file larger than `load_file_bytes` before parsing it (64 MiB in the hosted profile, no limit when limits are off, settable in any mode with `P2A_LIMIT_OVERRIDES=load_file_bytes=<bytes>`);
 - the loader chooses a parser by file extension (CSV, Parquet, Excel/ODS, Stata, SAS) and refuses any other extension;
 - error messages show paths relative to the data root, never absolute server paths.
 

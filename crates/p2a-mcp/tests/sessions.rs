@@ -16,6 +16,7 @@ use p2a_mcp::config::ServerConfig;
 use p2a_mcp::db::DatasetMeta;
 use p2a_mcp::path_jail::allowed_data_root;
 use p2a_mcp::persistent_session::PersistentSessionManager;
+use p2a_mcp::tools::limits;
 use p2a_mcp::transport::http::{AppState, build_app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -305,6 +306,67 @@ async fn reload_respects_the_session_dataset_quota() {
     assert!(!session.datasets.read().await.contains_key("second"));
     let bytes = session.refresh_data_bytes().await;
     assert!(bytes > 0 && bytes <= quota, "{bytes}");
+}
+
+/// A reload checks each source file against `load_file_bytes` before it
+/// parses it, as `load_dataset` does: a file that grew past the budget after
+/// it was loaded is reported failed with its size and the limit (and no
+/// server path), and the session does not get it.
+#[test]
+fn reload_refuses_a_source_above_load_file_bytes() {
+    let big_csv = noisy_csv(200, 3);
+    let size = big_csv.len() as u64;
+    let capped = limits::Limits::off()
+        .with_overrides(&[format!("load_file_bytes={}", size - 1)])
+        .unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // The limits are this thread's (`with_limits`, not a process-wide
+    // install); the current-thread runtime runs the route on it, and the
+    // governor hands them to the blocking thread that loads the files.
+    limits::with_limits(capped, || {
+        rt.block_on(async {
+            let (r, state) = app(ServerConfig::default()).await;
+            let sid = new_session(&r).await;
+            let root = allowed_data_root().unwrap();
+            let dir = tempfile::Builder::new()
+                .prefix(".p2a-pr12-")
+                .tempdir_in(&root)
+                .unwrap();
+            let (small, big) = (dir.path().join("small.csv"), dir.path().join("big.csv"));
+            std::fs::write(&small, noisy_csv(3, 1)).unwrap();
+            std::fs::write(&big, &big_csv).unwrap();
+            store_meta(&state, &sid, "small", &small, 0).await;
+            store_meta(&state, &sid, "big", &big, 1).await;
+
+            let (st, body) = call(
+                &r,
+                "POST",
+                &format!("/api/sessions/{sid}/datasets/reload"),
+                Some(&sid),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert_eq!(body["data"]["succeeded"], json!(["small"]), "{body}");
+            assert_eq!(body["data"]["failed"][0]["name"], "big", "{body}");
+            let error = body["data"]["failed"][0]["error"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                error.contains("(load_file_bytes)")
+                    && error.contains(&size.to_string())
+                    && error.contains(&(size - 1).to_string()),
+                "{body}"
+            );
+            assert!(!error.contains(&*root.to_string_lossy()), "{body}");
+            let session = state.session_manager.get_session(&sid).await.unwrap();
+            assert!(session.datasets.read().await.contains_key("small"));
+            assert!(!session.datasets.read().await.contains_key("big"));
+        })
+    });
 }
 
 /// A reload is admitted like a tool call: above the memory soft limit it is

@@ -725,22 +725,51 @@ pub struct ReloadSource {
 }
 
 /// The load step of a dataset reload: validate `source.source_path` through
-/// the path jail and load the file. It blocks; run it on the blocking pool
-/// inside the session's path-jail scope (`ToolGovernor::run_blocking` does
-/// both). The error is a fixed text without server paths; the details are
-/// logged at debug level.
-pub fn load_reload_source(source: &ReloadSource) -> Result<p2a_core::data::Dataset, &'static str> {
+/// the path jail, check the file's size against the `load_file_bytes` budget
+/// before any parsing (as `load_dataset` does) and load the file. It blocks;
+/// run it on the blocking pool inside the session's path-jail scope and
+/// under the server's request limits (`ToolGovernor::run_blocking` does
+/// both). The error is a fixed text, or the budget refusal with the file's
+/// size and the limit; neither holds a server path. The details are logged
+/// at debug level.
+pub fn load_reload_source(source: &ReloadSource) -> Result<p2a_core::data::Dataset, String> {
     let name = &source.name;
-    match crate::path_jail::validate_data_path(&source.source_path) {
-        Err(e) => {
-            tracing::debug!(dataset = %name, error = %e, "Reload path rejected by the path jail");
-            Err(RELOAD_OUTSIDE_JAIL)
+    let path = crate::path_jail::validate_data_path(&source.source_path).map_err(|e| {
+        tracing::debug!(dataset = %name, error = %e, "Reload path rejected by the path jail");
+        RELOAD_OUTSIDE_JAIL.to_string()
+    })?;
+    let limits = crate::tools::limits::current();
+    if limits.load_file_bytes.is_some() {
+        let size = std::fs::metadata(&path)
+            .map_err(|e| {
+                tracing::debug!(dataset = %name, error = %e, "Failed to read a reload source's size");
+                RELOAD_LOAD_FAILED.to_string()
+            })?
+            .len();
+        if let Err(v) = limits.check_budget(
+            RELOAD_LABEL,
+            "load_file_bytes",
+            size,
+            limits.load_file_bytes,
+        ) {
+            tracing::info!(
+                tool = RELOAD_LABEL,
+                dataset = %name,
+                override_key = v.override_key,
+                requested = %v.requested,
+                limit = %v.limit,
+                "request refused by a named budget"
+            );
+            return Err(format!(
+                "the file needs {} (load_file_bytes), which exceeds this server's limit of {}",
+                v.requested, v.limit
+            ));
         }
-        Ok(path) => p2a_core::DataLoader::load(&path).map_err(|e| {
-            tracing::debug!(dataset = %name, error = %e, "Failed to reload dataset");
-            RELOAD_LOAD_FAILED
-        }),
     }
+    p2a_core::DataLoader::load(&path).map_err(|e| {
+        tracing::debug!(dataset = %name, error = %e, "Failed to reload dataset");
+        RELOAD_LOAD_FAILED.to_string()
+    })
 }
 
 /// The in-memory dataset quotas a reload keeps (the governor's
@@ -816,6 +845,10 @@ pub async fn insert_reloaded_dataset(
 /// same whether it exists or not.
 const CONVERSATION_NOT_FOUND: &str = "Conversation not found";
 const MESSAGE_NOT_FOUND: &str = "Message not found";
+
+/// The name a reload's budget checks and their log lines go by (the label of
+/// its governed call).
+const RELOAD_LABEL: &str = "reload_session_datasets";
 
 /// Reload texts. They are fixed so that no server path reaches a caller.
 const RELOAD_NO_SOURCE: &str = "no source path stored";

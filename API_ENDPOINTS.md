@@ -151,7 +151,7 @@ The path id is the caller; it must be a live session (404 otherwise), and a `X-P
 POST /api/sessions/{session_id}/datasets/reload
 ```
 
-The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory, and each reloaded dataset must fit the dataset quotas. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
+The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory. Each source file must fit `load_file_bytes`, checked before it is parsed as `load_dataset` checks it, and each reloaded dataset must fit the dataset quotas; a dataset that does not is reported in `failed`. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
 
 **Request:** (empty body)
 ```json
