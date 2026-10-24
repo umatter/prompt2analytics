@@ -894,7 +894,9 @@ thread_local! {
 /// move with every session's load, and the RSS is what the memory admission
 /// limit is checked against, so an unauthenticated visitor polling them could
 /// watch other sessions and time memory-pressure attempts. Outside a governed
-/// call (stdio, which is always local) nothing is withheld.
+/// call (stdio, which is always local, or a direct
+/// `AnalyticsServer::call_tool_with_session` from a test or embedder) nothing
+/// is withheld.
 pub(crate) fn redact_process_memory(redact: bool) -> ProcessMemoryRedaction {
     let previous = REDACT_PROCESS_MEMORY.with(|r| r.replace(redact));
     ProcessMemoryRedaction {
