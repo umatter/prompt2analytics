@@ -162,9 +162,9 @@ impl ChatSession {
 
     /// The chat's session, when it is still the live session under its id
     /// (a successful lookup refreshes the last access of the session now
-    /// under the id). Otherwise why not, and
-    /// the driver is woken: the first call to find the session gone records
-    /// the reason, and every later call gives it without a lookup.
+    /// under the id). Otherwise the reason it is gone, and the driver is
+    /// woken: the first call to find the session gone records the reason,
+    /// and every later call returns it without a lookup.
     async fn live(&self) -> Result<Arc<Session>, SessionGone> {
         let gone = match self.gone.reason.get() {
             Some(gone) => *gone,
@@ -195,6 +195,7 @@ impl ChatSession {
         let gone = || self.gone.reason.get().copied();
         tokio::select! {
             biased;
+            // `live` notifies only after `reason` is set, so the fallback is unreachable.
             () = self.gone.notify.notified() => Err(gone().unwrap_or(SessionGone::NotFound)),
             out = chat => gone().map_or(Ok(out), Err),
         }
@@ -224,7 +225,8 @@ const UNKNOWN_TOOL: &str = "unknown_tool";
 /// looks for. Either error is the tool's error text.
 ///
 /// The routes pass `AppState::audit_logger`, which `build_app` opens for the
-/// governor's audit file: a refusal and the governed calls around it go
+/// same file as the governor's (`ExecConfig::from_config` takes
+/// `config.audit`), so a refusal and the governed calls around it go
 /// through one writer, in call order.
 async fn admit_tool_call(
     chat: &ChatSession,
@@ -2596,6 +2598,53 @@ mod chat_tests {
             })
             .await;
         assert_eq!(again.unwrap_err(), SessionGone::NotFound);
+    }
+
+    /// The answer of a non-streaming chat whose session went while it ran
+    /// (`llm_chat` answers with the response of the reason `run` returns): a
+    /// deleted or evicted session answers 404 `session_not_found`, an expired
+    /// one 410 `session_expired`, each as a failed `ApiResponse` whose error
+    /// is the reason's message.
+    #[tokio::test]
+    async fn a_chat_on_a_gone_session_answers_with_the_reasons_status_and_code() {
+        for (removal, want, status, code) in [
+            (
+                "deleted",
+                SessionGone::NotFound,
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+            ),
+            (
+                "expired",
+                SessionGone::Expired,
+                StatusCode::GONE,
+                "session_expired",
+            ),
+        ] {
+            let (governor, chat, sessions) = admitting_parts_with_sessions().await;
+            if removal == "deleted" {
+                sessions.delete_session(&chat.session().id).await.unwrap();
+            } else {
+                *chat.session().last_accessed.write().await =
+                    chrono::Utc::now() - chrono::Duration::minutes(61);
+            }
+            let server = Arc::new(crate::server::AnalyticsServer::new());
+            let executor = SessionToolExecutor::new(governor, server, chat.clone(), no_audit());
+            let gone = chat
+                .run(executor.execute("list_datasets", serde_json::json!({})))
+                .await
+                .unwrap_err();
+            assert_eq!(gone, want, "{removal}");
+            let resp = gone.into_response();
+            assert_eq!(resp.status(), status, "{removal}");
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], code, "{removal}");
+            assert_eq!(body["success"], false, "{removal}");
+            assert_eq!(body["error"], want.message(), "{removal}");
+        }
     }
 
     /// The argument string of a tool call the model did not finish, as a
