@@ -2338,12 +2338,17 @@ mod tests {
                     "open public mode: {text}"
                 );
                 assert!(text.contains("Process memory: not reported"), "{text}");
-            } else if p2a_core::get_process_memory().is_some() {
-                assert!(health["rss_bytes"].is_u64(), "{health}");
-                assert!(
-                    text.contains("Process RSS: ") && text.contains("Process Virtual: "),
-                    "local mode: {text}"
-                );
+            } else {
+                // Holds on every platform, also one that reports no process
+                // memory: the local governor withholds nothing.
+                assert!(!text.contains("not reported"), "local mode: {text}");
+                if p2a_core::get_process_memory().is_some() {
+                    assert!(health["rss_bytes"].is_u64(), "{health}");
+                    assert!(
+                        text.contains("Process RSS: ") && text.contains("Process Virtual: "),
+                        "local mode: {text}"
+                    );
+                }
             }
         }
     }
