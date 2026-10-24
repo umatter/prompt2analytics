@@ -88,6 +88,10 @@ base64.workspace = true
 # check also names polars' footer types with this crate's, so a polars that
 # moves to another version stops compiling rather than drifting apart.
 polars-parquet-format = "=0.1.0"
+# Decompresses a categorical column's dictionary pages before the file is
+# decoded, with polars' own codecs, so each label is counted once over the
+# row groups (tools/handlers/data.rs). Pinned with polars like the above.
+polars-parquet = { version = "=0.52.0", default-features = false }
 
 [dev-dependencies]
 polars.workspace = true

@@ -7047,6 +7047,7 @@ dependencies = [
  "ndarray 0.16.1",
  "p2a-core",
  "polars",
+ "polars-parquet",
  "polars-parquet-format",
  "reqwest",
  "rmcp",
