@@ -841,6 +841,39 @@ fn below_min_tolerance(f: Option<f64>, min: f64) -> bool {
     }
 }
 
+/// The refusal of the number `n` at `path`, which exceeds `cap` by magnitude: the wording of
+/// [`Rule::Max`] and [`Rule::ArrayElemMax`]. `subject` sits between the parameter and the verb:
+/// `"= {n}"` for a scalar, `"contains {n}, which"` for an element of an array. `plural` words
+/// the advice for the array's values.
+fn magnitude_refusal(
+    path: &str,
+    subject: &str,
+    n: &serde_json::Number,
+    cap: u64,
+    key: &str,
+    tool_echo: &str,
+    plural: bool,
+) -> String {
+    // The cap bounds the magnitude, so "smaller" would point a negative value the wrong way.
+    if n.to_string().starts_with('-') {
+        let values = if plural { "values" } else { "a value" };
+        format!(
+            "Parameter `{path}` {subject} is outside this server's limit of ±{cap} ({key}) for \
+             `{tool_echo}`. Use {values} of smaller magnitude."
+        )
+    } else {
+        let values = if plural {
+            "smaller values"
+        } else {
+            "a smaller value"
+        };
+        format!(
+            "Parameter `{path}` {subject} exceeds this server's limit of {cap} ({key}) for \
+             `{tool_echo}`. Use {values}."
+        )
+    }
+}
+
 /// The refusal of the tolerance `shown` (the number as the request wrote it) at `path`.
 /// `readable` is false for a number with no `f64` reading, which may lie above the minimum as
 /// well as below it, so the message says it cannot be read instead.
@@ -1055,21 +1088,9 @@ impl Limits {
                     return Ok(());
                 }
                 let key = family.key();
-                let requested = n.to_string();
-                // The cap bounds the magnitude, so "smaller" would point a negative value the
-                // wrong way.
-                let message = if requested.starts_with('-') {
-                    format!(
-                        "Parameter `{path}` = {n} is outside this server's limit of ±{cap} ({key}) \
-                         for `{tool_echo}`. Use a value of smaller magnitude."
-                    )
-                } else {
-                    format!(
-                        "Parameter `{path}` = {n} exceeds this server's limit of {cap} ({key}) for \
-                         `{tool_echo}`. Use a smaller value."
-                    )
-                };
-                violation(requested, cap.to_string(), key, message)
+                let subject = format!("= {n}");
+                let message = magnitude_refusal(path, &subject, n, cap, key, tool_echo, false);
+                violation(n.to_string(), cap.to_string(), key, message)
             }
             Rule::ArrayLen(family) | Rule::UniqueList(family) => {
                 let (Some(cap), Some(items)) = (self.cap(family), value.as_array()) else {
@@ -1114,21 +1135,10 @@ impl Limits {
                 let key = family.key();
                 for n in items.iter().filter_map(Value::as_number) {
                     if number_exceeds(n, cap) {
-                        let requested = n.to_string();
-                        // As for `Max`: the cap bounds the magnitude.
-                        let message = if requested.starts_with('-') {
-                            format!(
-                                "Parameter `{path}` contains {n}, which is outside this server's \
-                                 limit of ±{cap} ({key}) for `{tool_echo}`. Use values of smaller \
-                                 magnitude."
-                            )
-                        } else {
-                            format!(
-                                "Parameter `{path}` contains {n}, which exceeds this server's limit \
-                                 of {cap} ({key}) for `{tool_echo}`. Use smaller values."
-                            )
-                        };
-                        return violation(requested, cap.to_string(), key, message);
+                        let subject = format!("contains {n}, which");
+                        let message =
+                            magnitude_refusal(path, &subject, n, cap, key, tool_echo, true);
+                        return violation(n.to_string(), cap.to_string(), key, message);
                     }
                 }
                 Ok(())
@@ -1717,11 +1727,11 @@ mod tests {
         let v = h
             .check_with("timeseries_spectrum", &json!({"spans": [3, 1003]}), T)
             .unwrap_err();
-        assert!(
-            v.message.contains("contains 1003") && v.override_key == "span_width",
-            "{}",
-            v.message
+        assert_eq!(
+            v.message,
+            "Parameter `spans` contains 1003, which exceeds this server's limit of 1001 (span_width) for `timeseries_spectrum`. Use smaller values."
         );
+        assert_eq!(v.override_key, "span_width");
         assert!(h.check_with("t", &json!({"spans": [3, -1001]}), T).is_ok());
         let v = h
             .check_with("timeseries_spectrum", &json!({"spans": [3, -1003]}), T)
