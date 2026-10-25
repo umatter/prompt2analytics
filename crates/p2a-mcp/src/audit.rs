@@ -193,7 +193,8 @@ pub struct AuditEntry {
     /// Whether the tool call succeeded (`outcome == "ok"`)
     pub success: bool,
     /// `ok`, `tool_error`, `cancelled`, or a refusal code such as
-    /// `limit_exceeded`, `unknown_tool` or `deadline_exceeded`
+    /// `limit_exceeded`, `unknown_tool`, `not_available` (an internal tool
+    /// the assistant asked for) or `deadline_exceeded`
     pub outcome: &'static str,
     /// Execution time in milliseconds
     pub duration_ms: u64,

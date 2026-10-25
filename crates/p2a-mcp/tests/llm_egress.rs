@@ -451,6 +451,23 @@ async fn new_session(app: &Router) -> String {
     b["data"]["session_id"].as_str().unwrap().to_string()
 }
 
+/// The whole SSE body of one chat-stream request.
+async fn stream_body(app: &Router, body: Value) -> String {
+    let resp = app
+        .clone()
+        .oneshot(post_json("/api/llm/chat/stream", &body))
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(10),
+        axum::body::to_bytes(resp.into_body(), usize::MAX),
+    )
+    .await
+    .expect("the stream ends")
+    .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// The provider block of a chat request pointing at an Ollama stub.
 fn stub_provider(addr: SocketAddr) -> Value {
     json!({"provider_type": "ollama", "base_url": format!("http://{addr}"), "model": "stub"})
@@ -510,6 +527,182 @@ async fn llm_executor_refuses_internal_and_unknown_tools() {
         !c2.contains("is not available to the assistant") && !c2.contains("Unknown tool"),
         "{c2}"
     );
+}
+
+/// An Ollama stub whose first answer asks for two internal tools, a name no
+/// handler registers and an ordinary tool (which fails on its arguments);
+/// a request that carries tool results gets a text answer.
+async fn refused_calls_stub() -> SocketAddr {
+    spawn_stub(Router::new().route(
+        "/api/chat",
+        post(|axum::Json(request): axum::Json<Value>| async move {
+            let answered = request["messages"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|m| m["role"] == "tool"));
+            let message = if answered {
+                json!({"role": "assistant", "content": "done"})
+            } else {
+                json!({"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "server_stats", "arguments": {}}},
+                    {"function": {"name": "import_session",
+                                  "arguments": {"path": "x.json", "merge": false}}},
+                    {"function": {"name": "definitely_not_a_tool", "arguments": {"a": 1}}},
+                    {"function": {"name": "hypothesis_poisson", "arguments": {}}}
+                ]})
+            };
+            format!("{}\n", json!({"message": message, "done": true}))
+        }),
+    ))
+    .await
+}
+
+/// The audit entries of session `sid` in the log at `path`.
+fn audit_entries(path: &std::path::Path, sid: &str) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|e| e["session_id"] == sid)
+        .collect()
+}
+
+/// A tool call the executors refuse before the governor (an internal tool,
+/// or a name no handler registers) leaves an audit entry like every other
+/// refused call: origin `llm_tool`, the chat's session, the sanitised
+/// arguments and outcome `not_available` or `unknown_tool`, on both chat
+/// routes. These are the calls an operator looks for when a model was
+/// steered by injected instructions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_llm_tool_calls_are_audited() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let mut cfg = ServerConfig::default();
+    cfg.audit.enabled = true;
+    cfg.audit.path = log.to_string_lossy().into_owned();
+    let (app, state) = build_app(&cfg).await.unwrap();
+    let addr = refused_calls_stub().await;
+
+    for route in ["/api/llm/chat", "/api/llm/chat/stream"] {
+        let sid = new_session(&app).await;
+        let body = json!({"session_id": sid, "message": "go", "provider": stub_provider(addr)});
+        if route.ends_with("stream") {
+            let text = stream_body(&app, body).await;
+            assert!(text.contains(r#""type":"done""#), "{route}: {text}");
+        } else {
+            let (status, body) = send_json(&app, route, body).await;
+            assert_eq!(status, StatusCode::OK, "{route}: {body}");
+        }
+        state.governor.flush_audit().await;
+        state.audit_logger.flush().await;
+
+        let entries = audit_entries(&log, &sid);
+        let got: Vec<(&str, &str, &str)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e["origin"].as_str().unwrap(),
+                    e["tool_name"].as_str().unwrap(),
+                    e["outcome"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("llm_tool", "server_stats", "not_available"),
+                ("llm_tool", "import_session", "not_available"),
+                ("llm_tool", "definitely_not_a_tool", "unknown_tool"),
+                ("llm_tool", "hypothesis_poisson", "invalid_arguments"),
+            ],
+            "{route}: {entries:?}"
+        );
+        assert_eq!(
+            entries[1]["arguments"],
+            json!({"path": "x.json", "merge": false}),
+            "{route}"
+        );
+        assert_eq!(entries[0]["success"], false, "{route}");
+        assert_eq!(entries[0]["duration_ms"], 0, "{route}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A chat whose session goes away while it runs
+// ---------------------------------------------------------------------------
+
+/// An Ollama answer that calls `create_dataset` for a small dataset `name`.
+fn create_dataset_answer(name: &str) -> Value {
+    json!({"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {
+        "name": "create_dataset",
+        "arguments": {"name": name, "csv_content": "x,y\n1.0,1.1\n2.0,1.9\n3.0,3.2\n"}}}]},
+        "done": true})
+}
+
+/// An Ollama stub for a chat on session `sid` of `state`: request 1 asks
+/// for dataset `d1`; request 2 deletes the session, then asks for `d2`; a
+/// later request gets a text answer. Returns the address and the number of
+/// requests received.
+async fn session_deleting_stub(state: &AppState, sid: &str) -> (SocketAddr, Arc<AtomicUsize>) {
+    let hits = counter();
+    let (h, sessions, sid) = (hits.clone(), state.session_manager.clone(), sid.to_string());
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(move || {
+            let (h, sessions, sid) = (h.clone(), sessions.clone(), sid.clone());
+            async move {
+                let answer = match h.fetch_add(1, Ordering::SeqCst) + 1 {
+                    1 => create_dataset_answer("d1"),
+                    2 => {
+                        sessions.delete_session(&sid).await.unwrap();
+                        create_dataset_answer("d2")
+                    }
+                    _ => json!({"message": {"role": "assistant", "content": "done"}, "done": true}),
+                };
+                format!("{answer}\n")
+            }
+        }),
+    ))
+    .await;
+    (addr, hits)
+}
+
+/// A chat whose session is deleted while it runs runs no further tool on
+/// it: a removed session counts toward neither the session cap nor the
+/// total dataset quota. The tool call after the delete is refused before it
+/// runs, and the chat ends there, with 404 `session_not_found` (an SSE
+/// `error` event on the stream route) and without another provider request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_ends_when_its_session_is_deleted() {
+    for streamed in [false, true] {
+        let (app, state) = app().await;
+        let sid = new_session(&app).await;
+        let orphan = state.session_manager.get_session(&sid).await.unwrap();
+        let (addr, hits) = session_deleting_stub(&state, &sid).await;
+        let body = json!({"session_id": sid, "message": "go", "provider": stub_provider(addr)});
+        if streamed {
+            let text = stream_body(&app, body).await;
+            assert!(
+                text.contains(r#""type":"error""#) && text.contains("Session not found"),
+                "{text}"
+            );
+            assert_eq!(text.matches(r#""type":"tool_start""#).count(), 1, "{text}");
+        } else {
+            let (status, body) = send_json(&app, "/api/llm/chat", body).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(body["code"], "session_not_found", "{body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Session not found"),
+                "{body}"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "streamed={streamed}");
+        let mut names: Vec<String> = orphan.datasets.read().await.keys().cloned().collect();
+        names.sort();
+        assert_eq!(names, ["d1"], "streamed={streamed}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -748,24 +941,6 @@ async fn stream_task_stops_after_client_disconnects() {
 // ---------------------------------------------------------------------------
 // Task 7: conversation ownership in the chat stream (db builds)
 // ---------------------------------------------------------------------------
-
-/// The whole SSE body of one chat-stream request.
-#[cfg(feature = "db")]
-async fn stream_body(app: &Router, body: Value) -> String {
-    let resp = app
-        .clone()
-        .oneshot(post_json("/api/llm/chat/stream", &body))
-        .await
-        .unwrap();
-    let bytes = tokio::time::timeout(
-        Duration::from_secs(10),
-        axum::body::to_bytes(resp.into_body(), usize::MAX),
-    )
-    .await
-    .expect("the stream ends")
-    .unwrap();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
 
 #[cfg(feature = "db")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
