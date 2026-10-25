@@ -856,6 +856,8 @@ The `governor` object reports the tool calls running (`in_flight`), those past t
 }
 ```
 
+The `server_stats` tool leaves out the process RSS and virtual size in the same mode and prints "Process memory: not reported in open public mode" in their place; it still reports the calling session's own datasets.
+
 While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. In the hosted profile the process exits (code 70) when that lasts `P2A_STUCK_EXIT_SECS` (300 s), so the platform can restart it.
 
 ---

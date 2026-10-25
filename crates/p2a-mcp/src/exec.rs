@@ -95,7 +95,8 @@ pub struct ExecConfig {
     /// Enter the `path_jail` session scope per call.
     pub session_dirs: bool,
     /// Leave the process memory and the in-flight count out of `/health`
-    /// (open public mode, where `/health` is unauthenticated).
+    /// (open public mode, where `/health` is unauthenticated), and the
+    /// process memory out of the `server_stats` tool in governed calls.
     pub redact_health: bool,
     /// Where the governor writes one audit entry per call (`None`: no
     /// audit). The governor shares the process's writer for that file.
@@ -783,12 +784,14 @@ impl ToolGovernor {
         // thread-local override) travel with the call onto the blocking
         // thread, where the tool's limit checks and handlers read them.
         let limits = limits::current();
+        let redact_health = self.cfg.redact_health;
 
         // 4. Off the runtime. Everything held is released when the work stops.
         let mut join = tokio::task::spawn_blocking(move || {
             let _held = (session_permit, global_permit, in_flight, active);
             let _span = span.enter();
             let _scope = crate::path_jail::enter_session_scope(&session_id);
+            let _redaction = crate::tools::handlers::utils::redact_process_memory(redact_health);
             limits::with_limits((*limits).clone(), || {
                 resource::with_budget(budget.clone(), || work(&budget))
             })
