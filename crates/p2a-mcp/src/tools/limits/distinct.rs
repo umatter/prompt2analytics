@@ -9,8 +9,8 @@
 //! are keyed as the pivot groups them ([`Key`]).
 //!
 //! A column of a type that has no key here (lists, arrays, structs, objects) and a partitioned
-//! column are counted by polars instead, exactly and without the bound. A dataset holds them only
-//! when a tool made them, and the dataset quotas bound the rows polars reads.
+//! column are counted by polars instead, exactly and without the bound; there, only the dataset
+//! quotas and the dataset-height refusal of `check_pivot` bound the rows polars reads.
 
 use std::fmt;
 use std::hash::Hash;
