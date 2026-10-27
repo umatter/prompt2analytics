@@ -26,10 +26,36 @@ const fn row(tool: &'static str, class: RowClass) -> RowRule {
 //    index in another.
 // 3. Every `Exempt` states why the field costs nothing (it selects, indexes or shrinks work, or a
 //    closed-form formula uses it). The schema test in this file requires every integer field,
-//    every array field (arrays nested in arrays and tuples included), the integer elements of
-//    every array (at the element path `a[]`), every untyped (any-JSON) field and every
-//    `tol`/`eps` float field of every tool to be matched here; the module documentation
-//    (`Classifying a new request field`) says which rules match which.
+//    every float field, every array field (arrays nested in arrays and tuples included), the
+//    integer and float elements of every array (at the element path `a[]`) and every untyped
+//    (any-JSON) field of every tool to be matched here; the module documentation (`Classifying
+//    a new request field`) says which rules match which. A float is a cost parameter when the
+//    work grows with what it counts or sizes (the `n` of `power_t_test`), so it gets a `Max` like
+//    an integer.
+
+// Reasons shared by the `Exempt`s of several float fields and float elements (rule 3).
+const LEVEL: &str = "confidence or significance level; it sets a quantile or the target of a \
+                     bounded search, never a loop count or an allocation";
+const TARGET_POWER: &str = "target power; the solvers bisect at most 100 steps whatever its value";
+const EFFECT: &str = "effect size, proportion or variance; it enters the noncentrality \
+                      parameter only";
+const CLOSED_FORM: &str = "input of a closed-form formula; no loop or allocation depends on it";
+const TRIM: &str = "trimming bound; it clips scores or weights, no loop or allocation";
+const SMOOTHING: &str = "smoothing weight of each recursion step; a given value skips its \
+                         optimisation";
+const DISTRIBUTION: &str = "parameter of the reference distribution; it enters its CDF only";
+const NULL_VALUE: &str = "null-hypothesis value; it shifts the data or the statistic";
+const CUTOFF: &str = "threshold value; it splits or selects rows";
+const RD_BANDWIDTH: &str = "kernel bandwidth in units of the running variable; it selects rows";
+const DISPLAY: &str = "display threshold; it filters the reported weights";
+const ARRAY_VALUE: &str = "value of a caller array; the array's length rule bounds the work";
+const COEFFICIENT: &str = "coefficient value; the array's length rule bounds the work";
+const CUT_HEIGHT: &str = "cut height; it selects where to cut the built tree";
+const MIXING: &str = "elastic-net mixing weight; it changes the penalty, not the number of fits";
+const PENALTY_VALUE: &str = "penalty of one fit; the lambda length rule bounds their number";
+const DISTANCE_BAND: &str = "distance band; spatial_links bounds the links it produces";
+const TAPER: &str = "taper proportion; core keeps it in [0, 0.5], and it reweights the series \
+                     only";
 
 /// Every classified request field (see the classification rules above).
 pub static PARAM_RULES: &[ParamRule] = {
@@ -135,6 +161,10 @@ pub static PARAM_RULES: &[ParamRule] = {
             Exempt("minimum node or segment size; larger values reduce work"),
         ),
         p("*", "tolerance", Tolerance),
+        p("*", "conf_level", Exempt(LEVEL)),
+        p("*", "confidence_level", Exempt(LEVEL)),
+        p("*", "sig_level", Exempt(LEVEL)),
+        p("*", "xout[]", Exempt(ARRAY_VALUE)),
         p("*", "x", UniqueList(ListLength)),
         p("*", "z", UniqueList(ListLength)),
         p("*", "columns", UniqueList(ListLength)),
@@ -204,6 +234,7 @@ pub static PARAM_RULES: &[ParamRule] = {
             "post_period_end",
             Exempt("time value that selects rows"),
         ),
+        p("causal_impact_analysis", "alpha", Exempt(LEVEL)),
         p(
             "cleaning_rollback",
             "checkpoint_index",
@@ -213,7 +244,14 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("cleaning_session_apply", "old_value", Max(StringBytes)),
         p("cleaning_session_apply", "filter_value", Max(StringBytes)),
         p("collaborative_tmle", "max_covariates", Max(ListLength)),
+        p("collaborative_tmle", "ps_lower", Exempt(TRIM)),
+        p("collaborative_tmle", "ps_upper", Exempt(TRIM)),
         p("descriptive_medpolish", "eps", Tolerance),
+        p("evalue", "baseline_risk", Exempt(CLOSED_FORM)),
+        p("evalue", "ci_lower", Exempt(CLOSED_FORM)),
+        p("evalue", "ci_upper", Exempt(CLOSED_FORM)),
+        p("evalue", "point", Exempt(CLOSED_FORM)),
+        p("evalue", "se", Exempt(CLOSED_FORM)),
         p("generate_random_data", "columns", ArrayLen(ListLength)),
         p("generate_random_data", "columns[].name", Max(StringBytes)),
         p(
@@ -283,6 +321,7 @@ pub static PARAM_RULES: &[ParamRule] = {
             "threshold_variable",
             Exempt("index into the time-varying covariate list"),
         ),
+        p("gformula", "threshold_cutoff", Exempt(CUTOFF)),
         p(
             "head_dataset",
             "n",
@@ -290,6 +329,12 @@ pub static PARAM_RULES: &[ParamRule] = {
                 "rows returned are bounded by the dataset height; text output by response_bytes",
             ),
         ),
+        p("hypothesis_chisq_gof", "probs[]", Exempt(ARRAY_VALUE)),
+        p("hypothesis_ks_test", "a", Exempt(DISTRIBUTION)),
+        p("hypothesis_ks_test", "b", Exempt(DISTRIBUTION)),
+        p("hypothesis_ks_test", "mean", Exempt(DISTRIBUTION)),
+        p("hypothesis_ks_test", "rate", Exempt(DISTRIBUTION)),
+        p("hypothesis_ks_test", "sd", Exempt(DISTRIBUTION)),
         p(
             "hypothesis_mcnemar",
             "b",
@@ -308,16 +353,51 @@ pub static PARAM_RULES: &[ParamRule] = {
         ),
         p("hypothesis_poisson", "t", ArrayLen(ListLength)),
         p(
+            "hypothesis_poisson",
+            "r",
+            Exempt(
+                "hypothesised rate or rate ratio; it sets the parameter of the Poisson or \
+                 binomial distribution whose CDF gives the p-value",
+            ),
+        ),
+        p("hypothesis_poisson", "t[]", Exempt(ARRAY_VALUE)),
+        p(
             "hypothesis_prop_trend_test",
             "trials",
             Exempt("column name, not a boosting count"),
         ),
+        p(
+            "hypothesis_prop_trend_test",
+            "scores[]",
+            Exempt(ARRAY_VALUE),
+        ),
+        p("hypothesis_t_test", "mu", Exempt(NULL_VALUE)),
+        p("hypothesis_wilcoxon", "mu", Exempt(NULL_VALUE)),
         p("linalg_toeplitz", "column", SquareLen),
         p("linalg_toeplitz", "row", SquareLen),
+        p("linalg_toeplitz", "column[]", Exempt(ARRAY_VALUE)),
+        p("linalg_toeplitz", "row[]", Exempt(ARRAY_VALUE)),
         p("ltmle", "covariates", ArrayLen(ListLength)),
+        p("ltmle", "ps_lower", Exempt(TRIM)),
+        p("ltmle", "ps_upper", Exempt(TRIM)),
+        p("mediation_analysis", "trim", Exempt(TRIM)),
+        p(
+            "ml_c50",
+            "cf",
+            Exempt("pruning confidence factor; it enters the pessimistic error estimate only"),
+        ),
         p("ml_cmdscale", "k", Max(Components)),
+        p(
+            "ml_ctree",
+            "mincriterion",
+            Exempt(
+                "split criterion (1 - p-value); a low value allows more splits, which the \
+                 node-size minimums and maxdepth bound as at the default",
+            ),
+        ),
         p("ml_cubist", "neighbors", Max(Neighbors)),
         p("ml_cutree", "k", Max(Components)),
+        p("ml_cutree", "cut_height", Exempt(CUT_HEIGHT)),
         p(
             "ml_dbscan",
             "eps",
@@ -325,16 +405,46 @@ pub static PARAM_RULES: &[ParamRule] = {
                 "neighbourhood radius, not a convergence tolerance; dense cost is bounded by dense_rows",
             ),
         ),
+        p("ml_hierarchical", "distance_threshold", Exempt(CUT_HEIGHT)),
         p("ml_kmeans", "k", Max(Components)),
+        p(
+            "ml_mboost",
+            "nu",
+            Exempt("step size; core refuses one outside (0, 1], and mstop bounds the rounds"),
+        ),
+        p(
+            "ml_ppr",
+            "bass",
+            Exempt(
+                "bass tone; kept in the fit's configuration, no loop or allocation depends on it",
+            ),
+        ),
         p(
             "ml_shap_values",
             "max_obs",
             Exempt("bounded by the dataset height"),
         ),
+        p(
+            "ml_svm",
+            "c",
+            Exempt("regularisation constant; max_iterations bounds the SMO sweeps"),
+        ),
+        p(
+            "ml_tsne",
+            "learning_rate",
+            Exempt("gradient step size; max_iterations bounds the steps"),
+        ),
+        p(
+            "ml_tsne",
+            "perplexity",
+            Exempt("target perplexity; the bandwidth search of each point runs 50 steps"),
+        ),
         p("multivariate_mahalanobis", "center", ArrayLen(ListLength)),
+        p("multivariate_mahalanobis", "center[]", Exempt(ARRAY_VALUE)),
         p("munge_bin", "bins", ArrayLen(Bins)),
         p("munge_bin", "labels", ArrayLen(Bins)),
         p("munge_bin", "labels[]", Max(StringBytes)),
+        p("munge_bin", "bins[]", Exempt(ARRAY_VALUE)),
         p("munge_cast", "casts", ArrayLen(ListLength)),
         p(
             "munge_cast",
@@ -371,10 +481,37 @@ pub static PARAM_RULES: &[ParamRule] = {
         ),
         p("munge_sample", "n", Max(GeneratedRows)),
         p(
-            "power_anova_test",
-            "groups",
-            Exempt("number of groups in a closed-form power formula"),
+            "negbin",
+            "init_theta",
+            Exempt("ignored by core: run_negbin does not use a starting dispersion"),
         ),
+        p("power_anova_test", "groups", Max(DesignGroups)),
+        p("power_anova_test", "n", Max(PowerSampleSize)),
+        p("power_anova_test", "between_var", Exempt(EFFECT)),
+        p("power_anova_test", "within_var", Exempt(EFFECT)),
+        p("power_anova_test", "power", Exempt(TARGET_POWER)),
+        p(
+            "power_prop_test",
+            "n",
+            Exempt(
+                "per-group sample size of a closed-form normal power; the n solver bisects at \
+                 most 100 steps",
+            ),
+        ),
+        p("power_prop_test", "p1", Exempt(EFFECT)),
+        p("power_prop_test", "p2", Exempt(EFFECT)),
+        p("power_prop_test", "power", Exempt(TARGET_POWER)),
+        p("power_t_test", "n", Max(PowerSampleSize)),
+        p("power_t_test", "delta", Exempt(EFFECT)),
+        p(
+            "power_t_test",
+            "sd",
+            Exempt(
+                "standard deviation; it scales the standard error and the delta search bracket, \
+                 which the solver bisects in at most 100 steps",
+            ),
+        ),
+        p("power_t_test", "power", Exempt(TARGET_POWER)),
         p(
             "preview_cleaning",
             "sample_size",
@@ -382,38 +519,135 @@ pub static PARAM_RULES: &[ParamRule] = {
         ),
         p("propensity_matching", "ratio", Max(Neighbors)),
         p("propensity_matching", "n_subclasses", Max(Bins)),
+        p(
+            "propensity_matching",
+            "caliper",
+            Exempt("maximum match distance; it filters candidate matches"),
+        ),
         p("rd_bw", "p", Max(ModelOrder)),
+        p("rd_bw", "cutoff", Exempt(CUTOFF)),
         p("rd_estimate", "p", Max(ModelOrder)),
+        p("rd_estimate", "b", Exempt(RD_BANDWIDTH)),
+        p("rd_estimate", "cutoff", Exempt(CUTOFF)),
+        p("rd_estimate", "h", Exempt(RD_BANDWIDTH)),
+        p("rd_estimate", "level", Exempt(LEVEL)),
         p("rd_fuzzy", "p", Max(ModelOrder)),
+        p("rd_fuzzy", "cutoff", Exempt(CUTOFF)),
+        p("rd_fuzzy", "h", Exempt(RD_BANDWIDTH)),
+        p("rd_fuzzy", "level", Exempt(LEVEL)),
         p("rd_multi", "p", Max(ModelOrder)),
         p(
             "rd_multi",
             "bandwidth",
             Exempt("kernel bandwidth in units of the running variable, not a lag count"),
         ),
+        p("rd_multi", "bandwidths[]", Exempt(RD_BANDWIDTH)),
+        p("rd_multi", "cutoffs[]", Exempt(CUTOFF)),
+        p("rd_multi", "level", Exempt(LEVEL)),
         p("regression_bgtest", "order", Max(Lags)),
+        p(
+            "regression_bgtest",
+            "fill",
+            Exempt("fill value of the initial lagged residuals"),
+        ),
+        p("regression_cv_glmnet", "alpha", Exempt(MIXING)),
+        p("regression_glmnet", "alpha", Exempt(MIXING)),
+        p("regression_glmnet", "lambda[]", Exempt(PENALTY_VALUE)),
+        p(
+            "regression_gls",
+            "rho",
+            Exempt("correlation parameter of the O(n) whitening"),
+        ),
+        p("regression_lasso", "lambda[]", Exempt(PENALTY_VALUE)),
         p("regression_line", "iter", Max(Iterations)),
         p("regression_loess", "degree", Max(ModelOrder)),
+        p(
+            "regression_loess",
+            "span",
+            Exempt("neighbourhood fraction; core clamps the neighbour count to the row count"),
+        ),
         p("regression_nls", "start", ArrayLen(ListLength)),
+        p(
+            "regression_nls",
+            "start[]",
+            Exempt(
+                "starting value of a parameter; the fit's iteration limit does not depend on it",
+            ),
+        ),
+        p(
+            "regression_quantreg",
+            "tau",
+            Exempt("quantile in (0, 1); one fit whatever its value"),
+        ),
+        p(
+            "regression_quantreg",
+            "taus[]",
+            Exempt("quantile in (0, 1); one fit per value, and taus bounds their number"),
+        ),
         p("regression_resettest", "powers", ArrayLen(ListLength)),
         p("regression_resettest", "powers", ArrayElemMax(ModelOrder)),
+        p("regression_ridge", "lambda[]", Exempt(PENALTY_VALUE)),
+        p(
+            "regression_smooth_spline",
+            "df",
+            Exempt("target equivalent degrees of freedom; a 30-step search finds its penalty"),
+        ),
+        p(
+            "regression_smooth_spline",
+            "spar",
+            Exempt("smoothing parameter; it sets the penalty of one fit"),
+        ),
+        p(
+            "regression_supsmu",
+            "bass",
+            Exempt(
+                "bass tone of the super smoother; core clamps the span it gives to the row count",
+            ),
+        ),
+        p(
+            "regression_supsmu",
+            "span",
+            Exempt("span fraction; core clamps the span to (0, 1] of the row count"),
+        ),
         p(
             "scpi",
             "treatment_time",
             Exempt("time value that selects rows"),
         ),
+        p("scpi", "alpha", Exempt(LEVEL)),
+        p(
+            "scpi",
+            "lambda",
+            Exempt(
+                "penalty weight of the weight constraint; the solver's iteration limit does not \
+                 depend on it",
+            ),
+        ),
+        p("scpi", "weight_threshold", Exempt(DISPLAY)),
         p(
             "search_tools",
             "limit",
             Exempt("the handler clamps it to 25"),
         ),
+        p("sensemakr", "alpha", Exempt(LEVEL)),
+        p("sensemakr", "kd", Exempt(CLOSED_FORM)),
+        p("sensemakr", "ky", Exempt(CLOSED_FORM)),
+        p("sensemakr", "q", Exempt(CLOSED_FORM)),
         p("spatial_neighbors", "k", Max(Neighbors)),
+        p("spatial_neighbors", "d_max", Exempt(DISTANCE_BAND)),
+        p("spatial_neighbors", "d_min", Exempt(DISTANCE_BAND)),
         p(
             "staggered_did",
             "base_period",
             Exempt("relative period offset"),
         ),
         p("stats_density", "n", Max(GridPoints)),
+        p(
+            "stats_density",
+            "bw",
+            Exempt("kernel bandwidth; the grid has n points whatever its value"),
+        ),
+        p("stats_ecdf", "at[]", Exempt(ARRAY_VALUE)),
         p("stats_iqr", "qtype", Exempt("quantile type selector 1-9")),
         p("stats_loglin", "eps", Tolerance),
         p("stats_loglin", "margins", ArrayLen(ListLength)),
@@ -423,8 +657,10 @@ pub static PARAM_RULES: &[ParamRule] = {
             "margins[][]",
             Exempt("factor indices, each checked against the number of factors"),
         ),
+        p("stats_mad", "constant", Exempt(CLOSED_FORM)),
         p("stats_se_contrast", "contrasts", ArrayLen(ListLength)),
         p("stats_se_contrast", "contrasts[]", ArrayLen(ListLength)),
+        p("stats_se_contrast", "contrasts[][]", Exempt(ARRAY_VALUE)),
         p("str_concat", "columns", ArrayLen(ListLength)),
         p("str_concat", "separator", Max(StringBytes)),
         p("str_regex_count", "pattern", Max(StringBytes)),
@@ -483,28 +719,49 @@ pub static PARAM_RULES: &[ParamRule] = {
             "custom_v_weights",
             ArrayLen(ListLength),
         ),
+        p(
+            "synthetic_control",
+            "custom_v_weights[]",
+            Exempt(ARRAY_VALUE),
+        ),
+        p("synthetic_control", "weight_threshold", Exempt(DISPLAY)),
         p("timeseries_acf_to_ar", "acf", ArrayLen(Lags)),
+        p("timeseries_acf_to_ar", "acf[]", Exempt(ARRAY_VALUE)),
         p("timeseries_ar", "order", Max(Lags)),
         p("timeseries_arima_sim", "n", Max(GeneratedRows)),
         p("timeseries_arima_sim", "d", Max(ModelOrder)),
         p("timeseries_arima_sim", "ar", ArrayLen(ModelOrder)),
         p("timeseries_arima_sim", "ma", ArrayLen(ModelOrder)),
+        p("timeseries_arima_sim", "ar[]", Exempt(COEFFICIENT)),
+        p("timeseries_arima_sim", "ma[]", Exempt(COEFFICIENT)),
+        p(
+            "timeseries_arima_sim",
+            "sd",
+            Exempt("innovation standard deviation; it scales the values"),
+        ),
         p("timeseries_arma_acf", "ar", ArrayLen(ModelOrder)),
         p("timeseries_arma_acf", "ma", ArrayLen(ModelOrder)),
+        p("timeseries_arma_acf", "ar[]", Exempt(COEFFICIENT)),
+        p("timeseries_arma_acf", "ma[]", Exempt(COEFFICIENT)),
         p("timeseries_arma_to_ma", "ar", ArrayLen(ModelOrder)),
         p("timeseries_arma_to_ma", "ma", ArrayLen(ModelOrder)),
+        p("timeseries_arma_to_ma", "ar[]", Exempt(COEFFICIENT)),
+        p("timeseries_arma_to_ma", "ma[]", Exempt(COEFFICIENT)),
         p("timeseries_box_test", "lag", Max(Lags)),
         p(
             "timeseries_box_test",
             "fitdf",
             Exempt("degrees-of-freedom adjustment; no allocation or loop"),
         ),
+        p("timeseries_cpgram", "taper", Exempt(TAPER)),
         p("timeseries_decompose", "period", Max(Lags)),
         p("timeseries_diffinv", "lag", Max(Lags)),
         p("timeseries_diffinv", "xi", ArrayLen(ArrayLength)),
+        p("timeseries_diffinv", "xi[]", Exempt(ARRAY_VALUE)),
         p("timeseries_embed", "dimension", Max(Lags)),
         p("timeseries_filter", "sides", Exempt("selector 1 or 2")),
         p("timeseries_filter", "filter", ArrayLen(SpanWidth)),
+        p("timeseries_filter", "filter[]", Exempt(COEFFICIENT)),
         p(
             "timeseries_lag",
             "k",
@@ -513,6 +770,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("timeseries_runmed", "k", Max(SpanWidth)),
         p("timeseries_spectrum", "spans", ArrayLen(ListLength)),
         p("timeseries_spectrum", "spans", ArrayElemMax(SpanWidth)),
+        p("timeseries_spectrum", "taper", Exempt(TAPER)),
         p("timeseries_structts", "period", Max(Lags)),
         p(
             "timeseries_window",
@@ -525,24 +783,71 @@ pub static PARAM_RULES: &[ParamRule] = {
             Exempt("index into the series; the output is a slice"),
         ),
         p(
+            "treatment_cbps",
+            "balance_threshold",
+            Exempt("balance threshold; it marks covariates in the balance table only"),
+        ),
+        p("treatment_double_ml", "trim", Exempt(TRIM)),
+        p("treatment_doubly_robust", "trim", Exempt(TRIM)),
+        p(
             "treatment_entropy_balance",
             "target_means",
             ArrayLen(ListLength),
         ),
         p(
+            "treatment_entropy_balance",
+            "target_means[]",
+            Exempt(ARRAY_VALUE),
+        ),
+        p("treatment_ipw", "trim", Exempt(TRIM)),
+        p(
             "treatment_sbw",
             "balance_tol",
             Exempt("balance tolerance; 0 (exact balance) is the default and valid"),
         ),
+        p(
+            "treatment_sbw",
+            "balance_penalty",
+            Exempt("penalty weight of approximate balance; the problem keeps its size"),
+        ),
+        p(
+            "treatment_sbw",
+            "min_weight",
+            Exempt("lower bound on the weights; a constraint value"),
+        ),
+        p("treatment_tmle", "ps_lower", Exempt(TRIM)),
+        p("treatment_tmle", "ps_upper", Exempt(TRIM)),
+        p(
+            "treatment_twang",
+            "balance_threshold",
+            Exempt("early-stopping threshold; n_trees bounds the boosting"),
+        ),
+        p(
+            "treatment_twang",
+            "shrinkage",
+            Exempt("learning rate; n_trees bounds the boosting"),
+        ),
+        p("treatment_weightit", "trim_quantile", Exempt(TRIM)),
         p("ts_arima_fit", "p", Max(ModelOrder)),
         p("ts_arima_fit", "d", Max(ModelOrder)),
         p("ts_arima_fit", "q", Max(ModelOrder)),
         p("ts_arima_forecast", "p", Max(ModelOrder)),
         p("ts_arima_forecast", "d", Max(ModelOrder)),
         p("ts_arima_forecast", "q", Max(ModelOrder)),
+        p(
+            "ts_changepoint",
+            "penalty",
+            Exempt(
+                "changepoint penalty; PELT's work is at most quadratic in the rows whatever its \
+                 value, and quadratic_rows bounds the rows",
+            ),
+        ),
         p("ts_garch_fit", "p", Max(ModelOrder)),
         p("ts_garch_fit", "q", Max(ModelOrder)),
         p("ts_holt_winters", "period", Max(Lags)),
+        p("ts_holt_winters", "alpha", Exempt(SMOOTHING)),
+        p("ts_holt_winters", "beta", Exempt(SMOOTHING)),
+        p("ts_holt_winters", "gamma", Exempt(SMOOTHING)),
         p("ts_mstl", "periods", ArrayLen(ListLength)),
         p("ts_mstl", "periods", ArrayElemMax(Lags)),
         p("ts_varma", "p", Max(ModelOrder)),
@@ -554,6 +859,14 @@ pub static PARAM_RULES: &[ParamRule] = {
             Exempt("linkage row; the handler reads the first four values and ignores the rest"),
         ),
         p("viz_dendrogram", "labels", ArrayLen(ArrayLength)),
+        p(
+            "viz_dendrogram",
+            "linkage_matrix[][]",
+            Exempt(
+                "linkage entry: merged cluster ids, which core checks against the merges so far, a \
+                 height, and a size it ignores",
+            ),
+        ),
     ]
 };
 
@@ -608,6 +921,12 @@ pub static ROW_RULES: &[RowRule] = &[
     row("ml_svm", RowClass::Quadratic),
     // Quadratic: each of the n points is fitted on its ceil(span * n) nearest neighbours.
     row("regression_loess", RowClass::Quadratic),
+    // Quadratic: at each t PELT examines every candidate changepoint that survived pruning, and
+    // on a series without changes, or under a large penalty, it prunes none, so its work is
+    // O(n^2). PELT checks the call's budget at every step, so an overrun ends at the deadline;
+    // the row cap keeps the default arguments well inside it. Binary segmentation (at most 10
+    // changepoints, one scan each) is linear and shares the rule.
+    row("ts_changepoint", RowClass::Quadratic),
 ];
 
 #[cfg(test)]
@@ -645,6 +964,8 @@ mod tests {
         (Family::ArrayLength, "stats_spline", "xout"),
         (Family::StringBytes, "str_regex_count", "pattern"),
         (Family::TreeDepth, "ml_random_forest", "max_depth"),
+        (Family::PowerSampleSize, "power_t_test", "n"),
+        (Family::DesignGroups, "power_anova_test", "groups"),
     ];
 
     fn value_of_size(f: Family, n: u64) -> Value {
@@ -1321,6 +1642,166 @@ mod tests {
         }
     }
 
+    /// The float sample size `n` of `power_t_test` and `power_anova_test` and the group count
+    /// of `power_anova_test` are capped in the hosted profile: the refusal names the parameter,
+    /// the cap and its override key; every value up to the cap (fractional, negative or written
+    /// as an integer) passes; nothing is refused when limits are off. `power_prop_test`'s `n`
+    /// is not capped.
+    #[test]
+    fn power_sample_sizes_and_groups_are_capped_in_hosted_profile() {
+        let cases: &[(&str, &str, Value, &str, &str)] = &[
+            (
+                "power_t_test",
+                "n",
+                json!({"n": 1e7, "delta": 1.0, "sd": 1.0, "sig_level": 0.05}),
+                "power_sample_size",
+                "1000000",
+            ),
+            (
+                "power_t_test",
+                "n",
+                json!({"n": 1e300, "delta": 1.0}),
+                "power_sample_size",
+                "1000000",
+            ),
+            (
+                "power_t_test",
+                "n",
+                json!({"n": -1e300, "delta": 1.0}),
+                "power_sample_size",
+                "1000000",
+            ),
+            (
+                "power_t_test",
+                "n",
+                json!({"n": 1_000_001, "delta": 1.0}),
+                "power_sample_size",
+                "1000000",
+            ),
+            (
+                "power_anova_test",
+                "n",
+                json!({"groups": 3, "n": 1e7, "between_var": 0.25, "within_var": 1.0}),
+                "power_sample_size",
+                "1000000",
+            ),
+            (
+                "power_anova_test",
+                "groups",
+                json!({"groups": 95, "between_var": 1.0, "within_var": 3.0, "power": 0.8}),
+                "design_groups",
+                "10",
+            ),
+            (
+                "power_anova_test",
+                "groups",
+                json!({"groups": u64::MAX, "n": 10, "between_var": 1.0}),
+                "design_groups",
+                "10",
+            ),
+        ];
+        for (tool, param, args, key, cap) in cases {
+            let v = hosted(tool, args.clone()).expect_err(tool);
+            assert_eq!(
+                (v.parameter.as_str(), v.override_key, v.limit.as_str()),
+                (*param, *key, *cap),
+                "{tool}: {args}"
+            );
+            // The cap bounds the magnitude, and a negative value is told so.
+            let limit = if v.requested.starts_with('-') {
+                format!("±{cap}")
+            } else {
+                cap.to_string()
+            };
+            assert!(
+                v.message.starts_with(&format!("Parameter `{param}` = "))
+                    && v.message
+                        .contains(&format!("limit of {limit} ({key}) for `{tool}`")),
+                "{}",
+                v.message
+            );
+            assert!(Limits::off().check_tool_arguments(tool, args).is_ok());
+        }
+        assert_eq!(
+            hosted("power_t_test", json!({"n": -1e300, "delta": 1.0}))
+                .unwrap_err()
+                .message,
+            format!(
+                "Parameter `n` = {} is outside this server's limit of ±1000000 \
+                 (power_sample_size) for `power_t_test`. Use a value of smaller magnitude.",
+                json!(-1e300)
+            )
+        );
+        // Up to the caps everything passes, including every n the solvers can return (their
+        // bisection searches n in [2, 1e6]) and a solve for n with the most groups allowed.
+        for args in [
+            json!({"n": 1e6, "delta": 1.0}),
+            json!({"n": 999_999.5, "delta": 1.0}),
+            json!({"n": -1e6, "delta": 1.0}),
+            json!({"n": 2, "delta": 0.5, "sd": 1.0, "sig_level": 0.05}),
+            json!({"delta": 0.5, "power": 0.8}),
+        ] {
+            assert!(hosted("power_t_test", args.clone()).is_ok(), "{args}");
+        }
+        // power_prop_test computes with the normal distribution only, so its `n` is not capped:
+        // a power question about ten million users per arm is answered.
+        for n in [1e6, 1e7, 1e9, 1e300, u64::MAX as f64] {
+            let args = json!({"n": n, "p1": 0.3, "p2": 0.5});
+            assert!(hosted("power_prop_test", args.clone()).is_ok(), "{args}");
+        }
+        for args in [
+            json!({"groups": 10, "n": 1e6, "between_var": 1.0, "within_var": 3.0}),
+            json!({"groups": 10, "between_var": 0.0, "within_var": 1.0, "power": 0.8}),
+            json!({"groups": 2, "n": 5.5, "between_var": 1.0}),
+        ] {
+            assert!(hosted("power_anova_test", args.clone()).is_ok(), "{args}");
+        }
+        // The override key is `power_sample_size`, so it cannot be read as the `sample_size`
+        // request field of other tools; `sample_size` is not a limit key.
+        let raised = Limits::hosted()
+            .with_overrides(&["power_sample_size=2000000".to_string()])
+            .unwrap();
+        assert!(
+            raised
+                .check_tool_arguments("power_t_test", &json!({"n": 2e6, "delta": 1.0}))
+                .is_ok()
+        );
+        assert!(
+            Limits::hosted()
+                .with_overrides(&["sample_size=2000000".to_string()])
+                .is_err()
+        );
+    }
+
+    /// PELT's work is quadratic in the rows when it prunes nothing, so `ts_changepoint` is
+    /// row-limited by the quadratic class in the hosted profile and not at all when limits are
+    /// off.
+    #[test]
+    fn ts_changepoint_rows_are_capped_by_the_quadratic_class() {
+        let h = Limits::hosted();
+        let v = h.check_rows("ts_changepoint", 50_001, 1).unwrap_err();
+        assert_eq!(
+            (
+                v.parameter.as_str(),
+                v.requested.as_str(),
+                v.limit.as_str(),
+                v.override_key
+            ),
+            ("dataset", "50001", "50000", "quadratic_rows")
+        );
+        assert!(
+            v.message
+                .contains("`ts_changepoint` has 50001 rows and 1 columns")
+                && v.message.contains("at most 50000 rows"),
+            "{}",
+            v.message
+        );
+        assert!(h.check_rows("ts_changepoint", 50_000, 1).is_ok());
+        for rows in [50_000, 50_001] {
+            assert!(Limits::off().check_rows("ts_changepoint", rows, 1).is_ok());
+        }
+    }
+
     #[test]
     fn every_capped_scalar_rule_refuses_1e15_and_off_accepts_it() {
         for r in PARAM_RULES {
@@ -1370,7 +1851,7 @@ mod tests {
                 "{tool}.{path} needs a length rule"
             );
         }
-        assert_eq!(ROW_RULES.len(), 16);
+        assert_eq!(ROW_RULES.len(), 17);
     }
 }
 
@@ -1387,15 +1868,19 @@ mod schema_tests {
     enum Kind {
         /// An integer field.
         Integer,
-        /// A float field whose name contains `tol` or `eps`.
-        Tolerance,
+        /// A float field. A count or size given as a float (the `n` of `power_t_test`) takes a
+        /// numeric `Max`, a convergence tolerance `Rule::Tolerance`.
+        Float,
         /// An array: a field, an element of an array (`a[]`) or a tuple.
         Array,
         /// Integer elements of an array, recorded at the element path (`a[]` for the elements of
         /// the array `a`), so that a rule for them is never mistaken for the array's length rule.
         IntegerElems,
-        /// A map whose values are integers, arrays, objects or any JSON. No rule path can
-        /// address map values, so only `Exempt` classifies it.
+        /// Float elements of an array, recorded at the element path like
+        /// [`Kind::IntegerElems`] and classified the same way.
+        FloatElems,
+        /// A map whose values are integers, floats, arrays, objects or any JSON. No rule path
+        /// can address map values, so only `Exempt` classifies it.
         MapValues,
         /// A field or element that can hold any JSON: a variant of its schema says nothing about
         /// its value (a `serde_json::Value`, also as one arm of an untagged enum), or its schema
@@ -1410,24 +1895,25 @@ mod schema_tests {
 
     /// True when `rule`, on the path where the walk found `kind`, checks that value (or exempts
     /// it). `Max(StringBytes)` checks only strings. `ArrayElemMax` sits on the array's path, not
-    /// on the element path of [`Kind::IntegerElems`]; [`classified`] handles it.
+    /// on the element path of [`Kind::IntegerElems`] or [`Kind::FloatElems`]; [`classified`]
+    /// handles it.
     fn classifies(kind: Kind, rule: Rule) -> bool {
         match (kind, rule) {
             (Kind::TooDeep, _) => false,
             (_, Rule::Exempt(_)) => true,
-            (Kind::Integer | Kind::IntegerElems | Kind::Tolerance, Rule::Max(f)) => {
+            (Kind::Integer | Kind::IntegerElems | Kind::Float | Kind::FloatElems, Rule::Max(f)) => {
                 f != Family::StringBytes
             }
-            (Kind::Tolerance, Rule::Tolerance) => true,
+            (Kind::Float, Rule::Tolerance) => true,
             (Kind::Array, Rule::ArrayLen(_) | Rule::UniqueList(_) | Rule::SquareLen) => true,
             _ => false,
         }
     }
 
     /// True when one of a tool's `rules` classifies `kind` at `path`: a rule on `path` itself
-    /// ([`classifies`]) or, for the integer elements at `a[]`, `ArrayElemMax` on the array `a`.
-    /// Nothing classifies the empty path, where [`cost_properties`] records what the root of a
-    /// schema needs.
+    /// ([`classifies`]) or, for the integer or float elements at `a[]`, `ArrayElemMax` on the
+    /// array `a`. Nothing classifies the empty path, where [`cost_properties`] records what the
+    /// root of a schema needs.
     fn classified(rules: &[&ParamRule], path: &str, kind: Kind) -> bool {
         if path.is_empty() {
             return false;
@@ -1435,7 +1921,7 @@ mod schema_tests {
         let on_path = rules
             .iter()
             .any(|r| r.path == path && classifies(kind, r.rule));
-        let by_array = kind == Kind::IntegerElems
+        let by_array = matches!(kind, Kind::IntegerElems | Kind::FloatElems)
             && path.strip_suffix("[]").is_some_and(|array| {
                 rules
                     .iter()
@@ -1449,23 +1935,29 @@ mod schema_tests {
         use Family::{Lags, ListLength, StringBytes};
         assert!(classifies(Kind::Integer, Rule::Max(Lags)));
         assert!(!classifies(Kind::Integer, Rule::Max(StringBytes)));
-        assert!(classifies(Kind::Tolerance, Rule::Tolerance));
-        assert!(classifies(Kind::Tolerance, Rule::Max(Lags)));
-        assert!(!classifies(Kind::Tolerance, Rule::Max(StringBytes)));
+        assert!(!classifies(Kind::Integer, Rule::Tolerance));
+        assert!(classifies(Kind::Float, Rule::Tolerance));
+        assert!(classifies(Kind::Float, Rule::Max(Lags)));
+        assert!(!classifies(Kind::Float, Rule::Max(StringBytes)));
+        assert!(!classifies(Kind::Float, Rule::ArrayElemMax(Lags)));
         assert!(classifies(Kind::Array, Rule::ArrayLen(ListLength)));
         assert!(classifies(Kind::Array, Rule::UniqueList(ListLength)));
         assert!(classifies(Kind::Array, Rule::SquareLen));
         assert!(!classifies(Kind::Array, Rule::ArrayElemMax(Lags)));
-        assert!(classifies(Kind::IntegerElems, Rule::Max(Lags)));
-        assert!(!classifies(Kind::IntegerElems, Rule::Max(StringBytes)));
-        assert!(!classifies(Kind::IntegerElems, Rule::ArrayLen(ListLength)));
+        for elems in [Kind::IntegerElems, Kind::FloatElems] {
+            assert!(classifies(elems, Rule::Max(Lags)));
+            assert!(!classifies(elems, Rule::Max(StringBytes)));
+            assert!(!classifies(elems, Rule::ArrayLen(ListLength)));
+            assert!(!classifies(elems, Rule::Tolerance));
+        }
         assert!(!classifies(Kind::MapValues, Rule::ArrayLen(ListLength)));
         assert!(!classifies(Kind::Untyped, Rule::Max(Lags)));
         for kind in [
             Kind::Integer,
-            Kind::Tolerance,
+            Kind::Float,
             Kind::Array,
             Kind::IntegerElems,
+            Kind::FloatElems,
             Kind::MapValues,
             Kind::Untyped,
         ] {
@@ -1484,18 +1976,29 @@ mod schema_tests {
         let elem_cap = [at("a[]", Rule::Max(Lags))];
         for table in [&elem_max, &elem_exempt, &elem_cap] {
             let rules: Vec<&ParamRule> = table.iter().collect();
-            assert!(classified(&rules, "a[]", Kind::IntegerElems), "{table:?}");
+            for elems in [Kind::IntegerElems, Kind::FloatElems] {
+                assert!(classified(&rules, "a[]", elems), "{table:?}");
+            }
             assert!(!classified(&rules, "a", Kind::Array), "{table:?}");
         }
         let length = [at("a", Rule::ArrayLen(ListLength))];
         let rules: Vec<&ParamRule> = length.iter().collect();
         assert!(classified(&rules, "a", Kind::Array));
         assert!(!classified(&rules, "a[]", Kind::IntegerElems));
-        // `ArrayElemMax` on `a[]` covers the integers of the inner arrays, at `a[][]`
+        assert!(!classified(&rules, "a[]", Kind::FloatElems));
+        // `ArrayElemMax` on `a[]` covers the numbers of the inner arrays, at `a[][]`
         let inner = [at("a[]", Rule::ArrayElemMax(Lags))];
         let rules: Vec<&ParamRule> = inner.iter().collect();
         assert!(classified(&rules, "a[][]", Kind::IntegerElems));
+        assert!(classified(&rules, "a[][]", Kind::FloatElems));
         assert!(!classified(&rules, "a[]", Kind::IntegerElems));
+        // A float field needs a rule of its own: a length rule on its name does not classify it.
+        assert!(!classified(&rules, "a", Kind::Float));
+        let scalar = [at("x", Rule::Max(Lags)), at("tol", Rule::Tolerance)];
+        let rules: Vec<&ParamRule> = scalar.iter().collect();
+        assert!(classified(&rules, "x", Kind::Float));
+        assert!(classified(&rules, "tol", Kind::Float));
+        assert!(!classified(&rules, "y", Kind::Float));
 
         // The runtime agrees: StringBytes ignores numbers, ArrayElemMax ignores an array's
         // length, and a Max on `a[]` checks each element.
@@ -1522,6 +2025,10 @@ mod schema_tests {
         }];
         assert!(h.check_with("t", &json!({"a": [1, 1_000]}), t).is_ok());
         assert!(h.check_with("t", &json!({"a": [1, 1_001]}), t).is_err());
+        // A numeric Max checks a float by absolute value, fractions and negatives included.
+        assert!(h.check_with("t", &json!({"a": [0.5, -1_000.0]}), t).is_ok());
+        assert!(h.check_with("t", &json!({"a": [1_000.5]}), t).is_err());
+        assert!(h.check_with("t", &json!({"a": [-1e300]}), t).is_err());
     }
 
     #[test]
@@ -1537,6 +2044,8 @@ mod schema_tests {
                 "legacy": {"type": "array",
                            "items": [{"type": "string"}, {"$ref": "#/$defs/Lens"}]},
                 "reps": {"type": "object", "additionalProperties": {"type": "integer"}},
+                // a map of floats (`HashMap<String, f64>`) needs a decision like one of integers
+                "fmap": {"type": "object", "additionalProperties": {"type": "number"}},
                 "names": {"type": "object", "additionalProperties": {"type": "string"}},
                 "tables": {"type": "array",
                            "items": {"type": "object", "additionalProperties": {"type": "array"}}},
@@ -1549,6 +2058,11 @@ mod schema_tests {
                 "pair": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}],
                          "items": false},
                 "level": {"enum": ["low", "high"]},
+                // floats: a field whatever its name, an `Option<f64>`, elements and a nested one
+                "n": {"type": "number", "format": "double"},
+                "abs_tol": {"type": ["number", "null"]},
+                "weights": {"type": "array", "items": {"type": "number"}},
+                "shape": {"type": "object", "properties": {"scale": {"type": "number"}}},
                 // an untagged enum with a `Value` arm: the typed arm does not hide the other
                 "mixed": {"anyOf": [{"type": "integer"}, true]},
                 // an `Option<Struct>` whose definition is missing: the null arm does not hide it
@@ -1581,6 +2095,7 @@ mod schema_tests {
         assert_eq!(
             found,
             [
+                ("abs_tol", Kind::Float),
                 ("anymap", Kind::MapValues),
                 ("anys", Kind::Array),
                 ("anys[]", Kind::Untyped),
@@ -1590,6 +2105,7 @@ mod schema_tests {
                 ("cycle", Kind::TooDeep),
                 ("dangling", Kind::Untyped),
                 ("flat", Kind::MapValues),
+                ("fmap", Kind::MapValues),
                 ("grid", Kind::Array),
                 ("grid[]", Kind::Array),
                 ("grid[][]", Kind::IntegerElems),
@@ -1600,12 +2116,15 @@ mod schema_tests {
                 ("maybe[]", Kind::IntegerElems),
                 ("mixed", Kind::Untyped),
                 ("mixed", Kind::Integer),
+                ("n", Kind::Float),
                 ("narrowed.k", Kind::Integer),
                 ("options", Kind::Untyped),
                 ("pair", Kind::Array),
+                ("pair[]", Kind::FloatElems),
                 ("pairs", Kind::Array),
                 ("pairs[]", Kind::Array),
                 ("reps", Kind::MapValues),
+                ("shape.scale", Kind::Float),
                 ("spec", Kind::Untyped),
                 ("tables", Kind::Array),
                 ("tables[]", Kind::MapValues),
@@ -1613,6 +2132,8 @@ mod schema_tests {
                 ("untyped_list[]", Kind::IntegerElems),
                 ("untyped_map", Kind::MapValues),
                 ("untyped_object.k", Kind::Integer),
+                ("weights", Kind::Array),
+                ("weights[]", Kind::FloatElems),
                 ("window", Kind::Array),
                 ("window[]", Kind::IntegerElems),
             ]
@@ -1897,13 +2418,12 @@ mod schema_tests {
         }
     }
 
-    /// Records what the value at `path`, described by `schema`, needs: its integers, an array
-    /// (and what its elements need, at `{path}[]`), the properties of an object (under
+    /// Records what the value at `path`, described by `schema`, needs: its integers and floats,
+    /// an array (and what its elements need, at `{path}[]`), the properties of an object (under
     /// `{path}.`) and map values, [`Kind::Untyped`], or [`Kind::TooDeep`] when the walk cannot
     /// see all of it. Properties, elements and map values are walked whenever a variant lists
     /// them, whatever its `type`. `name` is the field name of a property and `None` for an
-    /// array element, whose integers are [`Kind::IntegerElems`] and which is never a tolerance
-    /// (that check goes by field name).
+    /// array element, whose numbers are [`Kind::IntegerElems`] and [`Kind::FloatElems`].
     fn record(
         root: &Value,
         schema: &Value,
@@ -1924,16 +2444,14 @@ mod schema_tests {
             push(out, path, Kind::Untyped);
         }
         let ts = types(&vs.all);
-        if ts.contains(&"integer") {
-            let kind = if name.is_some() {
-                Kind::Integer
-            } else {
-                Kind::IntegerElems
-            };
-            push(out, path, kind);
-        }
-        if ts.contains(&"number") && name.is_some_and(|n| n.contains("tol") || n.contains("eps")) {
-            push(out, path, Kind::Tolerance);
+        let numbers = [
+            ("integer", Kind::Integer, Kind::IntegerElems),
+            ("number", Kind::Float, Kind::FloatElems),
+        ];
+        for (json_type, field, elements) in numbers {
+            if ts.contains(&json_type) {
+                push(out, path, if name.is_some() { field } else { elements });
+            }
         }
         if is_array(&vs) {
             push(out, path, Kind::Array);
@@ -1947,7 +2465,7 @@ mod schema_tests {
     }
 
     /// Records [`Kind::MapValues`] at `path` when a schema among `variants_of` is a map (its
-    /// [`map_value_schemas`]) whose values are integers, arrays, objects or any JSON, and
+    /// [`map_value_schemas`]) whose values are integers, floats, arrays, objects or any JSON, and
     /// [`Kind::TooDeep`] when the walk cannot see what they are.
     fn map_values(root: &Value, variants_of: &[&Value], path: &str, out: &mut Vec<(String, Kind)>) {
         for values in map_value_schemas(variants_of) {
@@ -1961,7 +2479,12 @@ mod schema_tests {
                     .all
                     .iter()
                     .any(|v| v.get("properties").is_some() || !map_value_schemas(&[*v]).is_empty());
-            if vvs.untyped || vts.contains(&"integer") || is_array(&vvs) || object {
+            if vvs.untyped
+                || vts.contains(&"integer")
+                || vts.contains(&"number")
+                || is_array(&vvs)
+                || object
+            {
                 push(out, path, Kind::MapValues);
             }
         }
@@ -2001,7 +2524,8 @@ mod schema_tests {
     fn every_cost_property_of_every_tool_is_classified() {
         let tools = tools();
         assert!(tools.len() >= 250, "walker saw {} tools", tools.len());
-        let (mut ints, mut arrays, mut tols, mut elems, mut maps, mut untyped) = (0, 0, 0, 0, 0, 0);
+        let (mut ints, mut arrays, mut floats, mut elems, mut float_elems) = (0, 0, 0, 0, 0);
+        let (mut maps, mut untyped) = (0, 0);
         let mut missing = Vec::new();
         for (tool, schema) in &tools {
             let rules = rules_for(tool);
@@ -2009,8 +2533,9 @@ mod schema_tests {
                 match kind {
                     Kind::Integer => ints += 1,
                     Kind::Array => arrays += 1,
-                    Kind::Tolerance => tols += 1,
+                    Kind::Float => floats += 1,
                     Kind::IntegerElems => elems += 1,
+                    Kind::FloatElems => float_elems += 1,
                     Kind::MapValues => maps += 1,
                     Kind::Untyped => untyped += 1,
                     Kind::TooDeep => {}
@@ -2030,19 +2555,21 @@ mod schema_tests {
             missing.join("\n")
         );
         eprintln!(
-            "schema walker: {} tools, {ints} integer, {arrays} array, {tols} tolerance, {elems} \
-             integer-element, {maps} map and {untyped} untyped fields",
+            "schema walker: {} tools, {ints} integer, {arrays} array, {floats} float, {elems} \
+             integer-element, {float_elems} float-element, {maps} map and {untyped} untyped \
+             fields",
             tools.len()
         );
         // Sanity: a schema format change must not silently hide properties (the walker saw
-        // 191 integer, 207 array, 10 tolerance, 7 integer-element and 1 untyped field when it
-        // learned element paths and untyped fields). Untyped fields have no floor: giving the
-        // last `serde_json::Value` request field a type would be an improvement, and
+        // 191 integer, 207 array, 7 integer-element and 1 untyped field when it learned element
+        // paths and untyped fields, and 118 float and 31 float-element fields when it learned
+        // floats). Untyped fields have no floor: giving the last `serde_json::Value` request
+        // field a type would be an improvement, and
         // `walker_reports_nested_arrays_tuple_elements_and_maps` shows they are found.
         assert!(
-            ints >= 150 && arrays >= 150 && tols >= 8 && elems >= 5,
-            "walker saw {ints} integer, {arrays} array, {tols} tolerance and {elems} \
-             integer-element fields"
+            ints >= 150 && arrays >= 150 && floats >= 100 && elems >= 5 && float_elems >= 25,
+            "walker saw {ints} integer, {arrays} array, {floats} float, {elems} integer-element \
+             and {float_elems} float-element fields"
         );
     }
 
@@ -2189,10 +2716,15 @@ mod schema_tests {
                 // the walk records after the array and whose value replaces the empty one
                 let (field, value) = match kind {
                     Kind::Integer => (path.as_str(), json!(1)),
-                    Kind::Tolerance => (path.as_str(), json!(1e-6)),
+                    // at least the smallest tolerance, and below every cap
+                    Kind::Float => (path.as_str(), json!(1e-6)),
                     Kind::Array => (path.as_str(), json!([])),
                     Kind::IntegerElems => match path.strip_suffix("[]") {
                         Some(array) => (array, json!([1])),
+                        None => continue,
+                    },
+                    Kind::FloatElems => match path.strip_suffix("[]") {
+                        Some(array) => (array, json!([0.5])),
                         None => continue,
                     },
                     Kind::MapValues => (path.as_str(), json!({})),

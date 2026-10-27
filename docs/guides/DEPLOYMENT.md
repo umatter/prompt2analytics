@@ -186,12 +186,12 @@ not continuously; the stdio transport has no deadline, slots or quotas.
 
 ### Request limits
 
-`crates/p2a-mcp/src/tools/limits/` classifies every integer, array and
-tolerance field of every tool. When limits are set (the hosted profile, or
-overrides), each call's JSON arguments are checked before they are
-deserialised, on the HTTP, LLM, websocket and stdio paths.
+`crates/p2a-mcp/src/tools/limits/` classifies every integer, float and array
+field of every tool, and the numbers inside array fields. When limits are set
+(the hosted profile, or overrides), each call's JSON arguments are checked
+before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
 
-- **Families.** 23 families of cost parameters (replications, trees,
+- **Families.** 25 families of cost parameters (replications, trees,
   iterations, folds, grid points, lags, components, list lengths, ...) each
   have one cap. Every hosted family cap is at least 1.5 times the corresponding
   tool default, so a call with default arguments is never refused.
@@ -489,12 +489,19 @@ Families (Off: none):
 | `span_width` | `spans` elements, `runmed` `k`, windows | 1,001 |
 | `components` | `n_components`, `n_factors`, `rank`, `n_clusters`, k-means `k` | 500 |
 | `neighbors` | kNN `k`, `n_neighbors` | 100 |
-| `generated_rows` | generated rows (`n_rows`, `arima_sim` `n`, `sample_size`) | 1,000,000 |
+| `generated_rows` | generated and sampled rows (`n_rows`, `munge_sample` `n`, `arima_sim` `n`) | 1,000,000 |
 | `image_dimension` | chart `width`, `height` | 4,000 |
 | `list_length` | column lists (`x`, `covariates`, `columns`, ...); duplicates are refused | 500 |
 | `array_length` | numeric arrays (`xout`, `values`, `probs`, `taus`, ...) | 100,000 |
 | `string_bytes` | generator strings, labels, pad and fill strings, regex patterns (UTF-8 bytes) | 4,096 |
 | `tree_depth` | `max_depth`, `maxdepth` | 100 |
+| `power_sample_size` | the sample size `n` of `power_t_test` and `power_anova_test`, per group in two-sample and ANOVA designs (the top of the range in which they solve for `n`); `power_prop_test` is not capped. Do not raise it (see below) | 1,000,000 |
+| `design_groups` | `power_anova_test` `groups`. Do not raise it (see below) | 10 |
+
+Until the core bounds the t and F quantiles of the power calculations, the
+`power_sample_size` and `design_groups` caps also keep those quantiles within
+the range the core computes. Raising either with `P2A_LIMIT_OVERRIDES` can let
+`power_t_test` or `power_anova_test` run past the deadline.
 
 Row classes and tolerance (Off: none):
 
@@ -502,7 +509,7 @@ Row classes and tolerance (Off: none):
 |---|---|---|
 | `dense_rows` | dataset rows for `ml_hierarchical`, `ml_cutree`, `ml_dbscan`, `regression_smooth_spline` | 5,000 |
 | `cubic_rows` | dataset rows for `ml_tsne`, `ml_cmdscale`, `sar_model`, `sem_model`, `sar_probit_model`, `sem_probit_model`, `spatial_panel_ml`, `spatial_panel_gmm` | 2,000 |
-| `quadratic_rows` | dataset rows for `propensity_matching`, `heterogeneity_test`, `ml_svm`, `regression_loess` | 50,000 |
+| `quadratic_rows` | dataset rows for `propensity_matching`, `heterogeneity_test`, `ml_svm`, `regression_loess`, `ts_changepoint` | 50,000 |
 | `min_tolerance` | smallest convergence tolerance (`tol`, `eps`, ...) | 1e-15 |
 
 Named budgets:

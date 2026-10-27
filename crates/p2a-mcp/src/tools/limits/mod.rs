@@ -39,13 +39,13 @@
 //! These request fields of every registered tool must be matched by a rule:
 //!
 //! - an integer field, by [`Rule::Max`] with a numeric family (not [`Family::StringBytes`]);
-//! - a float field whose name contains `tol` or `eps`, by [`Rule::Tolerance`] or a numeric
-//!   [`Rule::Max`];
+//! - a float field, by a numeric [`Rule::Max`] (a count or size given as a float, such as the
+//!   `n` of `power_t_test`) or, for a convergence tolerance, by [`Rule::Tolerance`];
 //! - an array field, an array element that is itself an array (`a[]`) or a tuple, by
 //!   [`Rule::ArrayLen`], [`Rule::UniqueList`] or [`Rule::SquareLen`];
-//! - the integer elements of an array (`Vec<usize>`, a tuple of integers), which the test lists
-//!   at the element path `a[]`, by [`Rule::ArrayElemMax`] on the array's path `a`, or by a
-//!   numeric [`Rule::Max`] on `a[]`;
+//! - the integer or float elements of an array (`Vec<usize>`, `Vec<f64>`, a tuple of numbers),
+//!   which the test lists at the element path `a[]`, by [`Rule::ArrayElemMax`] on the array's
+//!   path `a`, or by a numeric [`Rule::Max`] on `a[]`;
 //! - any of these, alternatively, by `Rule::Exempt` on the same path with the reason the value
 //!   costs nothing. An `Exempt` on `a[]` covers the elements only, never the array's length.
 //!
@@ -59,10 +59,10 @@
 //! untagged enum with a `Value` arm, or a field whose schema refers to a definition the test
 //! cannot find. Give each of its cost sub-fields a rule of its own by path, because the schema
 //! does not list them and the test cannot find them. A rule path cannot address the values of a
-//! map (`HashMap`, `BTreeMap`), so a map whose values are integers, arrays, objects or any JSON
-//! can only be `Exempt`; give a cost field a struct or a list instead. A map at the top level of
-//! a request (a `#[serde(flatten)]` map) cannot even be exempted, because a rule path is never
-//! empty, so the test fails on it whatever its values. Do not give a cost field a
+//! map (`HashMap`, `BTreeMap`), so a map whose values are integers, floats, arrays, objects or
+//! any JSON can only be `Exempt`; give a cost field a struct or a list instead. A map at the top
+//! level of a request (a `#[serde(flatten)]` map) cannot even be exempted, because a rule path is
+//! never empty, so the test fails on it whatever its values. Do not give a cost field a
 //! `#[serde(alias = ...)]`. If one is unavoidable, add the same rule for the alias name, because
 //! the schema, and so the schema test, does not list aliases.
 //!
@@ -179,6 +179,21 @@ families! {
     StringBytes => "string_bytes", 4_096;
     /// Recursion depth of tree builders.
     TreeDepth => "tree_depth", 100;
+    /// The float sample size `n` (per group in two-sample and ANOVA designs) that
+    /// `power_t_test` and `power_anova_test` are given; it sets the degrees of freedom of their
+    /// t and F distributions. The cap is the top of the bracket in which those tools solve for
+    /// `n`, so every sample size they can return is accepted. `power_prop_test` computes with
+    /// the normal distribution only, and its `n` is not capped. The key is `power_sample_size`,
+    /// not `sample_size`, which other tools use as a request field name. Until p2a-core bounds
+    /// the t and F quantiles of the power calculations (PR-01), this cap also keeps them within
+    /// the range the core computes, so it must not be raised with `P2A_LIMIT_OVERRIDES`.
+    PowerSampleSize => "power_sample_size", 1_000_000;
+    /// Groups of a planned design (`power_anova_test` `groups`). With
+    /// [`Family::PowerSampleSize`] it bounds the F distribution's degrees of freedom,
+    /// `groups * (n - 1)`, also when `n` is solved for. Until p2a-core bounds the t and F
+    /// quantiles of the power calculations (PR-01), this cap also keeps them within the range
+    /// the core computes, so it must not be raised with `P2A_LIMIT_OVERRIDES`.
+    DesignGroups => "design_groups", 10;
 }
 
 /// Number of families; the length of [`Family::ALL`].
@@ -832,6 +847,39 @@ fn below_min_tolerance(f: Option<f64>, min: f64) -> bool {
     }
 }
 
+/// The refusal of the number `n` at `path`, which exceeds `cap` by magnitude: the wording of
+/// [`Rule::Max`] and [`Rule::ArrayElemMax`]. `subject` sits between the parameter and the verb:
+/// `"= {n}"` for a scalar, `"contains {n}, which"` for an element of an array. `plural` words
+/// the advice for the array's values.
+fn magnitude_refusal(
+    path: &str,
+    subject: &str,
+    n: &serde_json::Number,
+    cap: u64,
+    key: &str,
+    tool_echo: &str,
+    plural: bool,
+) -> String {
+    // The cap bounds the magnitude, so "smaller" would point a negative value the wrong way.
+    if n.to_string().starts_with('-') {
+        let values = if plural { "values" } else { "a value" };
+        format!(
+            "Parameter `{path}` {subject} is outside this server's limit of ±{cap} ({key}) for \
+             `{tool_echo}`. Use {values} of smaller magnitude."
+        )
+    } else {
+        let values = if plural {
+            "smaller values"
+        } else {
+            "a smaller value"
+        };
+        format!(
+            "Parameter `{path}` {subject} exceeds this server's limit of {cap} ({key}) for \
+             `{tool_echo}`. Use {values}."
+        )
+    }
+}
+
 /// The refusal of the tolerance `shown` (the number as the request wrote it) at `path`.
 /// `readable` is false for a number with no `f64` reading, which may lie above the minimum as
 /// well as below it, so the message says it cannot be read instead.
@@ -1046,15 +1094,9 @@ impl Limits {
                     return Ok(());
                 }
                 let key = family.key();
-                violation(
-                    n.to_string(),
-                    cap.to_string(),
-                    key,
-                    format!(
-                        "Parameter `{path}` = {n} exceeds this server's limit of {cap} ({key}) for \
-                         `{tool_echo}`. Use a smaller value."
-                    ),
-                )
+                let subject = format!("= {n}");
+                let message = magnitude_refusal(path, &subject, n, cap, key, tool_echo, false);
+                violation(n.to_string(), cap.to_string(), key, message)
             }
             Rule::ArrayLen(family) | Rule::UniqueList(family) => {
                 let (Some(cap), Some(items)) = (self.cap(family), value.as_array()) else {
@@ -1099,15 +1141,10 @@ impl Limits {
                 let key = family.key();
                 for n in items.iter().filter_map(Value::as_number) {
                     if number_exceeds(n, cap) {
-                        return violation(
-                            n.to_string(),
-                            cap.to_string(),
-                            key,
-                            format!(
-                                "Parameter `{path}` contains {n}, which exceeds this server's limit \
-                                 of {cap} ({key}) for `{tool_echo}`. Use smaller values."
-                            ),
-                        );
+                        let subject = format!("contains {n}, which");
+                        let message =
+                            magnitude_refusal(path, &subject, n, cap, key, tool_echo, true);
+                        return violation(n.to_string(), cap.to_string(), key, message);
                     }
                 }
                 Ok(())
@@ -1326,8 +1363,25 @@ mod tests {
                 .requested,
             json!(1e30).to_string()
         );
-        // absolute value
-        assert!(h.check_with("t", &json!({"reps": -10_001}), T).is_err());
+        // absolute value; a negative value is told to shrink in magnitude, not to get smaller
+        let v = h
+            .check_with(
+                "mediation_analysis",
+                &json!({"reps": -1_000_000_000_000i64}),
+                T,
+            )
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            "Parameter `reps` = -1000000000000 is outside this server's limit of ±10000 (replications) for `mediation_analysis`. Use a value of smaller magnitude."
+        );
+        assert_eq!(
+            (v.requested.as_str(), v.limit.as_str(), v.override_key),
+            ("-1000000000000", "10000", "replications")
+        );
+        let v = h.check_with("t", &json!({"reps": -10_001}), T).unwrap_err();
+        assert!(v.message.contains("limit of ±10000"), "{}", v.message);
+        assert!(h.check_with("t", &json!({"reps": -10_000}), T).is_ok());
         assert!(
             h.check_with("t", &json!({"reps": null, "other": 1e30}), T)
                 .is_ok()
@@ -1679,11 +1733,20 @@ mod tests {
         let v = h
             .check_with("timeseries_spectrum", &json!({"spans": [3, 1003]}), T)
             .unwrap_err();
-        assert!(
-            v.message.contains("contains 1003") && v.override_key == "span_width",
-            "{}",
-            v.message
+        assert_eq!(
+            v.message,
+            "Parameter `spans` contains 1003, which exceeds this server's limit of 1001 (span_width) for `timeseries_spectrum`. Use smaller values."
         );
+        assert_eq!(v.override_key, "span_width");
+        assert!(h.check_with("t", &json!({"spans": [3, -1001]}), T).is_ok());
+        let v = h
+            .check_with("timeseries_spectrum", &json!({"spans": [3, -1003]}), T)
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            "Parameter `spans` contains -1003, which is outside this server's limit of ±1001 (span_width) for `timeseries_spectrum`. Use values of smaller magnitude."
+        );
+        assert_eq!((v.requested.as_str(), v.limit.as_str()), ("-1003", "1001"));
         assert!(h.check_with("t", &json!({"free": 1e300}), T).is_ok());
     }
 
@@ -1794,6 +1857,8 @@ mod tests {
             (Family::ArrayLength, "array_length", 100_000),
             (Family::StringBytes, "string_bytes", 4_096),
             (Family::TreeDepth, "tree_depth", 100),
+            (Family::PowerSampleSize, "power_sample_size", 1_000_000),
+            (Family::DesignGroups, "design_groups", 10),
         ];
         assert_eq!(Family::ALL.len(), expect.len());
         for &(f, key, cap) in expect {

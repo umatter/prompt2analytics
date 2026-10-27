@@ -512,9 +512,9 @@ pub struct MboostRequest {
     )]
     pub mstop: Option<usize>,
 
-    /// Learning rate (default: 0.1)
+    /// Learning rate, a step size in (0, 1] (default: 0.1)
     #[schemars(
-        description = "Learning rate (nu). Default is 0.1. Smaller values require more iterations but often improve generalization."
+        description = "Learning rate (nu), a step size in (0, 1]; a value outside that range is refused. Default is 0.1. Smaller values require more iterations but often improve generalization."
     )]
     pub nu: Option<f64>,
 
@@ -555,4 +555,21 @@ pub struct MboostRequest {
     /// Random seed for reproducibility
     #[schemars(description = "Optional random seed for reproducible results.")]
     pub seed: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MboostRequest;
+
+    /// The schema an LLM reads states the step-size range core enforces (`check_step_size` in
+    /// p2a-core's mboost: finite, in (0, 1]) next to the default.
+    #[test]
+    fn mboost_nu_description_states_its_range() {
+        let schema = serde_json::to_value(schemars::schema_for!(MboostRequest)).unwrap();
+        let description = schema["properties"]["nu"]["description"]
+            .as_str()
+            .expect("nu has a description");
+        assert!(description.contains("(0, 1]"), "{description}");
+        assert!(description.contains("Default is 0.1"), "{description}");
+    }
 }

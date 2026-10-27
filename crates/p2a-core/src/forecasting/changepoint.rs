@@ -62,6 +62,11 @@ pub enum CostFunction {
 ///
 /// # Returns
 /// * `ChangepointResult` with detected changepoints and segment statistics
+///
+/// # Errors
+/// Fails on a series too short for the minimum segment length, and when the
+/// budget installed with [`crate::resource::with_budget`] is cancelled or past
+/// its deadline.
 pub fn detect_changepoints(
     data: &[f64],
     penalty: Option<f64>,
@@ -76,7 +81,8 @@ pub fn detect_changepoints(
 
     let min_seg = min_segment_length.unwrap_or(2).max(2);
 
-    if n < min_seg * 2 {
+    // Saturating: a caller's minimum near usize::MAX must be refused, not wrap.
+    if n < min_seg.saturating_mul(2) {
         return Err(format!(
             "Data length ({}) must be at least 2x minimum segment length ({})",
             n, min_seg
@@ -100,7 +106,7 @@ pub fn detect_changepoints(
     let (cum_sum, cum_sum_sq) = compute_cumulative_sums(data);
 
     // PELT algorithm
-    let changepoints = pelt(data, &cum_sum, &cum_sum_sq, pen, min_seg, cost_function);
+    let changepoints = pelt(data, &cum_sum, &cum_sum_sq, pen, min_seg, cost_function)?;
 
     // Compute segment statistics
     let segments = compute_segment_stats(data, &changepoints);
@@ -180,7 +186,11 @@ fn segment_cost(
     }
 }
 
-/// PELT (Pruned Exact Linear Time) algorithm for multiple changepoint detection
+/// PELT (Pruned Exact Linear Time) algorithm for multiple changepoint detection.
+///
+/// When pruning removes no candidate (as with a large penalty), the work is
+/// quadratic in the length of the series, so the budget installed by the
+/// caller is checked at every step.
 fn pelt(
     data: &[f64],
     cum_sum: &[f64],
@@ -188,7 +198,7 @@ fn pelt(
     penalty: f64,
     min_seg: usize,
     cost_function: CostFunction,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, String> {
     let n = data.len();
 
     // F[t] = minimum cost of segmenting data[0..t]
@@ -202,6 +212,9 @@ fn pelt(
     let mut r: Vec<usize> = vec![0];
 
     for t in min_seg..=n {
+        // One step costs O(|R|), so a check every step is negligible.
+        crate::resource::checkpoint().map_err(|e| e.to_string())?;
+
         // Find the best last changepoint for position t
         let mut best_cost = f64::INFINITY;
         let mut best_cp = None;
@@ -248,7 +261,7 @@ fn pelt(
     }
 
     changepoints.reverse();
-    changepoints
+    Ok(changepoints)
 }
 
 /// Compute statistics for each segment
@@ -308,6 +321,11 @@ fn compute_total_cost(data: &[f64], changepoints: &[usize], cost_function: CostF
 
 /// Binary segmentation algorithm (simpler alternative to PELT)
 /// Recursively finds the single best changepoint in each segment
+///
+/// # Errors
+/// Fails on a series of fewer than 2 points, on a series too short for two
+/// segments of the minimum segment length, and when the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline.
 pub fn binary_segmentation(
     data: &[f64],
     max_changepoints: Option<usize>,
@@ -321,6 +339,17 @@ pub fn binary_segmentation(
     }
 
     let min_seg = min_segment_length.unwrap_or(2).max(2);
+
+    // As in detect_changepoints: a series that cannot hold two segments is
+    // refused, not reported as having no changepoint. Saturating, so that a
+    // minimum near usize::MAX is refused instead of wrapping.
+    if n < min_seg.saturating_mul(2) {
+        return Err(format!(
+            "Data length ({}) must be at least 2x minimum segment length ({})",
+            n, min_seg
+        ));
+    }
+
     let max_cp = max_changepoints.unwrap_or(10);
     let threshold = significance_threshold.unwrap_or(0.0);
 
@@ -330,13 +359,16 @@ pub fn binary_segmentation(
     let mut segments_to_check: Vec<(usize, usize)> = vec![(0, n)];
 
     while !segments_to_check.is_empty() && changepoints.len() < max_cp {
+        // Each pass scans the whole series once.
+        crate::resource::checkpoint().map_err(|e| e.to_string())?;
+
         // Find segment with best potential changepoint
         let mut best_gain = threshold;
         let mut best_cp = None;
         let mut best_segment_idx = 0;
 
         for (idx, &(start, end)) in segments_to_check.iter().enumerate() {
-            if end - start < 2 * min_seg {
+            if end - start < min_seg.saturating_mul(2) {
                 continue;
             }
 
@@ -390,6 +422,12 @@ pub fn binary_segmentation(
 ///
 /// This is a convenience wrapper that extracts the column data from a Dataset
 /// and runs the changepoint detection algorithm.
+///
+/// # Errors
+/// Fails when `column` is missing or not numeric (f64 or i64), on fewer than
+/// 4 observations, and with every error of [`detect_changepoints`], including
+/// a cancelled or expired budget installed with
+/// [`crate::resource::with_budget`].
 pub fn run_changepoint(
     dataset: &Dataset,
     column: &str,
@@ -428,6 +466,12 @@ pub fn run_changepoint(
 }
 
 /// Run binary segmentation changepoint detection on a dataset column.
+///
+/// # Errors
+/// Fails when `column` is missing or not numeric (f64 or i64), on fewer than
+/// 4 observations, and with every error of [`binary_segmentation`], including
+/// a cancelled or expired budget installed with
+/// [`crate::resource::with_budget`].
 pub fn run_binary_segmentation(
     dataset: &Dataset,
     column: &str,
@@ -803,5 +847,73 @@ mod tests {
         // Should run successfully
         assert!(result.method.contains("mean and variance"));
         assert!(result.total_cost.is_finite());
+    }
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn pelt_stops_when_the_budget_is_cancelled() {
+        // Before the fix pelt() never looked at the budget, so a call past its
+        // deadline ran to the end of its quadratic scan and returned Ok.
+        let data = create_mean_shift_data(2_000, 2_000, 0.0, 0.0, 1.0);
+        for cost in [
+            CostFunction::MeanChange,
+            CostFunction::VarianceChange,
+            CostFunction::MeanAndVariance,
+        ] {
+            assert!(detect_changepoints(&data, None, None, cost).is_ok());
+            let err = cancelled(|| detect_changepoints(&data, None, None, cost))
+                .expect_err("a cancelled budget must stop PELT");
+            assert!(err.contains("cancelled"), "{cost:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn binary_segmentation_stops_when_the_budget_is_cancelled() {
+        let data = create_mean_shift_data(2_000, 2_000, 0.0, 0.0, 1.0);
+        assert!(binary_segmentation(&data, Some(5), None, None).is_ok());
+        let err = cancelled(|| binary_segmentation(&data, Some(5), None, None))
+            .expect_err("a cancelled budget must stop binary segmentation");
+        assert!(err.contains("cancelled"), "{err}");
+    }
+
+    #[test]
+    fn a_huge_min_segment_length_is_refused_not_overflowed() {
+        // `min_seg * 2` overflowed: a debug build panicked, and a release
+        // build wrapped (to 0 for 2^63, so PELT ran and reported no change).
+        let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
+        for min_seg in [usize::MAX, usize::MAX / 2 + 1] {
+            let err =
+                detect_changepoints(&data, Some(5.0), Some(min_seg), CostFunction::MeanChange)
+                    .expect_err("a minimum segment longer than the series must be refused");
+            assert!(err.contains("minimum segment length"), "{err}");
+            let err = binary_segmentation(&data, Some(5), Some(min_seg), None)
+                .expect_err("a minimum segment longer than the series must be refused");
+            assert!(err.contains("minimum segment length"), "{err}");
+        }
+    }
+
+    #[test]
+    fn binary_segmentation_refuses_a_series_shorter_than_two_minimum_segments() {
+        // Binary segmentation skipped every segment shorter than two minimum
+        // segments, so it answered "no changepoints" for a series it never
+        // examined, where PELT refuses the same input.
+        let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
+        let err = binary_segmentation(&data, Some(5), Some(51), None)
+            .expect_err("100 points cannot hold two segments of 51");
+        assert!(
+            err.contains("Data length (100) must be at least 2x minimum segment length (51)"),
+            "{err}"
+        );
+        let pelt_err = detect_changepoints(&data, Some(5.0), Some(51), CostFunction::MeanChange)
+            .expect_err("PELT refuses it too");
+        assert_eq!(err, pelt_err);
+        // Two segments of 50 fit exactly; the shift sits at their boundary.
+        let r = binary_segmentation(&data, Some(5), Some(50), None).unwrap();
+        assert_eq!(r.changepoints, vec![50]);
     }
 }
