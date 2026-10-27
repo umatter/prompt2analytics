@@ -548,9 +548,15 @@ draw for every row and bootstrap replication, so neither the deadline nor the
 ceiling bounds what one fit holds; the handlers refuse a fit whose bound is
 larger before it starts, and say how many rows its settings allow. With four
 covariates it admits both tools' defaults on a few hundred thousand rows. The
-bound counts buffers by their lengths, so the allocator adds a few MiB on top;
-keep it at or below the ceiling and well below the room the memory admission
-leaves (`P2A_MEMORY_SOFT_LIMIT_MB` against the machine's memory).
+bound counts every buffer the fit holds at once, and the fit allocates each at
+its exact length (the recursion's index vectors are sized before they are
+filled), so what an admitted fit holds stays within the bound whatever the
+data. On a release build, a fit whose trees split a few rows off at every level,
+the shape that gives the recursion its largest share of the bound, peaked at
+85% of its bound. Only the allocator's own overhead (chunk headers and free
+lists) comes on top. Keep the budget at or below the ceiling and well below the
+room the memory admission leaves (`P2A_MEMORY_SOFT_LIMIT_MB` against the
+machine's memory).
 
 ## Must-do checklist
 

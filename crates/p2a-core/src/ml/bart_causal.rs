@@ -78,7 +78,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use super::heap_chunk_bytes;
+use super::{default_mtry, heap_chunk_bytes, mul, partition_exact, pow2};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -166,8 +166,10 @@ impl BartCausalConfig {
     /// An upper bound, in bytes, of what [`bart_causal`] holds at once for a
     /// dataset of `n_obs` rows and `n_covariates` covariates under this
     /// configuration: the trees it keeps, its bootstrap draws and the buffers
-    /// that are alive together while it runs, counted by their lengths. A
-    /// vector's unused capacity, the allocator's free lists and the dataset
+    /// that are alive together while it runs. Every buffer it counts is
+    /// allocated at its exact length, the group indices and the index vectors
+    /// of the recursion included, so no vector holds unused capacity. The
+    /// allocator's own overhead (chunk headers and free lists) and the dataset
     /// itself come on top. Saturates at `u64::MAX`.
     ///
     /// The bound holds whatever the data are, because each term counts the
@@ -195,18 +197,20 @@ impl BartCausalConfig {
     ///   standard errors, the result's copies and the sorted copy its summary
     ///   makes.
     /// - **One tree's working copies.** The subsample's flags, indices and
-    ///   rows, and the index vectors of the recursion: every level on the path
-    ///   to the node being split holds its children's index vectors, together
-    ///   at most the subsample, and the path is at most `max_depth` levels deep
+    ///   rows, and what the recursion holds: every level on the path to the
+    ///   node being split holds its children's index vectors, together at most
+    ///   the subsample, and the covariates its split drew (`mtry`, at most the
+    ///   ensembles' covariates). The path is at most `max_depth` levels deep
     ///   and at most the subsample divided by `max(min_node_size, 1)`. The
-    ///   split search's sort order adds one subsample, and its feature draw one
-    ///   covariate list.
+    ///   split search's sort order adds one subsample, and the list the
+    ///   covariates are drawn from one covariate list.
     pub fn memory_bound(&self, n_obs: usize, n_covariates: usize) -> u64 {
         let n = n_obs as u128;
         let p = n_covariates as u128;
         // Covariates of the ensembles: with the propensity score as one more.
-        let q = p.saturating_add(u128::from(self.include_propensity));
-        let s = ((n_obs as f64) * self.sample_fraction) as usize as u128;
+        let q_cols = n_covariates.saturating_add(usize::from(self.include_propensity));
+        let q = q_cols as u128;
+        let s = self.subsample_size(n_obs);
         let leaf = self.min_node_size.max(1) as u128;
         let node = heap_chunk_bytes(size_of::<TreeNode>());
         let tree = size_of::<RegressionTree>() as u128;
@@ -233,9 +237,17 @@ impl BartCausalConfig {
             .saturating_add(mul(mul(8, n), p))
             .saturating_add(mul(mul(32, n), q));
         let levels = (s / leaf).min(self.max_depth as u128) + 1;
+        // The covariates one split draws, as `select_features` keeps them.
+        let drawn = self
+            .mtry
+            .unwrap_or_else(|| default_mtry(q_cols))
+            .min(q_cols) as u128;
+        // Subsample flags, indices and rows; the recursion path (each level's child index
+        // vectors and drawn covariates); the split search's order; the list the covariates are
+        // drawn from, or the importance sums and one tree's importances.
         let work = n
             .saturating_add(mul(mul(8, s), q.saturating_add(2)))
-            .saturating_add(mul(mul(8, s), levels))
+            .saturating_add(mul(mul(8, s.saturating_add(drawn)), levels))
             .saturating_add(mul(8, s))
             .saturating_add(mul(16, q));
         u64::try_from(
@@ -250,18 +262,16 @@ impl BartCausalConfig {
     /// The most leaves a treated tree and a control tree fitted together can
     /// have for `n_obs` rows ([`Self::memory_bound`]).
     fn max_leaves_per_pair(&self, n_obs: usize) -> u128 {
-        let s = ((n_obs as f64) * self.sample_fraction) as usize as u128;
+        let s = self.subsample_size(n_obs);
         let leaf = self.min_node_size.max(1) as u128;
-        let by_depth = 1u128
-            .checked_shl(self.max_depth.min(u32::MAX as usize) as u32)
-            .unwrap_or(u128::MAX);
-        (s / leaf + 2).min(by_depth.saturating_mul(2))
+        (s / leaf + 2).min(pow2(self.max_depth).saturating_mul(2))
     }
-}
 
-/// `a * b`, saturating at `u128::MAX`.
-fn mul(a: u128, b: u128) -> u128 {
-    a.saturating_mul(b)
+    /// The rows of a subsample drawn from `n_obs` rows, as `subsample` draws it; a treated and a
+    /// control tree draw theirs from groups that together hold `n_obs` rows.
+    fn subsample_size(&self, n_obs: usize) -> u128 {
+        ((n_obs as f64) * self.sample_fraction) as usize as u128
+    }
 }
 
 /// Result from BART-based causal inference.
@@ -492,9 +502,10 @@ impl RegressionTree {
         // Find best split
         if let Some((best_feature, best_threshold)) = self.find_best_split(x, y, indices, &features)
         {
-            let (left_indices, right_indices): (Vec<usize>, Vec<usize>) = indices
-                .iter()
-                .partition(|&&i| x[[i, best_feature]] <= best_threshold);
+            // Each child's vector at its exact length: every level of the path holds them.
+            let (left_indices, right_indices) = partition_exact(indices.iter().copied(), |i| {
+                x[[i, best_feature]] <= best_threshold
+            });
 
             if left_indices.len() < self.min_node_size || right_indices.len() < self.min_node_size {
                 return self.create_leaf(y, indices);
@@ -702,10 +713,7 @@ impl TreeEnsemble {
         rng_state: &mut u64,
     ) -> EconResult<()> {
         self.n_features = x.ncols();
-        let mtry_value = mtry.unwrap_or_else(|| {
-            let sqrt_p = (self.n_features as f64).sqrt().ceil() as usize;
-            sqrt_p.max(1)
-        });
+        let mtry_value = mtry.unwrap_or_else(|| default_mtry(self.n_features));
 
         self.trees = try_with_capacity(n_trees, "BART trees")?;
 
@@ -957,8 +965,7 @@ pub fn bart_causal_arrays(
     }
 
     // Split data into treated and control
-    let treated_indices: Vec<usize> = (0..n).filter(|&i| treatment[i] > 0.5).collect();
-    let control_indices: Vec<usize> = (0..n).filter(|&i| treatment[i] <= 0.5).collect();
+    let (treated_indices, control_indices) = treated_and_control(&treatment);
 
     let n_treated = treated_indices.len();
     let n_control = control_indices.len();
@@ -1273,6 +1280,13 @@ fn subsample(n_samples: usize, fraction: f64, rng_state: &mut u64) -> Vec<usize>
     sample
 }
 
+/// The treated rows of `w` (above 0.5) and the control rows (the others), each vector at its
+/// exact length, as [`BartCausalConfig::memory_bound`] counts them. `w` is finite (the caller
+/// checked the treatment), so each row is either treated or control.
+fn treated_and_control(w: &ArrayView1<f64>) -> (Vec<usize>, Vec<usize>) {
+    partition_exact(0..w.len(), |i| w[i] > 0.5)
+}
+
 /// Select rows from a 2D array.
 fn select_rows(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
     let n_features = data.ncols();
@@ -1349,8 +1363,7 @@ fn bootstrap_cate(
         let x_boot = select_rows(&x, &indices);
 
         // Split into treated/control
-        let treated_idx: Vec<usize> = (0..n).filter(|&i| w_boot[i] > 0.5).collect();
-        let control_idx: Vec<usize> = (0..n).filter(|&i| w_boot[i] <= 0.5).collect();
+        let (treated_idx, control_idx) = treated_and_control(&w_boot.view());
 
         // Skip if not enough in either group
         if treated_idx.len() < 5 || control_idx.len() < 5 {
@@ -1541,6 +1554,31 @@ mod tests {
         }
     }
 
+    /// The group indices of the fit and of every bootstrap replicate are allocated at their
+    /// exact lengths, as `memory_bound` counts them (`filter().collect()` grows a vector by
+    /// pushing and can leave close to twice its length allocated), and so is a subsample. The
+    /// recursion's child vectors come from `partition_exact`, tested in `ml`.
+    #[test]
+    fn group_and_subsample_indices_are_allocated_at_their_lengths() {
+        for (n, every) in [(1_000, 2), (777, 3), (1_000, 997), (61, 1)] {
+            let w = Array1::from_shape_fn(n, |i| if i % every == 0 { 1.0 } else { 0.0 });
+            let (treated, control) = treated_and_control(&w.view());
+            assert_eq!(treated.len() + control.len(), n);
+            assert!(treated.iter().all(|&i| w[i] > 0.5) && control.iter().all(|&i| w[i] < 0.5));
+            assert_eq!(treated.capacity(), treated.len(), "{n} rows, every {every}");
+            assert_eq!(control.capacity(), control.len(), "{n} rows, every {every}");
+        }
+        let mut rng = 3;
+        for (n, fraction) in [(1_000, 0.632), (20, 0.05)] {
+            let sample = subsample(n, fraction, &mut rng);
+            assert_eq!(
+                sample.capacity(),
+                sample.len(),
+                "{n} rows, fraction {fraction}"
+            );
+        }
+    }
+
     #[test]
     fn memory_bound_grows_with_its_arguments_and_saturates() {
         let d = BartCausalConfig::default();
@@ -1551,6 +1589,12 @@ mod tests {
             f(&mut c);
             c
         };
+        // Every level of the recursion's path keeps the covariates its split drew.
+        assert!(at(&with(|c| c.mtry = Some(16)), 10_000, 16) > at(&d, 10_000, 16));
+        assert_eq!(
+            at(&with(|c| c.mtry = Some(16)), 10_000, 16),
+            at(&with(|c| c.mtry = Some(1_000)), 10_000, 16)
+        );
         assert!(at(&with(|c| c.n_trees = 300), 10_000, 4) > base);
         assert!(at(&with(|c| c.n_bootstrap = 150), 10_000, 4) > base);
         assert!(at(&with(|c| c.max_depth = 8), 10_000, 4) > base);

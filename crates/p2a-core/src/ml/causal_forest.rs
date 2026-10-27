@@ -61,7 +61,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use super::heap_chunk_bytes;
+use super::{default_mtry, heap_chunk_bytes, mul, partition_exact, pow2};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -111,8 +111,10 @@ impl CausalForestConfig {
     /// An upper bound, in bytes, of what [`causal_forest`] holds at once for a
     /// dataset of `n_obs` rows and `n_covariates` covariates under this
     /// configuration: the trees it keeps and the buffers that are alive
-    /// together while it runs, counted by their lengths. A vector's unused
-    /// capacity, the allocator's free lists and the dataset itself come on
+    /// together while it runs. Every buffer it counts is allocated at its
+    /// exact length, the index vectors of the subsample and of the recursion
+    /// included, so no vector holds unused capacity. The allocator's own
+    /// overhead (chunk headers and free lists) and the dataset itself come on
     /// top. Saturates at `u64::MAX`.
     ///
     /// The bound holds whatever the data are, because each term counts the
@@ -133,19 +135,25 @@ impl CausalForestConfig {
     ///   summary makes.
     /// - **One tree's working copies.** The subsample's flags and indices and
     ///   its rows; with honesty, the shuffled indices, the two parts and their
-    ///   rows; and the index vectors of the recursion. Every level on the path
-    ///   to the node being split holds its children's index vectors, which
-    ///   together are at most the two parts, and the path is at most
-    ///   `max_depth` levels deep and at most the structure part divided by
-    ///   `max(min_node_size, 4)`, since each split leaves the child on the path
-    ///   at least that many rows fewer. The split search's sort order adds one
-    ///   structure part, and its feature draw one covariate list.
+    ///   rows; and what the recursion holds. Every level on the path to the
+    ///   node being split holds its children's index vectors, which together
+    ///   are at most the two parts, and the covariates its split drew (`mtry`,
+    ///   at most `n_covariates`). The path is at most `max_depth` levels deep
+    ///   and at most the structure part divided by `max(min_node_size, 4)`,
+    ///   since each split leaves the child on the path at least that many rows
+    ///   fewer. The split search's sort order adds one structure part, and the
+    ///   list the covariates are drawn from one covariate list.
     pub fn memory_bound(&self, n_obs: usize, n_covariates: usize) -> u64 {
         let n = n_obs as u128;
         let p = n_covariates as u128;
         let (s, t, e) = self.subsample_parts(n_obs);
         let leaf = self.min_node_size.max(4) as u128;
         let levels = (t / leaf).min(self.max_depth as u128) + 1;
+        // The covariates one split draws, as `select_features` keeps them.
+        let drawn = self
+            .mtry
+            .unwrap_or_else(|| default_mtry(n_covariates))
+            .min(n_covariates) as u128;
         let tree = mul(
             self.max_nodes_per_tree(n_obs),
             heap_chunk_bytes(size_of::<CausalTreeNode>()),
@@ -154,7 +162,8 @@ impl CausalForestConfig {
         let trees = mul(self.n_trees as u128, tree);
         // Extracted y, w and x, and the column being extracted (its cast and its values) (2);
         // out-of-bag counts, means and sums of squares (3); predictions, variances and the
-        // summary's sorted copy (3); the feature draw and importance sums.
+        // summary's sorted copy (3); the importance sums, and the list the covariates are drawn
+        // from or one tree's importances.
         let data = mul(mul(8, n), p.saturating_add(2 + 2 + 3 + 3)).saturating_add(mul(16, p));
         // Subsample flags, indices and rows.
         let mut work = mul(n, 9).saturating_add(mul(mul(8, s), p.saturating_add(2)));
@@ -163,9 +172,10 @@ impl CausalForestConfig {
                 .saturating_add(mul(24, s))
                 .saturating_add(mul(mul(8, t + e), p.saturating_add(2)));
         }
-        // Recursion path and split search.
+        // Recursion path (each level's child index vectors and drawn covariates) and split
+        // search.
         work = work
-            .saturating_add(mul(mul(8, t + e), levels))
+            .saturating_add(mul(mul(8, t + e + drawn), levels))
             .saturating_add(mul(8, t));
         u64::try_from(trees.saturating_add(data).saturating_add(work)).unwrap_or(u64::MAX)
     }
@@ -190,18 +200,6 @@ impl CausalForestConfig {
         let leaves = (t / leaf).min(e / leaf).min(pow2(self.max_depth)).max(1);
         2 * leaves - 1
     }
-}
-
-/// `2^d`, saturating at `u128::MAX`.
-fn pow2(d: usize) -> u128 {
-    1u128
-        .checked_shl(d.min(u32::MAX as usize) as u32)
-        .unwrap_or(u128::MAX)
-}
-
-/// `a * b`, saturating at `u128::MAX`.
-fn mul(a: u128, b: u128) -> u128 {
-    a.saturating_mul(b)
 }
 
 /// Result from causal forest estimation.
@@ -774,19 +772,22 @@ fn count_treated_control(w: &ArrayView1<f64>, indices: &[usize]) -> (usize, usiz
     (n_treated, n_control)
 }
 
-/// Partition indices based on a split.
+/// Partition indices based on a split, each child's vector at its exact length (the
+/// recursion holds them on every level, and [`CausalForestConfig::memory_bound`] counts them
+/// by their lengths).
 fn partition_indices(
     x: &ArrayView2<f64>,
     indices: &[usize],
     feature: usize,
     threshold: f64,
 ) -> (Vec<usize>, Vec<usize>) {
-    indices.iter().partition(|&&i| x[[i, feature]] <= threshold)
+    partition_exact(indices.iter().copied(), |i| x[[i, feature]] <= threshold)
 }
 
 use super::lcg_random;
 
-/// Generate bootstrap sample indices.
+/// Generate subsample indices without replacement and the out-of-bag rest, both vectors at
+/// their exact lengths.
 fn subsample(n_samples: usize, fraction: f64, rng_state: &mut u64) -> (Vec<usize>, Vec<usize>) {
     let subsample_size = ((n_samples as f64) * fraction) as usize;
     let mut selected = vec![false; n_samples];
@@ -800,7 +801,13 @@ fn subsample(n_samples: usize, fraction: f64, rng_state: &mut u64) -> (Vec<usize
         }
     }
 
-    let oob: Vec<usize> = (0..n_samples).filter(|&i| !selected[i]).collect();
+    // `sample` holds distinct indices, so exactly the others are out of bag.
+    let mut oob = Vec::with_capacity(n_samples - sample.len());
+    for (i, &in_sample) in selected.iter().enumerate() {
+        if !in_sample {
+            oob.push(i);
+        }
+    }
     (sample, oob)
 }
 
@@ -1022,10 +1029,7 @@ pub fn causal_forest_arrays(
     let mut rng_state = config.seed.unwrap_or(42);
 
     // Determine mtry
-    let mtry = config.mtry.unwrap_or_else(|| {
-        let sqrt_p = (p as f64).sqrt().ceil() as usize;
-        sqrt_p.max(1)
-    });
+    let mtry = config.mtry.unwrap_or_else(|| default_mtry(p));
 
     // Build forest
     let mut trees = try_with_capacity::<CausalTree>(config.n_trees, "causal forest trees")?;
@@ -1463,8 +1467,39 @@ mod tests {
                 "{cfg:?} on {n} rows: a tree has {most} nodes, bound {bound}"
             );
             // The trees fill a good part of what the bound allows (it is not loose by orders
-            // of magnitude), except where the depth stops them first.
+            // of magnitude), also where the depth stops them first.
             assert!(4 * most >= bound, "{cfg:?} on {n} rows: {most} of {bound}");
+        }
+    }
+
+    /// The subsample, its out-of-bag rest and the recursion's child index vectors are
+    /// allocated at their exact lengths, as `memory_bound` counts them: `Iterator::partition`
+    /// and `filter().collect()` grow a vector by pushing and can leave close to twice its
+    /// length allocated, and the recursion holds child vectors on every level of its path.
+    #[test]
+    fn index_vectors_are_allocated_at_their_lengths() {
+        let mut rng = 5;
+        for (n, fraction) in [(1_000, 0.5), (777, 0.632), (61, 1.0), (10, 0.1)] {
+            let (sample, oob) = subsample(n, fraction, &mut rng);
+            assert_eq!(sample.len() + oob.len(), n);
+            assert_eq!(
+                sample.capacity(),
+                sample.len(),
+                "{n} rows, fraction {fraction}"
+            );
+            assert_eq!(oob.capacity(), oob.len(), "{n} rows, fraction {fraction}");
+        }
+        // Thresholds that send one row, or all but a few, to one side, as the splits of very
+        // unbalanced data do, and balanced ones.
+        let x = Array2::from_shape_fn((1_000, 1), |(i, _)| i as f64 + 0.25 * (i % 3) as f64);
+        let indices: Vec<usize> = (0..1_000).rev().collect();
+        for threshold in [0.1, 3.0, 500.0, 996.9, 2_000.0] {
+            let (left, right) = partition_indices(&x.view(), &indices, 0, threshold);
+            assert_eq!(left.len() + right.len(), 1_000);
+            assert!(left.iter().all(|&i| x[[i, 0]] <= threshold));
+            assert!(right.iter().all(|&i| x[[i, 0]] > threshold));
+            assert_eq!(left.capacity(), left.len(), "threshold {threshold}");
+            assert_eq!(right.capacity(), right.len(), "threshold {threshold}");
         }
     }
 
@@ -1473,6 +1508,13 @@ mod tests {
         let d = CausalForestConfig::default();
         let at = |cfg: &CausalForestConfig, n: usize, p: usize| cfg.memory_bound(n, p);
         let base = at(&d, 10_000, 4);
+        // Every level of the recursion's path keeps the covariates its split drew.
+        let mtry = |m: usize| CausalForestConfig {
+            mtry: Some(m),
+            ..d.clone()
+        };
+        assert!(at(&mtry(16), 10_000, 16) > at(&mtry(4), 10_000, 16));
+        assert_eq!(at(&mtry(16), 10_000, 16), at(&mtry(1_000), 10_000, 16));
         let more_trees = CausalForestConfig {
             n_trees: 3_000,
             ..d.clone()

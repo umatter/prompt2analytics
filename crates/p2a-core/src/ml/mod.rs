@@ -223,6 +223,51 @@ pub(crate) const fn heap_chunk_bytes(size: usize) -> u128 {
     if chunk < 32 { 32 } else { chunk }
 }
 
+/// `a * b`, saturating at `u128::MAX`, for the terms of the tree ensembles' memory bounds.
+pub(crate) fn mul(a: u128, b: u128) -> u128 {
+    a.saturating_mul(b)
+}
+
+/// `2^d`, saturating at `u128::MAX`.
+pub(crate) fn pow2(d: usize) -> u128 {
+    1u128
+        .checked_shl(d.min(u32::MAX as usize) as u32)
+        .unwrap_or(u128::MAX)
+}
+
+/// The covariates a split of the causal forest or of BART draws by default from `p`:
+/// `ceil(sqrt(p))`, and at least one.
+pub(crate) fn default_mtry(p: usize) -> usize {
+    ((p as f64).sqrt().ceil() as usize).max(1)
+}
+
+/// `indices` split into those `pred` holds for and the others, each in its original order, as
+/// [`Iterator::partition`] splits them, but with each vector allocated at its exact length.
+///
+/// `partition` grows its vectors by pushing, so their capacity can be close to twice their
+/// length; the memory bounds of the tree ensembles count their index vectors by their lengths.
+/// `pred` is called twice for each index, so it must be a pure function of it.
+pub(crate) fn partition_exact<I>(
+    indices: I,
+    pred: impl Fn(usize) -> bool,
+) -> (Vec<usize>, Vec<usize>)
+where
+    I: ExactSizeIterator<Item = usize> + Clone,
+{
+    let n = indices.len();
+    let n_true = indices.clone().filter(|&i| pred(i)).count();
+    let mut yes = Vec::with_capacity(n_true);
+    let mut no = Vec::with_capacity(n - n_true);
+    for i in indices {
+        if pred(i) {
+            yes.push(i);
+        } else {
+            no.push(i);
+        }
+    }
+    (yes, no)
+}
+
 /// Simple Linear Congruential Generator for reproducible randomness.
 ///
 /// Used across ML modules for deterministic random sampling (bootstrap,
@@ -456,3 +501,27 @@ pub use pdp::{
     Pdp2dResult, PdpConfig, PdpResult, partial_dependence, partial_dependence_2d,
     partial_dependence_2d_named, partial_dependence_named,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::partition_exact;
+
+    /// `partition_exact` splits as `Iterator::partition` does, with every vector at exactly its
+    /// length, also where one side keeps almost every index.
+    #[test]
+    fn partition_exact_matches_partition_with_capacity_equal_to_length() {
+        let indices: Vec<usize> = (0..1_000).map(|i| (i * 37) % 1_009).collect();
+        for cut in [0, 1, 4, 500, 996, 999, 1_009] {
+            let pred = |i: usize| i < cut;
+            let (yes, no) = partition_exact(indices.iter().copied(), pred);
+            let (want_yes, want_no): (Vec<usize>, Vec<usize>) =
+                indices.iter().partition(|&&i| pred(i));
+            assert_eq!((&yes, &no), (&want_yes, &want_no), "cut {cut}");
+            assert_eq!(yes.capacity(), yes.len(), "cut {cut}");
+            assert_eq!(no.capacity(), no.len(), "cut {cut}");
+        }
+        let (even, odd) = partition_exact(0..777, |i| i % 2 == 0);
+        assert_eq!((even.len(), odd.len()), (389, 388));
+        assert_eq!((even.capacity(), odd.capacity()), (389, 388));
+    }
+}
