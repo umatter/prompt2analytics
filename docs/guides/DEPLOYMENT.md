@@ -186,7 +186,8 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
   sampling with `munge_sample`.
 - **Named budgets.** Sizes the handlers compute while they run: image pixels,
   table cells, join output, generated data, export and file sizes, spatial
-  links, SQL results, the conversation store and the LLM context.
+  links, the work of an ARIMA fit, SQL results, the conversation store and the
+  LLM context.
 - **Response size.** A tool's text and image output above `response_bytes`
   (16 MiB) is replaced by a refusal.
 
@@ -506,6 +507,7 @@ Named budgets:
 | `response_bytes` | one tool's text and image output | 16 MiB | none |
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
+| `arima_fit_work` | work of a `ts_arima_fit` or `ts_arima_forecast` fit, observations × ((p + q + 3)² + d), checked before the fit starts because it cannot be stopped once it runs (400,000 allows ARIMA(1,1,1) on 15,384 observations; on a release build the slowest fit it allows is bounded at about 16 s); while set, a series holding a nonzero value below 1e-100 is refused as well, since arithmetic on such values is many times slower | 400,000 | none |
 | `db_result_rows` | rows a SQL tool keeps | 100,000 | none |
 | `db_result_bytes` | estimated bytes a SQL tool keeps | 64 MiB | none |
 | `db_timeout_secs` | run time of one SQL statement | 20 | none |

@@ -611,6 +611,10 @@ impl AnalyticsServer {
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
+        let orders = (request.p, request.d, request.q);
+        if let Some(refusal) = arima_refusal("ts_arima_fit", dataset, &request.column, orders) {
+            return Ok(refusal);
+        }
 
         let result = match run_arima(dataset, &request.column, request.p, request.d, request.q) {
             Ok(r) => r,
@@ -659,6 +663,11 @@ impl AnalyticsServer {
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
+        let orders = (request.p, request.d, request.q);
+        if let Some(refusal) = arima_refusal("ts_arima_forecast", dataset, &request.column, orders)
+        {
+            return Ok(refusal);
+        }
 
         let result = match forecast_arima(
             dataset,
@@ -2213,6 +2222,39 @@ impl AnalyticsServer {
     }
 }
 
+/// The refusal of an ARIMA fit of `column` at orders `p`, `d` and `q` that the installed
+/// `arima_fit_work` budget does not allow, checked before anything is fitted:
+/// `arima::estimate::fit` cannot be stopped once it starts, so the call's deadline would not end
+/// it. The budget bounds the fit's work, and while it is set a series that would slow the fit's
+/// arithmetic is refused as well. The series is read as `run_arima` reads it (the whole `f64`
+/// column, without its null mask). A missing or non-`f64` column is not refused here, so that the
+/// core reports it.
+fn arima_refusal(
+    tool: &str,
+    dataset: &p2a_core::Dataset,
+    column: &str,
+    (p, d, q): (usize, usize, usize),
+) -> Option<CallToolResult> {
+    let series = dataset.df().column(column).ok()?.f64().ok()?;
+    let limits = crate::tools::limits::current();
+    let v = limits
+        .check_arima_fit(tool, series.len(), p, d, q)
+        .err()
+        .or_else(|| {
+            limits
+                .check_arima_series(tool, column, series.into_no_null_iter())
+                .err()
+        })?;
+    tracing::info!(
+        tool = %v.tool,
+        knob = v.override_key,
+        requested = %v.requested,
+        limit = %v.limit,
+        "tool request refused by a resource limit"
+    );
+    Some(CallToolResult::error(vec![Content::text(v.message)]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2325,6 +2367,142 @@ mod tests {
         });
         assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
         assert!(text_of(&r).contains("\"n_rows\": 4001"), "{}", text_of(&r));
+    }
+
+    /// A noisy AR(1) series.
+    fn ar1(n: usize) -> Vec<f64> {
+        let mut prev = 0.0;
+        (0..n)
+            .map(|t| {
+                prev = 0.6 * prev + (((t * 37 + 11) % 23) as f64 / 23.0 - 0.5);
+                prev
+            })
+            .collect()
+    }
+
+    /// Runs `ts_arima_fit` and `ts_arima_forecast` (horizon 5) at ARIMA(1, `d`, 1) on `column`
+    /// of dataset "a" under `limits`, returning both results.
+    fn arima_calls(
+        rt: &tokio::runtime::Runtime,
+        server: &AnalyticsServer,
+        limits: &crate::tools::limits::Limits,
+        column: &str,
+        d: usize,
+    ) -> [(&'static str, CallToolResult); 2] {
+        let fit = ArimaRequest {
+            dataset: "a".into(),
+            column: column.into(),
+            p: 1,
+            d,
+            q: 1,
+        };
+        let forecast = ArimaForecastRequest {
+            dataset: "a".into(),
+            column: column.into(),
+            p: 1,
+            d,
+            q: 1,
+            horizon: 5,
+        };
+        crate::tools::limits::with_limits(limits.clone(), || {
+            [
+                (
+                    "ts_arima_fit",
+                    rt.block_on(server.ts_arima_fit(Parameters(fit))).unwrap(),
+                ),
+                (
+                    "ts_arima_forecast",
+                    rt.block_on(server.ts_arima_forecast(Parameters(forecast)))
+                        .unwrap(),
+                ),
+            ]
+        })
+    }
+
+    /// The `arima` crate's fit cannot be stopped once it starts, so both ARIMA tools check its
+    /// work against `arima_fit_work` before they fit, and fit as before within the budget.
+    #[test]
+    fn ts_arima_tools_refuse_a_fit_over_the_work_budget_before_fitting() {
+        use crate::tools::limits::Limits;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = rt.block_on(server_with_series("a", &ar1(400)));
+        // 400 x ((1 + 1 + 3)^2 + 1) = 10,400 > 5,000; 5,000 / 26 = 192 observations
+        let tight = Limits::hosted()
+            .with_overrides(&["arima_fit_work=5000".to_string()])
+            .unwrap();
+        for (tool, r) in arima_calls(&rt, &server, &tight, "y", 1) {
+            let t = text_of(&r);
+            assert_eq!(r.is_error, Some(true), "{t}");
+            assert!(
+                t.starts_with(&format!(
+                    "`{tool}` with p = 1, d = 1 and q = 1 on 400 observations needs 10400 \
+                     (arima_fit_work"
+                )) && t.contains("limit of 5000")
+                    && t.contains("at most 192 observations"),
+                "{t}"
+            );
+        }
+        // A missing column keeps the core's error.
+        for (_, r) in arima_calls(&rt, &server, &tight, "nope", 1) {
+            assert_eq!(r.is_error, Some(true));
+            assert!(
+                text_of(&r).contains("not found") && !text_of(&r).contains("arima_fit_work"),
+                "{}",
+                text_of(&r)
+            );
+        }
+        // The hosted budget and the off profile fit the same request.
+        for limits in [Limits::hosted(), Limits::off()] {
+            let [(_, fit), (_, forecast)] = arima_calls(&rt, &server, &limits, "y", 1);
+            assert_ne!(fit.is_error, Some(true), "{}", text_of(&fit));
+            assert!(text_of(&fit).contains("ARIMA(1,1,1) Model Results"));
+            assert_ne!(forecast.is_error, Some(true), "{}", text_of(&forecast));
+            assert!(
+                text_of(&forecast).contains("t+5:"),
+                "{}",
+                text_of(&forecast)
+            );
+        }
+    }
+
+    /// While the work budget is set, both ARIMA tools refuse a column holding a nonzero value
+    /// below `ARIMA_MIN_MAGNITUDE` before they fit (the budget's time per unit does not hold for
+    /// such values); the off profile fits it as before.
+    #[test]
+    fn ts_arima_tools_refuse_a_column_below_the_magnitude_floor_before_fitting() {
+        use crate::tools::limits::Limits;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut y = ar1(400);
+        y[123] = 1e-200;
+        let server = rt.block_on(server_with_series("a", &y));
+        for (tool, r) in arima_calls(&rt, &server, &Limits::hosted(), "y", 0) {
+            let t = text_of(&r);
+            assert_eq!(r.is_error, Some(true), "{t}");
+            assert!(
+                t.starts_with(&format!(
+                    "`{tool}` cannot fit column `y`: it holds a nonzero value of magnitude \
+                     1e-200, below this server's floor of 1e-100"
+                )),
+                "{t}"
+            );
+        }
+        let [(_, fit), (_, forecast)] = arima_calls(&rt, &server, &Limits::off(), "y", 0);
+        assert!(
+            text_of(&fit).contains("ARIMA(1,0,1) Model Results"),
+            "{}",
+            text_of(&fit)
+        );
+        assert!(
+            text_of(&forecast).contains("t+5:"),
+            "{}",
+            text_of(&forecast)
+        );
     }
 
     /// Dimension 0 and dimension above the series length keep their messages.
