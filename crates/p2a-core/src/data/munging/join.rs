@@ -346,8 +346,8 @@ pub fn join_with(
 ///
 /// # Errors
 ///
-/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
-/// empty `left_on`.
+/// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
+/// missing from either dataset, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -368,8 +368,8 @@ pub fn left_join(
 ///
 /// # Errors
 ///
-/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
-/// empty `left_on`.
+/// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
+/// missing from either dataset, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -390,8 +390,8 @@ pub fn right_join(
 ///
 /// # Errors
 ///
-/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
-/// empty `left_on`.
+/// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
+/// missing from either dataset, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -412,8 +412,8 @@ pub fn inner_join(
 ///
 /// # Errors
 ///
-/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
-/// empty `left_on`.
+/// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
+/// missing from either dataset, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -434,8 +434,8 @@ pub fn full_join(
 ///
 /// # Errors
 ///
-/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
-/// empty `left_on`.
+/// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
+/// missing from either dataset, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -456,8 +456,8 @@ pub fn anti_join(
 ///
 /// # Errors
 ///
-/// As in [`join`]; `on` is its `left_on`, so an empty `on` is reported as an
-/// empty `left_on`.
+/// As in [`join`]; `on` is its `left_on`, so an empty `on`, or an `on` name
+/// missing from either dataset, is reported under `left_on`.
 ///
 /// # Example
 ///
@@ -627,6 +627,20 @@ mod tests {
         match r {
             Ok(_) => panic!("expected an error"),
             Err(e) => e.to_string(),
+        }
+    }
+
+    /// Assert that a call failed with a [`MungeError::JoinError`] and, when
+    /// `want` is given, that its text (without the display prefix) is `want`.
+    fn expect_join_error(res: MungeResult<Dataset>, want: Option<&str>, what: &str) {
+        match res {
+            Err(MungeError::JoinError(e)) => {
+                if let Some(want) = want {
+                    assert_eq!(e, want, "{what}");
+                }
+            }
+            Err(e) => panic!("{what}: expected a JoinError, got {e}"),
+            Ok(_) => panic!("{what}: expected a JoinError, got a dataset"),
         }
     }
 
@@ -823,17 +837,16 @@ mod tests {
         let cap = |n| JoinOptions {
             max_output_rows: Some(n),
         };
-        let is_join_err = |res: MungeResult<Dataset>, what: &str| match res {
-            Err(MungeError::JoinError(_)) => {}
-            Err(e) => panic!("{what}: expected a JoinError, got {e}"),
-            Ok(_) => panic!("{what}: expected a JoinError, got a dataset"),
-        };
-
         // Key columns of different data types: polars refuses the join.
         for (rd, kind) in [(&r_str, "str"), (&r_f64, "f64")] {
-            is_join_err(join(&l, rd, &["id"], None, JoinType::Inner, None), kind);
-            is_join_err(
+            expect_join_error(
+                join(&l, rd, &["id"], None, JoinType::Inner, None),
+                None,
+                kind,
+            );
+            expect_join_error(
                 join_with(&l, rd, &["id"], None, JoinType::Inner, None, &cap(1_000)),
+                None,
                 kind,
             );
             assert!(
@@ -846,14 +859,16 @@ mod tests {
         }
 
         // Keys of different lengths.
-        is_join_err(
+        expect_join_error(
             join(&l, &r, &["id", "x"], Some(&["id"]), JoinType::Left, None),
+            None,
             "length",
         );
 
         // A result above the ceiling (3 matched rows, ceiling 2).
-        is_join_err(
+        expect_join_error(
             join_with(&l, &r, &["id"], None, JoinType::Inner, None, &cap(2)),
+            None,
             "ceiling",
         );
 
@@ -866,8 +881,9 @@ mod tests {
                 estimate_join_rows(&l, &r, &["id"], None, JoinType::Inner),
                 Err(MungeError::JoinError(_))
             ));
-            is_join_err(
+            expect_join_error(
                 join_with(&l, &r, &["id"], None, JoinType::Inner, None, &cap(1_000)),
+                None,
                 "cancelled",
             );
             assert_eq!(
@@ -914,11 +930,6 @@ mod tests {
                  the left_on names are used for both datasets)",
             ),
         ];
-        let want_join_error = |res: MungeResult<Dataset>, want: &str, what: &str| match res {
-            Err(MungeError::JoinError(e)) => assert_eq!(e, want, "{what}"),
-            Err(e) => panic!("{what}: expected a JoinError, got {e}"),
-            Ok(_) => panic!("{what}: expected a JoinError, got a dataset"),
-        };
         for (left_on, right_on, want) in cases {
             for jt in [
                 JoinType::Inner,
@@ -929,10 +940,10 @@ mod tests {
                 JoinType::Anti,
             ] {
                 let what = format!("{left_on:?} {right_on:?} {jt:?}");
-                want_join_error(join(&l, &r, left_on, right_on, jt, None), want, &what);
-                want_join_error(
+                expect_join_error(join(&l, &r, left_on, right_on, jt, None), Some(want), &what);
+                expect_join_error(
                     join_with(&l, &r, left_on, right_on, jt, None, &cap),
-                    want,
+                    Some(want),
                     &what,
                 );
                 match estimate_join_rows(&l, &r, left_on, right_on, jt) {
@@ -945,11 +956,12 @@ mod tests {
                 err_text(inner_join(&l, &r, left_on, right_on, None)),
                 format!("Join failed: {want}")
             );
-            want_join_error(left_join(&l, &r, left_on, right_on, None), want, "left");
-            want_join_error(right_join(&l, &r, left_on, right_on, None), want, "right");
-            want_join_error(full_join(&l, &r, left_on, right_on, None), want, "full");
-            want_join_error(anti_join(&l, &r, left_on, right_on), want, "anti");
-            want_join_error(semi_join(&l, &r, left_on, right_on), want, "semi");
+            let want = Some(want);
+            expect_join_error(left_join(&l, &r, left_on, right_on, None), want, "left");
+            expect_join_error(right_join(&l, &r, left_on, right_on, None), want, "right");
+            expect_join_error(full_join(&l, &r, left_on, right_on, None), want, "full");
+            expect_join_error(anti_join(&l, &r, left_on, right_on), want, "anti");
+            expect_join_error(semi_join(&l, &r, left_on, right_on), want, "semi");
         }
     }
 
