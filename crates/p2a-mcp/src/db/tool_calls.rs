@@ -158,10 +158,11 @@ impl DbConnection {
     /// Change the status of tool call `id`, and for a finished call store its
     /// result or error, in its conversation's turn, like
     /// [`create_tool_call`](Self::create_tool_call). The conversation is the
-    /// stored row's (`NotFound` when there is none). The text is cut at a
-    /// char boundary to `message_bytes` and to what the session has left
-    /// under `session_db_bytes`, with the bytes of the stored text it
-    /// replaces as room, never refused.
+    /// stored row's (`NotFound` when there is none). A finished call's text,
+    /// already cut to `message_bytes` by its constructor
+    /// ([`StatusChange::finished`]), is cut at a char boundary to what the
+    /// session has left under `session_db_bytes`, with the bytes of the
+    /// stored text it replaces as room, never refused.
     async fn change_tool_call_status(
         &self,
         id: &str,
@@ -256,12 +257,13 @@ impl DbConnection {
         result_str: &str,
         duration_ms: i32,
     ) -> Result<ToolCall, DbError> {
-        let change = StatusChange::Finished {
-            status: ToolCallStatus::Success,
-            field: TextField::Result,
-            text: self.truncate_server_text(result_str),
+        let change = StatusChange::finished(
+            self,
+            ToolCallStatus::Success,
+            TextField::Result,
+            result_str,
             duration_ms,
-        };
+        );
         self.change_tool_call_status(id, change).await
     }
 
@@ -274,12 +276,13 @@ impl DbConnection {
         error: &str,
         duration_ms: i32,
     ) -> Result<ToolCall, DbError> {
-        let change = StatusChange::Finished {
-            status: ToolCallStatus::Error,
-            field: TextField::Error,
-            text: self.truncate_server_text(error),
+        let change = StatusChange::finished(
+            self,
+            ToolCallStatus::Error,
+            TextField::Error,
+            error,
             duration_ms,
-        };
+        );
         self.change_tool_call_status(id, change).await
     }
 
@@ -330,14 +333,36 @@ enum StatusChange {
     /// It is running.
     Running,
     /// It finished with `status`, storing `text` in `field`, after
-    /// `duration_ms`. `text` is already cut to `message_bytes`
-    /// ([`truncate_server_text`](DbConnection::truncate_server_text)).
+    /// `duration_ms`. Built with [`StatusChange::finished`], which cuts
+    /// `text` to `message_bytes`.
     Finished {
         status: ToolCallStatus,
         field: TextField,
         text: String,
         duration_ms: i32,
     },
+}
+
+impl StatusChange {
+    /// A finished call's change, its `text` cut to `message_bytes`
+    /// ([`truncate_server_text`](DbConnection::truncate_server_text)) as it
+    /// is copied. Build every [`StatusChange::Finished`] with this:
+    /// [`change_tool_call_status`](DbConnection::change_tool_call_status)
+    /// cuts the text only to the session's `session_db_bytes` budget.
+    fn finished(
+        db: &DbConnection,
+        status: ToolCallStatus,
+        field: TextField,
+        text: &str,
+        duration_ms: i32,
+    ) -> Self {
+        Self::Finished {
+            status,
+            field,
+            text: db.truncate_server_text(text),
+            duration_ms,
+        }
+    }
 }
 
 /// The text field a finished tool call stores.
