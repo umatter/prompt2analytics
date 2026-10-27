@@ -1098,12 +1098,13 @@ impl Limits {
     /// [`Limits::ensemble_bytes`] budget (`None` passes). `bound(rows)` is the fit's memory
     /// bound for a dataset of `rows` rows at the request's settings (the core's
     /// `memory_bound`), which must not decrease as `rows` grows; `n_rows` is the dataset's
-    /// height. `settings` names the settings the bound depends on for the refusal
-    /// (`n_trees = 2000 and max_depth = 10`), and `change` what the caller could change
-    /// instead ([`EnsembleChange`]). The refusal says how many rows the settings allow, when
-    /// any, and offers the advice of the first of `change.tiers` whose `cheapest` bound is
-    /// within the limit; when none is, it says that no values of `change.parameters` fit
-    /// `n_rows` rows.
+    /// height. `settings()` names the settings the bound depends on for the refusal
+    /// (`n_trees = 2000 and max_depth = 10`), and `change()` what the caller could change
+    /// instead ([`EnsembleChange`]); both are called only when the fit is refused, so an
+    /// admitted call, and every call when the budget is not set, builds neither. The refusal
+    /// says how many rows the settings allow, when any, and offers the advice of the first of
+    /// the change's `tiers` whose `cheapest` bound is within the limit; when none is, it says
+    /// that no values of its `parameters` fit `n_rows` rows.
     /// The handlers call it before they fit: the fits keep every tree they grow, so the
     /// deadline would stop one only after its memory had grown, and the per-allocation ceiling
     /// sees each node on its own.
@@ -1111,8 +1112,8 @@ impl Limits {
         &self,
         tool: &str,
         n_rows: usize,
-        settings: &str,
-        change: EnsembleChange,
+        settings: impl FnOnce() -> String,
+        change: impl FnOnce() -> EnsembleChange,
         bound: impl Fn(usize) -> u64,
     ) -> Result<(), LimitViolation> {
         const KNOB: &str = "ensemble_bytes";
@@ -1136,7 +1137,8 @@ impl Limits {
         let fit_rows = (bound(lo) <= limit && lo > 0).then_some(lo);
         let bytes =
             |b: u64| p2a_core::memory::format_bytes(usize::try_from(b).unwrap_or(usize::MAX));
-        let EnsembleChange { tiers, parameters } = change;
+        let settings = settings();
+        let EnsembleChange { tiers, parameters } = change();
         let tier = tiers.iter().find(|t| t.cheapest <= limit);
         let no_setting =
             format!("No values of {parameters} bring it within this limit on {n_rows} rows.");
@@ -2391,8 +2393,8 @@ mod tests {
             h.check_ensemble(
                 tool,
                 rows,
-                "these settings",
-                fixable("lower n_trees"),
+                || "these settings".to_string(),
+                || fixable("lower n_trees"),
                 bound,
             )
         };
@@ -2417,12 +2419,14 @@ mod tests {
             .check_ensemble(
                 "ml_causal_forest",
                 400_000,
-                "n_trees = 2000 and max_depth = 10",
-                one_tier(
-                    "lower n_trees or max_depth",
-                    "n_trees or max_depth",
-                    cheapest,
-                ),
+                || "n_trees = 2000 and max_depth = 10".to_string(),
+                || {
+                    one_tier(
+                        "lower n_trees or max_depth",
+                        "n_trees or max_depth",
+                        cheapest,
+                    )
+                },
                 &bound,
             )
             .unwrap_err();
@@ -2460,12 +2464,14 @@ mod tests {
             .check_ensemble(
                 "ml_bart_causal",
                 1_500_000,
-                "n_trees = 1, max_depth = 0 and n_bootstrap = 2",
-                one_tier(
-                    "lower n_trees, max_depth or n_bootstrap",
-                    "n_trees, max_depth or n_bootstrap",
-                    cheapest,
-                ),
+                || "n_trees = 1, max_depth = 0 and n_bootstrap = 2".to_string(),
+                || {
+                    one_tier(
+                        "lower n_trees, max_depth or n_bootstrap",
+                        "n_trees, max_depth or n_bootstrap",
+                        cheapest,
+                    )
+                },
                 &bound,
             )
             .unwrap_err();
@@ -2500,8 +2506,8 @@ mod tests {
             .check_ensemble(
                 "ml_bart_causal",
                 50,
-                "s",
-                one_tier("lower n_trees", "n_trees", u64::MAX),
+                || "s".to_string(),
+                || one_tier("lower n_trees", "n_trees", u64::MAX),
                 |_| u64::MAX,
             )
             .unwrap_err();
@@ -2516,9 +2522,13 @@ mod tests {
 
         let off = Limits::off();
         assert!(
-            off.check_ensemble("ml_bart_causal", 1_500_000, "s", fixable("r"), |_| {
-                u64::MAX
-            })
+            off.check_ensemble(
+                "ml_bart_causal",
+                1_500_000,
+                || "s".to_string(),
+                || fixable("r"),
+                |_| u64::MAX
+            )
             .is_ok()
         );
         let tight = Limits::off()
@@ -2526,12 +2536,24 @@ mod tests {
             .unwrap();
         assert!(
             tight
-                .check_ensemble("ml_causal_forest", 10, "s", fixable("r"), |_| 1_000)
+                .check_ensemble(
+                    "ml_causal_forest",
+                    10,
+                    || "s".to_string(),
+                    || fixable("r"),
+                    |_| 1_000
+                )
                 .is_ok()
         );
         assert!(
             tight
-                .check_ensemble("ml_causal_forest", 10, "s", fixable("r"), |_| 1_001)
+                .check_ensemble(
+                    "ml_causal_forest",
+                    10,
+                    || "s".to_string(),
+                    || fixable("r"),
+                    |_| 1_001
+                )
                 .is_err()
         );
         // The cheapest bound decides the advice by the same limit, not by the request's bound.
@@ -2540,8 +2562,8 @@ mod tests {
                 .check_ensemble(
                     "ml_causal_forest",
                     10,
-                    "s",
-                    one_tier("lower n_trees", "n_trees", cheapest),
+                    || "s".to_string(),
+                    || one_tier("lower n_trees", "n_trees", cheapest),
                     |rows| 995 + rows as u64,
                 )
                 .unwrap_err()
@@ -2581,7 +2603,7 @@ mod tests {
         };
         let refuse = |change, bound: fn(usize) -> u64| {
             tight
-                .check_ensemble("ml_causal_forest", 10, "s", change, bound)
+                .check_ensemble("ml_causal_forest", 10, || "s".to_string(), || change, bound)
                 .unwrap_err()
                 .message
         };
@@ -2621,6 +2643,43 @@ mod tests {
                  sample of at most 5 rows"
             ),
             "{none}"
+        );
+    }
+
+    /// The settings text and the changes are built only for a refusal: an admitted call, and
+    /// every call when the budget is not set, calls neither.
+    #[test]
+    fn ensemble_refusal_texts_are_built_only_for_a_refusal() {
+        let built = std::cell::Cell::new(0);
+        let check = |limits: &Limits, need: u64| {
+            limits.check_ensemble(
+                "ml_causal_forest",
+                10,
+                || {
+                    built.set(built.get() + 1);
+                    "s".to_string()
+                },
+                || {
+                    built.set(built.get() + 1);
+                    fixable("r")
+                },
+                |_| need,
+            )
+        };
+        let tight = Limits::off()
+            .with_overrides(&["ensemble_bytes=1000".to_string()])
+            .unwrap();
+        assert!(check(&Limits::off(), u64::MAX).is_ok());
+        assert!(check(&tight, 1_000).is_ok());
+        assert_eq!(built.get(), 0);
+        let v = check(&tight, 1_001).unwrap_err();
+        assert_eq!(built.get(), 2);
+        assert!(
+            v.message
+                .starts_with("`ml_causal_forest` with s on 10 rows")
+                && v.message.ends_with("To run it on 10 rows, r."),
+            "{}",
+            v.message
         );
     }
 

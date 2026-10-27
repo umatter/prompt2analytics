@@ -69,14 +69,14 @@ use p2a_core::{
 /// The refusal of a tree-ensemble fit on `n_rows` rows whose memory bound (`bound`, for a
 /// number of rows at the request's settings) the installed `ensemble_bytes` budget does not
 /// allow, checked before anything is fitted: the fit keeps every tree it grows, so the call's
-/// deadline would stop it only after its memory had grown. `settings` names the settings for
-/// the refusal and `change` what the request could change instead
-/// ([`crate::tools::limits::Limits::check_ensemble`]).
+/// deadline would stop it only after its memory had grown. `settings()` names the settings for
+/// the refusal and `change()` what the request could change instead; both are called only for
+/// a refusal ([`crate::tools::limits::Limits::check_ensemble`]).
 fn ensemble_refusal(
     tool: &str,
     n_rows: usize,
-    settings: &str,
-    change: EnsembleChange,
+    settings: impl FnOnce() -> String,
+    change: impl FnOnce() -> EnsembleChange,
     bound: impl Fn(usize) -> u64,
 ) -> Option<CallToolResult> {
     crate::tools::limits::current()
@@ -983,17 +983,18 @@ impl AnalyticsServer {
             request.max_depth,
             seed,
         );
-        let settings = format!(
-            "n_trees = {}, max_depth = {}, min_node_size = {} and honesty = {}",
-            config.n_trees, config.max_depth, config.min_node_size, config.honesty
-        );
         let n_covariates = request.covariates.len();
         let n_rows = dataset.nrows();
         if let Some(refusal) = ensemble_refusal(
             "ml_causal_forest",
             n_rows,
-            &settings,
-            forest_change(&config, n_rows, n_covariates),
+            || {
+                format!(
+                    "n_trees = {}, max_depth = {}, min_node_size = {} and honesty = {}",
+                    config.n_trees, config.max_depth, config.min_node_size, config.honesty
+                )
+            },
+            || forest_change(&config, n_rows, n_covariates),
             |rows| config.memory_bound(rows, n_covariates),
         ) {
             return Ok(refusal);
@@ -1072,17 +1073,18 @@ impl AnalyticsServer {
             request.include_propensity,
             seed,
         );
-        let settings = format!(
-            "n_trees = {}, max_depth = {}, n_bootstrap = {} and include_propensity = {}",
-            config.n_trees, config.max_depth, config.n_bootstrap, config.include_propensity
-        );
         let n_covariates = request.covariates.len();
         let n_rows = dataset.nrows();
         if let Some(refusal) = ensemble_refusal(
             "ml_bart_causal",
             n_rows,
-            &settings,
-            bart_change(&config, n_rows, n_covariates),
+            || {
+                format!(
+                    "n_trees = {}, max_depth = {}, n_bootstrap = {} and include_propensity = {}",
+                    config.n_trees, config.max_depth, config.n_bootstrap, config.include_propensity
+                )
+            },
+            || bart_change(&config, n_rows, n_covariates),
             |rows| config.memory_bound(rows, n_covariates),
         ) {
             return Ok(refusal);
