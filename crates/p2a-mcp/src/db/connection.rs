@@ -640,7 +640,8 @@ impl DbConnection {
     /// The lock on the store turns' map, held until the returned guard is
     /// dropped: meanwhile no turn ends and no call joins one.
     #[cfg(test)]
-    pub(crate) fn hold_store_turns(&self) -> impl Sized + '_ {
+    #[must_use = "the map is free again as soon as the guard is dropped"]
+    pub(crate) fn hold_store_turns(&self) -> impl Sized {
         self.store_turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
