@@ -211,6 +211,20 @@ pub fn check_named_budget(
         })
 }
 
+/// A request refused by a resource limit, as a handler returns it: logged at `info` (tool,
+/// override key, requested size and limit), and returned as an in-band tool error whose text
+/// names the parameter, the requested size and the limit.
+pub(crate) fn limit_refusal(v: crate::tools::limits::LimitViolation) -> CallToolResult {
+    tracing::info!(
+        tool = %v.tool,
+        knob = v.override_key,
+        requested = %v.requested,
+        limit = %v.limit,
+        "tool request refused by a resource limit"
+    );
+    CallToolResult::error(vec![Content::text(v.message)])
+}
+
 /// How many caller-supplied names a refusal lists before "(and N more)".
 pub(crate) const REFUSAL_NAMES: usize = 5;
 

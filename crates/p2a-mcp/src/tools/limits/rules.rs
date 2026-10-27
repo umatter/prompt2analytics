@@ -929,6 +929,76 @@ pub static ROW_RULES: &[RowRule] = &[
     row("ts_changepoint", RowClass::Quadratic),
 ];
 
+/// Work of an ARIMA fit as the `arima_fit_work` budget counts it:
+/// `n_obs * ((p + q + 3)^2 + d)`, saturating at `u64::MAX`.
+///
+/// `ts_arima_fit` and `ts_arima_forecast` fit with `arima::estimate::fit` (arima 0.3.0), whose
+/// optimiser never looks at the call's budget: once it starts, the governor's deadline cannot
+/// stop it, so an expensive fit has to be refused before it starts. The fit minimises the
+/// conditional sum of squares with L-BFGS (liblbfgs 0.1.0, More-Thuente line search): at most
+/// 200 iterations, the first without a line search and each of the others a line search of at
+/// most 40 evaluations, so at most 1 + 199 x 40 = 7,961 evaluations. The bound is reachable: a
+/// failed line search is reverted and the next iteration starts instead of ending the fit, and
+/// some series reach it. One evaluation is the objective and its forward-difference gradient,
+/// `p + q + 3` passes over the differenced series. A pass costs at most about one unit per
+/// observation for each of `p + q + 3` terms (the residual, its square and its storage count as
+/// about three), measured on a release build over AR-only, MA-only and mixed orders; an MA term
+/// costs about twice an AR term, so the unit is an MA term's. So the slowest fit the data can
+/// force takes a time proportional to `n_obs * (p + q + 3)^2`. The `d` term counts the
+/// differencing (`d` passes, done by the fit and again by `run_arima` for the residuals), so
+/// that the count bounds every uninterruptible pass even where `model_order` is raised;
+/// differencing only shortens the series, and the starting values, the residuals and the
+/// forecast after the fit are a few passes more.
+///
+/// The time per unit holds only in ordinary floating-point arithmetic: see
+/// [`ARIMA_MIN_MAGNITUDE`] for the series the budget therefore refuses as well.
+pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
+    let terms = (p as u128).saturating_add(q as u128).saturating_add(3);
+    let per_obs = terms.saturating_mul(terms).saturating_add(d as u128);
+    let work = (n_obs as u128).saturating_mul(per_obs);
+    u64::try_from(work).unwrap_or(u64::MAX)
+}
+
+/// The smallest magnitude a nonzero value of an ARIMA fit's series may have while the
+/// `arima_fit_work` budget is set ([`super::Limits::check_arima_series`]).
+///
+/// The budget's time per unit ([`arima_fit_work`]) is that of ordinary floating-point
+/// arithmetic. An operation whose operand or result is subnormal (nonzero and below about
+/// 2.2e-308) takes a much slower path on common CPUs: on a release build a pass over a series
+/// of subnormal values took up to 40 times as long as one over ordinary values. A series whose
+/// values, or the differences, products and squares the fit forms from them, fall into that
+/// range would make the fit run that much longer than the budget allows for.
+///
+/// The floor is on the column itself, because it bounds the differenced series the fit reads:
+/// every value of the column is a multiple of the spacing of doubles at its smallest nonzero
+/// value `m` (about `m * 2^-52`), a difference of two such multiples rounds to another one, so
+/// every nonzero value of every difference is at least about `m * 2^-53`. From 1e-100 that is
+/// about 1e-116. Where a value of the differenced series is nonzero, the residual the fit forms
+/// at it is, when it is not zero, at least about 2^-52 of that value, about 2e-132, and its
+/// square about 6e-264: ordinary numbers. So the floor covers the column, its differences, and
+/// their products and squares with ordinary-sized coefficients, with a wide margin. NaN,
+/// infinities and zero cost no more than other numbers and pass.
+///
+/// Where a value of the differenced series is zero, the floor bounds nothing. There
+/// `arima::estimate::residuals` gives the residual as
+/// `-(intercept + sum phi_j x_{t-j-1} + sum theta_j e_{t-j-1})`, which the coefficients the
+/// optimiser tries set, and the release-build measurements behind [`arima_fit_work`] cover it,
+/// not the floor. One case is known to leave the ordinary range: at an intercept of exactly 0.0
+/// over a stretch of exact zeros, the MA recursion `e_t = -sum theta_j e_{t-j-1}` decays
+/// geometrically into the subnormal range and, for `|theta| > 1/2`, can stay on a subnormal
+/// rounding fixed point (for example 4 x 2^-1074 at `theta = 0.9`). Exact zeros pass the floor,
+/// and on a release build one pass of the objective in that state was measured at about 28
+/// times the time of a pass over ordinary data, a cost the budget's time per unit does not
+/// cover. A whole fit is not believed to stay in that state over its many evaluations: the
+/// intercept starts at the differenced series' mean, the forward-difference gradient moves it
+/// off zero, and where the data are large enough to absorb that step the first line search
+/// reached its minimum step, and in the runs measured the fit ended at the next one: the
+/// reverted step leaves the next L-BFGS update with zero correction pairs, whose 0/0 scaling
+/// made that line search fail its step check (a failed line search does not by itself end the
+/// fit; see [`arima_fit_work`]). This is a residual risk: a change of the optimiser (the TS-1
+/// replacement) must examine it again.
+pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
+
 #[cfg(test)]
 mod tests {
     use super::super::{Family, LimitViolation, Limits, Rule, rules_for, struct_paths};
@@ -1799,6 +1869,320 @@ mod tests {
         assert!(h.check_rows("ts_changepoint", 50_000, 1).is_ok());
         for rows in [50_000, 50_001] {
             assert!(Limits::off().check_rows("ts_changepoint", rows, 1).is_ok());
+        }
+    }
+
+    #[test]
+    fn arima_fit_work_is_observations_times_the_squared_order_sum_plus_three_and_d() {
+        use super::arima_fit_work;
+        assert_eq!(arima_fit_work(1_000, 1, 0, 1), 25_000);
+        assert_eq!(arima_fit_work(1_000, 1, 1, 1), 26_000);
+        assert_eq!(arima_fit_work(1_000, 0, 0, 0), 9_000);
+        assert_eq!(arima_fit_work(1_000, 0, 20, 0), 29_000);
+        assert_eq!(arima_fit_work(10, 20, 0, 20), 18_490);
+        assert_eq!(arima_fit_work(0, 20, 20, 20), 0);
+        // saturating, never wrapping
+        assert_eq!(arima_fit_work(2, usize::MAX, 0, 0), u64::MAX);
+        assert_eq!(arima_fit_work(2, 0, usize::MAX, 0), u64::MAX);
+        assert_eq!(
+            arima_fit_work(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+            u64::MAX
+        );
+    }
+
+    /// The `arima` crate's fit cannot be stopped once it starts, so the hosted profile bounds
+    /// its work before it starts, for both ARIMA tools, at every order the `model_order` cap
+    /// allows (each of p, d and q from 0 to the cap); nothing is bounded when limits are off.
+    #[test]
+    fn arima_fit_work_is_capped_in_hosted_profile() {
+        use super::arima_fit_work;
+        let h = Limits::hosted();
+        let cap = h.arima_fit_work.expect("hosted ARIMA work budget");
+        let max_order = usize::try_from(h.cap(Family::ModelOrder).expect("hosted model_order"))
+            .expect("model_order cap fits usize");
+        assert_eq!(max_order, 20);
+        let mut checked = 0;
+        for tool in ["ts_arima_fit", "ts_arima_forecast"] {
+            for p in 0..=max_order {
+                for d in 0..=max_order {
+                    for q in 0..=max_order {
+                        let per_obs = arima_fit_work(1, p, d, q);
+                        let n_max = usize::try_from(cap / per_obs).unwrap();
+                        // Even at the largest orders the cap leaves enough observations to
+                        // fit (p + d + q + 10), so the refusal can point to fewer of them.
+                        assert!(n_max >= p + d + q + 10, "{p} {d} {q}: {n_max}");
+                        assert!(h.check_arima_fit(tool, n_max, p, d, q).is_ok());
+                        let v = h.check_arima_fit(tool, n_max + 1, p, d, q).unwrap_err();
+                        assert!(
+                            v.message
+                                .contains(&format!("at most {n_max} observations at these orders")),
+                            "{p} {d} {q}: {}",
+                            v.message
+                        );
+                        assert_eq!(
+                            (
+                                v.tool.as_str(),
+                                v.parameter.as_str(),
+                                v.requested.clone(),
+                                v.limit.clone(),
+                                v.override_key
+                            ),
+                            (
+                                tool,
+                                "arima_fit_work",
+                                ((n_max as u64 + 1) * per_obs).to_string(),
+                                cap.to_string(),
+                                "arima_fit_work"
+                            ),
+                            "{p} {d} {q}"
+                        );
+                        for rows in [n_max + 1, usize::MAX] {
+                            assert!(Limits::off().check_arima_fit(tool, rows, p, d, q).is_ok());
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 2 * 21 * 21 * 21);
+        // The fits the tool description suggests run on long series: ARIMA(1,0,1) and
+        // ARIMA(1,1,1) on 10,000 observations.
+        assert!(h.check_arima_fit("ts_arima_fit", 10_000, 1, 0, 1).is_ok());
+        assert!(h.check_arima_fit("ts_arima_fit", 10_000, 1, 1, 1).is_ok());
+        assert!(
+            h.check_arima_fit(
+                "ts_arima_fit",
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX
+            )
+            .is_err()
+        );
+    }
+
+    /// The refusal names the orders, the observations, the work and the limit, and says how
+    /// far the observations or the orders must shrink, never to fewer observations than the fit
+    /// needs.
+    #[test]
+    fn arima_fit_refusal_says_what_to_change() {
+        let l = Limits::off()
+            .with_overrides(&["arima_fit_work=10000".to_string()])
+            .unwrap();
+        // 1,000 x 5^2 = 25,000; 10,000 / 25 = 400 observations; 10,000 / 1,000 = 10 >= 3^2, so
+        // p = q = 0 still fits 1,000 observations.
+        let v = l
+            .check_arima_fit("ts_arima_fit", 1_000, 1, 0, 1)
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            "`ts_arima_fit` with p = 1, d = 0 and q = 1 on 1000 observations needs 25000 \
+             (arima_fit_work: observations x ((p + q + 3)^2 + d)), which exceeds this server's \
+             limit of 10000: the ARIMA fit cannot be stopped once it starts. Use at most 400 \
+             observations at these orders, for example the most recent ones, or set p and q to \
+             0."
+        );
+        // 1,000 x (5^2 + 1) = 26,000; 10,000 / 26 = 384; 10 - 1 = 9 = 3^2, so p = q = 0 fits.
+        let v = l
+            .check_arima_fit("ts_arima_fit", 1_000, 1, 1, 1)
+            .unwrap_err();
+        assert!(
+            v.message.starts_with(
+                "`ts_arima_fit` with p = 1, d = 1 and q = 1 on 1000 observations needs 26000 "
+            ) && v.message.ends_with(
+                "Use at most 384 observations at these orders, for example the most recent ones, \
+                 or set p and q to 0."
+            ),
+            "{}",
+            v.message
+        );
+        // 100 x 43^2; 10,000 / 1,849 = 5 observations, fewer than the 50 the fit needs;
+        // 10,000 / 100 = 100 = 10^2, so p + q <= 7.
+        let v = l
+            .check_arima_fit("ts_arima_fit", 100, 20, 0, 20)
+            .unwrap_err();
+        assert!(
+            v.message.ends_with(
+                "the ARIMA fit cannot be stopped once it starts. Lower the orders so that \
+                 p + q is at most 7."
+            ),
+            "{}",
+            v.message
+        );
+        // 10,000 / 10,000 = 1 < 3^2: no order fits 10,000 observations.
+        let v = l
+            .check_arima_fit("ts_arima_fit", 10_000, 1, 0, 1)
+            .unwrap_err();
+        assert!(
+            v.message.ends_with(
+                "Use at most 400 observations at these orders, for example the most recent ones."
+            ),
+            "{}",
+            v.message
+        );
+        // 10,000 / 1,000 = 10 < 9 + 11: d alone leaves no room for any p and q.
+        let v = l
+            .check_arima_fit("ts_arima_fit", 1_000, 0, 11, 0)
+            .unwrap_err();
+        assert!(
+            v.message.ends_with(
+                "Use at most 500 observations at these orders, for example the most recent ones."
+            ),
+            "{}",
+            v.message
+        );
+        // (100 + 100 + 3)^2 = 41,209 > 10,000: no series fits these orders.
+        let v = l
+            .check_arima_fit("ts_arima_fit", 10, 100, 0, 100)
+            .unwrap_err();
+        assert!(
+            v.message
+                .ends_with("Lower the orders so that p + q is at most 28."),
+            "{}",
+            v.message
+        );
+        // Neither alone: 5 observations are too few for these orders, and 1 per observation is
+        // below 3^2.
+        let v = l
+            .check_arima_fit("ts_arima_fit", 10_000, 20, 0, 20)
+            .unwrap_err();
+        assert!(
+            v.message
+                .ends_with("Use fewer observations and lower orders."),
+            "{}",
+            v.message
+        );
+        assert!(l.check_arima_fit("ts_arima_fit", 400, 1, 0, 1).is_ok());
+        assert!(
+            l.with_overrides(&["arima_fit_work=none".to_string()])
+                .unwrap()
+                .check_arima_fit("ts_arima_fit", 1_000_000, 20, 20, 20)
+                .is_ok()
+        );
+    }
+
+    /// While the ARIMA work budget is set, a column holding a nonzero value below
+    /// `ARIMA_MIN_MAGNITUDE` is refused, because the differences, products and squares the fit
+    /// forms from such values can be subnormal, and arithmetic on those is far slower than the
+    /// budget assumes.
+    /// Zero, NaN and infinities cost no more than other numbers and pass, as does everything when
+    /// the budget is off.
+    #[test]
+    fn arima_series_below_the_magnitude_floor_is_refused_while_the_budget_is_set() {
+        use super::ARIMA_MIN_MAGNITUDE;
+        let h = Limits::hosted();
+        let noisy = |scale: f64| -> Vec<f64> {
+            (0..200)
+                .map(|t| scale * (1.0 + ((t * 37 + 11) % 23) as f64 / 23.0))
+                .collect()
+        };
+        for tool in ["ts_arima_fit", "ts_arima_forecast"] {
+            // Subnormal values, and ordinary values whose squares are subnormal.
+            for (series, found) in [
+                (vec![1.0, 2.5, f64::from_bits(1), 3.0], "5e-324".to_string()),
+                (noisy(1e-160), format!("{:e}", 1e-160 * (1.0 + 11.0 / 23.0))),
+                ([noisy(1.0), vec![-1e-101]].concat(), "1e-101".to_string()),
+            ] {
+                let v = h.check_arima_series(tool, "y", series).unwrap_err();
+                assert_eq!(
+                    (
+                        v.tool.as_str(),
+                        v.parameter.as_str(),
+                        v.requested.as_str(),
+                        v.limit.as_str(),
+                        v.override_key
+                    ),
+                    (tool, "column", found.as_str(), "1e-100", "arima_fit_work")
+                );
+                assert_eq!(
+                    v.message,
+                    format!(
+                        "`{tool}` cannot fit column `y`: it holds a nonzero value of magnitude \
+                         {found}, below this server's floor of 1e-100 for an ARIMA fit \
+                         (arima_fit_work). Values that small can make the fit's arithmetic many \
+                         times slower, and the fit cannot be stopped once it starts. Set values \
+                         that small to 0, or rescale the column, for example multiply it by a \
+                         power of ten."
+                    )
+                );
+            }
+            for series in [
+                noisy(1.0),
+                noisy(ARIMA_MIN_MAGNITUDE),
+                noisy(1e300),
+                vec![0.0, -0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0],
+                Vec::new(),
+            ] {
+                assert!(h.check_arima_series(tool, "y", series).is_ok());
+            }
+            assert!(
+                Limits::off()
+                    .check_arima_series(tool, "y", noisy(1e-310))
+                    .is_ok()
+            );
+            assert!(
+                h.clone()
+                    .with_overrides(&["arima_fit_work=none".to_string()])
+                    .unwrap()
+                    .check_arima_series(tool, "y", noisy(1e-310))
+                    .is_ok()
+            );
+        }
+        // A long column name is cut as other echoed caller strings are.
+        let long = "c".repeat(100);
+        let v = h
+            .check_arima_series("ts_arima_fit", &long, [1e-200])
+            .unwrap_err();
+        assert!(v.message.contains(&format!("column `{}`:", "c".repeat(64))));
+    }
+
+    /// The floor on the column bounds the differenced series the fit reads: every nonzero
+    /// value of every difference of the column is at least about 2^-53 of the column's smallest
+    /// nonzero value, so a column that passes the floor never differences into subnormal values.
+    #[test]
+    fn arima_differences_of_a_column_above_the_floor_stay_above_it_times_2_pow_minus_53() {
+        use super::ARIMA_MIN_MAGNITUDE;
+        // `arima::util::diff` (arima 0.3.0) for f64, with the same subtractions in the same
+        // order: the differencing the fit applies.
+        fn crate_diff(x: &[f64], d: usize) -> Vec<f64> {
+            let mut y: Vec<f64> = x.to_vec();
+            let len = y.len();
+            for s in 0..d {
+                for i in 1..len - s {
+                    y[len - i] -= y[len - i - 1];
+                }
+            }
+            y.drain(0..d);
+            y
+        }
+        let bound = ARIMA_MIN_MAGNITUDE * 2f64.powi(-53);
+        // Values one spacing apart near the floor and at other scales, the cancellations most
+        // likely to leave a small difference.
+        let m = ARIMA_MIN_MAGNITUDE;
+        let up = |x: f64, k: u64| f64::from_bits(x.to_bits() + k);
+        let series: Vec<Vec<f64>> = vec![
+            (0..60).map(|t| up(m, (t * t) % 7)).collect(),
+            (0..60)
+                .map(|t| up(m * (1.0 + (t % 3) as f64), t % 5))
+                .collect(),
+            (0..60)
+                .map(|t| if t % 2 == 0 { up(m, t) } else { -up(1.0, t) })
+                .collect(),
+            (0..60)
+                .map(|t| up(1e10, (t * 7) % 11) * if t % 4 == 0 { -1.0 } else { 1.0 })
+                .collect(),
+        ];
+        for x in &series {
+            assert!(
+                Limits::hosted()
+                    .check_arima_series("ts_arima_fit", "y", x.clone())
+                    .is_ok()
+            );
+            for d in 0..=20 {
+                for v in crate_diff(x, d) {
+                    assert!(v == 0.0 || v.abs() >= bound, "d = {d}: {v:e}");
+                }
+            }
         }
     }
 

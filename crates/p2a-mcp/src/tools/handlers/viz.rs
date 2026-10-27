@@ -10,7 +10,8 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::limits::{self, LimitViolation};
+use crate::tools::common::limit_refusal;
+use crate::tools::limits;
 use crate::tools::requests::viz::*;
 
 use p2a_core::{
@@ -1073,7 +1074,7 @@ impl AnalyticsServer {
             u64::from(width) * u64::from(height),
             limits.image_pixels,
         ) {
-            return Ok(refused(v));
+            return Ok(limit_refusal(v));
         }
 
         let config = ChartConfig {
@@ -1102,19 +1103,6 @@ impl AnalyticsServer {
             ))])),
         }
     }
-}
-
-/// A request refused by a resource limit: logged, and returned as an in-band
-/// tool error whose text names the parameter, the requested size and the limit.
-fn refused(v: LimitViolation) -> CallToolResult {
-    tracing::info!(
-        tool = %v.tool,
-        knob = v.override_key,
-        requested = %v.requested,
-        limit = %v.limit,
-        "tool request refused by a resource limit"
-    );
-    CallToolResult::error(vec![Content::text(v.message)])
 }
 
 #[cfg(test)]
