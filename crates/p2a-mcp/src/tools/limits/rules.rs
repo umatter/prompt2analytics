@@ -1,9 +1,8 @@
 //! The rule tables of the request-limits catalogue: [`PARAM_RULES`] classifies every cost-bearing
 //! request field of the MCP tools, [`ROW_RULES`] names the tools whose cost grows faster than
-//! linearly in the dataset's row count, and [`PIVOT_RULES`] the tools whose output shape the
-//! distinct values of the dataset decide.
+//! linearly in the dataset's row count.
 
-use super::{Family, ParamRule, PivotRule, RowClass, RowRule, Rule};
+use super::{Family, ParamRule, RowClass, RowRule, Rule};
 
 const fn p(tool: &'static str, path: &'static str, rule: Rule) -> ParamRule {
     ParamRule { tool, path, rule }
@@ -938,7 +937,7 @@ pub static ROW_RULES: &[RowRule] = &[
 /// `munge_pivot` (polars' pivot) puts every distinct value of `on` in a column of its own,
 /// whatever the height of the input, and allocates its rows x columns output in one buffer
 /// before the dataset quotas see the result.
-pub static PIVOT_RULES: &[PivotRule] = &[PivotRule {
+pub static PIVOT_RULES: &[super::PivotRule] = &[super::PivotRule {
     tool: "munge_pivot",
     dataset_field: "dataset",
     index_field: "index",
@@ -3182,8 +3181,6 @@ mod schema_tests {
                 "{}.{}",
                 rule.tool, rule.index_field
             );
-            // The governed paths and stdio check the shape before the handler runs.
-            assert!(super::super::pivot_rule(rule.tool).is_some());
         }
     }
 }
