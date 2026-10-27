@@ -659,6 +659,25 @@ async fn many_short_labels_of_another_writer_are_refused_before_decoding() {
     assert!(error_text(&body).contains("Nothing was loaded"), "{body}");
 }
 
+#[tokio::test]
+async fn one_label_over_many_rows_of_another_writer_is_refused_before_decoding() {
+    // One label over 2,000,000 rows in one row group: a file of a few
+    // kilobytes, charged 8 MB of codes once loaded. polars decodes a
+    // column another writer wrote into a string view a row (32 MB) and
+    // casts it to a dictionary, a key a row (8 MB), before it builds the
+    // codes. Pre-fix the check before decoding counted the codes only, so
+    // the file was admitted under a 16 MiB quota and decoded, at a peak
+    // five times what the quota then charged for it.
+    let dir = data_dir();
+    let path = dir.path().join("one.parquet");
+    foreign_categorical_parquet(&path, 2_000_000, 2_000_000, |_| "same label".to_string());
+    let bytes = std::fs::metadata(&path).unwrap().len();
+    assert!(bytes < 512 * 1024, "{bytes} bytes");
+    assert_eq!(footer_of(&path).row_groups.len(), 1);
+    assert!(reads_as_categorical(&path));
+    refused_before_decoding_under(&path, 16 * MIB).await;
+}
+
 /// Rebuild the parquet file at `path` with `edit` applied to every page
 /// header, in file order. The pages are copied as they are, the column
 /// chunks laid out again one after another, and the footer's offsets and

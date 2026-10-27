@@ -285,16 +285,21 @@ fn footer_decoded_bytes(
     let Ok(file) = std::fs::File::open(path) else {
         return Ok(None);
     };
-    let columns: Vec<(&str, DataType)> = schema
+    let columns: Vec<(&str, DataType, Vec<LeafDecode>)> = schema
         .iter_values()
-        .map(|field| (field.name.as_str(), DataType::from_arrow_field(field)))
+        .map(|field| {
+            let dtype = DataType::from_arrow_field(field);
+            let mut decodes = Vec::new();
+            leaf_decodes(&dtype, Some(field), &mut decodes);
+            (field.name.as_str(), dtype, decodes)
+        })
         .collect();
     let mut walk = PageWalk::new(std::io::BufReader::new(file), file_len);
     // An Enum leaf's labels are the categories its type declares, which
     // polars builds from the file's schema whatever its pages hold.
     let mut dataset = columns
         .iter()
-        .flat_map(|(_, dtype)| leaf_types(dtype))
+        .flat_map(|(_, dtype, _)| leaf_types(dtype))
         .fold(0u64, |bytes, leaf| match leaf {
             DataType::Enum(frozen, _) => bytes.saturating_add(session::frozen_label_bytes(frozen)),
             _ => bytes,
@@ -304,7 +309,7 @@ fn footer_decoded_bytes(
     // column and leaf; only Categorical leaves add to them.
     let mut labels: Vec<Vec<DictionaryLabels>> = columns
         .iter()
-        .map(|(_, dtype)| {
+        .map(|(_, dtype, _)| {
             std::iter::repeat_with(DictionaryLabels::default)
                 .take(leaf_types(dtype).len())
                 .collect()
@@ -322,7 +327,7 @@ fn footer_decoded_bytes(
     };
     for group in &metadata.row_groups {
         let rows = group.num_rows() as u64;
-        for ((name, dtype), labels) in columns.iter().zip(&mut labels) {
+        for ((name, dtype, decodes), labels) in columns.iter().zip(&mut labels) {
             let leaf_types = leaf_types(dtype);
             let mut leaves = Vec::with_capacity(leaf_types.len());
             let mut pages = Vec::with_capacity(leaf_types.len());
@@ -347,6 +352,7 @@ fn footer_decoded_bytes(
                 transients.push(chunk_transient(
                     &read,
                     leaf_types.get(i).copied(),
+                    decodes.get(i).copied().unwrap_or_default(),
                     codec != polars_parquet_format::CompressionCodec::UNCOMPRESSED,
                     dtype.is_nested(),
                     declared,
@@ -373,7 +379,7 @@ fn footer_decoded_bytes(
         .iter()
         .flatten()
         .fold(0u64, |bytes, labels| bytes.saturating_add(labels.bytes()));
-    let structure = session::structure_bytes(columns.iter().map(|(name, _)| *name));
+    let structure = session::structure_bytes(columns.iter().map(|(name, _, _)| *name));
     Ok(Some(DecodedBound {
         dataset: dataset.saturating_add(labels).saturating_add(structure),
         transient: largest_sum(transients, decode_threads()),
@@ -428,6 +434,125 @@ fn leaf_types(dtype: &DataType) -> Vec<&DataType> {
     let mut out = Vec::new();
     push(dtype, &mut out);
     out
+}
+
+/// The field metadata keys by which polars marks a dictionary column as its
+/// own Categorical or Enum (polars-arrow's `DTYPE_ENUM_VALUES_LEGACY`,
+/// `DTYPE_ENUM_VALUES_NEW`, `DTYPE_CATEGORICAL_LEGACY` and
+/// `DTYPE_CATEGORICAL_NEW`), which polars-parquet's decoder looks for.
+const POLARS_DICTIONARY_KEYS: [&str; 4] = [
+    "_PL_ENUM_VALUES",
+    "_PL_ENUM_VALUES2",
+    "_PL_CATEGORICAL",
+    "_PL_CATEGORICAL2",
+];
+
+/// How polars decodes the values of a Categorical or Enum leaf column of a
+/// parquet file (polars-parquet's `deserialize/simple.rs`), read from its
+/// arrow field. Its values become an arrow dictionary, keys and labels,
+/// which polars then turns into the column's codes, so each value has a key
+/// while the chunk decodes, and, for a column of another writer, a view too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LeafDecode {
+    /// Bytes of one key of that dictionary: the width of the field's key
+    /// type.
+    key_bytes: u64,
+    /// Whether the values are decoded into string views first and then cast
+    /// to the dictionary: the field lacks polars' metadata (see
+    /// [`POLARS_DICTIONARY_KEYS`]), as a dictionary<string> column that R's
+    /// or Python's arrow writes does, or its key or label type is not one
+    /// polars' categorical decoder takes.
+    views: bool,
+}
+
+impl Default for LeafDecode {
+    /// The least: a leaf whose field is not known.
+    fn default() -> Self {
+        Self {
+            key_bytes: 1,
+            views: false,
+        }
+    }
+}
+
+impl LeafDecode {
+    /// The decoding of a leaf whose arrow field is `field`.
+    fn of(field: &p2a_core::polars::prelude::ArrowField) -> Self {
+        use p2a_core::polars::prelude::ArrowDataType as A;
+        let A::Dictionary(key, labels, _) = &field.dtype else {
+            return Self::default();
+        };
+        let key = A::from(*key);
+        let key_bytes = match key {
+            A::Int8 | A::UInt8 => 1,
+            A::Int16 | A::UInt16 => 2,
+            A::Int32 | A::UInt32 => 4,
+            A::Int128 | A::UInt128 => 16,
+            _ => 8,
+        };
+        let marked = field
+            .metadata
+            .as_deref()
+            .is_some_and(|md| POLARS_DICTIONARY_KEYS.iter().any(|k| md.contains_key(*k)));
+        let decoded = marked
+            && matches!(key, A::UInt8 | A::UInt16 | A::UInt32)
+            && matches!(**labels, A::Utf8View);
+        Self {
+            key_bytes,
+            views: !decoded,
+        }
+    }
+
+    /// Bytes each value takes while its chunk decodes: its key, and its view
+    /// when it is decoded into one.
+    fn value_bytes(self) -> u64 {
+        if self.views {
+            self.key_bytes.saturating_add(session::VIEW_BYTES)
+        } else {
+            self.key_bytes
+        }
+    }
+}
+
+/// Push the [`LeafDecode`] of each leaf column of `dtype`, polars' type of
+/// the arrow field `field`, to `out`, in the order of [`leaf_types`]. A leaf
+/// whose field the walk does not find (it follows polars' conversion of
+/// lists, maps, arrays and structs) gets the least.
+fn leaf_decodes(
+    dtype: &DataType,
+    field: Option<&p2a_core::polars::prelude::ArrowField>,
+    out: &mut Vec<LeafDecode>,
+) {
+    use p2a_core::polars::prelude::ArrowDataType as A;
+    let arrow = field.map(|field| &field.dtype);
+    match dtype {
+        DataType::List(inner) => {
+            let inner_field = match arrow {
+                Some(A::List(f) | A::LargeList(f) | A::Map(f, _)) => Some(f.as_ref()),
+                _ => None,
+            };
+            leaf_decodes(inner, inner_field, out);
+        }
+        DataType::Array(inner, _) => {
+            let inner_field = match arrow {
+                Some(A::FixedSizeList(f, _)) => Some(f.as_ref()),
+                _ => None,
+            };
+            leaf_decodes(inner, inner_field, out);
+        }
+        DataType::Struct(fields) => {
+            let arrow_fields = match arrow {
+                Some(A::Struct(arrow_fields)) if arrow_fields.len() == fields.len() => {
+                    Some(arrow_fields)
+                }
+                _ => None,
+            };
+            for (i, f) in fields.iter().enumerate() {
+                leaf_decodes(f.dtype(), arrow_fields.and_then(|fs| fs.get(i)), out);
+            }
+        }
+        _ => out.push(field.map_or_else(LeafDecode::default, LeafDecode::of)),
+    }
 }
 
 /// What is known about one leaf column of one row group before decoding.
@@ -503,7 +628,12 @@ const LEVEL_BYTES: u64 = 4;
 ///   decoded chunk, but it is reserved whatever the column holds once
 ///   loaded (an array of size zero holds no values), so it counts here
 ///   rather than in the dataset's part. A flat column's reservation is
-///   bounded by its rows, which the dataset's part counts.
+///   bounded by its rows, which the dataset's part counts;
+/// - a Categorical or Enum leaf's values, flat or nested, are decoded into
+///   an arrow dictionary before they become the column's codes: a key per
+///   entry, and a view per entry first when the column is not polars' own
+///   (see [`LeafDecode`], `decode`). This is the leaf's decoded chunk, so
+///   it takes the place of a nested chunk's reservation above.
 ///
 /// These count for every leaf type, fixed-width ones included, whose
 /// dataset charge does not grow with their pages. Only the decompression
@@ -511,6 +641,7 @@ const LEVEL_BYTES: u64 = 4;
 fn chunk_transient(
     read: &ChunkPages,
     leaf: Option<&DataType>,
+    decode: LeafDecode,
     compressed: bool,
     nested: bool,
     declared: u64,
@@ -539,9 +670,20 @@ fn chunk_transient(
         .saturating_add(1)
         .saturating_mul(read.dict_entries)
         .saturating_add(if text { read.dict_bytes } else { 0 });
+    let entries = declared.max(read.entries);
+    let categorical = matches!(
+        leaf,
+        Some(DataType::Categorical(_, _) | DataType::Enum(_, _))
+    );
+    let keys = if categorical {
+        decode.value_bytes().saturating_mul(entries)
+    } else {
+        0
+    };
     let (levels, reserved) = if nested {
-        let entries = declared.max(read.entries);
         let values = match leaf {
+            // Counted as its keys (and views) above.
+            _ if categorical => 0,
             Some(leaf) => leaf_value_bytes(leaf, entries),
             None => session::VIEW_BYTES.saturating_mul(entries),
         };
@@ -554,6 +696,7 @@ fn chunk_transient(
     };
     decompressed
         .saturating_add(dictionary)
+        .saturating_add(keys)
         .saturating_add(levels)
         .saturating_add(reserved)
 }
@@ -1956,9 +2099,15 @@ mod tests {
             ..ChunkPages::default()
         };
         let f64 = Some(&DataType::Float64);
-        assert_eq!(chunk_transient(&pages, f64, true, false, 2), 1000);
+        assert_eq!(
+            chunk_transient(&pages, f64, LeafDecode::default(), true, false, 2),
+            1000
+        );
         // Uncompressed pages are decoded where they lie in the file.
-        assert_eq!(chunk_transient(&pages, f64, false, false, 2), 0);
+        assert_eq!(
+            chunk_transient(&pages, f64, LeafDecode::default(), false, false, 2),
+            0
+        );
         // A dictionary page: its decompression buffer, and its entries
         // decoded at their width (and a byte each).
         let dict = ChunkPages {
@@ -1967,24 +2116,30 @@ mod tests {
             ..pages
         };
         assert_eq!(
-            chunk_transient(&dict, f64, true, false, 2),
+            chunk_transient(&dict, f64, LeafDecode::default(), true, false, 2),
             1000 + 5000 + 9 * 600
         );
-        assert_eq!(chunk_transient(&dict, f64, false, false, 2), 9 * 600);
+        assert_eq!(
+            chunk_transient(&dict, f64, LeafDecode::default(), false, false, 2),
+            9 * 600
+        );
         // A text dictionary is decoded into views, its bytes copied out.
         let text = Some(&DataType::String);
         assert_eq!(
-            chunk_transient(&dict, text, false, false, 2),
+            chunk_transient(&dict, text, LeafDecode::default(), false, false, 2),
             17 * 600 + 5000
         );
         assert_eq!(
-            chunk_transient(&dict, None, false, false, 2),
+            chunk_transient(&dict, None, LeafDecode::default(), false, false, 2),
             17 * 600 + 5000
         );
         // A Boolean dictionary is not decoded, but reading it reserves a
         // byte per entry.
         let flag = Some(&DataType::Boolean);
-        assert_eq!(chunk_transient(&dict, flag, false, false, 2), 600);
+        assert_eq!(
+            chunk_transient(&dict, flag, LeafDecode::default(), false, false, 2),
+            600
+        );
         // A nested column's levels, two u16 per entry of its largest page,
         // and the room reserved for its entries: two bitmaps for booleans.
         let levels = ChunkPages {
@@ -1993,34 +2148,86 @@ mod tests {
             ..ChunkPages::default()
         };
         assert_eq!(
-            chunk_transient(&levels, flag, false, true, 1 << 20),
+            chunk_transient(&levels, flag, LeafDecode::default(), false, true, 1 << 20),
             (4 << 20) + (2 << 17)
         );
-        assert_eq!(chunk_transient(&levels, flag, false, false, 1 << 20), 0);
+        assert_eq!(
+            chunk_transient(&levels, flag, LeafDecode::default(), false, false, 1 << 20),
+            0
+        );
         // The room is reserved for the footer's count before the pages are
         // read, and grows to the pages' entries: the more of the two. Pre-fix
         // neither counted here.
         let none = ChunkPages::default();
         assert_eq!(
-            chunk_transient(&none, f64, false, true, 1 << 30),
+            chunk_transient(&none, f64, LeafDecode::default(), false, true, 1 << 30),
             (8 << 30) + (1 << 27)
         );
         assert_eq!(
-            chunk_transient(&levels, f64, false, true, 0),
+            chunk_transient(&levels, f64, LeafDecode::default(), false, true, 0),
             (4 << 20) + (8 << 20) + (1 << 17)
         );
         assert_eq!(
-            chunk_transient(&none, None, false, true, 1 << 10),
+            chunk_transient(&none, None, LeafDecode::default(), false, true, 1 << 10),
             16 * 1024 + 128
         );
         // A flat column's reservation is bounded by its rows.
-        assert_eq!(chunk_transient(&none, f64, false, false, 1 << 30), 0);
+        assert_eq!(
+            chunk_transient(&none, f64, LeafDecode::default(), false, false, 1 << 30),
+            0
+        );
         // A 128-bit leaf reserves 16 bytes an entry (pre-fix nothing).
         let u128 = Some(&DataType::UInt128);
         assert_eq!(
-            chunk_transient(&none, u128, false, true, 1 << 10),
+            chunk_transient(&none, u128, LeafDecode::default(), false, true, 1 << 10),
             16 * 1024 + 128
         );
+        // A Categorical or Enum leaf's values are decoded into an arrow
+        // dictionary first: a key per entry, and a view per entry before it
+        // when polars did not write the column. Pre-fix neither counted, so
+        // a file of one label over 40,000,000 rows was admitted at its
+        // codes' 4 bytes a row.
+        use p2a_core::polars::prelude::Categories;
+        let cat =
+            DataType::from_categories(Categories::random("".into(), CategoricalPhysical::U32));
+        let cat = Some(&cat);
+        let rows = ChunkPages {
+            entries: 1000,
+            most_page_entries: 1000,
+            ..ChunkPages::default()
+        };
+        let own = LeafDecode {
+            key_bytes: 4,
+            views: false,
+        };
+        let other = LeafDecode {
+            key_bytes: 4,
+            views: true,
+        };
+        assert_eq!(chunk_transient(&rows, cat, own, false, false, 1000), 4000);
+        assert_eq!(
+            chunk_transient(&rows, cat, other, false, false, 1000),
+            20_000
+        );
+        // The larger of the footer's and the pages' entries; a key's width
+        // is the field's key type's.
+        let narrow = LeafDecode {
+            key_bytes: 1,
+            views: false,
+        };
+        assert_eq!(
+            chunk_transient(&rows, cat, narrow, false, false, 3000),
+            3000
+        );
+        // Nested, the keys (and views) are the decoded chunk, in place of
+        // the reservation at the codes' width; levels and validity as for
+        // any nested leaf.
+        assert_eq!(
+            chunk_transient(&rows, cat, other, false, true, 1000),
+            20_000 + 4 * 1000 + 125
+        );
+        // Other leaf types decode no keys.
+        assert_eq!(chunk_transient(&rows, f64, other, false, false, 1000), 0);
         // The chunks decoded at once: the largest, as many as threads.
         assert_eq!(largest_sum(vec![5, 1, 9, 3], 2), 14);
         assert_eq!(largest_sum(vec![5, 1], 8), 6);
@@ -2793,6 +3000,115 @@ mod tests {
         assert_eq!(
             plain_values(1_000, 0, Encoding::DELTA_BYTE_ARRAY, 10),
             1_000
+        );
+    }
+
+    /// Rewrite the ARROW:schema of the parquet file at `path` so that no
+    /// field carries polars' categorical or enum metadata (see
+    /// [`POLARS_DICTIONARY_KEYS`]), as a file of another writer has none:
+    /// each key is overwritten in place by a key of the same length.
+    fn strip_polars_metadata(path: &Path) {
+        use base64::Engine;
+        rewrite_footer(path, |footer| {
+            let schema = footer
+                .key_value_metadata
+                .as_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|kv| kv.key == "ARROW:schema")
+                .unwrap();
+            let engine = base64::engine::general_purpose::STANDARD;
+            let mut ipc = engine.decode(schema.value.as_ref().unwrap()).unwrap();
+            let mut stripped = 0;
+            for at in 0..ipc.len() {
+                if ipc[at..].starts_with(b"_PL_") {
+                    ipc[at..at + 4].copy_from_slice(b"_XX_");
+                    stripped += 1;
+                }
+            }
+            assert!(stripped > 0);
+            schema.value = Some(engine.encode(ipc));
+        });
+    }
+
+    /// The [`LeafDecode`]s of the parquet file at `path`, its leaves in
+    /// order.
+    fn decodes_of(path: &Path) -> Vec<LeafDecode> {
+        let mut footer = read_footer(path).unwrap().unwrap();
+        let schema = footer.reader.schema().unwrap();
+        let mut out = Vec::new();
+        for field in schema.iter_values() {
+            leaf_decodes(&DataType::from_arrow_field(field), Some(field), &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn a_categorical_columns_values_take_a_key_and_a_view_unless_polars_wrote_it() {
+        // polars decodes a dictionary<string> column it wrote (its field
+        // metadata says so) straight into keys; any other one into string
+        // views first, which it then casts. One label over 100,000 rows in
+        // one row group: the views alone are 1.6 MB. Pre-fix neither the
+        // keys nor the views counted.
+        use p2a_core::polars::prelude::{Categories, IntoSeries, ListChunked, NamedFrom, Series};
+        let rows = 100_000usize;
+        let cat = |physical| DataType::from_categories(Categories::random("".into(), physical));
+        let one = Series::new("one".into(), vec!["a"; rows])
+            .cast(&cat(CategoricalPhysical::U32))
+            .unwrap();
+        let small = Series::new(
+            "small".into(),
+            (0..rows).map(|i| format!("v{}", i % 3)).collect::<Vec<_>>(),
+        )
+        .cast(&cat(CategoricalPhysical::U8))
+        .unwrap();
+        let in_lists: ListChunked = (0..rows).map(|i| Some(one.slice(0, i % 3))).collect();
+        let in_lists = in_lists.into_series().with_name("lists".into());
+        let flat = Series::new(
+            "f".into(),
+            (0..rows).map(|i| i as f64 * 0.5 + 0.1).collect::<Vec<_>>(),
+        );
+        let mut df =
+            DataFrame::new(vec![one.into(), small.into(), in_lists.into(), flat.into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("own.parquet");
+        write_parquet(&mut df, &path, rows);
+        let own = |key_bytes| LeafDecode {
+            key_bytes,
+            views: false,
+        };
+        assert_eq!(
+            decodes_of(&path),
+            [own(4), own(1), own(4), LeafDecode::default()]
+        );
+        let before = bound_of(&path);
+        strip_polars_metadata(&path);
+        let other = |key_bytes| LeafDecode {
+            key_bytes,
+            views: true,
+        };
+        assert_eq!(
+            decodes_of(&path),
+            [other(4), other(1), other(4), LeafDecode::default()]
+        );
+        let after = bound_of(&path);
+        // Without polars' metadata the 8-bit column loads with polars'
+        // default 32-bit codes, three bytes a row more; the columns still
+        // load as Categorical, and the bound stays below their charge.
+        assert_eq!(after.dataset, before.dataset + 3 * rows as u64);
+        let loaded = DataLoader::load(&path).unwrap();
+        for name in ["one", "small"] {
+            let dtype = loaded.df().column(name).unwrap().dtype().clone();
+            assert_eq!(dtype.cat_physical().unwrap(), CategoricalPhysical::U32);
+        }
+        let charge = session::datasets_bytes_of([("d", &loaded)]);
+        assert!(after.dataset <= charge, "{after:?} > {charge}");
+        // Each value's view, in the chunks decoded at once.
+        let threads = decode_threads() as u64;
+        let views = if threads >= 2 { 2 } else { 1 } * rows as u64 * session::VIEW_BYTES;
+        assert!(
+            after.transient >= before.transient + views,
+            "{before:?} {after:?}"
         );
     }
 
