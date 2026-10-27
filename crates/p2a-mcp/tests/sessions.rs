@@ -462,9 +462,11 @@ async fn reload(r: &Router, sid: &str) -> Value {
 /// exceeds the session's quota is reported failed with `load_dataset`'s
 /// refusal before anything is decoded ("Nothing was loaded"), with no server
 /// path; the other stored dataset still reloads, and the dataset the file
-/// held when it was last loaded stays as it was.
+/// held when it was last loaded stays as it was. The refusal's log line
+/// carries its text, so an operator sees the size and the limit.
 #[tokio::test]
 async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
+    let logs = process_logs();
     let mut cfg = ServerConfig::default();
     cfg.exec.session_data_mb = Some(8);
     let (r, state) = app(cfg).await;
@@ -505,6 +507,16 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
     let datasets = session.datasets.read().await;
     assert_eq!(datasets["p"].nrows(), 1_000);
     assert_eq!(datasets["small"].nrows(), 50);
+
+    // Pre-fix (round 2) the line named the dataset but not the refusal.
+    let reload_span = format!("{RELOAD_LABEL}{{session_id={sid}}}");
+    let refusals = logs.lines_with("reload source refused by the dataset quotas before decoding");
+    assert!(
+        refusals.iter().any(|l| l.contains(&reload_span)
+            && l.contains("dataset=p")
+            && l.contains(&format!("refusal={error}"))),
+        "no refusal with its text logged in span {reload_span}: {refusals:#?}"
+    );
 }
 
 /// Write a parquet file of `rows` rows of one noisy float column at `path`,

@@ -739,13 +739,10 @@ async fn reload_session_datasets(
                 sources,
                 skipped,
                 budget,
-                |source| {
-                    // The check before a parquet file is decoded reads the
-                    // quotas from here; what it reserves against the total
-                    // is held until the dataset is inserted or refused.
-                    let admission = quotas.install(&target, &sessions);
-                    load_reload_source(&handle, source).map(|dataset| (dataset, admission))
-                },
+                // What the check before a parquet file is decoded reserves
+                // against the total is held by the guard the load returns,
+                // until the dataset is inserted or refused.
+                |source| load_reload_source(&handle, source, quotas, &target, &sessions),
                 |source, (dataset, _admission)| {
                     handle.block_on(insert_reloaded_dataset(
                         &target,
@@ -822,7 +819,6 @@ fn reload_sources<L>(
 mod tests {
     use super::*;
     use p2a_core::resource::CancelToken;
-    use std::time::{Duration, Instant};
 
     /// Sources named `names`, each at `<name>.parquet`.
     fn sources(names: &[&str]) -> Vec<ReloadSource> {
@@ -835,16 +831,23 @@ mod tests {
             .collect()
     }
 
-    /// What the check before a parquet file is decoded returns when the
-    /// call's budget stops it at a checkpoint.
+    /// A stand-in for the error the check before decoding returns when the
+    /// call's budget stops it; `reload_sources` does not read it.
     const STOPPED: &str =
-        "the file could not be loaded: the call stopped while the file was checked (cancelled)";
+        "the file could not be loaded: the call stopped while the file was checked";
 
-    /// A load that fails once the call is cancelled ends the reload with
-    /// the call's error instead of a `failed` entry for the file (PR-H2,
-    /// round-1 follow-up). Pre-fix only a load that succeeded was followed
-    /// by a budget check, so the last source's stopped check was reported
-    /// in `failed` and the reload answered 200.
+    /// A load that fails once the call's budget is spent ends the reload
+    /// with the call's error instead of a `failed` entry for the file
+    /// (PR-H2, round-1 follow-up). Pre-fix only a load that succeeded was
+    /// followed by a budget check, so the last source's stopped check was
+    /// reported in `failed` and the reload answered 200.
+    ///
+    /// The load cancels the call's token, which makes the test
+    /// deterministic: the deadline stops a budget the same way
+    /// (`Budget::check` refuses both, and the loop does not tell them
+    /// apart), and `run_blocking` answers the internal error a call returns
+    /// past its deadline as `deadline_exceeded`, which exec.rs's
+    /// `deadline_only_masks_internal_errors` tests.
     #[test]
     fn a_load_that_fails_once_the_call_is_cancelled_ends_the_reload() {
         let token = CancelToken::new();
@@ -871,31 +874,6 @@ mod tests {
             "{outcome:?}"
         );
         assert_eq!(inserted, ["first"]);
-    }
-
-    /// The same once the deadline has passed while the file was checked:
-    /// the reload ends with an internal error, which `run_blocking` turns
-    /// into `deadline_exceeded` past the deadline.
-    #[test]
-    fn a_load_that_fails_past_the_deadline_ends_the_reload() {
-        let deadline = Instant::now() + Duration::from_millis(20);
-        let budget = Budget::new(Some(deadline), CancelToken::new());
-        let outcome = reload_sources(
-            sources(&["last"]),
-            Vec::new(),
-            &budget,
-            |_| {
-                while Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err::<(), _>(STOPPED.to_string())
-            },
-            |_, ()| Ok(()),
-        );
-        assert!(
-            matches!(outcome, Err(ToolCallError::Internal(_))),
-            "{outcome:?}"
-        );
     }
 
     /// Within the budget a load or insert that fails is that file's: it is

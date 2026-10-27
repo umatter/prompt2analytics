@@ -734,24 +734,31 @@ pub struct ReloadSource {
 /// async part of the parquet check on `handle`; run it on the blocking pool
 /// inside the session's path-jail scope and under the server's request
 /// limits (`ToolGovernor::run_blocking` does both). The error is a fixed
-/// text, the budget refusal with the file's size and the limit, or the
-/// quota refusal `load_dataset` gives; none holds a server path. The
-/// details are logged at debug level, the refusals at info level.
+/// text, the budget refusal with the file's size and the limit, the quota
+/// refusal `load_dataset` gives, or `the file could not be loaded: <reason>`
+/// for a parquet file the check will not read; none holds a server path.
+/// The details are logged at debug level, the budget and quota refusals at
+/// info level.
 ///
 /// The decoded-size check is `load_dataset`'s (`session::admit_dataset`):
-/// it reads the quotas installed on this thread ([`DatasetQuotas::install`])
-/// and refuses, before decoding it, a parquet file whose dataset would take
-/// the session or the server past them, so a file replaced at a stored path
-/// since it was loaded cannot decode more than `load_dataset` would admit.
-/// What it admits stays reserved against the server's total until the
-/// caller drops that guard, once [`insert_reloaded_dataset`] has inserted
-/// the dataset or refused it. Without installed quotas only the footer is
+/// this function installs `quotas` for `session` on this thread, as a tool
+/// call installs its own, and the check refuses, before decoding it, a
+/// parquet file whose dataset would take the session or the server past
+/// them, so a file replaced at a stored path since it was loaded cannot
+/// decode more than `load_dataset` would admit. What the check admits stays
+/// reserved against the server's total until the caller drops the returned
+/// guard: hold it until [`insert_reloaded_dataset`] has inserted the
+/// dataset or refused it, and drop it on this thread. With no quotas
+/// (`DatasetQuotas::default()`) there is no guard and only the footer is
 /// checked. Other formats are charged only once decoded, by
 /// [`insert_reloaded_dataset`].
 pub fn load_reload_source(
     handle: &tokio::runtime::Handle,
     source: &ReloadSource,
-) -> Result<p2a_core::data::Dataset, String> {
+    quotas: DatasetQuotas,
+    session: &Arc<Session>,
+    sessions: &Arc<SessionManager>,
+) -> Result<(p2a_core::data::Dataset, Option<AdmissionGuard>), String> {
     let name = &source.name;
     let path = crate::path_jail::validate_data_path(&source.source_path).map_err(|e| {
         tracing::debug!(dataset = %name, error = %e, "Reload path rejected by the path jail");
@@ -785,12 +792,18 @@ pub fn load_reload_source(
             ));
         }
     }
+    // The check before a parquet file is decoded reads the quotas from this
+    // thread; on an early return the guard drops here, on this thread, and
+    // releases what the check reserved.
+    let admission = quotas.install(session, sessions);
     match handle.block_on(admit_parquet(&path, name)) {
         Ok(()) => {}
         Err(NotAdmitted::Quota(refusal)) => {
+            // The refusal names the sizes and the limit, never a path.
             tracing::info!(
                 tool = RELOAD_LABEL,
                 dataset = %name,
+                refusal = %refusal.message,
                 "reload source refused by the dataset quotas before decoding"
             );
             return Err(refusal.message.into_owned());
@@ -800,10 +813,11 @@ pub fn load_reload_source(
             return Err(format!("{RELOAD_LOAD_FAILED}: {reason}"));
         }
     }
-    p2a_core::DataLoader::load(&path).map_err(|e| {
+    let dataset = p2a_core::DataLoader::load(&path).map_err(|e| {
         tracing::debug!(dataset = %name, error = %e, "Failed to reload dataset");
         RELOAD_LOAD_FAILED.to_string()
-    })
+    })?;
+    Ok((dataset, admission))
 }
 
 /// The in-memory dataset quotas a reload keeps (the governor's
@@ -818,13 +832,14 @@ pub struct DatasetQuotas {
 
 impl DatasetQuotas {
     /// Install these quotas on this thread for the check a reload makes
-    /// before it decodes a file of `session` ([`load_reload_source`]), as a
-    /// tool call installs its own; `None` when there are none. Hold the
-    /// guard until the file's dataset is inserted or refused
-    /// ([`insert_reloaded_dataset`]) and drop it on this thread: dropping
-    /// it releases what the check reserved against the total.
+    /// before it decodes a file of `session`, as a tool call installs its
+    /// own; `None` when there are none. [`load_reload_source`] installs
+    /// them and hands the guard to its caller, who holds it until the
+    /// file's dataset is inserted or refused ([`insert_reloaded_dataset`])
+    /// and drops it on this thread: dropping it releases what the check
+    /// reserved against the total.
     #[must_use = "dropping the guard uninstalls the quotas the pre-decode check reads"]
-    pub fn install(
+    fn install(
         &self,
         session: &Arc<Session>,
         sessions: &Arc<SessionManager>,
