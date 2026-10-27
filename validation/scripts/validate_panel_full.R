@@ -8,8 +8,8 @@
 # - Random Effects (plm model="random")
 # - Hausman Test (phtest)
 # - Arellano-Bond GMM (pgmm)
-# - Panel GLS - FEGLS (pggls model="within")
-# - Panel GLS - Pooled (pggls model="pooling")
+# - Panel GLS - FEGLS (pggls model="within"), on Grunfeld 1935-1944
+# - Panel GLS - Pooled (pggls model="pooling"), on Grunfeld 1935-1944
 # - PVCM Within (pvcm model="within")
 # - PVCM Random (pvcm model="random")
 # - Mean Group/PMG (pmg)
@@ -215,12 +215,27 @@ if (!is.null(gmm2_result)) {
 }
 
 # =============================================================================
+# Panel GLS (Tests 6-7): Grunfeld 1935-1944, N = T = 10
+# =============================================================================
+# p2a-core refuses panel GLS when T > N: the T x T error covariance is
+# estimated from N residual vectors, so with T > N its rank is at most N and
+# it has no inverse. pggls returns a generalised-inverse fit on full Grunfeld
+# (N = 10 firms, T = 20 years) instead, which p2a-core does not reproduce, so
+# both GLS tests use the first 10 years, where N = T = 10.
+pdata_sq <- pdata.frame(subset(Grunfeld, year <= 1944), index = c("firm", "year"))
+cat(sprintf("\nPanel GLS subset: %d firms, %d years (p2a-core refuses T > N)\n",
+            length(unique(pdata_sq$firm)), length(unique(pdata_sq$year))))
+
+# =============================================================================
 # Test 6: Panel GLS - Fixed Effects (FEGLS/pggls within)
 # =============================================================================
-cat("\n=== Test 6: Panel GLS - Fixed Effects ===\n")
+# Reference values only: no p2a-core test compares FE panel GLS with pggls yet
+# (ECON-33). On full Grunfeld p2a-core refuses it
+# (test_panel_gls_fe_full_grunfeld_is_refused).
+cat("\n=== Test 6: Panel GLS - Fixed Effects (Grunfeld 1935-1944) ===\n")
 
 fegls_result <- tryCatch({
-  pggls(inv ~ value + capital, data = pdata, model = "within")
+  pggls(inv ~ value + capital, data = pdata_sq, model = "within")
 }, error = function(e) {
   cat("FEGLS failed:", e$message, "\n")
   NULL
@@ -240,16 +255,21 @@ if (!is.null(fegls_result)) {
     coefficient = as.numeric(coef(fegls_result)),
     std_error = as.numeric(sqrt(diag(vcov(fegls_result))))
   )
-  write.csv(fegls_expected, "validation/expected/fegls_full.csv", row.names = FALSE)
+  write.csv(fegls_expected, "validation/expected/fegls_1935_1944.csv", row.names = FALSE)
 }
 
 # =============================================================================
 # Test 7: Panel GLS - Pooled (pggls pooling)
 # =============================================================================
-cat("\n=== Test 7: Panel GLS - Pooled ===\n")
+# The coefficients are the ones test_validate_pooled_gls_square_grunfeld_vs_plm
+# (gls_models.rs) checks to 1e-8. That test does not compare standard
+# errors: p2a-core scales them by rss/df once more than pggls does
+# (ECON-33). On full Grunfeld p2a-core refuses pooled GLS
+# (test_pooled_gls_full_grunfeld_is_refused).
+cat("\n=== Test 7: Panel GLS - Pooled (Grunfeld 1935-1944) ===\n")
 
 pggls_pool_result <- tryCatch({
-  pggls(inv ~ value + capital, data = pdata, model = "pooling")
+  pggls(inv ~ value + capital, data = pdata_sq, model = "pooling")
 }, error = function(e) {
   cat("Pooled GLS failed:", e$message, "\n")
   NULL
@@ -269,7 +289,7 @@ if (!is.null(pggls_pool_result)) {
     coefficient = as.numeric(coef(pggls_pool_result)),
     std_error = as.numeric(sqrt(diag(vcov(pggls_pool_result))))
   )
-  write.csv(pggls_pool_expected, "validation/expected/pggls_pooling_full.csv", row.names = FALSE)
+  write.csv(pggls_pool_expected, "validation/expected/pggls_pooling_1935_1944.csv", row.names = FALSE)
 }
 
 # =============================================================================
@@ -463,8 +483,8 @@ cat("  - panel_re_full.csv\n")
 cat("  - hausman_full.csv\n")
 cat("  - arellano_bond_full.csv\n")
 cat("  - gmm_twostep_full.csv\n")
-cat("  - fegls_full.csv\n")
-cat("  - pggls_pooling_full.csv\n")
+cat("  - fegls_1935_1944.csv\n")
+cat("  - pggls_pooling_1935_1944.csv\n")
 cat("  - pvcm_within_full.csv\n")
 cat("  - pvcm_random_full.csv\n")
 cat("  - pmg_full.csv\n")
