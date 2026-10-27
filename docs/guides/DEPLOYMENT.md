@@ -278,8 +278,9 @@ HTTP), and they never depend on the resource profile:
   the first file access after a restart. A session's directory holds at most
   `session_disk_bytes` (hosted 64 MiB).
 - **Sizes.** `load_dataset` and the dataset reload route refuse a file larger
-  than `load_file_bytes` (hosted 64 MiB) before parsing it; `export_dataset`, `export_session` and
-  `import_session` are bounded by `export_bytes` (hosted 64 MiB).
+  than `load_file_bytes` (hosted 64 MiB) before parsing it; `export_dataset`,
+  `export_session` and `import_session` are bounded by `export_bytes` (hosted
+  64 MiB).
 - **Messages** show paths relative to the data root, never absolute server
   paths.
 
