@@ -158,12 +158,15 @@ impl Default for BartCausalConfig {
     }
 }
 
-/// Trees of the propensity model ([`estimate_propensity`]), their depth, the rows a node
-/// keeps at least, and the fraction of all the rows each tree's subsample draws. The
-/// configuration does not change them.
+// The shape of the propensity model (`estimate_propensity`). The configuration does not
+// change it, and the public doc of `BartCausalConfig::memory_bound` states these values.
+/// Trees of the propensity model ([`estimate_propensity`]).
 const PROPENSITY_TREES: usize = 50;
+/// Depth of the propensity model's trees.
 const PROPENSITY_DEPTH: usize = 3;
+/// The fewest rows a node of a propensity tree keeps.
 const PROPENSITY_NODE_SIZE: usize = 5;
+/// The fraction of all the rows each propensity tree's subsample draws.
 const PROPENSITY_FRACTION: f64 = 0.632;
 
 impl BartCausalConfig {
@@ -182,10 +185,11 @@ impl BartCausalConfig {
     /// - **Trees.** The two response-surface ensembles of `n_trees` trees
     ///   each, kept for the result, and the two ensembles of `n_trees / 4`
     ///   trees of the bootstrap replicate being fitted; with
-    ///   `include_propensity`, the propensity model's trees too. A tree has at
-    ///   most `2 L - 1` nodes for `L` leaves; `L` is at most `2^max_depth` and
-    ///   at most its subsample divided by `max(min_node_size, 1)`, since every
-    ///   child keeps `min_node_size` rows and at least one. A treated tree and
+    ///   `include_propensity`, the propensity model's 50 trees
+    ///   (`PROPENSITY_TREES`) of depth 3 too. A tree has at most `2 L - 1`
+    ///   nodes for `L` leaves; `L` is at most `2^max_depth` and at most its
+    ///   subsample divided by `max(min_node_size, 1)`, since every child
+    ///   keeps `min_node_size` rows and at least one. A treated tree and
     ///   a control tree are fitted on subsamples that together hold at most
     ///   `sample_fraction` of the rows, so a pair has at most that many rows
     ///   divided by `max(min_node_size, 1)`, plus two, leaves. Every node is
@@ -210,13 +214,15 @@ impl BartCausalConfig {
     ///   covariates are drawn from one covariate list. With
     ///   `include_propensity`, the propensity model is fitted first, before
     ///   any of the ensembles' working buffers exist, by trees the
-    ///   configuration does not shape: `PROPENSITY_DEPTH` deep, with nodes
-    ///   of at least `PROPENSITY_NODE_SIZE` rows, on subsamples of
-    ///   `PROPENSITY_FRACTION` of all the rows and the covariates without the
-    ///   score. The term is the larger of one such tree's working copies,
-    ///   counted the same way, and an ensemble tree's, so it also holds where
-    ///   the configuration's trees are the smaller (a lower
-    ///   `sample_fraction`, a shallower depth or larger nodes).
+    ///   configuration does not shape: 3 levels deep (`PROPENSITY_DEPTH`),
+    ///   with nodes of at least 5 rows (`PROPENSITY_NODE_SIZE`), on
+    ///   subsamples of 0.632 of all the rows (`PROPENSITY_FRACTION`), each
+    ///   split drawing `ceil(sqrt(n_covariates))` of the `n_covariates`
+    ///   covariates without the score, whatever `mtry` is. The term is the
+    ///   larger of one such tree's working copies, counted the same way, and
+    ///   an ensemble tree's, so it also holds where the configuration's trees
+    ///   are the smaller (a lower `sample_fraction`, a shallower depth,
+    ///   larger nodes or a smaller `mtry`).
     pub fn memory_bound(&self, n_obs: usize, n_covariates: usize) -> u64 {
         let n = n_obs as u128;
         let p = n_covariates as u128;
@@ -1711,6 +1717,18 @@ mod tests {
             with,
             without + propensity_trees + score_column + own_with_score - own
         );
+    }
+
+    /// The public doc of [`BartCausalConfig::memory_bound`] writes out the propensity
+    /// model's shape (50 trees, depth 3, nodes of at least 5 rows, subsamples of 0.632 of
+    /// the rows), since its readers cannot see the private constants. A change to them
+    /// fails here until the doc is changed with them.
+    #[test]
+    fn the_propensity_shape_is_the_one_memory_bound_documents() {
+        assert_eq!(PROPENSITY_TREES, 50);
+        assert_eq!(PROPENSITY_DEPTH, 3);
+        assert_eq!(PROPENSITY_NODE_SIZE, 5);
+        assert_eq!(PROPENSITY_FRACTION.to_bits(), 0.632f64.to_bits());
     }
 
     /// A `min_node_size` above `usize::MAX / 2` cannot split any node: twice it (the rows a
