@@ -574,6 +574,19 @@ impl DbConnection {
             .map_or(0, |(_, users)| *users)
     }
 
+    /// Whether a call holds the store turn `key` (a conversation id, or
+    /// `session:<id>`), as opposed to only being registered for it:
+    /// [`turn`](Self::turn) counts a call in `users` before it waits for the
+    /// lock.
+    #[cfg(test)]
+    pub(crate) fn store_turn_held(&self, key: &str) -> bool {
+        self.store_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .is_some_and(|(lock, _)| lock.try_lock().is_err())
+    }
+
     /// Whether the `session_db_bytes` budget is set.
     pub(crate) fn tracks_session_bytes(&self) -> bool {
         self.limits.session_db_bytes.is_some()

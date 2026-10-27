@@ -1252,7 +1252,7 @@ async fn drop_while_running(
     let mut call = std::pin::pin!(call);
     tokio::select! {
         _ = &mut call => panic!("{what:?} finished before it was seen holding its turn"),
-        held = turn_has_users(db, key, 1) => assert!(held, "{what:?} never held its turn"),
+        held = turn_is_held(db, key) => assert!(held, "{what:?} never held its turn"),
     }
     let dropped = tokio::time::timeout(std::time::Duration::from_millis(100), call).await;
     assert!(dropped.is_err(), "{what:?} finished before it was dropped");
@@ -1382,6 +1382,20 @@ async fn a_retry_after_a_dropped_clear_or_delete_waits_for_it() {
 async fn turn_has_users(db: &DbConnection, key: &str, n: usize) -> bool {
     for _ in 0..500 {
         if db.store_turn_users(key) == n {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// Whether a call holds store turn `key`, not only waits for it (a call is
+/// counted among [`turn_has_users`] before it has the lock), polled a
+/// bounded number of times (no timing assertion: a slow machine only polls
+/// longer).
+async fn turn_is_held(db: &DbConnection, key: &str) -> bool {
+    for _ in 0..500 {
+        if db.store_turn_held(key) {
             return true;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1571,7 +1585,7 @@ async fn a_tool_call_write_during_a_clear_waits_for_it() {
                 let (db, id) = (db.clone(), id.clone());
                 async move { db.clear_messages(&id).await }
             });
-            assert!(turn_has_users(&db, &id, 1).await);
+            assert!(turn_is_held(&db, &id).await, "{case}");
             // Let the clear send its transaction, which then runs through 21
             // slow message deletes. What the write and the clear return does
             // not depend on this pause; without it, the write could commit
@@ -1628,7 +1642,7 @@ async fn a_clear_during_a_tool_call_write_waits_for_it() {
         let call = only_tool_call(&db, &id).await;
         let written = write.spawn(&db, &call);
         assert!(
-            turn_has_users(&db, &id, 1).await,
+            turn_is_held(&db, &id).await,
             "{write:?} takes its conversation's turn"
         );
         let cleared = db.clear_messages(&id).await;
@@ -1687,7 +1701,7 @@ async fn a_tool_call_create_during_a_clear_or_delete_leaves_no_row() {
                     }
                 }
             });
-            assert!(turn_has_users(&db, &id, 1).await, "{case}");
+            assert!(turn_is_held(&db, &id).await, "{case}");
             // As in a_tool_call_write_during_a_clear_waits_for_it.
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let call = ToolCall::new(message_id, id.clone(), "regression_ols".into(), "{}".into());
