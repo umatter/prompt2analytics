@@ -262,7 +262,13 @@ pub fn DatasetInspectorModal(props: DatasetInspectorModalProps) -> Element {
                     // Columns section
                     div {
                         h3 { class: "text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3",
-                            "Columns ({dataset.column_names.len()})"
+                            "Columns ({dataset.width()})"
+                        }
+                        // A wide dataset's row keeps its first names only.
+                        if dataset.column_names_cut() {
+                            p { class: "text-xs text-gray-500 dark:text-gray-400 mb-2",
+                                "First {dataset.column_names.len()} of {dataset.width()} shown"
+                            }
                         }
                         div { class: "bg-gray-50 dark:bg-gray-800 rounded-lg p-3",
                             div { class: "flex flex-wrap gap-2",
