@@ -237,17 +237,41 @@ pub(crate) fn truncate_to(s: &str, limit: usize) -> String {
     if s.len() <= limit {
         return s.to_string();
     }
-    let Some(room) = limit.checked_sub(TRUNCATION_SUFFIX.len()) else {
+    let Some(cut) = truncation_cut(s, limit) else {
         return String::new();
     };
-    let mut cut = room;
-    while !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
     let mut out = String::with_capacity(cut + TRUNCATION_SUFFIX.len());
     out.push_str(&s[..cut]);
     out.push_str(TRUNCATION_SUFFIX);
     out
+}
+
+/// `text` cut as [`truncate_to`] cuts it, in its own buffer: a text that
+/// fits is left as it is, and one that does not is shortened and given the
+/// suffix without a copy.
+pub(crate) fn truncate_in_place(text: &mut String, limit: usize) {
+    if text.len() <= limit {
+        return;
+    }
+    match truncation_cut(text, limit) {
+        Some(cut) => {
+            text.truncate(cut);
+            text.push_str(TRUNCATION_SUFFIX);
+        }
+        None => text.clear(),
+    }
+}
+
+/// How many bytes of `s`, which is longer than `limit`, are kept in front
+/// of [`TRUNCATION_SUFFIX`]: the most that fit beside it, at a char
+/// boundary. `None` when `limit` has no room for the suffix (nothing is
+/// kept).
+fn truncation_cut(s: &str, limit: usize) -> Option<usize> {
+    let mut cut = limit.checked_sub(TRUNCATION_SUFFIX.len())?;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Some(cut)
 }
 
 /// The error a transaction's failed statement reported, from the
@@ -385,6 +409,14 @@ impl DbConnection {
         }
     }
 
+    /// Server-produced `text` cut to `message_bytes` in its own buffer (see
+    /// [`truncate_in_place`]); a text that fits is left as it is.
+    pub(crate) fn truncate_server_text_in_place(&self, text: &mut String) {
+        if let Some(limit) = self.limits.message_bytes {
+            truncate_in_place(text, limit);
+        }
+    }
+
     fn session_bytes_map(&self) -> MutexGuard<'_, HashMap<String, u64>> {
         self.session_bytes
             .lock()
@@ -441,7 +473,7 @@ impl DbConnection {
     }
 
     /// Fit server-produced `texts`, of a write that replaces stored texts of
-    /// `replaced` bytes, in place: cut in order (see [`truncate_to`]) to the
+    /// `replaced` bytes, in place: cut in order (see [`truncate_in_place`]) to the
     /// bytes the session has left under `session_db_bytes` plus `replaced`
     /// (each possibly to the empty string), and count them; never refused.
     /// Without the budget `texts` are left as they are. The counter holds
@@ -463,10 +495,7 @@ impl DbConnection {
         self.with_session_bytes(session_id, |used| {
             let mut room = limit.saturating_sub(*used).saturating_add(replaced);
             for text in texts.iter_mut() {
-                let fits = usize::try_from(room).unwrap_or(usize::MAX);
-                if text.len() > fits {
-                    **text = truncate_to(text, fits);
-                }
+                truncate_in_place(text, usize::try_from(room).unwrap_or(usize::MAX));
                 room = room.saturating_sub(text.len() as u64);
                 *used = used.saturating_add(text.len() as u64);
             }

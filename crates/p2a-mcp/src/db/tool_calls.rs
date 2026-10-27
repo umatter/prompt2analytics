@@ -133,7 +133,7 @@ impl DbConnection {
             .chain(tool_call.error.as_mut())
             .collect();
         for text in texts.iter_mut() {
-            **text = self.truncate_server_text(text.as_str());
+            self.truncate_server_text_in_place(text);
         }
         self.fit_session_texts(session_id, &mut texts, replaced)
             .await?;
@@ -173,11 +173,7 @@ impl DbConnection {
                     field,
                     text,
                     duration_ms,
-                } => (
-                    status,
-                    Some((field, db.truncate_server_text(&text))),
-                    Some(duration_ms),
-                ),
+                } => (status, Some((field, text)), Some(duration_ms)),
             };
             let mut session_id = String::new();
             let mut replaced = 0;
@@ -250,7 +246,7 @@ impl DbConnection {
         let change = StatusChange::Finished {
             status: ToolCallStatus::Success,
             field: TextField::Result,
-            text: result_str.to_string(),
+            text: self.truncate_server_text(result_str),
             duration_ms,
         };
         self.change_tool_call_status(id, change).await
@@ -268,7 +264,7 @@ impl DbConnection {
         let change = StatusChange::Finished {
             status: ToolCallStatus::Error,
             field: TextField::Error,
-            text: error.to_string(),
+            text: self.truncate_server_text(error),
             duration_ms,
         };
         self.change_tool_call_status(id, change).await
@@ -320,8 +316,9 @@ impl DbConnection {
 enum StatusChange {
     /// It is running.
     Running,
-    /// It finished with `status`, storing `text` in `field`, after
-    /// `duration_ms`.
+    /// It finished with `status`, storing `text` (already cut to
+    /// `message_bytes`, [`truncate_server_text`](DbConnection::truncate_server_text))
+    /// in `field`, after `duration_ms`.
     Finished {
         status: ToolCallStatus,
         field: TextField,

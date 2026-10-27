@@ -6,7 +6,9 @@ use std::collections::HashMap;
 
 use surrealdb::error::Db as SurrealDbError;
 
-use super::connection::{DbConnection, DbError, PersistenceLimits, failed_statement, truncate_to};
+use super::connection::{
+    DbConnection, DbError, PersistenceLimits, failed_statement, truncate_in_place, truncate_to,
+};
 use super::models::{Message, MessageRole, ToolCall};
 
 /// Helper to create an in-memory database for testing
@@ -109,6 +111,35 @@ fn truncate_to_cuts_at_char_boundaries() {
     // No room for the suffix: nothing is kept.
     assert_eq!(truncate_to(&"x".repeat(50), 11), "");
     assert_eq!(truncate_to(&"x".repeat(50), 12), "\n[truncated]");
+}
+
+/// `truncate_in_place` cuts a text as `truncate_to` does, in its own buffer:
+/// a text that fits keeps it untouched, and one that is cut is not copied.
+#[test]
+fn truncate_in_place_cuts_as_truncate_to_does() {
+    let texts = [
+        "short".to_string(),
+        "ä€x".repeat(9),
+        "x".repeat(50),
+        String::new(),
+    ];
+    for text in texts.iter().map(String::as_str) {
+        for limit in 0..=text.len() + 1 {
+            let mut cut = text.to_string();
+            truncate_in_place(&mut cut, limit);
+            assert_eq!(cut, truncate_to(text, limit), "{text:?} to {limit}");
+        }
+    }
+    let mut fits = "fits".to_string();
+    let buffer = fits.as_ptr();
+    truncate_in_place(&mut fits, 4);
+    assert_eq!((fits.as_str(), fits.as_ptr()), ("fits", buffer));
+    let mut long = String::with_capacity(64);
+    long.push_str(&"x".repeat(40));
+    let buffer = long.as_ptr();
+    truncate_in_place(&mut long, 20);
+    assert_eq!(long, format!("{}\n[truncated]", "x".repeat(8)));
+    assert_eq!(long.as_ptr(), buffer, "a text that is cut is not copied");
 }
 
 #[tokio::test]
