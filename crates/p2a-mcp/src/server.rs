@@ -2263,6 +2263,32 @@ mod tests {
         drop(logger);
     }
 
+    /// A handler can suspend before it panics or ends (`server_stats` waits
+    /// on the datasets lock first): `catch_panic` catches a panic on a later
+    /// poll and passes on an output that comes after a suspension.
+    /// `yield_now` suspends once, so the second poll is the one that panics
+    /// or ends.
+    #[tokio::test]
+    async fn catch_panic_covers_the_polls_after_a_suspension() {
+        let panicked = catch_panic(async {
+            tokio::task::yield_now().await;
+            panic!("after a suspension")
+        })
+        .await;
+        let payload = panicked.expect_err("a panic after a suspension came back as Ok");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"after a suspension"),
+            "the payload is not the panic's"
+        );
+        let ended = catch_panic(async {
+            tokio::task::yield_now().await;
+            7
+        })
+        .await;
+        assert_eq!(ended.ok(), Some(7));
+    }
+
     /// Helper to extract text from Content (Annotated<RawContent>)
     fn get_text_content(content: &Content) -> Option<String> {
         match &content.raw {
