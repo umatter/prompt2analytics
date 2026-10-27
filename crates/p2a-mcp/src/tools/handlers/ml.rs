@@ -1681,12 +1681,13 @@ mod tests {
                 .map(|i| ((i * (31 + 7 * k) + 3 * k) % 97) as f64 / 97.0)
                 .collect()
         };
+        let (c0, c1) = (c(0), c(1));
         let w: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
         let y: Vec<f64> = (0..n)
-            .map(|i| c(0)[i] + w[i] * (1.0 + c(1)[i]) + ((i * 13) % 11) as f64 / 20.0)
+            .map(|i| c0[i] + w[i] * (1.0 + c1[i]) + ((i * 13) % 11) as f64 / 20.0)
             .collect();
         let df = df!(
-            "y" => y, "w" => w, "c0" => c(0), "c1" => c(1), "c2" => c(2), "c3" => c(3)
+            "y" => y, "w" => w, "c0" => c0, "c1" => c1, "c2" => c(2), "c3" => c(3)
         )
         .unwrap();
         let server = AnalyticsServer::new();
@@ -1770,6 +1771,10 @@ mod tests {
     /// Both tree-ensemble tools keep every tree they grow, so they check their memory bound
     /// against `ensemble_bytes` before they fit, and refuse a fit over it with the settings
     /// and the rows that fit; the off profile does not refuse it.
+    ///
+    /// The off-profile calls go over the hosted budget through their trees alone: a BART fit
+    /// allocates its `n_bootstrap x n` draw matrix before its first checkpoint, so the large
+    /// draw count is sent only where the budget refuses it before anything is allocated.
     #[test]
     fn ensemble_tools_refuse_a_fit_over_the_memory_budget_before_fitting() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1777,12 +1782,13 @@ mod tests {
             .build()
             .unwrap();
         let server = rt.block_on(server_with_causal_data(5_000));
-        let large = || (forest(5_000, 100, false, 1), bart(5_000, 100, 6_000));
+        let large_draws = (forest(5_000, 100, false, 1), bart(5_000, 100, 6_000));
+        let large_trees = || (forest(5_000, 100, false, 1), bart(5_000, 100, 20));
         let settings = [
             "n_trees = 5000, max_depth = 100, min_node_size = 1 and honesty = false",
             "n_trees = 5000, max_depth = 100, n_bootstrap = 6000 and include_propensity = false",
         ];
-        let calls_hosted = calls(&rt, &server, &Limits::hosted(), true, large());
+        let calls_hosted = calls(&rt, &server, &Limits::hosted(), true, large_draws);
         for ((tool, r), settings) in calls_hosted.iter().zip(settings) {
             let t = text_of(r);
             assert_eq!(r.is_error, Some(true), "{t}");
@@ -1795,7 +1801,17 @@ mod tests {
                 "{t}"
             );
         }
-        for (_, r) in calls(&rt, &server, &Limits::off(), true, large()) {
+        let [_, (_, b)] = calls(&rt, &server, &Limits::hosted(), true, large_trees());
+        assert_eq!(b.is_error, Some(true), "{}", text_of(&b));
+        assert!(
+            text_of(&b).starts_with(
+                "`ml_bart_causal` with n_trees = 5000, max_depth = 100, n_bootstrap = 20 and \
+                 include_propensity = false on 5000 rows could hold up to "
+            ) && text_of(&b).contains("(ensemble_bytes: "),
+            "{}",
+            text_of(&b)
+        );
+        for (_, r) in calls(&rt, &server, &Limits::off(), true, large_trees()) {
             assert_eq!(r.is_error, Some(true));
             assert!(
                 text_of(&r).contains("failed") && !text_of(&r).contains("ensemble_bytes"),
