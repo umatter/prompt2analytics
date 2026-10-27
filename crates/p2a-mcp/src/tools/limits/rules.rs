@@ -1,8 +1,9 @@
 //! The rule tables of the request-limits catalogue: [`PARAM_RULES`] classifies every cost-bearing
 //! request field of the MCP tools, [`ROW_RULES`] names the tools whose cost grows faster than
-//! linearly in the dataset's row count.
+//! linearly in the dataset's row count, and [`PIVOT_RULES`] the tools whose output shape the
+//! distinct values of the dataset decide.
 
-use super::{Family, ParamRule, RowClass, RowRule, Rule};
+use super::{Family, ParamRule, PivotRule, RowClass, RowRule, Rule};
 
 const fn p(tool: &'static str, path: &'static str, rule: Rule) -> ParamRule {
     ParamRule { tool, path, rule }
@@ -928,6 +929,22 @@ pub static ROW_RULES: &[RowRule] = &[
     // changepoints, one scan each) is linear and shares the rule.
     row("ts_changepoint", RowClass::Quadratic),
 ];
+
+/// Tools that reshape a dataset from long to wide, whose output shape
+/// ([`super::Limits::check_pivot`]) is bounded by `pivot_columns` and `pivot_cells` before they
+/// run. The field names are the request's; the schema test checks that they name a required
+/// string (`dataset`, `on`, `values`) and a required list of strings (`index`) of the tool.
+///
+/// `munge_pivot` (polars' pivot) puts every distinct value of `on` in a column of its own,
+/// whatever the height of the input, and allocates its rows x columns output in one buffer
+/// before the dataset quotas see the result.
+pub static PIVOT_RULES: &[PivotRule] = &[PivotRule {
+    tool: "munge_pivot",
+    dataset_field: "dataset",
+    index_field: "index",
+    on_field: "on",
+    values_field: "values",
+}];
 
 /// Work of an ARIMA fit as the `arima_fit_work` budget counts it:
 /// `n_obs * ((p + q + 3)^2 + d)`, saturating at `u64::MAX`.
@@ -3127,6 +3144,46 @@ mod schema_tests {
                 h.check_tool_arguments(&tool, &args)
             );
             assert!(Limits::off().check_tool_arguments(&tool, &args).is_ok());
+        }
+    }
+
+    /// `Limits::check_pivot` passes a request whose fields it cannot read, so a renamed or
+    /// retyped field would silently switch the pivot budgets off: each rule's fields must be
+    /// required fields of its tool, a list of names for the index and a name for the others.
+    #[test]
+    fn pivot_rules_name_required_fields_of_their_tool() {
+        let tools: std::collections::HashMap<String, Value> = tools().into_iter().collect();
+        assert!(!super::PIVOT_RULES.is_empty());
+        for rule in super::PIVOT_RULES {
+            let schema = tools
+                .get(rule.tool)
+                .unwrap_or_else(|| panic!("pivot rule for unknown tool `{}`", rule.tool));
+            let required = schema["required"].as_array().unwrap();
+            let fields = [
+                (rule.dataset_field, json!("string")),
+                (rule.index_field, json!("array")),
+                (rule.on_field, json!("string")),
+                (rule.values_field, json!("string")),
+            ];
+            for (field, kind) in fields {
+                assert!(
+                    required.iter().any(|v| v == field),
+                    "{}.{field} is not required",
+                    rule.tool
+                );
+                assert_eq!(
+                    schema["properties"][field]["type"], kind,
+                    "{}.{field}",
+                    rule.tool
+                );
+            }
+            assert_eq!(
+                schema["properties"][rule.index_field]["items"]["type"], "string",
+                "{}.{}",
+                rule.tool, rule.index_field
+            );
+            // The governed paths and stdio check the shape before the handler runs.
+            assert!(super::super::pivot_rule(rule.tool).is_some());
         }
     }
 }
