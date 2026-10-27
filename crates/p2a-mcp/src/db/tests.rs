@@ -771,8 +771,10 @@ async fn a_failed_dataset_meta_delete_keeps_the_session() {
     assert_eq!(db.get_datasets_for_session("s1").await.unwrap().len(), 1);
 }
 
-/// `n` column names of `len` bytes each, distinct and in order.
+/// `n` column names of `len` bytes each, distinct and in order: each
+/// starts with its zero-padded index and `_`, which takes 7 bytes.
 fn column_names(n: usize, len: usize) -> Vec<String> {
+    assert!(len >= 7, "names shorter than 7 bytes are not distinct");
     (0..n)
         .map(|i| {
             format!("{i:06}_")
@@ -841,7 +843,7 @@ async fn dataset_meta_keeps_a_bounded_prefix_of_the_column_names() {
         .await
         .unwrap();
     assert_first(&saved.column_names, &full, MAX);
-    let narrow = column_names(3, 4);
+    let narrow = column_names(3, 8);
     let saved = db
         .save_dataset_meta(&meta("narrow", narrow.clone()))
         .await
