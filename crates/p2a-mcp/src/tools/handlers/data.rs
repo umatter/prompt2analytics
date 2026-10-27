@@ -309,9 +309,11 @@ fn footer_decoded_bytes(
     let Ok(schema) = reader.schema() else {
         return Ok(None);
     };
-    // The core loader refuses the polars type metadata that polars' schema
-    // conversion below panics on; refuse it here the same way, naming the
-    // column, so a call with quotas answers what one without them does.
+    // The core loader refuses the polars Categorical or Enum metadata that
+    // polars panics on converting or decoding, and a time zone polars cannot
+    // parse (on which the conversion below panics); refuse it here the same
+    // way, naming the column, so a call with quotas answers what one without
+    // them does.
     DataLoader::check_parquet_schema(&schema).map_err(|e| e.to_string())?;
     // A second handle for the page headers: the reader keeps its own.
     let Some((file, _)) = source.open() else {
@@ -1401,10 +1403,11 @@ async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
 /// quotas, and a call without them passes after the footer. A file whose
 /// footer cannot be read passes (the loader reports its error); one the
 /// check will not read is not loaded. A schema the core loader refuses
-/// (`DataLoader::check_parquet_schema`: polars type metadata that polars'
-/// schema conversion, `DataType::from_arrow_field`, panics on) is refused
-/// with the loader's reason, naming the column, and a footer or schema
-/// that still makes the check panic is not loaded either.
+/// (`DataLoader::check_parquet_schema`: polars Categorical or Enum metadata
+/// that polars' schema conversion or its nested parquet decoder panics on,
+/// or a time zone polars cannot parse) is refused with the loader's reason,
+/// naming the column, and a footer or schema that still makes the check
+/// panic is not loaded either.
 async fn admit_parquet_source(source: ParquetSource<'_>, name: &str) -> Result<(), NotAdmitted> {
     let footer = match std::panic::catch_unwind(|| read_footer(source)) {
         Ok(Ok(Some(footer))) => footer,

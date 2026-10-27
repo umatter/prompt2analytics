@@ -18,6 +18,7 @@ use p2a_mcp::path_jail::allowed_data_root;
 use p2a_mcp::transport::http::{AppState, build_app_with};
 use polars::prelude::{
     CategoricalPhysical, Categories, DataFrame, DataType, NamedFrom, ParquetWriter, Series,
+    TimeUnit, TimeZone,
 };
 use polars_parquet_format::thrift::protocol::{TCompactInputProtocol, TCompactOutputProtocol};
 use polars_parquet_format::{CompressionCodec, FileMetaData, PageHeader, PageType};
@@ -1110,4 +1111,69 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
         );
     }
     assert_eq!(stored_copies_of(&bytes), before, "the upload stored a copy");
+}
+
+#[tokio::test]
+async fn a_time_zone_polars_cannot_parse_is_refused_alike_with_and_without_quotas() {
+    // A top-level datetime column whose time zone polars cannot parse.
+    // Pre-fix the check before decoding (with quotas) panicked in polars'
+    // schema conversion, which unwraps the parse, and answered "could not
+    // read the file's schema", while a call without quotas answered polars'
+    // own error, naming no column. Both answer the core loader's refusal.
+    let dir = data_dir();
+    let path = dir.path().join("zoned.parquet");
+    let paris = DataType::Datetime(
+        TimeUnit::Microseconds,
+        TimeZone::opt_try_new(Some("Europe/Paris")).unwrap(),
+    );
+    let k = Series::new(
+        "k".into(),
+        [
+            1_700_000_000_123_456i64,
+            1_700_000_100_654_321,
+            1_700_000_250_000_007,
+        ],
+    )
+    .cast(&paris)
+    .unwrap();
+    let x = Series::new("x".into(), [0.3, 1.4, 2.6]);
+    let mut df = DataFrame::new(vec![x.into(), k.into()]).unwrap();
+    write_parquet(&mut df, &path);
+    rewrite_footer(&path, |footer| {
+        let schema = arrow_schema(footer);
+        let engine = base64::engine::general_purpose::STANDARD;
+        let mut ipc = engine.decode(schema.as_ref().unwrap()).unwrap();
+        let at = ipc.windows(12).position(|w| w == b"Europe/Paris").unwrap();
+        ipc[at..at + 12].copy_from_slice(b"Europe/Parix");
+        *schema = Some(engine.encode(ipc));
+    });
+    let content = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&path).unwrap());
+    let upload = json!({"content": content, "filename": "zoned.parquet"});
+    let load = json!({"path": path.to_string_lossy(), "name": "zoned"});
+
+    let (with_quotas, _) = app_with_quota(8 * MIB).await;
+    let (without, _) = build_app_with(&local(), ExecConfig::default())
+        .await
+        .unwrap();
+    for (app, mode) in [(&with_quotas, "with quotas"), (&without, "without")] {
+        for (tool, args) in [("upload_dataset", &upload), ("load_dataset", &load)] {
+            let sid = new_session(app).await;
+            let (status, body) = call(app, &sid, tool, args.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{mode}, {tool}: {body}");
+            assert_eq!(
+                body["data"]["success"],
+                json!(false),
+                "{mode}, {tool}: {body}"
+            );
+            let text = body.to_string();
+            assert!(
+                text.contains("Cannot read column 'k'"),
+                "{mode}, {tool}: {body}"
+            );
+            assert!(
+                text.contains("its time zone 'Europe/Parix' is not one polars can parse"),
+                "{mode}, {tool}: {body}"
+            );
+        }
+    }
 }
