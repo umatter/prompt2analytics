@@ -201,6 +201,13 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
   (`dense_rows`), or whose run time grows with its cube (`cubic_rows`) or square
   (`quadratic_rows`), refuse larger datasets with a message that suggests
   sampling with `munge_sample`.
+- **Pivot shape.** Before `munge_pivot` runs, the distinct values of its `on`
+  column and of its `index` columns are counted in the dataset it names. A
+  pivot whose output would have more than `pivot_columns` columns (the index
+  columns plus one per distinct `on` value) or more than `pivot_cells` cells
+  (rows times columns) is refused: polars allocates the whole wide table
+  before the dataset quotas can see it, so a small long table could otherwise
+  make one call's memory peak far above what the quotas allow.
 - **Named budgets.** Sizes the handlers compute while they run: image pixels,
   table cells, join output, generated data, export and file sizes, spatial
   links, the work of an ARIMA fit, SQL results, the conversation store and the
@@ -208,9 +215,10 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
 - **Response size.** A tool's text and image output above `response_bytes`
   (16 MiB) is replaced by a refusal.
 
-An argument, row or response-size refusal answers 422 `limit_exceeded` with
-`details {parameter, requested, limit}` and a message that names the parameter,
-the limit and what to change. From a sandboxed server in open mode:
+An argument, row, pivot-shape or response-size refusal answers 422
+`limit_exceeded` with `details {parameter, requested, limit}` and a message that
+names the parameter, the limit and what to change. From a sandboxed server in
+open mode:
 
 ```json
 {"success":false,"error":"Parameter `n_boot` = 1000000 exceeds this server's limit of 10000 (replications) for `regression_bootstrap_cov`. Use a smaller value.","code":"limit_exceeded","details":{"parameter":"n_boot","requested":"1000000","limit":"10000"}}
@@ -517,6 +525,8 @@ Named budgets:
 | `max_groups` | groups compared pairwise | 100 | none |
 | `join_output_rows` | predicted output rows of a join | 2,000,000 | none |
 | `onehot_levels` | levels a one-hot encoding expands | 500 | none |
+| `pivot_columns` | output columns of `munge_pivot`: the index columns plus one per distinct value of `on`, counted before the pivot | 10,000 | none |
+| `pivot_cells` | output cells of `munge_pivot`: rows (distinct combinations of `index`) × columns, counted before the pivot | 4,000,000 | none |
 | `str_split_parts` | parts `str_split` produces | 100 | none |
 | `str_pad_width` | target width of string padding (no current tool reads it) | 10,000 | none |
 | `generated_cells` | cells `generate_random_data` produces | 10,000,000 | none |
@@ -555,6 +565,16 @@ default 60 s: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a throttled shared
 CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. Raising it
 above about 3.5 times the hosted value lets a fit run past the deadline and keep
 its slot, since the fit has no checkpoint.
+
+The pivot budgets were measured on a release build. polars fills one buffer
+with every output cell before it builds the wide table's columns, so a pivot's
+peak memory grows with its output, not with the long table it reads: about
+25 bytes per cell for numeric values and about 65 bytes for string values, plus
+about 870 bytes per output column. At the hosted `pivot_cells` of 4,000,000 a
+pivot of string values peaks near 256 MiB (the hosted `P2A_MAX_ALLOC_MB`) and
+one of numbers near 100 MiB; at the hosted `pivot_columns` of 10,000 a one-row
+pivot peaks under 10 MiB. A refusal of `pivot_columns` names `on`, one of
+`pivot_cells` names `index`.
 
 ## Must-do checklist
 
