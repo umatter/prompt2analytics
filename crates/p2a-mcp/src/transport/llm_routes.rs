@@ -2289,8 +2289,8 @@ mod capture_tests {
     /// `db`, the session's id, and the receiver of the executor's events.
     /// The caller keeps the receiver for the whole test, so the executor
     /// sends to a client that is still listening; nothing reads it, and its
-    /// buffer of 16 holds every event of the two calls a test makes (a call
-    /// sends at most three).
+    /// buffer of 16 holds every event of the one or two calls a test makes
+    /// (a call sends at most three).
     async fn tracking_executor(
         db: &Arc<DbConnection>,
     ) -> (
