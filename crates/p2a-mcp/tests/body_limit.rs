@@ -4,7 +4,7 @@
 //! declared above it answers 413 with the plain-text body `length limit
 //! exceeded` before it is read, and one without a declared length is cut off
 //! at it. The routes that parse a JSON body accept one up to that cap,
-//! not only up to axum's own 2 MB extractor default, except in the hosted
+//! not only up to axum's own 2 MiB extractor default, except in the hosted
 //! profile, where they keep 2 MiB (or the cap, when it is lower): a body is
 //! parsed before the governor's memory admission sees the call.
 //!
@@ -43,6 +43,7 @@ const READ_REFUSAL: &str = "Failed to buffer the request body: length limit exce
 
 /// Run [`case`] for `name` in a child process of this binary, with the body
 /// cap variable set to `cap_mb` (unset for `None`) and a data root of its own.
+/// The child's output is shown only when it fails.
 fn run_case(name: &str, cap_mb: Option<&str>) {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("p2a-body-limit-{name}-{}", std::process::id()));
@@ -50,16 +51,22 @@ fn run_case(name: &str, cap_mb: Option<&str>) {
     std::fs::create_dir_all(&root).unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap());
     child
-        .args(["--exact", "case", "--test-threads=1", "--nocapture"])
+        .args(["--exact", "case", "--test-threads=1"])
         .env(CASE_VAR, name)
         .env("P2A_DATA_ROOT", &root);
     match cap_mb {
         Some(mb) => child.env(CAP_VAR, mb),
         None => child.env_remove(CAP_VAR),
     };
-    let status = child.status().unwrap();
+    let out = child.output().unwrap();
     let _ = std::fs::remove_dir_all(&root);
-    assert!(status.success(), "case {name} failed: {status}");
+    assert!(
+        out.status.success(),
+        "case {name} failed: {}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -354,9 +361,14 @@ async fn check_served_limits(case: &Case) {
         // Declared above the cap: refused from the headers alone.
         let answer = post(addr, uri, case.cap + 1, b"").await;
         assert_refused(&answer, CAP_REFUSAL, uri);
-        // Within the cap but above the parse limit: refused while it is read.
+        // Within the cap but above the parse limit: refused while it is read,
+        // each route with a body of its own shape.
         if case.parsed < case.cap {
-            let body = create_dataset_body(&sid, case.parsed + 1);
+            let body = if uri.ends_with("/upload_dataset") {
+                upload_dataset_body(&sid, case.parsed + 1)
+            } else {
+                create_dataset_body(&sid, case.parsed + 1)
+            };
             let answer = post_all(addr, uri, &body).await;
             assert_refused(&answer, READ_REFUSAL, uri);
         }
