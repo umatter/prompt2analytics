@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
+    Extension,
     extract::{
         State,
         ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
@@ -181,16 +182,23 @@ impl WsState {
 }
 
 /// WebSocket upgrade handler.
+///
+/// The session runs in a task of its own, after the connection it was
+/// upgraded from has left the server's connection tasks, so it takes the
+/// server's hold on the process-wide limits along (when the router carries
+/// one, `http::LimitsHold::attach`) and keeps it until the session ends.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<super::http::AppState>,
+    hold: Option<Extension<super::http::SharedHold>>,
 ) -> impl IntoResponse {
     // Bound messages and frames like HTTP request bodies, and the messages
     // waiting behind the one being handled to the same size in total.
     let cap = super::middleware::max_request_body_bytes();
     ws.max_message_size(cap)
         .max_frame_size(cap)
-        .on_upgrade(move |socket| {
+        .on_upgrade(move |socket| async move {
+            let _hold = hold;
             handle_socket(
                 socket,
                 state.server,
@@ -198,6 +206,7 @@ pub async fn ws_handler(
                 state.governor,
                 cap,
             )
+            .await
         })
 }
 

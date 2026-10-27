@@ -880,7 +880,11 @@ Auto-discovered guidance:
   in one binary run in parallel). Select limits with the thread-local `limits::with_limits` and
   `resource::with_alloc_ceiling`. The exceptions: a test binary whose tests all share one configuration installs
   it once inside a `OnceLock` (`crates/p2a-mcp/tests/isolation.rs`), and p2a-core's `global_ceiling_round_trips`
-  sets only a harmless ceiling (`usize::MAX - 1`) and restores `None`.
+  sets only a harmless ceiling (`usize::MAX - 1`) and restores `None`. `transport::http::serve` and
+  `start_http_transport` install the limits of the configuration they serve and refuse a start whose limits or
+  process policies differ from those of a server still running in the process (held until its last connection or
+  websocket session closes), so a test serves a configuration whose resource profile is off, with no overrides and
+  the default policies, or runs in a binary whose servers share one config (`crates/p2a-mcp/tests/serve_limits.rs`).
 - **Clippy runs but does not gate**: p2a-core has a pre-existing backlog of clippy violations, and
   `Cargo.toml` `[workspace.lints]` allows a long list of lints (dead_code, unused_imports, too_many_arguments, ...).
   Do not "fix" the allow-list to make a build green; do keep new code warning-free.

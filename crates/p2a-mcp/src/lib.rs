@@ -113,8 +113,13 @@ impl Drop for EmbeddedServer {
 /// Start the embedded server in the background
 ///
 /// Binds before returning, so a refused or failed bind is reported here and
-/// the handle carries the real port (also when `port` is 0). The server uses
-/// the same guarded start path as `p2a-mcp --transport http`.
+/// the handle carries the real port (also when `port` is 0). A start next to
+/// a server of this process that runs under other request limits or process
+/// policies is refused here too (`transport::http::hold_limits`). The
+/// embedded server is always a local one (the off profile, no session
+/// directories), so it is refused while, for example, an open public server
+/// of the same process still serves anything. The server uses the same
+/// guarded start path as `p2a-mcp --transport http`.
 ///
 /// Returns an `EmbeddedServer` handle that can be used to get the URL
 /// or shut down the server.
@@ -180,10 +185,23 @@ pub async fn start_embedded_server(
 
     // Bind first, so the guard's refusal or a bind error returns to the caller.
     let listener = transport::http::bind(&server_config).await?;
-    let port = listener.local_addr()?.port();
+    let bound = listener.local_addr()?;
+    // Take the hold `serve` takes, for the configuration as `serve` reads it
+    // (at the bound address), so that limits or process policies that
+    // conflict with a server already running in this process are refused
+    // here, not only in the spawned task's log. `serve` shares this hold;
+    // the task drops it once `serve` has returned.
+    let held = {
+        let mut served = server_config.clone();
+        served.http.addr = bound;
+        let limits = tools::limits::resolve(&served).map_err(transport::TransportError::Config)?;
+        transport::http::hold_limits(&limits, &exec::ExecConfig::from_config(&served))?
+    };
+    let port = bound.port();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     tokio::spawn(async move {
+        let _held = held;
         let shutdown = async {
             let _ = shutdown_rx.await;
             tracing::info!("Embedded server shutting down");
