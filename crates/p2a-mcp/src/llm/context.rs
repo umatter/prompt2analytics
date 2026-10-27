@@ -105,28 +105,6 @@ fn needs_unicode_escape(c: char) -> bool {
     c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
 }
 
-/// Test oracle: every character some line-splitting rule breaks a line at,
-/// i.e. Unicode's mandatory breaks (UAX #14 classes BK, CR, LF and NL) and
-/// the separators Python's `str.splitlines` also splits on. Written out by
-/// hand rather than derived from [`needs_unicode_escape`], so the tests do
-/// not just re-check the predicate `json_str` uses. The one copy shared by
-/// the tests here and in `transport::llm_routes`.
-#[cfg(test)]
-pub(crate) fn is_any_line_break(c: char) -> bool {
-    matches!(
-        c,
-        '\n' | '\r'
-            | '\u{b}'
-            | '\u{c}'
-            | '\u{1c}'
-            | '\u{1d}'
-            | '\u{1e}'
-            | '\u{85}'
-            | '\u{2028}'
-            | '\u{2029}'
-    )
-}
-
 /// Build the dataset context for the system prompt within the default byte
 /// budget (64 KiB). See [`build_dataset_context_bounded`].
 pub fn build_enhanced_dataset_context(datasets: &HashMap<String, Dataset>) -> Option<String> {
@@ -929,8 +907,35 @@ pub struct ProcessedContext {
     pub turns_summarized: usize,
 }
 
+/// Helpers shared by this module's tests and other modules' tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// Test oracle: every character some line-splitting rule breaks a line
+    /// at, i.e. Unicode's mandatory breaks (UAX #14 classes BK, CR, LF and
+    /// NL) and the separators Python's `str.splitlines` also splits on.
+    /// Written out by hand rather than derived from
+    /// [`needs_unicode_escape`](super::needs_unicode_escape), so the tests do
+    /// not just re-check the predicate `json_str` uses. The one copy shared
+    /// by the tests here and in `transport::llm_routes`.
+    pub(crate) fn is_any_line_break(c: char) -> bool {
+        matches!(
+            c,
+            '\n' | '\r'
+                | '\u{b}'
+                | '\u{c}'
+                | '\u{1c}'
+                | '\u{1d}'
+                | '\u{1e}'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::is_any_line_break;
     use super::*;
     use crate::llm::{ProviderType, ToolDefinition};
 
