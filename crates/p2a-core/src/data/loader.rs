@@ -38,6 +38,147 @@ pub enum LoadError {
 
     #[error("SAS error: {0}")]
     SasError(#[from] super::sas::SasError),
+
+    /// A parquet column whose schema polars cannot turn into a column type.
+    #[error("Cannot read column '{column}': {reason}")]
+    ParquetSchema { column: String, reason: String },
+}
+
+/// Refuse a parquet file whose schema polars' conversion to column types
+/// (`DataType::from_arrow_field`) would panic on, naming the column.
+///
+/// polars keeps a Categorical or Enum column's type in the field metadata
+/// of the file's ARROW:schema, as text it parses with `unwrap` and
+/// `split_at`, so malformed text in a file panics the reader. This checks
+/// that text the way polars 0.52 parses it, in every field it would reach
+/// (nested list, struct and map fields included), before the reader
+/// converts it; a file polars wrote passes.
+fn check_parquet_schema(schema: &ArrowSchema) -> Result<(), LoadError> {
+    for field in schema.iter_values() {
+        check_dtype(&field.dtype, field.metadata.as_deref()).map_err(|reason| {
+            LoadError::ParquetSchema {
+                column: field.name.to_string(),
+                reason,
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// [`check_parquet_schema`] of a field of type `dtype` with the metadata
+/// `md` and the fields nested in it, following `DataType::from_arrow` arm
+/// by arm where it reads metadata or recurses.
+fn check_dtype<M: MetaDataExt>(dtype: &ArrowDataType, md: Option<&M>) -> Result<(), String> {
+    match dtype {
+        // The enum metadata wins over the categorical one, as in polars;
+        // a dictionary of other values is read as its values, without
+        // metadata.
+        ArrowDataType::Dictionary(_, value, _) => {
+            if let Some(labels) = md.and_then(|md| md.pl_enum_metadata()) {
+                check_enum_metadata(labels)
+            } else if let Some(categories) = md.and_then(|md| md.pl_categorical_metadata()) {
+                check_categorical_metadata(categories)
+            } else {
+                check_dtype::<M>(value, None)
+            }
+        }
+        ArrowDataType::List(inner)
+        | ArrowDataType::LargeList(inner)
+        | ArrowDataType::FixedSizeList(inner, _)
+        | ArrowDataType::Map(inner, _) => check_nested(inner),
+        ArrowDataType::Struct(fields) => fields.iter().try_for_each(check_nested),
+        _ => Ok(()),
+    }
+}
+
+/// [`check_dtype`] of the field `inner` nested in another, whose reason
+/// names it.
+fn check_nested(inner: &ArrowField) -> Result<(), String> {
+    check_dtype(&inner.dtype, inner.metadata.as_deref())
+        .map_err(|reason| format!("its nested field '{}': {reason}", shown(&inner.name)))
+}
+
+/// At most 40 characters of `text` from a file, for an error message.
+fn shown(text: &str) -> String {
+    match text.char_indices().nth(40) {
+        Some((at, _)) => format!("{}...", &text[..at]),
+        None => text.to_string(),
+    }
+}
+
+/// The text after a length `len` (in bytes) of `text`, or why there is
+/// none: polars takes it with `split_at`, which panics when `len` runs past
+/// the end or into a character.
+fn after_length<'a>(text: &'a str, len: &str, what: &str) -> Result<(&'a str, &'a str), String> {
+    let len: usize = len
+        .parse()
+        .map_err(|_| format!("the {what} length '{}' is not a number", shown(len)))?;
+    match (text.get(..len), text.get(len..)) {
+        (Some(head), Some(rest)) => Ok((head, rest)),
+        _ => Err(format!(
+            "the {what} length {len} runs past the end of the metadata or into a character"
+        )),
+    }
+}
+
+/// Check polars' Enum metadata `labels`: each label as its length in bytes,
+/// `;` and the label, the labels distinct (polars builds its frozen
+/// categories from them and unwraps the result).
+fn check_enum_metadata(mut labels: &str) -> Result<(), String> {
+    let malformed = |what: String| format!("its polars enum metadata is malformed: {what}");
+    let mut seen = std::collections::HashSet::new();
+    while !labels.is_empty() {
+        let (len, rest) = labels
+            .split_once(';')
+            .ok_or_else(|| malformed(format!("no label length before '{}'", shown(labels))))?;
+        let (label, rest) = after_length(rest, len, "label").map_err(malformed)?;
+        if !seen.insert(label) {
+            return Err(malformed(format!(
+                "the label '{}' appears twice",
+                shown(label)
+            )));
+        }
+        labels = rest;
+    }
+    // polars refuses (and unwraps) as many labels as a u32 code can hold.
+    if seen.len() >= u32::MAX as usize {
+        return Err(malformed("more labels than a u32 code holds".to_string()));
+    }
+    Ok(())
+}
+
+/// Check polars' Categorical metadata `categories`: the categories' name
+/// and namespace, each as its length in bytes, `;` and the text, then the
+/// code width (`u8`, `u16` or `u32`) and `;`.
+fn check_categorical_metadata(categories: &str) -> Result<(), String> {
+    let malformed = |what: String| format!("its polars categorical metadata is malformed: {what}");
+    let mut rest = categories;
+    for what in ["name", "namespace"] {
+        let (len, after) = rest
+            .split_once(';')
+            .ok_or_else(|| malformed(format!("no {what} length")))?;
+        (_, rest) = after_length(after, len, what).map_err(malformed)?;
+    }
+    let (physical, _) = rest
+        .split_once(';')
+        .ok_or_else(|| malformed("no code width".to_string()))?;
+    physical.parse::<CategoricalPhysical>().map_err(|()| {
+        malformed(format!(
+            "the code width '{}' is not u8, u16 or u32",
+            shown(physical)
+        ))
+    })?;
+    Ok(())
+}
+
+/// Read a whole parquet file from `reader`, refusing one whose schema
+/// [`check_parquet_schema`] refuses before it is decoded.
+fn read_parquet<R: polars::io::mmap::MmapBytesReader>(reader: R) -> Result<DataFrame, LoadError> {
+    let mut reader = ParquetReader::new(reader);
+    // The reader keeps the schema it reads here for `finish`.
+    let schema = reader.schema()?;
+    check_parquet_schema(&schema)?;
+    Ok(reader.finish()?)
 }
 
 /// Data loader supporting multiple file formats.
@@ -102,10 +243,18 @@ impl DataLoader {
     }
 
     /// Load a Parquet file eagerly (entire file into memory).
+    ///
+    /// A file whose polars type metadata is malformed is refused with
+    /// [`LoadError::ParquetSchema`] naming the column, before it is decoded.
     pub fn load_parquet(path: impl AsRef<Path>) -> Result<DataFrame, LoadError> {
         let file = std::fs::File::open(path.as_ref())?;
-        let df = ParquetReader::new(file).finish()?;
-        Ok(df)
+        read_parquet(file)
+    }
+
+    /// Load a Parquet file held in memory (an upload, say) eagerly, as
+    /// [`DataLoader::load_parquet`] loads one from a path.
+    pub fn load_parquet_bytes(bytes: &[u8]) -> Result<DataFrame, LoadError> {
+        read_parquet(std::io::Cursor::new(bytes))
     }
 
     /// Load a CSV file with optional row limit (useful for previewing large files).
@@ -156,10 +305,10 @@ impl DataLoader {
         let df = if let Some(limit) = n_rows {
             // Read entire file but take only first n rows
             // Note: For very large files, consider using streaming readers
-            let full_df = ParquetReader::new(file).finish()?;
+            let full_df = read_parquet(file)?;
             full_df.head(Some(limit))
         } else {
-            ParquetReader::new(file).finish()?
+            read_parquet(file)?
         };
         Ok(df)
     }
@@ -551,5 +700,222 @@ mod tests {
         assert_eq!(df.height(), 3);
         // 3 columns: id, name, value
         assert_eq!(df.width(), 3);
+    }
+
+    /// Write `df` as a parquet file `name` in `dir`.
+    fn parquet_file(dir: &Path, name: &str, mut df: DataFrame) -> PathBuf {
+        let path = dir.join(name);
+        ParquetWriter::new(std::fs::File::create(&path).unwrap())
+            .finish(&mut df)
+            .unwrap();
+        path
+    }
+
+    /// A frame of the column `k` beside a noisy float column `x`.
+    fn frame_of(k: Series) -> DataFrame {
+        let x: Vec<f64> = (0..k.len()).map(|i| i as f64 * 1.1 + 0.3).collect();
+        DataFrame::new(vec![Series::new("x".into(), x).into(), k.into()]).unwrap()
+    }
+
+    /// A frame of a column `k` of `labels` (a row each) cast to `dtype`.
+    fn frame_with(dtype: &DataType, labels: &[&str]) -> DataFrame {
+        frame_of(Series::new("k".into(), labels).cast(dtype).unwrap())
+    }
+
+    /// A frame of a column `k` of one-row lists of `labels` cast to lists of
+    /// `dtype`.
+    fn list_frame_with(dtype: &DataType, labels: &[&str]) -> DataFrame {
+        let lists: Vec<Series> = labels
+            .iter()
+            .map(|label| Series::new("".into(), [*label]))
+            .collect();
+        let k = Series::new("k".into(), lists)
+            .cast(&DataType::List(Box::new(dtype.clone())))
+            .unwrap();
+        frame_of(k)
+    }
+
+    /// A frame of a column `k` of structs of one field `c` of `labels` cast
+    /// to `dtype`.
+    fn struct_frame_with(dtype: &DataType, labels: &[&str]) -> DataFrame {
+        let c = Series::new("c".into(), labels).cast(dtype).unwrap();
+        let k = StructChunked::from_series("k".into(), c.len(), [c].iter()).unwrap();
+        frame_of(k.into_series())
+    }
+
+    /// A Categorical column type of polars' categories `name` in the default
+    /// namespace with `physical` codes.
+    fn categorical(name: &str, physical: CategoricalPhysical) -> DataType {
+        DataType::from_categories(Categories::new(name.into(), "".into(), physical))
+    }
+
+    /// An Enum column type of `labels`.
+    fn enumeration(labels: &[&str]) -> DataType {
+        DataType::from_frozen_categories(FrozenCategories::new(labels.iter().copied()).unwrap())
+    }
+
+    /// Rewrite the base64 ARROW:schema of the parquet file at `path` in
+    /// place, with `from` replaced by `to` (of the same length) in its
+    /// decoded IPC bytes: the base64 text keeps its length, so the footer
+    /// keeps its layout and still parses.
+    fn edit_arrow_schema(path: &Path, from: &[u8], to: &[u8]) {
+        use base64::Engine;
+        assert_eq!(from.len(), to.len());
+        let engine = base64::engine::general_purpose::STANDARD;
+        let encoded = {
+            let mut reader = ParquetReader::new(std::fs::File::open(path).unwrap());
+            let metadata = reader.get_metadata().unwrap();
+            let kv = metadata.key_value_metadata().as_ref().unwrap();
+            let schema = kv.iter().find(|kv| kv.key == "ARROW:schema").unwrap();
+            schema.value.clone().unwrap()
+        };
+        let mut ipc = engine.decode(&encoded).unwrap();
+        let at = ipc.windows(from.len()).position(|w| w == from).unwrap();
+        ipc[at..at + to.len()].copy_from_slice(to);
+        let edited = engine.encode(&ipc);
+        assert_eq!(edited.len(), encoded.len());
+        let mut bytes = std::fs::read(path).unwrap();
+        let at = bytes
+            .windows(encoded.len())
+            .position(|w| w == encoded.as_bytes())
+            .unwrap();
+        bytes[at..at + edited.len()].copy_from_slice(edited.as_bytes());
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// The text of the error loading the parquet file at `path` every way
+    /// the loader reads one, which must agree.
+    fn parquet_error(path: &Path) -> String {
+        let Err(direct) = DataLoader::load_parquet(path) else {
+            panic!("{path:?} loaded");
+        };
+        let Err(by_extension) = DataLoader::load(path) else {
+            panic!("{path:?} loaded by its extension");
+        };
+        let Err(limited) = DataLoader::load_parquet_with_limit(path, Some(1)) else {
+            panic!("{path:?} loaded with a row limit");
+        };
+        let Err(in_memory) = DataLoader::load_parquet_bytes(&std::fs::read(path).unwrap()) else {
+            panic!("{path:?} loaded from its bytes");
+        };
+        let text = direct.to_string();
+        assert_eq!(by_extension.to_string(), text);
+        assert_eq!(limited.to_string(), text);
+        assert_eq!(in_memory.to_string(), text);
+        text
+    }
+
+    /// The error loading `df` written as a parquet file whose ARROW:schema
+    /// has `from` replaced by `to`. It names the column `k`.
+    fn refusal_of(df: DataFrame, from: &str, to: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = parquet_file(dir.path(), "edited.parquet", df);
+        edit_arrow_schema(&path, from.as_bytes(), to.as_bytes());
+        let text = parquet_error(&path);
+        assert!(text.contains("column 'k'"), "{text}");
+        text
+    }
+
+    #[test]
+    fn parquet_categorical_metadata_polars_panics_on_is_refused_naming_the_column() {
+        // polars keeps a Categorical column's categories (name, namespace
+        // and code width) in its ARROW:schema metadata, here "3;lab0;u32;",
+        // and parses it with unwrap and split_at. Pre-fix each of these
+        // edits panicked the reader in polars' schema conversion.
+        let lab = || frame_with(&categorical("lab", CategoricalPhysical::U32), &["lo", "hi"]);
+        for (to, says) in [
+            ("3;lab0;u99;", "the code width 'u99' is not u8, u16 or u32"),
+            ("x;lab0;u32;", "the name length 'x' is not a number"),
+            ("99;ab0;u32;", "the name length 99 runs past the end"),
+            ("3;lab9;u32;", "the namespace length 9 runs past the end"),
+            ("3;lab0;u32:", "no code width"),
+            ("3:lab0:u32:", "no name length"),
+        ] {
+            let text = refusal_of(lab(), "3;lab0;u32;", to);
+            assert!(
+                text.contains("polars categorical metadata is malformed"),
+                "{to}: {text}"
+            );
+            assert!(text.contains(says), "{to}: {text}");
+        }
+        // A length that ends inside a character ('é' is two bytes).
+        let accented = frame_with(&categorical("éa", CategoricalPhysical::U32), &["lo"]);
+        let text = refusal_of(accented, "3;éa0;", "1;éa0;");
+        assert!(
+            text.contains(
+                "the name length 1 runs past the end of the metadata or into a character"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn parquet_enum_metadata_polars_panics_on_is_refused_naming_the_column() {
+        // polars keeps an Enum column's labels in its ARROW:schema metadata,
+        // here "2;lo2;hi", and parses them with unwrap and split_at into
+        // categories that must be distinct. Pre-fix each of these edits
+        // panicked the reader in polars' schema conversion.
+        let lohi = || frame_with(&enumeration(&["lo", "hi"]), &["lo", "hi"]);
+        for (to, says) in [
+            ("2;lo2;lo", "the label 'lo' appears twice"),
+            ("2;lo9;hi", "the label length 9 runs past the end"),
+            ("2;lox;hi", "the label length 'x' is not a number"),
+            ("2;lo2:hi", "no label length before '2:hi'"),
+        ] {
+            let text = refusal_of(lohi(), "2;lo2;hi", to);
+            assert!(
+                text.contains("polars enum metadata is malformed"),
+                "{to}: {text}"
+            );
+            assert!(text.contains(says), "{to}: {text}");
+        }
+        let accented = frame_with(&enumeration(&["é", "hi"]), &["é", "hi"]);
+        let text = refusal_of(accented, "2;é2;hi", "1;é2;hi");
+        assert!(
+            text.contains(
+                "the label length 1 runs past the end of the metadata or into a character"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn malformed_metadata_of_a_nested_field_is_refused_naming_the_column_and_field() {
+        // polars converts the type of each field nested in a list or a
+        // struct the same way, so the same metadata panicked it there.
+        let dtype = categorical("lab", CategoricalPhysical::U32);
+        let text = refusal_of(list_frame_with(&dtype, &["lo", "hi"]), "u32;", "u99;");
+        assert!(text.contains("its nested field '"), "{text}");
+        assert!(text.contains("the code width 'u99'"), "{text}");
+        let text = refusal_of(struct_frame_with(&dtype, &["lo", "hi"]), "u32;", "u99;");
+        assert!(text.contains("its nested field 'c'"), "{text}");
+        assert!(text.contains("the code width 'u99'"), "{text}");
+    }
+
+    #[test]
+    fn categorical_and_enum_columns_polars_writes_still_load() {
+        // The check passes the metadata polars writes, at the top level and
+        // nested, and the columns load as written.
+        let dir = tempfile::tempdir().unwrap();
+        let labels = ["lo", "hi", "lo", "mid"];
+        let cat = categorical("lab", CategoricalPhysical::U32);
+        let narrow = categorical("nar", CategoricalPhysical::U8);
+        let accented = categorical("éa", CategoricalPhysical::U16);
+        let lohi = enumeration(&["lo", "mid", "hi"]);
+        for (name, df) in [
+            ("categorical", frame_with(&cat, &labels)),
+            ("narrow", frame_with(&narrow, &labels)),
+            ("accented", frame_with(&accented, &labels)),
+            ("enum", frame_with(&lohi, &labels)),
+            ("list", list_frame_with(&cat, &labels)),
+            ("struct", struct_frame_with(&lohi, &labels)),
+        ] {
+            let path = parquet_file(dir.path(), &format!("{name}.parquet"), df.clone());
+            let loaded = DataLoader::load_parquet(&path).unwrap();
+            assert_eq!(loaded.schema(), df.schema(), "{name}");
+            assert!(loaded.equals_missing(&df), "{name}: {loaded} vs {df}");
+            let in_memory = DataLoader::load_parquet_bytes(&std::fs::read(&path).unwrap());
+            assert!(in_memory.unwrap().equals_missing(&df), "{name}");
+        }
     }
 }

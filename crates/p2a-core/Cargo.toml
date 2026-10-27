@@ -101,6 +101,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 criterion.workspace = true
 rand_chacha.workspace = true
 tempfile = "3.10"
+# The data loader's tests edit a parquet file's base64 ARROW:schema.
+base64 = { workspace = true }
 memory-stats = "1.2"
 serde_json = { workspace = true }
 chrono = "0.4"
