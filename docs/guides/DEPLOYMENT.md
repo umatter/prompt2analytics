@@ -399,7 +399,10 @@ not.
   cross-origin access.
 - **`/ws`** exists only with the `websocket` feature, is off in open public mode
   unless `P2A_ENABLE_WS` is set, runs every tool message through the governor
-  and the request limits, and caps messages and frames at the body cap.
+  and the request limits, cancels the running call when its connection closes
+  or drops, and caps messages and frames at the body cap. At most 16 messages,
+  and the body cap in bytes, wait behind the one a connection handles; one more
+  is refused with `connection_busy`.
 - **Token.** With `P2A_ACCESS_TOKEN`, every route except `/health` and CORS
   preflight needs `Authorization: Bearer <token>`; without it the answer is 401,
   plain text, with `WWW-Authenticate: Bearer`.

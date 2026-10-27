@@ -64,6 +64,9 @@ pub(crate) fn build_cors(config: &ServerConfig) -> CorsLayer {
     }
 }
 
+/// The environment variable that sets [`max_request_body_bytes`], in MiB.
+pub(crate) const MAX_HTTP_BODY_VAR: &str = "P2A_MAX_HTTP_BODY_MB";
+
 /// Maximum accepted HTTP request body size, in bytes.
 ///
 /// Caps memory use from oversized requests (e.g. large base64 dataset uploads)
@@ -72,7 +75,7 @@ pub(crate) fn build_cors(config: &ServerConfig) -> CorsLayer {
 /// bodies and does not affect SSE/streaming responses.
 pub(crate) fn max_request_body_bytes() -> usize {
     const DEFAULT_MB: usize = 32;
-    let mb = std::env::var("P2A_MAX_HTTP_BODY_MB")
+    let mb = std::env::var(MAX_HTTP_BODY_VAR)
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&mb| mb > 0)
