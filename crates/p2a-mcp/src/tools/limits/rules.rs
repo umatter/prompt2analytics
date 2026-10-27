@@ -2095,10 +2095,10 @@ mod tests {
                     format!(
                         "`{tool}` cannot fit column `y`: it holds a nonzero value of magnitude \
                          {found}, below this server's floor of 1e-100 for an ARIMA fit \
-                         (arima_fit_work). Arithmetic on numbers that small is many times \
-                         slower, and the fit cannot be stopped once it starts. Set values that \
-                         small to 0, or rescale the column, for example multiply it by a power \
-                         of ten."
+                         (arima_fit_work). Values that small can make the fit's arithmetic many \
+                         times slower, and the fit cannot be stopped once it starts. Set values \
+                         that small to 0, or rescale the column, for example multiply it by a \
+                         power of ten."
                     )
                 );
             }

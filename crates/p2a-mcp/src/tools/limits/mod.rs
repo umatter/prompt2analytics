@@ -1114,9 +1114,9 @@ impl Limits {
             message: format!(
                 "`{tool}` cannot fit column `{column}`: it holds a nonzero value of magnitude \
                  {found:e}, below this server's floor of {ARIMA_MIN_MAGNITUDE:e} for an ARIMA fit \
-                 ({KNOB}). Arithmetic on numbers that small is many times slower, and the fit \
-                 cannot be stopped once it starts. Set values that small to 0, or rescale the \
-                 column, for example multiply it by a power of ten."
+                 ({KNOB}). Values that small can make the fit's arithmetic many times slower, \
+                 and the fit cannot be stopped once it starts. Set values that small to 0, or \
+                 rescale the column, for example multiply it by a power of ten."
             ),
             tool: tool.to_string(),
             parameter: "column".to_string(),
