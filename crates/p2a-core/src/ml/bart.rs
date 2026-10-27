@@ -477,6 +477,14 @@ impl BartTree {
 // MCMC Sampler
 // ============================================================================
 
+/// The fewest rows a leaf needs to be split: two children of `min_node_size` rows. It
+/// saturates at `usize::MAX`, more rows than any leaf can hold, so a `min_node_size`
+/// above `usize::MAX / 2` stops every split instead of overflowing; below that it is
+/// exactly `2 * min_node_size`.
+fn min_rows_to_split(min_node_size: usize) -> usize {
+    min_node_size.saturating_mul(2)
+}
+
 /// BART MCMC sampler state
 struct BartSampler {
     /// Current trees
@@ -709,7 +717,7 @@ impl BartSampler {
         let leaf_pos = leaves.iter().position(|&l| l == leaf_idx).unwrap();
         let obs_in_leaf: Vec<usize> = assignments[leaf_pos].clone();
 
-        if obs_in_leaf.len() < 2 * self.config.min_node_size {
+        if obs_in_leaf.len() < min_rows_to_split(self.config.min_node_size) {
             return; // Not enough observations to split
         }
 
@@ -1591,5 +1599,73 @@ mod tests {
         assert_eq!(config.k, 2.0);
         assert_eq!(config.alpha, 0.95);
         assert_eq!(config.beta, 2.0);
+    }
+
+    /// A `min_node_size` above `usize::MAX / 2` cannot split any leaf: twice it (the
+    /// rows a leaf needs to be split) used to overflow, a panic in a debug build, and
+    /// in a release build a product wrapped to a small number that let a grow move go
+    /// on to draw a covariate and a cut point for a split it could not make, which
+    /// moved the random stream every later move is drawn from. No tree ever splits,
+    /// and the fit is exactly the one at a `min_node_size` of all the rows.
+    #[test]
+    fn a_min_node_size_above_half_of_usize_neither_panics_nor_wraps() {
+        let (y, x) = generate_test_data(40, 7);
+        let fit = |min_node_size| {
+            let cfg = BartConfig {
+                n_trees: 10,
+                n_burn: 5,
+                n_mcmc: 20,
+                min_node_size,
+                ..tiny()
+            };
+            bart_arrays(y.view(), x.view(), None, cfg).unwrap()
+        };
+        let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        let summary = |r: &BartResult| {
+            let mut v = r.predictions.clone();
+            v.extend(&r.prediction_lower);
+            v.extend(&r.prediction_upper);
+            v.extend(&r.prediction_sd);
+            v.extend(&r.variable_importance);
+            v.extend([r.sigma, r.sigma_sd]);
+            bits(&v)
+        };
+        // With no split ever made the importance is uniform; at the default the
+        // sampler does split these data.
+        let uniform = bits(&[1.0 / 3.0; 3]);
+        assert_ne!(bits(&fit(5).variable_importance), uniform);
+        let want = fit(40);
+        assert_eq!(bits(&want.variable_importance), uniform);
+        for min_node_size in [usize::MAX / 2 + 1, usize::MAX - 1, usize::MAX] {
+            assert_eq!(
+                summary(&fit(min_node_size)),
+                summary(&want),
+                "min_node_size {min_node_size}"
+            );
+        }
+
+        // bart, the Dataset entry point
+        let ds = Dataset::new(
+            polars::prelude::df! {
+                "y" => y.to_vec(),
+                "x1" => x.column(0).to_vec(),
+                "x2" => x.column(1).to_vec(),
+                "x3" => x.column(2).to_vec(),
+            }
+            .unwrap(),
+        );
+        let cfg = BartConfig {
+            min_node_size: usize::MAX,
+            ..tiny()
+        };
+        let got = bart(&ds, "y", &["x1", "x2", "x3"], cfg).unwrap();
+        assert_eq!(bits(&got.variable_importance), uniform);
+
+        // The rule itself: the product saturates above `usize::MAX / 2` and is
+        // exact up to it.
+        assert_eq!(min_rows_to_split(usize::MAX / 2 + 1), usize::MAX);
+        assert_eq!(min_rows_to_split(usize::MAX), usize::MAX);
+        assert_eq!(min_rows_to_split(usize::MAX / 2), usize::MAX - 1);
+        assert_eq!((min_rows_to_split(0), min_rows_to_split(5)), (0, 10));
     }
 }

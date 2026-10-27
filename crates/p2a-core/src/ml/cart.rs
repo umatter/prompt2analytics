@@ -233,6 +233,14 @@ impl std::fmt::Display for CartResult {
     }
 }
 
+/// The rows two children of `min_bucket` rows hold, the fewest a node needs to be
+/// split. It saturates at `usize::MAX`, more rows than any node can hold, so a
+/// `min_bucket` above `usize::MAX / 2` stops every split instead of overflowing;
+/// below that it is exactly `2 * min_bucket`.
+fn two_buckets(min_bucket: usize) -> usize {
+    min_bucket.saturating_mul(2)
+}
+
 /// Build a CART tree recursively.
 fn build_cart_tree(
     x: &ArrayView2<f64>,
@@ -256,7 +264,7 @@ fn build_cart_tree(
     } else {
         config.max_depth
     };
-    if depth >= max_depth || n < config.min_split || n <= 2 * config.min_bucket {
+    if depth >= max_depth || n < config.min_split || n <= two_buckets(config.min_bucket) {
         return CartNode {
             id: node_id,
             n,
@@ -441,7 +449,7 @@ fn find_best_split_cart(
     let n = indices.len();
 
     // Early exit if too few samples
-    if n < 2 * config.min_bucket {
+    if n < two_buckets(config.min_bucket) {
         return None;
     }
 
@@ -1171,5 +1179,87 @@ mod tests {
         let result = cart(x.view(), y.view(), &config).unwrap();
 
         assert!(result.depth <= 2, "Depth {} exceeds max 2", result.depth);
+    }
+
+    /// A `min_bucket` above `usize::MAX / 2` cannot split any node: twice it (the
+    /// rows two children of `min_bucket` rows hold) used to overflow, a panic in a
+    /// debug build and a product wrapped to a small number in a release build.
+    /// The tree is a single leaf, exactly as at a `min_bucket` of all the rows, for
+    /// regression and classification and through both entry points.
+    #[test]
+    fn a_min_bucket_above_half_of_usize_neither_panics_nor_wraps() {
+        let x = array![
+            [1.0, 0.3],
+            [2.0, 0.1],
+            [3.0, 0.7],
+            [4.0, 0.2],
+            [5.0, 0.9],
+            [6.0, 0.4],
+            [7.0, 0.8],
+            [8.0, 0.6],
+            [9.0, 0.5],
+            [10.0, 0.0]
+        ];
+        let y_reg = array![1.1, 1.9, 2.2, 2.0, 5.0, 5.8, 6.1, 5.9, 9.0, 9.2];
+        // No tie for the majority class, and the class probabilities sorted: the
+        // classification nodes count classes in a HashMap, whose order is not fixed.
+        let y_class = array![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0];
+        let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        let summary = |r: &CartResult| {
+            let mut v = vec![r.root.dev, r.root.yval];
+            let mut probs = r.root.class_probs.clone().unwrap_or_default();
+            probs.sort_by(f64::total_cmp);
+            v.extend(probs);
+            v.extend(&r.predictions);
+            v.extend(&r.variable_importance);
+            v.extend(r.cp_table.iter().flat_map(|row| [row.cp, row.rel_error]));
+            bits(&v)
+        };
+        for (method, y) in [(CartMethod::Anova, &y_reg), (CartMethod::Gini, &y_class)] {
+            let fit = |min_bucket| {
+                let config = CartConfig {
+                    method,
+                    max_depth: 5,
+                    min_split: 2,
+                    min_bucket,
+                    cp: 0.0,
+                    ..Default::default()
+                };
+                cart(x.view(), y.view(), &config).unwrap()
+            };
+            let want = fit(10);
+            assert!(fit(1).n_nodes > 1, "{method:?}: the data can be split");
+            for min_bucket in [usize::MAX / 2 + 1, usize::MAX - 1, usize::MAX] {
+                let got = fit(min_bucket);
+                let case = format!("{method:?}, min_bucket {min_bucket}");
+                assert!(got.root.split.is_none(), "{case}");
+                assert_eq!((got.n_nodes, got.n_terminal), (1, 1), "{case}");
+                assert_eq!(summary(&got), summary(&want), "{case}");
+            }
+        }
+
+        // run_cart, the Dataset entry point
+        let ds = Dataset::new(
+            polars::prelude::df! {
+                "y" => y_reg.to_vec(),
+                "x1" => x.column(0).to_vec(),
+                "x2" => x.column(1).to_vec(),
+            }
+            .unwrap(),
+        );
+        let config = CartConfig {
+            min_split: 2,
+            min_bucket: usize::MAX / 2 + 1,
+            ..Default::default()
+        };
+        let got = run_cart(&ds, "y", &["x1", "x2"], &config).unwrap();
+        assert_eq!((got.n_nodes, got.n_terminal), (1, 1));
+
+        // The rule itself: the product saturates above `usize::MAX / 2` and is
+        // exact up to it.
+        assert_eq!(two_buckets(usize::MAX / 2 + 1), usize::MAX);
+        assert_eq!(two_buckets(usize::MAX), usize::MAX);
+        assert_eq!(two_buckets(usize::MAX / 2), usize::MAX - 1);
+        assert_eq!((two_buckets(0), two_buckets(7)), (0, 14));
     }
 }
