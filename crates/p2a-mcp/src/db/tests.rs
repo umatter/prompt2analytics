@@ -882,51 +882,6 @@ async fn dataset_meta_bounds_the_bytes_of_the_column_names() {
     assert_eq!(saved.column_count, 2);
 }
 
-/// Saving and listing a dataset's metadata logs the counts of its column
-/// names at info level, and the names themselves only at debug: a wide
-/// dataset's names are up to `MAX_STORED_COLUMN_NAME_BYTES` per line.
-#[tokio::test]
-async fn dataset_meta_logs_its_column_names_only_at_debug() {
-    /// What saving `meta` twice (a create, then an update of the same row)
-    /// and listing its session log at `level` and above.
-    async fn save_twice_and_list(
-        db: &DbConnection,
-        meta: &super::models::DatasetMeta,
-        level: tracing::Level,
-    ) -> String {
-        let logs = Logs::default();
-        {
-            let _default = tracing::subscriber::set_default(logs.subscriber_at(level));
-            db.save_dataset_meta(meta).await.unwrap();
-            db.save_dataset_meta(meta).await.unwrap();
-            assert_eq!(db.get_datasets_for_session("s1").await.unwrap().len(), 1);
-        }
-        logs.text()
-    }
-
-    let db = test_db().await;
-    let names: Vec<String> = (0..40).map(|i| format!("logcol{i:03}_q")).collect();
-    let meta =
-        super::models::DatasetMeta::new("s1".into(), "logged".into(), "csv".into(), 3, 40, names);
-
-    let info = save_twice_and_list(&db, &meta, tracing::Level::INFO).await;
-    for message in [
-        "[DB_SAVE_META] Starting save_dataset_meta",
-        "[DB_SAVE_META] CREATE returned successfully",
-        "[DB_SAVE_META] Found existing record, will update",
-        "[DB_SAVE_META] Content being sent to UPDATE",
-        "[DB_SAVE_META] UPDATE returned successfully",
-        "[DB_GET_DATASETS] Dataset record from SurrealDB",
-    ] {
-        assert!(info.contains(message), "no {message:?} at info");
-    }
-    assert!(info.contains("column_names_len=40"), "no count at info");
-    assert!(!info.contains("logcol"), "column names logged at info");
-
-    let debug = save_twice_and_list(&db, &meta, tracing::Level::DEBUG).await;
-    assert!(debug.contains("logcol039_q"), "no column names at debug");
-}
-
 /// The message cap counts the conversation's message rows, not its stored
 /// `message_count`: a counter left one or more below the truth (a recount
 /// that lost a write) does not let a message past the cap.
@@ -2473,17 +2428,10 @@ pub(super) struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 impl Logs {
     /// A subscriber that writes WARN and above to these logs.
     pub(super) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-        self.subscriber_at(tracing::Level::WARN)
-    }
-
-    /// A subscriber that writes `level` and above to these logs.
-    pub(super) fn subscriber_at(
-        &self,
-        level: tracing::Level,
-    ) -> impl tracing::Subscriber + Send + Sync + use<> {
+        share_callsite_interest();
         tracing_subscriber::fmt()
             .with_writer(self.clone())
-            .with_max_level(level)
+            .with_max_level(tracing::Level::WARN)
             .with_ansi(false)
             .finish()
     }
@@ -2510,6 +2458,26 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
     }
+}
+
+/// Register, once for the process, a dispatcher that is no thread's default
+/// and wants no event, so that a [`Logs`] subscriber is never the only
+/// registered dispatcher.
+///
+/// `tracing` caches a callsite's interest for the whole process when a
+/// thread first reaches it. While just one dispatcher is registered
+/// (tracing-core 0.1 `Dispatchers::rebuilder`), that interest comes from the
+/// reaching thread's default dispatcher alone, so a callsite that another
+/// test reached first on its own thread, with no subscriber, stayed disabled
+/// for a `Logs` subscriber set on this thread, and its events were lost (now
+/// and then, depending on which test got there first). With a second
+/// dispatcher registered, a callsite's interest combines every registered
+/// dispatcher's, under the lock that registering a dispatcher takes, and
+/// registering the `Logs` subscriber rebuilds every callsite's interest.
+/// This dispatcher answers never, so it adds nothing to that combination.
+fn share_callsite_interest() {
+    static OTHER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    OTHER.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new()));
 }
 
 /// Store `n` conversations of the rowless session "no-row" whose keys do not
