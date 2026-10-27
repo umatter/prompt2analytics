@@ -1170,6 +1170,7 @@ impl AnalyticsServer {
         dispatch!("munge_diff" => DiffRequest => munge_diff);
         dispatch!("munge_sample" => SampleDatasetRequest => munge_sample);
         dispatch!("munge_mutate" => MutateColumnRequest => munge_mutate);
+        dispatch!("munge_cast" => CastColumnRequest => munge_cast);
 
         // ===== Survival =====
         dispatch!("kaplan_meier" => KaplanMeierRequest => kaplan_meier);
@@ -1951,6 +1952,33 @@ mod tests {
             .await
             .expect_err("an unknown tool ran");
         assert_eq!(e.to_string(), "Unknown tool: no_such_tool");
+    }
+
+    /// `dispatch_tool`'s arms are written by hand, apart from the router that
+    /// lists the tools, so a tool can be advertised (`tools/list`,
+    /// `GET /api/tools`, the LLM's tool list) and still be unknown on the HTTP
+    /// route, the LLM tool loop and websocket. Arguments that are not an object
+    /// fail every typed arm's parsing before its handler runs, so only a name
+    /// without an arm answers `UnknownTool`.
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn every_advertised_tool_has_a_dispatch_arm() {
+        use crate::exec::ToolCallError;
+        let session = crate::session::Session::new("arms".into(), None);
+        let server = AnalyticsServer::with_session(&session);
+        let mut missing = Vec::new();
+        for tool in server.tool_router.list_all() {
+            let r = server
+                .dispatch_tool(&tool.name, serde_json::json!("not an object"))
+                .await;
+            if let Err(ToolCallError::UnknownTool(_)) = r {
+                missing.push(tool.name.to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "advertised but not dispatched: {missing:?}"
+        );
     }
 
     /// Splits what `quote_cut` made of a cut message into its start, the
