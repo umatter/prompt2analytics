@@ -516,7 +516,7 @@ impl AnalyticsServer {
 
     /// Query a Parquet or CSV file directly using DuckDB SQL.
     #[tool(
-        description = "Execute exactly one read-only SQL statement directly on a Parquet or CSV file using DuckDB. This is powerful for filtering, aggregating, or joining large files before loading them as datasets. Refer to the file as {file}, also inside reader functions, for example SELECT * FROM {file} or read_csv_auto({file}, header = true); the query can read file_path and no other file. EXPLAIN ANALYZE, ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused. The server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
+        description = "Execute exactly one read-only SQL statement with DuckDB on one Parquet or CSV file, file_path, and load the result as a dataset, for example to filter or aggregate the file before loading it. Refer to the file as {file}, also inside reader functions, for example SELECT * FROM {file} or read_csv_auto({file}, header = true). The query can read no other file, so it cannot join files. The rules and caps of db_duckdb_query apply: EXPLAIN ANALYZE, ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused, and the server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there."
     )]
     pub async fn db_query_file(
         &self,
@@ -704,6 +704,24 @@ mod tests {
                 && o.memory_limit_mb.is_none()
                 && o.threads.is_none()
         );
+    }
+
+    /// `db_query_file` reads only its own file (the core test
+    /// `file_query_reads_only_the_named_file`), so its description offers one file and
+    /// `db_duckdb_query`'s rules, not the joins of several files it offered before the lockdown.
+    #[test]
+    fn db_query_file_description_matches_the_lockdown() {
+        let tool = AnalyticsServer::db_query_file_tool_attr();
+        let d = tool.description.as_deref().unwrap_or_default();
+        for needle in [
+            "on one Parquet or CSV file, file_path,",
+            "The query can read no other file, so it cannot join files.",
+            "The rules and caps of db_duckdb_query apply",
+            "Not available when the server disables free-form SQL",
+        ] {
+            assert!(d.contains(needle), "{needle:?} missing from: {d}");
+        }
+        assert!(!d.contains("joining large files"), "{d}");
     }
 
     #[test]
