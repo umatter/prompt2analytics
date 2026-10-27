@@ -61,6 +61,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use super::heap_chunk_bytes;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -104,6 +105,103 @@ impl Default for CausalForestConfig {
             sample_fraction: 0.5,
         }
     }
+}
+
+impl CausalForestConfig {
+    /// An upper bound, in bytes, of what [`causal_forest`] holds at once for a
+    /// dataset of `n_obs` rows and `n_covariates` covariates under this
+    /// configuration: the trees it keeps and the buffers that are alive
+    /// together while it runs, counted by their lengths. A vector's unused
+    /// capacity, the allocator's free lists and the dataset itself come on
+    /// top. Saturates at `u64::MAX`.
+    ///
+    /// The bound holds whatever the data are, because each term counts the
+    /// most the code can allocate:
+    ///
+    /// - **Trees.** Each tree has at most `2 L - 1` nodes for `L` leaves.
+    ///   `L` is at most `2^max_depth`, and at most each part of the tree's
+    ///   subsample (structure and estimation; with honesty off, both are the
+    ///   whole subsample) divided by `max(min_node_size, 4)`: a split is kept
+    ///   only when each child has `min_node_size` rows and two treated and two
+    ///   control units in both parts, and the leaves partition both parts.
+    ///   Every node is counted at its heap size, and each tree with its slot
+    ///   in the per-row prediction buffer.
+    /// - **Data and results.** The outcome, treatment and covariates
+    ///   [`causal_forest`] extracts, and the column it is extracting (cast to
+    ///   `f64` and copied); the out-of-bag counts, means and sums of squares;
+    ///   the predictions, the variances and the sorted copy the result's
+    ///   summary makes.
+    /// - **One tree's working copies.** The subsample's flags and indices and
+    ///   its rows; with honesty, the shuffled indices, the two parts and their
+    ///   rows; and the index vectors of the recursion. Every level on the path
+    ///   to the node being split holds its children's index vectors, which
+    ///   together are at most the two parts, and the path is at most
+    ///   `max_depth` levels deep and at most the structure part divided by
+    ///   `max(min_node_size, 4)`, since each split leaves the child on the path
+    ///   at least that many rows fewer. The split search's sort order adds one
+    ///   structure part, and its feature draw one covariate list.
+    pub fn memory_bound(&self, n_obs: usize, n_covariates: usize) -> u64 {
+        let n = n_obs as u128;
+        let p = n_covariates as u128;
+        let (s, t, e) = self.subsample_parts(n_obs);
+        let leaf = self.min_node_size.max(4) as u128;
+        let levels = (t / leaf).min(self.max_depth as u128) + 1;
+        let tree = mul(
+            self.max_nodes_per_tree(n_obs),
+            heap_chunk_bytes(size_of::<CausalTreeNode>()),
+        )
+        .saturating_add(size_of::<CausalTree>() as u128 + 8);
+        let trees = mul(self.n_trees as u128, tree);
+        // Extracted y, w and x, and the column being extracted (its cast and its values) (2);
+        // out-of-bag counts, means and sums of squares (3); predictions, variances and the
+        // summary's sorted copy (3); the feature draw and importance sums.
+        let data = mul(mul(8, n), p.saturating_add(2 + 2 + 3 + 3)).saturating_add(mul(16, p));
+        // Subsample flags, indices and rows.
+        let mut work = mul(n, 9).saturating_add(mul(mul(8, s), p.saturating_add(2)));
+        if self.honesty {
+            work = work
+                .saturating_add(mul(24, s))
+                .saturating_add(mul(mul(8, t + e), p.saturating_add(2)));
+        }
+        // Recursion path and split search.
+        work = work
+            .saturating_add(mul(mul(8, t + e), levels))
+            .saturating_add(mul(8, t));
+        u64::try_from(trees.saturating_add(data).saturating_add(work)).unwrap_or(u64::MAX)
+    }
+
+    /// The sizes `(s, t, e)` of a tree's subsample and of its structure and
+    /// estimation parts, as the fit draws them for `n_obs` rows; without
+    /// honesty both parts are the whole subsample.
+    fn subsample_parts(&self, n_obs: usize) -> (u128, u128, u128) {
+        let s = ((n_obs as f64) * self.sample_fraction) as usize;
+        if self.honesty {
+            let e = ((s as f64) * self.honesty_fraction) as usize;
+            (s as u128, (s - e.min(s)) as u128, e as u128)
+        } else {
+            (s as u128, s as u128, s as u128)
+        }
+    }
+
+    /// The most nodes one tree can have for `n_obs` rows ([`Self::memory_bound`]).
+    fn max_nodes_per_tree(&self, n_obs: usize) -> u128 {
+        let (_, t, e) = self.subsample_parts(n_obs);
+        let leaf = self.min_node_size.max(4) as u128;
+        let leaves = (t / leaf).min(e / leaf).min(pow2(self.max_depth)).max(1);
+        2 * leaves - 1
+    }
+}
+
+/// `2^d`, saturating at `u128::MAX`.
+fn pow2(d: usize) -> u128 {
+    1u128
+        .checked_shl(d.min(u32::MAX as usize) as u32)
+        .unwrap_or(u128::MAX)
+}
+
+/// `a * b`, saturating at `u128::MAX`.
+fn mul(a: u128, b: u128) -> u128 {
+    a.saturating_mul(b)
 }
 
 /// Result from causal forest estimation.
@@ -1252,17 +1350,29 @@ pub fn run_causal_forest(
     seed: Option<u64>,
 ) -> EconResult<CausalForestResult> {
     let cov_refs: Vec<&str> = covariate_cols.iter().map(|s| s.as_str()).collect();
-
-    let config = CausalForestConfig {
-        n_trees: n_trees.unwrap_or(2000),
-        min_node_size: min_node_size.unwrap_or(5),
-        honesty: honesty.unwrap_or(true),
-        max_depth: max_depth.unwrap_or(10),
-        seed,
-        ..Default::default()
-    };
-
+    let config = run_causal_forest_config(n_trees, min_node_size, honesty, max_depth, seed);
     causal_forest(dataset, outcome_col, treatment_col, &cov_refs, config)
+}
+
+/// The configuration [`run_causal_forest`] fits with for these arguments
+/// (the defaults of [`CausalForestConfig`] where an argument is `None`), for
+/// example to check its [`CausalForestConfig::memory_bound`] first.
+pub fn run_causal_forest_config(
+    n_trees: Option<usize>,
+    min_node_size: Option<usize>,
+    honesty: Option<bool>,
+    max_depth: Option<usize>,
+    seed: Option<u64>,
+) -> CausalForestConfig {
+    let defaults = CausalForestConfig::default();
+    CausalForestConfig {
+        n_trees: n_trees.unwrap_or(defaults.n_trees),
+        min_node_size: min_node_size.unwrap_or(defaults.min_node_size),
+        honesty: honesty.unwrap_or(defaults.honesty),
+        max_depth: max_depth.unwrap_or(defaults.max_depth),
+        seed,
+        ..defaults
+    }
 }
 
 #[cfg(test)]
@@ -1288,6 +1398,132 @@ mod tests {
             seed: Some(3),
             ..Default::default()
         }
+    }
+
+    fn count_nodes(node: &CausalTreeNode) -> u128 {
+        match node {
+            CausalTreeNode::Leaf { .. } => 1,
+            CausalTreeNode::Split { left, right, .. } => 1 + count_nodes(left) + count_nodes(right),
+        }
+    }
+
+    /// Distinct covariate values, alternating treatment and a noisy outcome: every threshold
+    /// the size and treatment-count checks allow is a candidate, so the trees grow as large as
+    /// those checks let them.
+    fn splittable_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        let mut rng = seed;
+        let mut x = Array2::zeros((n, 3));
+        let mut y = Array1::zeros(n);
+        let mut w = Array1::zeros(n);
+        for i in 0..n {
+            for j in 0..3 {
+                x[[i, j]] = (lcg_random(&mut rng) % 1_000_003) as f64 + i as f64 * 1e-7;
+            }
+            w[i] = (i % 2) as f64;
+            let noise = (lcg_random(&mut rng) % 1000) as f64 / 1000.0;
+            y[i] = x[[i, 0]] * 1e-6 * (1.0 + w[i]) + noise;
+        }
+        (x, y, w)
+    }
+
+    /// The node bound behind `memory_bound` holds for every tree of fitted forests, with and
+    /// without honesty, at node sizes 0 to 5 and depths 3 to 100.
+    #[test]
+    fn memory_bound_counts_at_least_the_nodes_every_tree_grows() {
+        for (n, honesty, min_node_size, max_depth) in [
+            (400, true, 5, 10),
+            (400, true, 0, 100),
+            (400, false, 0, 100),
+            (400, false, 1, 100),
+            (400, false, 5, 100),
+            (250, false, 4, 3),
+            (61, true, 5, 10),
+            (1_000, false, 0, 100),
+        ] {
+            let cfg = CausalForestConfig {
+                n_trees: 6,
+                honesty,
+                min_node_size,
+                max_depth,
+                seed: Some(11),
+                ..Default::default()
+            };
+            let bound = cfg.max_nodes_per_tree(n);
+            let (x, y, w) = splittable_data(n, 7 + n as u64);
+            let fit =
+                causal_forest_arrays(x.view(), y.view(), w.view(), names3(), cfg.clone()).unwrap();
+            let most = fit
+                .trees
+                .iter()
+                .map(|t| count_nodes(t.root.as_ref().unwrap()))
+                .max()
+                .unwrap();
+            assert!(
+                most <= bound,
+                "{cfg:?} on {n} rows: a tree has {most} nodes, bound {bound}"
+            );
+            // The trees fill a good part of what the bound allows (it is not loose by orders
+            // of magnitude), except where the depth stops them first.
+            assert!(4 * most >= bound, "{cfg:?} on {n} rows: {most} of {bound}");
+        }
+    }
+
+    #[test]
+    fn memory_bound_grows_with_its_arguments_and_saturates() {
+        let d = CausalForestConfig::default();
+        let at = |cfg: &CausalForestConfig, n: usize, p: usize| cfg.memory_bound(n, p);
+        let base = at(&d, 10_000, 4);
+        let more_trees = CausalForestConfig {
+            n_trees: 3_000,
+            ..d.clone()
+        };
+        let deeper = CausalForestConfig {
+            max_depth: 20,
+            ..d.clone()
+        };
+        let no_honesty = CausalForestConfig {
+            honesty: false,
+            ..d.clone()
+        };
+        assert!(at(&more_trees, 10_000, 4) > base);
+        assert!(at(&d, 20_000, 4) > base);
+        assert!(at(&d, 10_000, 8) > base);
+        assert!(at(&no_honesty, 10_000, 4) > base);
+        assert!(at(&deeper, 1_000_000, 4) > at(&d, 1_000_000, 4));
+        // At the default depth a tree has at most 2^11 - 1 nodes however many rows there are.
+        let node = heap_chunk_bytes(size_of::<CausalTreeNode>());
+        assert_eq!(d.max_nodes_per_tree(10_000_000), 2_047);
+        assert!(u128::from(at(&d, 1_000_000, 4)) > 2_000 * 2_047 * node);
+        let huge = CausalForestConfig {
+            n_trees: usize::MAX,
+            max_depth: usize::MAX,
+            min_node_size: 0,
+            ..d.clone()
+        };
+        assert_eq!(at(&huge, usize::MAX, usize::MAX), u64::MAX);
+        assert_eq!(at(&d, usize::MAX, 4), u64::MAX);
+        assert!(at(&d, 0, 0) > 0);
+    }
+
+    /// `run_causal_forest_config` gives the configuration `run_causal_forest` used before it
+    /// existed: the arguments, and the defaults where they are `None`.
+    #[test]
+    fn run_config_takes_the_arguments_and_the_defaults() {
+        let c = run_causal_forest_config(None, None, None, None, None);
+        let d = CausalForestConfig::default();
+        assert_eq!(
+            (c.n_trees, c.min_node_size, c.honesty, c.max_depth, c.seed),
+            (2000, 5, true, 10, None)
+        );
+        assert_eq!(
+            (c.sample_fraction, c.honesty_fraction, c.mtry),
+            (d.sample_fraction, d.honesty_fraction, d.mtry)
+        );
+        let c = run_causal_forest_config(Some(7), Some(2), Some(false), Some(3), Some(9));
+        assert_eq!(
+            (c.n_trees, c.min_node_size, c.honesty, c.max_depth, c.seed),
+            (7, 2, false, 3, Some(9))
+        );
     }
 
     #[test]

@@ -214,6 +214,15 @@ pub mod trees;
 mod xgboost;
 mod xgboost_fast;
 
+/// Bytes a heap allocation of `size` bytes occupies under glibc malloc (the
+/// allocator of the Linux builds): the size plus an 8-byte header, rounded up
+/// to a multiple of 16, and at least 32. The memory bounds of the tree
+/// ensembles count each boxed tree node at this size.
+pub(crate) const fn heap_chunk_bytes(size: usize) -> u128 {
+    let chunk = (size as u128 + 8).div_ceil(16) * 16;
+    if chunk < 32 { 32 } else { chunk }
+}
+
 /// Simple Linear Congruential Generator for reproducible randomness.
 ///
 /// Used across ML modules for deterministic random sampling (bootstrap,
@@ -332,7 +341,7 @@ pub use advanced_clustering_mod::{
 pub use bart::{BartConfig, BartResult, bart, bart_arrays, bart_predict, run_bart};
 pub use bart_causal::{
     BartCausalConfig, BartCausalResult, bart_causal, bart_causal_arrays, bart_causal_predict,
-    bart_causal_predict_arrays, run_bart_causal,
+    bart_causal_predict_arrays, run_bart_causal, run_bart_causal_config,
 };
 pub use c50::{
     C50Config, C50Node, C50Result, C50Rule, C50RuleCondition, C50Split, ComparisonOp, c50,
@@ -345,6 +354,7 @@ pub use cart::{
 pub use causal_forest::{
     CausalForestConfig, CausalForestResult, average_treatment_effect, causal_forest,
     causal_forest_arrays, causal_forest_predict, causal_forest_predict_arrays, run_causal_forest,
+    run_causal_forest_config,
 };
 pub use cluster_optimized::{
     affinity_propagation_optimized, compute_pairwise_distances_parallel,
