@@ -105,6 +105,24 @@ fn assert_query_kept_ahead_of_padding(line: &serde_json::Value) {
     );
 }
 
+/// A long table of `rows` rows for `munge_pivot` (PR-H1): `key` holds a distinct value in
+/// every row and `idx` takes `index_values` distinct values, so pivoting `key` over `idx`
+/// makes `index_values` rows and `rows + 1` columns. `val` is noisy.
+fn long_csv(rows: usize, index_values: usize) -> String {
+    let mut csv = String::from("idx,key,val\n");
+    for i in 0..rows {
+        let val = ((i * 7919) % 1013) as f64 / 101.3 + 0.01;
+        csv.push_str(&format!("{},k{i},{val:.4}\n", i % index_values));
+    }
+    csv
+}
+
+/// The `munge_pivot` arguments that pivot [`long_csv`]'s `dataset` into `result_name`.
+fn pivot_args(dataset: &str, result_name: &str) -> serde_json::Value {
+    serde_json::json!({"dataset": dataset, "index": ["idx"], "on": "key", "values": "val",
+           "result_name": result_name})
+}
+
 #[cfg(feature = "http")]
 mod http_paths {
     use super::*;
@@ -470,6 +488,255 @@ mod http_paths {
                 rule.tool, rule.dataset_field
             );
         }
+    }
+
+    /// An ordinary long panel in [`long_csv`]'s columns: `ids` units (`idx`) observed in
+    /// `periods` periods (`key`), which pivots into `ids` rows and `periods + 1` columns.
+    fn panel_csv(ids: usize, periods: usize) -> String {
+        let mut csv = String::from("idx,key,val\n");
+        for i in 0..ids {
+            for t in 0..periods {
+                let val =
+                    1.0 + i as f64 * 0.37 + t as f64 * 0.11 + ((i * 31 + t) % 17) as f64 / 170.0;
+                csv.push_str(&format!("{i},p{t},{val:.4}\n"));
+            }
+        }
+        csv
+    }
+
+    /// Creates `name` from `csv` through `create_dataset`, so through the dataset quotas.
+    async fn create(app: &Router, sid: &str, name: &str, csv: &str) {
+        let (status, body) = post_tool(
+            app,
+            sid,
+            "create_dataset",
+            json!({"name": name, "csv_content": csv}),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["success"], true, "{body}");
+    }
+
+    /// The names and (rows, columns) of the session's datasets.
+    async fn shapes(state: &AppState, sid: &str) -> Vec<(String, (usize, usize))> {
+        let session = state.session_manager.get_session(sid).await.unwrap();
+        let datasets = session.datasets.read().await;
+        let mut shapes: Vec<_> = datasets
+            .iter()
+            .map(|(name, d)| (name.clone(), (d.df().height(), d.df().width())))
+            .collect();
+        shapes.sort();
+        shapes
+    }
+
+    #[test]
+    fn pivot_wider_than_the_column_cap_is_refused_before_pivoting() {
+        let cfg = open_public_config();
+        run(limits::resolve(&cfg).unwrap(), async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            // 10,000 distinct `key` values: 10,001 columns with the index, one more than the
+            // hosted pivot_columns. The long table is far within the dataset quotas. Counting
+            // stops at the first value that cannot pass, so the refusal gives a lower bound.
+            create(&app, &sid, "long", &long_csv(10_000, 1)).await;
+            let (status, body) =
+                post_tool(&app, &sid, "munge_pivot", pivot_args("long", "wide")).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["code"], "limit_exceeded", "{body}");
+            assert_eq!(
+                body["details"],
+                json!({"parameter": "on", "requested": "at least 10001", "limit": "10000"}),
+                "{body}"
+            );
+            let error = body["error"].as_str().unwrap();
+            assert!(
+                error.starts_with(
+                    "Parameter `on` names column `key`, which has at least 10000 distinct values"
+                ) && error.contains("limit of 10000 columns (pivot_columns)"),
+                "{error}"
+            );
+            assert_eq!(
+                shapes(&state, &sid).await,
+                [("long".to_string(), (10_000, 3))],
+                "the refused pivot changed the session's datasets"
+            );
+
+            // At the cap, and an ordinary panel, the pivot runs.
+            create(&app, &sid, "edge", &long_csv(9_999, 1)).await;
+            create(&app, &sid, "panel", &panel_csv(200, 12)).await;
+            for (dataset, result, shape) in [
+                ("edge", "edge_wide", (1, 10_000)),
+                ("panel", "panel_wide", (200, 13)),
+            ] {
+                let (status, body) =
+                    post_tool(&app, &sid, "munge_pivot", pivot_args(dataset, result)).await;
+                assert_eq!(status, 200, "{body}");
+                assert_eq!(body["data"]["success"], true, "{body}");
+                let shapes = shapes(&state, &sid).await;
+                assert!(
+                    shapes.contains(&(result.to_string(), shape)),
+                    "{result}: {shapes:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn pivot_past_the_cell_cap_is_refused_before_pivoting() {
+        let cfg = open_public_config();
+        run(limits::resolve(&cfg).unwrap(), async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            // 1,000 rows, each its own `idx` and `key` value: a 1,000 x 1,001 wide table,
+            // 1,001,000 cells, from a long table of 1,000 rows. Its 1,001 columns are within
+            // pivot_columns.
+            create(&app, &sid, "long", &long_csv(1_000, 1_000)).await;
+            let (status, body) =
+                post_tool(&app, &sid, "munge_pivot", pivot_args("long", "wide")).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["code"], "limit_exceeded", "{body}");
+            assert_eq!(
+                body["details"],
+                json!({"parameter": "index", "requested": "at least 1001000", "limit": "1000000"}),
+                "{body}"
+            );
+            let error = body["error"].as_str().unwrap();
+            assert!(
+                error.starts_with("`munge_pivot` would make at least 1000 rows")
+                    && error.contains("by 1001 columns")
+                    && error.contains("limit of 1000000 cells (pivot_cells)"),
+                "{error}"
+            );
+            assert_eq!(
+                shapes(&state, &sid).await,
+                [("long".to_string(), (1_000, 3))],
+                "the refused pivot changed the session's datasets"
+            );
+        });
+    }
+
+    #[test]
+    fn pivot_of_more_rows_than_the_cell_cap_is_refused_before_counting() {
+        let cfg = open_public_config();
+        let limits = limits::resolve(&cfg)
+            .unwrap()
+            .with_overrides(&["pivot_cells=1500".to_string()])
+            .unwrap();
+        run(limits, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            // Each row fills one cell, so 2,000 rows make at least 2,000 cells; here they would
+            // make a 1 x 2,001 wide table.
+            create(&app, &sid, "long", &long_csv(2_000, 1)).await;
+            let (status, body) =
+                post_tool(&app, &sid, "munge_pivot", pivot_args("long", "wide")).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["code"], "limit_exceeded", "{body}");
+            assert_eq!(
+                body["details"],
+                json!({"parameter": "dataset", "requested": "at least 2000", "limit": "1500"}),
+                "{body}"
+            );
+            let error = body["error"].as_str().unwrap();
+            assert!(
+                error.starts_with("The dataset has 2000 rows")
+                    && error.contains("limit of 1500 cells (pivot_cells)"),
+                "{error}"
+            );
+            assert_eq!(
+                shapes(&state, &sid).await,
+                [("long".to_string(), (2_000, 3))],
+                "the refused pivot changed the session's datasets"
+            );
+        });
+    }
+
+    /// A long table of `rows` rows with `index_columns` index columns that never change
+    /// (`i0`, `i1`, ...), a `key` value of its own in every row and a noisy `val`: it pivots
+    /// into one row of `index_columns + rows` columns.
+    fn many_index_csv(rows: usize, index_columns: usize) -> String {
+        let names: Vec<String> = (0..index_columns).map(|j| format!("i{j}")).collect();
+        let mut csv = format!("{},key,val\n", names.join(","));
+        let zeros = vec!["0"; index_columns].join(",");
+        for i in 0..rows {
+            let val = ((i * 7919) % 1013) as f64 / 101.3 + 0.01;
+            csv.push_str(&format!("{zeros},k{i},{val:.4}\n"));
+        }
+        csv
+    }
+
+    #[test]
+    fn pivot_over_many_index_columns_is_refused_before_counting() {
+        let cfg = open_public_config();
+        let limits = limits::resolve(&cfg)
+            .unwrap()
+            .with_overrides(&["pivot_cells=1500".to_string()])
+            .unwrap();
+        run(limits, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let index: Vec<String> = (0..12).map(|j| format!("i{j}")).collect();
+            let args = |dataset: &str, result: &str| {
+                json!({"dataset": dataset, "index": index, "on": "key", "values": "val",
+                       "result_name": result})
+            };
+            // 300 rows of 12 index values and an `on` value each: 3,900 values for polars to
+            // group, more than twice the 1,500 cells, although the wide table would have one
+            // row of 312 cells.
+            create(&app, &sid, "long", &many_index_csv(300, 12)).await;
+            let (status, body) = post_tool(&app, &sid, "munge_pivot", args("long", "wide")).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["code"], "limit_exceeded", "{body}");
+            assert_eq!(
+                body["details"],
+                json!({"parameter": "index", "requested": "3900", "limit": "3000"}),
+                "{body}"
+            );
+            let error = body["error"].as_str().unwrap();
+            assert!(
+                error.starts_with("The dataset has 300 rows, and `munge_pivot` groups each row")
+                    && error.contains(
+                        "limit of 3000 values to group (2 for each of its 1500 cells, pivot_cells)"
+                    ),
+                "{error}"
+            );
+            assert_eq!(
+                shapes(&state, &sid).await,
+                [("long".to_string(), (300, 14))],
+                "the refused pivot changed the session's datasets"
+            );
+
+            // 230 rows hold 2,990 values: the pivot runs.
+            create(&app, &sid, "edge", &many_index_csv(230, 12)).await;
+            let (status, body) =
+                post_tool(&app, &sid, "munge_pivot", args("edge", "edge_wide")).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["success"], true, "{body}");
+            assert!(
+                shapes(&state, &sid)
+                    .await
+                    .contains(&("edge_wide".to_string(), (1, 242)))
+            );
+        });
+    }
+
+    #[test]
+    fn pivot_shapes_are_not_limited_when_off() {
+        let cfg = local_config();
+        run(Limits::off(), async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            create(&app, &sid, "long", &long_csv(10_000, 1)).await;
+            let (status, body) =
+                post_tool(&app, &sid, "munge_pivot", pivot_args("long", "wide")).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["success"], true, "{body}");
+            assert!(
+                shapes(&state, &sid)
+                    .await
+                    .contains(&("wide".to_string(), (1, 10_001)))
+            );
+        });
     }
 
     #[test]
@@ -1093,8 +1360,10 @@ mod stdio_path {
 
     /// Serves `server` over an in-memory duplex stream, as the stdio
     /// transport does over stdin/stdout, initialises the session and returns
-    /// the JSON-RPC response to one request (`method`, `params`).
-    async fn stdio_request(server: AnalyticsServer, method: &str, params: Value) -> Value {
+    /// the JSON-RPC responses to `requests` (`method`, `params`), sent in
+    /// order in that one session, each after the previous one was answered,
+    /// so that a later call sees the datasets an earlier one made.
+    async fn stdio_session(server: AnalyticsServer, requests: &[(&str, Value)]) -> Vec<Value> {
         let (client, server_end) = tokio::io::duplex(1 << 22);
         let (r, w) = tokio::io::split(server_end);
         let service = tokio::spawn(async move {
@@ -1116,15 +1385,25 @@ mod stdio_path {
             json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         )
         .await;
-        send_line(
-            &mut cw,
-            json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params}),
-        )
-        .await;
-        let msg = read_until_id(&mut lines, 2).await;
+        let mut responses = Vec::with_capacity(requests.len());
+        for (id, (method, params)) in (2u64..).zip(requests) {
+            send_line(
+                &mut cw,
+                json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+            )
+            .await;
+            responses.push(read_until_id(&mut lines, id).await);
+        }
         drop(cw);
         service.abort();
-        msg
+        responses
+    }
+
+    /// The JSON-RPC response to one request (`method`, `params`) over the
+    /// stdio transport.
+    async fn stdio_request(server: AnalyticsServer, method: &str, params: Value) -> Value {
+        let mut responses = stdio_session(server, &[(method, params)]).await;
+        responses.pop().expect("one response")
     }
 
     /// The JSON-RPC response to one `tools/call` over the stdio transport.
@@ -1135,6 +1414,49 @@ mod stdio_path {
             json!({"name": tool, "arguments": args}),
         )
         .await
+    }
+
+    /// The JSON-RPC responses to `calls` (tool and arguments), made in order in one stdio
+    /// session, so that a later call sees the datasets an earlier one made.
+    async fn stdio_calls(server: AnalyticsServer, calls: &[(&str, Value)]) -> Vec<Value> {
+        let requests: Vec<(&str, Value)> = calls
+            .iter()
+            .map(|(tool, args)| ("tools/call", json!({"name": tool, "arguments": args})))
+            .collect();
+        stdio_session(server, &requests).await
+    }
+
+    #[test]
+    fn stdio_refuses_a_pivot_past_the_column_cap_when_hosted() {
+        let create = json!({"name": "long", "csv_content": long_csv(10_000, 1)});
+        let responses = run(
+            Limits::hosted(),
+            stdio_calls(
+                AnalyticsServer::new(),
+                &[
+                    ("create_dataset", create),
+                    ("munge_pivot", pivot_args("long", "wide")),
+                    ("list_datasets", json!({})),
+                ],
+            ),
+        );
+        let [created, pivot, listed] = &responses[..] else {
+            panic!("{responses:?}");
+        };
+        assert_ne!(created["result"]["isError"], true, "{created}");
+        assert_eq!(pivot["error"]["code"], -32602, "{pivot}");
+        assert_eq!(pivot["error"]["data"]["code"], "limit_exceeded", "{pivot}");
+        assert_eq!(pivot["error"]["data"]["parameter"], "on", "{pivot}");
+        assert_eq!(
+            pivot["error"]["data"]["requested"], "at least 10001",
+            "{pivot}"
+        );
+        assert_eq!(pivot["error"]["data"]["limit"], "10000", "{pivot}");
+        let listing = listed["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            listing.contains("long") && !listing.contains("wide"),
+            "{listing}"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::tools::limits::{LimitViolation, Limits, ROW_RULES};
+use crate::tools::limits::{LimitViolation, Limits, PIVOT_RULES, ROW_RULES};
 use crate::tools::requests::*;
 
 use p2a_core::{
@@ -750,7 +750,9 @@ impl AnalyticsServer {
     /// `LimitExceeded`, a nested struct the catalogue has rules inside given
     /// as a JSON array; the audit entry of such a call is bounded by the
     /// sanitiser's size and depth caps, not redacted by name), then the
-    /// dataset a `ROW_RULES` tool names must be within its row class. After
+    /// dataset a `ROW_RULES` tool names must be within its row class, and the
+    /// wide table a `PIVOT_RULES` tool would make of it within the pivot
+    /// budgets. After
     /// the handler returns, output above the `response_bytes` budget
     /// replaces the result. A refusal is
     /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`). The response
@@ -1373,8 +1375,10 @@ fn extract_numeric_matrix(
 /// (`call_tool_with_session`) and the stdio transport: the cost parameters
 /// against the catalogue (`Limits::check_tool_arguments`), then, for the
 /// tools in `ROW_RULES`, the height of the dataset the request names
-/// (`Limits::check_rows`, skipped when limits are off). A missing dataset
-/// field or an unknown dataset is left to the handler's usual error.
+/// (`Limits::check_rows`), and for the tools in `PIVOT_RULES`, the shape of
+/// the wide table the request would make of it (`Limits::check_pivot`), both
+/// skipped when limits are off. A missing dataset field or an unknown dataset
+/// is left to the handler's usual error.
 #[allow(
     clippy::result_large_err,
     reason = "LimitViolation is WP02's fixed public shape"
@@ -1400,6 +1404,17 @@ async fn enforce_request_limits(
         });
         if let Some((rows, cols)) = shape {
             limits.check_rows(tool, rows, cols)?;
+        }
+    }
+    for rule in PIVOT_RULES.iter().filter(|r| r.tool == tool) {
+        let Some(name) = args.get(rule.dataset_field).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // An owned copy (the columns are shared), so the guard is dropped before the
+        // distinct values are counted.
+        let dataset = datasets.read().await.get(name).cloned();
+        if let Some(dataset) = dataset {
+            limits.check_pivot(rule, args, dataset.df())?;
         }
     }
     Ok(())
@@ -1623,9 +1638,10 @@ impl std::fmt::Write for QuoteEnds {
 // ============================================================================
 
 /// The MCP handler of the stdio transport. Tool calls run the same request
-/// limits as the governed HTTP-side path (arguments, dataset rows of this
-/// server's own datasets, response size) before and after delegating to the
-/// tool router, and with `with_audit_logger` each call leaves one audit entry
+/// limits as the governed HTTP-side path (arguments, dataset rows and pivot
+/// shapes of this server's own datasets, response size) before and after
+/// delegating to the tool router, and with `with_audit_logger` each call
+/// leaves one audit entry
 /// (origin and session id `stdio`). A call that panics is answered with the
 /// JSON-RPC error -32603, data code `internal` (the governed path's 500
 /// `internal`), and audited as `internal`; the server goes on serving.

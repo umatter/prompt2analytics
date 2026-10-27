@@ -957,7 +957,7 @@ An error response has this shape; `data` is absent, and `code` and `details` app
 | 410 | `session_expired` | the session expired (session and conversation routes); a session that has expired when a request on `POST /api/tools/{name}` or `/api/llm/chat` starts answers 410 `"Session expired"` without a `code` (the stream route reports these as an SSE `error` event); a session that expires while `/api/llm/chat` runs answers 410 with `code` `session_expired`, and an authenticated websocket's `error` carries the same code |
 | 413 | `payload_too_large` | a message, title or settings string above `message_bytes`. A request body above `P2A_MAX_HTTP_BODY_MB` answers 413 with the plain-text body `length limit exceeded` and no `code` |
 | 421 | `misdirected` | a local server received a request addressed to a host other than `localhost` or a loopback address |
-| 422 | `limit_exceeded` | a request limit refused a parameter, the dataset's row count or the response size; `details {parameter, requested, limit}` |
+| 422 | `limit_exceeded` | a request limit refused a parameter, the dataset's row count, a pivot's output shape (`pivot_columns`, `pivot_cells`) or the response size; `details {parameter, requested, limit}` |
 | 422 | `quota_exceeded` | a dataset quota (the call's changes were undone) or a conversation-store bound |
 | 429 | `session_busy` | the session's slot is taken: `Retry-After: 2` |
 | 503 | `server_busy` | every tool slot is taken: `Retry-After: 5` |

@@ -207,6 +207,22 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
   spatial-lag fit runs in time that grows with the rows times the time periods
   and cannot be stopped once it starts, so the cap applies with or without
   `lag`).
+- **Pivot shape.** Before `munge_pivot` runs, the distinct values of its `on`
+  column and of its `index` columns are counted in the dataset it names. A
+  pivot whose output would have more than `pivot_columns` columns (the index
+  columns plus one per distinct `on` value) or more than `pivot_cells` cells
+  (rows times columns) is refused: polars groups the long table and allocates
+  the whole wide table before the dataset quotas can see it, so a long table
+  within the quotas could otherwise make one call's memory peak far above what
+  the quotas allow. Each row of the long table fills one cell, so a dataset
+  with more rows than `pivot_cells` is refused before anything is counted, and
+  polars groups each row by its index and `on` values, so a dataset whose rows
+  hold more than twice `pivot_cells` of those values (its rows times one more
+  than the index columns) is refused before counting as well, however few
+  cells they would make. The counts stop at the first value that cannot pass,
+  in one hash map at a time, so counting takes memory in proportion to the
+  budgets rather than to the rows, and a refusal gives its count as a lower
+  bound (`"requested": "at least 10001"`).
 - **Named budgets.** Sizes the handlers compute while they run: image pixels,
   table cells, join output, generated data, export and file sizes, spatial
   links, the work of an ARIMA fit, the memory of a tree-ensemble fit, SQL
@@ -214,9 +230,10 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
 - **Response size.** A tool's text and image output above `response_bytes`
   (16 MiB) is replaced by a refusal.
 
-An argument, row or response-size refusal answers 422 `limit_exceeded` with
-`details {parameter, requested, limit}` and a message that names the parameter,
-the limit and what to change. From a sandboxed server in open mode:
+An argument, row, pivot-shape or response-size refusal answers 422
+`limit_exceeded` with `details {parameter, requested, limit}` and a message that
+names the parameter, the limit and what to change. From a sandboxed server in
+open mode:
 
 ```json
 {"success":false,"error":"Parameter `n_boot` = 1000000 exceeds this server's limit of 10000 (replications) for `regression_bootstrap_cov`. Use a smaller value.","code":"limit_exceeded","details":{"parameter":"n_boot","requested":"1000000","limit":"10000"}}
@@ -537,6 +554,8 @@ Named budgets:
 | `max_groups` | groups compared pairwise | 100 | none |
 | `join_output_rows` | predicted output rows of a join | 2,000,000 | none |
 | `onehot_levels` | levels a one-hot encoding expands | 500 | none |
+| `pivot_columns` | output columns of `munge_pivot`: the index columns plus one per distinct value of `on`, counted before the pivot | 10,000 | none |
+| `pivot_cells` | output cells of `munge_pivot`: rows (distinct combinations of `index`) × columns, counted before the pivot; also at least the rows of the long table, and at least half the index and `on` values it holds (rows × (index columns + 1)) | 1,000,000 | none |
 | `str_split_parts` | parts `str_split` produces | 100 | none |
 | `str_pad_width` | target width of string padding (no current tool reads it) | 10,000 | none |
 | `generated_cells` | cells `generate_random_data` produces | 10,000,000 | none |
@@ -601,6 +620,51 @@ of its bound. Only the allocator's own overhead (chunk headers and free lists)
 comes on top. Keep the budget at or below the ceiling and well below the room
 the memory admission leaves (`P2A_MEMORY_SOFT_LIMIT_MB` against the machine's
 memory).
+
+The pivot budgets were measured on a release build of the hosted server.
+polars groups every row of the long table by its index and `on` values, then
+fills one buffer with every output cell and builds the wide table's columns
+from it, so a pivot's peak memory grows with the rows it reads and the index
+and `on` values they hold as well as with the cells it makes. A pivot reads at
+most as many rows as it makes cells and at most twice as many of those values,
+so the costliest pivot of a given size is a dense one with one index column, a
+row for each pair of index value and `on` value. In a fresh process, a dense
+pivot of about 1,000,000 cells raised the peak RSS above the loaded long table
+by 150 to 200 MiB for numeric values and by 195 to 260 MiB for string values
+(of 6 to 45 bytes), whether the wide table was 1,000 × 1,000, 100 × 10,000 or
+9,900 × 101; about 2,000,000 cells raised it by 310 MiB (numbers) and 415 MiB
+(strings). A process that has already freed large buffers, as a long-running
+server has, keeps more of a pivot's memory resident, because glibc's malloc
+raises its mmap threshold as it frees them: there the 1,000 × 1,000 pivot
+peaked up to 252 MiB with integer index values and up to 351 MiB with 45-byte
+strings as index and values. With 2 to 40 index columns, dense pivots holding
+as many values as `pivot_cells` allows peaked lower in the same state: 87 to
+191 MiB with integer index columns, 169 to 290 MiB with string index columns
+of 20 or 45 bytes. A sparse pivot, with far fewer rows than cells, costs about
+25 bytes per cell for numbers and 65 bytes for strings, plus about 870 bytes
+per output column. At the hosted `pivot_cells` of 1,000,000 one pivot
+therefore peaks at most about 350 MiB above what the session holds when its
+index and values are at most about 45 bytes, so a session within its 200 MiB
+quota stays under the 700 MiB soft limit of a 1 GB machine (with other
+sessions' datasets near the 500 MiB total, it does not). Wider strings add up
+to about their own bytes, which polars copies: 150-byte string values raised a
+fresh 1,000 × 1,000 pivot's peak to 303 MiB above the long table, 150-byte
+index values to 273 MiB. The session's dataset quota bounds those bytes, not
+`pivot_cells`. At the hosted `pivot_columns` of 10,000 a one-row pivot peaks
+under 10 MiB. `P2A_MAX_ALLOC_MB` bounds p2a-core's own buffers, not polars',
+so it does not apply to a pivot.
+
+Counting before the pivot keeps one hash map at a time. The refusals that
+count the most rows within the budgets peaked 37 MiB above the loaded table
+with one index column and 36, 21 and 11 MiB with 2, 7 and 12. Before an
+admitted pivot with several index columns, the count can put a fresh process
+into the state described above, up to about 50 MiB higher at the pivot's
+peak; the bounds above were measured in that state. A refusal of
+`pivot_columns` names `on`. One of `pivot_cells` names `dataset` when the long
+table alone has more rows than the cap; `index` when its rows hold more than
+twice the cap in index and `on` values, or when its index makes too many rows;
+and `on` when the distinct `on` values alone make more columns than the cap
+allows cells (`index` when the index columns alone do).
 
 ## Must-do checklist
 

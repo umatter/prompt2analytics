@@ -999,6 +999,9 @@ impl AnalyticsServer {
 
         let index: Vec<&str> = request.index.iter().map(|s| s.as_str()).collect();
 
+        // The wide table's columns and cells were checked against the pivot budgets before this
+        // handler ran (`Limits::check_pivot`, `PIVOT_RULES`), on every governed path and stdio,
+        // so that a refusal is a 422 `limit_exceeded` like the other request limits.
         let result = match pivot(dataset, &index, &request.on, &request.values) {
             Ok(ds) => ds,
             Err(e) => {
