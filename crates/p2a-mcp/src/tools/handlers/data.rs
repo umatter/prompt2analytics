@@ -3181,18 +3181,22 @@ mod tests {
         );
         let mut df = DataFrame::new(vec![Series::new("l".into(), [inner]).into()]).unwrap();
         write_parquet(&mut df, &lists, 1);
-        for path in [&labels, &lists] {
+        let [_, honest] = [&labels, &lists].map(|path| {
             let from_file = parquet_decoded_bytes(path).unwrap().unwrap();
             assert!(from_file.dataset > 0, "{from_file:?}");
             assert_eq!(bytes_bound_of(path), Ok(Some(from_file)), "{path:?}");
-        }
-        // A footer that understates the entries.
+            from_file
+        });
+        // A footer that understates the entries: the file's bound still
+        // comes from its page headers, and so does the bytes'.
         rewrite_footer(&lists, |footer| {
             for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
                 chunk.meta_data.as_mut().unwrap().num_values = 1;
             }
         });
-        assert_eq!(bytes_bound_of(&lists), parquet_decoded_bytes(&lists));
+        let understated = parquet_decoded_bytes(&lists).unwrap().unwrap();
+        assert_eq!(understated.dataset, honest.dataset, "{understated:?}");
+        assert_eq!(bytes_bound_of(&lists), Ok(Some(understated)));
         // A chunk that passes the end of the file, and a negative count.
         rewrite_footer(&labels, |footer| {
             let chunk = &mut footer.row_groups[0].columns[0];
