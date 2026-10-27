@@ -913,12 +913,12 @@ impl StreamingToolExecutor {
     /// (`routes_tools::capture_dataset_metadata_off_runtime`).
     ///
     /// At info level a capture logs a fixed set of events with counts; the
-    /// full result text, the column lines and the column names are at debug
-    /// (the first line and the Dimensions line stay at info), and column
-    /// lines without a dtype are one warning with their count. A save that
-    /// fails is logged and nothing else happens: a refusal by the session's
-    /// `session_db_bytes` budget (`QuotaExceeded`) at warn, any other
-    /// failure at error.
+    /// result text (its first 2,000 bytes), the column lines and the column
+    /// names are at debug (the first line and the Dimensions line stay at
+    /// info), and column lines without a dtype are one warning with their
+    /// count. A save that fails is logged and nothing else happens: a
+    /// refusal by the session's `session_db_bytes` budget (`QuotaExceeded`)
+    /// at warn, any other failure at error.
     #[cfg(feature = "db")]
     pub async fn capture_dataset_metadata_static(
         db: Arc<crate::db::DbConnection>,
