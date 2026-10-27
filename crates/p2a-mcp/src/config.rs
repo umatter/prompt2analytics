@@ -232,8 +232,10 @@ pub struct CliArgs {
     #[arg(long, env = "P2A_TOOL_TIMEOUT_SECS")]
     pub tool_timeout_secs: Option<u64>,
 
-    /// Exit (code 70) when every tool slot has been stuck past its deadline
-    /// for this many seconds, 0 = never (default: never; hosted: 300).
+    /// Exit (code 70) when the governor has been unhealthy (every tool slot
+    /// stuck past its deadline, or memory stuck above the soft limit with no
+    /// call running within its deadline) for this many seconds, 0 = never
+    /// (default: never; hosted: 300).
     #[arg(long, env = "P2A_STUCK_EXIT_SECS")]
     pub stuck_exit_secs: Option<u64>,
 

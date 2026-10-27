@@ -247,9 +247,12 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 /// or transport a caller wrote in `config` (the default transport is stdio).
 /// Then it validates the configuration again, so no caller can skip the
 /// guard, builds the app, installs the process-wide policies (allocation
-/// ceiling, session directories) and serves it with graceful shutdown.
-/// Before it returns, every audit entry queued by then is written out; a call
-/// still running after its deadline answer is logged when its work ends.
+/// ceiling, session directories), starts the health readers (the stuck
+/// watchdog, or the plain poll under a memory soft limit; see
+/// `spawn_health_readers`) and serves the app with graceful shutdown.
+/// Before it returns, it stops the health readers and writes out every audit
+/// entry queued by then; a call still running after its deadline answer is
+/// logged when its work ends.
 /// It does not install the request limits or apply `--limit-override`
 /// (`P2A_LIMIT_OVERRIDES`); `transport::start_transport` does that before it
 /// calls `start_http_transport`. A caller that uses `serve` directly gets the
@@ -272,14 +275,31 @@ pub async fn serve(
     let exec = state.governor.config().clone();
     crate::exec::install_process_policies(&exec);
     log_startup(&config, &exec);
-    if let Some(limit) = exec.stuck_exit {
-        spawn_stuck_watchdog(state.governor.clone(), limit);
-    }
+    serve_app(listener, app, state, shutdown).await
+}
+
+/// Serve a built app with its health readers ([`spawn_health_readers`])
+/// until `shutdown` resolves, then stop the readers and write out the queued
+/// audit entries.
+async fn serve_app(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    state: AppState,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> TransportResult<()> {
+    let readers = spawn_health_readers(&state.governor, state.governor.config());
 
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)));
+    // Each reader holds the governor, and through it the session manager
+    // and every session's datasets, and the plain poll keeps handing memory
+    // back; an embedder that keeps the process after a graceful shutdown
+    // must not keep those too.
+    if let Some(readers) = readers {
+        readers.abort();
+    }
     // Write out the queued audit entries before returning, so a caller that
     // exits right after a graceful shutdown keeps them. The governor's logger
     // holds the entries of every tool call; `state.audit_logger` is opened
@@ -352,24 +372,65 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig) {
     );
 }
 
-/// Exit with code 70 when every tool permit stays held by overdue work for
-/// `limit`, so the platform restarts the machine instead of leaving it
-/// wedged. Set by the hosted profile (300 s) or `--stuck-exit-secs`.
-fn spawn_stuck_watchdog(governor: Arc<ToolGovernor>, limit: Duration) {
+/// How often the server reads its governor's health on its own.
+const HEALTH_POLL: Duration = Duration::from_secs(5);
+
+/// Start what reads the governor's health on its own: the stuck watchdog
+/// when one is configured, otherwise, under a memory soft limit, a plain
+/// poll. An idle governor hands freed heap memory back only when a call
+/// arrives or its health is read (`ToolGovernor::health`), and the
+/// conversation store refuses for memory on the same RSS without starting a
+/// hand-back, so without a poll a server nobody calls would keep refusing
+/// store writes. The task started, if any, runs until it is aborted through
+/// the returned handle (or the process exits).
+fn spawn_health_readers(
+    governor: &Arc<ToolGovernor>,
+    exec: &ExecConfig,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if let Some(limit) = exec.stuck_exit {
+        Some(spawn_stuck_watchdog(Arc::clone(governor), limit))
+    } else if exec.rss_soft_limit_bytes.is_some() {
+        let governor = Arc::clone(governor);
+        Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(HEALTH_POLL);
+            loop {
+                tick.tick().await;
+                // Read for its side effect: a due hand-back while idle.
+                governor.health();
+            }
+        }))
+    } else {
+        None
+    }
+}
+
+/// Exit with code 70 when the governor stays unhealthy for `limit` (every
+/// tool permit held by overdue work, or the process stuck above its memory
+/// soft limit with no call running within its deadline), so the platform
+/// restarts the machine instead of leaving it wedged. Set by the hosted
+/// profile (300 s) or `--stuck-exit-secs`.
+fn spawn_stuck_watchdog(
+    governor: Arc<ToolGovernor>,
+    limit: Duration,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut watchdog = StuckWatchdog::new(limit);
-        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut tick = tokio::time::interval(HEALTH_POLL);
         loop {
             tick.tick().await;
-            if watchdog.observe(governor.health().healthy, Instant::now()) {
+            let health = governor.health();
+            if watchdog.observe(health.healthy, Instant::now()) {
+                let cause = health
+                    .unhealthy_cause()
+                    .unwrap_or_else(|| "no cause reported".to_string());
                 tracing::error!(
-                    "tool workers stuck past their deadline for {limit:?}; exiting so the \
-                     platform restarts the machine"
+                    "tool governor unhealthy for {limit:?} ({cause}); exiting so the platform \
+                     restarts the machine"
                 );
                 std::process::exit(70);
             }
         }
-    });
+    })
 }
 
 /// Create the axum router with all routes.
@@ -564,9 +625,10 @@ pub struct ToolDefinition {
 
 /// Health check endpoint: 200 with `"status": "ok"`, or 503 with
 /// `"status": "degraded"` while every tool permit is held by work past its
-/// deadline. The `governor` object reports in-flight and overdue work; in
-/// open public mode it leaves out the in-flight count and the process memory
-/// (`ToolGovernor::health_report`).
+/// deadline or the process is stuck above its memory soft limit
+/// (`GovernorHealth::memory_stuck`). The `governor` object reports in-flight
+/// and overdue work; in open public mode it leaves out the in-flight count
+/// and the process memory (`ToolGovernor::health_report`).
 async fn health_check(State(state): State<AppState>) -> Response {
     let session_count = state.session_manager.session_count().await;
     let health = state.governor.health();
@@ -676,6 +738,96 @@ mod serve_tests {
                 .iter()
                 .all(|e| e["tool_name"] == "list_datasets" && e["session_id"] == sid.as_str())
         );
+    }
+
+    /// Under a memory soft limit with no stuck watchdog, the server still
+    /// reads its governor's health on its own, so an idle process above the
+    /// limit gets its freed heap memory handed back without a tool call or a
+    /// `/health` read, which lowers the RSS that the conversation store's own
+    /// memory check reads (PR-04).
+    #[tokio::test]
+    async fn a_soft_limit_without_a_watchdog_still_hands_memory_back() {
+        use crate::exec::fake_memory::FakeMemory;
+        const LIMIT: u64 = 100 << 20;
+        let exec = ExecConfig {
+            rss_soft_limit_bytes: Some(LIMIT),
+            ..Default::default()
+        };
+        assert_eq!(exec.stuck_exit, None);
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let memory = FakeMemory::new(LIMIT + (50 << 20), LIMIT / 2);
+        let governor =
+            Arc::new(ToolGovernor::new(exec.clone(), sessions).with_fake_memory(&memory));
+        let readers = spawn_health_readers(&governor, &exec).expect("a plain poll");
+        // A bound on the wait, not a timing assertion: the poll's first
+        // reading is immediate.
+        for _ in 0..500 {
+            if memory.releases() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        readers.abort();
+        assert_eq!(memory.releases(), 1, "no hand-back without a reader");
+        let health = governor.health();
+        assert!(health.healthy && !health.memory_stuck, "{health:?}");
+        assert_eq!(health.rss_bytes, Some(LIMIT / 2));
+    }
+
+    /// The health readers stop when the server does. Each holds the
+    /// governor, and through it the session manager and every session's
+    /// datasets, and the plain poll keeps handing memory back, so a reader
+    /// left running after a graceful shutdown would keep a dead server's
+    /// memory and its hand-backs for as long as an embedder keeps the
+    /// process (PR-04).
+    #[tokio::test]
+    async fn the_health_readers_stop_when_the_server_does() {
+        let config = ServerConfig {
+            transport: TransportType::Http,
+            ..Default::default()
+        };
+        let readers = [
+            (
+                // A soft limit far above any RSS, so nothing is refused or
+                // handed back, and no watchdog.
+                "the plain poll",
+                ExecConfig {
+                    rss_soft_limit_bytes: Some(1 << 50),
+                    ..Default::default()
+                },
+            ),
+            (
+                // A healthy governor never trips it.
+                "the stuck watchdog",
+                ExecConfig {
+                    stuck_exit: Some(Duration::from_secs(3600)),
+                    ..Default::default()
+                },
+            ),
+        ];
+        let mut outlived = Vec::new();
+        for (reader, exec) in readers {
+            let (app, state) = build_app_with(&config, exec).await.unwrap();
+            let governor = Arc::downgrade(&state.governor);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            serve_app(listener, app, state, async {}).await.unwrap();
+            // A bound on the wait, not a timing assertion: an aborted task
+            // is dropped on its next turn on the runtime.
+            for _ in 0..500 {
+                if governor.upgrade().is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            if governor.upgrade().is_some() {
+                outlived.push(reader);
+            }
+        }
+        assert!(outlived.is_empty(), "outlived the server: {outlived:?}");
     }
 }
 

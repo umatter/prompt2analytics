@@ -139,7 +139,18 @@ websocket `tool` messages runs through one governor
 - **Memory admission.** While the process RSS is above
   `P2A_MEMORY_SOFT_LIMIT_MB` (hosted 700 MiB), new calls are refused with 503
   `memory_pressure` (`Retry-After: 15`). This needs a platform that reports RSS
-  (Linux); elsewhere the server warns at startup and admits every call.
+  (Linux); elsewhere the server warns at startup and admits every call. The
+  RSS also counts memory the allocator kept after the data in it was freed
+  (glibc keeps a thread's freed heap resident), so before refusing, the server
+  hands its freed heap pages back to the operating system (`malloc_trim` on
+  glibc; nothing elsewhere) and admits the call if that brought it under the
+  limit. It also does this on its own while no call runs within its deadline,
+  whenever its health is read: by `/health`, and by the server itself every 5 s
+  whenever a soft limit is set (the stuck watchdog's polling, or a plain poll
+  when no watchdog is configured). Hand-backs are at least 10 s apart, so an
+  idle server that is above the limit only because of memory it has already
+  freed is back under it within about 15 s (the 10 s spacing plus one 5 s
+  poll), with no visitor.
 - **Dataset quotas.** After a call, the in-memory size of the session's
   datasets is checked against `P2A_SESSION_DATA_MB` (hosted 200 MiB) and the
   total over all sessions against `P2A_TOTAL_DATA_MB` (hosted 500 MiB). A call
@@ -152,10 +163,16 @@ websocket `tool` messages runs through one governor
   aborting the process.
 - **Health and watchdog.** `/health` reports a `governor` object and answers 503
   with `"status": "degraded"` while every slot is held by work past its
-  deadline. If that state lasts `P2A_STUCK_EXIT_SECS` (hosted 300 s), the
-  process logs an error and exits with exit code 70, so that the platform's
-  restart policy starts a fresh process. A restart discards every in-memory
-  session.
+  deadline, or while the process stays above its memory soft limit after a
+  hand-back with no call running within its deadline (`"memory_stuck": true`:
+  every call is refused, so no tool call will run to free it; only work
+  detached past its deadline ending, or sessions being deleted or expiring, can
+  bring the process back under the limit). If either state
+  lasts `P2A_STUCK_EXIT_SECS` (hosted 300 s), the process logs an error and
+  exits with exit code 70, so that the platform's restart policy starts a
+  fresh process. A restart discards every in-memory session. A soft
+  limit below the server's idle RSS therefore restarts it every
+  `P2A_STUCK_EXIT_SECS`.
 - **Session capacity.** When `P2A_MAX_SESSIONS` (100) sessions exist, creating
   another evicts the least recently used session that has been idle for at
   least `P2A_SESSION_EVICT_IDLE_MINUTES` (hosted 10); a session with a running
@@ -255,7 +272,10 @@ HTTP), and they never depend on the resource profile:
   `quota_exceeded`; text the server produces (assistant replies, tool results)
   is truncated to the room left; deleting a conversation frees its bytes.
 - **Memory.** While RSS is above `P2A_MEMORY_SOFT_LIMIT_MB`, writes to the store
-  answer 503 `memory_pressure` (`Retry-After: 15`).
+  answer 503 `memory_pressure` (`Retry-After: 15`). The store does not hand
+  memory back itself; it reads the same RSS, so it accepts writes again once the
+  server's own hand-back (Memory admission, under Execution governor) brings the
+  RSS under the limit.
 - **`user_id`.** Optional, at most 128 bytes of `A-Z a-z 0-9 . _ @ -` (400
   `invalid_arguments` otherwise), and ignored in open public mode.
 

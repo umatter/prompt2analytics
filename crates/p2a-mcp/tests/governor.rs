@@ -627,6 +627,41 @@ async fn every_http_entry_is_governed() {
     assert_eq!(h[header::RETRY_AFTER], "15");
 }
 
+/// A process left above its memory soft limit with no call running reports
+/// itself on `/health`: 503 "degraded" with `governor.memory_stuck` (PR-04).
+/// In open public mode the key stays while the in-flight count and the
+/// process memory are left out. A 1-byte limit stays exceeded whatever the
+/// heap hands back, so the refused call's hand-back makes the gate stuck.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn health_reports_a_stuck_memory_gate() {
+    let open = http_cfg("0.0.0.0:8080", None, true);
+    let refusing = |exec: ExecConfig| ExecConfig {
+        rss_soft_limit_bytes: Some(1),
+        ..exec
+    };
+    for (cfg, exec) in [
+        (local(), refusing(ExecConfig::default())),
+        (open.clone(), refusing(ExecConfig::from_config(&open))),
+    ] {
+        let redacted = exec.redact_health;
+        let (app, _) = app_with(&cfg, exec).await;
+        let sid = new_session(&app).await;
+        let (s, _, b) = call(&app, &sid, "list_datasets", json!({})).await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{b}");
+        assert_eq!(b["code"], json!("memory_pressure"), "{b}");
+
+        let (s, _, body) = send(&app, get("/health")).await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["status"], json!("degraded"), "{body}");
+        let governor = &body["governor"];
+        assert_eq!(governor["healthy"], json!(false), "{body}");
+        assert_eq!(governor["memory_stuck"], json!(true), "{body}");
+        assert_eq!(governor.get("in_flight").is_none(), redacted, "{body}");
+        assert_eq!(governor["rss_bytes"].is_null(), redacted, "{body}");
+    }
+}
+
 #[tokio::test]
 async fn unknown_tool_and_bad_arguments_have_codes() {
     let (app, _) = build_app(&local()).await.unwrap();
