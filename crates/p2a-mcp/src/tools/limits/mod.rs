@@ -265,26 +265,24 @@ const PIVOT_COLUMNS_HOSTED: usize = 10_000;
 /// the most.
 ///
 /// Measured on a release build of the hosted server, in a fresh process, a dense pivot of about
-/// 1,000,000 cells raised the peak RSS above the loaded long table by 150 to 200 MiB for f64
-/// values and by 195 to 260 MiB for string values (of 6, 20 and 45 bytes), as a 1,000 x 1,000, a
-/// 100 x 10,000 or a 9,900 x 101 wide table; about 2,000,000 cells raised it by 310 MiB for
-/// numbers and 415 MiB for strings. A sparse pivot, with far fewer rows than cells, costs about
-/// 25 bytes per cell for numbers and 65 for strings. A process that has already freed large
+/// 1,000,000 cells raised the peak RSS above the loaded long table by 150 to 200 MiB for f64 values
+/// and by 195 to 260 MiB for string values (of 6, 20 and 45 bytes), as a 1,000 x 1,000, a
+/// 100 x 10,000 or a 9,900 x 101 wide table. A sparse pivot, with far fewer rows than cells, costs
+/// about 25 bytes per cell for numbers and 65 for strings. A process that has already freed large
 /// buffers, as a long-running server has, keeps more of a pivot's memory resident (glibc's malloc
-/// raises its mmap threshold as it frees them): there the 1,000 x 1,000 pivot peaked up to 252
-/// MiB with integer index and f64 values and up to 351 MiB with 45-byte strings as index and
-/// values. Dense pivots with more index columns, as many rows as the values to group allow,
-/// peaked lower in that state: 191, 176, 124, 111, 94 and 87 MiB with 2, 3, 5, 10, 20 and 40
-/// integer index columns, 169 to 290 MiB with string index columns of 20 or 45 bytes. For index
-/// and values of up to about 45 bytes, one pivot therefore peaks at most about 350 MiB above what
-/// the session already holds, so a session within its 200 MiB quota stays under the 700 MiB soft
-/// limit of the hosted 1 GB machine. Wider strings add up to about their own bytes, which polars
-/// copies (in a fresh process a 1,000 x 1,000 pivot of 150-byte string values peaked 303 MiB above
-/// the long table, of 150-byte index values 273 MiB); the session's dataset quota, not this
-/// budget, bounds those bytes. With one index column, a wide table of 100,000 rows and 10
-/// columns, of 10,000 rows and 100 columns or of 1,000 rows and 1,000 columns still fits. The
-/// allocation ceiling (`P2A_MAX_ALLOC_MB`) bounds p2a-core's own buffers, not polars', so it does
-/// not apply to a pivot.
+/// raises its mmap threshold as it frees them): there the 1,000 x 1,000 pivot peaked up to 252 MiB
+/// with integer index and f64 values and up to 351 MiB with 45-byte strings as index and values.
+/// Dense pivots with more index columns, as many rows as the values to group allow, peaked lower in
+/// that state: 191, 176, 124, 111, 94 and 87 MiB with 2, 3, 5, 10, 20 and 40 integer index columns,
+/// 169 to 290 MiB with string index columns of 20 or 45 bytes. For index and values of up to about
+/// 45 bytes, one pivot therefore peaks at most about 350 MiB above what the session already holds,
+/// so a session within its 200 MiB quota stays under the 700 MiB soft limit of the hosted 1 GB
+/// machine. Wider strings add up to about their own bytes, which polars copies (in a fresh process
+/// a 1,000 x 1,000 pivot of 150-byte string values peaked 303 MiB above the long table, of 150-byte
+/// index values 273 MiB); the session's dataset quota, not this budget, bounds those bytes. With
+/// one index column, a wide table of 100,000 rows and 10 columns, of 10,000 rows and 100 columns or
+/// of 1,000 rows and 1,000 columns still fits. The allocation ceiling (`P2A_MAX_ALLOC_MB`) bounds
+/// p2a-core's own buffers, not polars', so it does not apply to a pivot.
 const PIVOT_CELLS_HOSTED: u64 = 1_000_000;
 
 /// Index and `on` values [`Limits::check_pivot`] lets a pivot group for each cell of
