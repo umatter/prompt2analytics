@@ -144,8 +144,12 @@ websocket `tool` messages runs through one governor
   (glibc keeps a thread's freed heap resident), so before refusing, the server
   hands its freed heap pages back to the operating system (`malloc_trim` on
   glibc; nothing elsewhere) and admits the call if that brought it under the
-  limit. It also does this on its own while nothing runs, when `/health` or the
-  watchdog looks. Hand-backs are at least 10 s apart.
+  limit. It also does this on its own while no call runs within its deadline,
+  whenever its health is read: by `/health`, and by the server itself every 5 s
+  whenever a soft limit is set (the stuck watchdog's polling, or a plain poll
+  when no watchdog is configured). Hand-backs are at least 10 s apart, so an
+  idle server that freed memory alone held above the limit is back under it
+  within about 15 s, with no visitor.
 - **Dataset quotas.** After a call, the in-memory size of the session's
   datasets is checked against `P2A_SESSION_DATA_MB` (hosted 200 MiB) and the
   total over all sessions against `P2A_TOTAL_DATA_MB` (hosted 500 MiB). A call
@@ -266,7 +270,10 @@ HTTP), and they never depend on the resource profile:
   `quota_exceeded`; text the server produces (assistant replies, tool results)
   is truncated to the room left; deleting a conversation frees its bytes.
 - **Memory.** While RSS is above `P2A_MEMORY_SOFT_LIMIT_MB`, writes to the store
-  answer 503 `memory_pressure` (`Retry-After: 15`).
+  answer 503 `memory_pressure` (`Retry-After: 15`). The store does not hand
+  memory back itself; it reads the same RSS, so it accepts writes again once the
+  server's own hand-back (Memory admission, under Execution governor) brings the
+  RSS under the limit.
 - **`user_id`.** Optional, at most 128 bytes of `A-Z a-z 0-9 . _ @ -` (400
   `invalid_arguments` otherwise), and ignored in open public mode.
 

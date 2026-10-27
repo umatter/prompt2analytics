@@ -839,8 +839,10 @@ impl ToolGovernor {
     /// memory gate is stuck: the process stays above its soft limit after
     /// freed heap memory was handed back, with no call running within its
     /// deadline. Above the limit with no such call running, this starts a
-    /// due hand-back in the background (see `MemoryGate`), so whatever polls
-    /// it (the stuck watchdog, `/health`) also gives the server its way back.
+    /// due hand-back in the background (see `MemoryGate`), so whatever reads
+    /// it also gives the server its way back: `/health`, and the HTTP server
+    /// itself every 5 s under a soft limit (the stuck watchdog, or a plain
+    /// poll without one).
     pub fn health(&self) -> GovernorHealth {
         let (in_flight, overdue) = self.running_and_overdue();
         let rss = self.memory.rss();
