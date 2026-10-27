@@ -19,9 +19,19 @@
 //!   data file that is itself a symlink must be named by its real path.
 //! - **Writes.** [`validate_data_path_for_write`] also refuses a folder at the
 //!   target and a parent folder that does not exist. [`write_atomically`]
-//!   writes a `0600` temporary file beside the target and renames it into
-//!   place, so a link planted at the target after validation is replaced,
-//!   never followed, and a failed write leaves nothing behind.
+//!   writes a `0600` temporary file (`.<name>.<uuid>.p2a-tmp`) beside the
+//!   target and renames it into place, so a link planted at the target after
+//!   validation is replaced, never followed, and a write that returns an
+//!   error leaves nothing behind.
+//! - **Leftovers.** A process that stops while writing (killed, or shut down
+//!   before the write ends) leaves its temporary file. Using a root or
+//!   writing into a folder sweeps it: the first time in a process, and again
+//!   whenever its last sweep is ten minutes past. A sweep removes the
+//!   temporary files there that nobody has modified for ten minutes and that
+//!   are no write of this process in progress: regular files with exactly
+//!   that name pattern, never a link and never anything in a subfolder. A
+//!   write in progress goes seconds at most between two writes to its file,
+//!   so another process that shares the data root keeps its writes.
 //! - **Messages.** Errors never contain an absolute server path or an
 //!   environment variable name: they echo the caller's input (at most 200
 //!   characters) or a [`display_path`] form, which is relative to the root.
@@ -59,12 +69,13 @@
 //!   refuses a write that would take the directory past it.
 
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard, Once, OnceLock, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Cached resolved jail root, computed once on first use.
 static DATA_ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -142,7 +153,10 @@ pub fn validate_data_path_for_write(input: &str) -> Result<PathBuf, String> {
 /// Write `target` atomically: `write` fills a new temporary file (mode `0600`)
 /// in the target's folder, which is then renamed over the target. A symlink
 /// at the target is replaced, never followed, and on every error the
-/// temporary file is removed. Inside a session scope with a
+/// temporary file is removed (a process that stops during the write leaves
+/// it, for a later sweep to remove: see the module documentation). A write
+/// into a folder first removes the folder's leftover temporary files when
+/// the folder is due a sweep. Inside a session scope with a
 /// `session_disk_bytes` budget, the write is refused (and nothing is left
 /// behind) when the session's directory would exceed it. `target` should come
 /// from [`validate_data_path_for_write`].
@@ -303,16 +317,20 @@ fn write_atomically_in(
     let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
         return Err(cannot_save());
     };
+    sweep_leftover_temp_files(parent);
     let name = name.to_string_lossy();
     let mut cut = name.len().min(TMP_NAME_BYTES);
     while !name.is_char_boundary(cut) {
         cut -= 1;
     }
     let tmp = parent.join(format!(
-        ".{}.{}.p2a-tmp",
+        ".{}.{}{TMP_SUFFIX}",
         &name[..cut],
         uuid::Uuid::new_v4()
     ));
+    // Registered before the file exists, so no sweep can take it for a
+    // leftover while this write is in progress.
+    let _in_flight = InFlight::register(&tmp);
 
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -382,6 +400,138 @@ fn dir_usage_bytes(dir: &Path) -> u64 {
         }
     }
     total
+}
+
+// =============================================================================
+// Temporary files left by a write that never ended
+// =============================================================================
+
+/// The end of the name of every temporary file [`write_atomically_in`]
+/// creates: `.<target name>.<UUID v4>.p2a-tmp`.
+const TMP_SUFFIX: &str = ".p2a-tmp";
+
+/// How long a temporary file must have gone unmodified before a sweep takes
+/// it for a leftover, and how often a folder in use is swept. A write in
+/// progress goes seconds at most between two writes to its file, so a write
+/// of another process that shares the data root is never taken for one.
+/// (A sweep that ran after the writer's last write, as "older than this
+/// process" would, removes a live export of such a process.)
+const LEFTOVER_IDLE: Duration = Duration::from_secs(10 * 60);
+// The module doc states the idle time as a literal.
+const _: () = assert!(
+    LEFTOVER_IDLE.as_secs() == 600,
+    "update the ten minutes in the path_jail module doc"
+);
+
+/// Most folders [`SWEPT_DIRS`] remembers; past this it forgets them all, and
+/// a folder is swept again (which is harmless) the next time it is used.
+const MAX_SWEPT_DIRS: usize = 4_096;
+
+/// The temporary files of the writes in progress in this process, which a
+/// sweep never removes, however long they have gone unmodified.
+static IN_FLIGHT: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+
+/// When this process last swept each folder for leftover temporary files.
+static SWEPT_DIRS: LazyLock<Mutex<HashMap<PathBuf, Instant>>> = LazyLock::new(Default::default);
+
+/// A write in progress: its temporary file is in [`IN_FLIGHT`] until this is
+/// dropped, also when the write panics.
+struct InFlight(PathBuf);
+
+impl InFlight {
+    fn register(tmp: &Path) -> Self {
+        locked(&IN_FLIGHT).insert(tmp.to_path_buf());
+        Self(tmp.to_path_buf())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        locked(&IN_FLIGHT).remove(&self.0);
+    }
+}
+
+/// Whether `name` has the form of a temporary file name of
+/// [`write_atomically_in`]: `.<name>.<UUID v4>.p2a-tmp`, the UUID in its
+/// canonical (lower-case, hyphenated) form.
+fn is_temp_file_name(name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix('.')
+        .and_then(|n| n.strip_suffix(TMP_SUFFIX))
+    else {
+        return false;
+    };
+    let Some((stem, id)) = rest.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty() && canonical_uuid(id).is_some_and(|u| u.get_version_num() == 4)
+}
+
+/// Remove the temporary files left in `dir` (not in its subfolders): the
+/// regular files with a temporary file's name (links are neither followed
+/// nor removed) that were last modified before `before` and are not the
+/// temporary file of a write in progress in this process. Looks at no more
+/// than [`MAX_USAGE_ENTRIES`] entries. Returns the number removed.
+fn remove_leftover_temp_files_in(dir: &Path, before: SystemTime) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten().take(MAX_USAGE_ENTRIES) {
+        if !entry.file_name().to_str().is_some_and(is_temp_file_name) {
+            continue;
+        }
+        let path = entry.path();
+        let left_over = fs::symlink_metadata(&path)
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| m.modified().ok())
+            .is_some_and(|modified| modified < before);
+        if !left_over || locked(&IN_FLIGHT).contains(&path) {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cannot remove a leftover temporary file")
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "removed leftover temporary files");
+    }
+    removed
+}
+
+/// [`remove_leftover_temp_files_in`] for `dir` and the files nobody has
+/// modified for [`LEFTOVER_IDLE`], when this process uses `dir` as a root or
+/// writes into it for the first time, or for the first time since it last
+/// did so [`LEFTOVER_IDLE`] ago.
+fn sweep_leftover_temp_files(dir: &Path) {
+    if !due_for_sweep(&mut locked(&SWEPT_DIRS), dir, Instant::now()) {
+        return;
+    }
+    if let Some(before) = SystemTime::now().checked_sub(LEFTOVER_IDLE) {
+        remove_leftover_temp_files_in(dir, before);
+    }
+}
+
+/// Whether `dir` is due a sweep at `now`: never swept as far as `swept`
+/// remembers, or last swept [`LEFTOVER_IDLE`] or longer ago. When it is, it
+/// counts as swept at `now` (so concurrent callers do not all sweep it).
+fn due_for_sweep(swept: &mut HashMap<PathBuf, Instant>, dir: &Path, now: Instant) -> bool {
+    if swept
+        .get(dir)
+        .is_some_and(|at| now.saturating_duration_since(*at) < LEFTOVER_IDLE)
+    {
+        return false;
+    }
+    if swept.len() >= MAX_SWEPT_DIRS {
+        swept.clear();
+    }
+    swept.insert(dir.to_path_buf(), now);
+    true
 }
 
 /// `path` relative to `root` for a message (`/`-separated, `.` for the root
@@ -689,22 +839,28 @@ fn data_root() -> Result<PathBuf, String> {
 
 /// The root paths resolve against: `data_root` when session directories are
 /// off, else the scope's session directory; refused when they are on and no
-/// scope is active.
+/// scope is active. The root's leftover temporary files are removed first
+/// (see [`sweep_leftover_temp_files`]), so no quota check counts them.
 fn active_root_for(
     data_root: &Path,
     enabled: bool,
     scope: Option<&str>,
 ) -> Result<PathBuf, String> {
-    if !enabled {
-        return Ok(data_root.to_path_buf());
-    }
-    match scope {
-        None => Err(
-            "file access needs a session; this server keeps each session's files separate"
-                .to_string(),
-        ),
-        Some(id) => session_dir_in(data_root, id),
-    }
+    let root = if !enabled {
+        data_root.to_path_buf()
+    } else {
+        match scope {
+            None => {
+                return Err(
+                    "file access needs a session; this server keeps each session's files separate"
+                        .to_string(),
+                );
+            }
+            Some(id) => session_dir_in(data_root, id)?,
+        }
+    };
+    sweep_leftover_temp_files(&root);
+    Ok(root)
 }
 
 /// `<data_root>/sessions/<id>`, created on first use with mode `0700` (its
@@ -985,6 +1141,123 @@ mod tests {
         );
     }
 
+    /// A file named like a temporary file of [`write_atomically_in`] for
+    /// `target`, last modified at `modified`.
+    fn temp_file_at(dir: &Path, target: &str, modified: std::time::SystemTime) -> PathBuf {
+        let path = dir.join(format!(".{target}.{}.p2a-tmp", uuid::Uuid::new_v4()));
+        fs::write(&path, "x,y\n1,2.1\n2,").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        path
+    }
+
+    fn an_hour_ago() -> std::time::SystemTime {
+        std::time::SystemTime::now() - std::time::Duration::from_secs(3600)
+    }
+
+    /// A process that stopped while writing left its temporary file behind:
+    /// the next use of the root removes it, and nothing else.
+    #[test]
+    fn using_a_root_removes_temporary_files_left_by_a_write_that_stopped() {
+        let (_t, root) = tmp_root();
+        let leftover = temp_file_at(&root, "out.csv", an_hour_ago());
+        // Modified a minute ago: a write of another process that shares the
+        // root may still be in progress. And a time ahead of the clock.
+        let a_minute_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let current = temp_file_at(&root, "live.csv", a_minute_ago);
+        let in_the_future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let ahead = temp_file_at(&root, "ahead.csv", in_the_future);
+        // Names that only look alike, and the operator's own files.
+        let others = [
+            ".out.csv.p2a-tmp".to_string(),
+            "out.csv.4b0f5a8e-1c2d-4e3f-9a8b-7c6d5e4f3a2b.p2a-tmp".to_string(),
+            ".out.csv.4B0F5A8E-1C2D-4E3F-9A8B-7C6D5E4F3A2B.p2a-tmp".to_string(),
+            ".out.csv.4b0f5a8e-1c2d-4e3f-9a8b-7c6d5e4f3a2b.p2a-tmp.bak".to_string(),
+            "notes.txt".to_string(),
+        ];
+        for name in &others {
+            fs::write(root.join(name), "keep").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(root.join(name))
+                .unwrap()
+                .set_modified(an_hour_ago())
+                .unwrap();
+        }
+        let dir_like = root.join(format!(".d.csv.{}.p2a-tmp", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir_like).unwrap();
+
+        assert_eq!(active_root_for(&root, false, None).unwrap(), root);
+        assert!(
+            !leftover.exists(),
+            "the leftover temporary file is still there"
+        );
+        assert!(current.exists() && ahead.exists());
+        for name in &others {
+            assert!(root.join(name).exists(), "{name} was removed");
+        }
+        assert!(dir_like.is_dir());
+        #[cfg(unix)]
+        {
+            // A link with a temporary file's name is not followed or removed.
+            use std::os::unix::fs::symlink;
+            let (_o, outside) = tmp_root();
+            fs::write(outside.join("victim.csv"), "a\n1\n").unwrap();
+            let (_t2, root2) = tmp_root();
+            let link = root2.join(format!(".v.csv.{}.p2a-tmp", uuid::Uuid::new_v4()));
+            symlink(outside.join("victim.csv"), &link).unwrap();
+            active_root_for(&root2, false, None).unwrap();
+            assert!(fs::symlink_metadata(&link).is_ok());
+            assert!(outside.join("victim.csv").exists());
+        }
+    }
+
+    /// An export into a folder of the root removes the temporary files an
+    /// earlier process left in that folder.
+    #[test]
+    fn writing_into_a_folder_removes_its_leftover_temporary_files() {
+        let (_t, root) = tmp_root();
+        fs::create_dir(root.join("sub")).unwrap();
+        let leftover = temp_file_at(&root.join("sub"), "out.csv", an_hour_ago());
+        let target = resolve_for_write_in(&root, "sub/out.csv", None).unwrap();
+        write_atomically_in(&target, None, |tmp| {
+            fs::write(tmp, "x,y\n1,2.1\n").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        assert!(
+            !leftover.exists(),
+            "the leftover temporary file is still there"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "x,y\n1,2.1\n");
+        assert_eq!(fs::read_dir(root.join("sub")).unwrap().count(), 1);
+    }
+
+    /// A folder in use is swept again once the idle time has passed since
+    /// its last sweep, so a leftover that was too fresh at a restart still
+    /// goes; the set of swept folders stays bounded.
+    #[test]
+    fn a_folder_in_use_is_swept_again_after_the_idle_time() {
+        let mut swept = HashMap::new();
+        let (a, b) = (Path::new("/data/a"), Path::new("/data/b"));
+        let t0 = Instant::now();
+        let later = |d: Duration| t0.checked_add(d).unwrap();
+        assert!(due_for_sweep(&mut swept, a, t0));
+        assert!(!due_for_sweep(&mut swept, a, t0));
+        assert!(!due_for_sweep(&mut swept, a, later(LEFTOVER_IDLE / 2)));
+        assert!(due_for_sweep(&mut swept, b, later(LEFTOVER_IDLE / 2)));
+        assert!(due_for_sweep(&mut swept, a, later(LEFTOVER_IDLE)));
+        assert!(!due_for_sweep(&mut swept, a, later(LEFTOVER_IDLE * 3 / 2)));
+        assert!(due_for_sweep(&mut swept, b, later(LEFTOVER_IDLE * 3 / 2)));
+        for i in 0..MAX_SWEPT_DIRS * 2 {
+            due_for_sweep(&mut swept, &Path::new("/data").join(i.to_string()), t0);
+        }
+        assert!(swept.len() <= MAX_SWEPT_DIRS);
+    }
+
     #[test]
     fn write_target_that_is_a_directory_is_refused() {
         let (_t, root) = tmp_root();
@@ -1116,6 +1389,56 @@ mod tests {
         keep_session_dirs([&back]);
         remove_session_dir_in(&data, &back).unwrap();
         assert!(!locked(&KEPT_SESSIONS).contains(&session_uuid(&back).unwrap()));
+    }
+
+    /// A sweep never takes the temporary file of a write in progress for a
+    /// leftover, whatever its time.
+    #[test]
+    fn a_sweep_leaves_a_write_in_progress_alone() {
+        let (_t, root) = tmp_root();
+        let target = root.join("out.csv");
+        write_atomically_in(&target, None, |tmp| {
+            fs::write(tmp, "x,y\n").map_err(|e| e.to_string())?;
+            fs::File::options()
+                .write(true)
+                .open(tmp)
+                .and_then(|f| f.set_modified(an_hour_ago()))
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                remove_leftover_temp_files_in(&root, std::time::SystemTime::now()),
+                0
+            );
+            assert!(tmp.exists());
+            fs::write(tmp, "x,y\n1,2.1\n").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "x,y\n1,2.1\n");
+        assert!(!locked(&IN_FLIGHT).iter().any(|p| p.starts_with(&root)));
+    }
+
+    #[test]
+    fn temp_file_names_are_recognised_exactly() {
+        let id = "4b0f5a8e-1c2d-4e3f-9a8b-7c6d5e4f3a2b";
+        for name in [
+            format!(".out.csv.{id}.p2a-tmp"),
+            format!("..{id}.{id}.p2a-tmp"),
+            format!(".é.{id}.p2a-tmp"),
+        ] {
+            assert!(is_temp_file_name(&name), "{name}");
+        }
+        for name in [
+            format!("out.csv.{id}.p2a-tmp"),
+            format!("..{id}.p2a-tmp"),
+            format!(".out.csv.{}.p2a-tmp", id.to_uppercase()),
+            format!(".out.csv.{}.p2a-tmp", id.replace('-', "")),
+            // version 1, not 4
+            ".out.csv.4b0f5a8e-1c2d-1e3f-9a8b-7c6d5e4f3a2b.p2a-tmp".to_string(),
+            format!(".out.csv.{id}.p2a-tmp.bak"),
+            ".out.csv.p2a-tmp".to_string(),
+            ".p2a-tmp".to_string(),
+        ] {
+            assert!(!is_temp_file_name(&name), "{name}");
+        }
     }
 
     /// A session id no other test uses: removing one is recorded process-wide
