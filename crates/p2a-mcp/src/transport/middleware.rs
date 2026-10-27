@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderName, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -16,7 +16,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use super::http::ApiResponse;
-use crate::config::{DeploymentMode, ServerConfig};
+use crate::config::{DeploymentMode, ResourceProfile, ServerConfig};
 
 /// Request headers a browser client may send cross-origin: the bearer token,
 /// JSON bodies, `Accept` and the session header. A `*` wildcard would not
@@ -72,32 +72,108 @@ pub(crate) const MAX_HTTP_BODY_VAR: &str = "P2A_MAX_HTTP_BODY_MB";
 /// Caps memory use from oversized requests (e.g. large base64 dataset uploads)
 /// on a publicly reachable backend. Defaults to 32 MiB; override with the
 /// `P2A_MAX_HTTP_BODY_MB` environment variable. This only limits request
-/// bodies and does not affect SSE/streaming responses.
+/// bodies and does not affect SSE/streaming responses. The routes that parse
+/// a JSON body take one up to this size, except in the hosted profile
+/// ([`parsed_body_bytes`]).
 pub(crate) fn max_request_body_bytes() -> usize {
+    body_cap_bytes(std::env::var(MAX_HTTP_BODY_VAR).ok().as_deref())
+}
+
+/// The body cap a `P2A_MAX_HTTP_BODY_MB` value sets, in bytes: the default
+/// 32 MiB when the variable is unset, is not a positive whole number, or is
+/// too large to count in bytes. A value set but not used is logged once per
+/// process, as a warning.
+fn body_cap_bytes(value: Option<&str>) -> usize {
     const DEFAULT_MB: usize = 32;
-    let mb = std::env::var(MAX_HTTP_BODY_VAR)
+    const MIB: usize = 1024 * 1024;
+    let Some(value) = value else {
+        return DEFAULT_MB * MIB;
+    };
+    let bytes = value
+        .parse::<usize>()
         .ok()
-        .and_then(|v| v.parse::<usize>().ok())
         .filter(|&mb| mb > 0)
-        .unwrap_or(DEFAULT_MB);
-    mb * 1024 * 1024
+        .and_then(|mb| mb.checked_mul(MIB));
+    bytes.unwrap_or_else(|| {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "{MAX_HTTP_BODY_VAR}={value:?} is not a positive whole number of MiB \
+                 below {} MiB; using the default {DEFAULT_MB} MiB",
+                usize::MAX / MIB + 1
+            );
+        });
+        DEFAULT_MB * MIB
+    })
+}
+
+/// The largest body the hosted profile parses: 2 MiB, axum's own default for
+/// its body extractors, which the hosted server has always applied.
+///
+/// A route parses its whole body (a tool call's arguments into
+/// `serde_json::Value`) before the tool governor's memory admission sees the
+/// call, and the parsed value can take much more memory than the body. The
+/// hosted profile keeps the 2 MiB limit until that parse is bounded; raising
+/// it to the body cap is a separate decision.
+const HOSTED_PARSED_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// The largest body the routes that parse one (axum's `Json`, `Bytes`,
+/// `String` and `Form` extractors) accept: the body cap `body_cap`, or in the
+/// hosted profile [`HOSTED_PARSED_BODY_BYTES`] when that is smaller.
+fn parsed_body_bytes(profile: ResourceProfile, body_cap: usize) -> usize {
+    match profile {
+        ResourceProfile::Off => body_cap,
+        ResourceProfile::Hosted => body_cap.min(HOSTED_PARSED_BODY_BYTES),
+    }
+}
+
+/// What building the router logs in the hosted profile when the body cap
+/// `body_cap` is above [`HOSTED_PARSED_BODY_BYTES`]: an operator who raised
+/// `P2A_MAX_HTTP_BODY_MB` learns that HTTP JSON bodies stay at the hosted
+/// limit, which no setting raises. `None` when the two limits are the same.
+fn hosted_parse_limit_note(profile: ResourceProfile, body_cap: usize) -> Option<String> {
+    let parsed = parsed_body_bytes(profile, body_cap);
+    (profile == ResourceProfile::Hosted && parsed < body_cap).then(|| {
+        format!(
+            "hosted profile: HTTP JSON request bodies are limited to {parsed} bytes; \
+             {MAX_HTTP_BODY_VAR} ({body_cap} bytes) still bounds declared body lengths \
+             and websocket messages"
+        )
+    })
 }
 
 /// Apply global middleware to the fully-composed router.
 ///
 /// Must run AFTER all routes (including nested ones) are registered so the
 /// layers cover every route. In axum each `.layer` call wraps everything
-/// before it, so the order below is innermost first: the body limit, the
+/// before it, so the order below is innermost first: the body limits, the
 /// bearer token, the local-mode Host check, then CORS and tracing outermost.
 /// With CORS outside the other layers, preflight requests are answered
 /// before authentication, and 401, 413 and 421 responses carry CORS headers
 /// a browser can read.
+///
+/// There are two body limits. `RequestBodyLimitLayer` holds every body to
+/// the cap ([`max_request_body_bytes`]): a body declared longer answers 413
+/// (plain text `length limit exceeded`) before it is read, and one without a
+/// declared length is cut off at the cap. axum's body extractors apply a
+/// limit of their own, 2 MiB unless `DefaultBodyLimit` sets it, and refuse a
+/// longer body with 413 (`Failed to buffer the request body: length limit
+/// exceeded`); it is set to [`parsed_body_bytes`], so outside the hosted
+/// profile the cap is the limit of every route. In the hosted profile with a
+/// cap above 2 MiB, building the router logs the lower JSON limit once
+/// ([`hosted_parse_limit_note`]).
 pub(crate) fn apply_global_middleware(router: Router, config: &ServerConfig) -> Router {
     // Shared bearer token, if configured. `None` disables the check (loopback
     // development only; the startup guard forbids this on a public bind).
     let token_state: Option<Arc<str>> = config.http.access_token.as_deref().map(Arc::from);
+    let body_cap = max_request_body_bytes();
+    let parsed = parsed_body_bytes(config.resource_profile(), body_cap);
+    if let Some(note) = hosted_parse_limit_note(config.resource_profile(), body_cap) {
+        tracing::info!("{note}");
+    }
     let router = router
-        .layer(RequestBodyLimitLayer::new(max_request_body_bytes()))
+        .layer(DefaultBodyLimit::max(parsed))
+        .layer(RequestBodyLimitLayer::new(body_cap))
         .layer(middleware::from_fn_with_state(
             token_state,
             require_access_token,
@@ -242,6 +318,115 @@ mod tests {
             "[::]:80",
         ] {
             assert!(!is_local_host(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parsed_bodies_follow_the_cap_except_above_2_mib_in_the_hosted_profile() {
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(parsed_body_bytes(ResourceProfile::Off, 32 * MIB), 32 * MIB);
+        assert_eq!(parsed_body_bytes(ResourceProfile::Off, MIB), MIB);
+        assert_eq!(
+            parsed_body_bytes(ResourceProfile::Hosted, 32 * MIB),
+            2 * MIB
+        );
+        assert_eq!(parsed_body_bytes(ResourceProfile::Hosted, MIB), MIB);
+        // axum's own extractor default, which the hosted server applied
+        // before the limit was set explicitly.
+        assert_eq!(HOSTED_PARSED_BODY_BYTES, 2_097_152);
+    }
+
+    /// A shared buffer the log lines of a test subscriber go to.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// In the hosted profile, a body cap above 2 MiB does not raise the JSON
+    /// body limit, and building the router says so once: the note names
+    /// both limits and the variable that sets the cap. With the two limits
+    /// equal, or outside the hosted profile, there is nothing to say.
+    #[test]
+    fn a_hosted_router_logs_a_json_body_limit_below_the_cap_once() {
+        const MIB: usize = 1024 * 1024;
+        let note = hosted_parse_limit_note(ResourceProfile::Hosted, 32 * MIB)
+            .expect("a hosted cap above 2 MiB is noted");
+        for part in [
+            "2097152 bytes",
+            "33554432 bytes",
+            MAX_HTTP_BODY_VAR,
+            "websocket",
+        ] {
+            assert!(note.contains(part), "{part}: {note}");
+        }
+        assert_eq!(
+            hosted_parse_limit_note(ResourceProfile::Hosted, 2 * MIB),
+            None
+        );
+        assert_eq!(hosted_parse_limit_note(ResourceProfile::Hosted, MIB), None);
+        assert_eq!(
+            hosted_parse_limit_note(ResourceProfile::Off, 32 * MIB),
+            None
+        );
+
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        // Another test thread may register the note's callsite while no
+        // subscriber is in place, which caches it as disabled: with a second
+        // dispatcher registered, recompute every callsite's interest with
+        // this subscriber in place (as websocket.rs's log test does).
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        let log = || String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+
+        let mut config = ServerConfig::default();
+        config.limits.profile = Some(ResourceProfile::Hosted);
+        assert_eq!(config.resource_profile(), ResourceProfile::Hosted);
+        let _router = apply_global_middleware(Router::new(), &config);
+        // The cap this test process runs with: the default 32 MiB unless its
+        // environment sets another.
+        match hosted_parse_limit_note(ResourceProfile::Hosted, max_request_body_bytes()) {
+            Some(note) => assert_eq!(log().matches(&note).count(), 1, "{}", log()),
+            None => assert!(!log().contains("hosted profile"), "{}", log()),
+        }
+
+        let before = log();
+        config.limits.profile = None;
+        assert_eq!(config.resource_profile(), ResourceProfile::Off);
+        let _router = apply_global_middleware(Router::new(), &config);
+        assert_eq!(log(), before);
+    }
+
+    /// The cap is `P2A_MAX_HTTP_BODY_MB` MiB; unset, not a positive whole
+    /// number, or too large to count in bytes, it is the default 32 MiB.
+    #[test]
+    fn body_cap_follows_the_variable_and_falls_back_to_32_mib() {
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(body_cap_bytes(None), 32 * MIB);
+        assert_eq!(body_cap_bytes(Some("4")), 4 * MIB);
+        for invalid in ["0", "-1", "4.5", "", "lots"] {
+            assert_eq!(body_cap_bytes(Some(invalid)), 32 * MIB, "{invalid:?}");
+        }
+        let largest = usize::MAX / MIB;
+        assert_eq!(body_cap_bytes(Some(&largest.to_string())), largest * MIB);
+        // One MiB more does not fit in a usize of bytes: the product used to
+        // overflow (a panic in a debug build, a wrap in a release build).
+        for huge in [largest + 1, usize::MAX] {
+            assert_eq!(body_cap_bytes(Some(&huge.to_string())), 32 * MIB, "{huge}");
         }
     }
 
