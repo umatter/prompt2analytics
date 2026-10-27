@@ -548,7 +548,8 @@ The hosted `ensemble_bytes` of 256 MiB matches the per-allocation ceiling: a
 causal-forest or BART-causal fit keeps every tree it grows, and BART keeps a
 draw for every row and bootstrap replication, so neither the deadline nor the
 ceiling bounds what one fit holds; the handlers refuse a fit whose bound is
-larger before it starts, and say how many rows its settings allow. With four
+larger before it starts, say how many rows its settings allow, and suggest
+other settings only when the least memory those reach fits the dataset. With four
 covariates it admits both tools' defaults on a few hundred thousand rows. The
 bound counts every buffer the fit holds at once, and the fit allocates each at
 its exact length (the recursion's index vectors are sized before they are

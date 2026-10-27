@@ -327,6 +327,22 @@ impl RowClass {
     }
 }
 
+/// What a tree-ensemble fit refused by [`Limits::check_ensemble`] could change instead of its
+/// rows.
+#[derive(Debug, Clone, Copy)]
+pub struct EnsembleChange<'a> {
+    /// The changes that lower the fit's memory bound, completing "or ..." in the refusal
+    /// (`lower n_trees or max_depth`).
+    pub advice: &'a str,
+    /// The parameters those changes set (`n_trees or max_depth`), named when no values of them
+    /// bring the bound within the limit.
+    pub parameters: &'a str,
+    /// The bound for the dataset's rows at the values of `parameters` that give the least
+    /// memory, among the values the tool accepts. The refusal offers `advice` only when it is
+    /// within the limit, so that the advice is true for every input.
+    pub cheapest: u64,
+}
+
 /// A tool whose dataset height is limited by a [`RowClass`].
 #[derive(Debug, Clone, Copy)]
 pub struct RowRule {
@@ -1062,8 +1078,10 @@ impl Limits {
     /// bound for a dataset of `rows` rows at the request's settings (the core's
     /// `memory_bound`), which must not decrease as `rows` grows; `n_rows` is the dataset's
     /// height. `settings` names the settings the bound depends on for the refusal
-    /// (`n_trees = 2000 and max_depth = 10`), and `reduce` the parameters that lower it
-    /// (`n_trees or max_depth`). The refusal says how many rows the settings allow, when any.
+    /// (`n_trees = 2000 and max_depth = 10`), and `change` what the caller could change
+    /// instead ([`EnsembleChange`]). The refusal says how many rows the settings allow, when
+    /// any, and offers `change.advice` only when its `cheapest` bound is within the limit;
+    /// otherwise it says that no values of `change.parameters` fit `n_rows` rows.
     /// The handlers call it before they fit: the fits keep every tree they grow, so the
     /// deadline would stop one only after its memory had grown, and the per-allocation ceiling
     /// sees each node on its own.
@@ -1072,7 +1090,7 @@ impl Limits {
         tool: &str,
         n_rows: usize,
         settings: &str,
-        reduce: &str,
+        change: EnsembleChange<'_>,
         bound: impl Fn(usize) -> u64,
     ) -> Result<(), LimitViolation> {
         const KNOB: &str = "ensemble_bytes";
@@ -1096,12 +1114,24 @@ impl Limits {
         let fit_rows = (bound(lo) <= limit && lo > 0).then_some(lo);
         let bytes =
             |b: u64| p2a_core::memory::format_bytes(usize::try_from(b).unwrap_or(usize::MAX));
-        let advice = match fit_rows {
-            Some(r) => format!(
+        let EnsembleChange {
+            advice: change_advice,
+            parameters,
+            cheapest,
+        } = change;
+        let no_setting =
+            format!("No values of {parameters} bring it within this limit on {n_rows} rows.");
+        let advice = match (fit_rows, cheapest <= limit) {
+            (Some(r), true) => format!(
                 "Use a sample of at most {r} rows at these settings, for example with \
-                 munge_sample, or lower {reduce}."
+                 munge_sample, or {change_advice}."
             ),
-            None => format!("Lower {reduce}."),
+            (None, true) => format!("To run it on {n_rows} rows, {change_advice}."),
+            (Some(r), false) => format!(
+                "{no_setting} Use a sample of at most {r} rows at these settings, for example \
+                 with munge_sample."
+            ),
+            (None, false) => format!("{no_setting} No sample does at these settings either."),
         };
         let tool = echo(tool);
         Err(LimitViolation {
@@ -2314,6 +2344,15 @@ mod tests {
         move |rows| c.memory_bound(rows, 4)
     }
 
+    /// An [`EnsembleChange`] whose changes always fit (`cheapest` 0).
+    fn fixable(advice: &'static str) -> EnsembleChange<'static> {
+        EnsembleChange {
+            advice,
+            parameters: "n_trees",
+            cheapest: 0,
+        }
+    }
+
     /// The hosted `ensemble_bytes` budget admits both tools' defaults, and 1.5 times each
     /// default setting, on ordinary datasets, and refuses a fit whose trees, draws and working
     /// copies would be too large, saying how many rows its settings allow.
@@ -2321,7 +2360,13 @@ mod tests {
     fn ensemble_budget_admits_the_defaults_and_refuses_large_fits_with_advice() {
         let h = Limits::hosted();
         let check = |tool: &str, rows: usize, bound: &dyn Fn(usize) -> u64| {
-            h.check_ensemble(tool, rows, "these settings", "n_trees", bound)
+            h.check_ensemble(
+                tool,
+                rows,
+                "these settings",
+                fixable("lower n_trees"),
+                bound,
+            )
         };
         for rows in [100, 10_000, 100_000] {
             assert!(
@@ -2336,13 +2381,20 @@ mod tests {
         assert!(check("ml_causal_forest", 10_000, &forest_bound(3_000, 15)).is_ok());
         assert!(check("ml_bart_causal", 10_000, &bart_bound(300, 6, 150)).is_ok());
 
-        let bound = bart_bound(5_000, 100, 20);
+        // Settings that can fit the rows: the refusal offers them beside a sample.
+        let bound = forest_bound(2_000, 10);
+        let cheapest = forest_bound(1, 0)(400_000);
+        assert!(cheapest <= 256 * 1024 * 1024, "{cheapest}");
         let v = h
             .check_ensemble(
-                "ml_bart_causal",
-                1_500_000,
-                "n_trees = 5000, max_depth = 100 and n_bootstrap = 20",
-                "n_trees, max_depth or n_bootstrap",
+                "ml_causal_forest",
+                400_000,
+                "n_trees = 2000 and max_depth = 10",
+                EnsembleChange {
+                    advice: "lower n_trees or max_depth",
+                    parameters: "n_trees or max_depth",
+                    cheapest,
+                },
                 &bound,
             )
             .unwrap_err();
@@ -2350,24 +2402,56 @@ mod tests {
             (v.parameter.as_str(), v.limit.as_str(), v.override_key),
             ("ensemble_bytes", "268435456", "ensemble_bytes")
         );
-        assert_eq!(v.requested, bound(1_500_000).to_string());
-        let fit = (1..1_500_000usize)
+        assert_eq!(v.requested, bound(400_000).to_string());
+        let fit = (1..400_000usize)
             .rev()
             .find(|&r| bound(r) <= 256 * 1024 * 1024)
             .unwrap();
-        assert!(fit < 5_000, "{fit}");
         assert!(
             v.message.starts_with(
-                "`ml_bart_causal` with n_trees = 5000, max_depth = 100 and n_bootstrap = 20 on \
-                 1500000 rows could hold up to "
+                "`ml_causal_forest` with n_trees = 2000 and max_depth = 10 on 400000 rows could \
+                 hold up to "
             ) && v
                 .message
                 .contains("(ensemble_bytes: its trees and the other buffers")
                 && v.message.contains("limit of 256.00 MB")
-                && v.message
-                    .contains(&format!("Use a sample of at most {fit} rows"))
-                && v.message
-                    .ends_with("or lower n_trees, max_depth or n_bootstrap."),
+                && v.message.ends_with(&format!(
+                    "Use a sample of at most {fit} rows at these settings, for example with \
+                     munge_sample, or lower n_trees or max_depth."
+                )),
+            "{}",
+            v.message
+        );
+
+        // BART at the least memory its settings reach still holds too much for 1.5 million
+        // rows: the refusal says so and offers only the sample, at the request's settings.
+        let bound = bart_bound(1, 0, 2);
+        let cheapest = bound(1_500_000);
+        assert!(cheapest > 256 * 1024 * 1024, "{cheapest}");
+        let v = h
+            .check_ensemble(
+                "ml_bart_causal",
+                1_500_000,
+                "n_trees = 1, max_depth = 0 and n_bootstrap = 2",
+                EnsembleChange {
+                    advice: "lower n_trees, max_depth or n_bootstrap",
+                    parameters: "n_trees, max_depth or n_bootstrap",
+                    cheapest,
+                },
+                &bound,
+            )
+            .unwrap_err();
+        assert_eq!(v.requested, cheapest.to_string());
+        let fit = (1..1_500_000usize)
+            .rev()
+            .find(|&r| bound(r) <= 256 * 1024 * 1024)
+            .unwrap();
+        assert!(
+            v.message.ends_with(&format!(
+                "above this server's limit of 256.00 MB. No values of n_trees, max_depth or \
+                 n_bootstrap bring it within this limit on 1500000 rows. Use a sample of at \
+                 most {fit} rows at these settings, for example with munge_sample."
+            )) && !v.message.contains("lower"),
             "{}",
             v.message
         );
@@ -2375,28 +2459,83 @@ mod tests {
         assert!(check("ml_bart_causal", 1_500_000, &bart_bound(8, 4, 20)).is_err());
         assert!(check("ml_causal_forest", 1_500_000, &forest_bound(2_000, 10)).is_err());
         assert!(check("ml_causal_forest", 1_500_000, &forest_bound(5_000, 100)).is_err());
-        // Nothing fits: no row count to suggest.
+        // No row count fits these settings: no sample to suggest, only the changes, and
+        // neither when the changes do not fit.
         let v = check("ml_bart_causal", 50, &|_| u64::MAX).unwrap_err();
-        assert!(v.message.ends_with("Lower n_trees."), "{}", v.message);
+        assert!(
+            v.message.ends_with("To run it on 50 rows, lower n_trees."),
+            "{}",
+            v.message
+        );
         assert!(!v.message.contains("sample"), "{}", v.message);
+        let v = h
+            .check_ensemble(
+                "ml_bart_causal",
+                50,
+                "s",
+                EnsembleChange {
+                    advice: "lower n_trees",
+                    parameters: "n_trees",
+                    cheapest: u64::MAX,
+                },
+                |_| u64::MAX,
+            )
+            .unwrap_err();
+        assert!(
+            v.message.ends_with(
+                "No values of n_trees bring it within this limit on 50 rows. No sample does at \
+                 these settings either."
+            ) && !v.message.contains("lower"),
+            "{}",
+            v.message
+        );
 
         let off = Limits::off();
         assert!(
-            off.check_ensemble("ml_bart_causal", 1_500_000, "s", "r", |_| u64::MAX)
-                .is_ok()
+            off.check_ensemble("ml_bart_causal", 1_500_000, "s", fixable("r"), |_| {
+                u64::MAX
+            })
+            .is_ok()
         );
         let tight = Limits::off()
             .with_overrides(&["ensemble_bytes=1000".to_string()])
             .unwrap();
         assert!(
             tight
-                .check_ensemble("ml_causal_forest", 10, "s", "r", |_| 1_000)
+                .check_ensemble("ml_causal_forest", 10, "s", fixable("r"), |_| 1_000)
                 .is_ok()
         );
         assert!(
             tight
-                .check_ensemble("ml_causal_forest", 10, "s", "r", |_| 1_001)
+                .check_ensemble("ml_causal_forest", 10, "s", fixable("r"), |_| 1_001)
                 .is_err()
+        );
+        // The cheapest bound decides the advice by the same limit, not by the request's bound.
+        let at_limit = |cheapest| {
+            tight
+                .check_ensemble(
+                    "ml_causal_forest",
+                    10,
+                    "s",
+                    EnsembleChange {
+                        advice: "lower n_trees",
+                        parameters: "n_trees",
+                        cheapest,
+                    },
+                    |rows| 995 + rows as u64,
+                )
+                .unwrap_err()
+                .message
+        };
+        assert!(
+            at_limit(1_000).ends_with("or lower n_trees."),
+            "{}",
+            at_limit(1_000)
+        );
+        assert!(
+            at_limit(1_001).contains("No values of n_trees bring it"),
+            "{}",
+            at_limit(1_001)
         );
     }
 

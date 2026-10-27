@@ -11,10 +11,14 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{extract_numeric_matrix, limit_refusal};
+use crate::tools::limits::EnsembleChange;
 use crate::tools::requests::causal::{BartCausalRequest, CausalForestRequest, HetTxRequest};
 use crate::tools::requests::ml::*;
 
-use p2a_core::ml::{bart_causal, causal_forest, run_bart_causal_config, run_causal_forest_config};
+use p2a_core::ml::{
+    BartCausalConfig, CausalForestConfig, bart_causal, causal_forest, run_bart_causal_config,
+    run_causal_forest_config,
+};
 use p2a_core::{
     C50Config,
     CartConfig,
@@ -65,20 +69,96 @@ use p2a_core::{
 /// The refusal of a tree-ensemble fit on `n_rows` rows whose memory bound (`bound`, for a
 /// number of rows at the request's settings) the installed `ensemble_bytes` budget does not
 /// allow, checked before anything is fitted: the fit keeps every tree it grows, so the call's
-/// deadline would stop it only after its memory had grown. `settings` and `reduce` name the
-/// settings and the parameters to lower for the refusal
+/// deadline would stop it only after its memory had grown. `settings` names the settings for
+/// the refusal and `change` what the request could change instead
 /// ([`crate::tools::limits::Limits::check_ensemble`]).
 fn ensemble_refusal(
     tool: &str,
     n_rows: usize,
     settings: &str,
-    reduce: &str,
+    change: EnsembleChange<'_>,
     bound: impl Fn(usize) -> u64,
 ) -> Option<CallToolResult> {
     crate::tools::limits::current()
-        .check_ensemble(tool, n_rows, settings, reduce, bound)
+        .check_ensemble(tool, n_rows, settings, change, bound)
         .err()
         .map(limit_refusal)
+}
+
+/// The fewest trees both tree-ensemble fits accept (they refuse 0).
+const FEWEST_TREES: usize = 1;
+/// The shallowest trees both fits accept: at depth 0 each tree is a single leaf.
+const SHALLOWEST_TREES: usize = 0;
+/// The fewest bootstrap replications `bart_causal` accepts (two give a standard error).
+const FEWEST_BART_REPLICATIONS: usize = 2;
+
+/// What a refused `ml_causal_forest` request could change instead of its rows: fewer or
+/// shallower trees, larger leaves, and no honest splitting when it asked for it. `cheapest`
+/// is the bound for `n_rows` rows at the least memory those changes reach: one tree of depth
+/// 0 whose leaves are as large as the data, with or without honesty, whichever holds less.
+fn forest_change(
+    config: &CausalForestConfig,
+    n_rows: usize,
+    n_covariates: usize,
+) -> EnsembleChange<'static> {
+    let cheapest_with = |honesty| {
+        CausalForestConfig {
+            n_trees: FEWEST_TREES,
+            max_depth: SHALLOWEST_TREES,
+            min_node_size: n_rows.max(config.min_node_size),
+            honesty,
+            ..config.clone()
+        }
+        .memory_bound(n_rows, n_covariates)
+    };
+    if config.honesty {
+        EnsembleChange {
+            advice: "lower n_trees or max_depth, raise min_node_size or set honesty = false",
+            parameters: "n_trees, max_depth, min_node_size or honesty",
+            cheapest: cheapest_with(true).min(cheapest_with(false)),
+        }
+    } else {
+        EnsembleChange {
+            advice: "lower n_trees or max_depth, or raise min_node_size",
+            parameters: "n_trees, max_depth or min_node_size",
+            cheapest: cheapest_with(false),
+        }
+    }
+}
+
+/// What a refused `ml_bart_causal` request could change instead of its rows: fewer or
+/// shallower trees, fewer bootstrap replications, and no propensity score when it asked for
+/// one. `cheapest` is the bound for `n_rows` rows at the least memory those changes reach:
+/// the fewest and shallowest trees and the fewest replications the fit accepts, with or
+/// without the propensity score, whichever holds less.
+fn bart_change(
+    config: &BartCausalConfig,
+    n_rows: usize,
+    n_covariates: usize,
+) -> EnsembleChange<'static> {
+    let cheapest_with = |include_propensity| {
+        BartCausalConfig {
+            n_trees: FEWEST_TREES,
+            max_depth: SHALLOWEST_TREES,
+            n_bootstrap: FEWEST_BART_REPLICATIONS,
+            include_propensity,
+            ..config.clone()
+        }
+        .memory_bound(n_rows, n_covariates)
+    };
+    if config.include_propensity {
+        EnsembleChange {
+            advice: "lower n_trees, max_depth or n_bootstrap, or set include_propensity = false",
+            parameters: "n_trees, max_depth, n_bootstrap or include_propensity",
+            cheapest: cheapest_with(true).min(cheapest_with(false)),
+        }
+    } else {
+        EnsembleChange {
+            advice: "lower n_trees, max_depth or n_bootstrap",
+            parameters: "n_trees, max_depth or n_bootstrap",
+            cheapest: cheapest_with(false),
+        }
+    }
 }
 
 #[tool_router(router = ml_router, vis = "pub")]
@@ -825,11 +905,12 @@ impl AnalyticsServer {
             config.n_trees, config.max_depth, config.min_node_size, config.honesty
         );
         let n_covariates = request.covariates.len();
+        let n_rows = dataset.nrows();
         if let Some(refusal) = ensemble_refusal(
             "ml_causal_forest",
-            dataset.nrows(),
+            n_rows,
             &settings,
-            "n_trees or max_depth, or raise min_node_size",
+            forest_change(&config, n_rows, n_covariates),
             |rows| config.memory_bound(rows, n_covariates),
         ) {
             return Ok(refusal);
@@ -913,11 +994,12 @@ impl AnalyticsServer {
             config.n_trees, config.max_depth, config.n_bootstrap, config.include_propensity
         );
         let n_covariates = request.covariates.len();
+        let n_rows = dataset.nrows();
         if let Some(refusal) = ensemble_refusal(
             "ml_bart_causal",
-            dataset.nrows(),
+            n_rows,
             &settings,
-            "n_trees, max_depth or n_bootstrap",
+            bart_change(&config, n_rows, n_covariates),
             |rows| config.memory_bound(rows, n_covariates),
         ) {
             return Ok(refusal);
@@ -1819,6 +1901,142 @@ mod tests {
                 text_of(&r)
             );
         }
+    }
+
+    /// A server holding dataset "d" of `n` rows and one noisy column `y`, for calls that the
+    /// ensemble budget refuses before they read a column: a call it did not refuse would fail
+    /// on its missing columns instead of fitting.
+    async fn server_with_rows(n: usize) -> AnalyticsServer {
+        let y: Vec<f64> = (0..n).map(|i| ((i * 37) % 101) as f64 / 101.0).collect();
+        let server = AnalyticsServer::new();
+        server
+            .datasets
+            .write()
+            .await
+            .insert("d".to_string(), Dataset::new(df!("y" => y).unwrap()));
+        server
+    }
+
+    /// A refusal offers other settings only when the least memory they reach fits the
+    /// dataset's rows, so that what it says is true for every input. On 1.5 million rows with
+    /// four covariates, no BART setting fits and the causal forest fits only without honest
+    /// splitting; with eight covariates no forest setting fits either.
+    #[test]
+    fn ensemble_refusals_offer_other_settings_only_when_they_fit() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = rt.block_on(server_with_rows(1_500_000));
+        let hosted = Limits::hosted();
+        let refusal = |r: &CallToolResult| {
+            let t = text_of(r);
+            assert_eq!(r.is_error, Some(true), "{t}");
+            assert!(
+                t.contains("(ensemble_bytes: ") && t.contains("on 1500000 rows"),
+                "{t}"
+            );
+            t
+        };
+
+        // BART at the least memory it accepts, and the forest at its defaults without honesty.
+        let least_bart = bart(FEWEST_TREES, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS);
+        let [(_, f), (_, b)] = calls(
+            &rt,
+            &server,
+            &hosted,
+            true,
+            (forest(2_000, 10, false, 5), least_bart),
+        );
+        let (f, b) = (refusal(&f), refusal(&b));
+        assert!(
+            f.ends_with("or lower n_trees or max_depth, or raise min_node_size.")
+                && f.contains("Use a sample of at most "),
+            "{f}"
+        );
+        assert!(
+            b.contains(
+                "No values of n_trees, max_depth or n_bootstrap bring it within this limit on \
+                 1500000 rows. Use a sample of at most "
+            ) && b.ends_with("rows at these settings, for example with munge_sample.")
+                && !b.contains("lower"),
+            "{b}"
+        );
+
+        // The forest's smallest honest trees do not fit, but without honesty they do; BART
+        // with the propensity score names it among the settings that cannot help.
+        let mut with_propensity = bart(200, 4, 100);
+        with_propensity.include_propensity = Some(true);
+        let [(_, f), (_, b)] = calls(
+            &rt,
+            &server,
+            &hosted,
+            true,
+            (
+                forest(FEWEST_TREES, SHALLOWEST_TREES, true, 1_500_000),
+                with_propensity,
+            ),
+        );
+        let (f, b) = (refusal(&f), refusal(&b));
+        assert!(
+            f.ends_with(
+                "or lower n_trees or max_depth, raise min_node_size or set honesty = false."
+            ),
+            "{f}"
+        );
+        assert!(
+            b.contains(
+                "No values of n_trees, max_depth, n_bootstrap or include_propensity bring it \
+                 within this limit on 1500000 rows."
+            ) && !b.contains("lower"),
+            "{b}"
+        );
+
+        // Eight covariates: no forest setting fits 1.5 million rows.
+        let mut wide = forest(FEWEST_TREES, SHALLOWEST_TREES, true, 1_500_000);
+        wide.covariates = (0..8).map(|k| format!("c{k}")).collect();
+        let [(_, f), _] = calls(&rt, &server, &hosted, true, (wide, bart(1, 0, 2)));
+        let f = refusal(&f);
+        assert!(
+            f.contains(
+                "No values of n_trees, max_depth, min_node_size or honesty bring it within this \
+                 limit on 1500000 rows. Use a sample of at most "
+            ) && !f.contains("lower"),
+            "{f}"
+        );
+    }
+
+    /// The least-memory settings the refusals compute from are the smallest the fits accept:
+    /// each tool fits at them, and one tree or replication fewer is an error.
+    #[test]
+    fn ensemble_least_memory_settings_are_the_smallest_the_fits_accept() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = rt.block_on(server_with_causal_data(300));
+        let least = (
+            forest(FEWEST_TREES, SHALLOWEST_TREES, true, 300),
+            bart(FEWEST_TREES, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS),
+        );
+        for (tool, r) in calls(&rt, &server, &Limits::hosted(), false, least) {
+            assert_ne!(r.is_error, Some(true), "{tool}: {}", text_of(&r));
+        }
+        let fewer = (
+            forest(FEWEST_TREES - 1, SHALLOWEST_TREES, true, 300),
+            bart(FEWEST_TREES, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS - 1),
+        );
+        let [(_, f), (_, b)] = calls(&rt, &server, &Limits::hosted(), false, fewer);
+        assert!(
+            f.is_error == Some(true) && text_of(&f).contains("n_trees must be at least 1"),
+            "{}",
+            text_of(&f)
+        );
+        assert!(
+            b.is_error == Some(true) && text_of(&b).contains("n_bootstrap must be at least 2"),
+            "{}",
+            text_of(&b)
+        );
     }
 
     /// Within the budget, the hosted profile fits as before.
