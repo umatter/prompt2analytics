@@ -1535,12 +1535,23 @@ pub async fn llm_chat_stream(
 /// each of its tool calls still pending or running is failed, since the
 /// dropped future will not go on to finish it.
 ///
-/// Dropping `chat` does not cancel a write it had already handed to the
-/// database: SurrealDB's embedded router runs each request in a task of its
-/// own, so such a write can still land after this cleanup. A completion or
-/// failure then replaces the stopped error. A tool-call row whose create the
-/// database already received when the chat was dropped is still written,
-/// and in the rare case it lands after this cleanup's read it stays Running.
+/// Every write of the dropped chat to that message or its tool calls lands
+/// before this cleanup or not at all. Each such write waits in the chat for
+/// the conversation's store turn and then holds it, in a task of its own,
+/// until the store has written it (`StoreTurn` and `run_to_end` in
+/// `db::connection`): a write still waiting for the turn is dropped with
+/// the chat and does nothing, and one holding it runs to its end. The
+/// cleanup's message update waits for the same turn, which is handed out
+/// first come, first served, and the tool calls are read after it. So a
+/// call the dropped chat completed or failed keeps its result, one it left
+/// pending or running is failed here, and content it wrote is replaced by
+/// the stopped text. The exception is an update whose lookup of the
+/// message, made before it waits, fails, so the read does not wait: a
+/// message that is gone took its tool calls with it, and a later write
+/// finds no row, but after a store error the order is not known. A
+/// dataset-metadata capture the dropped chat started runs to its end on the
+/// blocking pool and may land after the cleanup, which leaves dataset
+/// metadata alone.
 async fn run_chat_task<F: std::future::Future<Output = ()>>(
     tx: &tokio::sync::mpsc::Sender<ProgressEvent>,
     chat: F,
