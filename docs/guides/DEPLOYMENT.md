@@ -555,9 +555,9 @@ start from: the request's own, or the request's with `honesty` or
 `include_propensity` turned off where the refusal names that change as required.
 It names `honesty = false` or `include_propensity = false` as required only when
 the least memory with the option does not fit the dataset and the least memory
-without it does; when the request asks for the score, BART's refusal also offers
-`include_propensity = false` as one more way to lower the bound, while the
-forest's never does, since turning honesty off can raise it. With four
+without it does; when the request asks for the propensity score, BART's refusal
+also offers `include_propensity = false` as one more way to lower the bound,
+while the forest's never does, since turning honesty off can raise it. With four
 covariates the budget admits both tools' defaults on a few hundred thousand
 rows. The bound counts every buffer the fit holds at once, and the fit allocates
 each at its exact length (the recursion's index vectors are sized before they
