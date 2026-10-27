@@ -536,7 +536,8 @@ mod http_paths {
             let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
             let sid = new_session(&app).await;
             // 10,000 distinct `key` values: 10,001 columns with the index, one more than the
-            // hosted pivot_columns. The long table is far within the dataset quotas.
+            // hosted pivot_columns. The long table is far within the dataset quotas. Counting
+            // stops at the first value that cannot pass, so the refusal gives a lower bound.
             create(&app, &sid, "long", &long_csv(10_000, 1)).await;
             let (status, body) =
                 post_tool(&app, &sid, "munge_pivot", pivot_args("long", "wide")).await;
@@ -544,13 +545,14 @@ mod http_paths {
             assert_eq!(body["code"], "limit_exceeded", "{body}");
             assert_eq!(
                 body["details"],
-                json!({"parameter": "on", "requested": "10001", "limit": "10000"}),
+                json!({"parameter": "on", "requested": "at least 10001", "limit": "10000"}),
                 "{body}"
             );
             let error = body["error"].as_str().unwrap();
             assert!(
-                error.starts_with("Parameter `on` names column `key`, whose 10000 distinct values")
-                    && error.contains("limit of 10000 columns (pivot_columns)"),
+                error.starts_with(
+                    "Parameter `on` names column `key`, which has at least 10000 distinct values"
+                ) && error.contains("limit of 10000 columns (pivot_columns)"),
                 "{error}"
             );
             assert_eq!(
@@ -595,14 +597,50 @@ mod http_paths {
             assert_eq!(body["code"], "limit_exceeded", "{body}");
             assert_eq!(
                 body["details"],
-                json!({"parameter": "index", "requested": "4002000", "limit": "4000000"}),
+                json!({"parameter": "index", "requested": "at least 4002000", "limit": "4000000"}),
                 "{body}"
             );
             let error = body["error"].as_str().unwrap();
             assert!(
-                error.starts_with("`munge_pivot` would make 2000 rows")
+                error.starts_with("`munge_pivot` would make at least 2000 rows")
                     && error.contains("by 2001 columns")
                     && error.contains("limit of 4000000 cells (pivot_cells)"),
+                "{error}"
+            );
+            assert_eq!(
+                shapes(&state, &sid).await,
+                [("long".to_string(), (2_000, 3))],
+                "the refused pivot changed the session's datasets"
+            );
+        });
+    }
+
+    #[test]
+    fn pivot_of_more_rows_than_the_cell_cap_is_refused_before_counting() {
+        let cfg = open_public_config();
+        let limits = limits::resolve(&cfg)
+            .unwrap()
+            .with_overrides(&["pivot_cells=1500".to_string()])
+            .unwrap();
+        run(limits, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            // Each row fills one cell, so 2,000 rows make at least 2,000 cells; here they would
+            // make a 1 x 2,001 wide table.
+            create(&app, &sid, "long", &long_csv(2_000, 1)).await;
+            let (status, body) =
+                post_tool(&app, &sid, "munge_pivot", pivot_args("long", "wide")).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["code"], "limit_exceeded", "{body}");
+            assert_eq!(
+                body["details"],
+                json!({"parameter": "dataset", "requested": "at least 2000", "limit": "1500"}),
+                "{body}"
+            );
+            let error = body["error"].as_str().unwrap();
+            assert!(
+                error.starts_with("The dataset has 2000 rows")
+                    && error.contains("limit of 1500 cells (pivot_cells)"),
                 "{error}"
             );
             assert_eq!(
@@ -1357,7 +1395,10 @@ mod stdio_path {
         assert_eq!(pivot["error"]["code"], -32602, "{pivot}");
         assert_eq!(pivot["error"]["data"]["code"], "limit_exceeded", "{pivot}");
         assert_eq!(pivot["error"]["data"]["parameter"], "on", "{pivot}");
-        assert_eq!(pivot["error"]["data"]["requested"], "10001", "{pivot}");
+        assert_eq!(
+            pivot["error"]["data"]["requested"], "at least 10001",
+            "{pivot}"
+        );
         assert_eq!(pivot["error"]["data"]["limit"], "10000", "{pivot}");
         let listing = listed["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
