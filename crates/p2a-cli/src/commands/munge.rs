@@ -3,10 +3,10 @@
 use clap::{Subcommand, ValueEnum};
 use p2a_core::Dataset;
 use p2a_core::data::munging::{
-    AggFn, AggSpec, ArithOp, BinStrategy, FillStrategy, MutateExpr, bin, concat, deduplicate, diff,
-    drop_columns, drop_na, fill_na, filter, full_join, group_by, inner_join, lag, lead, left_join,
-    melt, mutate, normalize, one_hot_encode, pct_change, pivot, rename, right_join, sample, select,
-    sort, standardize, value_counts,
+    AggFn, AggSpec, ArithOp, BinStrategy, FillStrategy, MungeError, MutateExpr, bin, concat,
+    deduplicate, diff, drop_columns, drop_na, fill_na, filter, full_join, group_by, inner_join,
+    lag, lead, left_join, melt, mutate, normalize, one_hot_encode, pct_change, pivot, rename,
+    right_join, sample, select, sort, standardize, value_counts,
 };
 
 use crate::output::{OutputFormat, print_error, print_message};
@@ -223,8 +223,8 @@ EXAMPLES:
         /// Right dataset name
         right: String,
 
-        /// Join key columns
-        #[arg(short, long, num_args = 1..)]
+        /// Join key columns (at least one)
+        #[arg(short, long, num_args = 1.., required = true)]
         on: Vec<String>,
 
         /// Right key columns (if different from left)
@@ -1131,7 +1131,13 @@ fn execute_join(
     match result {
         Ok(ds) => store_result(ds, output_name, left, "joined", session, format),
         Err(e) => {
-            print_error(&format!("Join failed: {}", e), format);
+            // The core's JoinError already reads "Join failed: ..."; only its
+            // other errors (a missing key column) need the prefix.
+            let msg = match e {
+                MungeError::JoinError(_) => e.to_string(),
+                _ => format!("Join failed: {e}"),
+            };
+            print_error(&msg, format);
             Ok(())
         }
     }
