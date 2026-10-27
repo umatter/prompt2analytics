@@ -15,7 +15,7 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use p2a_mcp::config::ServerConfig;
 use p2a_mcp::db::DatasetMeta;
 use p2a_mcp::path_jail::allowed_data_root;
-use p2a_mcp::persistent_session::PersistentSessionManager;
+use p2a_mcp::persistent_session::{PersistentSessionManager, RELOAD_LABEL};
 use p2a_mcp::tools::limits;
 use p2a_mcp::transport::http::{AppState, build_app};
 use serde_json::{Value, json};
@@ -414,12 +414,16 @@ fn reload_refuses_a_source_above_load_file_bytes() {
             assert!(session.datasets.read().await.contains_key("small"));
             assert!(!session.datasets.read().await.contains_key("big"));
 
+            // The session id must come from the reload span's own field, not
+            // from anywhere in the line (the HTTP trace span's URI holds it
+            // too, should that span ever reach this subscriber's level).
+            let reload_span = format!("{RELOAD_LABEL}{{session_id={sid}}}");
             let refusals = logs.lines_with("request refused by a named budget");
             assert!(
                 refusals
                     .iter()
-                    .any(|l| l.contains("dataset=big") && l.contains(&sid)),
-                "no refusal logged with session {sid}: {refusals:#?}"
+                    .any(|l| l.contains("dataset=big") && l.contains(&reload_span)),
+                "no refusal logged in span {reload_span}: {refusals:#?}"
             );
         })
     });
