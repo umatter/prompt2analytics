@@ -1273,11 +1273,12 @@ impl ToolExecutor for StreamingToolExecutor {
         // The arguments move into the call; the metadata capture reads only
         // their path and filename (a create_dataset csv_content or an
         // upload_dataset content can be large), so only those are kept, and
-        // only for a dataset loader on an executor that tracks datasets.
+        // only for a dataset loader (the tool route's list) on an executor
+        // that tracks datasets.
         #[cfg(feature = "db")]
         let args_for_metadata = (self.db.is_some()
             && self.session_id.is_some()
-            && matches!(name, "load_dataset" | "upload_dataset" | "create_dataset"))
+            && super::routes_tools::METADATA_TOOLS.contains(&name))
         .then(|| super::routes_tools::capture_fields(&arguments));
 
         tracing::info!(tool = %name, "Executing tool");
@@ -1360,12 +1361,13 @@ impl ToolExecutor for StreamingToolExecutor {
                 // Capture dataset metadata for load_dataset, upload_dataset
                 // and create_dataset, the calls args_for_metadata is kept for
                 // (separate from tool call tracking: it needs only db and
-                // session_id). It runs on the blocking pool, as on the tool
+                // session_id), when the call succeeded (`success`, the tool
+                // route's test). It runs on the blocking pool, as on the tool
                 // route, and the call waits until its row is stored.
                 #[cfg(feature = "db")]
                 if let (Some(db), Some(session_id)) = (&self.db, &self.session_id)
                     && let Some(args_for_metadata) = args_for_metadata
-                    && result.error.is_none()
+                    && result.success
                 {
                     super::routes_tools::capture_dataset_metadata_off_runtime(
                         db.clone(),

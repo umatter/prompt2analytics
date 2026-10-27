@@ -24,9 +24,11 @@ pub struct CallToolRequest {
 }
 
 /// Tools whose successful result the conversation store reads dataset
-/// metadata from (with the `db` and `llm` features and an open store).
+/// metadata from (with the `db` and `llm` features and an open store). The
+/// tool route and the LLM tool loop (`llm_routes`) both read this list, so a
+/// loader added here is captured on both.
 #[cfg(all(feature = "db", feature = "llm"))]
-const METADATA_TOOLS: [&str; 3] = ["load_dataset", "upload_dataset", "create_dataset"];
+pub(super) const METADATA_TOOLS: [&str; 3] = ["load_dataset", "upload_dataset", "create_dataset"];
 
 /// Store the dataset metadata of a successful `tool` call in `session_id`,
 /// read from its `result_text`, on the blocking pool, and wait until it is
