@@ -160,7 +160,8 @@ websocket `tool` messages runs through one governor
   with `"status": "degraded"` while every slot is held by work past its
   deadline, or while the process stays above its memory soft limit after a
   hand-back with no call running within its deadline (`"memory_stuck": true`:
-  every call is refused and nothing running will free memory). If either state
+  every call is refused, and although work detached past its deadline may still
+  end and free memory, nothing the server waits for will). If either state
   lasts `P2A_STUCK_EXIT_SECS` (hosted 300 s), the process logs an error and
   exits with exit code 70, so that the platform's restart policy starts a
   fresh process. A restart discards every in-memory session. A soft

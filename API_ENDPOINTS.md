@@ -854,7 +854,7 @@ The `governor` object reports the tool calls running (`in_flight`), those past t
 }
 ```
 
-While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. It does the same with `"memory_stuck": true` while the process stays above its memory soft limit with no call running within its deadline, after the server handed its freed heap memory back to the operating system: every tool call is then refused with `memory_pressure` and nothing running will free memory. In the hosted profile the process exits (code 70) when either state lasts `P2A_STUCK_EXIT_SECS` (300 s), so the platform can restart it.
+While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. It does the same with `"memory_stuck": true` while the process stays above its memory soft limit with no call running within its deadline, after the server handed its freed heap memory back to the operating system: every tool call is then refused with `memory_pressure`, and although work detached past its deadline may still end and free memory, nothing the server waits for will. In the hosted profile the process exits (code 70) when either state lasts `P2A_STUCK_EXIT_SECS` (300 s), so the platform can restart it.
 
 ---
 
