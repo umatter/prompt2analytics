@@ -10,10 +10,11 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::extract_numeric_matrix;
+use crate::tools::common::{extract_numeric_matrix, limit_refusal};
 use crate::tools::requests::causal::{BartCausalRequest, CausalForestRequest, HetTxRequest};
 use crate::tools::requests::ml::*;
 
+use p2a_core::ml::{bart_causal, causal_forest, run_bart_causal_config, run_causal_forest_config};
 use p2a_core::{
     C50Config,
     CartConfig,
@@ -44,11 +45,9 @@ use p2a_core::{
     random_forest,
     // SHAP values
     random_forest_with_trees,
-    run_bart_causal,
     // C5.0 Decision Trees
     run_c50,
     run_cart,
-    run_causal_forest,
     // Conditional Inference Trees
     run_ctree,
     // Cubist rule-based regression
@@ -62,6 +61,25 @@ use p2a_core::{
     shap_values_model,
     tsne,
 };
+
+/// The refusal of a tree-ensemble fit on `n_rows` rows whose memory bound (`bound`, for a
+/// number of rows at the request's settings) the installed `ensemble_bytes` budget does not
+/// allow, checked before anything is fitted: the fit keeps every tree it grows, so the call's
+/// deadline would stop it only after its memory had grown. `settings` and `reduce` name the
+/// settings and the parameters to lower for the refusal
+/// ([`crate::tools::limits::Limits::check_ensemble`]).
+fn ensemble_refusal(
+    tool: &str,
+    n_rows: usize,
+    settings: &str,
+    reduce: &str,
+    bound: impl Fn(usize) -> u64,
+) -> Option<CallToolResult> {
+    crate::tools::limits::current()
+        .check_ensemble(tool, n_rows, settings, reduce, bound)
+        .err()
+        .map(limit_refusal)
+}
 
 #[tool_router(router = ml_router, vis = "pub")]
 impl AnalyticsServer {
@@ -795,16 +813,36 @@ impl AnalyticsServer {
         let global_seed = self.global_seed.read().await;
         let seed = request.seed.or(*global_seed);
 
-        let result = match run_causal_forest(
-            dataset,
-            &request.outcome,
-            &request.treatment,
-            request.covariates.clone(),
+        let config = run_causal_forest_config(
             request.n_trees,
             request.min_node_size,
             request.honesty,
             request.max_depth,
             seed,
+        );
+        let settings = format!(
+            "n_trees = {}, max_depth = {}, min_node_size = {} and honesty = {}",
+            config.n_trees, config.max_depth, config.min_node_size, config.honesty
+        );
+        let n_covariates = request.covariates.len();
+        if let Some(refusal) = ensemble_refusal(
+            "ml_causal_forest",
+            dataset.nrows(),
+            &settings,
+            "n_trees or max_depth, or raise min_node_size",
+            |rows| config.memory_bound(rows, n_covariates),
+        ) {
+            return Ok(refusal);
+        }
+
+        // Fit the configuration whose bound was checked.
+        let cov_refs: Vec<&str> = request.covariates.iter().map(String::as_str).collect();
+        let result = match causal_forest(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &cov_refs,
+            config,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -863,16 +901,36 @@ impl AnalyticsServer {
         let global_seed = self.global_seed.read().await;
         let seed = request.seed.or(*global_seed);
 
-        let result = match run_bart_causal(
-            dataset,
-            &request.outcome,
-            &request.treatment,
-            request.covariates.clone(),
+        let config = run_bart_causal_config(
             request.n_trees,
             request.max_depth,
             request.n_bootstrap,
             request.include_propensity,
             seed,
+        );
+        let settings = format!(
+            "n_trees = {}, max_depth = {}, n_bootstrap = {} and include_propensity = {}",
+            config.n_trees, config.max_depth, config.n_bootstrap, config.include_propensity
+        );
+        let n_covariates = request.covariates.len();
+        if let Some(refusal) = ensemble_refusal(
+            "ml_bart_causal",
+            dataset.nrows(),
+            &settings,
+            "n_trees, max_depth or n_bootstrap",
+            |rows| config.memory_bound(rows, n_covariates),
+        ) {
+            return Ok(refusal);
+        }
+
+        // Fit the configuration whose bound was checked.
+        let cov_refs: Vec<&str> = request.covariates.iter().map(String::as_str).collect();
+        let result = match bart_causal(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &cov_refs,
+            config,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1592,5 +1650,182 @@ impl AnalyticsServer {
             result,
             serde_json::to_string_pretty(&output).unwrap_or_default()
         ))]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::limits::{Limits, with_limits};
+    use p2a_core::data::Dataset;
+    use p2a_core::polars::prelude::*;
+    use p2a_core::resource::{Budget, CancelToken, with_budget};
+    use rmcp::model::RawContent;
+
+    fn text_of(r: &CallToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| match &c.raw {
+                RawContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A server holding dataset "d" of `n` rows: a noisy outcome `y`, an alternating
+    /// treatment `w` and four covariates.
+    async fn server_with_causal_data(n: usize) -> AnalyticsServer {
+        let c = |k: usize| -> Vec<f64> {
+            (0..n)
+                .map(|i| ((i * (31 + 7 * k) + 3 * k) % 97) as f64 / 97.0)
+                .collect()
+        };
+        let w: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| c(0)[i] + w[i] * (1.0 + c(1)[i]) + ((i * 13) % 11) as f64 / 20.0)
+            .collect();
+        let df = df!(
+            "y" => y, "w" => w, "c0" => c(0), "c1" => c(1), "c2" => c(2), "c3" => c(3)
+        )
+        .unwrap();
+        let server = AnalyticsServer::new();
+        server
+            .datasets
+            .write()
+            .await
+            .insert("d".to_string(), Dataset::new(df));
+        server
+    }
+
+    fn covariates() -> Vec<String> {
+        ["c0", "c1", "c2", "c3"].map(String::from).to_vec()
+    }
+
+    fn forest(
+        n_trees: usize,
+        max_depth: usize,
+        honesty: bool,
+        min_node: usize,
+    ) -> CausalForestRequest {
+        CausalForestRequest {
+            dataset: "d".into(),
+            outcome: "y".into(),
+            treatment: "w".into(),
+            covariates: covariates(),
+            n_trees: Some(n_trees),
+            min_node_size: Some(min_node),
+            max_depth: Some(max_depth),
+            honesty: Some(honesty),
+            seed: Some(1),
+        }
+    }
+
+    fn bart(n_trees: usize, max_depth: usize, n_bootstrap: usize) -> BartCausalRequest {
+        BartCausalRequest {
+            dataset: "d".into(),
+            outcome: "y".into(),
+            treatment: "w".into(),
+            covariates: covariates(),
+            n_trees: Some(n_trees),
+            max_depth: Some(max_depth),
+            n_bootstrap: Some(n_bootstrap),
+            include_propensity: None,
+            seed: Some(1),
+        }
+    }
+
+    /// Runs both tools under `limits`; with `cancelled`, inside a cancelled budget, so that a
+    /// fit that is not refused stops at its first checkpoint instead of running.
+    fn calls(
+        rt: &tokio::runtime::Runtime,
+        server: &AnalyticsServer,
+        limits: &Limits,
+        cancelled: bool,
+        (f, b): (CausalForestRequest, BartCausalRequest),
+    ) -> [(&'static str, CallToolResult); 2] {
+        let run = || {
+            [
+                (
+                    "ml_causal_forest",
+                    rt.block_on(server.ml_causal_forest(Parameters(f))).unwrap(),
+                ),
+                (
+                    "ml_bart_causal",
+                    rt.block_on(server.ml_bart_causal(Parameters(b))).unwrap(),
+                ),
+            ]
+        };
+        with_limits(limits.clone(), || {
+            if cancelled {
+                let token = CancelToken::new();
+                token.cancel();
+                with_budget(Budget::new(None, token), run)
+            } else {
+                run()
+            }
+        })
+    }
+
+    /// Both tree-ensemble tools keep every tree they grow, so they check their memory bound
+    /// against `ensemble_bytes` before they fit, and refuse a fit over it with the settings
+    /// and the rows that fit; the off profile does not refuse it.
+    #[test]
+    fn ensemble_tools_refuse_a_fit_over_the_memory_budget_before_fitting() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = rt.block_on(server_with_causal_data(5_000));
+        let large = || (forest(5_000, 100, false, 1), bart(5_000, 100, 6_000));
+        let settings = [
+            "n_trees = 5000, max_depth = 100, min_node_size = 1 and honesty = false",
+            "n_trees = 5000, max_depth = 100, n_bootstrap = 6000 and include_propensity = false",
+        ];
+        let calls_hosted = calls(&rt, &server, &Limits::hosted(), true, large());
+        for ((tool, r), settings) in calls_hosted.iter().zip(settings) {
+            let t = text_of(r);
+            assert_eq!(r.is_error, Some(true), "{t}");
+            assert!(
+                t.starts_with(&format!(
+                    "`{tool}` with {settings} on 5000 rows could hold up to "
+                )) && t.contains("(ensemble_bytes: ")
+                    && t.contains("limit of 256.00 MB")
+                    && t.contains("Use a sample of at most "),
+                "{t}"
+            );
+        }
+        for (_, r) in calls(&rt, &server, &Limits::off(), true, large()) {
+            assert_eq!(r.is_error, Some(true));
+            assert!(
+                text_of(&r).contains("failed") && !text_of(&r).contains("ensemble_bytes"),
+                "{}",
+                text_of(&r)
+            );
+        }
+    }
+
+    /// Within the budget, the hosted profile fits as before.
+    #[test]
+    fn ensemble_tools_fit_within_the_memory_budget() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = rt.block_on(server_with_causal_data(300));
+        let small = (forest(50, 10, true, 5), bart(20, 4, 4));
+        let [(_, f), (_, b)] = calls(&rt, &server, &Limits::hosted(), false, small);
+        assert_ne!(f.is_error, Some(true), "{}", text_of(&f));
+        assert!(
+            text_of(&f).contains("Causal Forest Results"),
+            "{}",
+            text_of(&f)
+        );
+        assert_ne!(b.is_error, Some(true), "{}", text_of(&b));
+        assert!(
+            text_of(&b).contains("\"n_bootstrap\": 4"),
+            "{}",
+            text_of(&b)
+        );
     }
 }

@@ -190,8 +190,8 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
   and it cannot be stopped once it starts).
 - **Named budgets.** Sizes the handlers compute while they run: image pixels,
   table cells, join output, generated data, export and file sizes, spatial
-  links, the work of an ARIMA fit, SQL results, the conversation store and the
-  LLM context.
+  links, the work of an ARIMA fit, the memory of a tree-ensemble fit, SQL
+  results, the conversation store and the LLM context.
 - **Response size.** A tool's text and image output above `response_bytes`
   (16 MiB) is replaced by a refusal.
 
@@ -512,6 +512,7 @@ Named budgets:
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
 | `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 400,000 | none |
+| `ensemble_bytes` | memory a `ml_causal_forest` or `ml_bart_causal` fit may hold at once (its trees, bootstrap draws and working copies of the data), as the core's bound predicts it from the rows and the settings, checked before the fit starts | 256 MiB | none |
 | `db_result_rows` | rows a SQL tool keeps | 100,000 | none |
 | `db_result_bytes` | estimated bytes a SQL tool keeps | 64 MiB | none |
 | `db_timeout_secs` | run time of one SQL statement | 20 | none |
@@ -540,6 +541,16 @@ default 60 s: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a throttled shared
 CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. Raising it
 above about 3.5 times the hosted value lets a fit run past the deadline and keep
 its slot, since the fit has no checkpoint.
+
+The hosted `ensemble_bytes` of 256 MiB matches the per-allocation ceiling: a
+causal-forest or BART-causal fit keeps every tree it grows, and BART keeps a
+draw for every row and bootstrap replication, so neither the deadline nor the
+ceiling bounds what one fit holds; the handlers refuse a fit whose bound is
+larger before it starts, and say how many rows its settings allow. With four
+covariates it admits both tools' defaults on a few hundred thousand rows. The
+bound counts buffers by their lengths, so the allocator adds a few MiB on top;
+keep it at or below the ceiling and well below the room the memory admission
+leaves (`P2A_MEMORY_SOFT_LIMIT_MB` against the machine's memory).
 
 ## Must-do checklist
 

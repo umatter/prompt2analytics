@@ -30,6 +30,9 @@
 //!   working memory is too large a multiple of the data ([`RowRule::reason`] says which).
 //! - [`Limits::check_budget`] lets a handler check a quantity it computes itself (for example a
 //!   predicted join size) against a named budget field such as [`Limits::join_output_rows`].
+//! - [`Limits::check_ensemble`] lets the tree-ensemble handlers refuse a fit whose memory bound
+//!   exceeds [`Limits::ensemble_bytes`] before it starts: those fits keep every tree they grow,
+//!   so neither the deadline nor the per-allocation ceiling bounds what they hold.
 //! - [`Limits::check_arima_fit`] and [`Limits::check_arima_series`] let the ARIMA handlers
 //!   refuse a fit before it starts, because the `arima` crate's optimiser cannot be stopped
 //!   once it runs: one whose work exceeds [`Limits::arima_fit_work`], and one whose series holds
@@ -213,6 +216,21 @@ families! {
 /// slot, since the fit has no checkpoint.
 const ARIMA_FIT_WORK_HOSTED: u64 = 400_000;
 
+/// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling
+/// (`P2A_MAX_ALLOC_MB`), so that one tree-ensemble fit grows the process by about as much as one
+/// allocation may, which the 700 MiB memory admission leaves room for on the 1 GiB machine.
+/// With four covariates it admits the defaults of `ml_causal_forest` on up to about 316,000 rows
+/// and those of `ml_bart_causal` on up to about 220,000 rows (both reach the 60 s deadline well
+/// before that), and 1.5 times each default setting on 18,000 and 162,000 rows.
+///
+/// The bound counts the buffers a fit holds by their lengths. On a release build in a 1 GiB,
+/// no-swap scope, fits admitted close to the budget (the largest trees and draw matrices it
+/// admits on a few thousand rows, and both defaults on the largest datasets it admits) grew the
+/// process by 53 to 234 MiB, at most about 3 MiB above their bounds (allocator and thread
+/// overhead). With resident data just under the admission limit the same fits peaked at
+/// 852 MiB.
+const ENSEMBLE_BYTES_HOSTED: u64 = 256 * 1024 * 1024;
+
 /// Number of families; the length of [`Family::ALL`].
 const FAMILY_COUNT: usize = Family::ALL.len();
 
@@ -373,6 +391,11 @@ pub struct Limits {
     /// before the fit starts. While it is set, [`Limits::check_arima_series`] also refuses a
     /// series below [`ARIMA_MIN_MAGNITUDE`].
     pub arima_fit_work: Option<u64>,
+    /// Bytes a tree-ensemble fit may hold at once (`ml_causal_forest`, `ml_bart_causal`): its
+    /// trees, bootstrap draws and working copies of the data, as the core's `memory_bound`
+    /// predicts them from the dataset's row count and the request's settings; checked by
+    /// their handlers with [`Limits::check_ensemble`] before the fit starts.
+    pub ensemble_bytes: Option<u64>,
     /// Rows a SQL tool returns.
     pub db_result_rows: Option<usize>,
     /// Bytes a SQL tool returns.
@@ -457,8 +480,8 @@ named_limits! {
         dense_rows, cubic_rows, quadratic_rows, min_tolerance, image_pixels, table_cells,
         max_groups, join_output_rows, onehot_levels, str_split_parts, str_pad_width,
         generated_cells, generated_bytes, export_bytes, load_file_bytes, response_bytes,
-        session_disk_bytes, spatial_links, arima_fit_work, db_result_rows, db_result_bytes,
-        db_timeout_secs, db_memory_mb, db_threads, conversations_per_session,
+        session_disk_bytes, spatial_links, arima_fit_work, ensemble_bytes, db_result_rows,
+        db_result_bytes, db_timeout_secs, db_memory_mb, db_threads, conversations_per_session,
         messages_per_conversation, session_db_bytes, llm_streams_per_session,
     }
     required {
@@ -492,6 +515,7 @@ impl Limits {
             session_disk_bytes: None,
             spatial_links: None,
             arima_fit_work: None,
+            ensemble_bytes: None,
             db_result_rows: None,
             db_result_bytes: None,
             db_timeout_secs: None,
@@ -540,6 +564,7 @@ impl Limits {
             session_disk_bytes: Some(64 * MIB),
             spatial_links: Some(2_000_000),
             arima_fit_work: Some(ARIMA_FIT_WORK_HOSTED),
+            ensemble_bytes: Some(ENSEMBLE_BYTES_HOSTED),
             db_result_rows: Some(100_000),
             db_result_bytes: Some(64 * MIB),
             db_timeout_secs: Some(20),
@@ -1030,6 +1055,69 @@ impl Limits {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Checks the memory a tree-ensemble fit would hold at once against the
+    /// [`Limits::ensemble_bytes`] budget (`None` passes). `bound(rows)` is the fit's memory
+    /// bound for a dataset of `rows` rows at the request's settings (the core's
+    /// `memory_bound`), which must not decrease as `rows` grows; `n_rows` is the dataset's
+    /// height. `settings` names the settings the bound depends on for the refusal
+    /// (`n_trees = 2000 and max_depth = 10`), and `reduce` the parameters that lower it
+    /// (`n_trees or max_depth`). The refusal says how many rows the settings allow, when any.
+    /// The handlers call it before they fit: the fits keep every tree they grow, so the
+    /// deadline would stop one only after its memory had grown, and the per-allocation ceiling
+    /// sees each node on its own.
+    pub fn check_ensemble(
+        &self,
+        tool: &str,
+        n_rows: usize,
+        settings: &str,
+        reduce: &str,
+        bound: impl Fn(usize) -> u64,
+    ) -> Result<(), LimitViolation> {
+        const KNOB: &str = "ensemble_bytes";
+        let Some(limit) = self.ensemble_bytes else {
+            return Ok(());
+        };
+        let need = bound(n_rows);
+        if need <= limit {
+            return Ok(());
+        }
+        // `bound(n_rows) > limit`, so the most rows that fit are fewer than `n_rows`.
+        let (mut lo, mut hi) = (0usize, n_rows);
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            if bound(mid) <= limit {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        let fit_rows = (bound(lo) <= limit && lo > 0).then_some(lo);
+        let bytes =
+            |b: u64| p2a_core::memory::format_bytes(usize::try_from(b).unwrap_or(usize::MAX));
+        let advice = match fit_rows {
+            Some(r) => format!(
+                "Use a sample of at most {r} rows at these settings, for example with \
+                 munge_sample, or lower {reduce}."
+            ),
+            None => format!("Lower {reduce}."),
+        };
+        let tool = echo(tool);
+        Err(LimitViolation {
+            message: format!(
+                "`{tool}` with {settings} on {n_rows} rows could hold up to {} at once \
+                 ({KNOB}: its trees and the other buffers it keeps while it runs), above this \
+                 server's limit of {}. {advice}",
+                bytes(need),
+                bytes(limit)
+            ),
+            tool: tool.to_string(),
+            parameter: KNOB.to_string(),
+            requested: need.to_string(),
+            limit: limit.to_string(),
+            override_key: KNOB,
+        })
     }
 
     /// Checks an ARIMA fit of `n_obs` observations at orders `p`, `d` and `q`
@@ -2043,6 +2131,7 @@ mod tests {
         assert!(!h.sql_freeform);
         assert_eq!(h.spatial_links, Some(2_000_000));
         assert_eq!(h.arima_fit_work, Some(400_000));
+        assert_eq!(h.ensemble_bytes, Some(256 * 1024 * 1024));
         assert_eq!(
             (h.db_result_rows, h.db_result_bytes),
             (Some(100_000), Some(64 * 1024 * 1024))
@@ -2201,6 +2290,116 @@ mod tests {
         );
     }
 
+    /// Bounds of the two tree-ensemble tools at the request's settings, as their handlers
+    /// compute them.
+    fn forest_bound(n_trees: usize, max_depth: usize) -> impl Fn(usize) -> u64 {
+        let c = p2a_core::ml::run_causal_forest_config(
+            Some(n_trees),
+            None,
+            None,
+            Some(max_depth),
+            None,
+        );
+        move |rows| c.memory_bound(rows, 4)
+    }
+
+    fn bart_bound(n_trees: usize, max_depth: usize, n_bootstrap: usize) -> impl Fn(usize) -> u64 {
+        let c = p2a_core::ml::run_bart_causal_config(
+            Some(n_trees),
+            Some(max_depth),
+            Some(n_bootstrap),
+            None,
+            None,
+        );
+        move |rows| c.memory_bound(rows, 4)
+    }
+
+    /// The hosted `ensemble_bytes` budget admits both tools' defaults, and 1.5 times each
+    /// default setting, on ordinary datasets, and refuses a fit whose trees, draws and working
+    /// copies would be too large, saying how many rows its settings allow.
+    #[test]
+    fn ensemble_budget_admits_the_defaults_and_refuses_large_fits_with_advice() {
+        let h = Limits::hosted();
+        let check = |tool: &str, rows: usize, bound: &dyn Fn(usize) -> u64| {
+            h.check_ensemble(tool, rows, "these settings", "n_trees", bound)
+        };
+        for rows in [100, 10_000, 100_000] {
+            assert!(
+                check("ml_causal_forest", rows, &forest_bound(2_000, 10)).is_ok(),
+                "{rows}"
+            );
+            assert!(
+                check("ml_bart_causal", rows, &bart_bound(200, 4, 100)).is_ok(),
+                "{rows}"
+            );
+        }
+        assert!(check("ml_causal_forest", 10_000, &forest_bound(3_000, 15)).is_ok());
+        assert!(check("ml_bart_causal", 10_000, &bart_bound(300, 6, 150)).is_ok());
+
+        let bound = bart_bound(5_000, 100, 20);
+        let v = h
+            .check_ensemble(
+                "ml_bart_causal",
+                1_500_000,
+                "n_trees = 5000, max_depth = 100 and n_bootstrap = 20",
+                "n_trees, max_depth or n_bootstrap",
+                &bound,
+            )
+            .unwrap_err();
+        assert_eq!(
+            (v.parameter.as_str(), v.limit.as_str(), v.override_key),
+            ("ensemble_bytes", "268435456", "ensemble_bytes")
+        );
+        assert_eq!(v.requested, bound(1_500_000).to_string());
+        let fit = (1..1_500_000usize)
+            .rev()
+            .find(|&r| bound(r) <= 256 * 1024 * 1024)
+            .unwrap();
+        assert!(fit < 5_000, "{fit}");
+        assert!(
+            v.message.starts_with(
+                "`ml_bart_causal` with n_trees = 5000, max_depth = 100 and n_bootstrap = 20 on \
+                 1500000 rows could hold up to "
+            ) && v
+                .message
+                .contains("(ensemble_bytes: its trees and the other buffers")
+                && v.message.contains("limit of 256.00 MB")
+                && v.message
+                    .contains(&format!("Use a sample of at most {fit} rows"))
+                && v.message
+                    .ends_with("or lower n_trees, max_depth or n_bootstrap."),
+            "{}",
+            v.message
+        );
+        // Small trees do not make the draws and copies of 1.5 million rows fit.
+        assert!(check("ml_bart_causal", 1_500_000, &bart_bound(8, 4, 20)).is_err());
+        assert!(check("ml_causal_forest", 1_500_000, &forest_bound(2_000, 10)).is_err());
+        assert!(check("ml_causal_forest", 1_500_000, &forest_bound(5_000, 100)).is_err());
+        // Nothing fits: no row count to suggest.
+        let v = check("ml_bart_causal", 50, &|_| u64::MAX).unwrap_err();
+        assert!(v.message.ends_with("Lower n_trees."), "{}", v.message);
+        assert!(!v.message.contains("sample"), "{}", v.message);
+
+        let off = Limits::off();
+        assert!(
+            off.check_ensemble("ml_bart_causal", 1_500_000, "s", "r", |_| u64::MAX)
+                .is_ok()
+        );
+        let tight = Limits::off()
+            .with_overrides(&["ensemble_bytes=1000".to_string()])
+            .unwrap();
+        assert!(
+            tight
+                .check_ensemble("ml_causal_forest", 10, "s", "r", |_| 1_000)
+                .is_ok()
+        );
+        assert!(
+            tight
+                .check_ensemble("ml_causal_forest", 10, "s", "r", |_| 1_001)
+                .is_err()
+        );
+    }
+
     #[test]
     fn every_known_key_is_settable() {
         const BOOLS: &[&str] = &["llm_server_keys", "llm_allow_loopback", "sql_freeform"];
@@ -2232,6 +2431,7 @@ mod tests {
             "session_disk_bytes",
             "spatial_links",
             "arima_fit_work",
+            "ensemble_bytes",
             "db_result_rows",
             "db_result_bytes",
             "db_timeout_secs",
@@ -2252,7 +2452,7 @@ mod tests {
         ] {
             assert!(keys.contains(&k), "{k}");
         }
-        assert_eq!(keys.len(), Family::ALL.len() + 36);
+        assert_eq!(keys.len(), Family::ALL.len() + 37);
         for k in keys {
             let v = if BOOLS.contains(&k) { "true" } else { "1" };
             Limits::off()
