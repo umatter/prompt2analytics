@@ -1061,7 +1061,7 @@ fn leaf_value_bytes(dtype: &DataType, values: u64) -> u64 {
         | DataType::Duration(_)
         | DataType::Time
         | DataType::BinaryOffset => width(8),
-        DataType::Int128 | DataType::Decimal(_, _) => width(16),
+        DataType::Int128 | DataType::UInt128 | DataType::Decimal(_, _) => width(16),
         DataType::String | DataType::Binary => width(session::VIEW_BYTES),
         DataType::Categorical(_, _) | DataType::Enum(_, _) => match dtype.cat_physical() {
             Ok(CategoricalPhysical::U8) => width(1),
@@ -1752,8 +1752,11 @@ mod tests {
         // A footer with fewer entries than slots, or none, counts no values.
         assert_eq!(least(&list(DataType::Float64), 5, &[3]), 40);
         assert_eq!(least(&list(DataType::Float64), 5, &[]), 40);
-        // Flat columns count their rows, as before.
+        // Flat columns count their rows, as before; 128-bit ones 16 bytes a
+        // row (UInt128 counted nothing pre-fix).
         assert_eq!(least(&DataType::Float64, 7, &[7]), 56);
+        assert_eq!(least(&DataType::UInt128, 3, &[3]), 48);
+        assert_eq!(least(&DataType::Int128, 3, &[3]), 48);
         assert_eq!(least(&DataType::String, 2, &[2]), 32);
         // Outside a list, a leaf column takes room for the entries it
         // declares where they are more than its slots: polars reserves room
@@ -1877,6 +1880,12 @@ mod tests {
         );
         // A flat column's reservation is bounded by its rows.
         assert_eq!(chunk_transient(&none, f64, false, false, 1 << 30), 0);
+        // A 128-bit leaf reserves 16 bytes an entry (pre-fix nothing).
+        let u128 = Some(&DataType::UInt128);
+        assert_eq!(
+            chunk_transient(&none, u128, false, true, 1 << 10),
+            16 * 1024 + 128
+        );
         // The chunks decoded at once: the largest, as many as threads.
         assert_eq!(largest_sum(vec![5, 1, 9, 3], 2), 14);
         assert_eq!(largest_sum(vec![5, 1], 8), 6);
