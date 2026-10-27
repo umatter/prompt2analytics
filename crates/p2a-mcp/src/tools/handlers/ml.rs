@@ -2006,10 +2006,12 @@ mod tests {
 
     /// A refusal offers other settings only when the least memory they reach fits the
     /// dataset's rows, lists only the changes the request can still make, and names turning
-    /// honesty or the propensity score off as required only when the rows fit without it
-    /// alone, so that what it says is true for every input. On 1.5 million rows with four
-    /// covariates, no BART setting fits and the causal forest fits only without honest
-    /// splitting; with eight covariates no forest setting fits either.
+    /// honesty or the propensity score off as required only when the least memory with it
+    /// does not fit and the least memory without it does;
+    /// `ensemble_changes_reach_the_least_memory_the_fits_accept` checks the tiers over a grid
+    /// of inputs. On 1.5 million rows with four covariates, no BART setting fits and the
+    /// causal forest fits only without honest splitting; with eight covariates no forest
+    /// setting fits either.
     #[test]
     fn ensemble_refusals_offer_other_settings_only_when_they_fit() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -2183,22 +2185,26 @@ mod tests {
     }
 
     /// Checks `change`, the tiers for a request `c` (`case` names it), against `floor(flag)`,
-    /// the least memory the fit accepts with its boolean option (`flag`, set to `requested`
+    /// the least memory the fit accepts with its boolean `option` (`flag`, set to `requested`
     /// in `c`) on or off, and against `lowers(base, parameter)`, whether setting that
     /// parameter alone to its least memory lowers `base`'s bound. `without` is `c` with the
-    /// option off and `drop_option` the advice that turns it off.
+    /// option off. `option_beside_others` says whether the first tier may offer turning the
+    /// option off beside the other changes (BART's propensity score, which always lowers the
+    /// bound) or must never name it (the forest's honesty, which can raise it).
     fn check_tiers<C>(
         case: &str,
         change: &EnsembleChange<'_>,
         c: &C,
         without: &C,
         requested: bool,
-        drop_option: &str,
+        option: &str,
+        option_beside_others: bool,
         parameters: [&str; 3],
         bound: impl Fn(&C) -> u64,
         floor: impl Fn(bool) -> u64,
         lowers: impl Fn(&C, &str) -> bool,
     ) {
+        let drop_option = format!("set {option} = false");
         let mut tiers = change.tiers.iter().peekable();
         match tiers.next_if(|t| !t.advice.starts_with("set ")) {
             Some(t) => {
@@ -2211,20 +2217,22 @@ mod tests {
                         t.advice
                     );
                 }
-                // The option is offered beside the others only where turning it off always
-                // lowers the bound (BART's propensity score), never for the forest's honesty.
-                assert!(
-                    !t.advice.contains(drop_option) || bound(without) < bound(c),
-                    "{case}: {}",
-                    t.advice
-                );
+                if option_beside_others {
+                    assert!(
+                        !t.advice.contains(&drop_option) || bound(without) < bound(c),
+                        "{case}: {}",
+                        t.advice
+                    );
+                } else {
+                    assert!(!t.advice.contains(option), "{case}: {}", t.advice);
+                }
             }
             None => assert_eq!(bound(c), floor(requested), "{case}"),
         }
         if requested {
             let t = tiers.next().unwrap();
             let (required, offered) = advice_parts(&t.advice);
-            assert_eq!(required, drop_option, "{case}");
+            assert_eq!(required, drop_option.as_str(), "{case}");
             assert_eq!(t.cheapest, floor(false), "{case}");
             for parameter in parameters {
                 assert_eq!(
@@ -2276,7 +2284,8 @@ mod tests {
                                 &c,
                                 &without,
                                 honesty,
-                                "set honesty = false",
+                                "honesty",
+                                false,
                                 ["n_trees", "max_depth", "min_node_size"],
                                 bound,
                                 |honesty| {
@@ -2342,7 +2351,8 @@ mod tests {
                                 &c,
                                 &without,
                                 propensity,
-                                "set include_propensity = false",
+                                "include_propensity",
+                                true,
                                 ["n_trees", "max_depth", "n_bootstrap"],
                                 bound,
                                 |include_propensity| {
