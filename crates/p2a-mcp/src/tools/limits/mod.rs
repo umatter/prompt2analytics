@@ -1398,8 +1398,9 @@ impl Limits {
     /// exactly 0.0 over a stretch of exact zeros, which can sit in the subnormal range (one pass
     /// measured about 28 times slower); [`ARIMA_MIN_MAGNITUDE`] says why that is not believed to
     /// last a whole fit, and records it as a residual risk for a change of the optimiser. The
-    /// ARIMA handlers call it after [`Limits::check_arima_fit`]. `column` names the series in
-    /// the refusal.
+    /// ARIMA handlers call it after [`Limits::check_arima_fit`], with the column's valid values
+    /// (the fit refuses a column with nulls, so the values behind its null slots are never
+    /// read). `column` names the series in the refusal.
     pub fn check_arima_series(
         &self,
         tool: &str,

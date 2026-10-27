@@ -2227,9 +2227,10 @@ impl AnalyticsServer {
 /// `arima_fit_work` budget does not allow, checked before anything is fitted:
 /// `arima::estimate::fit` cannot be stopped once it starts, so the call's deadline would not end
 /// it. The budget bounds the fit's work, and while it is set a series that would slow the fit's
-/// arithmetic is refused as well. The series is read as `run_arima` reads it (the whole `f64`
-/// column, without its null mask). A missing or non-`f64` column is not refused here, so that the
-/// core reports it.
+/// arithmetic is refused as well. That check reads the values the fit reads, the column's valid
+/// values: `run_arima` refuses a column with nulls before it fits, so the buffer value behind a
+/// null slot never reaches the fit and is not checked. A missing or non-`f64` column is not
+/// refused here, so that the core reports it.
 fn arima_refusal(
     tool: &str,
     dataset: &p2a_core::Dataset,
@@ -2243,7 +2244,7 @@ fn arima_refusal(
         .err()
         .or_else(|| {
             limits
-                .check_arima_series(tool, column, series.into_no_null_iter())
+                .check_arima_series(tool, column, series.iter().flatten())
                 .err()
         })
         .map(limit_refusal)
@@ -2496,6 +2497,73 @@ mod tests {
             text_of(&forecast).contains("t+5:"),
             "{}",
             text_of(&forecast)
+        );
+    }
+
+    /// The magnitude floor reads only the values the fit uses. Polars keeps a buffer value
+    /// behind every null, and arithmetic on a column runs over it too, so a null can hide a
+    /// value below the floor; the fit never reads it (the core refuses a column with nulls), so
+    /// the floor does not refuse for it, in either profile. A valid value below the floor in
+    /// the same column is still refused.
+    #[test]
+    fn ts_arima_floor_ignores_the_buffer_behind_a_null() {
+        use crate::tools::limits::Limits;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let y = ar1(400);
+        let column = |tiny_at: Option<usize>| {
+            let values: Vec<Option<f64>> = y
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| match (i, tiny_at) {
+                    (123, _) => None,
+                    (i, Some(t)) if i == t => Some(-1e-150),
+                    _ => Some(v),
+                })
+                .collect();
+            // 0.0 + 1e-200 behind the null; the valid values do not change.
+            let ca = &Float64Chunked::from_slice_options("y".into(), &values) + 1e-200;
+            assert_eq!(ca.into_no_null_iter().nth(123), Some(1e-200));
+            assert_eq!(ca.null_count(), 1);
+            assert!(ca.iter().zip(&values).all(|(a, b)| a == *b));
+            ca
+        };
+        let server = AnalyticsServer::new();
+        for (name, ca) in [("a", column(None)), ("b", column(Some(200)))] {
+            let df = DataFrame::new(vec![ca.into_series().into()]).unwrap();
+            rt.block_on(server.datasets.write())
+                .insert(name.to_string(), Dataset::new(df));
+        }
+        for limits in [Limits::hosted(), Limits::off()] {
+            for (tool, r) in arima_calls(&rt, &server, &limits, "y", 0) {
+                let t = text_of(&r);
+                assert_eq!(r.is_error, Some(true), "{tool}: {t}");
+                assert!(
+                    t.contains("Column 'y' contains 1 null values") && !t.contains("floor"),
+                    "{tool}: {t}"
+                );
+            }
+        }
+        // The same column with a valid value below the floor ("b"): refused for that value.
+        let fit = ArimaRequest {
+            dataset: "b".into(),
+            column: "y".into(),
+            p: 1,
+            d: 0,
+            q: 1,
+        };
+        let r = crate::tools::limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.ts_arima_fit(Parameters(fit))).unwrap()
+        });
+        assert!(
+            text_of(&r).starts_with(
+                "`ts_arima_fit` cannot fit column `y`: it holds a nonzero value of magnitude \
+                 1e-150, below this server's floor of 1e-100"
+            ),
+            "{}",
+            text_of(&r)
         );
     }
 
