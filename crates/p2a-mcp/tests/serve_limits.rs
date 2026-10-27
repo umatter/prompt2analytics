@@ -272,6 +272,24 @@ async fn start_transport_refuses_other_limits_while_an_open_public_server_runs()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_embedded_server_reports_a_conflict_with_a_running_server() {
+    let (addr, stop, server) = running_open_public().await;
+
+    // The embedded server is always local, so its limits are the off
+    // profile. Its refusal must come back to the caller, not only to a log
+    // line of a task that serves nothing.
+    let e = p2a_mcp::start_embedded_server(p2a_mcp::EmbeddedServerConfig::default().with_port(0))
+        .await
+        .err()
+        .expect("start_embedded_server returned Ok next to an open public server");
+    assert_refused_for_other_limits(&e, "start_embedded_server");
+
+    assert_serves_open_public_limits(addr).await;
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_refuses_other_process_policies_under_the_same_limits() {
     let (addr, stop, server) = running_open_public().await;
 
