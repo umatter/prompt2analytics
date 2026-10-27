@@ -6,20 +6,36 @@
 //! a line into the JSON-RPC stream that the client cannot parse. The
 //! in-process stdio tests (`limits_e2e.rs`) serve a duplex stream and cannot
 //! see such a line, because it goes to the real stdout.
+//!
+//! A test ends the session by closing stdin, as a client does, and reads
+//! stdout until the process closes it, so the check covers every line the
+//! process wrote: those of a background task or of the shutdown path, and
+//! not only those before the last response.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+
+/// How long to wait for the next stdout line, or for the process to exit,
+/// before failing. This only keeps a hung server from hanging `cargo test`
+/// (CI sets no job timeout); it asserts nothing about speed, and a line
+/// normally arrives in well under a second.
+const PATIENCE: Duration = Duration::from_secs(60);
 
 /// A `p2a-mcp --transport stdio` child process and every line it has
 /// written to stdout so far.
 struct StdioServer {
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    /// The child's stdout, one line at a time, from a reader thread: a
+    /// line (newline included), `Ok(None)` at the end of stdout, or the
+    /// read error. A blocking read here could hang the test for good.
+    stdout: Receiver<io::Result<Option<String>>>,
     stderr_log: PathBuf,
     lines: Vec<String>,
 }
@@ -42,11 +58,28 @@ impl StdioServer {
             .spawn()
             .expect("start p2a-mcp");
         let stdin = child.stdin.take();
-        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            loop {
+                // Bytes, not `read_line`: a write that is not UTF-8 is a
+                // stray line too, not a read error.
+                let mut buf = Vec::new();
+                let event = match stdout.read_until(b'\n', &mut buf) {
+                    Ok(0) => Ok(None),
+                    Ok(_) => Ok(Some(String::from_utf8_lossy(&buf).into_owned())),
+                    Err(e) => Err(e),
+                };
+                let more = matches!(event, Ok(Some(_)));
+                if tx.send(event).is_err() || !more {
+                    return;
+                }
+            }
+        });
         let mut server = StdioServer {
             child,
             stdin,
-            stdout,
+            stdout: rx,
             stderr_log,
             lines: Vec::new(),
         };
@@ -66,25 +99,43 @@ impl StdioServer {
         stdin.flush().expect("flush to p2a-mcp");
     }
 
+    /// A panic naming `what` the test was waiting for, with the stdout
+    /// lines read so far and the server's stderr.
+    fn fail(&self, what: &str) -> ! {
+        let stderr = std::fs::read_to_string(&self.stderr_log).unwrap_or_default();
+        panic!(
+            "p2a-mcp {what}; stdout so far: {:?}; stderr: {stderr}",
+            self.lines
+        );
+    }
+
+    /// The next stdout line, recorded in `lines`, or `None` once stdout has
+    /// ended. Fails if no line arrives within `PATIENCE`; `waiting_for`
+    /// says for what.
+    fn next_line(&mut self, waiting_for: &str) -> Option<String> {
+        match self.stdout.recv_timeout(PATIENCE) {
+            Ok(Ok(Some(line))) => {
+                self.lines.push(line.clone());
+                Some(line)
+            }
+            // The reader thread hangs up only after the end or an error.
+            Ok(Ok(None)) | Err(RecvTimeoutError::Disconnected) => None,
+            Ok(Err(e)) => self.fail(&format!("stdout read failed ({e}) {waiting_for}")),
+            Err(RecvTimeoutError::Timeout) => self.fail(&format!(
+                "wrote nothing to stdout for {PATIENCE:?} {waiting_for}"
+            )),
+        }
+    }
+
     /// Sends request `id` and returns its response, recording every stdout
     /// line read on the way, JSON or not.
     fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
         self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        let waiting_for = format!("while answering request {id}");
         loop {
-            let mut line = String::new();
-            let n = self
-                .stdout
-                .read_line(&mut line)
-                .expect("read p2a-mcp stdout");
-            if n == 0 {
-                let stderr = std::fs::read_to_string(&self.stderr_log).unwrap_or_default();
-                panic!(
-                    "p2a-mcp closed stdout before answering request {id}; \
-                     stdout so far: {:?}; stderr: {stderr}",
-                    self.lines
-                );
-            }
-            self.lines.push(line.clone());
+            let Some(line) = self.next_line(&waiting_for) else {
+                self.fail(&format!("closed stdout before answering request {id}"));
+            };
             if let Ok(msg) = serde_json::from_str::<Value>(&line)
                 && msg["id"] == id
             {
@@ -96,6 +147,32 @@ impl StdioServer {
     /// The `tools/call` response for `tool` with `args`.
     fn call(&mut self, id: u64, tool: &str, args: Value) -> Value {
         self.request(id, "tools/call", json!({"name": tool, "arguments": args}))
+    }
+
+    /// Ends the session as a client does, by closing stdin, records the
+    /// rest of stdout up to its end, and returns the exit status once the
+    /// process has exited.
+    fn finish(&mut self) -> ExitStatus {
+        drop(self.stdin.take());
+        while self
+            .next_line("after stdin closed, without closing stdout")
+            .is_some()
+        {}
+        // Stdout has ended, so the process is exiting; poll rather than
+        // `wait`, under the same guard against a hang.
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => self.fail(&format!(
+                    "closed stdout but had not exited {PATIENCE:?} later"
+                )),
+                Err(e) => self.fail(&format!("could not be waited for ({e})")),
+            }
+        }
     }
 
     /// The stdout lines so far that are not a JSON-RPC 2.0 message.
@@ -113,9 +190,13 @@ impl StdioServer {
 
 impl Drop for StdioServer {
     fn drop(&mut self) {
-        // Closing stdin ends the stdio session; kill in case it does not.
+        // After `finish` the child has exited and been reaped. A test that
+        // failed before then leaves it running: kill it, so that neither
+        // the process nor the reader thread outlives the test.
         drop(self.stdin.take());
-        let _ = self.child.kill();
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+        }
         let _ = self.child.wait();
     }
 }
@@ -129,8 +210,9 @@ fn tool_text(response: &Value) -> &str {
 }
 
 /// `munge_pivot` (two index columns, a null in `on`, a missing combination)
-/// answers with a JSON-RPC response and leaves nothing else on stdout:
-/// polars' `pivot` entry point prints a notice to stdout on every call.
+/// answers with a JSON-RPC response and the process leaves nothing else on
+/// stdout up to its exit: polars' `pivot` entry point prints a notice to
+/// stdout on every call.
 #[test]
 fn munge_pivot_writes_only_json_rpc_to_stdout() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -159,9 +241,14 @@ fn munge_pivot_writes_only_json_rpc_to_stdout() {
         tool_text(&pivoted).contains("saved as 'wide' (4 rows, 5 columns)"),
         "{pivoted}"
     );
+    let status = server.finish();
     assert!(
         server.stray_lines().is_empty(),
         "stdout lines that are not JSON-RPC: {:?}",
         server.stray_lines()
+    );
+    assert!(
+        status.success(),
+        "p2a-mcp exited with {status} after stdin closed"
     );
 }
