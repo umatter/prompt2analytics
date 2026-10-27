@@ -4,8 +4,11 @@
 //! gets the hosted floor (the catalogue, no free-form SQL, no server LLM
 //! keys, no loopback Ollama) with its `limits.overrides` applied (PR-18).
 //!
-//! One process serves one set of request limits: while a server runs, a
-//! start whose limits differ is refused instead of replacing them under it.
+//! One process serves one set of request limits and process policies
+//! (allocation ceiling, session directories): while a server runs, a start
+//! whose limits or policies differ is refused instead of replacing them
+//! under it. How long a server holds them is tested in
+//! `serve_limits_hold.rs`.
 //!
 //! `serve` installs the limits and the process-wide policies (allocation
 //! ceiling, session directories) for the whole process, and the tests of one
@@ -83,7 +86,7 @@ async fn running_open_public() -> (
 
 /// Asserts that `e` is the refusal of a start whose limits differ from those
 /// of a running server, and that the installed limits are still [`expected`].
-fn assert_refused_for_other_limits(e: &p2a_mcp::transport::TransportError, what: &str) {
+fn assert_refused_for_other_limits(e: &dyn std::fmt::Display, what: &str) {
     assert!(
         e.to_string()
             .contains("running under different request limits"),
@@ -262,6 +265,50 @@ async fn start_transport_refuses_other_limits_while_an_open_public_server_runs()
         let e = started.expect_err("start_transport returned Ok");
         assert_refused_for_other_limits(&e, &what);
     }
+
+    assert_serves_open_public_limits(addr).await;
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_refuses_other_process_policies_under_the_same_limits() {
+    let (addr, stop, server) = running_open_public().await;
+
+    // A local configuration with `--limits hosted` and the same overrides
+    // has the open public server's request limits and allocation ceiling,
+    // but no per-session directories (`--session-dirs auto` turns them on
+    // only in open public mode). Serving it would turn them off for the
+    // whole process.
+    let mut cfg = local("127.0.0.1:0".parse().unwrap());
+    cfg.limits.profile = Some(p2a_mcp::config::ResourceProfile::Hosted);
+    cfg.limits.overrides = overrides();
+    assert_eq!(limits::resolve(&cfg), Ok(expected()));
+    let ceiling = p2a_core::resource::alloc_ceiling_bytes();
+    assert_eq!(cfg.alloc_ceiling_bytes(), ceiling);
+    let listener = p2a_mcp::transport::http::bind(&cfg).await.unwrap();
+    let e = p2a_mcp::transport::http::serve(listener, cfg, std::future::ready(()))
+        .await
+        .expect_err("serve turned off the session directories of an open public server");
+    let message = e.to_string();
+    assert!(
+        message.contains("same request limits")
+            && message.contains("--max-alloc-mb")
+            && message.contains("--session-dirs"),
+        "{message}"
+    );
+    assert_eq!(*limits::current(), expected());
+    assert_eq!(p2a_core::resource::alloc_ceiling_bytes(), ceiling);
+
+    // Another allocation ceiling under the same limits is refused too.
+    let mut cfg = open_public("127.0.0.1:0".parse().unwrap());
+    cfg.exec.max_alloc_mb = Some(64);
+    let listener = p2a_mcp::transport::http::bind(&cfg).await.unwrap();
+    let e = p2a_mcp::transport::http::serve(listener, cfg, std::future::ready(()))
+        .await
+        .expect_err("serve changed the allocation ceiling of an open public server");
+    assert!(e.to_string().contains("same request limits"), "{e}");
+    assert_eq!(p2a_core::resource::alloc_ceiling_bytes(), ceiling);
 
     assert_serves_open_public_limits(addr).await;
     stop.send(()).unwrap();

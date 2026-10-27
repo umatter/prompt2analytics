@@ -1472,9 +1472,12 @@ async fn run_until_client_gone<F: std::future::Future>(
 /// dropped, and with it the provider request and any in-flight governed
 /// tool call, whose guard cancels the tool; the stored message and tool
 /// calls are closed as stopped ([`run_chat_task`]). The session's chat
-/// slot is held until the task ends.
+/// slot is held until the task ends, and so is the server's hold on the
+/// process-wide limits when the router carries one
+/// (`http::LimitsHold::attach`).
 pub async fn llm_chat_stream(
     State(state): State<AppState>,
+    hold: Option<axum::Extension<super::http::SharedHold>>,
     Json(request): Json<LlmChatRequest>,
 ) -> Response {
     let settings = LlmSettings::current();
@@ -1490,6 +1493,7 @@ pub async fn llm_chat_stream(
     let placeholder: Arc<OnceLock<String>> = Arc::default();
     tokio::spawn(async move {
         let _slot = slot;
+        let _hold = hold;
         let chat = run_chat_stream(state, request, settings, tx.clone(), placeholder.clone());
         run_chat_task(
             &tx,

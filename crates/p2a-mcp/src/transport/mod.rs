@@ -54,9 +54,10 @@ pub type TransportResult<T> = Result<T, TransportError>;
 /// first, for every transport; an unknown override key fails startup. The
 /// stdio transport installs them here. On the HTTP path
 /// `transport::http::serve` resolves them again, from the socket it serves,
-/// and installs them. Either way the server holds its limits while it runs,
-/// and a start whose limits differ from those of a server still running in
-/// this process is refused (`http::serve` says more; without the `http`
+/// and installs them. Either way the server holds its limits and its
+/// allocation ceiling while it runs, and a start whose limits or ceiling
+/// differ from those of a server still running in this process is refused
+/// (`http::hold_limits` and `http::serve` say more; without the `http`
 /// feature no other server can run).
 pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::config::TransportType;
@@ -66,9 +67,10 @@ pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
     match config.transport {
         TransportType::Stdio => {
             // Held while the stdio server runs, as `http::serve` holds its
-            // limits, so no other server in this process replaces them.
+            // limits, so no other server in this process replaces them or
+            // the allocation ceiling.
             #[cfg(feature = "http")]
-            let _held = http::hold_limits(&limits)?;
+            let _held = http::hold_stdio_limits(&limits, config.alloc_ceiling_bytes())?;
             tracing::info!(
                 profile = ?config.resource_profile(),
                 overrides = ?config.limits.overrides,
