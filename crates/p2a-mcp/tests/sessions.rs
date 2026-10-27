@@ -19,6 +19,8 @@ use p2a_mcp::persistent_session::{PersistentSessionManager, RELOAD_LABEL};
 use p2a_mcp::tools::limits;
 use p2a_mcp::transport::http::{AppState, build_app};
 use polars::prelude::{DataFrame, NamedFrom, ParquetWriter, Series};
+use polars_parquet_format::FileMetaData;
+use polars_parquet_format::thrift::protocol::{TCompactInputProtocol, TCompactOutputProtocol};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -457,7 +459,7 @@ async fn reload(r: &Router, sid: &str) -> Value {
 
 /// A reload runs the check `load_dataset` runs before it decodes a parquet
 /// file (PR-H2). A stored parquet path now holding a file whose decoded size
-/// passes the session's quota is reported failed with `load_dataset`'s
+/// exceeds the session's quota is reported failed with `load_dataset`'s
 /// refusal before anything is decoded ("Nothing was loaded"), with no server
 /// path; the other stored dataset still reloads, and the dataset the file
 /// held when it was last loaded stays as it was.
@@ -483,7 +485,7 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
 
     // Replaced at the stored path by 4,000,000 rows: 32 MB once decoded.
     // Pre-fix the reload decoded it in full and only then refused it at the
-    // insert ("this session's datasets would use 30.54 MB ...").
+    // insert ("this session's datasets would use 30.53 MB ...").
     levels_parquet(&stored, 4_000_000);
     let body = reload(&r, &sid).await;
     assert_eq!(body["data"]["succeeded"], json!(["small"]), "{body}");
@@ -505,12 +507,109 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
     assert_eq!(datasets["small"].nrows(), 50);
 }
 
+/// Write a parquet file of `rows` rows of one noisy float column at `path`,
+/// in row groups of `group_rows` rows.
+fn grouped_parquet(path: &std::path::Path, rows: usize, group_rows: usize) {
+    let values: Vec<f64> = (0..rows).map(|i| (i % 31) as f64 * 0.5 + 0.25).collect();
+    let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
+    ParquetWriter::new(std::fs::File::create(path).unwrap())
+        .with_row_group_size(Some(group_rows))
+        .finish(&mut df)
+        .unwrap();
+}
+
+/// Rewrite the footer of the parquet file at `path` with `edit`, leaving the
+/// pages where they are (the helper of the same name in
+/// tests/dataset_quotas.rs).
+fn rewrite_footer(path: &std::path::Path, edit: impl FnOnce(&mut FileMetaData)) {
+    let bytes = std::fs::read(path).unwrap();
+    let n = bytes.len();
+    assert_eq!(&bytes[n - 4..], b"PAR1");
+    let len = u32::from_le_bytes(bytes[n - 8..n - 4].try_into().unwrap()) as usize;
+    let start = n - 8 - len;
+    let mut input = TCompactInputProtocol::new(&bytes[start..n - 8], usize::MAX);
+    let mut footer = FileMetaData::read_from_in_protocol(&mut input).unwrap();
+    edit(&mut footer);
+    let mut written = Vec::new();
+    footer
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut written))
+        .unwrap();
+    let mut out = bytes[..start].to_vec();
+    out.extend_from_slice(&written);
+    out.extend_from_slice(&u32::try_from(written.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(b"PAR1");
+    std::fs::write(path, out).unwrap();
+}
+
+/// A reload refuses from its footer a stored parquet file that the check
+/// before decoding will not read, as `load_dataset` does, with or without
+/// dataset quotas (PR-H2, round-1 follow-up). The stored path is reloaded
+/// once and then replaced by a file whose row groups point at the same
+/// column chunk, which no writer produces: it is reported in `failed` with
+/// the check's reason and no server path, the other stored dataset still
+/// reloads, and the dataset the file held when it was last loaded stays.
+/// Pre-fix the reload handed the file to the loader, which read the shared
+/// chunk once per row group and replaced the dataset with 4,000 rows.
+async fn reload_refuses_a_parquet_source_it_will_not_read_under(cfg: ServerConfig) {
+    let (r, state) = app(cfg).await;
+    let sid = new_session(&r).await;
+    let root = allowed_data_root().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-prh2-")
+        .tempdir_in(&root)
+        .unwrap();
+    let (small, stored) = (dir.path().join("small.csv"), dir.path().join("p.parquet"));
+    std::fs::write(&small, noisy_csv(50, 5)).unwrap();
+    levels_parquet(&stored, 1_000);
+    store_meta(&state, &sid, "small", &small, 0).await;
+    store_meta(&state, &sid, "p", &stored, 1).await;
+    let body = reload(&r, &sid).await;
+    assert_eq!(body["data"]["succeeded"], json!(["small", "p"]), "{body}");
+
+    grouped_parquet(&stored, 4_000, 1_000);
+    rewrite_footer(&stored, |footer| {
+        assert_eq!(footer.row_groups.len(), 4);
+        let shared = footer.row_groups[0].columns[0].meta_data.clone();
+        for group in footer.row_groups.iter_mut().skip(1) {
+            group.columns[0].meta_data = shared.clone();
+        }
+    });
+    let body = reload(&r, &sid).await;
+    assert_eq!(body["data"]["succeeded"], json!(["small"]), "{body}");
+    assert_eq!(body["data"]["failed"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["data"]["failed"][0]["name"], "p", "{body}");
+    let error = body["data"]["failed"][0]["error"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(
+        error, "the file could not be loaded: two column chunks of the file share bytes",
+        "{body}"
+    );
+    assert!(!error.contains(&*root.to_string_lossy()), "{body}");
+    let session = state.session_manager.get_session(&sid).await.unwrap();
+    let datasets = session.datasets.read().await;
+    assert_eq!(datasets["p"].nrows(), 1_000);
+    assert_eq!(datasets["small"].nrows(), 50);
+}
+
+#[tokio::test]
+async fn reload_refuses_a_parquet_source_it_will_not_read_without_quotas() {
+    reload_refuses_a_parquet_source_it_will_not_read_under(ServerConfig::default()).await;
+}
+
+#[tokio::test]
+async fn reload_refuses_a_parquet_source_it_will_not_read_under_a_quota() {
+    let mut cfg = ServerConfig::default();
+    cfg.exec.session_data_mb = Some(8);
+    reload_refuses_a_parquet_source_it_will_not_read_under(cfg).await;
+}
+
 /// What a reload's check before decoding reserves against the total quota
 /// is released once the file is in or refused. A regression guard, not
 /// evidence of the check: without it nothing is reserved. Five reloads of a
-/// 2.4 MB parquet file (admitted at 3.2 MB, with what decoding it allocates)
-/// under a 6 MiB total each replace the dataset by name; a reservation the
-/// first left behind would refuse the second.
+/// 300,000-row parquet file (2.4 MB decoded, admitted at 3.2 MB with what
+/// decoding it allocates) under a 6 MiB total each replace the dataset by
+/// name; a reservation the first left behind would refuse the second.
 #[tokio::test]
 async fn reload_releases_what_its_check_before_decoding_reserves() {
     let mut cfg = ServerConfig::default();

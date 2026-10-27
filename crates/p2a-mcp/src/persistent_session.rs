@@ -823,6 +823,7 @@ impl DatasetQuotas {
     /// guard until the file's dataset is inserted or refused
     /// ([`insert_reloaded_dataset`]) and drop it on this thread: dropping
     /// it releases what the check reserved against the total.
+    #[must_use = "dropping the guard uninstalls the quotas the pre-decode check reads"]
     pub fn install(
         &self,
         session: &Arc<Session>,
