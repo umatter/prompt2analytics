@@ -1291,8 +1291,10 @@ mod stdio_path {
 
     /// Serves `server` over an in-memory duplex stream, as the stdio
     /// transport does over stdin/stdout, initialises the session and returns
-    /// the JSON-RPC response to one request (`method`, `params`).
-    async fn stdio_request(server: AnalyticsServer, method: &str, params: Value) -> Value {
+    /// the JSON-RPC responses to `requests` (`method`, `params`), sent in
+    /// order in that one session, each after the previous one was answered,
+    /// so that a later call sees the datasets an earlier one made.
+    async fn stdio_session(server: AnalyticsServer, requests: &[(&str, Value)]) -> Vec<Value> {
         let (client, server_end) = tokio::io::duplex(1 << 22);
         let (r, w) = tokio::io::split(server_end);
         let service = tokio::spawn(async move {
@@ -1314,15 +1316,25 @@ mod stdio_path {
             json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         )
         .await;
-        send_line(
-            &mut cw,
-            json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params}),
-        )
-        .await;
-        let msg = read_until_id(&mut lines, 2).await;
+        let mut responses = Vec::with_capacity(requests.len());
+        for (id, (method, params)) in (2u64..).zip(requests) {
+            send_line(
+                &mut cw,
+                json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+            )
+            .await;
+            responses.push(read_until_id(&mut lines, id).await);
+        }
         drop(cw);
         service.abort();
-        msg
+        responses
+    }
+
+    /// The JSON-RPC response to one request (`method`, `params`) over the
+    /// stdio transport.
+    async fn stdio_request(server: AnalyticsServer, method: &str, params: Value) -> Value {
+        let mut responses = stdio_session(server, &[(method, params)]).await;
+        responses.pop().expect("one response")
     }
 
     /// The JSON-RPC response to one `tools/call` over the stdio transport.
@@ -1338,40 +1350,11 @@ mod stdio_path {
     /// The JSON-RPC responses to `calls` (tool and arguments), made in order in one stdio
     /// session, so that a later call sees the datasets an earlier one made.
     async fn stdio_calls(server: AnalyticsServer, calls: &[(&str, Value)]) -> Vec<Value> {
-        let (client, server_end) = tokio::io::duplex(1 << 22);
-        let (r, w) = tokio::io::split(server_end);
-        let service = tokio::spawn(async move {
-            let running = server.serve((r, w)).await.expect("serve");
-            let _ = running.waiting().await;
-        });
-        let (cr, mut cw) = tokio::io::split(client);
-        let mut lines = BufReader::new(cr).lines();
-        send_line(
-            &mut cw,
-            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-                "protocolVersion": "2024-11-05", "capabilities": {},
-                "clientInfo": {"name": "limits-e2e", "version": "0"}}}),
-        )
-        .await;
-        read_until_id(&mut lines, 1).await;
-        send_line(
-            &mut cw,
-            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-        )
-        .await;
-        let mut responses = Vec::new();
-        for (id, (tool, args)) in (2u64..).zip(calls) {
-            send_line(
-                &mut cw,
-                json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
-                       "params": {"name": tool, "arguments": args}}),
-            )
-            .await;
-            responses.push(read_until_id(&mut lines, id).await);
-        }
-        drop(cw);
-        service.abort();
-        responses
+        let requests: Vec<(&str, Value)> = calls
+            .iter()
+            .map(|(tool, args)| ("tools/call", json!({"name": tool, "arguments": args})))
+            .collect();
+        stdio_session(server, &requests).await
     }
 
     #[test]
