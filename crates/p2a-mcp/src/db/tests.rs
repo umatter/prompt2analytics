@@ -3280,11 +3280,50 @@ async fn keep_adoptable_session_dirs_keeps_the_sessions_within_the_ttl() {
         .await
         .unwrap();
     }
-    let mut kept = db.keep_adoptable_session_dirs(60).await.unwrap();
+    let mut kept = db.keep_adoptable_session_dirs(60, 100).await.unwrap();
     kept.sort();
     let mut expected = vec![fresh, at_the_ttl];
     expected.sort();
     assert_eq!(kept, expected);
+}
+
+/// However many adoptable rows earlier processes left (each restart within
+/// one TTL adds up to the session cap), at most `max_kept` directories are
+/// kept: those of the most recently accessed sessions.
+#[tokio::test]
+async fn keep_adoptable_session_dirs_keeps_at_most_the_most_recent_sessions() {
+    let db = test_db().await;
+    let now = chrono::Utc::now();
+    // Seven adoptable rows, accessed 3, 10, ..., 45 minutes ago (inserted
+    // out of order), and one past the TTL.
+    let minutes = [24, 3, 45, 17, 38, 10, 31, 90];
+    let ids: Vec<String> = minutes
+        .iter()
+        .map(|_| uuid::Uuid::new_v4().to_string())
+        .collect();
+    for (id, m) in ids.iter().zip(minutes) {
+        db.set_session_last_accessed(
+            id,
+            now - chrono::Duration::minutes(m) - chrono::Duration::seconds(7),
+        )
+        .await
+        .unwrap();
+    }
+    let id_at = |m: i64| ids[minutes.iter().position(|&x| x == m).unwrap()].clone();
+
+    let kept = db.keep_adoptable_session_dirs(60, 3).await.unwrap();
+    assert_eq!(kept, vec![id_at(3), id_at(10), id_at(17)]);
+    // A cap above the number of adoptable rows keeps them all, never the
+    // one past the TTL.
+    let kept = db.keep_adoptable_session_dirs(60, 20).await.unwrap();
+    assert_eq!(kept.len(), 7);
+    assert!(!kept.contains(&id_at(90)));
+    assert!(
+        db.keep_adoptable_session_dirs(60, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ==================== Integration Tests ====================

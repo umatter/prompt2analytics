@@ -467,20 +467,27 @@ impl DbConnection {
     /// adopted, those whose row was accessed within `ttl_minutes` (the rule
     /// `PersistentSessionManager::get_session` adopts by), through the
     /// first-use purge of stale session directories
-    /// (`path_jail::keep_session_dirs`). The server calls this once at
-    /// startup, before it takes requests. Returns the ids kept.
+    /// (`path_jail::keep_session_dirs`): at most `max_kept` of them, the most
+    /// recently accessed first. The server calls this once at startup, before
+    /// it takes requests, with `P2A_MAX_SESSIONS`: the store also holds the
+    /// rows of the sessions kept at earlier restarts within the TTL, so
+    /// without the cap every restart would keep more directories. Returns
+    /// the ids kept, the most recently accessed first.
     pub async fn keep_adoptable_session_dirs(
         &self,
         ttl_minutes: u64,
+        max_kept: usize,
     ) -> Result<Vec<String>, DbError> {
         let now = Utc::now();
-        let ids: Vec<String> = self
-            .list_sessions()
-            .await?
+        let mut rows = self.list_sessions().await?;
+        // Most recently accessed first, whatever order the query returned.
+        rows.sort_by_cached_key(|row| std::cmp::Reverse(row.last_accessed_chrono()));
+        let ids: Vec<String> = rows
             .iter()
             .filter(|row| {
                 !crate::session::is_past_ttl(row.last_accessed_chrono(), now, ttl_minutes)
             })
+            .take(max_kept)
             .map(DbSession::id_string)
             .collect();
         crate::path_jail::keep_session_dirs(&ids);

@@ -35,6 +35,14 @@ const DELETED: &str = "7c2e1a4d-9f36-4b58-8d43-5e1f2a6b8c93";
 /// A stored session past the TTL: it cannot be adopted, so its directory is
 /// stale.
 const EXPIRED: &str = "8d3f2b5e-a047-4c69-9e54-6f2a3b7c9da4";
+/// A stored session within the TTL, accessed before the [`MAX_SESSIONS`]
+/// most recent ones (as the sessions kept at an earlier restart are): its
+/// directory is not kept, so the kept directories never outnumber the
+/// sessions the server can hold.
+const CAPPED: &str = "af5b4d7a-c269-4e8b-9076-8b4c5d9ebfc6";
+/// `P2A_MAX_SESSIONS` of the restarted server: one below the number of
+/// adoptable stored sessions.
+const MAX_SESSIONS: usize = 3;
 /// A directory without a stored session.
 const STALE: &str = "9e4a3c6f-b158-4d7a-8f65-7a3b4c8daeb5";
 
@@ -73,6 +81,9 @@ async fn seed_store(db_path: &Path) {
         db.set_session_last_accessed(id, now).await.unwrap();
     }
     db.set_session_last_accessed(EXPIRED, now - chrono::Duration::hours(3))
+        .await
+        .unwrap();
+    db.set_session_last_accessed(CAPPED, now - chrono::Duration::minutes(30))
         .await
         .unwrap();
     let mut meta = DatasetMeta::new(
@@ -116,7 +127,7 @@ fn run_earlier_process(db_path: &Path) {
 
 /// The session directories the earlier process left under `root`.
 fn seed_dirs(root: &Path) {
-    for id in [KEPT, LATER, DELETED, EXPIRED, STALE] {
+    for id in [KEPT, LATER, DELETED, EXPIRED, CAPPED, STALE] {
         let dir = root.join("sessions").join(id);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("mine.csv"), "x,y\n1,2.1\n2,3.9\n3,6.2\n").unwrap();
@@ -154,6 +165,7 @@ async fn stored_sessions_keep_their_directories_across_a_restart() {
     unsafe { std::env::set_var("P2A_DATA_ROOT", &root) };
     p2a_mcp::path_jail::configure_session_dirs(true);
     let mut cfg = ServerConfig::default();
+    cfg.session.max_sessions = MAX_SESSIONS;
     cfg.http.session_dirs = SessionDirsSetting::On;
     cfg.http.db_path = Some(db_path.to_string_lossy().into_owned());
     let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
@@ -194,6 +206,10 @@ async fn stored_sessions_keep_their_directories_across_a_restart() {
     // What cannot come back was purged; a session that can is kept.
     assert!(!exists(dir(STALE)), "a directory without a stored session");
     assert!(!exists(dir(EXPIRED)), "a stored session past the TTL");
+    assert!(
+        !exists(dir(CAPPED)),
+        "a stored session beyond the P2A_MAX_SESSIONS most recent"
+    );
     assert!(exists(dir(LATER).join("mine.csv")));
 
     // Once the unadopted session's row ages out, the sweep deletes the row

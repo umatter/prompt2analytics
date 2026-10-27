@@ -209,9 +209,15 @@ async fn init_persistence(
             tracing::info!("Database persistence enabled - conversation routes will be available");
             let manager = Arc::new(manager);
             // Stored sessions that can still be adopted keep their data
-            // directories through the first-use purge of stale ones.
+            // directories through the first-use purge of stale ones, at
+            // most as many as the live table holds.
             let ttl_minutes = manager.sessions().ttl_minutes();
-            if let Err(e) = manager.db().keep_adoptable_session_dirs(ttl_minutes).await {
+            let max_kept = config.session.max_sessions;
+            if let Err(e) = manager
+                .db()
+                .keep_adoptable_session_dirs(ttl_minutes, max_kept)
+                .await
+            {
                 tracing::warn!(error = %e, "Cannot list the stored sessions; their data directories count as stale");
             }
             // Delete the rows of removed sessions and sweep stale ones.
