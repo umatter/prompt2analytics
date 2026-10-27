@@ -69,7 +69,7 @@ impl DbConnection {
             session_id = %stored.session_id,
             name = %stored.name,
             column_names_len = stored.column_names.len(),
-            given_column_names = given_names,
+            given_column_names_len = given_names,
             "[DB_SAVE_META] Starting save_dataset_meta"
         );
         tracing::debug!(
