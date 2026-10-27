@@ -2,9 +2,10 @@
 //!
 //! A tool call's create, update and status changes run in its conversation's
 //! turn, like the writes of its messages and of the conversation row (see
-//! [`create_tool_call`](DbConnection::create_tool_call));
-//! `delete_tool_calls_for_message`, which nothing in the server calls, does
-//! not.
+//! [`create_tool_call`](DbConnection::create_tool_call)). Tool calls are
+//! deleted with their conversation's messages, by a clear or delete of the
+//! conversation in its turn, or, when left behind for a deleted
+//! conversation, by the orphan sweeps.
 
 use surrealdb::RecordId;
 
@@ -320,37 +321,6 @@ impl DbConnection {
     pub async fn get_tool_call(&self, id: &str) -> Result<ToolCall, DbError> {
         let tool_call: Option<ToolCall> = self.db().select(("tool_calls", id)).await?;
         tool_call.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))
-    }
-
-    /// Delete all tool calls for a message. Unlike the other writes of a
-    /// tool-call row, this takes no turn and releases nothing from the
-    /// `session_db_bytes` counter (which then stays above the store, never
-    /// below it); nothing in the server calls it.
-    pub async fn delete_tool_calls_for_message(&self, message_id: &str) -> Result<u32, DbError> {
-        let message_id_owned = message_id.to_string();
-
-        // Count before deletion
-        let mut result = self
-            .db()
-            .query("SELECT count() FROM tool_calls WHERE message_id = $message_id GROUP ALL")
-            .bind(("message_id", message_id_owned.clone()))
-            .await?;
-
-        #[derive(serde::Deserialize)]
-        struct CountResult {
-            count: i64,
-        }
-
-        let count: Option<CountResult> = result.take(0)?;
-        let deleted_count = count.map(|c| c.count as u32).unwrap_or(0);
-
-        // Delete tool calls
-        self.db()
-            .query("DELETE FROM tool_calls WHERE message_id = $message_id")
-            .bind(("message_id", message_id_owned))
-            .await?;
-
-        Ok(deleted_count)
     }
 }
 
