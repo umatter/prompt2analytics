@@ -30,6 +30,7 @@ use futures::{
     sink::SinkExt,
     stream::{Stream, StreamExt},
 };
+use p2a_core::memory::format_bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -150,6 +151,11 @@ pub async fn ws_handler(
 
 /// The most messages that wait while a connection handles another one.
 const MAX_WAITING_MESSAGES: usize = 16;
+
+/// The variable that sets the message cap, the HTTP body cap of
+/// [`super::middleware::max_request_body_bytes`]; the messages waiting on a
+/// connection may take that much together.
+const MESSAGE_CAP_VAR: &str = "P2A_MAX_HTTP_BODY_MB";
 
 /// How long a connection that ended may take to send what it still has and
 /// its close frame before the socket is dropped.
@@ -338,14 +344,14 @@ impl Waiting {
                  already waiting; send this one again once their answers arrive."
             ))
         } else if bytes > self.max_bytes {
-            let size = p2a_core::memory::format_bytes;
             Some(format!(
                 "This connection is still handling an earlier message, and this one ({}) \
                  does not fit behind the messages already waiting: together they may take \
-                 at most {}, and those take {}; send it again once their answers arrive.",
-                size(text.len()),
-                size(self.max_bytes),
-                size(self.bytes)
+                 at most the message cap, {} ({MESSAGE_CAP_VAR}), and those take {}; send \
+                 it again once their answers arrive.",
+                format_bytes(text.len()),
+                format_bytes(self.max_bytes),
+                format_bytes(self.bytes)
             ))
         } else {
             None
@@ -869,10 +875,8 @@ mod tests {
                 assert_eq!(code.as_deref(), Some("connection_busy"));
                 // The refusal names the bound that applied, not the other.
                 assert!(message.contains("16 messages"), "{message}");
-                assert!(
-                    !message.contains(&p2a_core::memory::format_bytes(usize::MAX)),
-                    "{message}"
-                );
+                assert!(!message.contains(&format_bytes(usize::MAX)), "{message}");
+                assert!(!message.contains(MESSAGE_CAP_VAR), "{message}");
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -895,17 +899,25 @@ mod tests {
     #[test]
     fn waiting_messages_are_bounded_by_bytes() {
         let one = tool_text("a", 100).len();
-        let mut waiting = Waiting::new(2 * one);
+        // Room for `a` and `b`, and a little more, but not for `c` too: the
+        // bound and what waits are two different numbers.
+        let headroom = 10;
+        assert!(tool_text("c", 0).len() > headroom);
+        let mut waiting = Waiting::new(2 * one + headroom);
         assert!(waiting.admit(tool_text("a", 100)).is_none());
         assert!(waiting.admit(tool_text("b", 100)).is_none());
         match waiting.admit(tool_text("c", 0)) {
             Some(ServerMessage::Error { id, code, message }) => {
                 assert_eq!(id, "c");
                 assert_eq!(code.as_deref(), Some("connection_busy"));
-                // The refusal names the bound that applied, this message's
-                // size and what already waits, not the count bound.
+                // The refusal names the bound that applied, by its value and
+                // its variable, this message's size and what already waits,
+                // not the count bound.
                 assert!(
-                    message.contains(&format!("at most {} bytes", 2 * one)),
+                    message.contains(&format!(
+                        "at most the message cap, {} bytes ({MESSAGE_CAP_VAR})",
+                        2 * one + headroom
+                    )),
                     "{message}"
                 );
                 assert!(
