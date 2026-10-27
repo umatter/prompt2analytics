@@ -233,8 +233,10 @@ impl std::fmt::Display for CartResult {
     }
 }
 
-/// The rows two children of `min_bucket` rows hold, the fewest a node needs to be
-/// split. It saturates at `usize::MAX`, more rows than any node can hold, so a
+/// Twice `min_bucket`, the rows two children of `min_bucket` rows hold.
+/// `build_cart_tree` splits only a node with more rows than this, and
+/// `find_best_split_cart` searches only a node with at least this many. It
+/// saturates at `usize::MAX`, more rows than any node can hold, so a
 /// `min_bucket` above `usize::MAX / 2` stops every split instead of overflowing;
 /// below that it is exactly `2 * min_bucket`.
 fn two_buckets(min_bucket: usize) -> usize {
