@@ -1,7 +1,10 @@
 //! Audit logging for MCP tool calls.
 //!
-//! One JSON line per executed tool call, for security auditing (for example
-//! investigating tool use an LLM was steered into). Each entry records:
+//! One JSON line per tool call, executed or refused (governor refusals, and
+//! assistant tool calls refused as `not_available` or `unknown_tool`; a call
+//! on a session that no longer exists is not logged), for security auditing
+//! (for example investigating tool use an LLM was steered into). Each entry
+//! records:
 //! - the timestamp (ISO 8601) and the session id;
 //! - the origin of the call (`http`, `llm_tool`, `websocket` or `stdio`);
 //! - the tool name, cut to 200 bytes, and its arguments, sanitised by

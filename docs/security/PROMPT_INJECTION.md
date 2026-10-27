@@ -141,7 +141,7 @@ Key principle: **The server applies the same limits regardless of whether a call
 6. **SQL lockdown**: one read-only statement, no file or extension access.
 7. **Egress checks**: provider hosts allowlisted and resolved addresses vetted.
 8. **Ownership checks**: a session sees only its own conversations and files.
-9. **Audit trail**: when enabled, one entry per executed tool call and per refused call of a live session.
+9. **Audit trail**: when enabled, one entry per tool call that reaches the governor (executed or refused) and per assistant call of a tool it may not use (`not_available`, `unknown_tool`); DATA_SECURITY.md (Audit Log) lists what is and is not recorded.
 
 ## Known Limitations
 
