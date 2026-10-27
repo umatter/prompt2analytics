@@ -397,8 +397,15 @@ fn rewrite_footer(path: &Path, edit: impl FnOnce(&mut FileMetaData)) {
 /// into a fresh session of a server with an 8 MiB session quota, and check
 /// that both are refused before anything is decoded.
 async fn refused_before_decoding_by_upload_and_load(path: &Path) {
+    refused_before_decoding_under(path, 8 * MIB).await;
+}
+
+/// [`refused_before_decoding_by_upload_and_load`] under a session quota of
+/// `quota` bytes. A file the quota refuses only once it is decoded is
+/// answered "The change was undone", not "Nothing was loaded".
+async fn refused_before_decoding_under(path: &Path, quota: u64) {
     let content = base64::engine::general_purpose::STANDARD.encode(std::fs::read(path).unwrap());
-    let (app, _) = app_with_quota(8 * MIB).await;
+    let (app, _) = app_with_quota(quota).await;
     let calls = [
         (
             "upload_dataset",
@@ -468,35 +475,188 @@ async fn categorical_labels_count_against_the_session_quota() {
     // Each file holds 2,500 labels of 1,000 bytes (2.5 MB) as a dictionary
     // column, which loads as Categorical. Pre-fix each was charged its 10 kB
     // of codes, so a quota held any number of them. Held, each is charged
-    // about 4.2 MB, so two pass a 7.5 MiB quota. Loading one takes about
-    // 7.3 MB by the check before decoding (the labels, and the decompressed
-    // dictionary page and its decoded copy while it loads), which the quota
-    // admits.
+    // about 4.2 MB. Loading one takes about 8.8 MB by the check before
+    // decoding: its labels at what the quotas charge for them, and the
+    // decompressed dictionary page and its decoded copy while it loads. So
+    // a 14 MiB quota admits the first file and the second beside it, and
+    // refuses the third.
     let dir = data_dir();
-    let (first, second) = (dir.path().join("a.parquet"), dir.path().join("b.parquet"));
-    categorical_parquet(&first, "a", 2500);
-    categorical_parquet(&second, "b", 2500);
+    let paths: Vec<_> = ["a", "b", "c"]
+        .into_iter()
+        .map(|tag| {
+            let path = dir.path().join(format!("{tag}.parquet"));
+            categorical_parquet(&path, tag, 2500);
+            (tag, path)
+        })
+        .collect();
 
-    let (app, _) = app_with_quota(15 * MIB / 2).await;
+    let (app, _) = app_with_quota(14 * MIB).await;
+    let sid = new_session(&app).await;
+    for (tag, path) in &paths[..2] {
+        let (status, body) = call(
+            &app,
+            &sid,
+            "load_dataset",
+            json!({"path": path.to_string_lossy(), "name": tag}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{tag}: {body}");
+        assert_eq!(body["data"]["success"], json!(true), "{tag}: {body}");
+        assert!(body.to_string().contains("(cat)"), "{tag}: {body}");
+    }
+    let (tag, path) = &paths[2];
+    let (status, body) = call(
+        &app,
+        &sid,
+        "load_dataset",
+        json!({"path": path.to_string_lossy(), "name": tag}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], json!("quota_exceeded"), "{body}");
+}
+
+/// The footer of the parquet file at `path`.
+fn footer_of(path: &Path) -> FileMetaData {
+    let bytes = std::fs::read(path).unwrap();
+    let n = bytes.len();
+    let len = u32::from_le_bytes(bytes[n - 8..n - 4].try_into().unwrap()) as usize;
+    let mut input = TCompactInputProtocol::new(&bytes[n - 8 - len..n - 8], usize::MAX);
+    FileMetaData::read_from_in_protocol(&mut input).unwrap()
+}
+
+/// `ipc`, a base64 ARROW:schema, with no field carrying polars' categorical
+/// or enum metadata, whose keys all start with `_PL_`: each is overwritten
+/// in place by a key of the same length, so the schema still parses.
+fn without_polars_metadata(ipc: &str) -> String {
+    let engine = base64::engine::general_purpose::STANDARD;
+    let mut ipc = engine.decode(ipc).unwrap();
+    let mut stripped = 0;
+    for at in 0..ipc.len() {
+        if ipc[at..].starts_with(b"_PL_") {
+            ipc[at..at + 4].copy_from_slice(b"_XX_");
+            stripped += 1;
+        }
+    }
+    assert!(stripped > 0);
+    engine.encode(ipc)
+}
+
+/// The footer entry of the parquet file at `path` holding its ARROW:schema.
+fn arrow_schema(footer: &mut FileMetaData) -> &mut Option<String> {
+    &mut footer
+        .key_value_metadata
+        .as_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|kv| kv.key == "ARROW:schema")
+        .unwrap()
+        .value
+}
+
+/// A Categorical column `k` of the labels `label(i)` of rows `0..rows`.
+fn categorical_frame(rows: usize, label: impl Fn(usize) -> String) -> DataFrame {
+    let dtype = DataType::from_categories(Categories::random("".into(), CategoricalPhysical::U32));
+    let k = Series::new("k".into(), (0..rows).map(label).collect::<Vec<_>>())
+        .cast(&dtype)
+        .unwrap();
+    DataFrame::new(vec![k.into()]).unwrap()
+}
+
+/// A parquet file at `path` whose column `k` is a dictionary<string> column
+/// of `rows` rows, the row `i` holding `label(i)`, in row groups of
+/// `rows_per_group` rows, as another writer (R's or Python's arrow) writes
+/// it: without polars' categorical metadata. polars decodes such a column's
+/// values into string views and casts them to a dictionary, a view and a
+/// key a value, and it still loads as Categorical.
+fn foreign_categorical_parquet(
+    path: &Path,
+    rows: usize,
+    rows_per_group: usize,
+    label: impl Fn(usize) -> String,
+) {
+    ParquetWriter::new(std::fs::File::create(path).unwrap())
+        .with_row_group_size(Some(rows_per_group))
+        .finish(&mut categorical_frame(rows, label))
+        .unwrap();
+    rewrite_footer(path, |footer| {
+        let schema = arrow_schema(footer);
+        *schema = Some(without_polars_metadata(schema.as_deref().unwrap()));
+    });
+}
+
+/// [`foreign_categorical_parquet`] with the values in PLAIN pages and no
+/// dictionary page, as arrow's writers fall back to once a column's
+/// dictionary passes their page limit (about a megabyte): the pages of a
+/// String column, under the ARROW:schema of a dictionary<string> one.
+fn foreign_plain_categorical_parquet(path: &Path, rows: usize, label: impl Fn(usize) -> String) {
+    let dir = tempfile::tempdir().unwrap();
+    let typed = dir.path().join("schema.parquet");
+    foreign_categorical_parquet(&typed, 1, 1, &label);
+    let schema = arrow_schema(&mut footer_of(&typed)).clone();
+    let k = Series::new("k".into(), (0..rows).map(label).collect::<Vec<_>>());
+    let mut df = DataFrame::new(vec![k.into()]).unwrap();
+    write_parquet(&mut df, path);
+    rewrite_footer(path, |footer| {
+        for chunk in &footer.row_groups[0].columns {
+            let meta = chunk.meta_data.as_ref().unwrap();
+            assert_eq!(meta.dictionary_page_offset, None);
+        }
+        *arrow_schema(footer) = schema;
+    });
+}
+
+/// Whether the parquet file at `path` reads as one Categorical column.
+fn reads_as_categorical(path: &Path) -> bool {
+    use polars::prelude::{ParquetReader, SerReader};
+    let df = ParquetReader::new(std::fs::File::open(path).unwrap())
+        .finish()
+        .unwrap();
+    df.get_columns().len() == 1 && df.get_columns()[0].dtype().is_categorical()
+}
+
+#[tokio::test]
+async fn many_short_labels_of_another_writer_are_refused_before_decoding() {
+    // 1,000,000 distinct 8-byte labels, a row each, as arrow's writers
+    // write such a column past their dictionary page limit: PLAIN pages, a
+    // file of a few hundred kilobytes. Loaded, polars puts each label into
+    // the column's mapping at about 130 bytes over its text, and the quotas
+    // charge 172 bytes for it (172 MB). Pre-fix the check before decoding
+    // counted a value of such a page at its bytes there (12), so the file
+    // was admitted under a 96 MiB quota, decoded in full, and only then
+    // undone ("The change was undone").
+    let dir = data_dir();
+    // Both files read as Categorical, as a few rows show.
+    let few = dir.path().join("few.parquet");
+    foreign_plain_categorical_parquet(&few, 1_000, |i| format!("s{i:07}"));
+    assert!(reads_as_categorical(&few));
+    foreign_categorical_parquet(&few, 1_000, 250, |i| format!("s{i:07}"));
+    assert!(reads_as_categorical(&few));
+    let path = dir.path().join("short.parquet");
+    foreign_plain_categorical_parquet(&path, 1_000_000, |i| format!("s{i:07}"));
+    let bytes = std::fs::metadata(&path).unwrap().len();
+    assert!(bytes < 1024 * 1024, "{bytes} bytes");
+    refused_before_decoding_under(&path, 96 * MIB).await;
+
+    // The same labels in dictionary pages over four row groups: each label
+    // counts once, at what the quotas charge for it. Pre-fix each counted
+    // its 12 bytes in the page. The file's index pages put it past the
+    // request body limit, so it is loaded from its path only.
+    let path = dir.path().join("dictionary.parquet");
+    foreign_categorical_parquet(&path, 1_000_000, 250_000, |i| format!("s{i:07}"));
+    assert_eq!(footer_of(&path).row_groups.len(), 4);
+    let (app, _) = app_with_quota(96 * MIB).await;
     let sid = new_session(&app).await;
     let (status, body) = call(
         &app,
         &sid,
         "load_dataset",
-        json!({"path": first.to_string_lossy(), "name": "a"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.to_string().contains("(cat)"), "{body}");
-    let (status, body) = call(
-        &app,
-        &sid,
-        "load_dataset",
-        json!({"path": second.to_string_lossy(), "name": "b"}),
+        json!({"path": path.to_string_lossy(), "name": "dictionary"}),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(body["code"], json!("quota_exceeded"), "{body}");
+    assert!(error_text(&body).contains("Nothing was loaded"), "{body}");
 }
 
 /// Rebuild the parquet file at `path` with `edit` applied to every page

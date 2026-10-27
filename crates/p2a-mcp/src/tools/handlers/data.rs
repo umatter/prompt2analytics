@@ -176,12 +176,15 @@ struct DecodedBound {
 /// dataset's structure. It is taken per row group and summed: polars
 /// decodes each row group on its own (several at once), so what one group
 /// declares cannot cancel what another holds. The labels of a Categorical
-/// or Enum column are the exception: polars keeps one mapping a column, so
-/// a label that several row groups' dictionaries hold is held once, and
-/// each distinct label of the column's dictionary pages is counted once
-/// (see [`DictionaryLabels`]). The transient part is the decoder's buffers
-/// for the column chunks it decodes at once (see [`chunk_transient`] and
-/// [`decode_threads`]).
+/// column are the exception: polars keeps one mapping a column, so a label
+/// that several row groups' dictionaries hold is held once, and each
+/// distinct label of the column's dictionary pages is counted once, at what
+/// the quotas charge for it, as is each value of a page that is not
+/// dictionary-encoded (see [`DictionaryLabels`]). An Enum column's labels
+/// are the categories its type declares, counted once a column (see
+/// [`session::frozen_label_bytes`]). The transient part is the decoder's
+/// buffers for the column chunks it decodes at once (see
+/// [`chunk_transient`] and [`decode_threads`]).
 ///
 /// The counts are the ones the decoder follows, not the footer's summary of
 /// them: the rows are each row group's own (polars decodes those and never
@@ -287,10 +290,18 @@ fn footer_decoded_bytes(
         .map(|field| (field.name.as_str(), DataType::from_arrow_field(field)))
         .collect();
     let mut walk = PageWalk::new(std::io::BufReader::new(file), file_len);
-    let mut dataset = 0u64;
+    // An Enum leaf's labels are the categories its type declares, which
+    // polars builds from the file's schema whatever its pages hold.
+    let mut dataset = columns
+        .iter()
+        .flat_map(|(_, dtype)| leaf_types(dtype))
+        .fold(0u64, |bytes, leaf| match leaf {
+            DataType::Enum(frozen, _) => bytes.saturating_add(session::frozen_label_bytes(frozen)),
+            _ => bytes,
+        });
     let mut transients = Vec::new();
     // The labels of each leaf column's dictionaries over the row groups, by
-    // column and leaf; only Categorical and Enum leaves add to them.
+    // column and leaf; only Categorical leaves add to them.
     let mut labels: Vec<Vec<DictionaryLabels>> = columns
         .iter()
         .map(|(_, dtype)| {
@@ -300,8 +311,9 @@ fn footer_decoded_bytes(
         })
         .collect();
     let hasher = std::hash::RandomState::new();
-    // In one row group each label has one dictionary page: its bytes count
-    // as they are, and reading them would gain nothing.
+    // In one row group each label has one dictionary page: its labels count
+    // from its size (see `page_label_bytes`), and reading them would gain
+    // no more than the rounding of their halves.
     let mut none = DictionaryBudget::none();
     let budget = if metadata.row_groups.len() > 1 {
         budget
@@ -326,7 +338,7 @@ fn footer_decoded_bytes(
                     page_bytes: u64::try_from(chunk.uncompressed_size())
                         .unwrap_or(0)
                         .max(read.page_bytes),
-                    dict_bytes: read.dict_bytes,
+                    data_page_bytes: read.page_bytes.saturating_sub(read.dict_bytes),
                 });
                 // polars' own footer type: this stops compiling when the
                 // thrift parser the walk uses is not the one polars reads
@@ -351,6 +363,7 @@ fn footer_decoded_bytes(
             let counted = holds_labels.iter().zip(&pages).zip(labels.iter_mut());
             for ((&holds, (read, codec)), labels) in counted {
                 if holds {
+                    labels.plain_values = labels.plain_values.saturating_add(read.plain_values);
                     walk.dictionary(read, *codec, &hasher, labels, budget)?;
                 }
             }
@@ -422,10 +435,14 @@ fn leaf_types(dtype: &DataType) -> Vec<&DataType> {
 struct LeafChunks {
     /// Its entries: values, nulls, and empty or null lists above them.
     entries: u64,
-    /// Its pages' uncompressed size.
+    /// Its pages' uncompressed size: what their headers declare (see
+    /// [`ChunkPages::page_bytes`]), or the footer's size of the chunk where
+    /// that is more (it counts the page headers too).
     page_bytes: u64,
-    /// The part of `page_bytes` that is its dictionary page.
-    dict_bytes: u64,
+    /// Its data pages' uncompressed size, as their headers declare: the
+    /// pages alone, without the dictionary page or the headers (which can
+    /// hold a page's least and greatest value, two labels).
+    data_page_bytes: u64,
 }
 
 /// What the page headers of one column chunk declare, over the pages
@@ -449,6 +466,11 @@ struct ChunkPages {
     dict_at: Option<u64>,
     /// The size of its dictionary page's bytes in the file.
     dict_size: u64,
+    /// The values of its data pages that are not dictionary-encoded, at
+    /// most: a page's entries (less the nulls a v2 header counts), and no
+    /// more than a quarter of a PLAIN page's bytes (a PLAIN byte array
+    /// takes four bytes of length and its text).
+    plain_values: u64,
 }
 
 /// Bytes of one entry's definition and repetition levels, a `u16` each, as
@@ -552,6 +574,28 @@ fn decode_threads() -> usize {
         .and_then(|threads| threads.parse::<usize>().ok())
         .filter(|&threads| threads > 0)
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
+/// The values a data page of `entries` entries, `nulls` of them null by its
+/// header (a v2 header counts them, a v1 header does not: 0), `encoding`
+/// and `bytes` uncompressed, holds outside a dictionary, at most (see
+/// [`ChunkPages::plain_values`]); none when it is dictionary-encoded.
+fn plain_values(
+    entries: u64,
+    nulls: i32,
+    encoding: polars_parquet_format::Encoding,
+    bytes: u64,
+) -> u64 {
+    use polars_parquet_format::Encoding;
+    if encoding == Encoding::PLAIN_DICTIONARY || encoding == Encoding::RLE_DICTIONARY {
+        return 0;
+    }
+    let values = entries.saturating_sub(u64::try_from(nulls).unwrap_or(0));
+    if encoding == Encoding::PLAIN {
+        values.min(bytes / 4)
+    } else {
+        values
+    }
 }
 
 /// Page headers parsed between two cancellation checkpoints.
@@ -686,14 +730,22 @@ impl PageWalk {
             let Some(header) = self.header(&mut left)? else {
                 break;
             };
-            let entries = match header.type_ {
-                PageType::DATA_PAGE => header.data_page_header.as_ref().map(|h| h.num_values),
-                PageType::DATA_PAGE_V2 => header.data_page_header_v2.as_ref().map(|h| h.num_values),
+            // Entries, nulls the header counts, and encoding.
+            let page = match header.type_ {
+                PageType::DATA_PAGE => header
+                    .data_page_header
+                    .as_ref()
+                    .map(|h| (h.num_values, 0, h.encoding)),
+                PageType::DATA_PAGE_V2 => header
+                    .data_page_header_v2
+                    .as_ref()
+                    .map(|h| (h.num_values, h.num_nulls, h.encoding)),
                 _ => None,
             };
             let size = u64::try_from(header.compressed_page_size);
             let bytes = u64::try_from(header.uncompressed_page_size);
-            let (Some(entries), Ok(size), Ok(bytes)) = (entries, size, bytes) else {
+            let (Some((entries, nulls, encoding)), Ok(size), Ok(bytes)) = (page, size, bytes)
+            else {
                 break;
             };
             if !self.skip(size, &mut left) {
@@ -701,6 +753,9 @@ impl PageWalk {
             }
             seen = seen.saturating_add(i64::from(entries));
             let entries = u64::try_from(entries).unwrap_or(0);
+            read.plain_values = read
+                .plain_values
+                .saturating_add(plain_values(entries, nulls, encoding, bytes));
             read.entries = read.entries.saturating_add(entries);
             read.page_bytes = read.page_bytes.saturating_add(bytes);
             read.largest_page = read.largest_page.max(bytes);
@@ -714,7 +769,8 @@ impl PageWalk {
     /// with `hasher`, as far as `budget` allows (see
     /// [`PageWalk::dictionary_page`]). A page that is not read, or does not
     /// hold the labels its header declares, leaves `labels` to count every
-    /// page's bytes. `Err` when the call is cancelled or past its deadline.
+    /// page from its size (see [`page_label_bytes`]). `Err` when the call is
+    /// cancelled or past its deadline.
     fn dictionary(
         &mut self,
         read: &ChunkPages,
@@ -726,7 +782,9 @@ impl PageWalk {
         let Some(at) = read.dict_at else {
             return Ok(());
         };
-        labels.pages = labels.pages.saturating_add(read.dict_bytes);
+        labels.pages = labels
+            .pages
+            .saturating_add(page_label_bytes(read.dict_bytes, read.dict_entries));
         if labels.unread {
             return Ok(());
         }
@@ -794,8 +852,22 @@ const DICTIONARY_LABELS: u64 = 1 << 20;
 
 /// What the check before decoding spends on reading a file's dictionary
 /// pages: their bytes in the file and decompressed, and the distinct labels
-/// it keeps a hash of. Past it, a column's dictionary pages count their
-/// bytes, as they did before they were read (see [`DictionaryLabels`]).
+/// it keeps a hash of. Past it, a column's dictionary pages count from
+/// their sizes, as they did before they were read (see
+/// [`DictionaryLabels`]).
+///
+/// The check's own memory, which no quota counts since it runs before the
+/// file is admitted: one dictionary page at a time, its bytes from the file
+/// and its decompressed bytes, at most [`DICTIONARY_PAGE_BYTES`] together
+/// and freed before the next page is read; and the hashes of the distinct
+/// labels, at most [`DICTIONARY_LABELS`] over the file's columns, eight
+/// bytes and a control byte a slot in sets that hold at least half their
+/// slots (about 20 MB, at most twice that when the labels spread over many
+/// columns). So about 100 MB at most, held only while the check runs. The
+/// hosted deployment runs one call at a time, so one check holds it at
+/// once, inside the headroom the memory soft limit leaves above the dataset
+/// quotas; and an honest dictionary page is mostly far smaller (arrow's
+/// writers fall back to plain pages once one passes about a megabyte).
 struct DictionaryBudget {
     /// Bytes left to read and decompress.
     bytes: u64,
@@ -844,25 +916,65 @@ impl DictionaryBudget {
     }
 }
 
-/// The labels of one Categorical or Enum leaf column's dictionary pages over
-/// a file's row groups, for [`parquet_decoded_bytes`]. polars keeps one
-/// mapping a column and puts each label in it once, so a label several row
-/// groups' dictionaries hold (each group has a dictionary of its own) is
-/// counted once, at its bytes in the page (a 4-byte length and its text).
-/// Counting the largest dictionary instead would let a file whose row
-/// groups each hold different labels pass with one group's; counting every
-/// page, as before, refused a file whose groups repeat long labels although
-/// the quotas would hold it once loaded.
+/// The least a label new to a Categorical column's mapping takes there on
+/// top of its text, for a value of a page that is not dictionary-encoded,
+/// which may or may not be a label of its own. Measured on a release build
+/// of the hosted server (PR-03; the measurements are in session.rs): about
+/// 130 B over their text for 8-byte labels loaded from parquet, rounded
+/// down here. The quotas charge [`session::LABEL_OVERHEAD_BYTES`] and half
+/// the text more, so a column whose values are each a label of their own
+/// is not bounded above its charge.
+const MAPPING_LABEL_BYTES: u64 = 128;
+
+/// The least the quotas charge for the labels of a dictionary page of
+/// `bytes` uncompressed bytes declaring `entries` labels, when its labels
+/// are distinct and used: the sum of [`session::label_bytes`] over them.
+/// Each label takes a 4-byte length and its text in the page, so the text
+/// is `bytes - 4 * entries`, and half of each label's text, rounded down,
+/// is at least half of it less a half.
+fn page_label_bytes(bytes: u64, entries: u64) -> u64 {
+    let text = bytes.saturating_sub(entries.saturating_mul(4));
+    text.saturating_add(text.saturating_sub(entries) / 2)
+        .saturating_add(entries.saturating_mul(session::LABEL_OVERHEAD_BYTES))
+}
+
+/// The labels of one Categorical leaf column over a file's row groups, for
+/// [`parquet_decoded_bytes`]: what polars puts into the column's mapping
+/// while it decodes it, at what the quotas charge for each label once the
+/// file is loaded (see [`session::label_bytes`]).
+///
+/// polars keeps one mapping a column and puts each label in it once, so a
+/// label several row groups' dictionaries hold (each group has a dictionary
+/// of its own) is counted once. Counting the largest dictionary instead
+/// would let a file whose row groups each hold different labels pass with
+/// one group's; counting every page refuses a file whose groups repeat long
+/// labels although the quotas would hold it once loaded. A dictionary page
+/// that is not read counts from its size (see [`page_label_bytes`]). A label
+/// that no row uses counts too (polars writes none; arrow's writers can
+/// write a factor's unused levels), since only decoding the data pages
+/// tells.
+///
+/// A value of a data page that is not dictionary-encoded is put into the
+/// mapping as it is decoded, and nothing short of decoding the page tells
+/// whether it repeats another, so each counts [`MAPPING_LABEL_BYTES`] (its
+/// text is in the page's bytes, which the column's values count). Writers
+/// fall back to such pages when a dictionary grows past their page limit,
+/// that is, for columns of many distinct labels (arrow's writers at about a
+/// megabyte; R's and Python's arrow can also be told to write none).
 #[derive(Default)]
 struct DictionaryLabels {
     /// The hashes of the labels counted.
     seen: std::collections::HashSet<u64>,
-    /// Bytes of the labels counted.
+    /// What the quotas charge for the labels counted.
     bytes: u64,
-    /// Bytes of every dictionary page added, read or not.
+    /// What every dictionary page added counts from its size, read or not.
     pages: u64,
     /// Set once a page was not read (see [`PageWalk::dictionary`]).
     unread: bool,
+    /// The values of the column's data pages that are not
+    /// dictionary-encoded, over its chunks (see
+    /// [`ChunkPages::plain_values`]).
+    plain_values: u64,
 }
 
 impl DictionaryLabels {
@@ -897,16 +1009,18 @@ impl DictionaryLabels {
                 if !budget.take_label() {
                     return false;
                 }
-                self.bytes = self.bytes.saturating_add(4 + label.len() as u64);
+                self.bytes = self.bytes.saturating_add(session::label_bytes(label.len()));
             }
         }
         true
     }
 
     /// What the column's labels count: each distinct label once, or every
-    /// page's bytes when a page was not read.
+    /// page from its size when a page was not read; and each value of its
+    /// pages that are not dictionary-encoded.
     fn bytes(&self) -> u64 {
-        if self.unread { self.pages } else { self.bytes }
+        let labels = if self.unread { self.pages } else { self.bytes };
+        labels.saturating_add(MAPPING_LABEL_BYTES.saturating_mul(self.plain_values))
     }
 }
 
@@ -953,15 +1067,17 @@ const OFFSET_BYTES: u64 = 8;
 /// struct counts the most any one of its fields does instead, which is
 /// still a lower bound (and still counts a field that holds many values).
 /// A text leaf takes at least its pages (long strings): the quotas charge
-/// more for each value than its pages hold. A categorical leaf takes at
-/// least its data pages; its dictionary page is left to the caller, which
-/// counts each label once over the row groups (see [`DictionaryLabels`]),
-/// and `holds_labels` gets one entry per leaf consumed, in order: whether
-/// it is a Categorical or Enum leaf that holds values. A fixed-width leaf's
-/// charge does not grow with its pages, which also hold levels its values
-/// in memory do not; what decoding its pages allocates is counted with the
-/// decoder's buffers instead (see [`chunk_transient`]). Types without a
-/// fixed floor count nothing.
+/// more for each value than its pages hold. A Categorical or Enum leaf
+/// takes at least its data pages without their headers (the text of a
+/// page that is not dictionary-encoded); a Categorical leaf's labels are
+/// left to the caller, which counts each label once over the row groups
+/// (see [`DictionaryLabels`]), and `holds_labels` gets one entry per leaf
+/// consumed, in order: whether it is a Categorical leaf that holds values
+/// (an Enum leaf's labels are its type's, see [`parquet_decoded_bytes`]).
+/// A fixed-width leaf's charge does not grow with its pages, which also
+/// hold levels its values in memory do not; what decoding its pages
+/// allocates is counted with the decoder's buffers instead (see
+/// [`chunk_transient`]). Types without a fixed floor count nothing.
 fn least_value_bytes(
     dtype: &DataType,
     slots: Slots,
@@ -1020,7 +1136,7 @@ fn least_value_bytes(
         }
         leaf => {
             let chunks = leaves.next().unwrap_or_default();
-            let categorical = matches!(leaf, DataType::Categorical(_, _) | DataType::Enum(_, _));
+            let coded = matches!(leaf, DataType::Categorical(_, _) | DataType::Enum(_, _));
             let values = match slots {
                 Slots::Empty => {
                     holds_labels.push(false);
@@ -1032,12 +1148,12 @@ fn least_value_bytes(
                     leaf_value_bytes(leaf, values).min(OFFSET_BYTES.saturating_mul(values))
                 }
             };
-            holds_labels.push(categorical);
+            holds_labels.push(matches!(leaf, DataType::Categorical(_, _)));
             match leaf {
                 DataType::String | DataType::Binary | DataType::BinaryOffset => {
                     values.max(chunks.page_bytes)
                 }
-                _ if categorical => values.max(chunks.page_bytes.saturating_sub(chunks.dict_bytes)),
+                _ if coded => values.max(chunks.data_page_bytes),
                 _ => values,
             }
         }
@@ -1673,7 +1789,7 @@ mod tests {
         let mut leaves = entries.iter().map(|&entries| LeafChunks {
             entries,
             page_bytes,
-            dict_bytes: 0,
+            data_page_bytes: page_bytes,
         });
         least_value_bytes(dtype, Slots::Known(rows), &mut leaves, &mut Vec::new())
     }
@@ -1791,21 +1907,40 @@ mod tests {
             ("x", DataType::Float64),
             ("e", DataType::Array(Box::new(cat.clone()), 0)),
         ]);
-        let chunk = |entries, page_bytes, dict_bytes| LeafChunks {
+        let chunk = |entries, page_bytes, data_page_bytes| LeafChunks {
             entries,
             page_bytes,
-            dict_bytes,
+            data_page_bytes,
         };
-        let mut leaves = [chunk(10, 5000, 4900), chunk(10, 80, 0), chunk(10, 900, 800)].into_iter();
+        let mut leaves = [chunk(10, 5000, 100), chunk(10, 80, 80), chunk(10, 900, 100)].into_iter();
         let mut holds_labels = Vec::new();
         let bytes = least_value_bytes(&pair, Slots::Known(10), &mut leaves, &mut holds_labels);
         assert_eq!(bytes, 100 + 80);
         assert_eq!(holds_labels, [true, false, false]);
-        let mut leaves = std::iter::once(chunk(10, 5000, 1000));
+        let mut leaves = std::iter::once(chunk(10, 5000, 4000));
         assert_eq!(
             least_value_bytes(&cat, Slots::Known(10), &mut leaves, &mut Vec::new()),
             4000
         );
+        // The data pages count without their headers, which can hold the
+        // page's least and greatest label and which the chunk's size in the
+        // footer counts. That size less the dictionary page, counted before,
+        // put a column of long labels above its charge once its labels
+        // counted what the quotas charge for them.
+        let mut leaves = std::iter::once(chunk(10, 5000, 30));
+        assert_eq!(
+            least_value_bytes(&cat, Slots::Known(10), &mut leaves, &mut Vec::new()),
+            40
+        );
+        // An Enum leaf counts its codes and data pages the same way, but its
+        // labels are its type's categories, which the caller counts once a
+        // leaf: its dictionary pages put nothing into a mapping.
+        let frozen = p2a_core::polars::prelude::FrozenCategories::new(["lo", "hi"]).unwrap();
+        let levels = DataType::from_frozen_categories(frozen);
+        let mut leaves = std::iter::once(chunk(10, 5000, 4000));
+        let mut holds_labels = Vec::new();
+        let bytes = least_value_bytes(&levels, Slots::Known(10), &mut leaves, &mut holds_labels);
+        assert_eq!((bytes, holds_labels), (4000, vec![false]));
     }
 
     #[test]
@@ -2023,6 +2158,32 @@ mod tests {
         )
         .cast(&cat)
         .unwrap();
+        // 2,000 distinct 6-byte labels, in a mapping of their own: short
+        // labels, whose charge is mostly the mapping's overhead.
+        let short_cat = DataType::from_categories(p2a_core::polars::prelude::Categories::random(
+            "".into(),
+            CategoricalPhysical::U32,
+        ));
+        let short = Series::new(
+            "short".into(),
+            (0..rows).map(|i| format!("s{i:05}")).collect::<Vec<_>>(),
+        )
+        .cast(&short_cat)
+        .unwrap();
+        // An Enum of 50 categories of 200 bytes, 30 of them used: the column
+        // owns all 50.
+        let names: Vec<String> = (0..50).map(|i| format!("{i:0200}")).collect();
+        let frozen =
+            p2a_core::polars::prelude::FrozenCategories::new(names.iter().map(String::as_str))
+                .unwrap();
+        let levels = Series::new(
+            "levels".into(),
+            (0..rows)
+                .map(|i| names[(i * 7) % 30].clone())
+                .collect::<Vec<_>>(),
+        )
+        .cast(&DataType::from_frozen_categories(frozen.clone()))
+        .unwrap();
         let mut df = DataFrame::new(vec![
             lists.into_series().with_name("lists".into()).into(),
             nested.into_series().with_name("nested".into()).into(),
@@ -2031,6 +2192,8 @@ mod tests {
             deep.into_series().with_name("deep".into()).into(),
             array.into(),
             labels.into(),
+            short.into(),
+            levels.into(),
             floats(rows, 0.1).with_name("flat".into()).into(),
         ])
         .unwrap();
@@ -2058,7 +2221,7 @@ mod tests {
 
             // Each column alone, too.
             for name in [
-                "lists", "nested", "structs", "cats", "deep", "arr", "labels",
+                "lists", "nested", "structs", "cats", "deep", "arr", "labels", "short", "levels",
             ] {
                 let mut one = df.select([name]).unwrap();
                 let (charge, bound) = loaded_charge_and_bound(&mut one, groups);
@@ -2066,10 +2229,19 @@ mod tests {
                     bound <= charge,
                     "{groups:?} {name}: bound {bound} > charge {charge}"
                 );
-                if name == "labels" {
-                    // Its dictionary still counts, once.
-                    assert!(bound >= 40 * 1_000, "{groups:?}: bound {bound}");
-                }
+                // A Categorical column's labels count once, at what the
+                // quotas charge for them (read from the pages over several
+                // row groups, from the page's size in one); an Enum's
+                // categories once. Pre-fix a label counted its bytes in the
+                // page (1,004 and 10 bytes) and an Enum's categories nothing.
+                let least = match name {
+                    "labels" => 40 * session::label_bytes(1_000),
+                    "short" if groups.is_some() => 2_000 * session::label_bytes(6),
+                    "short" => 2_000 * 168,
+                    "levels" => session::frozen_label_bytes(&frozen),
+                    _ => 0,
+                };
+                assert!(bound >= least, "{groups:?} {name}: bound {bound} < {least}");
             }
         }
     }
@@ -2408,15 +2580,16 @@ mod tests {
             .row_groups
             .len() as u64;
         assert!(groups >= 3, "{groups}");
+        let label = session::label_bytes(1_000);
         let bound = bound_of(&repeated).dataset;
-        assert!(bound >= 40 * 1_000, "{bound}");
-        assert!(bound < 2 * 40 * 1_004 + 2_000 * 4 + 8_192, "{bound}");
+        assert!(bound >= 40 * label, "{bound}");
+        assert!(bound < 2 * 40 * label + 2_000 * 4 + 8_192, "{bound}");
         let distinct = dir.path().join("distinct.parquet");
         labels_parquet(&distinct, 2_000);
         let bound = bound_of(&distinct).dataset;
-        assert!(bound >= 2_000 * 1_000, "{bound}");
-        // Past the budget the pages count their bytes, as before: more than
-        // the labels once, never less.
+        assert!(bound >= 2_000 * label, "{bound}");
+        // Past the budget the pages count from their sizes: more than the
+        // labels once, never less.
         let mut tight = DictionaryBudget {
             bytes: 100_000,
             ..DictionaryBudget::default()
@@ -2425,7 +2598,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .dataset;
-        assert!(bounded >= groups * 40 * 1_000, "{groups}: {bounded}");
+        assert!(bounded >= groups * 40 * (label - 1), "{groups}: {bounded}");
         let mut few = DictionaryBudget {
             labels: 10,
             ..DictionaryBudget::default()
@@ -2434,25 +2607,127 @@ mod tests {
             .unwrap()
             .unwrap()
             .dataset;
-        assert!(bounded >= 2_000 * 1_000, "{bounded}");
+        assert!(bounded >= 2_000 * (label - 1), "{bounded}");
     }
 
     #[test]
-    fn a_dictionary_page_that_does_not_hold_its_labels_counts_its_bytes() {
+    fn short_labels_count_what_the_quotas_charge_for_them() {
+        // 20,000 distinct 6-byte labels over seven row groups. polars puts
+        // each into the column's mapping at about 130 bytes over its text,
+        // and the quotas charge 169 bytes for it. Pre-fix the bound counted
+        // its 10 bytes in the page, so a file of millions of short labels
+        // was admitted far below what loading it took.
+        use p2a_core::polars::prelude::{Categories, NamedFrom, Series};
+        let rows = 20_000usize;
+        let dtype =
+            DataType::from_categories(Categories::random("".into(), CategoricalPhysical::U32));
+        let k = Series::new(
+            "k".into(),
+            (0..rows).map(|i| format!("s{i:05}")).collect::<Vec<_>>(),
+        )
+        .cast(&dtype)
+        .unwrap();
+        let mut df = DataFrame::new(vec![k.into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.parquet");
+        write_parquet(&mut df, &path, 3_000);
+        let bound = bound_of(&path).dataset;
+        assert!(bound >= rows as u64 * session::label_bytes(6), "{bound}");
+        let charge = session::datasets_bytes_of([("d", &DataLoader::load(&path).unwrap())]);
+        assert!(bound <= charge, "{bound} > {charge}");
+    }
+
+    /// Rewrite the header of the first page of the first column chunk of the
+    /// parquet file at `path` with `edit`, which must leave its encoded size
+    /// as it was.
+    fn rewrite_first_page_header(
+        path: &Path,
+        edit: impl FnOnce(&mut polars_parquet_format::PageHeader),
+    ) {
+        use polars_parquet_format::thrift::protocol::{
+            TCompactInputProtocol, TCompactOutputProtocol,
+        };
+        let metadata = std::sync::Arc::clone(
+            ParquetReader::new(std::fs::File::open(path).unwrap())
+                .get_metadata()
+                .unwrap(),
+        );
+        let at = metadata.row_groups[0].parquet_columns()[0]
+            .byte_range()
+            .start as usize;
+        let mut bytes = std::fs::read(path).unwrap();
+        let mut rest = &bytes[at..];
+        let mut header = polars_parquet_format::PageHeader::read_from_in_protocol(
+            &mut TCompactInputProtocol::new(&mut rest, usize::MAX),
+        )
+        .unwrap();
+        let len = bytes.len() - at - rest.len();
+        edit(&mut header);
+        let mut written = Vec::new();
+        header
+            .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut written))
+            .unwrap();
+        assert_eq!(written.len(), len);
+        bytes[at..at + len].copy_from_slice(&written);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_dictionary_page_counts_every_page_from_its_size() {
+        // Seven row groups, each with a dictionary page of the same 40
+        // labels of 1,000 bytes; the first group's header is rewritten to
+        // declare 63 labels, more than its page holds. Its labels are not
+        // read, so the column counts every page from its size, whatever the
+        // others hold: at least each page's bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unread.parquet");
+        labels_parquet(&path, 40);
+        rewrite_first_page_header(&path, |header| {
+            let dict = header.dictionary_page_header.as_mut().unwrap();
+            assert_eq!(dict.num_values, 40);
+            dict.num_values = 63;
+        });
+        let metadata = std::sync::Arc::clone(
+            ParquetReader::new(std::fs::File::open(&path).unwrap())
+                .get_metadata()
+                .unwrap(),
+        );
+        assert!(metadata.row_groups.len() >= 2);
+        let mut walk = walk_of(&path);
+        let mut pages = 0;
+        for group in &metadata.row_groups {
+            let chunk = &group.parquet_columns()[0];
+            let read = walk.chunk(chunk.byte_range(), chunk.num_values()).unwrap();
+            assert!(read.dict_bytes >= 40 * 1_004);
+            pages += read.dict_bytes;
+        }
+        let bound = bound_of(&path).dataset;
+        assert!(bound >= pages, "{bound} < {pages}");
+        // Read, the 40 labels counted once: far less.
+        let honest = dir.path().join("honest.parquet");
+        labels_parquet(&honest, 40);
+        assert!(bound_of(&honest).dataset < pages, "{pages}");
+    }
+
+    #[test]
+    fn a_dictionary_page_that_does_not_hold_its_labels_is_not_counted_from_them() {
         // A page whose header declares more labels than it holds, or a
-        // label longer than the page, is not counted from its labels.
+        // label longer than the page, is not counted from its labels. A
+        // label it holds counts what the quotas charge for it, once.
         let hasher = std::hash::RandomState::new();
         let mut page = Vec::new();
         for label in [b"ab".as_slice(), b"cde", b"ab"] {
             page.extend_from_slice(&(label.len() as u32).to_le_bytes());
             page.extend_from_slice(label);
         }
+        let charged = session::label_bytes(2) + session::label_bytes(3);
+        assert_eq!(charged, 163 + 164);
         let mut labels = DictionaryLabels::default();
         let mut budget = DictionaryBudget::default();
         assert!(labels.add(&page, 3, &hasher, &mut budget));
-        assert_eq!(labels.bytes(), 6 + 7);
+        assert_eq!(labels.bytes(), charged);
         assert!(labels.add(&page, 3, &hasher, &mut budget));
-        assert_eq!(labels.bytes(), 6 + 7);
+        assert_eq!(labels.bytes(), charged);
         assert!(!labels.add(&page, 4, &hasher, &mut budget));
         let mut long = 100u32.to_le_bytes().to_vec();
         long.extend_from_slice(b"short");
@@ -2460,6 +2735,65 @@ mod tests {
         // Each entry takes at least four bytes, so a header that declares
         // billions of entries stops at the page's end.
         assert!(!DictionaryLabels::default().add(&page, u64::MAX, &hasher, &mut budget));
+        // A value of a page that is not dictionary-encoded counts the
+        // mapping's least overhead for a label, whether or not it repeats.
+        let mut plain = DictionaryLabels {
+            plain_values: 10,
+            ..DictionaryLabels::default()
+        };
+        assert_eq!(plain.bytes(), 10 * MAPPING_LABEL_BYTES);
+        assert!(plain.add(&page, 3, &hasher, &mut budget));
+        assert_eq!(plain.bytes(), charged + 10 * MAPPING_LABEL_BYTES);
+        // Not read, every page counts from its size, plus those values.
+        plain.unread = true;
+        plain.pages = page_label_bytes(page.len() as u64, 3);
+        assert_eq!(plain.bytes(), plain.pages + 10 * MAPPING_LABEL_BYTES);
+    }
+
+    #[test]
+    fn a_dictionary_pages_size_bounds_what_its_labels_are_charged() {
+        // Its labels' text, and half of it less a half a label, and the
+        // mapping's overhead for each: at most what the quotas charge for
+        // the page's labels when they are distinct and used, and at least
+        // the page's bytes. Pre-fix it was the page's bytes, 4 + 1,000 for a
+        // 1,000-byte label, against a charge of 1,660.
+        let page = |lens: &[usize]| lens.iter().map(|len| 4 + *len as u64).sum::<u64>();
+        let charge = |lens: &[usize]| lens.iter().map(|len| session::label_bytes(*len)).sum();
+        for lens in [&[2usize, 3][..], &[2, 2], &[1_000; 40], &[0, 7, 13, 1]] {
+            let bytes = page(lens);
+            let entries = lens.len() as u64;
+            let counted = page_label_bytes(bytes, entries);
+            assert!(counted <= charge(lens), "{lens:?}: {counted}");
+            assert!(counted >= bytes, "{lens:?}: {counted}");
+            assert!(
+                counted + entries / 2 + 1 >= charge(lens),
+                "{lens:?}: {counted}"
+            );
+        }
+        assert_eq!(page_label_bytes(40 * 1_004, 40), 40_000 + 19_980 + 40 * 160);
+        // A header that declares more labels than the page holds bytes for
+        // counts the overhead of each.
+        assert_eq!(page_label_bytes(10, 1_000), 160_000);
+    }
+
+    #[test]
+    fn values_outside_a_dictionary_are_counted_from_the_page_headers() {
+        use polars_parquet_format::Encoding;
+        // A dictionary-encoded page holds labels of the dictionary only.
+        assert_eq!(plain_values(1_000, 0, Encoding::RLE_DICTIONARY, 9_000), 0);
+        assert_eq!(plain_values(1_000, 0, Encoding::PLAIN_DICTIONARY, 9_000), 0);
+        // A PLAIN page holds no more values than a quarter of its bytes (a
+        // value takes a 4-byte length and its text), and no more than its
+        // entries less the nulls a v2 header counts.
+        assert_eq!(plain_values(1_000, 0, Encoding::PLAIN, 2_000), 500);
+        assert_eq!(plain_values(1_000, 0, Encoding::PLAIN, 12_000), 1_000);
+        assert_eq!(plain_values(1_000, 300, Encoding::PLAIN, 12_000), 700);
+        assert_eq!(plain_values(1_000, -5, Encoding::PLAIN, 12_000), 1_000);
+        // Other encodings can pack values tighter than their bytes.
+        assert_eq!(
+            plain_values(1_000, 0, Encoding::DELTA_BYTE_ARRAY, 10),
+            1_000
+        );
     }
 
     #[test]

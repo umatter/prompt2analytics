@@ -201,7 +201,8 @@ pub const VIEW_BYTES: u64 = 16;
 const VIEW_CHARGE_BYTES: u64 = 18;
 /// Bytes charged per category label on top of its text: its slots in the
 /// mapping (hash table entry, id-to-label entry, allocation rounding).
-const LABEL_OVERHEAD_BYTES: u64 = 160;
+/// The check before a parquet file is decoded counts it too.
+pub(crate) const LABEL_OVERHEAD_BYTES: u64 = 160;
 
 /// What the dataset quotas charge for some datasets.
 #[derive(Debug, Default)]
@@ -423,8 +424,9 @@ where
 }
 
 /// The categories an Enum dtype owns: its label array (views and text) and
-/// the mapping's copy of each label.
-fn frozen_label_bytes(frozen: &FrozenCategories) -> u64 {
+/// the mapping's copy of each label. The check before a parquet file is
+/// decoded counts it for each Enum leaf column of the file.
+pub(crate) fn frozen_label_bytes(frozen: &FrozenCategories) -> u64 {
     let labels = frozen.categories();
     let text = labels.total_bytes_len() as u64;
     view_bytes(
@@ -437,8 +439,10 @@ fn frozen_label_bytes(frozen: &FrozenCategories) -> u64 {
 }
 
 /// The charge for a category label of `len` bytes: its text once and a half
-/// (what loading it costs, see above) and its slots in the mapping.
-fn label_bytes(len: usize) -> u64 {
+/// (what loading it costs, see above) and its slots in the mapping. The
+/// check before a parquet file is decoded counts it for each distinct label
+/// of a Categorical column's dictionary pages.
+pub(crate) fn label_bytes(len: usize) -> u64 {
     let len = len as u64;
     len.saturating_add(len / 2)
         .saturating_add(LABEL_OVERHEAD_BYTES)
