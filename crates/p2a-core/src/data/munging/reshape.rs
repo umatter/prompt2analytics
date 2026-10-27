@@ -27,7 +27,11 @@
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
-use polars_ops::frame::pivot::pivot as polars_pivot;
+// polars-ops 0.52's `pivot` runs exactly the code `pivot_stable` runs, and
+// also prints a notice to stdout on every call. Stdout is the MCP stdio
+// transport's JSON-RPC stream and the CLI's JSON output, so call the stable
+// entry point, which prints nothing.
+use polars_ops::frame::pivot::pivot_stable;
 
 /// Pivot a dataset from long to wide format.
 ///
@@ -76,8 +80,8 @@ pub fn pivot(dataset: &Dataset, index: &[&str], on: &str, values: &str) -> Munge
         return Err(MungeError::ColumnNotFound(values.to_string()));
     }
 
-    // Use polars_pivot free function (not a method on DataFrame)
-    let result = polars_pivot(
+    // polars' free function (not a method on DataFrame); see the import.
+    let result = pivot_stable(
         df,
         [on],
         Some(index.iter().copied()),
@@ -397,6 +401,118 @@ mod tests {
         assert!(result.df().column("id").is_ok());
         assert!(result.df().column("2020").is_ok());
         assert!(result.df().column("2021").is_ok());
+    }
+
+    /// `pivot` calls polars' `pivot_stable`, and must give exactly what the
+    /// `pivot` entry point it replaced gives (the two differ only in a notice
+    /// `pivot` prints to stdout): same column names, dtypes, order and cells,
+    /// on shapes with several index columns, a null in `on`, a missing
+    /// combination, integer and string `on` columns, and the same error for
+    /// duplicated keys.
+    #[test]
+    fn test_pivot_matches_polars_pivot() {
+        let shapes: Vec<(DataFrame, Vec<&str>, &str, &str)> = vec![
+            (
+                df! {
+                    "id" => [1, 1, 2, 2],
+                    "year" => ["2020", "2021", "2020", "2021"],
+                    "value" => [100.3, 110.9, 201.7, 219.4],
+                }
+                .unwrap(),
+                vec!["id"],
+                "year",
+                "value",
+            ),
+            // Several index columns, an integer `on` column and a missing
+            // (id, grp, year) combination, which leaves a null cell.
+            (
+                df! {
+                    "id" => [1, 1, 1, 2, 2, 2, 3],
+                    "grp" => ["a", "a", "b", "a", "b", "b", "a"],
+                    "year" => [2020, 2021, 2020, 2021, 2020, 2021, 2020],
+                    "value" => [1.1, 2.3, 0.7, 4.2, 3.9, 5.6, 2.8],
+                }
+                .unwrap(),
+                vec!["id", "grp"],
+                "year",
+                "value",
+            ),
+            // A null in `on`, a null value, and rows whose `on` values first
+            // appear out of sorted order.
+            (
+                df! {
+                    "id" => [2, 1, 2, 1, 3, 3],
+                    "key" => [Some("z"), None, Some("a"), Some("z"), None, Some("a")],
+                    "value" => [Some(5.2), Some(1.4), None, Some(3.3), Some(6.1), Some(2.9)],
+                }
+                .unwrap(),
+                vec!["id"],
+                "key",
+                "value",
+            ),
+            // Three index columns and integer values.
+            (
+                df! {
+                    "a" => [1, 1, 1, 1, 2, 2],
+                    "b" => ["x", "x", "y", "y", "x", "x"],
+                    "c" => [true, false, true, false, true, true],
+                    "key" => ["p", "q", "p", "q", "p", "q"],
+                    "value" => [11, 23, 7, 42, 39, 56],
+                }
+                .unwrap(),
+                vec!["a", "b", "c"],
+                "key",
+                "value",
+            ),
+            // A duplicated (index, on) pair: both refuse it the same way.
+            (
+                df! {
+                    "id" => [1, 1, 2],
+                    "key" => ["p", "p", "q"],
+                    "value" => [1.2, 3.4, 5.6],
+                }
+                .unwrap(),
+                vec!["id"],
+                "key",
+                "value",
+            ),
+        ];
+
+        let mut pivoted = 0;
+        for (i, (df, index, on, values)) in shapes.into_iter().enumerate() {
+            let polars = polars_ops::frame::pivot::pivot(
+                &df,
+                [on],
+                Some(index.iter().copied()),
+                Some([values]),
+                false,
+                None,
+                None,
+            );
+            let ours = pivot(&Dataset::new(df.clone()), &index, on, values);
+            match (polars, ours) {
+                (Ok(expected), Ok(got)) => {
+                    let got = got.df();
+                    assert!(
+                        got.equals_missing(&expected),
+                        "shape {i}: got {got}, polars gives {expected}"
+                    );
+                    got.schema_equal(&expected)
+                        .unwrap_or_else(|e| panic!("shape {i}: {e}"));
+                    pivoted += 1;
+                }
+                (Err(expected), Err(MungeError::ReshapeError(got))) => {
+                    assert_eq!(got, expected.to_string(), "shape {i}");
+                }
+                (expected, got) => panic!(
+                    "shape {i}: polars gives {:?}, p2a gives {:?}",
+                    expected.map(|d| d.shape()),
+                    got.map(|d| d.df().shape())
+                ),
+            }
+        }
+        // Every shape but the duplicated key pivots.
+        assert_eq!(pivoted, 4);
     }
 
     #[test]
