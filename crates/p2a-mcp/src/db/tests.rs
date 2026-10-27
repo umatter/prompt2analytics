@@ -1767,7 +1767,12 @@ async fn a_clear_during_a_tool_call_write_waits_for_it() {
         );
         assert_eq!(rows_in(&db, "tool_calls").await, 0, "dropped {write:?}");
         assert_counter_matches_store(&db, "s1").await;
-        assert_eq!(db.store_turns_in_use(), 0);
+        // The dropped write's entry can outlast the clear by a moment
+        // (`StoreTurn::drop` lets the next call in first).
+        assert!(
+            turns_released(&db).await,
+            "dropped {write:?}: a turn stays in use"
+        );
     }
 }
 
@@ -1913,7 +1918,10 @@ async fn a_write_after_a_dropped_add_or_create_finds_the_cap_reached() {
         let refused = db.create_conversation("s1", "refused").await.map(|_| ());
         let stored = db.count_conversations("s1").await.unwrap() as i64;
         outcomes.push((engine, "create", refused, (stored, stored)));
-        assert_eq!(db.store_turns_in_use(), 0);
+        // A dropped call's task lets the next call in before its entry
+        // leaves the map (`StoreTurn::drop`), so the entry can outlast the
+        // next call by a moment.
+        assert!(turns_released(&db).await, "{engine:?}: a turn stays in use");
     }
     // Left: the cases whose second call was not refused, or that do not
     // store (and list) three rows.
@@ -2001,7 +2009,9 @@ async fn a_clear_after_a_dropped_write_waits_for_it() {
         if let Some(gap) = counter_gap(&db, "s1").await {
             problems.push(format!("{write:?}: {gap}"));
         }
-        assert_eq!(db.store_turns_in_use(), 0);
+        // The dropped write's entry can outlast the clear by a moment
+        // (`StoreTurn::drop` lets the next call in first).
+        assert!(turns_released(&db).await, "{write:?}: a turn stays in use");
     }
     assert!(problems.is_empty(), "{problems:#?}");
 }
