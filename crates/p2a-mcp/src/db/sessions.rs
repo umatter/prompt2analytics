@@ -9,6 +9,23 @@ use surrealdb::sql::Datetime;
 use super::connection::{DbConnection, DbError, failed_statement};
 use super::models::{DbSession, Settings, key_string};
 
+/// `path_jail::remove_stored_session_dir` for `id`, on tokio's blocking pool
+/// inside a runtime (inline outside one); a failure is logged.
+async fn remove_stored_session_dir(id: &str) {
+    let owned = id.to_string();
+    let remove = move || crate::path_jail::remove_stored_session_dir(&owned);
+    let removed = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle
+            .spawn_blocking(remove)
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e))),
+        Err(_) => remove(),
+    };
+    if let Err(e) = removed {
+        tracing::warn!(session_id = %id, error = %e, "Failed to remove a stored session's directory");
+    }
+}
+
 /// One row of `SELECT count() ... GROUP ALL`.
 #[derive(serde::Deserialize)]
 struct CountRow {
@@ -403,7 +420,8 @@ impl DbConnection {
         Ok(sessions)
     }
 
-    /// Delete a session and all associated data
+    /// Delete a session and all associated data, and then the data directory
+    /// a restart kept for it, if any (`path_jail::remove_stored_session_dir`).
     pub async fn delete_session(&self, id: &str) -> Result<(), DbError> {
         // The byte counter goes with the session: dropping it first spares
         // each conversation delete below from summing what it releases.
@@ -437,7 +455,36 @@ impl DbConnection {
         let _: Option<DbSession> = self.db().delete(("sessions", id)).await?;
         self.forget_session_bytes(id);
 
+        // Without its row the session can no longer be adopted, so the data
+        // directory a restart kept for it goes too. Only after the row: a
+        // failed delete leaves the session adoptable, with its files.
+        remove_stored_session_dir(id).await;
+
         Ok(())
+    }
+
+    /// Keep the data directories of the stored sessions that can still be
+    /// adopted, those whose row was accessed within `ttl_minutes` (the rule
+    /// `PersistentSessionManager::get_session` adopts by), through the
+    /// first-use purge of stale session directories
+    /// (`path_jail::keep_session_dirs`). The server calls this once at
+    /// startup, before it takes requests. Returns the ids kept.
+    pub async fn keep_adoptable_session_dirs(
+        &self,
+        ttl_minutes: u64,
+    ) -> Result<Vec<String>, DbError> {
+        let now = Utc::now();
+        let ids: Vec<String> = self
+            .list_sessions()
+            .await?
+            .iter()
+            .filter(|row| {
+                !crate::session::is_past_ttl(row.last_accessed_chrono(), now, ttl_minutes)
+            })
+            .map(DbSession::id_string)
+            .collect();
+        crate::path_jail::keep_session_dirs(&ids);
+        Ok(ids)
     }
 
     /// Ids of the session rows whose `last_accessed` is before `cutoff`.

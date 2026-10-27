@@ -3263,6 +3263,30 @@ async fn test_delete_session() {
     assert!(result.expect("Should not error").is_none());
 }
 
+/// The directories kept through a restart's purge are those of the stored
+/// sessions `get_session` would still adopt: last accessed within the TTL,
+/// by the same whole-minute rule.
+#[tokio::test]
+async fn keep_adoptable_session_dirs_keeps_the_sessions_within_the_ttl() {
+    let db = test_db().await;
+    let now = chrono::Utc::now();
+    let id = || uuid::Uuid::new_v4().to_string();
+    let (fresh, at_the_ttl, past) = (id(), id(), id());
+    for (sid, minutes) in [(&fresh, 0), (&at_the_ttl, 60), (&past, 61)] {
+        db.set_session_last_accessed(
+            sid,
+            now - chrono::Duration::minutes(minutes) - chrono::Duration::seconds(5),
+        )
+        .await
+        .unwrap();
+    }
+    let mut kept = db.keep_adoptable_session_dirs(60).await.unwrap();
+    kept.sort();
+    let mut expected = vec![fresh, at_the_ttl];
+    expected.sort();
+    assert_eq!(kept, expected);
+}
+
 // ==================== Integration Tests ====================
 
 #[tokio::test]
