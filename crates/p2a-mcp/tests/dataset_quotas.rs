@@ -998,6 +998,26 @@ fn copies_of(bytes: &[u8]) -> BTreeSet<PathBuf> {
     copies
 }
 
+/// The name prefix of the probe that
+/// `a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behind`
+/// puts in the temporary folder to show that [`copies_of`] looks there.
+const PROBE_PREFIX: &str = ".p2a-pr23-probe-";
+
+/// [`copies_of`] without any file named like a probe. The temporary folder
+/// is shared between processes: when two checkouts run this test at once,
+/// one run can create or remove its probe, which holds the same bytes,
+/// between the other run's two scans.
+fn stored_copies_of(bytes: &[u8]) -> BTreeSet<PathBuf> {
+    copies_of(bytes)
+        .into_iter()
+        .filter(|path| {
+            !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(PROBE_PREFIX))
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behind() {
     // A categorical column whose polars metadata names a code width that
@@ -1028,14 +1048,19 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
 
     // The copies are looked for in both places a stored upload could land:
     // they find this test's own file under the data root, and a probe in
-    // the temporary folder.
-    let probe = tempfile::NamedTempFile::new().unwrap();
+    // the temporary folder. The sets compared leave out every probe, this
+    // run's and any other run's.
+    let probe = tempfile::Builder::new()
+        .prefix(PROBE_PREFIX)
+        .tempfile()
+        .unwrap();
     std::fs::write(probe.path(), &bytes).unwrap();
     let seen = copies_of(&bytes);
     assert!(seen.contains(&path), "{path:?} not in {seen:?}");
     assert!(seen.contains(probe.path()), "{probe:?} not in {seen:?}");
     probe.close().unwrap();
-    let before = copies_of(&bytes);
+    let before = stored_copies_of(&bytes);
+    assert!(before.contains(&path), "{path:?} not in {before:?}");
 
     // With the quotas the check refuses it cleanly, and nothing is loaded.
     let (app, _) = app_with_quota(8 * MIB).await;
@@ -1056,7 +1081,7 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
             "{tool}: {body}"
         );
     }
-    assert_eq!(copies_of(&bytes), before, "an upload stored a copy");
+    assert_eq!(stored_copies_of(&bytes), before, "an upload stored a copy");
 
     // Without them the loader panics on it, and the upload leaves no file
     // behind all the same (it is decoded from memory; PR-23).
@@ -1066,5 +1091,5 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
     let sid = new_session(&app).await;
     let (status, body) = call(&app, &sid, "upload_dataset", upload).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert_eq!(copies_of(&bytes), before, "the upload stored a copy");
+    assert_eq!(stored_copies_of(&bytes), before, "the upload stored a copy");
 }
