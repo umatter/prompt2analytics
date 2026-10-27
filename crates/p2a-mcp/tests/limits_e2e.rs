@@ -651,6 +651,75 @@ mod http_paths {
         });
     }
 
+    /// A long table of `rows` rows with `index_columns` index columns that never change
+    /// (`i0`, `i1`, ...), a `key` value of its own in every row and a noisy `val`: it pivots
+    /// into one row of `index_columns + rows` columns.
+    fn many_index_csv(rows: usize, index_columns: usize) -> String {
+        let names: Vec<String> = (0..index_columns).map(|j| format!("i{j}")).collect();
+        let mut csv = format!("{},key,val\n", names.join(","));
+        let zeros = vec!["0"; index_columns].join(",");
+        for i in 0..rows {
+            let val = ((i * 7919) % 1013) as f64 / 101.3 + 0.01;
+            csv.push_str(&format!("{zeros},k{i},{val:.4}\n"));
+        }
+        csv
+    }
+
+    #[test]
+    fn pivot_over_many_index_columns_is_refused_before_counting() {
+        let cfg = open_public_config();
+        let limits = limits::resolve(&cfg)
+            .unwrap()
+            .with_overrides(&["pivot_cells=1500".to_string()])
+            .unwrap();
+        run(limits, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let index: Vec<String> = (0..12).map(|j| format!("i{j}")).collect();
+            let args = |dataset: &str, result: &str| {
+                json!({"dataset": dataset, "index": index, "on": "key", "values": "val",
+                       "result_name": result})
+            };
+            // 300 rows of 12 index values and an `on` value each: 3,900 values for polars to
+            // group, more than twice the 1,500 cells, although the wide table would have one
+            // row of 312 cells.
+            create(&app, &sid, "long", &many_index_csv(300, 12)).await;
+            let (status, body) = post_tool(&app, &sid, "munge_pivot", args("long", "wide")).await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["code"], "limit_exceeded", "{body}");
+            assert_eq!(
+                body["details"],
+                json!({"parameter": "index", "requested": "3900", "limit": "3000"}),
+                "{body}"
+            );
+            let error = body["error"].as_str().unwrap();
+            assert!(
+                error.starts_with("The dataset has 300 rows, and `munge_pivot` groups each row")
+                    && error.contains(
+                        "limit of 3000 values to group (2 for each of its 1500 cells, pivot_cells)"
+                    ),
+                "{error}"
+            );
+            assert_eq!(
+                shapes(&state, &sid).await,
+                [("long".to_string(), (300, 14))],
+                "the refused pivot changed the session's datasets"
+            );
+
+            // 230 rows hold 2,990 values: the pivot runs.
+            create(&app, &sid, "edge", &many_index_csv(230, 12)).await;
+            let (status, body) =
+                post_tool(&app, &sid, "munge_pivot", args("edge", "edge_wide")).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["success"], true, "{body}");
+            assert!(
+                shapes(&state, &sid)
+                    .await
+                    .contains(&("edge_wide".to_string(), (1, 242)))
+            );
+        });
+    }
+
     #[test]
     fn pivot_shapes_are_not_limited_when_off() {
         let cfg = local_config();

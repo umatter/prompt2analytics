@@ -235,22 +235,46 @@ const PIVOT_COLUMNS_HOSTED: usize = 10_000;
 /// Hosted [`Limits::pivot_cells`]. polars' pivot groups every row of the long table by its index
 /// and `on` values, then fills one buffer with every output cell (an `Option` of the value for
 /// numbers, an `AnyValue` otherwise) and builds the columns from it, so its peak memory grows
-/// with the rows it reads as well as with the cells it makes. It reads at most as many rows as
-/// it makes cells ([`Limits::check_pivot`] refuses a taller dataset), so at a given number of
-/// cells the dense pivot, one row for each pair of index values and `on` value, costs the most.
+/// with the rows it reads and the index and `on` values they hold as well as with the cells it
+/// makes. [`Limits::check_pivot`] refuses a long table with more rows than this, or with more
+/// than [`PIVOT_KEYS_PER_CELL`] times this of those values, so at a given number of cells the
+/// dense pivot with one index column, one row for each pair of index value and `on` value, costs
+/// the most.
 ///
-/// Measured on a release build of the hosted server, a fresh process for each measurement, a
-/// dense pivot of about 1,000,000 cells raised the peak RSS above the loaded long table by 150
-/// to 200 MiB for f64 values and by 195 to 260 MiB for string values (of 6, 20 and 45 bytes),
-/// as a 1,000 x 1,000, a 100 x 10,000 or a 9,900 x 101 wide table; about 2,000,000 cells raised
-/// it by 310 MiB for numbers and 415 MiB for strings. A sparse pivot, with far fewer rows than
-/// cells, costs about 25 bytes per cell for numbers and 65 for strings. At this value one pivot
-/// peaks at most about 260 MiB above what the session already holds, well under the 700 MiB
-/// soft limit of the hosted 1 GB machine, and a wide table of 100,000 rows and 10 columns, of
-/// 10,000 rows and 100 columns or of 1,000 rows and 1,000 columns still fits. The allocation
-/// ceiling (`P2A_MAX_ALLOC_MB`) bounds p2a-core's own buffers, not polars', so it does not
-/// apply to a pivot.
+/// Measured on a release build of the hosted server, in a fresh process, a dense pivot of about
+/// 1,000,000 cells raised the peak RSS above the loaded long table by 150 to 200 MiB for f64
+/// values and by 195 to 260 MiB for string values (of 6, 20 and 45 bytes), as a 1,000 x 1,000, a
+/// 100 x 10,000 or a 9,900 x 101 wide table; about 2,000,000 cells raised it by 310 MiB for
+/// numbers and 415 MiB for strings. A sparse pivot, with far fewer rows than cells, costs about
+/// 25 bytes per cell for numbers and 65 for strings. A process that has already freed large
+/// buffers, as a long-running server has, keeps more of a pivot's memory resident (glibc's malloc
+/// raises its mmap threshold as it frees them): there the 1,000 x 1,000 pivot peaked up to 252
+/// MiB with integer index and f64 values and up to 351 MiB with 45-byte strings as index and
+/// values. Dense pivots with more index columns, as many rows as the values to group allow,
+/// peaked lower in that state: 191, 176, 124, 111, 94 and 87 MiB with 2, 3, 5, 10, 20 and 40
+/// integer index columns, 169 to 290 MiB with string index columns of 20 or 45 bytes. For index
+/// and values of up to about 45 bytes, one pivot therefore peaks at most about 350 MiB above what
+/// the session already holds, so a session within its 200 MiB quota stays under the 700 MiB soft
+/// limit of the hosted 1 GB machine. Wider strings add up to about their own bytes, which polars
+/// copies (in a fresh process a 1,000 x 1,000 pivot of 150-byte string values peaked 303 MiB above
+/// the long table, of 150-byte index values 273 MiB); the session's dataset quota, not this
+/// budget, bounds those bytes. With one index column, a wide table of 100,000 rows and 10
+/// columns, of 10,000 rows and 100 columns or of 1,000 rows and 1,000 columns still fits. The
+/// allocation ceiling (`P2A_MAX_ALLOC_MB`) bounds p2a-core's own buffers, not polars', so it does
+/// not apply to a pivot.
 const PIVOT_CELLS_HOSTED: u64 = 1_000_000;
+
+/// Index and `on` values [`Limits::check_pivot`] lets a pivot group for each cell of
+/// [`Limits::pivot_cells`], in every profile that sets that budget. polars groups each row of
+/// the long table by its index and `on` values, one more than the index columns, and copies them
+/// to place each row, so a pivot with many index columns can read far more values than it makes
+/// cells (or than its rows, which the cell budget bounds), and a long table that repeats one pair
+/// in many rows makes a single cell until polars refuses it. At 2, what bounds a pivot with one
+/// index column is the rows of the long table alone, and a panel of 500,000 rows with three index
+/// columns still fits at the hosted cell budget. At this bound of the hosted budget, a long table
+/// repeating one pair under 100 index columns peaked under 50 MiB before polars refused it
+/// (measured as for the hosted `pivot_cells`).
+pub const PIVOT_KEYS_PER_CELL: u64 = 2;
 
 /// Number of families; the length of [`Family::ALL`].
 const FAMILY_COUNT: usize = Family::ALL.len();
@@ -404,7 +428,8 @@ pub struct Limits {
     /// column; checked by [`Limits::check_pivot`] before the pivot.
     pub pivot_columns: Option<usize>,
     /// Output cells of a pivot: its rows (one per distinct combination of the index columns)
-    /// times its columns, and at least the rows of the dataset it reads; checked by
+    /// times its columns, at least the rows of the dataset it reads, and at least half the index
+    /// and `on` values those rows hold ([`PIVOT_KEYS_PER_CELL`]); checked by
     /// [`Limits::check_pivot`] before the pivot.
     pub pivot_cells: Option<u64>,
     /// Parts produced by `str_split`.
@@ -1274,27 +1299,37 @@ impl Limits {
     /// is one value, as in the pivot); the rows are the distinct combinations of the index
     /// columns. Each row of `df` fills one cell, and a second row for the same cell makes the
     /// pivot fail, so a `df` with more rows than `pivot_cells` is refused before anything is
-    /// counted. The distinct values are then counted in hash maps that stop at the first count
-    /// no budget can pass (`distinct::count`): counting takes memory in proportion to the
-    /// budgets, not to the rows of `df`, and a refusal returns as soon as it is certain, giving
-    /// that count as a lower bound (`at least`).
+    /// counted. So is one whose rows hold more index and `on` values than
+    /// [`PIVOT_KEYS_PER_CELL`] times `pivot_cells` (its rows times one more than the index
+    /// columns): polars groups, and copies, all of them, however few cells they make. The
+    /// distinct values are then counted in hash maps that stop at the first count no budget can
+    /// pass (`distinct::count`), one map of at most that many entries at a time, plus one number
+    /// per row of `df` when there are several index columns, and a refusal returns as soon as it
+    /// is certain, giving that count as a lower bound (`at least`).
     ///
     /// Arguments of another shape, an empty index and a column `df` lacks (an index column, `on`
     /// or the values column) pass, so that serde or the core refuses them as usual. A column
     /// whose distinct values cannot be counted is refused, so that the check fails closed. The
-    /// refusal names `on` for the column budget, and for the cell budget the dataset field when
-    /// `df` alone has too many rows, `index` otherwise.
+    /// refusal names `on` for the column budget. For the cell budget it names the dataset field
+    /// when `df` alone has too many rows, `index` when the index columns make too many values to
+    /// group or, counted, too many rows, and `on` when its distinct values alone make too many
+    /// columns for one row (`index` when the index columns alone do).
+    ///
+    /// On the governed paths (the HTTP route, the LLM tool loop and websocket) this runs on the
+    /// governor's blocking thread, within the call's slot and deadline; over stdio it runs on the
+    /// request's task, as the handler that pivots does.
     pub fn check_pivot(
         &self,
         rule: &PivotRule,
         args: &Value,
         df: &DataFrame,
     ) -> Result<(), LimitViolation> {
+        let columns_cap = self.pivot_columns.map(|cap| cap as u64);
         // The budget the count of `on` values serves: the column budget, or else the cell
         // budget, which needs the columns too.
-        let on_budget = match (self.pivot_columns, self.pivot_cells) {
+        let on_budget = match (columns_cap, self.pivot_cells) {
             (None, None) => return Ok(()),
-            (Some(cap), _) => ("pivot_columns", cap as u64),
+            (Some(cap), _) => ("pivot_columns", cap),
             (None, Some(cap)) => ("pivot_cells", cap),
         };
         let Some(request) = PivotRequest::read(rule, args) else {
@@ -1313,30 +1348,52 @@ impl Limits {
         let index_columns = request.index.len() as u64;
         let height = df.height() as u64;
 
-        if let Some(cap) = self.pivot_cells
-            && height > cap
-        {
-            return Err(LimitViolation {
-                message: format!(
-                    "The dataset has {height} rows, and `{tool}` fills one cell of the wide \
-                     table from each row (one row for each pair of `index` values and `on` \
-                     value), so it would make at least {height} cells, which exceeds this \
-                     server's limit of {cap} cells (pivot_cells). Pivot fewer rows, for example \
-                     after munge_filter or munge_sample; where a pair has several rows, \
-                     aggregate them first with munge_group_by."
-                ),
-                tool: tool.to_string(),
-                parameter: rule.dataset_field.to_string(),
-                requested: distinct::Count::at_least(height).to_string(),
-                limit: cap.to_string(),
-                override_key: "pivot_cells",
-            });
+        if let Some(cap) = self.pivot_cells {
+            if height > cap {
+                return Err(LimitViolation {
+                    message: format!(
+                        "The dataset has {height} rows, and `{tool}` fills one cell of the wide \
+                         table from each row (one row for each pair of `index` values and `on` \
+                         value), so it would make at least {height} cells, which exceeds this \
+                         server's limit of {cap} cells (pivot_cells). Pivot fewer rows, for \
+                         example after munge_filter or munge_sample; where a pair has several \
+                         rows, aggregate them first with munge_group_by."
+                    ),
+                    tool: tool.to_string(),
+                    parameter: rule.dataset_field.to_string(),
+                    requested: distinct::Count::at_least(height).to_string(),
+                    limit: cap.to_string(),
+                    override_key: "pivot_cells",
+                });
+            }
+            // With one index column this is the row check above; with more, each row adds
+            // another value to group.
+            let keys = height.saturating_mul(index_columns + 1);
+            let keys_cap = cap.saturating_mul(PIVOT_KEYS_PER_CELL);
+            if keys > keys_cap {
+                return Err(LimitViolation {
+                    message: format!(
+                        "The dataset has {height} rows, and `{tool}` groups each row by its \
+                         {index_columns} `index` values and its `on` value, {keys} values in all, \
+                         which exceeds this server's limit of {keys_cap} values to group \
+                         ({PIVOT_KEYS_PER_CELL} for each of its {cap} cells, pivot_cells). Name \
+                         fewer `index` columns (one that identifies each row is enough; join the \
+                         others back afterwards with munge_join), or pivot fewer rows, for \
+                         example after munge_filter or munge_sample."
+                    ),
+                    tool: tool.to_string(),
+                    parameter: "index".to_string(),
+                    requested: keys.to_string(),
+                    limit: keys_cap.to_string(),
+                    override_key: "pivot_cells",
+                });
+            }
         }
 
         // Count the `on` values up to the first count that cannot pass: one that makes more
         // columns than pivot_columns, or more cells than pivot_cells, since a dataset with an
         // `on` value has at least one row.
-        let stop = [self.pivot_columns.map(|cap| cap as u64), self.pivot_cells]
+        let stop = [columns_cap, self.pivot_cells]
             .into_iter()
             .flatten()
             .map(|cap| cap.saturating_sub(index_columns).saturating_add(1))
@@ -1345,7 +1402,7 @@ impl Limits {
         let on_values = distinct::count(df, &[request.on], stop)
             .map_err(|e| uncountable(tool, "on", on, on_budget, &e))?;
         let columns = on_values.plus(index_columns);
-        if let Some(cap) = self.pivot_columns.map(|cap| cap as u64)
+        if let Some(cap) = columns_cap
             && columns.n > cap
         {
             return Err(LimitViolation {
@@ -1367,6 +1424,38 @@ impl Limits {
         let Some(cap) = self.pivot_cells else {
             return Ok(());
         };
+        // A count that stopped short stopped at the cell budget's bound (the column budget's
+        // refused above): one row of the wide table would already have more cells than the cap.
+        if !on_values.exact {
+            let (parameter, message) = if index_columns >= cap {
+                let message = format!(
+                    "Parameter `index` names {index_columns} columns, so `{tool}` would make \
+                     {columns} output columns (with one for each distinct value of the `on` \
+                     column `{on}`), and each row of the wide table as many cells, which exceeds \
+                     this server's limit of {cap} cells (pivot_cells). Name fewer `index` \
+                     columns."
+                );
+                ("index", message)
+            } else {
+                let message = format!(
+                    "Parameter `on` names column `{on}`, which has {on_values} distinct values, \
+                     so `{tool}` would make {columns} output columns (index columns included), \
+                     and each row of the wide table as many cells, which exceeds this server's \
+                     limit of {cap} cells (pivot_cells). Pivot a column with fewer distinct \
+                     values, or first keep only the rows whose `{on}` values you need, for \
+                     example with munge_filter."
+                );
+                ("on", message)
+            };
+            return Err(LimitViolation {
+                message,
+                tool: tool.to_string(),
+                parameter: parameter.to_string(),
+                requested: columns.to_string(),
+                limit: cap.to_string(),
+                override_key: "pivot_cells",
+            });
+        }
         // The rows are at most the dataset's height; count them only when that could not pass,
         // up to the first count that cannot (`columns.n` is at least 1, the index column).
         if height.saturating_mul(columns.n) <= cap {
@@ -1383,10 +1472,11 @@ impl Limits {
         if cells.n <= cap {
             return Ok(());
         }
+        let row_noun = if rows.n == 1 { "row" } else { "rows" };
         Err(LimitViolation {
             message: format!(
-                "`{tool}` would make {rows} rows (one per distinct combination of the `index` \
-                 columns {index_echo}) by {columns} columns (the `on` column `{on}` has \
+                "`{tool}` would make {rows} {row_noun} (one per distinct combination of the \
+                 `index` columns {index_echo}) by {columns} columns (the `on` column `{on}` has \
                  {on_values} distinct values), {cells} cells, which exceeds this server's limit \
                  of {cap} cells (pivot_cells). Pivot fewer rows or fewer `on` values, for example \
                  after munge_filter or munge_sample."
@@ -2647,7 +2737,7 @@ mod tests {
     mod pivot_budgets {
         use super::super::*;
         use p2a_core::data::{Dataset, munging::pivot};
-        use p2a_core::polars::prelude::{DataFrame, PolarsError, df};
+        use p2a_core::polars::prelude::{Column, DataFrame, NamedFrom, PolarsError, Series, df};
         use serde_json::json;
 
         fn rule() -> &'static PivotRule {
@@ -2800,28 +2890,148 @@ mod tests {
             assert_eq!(v.override_key, "pivot_cells");
             assert_eq!(v.requested, "at least 20");
             // Too many `on` values for the cell budget alone stop the count of the `on` values:
-            // the dataset has a row, so the wide table at least one.
+            // the dataset has a row, so the wide table at least one. The refusal names `on`,
+            // the parameter to change, without counting the rows.
             let wide = long(1, 12);
             assert_eq!(pivoted(&wide, &["idx"]), (1, 13));
             let v = with("pivot_columns=none,pivot_cells=12")
                 .check_pivot(rule(), &args(&["idx"]), &wide)
                 .unwrap_err();
             assert_eq!(
-                (v.parameter.as_str(), v.requested.as_str()),
-                ("index", "at least 13")
-            );
-            assert!(
-                v.message.contains(
-                    "by at least 13 columns (the `on` column `key` has at least \
-                     12 distinct values)"
+                (
+                    v.parameter.as_str(),
+                    v.requested.as_str(),
+                    v.limit.as_str(),
+                    v.override_key
                 ),
-                "{}",
-                v.message
+                ("on", "at least 13", "12", "pivot_cells")
+            );
+            assert_eq!(
+                v.message,
+                "Parameter `on` names column `key`, which has at least 12 distinct values, so \
+                 `munge_pivot` would make at least 13 output columns (index columns included), \
+                 and each row of the wide table as many cells, which exceeds this server's limit \
+                 of 12 cells (pivot_cells). Pivot a column with fewer distinct values, or first \
+                 keep only the rows whose `key` values you need, for example with munge_filter."
+            );
+            // The same with a column budget above the cell budget.
+            let v = with("pivot_columns=100,pivot_cells=12")
+                .check_pivot(rule(), &args(&["idx"]), &wide)
+                .unwrap_err();
+            assert_eq!(
+                (v.parameter.as_str(), v.override_key),
+                ("on", "pivot_cells")
             );
             assert!(
                 with("pivot_columns=none,pivot_cells=13")
                     .check_pivot(rule(), &args(&["idx"]), &wide)
                     .is_ok()
+            );
+            // Where the index columns alone fill the cell budget, the refusal names `index`.
+            let df = df!(
+                "a" => [1i64], "b" => [2i64], "c" => [3i64], "key" => ["k"], "val" => [0.7]
+            )
+            .unwrap();
+            assert_eq!(pivoted(&df, &["a", "b", "c"]), (1, 4));
+            let v = with("pivot_columns=none,pivot_cells=3")
+                .check_pivot(rule(), &args(&["a", "b", "c"]), &df)
+                .unwrap_err();
+            assert_eq!(
+                (v.parameter.as_str(), v.requested.as_str(), v.limit.as_str()),
+                ("index", "at least 4", "3")
+            );
+            assert!(
+                v.message
+                    .starts_with("Parameter `index` names 3 columns, so `munge_pivot` would make"),
+                "{}",
+                v.message
+            );
+            assert!(
+                with("pivot_columns=none,pivot_cells=4")
+                    .check_pivot(rule(), &args(&["a", "b", "c"]), &df)
+                    .is_ok()
+            );
+        }
+
+        #[test]
+        fn the_row_noun_follows_the_count() {
+            // Two rows by 5 columns, 10 cells, refused at 9.
+            let df = long(2, 4);
+            assert_eq!(pivoted(&df, &["idx"]), (2, 5));
+            let v = with("pivot_cells=9")
+                .check_pivot(rule(), &args(&["idx"]), &df)
+                .unwrap_err();
+            assert!(
+                v.message
+                    .starts_with("`munge_pivot` would make at least 2 rows (one per distinct"),
+                "{}",
+                v.message
+            );
+        }
+
+        #[test]
+        fn many_index_columns_are_refused_before_counting_when_they_hold_too_many_values() {
+            // Nine index columns that never change and a `key` value of its own in every row:
+            // a wide table of one row and 9 + `rows` columns, few cells, from a long table whose
+            // rows hold 10 values each for polars to group.
+            let index: Vec<String> = (0..9).map(|j| format!("i{j}")).collect();
+            let index: Vec<&str> = index.iter().map(String::as_str).collect();
+            let table = |rows: usize| {
+                let mut columns: Vec<Column> = index
+                    .iter()
+                    .map(|name| Series::new((*name).into(), vec![0i64; rows]).into())
+                    .collect();
+                let key: Vec<String> = (0..rows).map(|i| format!("k{i}")).collect();
+                let val: Vec<f64> = (0..rows).map(|i| i as f64 * 0.37 + 0.11).collect();
+                columns.push(Series::new("key".into(), key).into());
+                columns.push(Series::new("val".into(), val).into());
+                DataFrame::new(columns).unwrap()
+            };
+            let limits = with("pivot_cells=20");
+            // 4 rows hold 40 values, twice the 20 cells: the boundary passes, and the pivot
+            // makes 1 x 13 = 13 cells.
+            let edge = table(4);
+            assert_eq!(pivoted(&edge, &index), (1, 13));
+            assert!(limits.check_pivot(rule(), &args(&index), &edge).is_ok());
+            // 5 rows hold 50 values: refused before counting, although the pivot would make
+            // only 14 cells from 5 rows, both within the cell budget.
+            let over = table(5);
+            assert_eq!(pivoted(&over, &index), (1, 14));
+            let v = limits
+                .check_pivot(rule(), &args(&index), &over)
+                .unwrap_err();
+            assert_eq!(
+                (
+                    v.tool.as_str(),
+                    v.parameter.as_str(),
+                    v.requested.as_str(),
+                    v.limit.as_str(),
+                    v.override_key
+                ),
+                ("munge_pivot", "index", "50", "40", "pivot_cells")
+            );
+            assert_eq!(
+                v.message,
+                "The dataset has 5 rows, and `munge_pivot` groups each row by its 9 `index` \
+                 values and its `on` value, 50 values in all, which exceeds this server's limit \
+                 of 40 values to group (2 for each of its 20 cells, pivot_cells). Name fewer \
+                 `index` columns (one that identifies each row is enough; join the others back \
+                 afterwards with munge_join), or pivot fewer rows, for example after munge_filter \
+                 or munge_sample."
+            );
+            // A long table repeating one pair, which the pivot refuses after grouping all of
+            // its values, is refused the same way.
+            let mut repeated = table(5);
+            repeated
+                .with_column(Series::new("key".into(), vec!["k"; 5]))
+                .unwrap();
+            assert!(pivot(&Dataset::new(repeated.clone()), &index, "key", "val").is_err());
+            assert_eq!(
+                limits
+                    .check_pivot(rule(), &args(&index), &repeated)
+                    .unwrap_err()
+                    .parameter,
+                "index"
             );
         }
 
