@@ -555,8 +555,7 @@ impl DbConnection {
         run_to_end(turn, async move {
             // With the `session_db_bytes` budget: the session the content
             // counts against, and the bytes of the content it replaces.
-            let mut counted = None;
-            if db.tracks_session_bytes() {
+            let counted = if db.tracks_session_bytes() {
                 // Read again in the turn: a clear that ran before it took the
                 // message, and its bytes must not be counted for a write that
                 // finds no row. The content it replaces is room for the new
@@ -566,8 +565,10 @@ impl DbConnection {
                 let replaced = stored.content.len() as u64;
                 db.fit_session_texts(&session_id, &mut [&mut content], replaced)
                     .await?;
-                counted = Some((session_id, replaced));
-            }
+                Some((session_id, replaced))
+            } else {
+                None
+            };
             let mut result = db
                 .db()
                 .query("UPDATE messages SET content = $content WHERE id = $id RETURN AFTER")
@@ -582,8 +583,8 @@ impl DbConnection {
                     message_id
                 )));
             };
-            if let Some((session_id, replaced)) = &counted {
-                db.release_session_bytes(session_id, *replaced);
+            if let Some((session_id, replaced)) = counted {
+                db.release_session_bytes(&session_id, replaced);
             }
             db.update_conversation_after_message(&msg.conversation_id, &msg.content)
                 .await?;

@@ -110,8 +110,8 @@ impl DbConnection {
                 .await?;
             let updated =
                 result.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))?;
-            if let Some(session_id) = &session_id {
-                db.release_session_bytes(session_id, replaced);
+            if let Some(session_id) = session_id {
+                db.release_session_bytes(&session_id, replaced);
             }
             Ok(updated)
         })
@@ -184,8 +184,7 @@ impl DbConnection {
             };
             // With the `session_db_bytes` budget: the session the text counts
             // against, and the bytes of the stored text it replaces.
-            let mut counted = None;
-            if let Some((field, text)) = &mut text
+            let counted = if let Some((field, text)) = &mut text
                 && db.tracks_session_bytes()
             {
                 // Read again in the turn: a delete or clear that ran before
@@ -199,8 +198,10 @@ impl DbConnection {
                 let replaced = field.stored(&stored).map_or(0, |t| t.len() as u64);
                 db.fit_session_texts(&session_id, &mut [text], replaced)
                     .await?;
-                counted = Some((session_id, replaced));
-            }
+                Some((session_id, replaced))
+            } else {
+                None
+            };
 
             let query = match &text {
                 None => "UPDATE tool_calls SET status = $status WHERE id = $id RETURN AFTER",
@@ -233,8 +234,8 @@ impl DbConnection {
             let updated: Option<ToolCall> = result.take(0)?;
             let updated =
                 updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))?;
-            if let Some((session_id, replaced)) = &counted {
-                db.release_session_bytes(session_id, *replaced);
+            if let Some((session_id, replaced)) = counted {
+                db.release_session_bytes(&session_id, replaced);
             }
             Ok(updated)
         })
