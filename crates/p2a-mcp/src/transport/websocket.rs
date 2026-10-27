@@ -14,12 +14,17 @@
 //!   the message cap in bytes; one more is refused with an `error` whose code
 //!   is `connection_busy`.
 //!
-//! What an answer echoes of a message is short, so the answers queued for a
-//! client that does not read stay small whatever it sends: an `id` may be at
-//! most [`MAX_ID_BYTES`] long (a message with a longer one is refused, and
-//! such a refusal, like any answer that has no id to echo, carries the id
-//! `system`), and a parse error gives serde's message, which quotes the
-//! message, cut at [`MAX_QUOTE_BYTES`].
+//! An answer echoes at most [`MAX_ID_BYTES`] of a message's `id`: a message
+//! with a longer one is refused, and that refusal, like any answer that has
+//! no id to echo, carries the id `system`.
+//! A parse error, and a tool's refusal of arguments that do not deserialise,
+//! give serde's message, which quotes the offending value, cut to
+//! [`MAX_QUOTE_BYTES`](crate::server::MAX_QUOTE_BYTES) of it
+//! ([`quote_cut`]). Nothing else is cut here: a
+//! tool's own error or result can still quote argument values, such as a
+//! dataset or column name, in full (a result can hold such a quote twice,
+//! in its content and in its `error`), up to the size of the message and,
+//! for a result where a `response_bytes` cap is set, that cap.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -42,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::exec::{CallOrigin, ToolGovernor};
-use crate::server::AnalyticsServer;
+use crate::server::{AnalyticsServer, quote_cut};
 use crate::session::{Session, SessionError, SessionManager};
 use crate::transport::http::ToolResult;
 
@@ -81,13 +86,8 @@ impl ClientMessage {
 }
 
 /// The longest `id` a client message may have, in bytes. Every answer to a
-/// message carries its id, so this keeps the answers queued for a client
-/// that does not read them small, however long the messages it sends.
+/// message carries its id, so this keeps the id part of every answer short.
 const MAX_ID_BYTES: usize = 256;
-
-/// How much of serde's message a parse error gives, in bytes: serde quotes
-/// an unknown `type` or a mistyped string in full.
-const MAX_QUOTE_BYTES: usize = 256;
 
 /// The id an answer to a message carries: the message's own when it has
 /// one of at most [`MAX_ID_BYTES`], `system` otherwise.
@@ -106,23 +106,11 @@ fn id_too_long(id: &str) -> String {
     )
 }
 
-/// The refusal of a message that is not a client message, with what serde
-/// quotes of it cut to [`MAX_QUOTE_BYTES`].
+/// The refusal of a message that is not a client message, with serde's
+/// message cut by [`quote_cut`]: the end it keeps says what serde expected
+/// and where it stopped.
 fn invalid_format(e: &serde_json::Error) -> String {
-    let said = e.to_string();
-    if said.len() <= MAX_QUOTE_BYTES {
-        return format!("Invalid message format: {said}");
-    }
-    let mut end = MAX_QUOTE_BYTES;
-    while !said.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "Invalid message format: {}... (cut; at line {} column {})",
-        &said[..end],
-        e.line(),
-        e.column()
-    )
+    format!("Invalid message format: {}", quote_cut(e))
 }
 
 /// WebSocket message types from server to client.
@@ -601,6 +589,7 @@ async fn handle_client_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::MAX_QUOTE_BYTES;
 
     #[test]
     fn test_client_message_parsing() {
@@ -1083,7 +1072,8 @@ mod tests {
     }
 
     /// serde quotes an unknown `type` in full; the parse error sent back cuts
-    /// the quote (here inside a two-byte character) and keeps the position.
+    /// the quote (here between two-byte characters) and keeps its end, which
+    /// says what was expected and where.
     #[tokio::test]
     async fn a_parse_error_quotes_the_message_cut() {
         let (mut state, _session, tx, mut rx) = authenticated(Default::default()).await;
@@ -1097,7 +1087,15 @@ mod tests {
                     message.starts_with("Invalid message format: unknown variant `éé"),
                     "{message}"
                 );
-                assert!(message.contains("... (cut; at line 1 column"), "{message}");
+                assert!(message.contains(" bytes cut ...]éé"), "{message}");
+                let (said, column) = message
+                    .rsplit_once(" at line 1 column ")
+                    .unwrap_or_else(|| panic!("no position: {message}"));
+                assert!(
+                    said.ends_with("éé`, expected one of `auth`, `tool`, `chat`, `ping`"),
+                    "{message}"
+                );
+                assert!(column.parse::<usize>().is_ok(), "{message}");
                 assert!(
                     message.len() < 2 * MAX_QUOTE_BYTES,
                     "{} bytes",
@@ -1114,11 +1112,42 @@ mod tests {
                     message.starts_with("Invalid message format: unknown variant `nonsense`"),
                     "{message}"
                 );
-                assert!(!message.contains("(cut;"), "{message}");
+                assert!(!message.contains(" cut ...]"), "{message}");
                 assert!(message.contains(" at line 1 column "), "{message}");
             }
             other => panic!("expected a parse error, got {other:?}"),
         }
+    }
+
+    /// A tool message whose argument does not deserialise is refused with
+    /// serde's message, which quotes the value: the refusal gives it cut.
+    #[tokio::test]
+    async fn an_argument_parse_error_quotes_the_value_cut() {
+        let (mut state, session, tx, mut rx) = authenticated(Default::default()).await;
+        let text = json!({"type": "tool", "id": "t1", "name": "set_seed",
+            "args": {"seed": "7".repeat(100_000)}})
+        .to_string();
+        handle_text(&mut state, &text, &tx).await;
+        match rx.recv().await {
+            Some(ServerMessage::Error { id, message, code }) => {
+                assert_eq!(id, "t1");
+                assert_eq!(code.as_deref(), Some("invalid_arguments"));
+                assert!(
+                    message.starts_with(
+                        "Failed to parse arguments for 'set_seed': invalid type: string \"777"
+                    ),
+                    "{message}"
+                );
+                assert!(message.ends_with("777\", expected u64"), "{message}");
+                assert!(
+                    message.len() < 2 * MAX_QUOTE_BYTES,
+                    "{} bytes",
+                    message.len()
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(*session.global_seed.read().await, None, "set_seed ran");
     }
 
     type Client = tokio_tungstenite::WebSocketStream<

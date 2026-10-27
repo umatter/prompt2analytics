@@ -847,6 +847,8 @@ impl AnalyticsServer {
         // Macro to reduce boilerplate for dispatching to tool handler methods.
         // Each arm deserializes the JSON arguments into the correct request type
         // and calls the corresponding async method on the session server.
+        // serde's message quotes a mistyped value in full, so the refusal
+        // gives it cut (`quote_cut`).
         macro_rules! dispatch {
             ($name:literal => no_params => $method:ident) => {
                 if tool_name == $name {
@@ -862,7 +864,8 @@ impl AnalyticsServer {
                     let request: $req = serde_json::from_value(arguments.clone()).map_err(|e| {
                         ToolCallError::InvalidArguments(format!(
                             "Failed to parse arguments for '{}': {}",
-                            tool_name, e
+                            tool_name,
+                            quote_cut(&e)
                         ))
                     })?;
                     let result = session_server
@@ -1468,6 +1471,119 @@ fn log_and_convert(v: LimitViolation) -> crate::exec::ToolCallError {
     crate::exec::ToolCallError::from(v)
 }
 
+/// The most of a parser's message that an error gives back, in bytes. serde
+/// quotes a mistyped string or an unknown variant in full, and that string
+/// is the caller's: as long as a request body or a websocket message.
+#[cfg(feature = "http")]
+pub(crate) const MAX_QUOTE_BYTES: usize = 256;
+
+/// How many of [`MAX_QUOTE_BYTES`] a cut message keeps of its end, where
+/// serde says what it expected and, for a parse error, where it stopped.
+#[cfg(feature = "http")]
+const QUOTE_TAIL_BYTES: usize = 96;
+
+/// How many of [`MAX_QUOTE_BYTES`] a cut message keeps of its start.
+#[cfg(feature = "http")]
+const QUOTE_HEAD_BYTES: usize = MAX_QUOTE_BYTES - QUOTE_TAIL_BYTES;
+
+/// The text of `message` when it is at most [`MAX_QUOTE_BYTES`] long.
+/// A longer one gives its first [`QUOTE_HEAD_BYTES`] and its last
+/// [`QUOTE_TAIL_BYTES`] (each cut at a char boundary, so possibly fewer)
+/// around a note of how many bytes were left out. The text is written into
+/// a buffer of that size, never built whole.
+#[cfg(feature = "http")]
+pub(crate) fn quote_cut(message: &dyn std::fmt::Display) -> String {
+    let mut ends = QuoteEnds::default();
+    // Writing to `QuoteEnds` never fails; a `Display` that fails anyway
+    // leaves what it wrote before.
+    let _ = std::fmt::write(&mut ends, format_args!("{message}"));
+    ends.finish()
+}
+
+/// The longest end of `s` of at most `n` bytes that starts at a char
+/// boundary.
+#[cfg(feature = "http")]
+fn last_bytes(s: &str, n: usize) -> &str {
+    let mut start = s.len().saturating_sub(n);
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
+}
+
+/// The `fmt::Write` behind [`quote_cut`]: keeps a message whole while it
+/// fits in [`MAX_QUOTE_BYTES`], and then only its start and its end.
+#[cfg(feature = "http")]
+#[derive(Default)]
+struct QuoteEnds {
+    /// The message while it fits; its start once it did not.
+    head: String,
+    /// The last bytes written, once the message did not fit.
+    tail: String,
+    /// Whether the message did not fit.
+    cut: bool,
+    /// How many bytes were written in all.
+    written: usize,
+}
+
+#[cfg(feature = "http")]
+impl QuoteEnds {
+    /// Append `s` to the tail, which keeps its last [`QUOTE_TAIL_BYTES`].
+    fn push_tail(&mut self, s: &str) {
+        if s.len() >= QUOTE_TAIL_BYTES {
+            self.tail.clear();
+            self.tail.push_str(last_bytes(s, QUOTE_TAIL_BYTES));
+            return;
+        }
+        self.tail.push_str(s);
+        let keep = last_bytes(&self.tail, QUOTE_TAIL_BYTES).len();
+        let drop = self.tail.len() - keep;
+        self.tail.drain(..drop);
+    }
+
+    fn finish(self) -> String {
+        if !self.cut {
+            return self.head;
+        }
+        let left_out = self.written - self.head.len() - self.tail.len();
+        let unit = if left_out == 1 { "byte" } else { "bytes" };
+        format!("{}[... {left_out} {unit} cut ...]{}", self.head, self.tail)
+    }
+}
+
+#[cfg(feature = "http")]
+impl std::fmt::Write for QuoteEnds {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.written = self.written.saturating_add(s.len());
+        if self.cut {
+            self.push_tail(s);
+            return Ok(());
+        }
+        if self.head.len() + s.len() <= MAX_QUOTE_BYTES {
+            self.head.push_str(s);
+            return Ok(());
+        }
+        // It does not fit: keep the start in `head` and the end in `tail`.
+        self.cut = true;
+        if self.head.len() > QUOTE_HEAD_BYTES {
+            let mut end = QUOTE_HEAD_BYTES;
+            while !self.head.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.tail = self.head.split_off(end);
+            self.push_tail(s);
+        } else {
+            let mut end = QUOTE_HEAD_BYTES - self.head.len();
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.head.push_str(&s[..end]);
+            self.push_tail(&s[end..]);
+        }
+        Ok(())
+    }
+}
+
 // ============================================================================
 // ServerHandler Implementation
 // ============================================================================
@@ -1780,6 +1896,131 @@ mod tests {
             .await
             .expect_err("an unknown tool ran");
         assert_eq!(e.to_string(), "Unknown tool: no_such_tool");
+    }
+
+    /// Splits what `quote_cut` made of a cut message into its start, the
+    /// number of bytes it left out and its end.
+    #[cfg(feature = "http")]
+    fn quote_parts(quoted: &str) -> (&str, usize, &str) {
+        let (head, rest) = quoted.split_once("[... ").expect("not cut");
+        let (count, tail) = rest.split_once(" cut ...]").expect("not cut");
+        let count = count.trim_end_matches(" bytes").trim_end_matches(" byte");
+        (head, count.parse().unwrap(), tail)
+    }
+
+    /// A message of at most `MAX_QUOTE_BYTES` is given whole; a longer one
+    /// gives its start and its end and how many bytes it left out.
+    #[cfg(feature = "http")]
+    #[test]
+    fn quote_cut_keeps_the_two_ends_of_a_long_message() {
+        let fits = "a".repeat(MAX_QUOTE_BYTES);
+        assert_eq!(quote_cut(&fits), fits);
+        let over = format!("{fits}b");
+        assert_eq!(
+            quote_cut(&over),
+            format!(
+                "{}[... 1 byte cut ...]{}b",
+                "a".repeat(QUOTE_HEAD_BYTES),
+                "a".repeat(QUOTE_TAIL_BYTES - 1)
+            )
+        );
+        let long = format!("start{}end", "m".repeat(100_000));
+        let quoted = quote_cut(&long);
+        let (head, left_out, tail) = quote_parts(&quoted);
+        assert_eq!(head.len(), QUOTE_HEAD_BYTES);
+        assert_eq!(tail.len(), QUOTE_TAIL_BYTES);
+        assert!(
+            head.starts_with("start") && tail.ends_with("end"),
+            "{quoted}"
+        );
+        assert_eq!(left_out, long.len() - MAX_QUOTE_BYTES);
+    }
+
+    /// Both ends are cut at char boundaries (here inside a three-byte
+    /// character), so they may keep fewer bytes; what is left out is
+    /// counted exactly.
+    #[cfg(feature = "http")]
+    #[test]
+    fn quote_cut_cuts_at_char_boundaries() {
+        let long = format!("xx{}", "€".repeat(200));
+        let quoted = quote_cut(&long);
+        let (head, left_out, tail) = quote_parts(&quoted);
+        assert!(long.starts_with(head) && long.ends_with(tail), "{quoted}");
+        assert!(head.len() < QUOTE_HEAD_BYTES, "{} bytes", head.len());
+        assert!(tail.len() <= QUOTE_TAIL_BYTES, "{} bytes", tail.len());
+        assert_eq!(head.len() + left_out + tail.len(), long.len());
+    }
+
+    /// A `Display` that writes its text in pieces of `self.1` characters.
+    #[cfg(feature = "http")]
+    struct InPieces<'a>(&'a str, usize);
+
+    #[cfg(feature = "http")]
+    impl std::fmt::Display for InPieces<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let chars: Vec<char> = self.0.chars().collect();
+            for piece in chars.chunks(self.1) {
+                f.write_str(&piece.iter().collect::<String>())?;
+            }
+            Ok(())
+        }
+    }
+
+    /// The cut does not depend on how the message is written: one piece,
+    /// or many that fill the start and then the end.
+    #[cfg(feature = "http")]
+    #[test]
+    fn quote_cut_is_the_same_however_the_message_is_written() {
+        for text in [
+            "a".repeat(MAX_QUOTE_BYTES),
+            format!("é{}", "a".repeat(MAX_QUOTE_BYTES)),
+            format!("head {} tail", "€é".repeat(1_000)),
+        ] {
+            let whole = quote_cut(&text);
+            for piece in [1, 2, 7, 50, 97, 300, 10_000] {
+                assert_eq!(
+                    quote_cut(&InPieces(&text, piece)),
+                    whole,
+                    "pieces of {piece}"
+                );
+            }
+        }
+    }
+
+    /// serde quotes a mistyped string argument in full: the refusal gives it
+    /// cut, and keeps the end, where serde says what it expected.
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn an_argument_parse_error_quotes_the_value_cut() {
+        use crate::exec::ToolCallError;
+        let session = crate::session::Session::new("parse".into(), None);
+        let server = AnalyticsServer::with_session(&session);
+        let seed = "7".repeat(100_000);
+        let e = server
+            .call_tool_with_session("set_seed", serde_json::json!({ "seed": seed }), &session)
+            .await
+            .expect_err("a string seed ran");
+        let ToolCallError::InvalidArguments(m) = &e else {
+            panic!("{e:?}")
+        };
+        assert!(
+            m.starts_with("Failed to parse arguments for 'set_seed': invalid type: string \"777"),
+            "{m}"
+        );
+        assert!(m.contains(" bytes cut ...]"), "{m}");
+        assert!(m.ends_with("777\", expected u64"), "{m}");
+        assert!(m.len() < 2 * MAX_QUOTE_BYTES, "{} bytes", m.len());
+        assert_eq!(*session.global_seed.read().await, None, "set_seed ran");
+        // A short one is given whole.
+        let e = server
+            .call_tool_with_session("set_seed", serde_json::json!({"seed": "seven"}), &session)
+            .await
+            .expect_err("a string seed ran");
+        assert_eq!(
+            e.to_string(),
+            "Failed to parse arguments for 'set_seed': invalid type: string \"seven\", \
+             expected u64"
+        );
     }
 
     /// Helper to extract text from Content (Annotated<RawContent>)
