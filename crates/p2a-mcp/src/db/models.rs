@@ -364,7 +364,11 @@ pub struct DatasetMeta {
     pub row_count: i32,
     /// Number of columns
     pub column_count: i32,
-    /// Column names
+    /// Column names. A stored row keeps the dataset's first ones only, at
+    /// most [`MAX_STORED_COLUMN_NAMES`](super::MAX_STORED_COLUMN_NAMES) of
+    /// them and [`MAX_STORED_COLUMN_NAME_BYTES`](super::MAX_STORED_COLUMN_NAME_BYTES)
+    /// bytes ([`DbConnection::save_dataset_meta`](super::DbConnection::save_dataset_meta)),
+    /// so a wide dataset has fewer names than `column_count`.
     pub column_names: Vec<String>,
     /// When the dataset was loaded
     pub loaded_at: Datetime,

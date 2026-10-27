@@ -139,7 +139,7 @@ A directory listing inside the server's data root. Registered as `GET /api/sessi
 GET /api/sessions/{session_id}/datasets
 ```
 
-The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404.
+The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404. `column_names` holds the dataset's first column names, at most 1,000 of them and 64 KiB; `column_count` is its full width. The rows count against the session's `session_db_bytes`; a dataset whose row would pass it has no row here.
 
 **Response** (captured):
 ```json
@@ -520,7 +520,7 @@ Limits on what a session stores (hosted values; [DEPLOYMENT.md](docs/guides/DEPL
 
 - a message, title or settings string longer than `message_bytes` (262,144 bytes) answers 413 `payload_too_large`;
 - more than `conversations_per_session` (50) conversations or `messages_per_conversation` (1,000) messages answers 422 `quota_exceeded`;
-- `session_db_bytes` (16 MiB hosted, no limit when limits are off) caps the bytes one session's history holds (titles, message contents, tool-call arguments, results and errors): a client write past it answers 422 `quota_exceeded`, text the server produces is truncated to the room left, and deleting a conversation frees its bytes;
+- `session_db_bytes` (16 MiB hosted, no limit when limits are off) caps the bytes one session's history holds (titles, message contents, tool-call arguments, results and errors) together with its dataset metadata rows (each row's texts, kept column names included, plus 128 bytes): a client write past it answers 422 `quota_exceeded`, text the server produces is truncated to the room left, a dataset whose row would pass it is loaded but not listed in `GET /api/sessions/{id}/datasets`, and deleting a conversation frees its bytes;
 - while the server is low on memory, writes answer 503 `memory_pressure` with `Retry-After: 15`.
 
 Captured from an open public server:

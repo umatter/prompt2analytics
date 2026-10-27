@@ -6,8 +6,38 @@ use chrono::{DateTime, Utc};
 use surrealdb::RecordId;
 use surrealdb::sql::Datetime;
 
-use super::connection::{DbConnection, DbError};
+use super::connection::{DbConnection, DbError, failed_statement};
 use super::models::{DbSession, Settings, key_string};
+
+/// `f` on tokio's blocking pool inside a runtime (inline outside one); `Err`
+/// with the join error when it panicked there.
+async fn off_runtime<T, F>(f: F) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.spawn_blocking(f).await,
+        Err(_) => Ok(f()),
+    }
+}
+
+/// `path_jail::remove_stored_session_dir` for `id`, off the async runtime
+/// ([`off_runtime`]); a failure is logged. Nearly every deleted row is of a
+/// session whose directory was not kept, which the non-blocking
+/// `path_jail::is_kept_session_dir` settles without the blocking pool.
+async fn remove_stored_session_dir(id: &str) {
+    if !crate::path_jail::is_kept_session_dir(id) {
+        return;
+    }
+    let owned = id.to_string();
+    let removed = off_runtime(move || crate::path_jail::remove_stored_session_dir(&owned))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+    if let Err(e) = removed {
+        tracing::warn!(session_id = %id, error = %e, "Failed to remove a stored session's directory");
+    }
+}
 
 /// One row of `SELECT count() ... GROUP ALL`.
 #[derive(serde::Deserialize)]
@@ -265,14 +295,24 @@ pub(super) fn message_text_bytes(rows: &[MessageText]) -> u64 {
 
 /// UTF-8 bytes of the tool calls' arguments, results and errors.
 pub(super) fn tool_call_text_bytes(rows: &[ToolCallText]) -> u64 {
-    let len = |s: &str| s.len() as u64;
     rows.iter()
-        .map(|t| {
-            len(&t.arguments)
-                .saturating_add(t.result.as_deref().map_or(0, len))
-                .saturating_add(t.error.as_deref().map_or(0, len))
-        })
+        .map(|t| tool_call_texts_len(&t.arguments, t.result.as_deref(), t.error.as_deref()))
         .fold(0u64, u64::saturating_add)
+}
+
+/// The bytes of one tool call's texts that the `session_db_bytes` budget
+/// counts: its arguments, result and error. The one definition for both
+/// sides of the counter, the writes that count bytes and the seed and
+/// deletes that read what is stored, so the two cannot drift apart.
+pub(super) fn tool_call_texts_len(
+    arguments: &str,
+    result: Option<&str>,
+    error: Option<&str>,
+) -> u64 {
+    let len = |s: &str| s.len() as u64;
+    len(arguments)
+        .saturating_add(result.map_or(0, len))
+        .saturating_add(error.map_or(0, len))
 }
 
 impl DbConnection {
@@ -393,7 +433,8 @@ impl DbConnection {
         Ok(sessions)
     }
 
-    /// Delete a session and all associated data
+    /// Delete a session and all associated data, and then the data directory
+    /// a restart kept for it, if any (`path_jail::remove_stored_session_dir`).
     pub async fn delete_session(&self, id: &str) -> Result<(), DbError> {
         // The byte counter goes with the session: dropping it first spares
         // each conversation delete below from summing what it releases.
@@ -427,7 +468,53 @@ impl DbConnection {
         let _: Option<DbSession> = self.db().delete(("sessions", id)).await?;
         self.forget_session_bytes(id);
 
+        // Without its row the session can no longer be adopted, so the data
+        // directory a restart kept for it goes too. Only after the row: a
+        // failed delete leaves the session adoptable, with its files.
+        remove_stored_session_dir(id).await;
+
         Ok(())
+    }
+
+    /// Keep the data directories of the stored sessions that can still be
+    /// adopted ([`Self::adoptable_session_ids`]) through the first-use purge
+    /// of stale session directories (`path_jail::keep_session_dirs`): at
+    /// most `max_kept` directories, those of the most recently accessed
+    /// sessions that have one. The server calls this once at startup, before
+    /// it takes requests, with `P2A_MAX_SESSIONS`: the store also holds the
+    /// rows of the sessions kept at earlier restarts within the TTL, so
+    /// without the cap every restart would keep more directories. Sessions
+    /// that never used files hold no directory and so take none of the
+    /// places. Returns the ids kept, the most recently accessed first.
+    pub async fn keep_adoptable_session_dirs(
+        &self,
+        ttl_minutes: u64,
+        max_kept: usize,
+    ) -> Result<Vec<String>, DbError> {
+        let ids = self.adoptable_session_ids(ttl_minutes).await?;
+        // A look at up to every adoptable session's directory: off the
+        // async runtime.
+        off_runtime(move || crate::path_jail::keep_session_dirs(&ids, max_kept))
+            .await
+            .map_err(|e| DbError::Query(format!("cannot keep the session directories: {e}")))
+    }
+
+    /// Ids of the stored sessions that can still be adopted, those whose row
+    /// was accessed within `ttl_minutes` (the rule
+    /// `PersistentSessionManager::get_session` adopts by), the most recently
+    /// accessed first.
+    pub async fn adoptable_session_ids(&self, ttl_minutes: u64) -> Result<Vec<String>, DbError> {
+        let now = Utc::now();
+        let mut rows = self.list_sessions().await?;
+        // Most recently accessed first, whatever order the query returned.
+        rows.sort_by_cached_key(|row| std::cmp::Reverse(row.last_accessed_chrono()));
+        Ok(rows
+            .iter()
+            .filter(|row| {
+                !crate::session::is_past_ttl(row.last_accessed_chrono(), now, ttl_minutes)
+            })
+            .map(DbSession::id_string)
+            .collect())
     }
 
     /// Ids of the session rows whose `last_accessed` is before `cutoff`.
@@ -455,20 +542,25 @@ impl DbConnection {
         Ok(count.map_or(0, |c| usize::try_from(c.count).unwrap_or(0)))
     }
 
-    /// Bytes the session's conversations store: titles, message contents
-    /// and tool-call arguments, results and errors, as UTF-8 bytes (summed
-    /// here; SurrealQL's `string::len` counts characters). Seeds the
+    /// Bytes the session's conversations and dataset metadata rows store:
+    /// titles, message contents and tool-call arguments, results and
+    /// errors, as UTF-8 bytes (summed here; SurrealQL's `string::len` counts
+    /// characters), and what each dataset metadata row counts
+    /// ([`dataset_meta_bytes`](Self::dataset_meta_bytes)). Seeds the
     /// `session_db_bytes` counter.
     ///
     /// It reads every stored message once, one conversation at a time (each
-    /// through its index); a deleted or cleared conversation releases its
-    /// own bytes instead, so this runs only when a counter is first seeded.
+    /// through its index), and the session's dataset metadata rows; a
+    /// deleted or cleared conversation and a deleted dataset metadata row
+    /// release their own bytes instead, so this runs only when a counter is
+    /// first seeded.
     pub async fn session_stored_bytes(&self, session_id: &str) -> Result<u64, DbError> {
         let conversations = self.list_conversations(session_id).await?;
-        let mut total = conversations
+        let titles = conversations
             .iter()
             .map(|c| c.title.len() as u64)
             .fold(0u64, u64::saturating_add);
+        let mut total = titles.saturating_add(self.dataset_meta_bytes(session_id).await?);
         for conv in &conversations {
             let text = self.conversation_text_bytes(&conv.id_string()).await?;
             total = total.saturating_add(text);
@@ -560,7 +652,7 @@ impl DbConnection {
 
         // Settings and dataset metadata of sessions without a row.
         for (table, stamp) in [("settings", "updated_at"), ("dataset_meta", "loaded_at")] {
-            deleted += self
+            let rows = self
                 .delete_unowned(
                     table,
                     "session_id",
@@ -570,6 +662,12 @@ impl DbConnection {
                     SweptBy::Every,
                 )
                 .await?;
+            if table == "dataset_meta" && rows > 0 {
+                // Their sessions have no row any more; their counters go
+                // too (a dataset metadata row counts against the budget).
+                self.forget_session_bytes_except(&session_ids);
+            }
+            deleted += rows;
         }
 
         // Messages and tool calls of conversations that no longer exist.
@@ -754,7 +852,8 @@ impl DbConnection {
     /// (SurrealDB counts a `SELECT count() ... GROUP ALL` whose condition is
     /// a range of one index, or its column `IN` an array, by the keys,
     /// without reading a row). `inside` must be the distinct owners of the
-    /// range that are to be kept.
+    /// range that are to be kept. A count that fails is reported by its own
+    /// error ([`failed_statement`]).
     async fn unowned_rows(
         &self,
         table: &str,
@@ -776,8 +875,10 @@ impl DbConnection {
             .query("COMMIT TRANSACTION")
             .bind(span.bounds())
             .bind(("inside", inside))
-            .await?
-            .check()?;
+            .await?;
+        if let Some(error) = failed_statement(result.take_errors()) {
+            return Err(error.into());
+        }
         let count =
             |row: Option<CountRow>| row.map_or(0, |c| usize::try_from(c.count).unwrap_or(0));
         let in_range = count(result.take(0)?);

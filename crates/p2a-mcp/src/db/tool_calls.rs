@@ -1,144 +1,275 @@
 //! Tool call CRUD operations
+//!
+//! A tool call's create, update and status changes run in its conversation's
+//! turn, like the writes of its messages and of the conversation row (see
+//! [`create_tool_call`](DbConnection::create_tool_call)). Tool calls are
+//! deleted with their conversation's messages, by a clear or delete of the
+//! conversation in its turn, or, when left behind for a deleted
+//! conversation, by the orphan sweeps.
 
 use surrealdb::RecordId;
 
-use super::connection::{DbConnection, DbError};
+use super::connection::{DbConnection, DbError, run_to_end};
 use super::models::{ToolCall, ToolCallStatus};
+use super::sessions::tool_call_texts_len;
 
 impl DbConnection {
     // ==================== Tool Call Operations ====================
 
-    /// Create a new tool call record. Its conversation must exist
-    /// (`NotFound`), and it is refused with `MemoryPressure` above the RSS
-    /// soft limit. Its texts are cut at a char boundary to `message_bytes`
-    /// and to the bytes the session has left under `session_db_bytes`, never
-    /// refused.
+    /// Create a new tool call record. Its conversation must exist, and its
+    /// message must exist in that conversation (`NotFound` otherwise), and it
+    /// is refused with `MemoryPressure` above the RSS soft limit. Its texts
+    /// are cut at a char boundary to `message_bytes` and to the bytes the
+    /// session has left under `session_db_bytes`, never refused.
+    ///
+    /// The existence checks, the bytes and the write run in the
+    /// conversation's [`StoreTurn`](super::connection::StoreTurn), in a task
+    /// a dropped caller does not stop ([`run_to_end`]), like a tool call's
+    /// update and status changes; a call dropped while it waits for the turn
+    /// does nothing. A delete or clear of the conversation runs wholly
+    /// before such a write or wholly after it, never alongside it: on
+    /// RocksDB, which validates an optimistic transaction's writes when it
+    /// commits, a tool-call write committed on a row a clear's transaction
+    /// deletes would fail the clear whole on a write conflict. A write that
+    /// comes after a delete finds no conversation, and one after a clear
+    /// finds no message or, for an update or status change, no row: it is
+    /// `NotFound`, and nothing is counted or stored.
     pub async fn create_tool_call(&self, tool_call: &ToolCall) -> Result<ToolCall, DbError> {
         self.check_memory()?;
-        let conv = self.get_conversation(&tool_call.conversation_id).await?;
-        let tool_call = self
-            .fit_tool_call_texts(&conv.session_id, tool_call.clone())
-            .await?;
-        let created: Option<ToolCall> = self
-            .db()
-            .create(tool_call.id.clone())
-            .content(tool_call)
-            .await?;
+        let db = self.clone();
+        let tool_call = tool_call.clone();
+        let turn = db.conversation_turn(&tool_call.conversation_id).await;
+        run_to_end(turn, async move {
+            let conv = db.get_conversation(&tool_call.conversation_id).await?;
+            // A clear that ran first left the conversation but took the
+            // message; a row stored for it would only be counted, never
+            // shown, until the next clear or delete.
+            let message = db.get_message(&tool_call.message_id).await?;
+            if message.conversation_id != tool_call.conversation_id {
+                return Err(DbError::NotFound(format!(
+                    "Message not found in conversation {}: {}",
+                    tool_call.conversation_id, tool_call.message_id
+                )));
+            }
+            let tool_call = db
+                .fit_tool_call_texts(Some(&conv.session_id), tool_call, 0)
+                .await?;
+            let created: Option<ToolCall> = db
+                .db()
+                .create(tool_call.id.clone())
+                .content(tool_call)
+                .await?;
 
-        created.ok_or_else(|| DbError::Query("Failed to create tool call".to_string()))
+            created.ok_or_else(|| DbError::Query("Failed to create tool call".to_string()))
+        })
+        .await
     }
 
     /// Update an existing tool call (typically to set result/error/status).
-    /// Its texts are cut to fit, like those of a new one.
+    /// It must be stored for `tool_call.conversation_id` and
+    /// `tool_call.message_id` (`NotFound` otherwise, as when it does not
+    /// exist): an update never moves a call to another message, which could
+    /// be missing or in another conversation, as a create would refuse. Its
+    /// texts are cut to fit, like those of a new one, with the bytes of the
+    /// stored texts they replace as room: with a `session_db_bytes` budget
+    /// only what they add counts. Runs in the conversation's turn, like
+    /// [`create_tool_call`](Self::create_tool_call).
     pub async fn update_tool_call(&self, tool_call: &ToolCall) -> Result<ToolCall, DbError> {
-        let id_str = tool_call.id_string();
-        let session_id = self.tool_call_session(&tool_call.conversation_id).await?;
-        let tool_call = self
-            .fit_tool_call_texts(&session_id, tool_call.clone())
-            .await?;
+        let db = self.clone();
+        let tool_call = tool_call.clone();
+        let turn = db.conversation_turn(&tool_call.conversation_id).await;
+        run_to_end(turn, async move {
+            let id = tool_call.id_string();
+            let stored = db.get_tool_call(&id).await?;
+            if stored.conversation_id != tool_call.conversation_id {
+                return Err(DbError::NotFound(format!(
+                    "Tool call not found in conversation {}: {}",
+                    tool_call.conversation_id, id
+                )));
+            }
+            if stored.message_id != tool_call.message_id {
+                return Err(DbError::NotFound(format!(
+                    "Tool call {} not found for message {}: it is stored for message {}",
+                    id, tool_call.message_id, stored.message_id
+                )));
+            }
+            let session_id = db.tool_call_session(&stored.conversation_id).await?;
+            let replaced = tool_call_texts_len(
+                &stored.arguments,
+                stored.result.as_deref(),
+                stored.error.as_deref(),
+            );
+            let tool_call = db
+                .fit_tool_call_texts(session_id.as_deref(), tool_call, replaced)
+                .await?;
 
-        let result: Option<ToolCall> = self
-            .db()
-            .update(("tool_calls", id_str.as_str()))
-            .content(tool_call)
-            .await?;
-
-        result.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id_str)))
+            let result: Option<ToolCall> = db
+                .db()
+                .update(("tool_calls", id.as_str()))
+                .content(tool_call)
+                .await?;
+            let updated =
+                result.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))?;
+            if let Some(session_id) = session_id {
+                db.release_session_bytes(&session_id, replaced);
+            }
+            Ok(updated)
+        })
+        .await
     }
 
-    /// Server-produced tool-call text (arguments, a result or an error) cut
-    /// at a char boundary to `message_bytes` and, with a `session_db_bytes`
-    /// budget, to the bytes session `session_id` has left, where it is then
-    /// counted. Never refused.
-    async fn fit_tool_call_text(&self, session_id: &str, text: &str) -> Result<String, DbError> {
-        let text = self.truncate_server_text(text);
-        self.fit_session_bytes(session_id, text).await
-    }
-
-    /// [`fit_tool_call_text`](Self::fit_tool_call_text) for every text field
-    /// of `tool_call`.
+    /// Every text field of `tool_call` cut at a char boundary to
+    /// `message_bytes` and, given the session `session_id` that owns it,
+    /// fitted, arguments first, into what that session has left under
+    /// `session_db_bytes`, with the `replaced` bytes of the stored texts the
+    /// write replaces as room
+    /// ([`fit_session_texts`](Self::fit_session_texts)). Never refused.
     async fn fit_tool_call_texts(
         &self,
-        session_id: &str,
+        session_id: Option<&str>,
         mut tool_call: ToolCall,
+        replaced: u64,
     ) -> Result<ToolCall, DbError> {
-        tool_call.arguments = self
-            .fit_tool_call_text(session_id, &tool_call.arguments)
-            .await?;
-        if let Some(result) = tool_call.result.take() {
-            tool_call.result = Some(self.fit_tool_call_text(session_id, &result).await?);
+        let mut texts: Vec<&mut String> = std::iter::once(&mut tool_call.arguments)
+            .chain(tool_call.result.as_mut())
+            .chain(tool_call.error.as_mut())
+            .collect();
+        for text in texts.iter_mut() {
+            self.truncate_server_text_in_place(text);
         }
-        if let Some(error) = tool_call.error.take() {
-            tool_call.error = Some(self.fit_tool_call_text(session_id, &error).await?);
+        if let Some(session_id) = session_id {
+            self.fit_session_texts(session_id, &mut texts, replaced)
+                .await?;
         }
         Ok(tool_call)
     }
 
     /// The session that owns conversation `conversation_id`, read only when
-    /// the `session_db_bytes` budget needs it (the empty string otherwise).
-    async fn tool_call_session(&self, conversation_id: &str) -> Result<String, DbError> {
+    /// the `session_db_bytes` budget needs it (`None` without the budget).
+    async fn tool_call_session(&self, conversation_id: &str) -> Result<Option<String>, DbError> {
         if !self.tracks_session_bytes() {
-            return Ok(String::new());
+            return Ok(None);
         }
-        Ok(self.get_conversation(conversation_id).await?.session_id)
+        Ok(Some(
+            self.get_conversation(conversation_id).await?.session_id,
+        ))
     }
 
-    /// The session that owns tool call `id`, read only when the
-    /// `session_db_bytes` budget needs it (the empty string otherwise).
-    async fn tool_call_owner(&self, id: &str) -> Result<String, DbError> {
-        if !self.tracks_session_bytes() {
-            return Ok(String::new());
-        }
-        let tool_call = self.get_tool_call(id).await?;
-        self.tool_call_session(&tool_call.conversation_id).await
+    /// Change the status of tool call `id`, and for a finished call store its
+    /// result or error, in its conversation's turn, like
+    /// [`create_tool_call`](Self::create_tool_call). The conversation is the
+    /// stored row's (`NotFound` when there is none). A finished call's text,
+    /// already cut to `message_bytes` by its constructor
+    /// ([`StatusChange::finished`]), is cut at a char boundary to what the
+    /// session has left under `session_db_bytes`, with the bytes of the
+    /// stored text it replaces as room, never refused.
+    async fn change_tool_call_status(
+        &self,
+        id: &str,
+        change: StatusChange,
+    ) -> Result<ToolCall, DbError> {
+        let conversation_id = self.get_tool_call(id).await?.conversation_id;
+        let db = self.clone();
+        let id = id.to_string();
+        let turn = db.conversation_turn(&conversation_id).await;
+        run_to_end(turn, async move {
+            let (status, mut text, duration_ms) = match change {
+                StatusChange::Running => (ToolCallStatus::Running, None, None),
+                StatusChange::Finished {
+                    status,
+                    field,
+                    text,
+                    duration_ms,
+                } => (status, Some((field, text)), Some(duration_ms)),
+            };
+            // With the `session_db_bytes` budget: the session the text counts
+            // against, and the bytes of the stored text it replaces.
+            let counted = if let Some((field, text)) = &mut text
+                && db.tracks_session_bytes()
+            {
+                // Read again in the turn: a delete or clear that ran before
+                // it took the row, and no bytes may be counted for a write
+                // that finds none.
+                let stored = db.get_tool_call(&id).await?;
+                let session_id = db
+                    .get_conversation(&stored.conversation_id)
+                    .await?
+                    .session_id;
+                let replaced = field.stored(&stored).map_or(0, |t| t.len() as u64);
+                db.fit_session_texts(&session_id, &mut [text], replaced)
+                    .await?;
+                Some((session_id, replaced))
+            } else {
+                None
+            };
+
+            let query = match &text {
+                None => "UPDATE tool_calls SET status = $status WHERE id = $id RETURN AFTER",
+                Some((TextField::Result, _)) => {
+                    r#"UPDATE tool_calls SET
+                        status = $status,
+                        result = $text,
+                        completed_at = time::now(),
+                        duration_ms = $duration_ms
+                    WHERE id = $id RETURN AFTER"#
+                }
+                Some((TextField::Error, _)) => {
+                    r#"UPDATE tool_calls SET
+                        status = $status,
+                        error = $text,
+                        completed_at = time::now(),
+                        duration_ms = $duration_ms
+                    WHERE id = $id RETURN AFTER"#
+                }
+            };
+            let mut result = db
+                .db()
+                .query(query)
+                .bind(("id", RecordId::from(("tool_calls", id.as_str()))))
+                .bind(("status", status))
+                .bind(("text", text.map(|(_, text)| text)))
+                .bind(("duration_ms", duration_ms))
+                .await?;
+
+            let updated: Option<ToolCall> = result.take(0)?;
+            let updated =
+                updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))?;
+            if let Some((session_id, replaced)) = counted {
+                db.release_session_bytes(&session_id, replaced);
+            }
+            Ok(updated)
+        })
+        .await
     }
 
-    /// Mark a tool call as running
+    /// Mark a tool call as running, in its conversation's turn, like
+    /// [`create_tool_call`](Self::create_tool_call).
     pub async fn mark_tool_call_running(&self, id: &str) -> Result<ToolCall, DbError> {
-        let id_owned = id.to_string();
-        let mut result = self
-            .db()
-            .query("UPDATE tool_calls SET status = $status WHERE id = $id RETURN AFTER")
-            .bind(("id", RecordId::from(("tool_calls", id_owned.as_str()))))
-            .bind(("status", ToolCallStatus::Running))
-            .await?;
-
-        let updated: Option<ToolCall> = result.take(0)?;
-        updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))
+        self.change_tool_call_status(id, StatusChange::Running)
+            .await
     }
 
-    /// Mark a tool call as completed successfully. The result is cut to
-    /// fit, never refused.
+    /// Mark a tool call as completed successfully, in its conversation's
+    /// turn. The result is cut to fit, with the bytes of a stored result as
+    /// room, never refused.
     pub async fn complete_tool_call(
         &self,
         id: &str,
         result_str: &str,
         duration_ms: i32,
     ) -> Result<ToolCall, DbError> {
-        let session_id = self.tool_call_owner(id).await?;
-        let result_str = self.fit_tool_call_text(&session_id, result_str).await?;
-        let id_owned = id.to_string();
-        let mut result = self
-            .db()
-            .query(
-                r#"UPDATE tool_calls SET
-                    status = $status,
-                    result = $result,
-                    completed_at = time::now(),
-                    duration_ms = $duration_ms
-                WHERE id = $id RETURN AFTER"#,
-            )
-            .bind(("id", RecordId::from(("tool_calls", id_owned.as_str()))))
-            .bind(("status", ToolCallStatus::Success))
-            .bind(("result", result_str))
-            .bind(("duration_ms", duration_ms))
-            .await?;
-
-        let updated: Option<ToolCall> = result.take(0)?;
-        updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))
+        let change = StatusChange::finished(
+            self,
+            ToolCallStatus::Success,
+            TextField::Result,
+            result_str,
+            duration_ms,
+        );
+        self.change_tool_call_status(id, change).await
     }
 
-    /// Mark a tool call as failed. The error text is cut to fit, never
+    /// Mark a tool call as failed, in its conversation's turn. The error
+    /// text is cut to fit, with the bytes of a stored error as room, never
     /// refused.
     pub async fn fail_tool_call(
         &self,
@@ -146,27 +277,14 @@ impl DbConnection {
         error: &str,
         duration_ms: i32,
     ) -> Result<ToolCall, DbError> {
-        let session_id = self.tool_call_owner(id).await?;
-        let error = self.fit_tool_call_text(&session_id, error).await?;
-        let id_owned = id.to_string();
-        let mut result = self
-            .db()
-            .query(
-                r#"UPDATE tool_calls SET
-                    status = $status,
-                    error = $error,
-                    completed_at = time::now(),
-                    duration_ms = $duration_ms
-                WHERE id = $id RETURN AFTER"#,
-            )
-            .bind(("id", RecordId::from(("tool_calls", id_owned.as_str()))))
-            .bind(("status", ToolCallStatus::Error))
-            .bind(("error", error))
-            .bind(("duration_ms", duration_ms))
-            .await?;
-
-        let updated: Option<ToolCall> = result.take(0)?;
-        updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))
+        let change = StatusChange::finished(
+            self,
+            ToolCallStatus::Error,
+            TextField::Error,
+            error,
+            duration_ms,
+        );
+        self.change_tool_call_status(id, change).await
     }
 
     /// Get all tool calls for a message
@@ -208,32 +326,61 @@ impl DbConnection {
         let tool_call: Option<ToolCall> = self.db().select(("tool_calls", id)).await?;
         tool_call.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))
     }
+}
 
-    /// Delete all tool calls for a message
-    pub async fn delete_tool_calls_for_message(&self, message_id: &str) -> Result<u32, DbError> {
-        let message_id_owned = message_id.to_string();
+/// A change of an existing tool call's status
+/// ([`change_tool_call_status`](DbConnection::change_tool_call_status)).
+enum StatusChange {
+    /// It is running.
+    Running,
+    /// It finished with `status`, storing `text` in `field`, after
+    /// `duration_ms`. Built with [`StatusChange::finished`], which cuts
+    /// `text` to `message_bytes`.
+    Finished {
+        status: ToolCallStatus,
+        field: TextField,
+        text: String,
+        duration_ms: i32,
+    },
+}
 
-        // Count before deletion
-        let mut result = self
-            .db()
-            .query("SELECT count() FROM tool_calls WHERE message_id = $message_id GROUP ALL")
-            .bind(("message_id", message_id_owned.clone()))
-            .await?;
-
-        #[derive(serde::Deserialize)]
-        struct CountResult {
-            count: i64,
+impl StatusChange {
+    /// A finished call's change, its `text` cut to `message_bytes`
+    /// ([`truncate_server_text`](DbConnection::truncate_server_text)) as it
+    /// is copied. Build every [`StatusChange::Finished`] with this:
+    /// [`change_tool_call_status`](DbConnection::change_tool_call_status)
+    /// cuts the text only to the session's `session_db_bytes` budget.
+    fn finished(
+        db: &DbConnection,
+        status: ToolCallStatus,
+        field: TextField,
+        text: &str,
+        duration_ms: i32,
+    ) -> Self {
+        Self::Finished {
+            status,
+            field,
+            text: db.truncate_server_text(text),
+            duration_ms,
         }
+    }
+}
 
-        let count: Option<CountResult> = result.take(0)?;
-        let deleted_count = count.map(|c| c.count as u32).unwrap_or(0);
+/// The text field a finished tool call stores.
+#[derive(Clone, Copy)]
+enum TextField {
+    /// `result`, of a call that succeeded.
+    Result,
+    /// `error`, of a call that failed.
+    Error,
+}
 
-        // Delete tool calls
-        self.db()
-            .query("DELETE FROM tool_calls WHERE message_id = $message_id")
-            .bind(("message_id", message_id_owned))
-            .await?;
-
-        Ok(deleted_count)
+impl TextField {
+    /// This field's text in the stored row `tool_call`.
+    fn stored(self, tool_call: &ToolCall) -> Option<&str> {
+        match self {
+            TextField::Result => tool_call.result.as_deref(),
+            TextField::Error => tool_call.error.as_deref(),
+        }
     }
 }

@@ -275,9 +275,12 @@ HTTP), and they never depend on the resource profile:
   (1,000) messages answers 422 `quota_exceeded`.
 - **History budget.** `session_db_bytes` (hosted 16 MiB, none when off) caps the
   bytes one session's conversations store: titles, message contents and
-  tool-call arguments, results and errors. A client write past it answers 422
-  `quota_exceeded`; text the server produces (assistant replies, tool results)
-  is truncated to the room left; deleting a conversation frees its bytes.
+  tool-call arguments, results and errors, and also its dataset metadata rows
+  (the dataset listing; each row's texts and kept column names, plus 128 bytes).
+  A client write past it answers 422 `quota_exceeded`; text the server produces
+  (assistant replies, tool results) is truncated to the room left; a dataset
+  whose metadata row would pass it is loaded but not listed; deleting a
+  conversation frees its bytes.
 - **Memory.** While RSS is above `P2A_MEMORY_SOFT_LIMIT_MB`, writes to the store
   answer 503 `memory_pressure` (`Retry-After: 15`). The store does not hand
   memory back itself; it reads the same RSS, so it accepts writes again once the
@@ -297,12 +300,23 @@ HTTP), and they never depend on the resource profile:
   dangling.
 - **Writes.** Files are written to a temporary file (mode 0600) beside the
   target and renamed into place, so a link planted at the target is replaced,
-  never followed.
+  never followed. A process stopped in the middle of a write leaves its
+  temporary file (`.<name>.<uuid>.p2a-tmp`); a leftover is removed by the
+  first sweep of its folder after nobody has written to it for ten minutes. A
+  tool path that resolves through the data-root jail sweeps the root (or the
+  session's directory) and the folder the path lies in or names, the first
+  time in a process and then at most once every ten minutes.
 - **Per-session directories.** In open public mode each session's root is
   `<data root>/sessions/<session id>/` (mode 0700). Other sessions' directories
   and the shared root are outside it and unreachable. The directory is removed
   with the session, and directories left by an earlier process are purged at
-  the first file access after a restart. A session's directory holds at most
+  the first file access after a restart. With a RocksDB session store
+  (`P2A_DB_PATH`), the directories of stored sessions that can still be adopted
+  (accessed within the session TTL; at most `P2A_MAX_SESSIONS` directories,
+  those of the most recently used sessions that have one) are kept, so a
+  returning client's files are there for the dataset reload. Such a directory
+  goes when the store deletes the session's rows, or with the session once it
+  has come back and used its files. A session's directory holds at most
   `session_disk_bytes` (hosted 64 MiB).
 - **Sizes.** `load_dataset` and the dataset reload route refuse a file larger
   than `load_file_bytes` (hosted 64 MiB) before parsing it; `export_dataset`,
@@ -543,7 +557,7 @@ Named budgets:
 | `message_bytes` | one conversation message, title or settings string | 262,144 | 2,097,152 |
 | `conversations_per_session` | conversations one session holds | 50 | none |
 | `messages_per_conversation` | messages one conversation holds | 1,000 | none |
-| `session_db_bytes` | bytes one session's conversation history holds | 16 MiB | none |
+| `session_db_bytes` | bytes one session's conversation history and dataset metadata rows hold | 16 MiB | none |
 | `llm_timeout_secs` | provider call time (total, or idle for streams) | 120 | 900 |
 | `llm_max_tool_iterations` | clamp of a request's `max_tool_iterations` | 25 | 50 |
 | `llm_context_bytes` | dataset block in the system prompt | 24,576 | 65,536 |
@@ -684,10 +698,24 @@ memory).
    it defaulting to a home directory on an exposed host. The directory must
    exist. In open mode `sessions/` under it is reserved for the per-session
    directories, and files the operator places in the shared root are not
-   reachable by visitors. The disk worst case is `P2A_MAX_SESSIONS` ×
+   reachable by visitors. Without a session store on disk (`P2A_DB_PATH`
+   unset, as in `deploy/fly.toml`) the disk worst case is `P2A_MAX_SESSIONS` ×
    `session_disk_bytes`, 100 × 64 MiB = 6.25 GiB with the hosted defaults; keep
    that product within the disk the host has, and lower `session_disk_bytes`
-   with `P2A_LIMIT_OVERRIDES` if needed.
+   with `P2A_LIMIT_OVERRIDES` if needed. With a RocksDB store (`P2A_DB_PATH`,
+   as `docker-compose.yml` sets it), a restart keeps the directories of up to
+   `P2A_MAX_SESSIONS` stored sessions that can still come back (the most
+   recently used that have one; sessions that never used files take no
+   place), so the strict bound is twice that product, 2 × `P2A_MAX_SESSIONS` ×
+   `session_disk_bytes` (12.5 GiB with the hosted defaults), however often the
+   server restarts. On top of that comes one leftover temporary file (at most
+   `export_bytes`) for each write a stop interrupted: at most one for each call
+   running at the stop, so at most `P2A_TOOL_CONCURRENCY` per stop (default one
+   per vCPU; one per session in the hosted profile). Each stays until a sweep
+   of its folder or the removal of its directory takes it. The kept directories
+   go as their sessions come back and end, or when the store's sweep deletes
+   the rows of those that do not, about one session TTL (plus one sweep
+   period) after their last use.
 
 8. **Keep the session database outside the jail (`P2A_DB_PATH`).**
    File tools can write anywhere under `P2A_DATA_ROOT`, so the server refuses

@@ -311,11 +311,45 @@ pub struct DatasetMeta {
     pub source_path: Option<String>,
     pub source_type: String,
     pub row_count: i32,
+    /// The dataset's width.
     pub column_count: i32,
+    /// The dataset's first column names: the server's row keeps at most
+    /// 1,000 of them (fewer when they are long), so a wide dataset has
+    /// fewer names than `column_count`.
     pub column_names: Vec<String>,
     pub loaded_at: String,
     #[serde(default)]
     pub file_size_bytes: Option<i64>,
+}
+
+impl DatasetMeta {
+    /// The dataset's number of columns: `column_count`, or the number of
+    /// names when a row holds more names than its count.
+    pub fn width(&self) -> usize {
+        usize::try_from(self.column_count)
+            .unwrap_or(0)
+            .max(self.column_names.len())
+    }
+
+    /// How many of the dataset's columns are not among the first `shown`
+    /// names listed.
+    pub fn columns_beyond(&self, shown: usize) -> usize {
+        self.width()
+            .saturating_sub(shown.min(self.column_names.len()))
+    }
+
+    /// Whether the row holds fewer column names than the dataset has
+    /// columns.
+    pub fn column_names_cut(&self) -> bool {
+        self.column_names.len() < self.width()
+    }
+
+    /// Whether the row holds any column names: one whose first name was
+    /// too long to keep, or whose result had no column list, holds none
+    /// although the dataset has columns.
+    pub fn has_column_names(&self) -> bool {
+        !self.column_names.is_empty()
+    }
 }
 
 /// Result of reloading session datasets
@@ -347,4 +381,59 @@ pub struct ReloadSkip {
     pub name: String,
     /// Reason for skipping
     pub reason: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DatasetMeta;
+
+    fn meta(column_count: i32, names: usize) -> DatasetMeta {
+        DatasetMeta {
+            id: "dataset_meta:x".into(),
+            session_id: "s".into(),
+            name: "d".into(),
+            source_path: None,
+            source_type: "csv".into(),
+            row_count: 3,
+            column_count,
+            column_names: (0..names).map(|i| format!("c{i}")).collect(),
+            loaded_at: "2026-10-27T00:00:00Z".into(),
+            file_size_bytes: None,
+        }
+    }
+
+    /// A wide dataset's row keeps its first names only; its width, and the
+    /// columns not listed, come from `column_count`.
+    #[test]
+    fn a_wide_dataset_counts_its_columns_from_column_count() {
+        let wide = meta(50_000, 1_000);
+        assert_eq!(wide.width(), 50_000);
+        assert_eq!(wide.columns_beyond(10), 49_990);
+        assert_eq!(wide.columns_beyond(5_000), 49_000);
+        assert!(wide.column_names_cut());
+        assert!(wide.has_column_names());
+
+        // A first name too long for the row leaves no names at all: the
+        // sidebar and the inspector say the names are not stored.
+        let unnamed = meta(2, 0);
+        assert_eq!((unnamed.width(), unnamed.columns_beyond(10)), (2, 2));
+        assert!(unnamed.column_names_cut());
+        assert!(!unnamed.has_column_names());
+    }
+
+    #[test]
+    fn a_narrow_dataset_lists_every_column() {
+        let narrow = meta(4, 4);
+        assert_eq!(narrow.width(), 4);
+        assert_eq!(narrow.columns_beyond(10), 0);
+        assert!(!narrow.column_names_cut());
+        assert!(narrow.has_column_names());
+        let twelve = meta(12, 12);
+        assert_eq!(twelve.columns_beyond(10), 2);
+
+        // A count below the names (or negative) does not hide names.
+        let odd = meta(-1, 3);
+        assert_eq!((odd.width(), odd.columns_beyond(10)), (3, 0));
+        assert!(!odd.column_names_cut());
+    }
 }

@@ -338,11 +338,12 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                         }
                     }
 
-                    // Columns (collapsible list)
-                    if !dataset.column_names.is_empty() {
+                    // Columns (collapsible list). The count is the dataset's
+                    // width: a wide dataset's row keeps its first names only.
+                    if dataset.width() > 0 {
                         div { class: "mt-2 pt-2 border-t border-gray-100 dark:border-gray-700",
                             span { class: "text-gray-500 dark:text-gray-400 text-xs block mb-1",
-                                "Columns ({dataset.column_names.len()}):"
+                                "Columns ({dataset.width()}):"
                             }
                             div { class: "flex flex-wrap gap-1",
                                 for col in dataset.column_names.iter().take(10) {
@@ -352,9 +353,15 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                                         "{col}"
                                     }
                                 }
-                                if dataset.column_names.len() > 10 {
+                                // A row can hold no names (a first name too
+                                // long to keep, or no column list).
+                                if !dataset.has_column_names() {
                                     span { class: "px-1.5 py-0.5 text-xs text-gray-500 dark:text-gray-400",
-                                        "+{dataset.column_names.len() - 10} more"
+                                        "names not stored"
+                                    }
+                                } else if dataset.columns_beyond(10) > 0 {
+                                    span { class: "px-1.5 py-0.5 text-xs text-gray-500 dark:text-gray-400",
+                                        "+{dataset.columns_beyond(10)} more"
                                     }
                                 }
                             }
