@@ -6,21 +6,21 @@
 //! here keeps per-session data directories off.
 #![cfg(all(feature = "http", feature = "db"))]
 
+mod common;
+
 use std::future::Future;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
+use common::parquet::{levels_parquet, rewrite_footer};
 use p2a_mcp::config::ServerConfig;
 use p2a_mcp::db::DatasetMeta;
 use p2a_mcp::path_jail::allowed_data_root;
 use p2a_mcp::persistent_session::{PersistentSessionManager, RELOAD_LABEL};
 use p2a_mcp::tools::limits;
 use p2a_mcp::transport::http::{AppState, build_app};
-use polars::prelude::{DataFrame, NamedFrom, ParquetWriter, Series};
-use polars_parquet_format::FileMetaData;
-use polars_parquet_format::thrift::protocol::{TCompactInputProtocol, TCompactOutputProtocol};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -432,17 +432,6 @@ fn reload_refuses_a_source_above_load_file_bytes() {
     });
 }
 
-/// Write a parquet file of `rows` rows of one float column at `path`, the
-/// values cycling through 97 noisy levels: dictionary-encoded, so a few
-/// kilobytes on disk and 8 bytes a row once decoded.
-fn levels_parquet(path: &std::path::Path, rows: usize) {
-    let values: Vec<f64> = (0..rows).map(|i| (i % 97) as f64 * 0.37 + 0.1).collect();
-    let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
-    ParquetWriter::new(std::fs::File::create(path).unwrap())
-        .finish(&mut df)
-        .unwrap();
-}
-
 /// POST the reload route for `sid`; the route answers 200 with the result.
 async fn reload(r: &Router, sid: &str) -> Value {
     let (st, body) = call(
@@ -479,7 +468,7 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
     let (small, stored) = (dir.path().join("small.csv"), dir.path().join("p.parquet"));
     std::fs::write(&small, noisy_csv(50, 4)).unwrap();
     // 1,000 rows when it is first loaded.
-    levels_parquet(&stored, 1_000);
+    levels_parquet(&stored, 1_000, None);
     store_meta(&state, &sid, "small", &small, 0).await;
     store_meta(&state, &sid, "p", &stored, 1).await;
     let body = reload(&r, &sid).await;
@@ -488,7 +477,7 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
     // Replaced at the stored path by 4,000,000 rows: 32 MB once decoded.
     // Pre-fix the reload decoded it in full and only then refused it at the
     // insert ("this session's datasets would use 30.53 MB ...").
-    levels_parquet(&stored, 4_000_000);
+    levels_parquet(&stored, 4_000_000, None);
     let body = reload(&r, &sid).await;
     assert_eq!(body["data"]["succeeded"], json!(["small"]), "{body}");
     assert_eq!(body["data"]["failed"][0]["name"], "p", "{body}");
@@ -519,40 +508,6 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
     );
 }
 
-/// Write a parquet file of `rows` rows of one noisy float column at `path`,
-/// in row groups of `group_rows` rows.
-fn grouped_parquet(path: &std::path::Path, rows: usize, group_rows: usize) {
-    let values: Vec<f64> = (0..rows).map(|i| (i % 31) as f64 * 0.5 + 0.25).collect();
-    let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
-    ParquetWriter::new(std::fs::File::create(path).unwrap())
-        .with_row_group_size(Some(group_rows))
-        .finish(&mut df)
-        .unwrap();
-}
-
-/// Rewrite the footer of the parquet file at `path` with `edit`, leaving the
-/// pages where they are (the helper of the same name in
-/// tests/dataset_quotas.rs).
-fn rewrite_footer(path: &std::path::Path, edit: impl FnOnce(&mut FileMetaData)) {
-    let bytes = std::fs::read(path).unwrap();
-    let n = bytes.len();
-    assert_eq!(&bytes[n - 4..], b"PAR1");
-    let len = u32::from_le_bytes(bytes[n - 8..n - 4].try_into().unwrap()) as usize;
-    let start = n - 8 - len;
-    let mut input = TCompactInputProtocol::new(&bytes[start..n - 8], usize::MAX);
-    let mut footer = FileMetaData::read_from_in_protocol(&mut input).unwrap();
-    edit(&mut footer);
-    let mut written = Vec::new();
-    footer
-        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut written))
-        .unwrap();
-    let mut out = bytes[..start].to_vec();
-    out.extend_from_slice(&written);
-    out.extend_from_slice(&u32::try_from(written.len()).unwrap().to_le_bytes());
-    out.extend_from_slice(b"PAR1");
-    std::fs::write(path, out).unwrap();
-}
-
 /// A reload refuses from its footer a stored parquet file that the check
 /// before decoding will not read, as `load_dataset` does, with or without
 /// dataset quotas (PR-H2, round-1 follow-up). The stored path is reloaded
@@ -572,13 +527,13 @@ async fn reload_refuses_a_parquet_source_it_will_not_read_under(cfg: ServerConfi
         .unwrap();
     let (small, stored) = (dir.path().join("small.csv"), dir.path().join("p.parquet"));
     std::fs::write(&small, noisy_csv(50, 5)).unwrap();
-    levels_parquet(&stored, 1_000);
+    levels_parquet(&stored, 1_000, None);
     store_meta(&state, &sid, "small", &small, 0).await;
     store_meta(&state, &sid, "p", &stored, 1).await;
     let body = reload(&r, &sid).await;
     assert_eq!(body["data"]["succeeded"], json!(["small", "p"]), "{body}");
 
-    grouped_parquet(&stored, 4_000, 1_000);
+    levels_parquet(&stored, 4_000, Some(1_000));
     rewrite_footer(&stored, |footer| {
         assert_eq!(footer.row_groups.len(), 4);
         let shared = footer.row_groups[0].columns[0].meta_data.clone();
@@ -633,7 +588,7 @@ async fn reload_releases_what_its_check_before_decoding_reserves() {
         .tempdir_in(allowed_data_root().unwrap())
         .unwrap();
     let stored = dir.path().join("p.parquet");
-    levels_parquet(&stored, 300_000);
+    levels_parquet(&stored, 300_000, None);
     store_meta(&state, &sid, "p", &stored, 0).await;
     for round in 0..5 {
         let body = reload(&r, &sid).await;
