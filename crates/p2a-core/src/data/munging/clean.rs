@@ -692,6 +692,44 @@ pub fn regex_replace(
     Ok(Dataset::new(result_df))
 }
 
+/// An upper bound of the text, in bytes, of the column [`regex_replace`]
+/// would build from `column` with `pattern` and `replacement`, computed
+/// without building it: each non-null value's bytes outside its matches,
+/// and for each match the replacement's bytes plus, for each `$` in the
+/// replacement (a capture-group reference expands to at most the match),
+/// the match's bytes.
+///
+/// Validates the column and the pattern as [`regex_replace`] does and
+/// allocates nothing per value, so a caller can check the size of the
+/// output before replacing.
+pub fn regex_replace_bytes(
+    dataset: &Dataset,
+    column: &str,
+    pattern: &str,
+    replacement: &str,
+) -> MungeResult<u64> {
+    let (ca, re) = split_input(dataset, column, pattern)?;
+    let literal = replacement.len() as u64;
+    let references = replacement.bytes().filter(|&b| b == b'$').count() as u64;
+    let mut total = 0u64;
+    for (row, opt) in ca.into_iter().enumerate() {
+        if row.is_multiple_of(CHECKPOINT_EVERY) {
+            split_checkpoint(column, pattern)?;
+        }
+        let Some(s) = opt else { continue };
+        let mut bytes = s.len() as u64;
+        for m in re.find_iter(s) {
+            let matched = m.len() as u64;
+            bytes = bytes
+                .saturating_sub(matched)
+                .saturating_add(literal)
+                .saturating_add(references.saturating_mul(matched));
+        }
+        total = total.saturating_add(bytes);
+    }
+    Ok(total)
+}
+
 /// Replace all occurrences of a regex pattern (same as regex_replace but with clearer naming).
 pub fn regex_replace_all(
     dataset: &Dataset,
@@ -1240,6 +1278,50 @@ pub fn str_length(dataset: &Dataset, column: &str, new_column: &str) -> MungeRes
 mod tests {
     use super::*;
     use polars::prelude::df;
+
+    #[test]
+    fn regex_replace_bytes_bounds_the_replaced_text() {
+        let df = df! {
+            "s" => [Some("ab12cd345"), None, Some(""), Some("xyz"), Some("9")],
+        }
+        .unwrap();
+        let ds = Dataset::new(df);
+        let text = |out: &Dataset| -> u64 {
+            out.df()
+                .column("s")
+                .unwrap()
+                .str()
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .map(|s| s.len() as u64)
+                .sum()
+        };
+        // Literal replacements, group references, `$$`, empty matches.
+        for (pattern, replacement) in [
+            (r"\d+", "#"),
+            (r"\d", "<$0$0>"),
+            (r"(\d)(\d)?", "${2}-$1-$$"),
+            ("", "_"),
+            ("z*", "ZZ"),
+            (r"[a-z]", ""),
+        ] {
+            let bound = regex_replace_bytes(&ds, "s", pattern, replacement).unwrap();
+            let built = text(&regex_replace(&ds, "s", pattern, replacement).unwrap());
+            assert!(
+                bound >= built,
+                "{pattern:?} -> {replacement:?}: bound {bound} < {built}"
+            );
+        }
+        // A literal replacement is exact: "ab#cd#", "", "xyz" and "#".
+        assert_eq!(regex_replace_bytes(&ds, "s", r"\d+", "#").unwrap(), 10);
+        // The input checks are regex_replace's.
+        assert!(matches!(
+            regex_replace_bytes(&ds, "s", "(", "x"),
+            Err(MungeError::InvalidExpression(_))
+        ));
+        assert!(regex_replace_bytes(&ds, "nope", "a", "b").is_err());
+    }
 
     fn split_col(ds: &Dataset, name: &str) -> Vec<Option<String>> {
         ds.df()

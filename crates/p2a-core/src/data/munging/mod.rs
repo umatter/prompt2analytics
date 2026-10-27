@@ -67,6 +67,7 @@ pub use clean::{
     // Regex and advanced string operations
     regex_replace,
     regex_replace_all,
+    regex_replace_bytes,
     replace,
     str_concat,
     str_length,
