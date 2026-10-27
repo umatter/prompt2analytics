@@ -67,7 +67,7 @@ Callers choose the provider's `base_url`, so a steered or hostile client could p
 
 ### 6. Access to another session's objects
 
-Session ids are random UUIDs and work as capabilities. Conversation, message, tool-call and settings routes check that the caller's session (the `X-P2A-Session-Id` header) owns the object and answer 404 otherwise, the same answer as for a missing object. In open public mode the routes that list sessions and browse files do not exist, and each session's files live in its own directory.
+Session ids are random UUIDs and work as capabilities. Conversation, message, tool-call and settings routes check that the caller's session (the `X-P2A-Session-Id` header) owns the object and answer 404 otherwise, the same answer as for a missing object. In open public mode the routes that list sessions, browse files or count what the session store holds (`GET /api/db/stats`) do not exist, and each session's files live in its own directory.
 
 ## What the Server Enforces
 
@@ -88,6 +88,7 @@ Some layers are always on; others follow the resource profile, which is Hosted i
 | Server-held LLM keys | default endpoint only, and not with the hosted profile unless `llm_server_keys=true` | same | not unless `llm_server_keys=true` (false in the hosted profile), and then default endpoint only |
 | Ownership checks on conversation routes | on | on | on |
 | Session-list and file-browser routes | only with `--expose-enumeration` | on | absent |
+| Store-wide counts (`GET /api/db/stats`, feature `db`) | on | on | absent |
 
 ## Best Practices
 

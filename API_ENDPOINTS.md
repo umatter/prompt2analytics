@@ -44,7 +44,7 @@ Examples in this document marked "captured" are real responses of a sandboxed se
 | GET | `/api/sessions/{session_id}/datasets` | `db` | with the session database | path id |
 | POST | `/api/sessions/{session_id}/datasets/reload` | `db` | with the session database | path id |
 | GET | `/api/db/health` | `db` | with the session database | none |
-| GET | `/api/db/stats` | `db` | with the session database | none |
+| GET | `/api/db/stats` | `db` | with the session database; never in OpenPublic | none |
 
 - The `db` routes exist when the server is built with the `db` feature and its session database opens. The database is in memory unless `P2A_DB_PATH` names a directory.
 - With `P2A_ACCESS_TOKEN` set, every route except `/health` and CORS preflight needs `Authorization: Bearer <token>`.
@@ -764,7 +764,9 @@ GET /api/db/health
 GET /api/db/stats
 ```
 
-**Responses** (captured):
+`GET /api/db/stats` counts every session, conversation and message in the store, whoever owns them, and takes no session id. It is registered for Local and Authenticated servers only: an open public server answers it 404 with an empty body, whether or not the request names a session. `GET /api/db/health` exists in every mode.
+
+**Responses** (captured, the second from a Local server):
 ```json
 {"success":true,"data":{"healthy":true}}
 ```
