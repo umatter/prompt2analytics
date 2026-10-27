@@ -677,16 +677,16 @@ async fn store_turns_leave_the_map() {
     assert_eq!(db.store_turns_in_use(), 0);
 }
 
-/// The next call's turn starts only once the call before it has left the
+/// The next call's turn starts only once the holder before it has left the
 /// map: a turn that ends lets the next call in and lowers its count in one
-/// step under the map's lock (`StoreTurn::drop`), so a call that holds a
-/// turn never finds the one before it still counted. Here the test holds
-/// the map's lock while the first holder ends on a thread of its own, and
-/// the waiting call must not get its turn until the lock is free. Before,
-/// the ending turn let the next call in first and took the lock after, so
-/// the next call held its turn while the earlier holder was still in the
-/// map, and the dropped-call tests, which check the map after their last
-/// call, failed now and then on a loaded machine.
+/// step under the map's lock (`StoreTurn::drop`), so the call it passes the
+/// turn to never finds it still counted. Here the test holds the map's lock
+/// while the first holder ends on a thread of its own, and the waiting call
+/// must not get its turn until the lock is free. Before, the ending turn let
+/// the next call in first and took the lock after, so the next call held its
+/// turn while the earlier holder was still in the map, and the dropped-call
+/// tests, which check the map after their last call, failed now and then on
+/// a loaded machine.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_next_turn_starts_after_the_last_holder_left_the_map() {
     let db = test_db().await;
@@ -1618,8 +1618,12 @@ async fn slow_message_deletes(db: &DbConnection) {
 /// call must first hold store turn `key` (a conversation id, or
 /// `session:<id>` for a creation) and then not have finished 20 ms later.
 /// A call dropped before it holds its turn does nothing, which would leave
-/// the dropped-part-way path untested; the 20 ms let the reads before its
-/// write run and the write reach the store.
+/// the dropped-part-way path untested. The 20 ms normally let the reads
+/// before its write run and the write reach the store; since the call's
+/// work runs in a task of its own
+/// ([`run_to_end`](super::connection::run_to_end)), a slower machine only
+/// makes this a weaker check against work that runs in the caller, never a
+/// failure.
 ///
 /// What keeps the "finished before it was dropped" check off the wall
 /// clock is the margin: every call dropped here is held up in the store by

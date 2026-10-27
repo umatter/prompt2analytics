@@ -156,9 +156,11 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// `session_db_bytes` and write them in the conversation's turn, so a delete
 /// or clear never runs between the count and the write. The byte counter is
 /// per process, and so are the turns. An entry leaves the map with its last
-/// holder or waiter, also when a waiting call is cancelled. A turn ends and
-/// leaves its entry in one step under the map's lock, so a call that holds a
-/// turn never finds the call before it still counted in the map.
+/// holder or waiter, also when a waiting call is cancelled. A turn that ends
+/// leaves its entry in one step under the map's lock, so the call it passes
+/// the turn to never finds it still counted (a waiter cancelled just as the
+/// turn reached it passes the turn on as its wait is dropped, a moment
+/// before it leaves the map).
 ///
 /// Every call that takes a turn waits for it in its caller and then moves it
 /// into a task of its own ([`run_to_end`]), which holds it until the store
@@ -187,6 +189,8 @@ impl Drop for StoreTurn {
         // and any look at the map after that waits for this lock, so it
         // finds this turn gone. Releasing the guard only wakes the next
         // waiter and takes no lock on the map, so nothing waits on itself.
+        // A cancelled waiter has no guard: a turn that had just reached it
+        // went on to the next call when its wait was dropped, before this.
         self.guard.take();
         if let Some((_, users)) = turns.get_mut(&self.key) {
             *users = users.saturating_sub(1);
