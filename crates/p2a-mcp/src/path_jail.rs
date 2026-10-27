@@ -52,12 +52,13 @@
 //!   the active root and so unreachable.
 //! - On the first scoped use in a process, UUID-named entries already under
 //!   `sessions/` (left by an earlier process) are removed; other names are
-//!   left alone. The exception are the directories of stored sessions that
-//!   the session store can still adopt after a restart, which the server
-//!   names at startup ([`keep_session_dirs`]): such a session keeps its
-//!   files when it comes back, and its directory goes when the store deletes
-//!   its rows before the session has used it again
-//!   ([`remove_stored_session_dir`]), or with the session once it has.
+//!   left alone. Exempt are the directories of stored sessions that the
+//!   session store can still adopt after a restart, which the server names
+//!   at startup ([`keep_session_dirs`], at most `P2A_MAX_SESSIONS`
+//!   directories): such a session keeps its files when it comes back, and
+//!   its directory goes when the store deletes its rows before the session
+//!   has used it again ([`remove_stored_session_dir`]), or with the session
+//!   once it has.
 //!   [`remove_session_dir`] removes a session's directory when
 //!   the session goes, and from then on (until 65,536 more sessions have been
 //!   removed) the directory is not created again for that id: a call that
@@ -530,9 +531,10 @@ fn remove_leftover_temp_files_in(dir: &Path, before: SystemTime) -> usize {
 }
 
 /// [`remove_leftover_temp_files_in`] for `dir` and the files nobody has
-/// modified for [`LEFTOVER_IDLE`], when this process uses `dir` as a root or
-/// writes into it for the first time, or for the first time since it last
-/// did so [`LEFTOVER_IDLE`] ago.
+/// modified for [`LEFTOVER_IDLE`], when `dir` is due a sweep
+/// ([`due_for_sweep`]): the first time this process uses it (as a root, as
+/// the folder of a path it resolves, or as a folder it writes into), and
+/// again once its last sweep is [`LEFTOVER_IDLE`] past.
 fn sweep_leftover_temp_files(dir: &Path) {
     if !due_for_sweep(&mut locked(&SWEPT_DIRS), dir, Instant::now()) {
         return;
@@ -701,45 +703,106 @@ fn removed_sessions() -> MutexGuard<'static, RemovedSessions> {
 /// An id leaves the set when its session first uses its directory
 /// ([`session_dir_in`]), when the store deletes its rows
 /// ([`remove_stored_session_dir`]) or when its session is removed
-/// ([`remove_session_dir`]), so it holds at most the ids named at startup.
+/// ([`remove_session_dir`]), so it holds at most the ids kept at startup.
 static KEPT_SESSIONS: LazyLock<Mutex<HashSet<u128>>> = LazyLock::new(Default::default);
 
-/// Keep the directories of the sessions `ids` through the first-use purge of
-/// stale session directories: the stored sessions that the session store
-/// can still adopt after a restart, which then find their files again. The
-/// server calls this at startup, after opening its store and before it takes
-/// requests, with at most `P2A_MAX_SESSIONS` ids; ids the purge has already
-/// passed are not brought back. Ids not in canonical UUID form are ignored.
+/// Exempt from the first-use purge of stale session directories the
+/// directories of the stored sessions `ids`, which the session store can
+/// still adopt after a restart, so that a returning session finds its files
+/// again; returns the ids kept, in the order given.
+///
+/// `ids` come most recently accessed first, and the directories of the
+/// first `max_kept` of them that have one are kept: ids whose
+/// `<data_root>/sessions/<id>` is not a real directory (a session that never
+/// used files, a link, a file) take no place, so they do not push out an
+/// older session that has files. Ids not in canonical UUID form, and
+/// repeats, are passed over. The server calls this at startup, after opening
+/// its store and before it takes requests, with every adoptable session and
+/// `P2A_MAX_SESSIONS`, so the kept directories never outnumber the sessions
+/// the server can hold. It runs before the session-directories switch is
+/// installed ([`configure_session_dirs`]) and looks at the directories
+/// either way; with the switch off nothing is purged or removed through the
+/// kept set. Ids the purge has already passed are not brought back.
 ///
 /// A kept directory goes when the store deletes the session's rows before
 /// the session has used it again ([`remove_stored_session_dir`]: the session
 /// can no longer come back). Once the session uses its directory, the
 /// directory goes with the session ([`remove_session_dir`]).
-pub fn keep_session_dirs<I>(ids: I)
+pub fn keep_session_dirs<I>(ids: I, max_kept: usize) -> Vec<String>
 where
     I: IntoIterator,
     I::Item: AsRef<str>,
 {
-    let mut kept = locked(&KEPT_SESSIONS);
-    kept.extend(ids.into_iter().filter_map(|id| session_uuid(id.as_ref())));
+    match allowed_data_root() {
+        Ok(data_root) => keep_session_dirs_in(&data_root, ids, max_kept),
+        // No data root: no file access, so no purge either.
+        Err(_) => Vec::new(),
+    }
+}
+
+/// See [`keep_session_dirs`]: keep (in [`KEPT_SESSIONS`]) the first
+/// `max_kept` of `ids` whose `<data_root>/sessions/<id>` is a real directory.
+fn keep_session_dirs_in<I>(data_root: &Path, ids: I, max_kept: usize) -> Vec<String>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let sessions = data_root.join(SESSIONS_DIR);
+    // The purge passes over a `sessions/` that is not a real directory, and
+    // no session directory can be created under one.
+    if max_kept == 0 || !fs::symlink_metadata(&sessions).is_ok_and(|m| m.is_dir()) {
+        return Vec::new();
+    }
+    let mut uuids = HashSet::new();
+    let mut kept = Vec::new();
+    for id in ids {
+        let id = id.as_ref();
+        let Some(uuid) = session_uuid(id) else {
+            continue;
+        };
+        if uuids.contains(&uuid)
+            || !fs::symlink_metadata(sessions.join(id)).is_ok_and(|m| m.is_dir())
+        {
+            continue;
+        }
+        uuids.insert(uuid);
+        kept.push(id.to_string());
+        if kept.len() == max_kept {
+            break;
+        }
+    }
+    locked(&KEPT_SESSIONS).extend(uuids);
+    kept
+}
+
+/// Whether `session_id`'s directory may still need removing when the store
+/// deletes the session's rows: session directories are on and
+/// [`keep_session_dirs`] kept it, and the session has not used it since.
+/// Never blocks on I/O (one atomic load and one lookup), so the store can
+/// skip the blocking pool for the rows of every other session;
+/// [`remove_stored_session_dir`] checks again under its own lock.
+pub fn is_kept_session_dir(session_id: &str) -> bool {
+    SESSION_DIRS.load(Ordering::SeqCst) && is_in_kept_set(session_id)
+}
+
+/// Whether [`KEPT_SESSIONS`] holds `id`.
+fn is_in_kept_set(id: &str) -> bool {
+    session_uuid(id).is_some_and(|uuid| locked(&KEPT_SESSIONS).contains(&uuid))
 }
 
 /// Remove the directory [`keep_session_dirs`] kept for `session_id`, whose
 /// rows the session store has deleted, so it can no longer be adopted: the
 /// directory of a stored session nobody came back for. Called (off the async
-/// runtime) whenever the store deletes a session's rows; `Ok(())` without
-/// doing anything when session directories are off, when the directory is
-/// not kept (that of a session of this process, or of a kept session that
-/// has used it since the restart: either goes with its session) or has
-/// already gone. Links inside the directory are removed, never followed.
-/// Unlike [`remove_session_dir`] it does not refuse the directory to later
-/// calls.
+/// runtime) when the store deletes a session's rows and
+/// [`is_kept_session_dir`] holds; `Ok(())` without doing anything when
+/// session directories are off, when the directory is not kept (that of a
+/// session of this process, or of a kept session that has used it since the
+/// restart: either goes with its session) or has already gone. Links inside
+/// the directory are removed, never followed. Unlike [`remove_session_dir`]
+/// it does not refuse the directory to later calls.
 pub fn remove_stored_session_dir(session_id: &str) -> std::io::Result<()> {
-    if !SESSION_DIRS.load(Ordering::SeqCst) {
-        return Ok(());
-    }
     // Most deleted rows are of sessions of this process: no data root needed.
-    if !session_uuid(session_id).is_some_and(|id| locked(&KEPT_SESSIONS).contains(&id)) {
+    if !is_kept_session_dir(session_id) {
         return Ok(());
     }
     let data_root = allowed_data_root().map_err(std::io::Error::other)?;
@@ -1307,6 +1370,29 @@ mod tests {
         resolve_in(&root, "deeper/inner/new.csv").unwrap();
         assert!(in_deeper.exists());
         assert_eq!(fs::read_dir(root.join("sub")).unwrap().count(), 1);
+
+        // A path outside the jail is refused before anything is swept: a
+        // folder outside the root keeps its leftover, whether the path names
+        // a file in it or the folder itself, absolutely or through `..`.
+        let (_o, outside) = tmp_root();
+        let out_leftover = temp_file_at(&outside, "out.csv", an_hour_ago());
+        let name = outside.file_name().unwrap().to_str().unwrap();
+        for input in [
+            outside.join("x.csv").to_str().unwrap().to_string(),
+            format!("../{name}/x.csv"),
+            outside.to_str().unwrap().to_string(),
+            format!("../{name}"),
+        ] {
+            let err = resolve_in(&root, &input).unwrap_err();
+            assert!(
+                err.contains("is outside the data directory"),
+                "{input}: {err}"
+            );
+        }
+        assert!(
+            out_leftover.exists(),
+            "a leftover outside the data directory was removed"
+        );
     }
 
     /// A folder in use is swept again once the idle time has passed since
@@ -1441,13 +1527,18 @@ mod tests {
         let (_t, data) = tmp_root();
         let kept = fresh_id();
         let own = fresh_id();
-        keep_session_dirs([kept.as_str(), "not-a-uuid"]);
         for id in [&kept, &own] {
             fs::create_dir_all(data.join("sessions").join(id)).unwrap();
             fs::write(data.join("sessions").join(id).join("a.csv"), "x\n1\n").unwrap();
         }
+        assert_eq!(
+            keep_session_dirs_in(&data, [kept.as_str(), "not-a-uuid"], 10),
+            [kept.as_str()]
+        );
+        assert!(is_in_kept_set(&kept) && !is_in_kept_set(&own));
 
         remove_stored_session_dir_in(&data, &kept).unwrap();
+        assert!(!is_in_kept_set(&kept));
         assert!(fs::symlink_metadata(data.join("sessions").join(&kept)).is_err());
         remove_stored_session_dir_in(&data, &own).unwrap();
         assert!(data.join("sessions").join(&own).join("a.csv").exists());
@@ -1464,8 +1555,9 @@ mod tests {
         let dir = data.join("sessions").join(&in_use);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a.csv"), "x\n1\n").unwrap();
-        keep_session_dirs([&in_use]);
+        keep_session_dirs_in(&data, [&in_use], 10);
         assert_eq!(active_root_for(&data, true, Some(&in_use)).unwrap(), dir);
+        assert!(!is_in_kept_set(&in_use));
         remove_stored_session_dir_in(&data, &in_use).unwrap();
         assert_eq!(fs::read_to_string(dir.join("a.csv")).unwrap(), "x\n1\n");
         remove_session_dir_in(&data, &in_use).unwrap();
@@ -1473,9 +1565,79 @@ mod tests {
 
         // Once a kept session's own removal ran, deleting its rows is a no-op.
         let back = fresh_id();
-        keep_session_dirs([&back]);
+        fs::create_dir_all(data.join("sessions").join(&back)).unwrap();
+        keep_session_dirs_in(&data, [&back], 10);
+        assert!(is_in_kept_set(&back));
         remove_session_dir_in(&data, &back).unwrap();
-        assert!(!locked(&KEPT_SESSIONS).contains(&session_uuid(&back).unwrap()));
+        assert!(!is_in_kept_set(&back));
+    }
+
+    /// The cap on kept directories counts directories, not stored sessions:
+    /// the most recent sessions that never used files take no place, so an
+    /// older session with files keeps its directory; at most `max_kept` are
+    /// kept, in the order given, and only real directories under the
+    /// session's own id count.
+    #[test]
+    fn keep_session_dirs_keeps_the_most_recent_sessions_that_have_a_directory() {
+        let (_t, data) = tmp_root();
+        let sessions = data.join("sessions");
+        // Most recently accessed first.
+        let ids: Vec<String> = (0..7).map(|_| fresh_id()).collect();
+        let [chat_a, chat_b, older, a_file, a_link, oldest, beyond] =
+            <[String; 7]>::try_from(ids.clone()).unwrap();
+        for id in [&older, &oldest, &beyond] {
+            fs::create_dir_all(sessions.join(id)).unwrap();
+            fs::write(sessions.join(id).join("mine.csv"), "x,y\n1,2.1\n").unwrap();
+        }
+        fs::write(sessions.join(&a_file), "x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(sessions.join(&older), sessions.join(&a_link)).unwrap();
+        // A repeat and a name in another spelling take no place either.
+        let mut given = ids;
+        given.insert(3, older.clone());
+        given.insert(4, oldest.to_uppercase());
+        fs::create_dir_all(sessions.join(oldest.to_uppercase())).unwrap();
+
+        assert_eq!(
+            keep_session_dirs_in(&data, &given, 2),
+            [older.as_str(), oldest.as_str()]
+        );
+        assert!(is_in_kept_set(&older) && is_in_kept_set(&oldest));
+        for id in [&chat_a, &chat_b, &a_file, &a_link, &beyond] {
+            assert!(!is_in_kept_set(id), "{id}");
+        }
+        // The purge then keeps the two directories, never a third.
+        let keep: HashSet<u128> = [&older, &oldest]
+            .into_iter()
+            .map(|id| session_uuid(id).unwrap())
+            .collect();
+        purge_stale_session_dirs_in(&data, &keep);
+        assert!(sessions.join(&older).join("mine.csv").exists());
+        assert!(sessions.join(&oldest).join("mine.csv").exists());
+        assert!(fs::symlink_metadata(sessions.join(&beyond)).is_err());
+
+        // A cap of zero, or no `sessions/` folder, keeps nothing.
+        let (_t2, empty) = tmp_root();
+        let other = fresh_id();
+        assert!(keep_session_dirs_in(&empty, [&other], 5).is_empty());
+        fs::create_dir_all(empty.join("sessions").join(&other)).unwrap();
+        assert!(keep_session_dirs_in(&empty, [&other], 0).is_empty());
+        assert!(!is_in_kept_set(&other));
+    }
+
+    /// Only a kept session whose directory may still need removing needs
+    /// the blocking pool when its rows go.
+    #[test]
+    fn only_a_kept_session_dir_needs_removing_with_its_rows() {
+        let (_t, data) = tmp_root();
+        let kept = fresh_id();
+        fs::create_dir_all(data.join("sessions").join(&kept)).unwrap();
+        assert!(!is_in_kept_set(&kept));
+        keep_session_dirs_in(&data, [&kept], 1);
+        assert!(is_in_kept_set(&kept));
+        assert!(!is_in_kept_set("not-a-uuid") && !is_in_kept_set(&fresh_id()));
+        remove_stored_session_dir_in(&data, &kept).unwrap();
+        assert!(!is_in_kept_set(&kept));
     }
 
     /// A sweep never takes the temporary file of a write in progress for a

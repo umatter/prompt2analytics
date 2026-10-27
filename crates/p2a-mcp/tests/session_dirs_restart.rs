@@ -36,12 +36,20 @@ const DELETED: &str = "7c2e1a4d-9f36-4b58-8d43-5e1f2a6b8c93";
 /// stale.
 const EXPIRED: &str = "8d3f2b5e-a047-4c69-9e54-6f2a3b7c9da4";
 /// A stored session within the TTL, accessed before the [`MAX_SESSIONS`]
-/// most recent ones (as the sessions kept at an earlier restart are): its
-/// directory is not kept, so the kept directories never outnumber the
-/// sessions the server can hold.
+/// most recent ones that have a directory (as the sessions kept at an earlier
+/// restart are): its directory is not kept, so the kept directories never
+/// outnumber the sessions the server can hold.
 const CAPPED: &str = "af5b4d7a-c269-4e8b-9076-8b4c5d9ebfc6";
+/// Stored sessions within the TTL, accessed more recently than all the
+/// others, that never used files (chat-only sessions): they have no
+/// directory, so they take none of the [`MAX_SESSIONS`] places of those
+/// that do.
+const CHAT_ONLY: [&str; 2] = [
+    "b06c5e8b-d37a-4f9c-a187-9c5d6eaf0cd7",
+    "c17d6f9c-e48b-4a0d-b298-ad6e7fb01de8",
+];
 /// `P2A_MAX_SESSIONS` of the restarted server: one below the number of
-/// adoptable stored sessions.
+/// adoptable stored sessions that have a directory.
 const MAX_SESSIONS: usize = 3;
 /// A directory without a stored session.
 const STALE: &str = "9e4a3c6f-b158-4d7a-8f65-7a3b4c8daeb5";
@@ -77,8 +85,13 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (St
 async fn seed_store(db_path: &Path) {
     let db = DbConnection::connect_rocksdb(db_path).await.unwrap();
     let now = Utc::now();
-    for id in [KEPT, LATER, DELETED] {
+    for id in CHAT_ONLY {
         db.set_session_last_accessed(id, now).await.unwrap();
+    }
+    for id in [KEPT, LATER, DELETED] {
+        db.set_session_last_accessed(id, now - chrono::Duration::minutes(2))
+            .await
+            .unwrap();
     }
     db.set_session_last_accessed(EXPIRED, now - chrono::Duration::hours(3))
         .await

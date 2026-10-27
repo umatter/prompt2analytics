@@ -9,18 +9,31 @@ use surrealdb::sql::Datetime;
 use super::connection::{DbConnection, DbError, failed_statement};
 use super::models::{DbSession, Settings, key_string};
 
-/// `path_jail::remove_stored_session_dir` for `id`, on tokio's blocking pool
-/// inside a runtime (inline outside one); a failure is logged.
+/// `f` on tokio's blocking pool inside a runtime (inline outside one); `Err`
+/// with the join error when it panicked there.
+async fn off_runtime<T, F>(f: F) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.spawn_blocking(f).await,
+        Err(_) => Ok(f()),
+    }
+}
+
+/// `path_jail::remove_stored_session_dir` for `id`, off the async runtime
+/// ([`off_runtime`]); a failure is logged. Nearly every deleted row is of a
+/// session whose directory was not kept, which the non-blocking
+/// `path_jail::is_kept_session_dir` settles without the blocking pool.
 async fn remove_stored_session_dir(id: &str) {
+    if !crate::path_jail::is_kept_session_dir(id) {
+        return;
+    }
     let owned = id.to_string();
-    let remove = move || crate::path_jail::remove_stored_session_dir(&owned);
-    let removed = match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle
-            .spawn_blocking(remove)
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e))),
-        Err(_) => remove(),
-    };
+    let removed = off_runtime(move || crate::path_jail::remove_stored_session_dir(&owned))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
     if let Err(e) = removed {
         tracing::warn!(session_id = %id, error = %e, "Failed to remove a stored session's directory");
     }
@@ -464,34 +477,44 @@ impl DbConnection {
     }
 
     /// Keep the data directories of the stored sessions that can still be
-    /// adopted, those whose row was accessed within `ttl_minutes` (the rule
-    /// `PersistentSessionManager::get_session` adopts by), through the
-    /// first-use purge of stale session directories
-    /// (`path_jail::keep_session_dirs`): at most `max_kept` of them, the most
-    /// recently accessed first. The server calls this once at startup, before
+    /// adopted ([`Self::adoptable_session_ids`]) through the first-use purge
+    /// of stale session directories (`path_jail::keep_session_dirs`): at
+    /// most `max_kept` directories, those of the most recently accessed
+    /// sessions that have one. The server calls this once at startup, before
     /// it takes requests, with `P2A_MAX_SESSIONS`: the store also holds the
     /// rows of the sessions kept at earlier restarts within the TTL, so
-    /// without the cap every restart would keep more directories. Returns
-    /// the ids kept, the most recently accessed first.
+    /// without the cap every restart would keep more directories. Sessions
+    /// that never used files hold no directory and so take none of the
+    /// places. Returns the ids kept, the most recently accessed first.
     pub async fn keep_adoptable_session_dirs(
         &self,
         ttl_minutes: u64,
         max_kept: usize,
     ) -> Result<Vec<String>, DbError> {
+        let ids = self.adoptable_session_ids(ttl_minutes).await?;
+        // A look at up to every adoptable session's directory: off the
+        // async runtime.
+        off_runtime(move || crate::path_jail::keep_session_dirs(&ids, max_kept))
+            .await
+            .map_err(|e| DbError::Query(format!("cannot keep the session directories: {e}")))
+    }
+
+    /// Ids of the stored sessions that can still be adopted, those whose row
+    /// was accessed within `ttl_minutes` (the rule
+    /// `PersistentSessionManager::get_session` adopts by), the most recently
+    /// accessed first.
+    pub async fn adoptable_session_ids(&self, ttl_minutes: u64) -> Result<Vec<String>, DbError> {
         let now = Utc::now();
         let mut rows = self.list_sessions().await?;
         // Most recently accessed first, whatever order the query returned.
         rows.sort_by_cached_key(|row| std::cmp::Reverse(row.last_accessed_chrono()));
-        let ids: Vec<String> = rows
+        Ok(rows
             .iter()
             .filter(|row| {
                 !crate::session::is_past_ttl(row.last_accessed_chrono(), now, ttl_minutes)
             })
-            .take(max_kept)
             .map(DbSession::id_string)
-            .collect();
-        crate::path_jail::keep_session_dirs(&ids);
-        Ok(ids)
+            .collect())
     }
 
     /// Ids of the session rows whose `last_accessed` is before `cutoff`.

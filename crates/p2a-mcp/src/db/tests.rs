@@ -3263,11 +3263,11 @@ async fn test_delete_session() {
     assert!(result.expect("Should not error").is_none());
 }
 
-/// The directories kept through a restart's purge are those of the stored
-/// sessions `get_session` would still adopt: last accessed within the TTL,
-/// by the same whole-minute rule.
+/// The sessions whose directories a restart's purge may keep are those
+/// `get_session` would still adopt: last accessed within the TTL, by the same
+/// whole-minute rule.
 #[tokio::test]
-async fn keep_adoptable_session_dirs_keeps_the_sessions_within_the_ttl() {
+async fn adoptable_session_ids_are_the_sessions_within_the_ttl() {
     let db = test_db().await;
     let now = chrono::Utc::now();
     let id = || uuid::Uuid::new_v4().to_string();
@@ -3280,18 +3280,19 @@ async fn keep_adoptable_session_dirs_keeps_the_sessions_within_the_ttl() {
         .await
         .unwrap();
     }
-    let mut kept = db.keep_adoptable_session_dirs(60, 100).await.unwrap();
-    kept.sort();
-    let mut expected = vec![fresh, at_the_ttl];
-    expected.sort();
-    assert_eq!(kept, expected);
+    assert_eq!(
+        db.adoptable_session_ids(60).await.unwrap(),
+        vec![fresh, at_the_ttl]
+    );
 }
 
-/// However many adoptable rows earlier processes left (each restart within
-/// one TTL adds up to the session cap), at most `max_kept` directories are
-/// kept: those of the most recently accessed sessions.
+/// The adoptable sessions come most recently accessed first, whatever order
+/// their rows were written in, so that the cap on kept directories
+/// (`path_jail::keep_session_dirs`, tested there and in
+/// `tests/session_dirs_restart.rs`) keeps the most recent sessions that have
+/// files; every adoptable row is listed, never one past the TTL.
 #[tokio::test]
-async fn keep_adoptable_session_dirs_keeps_at_most_the_most_recent_sessions() {
+async fn adoptable_session_ids_come_most_recently_accessed_first() {
     let db = test_db().await;
     let now = chrono::Utc::now();
     // Seven adoptable rows, accessed 3, 10, ..., 45 minutes ago (inserted
@@ -3311,19 +3312,8 @@ async fn keep_adoptable_session_dirs_keeps_at_most_the_most_recent_sessions() {
     }
     let id_at = |m: i64| ids[minutes.iter().position(|&x| x == m).unwrap()].clone();
 
-    let kept = db.keep_adoptable_session_dirs(60, 3).await.unwrap();
-    assert_eq!(kept, vec![id_at(3), id_at(10), id_at(17)]);
-    // A cap above the number of adoptable rows keeps them all, never the
-    // one past the TTL.
-    let kept = db.keep_adoptable_session_dirs(60, 20).await.unwrap();
-    assert_eq!(kept.len(), 7);
-    assert!(!kept.contains(&id_at(90)));
-    assert!(
-        db.keep_adoptable_session_dirs(60, 0)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let expected: Vec<String> = [3, 10, 17, 24, 31, 38, 45].map(id_at).to_vec();
+    assert_eq!(db.adoptable_session_ids(60).await.unwrap(), expected);
 }
 
 // ==================== Integration Tests ====================
