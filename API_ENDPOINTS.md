@@ -151,7 +151,7 @@ The path id is the caller; it must be a live session (404 otherwise), and a `X-P
 POST /api/sessions/{session_id}/datasets/reload
 ```
 
-The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory. Each source file must fit `load_file_bytes`, checked before parsing as `load_dataset` checks it, and each reloaded dataset must fit the dataset quotas; a dataset that does not is reported in `failed`. A `failed` entry's `error` is the `load_file_bytes` refusal (as in the example below), a dataset-quota refusal, `path is not inside this session's data directory` or `the file could not be loaded`; none of them holds a server path. Only a dataset loaded with `load_dataset` has a source path to reload; uploaded and inline (`create_dataset`) datasets are reported in `skipped`. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
+The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory. Each source file must fit `load_file_bytes`, checked before parsing, as `load_dataset` checks it, and each reloaded dataset must fit the dataset quotas; a dataset that does not is reported in `failed`. A `failed` entry's `error` is the `load_file_bytes` refusal (as in the example below), a dataset-quota refusal, `path is not inside this session's data directory` or `the file could not be loaded`; none of them holds a server path. Only a dataset loaded with `load_dataset` has a source path to reload; uploaded and inline (`create_dataset`) datasets are reported in `skipped`. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
 
 **Request:** (empty body)
 ```json
@@ -167,7 +167,7 @@ The reload runs as one governed call (memory admission, the session's slot, the 
     "failed": [
       {
         "name": "archive_data",
-        "source_path": "/data/archive.csv",
+        "source_path": "archive.csv",
         "error": "the file needs 70000000 (load_file_bytes), which exceeds this server's limit of 67108864"
       }
     ],
