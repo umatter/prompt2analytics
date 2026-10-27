@@ -43,7 +43,8 @@
 //! a hand-back with no call running within its deadline (every call is then
 //! refused; detached overdue work may still end and free memory, but nothing
 //! the governor waits for will), [`ToolGovernor::health`] reports the server
-//! unhealthy, and the stuck watchdog restarts the process if that lasts.
+//! unhealthy, and the stuck watchdog, when configured
+//! ([`ExecConfig::stuck_exit`]), restarts the process if that lasts.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -550,8 +551,9 @@ impl MemoryProbe {
 /// leaves the process above the limit makes the gate stuck: every call is
 /// refused, and although detached overdue work may still end and free
 /// memory, nothing the governor waits for will. The governor then reports
-/// itself unhealthy (`/health` answers 503, and the stuck watchdog restarts
-/// the process) until the RSS is back at or under the limit.
+/// itself unhealthy (`/health` answers 503, and the stuck watchdog, when
+/// configured, restarts the process) until the RSS is back at or under the
+/// limit.
 struct MemoryGate {
     limit: Option<u64>,
     probe: MemoryProbe,
@@ -841,8 +843,8 @@ impl ToolGovernor {
     /// deadline. Above the limit with no such call running, this starts a
     /// due hand-back in the background (see `MemoryGate`), so whatever reads
     /// it also gives the server its way back: `/health`, and the HTTP server
-    /// itself every 5 s under a soft limit (the stuck watchdog, or a plain
-    /// poll without one).
+    /// itself on a short poll under a soft limit (the stuck watchdog, or a
+    /// plain poll without one; `transport::http::HEALTH_POLL`).
     pub fn health(&self) -> GovernorHealth {
         let (in_flight, overdue) = self.running_and_overdue();
         let rss = self.memory.rss();
@@ -1687,12 +1689,12 @@ mod tests {
         assert!(h.healthy);
     }
 
-    /// Above the memory soft limit with no call running, every call is
-    /// refused and nothing in flight will free memory, so the governor must
-    /// report itself unhealthy: `/health` then answers 503 and the stuck
-    /// watchdog restarts the process instead of leaving it refusing every
-    /// visitor (PR-04). A 1-byte limit stays exceeded whatever the heap
-    /// hands back.
+    /// Above the memory soft limit with no call running within its deadline,
+    /// every call is refused and nothing the governor waits for will free
+    /// memory, so the governor must report itself unhealthy: `/health` then
+    /// answers 503 and the stuck watchdog, when configured, restarts the
+    /// process instead of leaving it refusing every visitor (PR-04). A 1-byte
+    /// limit stays exceeded whatever the heap hands back.
     #[tokio::test]
     async fn memory_pressure_with_no_call_running_is_unhealthy() {
         if p2a_core::get_process_memory().is_none() {
@@ -1849,9 +1851,10 @@ mod tests {
         }
     }
 
-    /// With nothing running and the process above the limit, `health` (the
-    /// watchdog polls it) hands freed memory back on its own, so the server
-    /// recovers without waiting for a visitor's call.
+    /// With nothing running and the process above the limit, `health` (read
+    /// by `/health` and by the HTTP server's own poll under a soft limit)
+    /// hands freed memory back on its own, so the server recovers without
+    /// waiting for a visitor's call.
     #[tokio::test]
     async fn health_hands_freed_memory_back_when_nothing_runs() {
         let memory = FakeMemory::new(LIMIT + 50 * MIB, LIMIT / 2);

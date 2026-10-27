@@ -148,8 +148,9 @@ websocket `tool` messages runs through one governor
   whenever its health is read: by `/health`, and by the server itself every 5 s
   whenever a soft limit is set (the stuck watchdog's polling, or a plain poll
   when no watchdog is configured). Hand-backs are at least 10 s apart, so an
-  idle server that freed memory alone held above the limit is back under it
-  within about 15 s, with no visitor.
+  idle server that is above the limit only because of memory it has already
+  freed is back under it within about 15 s (the 10 s spacing plus one 5 s
+  poll), with no visitor.
 - **Dataset quotas.** After a call, the in-memory size of the session's
   datasets is checked against `P2A_SESSION_DATA_MB` (hosted 200 MiB) and the
   total over all sessions against `P2A_TOTAL_DATA_MB` (hosted 500 MiB). A call
@@ -164,8 +165,9 @@ websocket `tool` messages runs through one governor
   with `"status": "degraded"` while every slot is held by work past its
   deadline, or while the process stays above its memory soft limit after a
   hand-back with no call running within its deadline (`"memory_stuck": true`:
-  every call is refused, and although work detached past its deadline may still
-  end and free memory, nothing the server waits for will). If either state
+  every call is refused, so no tool call will run to free it; only work
+  detached past its deadline ending, or sessions being deleted or expiring, can
+  bring the process back under the limit). If either state
   lasts `P2A_STUCK_EXIT_SECS` (hosted 300 s), the process logs an error and
   exits with exit code 70, so that the platform's restart policy starts a
   fresh process. A restart discards every in-memory session. A soft

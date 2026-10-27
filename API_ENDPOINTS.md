@@ -854,7 +854,7 @@ The `governor` object reports the tool calls running (`in_flight`), those past t
 }
 ```
 
-While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. It does the same with `"memory_stuck": true` while the process stays above its memory soft limit with no call running within its deadline, after the server handed its freed heap memory back to the operating system: every tool call is then refused with `memory_pressure`, and although work detached past its deadline may still end and free memory, nothing the server waits for will. In the hosted profile the process exits (code 70) when either state lasts `P2A_STUCK_EXIT_SECS` (300 s), so the platform can restart it.
+While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. It does the same with `"memory_stuck": true` while the process stays above its memory soft limit with no call running within its deadline, after the server handed its freed heap memory back to the operating system: every tool call is then refused with `memory_pressure`, so no tool call will run to free it; only work detached past its deadline ending, or sessions being deleted or expiring, can bring the process back under the limit. In the hosted profile the process exits (code 70) when either state lasts `P2A_STUCK_EXIT_SECS` (300 s), so the platform can restart it.
 
 ---
 
@@ -952,7 +952,7 @@ An error response has this shape; `data` is absent, and `code` and `details` app
 | 422 | `quota_exceeded` | a dataset quota (the call's changes were undone) or a conversation-store bound |
 | 429 | `session_busy` | the session's slot is taken: `Retry-After: 2` |
 | 503 | `server_busy` | every tool slot is taken: `Retry-After: 5` |
-| 503 | `memory_pressure` | the process is above its memory soft limit, also after handing its freed heap memory back to the operating system: `Retry-After: 15` |
+| 503 | `memory_pressure` | the process is above its memory soft limit; before refusing a tool call, the server hands its freed heap memory back to the operating system, at most once every 10 s: `Retry-After: 15` |
 | 503 | `capacity` | the session table is full: `Retry-After: 60` |
 | 504 | `deadline_exceeded` | the tool call ran past the server's time limit; `details {limit_secs}` |
 | 500 | `internal` | the tool panicked or the server failed; the session survives |
