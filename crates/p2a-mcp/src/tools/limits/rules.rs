@@ -901,16 +901,20 @@ pub static ROW_RULES: &[RowRule] = &[
     // covers the data. Both phases check the call's budget per query, so an overrun ends at the
     // deadline. Below 500 rows a condensed distance matrix is kept, which is small.
     row("ml_dbscan", RowClass::Quadratic),
-    // Held to the dense cap, with its own reason. The penalty is stored as bands and each solve
-    // is O(n), so neither memory nor time grows with n^2, but the fit keeps about twenty arrays
-    // the length of the distinct x values at once (sorted copies, weights, the penalty bands,
-    // the banded system and its factor, and the fit's outputs): on a release build its working
-    // memory was about 170 bytes per distinct x value, ten times its two columns. Without a row
-    // cap a dataset well inside the session data quota would take the hosted process past its
-    // memory; a linear-memory class, or a fit that reuses its buffers, would let it go.
+    // Held to the quadratic cap, with its own reason. The penalty is stored as bands and each
+    // solve is O(n): the fit sorts the data once and then runs at most about thirty banded fits
+    // (the GCV search or the df search), each checking the call's budget, so neither memory nor
+    // time grows with n^2. But the fit keeps about twenty arrays the length of the distinct x
+    // values at once (sorted copies, weights, the penalty bands, the banded system and its
+    // factor, and the fit's outputs): on a release build its working memory was about 170 bytes
+    // per distinct x value, ten times its two columns. Without a row cap a dataset well inside
+    // the session data quota would take the hosted process past its memory; at the quadratic
+    // cap the working memory stays near 9 MB (a release-build call at the cap, every x value
+    // distinct, took under a second and grew the process by about 15 MiB, its JSON response
+    // included). A fit that reuses its buffers would let the cap go.
     row_because(
         "regression_smooth_spline",
-        RowClass::Dense,
+        RowClass::Quadratic,
         "its working memory is many times the size of its two columns",
     ),
     // Cubic: exact t-SNE (no Barnes-Hut) keeps the n x n affinity and similarity matrices and
@@ -933,14 +937,15 @@ pub static ROW_RULES: &[RowRule] = &[
     // memory instead of the NT x NT projection and needs no eigenvalues, but with `lag` the
     // panel spatial lag (`splm::spatial_lag_panel`) scans all NT rows once for each of the T
     // periods, k + 3 times per fit: O(k N T^2) time, quadratic in the rows of a long panel, and
-    // the estimator never checks the call's budget. On a release build a fit on 25 times the
-    // cubic cap with 20 regressors took about 30 s and could not be stopped. The quadratic cap
-    // would need that scan to be linear (rows grouped by period once) or to check the budget.
+    // the estimator never checks the call's budget. On a release build a long-panel fit with
+    // many regressors ran for tens of seconds without a checkpoint. The rule cannot see `lag`,
+    // so the cap applies to every call, and the reason says so. The quadratic cap would need
+    // that scan to be linear (rows grouped by period once) or to check the budget.
     row_because(
         "spatial_panel_gmm",
         RowClass::Cubic,
-        "with a spatial lag its run time grows with the number of rows times the number of time \
-         periods, and it cannot be stopped once it starts",
+        "its spatial-lag fit (`lag`) runs in time that grows with the rows times the time \
+         periods and cannot be stopped once it starts, so the cap applies with or without `lag`",
     ),
     // Quadratic: nearest-neighbour search over all controls.
     row("propensity_matching", RowClass::Quadratic),
@@ -1904,9 +1909,11 @@ mod tests {
     }
 
     /// `ml_dbscan` keeps O(n) memory, and only its run time is quadratic (when `eps` covers the
-    /// data), so the quadratic class limits it. `regression_smooth_spline` and
-    /// `spatial_panel_gmm` keep the dense and cubic caps, and their refusals say why, not that
-    /// their memory or time grows with the square or cube of the row count.
+    /// data), so the quadratic class limits it. `regression_smooth_spline` has linear cost and
+    /// is held to the quadratic cap for its working memory, and `spatial_panel_gmm` to the cubic
+    /// cap for its spatial-lag scan; their refusals say why, not that their memory or time grows
+    /// with the square or cube of the row count, and the one of `spatial_panel_gmm` holds for a
+    /// call without `lag` too.
     #[test]
     fn row_refusals_give_the_tools_own_reason() {
         let h = Limits::hosted();
@@ -1922,11 +1929,11 @@ mod tests {
             v.message
         );
 
-        assert!(h.check_rows("regression_smooth_spline", 5_000, 2).is_ok());
+        assert!(h.check_rows("regression_smooth_spline", 50_000, 2).is_ok());
         let v = h
-            .check_rows("regression_smooth_spline", 5_001, 2)
+            .check_rows("regression_smooth_spline", 50_001, 2)
             .unwrap_err();
-        assert_eq!(key(&v), ("5000".to_string(), "dense_rows"));
+        assert_eq!(key(&v), ("50000".to_string(), "quadratic_rows"));
         assert!(!v.message.contains("square"), "{}", v.message);
         assert!(
             v.message
@@ -1941,8 +1948,9 @@ mod tests {
         assert!(!v.message.contains("cube"), "{}", v.message);
         assert!(
             v.message.contains(
-                "because with a spatial lag its run time grows with the number of rows times \
-                 the number of time periods, and it cannot be stopped once it starts"
+                "because its spatial-lag fit (`lag`) runs in time that grows with the rows times \
+                 the time periods and cannot be stopped once it starts, so the cap applies with \
+                 or without `lag`."
             ),
             "{}",
             v.message

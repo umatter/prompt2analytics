@@ -185,9 +185,11 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
   (`quadratic_rows`), refuse larger datasets with a message that suggests
   sampling with `munge_sample`. Two methods are held to a class's cap for a
   reason of their own, which their refusal states: `regression_smooth_spline`
-  (its working memory is many times its two columns) and `spatial_panel_gmm`
-  (with a spatial lag its run time grows with the rows times the time periods,
-  and it cannot be stopped once it starts).
+  to the quadratic cap (its cost is linear, but its working memory is many
+  times its two columns) and `spatial_panel_gmm` to the cubic cap (its
+  spatial-lag fit runs in time that grows with the rows times the time periods
+  and cannot be stopped once it starts, so the cap applies with or without
+  `lag`).
 - **Named budgets.** Sizes the handlers compute while they run: image pixels,
   table cells, join output, generated data, export and file sizes, spatial
   links, the work of an ARIMA fit, the memory of a tree-ensemble fit, SQL
@@ -488,9 +490,9 @@ Row classes and tolerance (Off: none):
 
 | Key | What it bounds | Hosted |
 |---|---|---|
-| `dense_rows` | dataset rows for `ml_hierarchical`, `ml_cutree`, and `regression_smooth_spline` (for its working memory) | 5,000 |
+| `dense_rows` | dataset rows for `ml_hierarchical` and `ml_cutree` | 5,000 |
 | `cubic_rows` | dataset rows for `ml_tsne`, `ml_cmdscale`, `sar_model`, `sem_model`, `sar_probit_model`, `sem_probit_model`, `spatial_panel_ml`, and `spatial_panel_gmm` (for its spatial-lag scan) | 2,000 |
-| `quadratic_rows` | dataset rows for `propensity_matching`, `heterogeneity_test`, `ml_svm`, `regression_loess`, `ts_changepoint`, `ml_dbscan` | 50,000 |
+| `quadratic_rows` | dataset rows for `propensity_matching`, `heterogeneity_test`, `ml_svm`, `regression_loess`, `ts_changepoint`, `ml_dbscan`, and `regression_smooth_spline` (for its working memory) | 50,000 |
 | `min_tolerance` | smallest convergence tolerance (`tol`, `eps`, ...) | 1e-15 |
 
 Named budgets:
