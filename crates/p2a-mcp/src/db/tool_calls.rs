@@ -70,10 +70,9 @@ impl DbConnection {
     /// `tool_call.message_id` (`NotFound` otherwise, as when it does not
     /// exist): an update never moves a call to another message, which could
     /// be missing or in another conversation, as a create would refuse. Its
-    /// texts are cut to fit, like
-    /// those of a new one, with the bytes of the stored texts they replace as
-    /// room: with a `session_db_bytes` budget only what they add counts. Runs
-    /// in the conversation's turn, like
+    /// texts are cut to fit, like those of a new one, with the bytes of the
+    /// stored texts they replace as room: with a `session_db_bytes` budget
+    /// only what they add counts. Runs in the conversation's turn, like
     /// [`create_tool_call`](Self::create_tool_call).
     pub async fn update_tool_call(&self, tool_call: &ToolCall) -> Result<ToolCall, DbError> {
         let db = self.clone();
@@ -330,9 +329,9 @@ impl DbConnection {
 enum StatusChange {
     /// It is running.
     Running,
-    /// It finished with `status`, storing `text` (already cut to
-    /// `message_bytes`, [`truncate_server_text`](DbConnection::truncate_server_text))
-    /// in `field`, after `duration_ms`.
+    /// It finished with `status`, storing `text` in `field`, after
+    /// `duration_ms`. `text` is already cut to `message_bytes`
+    /// ([`truncate_server_text`](DbConnection::truncate_server_text)).
     Finished {
         status: ToolCallStatus,
         field: TextField,

@@ -473,12 +473,12 @@ impl DbConnection {
     }
 
     /// Fit server-produced `texts`, of a write that replaces stored texts of
-    /// `replaced` bytes, in place: cut in order (see [`truncate_in_place`]) to the
-    /// bytes the session has left under `session_db_bytes` plus `replaced`
-    /// (each possibly to the empty string), and count them; never refused.
-    /// Without the budget `texts` are left as they are. The counter holds
-    /// the replaced texts too until the caller, once the write has replaced
-    /// them, releases their bytes
+    /// `replaced` bytes, in place: cut in order (see [`truncate_in_place`])
+    /// to the bytes the session has left under `session_db_bytes` plus
+    /// `replaced` (each possibly to the empty string), and count them; never
+    /// refused. Without the budget `texts` are left as they are. The counter
+    /// holds the replaced texts too until the caller, once the write has
+    /// replaced them, releases their bytes
     /// ([`release_session_bytes`](Self::release_session_bytes)); a write that
     /// fails leaves both counted. Call it, the write and the release in the
     /// conversation's [`StoreTurn`], so that no delete or clear releases the
