@@ -274,21 +274,23 @@ HTTP), and they never depend on the resource profile:
 - **Writes.** Files are written to a temporary file (mode 0600) beside the
   target and renamed into place, so a link planted at the target is replaced,
   never followed. A process stopped in the middle of a write leaves its
-  temporary file (`.<name>.<uuid>.p2a-tmp`); it is removed at a later file
-  access in its folder (any file access, for the data root or a session's
-  directory) once nobody has written to it for ten minutes.
+  temporary file (`.<name>.<uuid>.p2a-tmp`); a leftover is removed by the
+  first sweep of its folder after nobody has written to it for ten minutes. A
+  tool path that resolves through the data-root jail sweeps the root (or the
+  session's directory) and the folder the path lies in or names, the first
+  time in a process and then at most once every ten minutes.
 - **Per-session directories.** In open public mode each session's root is
   `<data root>/sessions/<session id>/` (mode 0700). Other sessions' directories
   and the shared root are outside it and unreachable. The directory is removed
   with the session, and directories left by an earlier process are purged at
   the first file access after a restart. With a RocksDB session store
   (`P2A_DB_PATH`), the directories of stored sessions that can still be adopted
-  (accessed within the session TTL; at most `P2A_MAX_SESSIONS` of them, the
-  most recently used) are kept, so a returning client's files are there for
-  the dataset reload. Such a directory goes when the store deletes the
-  session's rows, or with the session once it has come back and used its
-  files. A session's directory holds at most `session_disk_bytes` (hosted
-  64 MiB).
+  (accessed within the session TTL; at most `P2A_MAX_SESSIONS` directories,
+  those of the most recently used sessions that have one) are kept, so a
+  returning client's files are there for the dataset reload. Such a directory
+  goes when the store deletes the session's rows, or with the session once it
+  has come back and used its files. A session's directory holds at most
+  `session_disk_bytes` (hosted 64 MiB).
 - **Sizes.** `load_dataset` refuses a file larger than `load_file_bytes` (hosted
   64 MiB) before parsing it; `export_dataset`, `export_session` and
   `import_session` are bounded by `export_bytes` (hosted 64 MiB).
@@ -631,15 +633,18 @@ Named budgets:
    that product within the disk the host has, and lower `session_disk_bytes`
    with `P2A_LIMIT_OVERRIDES` if needed. With a RocksDB store (`P2A_DB_PATH`,
    as `docker-compose.yml` sets it), a restart keeps the directories of up to
-   `P2A_MAX_SESSIONS` stored sessions that can still come back, so the strict
-   bound is twice that product, 2 × `P2A_MAX_SESSIONS` × `session_disk_bytes`
-   (12.5 GiB with the hosted defaults), however often the server restarts.
-   On top of that comes one leftover temporary file (at most `export_bytes`)
-   for each write a stop interrupted, at most one per stop with the hosted one
-   call at a time, until a later file access in its folder or the removal of
-   its directory takes it. The kept directories go as their sessions come
-   back and end, or when the store's sweep deletes the rows of those that do
-   not, about one session TTL (plus one sweep period) after their last use.
+   `P2A_MAX_SESSIONS` stored sessions that can still come back (the most
+   recently used that have one; sessions that never used files take no
+   place), so the strict bound is twice that product, 2 × `P2A_MAX_SESSIONS` ×
+   `session_disk_bytes` (12.5 GiB with the hosted defaults), however often the
+   server restarts. On top of that comes one leftover temporary file (at most
+   `export_bytes`) for each write a stop interrupted: at most one for each call
+   running at the stop, so at most `P2A_TOOL_CONCURRENCY` per stop (default one
+   per vCPU; one per session in the hosted profile). Each stays until a sweep
+   of its folder or the removal of its directory takes it. The kept directories
+   go as their sessions come back and end, or when the store's sweep deletes
+   the rows of those that do not, about one session TTL (plus one sweep
+   period) after their last use.
 
 8. **Keep the session database outside the jail (`P2A_DB_PATH`).**
    File tools can write anywhere under `P2A_DATA_ROOT`, so the server refuses
