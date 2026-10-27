@@ -1361,7 +1361,7 @@ fn leaf_value_bytes(dtype: &DataType, values: u64) -> u64 {
 }
 
 /// Why a parquet file is not loaded, decided before it is decoded.
-enum NotAdmitted {
+pub(crate) enum NotAdmitted {
     /// The dataset quotas refuse it: the handler's error.
     Quota(McpError),
     /// It is not read: the reason, for the tool's error result.
@@ -1372,8 +1372,9 @@ enum NotAdmitted {
 /// quotas would refuse once it was loaded as `name` (see
 /// [`admit_parquet_source`]). Other formats pass: a CSV, Excel, Stata or
 /// SAS file is charged only once decoded, and a CSV can decode to several
-/// times its size on disk.
-async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
+/// times its size on disk. `load_dataset` and a dataset reload
+/// (`persistent_session::load_reload_source`) run it.
+pub(crate) async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
     let is_parquet = path
         .extension()
         .and_then(|e| e.to_str())

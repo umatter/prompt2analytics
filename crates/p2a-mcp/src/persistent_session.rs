@@ -13,9 +13,10 @@ use crate::db::{
     PersistenceLimits, Settings,
 };
 use crate::session::{
-    DatasetStore, Session, SessionError, SessionId, SessionManager, fmt_bytes, is_past_ttl,
-    is_session_id,
+    AdmissionGuard, DatasetAdmission, DatasetStore, Session, SessionError, SessionId,
+    SessionManager, fmt_bytes, is_past_ttl, is_session_id,
 };
+use crate::tools::handlers::data::{NotAdmitted, admit_parquet};
 use std::sync::Arc;
 
 /// A session manager that persists sessions to SurrealDB.
@@ -674,8 +675,9 @@ impl PersistentSessionManager {
     /// Loading is a separate step, [`load_reload_source`] and then
     /// [`insert_reloaded_dataset`] for each source, which the HTTP route runs
     /// under the tool governor (admission, permits, deadline, the
-    /// `load_file_bytes` check on each source file, dataset quotas), so a
-    /// reload is bounded like a tool call.
+    /// `load_file_bytes` check on each source file and the dataset quotas,
+    /// a parquet file's before it is decoded), so a reload is bounded like a
+    /// tool call.
     pub async fn reload_plan(
         &self,
         session_id: &str,
@@ -726,20 +728,30 @@ pub struct ReloadSource {
 }
 
 /// The load step of a dataset reload: validate `source.source_path` through
-/// the path jail, check the file's size against the `load_file_bytes` budget
-/// before any parsing (as `load_dataset` does) and load the file. It blocks;
-/// run it on the blocking pool inside the session's path-jail scope and
-/// under the server's request limits (`ToolGovernor::run_blocking` does
-/// both). The error is a fixed text, or the budget refusal with the file's
-/// size and the limit; neither holds a server path. The details are logged
-/// at debug level, the budget refusal at info level.
+/// the path jail, check the file before any parsing as `load_dataset` does
+/// (its size against the `load_file_bytes` budget, then a parquet file's
+/// footer and decoded size), and load the file. It blocks, and runs the
+/// async part of the parquet check on `handle`; run it on the blocking pool
+/// inside the session's path-jail scope and under the server's request
+/// limits (`ToolGovernor::run_blocking` does both). The error is a fixed
+/// text, the budget refusal with the file's size and the limit, or the
+/// quota refusal `load_dataset` gives; none holds a server path. The
+/// details are logged at debug level, the refusals at info level.
 ///
-/// The file is decoded in full before [`insert_reloaded_dataset`] charges
-/// it against the quotas: unlike `load_dataset` and `upload_dataset`, a
-/// reload runs no `session::admit_dataset` check on a parquet file's
-/// decoded size first, so a file replaced at a stored path since it was
-/// loaded is bounded only after decoding (known residual of PR-03).
-pub fn load_reload_source(source: &ReloadSource) -> Result<p2a_core::data::Dataset, String> {
+/// The decoded-size check is `load_dataset`'s (`session::admit_dataset`):
+/// it reads the quotas installed on this thread ([`DatasetQuotas::install`])
+/// and refuses, before decoding it, a parquet file whose dataset would take
+/// the session or the server past them, so a file replaced at a stored path
+/// since it was loaded cannot decode more than `load_dataset` would admit.
+/// What it admits stays reserved against the server's total until the
+/// caller drops that guard, once [`insert_reloaded_dataset`] has inserted
+/// the dataset or refused it. Without installed quotas only the footer is
+/// checked. Other formats are charged only once decoded, by
+/// [`insert_reloaded_dataset`].
+pub fn load_reload_source(
+    handle: &tokio::runtime::Handle,
+    source: &ReloadSource,
+) -> Result<p2a_core::data::Dataset, String> {
     let name = &source.name;
     let path = crate::path_jail::validate_data_path(&source.source_path).map_err(|e| {
         tracing::debug!(dataset = %name, error = %e, "Reload path rejected by the path jail");
@@ -773,6 +785,21 @@ pub fn load_reload_source(source: &ReloadSource) -> Result<p2a_core::data::Datas
             ));
         }
     }
+    match handle.block_on(admit_parquet(&path, name)) {
+        Ok(()) => {}
+        Err(NotAdmitted::Quota(refusal)) => {
+            tracing::info!(
+                tool = RELOAD_LABEL,
+                dataset = %name,
+                "reload source refused by the dataset quotas before decoding"
+            );
+            return Err(refusal.message.into_owned());
+        }
+        Err(NotAdmitted::Unread(reason)) => {
+            tracing::debug!(dataset = %name, %reason, "Reload source not read");
+            return Err(format!("{RELOAD_LOAD_FAILED}: {reason}"));
+        }
+    }
     p2a_core::DataLoader::load(&path).map_err(|e| {
         tracing::debug!(dataset = %name, error = %e, "Failed to reload dataset");
         RELOAD_LOAD_FAILED.to_string()
@@ -787,6 +814,29 @@ pub struct DatasetQuotas {
     pub per_session: Option<u64>,
     /// Dataset bytes all sessions together may hold.
     pub total: Option<u64>,
+}
+
+impl DatasetQuotas {
+    /// Install these quotas on this thread for the check a reload makes
+    /// before it decodes a file of `session` ([`load_reload_source`]), as a
+    /// tool call installs its own; `None` when there are none. Hold the
+    /// guard until the file's dataset is inserted or refused
+    /// ([`insert_reloaded_dataset`]) and drop it on this thread: dropping
+    /// it releases what the check reserved against the total.
+    pub fn install(
+        &self,
+        session: &Arc<Session>,
+        sessions: &Arc<SessionManager>,
+    ) -> Option<AdmissionGuard> {
+        (self.per_session.is_some() || self.total.is_some()).then(|| {
+            DatasetAdmission::install(
+                self.per_session,
+                self.total,
+                Arc::clone(session),
+                Arc::clone(sessions),
+            )
+        })
+    }
 }
 
 /// Insert a reloaded `dataset` as `name` into `session` unless it would push

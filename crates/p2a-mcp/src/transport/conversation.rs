@@ -692,11 +692,13 @@ async fn list_session_datasets(
 /// The loading runs as one governed call (`ToolGovernor::run_blocking`):
 /// memory admission, the session's and a global permit, the deadline and
 /// panic isolation, on the blocking pool inside the session's path-jail
-/// scope. Each source file is first checked against the `load_file_bytes`
-/// budget before it is parsed ([`load_reload_source`]); a file above it is
-/// reported failed with its size and the limit. Each loaded dataset is
-/// inserted only if it fits the governor's dataset quotas; one that does not
-/// is reported failed. The call runs in a [`RELOAD_LABEL`] span that carries
+/// scope. Each source file is first checked as `load_dataset` checks it,
+/// before it is parsed ([`load_reload_source`]): against the
+/// `load_file_bytes` budget, and a parquet file's decoded size against the
+/// governor's dataset quotas. A file refused there is reported failed with
+/// `load_dataset`'s refusal (its size and the limit). Each loaded dataset is
+/// inserted only if it fits the dataset quotas; one that does not is
+/// reported failed. The call runs in a [`RELOAD_LABEL`] span that carries
 /// the session id, so its log lines (a budget refusal among them) name the
 /// session. A refusal by the governor answers as a refused tool call does
 /// (503 `server_busy` or `memory_pressure`, 429 `session_busy`, 504
@@ -743,7 +745,11 @@ async fn reload_session_datasets(
             };
             for source in sources {
                 in_budget()?;
-                let loaded = match load_reload_source(&source) {
+                // The check before a parquet file is decoded reads the quotas
+                // from here; what it reserves against the total is held until
+                // the dataset is inserted or refused.
+                let _admission = quotas.install(&target, &sessions);
+                let loaded = match load_reload_source(&handle, &source) {
                     Ok(dataset) => {
                         in_budget()?;
                         handle.block_on(insert_reloaded_dataset(

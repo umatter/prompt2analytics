@@ -18,6 +18,7 @@ use p2a_mcp::path_jail::allowed_data_root;
 use p2a_mcp::persistent_session::{PersistentSessionManager, RELOAD_LABEL};
 use p2a_mcp::tools::limits;
 use p2a_mcp::transport::http::{AppState, build_app};
+use polars::prelude::{DataFrame, NamedFrom, ParquetWriter, Series};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -427,6 +428,110 @@ fn reload_refuses_a_source_above_load_file_bytes() {
             );
         })
     });
+}
+
+/// Write a parquet file of `rows` rows of one float column at `path`, the
+/// values cycling through 97 noisy levels: dictionary-encoded, so a few
+/// kilobytes on disk and 8 bytes a row once decoded.
+fn levels_parquet(path: &std::path::Path, rows: usize) {
+    let values: Vec<f64> = (0..rows).map(|i| (i % 97) as f64 * 0.37 + 0.1).collect();
+    let mut df = DataFrame::new(vec![Series::new("x".into(), values).into()]).unwrap();
+    ParquetWriter::new(std::fs::File::create(path).unwrap())
+        .finish(&mut df)
+        .unwrap();
+}
+
+/// POST the reload route for `sid`; the route answers 200 with the result.
+async fn reload(r: &Router, sid: &str) -> Value {
+    let (st, body) = call(
+        r,
+        "POST",
+        &format!("/api/sessions/{sid}/datasets/reload"),
+        Some(sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    body
+}
+
+/// A reload runs the check `load_dataset` runs before it decodes a parquet
+/// file (PR-H2). A stored parquet path now holding a file whose decoded size
+/// passes the session's quota is reported failed with `load_dataset`'s
+/// refusal before anything is decoded ("Nothing was loaded"), with no server
+/// path; the other stored dataset still reloads, and the dataset the file
+/// held when it was last loaded stays as it was.
+#[tokio::test]
+async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
+    let mut cfg = ServerConfig::default();
+    cfg.exec.session_data_mb = Some(8);
+    let (r, state) = app(cfg).await;
+    let sid = new_session(&r).await;
+    let root = allowed_data_root().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-prh2-")
+        .tempdir_in(&root)
+        .unwrap();
+    let (small, stored) = (dir.path().join("small.csv"), dir.path().join("p.parquet"));
+    std::fs::write(&small, noisy_csv(50, 4)).unwrap();
+    // 1,000 rows when it is first loaded.
+    levels_parquet(&stored, 1_000);
+    store_meta(&state, &sid, "small", &small, 0).await;
+    store_meta(&state, &sid, "p", &stored, 1).await;
+    let body = reload(&r, &sid).await;
+    assert_eq!(body["data"]["succeeded"], json!(["small", "p"]), "{body}");
+
+    // Replaced at the stored path by 4,000,000 rows: 32 MB once decoded.
+    // Pre-fix the reload decoded it in full and only then refused it at the
+    // insert ("this session's datasets would use 30.54 MB ...").
+    levels_parquet(&stored, 4_000_000);
+    let body = reload(&r, &sid).await;
+    assert_eq!(body["data"]["succeeded"], json!(["small"]), "{body}");
+    assert_eq!(body["data"]["failed"][0]["name"], "p", "{body}");
+    let error = body["data"]["failed"][0]["error"]
+        .as_str()
+        .unwrap_or_default();
+    let limit = p2a_core::memory::format_bytes(8 << 20);
+    assert!(
+        error.starts_with("Loading this file takes at least")
+            && error.contains("Nothing was loaded")
+            && error.contains(&format!("(limit {limit} per session)")),
+        "{body}"
+    );
+    assert!(!error.contains(&*root.to_string_lossy()), "{body}");
+    let session = state.session_manager.get_session(&sid).await.unwrap();
+    let datasets = session.datasets.read().await;
+    assert_eq!(datasets["p"].nrows(), 1_000);
+    assert_eq!(datasets["small"].nrows(), 50);
+}
+
+/// What a reload's check before decoding reserves against the total quota
+/// is released once the file is in or refused. A regression guard, not
+/// evidence of the check: without it nothing is reserved. Five reloads of a
+/// 2.4 MB parquet file (admitted at 3.2 MB, with what decoding it allocates)
+/// under a 6 MiB total each replace the dataset by name; a reservation the
+/// first left behind would refuse the second.
+#[tokio::test]
+async fn reload_releases_what_its_check_before_decoding_reserves() {
+    let mut cfg = ServerConfig::default();
+    cfg.exec.total_data_mb = Some(6);
+    let (r, state) = app(cfg).await;
+    let sid = new_session(&r).await;
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-prh2-")
+        .tempdir_in(allowed_data_root().unwrap())
+        .unwrap();
+    let stored = dir.path().join("p.parquet");
+    levels_parquet(&stored, 300_000);
+    store_meta(&state, &sid, "p", &stored, 0).await;
+    for round in 0..5 {
+        let body = reload(&r, &sid).await;
+        assert_eq!(
+            body["data"]["succeeded"],
+            json!(["p"]),
+            "round {round}: {body}"
+        );
+    }
 }
 
 /// Only `load_dataset` records the file it loaded as a dataset's source. A
