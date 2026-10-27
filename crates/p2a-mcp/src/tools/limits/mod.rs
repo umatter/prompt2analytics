@@ -185,19 +185,18 @@ families! {
     /// Recursion depth of tree builders.
     TreeDepth => "tree_depth", 100;
     /// The float sample size `n` (per group in two-sample and ANOVA designs) that
-    /// `power_t_test` and `power_anova_test` are given; it sets the degrees of freedom of their
-    /// t and F distributions. The cap is the top of the bracket in which those tools solve for
-    /// `n`, so every sample size they can return is accepted. `power_prop_test` computes with
-    /// the normal distribution only, and its `n` is not capped. The key is `power_sample_size`,
-    /// not `sample_size`, which other tools use as a request field name. Until p2a-core bounds
-    /// the t and F quantiles of the power calculations (PR-01), this cap also keeps them within
-    /// the range the core computes, so it must not be raised with `P2A_LIMIT_OVERRIDES`.
+    /// `power_t_test` and `power_anova_test` are given. The cap is the top of the bracket in
+    /// which those tools solve for `n`, so every sample size they can return is accepted.
+    /// `power_prop_test`'s `n` is not capped. The key is `power_sample_size`, not
+    /// `sample_size`, which other tools use as a request field name. p2a-core computes the t
+    /// and F quantiles of the power calculations with bounded work at any `n`, so the cap is
+    /// kept as defense in depth, not as a cost bound, and raising it with
+    /// `P2A_LIMIT_OVERRIDES` does not let a call run past its deadline.
     PowerSampleSize => "power_sample_size", 1_000_000;
-    /// Groups of a planned design (`power_anova_test` `groups`). With
-    /// [`Family::PowerSampleSize`] it bounds the F distribution's degrees of freedom,
-    /// `groups * (n - 1)`, also when `n` is solved for. Until p2a-core bounds the t and F
-    /// quantiles of the power calculations (PR-01), this cap also keeps them within the range
-    /// the core computes, so it must not be raised with `P2A_LIMIT_OVERRIDES`.
+    /// Groups of a planned design (`power_anova_test` `groups`). As with
+    /// [`Family::PowerSampleSize`], p2a-core's F quantile does bounded work at any group count,
+    /// so the cap is kept as defense in depth, not as a cost bound, and can be raised with
+    /// `P2A_LIMIT_OVERRIDES`.
     DesignGroups => "design_groups", 10;
 }
 
@@ -358,7 +357,7 @@ pub struct Limits {
     pub generated_bytes: Option<u64>,
     /// Estimated bytes of an export.
     pub export_bytes: Option<u64>,
-    /// Size on disk of a file `load_dataset` reads, checked before parsing.
+    /// Size on disk of a file `load_dataset` or a dataset reload reads, checked before parsing.
     pub load_file_bytes: Option<u64>,
     /// Bytes of a tool's text output.
     pub response_bytes: Option<u64>,
