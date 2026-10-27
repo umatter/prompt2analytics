@@ -13,6 +13,13 @@
 //! - other messages wait their turn, up to [`MAX_WAITING_MESSAGES`] of them and
 //!   the message cap in bytes; one more is refused with an `error` whose code
 //!   is `connection_busy`.
+//!
+//! What an answer echoes of a message is short, so the answers queued for a
+//! client that does not read stay small whatever it sends: an `id` may be at
+//! most [`MAX_ID_BYTES`] long (a message with a longer one is refused, and
+//! such a refusal, like any answer that has no id to echo, carries the id
+//! `system`), and a parse error gives serde's message, which quotes the
+//! message, cut at [`MAX_QUOTE_BYTES`].
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -61,6 +68,61 @@ pub enum ClientMessage {
     },
     /// Ping for keepalive
     Ping,
+}
+
+impl ClientMessage {
+    /// The id the client gave this message, for the types that have one.
+    fn id(&self) -> Option<&str> {
+        match self {
+            Self::Tool { id, .. } | Self::Chat { id, .. } => Some(id),
+            Self::Auth { .. } | Self::Ping => None,
+        }
+    }
+}
+
+/// The longest `id` a client message may have, in bytes. Every answer to a
+/// message carries its id, so this keeps the answers queued for a client
+/// that does not read them small, however long the messages it sends.
+const MAX_ID_BYTES: usize = 256;
+
+/// How much of serde's message a parse error gives, in bytes: serde quotes
+/// an unknown `type` or a mistyped string in full.
+const MAX_QUOTE_BYTES: usize = 256;
+
+/// The id an answer to a message carries: the message's own when it has
+/// one of at most [`MAX_ID_BYTES`], `system` otherwise.
+fn answer_id(id: Option<&str>) -> String {
+    match id {
+        Some(id) if id.len() <= MAX_ID_BYTES => id.to_string(),
+        _ => "system".to_string(),
+    }
+}
+
+/// The refusal of a message whose id is longer than [`MAX_ID_BYTES`].
+fn id_too_long(id: &str) -> String {
+    format!(
+        "Invalid message: its id is {} long, and an id may be at most {MAX_ID_BYTES} bytes.",
+        format_bytes(id.len())
+    )
+}
+
+/// The refusal of a message that is not a client message, with what serde
+/// quotes of it cut to [`MAX_QUOTE_BYTES`].
+fn invalid_format(e: &serde_json::Error) -> String {
+    let said = e.to_string();
+    if said.len() <= MAX_QUOTE_BYTES {
+        return format!("Invalid message format: {said}");
+    }
+    let mut end = MAX_QUOTE_BYTES;
+    while !said.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "Invalid message format: {}... (cut; at line {} column {})",
+        &said[..end],
+        e.line(),
+        e.column()
+    )
 }
 
 /// WebSocket message types from server to client.
@@ -244,7 +306,7 @@ async fn handle_text(state: &mut WsState, text: &str, tx: &mpsc::Sender<ServerMe
             Ok(()) => return,
             Err(e) => e,
         },
-        Err(e) => format!("Invalid message format: {}", e),
+        Err(e) => invalid_format(&e),
     };
     let _ = tx
         .send(ServerMessage::Error {
@@ -357,11 +419,11 @@ impl Waiting {
             None
         };
         if let Some(message) = refusal {
+            let id = serde_json::from_str::<MessageId>(&text)
+                .ok()
+                .and_then(|message| message.id);
             return Some(ServerMessage::Error {
-                id: serde_json::from_str::<MessageId>(&text)
-                    .ok()
-                    .and_then(|message| message.id)
-                    .map_or_else(|| "system".to_string(), Cow::into_owned),
+                id: answer_id(id.as_deref()),
                 message,
                 code: Some("connection_busy".to_string()),
             });
@@ -372,12 +434,17 @@ impl Waiting {
     }
 }
 
-/// Handle a client message.
+/// Handle a client message. Every answer to it carries its id, so a message
+/// whose id is longer than [`MAX_ID_BYTES`] is refused (as `system`) before
+/// it is handled.
 async fn handle_client_message(
     state: &mut WsState,
     msg: ClientMessage,
     tx: &mpsc::Sender<ServerMessage>,
 ) -> Result<(), String> {
+    if let Some(id) = msg.id().filter(|id| id.len() > MAX_ID_BYTES) {
+        return Err(id_too_long(id));
+    }
     match msg {
         ClientMessage::Auth { session_id } => {
             match state.session_manager.get_session(&session_id).await {
@@ -943,6 +1010,115 @@ mod tests {
         waiting.pop().unwrap();
         assert!(waiting.pop().is_none());
         assert_eq!(waiting.bytes, 0);
+    }
+
+    /// A refusal holds no more of the refused message than a short id.
+    #[test]
+    fn a_busy_refusal_echoes_only_a_short_id() {
+        // Nothing fits, so every message is refused.
+        let mut waiting = Waiting::new(0);
+        let longest = "i".repeat(MAX_ID_BYTES);
+        match waiting.admit(tool_text(&longest, 0)) {
+            Some(ServerMessage::Error { id, .. }) => assert_eq!(id, longest),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        match waiting.admit(tool_text(&format!("{longest}i"), 0)) {
+            Some(ServerMessage::Error { id, code, .. }) => {
+                assert_eq!(id, "system");
+                assert_eq!(code.as_deref(), Some("connection_busy"));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Every answer to a message echoes its id: one longer than the bound is
+    /// refused before the message is handled, and the refusal does not echo
+    /// it.
+    #[tokio::test]
+    async fn a_message_whose_id_is_too_long_is_refused_unechoed() {
+        let (mut state, session, tx, mut rx) = authenticated(Default::default()).await;
+        let longest = "i".repeat(MAX_ID_BYTES);
+        let set_seed = |id: &str, seed: u64| {
+            json!({"type": "tool", "id": id, "name": "set_seed", "args": {"seed": seed}})
+                .to_string()
+        };
+        handle_text(&mut state, &set_seed(&longest, 42), &tx).await;
+        match rx.recv().await {
+            Some(ServerMessage::ToolResult { id, success, .. }) => {
+                assert_eq!(id, longest);
+                assert!(success);
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+        assert!(matches!(rx.recv().await, Some(ServerMessage::Done { id }) if id == longest));
+        let longer = format!("{longest}i");
+        let chat = json!({"type": "chat", "id": longer, "message": "hi"}).to_string();
+        for text in [set_seed(&longer, 43), chat] {
+            handle_text(&mut state, &text, &tx).await;
+            match rx.recv().await {
+                Some(ServerMessage::Error { id, message, code }) => {
+                    assert_eq!(id, "system");
+                    assert_eq!(code, None);
+                    assert_eq!(
+                        message,
+                        format!(
+                            "Invalid message: its id is {} bytes long, and an id may be at \
+                             most {MAX_ID_BYTES} bytes.",
+                            MAX_ID_BYTES + 1
+                        )
+                    );
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            *session.global_seed.read().await,
+            Some(42),
+            "the refused set_seed ran"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a refused message was answered twice"
+        );
+    }
+
+    /// serde quotes an unknown `type` in full; the parse error sent back cuts
+    /// the quote (here inside a two-byte character) and keeps the position.
+    #[tokio::test]
+    async fn a_parse_error_quotes_the_message_cut() {
+        let (mut state, _session, tx, mut rx) = authenticated(Default::default()).await;
+        let text = json!({"type": "é".repeat(100_000)}).to_string();
+        handle_text(&mut state, &text, &tx).await;
+        match rx.recv().await {
+            Some(ServerMessage::Error { id, message, code }) => {
+                assert_eq!(id, "system");
+                assert_eq!(code, None);
+                assert!(
+                    message.starts_with("Invalid message format: unknown variant `éé"),
+                    "{message}"
+                );
+                assert!(message.contains("... (cut; at line 1 column"), "{message}");
+                assert!(
+                    message.len() < 2 * MAX_QUOTE_BYTES,
+                    "{} bytes",
+                    message.len()
+                );
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+        // A short one is quoted whole.
+        handle_text(&mut state, r#"{"type": "nonsense"}"#, &tx).await;
+        match rx.recv().await {
+            Some(ServerMessage::Error { message, .. }) => {
+                assert!(
+                    message.starts_with("Invalid message format: unknown variant `nonsense`"),
+                    "{message}"
+                );
+                assert!(!message.contains("(cut;"), "{message}");
+                assert!(message.contains(" at line 1 column "), "{message}");
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
     }
 
     type Client = tokio_tungstenite::WebSocketStream<
