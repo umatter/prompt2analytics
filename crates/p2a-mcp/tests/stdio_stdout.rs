@@ -21,10 +21,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-/// How long to wait for the next stdout line, or for the process to exit,
-/// before failing. This only keeps a hung server from hanging `cargo test`
-/// (CI sets no job timeout); it asserts nothing about speed, and a line
-/// normally arrives in well under a second.
+/// How long to wait for a response, or for stdout to end, or for the
+/// process to exit, before failing. It bounds each wait as a whole, so a
+/// server that keeps writing lines without answering fails too. This only
+/// keeps a hung server from hanging `cargo test` (ci.yml sets no
+/// `timeout-minutes`, so a hang would hold the job until GitHub's six-hour
+/// default); it asserts nothing about speed, and a response normally
+/// arrives in well under a second.
 const PATIENCE: Duration = Duration::from_secs(60);
 
 /// A `p2a-mcp --transport stdio` child process and every line it has
@@ -110,20 +113,23 @@ impl StdioServer {
     }
 
     /// The next stdout line, recorded in `lines`, or `None` once stdout has
-    /// ended. Fails if no line arrives within `PATIENCE`; `waiting_for`
-    /// says for what.
-    fn next_line(&mut self, waiting_for: &str) -> Option<String> {
-        match self.stdout.recv_timeout(PATIENCE) {
+    /// ended. Fails if neither arrives before `deadline`, which the caller
+    /// sets `PATIENCE` after its wait began; `waiting_for` says for what.
+    fn next_line(&mut self, deadline: Instant, waiting_for: &str) -> Option<String> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match self.stdout.recv_timeout(left) {
             Ok(Ok(Some(line))) => {
                 self.lines.push(line.clone());
                 Some(line)
             }
             // The reader thread hangs up only after the end or an error.
             Ok(Ok(None)) | Err(RecvTimeoutError::Disconnected) => None,
-            Ok(Err(e)) => self.fail(&format!("stdout read failed ({e}) {waiting_for}")),
-            Err(RecvTimeoutError::Timeout) => self.fail(&format!(
-                "wrote nothing to stdout for {PATIENCE:?} {waiting_for}"
+            Ok(Err(e)) => self.fail(&format!(
+                "stdout read failed ({e}) while waiting for it {waiting_for}"
             )),
+            Err(RecvTimeoutError::Timeout) => {
+                self.fail(&format!("took more than {PATIENCE:?} {waiting_for}"))
+            }
         }
     }
 
@@ -131,13 +137,18 @@ impl StdioServer {
     /// line read on the way, JSON or not.
     fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
         self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
-        let waiting_for = format!("while answering request {id}");
+        let waiting_for = format!("to answer request {id}");
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            let Some(line) = self.next_line(&waiting_for) else {
+            let Some(line) = self.next_line(deadline, &waiting_for) else {
                 self.fail(&format!("closed stdout before answering request {id}"));
             };
+            // A response has `result` or `error` and never `method`; a
+            // server-to-client request may reuse the id. Any other line
+            // stays in `lines` for `stray_lines`.
             if let Ok(msg) = serde_json::from_str::<Value>(&line)
                 && msg["id"] == id
+                && msg.get("method").is_none()
             {
                 return msg;
             }
@@ -154,8 +165,9 @@ impl StdioServer {
     /// process has exited.
     fn finish(&mut self) -> ExitStatus {
         drop(self.stdin.take());
+        let deadline = Instant::now() + PATIENCE;
         while self
-            .next_line("after stdin closed, without closing stdout")
+            .next_line(deadline, "to close stdout after stdin closed")
             .is_some()
         {}
         // Stdout has ended, so the process is exiting; poll rather than
