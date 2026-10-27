@@ -32,23 +32,23 @@ const METADATA_TOOLS: [&str; 3] = ["load_dataset", "upload_dataset", "create_dat
 /// read from its `result_text`, on the blocking pool, and wait until it is
 /// stored, so that a dataset listing made after the call's answer shows it.
 ///
-/// The parsing walks every column line of the result, which
-/// `response_bytes` bounds; it runs on a blocking thread
-/// (`Handle::block_on` there, as in `reload_session_datasets`), not on a
-/// runtime worker. The store write is not moved by this: the embedded
-/// engine runs every query in a task on the runtime that opened the store,
-/// whoever awaits it, which is why the row it writes keeps a bounded list
-/// of names (`DbConnection::save_dataset_meta`).
+/// The parsing walks every column line of the result, so its work is
+/// linear in the call's output (bounded by `response_bytes` where request
+/// limits apply); it runs on a blocking thread (`Handle::block_on` there,
+/// as in `reload_session_datasets`), not on a runtime worker. The store
+/// write is not moved by this: the embedded engine runs every query in a
+/// task on the runtime that opened the store, whoever awaits it, which is
+/// why the row it writes keeps a bounded list of names
+/// (`DbConnection::save_dataset_meta`).
 ///
-/// The capture takes no permit of the tool governor and passes no admission
-/// of its own. It follows one governed call that has already succeeded, and
-/// its work is linear in that call's bounded output, so captures cannot
-/// pile up faster than governed calls finish. A second queue would let
-/// other visitors' calls, queued behind the call, hold back its answer and
-/// then refuse its row, which the dataset listing and the reload after a
-/// restart read. Once spawned the capture runs to the end, also when the
-/// client goes away. A capture that fails is logged; the call's answer is
-/// left as it is.
+/// The capture passes no admission of the tool governor. A capture starts
+/// at most once per finished governed call; captures take no governor
+/// permit and may overlap later calls, each bounded by its output and by
+/// the stored-row cap. A second queue would let other visitors' calls,
+/// queued behind the call, hold back its answer and then refuse its row,
+/// which the dataset listing and the reload after a restart read. Once
+/// spawned the capture runs to the end, also when the client goes away. A
+/// capture that fails is logged; the call's answer is left as it is.
 #[cfg(all(feature = "db", feature = "llm"))]
 pub(super) async fn capture_dataset_metadata_off_runtime(
     db: std::sync::Arc<crate::db::DbConnection>,
@@ -113,9 +113,10 @@ mod capture_threads {
 
 /// The two arguments the dataset-metadata capture reads, `path` and
 /// `filename`, copied without the rest of the call's payload. A missing
-/// field becomes null, which the capture reads as absent.
+/// field becomes null, which the capture reads as absent. The LLM tool loop
+/// (`llm_routes`) can use it for the copy it keeps for its own capture.
 #[cfg(any(test, all(feature = "db", feature = "llm")))]
-fn capture_fields(arguments: &serde_json::Value) -> serde_json::Value {
+pub(super) fn capture_fields(arguments: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "path": arguments.get("path"),
         "filename": arguments.get("filename"),
@@ -198,10 +199,10 @@ pub(crate) async fn call_tool(
                     .content
                     .iter()
                     .filter_map(|item| match item {
-                        super::http::ContentItem::Text { text } => Some(text.clone()),
+                        super::http::ContentItem::Text { text } => Some(text.as_str()),
                         super::http::ContentItem::Image { .. } => None,
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<&str>>()
                     .join("\n");
                 tracing::info!(
                     tool = %name,
