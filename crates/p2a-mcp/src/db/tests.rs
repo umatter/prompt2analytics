@@ -2461,18 +2461,6 @@ async fn session_state(db: &DbConnection) -> String {
     format!("{state:#?}\ncounted {:?}", db.session_bytes_entry("s1"))
 }
 
-/// Whether every store turn has left the map, polled a bounded number of
-/// times (no timing assertion: a slow machine only polls longer).
-async fn turns_released(db: &DbConnection) -> bool {
-    for _ in 0..500 {
-        if db.store_turns_in_use() == 0 {
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    false
-}
-
 /// A call dropped while it waits for its store turn (an HTTP client that
 /// disconnects before its turn comes) does nothing, for every call that
 /// takes a turn: once the turn is free, no row and no byte count has
@@ -2512,8 +2500,14 @@ async fn a_call_dropped_while_it_waits_for_its_turn_does_nothing() {
                 "{waiter:?} finished while its turn was held"
             );
         }
+        // The waiter left the map as it was dropped, and the holder as it
+        // ended (`StoreTurn::drop`).
         drop(held);
-        assert!(turns_released(&db).await, "{waiter:?}: a turn stays in use");
+        assert_eq!(
+            db.store_turns_in_use(),
+            0,
+            "{waiter:?}: a turn stays in use"
+        );
         let after = session_state(&db).await;
         if after != before {
             problems.push(format!(
@@ -2578,7 +2572,7 @@ async fn a_message_refused_for_size_or_memory_does_not_wait_for_its_turn() {
     }
     assert_eq!(db.store_turn_users(&id), 1, "a refused message is queued");
     drop(held);
-    assert!(turns_released(&db).await);
+    assert_eq!(db.store_turns_in_use(), 0);
     assert_eq!(rows_in(&db, "messages").await, 0);
 }
 
