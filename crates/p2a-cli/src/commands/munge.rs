@@ -1117,6 +1117,11 @@ fn execute_join(
         }
     };
 
+    if let Some(msg) = join_key_refusal(left, &left_ds, right, &right_ds, on, right_on) {
+        print_error(&msg, format);
+        return Ok(());
+    }
+
     let on_cols: Vec<&str> = on.iter().map(|s| s.as_str()).collect();
     let right_on_cols: Option<Vec<&str>> = right_on.map(|v| v.iter().map(|s| s.as_str()).collect());
     let right_on_ref: Option<&[&str]> = right_on_cols.as_deref();
@@ -1131,8 +1136,10 @@ fn execute_join(
     match result {
         Ok(ds) => store_result(ds, output_name, left, "joined", session, format),
         Err(e) => {
-            // The core's join refusals are JoinErrors, which already read
-            // "Join failed: ..."; only another error variant needs the prefix.
+            // The keys were checked above. The core's other join refusals
+            // (polars' own, such as key columns of different types) are
+            // JoinErrors, which already read "Join failed: ..."; only another
+            // error variant needs the prefix.
             let msg = match e {
                 MungeError::JoinError(_) => e.to_string(),
                 _ => format!("Join failed: {e}"),
@@ -1141,6 +1148,58 @@ fn execute_join(
             Ok(())
         }
     }
+}
+
+/// The key refusal of `munge join` in the CLI's own terms, or `None` when the
+/// keys are usable.
+///
+/// The core checks the same things in the same order (every `--on` name in
+/// the left dataset, every right key in the right one, then equal key counts),
+/// but its text names its `left_on`/`right_on` parameters and "the left/right
+/// dataset". This names the flags and the datasets the user typed instead.
+fn join_key_refusal(
+    left: &str,
+    left_ds: &Dataset,
+    right: &str,
+    right_ds: &Dataset,
+    on: &[String],
+    right_on: Option<&Vec<String>>,
+) -> Option<String> {
+    let missing = |ds: &Dataset, cols: &[String]| {
+        cols.iter()
+            .find(|c| ds.df().column(c.as_str()).is_err())
+            .cloned()
+    };
+    if let Some(col) = missing(left_ds, on) {
+        return Some(format!(
+            "Join failed: --on column '{col}' is not in dataset '{left}'"
+        ));
+    }
+    match right_on {
+        Some(right_on) => {
+            if let Some(col) = missing(right_ds, right_on) {
+                return Some(format!(
+                    "Join failed: --right-on column '{col}' is not in dataset '{right}'"
+                ));
+            }
+            if on.len() != right_on.len() {
+                return Some(format!(
+                    "Join failed: --on has {} columns but --right-on has {} columns",
+                    on.len(),
+                    right_on.len()
+                ));
+            }
+        }
+        None => {
+            if let Some(col) = missing(right_ds, on) {
+                return Some(format!(
+                    "Join failed: --on column '{col}' is not in dataset '{right}' (no \
+                     --right-on is given, so the --on names are used for both datasets)"
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn execute_concat(

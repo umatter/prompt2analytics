@@ -52,44 +52,58 @@ fn join_without_on_is_a_usage_error() {
 }
 
 /// A refused join says "Join failed:" once, in text and JSON output, and the
-/// process exits 1.
+/// process exits 1. A key refusal names the CLI's flags and the datasets the
+/// user typed, never the core's `left_on`/`right_on` parameters.
 #[test]
 fn join_errors_say_join_failed_once_and_exit_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
     let session = session_with_two_datasets(tmp.path());
-    let cases: [(&[&str], &str); 5] = [
+    // (keys, expected text, whether the CLI words the refusal itself)
+    let cases: [(&[&str], &str, bool); 5] = [
         (
             &["--on", "id", "--right-on", "id", "z"],
-            "Join failed: left_on has 1 columns but right_on has 2 columns",
+            "Join failed: --on has 1 columns but --right-on has 2 columns",
+            true,
         ),
-        // A missing key names its parameter and the dataset that lacks it.
+        // A missing key names its flag and the dataset that lacks it.
         (
             &["--on", "nope"],
-            "Join failed: left_on column 'nope' is not in the left dataset",
+            "Join failed: --on column 'nope' is not in dataset 'cs'",
+            true,
         ),
         (
             &["--on", "id", "--right-on", "nope"],
-            "Join failed: right_on column 'nope' is not in the right dataset",
+            "Join failed: --right-on column 'nope' is not in dataset 'cs2'",
+            true,
         ),
         (
             &["--on", "x"],
-            "Join failed: left_on column 'x' is not in the right dataset (right_on is not \
-             given, so the left_on names are used for both datasets)",
+            "Join failed: --on column 'x' is not in dataset 'cs2' (no --right-on is given, \
+             so the --on names are used for both datasets)",
+            true,
         ),
-        // polars refuses keys of different types; the core wraps its error.
-        (&["--on", "id", "--right-on", "code"], "Join failed: "),
+        // polars refuses keys of different types; the core wraps its error,
+        // whose wording is polars' own.
+        (
+            &["--on", "id", "--right-on", "code"],
+            "Join failed: ",
+            false,
+        ),
     ];
-    for (keys, want) in cases {
+    for (keys, want, cli_worded) in cases {
         for format in ["text", "json"] {
-            let out = p2a()
+            let mut assert = p2a()
                 .args(["--format", format, "--session", &session])
                 .args(["munge", "join", "cs", "cs2", "-n", "o"])
                 .args(keys)
                 .assert()
-                .code(1)
-                .get_output()
-                .clone();
-            let stderr = String::from_utf8_lossy(&out.stderr);
+                .code(1);
+            if cli_worded {
+                assert = assert
+                    .stderr(predicate::str::contains("left_on").not())
+                    .stderr(predicate::str::contains("right_on").not());
+            }
+            let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
             assert!(stderr.contains(want), "{keys:?} {format}: {stderr}");
             assert_eq!(
                 stderr.matches("Join failed").count(),
