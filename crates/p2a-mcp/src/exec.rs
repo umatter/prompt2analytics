@@ -59,7 +59,9 @@ use crate::config::{
     AuditConfig, DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting, available_cpus,
 };
 use crate::server::AnalyticsServer;
-use crate::session::{Session, SessionManager, datasets_bytes, fmt_bytes};
+use crate::session::{
+    DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager, datasets_bytes, fmt_bytes,
+};
 use crate::tools::limits::{self, LimitViolation};
 use crate::transport::http::{ApiResponse, ToolResult};
 
@@ -339,11 +341,14 @@ impl ToolCallError {
     /// Map a handler's `ErrorData`. The handlers report a caller's mistake
     /// (a missing column, a bad parameter combination) as either
     /// `INVALID_PARAMS` or `INVALID_REQUEST`; both stay the caller's problem
-    /// (400 `invalid_arguments`). Any other code is a server-side failure
-    /// (500 `internal`).
+    /// (400 `invalid_arguments`). A dataset quota refusal made before the
+    /// dataset was built ([`DATASET_QUOTA_EXCEEDED`]) is `quota_exceeded`.
+    /// Any other code is a server-side failure (500 `internal`).
     pub fn from_handler_error(tool: &str, e: rmcp::ErrorData) -> Self {
         if e.code == ErrorCode::INVALID_PARAMS || e.code == ErrorCode::INVALID_REQUEST {
             Self::InvalidArguments(e.message.to_string())
+        } else if e.code == DATASET_QUOTA_EXCEEDED {
+            Self::QuotaExceeded(e.message.to_string())
         } else {
             Self::Internal(format!("Tool '{tool}' failed: {}", e.message))
         }
@@ -643,9 +648,23 @@ impl ToolGovernor {
                 .run_blocking(&session, tool, move |budget| {
                     let budget = budget.clone();
                     let started = Instant::now();
+                    // Whether the call reached its quota check, which leaves
+                    // the session's cached charge current.
+                    let checked = std::cell::Cell::new(false);
                     // The entry is written where the work ends, also when the
                     // deadline answer was already sent or the work panicked.
                     let ran = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        // Checks made before a dataset is built (a file's
+                        // decoded size) read the quotas from here; what the
+                        // call reserves is released after its quota check.
+                        let _admission = quotas.any().then(|| {
+                            DatasetAdmission::install(
+                                quotas.per_session,
+                                quotas.total,
+                                Arc::clone(&s),
+                                Arc::clone(&sessions),
+                            )
+                        });
                         handle.block_on(async {
                             let snapshot = if quotas.any() {
                                 Some(s.datasets.read().await.clone())
@@ -660,6 +679,7 @@ impl ToolGovernor {
                                         // that ran: undo dataset growth past a quota
                                         // before reporting the refusal.
                                         if let Some(snapshot) = snapshot {
+                                            checked.set(true);
                                             quotas.enforce(&s, &sessions, snapshot).await?;
                                         }
                                         return Err(e);
@@ -671,12 +691,20 @@ impl ToolGovernor {
                                 return Err(ToolCallError::DeadlineExceeded { limit_secs });
                             }
                             if let Some(snapshot) = snapshot {
+                                checked.set(true);
                                 quotas.enforce(&s, &sessions, snapshot).await?;
                             }
                             s.touch().await;
                             Ok(result)
                         })
                     }));
+                    // A call that panicked or passed its deadline did not
+                    // reach its quota check, so the cached charge is
+                    // refreshed here: a later call that changes nothing
+                    // relies on it (`Quotas::enforce`).
+                    if quotas.any() && !checked.get() {
+                        refresh_after_call(&handle, &s.id, s.refresh_data_bytes());
+                    }
                     if let Some((audit, arguments)) = audit {
                         let (outcome, summary) = match &ran {
                             Ok(Ok(result)) => (
@@ -864,6 +892,26 @@ fn result_outcome(result: &ToolResult, budget: &Budget) -> &'static str {
     }
 }
 
+/// Run `refresh`, the refresh of session `session_id`'s cached dataset
+/// charge after a call that did not reach its quota check, on `handle`.
+/// Charging walks whatever the failed call left in the datasets; a panic
+/// there is logged and the cache left as it was, so the call's audit entry
+/// and its own outcome (its panic included) still follow.
+fn refresh_after_call(
+    handle: &tokio::runtime::Handle,
+    session_id: &str,
+    refresh: impl std::future::Future<Output = u64>,
+) {
+    let refreshed = std::panic::catch_unwind(AssertUnwindSafe(|| handle.block_on(refresh)));
+    if refreshed.is_err() {
+        tracing::error!(
+            session_id,
+            "charging the session's datasets after a call that did not finish panicked; the \
+             cached charge is left as it was"
+        );
+    }
+}
+
 /// Milliseconds since `started`, saturating.
 fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -886,12 +934,22 @@ impl Quotas {
     /// rollback assumes one call per session at a time, which is why
     /// `ExecConfig::from_config` defaults the session concurrency to 1 when a
     /// quota applies.
+    ///
+    /// A call that left every dataset as it found it (most calls only read
+    /// them) is passed without charging anything: the session's cached
+    /// charge is still that of its datasets, since every change to them is
+    /// made by a governed call, which refreshes the charge at its quota check
+    /// or after the call when it does not reach the check, or by a reload,
+    /// which refreshes it too.
     async fn enforce(
         &self,
         session: &Session,
         sessions: &SessionManager,
         snapshot: HashMap<String, p2a_core::data::Dataset>,
     ) -> Result<(), ToolCallError> {
+        if datasets_unchanged(&snapshot, &*session.datasets.read().await) {
+            return Ok(());
+        }
         let before = datasets_bytes(&snapshot);
         let after = session.refresh_data_bytes().await;
         if after <= before {
@@ -931,6 +989,29 @@ impl Quotas {
             }
         }
     }
+}
+
+/// Whether `current` holds exactly the datasets of `snapshot`: the same
+/// names, each with the same columns, shared with the snapshot rather than
+/// rebuilt. Only columns backed by a series are compared; any other column
+/// (a scalar or partitioned one) counts as changed, so the caller charges
+/// the datasets in full.
+fn datasets_unchanged(
+    snapshot: &HashMap<String, p2a_core::data::Dataset>,
+    current: &HashMap<String, p2a_core::data::Dataset>,
+) -> bool {
+    use p2a_core::polars::prelude::Column;
+    let same_column = |a: &Column, b: &Column| match (a, b) {
+        (Column::Series(a), Column::Series(b)) => Arc::ptr_eq(&a.0, &b.0),
+        _ => false,
+    };
+    snapshot.len() == current.len()
+        && snapshot.iter().all(|(name, before)| {
+            current.get(name).is_some_and(|now| {
+                let (before, now) = (before.df().get_columns(), now.df().get_columns());
+                before.len() == now.len() && before.iter().zip(now).all(|(a, b)| same_column(a, b))
+            })
+        })
 }
 
 /// Exits the process when the governor stays unhealthy (every permit held by
@@ -1119,6 +1200,16 @@ mod tests {
         );
         let e = ToolCallError::from_handler_error("t", rmcp::ErrorData::internal_error("x", None));
         assert!(matches!(&e, ToolCallError::Internal(m) if m.contains("Tool 't' failed")));
+        // A quota refusal made before a dataset was built is the quota's.
+        let e = ToolCallError::from_handler_error(
+            "load_dataset",
+            crate::session::quota_refusal("too big".into()),
+        );
+        assert!(
+            matches!(&e, ToolCallError::QuotaExceeded(m) if m == "too big"),
+            "{e:?}"
+        );
+        assert_eq!((e.status().as_u16(), e.code()), (422, "quota_exceeded"));
     }
 
     #[test]
@@ -1143,6 +1234,23 @@ mod tests {
             let code = e.code();
             assert_eq!(e.after_deadline(60).code(), code);
         }
+    }
+
+    #[test]
+    fn a_panic_while_charging_after_a_failed_call_does_not_unwind() {
+        // The refresh after a call that panicked or passed its deadline
+        // charges whatever the call left behind. Pre-fix it ran outside the
+        // call's catch_unwind, so a panic there skipped the audit entry and
+        // replaced the call's own panic.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let charging = std::thread::spawn(move || {
+            refresh_after_call(&handle, "s", async { panic!("charging failed") });
+            refresh_after_call(&handle, "s", async { 7 });
+        });
+        assert!(charging.join().is_ok());
     }
 
     #[test]
@@ -1392,5 +1500,93 @@ mod tests {
         let mut open = http_cfg("0.0.0.0:8080", None, true);
         open.http.session_dirs = SessionDirsSetting::Off;
         assert!(!ExecConfig::from_config(&open).session_dirs);
+    }
+
+    #[tokio::test]
+    async fn a_call_that_changes_no_dataset_is_not_charged_again() {
+        // Most calls only read the datasets; charging them again cost two
+        // passes over every column of the session on each call. A dataset
+        // put in place here without a refresh shows whether a call charged
+        // the session again: the cached charge stays 0 unless it did.
+        let (gov, session) = governor_and_session(ExecConfig {
+            session_data_bytes: Some(64 << 20),
+            ..Default::default()
+        })
+        .await;
+        let server = Arc::new(AnalyticsServer::new());
+        let x: Vec<f64> = (0..1000).map(|i| i as f64 * 0.7 + 0.2).collect();
+        let df = p2a_core::polars::prelude::DataFrame::new(vec![
+            p2a_core::polars::prelude::Column::new("x".into(), x),
+        ])
+        .unwrap();
+        session
+            .datasets
+            .write()
+            .await
+            .insert("d".into(), p2a_core::data::Dataset::new(df));
+        let listed = gov
+            .call(
+                Arc::clone(&server),
+                Arc::clone(&session),
+                "list_datasets",
+                serde_json::json!({}),
+                CallOrigin::Http,
+            )
+            .await
+            .unwrap();
+        assert!(listed.success);
+        assert_eq!(session.data_bytes(), 0);
+        // A call that adds a dataset is charged, all datasets included.
+        let created = gov
+            .call(
+                server,
+                Arc::clone(&session),
+                "create_dataset",
+                serde_json::json!({"name": "e", "csv_content": "y\n1.5\n2.25\n"}),
+                CallOrigin::Http,
+            )
+            .await
+            .unwrap();
+        assert!(created.success);
+        assert!(session.data_bytes() >= 8000, "{}", session.data_bytes());
+    }
+
+    #[test]
+    fn only_datasets_left_as_they_were_count_as_unchanged() {
+        use p2a_core::data::Dataset;
+        use p2a_core::polars::prelude::{Column, DataFrame};
+        let frame = |shift: f64| {
+            let x: Vec<f64> = (0..50).map(|i| i as f64 * 0.3 + shift).collect();
+            Dataset::new(DataFrame::new(vec![Column::new("x".into(), x)]).unwrap())
+        };
+        let snapshot =
+            HashMap::from([("a".to_string(), frame(0.1)), ("b".to_string(), frame(0.2))]);
+        // A call that only read the datasets leaves the map's clone as it was.
+        assert!(datasets_unchanged(&snapshot, &snapshot.clone()));
+        // Added, removed, renamed or rebuilt datasets, and changed columns,
+        // are changes, also when the new data equals the old.
+        let mut added = snapshot.clone();
+        added.insert("c".into(), frame(0.3));
+        let mut removed = snapshot.clone();
+        removed.remove("b");
+        let mut renamed = snapshot.clone();
+        let b = renamed.remove("b").unwrap();
+        renamed.insert("b2".into(), b);
+        let mut rebuilt = snapshot.clone();
+        rebuilt.insert("a".into(), frame(0.1));
+        let mut widened = snapshot.clone();
+        let mut df = widened["a"].df().clone();
+        df.with_column(Column::new("y".into(), vec![1.5f64; 50]))
+            .unwrap();
+        widened.insert("a".into(), Dataset::new(df));
+        for (what, current) in [
+            ("added", added),
+            ("removed", removed),
+            ("renamed", renamed),
+            ("rebuilt", rebuilt),
+            ("widened", widened),
+        ] {
+            assert!(!datasets_unchanged(&snapshot, &current), "{what}");
+        }
     }
 }

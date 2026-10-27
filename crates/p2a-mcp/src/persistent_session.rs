@@ -732,7 +732,13 @@ pub struct ReloadSource {
 /// under the server's request limits (`ToolGovernor::run_blocking` does
 /// both). The error is a fixed text, or the budget refusal with the file's
 /// size and the limit; neither holds a server path. The details are logged
-/// at debug level.
+/// at debug level, the budget refusal at info level.
+///
+/// The file is decoded in full before [`insert_reloaded_dataset`] charges
+/// it against the quotas: unlike `load_dataset` and `upload_dataset`, a
+/// reload runs no `session::admit_dataset` check on a parquet file's
+/// decoded size first, so a file replaced at a stored path since it was
+/// loaded is bounded only after decoding (known residual of PR-03).
 pub fn load_reload_source(source: &ReloadSource) -> Result<p2a_core::data::Dataset, String> {
     let name = &source.name;
     let path = crate::path_jail::validate_data_path(&source.source_path).map_err(|e| {
@@ -799,7 +805,6 @@ pub async fn insert_reloaded_dataset(
     dataset: p2a_core::data::Dataset,
     quotas: DatasetQuotas,
 ) -> Result<(), String> {
-    let added = dataset.df().estimated_size() as u64;
     // Read before taking the session's dataset lock: the total takes the
     // registry's lock, which is never awaited under a dataset lock.
     let others = match quotas.total {
@@ -810,12 +815,14 @@ pub async fn insert_reloaded_dataset(
         None => 0,
     };
     let mut datasets = session.datasets.write().await;
-    let replaced = datasets
-        .get(&name)
-        .map_or(0, |d| d.df().estimated_size() as u64);
-    let after = crate::session::datasets_bytes(&datasets)
-        .saturating_sub(replaced)
-        .saturating_add(added);
+    // The session's charge with this dataset in place of any of its name.
+    let after = crate::session::datasets_bytes_of(
+        datasets
+            .iter()
+            .filter(|(held, _)| **held != name)
+            .map(|(held, d)| (held.as_str(), d))
+            .chain(std::iter::once((name.as_str(), &dataset))),
+    );
     if let Some(limit) = quotas.per_session
         && after > limit
     {
@@ -1629,7 +1636,9 @@ mod tests {
             insert_reloaded_dataset(s, sm, name.to_string(), ds(1000, offset), quotas).await
         }
 
-        let one = ds(1000, 0.25).df().estimated_size() as u64;
+        // What one of these datasets is charged; the names x, y and z have
+        // the same length, so each is charged the same.
+        let one = crate::session::datasets_bytes_of([("x", &ds(1000, 0.25))]);
         let sm = registry(60);
         let a = sm
             .get_session(&sm.create_session(None).await.unwrap())
