@@ -160,10 +160,11 @@ type StoreTurns = Arc<Mutex<StoreTurnMap>>;
 /// or clear never runs between the count and the write. The byte counter is
 /// per process, and so are the turns. An entry leaves the map with its last
 /// holder or waiter, also when a waiting call is cancelled. A turn that ends
-/// leaves its entry in one step under the map's lock, so the call it passes
-/// the turn to never finds it still counted (a waiter cancelled just as the
-/// turn reached it passes the turn on as its wait is dropped, a moment
-/// before it leaves the map).
+/// lets the next call in and lowers its count (removing the entry with its last
+/// user) in one step under the map's lock, so the call it passes the turn to
+/// never finds it still counted (a waiter cancelled just as the turn reached it
+/// passes the turn on as its wait is dropped, a moment before it leaves the
+/// map).
 ///
 /// Every call that takes a turn waits for it in its caller and then moves it
 /// into a task of its own ([`run_to_end`]), which holds it until the store
