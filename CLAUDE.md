@@ -874,9 +874,11 @@ Auto-discovered guidance:
   that stops compiling is a build failure, so keep `use p2a_core::...` paths in doc comments pointing at
   what `mod.rs` actually re-exports. The 190 examples fenced as ignore are NOT compiled and can still rot silently.
 - **p2a-mcp integration tests** are one file per topic in `crates/p2a-mcp/tests/` (`governor.rs`,
-  `limits_e2e.rs`, `sessions.rs`, `llm_egress.rs`, `isolation.rs`, `integration_tests.rs`); their feature
-  gates and commands are in `docs/guides/TESTING.md`. The websocket tests run in CI; `sessions.rs` (needs
-  `db`) is outside it: run `cargo test -p p2a-mcp --features full` (or
+  `limits_e2e.rs`, `sessions.rs`, `llm_egress.rs`, `isolation.rs`, `integration_tests.rs`,
+  `dataset_quotas.rs`, `serve_limits.rs`, `serve_limits_hold.rs`, `uploads.rs`, `orphan_sweep_memory.rs`);
+  their feature gates and commands are in `docs/guides/TESTING.md`. The websocket tests run in CI;
+  everything behind `db` is outside it (`sessions.rs`, `orphan_sweep_memory.rs`, the conversation test in
+  `llm_egress.rs`, and the lib's `db` modules): run `cargo test -p p2a-mcp --features full` (or
   `--no-default-features --features "http,llm,auth,db"`) when touching sessions or the DB.
 - **Do not call `limits::install` or `resource::set_alloc_ceiling_bytes` per test** (process-global, and tests
   in one binary run in parallel). Select limits with the thread-local `limits::with_limits` and
@@ -891,7 +893,8 @@ Auto-discovered guidance:
   of clippy violations, and `Cargo.toml` `[workspace.lints]` allows a long list of lints (dead_code,
   unused_imports, too_many_arguments, ...).
   Do not "fix" the allow-list to make a build green; do keep new code warning-free.
-- **Excluded from CI**: release builds, the `database` feature (duckdb-sys), `cuda`, the Dioxus desktop
+- **Excluded from CI**: release builds, the `database` feature (duckdb-sys), the `db` feature of p2a-mcp
+  (SurrealDB), `cuda`, the Dioxus desktop
   target (WebKit/GTK), and `p2a-chat` tests (it has no test surface). These are exercised locally or on
   the self-hosted runner. A weekly `audit.yml` runs `cargo audit`; its RUSTSEC exemptions live as flags
   in that file (not `.cargo/audit.toml`, which is gitignored and would never reach CI).
