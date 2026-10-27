@@ -20,7 +20,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
-use tracing::{self, Instrument};
+use tracing::Instrument;
 
 use super::http::ApiResponse;
 use super::routes_sessions::capacity_response;
