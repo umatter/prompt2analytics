@@ -82,19 +82,24 @@ jobs:
       - name: Run tests (cheap subset)
         # `p2a-core` uses the `ci` feature alias (full minus database) to avoid
         # the ~1.5 GB libduckdb-sys compile. `p2a-mcp` drops the SurrealDB-
-        # backed `db` feature and the websocket deps. `p2a-cli` runs with
-        # its own `database` feature off so feature unification doesn't pull
-        # duckdb-sys back in. `p2a-chat` has no test surface and no p2a-core
-        # dependency, so it's not invoked here. `p2a-dioxus` is not compiled
-        # here — its WebKit/GTK deps dominate compile time and it's tested
-        # locally.
+        # backed `db` feature but keeps `websocket`: it adds only
+        # tokio-tungstenite and tungstenite to a build made anyway (axum's
+        # `ws` is always on), and without it the websocket transport's
+        # tests, the `/ws` routing test and the limits-hold test over a
+        # websocket session never compile. A separate step with its own
+        # feature set would build p2a-mcp and its test binaries a second
+        # time. `p2a-cli` runs with its own `database` feature off so feature
+        # unification doesn't pull duckdb-sys back in. `p2a-chat` has no test
+        # surface and no p2a-core dependency, so it's not invoked here.
+        # `p2a-dioxus` is not compiled here — its WebKit/GTK deps dominate
+        # compile time and it's tested locally.
         #
         # --tests runs unit + integration tests only; doctests are gated
         # separately in the step below so a failing example is distinguishable
         # from a failing unit test in the log.
         run: |
           cargo test -p p2a-core --tests --no-default-features --features ci
-          cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth"
+          cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket"
           cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis
         env:
           RUST_TEST_THREADS: 4
@@ -116,7 +121,7 @@ jobs:
         # `# ` setup lines is tracked separately.
         run: |
           cargo test -p p2a-core --doc --no-default-features --features ci
-          cargo test -p p2a-mcp --doc --no-default-features --features "http,llm,auth"
+          cargo test -p p2a-mcp --doc --no-default-features --features "http,llm,auth,websocket"
 
   clippy:
     name: Clippy
@@ -163,7 +168,7 @@ jobs:
         # Test job so duckdb-sys isn't pulled in.
         run: |
           cargo clippy -p p2a-core --no-default-features --features ci
-          cargo clippy -p p2a-mcp --no-default-features --features "http,llm,auth"
+          cargo clippy -p p2a-mcp --no-default-features --features "http,llm,auth,websocket"
           cargo clippy -p p2a-cli --no-default-features --features spectral-analysis
           cargo clippy -p p2a-chat
 

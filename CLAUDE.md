@@ -37,7 +37,7 @@ cargo fmt                                # Apply formatting
 # What CI (.github/workflows/ci.yml) actually runs on the free runner. Use these
 # feature sets when a full build is too heavy or when reproducing a CI failure:
 cargo test -p p2a-core --tests --no-default-features --features ci
-cargo test -p p2a-mcp  --tests --no-default-features --features "http,llm,auth"
+cargo test -p p2a-mcp  --tests --no-default-features --features "http,llm,auth,websocket"
 cargo test -p p2a-cli  --tests --no-default-features --features spectral-analysis
 cargo check -p p2a-dioxus --no-default-features --features web --target wasm32-unknown-unknown
 
@@ -868,16 +868,20 @@ Auto-discovered guidance:
 `.github/workflows/ci.yml` runs on the free GitHub runner and is kept cheap on purpose:
 
 - **Gating**: `cargo fmt --all -- --check`; `cargo test --tests` for p2a-core (`ci` feature), p2a-mcp
-  (`http,llm,auth`), p2a-cli (`spectral-analysis`); doctests for p2a-core (`ci`) and p2a-mcp
-  (`http,llm,auth`) in their own step; plus a wasm32 `cargo check` + host tests for p2a-dioxus (`web`).
+  (`http,llm,auth,websocket`), p2a-cli (`spectral-analysis`); doctests for p2a-core (`ci`) and p2a-mcp
+  (`http,llm,auth,websocket`) in their own step; plus a wasm32 `cargo check` + host tests for p2a-dioxus (`web`).
 - **Doctests are gated** and, as of Oct 2026, p2a-core runs 81 passed / 0 failed / 190 ignored. A doc example
   that stops compiling is a build failure, so keep `use p2a_core::...` paths in doc comments pointing at
   what `mod.rs` actually re-exports. The 190 examples fenced as ignore are NOT compiled and can still rot silently.
 - **p2a-mcp integration tests** are one file per topic in `crates/p2a-mcp/tests/` (`governor.rs`,
-  `limits_e2e.rs`, `sessions.rs`, `llm_egress.rs`, `isolation.rs`, `integration_tests.rs`); their feature
-  gates and commands are in `docs/guides/TESTING.md`. `sessions.rs` (needs `db`) and the `/ws` test (needs
-  `websocket`) are outside CI: run `cargo test -p p2a-mcp --features full` (or
-  `--no-default-features --features "http,llm,auth,db"`) when touching sessions, the DB or the websocket.
+  `limits_e2e.rs`, `sessions.rs`, `llm_egress.rs`, `isolation.rs`, `integration_tests.rs`,
+  `dataset_quotas.rs`, `serve_limits.rs`, `serve_limits_hold.rs`, `uploads.rs`, `orphan_sweep_memory.rs`);
+  their feature gates and commands are in `docs/guides/TESTING.md`. The websocket tests run in CI;
+  everything behind `db` is outside it (`sessions.rs`, `orphan_sweep_memory.rs`, the conversation test in
+  `llm_egress.rs`, and every `#[cfg(feature = "db")]` item in the lib, among them the `db`, `persistent_session`
+  and `transport::conversation` modules and the `db` tests in `transport::http` and `transport::llm_routes`):
+  run `cargo test -p p2a-mcp --features full` (or `--no-default-features --features "http,llm,auth,db"`) when
+  touching sessions, the DB or any `db`-gated code.
 - **Do not call `limits::install` or `resource::set_alloc_ceiling_bytes` per test** (process-global, and tests
   in one binary run in parallel). Select limits with the thread-local `limits::with_limits` and
   `resource::with_alloc_ceiling`. The exceptions: a test binary whose tests all share one configuration installs
@@ -887,13 +891,14 @@ Auto-discovered guidance:
   process policies differ from those of a server still running in the process (held until its last connection or
   websocket session closes), so a test serves a configuration whose resource profile is off, with no overrides and
   the default policies, or runs in a binary whose servers share one config (`crates/p2a-mcp/tests/serve_limits.rs`).
-- **Clippy runs but does not gate**: p2a-core has a pre-existing backlog of clippy violations, and
-  `Cargo.toml` `[workspace.lints]` allows a long list of lints (dead_code, unused_imports, too_many_arguments, ...).
-  Do not "fix" the allow-list to make a build green; do keep new code warning-free.
-- **Excluded from CI**: release builds, the `database` feature (duckdb-sys), `cuda`, the Dioxus desktop
-  target (WebKit/GTK), and `p2a-chat` tests (it has no test surface). These are exercised locally or on
-  the self-hosted runner. A weekly `audit.yml` runs `cargo audit`; its RUSTSEC exemptions live as flags
-  in that file (not `.cargo/audit.toml`, which is gitignored and would never reach CI).
+- **Clippy runs but does not gate** (with the test step's feature sets, plus `p2a-chat`; lib and bin targets
+  only, no `--tests`): p2a-core has a pre-existing backlog of clippy violations, and `Cargo.toml`
+  `[workspace.lints]` allows a long list of lints (dead_code, unused_imports, too_many_arguments, ...). Do
+  not "fix" the allow-list to make a build green; do keep new code warning-free.
+- **Excluded from CI**: release builds, the `database` feature (duckdb-sys), the `db` feature of p2a-mcp
+  (SurrealDB), `cuda`, the Dioxus desktop target (WebKit/GTK), and `p2a-chat` tests (it has no test surface).
+  These are exercised locally or on the self-hosted runner. A weekly `audit.yml` runs `cargo audit`; its RUSTSEC
+  exemptions live as flags in that file (not `.cargo/audit.toml`, which is gitignored and would never reach CI).
 - Only one test is `#[ignore]`d (an HDBSCAN benchmark in `ml/advanced_clustering_mod/advanced.rs`);
   run it with `--release -- --ignored`. `docs/guides/TESTING.md` lists expected runtimes and memory needs.
 - **`tests/benchmark_ml_rust.rs` and `tests/benchmark_fast_implementations.rs` are benchmarks, not

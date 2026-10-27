@@ -15,8 +15,8 @@
 //!    `/health`, SSE keep-alives and other visitors;
 //! 4. a per-call [`Budget`] installed for p2a-core's cooperative
 //!    [`resource::checkpoint`]s, cancelled at the deadline and when the
-//!    future driving the call is dropped (for `POST /api/tools/{name}`, when
-//!    the client disconnects and the handler future is dropped);
+//!    future driving the call is dropped, as it is when the client goes
+//!    away (see below);
 //! 5. a wall-clock deadline (504) and panic isolation (500, session intact);
 //! 6. per-session and total dataset-byte quotas that undo the call that
 //!    crossed them;
@@ -28,10 +28,28 @@
 //! blocking thread, where `AnalyticsServer::call_tool_with_session` checks
 //! them before dispatch.
 //!
-//! The streaming chat (`POST /api/llm/chat/stream`) runs its tool loop in a
-//! detached task that is not aborted when the SSE client disconnects, so the
-//! tool calls of an abandoned stream keep running until they finish or reach
-//! their deadline.
+//! When the client goes away, the future driving its call is dropped, which
+//! cancels the call's budget (`CancelOnDrop`), and cooperative work stops at
+//! its next checkpoint:
+//!
+//! - `POST /api/tools/{name}`: hyper drops the handler future when it reads
+//!   the end of the connection while the response is still pending;
+//! - a websocket `Tool` message: a close frame, a read error, the end of the
+//!   stream or a failed write to the socket ends the connection and drops the
+//!   message being handled (`transport::websocket`);
+//! - the streaming chat (`POST /api/llm/chat/stream`): its task runs the chat
+//!   only while the SSE client listens (`run_until_client_gone` in
+//!   `transport::llm_routes`); when the client goes, the chat future is
+//!   dropped, and with it the tool call it was awaiting;
+//! - the other routes that await the governor in their handler, as
+//!   `POST /api/tools/{name}` does: the non-streaming chat
+//!   (`POST /api/llm/chat`), and the dataset reload
+//!   (`POST /api/sessions/{session_id}/datasets/reload`, `db` builds), which
+//!   runs as one [`ToolGovernor::run_blocking`] call.
+//!
+//! Work that does not check its budget is not stopped by the cancellation:
+//! it runs to its end (and may still change the session), and no one
+//! receives its result.
 //!
 //! The permits, the in-flight registry entry and the session's active-call
 //! count are moved into the blocking closure, so they are released when the
@@ -455,9 +473,12 @@ impl IntoResponse for ToolCallError {
 }
 
 /// Cancels the call's token when the governing future returns or is
-/// dropped. A dropped HTTP handler future (client disconnect) drops it; the
-/// detached streaming-chat task is not aborted on an SSE disconnect, so its
-/// calls are not cancelled that way.
+/// dropped. This is how a client's going away reaches the work: a client
+/// that disconnects from `POST /api/tools/{name}` (or another route that
+/// awaits the governor in its handler), a websocket connection that closes
+/// while one of its `Tool` messages runs, and an SSE client that leaves a
+/// streaming chat each drop the future that holds it (see the module
+/// documentation).
 struct CancelOnDrop(CancelToken);
 
 impl Drop for CancelOnDrop {
