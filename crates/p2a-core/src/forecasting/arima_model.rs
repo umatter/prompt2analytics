@@ -109,7 +109,9 @@ pub struct ArimaForecastResult {
 /// when the budget installed with [`crate::resource::with_budget`] is already
 /// cancelled or past its deadline when the fit would start. The fit itself is
 /// the `arima` crate's L-BFGS loop, which never reaches a checkpoint: once
-/// started it runs to the end.
+/// started it runs to the end. A column with missing values (nulls) is refused
+/// with [`EconError::NullValues`] before anything is fitted: the fit has no way
+/// to skip a gap, so fill or interpolate the missing values first.
 pub fn run_arima(
     dataset: &Dataset,
     column: &str,
@@ -125,11 +127,20 @@ pub fn run_arima(
         .column(column)
         .map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
 
-    let values: Vec<f64> = col
+    let series = col
         .f64()
-        .map_err(|e| anyhow!("Column must be numeric: {}", e))?
-        .into_no_null_iter()
-        .collect();
+        .map_err(|e| anyhow!("Column must be numeric: {}", e))?;
+    // A null slot still holds a buffer value (0.0 for a CSV load, anything after arithmetic on
+    // the column) that `into_no_null_iter` would read as an observation, and the fit cannot
+    // skip a gap in the series, so a column with nulls is refused.
+    if series.null_count() > 0 {
+        return Err(EconError::NullValues {
+            column: column.to_string(),
+            count: series.null_count(),
+        }
+        .into());
+    }
+    let values: Vec<f64> = series.into_no_null_iter().collect();
 
     // p + d + q + 10, checked: an order sum that overflows can never be fitted.
     let required = p
@@ -240,7 +251,8 @@ pub fn run_arima(
 /// [`EconError::Cancelled`] when the budget installed with
 /// [`crate::resource::with_budget`] is cancelled or past its deadline. The
 /// check is inherited from [`run_arima`] and happens only before the fit
-/// starts; the fit and the forecast that follows run uninterrupted.
+/// starts; the fit and the forecast that follows run uninterrupted. So is the
+/// refusal of a column with nulls ([`EconError::NullValues`]).
 pub fn forecast_arima(
     dataset: &Dataset,
     column: &str,
@@ -254,7 +266,7 @@ pub fn forecast_arima(
     // First fit the model
     let model = run_arima(dataset, column, p, d, q)?;
 
-    // Extract original time series
+    // Extract original time series (`run_arima` refused a column with nulls)
     let df = dataset.df();
     let col = df
         .column(column)
@@ -545,6 +557,36 @@ mod tests {
             crate::resource::CancelToken::new(),
         );
         assert!(crate::resource::with_budget(live, || run_arima(&dataset, "y", 1, 0, 1)).is_ok());
+    }
+
+    /// A null slot is refused, not fitted: polars keeps a buffer value behind every null (0.0 for
+    /// a CSV load, anything after arithmetic on the column), and the fit would read it as an
+    /// observation. The refusal names the column and the number of nulls; a complete column fits.
+    #[test]
+    fn run_arima_and_forecast_refuse_a_column_with_nulls() {
+        let y = generate_ar1_data(200, 0.6, 7);
+        let with_nulls: Vec<Option<f64>> = y
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (i != 50 && i != 120).then_some(v))
+            .collect();
+        // Arithmetic runs over the buffer behind the nulls too: there it now holds 1e-200.
+        let ca = &Float64Chunked::from_slice_options("y".into(), &with_nulls) + 1e-200;
+        assert_eq!(ca.null_count(), 2);
+        assert_eq!(ca.into_no_null_iter().nth(50), Some(1e-200));
+        let dataset = Dataset::new(DataFrame::new(vec![ca.into_series().into()]).unwrap());
+        let is_null_refusal = |e: &anyhow::Error| {
+            matches!(
+                e.downcast_ref::<EconError>(),
+                Some(EconError::NullValues { column, count: 2 }) if column == "y"
+            )
+        };
+        let err = run_arima(&dataset, "y", 1, 0, 1).unwrap_err();
+        assert!(is_null_refusal(&err), "{err}");
+        let err = forecast_arima(&dataset, "y", 1, 0, 1, 5).unwrap_err();
+        assert!(is_null_refusal(&err), "{err}");
+        let complete = Dataset::new(df! { "y" => &y }.unwrap());
+        assert_eq!(run_arima(&complete, "y", 1, 0, 1).unwrap().n_obs, 200);
     }
 
     #[test]

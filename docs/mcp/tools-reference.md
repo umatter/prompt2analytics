@@ -241,8 +241,8 @@ Total tools: 106
 | Tool | Description | R Equivalent |
 |------|-------------|-------------|
 | `db_sqlite_query` | Execute SQL query on SQLite database | DBI::dbGetQuery() |
-| `db_duckdb_query` | Execute SQL query on DuckDB (can query Parquet/CSV directly) | duckdb::dbGetQuery() |
-| `db_query_file` | Query Parquet/CSV files directly with SQL | - |
+| `db_duckdb_query` | Execute a read-only SQL query on a DuckDB database (files: db_query_file) | duckdb::dbGetQuery() |
+| `db_query_file` | Query one Parquet/CSV file with read-only DuckDB SQL | - |
 
 ## Utility
 

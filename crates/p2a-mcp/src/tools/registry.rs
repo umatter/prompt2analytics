@@ -998,14 +998,14 @@ pub fn get_registry() -> Vec<ToolInfo> {
         ToolInfo {
             name: "db_duckdb_query",
             category: ToolCategory::Database,
-            description: "Execute SQL query on DuckDB (can query Parquet/CSV directly)",
+            description: "Execute a read-only SQL query on a DuckDB database (files: db_query_file)",
             related: &["db_duckdb_tables"],
             r_equivalent: Some("duckdb::dbGetQuery()"),
         },
         ToolInfo {
             name: "db_query_file",
             category: ToolCategory::Database,
-            description: "Query Parquet/CSV files directly with SQL",
+            description: "Query one Parquet/CSV file with read-only DuckDB SQL",
             related: &["db_duckdb_query"],
             r_equivalent: None,
         },

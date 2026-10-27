@@ -1149,10 +1149,12 @@ pub fn query_duckdb(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResul
     query_duckdb_with(db_path, query, &QueryOptions::default()).map(|o| o.result)
 }
 
-/// [`query_duckdb`] with bounds. A `SELECT`/`WITH` statement is wrapped in
-/// `LIMIT max_rows + 1` so DuckDB itself stops producing rows; collection stops
-/// at `opts.max_rows` or the estimated `opts.max_bytes` (`truncated` is then
-/// set). `memory_limit_mb` and `threads` configure the engine.
+/// [`query_duckdb`] with bounds. A `SELECT`/`WITH` statement runs as a
+/// subquery, followed by `LIMIT max_rows + 1` under a row budget so DuckDB
+/// itself stops producing rows; collection stops at `opts.max_rows` or the
+/// estimated `opts.max_bytes` (`truncated` is then set). `memory_limit_mb` and
+/// `threads` configure the engine. A repeated output column name gets DuckDB's
+/// suffix (`a`, `a_1`), with or without bounds (see `wrapped_duckdb_sql`).
 pub fn query_duckdb_with(
     db_path: impl AsRef<Path>,
     query: &str,
@@ -1263,23 +1265,39 @@ pub fn query_file_with_duckdb_with(
     run_duckdb_query(&conn, body, opts)
 }
 
-/// The SQL actually sent to DuckDB. duckdb-rs materialises a whole result
-/// before the first row can be read, so stopping the row loop early bounds
-/// nothing inside the engine: with a row budget a `SELECT`/`WITH` statement is
-/// wrapped in `LIMIT max_rows + 1` (the extra row tells whether more existed).
+/// The SQL actually sent to DuckDB. A `SELECT`/`WITH` statement runs as the
+/// subquery `SELECT * FROM (statement) AS p2a_bounded`, with a row budget
+/// followed by `LIMIT max_rows + 1` (the extra row tells whether more
+/// existed): duckdb-rs materialises a whole result before the first row can be
+/// read, so stopping the row loop early bounds nothing inside the engine.
+///
+/// The subquery is there with and without a row budget, so that a statement
+/// has the same columns either way. DuckDB names the columns of a subquery
+/// apart: a repeated output name gets a suffix (`SELECT 1 AS a, 2 AS a` gives
+/// `a` and `a_1`), and names compare without case (`x` and `X` give `x` and
+/// `X_1`). The bare statement's repeated names could not be stored as a
+/// dataset at all.
+///
+/// The statement's own `ORDER BY` keeps its order through the subquery, which
+/// only passes its columns on: DuckDB keeps the input order of a projection
+/// while `preserve_insertion_order` is on (its default, which these
+/// connections leave alone), and plans the row budget's `LIMIT` over the
+/// `ORDER BY` as one top-N. SQL itself does not promise that an outer query
+/// keeps a subquery's order; `duckdb_order_by_survives_the_wrapper` pins it
+/// for the bundled DuckDB.
+///
 /// Other statements (`EXPLAIN`, `PRAGMA`, `DESCRIBE`, `SHOW`) cannot be
 /// wrapped and are sent unchanged. The newline before `)` keeps a trailing
 /// line comment in `body` harmless.
-fn bounded_duckdb_sql<'a>(body: &'a str, opts: &QueryOptions) -> Cow<'a, str> {
-    match opts.max_rows {
-        Some(n) if matches!(first_keyword(body).as_str(), "select" | "with") => {
-            Cow::Owned(format!(
-                "SELECT * FROM (\n{body}\n) AS p2a_bounded LIMIT {}",
-                n.saturating_add(1)
-            ))
-        }
-        _ => Cow::Borrowed(body),
+fn wrapped_duckdb_sql<'a>(body: &'a str, opts: &QueryOptions) -> Cow<'a, str> {
+    if !matches!(first_keyword(body).as_str(), "select" | "with") {
+        return Cow::Borrowed(body);
     }
+    let limit = opts
+        .max_rows
+        .map(|n| format!(" LIMIT {}", n.saturating_add(1)))
+        .unwrap_or_default();
+    Cow::Owned(format!("SELECT * FROM (\n{body}\n) AS p2a_bounded{limit}"))
 }
 
 /// Run one (already validated) statement on a locked DuckDB connection and
@@ -1289,7 +1307,7 @@ fn run_duckdb_query(
     body: &str,
     opts: &QueryOptions,
 ) -> Result<QueryOutcome, DatabaseError> {
-    let sql = bounded_duckdb_sql(body, opts);
+    let sql = wrapped_duckdb_sql(body, opts);
     let watch = QueryWatch::arm(conn, opts)?;
     let reason = || watch.as_ref().and_then(QueryWatch::reason);
     let stopped = |e: duckdb::Error| stopped_by(reason(), e.into());
@@ -2077,7 +2095,78 @@ mod tests {
             "SELECT 1 -- trailing comment",
             "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 50) SELECT n FROM r",
         ] {
-            assert!(query_duckdb_with(":memory:", q, &rows(10)).is_ok(), "{q}");
+            for opts in [rows(10), QueryOptions::default()] {
+                assert!(query_duckdb_with(":memory:", q, &opts).is_ok(), "{q}");
+            }
+        }
+    }
+
+    /// The columns of a statement do not depend on the row budget. Before, only a bounded
+    /// statement went through the wrapper subquery, where DuckDB names repeated output names
+    /// apart (`a`, `a_1`), while the bare statement's repeated names failed as a dataset.
+    #[test]
+    fn duckdb_repeated_column_names_are_the_same_with_and_without_a_row_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = write_file(dir.path(), "d.csv", "a,b\n1,2.5\n3,4.5\n");
+        let names = |o: &QueryOutcome| -> Vec<String> {
+            let df = &o.result.dataframe;
+            assert_eq!(o.result.columns.len(), df.width());
+            df.get_column_names()
+                .iter()
+                .map(|n| n.to_string())
+                .collect()
+        };
+        for (q, expected) in [
+            ("SELECT 1 AS a, 2 AS a", vec!["a", "a_1"]),
+            // names compare without case in DuckDB
+            ("SELECT 1 AS x, 2 AS \"X\"", vec!["x", "X_1"]),
+            (
+                "WITH t AS (SELECT 1 AS id, 2.5 AS v) \
+                 SELECT * FROM t AS l JOIN t AS r ON l.id = r.id",
+                vec!["id", "v", "id_1", "v_1"],
+            ),
+        ] {
+            for opts in [QueryOptions::default(), rows(10)] {
+                let o = query_duckdb_with(":memory:", q, &opts)
+                    .unwrap_or_else(|e| panic!("{q} ({:?}): {e}", opts.max_rows));
+                assert_eq!(names(&o), expected, "{q} ({:?})", opts.max_rows);
+                assert_eq!(o.result.columns, expected, "{q} ({:?})", opts.max_rows);
+            }
+        }
+        for opts in [QueryOptions::default(), rows(10)] {
+            let o = query_file_with_duckdb_with(&csv, "SELECT a, a, b AS A FROM {file}", &opts)
+                .unwrap_or_else(|e| panic!("{:?}: {e}", opts.max_rows));
+            assert_eq!(names(&o), ["a", "a_1", "A_2"], "{:?}", opts.max_rows);
+            assert_eq!(i64_col(&o.result.dataframe, "a_1"), vec![Some(1), Some(3)]);
+        }
+    }
+
+    /// The statement's own ORDER BY keeps its order through the wrapper subquery, with a row
+    /// budget (one top-N in DuckDB's plan) and without one, on several threads and on a
+    /// statement with its own LIMIT. SQL does not promise this; the test pins it for the
+    /// bundled DuckDB.
+    #[test]
+    fn duckdb_order_by_survives_the_wrapper() {
+        let sorted_desc = |o: &QueryOutcome| {
+            let x = i64_col(&o.result.dataframe, "x");
+            x.windows(2).all(|w| w[0] >= w[1])
+        };
+        let q = "SELECT (range * 7919) % 100003 AS x FROM range(200000) ORDER BY x DESC";
+        let q_limited = format!("{q} LIMIT 150000");
+        for (q, max_rows, expected) in [
+            (q, None, 200_000),
+            (q, Some(100_000), 100_000),
+            (q_limited.as_str(), None, 150_000),
+            (q_limited.as_str(), Some(100_000), 100_000),
+        ] {
+            let opts = QueryOptions {
+                max_rows,
+                threads: Some(4),
+                ..Default::default()
+            };
+            let o = query_duckdb_with(":memory:", q, &opts).unwrap();
+            assert_eq!(o.rows_returned, expected, "{q} ({max_rows:?})");
+            assert!(sorted_desc(&o), "{q} ({max_rows:?})");
         }
     }
 
@@ -2326,10 +2415,12 @@ mod tests {
             .to_string();
         assert!(err.contains("must start with SELECT"), "{err}");
         assert!(validate_read_only_query("/* /* */ SELECT */ DROP TABLE t").is_err());
-        assert!(matches!(
-            bounded_duckdb_sql("/* /* */ x */ SELECT 1", &rows(10)),
-            Cow::Owned(_)
-        ));
+        for opts in [rows(10), QueryOptions::default()] {
+            assert!(matches!(
+                wrapped_duckdb_sql("/* /* */ x */ SELECT 1", &opts),
+                Cow::Owned(_)
+            ));
+        }
     }
 
     #[test]

@@ -1021,7 +1021,9 @@ pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
 /// values, or the differences, products and squares the fit forms from them, fall into that
 /// range would make the fit run that much longer than the budget allows for.
 ///
-/// The floor is on the column itself, because it bounds the differenced series the fit reads:
+/// The floor is on the column's valid values, the values the fit reads: `run_arima` refuses a
+/// column with nulls, so the buffer value behind a null slot never reaches the fit and is not
+/// checked. It is on the column itself, because it bounds the differenced series the fit reads:
 /// every value of the column is a multiple of the spacing of doubles at its smallest nonzero
 /// value `m` (about `m * 2^-52`), a difference of two such multiples rounds to another one, so
 /// every nonzero value of every difference is at least about `m * 2^-53`. From 1e-100 that is
