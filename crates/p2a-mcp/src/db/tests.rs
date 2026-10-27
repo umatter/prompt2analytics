@@ -808,6 +808,48 @@ async fn the_message_cap_counts_the_stored_messages() {
     assert_eq!(db.count_messages(&id).await.unwrap(), 2);
 }
 
+/// An add refused at the message cap brings the conversation's stored
+/// `message_count` in step with its rows, in memory and on RocksDB. The add
+/// that reached the cap can store its row and then fail its counter update
+/// (here the store refuses the conversation row's update; a process that
+/// stops between the two statements does the same), and every add after it
+/// is refused before a recount: before, the conversation list kept showing
+/// one message fewer than the refusal named until a clear or delete. A
+/// refusal whose repair of the counter fails is still the refusal.
+#[tokio::test]
+async fn a_refused_add_brings_the_message_count_in_step() {
+    for engine in ENGINES {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = PersistenceLimits {
+            messages_per_conversation: Some(3),
+            ..Default::default()
+        };
+        let db = engine_db(engine, dir.path(), limits).await;
+        let id = db.create_conversation("s1", "t").await.unwrap().id_string();
+        db.add_message(&id, "user", "first").await.unwrap();
+        db.add_message(&id, "assistant", "second").await.unwrap();
+        refuse_conversation_writes(&db, Some("UPDATE")).await;
+        // The add that reaches the cap stores its row; its counter update fails.
+        let stored = db.add_message(&id, "user", "third").await;
+        assert!(stored.is_err(), "{engine:?}: third add: {stored:?}");
+        assert_eq!(listed_and_stored(&db, &id).await, (2, 3), "{engine:?}");
+        let refused = db.add_message(&id, "user", "repair fails").await;
+        assert!(
+            matches!(refused, Err(DbError::QuotaExceeded(_))),
+            "{engine:?}: add while the repair fails: {refused:?}"
+        );
+
+        refuse_conversation_writes(&db, None).await;
+        let refused = db.add_message(&id, "user", "fourth").await;
+        assert!(
+            matches!(refused, Err(DbError::QuotaExceeded(_))),
+            "{engine:?}: fourth add: {refused:?}"
+        );
+        assert_eq!(listed_and_stored(&db, &id).await, (3, 3), "{engine:?}");
+        assert_eq!(db.store_turns_in_use(), 0);
+    }
+}
+
 /// A failed write of a conversation's counters is reported: a message add,
 /// a content update and a clear do not answer Ok when the conversation row
 /// cannot be updated. The error comes after the message row was written, so

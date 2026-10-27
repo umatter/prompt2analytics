@@ -144,7 +144,8 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// writes cannot pass a cap together. Both checks count the rows in the store
 /// under the turn (`count_messages`, `count_conversations`): the
 /// conversation's stored `message_count` is a display counter, recounted under
-/// the turn after each message add or content update, and never what a cap is
+/// the turn after each message add or content update (and written by an add
+/// refused at the cap when it differs from the rows), and never what a cap is
 /// checked against. A message add, a content update, a title change and a
 /// tool-call write (create, update, result or error) count their bytes against
 /// `session_db_bytes` and write them in the conversation's turn, so a delete

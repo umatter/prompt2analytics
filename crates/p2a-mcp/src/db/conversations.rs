@@ -312,8 +312,12 @@ impl DbConnection {
     ///
     /// The `messages_per_conversation` check counts the conversation's
     /// message rows ([`count_messages`](Self::count_messages)); the stored
-    /// `message_count` is only what the conversation list shows. Call it
-    /// during the conversation's turn
+    /// `message_count` is only what the conversation list shows. A refusal
+    /// at the cap first writes that count to `message_count` when the two
+    /// differ: the add that reached the cap may have stored its row and then
+    /// failed its counter update, and no add after it gets as far as the
+    /// recount. The refusal stands when that write fails. Call it during the
+    /// conversation's turn
     /// ([`conversation_turn`](DbConnection::conversation_turn)) and keep the
     /// turn until the message is written, so that concurrent adds cannot
     /// pass `messages_per_conversation` together.
@@ -327,6 +331,16 @@ impl DbConnection {
         if let Some(max) = self.limits().messages_per_conversation {
             let n = self.count_messages(conversation_id).await?;
             if n >= max {
+                let counted = i32::try_from(n).unwrap_or(i32::MAX);
+                if conv.message_count != counted
+                    && let Err(e) = self.set_message_count(conversation_id, counted).await
+                {
+                    tracing::warn!(
+                        conversation_id,
+                        error = %e,
+                        "could not bring a full conversation's message_count in step with its rows"
+                    );
+                }
                 return Err(DbError::QuotaExceeded(format!(
                     "this conversation already has {n} messages, the most this server keeps; \
                      start a new conversation"
@@ -353,6 +367,19 @@ impl DbConnection {
             .check()?;
         let count: Option<CountResult> = result.take(0)?;
         Ok(count.map_or(0, |c| usize::try_from(c.count).unwrap_or(0)))
+    }
+
+    /// Write `count` to conversation `conversation_id`'s stored
+    /// `message_count`, and nothing else (no preview, no `updated_at`: the
+    /// conversation did not change). Call it during the conversation's turn.
+    async fn set_message_count(&self, conversation_id: &str, count: i32) -> Result<(), DbError> {
+        self.db()
+            .query("UPDATE conversations SET message_count = $count WHERE id = $id RETURN NONE")
+            .bind(("id", RecordId::from(("conversations", conversation_id))))
+            .bind(("count", count))
+            .await?
+            .check()?;
+        Ok(())
     }
 
     /// Update conversation metadata after a message was added or changed:
@@ -409,7 +436,9 @@ impl DbConnection {
     ///
     /// An error from the conversation's counter and preview update comes
     /// after the message row was written: the message is stored, and only
-    /// the conversation's `message_count` and preview are stale.
+    /// the conversation's `message_count` and preview are stale, until the
+    /// next add recounts (one refused at `messages_per_conversation` repairs
+    /// the count but not the preview).
     pub async fn add_message(
         &self,
         conversation_id: &str,
@@ -443,8 +472,7 @@ impl DbConnection {
     /// [`add_message`](Self::add_message).
     ///
     /// An error from the conversation's counter and preview update comes
-    /// after the message row was written: the message is stored, and only
-    /// the conversation's `message_count` and preview are stale.
+    /// after the message row was written, as for `add_message`.
     pub async fn save_message(&self, message: &Message) -> Result<Message, DbError> {
         self.store_message(message.clone(), "Failed to save message")
             .await
