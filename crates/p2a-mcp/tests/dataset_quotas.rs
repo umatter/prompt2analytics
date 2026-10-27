@@ -1062,7 +1062,10 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
     let before = stored_copies_of(&bytes);
     assert!(before.contains(&path), "{path:?} not in {before:?}");
 
-    // With the quotas the check refuses it cleanly, and nothing is loaded.
+    // With the quotas the check refuses it cleanly, naming the column as
+    // the core loader does, and nothing is loaded. Before the check ran the
+    // loader's schema check, polars' conversion panicked in it and the
+    // refusal said only "could not read the file's schema".
     let (app, _) = app_with_quota(8 * MIB).await;
     for (tool, args) in [
         ("upload_dataset", upload.clone()),
@@ -1076,10 +1079,10 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
         assert_eq!(status, StatusCode::OK, "{tool}: {body}");
         assert_eq!(body["data"]["success"], json!(false), "{tool}: {body}");
         assert!(
-            body.to_string()
-                .contains("could not read the file's schema"),
+            body.to_string().contains("Cannot read column 'k'"),
             "{tool}: {body}"
         );
+        assert!(body.to_string().contains("u99"), "{tool}: {body}");
     }
     assert_eq!(stored_copies_of(&bytes), before, "an upload stored a copy");
 

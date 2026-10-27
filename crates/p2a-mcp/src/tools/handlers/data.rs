@@ -21,7 +21,7 @@ use crate::session;
 use crate::tools::handlers::utils::CappedWriter;
 use crate::tools::requests::data::*;
 
-use p2a_core::data::{DataLoader, Dataset, DatasetInfo};
+use p2a_core::data::{DataLoader, Dataset, DatasetInfo, LoadError};
 use p2a_core::polars::io::mmap::MmapBytesReader;
 use p2a_core::polars::prelude::{
     AnyValue, CategoricalPhysical, Column, CsvWriter, DataFrame, DataType, ParquetReader,
@@ -309,6 +309,10 @@ fn footer_decoded_bytes(
     let Ok(schema) = reader.schema() else {
         return Ok(None);
     };
+    // The core loader refuses the polars type metadata that polars' schema
+    // conversion below panics on; refuse it here the same way, naming the
+    // column, so a call with quotas answers what one without them does.
+    DataLoader::check_parquet_schema(&schema).map_err(|e| e.to_string())?;
     // A second handle for the page headers: the reader keeps its own.
     let Some((file, _)) = source.open() else {
         return Ok(None);
@@ -1396,10 +1400,11 @@ async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
 /// reservation). The page headers and dictionaries are read only under
 /// quotas, and a call without them passes after the footer. A file whose
 /// footer cannot be read passes (the loader reports its error); one the
-/// check will not read is not loaded, and neither is one whose footer or
-/// schema makes the check panic: polars' schema conversion
-/// (`DataType::from_arrow_field`) panics on some malformed categorical
-/// metadata, and the loader runs the same code.
+/// check will not read is not loaded. A schema the core loader refuses
+/// (`DataLoader::check_parquet_schema`: polars type metadata that polars'
+/// schema conversion, `DataType::from_arrow_field`, panics on) is refused
+/// with the loader's reason, naming the column, and a footer or schema
+/// that still makes the check panic is not loaded either.
 async fn admit_parquet_source(source: ParquetSource<'_>, name: &str) -> Result<(), NotAdmitted> {
     let footer = match std::panic::catch_unwind(|| read_footer(source)) {
         Ok(Ok(Some(footer))) => footer,
@@ -1438,11 +1443,17 @@ async fn admit_parquet_source(source: ParquetSource<'_>, name: &str) -> Result<(
 /// upload is never written to disk, so it needs no writable folder and
 /// stores nothing, and the loader's error names no file. The core loader
 /// reads it as it reads a file from a path, so a schema it refuses is
-/// refused here too, with or without the quotas.
+/// refused here too, with or without the quotas. A polars error is shown
+/// as polars words it: the caller says "Failed to parse Parquet", and the
+/// loader's "Failed to read file" would repeat that and call the upload a
+/// file.
 fn load_parquet_upload(bytes: &[u8]) -> Result<Dataset, String> {
     DataLoader::load_parquet_bytes(bytes)
         .map(Dataset::new)
-        .map_err(|e| e.to_string())
+        .map_err(|e| match e {
+            LoadError::PolarsError(e) => e.to_string(),
+            other => other.to_string(),
+        })
 }
 
 /// `text` (an error from a loader or writer) with the absolute forms of
@@ -3141,6 +3152,11 @@ mod tests {
             !shown.contains(&dir.path().display().to_string()),
             "{shown}"
         );
+        // polars' error as polars words it, which the caller shows after
+        // "Failed to parse Parquet: ". Before this the loader's own prefix
+        // ("Failed to read file: ") came first and called the upload a file.
+        assert!(!shown.contains("Failed to read file"), "{shown}");
+        assert!(shown.contains("parquet"), "{shown}");
     }
 
     /// [`parquet_decoded_bytes`] of the parquet file at `path`, read from
