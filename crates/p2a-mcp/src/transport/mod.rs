@@ -50,21 +50,35 @@ pub type TransportResult<T> = Result<T, TransportError>;
 /// Start the appropriate transport based on configuration.
 ///
 /// The request limits of the configured resource profile, with the
-/// `--limit-override` (`P2A_LIMIT_OVERRIDES`) entries applied, are installed
-/// first, for every transport; an unknown override key fails startup.
+/// `--limit-override` (`P2A_LIMIT_OVERRIDES`) entries applied, are resolved
+/// first, for every transport; an unknown override key fails startup. The
+/// stdio transport installs them here. On the HTTP path
+/// `transport::http::serve` resolves them again, from the socket it serves,
+/// and installs them. Either way the server holds its limits while it runs,
+/// and a start whose limits differ from those of a server still running in
+/// this process is refused (`http::serve` says more; without the `http`
+/// feature no other server can run).
 pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::config::TransportType;
 
     let limits = crate::tools::limits::resolve(config).map_err(TransportError::Config)?;
-    tracing::info!(
-        profile = ?config.resource_profile(),
-        overrides = ?config.limits.overrides,
-        "resource limits"
-    );
-    crate::tools::limits::install(limits);
 
     match config.transport {
-        TransportType::Stdio => start_stdio_transport(config).await,
+        TransportType::Stdio => {
+            // Held while the stdio server runs, as `http::serve` holds its
+            // limits, so no other server in this process replaces them.
+            #[cfg(feature = "http")]
+            let _held = http::hold_limits(&limits)?;
+            tracing::info!(
+                profile = ?config.resource_profile(),
+                overrides = ?config.limits.overrides,
+                "resource limits"
+            );
+            crate::tools::limits::install(limits);
+            start_stdio_transport(config).await
+        }
+        // `serve` holds and installs the limits; an install here, before its
+        // check, would replace those of a server already running.
         #[cfg(feature = "http")]
         TransportType::Http => http::start_http_transport(config).await,
     }

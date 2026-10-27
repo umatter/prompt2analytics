@@ -18,6 +18,7 @@
 #![cfg(feature = "http")]
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use p2a_mcp::config::{ServerConfig, TransportType};
 use p2a_mcp::tools::limits::{self, Family, Limits};
@@ -236,6 +237,32 @@ async fn serve_refuses_other_limits_while_an_open_public_server_runs() {
     assert_refused_for_other_limits(&e, "serve of a local configuration");
 
     // The open public server still runs under its limits.
+    assert_serves_open_public_limits(addr).await;
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_transport_refuses_other_limits_while_an_open_public_server_runs() {
+    let (addr, stop, server) = running_open_public().await;
+
+    // A local HTTP configuration and the stdio default, both of the off
+    // profile. A start that does not refuse runs until the bound, which the
+    // refusal (made before anything is served) never comes near.
+    let stdio = ServerConfig::default();
+    assert_eq!(stdio.transport, TransportType::Stdio);
+    for cfg in [local("127.0.0.1:0".parse().unwrap()), stdio] {
+        let what = format!("start_transport of a {:?} configuration", cfg.transport);
+        let started = tokio::time::timeout(
+            Duration::from_secs(60),
+            p2a_mcp::transport::start_transport(&cfg),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{what} was served next to an open public server"));
+        let e = started.expect_err("start_transport returned Ok");
+        assert_refused_for_other_limits(&e, &what);
+    }
+
     assert_serves_open_public_limits(addr).await;
     stop.send(()).unwrap();
     server.await.unwrap().unwrap();
