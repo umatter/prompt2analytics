@@ -904,11 +904,17 @@ Auto-discovered guidance:
 - **`tests/benchmark_ml_rust.rs` and `tests/benchmark_fast_implementations.rs` are benchmarks, not
   correctness tests**, and `cargo test -p p2a-core` runs them. In a debug build the ML one has been
   observed to burn 16+ minutes of CPU. Use `--lib` for a fast correctness loop.
-- **Wall-clock assertions**: four exist (`test_fast_mboost_componentwise_speed` and the panel scaling
-  tests `test_random_effects_scaling_many_entities`, `test_panel_gls_scaling_many_entities`,
-  `test_gmm_scaling_many_entities`), and all of them are release-only (`cfg!(debug_assertions)` guards).
-  Do not add ungated timing assertions — they fail on loaded or slower machines and make `cargo test`
-  machine-dependent, which the paper's reviewers will run.
+- **Wall-clock assertions**: seven exist, all release-only (`cfg!(debug_assertions)` guards), so a
+  debug `cargo test` skips them and `cargo test --release` on a slow or loaded machine can fail them.
+  In p2a-core: `test_fast_mboost_componentwise_speed` (1 s), `test_fast_xgboost_speed` (10 s), the
+  panel scaling tests `test_random_effects_scaling_many_entities` and
+  `test_panel_gls_scaling_many_entities` (100,000 entities, 10 s) and `test_gmm_scaling_many_entities`
+  (50,000 entities, 10 s), and `duckdb_query_stops_at_timeout` (5 s, `database` feature); in p2a-mcp,
+  `each_columns_own_mapping_is_charged_once` (250 ms). The panel tests guard against per-entity work
+  turning quadratic; the code keeps no operation count that a deterministic test could check instead.
+  Bounded polling loops with a deadline (the governor and serve tests) fail instead of hanging and
+  are not timing assertions. Do not add ungated timing assertions — they fail on loaded or slower
+  machines and make `cargo test` machine-dependent, which the paper's reviewers will run.
 
 ### Two traps on a dev box: disk and rustdoc
 
