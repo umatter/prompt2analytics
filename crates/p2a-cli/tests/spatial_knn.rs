@@ -10,8 +10,8 @@ fn p2a() -> Command {
     Command::cargo_bin("p2a").expect("Failed to find p2a binary")
 }
 
-/// A session holding `pts`: six points (`cx`, `cy`) with an outcome `v` and a
-/// regressor `x`, all with noise.
+/// Writes `csv` into `dir`, loads it as dataset `pts` in a new session file
+/// there, and returns that session's path.
 fn session_with_points(dir: &Path, csv: &str) -> String {
     let session = dir.join("s.json").to_str().unwrap().to_string();
     let path = dir.join("pts.csv");
@@ -25,6 +25,8 @@ fn session_with_points(dir: &Path, csv: &str) -> String {
     session
 }
 
+/// Six points (`cx`, `cy`) with an outcome `v` and a regressor `x`, all with
+/// noise.
 const POINTS: &str = "cx,cy,v,x\n\
                       0.1,0.2,1.3,0.5\n\
                       1.2,0.1,2.1,1.1\n\
