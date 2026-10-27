@@ -133,7 +133,9 @@ fn parquet_bytes(rows: usize) -> Vec<u8> {
     out
 }
 
-/// Every regular file under `dir`, relative to it, sorted.
+/// Every entry under `dir` that is not a folder, relative to it, sorted. A
+/// symlink is listed as an entry and never followed, so the walk stays
+/// under `dir`.
 fn files_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -142,11 +144,13 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
             continue;
         };
         for entry in read.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
             } else {
-                out.push(path.strip_prefix(dir).unwrap().to_path_buf());
+                out.push(entry.path().strip_prefix(dir).unwrap().to_path_buf());
             }
         }
     }
