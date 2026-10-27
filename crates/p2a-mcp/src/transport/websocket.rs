@@ -330,18 +330,33 @@ impl Waiting {
             return Some(ServerMessage::Pong);
         }
         let bytes = self.bytes.saturating_add(text.len());
-        if self.messages.len() >= MAX_WAITING_MESSAGES || bytes > self.max_bytes {
+        // The refusal names the bound that applied.
+        let refusal = if self.messages.len() >= MAX_WAITING_MESSAGES {
+            Some(format!(
+                "This connection is still handling an earlier message, and \
+                 {MAX_WAITING_MESSAGES} messages, the most that may wait behind it, are \
+                 already waiting; send this one again once their answers arrive."
+            ))
+        } else if bytes > self.max_bytes {
+            let size = p2a_core::memory::format_bytes;
+            Some(format!(
+                "This connection is still handling an earlier message, and this one ({}) \
+                 does not fit behind the messages already waiting: together they may take \
+                 at most {}, and those take {}; send it again once their answers arrive.",
+                size(text.len()),
+                size(self.max_bytes),
+                size(self.bytes)
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = refusal {
             return Some(ServerMessage::Error {
                 id: serde_json::from_str::<MessageId>(&text)
                     .ok()
                     .and_then(|message| message.id)
                     .map_or_else(|| "system".to_string(), Cow::into_owned),
-                message: format!(
-                    "This connection is still handling an earlier message, and the messages \
-                     waiting behind it are at the limit of {MAX_WAITING_MESSAGES} messages or \
-                     {} in total; send this one again once their answers arrive.",
-                    p2a_core::memory::format_bytes(self.max_bytes)
-                ),
+                message,
                 code: Some("connection_busy".to_string()),
             });
         }
@@ -852,7 +867,12 @@ mod tests {
             Some(ServerMessage::Error { id, code, message }) => {
                 assert_eq!(id, "over");
                 assert_eq!(code.as_deref(), Some("connection_busy"));
+                // The refusal names the bound that applied, not the other.
                 assert!(message.contains("16 messages"), "{message}");
+                assert!(
+                    !message.contains(&p2a_core::memory::format_bytes(usize::MAX)),
+                    "{message}"
+                );
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -882,7 +902,21 @@ mod tests {
             Some(ServerMessage::Error { id, code, message }) => {
                 assert_eq!(id, "c");
                 assert_eq!(code.as_deref(), Some("connection_busy"));
-                assert!(message.contains(&format!("{} bytes", 2 * one)), "{message}");
+                // The refusal names the bound that applied, this message's
+                // size and what already waits, not the count bound.
+                assert!(
+                    message.contains(&format!("at most {} bytes", 2 * one)),
+                    "{message}"
+                );
+                assert!(
+                    message.contains(&format!("({} bytes)", tool_text("c", 0).len())),
+                    "{message}"
+                );
+                assert!(
+                    message.contains(&format!("take {} bytes", 2 * one)),
+                    "{message}"
+                );
+                assert!(!message.contains("16 messages"), "{message}");
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
