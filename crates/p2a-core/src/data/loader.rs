@@ -40,21 +40,22 @@ pub enum LoadError {
     SasError(#[from] super::sas::SasError),
 
     /// A parquet column whose schema polars cannot turn into a column type
-    /// or decode.
-    #[error("Cannot read column '{column}': {reason}")]
+    /// or decode. The message shows at most 40 characters of the column's
+    /// name.
+    #[error("Cannot read column '{}': {}", shown(.column), .reason)]
     ParquetSchema {
         /// The top-level column (field of the file's ARROW:schema) that is
-        /// refused.
+        /// refused, its name in full.
         column: String,
         /// What is malformed, naming the nested field when the problem is
         /// inside one.
         reason: String,
     },
 
-    /// polars panicked reading a parquet file, on input that no check
-    /// before decoding rules out; the panic's message (see
-    /// [`DataLoader::load_parquet`]).
-    #[error("polars failed while decoding the parquet file: {0}")]
+    /// polars panicked reading a parquet file, its schema or its data, on
+    /// input that no check before decoding rules out; the panic's message,
+    /// without the words of an `unwrap` (see [`DataLoader::load_parquet`]).
+    #[error("polars failed while reading the parquet file: {0}")]
     ParquetPanic(String),
 }
 
@@ -69,15 +70,24 @@ const POLARS_TYPE_KEYS: [&str; 4] = [
     "_PL_CATEGORICAL2",
 ];
 
-/// Refuse a parquet file whose polars Categorical or Enum metadata
-/// `DataType::from_arrow_field` would panic on, naming the column.
+/// Refuse a parquet file whose polars Categorical or Enum metadata polars
+/// would panic on, or whose time zone polars cannot parse, naming the
+/// column.
 ///
 /// polars keeps a Categorical or Enum column's type in the field metadata
 /// of the file's ARROW:schema, as text it parses with `unwrap` and
 /// `split_at`, so malformed text in a file panics the reader. This checks
 /// that text the way polars 0.52 parses it, in every field it would reach
-/// (nested list, struct and map fields included), before the reader
-/// converts it; a file polars wrote passes.
+/// (nested list, large-list, fixed-size-list and struct fields included;
+/// polars-parquet reads a map as a large list of structs before this runs),
+/// before the reader converts it; a file polars wrote passes.
+///
+/// It refuses a timestamp, top-level or nested, whose time zone polars
+/// cannot parse: `DataType::from_arrow` unwraps `TimeZone::opt_try_new` of
+/// it, so the reader panics on a nested one, and it answers a top-level
+/// one with an error that names no column. The check calls the same
+/// function, so `POLARS_IGNORE_TIMEZONE_PARSE_ERROR=1` lets such a time
+/// zone through here as it does in polars.
 ///
 /// It also refuses a dictionary nested in a list, an array or a struct
 /// whose field carries one of polars' type keys over codes other than u8,
@@ -89,8 +99,8 @@ const POLARS_TYPE_KEYS: [&str; 4] = [
 /// depend on the data rather than the schema: a nested Categorical with
 /// more labels than its code width holds, which also counts the labels
 /// earlier loads put into the same process-wide categories. Others come
-/// from other types, such as an unparsable time zone nested in a list or
-/// struct. [`read_parquet`] catches those.
+/// before this check can run, such as an ARROW:schema too short to hold its
+/// own header. [`read_parquet`] catches those.
 fn check_parquet_schema(schema: &ArrowSchema) -> Result<(), LoadError> {
     for field in schema.iter_values() {
         check_dtype(&field.dtype, field.metadata.as_deref(), false).map_err(|reason| {
@@ -105,9 +115,9 @@ fn check_parquet_schema(schema: &ArrowSchema) -> Result<(), LoadError> {
 
 /// [`check_parquet_schema`] of a field of type `dtype` with the metadata
 /// `md` and the fields nested in it, following `DataType::from_arrow` arm
-/// by arm where it reads metadata or recurses. `nested` when the field is
-/// inside a list, an array or a struct, whose fields polars-parquet's
-/// nested decoder reads.
+/// by arm where it reads metadata, parses a time zone or recurses. `nested`
+/// when the field is inside a list, an array or a struct, whose fields
+/// polars-parquet's nested decoder reads.
 fn check_dtype<M: MetaDataExt>(
     dtype: &ArrowDataType,
     md: Option<&M>,
@@ -141,6 +151,18 @@ fn check_dtype<M: MetaDataExt>(
                 ));
             }
             Ok(())
+        }
+        // polars parses the time zone with this function and unwraps the
+        // result. Its error quotes the file's time zone whole, so the
+        // refusal shows a bounded part of it.
+        ArrowDataType::Timestamp(_, tz) => {
+            TimeZone::opt_try_new(tz.clone()).map(|_| ()).map_err(|e| {
+                format!(
+                    "its time zone '{}' is not one polars can parse: {}",
+                    shown(tz.as_deref().unwrap_or("")),
+                    shown_up_to(&e.to_string(), 300)
+                )
+            })
         }
         ArrowDataType::List(inner)
         | ArrowDataType::LargeList(inner)
@@ -264,10 +286,15 @@ fn read_parquet<R: polars::io::mmap::MmapBytesReader>(reader: R) -> Result<DataF
     Ok(polars_unwinding(move || reader.finish())??)
 }
 
+/// What a panic in `Result::unwrap` says before the error it unwrapped.
+const UNWRAP_PANIC_PREFIX: &str = "called `Result::unwrap()` on an `Err` value: ";
+
 /// Run `read`, a call into polars' parquet reader, and answer a panic in it
 /// (on this thread, or on polars' thread pool, which resumes it here) as
-/// [`LoadError::ParquetPanic`] with the panic's message. The reader `read`
-/// uses is dropped after a panic, never used again.
+/// [`LoadError::ParquetPanic`] with the panic's message, without
+/// [`UNWRAP_PANIC_PREFIX`], and log it as a warning: such a panic is a
+/// polars bug that operators can find in the logs. The reader `read` uses
+/// is dropped after a panic, never used again.
 fn polars_unwinding<T>(read: impl FnOnce() -> T) -> Result<T, LoadError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).map_err(|payload| {
         let message = payload
@@ -275,7 +302,15 @@ fn polars_unwinding<T>(read: impl FnOnce() -> T) -> Result<T, LoadError> {
             .map(|message| message.to_string())
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "a panic without a message".to_string());
-        LoadError::ParquetPanic(shown_up_to(&message, 300))
+        let message = message
+            .strip_prefix(UNWRAP_PANIC_PREFIX)
+            .unwrap_or(&message);
+        let message = shown_up_to(message, 300);
+        tracing::warn!(
+            panic = %message,
+            "polars panicked reading a parquet file; answered as LoadError::ParquetPanic"
+        );
+        LoadError::ParquetPanic(message)
     })
 }
 
@@ -354,9 +389,10 @@ impl DataLoader {
 
     /// Refuse a parquet file's arrow `schema` (polars' `ParquetReader::schema`)
     /// whose polars Categorical or Enum metadata polars would panic on
-    /// converting or decoding, with [`LoadError::ParquetSchema`] naming the
-    /// column. The loader runs it on every parquet file before decoding;
-    /// a check that converts a schema itself can run it first.
+    /// converting or decoding, or whose time zone polars cannot parse, with
+    /// [`LoadError::ParquetSchema`] naming the column. The loader runs it on
+    /// every parquet file before decoding; a check that converts a schema
+    /// itself can run it first.
     pub fn check_parquet_schema(schema: &ArrowSchema) -> Result<(), LoadError> {
         check_parquet_schema(schema)
     }
@@ -1025,6 +1061,28 @@ mod tests {
             ),
             "{text}"
         );
+        // The message shows 40 characters of a longer column name; the error
+        // keeps it whole.
+        let long = "k".repeat(30) + &"é".repeat(30);
+        let dtype = categorical("lab", CategoricalPhysical::U32);
+        let df = frame_of(
+            Series::new(long.as_str().into(), ["lo", "hi"])
+                .cast(&dtype)
+                .unwrap(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = parquet_file(dir.path(), "long.parquet", df);
+        edit_arrow_schema(&path, b"3;lab0;u32;", b"3;lab0;u99;");
+        let Err(LoadError::ParquetSchema { column, .. }) = DataLoader::load_parquet(&path) else {
+            panic!("not refused by the schema check");
+        };
+        assert_eq!(column, long);
+        let text = parquet_error(&path);
+        let cut: String = long.chars().take(40).collect();
+        assert!(
+            text.starts_with(&format!("Cannot read column '{cut}...': ")),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1122,19 +1180,38 @@ mod tests {
         assert_eq!(k, ["lo", "hi", "lo", "mid"]);
     }
 
+    /// The message of the error loading the parquet file at `path`, which
+    /// must be the [`LoadError::ParquetPanic`] of a caught panic in polars,
+    /// without the words of an `unwrap`.
+    fn panic_error(path: &Path) -> String {
+        let text = parquet_error(path);
+        let Some(message) = text.strip_prefix("polars failed while reading the parquet file: ")
+        else {
+            panic!("not a caught panic: {text}");
+        };
+        assert!(!message.contains("Result::unwrap()"), "{text}");
+        message.to_string()
+    }
+
+    /// A three-row float column `k` written by polars as a parquet file
+    /// `name` in `dir`, with an ARROW:schema whose base64 decodes to two
+    /// bytes. `tests/data/arrow_schema_short.parquet` is this file as polars
+    /// 0.52 writes it.
+    fn short_arrow_schema_file(dir: &Path, name: &str) -> PathBuf {
+        let path = parquet_file(
+            dir,
+            name,
+            frame_of(Series::new("k".into(), [0.5, 1.75, 2.25])),
+        );
+        replace_arrow_schema_value(&path, "AAA=");
+        path
+    }
+
     #[test]
     fn a_panic_in_polars_no_schema_check_rules_out_is_an_error() {
         // polars panics on some files whether their schema is well formed
         // or not; the loader catches the unwind and answers an error. Pre-fix
         // each of these panicked the reader.
-        let decoding_error = |path: &Path, says: &str| {
-            let text = parquet_error(path);
-            assert!(
-                text.contains("polars failed while decoding the parquet file"),
-                "{text}"
-            );
-            assert!(text.contains(says), "{text}");
-        };
         let dir = tempfile::tempdir().unwrap();
         // A nested Categorical whose metadata names u8 codes over more
         // labels than u8 codes hold: polars unwraps the failed import of a
@@ -1154,32 +1231,17 @@ mod tests {
         ] {
             let path = parquet_file(dir.path(), &format!("{name}.parquet"), df);
             edit_arrow_schema(&path, b"u32;", b"u8;;");
-            decoding_error(&path, overflow);
+            let message = panic_error(&path);
+            assert!(message.contains(overflow), "{name}: {message}");
+            // polars' unwrap of its error, shown as the error alone.
+            assert!(message.starts_with("ComputeError"), "{name}: {message}");
         }
         // An ARROW:schema whose base64 decodes to fewer than four bytes:
-        // polars slices its first four before any check.
-        let short = parquet_file(
-            dir.path(),
-            "short.parquet",
-            frame_of(Series::new("k".into(), [0.5, 1.75, 2.25])),
-        );
-        replace_arrow_schema_value(&short, "AAA=");
-        decoding_error(&short, "out of range for slice of length 2");
-        // A list of datetimes whose time zone polars cannot parse: polars
-        // unwraps the nested conversion.
-        let paris = DataType::Datetime(
-            TimeUnit::Microseconds,
-            TimeZone::opt_try_new(Some("Europe/Paris")).unwrap(),
-        );
-        let times = Series::new("".into(), [1_700_000_000_123_456i64, 1_700_000_100_654_321])
-            .cast(&paris)
-            .unwrap();
-        let k = Series::new("k".into(), [times.clone(), times])
-            .cast(&DataType::List(Box::new(paris)))
-            .unwrap();
-        let zoned = parquet_file(dir.path(), "zoned.parquet", frame_of(k));
-        edit_arrow_schema(&zoned, b"Europe/Paris", b"Europe/Parix");
-        decoding_error(&zoned, "Europe/Parix");
+        // polars slices its first four before any check, and the panic is
+        // std's (its wording is the toolchain's, so it is not asserted).
+        // The CLI's test loads the checked-in copy.
+        panic_error(&short_arrow_schema_file(dir.path(), "short.parquet"));
+        panic_error(&fixture("arrow_schema_short.parquet"));
         // The process reads parquet files as before.
         let fine = list_frame_with(
             &categorical("h5fine", CategoricalPhysical::U8),
@@ -1191,6 +1253,113 @@ mod tests {
                 .unwrap()
                 .equals_missing(&fine)
         );
+    }
+
+    /// A log the tests read back.
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_caught_polars_panic_is_logged_as_a_warning() {
+        // Pre-fix the panic reached p2a-mcp's governor, which logged it as
+        // a panicked tool call; the loader answers it now, and logs it.
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        // While this subscriber is the only dispatcher registered, tracing
+        // takes the interest of a callsite that another test's thread
+        // registers from that thread's default alone (none, so disabled for
+        // good); a second registered dispatcher makes every registration
+        // ask all of them. And a callsite registered before this test ran
+        // gets its interest recomputed with this subscriber in place.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        let loaded = DataLoader::load_parquet(fixture("arrow_schema_short.parquet"));
+        drop(guard);
+        let Err(LoadError::ParquetPanic(message)) = loaded else {
+            panic!("not a caught panic: {loaded:?}");
+        };
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let line = log
+            .lines()
+            .find(|line| line.contains("polars panicked reading a parquet file"))
+            .unwrap_or_else(|| panic!("nothing logged: {log}"));
+        assert!(line.contains("WARN"), "{line}");
+        assert!(line.contains(&format!("panic={message}")), "{line}");
+    }
+
+    /// A Datetime type of microseconds in the time zone `tz`.
+    fn zoned(tz: &str) -> DataType {
+        DataType::Datetime(
+            TimeUnit::Microseconds,
+            TimeZone::opt_try_new(Some(tz)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_time_zone_polars_cannot_parse_is_refused_naming_the_column() {
+        // polars parses a timestamp's time zone from the file's ARROW:schema
+        // and unwraps the result in its schema conversion. Pre-fix a nested
+        // one panicked the reader, and a top-level one was polars' own
+        // error, which named no column (and panicked p2a-mcp's check before
+        // decoding, which converts the schema itself).
+        let paris = zoned("Europe/Paris");
+        let times = |name: &str| {
+            Series::new(
+                name.into(),
+                [
+                    1_700_000_000_123_456i64,
+                    1_700_000_100_654_321,
+                    1_700_000_250_000_007,
+                ],
+            )
+            .cast(&paris)
+            .unwrap()
+        };
+        let list = Series::new("k".into(), [times(""), times("")])
+            .cast(&DataType::List(Box::new(paris.clone())))
+            .unwrap();
+        let structs = StructChunked::from_series("k".into(), 3, [times("c")].iter()).unwrap();
+        for (name, df, nested) in [
+            ("top", frame_of(times("k")), None),
+            ("list", frame_of(list), Some("its nested field '")),
+            (
+                "struct",
+                frame_of(structs.into_series()),
+                Some("its nested field 'c'"),
+            ),
+        ] {
+            // polars' own time zone loads.
+            let dir = tempfile::tempdir().unwrap();
+            let path = parquet_file(dir.path(), "paris.parquet", df.clone());
+            let loaded = DataLoader::load_parquet(&path).unwrap();
+            assert_eq!(loaded.schema(), df.schema(), "{name}");
+            assert!(loaded.equals_missing(&df), "{name}: {loaded} vs {df}");
+            let text = refusal_of(df, "Europe/Paris", "Europe/Parix");
+            assert!(
+                text.contains("its time zone 'Europe/Parix' is not one polars can parse"),
+                "{name}: {text}"
+            );
+            assert!(text.contains("unable to parse time zone"), "{name}: {text}");
+            if let Some(nested) = nested {
+                assert!(text.contains(nested), "{name}: {text}");
+            }
+        }
     }
 
     #[test]
