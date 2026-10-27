@@ -118,6 +118,52 @@ where
     false
 }
 
+/// What the process logs at INFO and above, from the first call on. The
+/// subscriber is the global default because a governed call logs on a
+/// blocking-pool thread, which a test thread's own default never reaches.
+/// Every test in this binary writes here once it is installed, so look a
+/// line up by something only one test logs, such as its session id.
+fn process_logs() -> &'static ProcessLogs {
+    static LOGS: std::sync::OnceLock<ProcessLogs> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let logs = ProcessLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other global subscriber in this test binary");
+        logs
+    })
+}
+
+#[derive(Clone, Default)]
+struct ProcessLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl ProcessLogs {
+    /// The lines logged so far that contain `needle`.
+    fn lines_with(&self, needle: &str) -> Vec<String> {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .lines()
+            .filter(|l| l.contains(needle))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+impl std::io::Write for ProcessLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 // =============================================================================
 // Task 1: one session registry (MCP-2; server half of MCP-8)
 // =============================================================================
@@ -311,9 +357,11 @@ async fn reload_respects_the_session_dataset_quota() {
 /// A reload checks each source file against `load_file_bytes` before it
 /// parses it, as `load_dataset` does: a file that grew past the budget after
 /// it was loaded is reported failed with its size and the limit (and no
-/// server path), and the session does not get it.
+/// server path), and the session does not get it. The refusal's log line
+/// carries the session id, so an operator can tie it to the session.
 #[test]
 fn reload_refuses_a_source_above_load_file_bytes() {
+    let logs = process_logs();
     let big_csv = noisy_csv(200, 3);
     let size = big_csv.len() as u64;
     let capped = limits::Limits::off()
@@ -365,6 +413,14 @@ fn reload_refuses_a_source_above_load_file_bytes() {
             let session = state.session_manager.get_session(&sid).await.unwrap();
             assert!(session.datasets.read().await.contains_key("small"));
             assert!(!session.datasets.read().await.contains_key("big"));
+
+            let refusals = logs.lines_with("request refused by a named budget");
+            assert!(
+                refusals
+                    .iter()
+                    .any(|l| l.contains("dataset=big") && l.contains(&sid)),
+                "no refusal logged with session {sid}: {refusals:#?}"
+            );
         })
     });
 }

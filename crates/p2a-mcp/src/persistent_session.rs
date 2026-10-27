@@ -673,8 +673,9 @@ impl PersistentSessionManager {
     ///
     /// Loading is a separate step, [`load_reload_source`] and then
     /// [`insert_reloaded_dataset`] for each source, which the HTTP route runs
-    /// under the tool governor (admission, permits, deadline, dataset
-    /// quotas), so a reload is bounded like a tool call.
+    /// under the tool governor (admission, permits, deadline, the
+    /// `load_file_bytes` check on each source file, dataset quotas), so a
+    /// reload is bounded like a tool call.
     pub async fn reload_plan(
         &self,
         session_id: &str,
@@ -846,9 +847,10 @@ pub async fn insert_reloaded_dataset(
 const CONVERSATION_NOT_FOUND: &str = "Conversation not found";
 const MESSAGE_NOT_FOUND: &str = "Message not found";
 
-/// The name a reload's budget checks and their log lines go by (the label of
-/// its governed call).
-const RELOAD_LABEL: &str = "reload_session_datasets";
+/// The name a reload goes by: the label of its governed call and of the span
+/// it runs in, and the tool its budget checks and their log lines name. The
+/// HTTP route passes this constant, so the names cannot drift apart.
+pub const RELOAD_LABEL: &str = "reload_session_datasets";
 
 /// Reload texts. They are fixed so that no server path reaches a caller.
 const RELOAD_NO_SOURCE: &str = "no source path stored";

@@ -20,15 +20,15 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
-use tracing;
+use tracing::{self, Instrument};
 
 use super::http::ApiResponse;
 use super::routes_sessions::capacity_response;
 use crate::db::{Conversation, ConversationWithMessages, DatasetMeta, DbError, Message};
 use crate::exec::{ToolCallError, ToolGovernor};
 use crate::persistent_session::{
-    DatasetQuotas, PersistentSessionError, PersistentSessionManager, ReloadFailure, ReloadPlan,
-    ReloadResult, insert_reloaded_dataset, load_reload_source,
+    DatasetQuotas, PersistentSessionError, PersistentSessionManager, RELOAD_LABEL, ReloadFailure,
+    ReloadPlan, ReloadResult, insert_reloaded_dataset, load_reload_source,
 };
 use crate::session::SessionError;
 
@@ -692,11 +692,15 @@ async fn list_session_datasets(
 /// The loading runs as one governed call (`ToolGovernor::run_blocking`):
 /// memory admission, the session's and a global permit, the deadline and
 /// panic isolation, on the blocking pool inside the session's path-jail
-/// scope. Each loaded dataset is inserted only if it fits the governor's
-/// dataset quotas; one that does not is reported failed. A refusal by the
-/// governor answers as a refused tool call does (503 `server_busy` or
-/// `memory_pressure`, 429 `session_busy`, 504 `deadline_exceeded`, with
-/// `Retry-After` where retrying helps).
+/// scope. Each source file is first checked against the `load_file_bytes`
+/// budget before it is parsed ([`load_reload_source`]); a file above it is
+/// reported failed with its size and the limit. Each loaded dataset is
+/// inserted only if it fits the governor's dataset quotas; one that does not
+/// is reported failed. The call runs in a [`RELOAD_LABEL`] span that carries
+/// the session id, so its log lines (a budget refusal among them) name the
+/// session. A refusal by the governor answers as a refused tool call does
+/// (503 `server_busy` or `memory_pressure`, 429 `session_busy`, 504
+/// `deadline_exceeded`, with `Retry-After` where retrying helps).
 async fn reload_session_datasets(
     State(state): State<ConversationState>,
     Extension(governor): Extension<Arc<ToolGovernor>>,
@@ -722,8 +726,10 @@ async fn reload_session_datasets(
     let sessions = Arc::clone(pm.sessions());
     let target = Arc::clone(&session);
     let handle = tokio::runtime::Handle::current();
+    // run_blocking enters the current span on the blocking thread.
+    let span = tracing::info_span!(RELOAD_LABEL, session_id = %session.id);
     let outcome = governor
-        .run_blocking(&session, "reload_session_datasets", move |budget| {
+        .run_blocking(&session, RELOAD_LABEL, move |budget| {
             // Past the deadline (or once the caller is gone) nothing more is
             // loaded or inserted.
             let in_budget = || {
@@ -748,7 +754,7 @@ async fn reload_session_datasets(
                             quotas,
                         ))
                     }
-                    Err(error) => Err(error.to_string()),
+                    Err(error) => Err(error),
                 };
                 match loaded {
                     Ok(()) => result.succeeded.push(source.name),
@@ -761,6 +767,7 @@ async fn reload_session_datasets(
             }
             Ok(result)
         })
+        .instrument(span)
         .await;
     match outcome {
         Ok(result) => {
