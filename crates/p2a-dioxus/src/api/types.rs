@@ -343,6 +343,13 @@ impl DatasetMeta {
     pub fn column_names_cut(&self) -> bool {
         self.column_names.len() < self.width()
     }
+
+    /// Whether the row holds any column names: one whose first name was
+    /// too long to keep, or whose result had no column list, holds none
+    /// although the dataset has columns.
+    pub fn has_column_names(&self) -> bool {
+        !self.column_names.is_empty()
+    }
 }
 
 /// Result of reloading session datasets
@@ -404,11 +411,14 @@ mod tests {
         assert_eq!(wide.columns_beyond(10), 49_990);
         assert_eq!(wide.columns_beyond(5_000), 49_000);
         assert!(wide.column_names_cut());
+        assert!(wide.has_column_names());
 
-        // A first name too long for the row leaves no names at all.
+        // A first name too long for the row leaves no names at all: the
+        // sidebar and the inspector say the names are not stored.
         let unnamed = meta(2, 0);
         assert_eq!((unnamed.width(), unnamed.columns_beyond(10)), (2, 2));
         assert!(unnamed.column_names_cut());
+        assert!(!unnamed.has_column_names());
     }
 
     #[test]
@@ -417,6 +427,7 @@ mod tests {
         assert_eq!(narrow.width(), 4);
         assert_eq!(narrow.columns_beyond(10), 0);
         assert!(!narrow.column_names_cut());
+        assert!(narrow.has_column_names());
         let twelve = meta(12, 12);
         assert_eq!(twelve.columns_beyond(10), 2);
 

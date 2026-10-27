@@ -264,34 +264,42 @@ pub fn DatasetInspectorModal(props: DatasetInspectorModalProps) -> Element {
                         h3 { class: "text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3",
                             "Columns ({dataset.width()})"
                         }
-                        // A wide dataset's row keeps its first names only.
-                        if dataset.column_names_cut() {
-                            p { class: "text-xs text-gray-500 dark:text-gray-400 mb-2",
-                                "First {dataset.column_names.len()} of {dataset.width()} shown"
+                        // A wide dataset's row keeps its first names only, and
+                        // a row can hold none (a first name too long to keep,
+                        // or a result without a column list).
+                        if dataset.has_column_names() {
+                            if dataset.column_names_cut() {
+                                p { class: "text-xs text-gray-500 dark:text-gray-400 mb-2",
+                                    "First {dataset.column_names.len()} of {dataset.width()} shown"
+                                }
                             }
-                        }
-                        div { class: "bg-gray-50 dark:bg-gray-800 rounded-lg p-3",
-                            div { class: "flex flex-wrap gap-2",
-                                for col in dataset.column_names.iter() {
-                                    span {
-                                        key: "{col}",
-                                        class: "inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300",
-                                        // Column icon
-                                        svg {
-                                            class: "w-3 h-3 text-gray-400",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path {
-                                                stroke_linecap: "round",
-                                                stroke_linejoin: "round",
-                                                stroke_width: "2",
-                                                d: "M7 20l4-16m2 16l4-16M6 9h14M4 15h14"
+                            div { class: "bg-gray-50 dark:bg-gray-800 rounded-lg p-3",
+                                div { class: "flex flex-wrap gap-2",
+                                    for col in dataset.column_names.iter() {
+                                        span {
+                                            key: "{col}",
+                                            class: "inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300",
+                                            // Column icon
+                                            svg {
+                                                class: "w-3 h-3 text-gray-400",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                view_box: "0 0 24 24",
+                                                path {
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    stroke_width: "2",
+                                                    d: "M7 20l4-16m2 16l4-16M6 9h14M4 15h14"
+                                                }
                                             }
+                                            "{col}"
                                         }
-                                        "{col}"
                                     }
                                 }
+                            }
+                        } else if dataset.width() > 0 {
+                            p { class: "text-xs text-gray-500 dark:text-gray-400",
+                                "Column names not stored"
                             }
                         }
                     }
