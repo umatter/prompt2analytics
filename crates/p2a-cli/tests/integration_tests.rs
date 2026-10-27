@@ -215,6 +215,24 @@ fn test_data_load_valid_csv() {
         .stdout(predicate::str::contains("Columns: 3"));
 }
 
+/// A parquet file whose schema the core loader refuses is an error naming
+/// the column, with exit code 1, not a panic (exit code 101). The file is
+/// p2a-core's fixture of a list of int32-coded dictionaries carrying
+/// polars' Categorical metadata, which polars' nested decoder leaves
+/// unimplemented (see `a_nested_dictionary_with_polars_metadata_and_signed_codes_is_refused`
+/// in p2a-core's loader).
+#[test]
+fn test_data_load_parquet_polars_cannot_decode_is_an_error() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../p2a-core/tests/data/polars_metadata_signed_list.parquet");
+    p2a()
+        .args(["data", "load", fixture.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("Cannot read column 'k'"))
+        .stderr(predicate::str::contains("panicked").not());
+}
+
 /// Test data head command.
 #[test]
 fn test_data_head_command() {
