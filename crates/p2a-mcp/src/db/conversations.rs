@@ -563,10 +563,8 @@ impl DbConnection {
                 let stored = db.get_message(&message_id).await?;
                 session_id = db.get_conversation(&conversation_id).await?.session_id;
                 replaced = stored.content.len() as u64;
-                let mut fitted = db
-                    .fit_session_texts(&session_id, vec![content], replaced)
+                db.fit_session_texts(&session_id, &mut [&mut content], replaced)
                     .await?;
-                content = fitted.pop().unwrap_or_default();
             }
             let mut result = db
                 .db()

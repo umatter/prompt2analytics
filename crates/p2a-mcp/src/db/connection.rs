@@ -428,12 +428,13 @@ impl DbConnection {
         .await?
     }
 
-    /// Server-produced `texts`, of a write that replaces stored texts of
-    /// `replaced` bytes, cut in order to the bytes the session has left under
-    /// `session_db_bytes` plus `replaced` (each possibly to the empty string)
-    /// and counted; never refused. `texts` unchanged without the budget. The
-    /// counter holds the replaced texts too until the caller, once the write
-    /// has replaced them, releases their bytes
+    /// Fit server-produced `texts`, of a write that replaces stored texts of
+    /// `replaced` bytes, in place: cut in order (see [`truncate_to`]) to the
+    /// bytes the session has left under `session_db_bytes` plus `replaced`
+    /// (each possibly to the empty string), and count them; never refused.
+    /// Without the budget `texts` are left as they are. The counter holds
+    /// the replaced texts too until the caller, once the write has replaced
+    /// them, releases their bytes
     /// ([`release_session_bytes`](Self::release_session_bytes)); a write that
     /// fails leaves both counted. Call it, the write and the release in the
     /// conversation's [`StoreTurn`], so that no delete or clear releases the
@@ -441,28 +442,22 @@ impl DbConnection {
     pub(crate) async fn fit_session_texts(
         &self,
         session_id: &str,
-        texts: Vec<String>,
+        texts: &mut [&mut String],
         replaced: u64,
-    ) -> Result<Vec<String>, DbError> {
+    ) -> Result<(), DbError> {
         let Some(limit) = self.limits.session_db_bytes else {
-            return Ok(texts);
+            return Ok(());
         };
         self.with_session_bytes(session_id, |used| {
             let mut room = limit.saturating_sub(*used).saturating_add(replaced);
-            texts
-                .into_iter()
-                .map(|text| {
-                    let fits = usize::try_from(room).unwrap_or(usize::MAX);
-                    let stored = if text.len() > fits {
-                        truncate_to(&text, fits)
-                    } else {
-                        text
-                    };
-                    room = room.saturating_sub(stored.len() as u64);
-                    *used = used.saturating_add(stored.len() as u64);
-                    stored
-                })
-                .collect()
+            for text in texts.iter_mut() {
+                let fits = usize::try_from(room).unwrap_or(usize::MAX);
+                if text.len() > fits {
+                    **text = truncate_to(text, fits);
+                }
+                room = room.saturating_sub(text.len() as u64);
+                *used = used.saturating_add(text.len() as u64);
+            }
         })
         .await
     }

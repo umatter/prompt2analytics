@@ -119,30 +119,15 @@ impl DbConnection {
         mut tool_call: ToolCall,
         replaced: u64,
     ) -> Result<ToolCall, DbError> {
-        let mut texts = vec![self.truncate_server_text(&tool_call.arguments)];
-        texts.extend(
-            tool_call
-                .result
-                .as_deref()
-                .map(|t| self.truncate_server_text(t)),
-        );
-        texts.extend(
-            tool_call
-                .error
-                .as_deref()
-                .map(|t| self.truncate_server_text(t)),
-        );
-        let mut fitted = self
-            .fit_session_texts(session_id, texts, replaced)
-            .await?
-            .into_iter();
-        tool_call.arguments = fitted.next().unwrap_or_default();
-        if tool_call.result.is_some() {
-            tool_call.result = fitted.next();
+        let mut texts: Vec<&mut String> = std::iter::once(&mut tool_call.arguments)
+            .chain(tool_call.result.as_mut())
+            .chain(tool_call.error.as_mut())
+            .collect();
+        for text in texts.iter_mut() {
+            **text = self.truncate_server_text(text.as_str());
         }
-        if tool_call.error.is_some() {
-            tool_call.error = fitted.next();
-        }
+        self.fit_session_texts(session_id, &mut texts, replaced)
+            .await?;
         Ok(tool_call)
     }
 
@@ -172,7 +157,7 @@ impl DbConnection {
         let id = id.to_string();
         let turn = db.conversation_turn(&conversation_id).await;
         run_to_end(turn, async move {
-            let (status, text, duration_ms) = match change {
+            let (status, mut text, duration_ms) = match change {
                 StatusChange::Running => (ToolCallStatus::Running, None, None),
                 StatusChange::Finished {
                     status,
@@ -187,21 +172,18 @@ impl DbConnection {
             };
             let mut session_id = String::new();
             let mut replaced = 0;
-            let text = match text {
-                Some((field, text)) if db.tracks_session_bytes() => {
-                    // Read again in the turn: a delete or clear that ran
-                    // before it took the row, and no bytes may be counted
-                    // for a write that finds none.
-                    let stored = db.get_tool_call(&id).await?;
-                    session_id = db.tool_call_session(&stored.conversation_id).await?;
-                    replaced = field.stored(&stored).map_or(0, |t| t.len() as u64);
-                    let mut fitted = db
-                        .fit_session_texts(&session_id, vec![text], replaced)
-                        .await?;
-                    Some((field, fitted.pop().unwrap_or_default()))
-                }
-                text => text,
-            };
+            if let Some((field, text)) = &mut text
+                && db.tracks_session_bytes()
+            {
+                // Read again in the turn: a delete or clear that ran before
+                // it took the row, and no bytes may be counted for a write
+                // that finds none.
+                let stored = db.get_tool_call(&id).await?;
+                session_id = db.tool_call_session(&stored.conversation_id).await?;
+                replaced = field.stored(&stored).map_or(0, |t| t.len() as u64);
+                db.fit_session_texts(&session_id, &mut [text], replaced)
+                    .await?;
+            }
 
             let query = match &text {
                 None => "UPDATE tool_calls SET status = $status WHERE id = $id RETURN AFTER",
