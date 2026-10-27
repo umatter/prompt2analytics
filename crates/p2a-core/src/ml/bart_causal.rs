@@ -158,9 +158,16 @@ impl Default for BartCausalConfig {
     }
 }
 
-/// Trees of the propensity model ([`estimate_propensity`]) and their depth.
+// The shape of the propensity model (`estimate_propensity`). The configuration does not
+// change it, and the public doc of `BartCausalConfig::memory_bound` states these values.
+/// Trees of the propensity model ([`estimate_propensity`]).
 const PROPENSITY_TREES: usize = 50;
+/// Depth of the propensity model's trees.
 const PROPENSITY_DEPTH: usize = 3;
+/// The fewest rows a node of a propensity tree keeps.
+const PROPENSITY_NODE_SIZE: usize = 5;
+/// The fraction of all the rows each propensity tree's subsample draws.
+const PROPENSITY_FRACTION: f64 = 0.632;
 
 impl BartCausalConfig {
     /// An upper bound, in bytes, of what [`bart_causal`] holds at once for a
@@ -178,10 +185,11 @@ impl BartCausalConfig {
     /// - **Trees.** The two response-surface ensembles of `n_trees` trees
     ///   each, kept for the result, and the two ensembles of `n_trees / 4`
     ///   trees of the bootstrap replicate being fitted; with
-    ///   `include_propensity`, the propensity model's trees too. A tree has at
-    ///   most `2 L - 1` nodes for `L` leaves; `L` is at most `2^max_depth` and
-    ///   at most its subsample divided by `max(min_node_size, 1)`, since every
-    ///   child keeps `min_node_size` rows and at least one. A treated tree and
+    ///   `include_propensity`, the propensity model's 50 trees
+    ///   (`PROPENSITY_TREES`) of depth 3 too. A tree has at most `2 L - 1`
+    ///   nodes for `L` leaves; `L` is at most `2^max_depth` and at most its
+    ///   subsample divided by `max(min_node_size, 1)`, since every child
+    ///   keeps `min_node_size` rows and at least one. A treated tree and
     ///   a control tree are fitted on subsamples that together hold at most
     ///   `sample_fraction` of the rows, so a pair has at most that many rows
     ///   divided by `max(min_node_size, 1)`, plus two, leaves. Every node is
@@ -203,7 +211,18 @@ impl BartCausalConfig {
     ///   ensembles' covariates). The path is at most `max_depth` levels deep
     ///   and at most the subsample divided by `max(min_node_size, 1)`. The
     ///   split search's sort order adds one subsample, and the list the
-    ///   covariates are drawn from one covariate list.
+    ///   covariates are drawn from one covariate list. With
+    ///   `include_propensity`, the propensity model is fitted first, before
+    ///   any of the ensembles' working buffers exist, by trees the
+    ///   configuration does not shape: 3 levels deep (`PROPENSITY_DEPTH`),
+    ///   with nodes of at least 5 rows (`PROPENSITY_NODE_SIZE`), on
+    ///   subsamples of 0.632 of all the rows (`PROPENSITY_FRACTION`), each
+    ///   split drawing `ceil(sqrt(n_covariates))` of the `n_covariates`
+    ///   covariates without the score, whatever `mtry` is. The term is the
+    ///   larger of one such tree's working copies, counted the same way, and
+    ///   an ensemble tree's, so it also holds where the configuration's trees
+    ///   are the smaller (a lower `sample_fraction`, a shallower depth,
+    ///   larger nodes or a smaller `mtry`).
     pub fn memory_bound(&self, n_obs: usize, n_covariates: usize) -> u64 {
         let n = n_obs as u128;
         let p = n_covariates as u128;
@@ -242,14 +261,13 @@ impl BartCausalConfig {
             .mtry
             .unwrap_or_else(|| default_mtry(q_cols))
             .min(q_cols) as u128;
-        // Subsample flags, indices and rows; the recursion path (each level's child index
-        // vectors and drawn covariates); the split search's order; the list the covariates are
-        // drawn from, or the importance sums and one tree's importances.
-        let work = n
-            .saturating_add(mul(mul(8, s), q.saturating_add(2)))
-            .saturating_add(mul(mul(8, s.saturating_add(drawn)), levels))
-            .saturating_add(mul(8, s))
-            .saturating_add(mul(16, q));
+        let mut work = tree_working_copies(n, s, q, drawn, levels);
+        if self.include_propensity {
+            let s = subsample_rows(n_obs, PROPENSITY_FRACTION);
+            let levels = (s / PROPENSITY_NODE_SIZE as u128).min(PROPENSITY_DEPTH as u128) + 1;
+            let drawn = default_mtry(n_covariates).min(n_covariates) as u128;
+            work = work.max(tree_working_copies(n, s, p, drawn, levels));
+        }
         u64::try_from(
             trees
                 .saturating_add(draws)
@@ -270,8 +288,26 @@ impl BartCausalConfig {
     /// The rows of a subsample drawn from `n_obs` rows, as `subsample` draws it; a treated and a
     /// control tree draw theirs from groups that together hold `n_obs` rows.
     fn subsample_size(&self, n_obs: usize) -> u128 {
-        ((n_obs as f64) * self.sample_fraction) as usize as u128
+        subsample_rows(n_obs, self.sample_fraction)
     }
+}
+
+/// The rows of a subsample of `fraction` drawn from `n_obs` rows, as `subsample` draws it.
+fn subsample_rows(n_obs: usize, fraction: f64) -> u128 {
+    ((n_obs as f64) * fraction) as usize as u128
+}
+
+/// What one tree holds while it is fitted ([`BartCausalConfig::memory_bound`]) on a subsample
+/// of `s` rows of `cols` covariates drawn from at most `n` rows, with `drawn` covariates
+/// drawn per split and a recursion path of `levels` levels: the subsample's flags, indices
+/// and rows; the path (each level's child index vectors and drawn covariates); the split
+/// search's order; the list the covariates are drawn from, or the importance sums and one
+/// tree's importances.
+fn tree_working_copies(n: u128, s: u128, cols: u128, drawn: u128, levels: u128) -> u128 {
+    n.saturating_add(mul(mul(8, s), cols.saturating_add(2)))
+        .saturating_add(mul(mul(8, s.saturating_add(drawn)), levels))
+        .saturating_add(mul(8, s))
+        .saturating_add(mul(16, cols))
 }
 
 /// Result from BART-based causal inference.
@@ -466,6 +502,14 @@ impl RegressionTree {
         }
     }
 
+    /// The fewest rows a node needs to be split: two children of `min_node_size` rows. It
+    /// saturates at `usize::MAX`, more rows than any node can hold, so a `min_node_size`
+    /// above `usize::MAX / 2` stops every split instead of overflowing; below that it is
+    /// exactly `2 * min_node_size`.
+    fn min_rows_to_split(&self) -> usize {
+        self.min_node_size.saturating_mul(2)
+    }
+
     /// Fit the tree to data.
     fn fit(&mut self, x: ArrayView2<f64>, y: ArrayView1<f64>, rng_state: &mut u64) {
         self.n_features = x.ncols();
@@ -485,7 +529,7 @@ impl RegressionTree {
         let n_samples = indices.len();
 
         // Stopping conditions
-        if depth >= self.max_depth || n_samples < 2 * self.min_node_size {
+        if depth >= self.max_depth || n_samples < self.min_rows_to_split() {
             return self.create_leaf(y, indices);
         }
 
@@ -1317,8 +1361,8 @@ fn estimate_propensity(
         treatment,
         PROPENSITY_TREES,
         PROPENSITY_DEPTH,
-        5,
-        0.632,
+        PROPENSITY_NODE_SIZE,
+        PROPENSITY_FRACTION,
         None,
         rng_state,
     )?;
@@ -1613,6 +1657,131 @@ mod tests {
         assert_eq!(at(&huge, usize::MAX, usize::MAX), u64::MAX);
         assert_eq!(at(&d, usize::MAX, 4), u64::MAX);
         assert!(at(&d, 0, 0) > 0);
+    }
+
+    /// With `include_propensity` the propensity model is fitted first, on subsamples of 0.632
+    /// of all the rows and to depth 3 with nodes of at least 5 rows, whatever the
+    /// configuration says. Below that fraction, here at depth 0 as well, a propensity tree's
+    /// working copies are larger than the ensembles' trees', and the bound counts them: with
+    /// the score it is the bound without it plus the propensity trees, the score's column
+    /// among the ensembles' covariates, and a propensity tree's working copies in place of a
+    /// configuration tree's. At the defaults the ensembles' trees, with the score as one
+    /// covariate more, hold more and keep the term they had.
+    #[test]
+    fn memory_bound_counts_the_propensity_trees_working_copies() {
+        let (n, p) = (10_000usize, 4usize);
+        let rows = n as u128;
+        // A tree's working copies as the doc counts them: the flags of all the rows, the
+        // subsample's indices, outcome and rows (`s` rows of `cols` covariates), the path of
+        // `levels` levels (child indices and the `drawn` covariates of each), the split
+        // search's order and the covariate list.
+        let work = |s: u128, cols: u128, drawn: u128, levels: u128| {
+            rows + 8 * s * (cols + 2) + 8 * (s + drawn) * levels + 8 * s + 16 * cols
+        };
+        let node = heap_chunk_bytes(size_of::<TreeNode>());
+        let propensity_trees = 50 * (15 * node + size_of::<RegressionTree>() as u128);
+        let score_column = 32 * rows;
+        // A propensity tree: 6_320 rows of the 4 covariates, 2 drawn per split, 4 levels.
+        let propensity = work(6_320, 4, 2, 4);
+        let bounds = |cfg: BartCausalConfig| {
+            let with = BartCausalConfig {
+                include_propensity: true,
+                ..cfg.clone()
+            };
+            (
+                u128::from(cfg.memory_bound(n, p)),
+                u128::from(with.memory_bound(n, p)),
+            )
+        };
+
+        let shallow = BartCausalConfig {
+            sample_fraction: 0.05,
+            max_depth: 0,
+            ..Default::default()
+        };
+        // The configuration's trees: 500 rows, one level; 4 covariates and 2 drawn without
+        // the score, 5 and 3 with it.
+        let (own, own_with_score) = (work(500, 4, 2, 1), work(500, 5, 3, 1));
+        assert!(own_with_score < propensity);
+        let (without, with) = bounds(shallow);
+        assert_eq!(
+            with,
+            without + propensity_trees + score_column + propensity - own
+        );
+
+        // The defaults: 6_320 rows, 5 levels; the configuration's trees hold more.
+        let (own, own_with_score) = (work(6_320, 4, 2, 5), work(6_320, 5, 3, 5));
+        assert!(own_with_score > propensity);
+        let (without, with) = bounds(BartCausalConfig::default());
+        assert_eq!(
+            with,
+            without + propensity_trees + score_column + own_with_score - own
+        );
+    }
+
+    /// The public doc of [`BartCausalConfig::memory_bound`] writes out the propensity
+    /// model's shape (50 trees, depth 3, nodes of at least 5 rows, subsamples of 0.632 of
+    /// the rows), since its readers cannot see the private constants. A change to them
+    /// fails here until the doc is changed with them.
+    #[test]
+    fn the_propensity_shape_is_the_one_memory_bound_documents() {
+        assert_eq!(PROPENSITY_TREES, 50);
+        assert_eq!(PROPENSITY_DEPTH, 3);
+        assert_eq!(PROPENSITY_NODE_SIZE, 5);
+        assert_eq!(PROPENSITY_FRACTION.to_bits(), 0.632f64.to_bits());
+    }
+
+    /// A `min_node_size` above `usize::MAX / 2` cannot split any node: twice it (the rows a
+    /// node needs to be split) used to overflow, a panic in a debug build, and in a release
+    /// build a product wrapped to a small number that let the tree go on to draw covariates
+    /// for a split it could not make, which moved the random stream every later subsample
+    /// is drawn from. Every tree is a single leaf, and the fit is exactly the one at a
+    /// `min_node_size` of all the rows.
+    #[test]
+    fn a_min_node_size_above_half_of_usize_neither_panics_nor_wraps() {
+        let (y, w, x) = generate_test_data(60, 3);
+        let fit = |min_node_size| {
+            let cfg = BartCausalConfig {
+                min_node_size,
+                ..small()
+            };
+            bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap()
+        };
+        let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        let want = fit(60);
+        for min_node_size in [usize::MAX / 2 + 1, usize::MAX - 1, usize::MAX] {
+            let got = fit(min_node_size);
+            for ensemble in [&got.ensemble_treated, &got.ensemble_control] {
+                assert!(
+                    ensemble
+                        .as_ref()
+                        .unwrap()
+                        .trees
+                        .iter()
+                        .all(|t| matches!(t.root, Some(TreeNode::Leaf { .. }))),
+                    "min_node_size {min_node_size}"
+                );
+            }
+            for (g, e) in [
+                (&got.cate, &want.cate),
+                (&got.cate_lower, &want.cate_lower),
+                (&got.cate_upper, &want.cate_upper),
+                (&got.cate_se, &want.cate_se),
+            ] {
+                assert_eq!(bits(g), bits(e), "min_node_size {min_node_size}");
+            }
+            assert_eq!(
+                bits(&[got.ate, got.ate_se, got.ate_ci_lower, got.ate_ci_upper]),
+                bits(&[want.ate, want.ate_se, want.ate_ci_lower, want.ate_ci_upper]),
+                "min_node_size {min_node_size}"
+            );
+        }
+        // The rule itself: the product saturates above `usize::MAX / 2` and is exact up to it.
+        let rows = |min_node_size| RegressionTree::new(4, min_node_size, 1).min_rows_to_split();
+        assert_eq!(rows(usize::MAX / 2 + 1), usize::MAX);
+        assert_eq!(rows(usize::MAX), usize::MAX);
+        assert_eq!(rows(usize::MAX / 2), usize::MAX - 1);
+        assert_eq!((rows(0), rows(5)), (0, 10));
     }
 
     /// `run_bart_causal_config` gives the configuration `run_bart_causal` used before it

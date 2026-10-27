@@ -89,7 +89,9 @@ fn ensemble_refusal(
 const FEWEST_TREES: usize = 1;
 /// The shallowest trees both fits accept: at depth 0 each tree is a single leaf.
 const SHALLOWEST_TREES: usize = 0;
-/// The fewest bootstrap replications `bart_causal` accepts (two give a standard error).
+/// The fewest bootstrap replications `bart_causal` accepts. Two give a standard error only
+/// when `n_trees` is at least 4: each replication fits `n_trees / 4` trees, none below 4,
+/// and the standard error is then NaN until ML-67 is fixed.
 const FEWEST_BART_REPLICATIONS: usize = 2;
 
 /// One numeric setting a refused tree-ensemble request could change: the verb and the
