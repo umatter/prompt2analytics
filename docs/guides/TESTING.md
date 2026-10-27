@@ -66,20 +66,20 @@ socket.
 | File | What it covers | Compile gate | Command |
 |---|---|---|---|
 | `integration_tests.rs` | server construction, core methods through the server | none | any feature set |
-| `governor.rs` | the tool governor, deployment modes, Host check, CORS, embedded start, `/ws` routing | `#![cfg(feature = "http")]`; the `/ws` test needs `websocket`, a few tests need `llm` | the CI set, plus `--features full` for `/ws` |
+| `governor.rs` | the tool governor, deployment modes, Host check, CORS, embedded start, `/ws` routing | `#![cfg(feature = "http")]`; the `/ws` test needs `websocket`, a few tests need `llm` | the CI set |
 | `limits_e2e.rs` | request limits on the HTTP, LLM, websocket and stdio paths, the response-size cap, the audit trail | module `http_paths` needs `http`; module `stdio_path` is ungated | the CI set, and `cargo test -p p2a-mcp --no-default-features --test limits_e2e` for stdio only |
 | `sessions.rs` | the session registry, conversation ownership, persistence bounds, the DB-path rule | `#![cfg(all(feature = "http", feature = "db"))]` | `--no-default-features --features "http,llm,auth,db"` (not in CI) |
 | `orphan_sweep_memory.rs` | what the orphan sweeps of a RocksDB conversation store read and hold, measured with a counting allocator | `#![cfg(feature = "db")]` | `--features full --test orphan_sweep_memory` (not in CI) |
 | `llm_egress.rs` | egress guard, upstream errors and retries, the key rule, the tool allowlist, context budget, chat-loop bounds | `#![cfg(all(feature = "http", feature = "llm"))]`; the conversation test needs `db` | the CI set, plus `--features full` |
 | `isolation.rs` | per-session directories, symbolic links, the disk quota, session export and import, the stale-directory purge | `#![cfg(feature = "http")]` | the CI set |
 | `serve_limits.rs` | `serve` and `start_http_transport` install the request limits of an open public configuration, overrides included, on a bound socket; while it runs, a start of other limits (`serve`, `start_transport` over HTTP or stdio, `start_embedded_server`, which returns the refusal) or of the same limits with another allocation ceiling or session-directory setting is refused | `#![cfg(feature = "http")]` | the CI set |
-| `serve_limits_hold.rs` | a server holds its limits until its last connection or websocket session closes: after an aborted `start_http_transport` with a keep-alive connection open, and after a graceful shutdown with a websocket session open, a local start is refused and the old connection keeps the caps; once it closes, the local start is accepted. Its tests run one at a time, since each ends by installing the off profile | `#![cfg(feature = "http")]`; the websocket test needs `websocket` | the CI set, plus `--features full` for the websocket test |
+| `serve_limits_hold.rs` | a server holds its limits until its last connection or websocket session closes: after an aborted `start_http_transport` with a keep-alive connection open, and after a graceful shutdown with a websocket session open, a local start is refused and the old connection keeps the caps; once it closes, the local start is accepted. Its tests run one at a time, since each ends by installing the off profile | `#![cfg(feature = "http")]`; the websocket test needs `websocket` | the CI set |
 
 Commands for the feature sets CI does not build:
 
 ```bash
-cargo test -p p2a-mcp --features full                                          # db + websocket + everything
-cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,db"      # sessions.rs without websocket
+cargo test -p p2a-mcp --features full                                          # db + everything
+cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,db"      # sessions.rs
 cargo check -p p2a-mcp --no-default-features                                   # stdio-only build
 cargo test -p p2a-core --features database data::database                      # SQL lockdown (duckdb-sys)
 ```
@@ -314,15 +314,15 @@ runner, with feature sets chosen to keep it cheap:
 1. **Format**: `cargo fmt --all -- --check`
 2. **Tests** (`cargo test --tests`):
    - `cargo test -p p2a-core --tests --no-default-features --features ci`
-   - `cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth"`
+   - `cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket"`
    - `cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis`
-3. **Doctests**: p2a-core with `ci`, p2a-mcp with `http,llm,auth`
-4. **Clippy** on p2a-core (`ci`), p2a-mcp (`http,llm,auth`), p2a-cli (`spectral-analysis`) and
+3. **Doctests**: p2a-core with `ci`, p2a-mcp with `http,llm,auth,websocket`
+4. **Clippy** on p2a-core (`ci`), p2a-mcp (`http,llm,auth,websocket`), p2a-cli (`spectral-analysis`) and
    p2a-chat; it reports but does not gate
 5. **p2a-dioxus**: `cargo check --no-default-features --features web --target wasm32-unknown-unknown`,
    plus the host tests with `web`
 
-CI does not build the `database` feature of p2a-core (duckdb-sys), the `db` and `websocket` features of
+CI does not build the `database` feature of p2a-core (duckdb-sys), the `db` feature of
 p2a-mcp, `cuda`, release builds or the Dioxus desktop target; run those locally (commands above). A
 separate Security audit workflow (`.github/workflows/audit.yml`) runs `cargo audit` weekly and on
 every change to `Cargo.lock`, any `Cargo.toml` or the workflow itself.
