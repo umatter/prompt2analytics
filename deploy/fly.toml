@@ -13,9 +13,9 @@
 #   * NEVER set OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY here.
 #     The hosted profile below does not use server-held keys
 #     (llm_server_keys=false), but a key in this
-#     environment is still one configuration change (for example
-#     P2A_LIMIT_OVERRIDES=llm_server_keys=true) away from an open proxy billed
-#     to the account. Unset = true BYOK.
+#     environment is still one configuration change (for example adding
+#     llm_server_keys=true to P2A_LIMIT_OVERRIDES below) away from an open
+#     proxy billed to the account. Unset = true BYOK.
 
 app = "p2a-qamelab-backend"
 primary_region = "fra"          # Frankfurt — EU
@@ -47,10 +47,11 @@ primary_region = "fra"          # Frankfurt — EU
   P2A_LLM_ALLOWED_HOSTS = "api.openai.com,api.anthropic.com,openrouter.ai"
 
   # Open public mode: no login, and isolation rests on unguessable session
-  # IDs. In this mode there are no session-list or file-browser routes, /ws is
-  # off, each session gets its own data directory, conversations answer only
-  # to the session that owns them, and the hosted profile does not use
-  # server-held LLM keys (llm_server_keys=false). Requires the hardened image
+  # IDs. In this mode there are no session-list, file-browser or
+  # database-statistics routes, /ws is off, each session gets its own data
+  # directory, conversations answer only to the session that owns them, and
+  # the hosted profile does not use server-held LLM keys
+  # (llm_server_keys=false). Requires the hardened image
   # (v0.1.2 or newer); do NOT set this on an older image. The rest of this list
   # (per-session directories, /ws off, conversation ownership, no server-held
   # keys), P2A_LIMITS below and the stuck-worker watchdog need the release that
@@ -58,9 +59,10 @@ primary_region = "fra"          # Frankfurt — EU
   P2A_ALLOW_UNAUTHENTICATED = "1"
 
   # The hosted resource profile: each tool call is stopped after
-  # P2A_TOOL_TIMEOUT_SECS (60 s); one tool call runs per vCPU and one per
-  # session; new calls are refused while RSS is above 700 MiB; datasets are
-  # capped at 200 MiB per session and 500 MiB in total; cost parameters
+  # P2A_TOOL_TIMEOUT_SECS (60 s); one tool call runs at a time
+  # (P2A_TOOL_CONCURRENCY below) and one per session; new calls are refused
+  # while RSS is above 700 MiB; datasets are capped at 200 MiB per session
+  # and 500 MiB in total; cost parameters
   # (replications, trees, iterations, ...) are capped; SQL results, run time
   # and engine memory are bounded and the free-form DuckDB tools are off
   # (sql_freeform); idle sessions are evicted after 10 minutes when the
@@ -69,6 +71,24 @@ primary_region = "fra"          # Frankfurt — EU
   # single limits with P2A_LIMIT_OVERRIDES (keys in DEPLOYMENT.md,
   # "Configuration reference").
   P2A_LIMITS = "hosted"
+
+  # Single limits changed from the hosted values, as comma-separated
+  # key=value pairs. pivot_cells (munge_pivot's output cells, hosted
+  # 1,000,000) is lowered for this 1 GB machine: at the hosted value one
+  # admitted pivot can peak about 350 MiB above the session's data, which
+  # with other sessions' datasets near the 500 MiB total comes close to the
+  # machine's memory. Measured on one CPU, pivots at 700,000 cells peaked at
+  # 0.45 to 0.77 times the same pivots at 1,000,000 (DEPLOYMENT.md, the
+  # pivot calibration note). Never add llm_server_keys=true here (see the
+  # note at the top).
+  P2A_LIMIT_OVERRIDES = "pivot_cells=700000"
+
+  # One tool call at a time, server-wide. The default is one per vCPU, which
+  # is also 1 on shared-cpu-1x; it is pinned so that resizing the VM does not
+  # raise it silently. Above 1, one call's parallel work in p2a-core shares
+  # the process's thread pool with every other admitted call and can hold
+  # them up for far longer than their own work takes, without a 429 or 503.
+  P2A_TOOL_CONCURRENCY = "1"
 
   # The path jail. In open mode each session works in /data/sessions/<id>/
   # (mode 0700), which is deleted with the session; directories left by an
@@ -104,8 +124,8 @@ primary_region = "fra"          # Frankfurt — EU
   # requests past hard_limit get a 503 from the proxy.
   #
   # Tool work is bounded inside the process by the execution governor:
-  # P2A_TOOL_CONCURRENCY (default one call per vCPU) and one call per session
-  # in the hosted profile. A call that waits longer than
+  # P2A_TOOL_CONCURRENCY (pinned to 1 above) and one call per session in the
+  # hosted profile. A call that waits longer than
   # P2A_TOOL_QUEUE_WAIT_SECS (10 s) for a slot gets 503 server_busy, or 429
   # session_busy for a second call in the same session, both with Retry-After.
   # Memory is guarded by RSS admission, the dataset quotas and a per-allocation
