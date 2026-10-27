@@ -66,8 +66,11 @@ impl DbConnection {
     }
 
     /// Update an existing tool call (typically to set result/error/status).
-    /// It must be stored for `tool_call.conversation_id` (`NotFound`
-    /// otherwise, as when it does not exist). Its texts are cut to fit, like
+    /// It must be stored for `tool_call.conversation_id` and
+    /// `tool_call.message_id` (`NotFound` otherwise, as when it does not
+    /// exist): an update never moves a call to another message, which could
+    /// be missing or in another conversation, as a create would refuse. Its
+    /// texts are cut to fit, like
     /// those of a new one, with the bytes of the stored texts they replace as
     /// room: with a `session_db_bytes` budget only what they add counts. Runs
     /// in the conversation's turn, like
@@ -83,6 +86,12 @@ impl DbConnection {
                 return Err(DbError::NotFound(format!(
                     "Tool call not found in conversation {}: {}",
                     tool_call.conversation_id, id
+                )));
+            }
+            if stored.message_id != tool_call.message_id {
+                return Err(DbError::NotFound(format!(
+                    "Tool call {} not found for message {}: it is stored for message {}",
+                    id, tool_call.message_id, stored.message_id
                 )));
             }
             let session_id = db.tool_call_session(&stored.conversation_id).await?;

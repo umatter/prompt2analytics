@@ -2113,6 +2113,60 @@ async fn a_tool_call_create_needs_its_message_in_its_conversation() {
     assert_eq!(counter_gap(&db, "s1").await, None);
 }
 
+/// An update of a tool call keeps the message it was created for: one that
+/// names a missing message, or another conversation's, is `NotFound`, with
+/// the stored row and the byte counter unchanged. Before, the update
+/// replaced the whole row, so it could move the call to a message that does
+/// not exist or is not in its conversation, which a create refuses.
+#[tokio::test]
+async fn a_tool_call_update_keeps_its_message() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1000),
+        ..Default::default()
+    })
+    .await;
+    let a = db.create_conversation("s1", "a").await.unwrap().id_string();
+    let b = db.create_conversation("s1", "b").await.unwrap().id_string();
+    let in_a = db
+        .add_message(&a, "assistant", "")
+        .await
+        .unwrap()
+        .id_string();
+    let in_b = db
+        .add_message(&b, "assistant", "")
+        .await
+        .unwrap()
+        .id_string();
+    let call = ToolCall::new(in_a, a.clone(), "regression_ols".into(), "{}".into());
+    let stored = db.create_tool_call(&call).await.unwrap();
+    for (case, message_id) in [
+        ("a missing", "no-such-message".to_string()),
+        ("another conversation's", in_b),
+    ] {
+        let mut moved = stored.clone();
+        moved.message_id = message_id;
+        moved.complete("moved".into());
+        let updated = db.update_tool_call(&moved).await;
+        assert!(
+            matches!(updated, Err(DbError::NotFound(_))),
+            "{case} message: {updated:?}"
+        );
+        let kept = db.get_tool_call(&stored.id_string()).await.unwrap();
+        assert_eq!(
+            (kept.message_id.as_str(), kept.result.as_deref()),
+            (stored.message_id.as_str(), None),
+            "{case} message"
+        );
+        assert_eq!(counter_gap(&db, "s1").await, None, "{case} message");
+    }
+    // The same message is still updated.
+    let mut done = stored.clone();
+    done.complete("kept".into());
+    let updated = db.update_tool_call(&done).await.unwrap();
+    assert_eq!(updated.result.as_deref(), Some("kept"));
+    assert_eq!(counter_gap(&db, "s1").await, None);
+}
+
 /// A message add or save, or a conversation creation, whose caller is
 /// dropped while the store writes its row (an HTTP client that disconnects)
 /// keeps its turn until the store has written the row and, for a message,
