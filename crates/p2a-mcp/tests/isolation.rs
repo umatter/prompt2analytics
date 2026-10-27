@@ -699,10 +699,12 @@ async fn import_session_refuses_files_above_the_import_limit() {
     )
     .await;
     assert!(!ok, "a session file above the import limit was imported");
-    // Refused by the size check before the file is opened, not by the
-    // parser's budget (whose message also names the import limit).
+    // Refused by the size check before the file is opened. Its message names
+    // the file in backticks, which tells it apart from both parser refusals
+    // ("the session file needs more than ..." and "the session file is
+    // larger than ..."), as they name the same limit.
     assert!(
-        msg.contains("is larger than this server's import limit of 32768 bytes"),
+        msg.contains("big.json` is larger than this server's import limit of 32768 bytes"),
         "{msg}"
     );
     assert!(!msg.contains(root_str()), "leaks the root: {msg}");
