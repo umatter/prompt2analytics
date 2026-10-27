@@ -19,6 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
+use p2a_core::resource::Budget;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
@@ -28,7 +29,8 @@ use crate::db::{Conversation, ConversationWithMessages, DatasetMeta, DbError, Me
 use crate::exec::{ToolCallError, ToolGovernor};
 use crate::persistent_session::{
     DatasetQuotas, PersistentSessionError, PersistentSessionManager, RELOAD_LABEL, ReloadFailure,
-    ReloadPlan, ReloadResult, insert_reloaded_dataset, load_reload_source,
+    ReloadPlan, ReloadResult, ReloadSkip, ReloadSource, insert_reloaded_dataset,
+    load_reload_source,
 };
 use crate::session::SessionError;
 
@@ -692,15 +694,18 @@ async fn list_session_datasets(
 /// The loading runs as one governed call (`ToolGovernor::run_blocking`):
 /// memory admission, the session's and a global permit, the deadline and
 /// panic isolation, on the blocking pool inside the session's path-jail
-/// scope. Each source file is first checked against the `load_file_bytes`
-/// budget before it is parsed ([`load_reload_source`]); a file above it is
-/// reported failed with its size and the limit. Each loaded dataset is
-/// inserted only if it fits the governor's dataset quotas; one that does not
-/// is reported failed. The call runs in a [`RELOAD_LABEL`] span that carries
-/// the session id, so its log lines (a budget refusal among them) name the
-/// session. A refusal by the governor answers as a refused tool call does
-/// (503 `server_busy` or `memory_pressure`, 429 `session_busy`, 504
-/// `deadline_exceeded`, with `Retry-After` where retrying helps).
+/// scope. Each source file is first checked as `load_dataset` checks it,
+/// before it is parsed ([`load_reload_source`]): against the
+/// `load_file_bytes` budget, and a parquet file's decoded size against the
+/// governor's dataset quotas. A file above the budget is reported failed
+/// with its size and the limit; a parquet file past the quotas with
+/// `load_dataset`'s quota refusal. Each loaded dataset is inserted only if
+/// it fits the dataset quotas; one that does not is reported failed (see
+/// [`reload_sources`]). The call runs in a [`RELOAD_LABEL`] span that
+/// carries the session id, so its log lines (a budget refusal among them)
+/// name the session. A refusal by the governor answers as a refused tool
+/// call does (503 `server_busy` or `memory_pressure`, 429 `session_busy`,
+/// 504 `deadline_exceeded`, with `Retry-After` where retrying helps).
 async fn reload_session_datasets(
     State(state): State<ConversationState>,
     Extension(governor): Extension<Arc<ToolGovernor>>,
@@ -730,42 +735,24 @@ async fn reload_session_datasets(
     let span = tracing::info_span!(RELOAD_LABEL, session_id = %session.id);
     let outcome = governor
         .run_blocking(&session, RELOAD_LABEL, move |budget| {
-            // Past the deadline (or once the caller is gone) nothing more is
-            // loaded or inserted.
-            let in_budget = || {
-                budget.check().map_err(|_| {
-                    ToolCallError::Internal("the dataset reload was stopped".to_string())
-                })
-            };
-            let mut result = ReloadResult {
+            reload_sources(
+                sources,
                 skipped,
-                ..ReloadResult::default()
-            };
-            for source in sources {
-                in_budget()?;
-                let loaded = match load_reload_source(&source) {
-                    Ok(dataset) => {
-                        in_budget()?;
-                        handle.block_on(insert_reloaded_dataset(
-                            &target,
-                            &sessions,
-                            source.name.clone(),
-                            dataset,
-                            quotas,
-                        ))
-                    }
-                    Err(error) => Err(error),
-                };
-                match loaded {
-                    Ok(()) => result.succeeded.push(source.name),
-                    Err(error) => result.failed.push(ReloadFailure {
-                        name: source.name,
-                        source_path: source.source_path,
-                        error,
-                    }),
-                }
-            }
-            Ok(result)
+                budget,
+                // What the check before a parquet file is decoded reserves
+                // against the total is held by the guard the load returns,
+                // until the dataset is inserted or refused.
+                |source| load_reload_source(&handle, source, quotas, &target, &sessions),
+                |source, (dataset, _admission)| {
+                    handle.block_on(insert_reloaded_dataset(
+                        &target,
+                        &sessions,
+                        source.name.clone(),
+                        dataset,
+                        quotas,
+                    ))
+                },
+            )
         })
         .instrument(span)
         .await;
@@ -781,5 +768,150 @@ async fn reload_session_datasets(
             ok(StatusCode::OK, result)
         }
         Err(e) => e.into_response(),
+    }
+}
+
+/// A dataset reload's loop over its `sources`, on the blocking thread under
+/// the call's `budget`: `load` checks and loads a source (what it returns
+/// holds what its check reserved) and `insert` puts what it loaded into the
+/// session. A source whose load or insert fails is reported in `failed`
+/// with that error, and the other sources still reload.
+///
+/// Past the deadline (or once the caller is gone) nothing more is loaded or
+/// inserted, and a load that ends once the budget is spent, whether it
+/// failed or not, ends the reload rather than being reported as the file's
+/// own failure: the check before a parquet file is decoded stops at the
+/// deadline with an error, which the governor then answers as the deadline
+/// (504 `deadline_exceeded`), as it answers `load_dataset`'s.
+fn reload_sources<L>(
+    sources: Vec<ReloadSource>,
+    skipped: Vec<ReloadSkip>,
+    budget: &Budget,
+    mut load: impl FnMut(&ReloadSource) -> Result<L, String>,
+    mut insert: impl FnMut(&ReloadSource, L) -> Result<(), String>,
+) -> Result<ReloadResult, ToolCallError> {
+    let in_budget = || {
+        budget
+            .check()
+            .map_err(|_| ToolCallError::Internal("the dataset reload was stopped".to_string()))
+    };
+    let mut result = ReloadResult {
+        skipped,
+        ..ReloadResult::default()
+    };
+    for source in sources {
+        in_budget()?;
+        let loaded = load(&source);
+        in_budget()?;
+        match loaded.and_then(|loaded| insert(&source, loaded)) {
+            Ok(()) => result.succeeded.push(source.name),
+            Err(error) => result.failed.push(ReloadFailure {
+                name: source.name,
+                source_path: source.source_path,
+                error,
+            }),
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2a_core::resource::CancelToken;
+
+    /// Sources named `names`, each at `<name>.parquet`.
+    fn sources(names: &[&str]) -> Vec<ReloadSource> {
+        names
+            .iter()
+            .map(|name| ReloadSource {
+                name: (*name).to_string(),
+                source_path: format!("{name}.parquet"),
+            })
+            .collect()
+    }
+
+    /// A stand-in for the error the check before decoding returns when the
+    /// call's budget stops it; `reload_sources` does not read it.
+    const STOPPED: &str =
+        "the file could not be loaded: the call stopped while the file was checked";
+
+    /// A load that fails once the call's budget is spent ends the reload
+    /// with the call's error instead of a `failed` entry for the file
+    /// (PR-H2, round-1 follow-up). Pre-fix only a load that succeeded was
+    /// followed by a budget check, so the last source's stopped check was
+    /// reported in `failed` and the reload answered 200.
+    ///
+    /// The load cancels the call's token, which makes the test
+    /// deterministic: the deadline stops a budget the same way
+    /// (`Budget::check` refuses both, and the loop does not tell them
+    /// apart), and `run_blocking` answers the internal error a call returns
+    /// past its deadline as `deadline_exceeded`, which exec.rs's
+    /// `deadline_only_masks_internal_errors` tests.
+    #[test]
+    fn a_load_that_fails_once_the_call_is_cancelled_ends_the_reload() {
+        let token = CancelToken::new();
+        let budget = Budget::new(None, token.clone());
+        let mut inserted = Vec::new();
+        let outcome = reload_sources(
+            sources(&["first", "last"]),
+            Vec::new(),
+            &budget,
+            |source| {
+                if source.name == "last" {
+                    token.cancel();
+                    return Err(STOPPED.to_string());
+                }
+                Ok(())
+            },
+            |source, ()| {
+                inserted.push(source.name.clone());
+                Ok(())
+            },
+        );
+        assert!(
+            matches!(outcome, Err(ToolCallError::Internal(_))),
+            "{outcome:?}"
+        );
+        assert_eq!(inserted, ["first"]);
+    }
+
+    /// Within the budget a load or insert that fails is that file's: it is
+    /// reported in `failed` with its error, and the other sources reload.
+    #[test]
+    fn a_failure_within_the_budget_is_reported_and_the_others_reload() {
+        let budget = Budget::new(None, CancelToken::new());
+        let skipped = vec![ReloadSkip {
+            name: "inline".to_string(),
+            reason: "no source path".to_string(),
+        }];
+        let result = reload_sources(
+            sources(&["a", "unread", "refused", "b"]),
+            skipped,
+            &budget,
+            |source| match source.name.as_str() {
+                "unread" => Err("the file could not be loaded".to_string()),
+                _ => Ok(source.name.clone()),
+            },
+            |_, loaded| match loaded.as_str() {
+                "refused" => Err("over the quota".to_string()),
+                _ => Ok(()),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.succeeded, ["a", "b"]);
+        let failed: Vec<_> = result
+            .failed
+            .iter()
+            .map(|f| (f.name.as_str(), f.source_path.as_str(), f.error.as_str()))
+            .collect();
+        assert_eq!(
+            failed,
+            [
+                ("unread", "unread.parquet", "the file could not be loaded"),
+                ("refused", "refused.parquet", "over the quota"),
+            ]
+        );
+        assert_eq!(result.skipped.len(), 1);
     }
 }

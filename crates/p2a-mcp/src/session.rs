@@ -966,6 +966,7 @@ thread_local! {
 impl DatasetAdmission {
     /// Install the quotas of a call of `session` on this thread until the
     /// returned guard is dropped (after the call's own quota check).
+    #[must_use = "dropping the guard uninstalls the quotas the checks before decoding read"]
     pub fn install(
         per_session: Option<u64>,
         total: Option<u64>,
