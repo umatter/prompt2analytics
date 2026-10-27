@@ -550,19 +550,21 @@ draw for every row and bootstrap replication, so neither the deadline nor the
 ceiling bounds what one fit holds; the handlers refuse a fit whose bound is
 larger before it starts and say how many rows its settings allow. The refusal
 suggests other settings only when the least memory they reach fits the dataset,
-and lists only the changes that still lower the bound from the request's own
-settings. It names `honesty = false` or `include_propensity = false` as required
-only when the least memory with the option does not fit the dataset and the
-least memory without it does; BART's refusal also offers
+and lists only the changes that still lower the bound from the settings they
+start from: the request's own, or the request's with `honesty` or
+`include_propensity` turned off where the refusal names that change as required.
+It names `honesty = false` or `include_propensity = false` as required only when
+the least memory with the option does not fit the dataset and the least memory
+without it does; when the request asks for the score, BART's refusal also offers
 `include_propensity = false` as one more way to lower the bound, while the
 forest's never does, since turning honesty off can raise it. With four
-covariates it admits both tools' defaults on a few hundred thousand rows. The
-bound counts every buffer the fit holds at once, and the fit allocates each at
-its exact length (the recursion's index vectors are sized before they are
-filled), so what an admitted fit holds stays within the bound whatever the data.
-On a release build, a fit whose trees split a few rows off at every level, the
-shape that gives the recursion its largest share of the bound, peaked at 85% of
-its bound. Only the allocator's own overhead (chunk headers and free lists)
+covariates the budget admits both tools' defaults on a few hundred thousand
+rows. The bound counts every buffer the fit holds at once, and the fit allocates
+each at its exact length (the recursion's index vectors are sized before they
+are filled), so what an admitted fit holds stays within the bound whatever the
+data. On a release build, a fit whose trees split a few rows off at every level,
+the shape that gives the recursion its largest share of the bound, peaked at 85%
+of its bound. Only the allocator's own overhead (chunk headers and free lists)
 comes on top. Keep the budget at or below the ceiling and well below the room
 the memory admission leaves (`P2A_MEMORY_SOFT_LIMIT_MB` against the machine's
 memory).
