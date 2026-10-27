@@ -1625,11 +1625,13 @@ async fn slow_message_deletes(db: &DbConnection) {
 /// makes this a weaker check against work that runs in the caller, never a
 /// failure.
 ///
-/// What keeps the "finished before it was dropped" check off the wall
-/// clock is the margin: every call dropped here is held up in the store by
-/// [`slow_writes`] events of at least 200 ms, of which the poll that sees
-/// the turn held (every 10 ms) and these 20 ms take at most 30, so the test
-/// task would have to be starved for some 170 ms for the check to fail.
+/// What keeps the "finished before it was dropped" check off the wall clock is
+/// the margin: every call dropped here is kept in the store for at least 200 ms
+/// by [`slow_writes`] events (one 200 or 300 ms event per write, or, for a
+/// clear or delete, 21 message deletes of 20 ms each from
+/// [`slow_message_deletes`]), of which the poll that sees the turn held
+/// (every 10 ms) and these 20 ms take at most 30, so the test task would have
+/// to be starved for some 170 ms for the check to fail.
 async fn drop_while_running(
     db: &DbConnection,
     key: &str,
