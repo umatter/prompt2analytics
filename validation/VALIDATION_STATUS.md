@@ -1,22 +1,41 @@
 # Validation Status Report
 
-**Last Updated:** 2026-08-26
+**Last Updated:** 2026-10-27
 **Branch:** main
 
 ## Summary
 
 | Metric | Count | Status |
 |--------|-------|--------|
-| **Rust Validation Tests** (`test_validate_*`) | 440 | All Pass |
-| **R Validation Scripts** | 41 | All Pass |
+| **Rust Validation Tests** (`test_validate_*`) | 476 | 473 pass (run 2026-10-27); 3 behind `database` not run |
+| **R Validation Scripts** | 41 | All Pass (2026-08-26; `validate_panel_full.R` re-run 2026-10-27) |
 | **R Expected Value CSVs** | 96 | All Pass |
-| **Total Test Functions** | 2,059 workspace / 1,867 in p2a-core | All pass (0 failures) |
+| **Total Test Functions** | 2,059 workspace / 1,867 in p2a-core | All pass (0 failures), 2026-08-26 count |
 
 **Verified:** `./validation/run_validation.sh` on 2026-08-26 reported
 `Rust tests: 440/440 passed`, `R scripts: 41 passed`, `Overall Status: PASS`.
-Counts above are from that run, not carried forward.
+Counts above are from that run, not carried forward, except the validation-test
+counts, which were re-derived on 2026-10-27 from the tests that exist now:
+452 `test_validate_*` tests in the p2a-core library with the CI feature set
+(`cargo test -p p2a-core --lib --no-default-features --features ci -- test_validate --list`),
+3 more behind the `database` feature (read-only SQL checks in `data::database`),
+and 21 in `tests/validation_ml_advanced.rs` and `tests/validation_boosting_methods.rs`,
+476 in all. The category counts below are the library tests by top-level module
+(`stats::`, `regression::`, `econometrics::`, `forecasting::`, `ml::`), with the 21
+integration tests counted under Machine Learning; the 3 `database` checks are in no
+category. The 473 that build without `database` were run on 2026-10-27 and pass;
+the 3 `database` checks were not run. The full `run_validation.sh` was not re-run.
 
 ### Recent Changes
+
+**2026-10** — Panel GLS (FE and pooled) refuses T > N (Tier 0), so full
+Grunfeld (N = 10 firms, T = 20 years) is refused: the two full-Grunfeld panel GLS
+validation tests became refusal tests, and pooled GLS is validated on Grunfeld
+1935-1944 (N = T = 10) instead (coefficients only, see Econometrics).
+`validate_panel_full.R` tests 6-7 run `pggls` on that subset and write
+`fegls_1935_1944.csv` and `pggls_pooling_1935_1944.csv`, which replace
+`fegls_full.csv` and `pggls_pooling_full.csv`. Validation-test counts re-derived
+(476; see above).
 
 **2026-08** — Full suite re-verified end to end (Rust 440/440, R 41/41). Fixed
 two R scripts that had broken against upstream package changes rather than
@@ -79,7 +98,7 @@ cargo test -p p2a-core -- test_validate
 
 ## Coverage by Category
 
-### Statistics (121 validation tests)
+### Statistics (145 validation tests)
 
 **Fully Validated (R cross-validated):**
 - T-tests (one-sample, two-sample, paired, Welch)
@@ -116,7 +135,7 @@ cargo test -p p2a-core -- test_validate
 - Constrained optimization
 - Classical MDS (cmdscale)
 
-### Regression (32 validation tests)
+### Regression (33 validation tests)
 
 **Fully Validated (R cross-validated):**
 - OLS (Longley dataset, simple regression)
@@ -137,13 +156,13 @@ cargo test -p p2a-core -- test_validate
 - Line (Tukey)
 - Diagnostics: RESET, Breusch-Godfrey, Harvey-Collier, Wald
 
-### Econometrics (155 validation tests)
+### Econometrics (182 validation tests)
 
 **Fully Validated (R cross-validated):**
 - Panel FE (Grunfeld, full Grunfeld, synthetic)
 - Panel RE (Grunfeld, full Grunfeld)
 - Hausman test
-- Panel GLS (FEGLS, pooled GLS, PGGLS)
+- Pooled panel GLS: coefficients vs `plm::pggls` on Grunfeld 1935-1944 (N = T = 10); standard errors not compared (ECON-33)
 - PVCM (within, random)
 - PMG (Pooled Mean Group)
 - Arellano-Bond GMM (one-step, two-step)
@@ -177,7 +196,15 @@ cargo test -p p2a-core -- test_validate
 - CBPS: propensity score bounds, positive weights, balance improvement, convergence, overidentification test
 - Entropy balancing (WeightIt): positive finite weights, balance improvement, ESS reasonable, ATT estimation, convergence
 
-### Forecasting (54 validation tests)
+**Refused on the reference data, not validated:**
+- Panel GLS (FE and pooled) on full Grunfeld (N = 10 firms, T = 20 years). Panel GLS needs T <= N:
+  the T x T error covariance is estimated from N residual vectors and has no inverse when T > N.
+  `plm::pggls` returns a generalised-inverse fit there; p2a-core refuses the input
+  (`test_panel_gls_fe_full_grunfeld_is_refused`, `test_pooled_gls_full_grunfeld_is_refused`), and
+  `validate_panel_full.R` tests 6-7 run `pggls` on Grunfeld 1935-1944 instead. FE panel GLS has no R
+  comparison on any panel yet (ECON-33).
+
+### Forecasting (56 validation tests)
 
 **Fully Validated (R cross-validated):**
 - AR models (Yule-Walker, OLS, Burg, order selection)
@@ -195,7 +222,7 @@ cargo test -p p2a-core -- test_validate
 - Structural time series: local level tracking, trend slope, BSM components sum, log-likelihood
 - CausalImpact: pre-period fit, post-period detection, cumulative effect, no-effect null
 
-### Machine Learning (69 validation tests)
+### Machine Learning (57 validation tests)
 
 **Fully Validated (R cross-validated):**
 - K-means (centroids, assignment, inertia, reproducibility, vs R)
@@ -234,7 +261,7 @@ Spatial R benchmarks consolidated from 5 to 2 files. Redundant `ml_benchmarks.rs
 
 - **Runner Script:** `validation/run_validation.sh`
 - **R Scripts:** `validation/scripts/` (41 scripts)
-- **Expected Values:** `validation/expected/` (73 CSVs)
+- **Expected Values:** `validation/expected/` (96 CSVs)
 - **Validation Docs:** `validation/[category]/`
 - **Reports:** `validation/reports/`
 - **Pipeline Overview:** `performance/README.md`

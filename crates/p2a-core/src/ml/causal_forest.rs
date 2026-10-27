@@ -73,7 +73,14 @@ use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 pub struct CausalForestConfig {
     /// Number of trees (default: 2000)
     pub n_trees: usize,
-    /// Minimum node size for splitting (default: 5)
+    /// Fewest rows each child of a split keeps (default: 5), in the structure part
+    /// and in the estimation part of the tree's subsample (with `honesty` off both
+    /// parts are the whole subsample).
+    ///
+    /// A node is split only when each part has at least twice this many rows and
+    /// its estimation part at least this many treated and this many control units,
+    /// and only into two children that keep, in each part, at least this many rows
+    /// and two treated and two control units. Any other node is a leaf.
     pub min_node_size: usize,
     /// Number of variables to consider at each split (default: sqrt(p))
     pub mtry: Option<usize>,

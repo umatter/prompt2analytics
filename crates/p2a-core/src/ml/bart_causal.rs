@@ -114,7 +114,12 @@ pub struct BartCausalConfig {
     /// Deeper trees may overfit.
     pub max_depth: usize,
 
-    /// Minimum samples required to split a node (default: 5)
+    /// Fewest rows each child of a split keeps (default: 5).
+    ///
+    /// A node is split only into two children of at least this many rows, so a
+    /// node needs at least twice this many rows to be split; a smaller node is a
+    /// leaf. A value above half of the rows a tree is fitted on grows single-leaf
+    /// trees.
     pub min_node_size: usize,
 
     /// Number of bootstrap samples for uncertainty quantification (default: 100)
