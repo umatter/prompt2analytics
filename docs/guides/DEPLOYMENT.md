@@ -139,7 +139,13 @@ websocket `tool` messages runs through one governor
 - **Memory admission.** While the process RSS is above
   `P2A_MEMORY_SOFT_LIMIT_MB` (hosted 700 MiB), new calls are refused with 503
   `memory_pressure` (`Retry-After: 15`). This needs a platform that reports RSS
-  (Linux); elsewhere the server warns at startup and admits every call.
+  (Linux); elsewhere the server warns at startup and admits every call. The
+  RSS also counts memory the allocator kept after the data in it was freed
+  (glibc keeps a thread's freed heap resident), so before refusing, the server
+  hands its freed heap pages back to the operating system (`malloc_trim` on
+  glibc; nothing elsewhere) and admits the call if that brought it under the
+  limit. It also does this on its own while nothing runs, when `/health` or the
+  watchdog looks. Hand-backs are at least 10 s apart.
 - **Dataset quotas.** After a call, the in-memory size of the session's
   datasets is checked against `P2A_SESSION_DATA_MB` (hosted 200 MiB) and the
   total over all sessions against `P2A_TOTAL_DATA_MB` (hosted 500 MiB). A call
@@ -152,10 +158,14 @@ websocket `tool` messages runs through one governor
   aborting the process.
 - **Health and watchdog.** `/health` reports a `governor` object and answers 503
   with `"status": "degraded"` while every slot is held by work past its
-  deadline. If that state lasts `P2A_STUCK_EXIT_SECS` (hosted 300 s), the
-  process logs an error and exits with exit code 70, so that the platform's
-  restart policy starts a fresh process. A restart discards every in-memory
-  session.
+  deadline, or while the process stays above its memory soft limit after a
+  hand-back with no call running within its deadline (`"memory_stuck": true`:
+  every call is refused and nothing running will free memory). If either state
+  lasts `P2A_STUCK_EXIT_SECS` (hosted 300 s), the process logs an error and
+  exits with exit code 70, so that the platform's restart policy starts a
+  fresh process. A restart discards every in-memory session. A soft
+  limit below the server's idle RSS therefore restarts it every
+  `P2A_STUCK_EXIT_SECS`.
 - **Session capacity.** When `P2A_MAX_SESSIONS` (100) sessions exist, creating
   another evicts the least recently used session that has been idle for at
   least `P2A_SESSION_EVICT_IDLE_MINUTES` (hosted 10); a session with a running

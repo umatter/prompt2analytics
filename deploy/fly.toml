@@ -117,9 +117,12 @@ primary_region = "fra"          # Frankfurt — EU
     hard_limit = 50
 
   # /health answers 503 with "status": "degraded" while every tool slot is held
-  # by work past its deadline. If that lasts P2A_STUCK_EXIT_SECS (300 s in the
-  # hosted profile), the process exits with code 70 and the restart policy
-  # below starts it again. A restart discards every in-memory session.
+  # by work past its deadline, or while RSS stays above the 700 MiB soft limit
+  # with nothing running after the server handed its freed heap memory back
+  # ("memory_stuck": every call is refused). If that lasts P2A_STUCK_EXIT_SECS
+  # (300 s in the hosted profile), the process exits with code 70 and the
+  # restart policy below starts it again. A restart discards every in-memory
+  # session.
   [[http_service.checks]]
     path = "/health"
     interval = "15s"

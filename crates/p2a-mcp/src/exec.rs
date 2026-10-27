@@ -4,7 +4,10 @@
 //! executors and websocket `Tool` messages) goes through
 //! [`ToolGovernor::call`], which applies, in order:
 //!
-//! 1. memory admission (refuse while the process RSS is above a soft limit);
+//! 1. memory admission (refuse while the process RSS is above a soft limit,
+//!    after handing the heap's freed pages back to the operating system, so
+//!    memory the allocator kept after the data in it was dropped does not
+//!    hold the server above the limit for good);
 //! 2. a per-session and a global permit, within one bounded queue wait;
 //! 3. execution on tokio's blocking pool inside the session's directory scope
 //!    (`path_jail::enter_session_scope`; with session directories on, file
@@ -36,7 +39,11 @@
 //! its budget past the deadline is detached, not stopped: its result is
 //! discarded, but it keeps running (and may still change the session) and
 //! stays counted as overdue until it ends. When every permit is held by
-//! overdue work, [`ToolGovernor::health`] reports the server unhealthy.
+//! overdue work, or when the process stays above its memory soft limit after
+//! a hand-back with no call running within its deadline (every call is then
+//! refused and nothing running will free memory), [`ToolGovernor::health`]
+//! reports the server unhealthy, and the stuck watchdog restarts the process
+//! if that lasts.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -72,6 +79,12 @@ pub const DEADLINE_GRACE: Duration = Duration::from_millis(250);
 const SESSION_BUSY_RETRY_SECS: u64 = 2;
 const SERVER_BUSY_RETRY_SECS: u64 = 5;
 const MEMORY_PRESSURE_RETRY_SECS: u64 = 15;
+
+/// How far apart the governor hands freed heap memory back to the operating
+/// system while the process is above its memory soft limit. Shorter than a
+/// memory refusal's `Retry-After`, so a client that waits as told meets a
+/// fresh hand-back.
+const MEMORY_RELEASE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Resolved governor settings (design section 2.6).
 #[derive(Debug, Clone)]
@@ -245,7 +258,13 @@ pub struct GovernorHealth {
     pub capacity: usize,
     /// Process resident set size, where the platform reports it.
     pub rss_bytes: Option<u64>,
-    /// False when every permit is held by overdue work.
+    /// True while the process stays above its memory soft limit with no
+    /// call running within its deadline, after freed heap memory was handed
+    /// back to the operating system: every call is refused for memory and
+    /// nothing running will free any.
+    pub memory_stuck: bool,
+    /// False when every permit is held by overdue work, or while
+    /// `memory_stuck`.
     pub healthy: bool,
 }
 
@@ -451,6 +470,205 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// Hand the allocator's free pages back to the operating system.
+///
+/// glibc keeps memory freed into a thread's arena (its 64 MiB heaps) mapped
+/// and resident, so after the datasets that filled them are dropped the
+/// process RSS can stay above the memory soft limit with nothing live in
+/// them. `malloc_trim(0)` returns every whole free page of every arena.
+/// Other platforms and allocators do nothing here.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn release_free_heap() {
+    unsafe extern "C" {
+        /// glibc's `int malloc_trim(size_t pad)`.
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+    // SAFETY: `malloc_trim` takes no pointers and has no preconditions. It
+    // locks each arena while it releases that arena's free pages, so other
+    // threads may allocate and free meanwhile.
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn release_free_heap() {}
+
+/// How the governor reads the process memory and hands freed heap memory
+/// back to the operating system. Tests replace both.
+#[derive(Clone)]
+struct MemoryProbe {
+    rss: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
+    release: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl MemoryProbe {
+    /// The process's own resident set size and heap.
+    fn process() -> Self {
+        Self {
+            rss: Arc::new(|| p2a_core::get_process_memory().map(|m| m.rss_bytes as u64)),
+            release: Arc::new(release_free_heap),
+        }
+    }
+}
+
+/// Memory admission and its way back (design section 2.2 step 1).
+///
+/// A call is refused while the process RSS is above the soft limit. The RSS
+/// also counts memory the allocator kept after the data in it was freed, so
+/// one spike could otherwise hold the process above the limit with every
+/// session gone, refusing every visitor for good. Before refusing, the gate
+/// therefore hands the heap's free pages back to the operating system and
+/// reads the RSS again; `ToolGovernor::health` does the same in the
+/// background while nothing runs, so the server also recovers between
+/// visits. Hand-backs are at least [`MEMORY_RELEASE_INTERVAL`] apart.
+///
+/// A hand-back that starts with no call running within its deadline and
+/// leaves the process above the limit makes the gate stuck: nothing running
+/// will free memory and every call is refused, so the governor reports
+/// itself unhealthy (`/health` answers 503, and the stuck watchdog restarts
+/// the process) until the RSS is back at or under the limit.
+struct MemoryGate {
+    limit: Option<u64>,
+    probe: MemoryProbe,
+    state: Arc<Mutex<ReleaseState>>,
+}
+
+#[derive(Debug, Default)]
+struct ReleaseState {
+    /// When the last hand-back started.
+    last: Option<Instant>,
+    /// The last hand-back started with no call running within its deadline
+    /// and left the process above the limit.
+    stuck: bool,
+}
+
+fn lock_release(state: &Mutex<ReleaseState>) -> MutexGuard<'_, ReleaseState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn rss_text(bytes: u64) -> String {
+    format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
+}
+
+impl MemoryGate {
+    fn new(limit: Option<u64>, probe: MemoryProbe) -> Self {
+        Self {
+            limit,
+            probe,
+            state: Arc::default(),
+        }
+    }
+
+    fn rss(&self) -> Option<u64> {
+        (self.probe.rss)()
+    }
+
+    /// Record a hand-back as started now, unless one started within the
+    /// interval (then false).
+    fn claim_release(&self, now: Instant) -> bool {
+        let mut state = lock_release(&self.state);
+        if state
+            .last
+            .is_some_and(|at| now.saturating_duration_since(at) < MEMORY_RELEASE_INTERVAL)
+        {
+            return false;
+        }
+        state.last = Some(now);
+        true
+    }
+
+    fn clear_stuck(&self) {
+        lock_release(&self.state).stuck = false;
+    }
+
+    /// One hand-back, for the blocking pool: release the free pages, read the
+    /// RSS again and record whether the gate is stuck. `idle`: no call was
+    /// running within its deadline when it started. It records its outcome
+    /// itself, so a caller that stops waiting for it loses nothing.
+    fn release_job(
+        &self,
+        before: u64,
+        idle: bool,
+    ) -> impl FnOnce() -> Option<u64> + Send + 'static {
+        let (probe, state, limit) = (self.probe.clone(), Arc::clone(&self.state), self.limit);
+        move || {
+            (probe.release)();
+            let after = (probe.rss)();
+            let over = matches!((limit, after), (Some(limit), Some(rss)) if rss > limit);
+            let stuck = idle && over;
+            let was_stuck = std::mem::replace(&mut lock_release(&state).stuck, stuck);
+            let after_text = after.map_or_else(|| "unknown".to_string(), rss_text);
+            let limit_text = limit.map_or_else(String::new, rss_text);
+            if stuck && !was_stuck {
+                tracing::error!(
+                    rss_before = %rss_text(before),
+                    rss_after = %after_text,
+                    limit = %limit_text,
+                    "process memory stays above the soft limit with no call running, after \
+                     handing freed heap memory back to the operating system; calls are refused \
+                     and /health reports unhealthy until it drops (the stuck watchdog, when \
+                     configured, restarts the process if this lasts)"
+                );
+            } else if after.is_some() && !over {
+                tracing::info!(
+                    rss_before = %rss_text(before),
+                    rss_after = %after_text,
+                    limit = %limit_text,
+                    "handed freed heap memory back to the operating system; process memory is \
+                     under the soft limit again"
+                );
+            }
+            after
+        }
+    }
+
+    /// The RSS a call is refused at, or `None` when it may run. Above the
+    /// limit, a due hand-back runs first (on the blocking pool) and the call
+    /// runs if it brought the process under the limit. `idle` tells whether
+    /// no call is running within its deadline; it is asked only then.
+    async fn refusal(&self, idle: impl FnOnce() -> bool) -> Option<u64> {
+        let limit = self.limit?;
+        let rss = self.rss()?;
+        if rss <= limit {
+            self.clear_stuck();
+            return None;
+        }
+        if !self.claim_release(Instant::now()) {
+            return Some(rss);
+        }
+        let job = self.release_job(rss, idle());
+        match tokio::task::spawn_blocking(job).await {
+            Ok(Some(after)) if after <= limit => None,
+            Ok(Some(after)) => Some(after),
+            Ok(None) | Err(_) => Some(rss),
+        }
+    }
+
+    /// Whether the gate is stuck, given the RSS just read and whether no call
+    /// is running within its deadline (`idle`). Above the limit with nothing
+    /// running, a due hand-back starts in the background, so a later reading
+    /// sees what it freed; outside a tokio runtime none starts.
+    fn stuck(&self, rss: Option<u64>, idle: bool) -> bool {
+        let (Some(limit), Some(rss)) = (self.limit, rss) else {
+            return false;
+        };
+        if rss <= limit || !idle {
+            // Under the limit, or work is running that may still free memory.
+            self.clear_stuck();
+            return false;
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current()
+            && self.claim_release(Instant::now())
+        {
+            drop(runtime.spawn_blocking(self.release_job(rss, true)));
+        }
+        lock_release(&self.state).stuck
+    }
+}
+
 /// Admission control and off-runtime execution for tool calls.
 pub struct ToolGovernor {
     cfg: ExecConfig,
@@ -463,6 +681,8 @@ pub struct ToolGovernor {
     next_id: AtomicU64,
     /// One entry per call (disabled unless `cfg.audit` is set).
     audit: Arc<AuditLogger>,
+    /// Memory admission (`cfg.rss_soft_limit_bytes`) and its way back.
+    memory: MemoryGate,
 }
 
 /// Wait for a permit of `slots` until `give_up` (`None` = no limit).
@@ -536,6 +756,7 @@ impl ToolGovernor {
         });
         Self {
             audit,
+            memory: MemoryGate::new(cfg.rss_soft_limit_bytes, MemoryProbe::process()),
             cfg,
             sessions,
             global: Arc::new(Semaphore::new(capacity)),
@@ -543,6 +764,29 @@ impl ToolGovernor {
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(0),
         }
+    }
+
+    /// This governor reading and releasing memory through `probe`.
+    #[cfg(test)]
+    fn with_memory_probe(mut self, probe: MemoryProbe) -> Self {
+        self.memory.probe = probe;
+        self
+    }
+
+    /// Calls whose work is still running, and those of them past their
+    /// deadline plus [`DEADLINE_GRACE`] (detached).
+    fn running_and_overdue(&self) -> (usize, usize) {
+        let now = Instant::now();
+        let map = lock(&self.in_flight);
+        let overdue = map
+            .values()
+            .filter(|deadline| {
+                deadline
+                    .and_then(|at| at.checked_add(DEADLINE_GRACE))
+                    .is_some_and(|late| now >= late)
+            })
+            .count();
+        (map.len(), overdue)
     }
 
     /// The resolved settings.
@@ -560,39 +804,35 @@ impl ToolGovernor {
 
     /// In-flight and overdue work, capacity and process memory. With
     /// `redact_health` (open public mode) `rss_bytes` is `None`.
+    ///
+    /// Unhealthy when every permit is held by overdue work, or when the
+    /// memory gate is stuck: the process stays above its soft limit after
+    /// freed heap memory was handed back, with no call running within its
+    /// deadline. Above the limit with nothing running, this starts a due
+    /// hand-back in the background (see `MemoryGate`), so the stuck
+    /// watchdog's polling also gives the server its way back.
     pub fn health(&self) -> GovernorHealth {
-        let now = Instant::now();
-        let (in_flight, overdue) = {
-            let map = lock(&self.in_flight);
-            let overdue = map
-                .values()
-                .filter(|deadline| {
-                    deadline
-                        .and_then(|at| at.checked_add(DEADLINE_GRACE))
-                        .is_some_and(|late| now >= late)
-                })
-                .count();
-            (map.len(), overdue)
-        };
-        let rss_bytes = if self.cfg.redact_health {
-            None
-        } else {
-            p2a_core::get_process_memory().map(|m| m.rss_bytes as u64)
-        };
+        let (in_flight, overdue) = self.running_and_overdue();
+        let rss = self.memory.rss();
+        let memory_stuck = self.memory.stuck(rss, in_flight == overdue);
         GovernorHealth {
             in_flight,
             overdue,
             capacity: self.capacity,
-            rss_bytes,
-            healthy: overdue < self.capacity,
+            rss_bytes: if self.cfg.redact_health { None } else { rss },
+            memory_stuck,
+            healthy: overdue < self.capacity && !memory_stuck,
         }
     }
 
     /// The `governor` object `/health` publishes for `health`. In open public
     /// mode (`redact_health`) it leaves out the in-flight count and reports no
     /// process memory, so an unauthenticated visitor cannot poll them to time
-    /// saturation or memory-pressure attempts; `overdue`, `capacity` and
-    /// `healthy` stay.
+    /// saturation or memory-pressure attempts; `overdue`, `capacity`,
+    /// `memory_stuck` and `healthy` stay. `memory_stuck` only turns true once
+    /// every call is already refused for memory with nothing running, which
+    /// any refused call shows as well, and it tells the operator why
+    /// `healthy` is false.
     pub fn health_report(&self, health: &GovernorHealth) -> serde_json::Value {
         let mut report = serde_json::to_value(health).unwrap_or(serde_json::Value::Null);
         if self.cfg.redact_health
@@ -762,13 +1002,18 @@ impl ToolGovernor {
         R: Send + 'static,
         F: FnOnce(&Budget) -> Result<R, ToolCallError> + Send + 'static,
     {
-        // 1. Memory admission.
-        if let Some(limit) = self.cfg.rss_soft_limit_bytes
-            && let Some(mem) = p2a_core::get_process_memory()
-            && mem.rss_bytes as u64 > limit
+        // 1. Memory admission, after handing freed heap memory back when the
+        // process is above the limit.
+        if let Some(rss) = self
+            .memory
+            .refusal(|| {
+                let (running, overdue) = self.running_and_overdue();
+                running == overdue
+            })
+            .await
         {
             tracing::warn!(
-                rss = %format_bytes(mem.rss_bytes),
+                rss = %rss_text(rss),
                 "refusing a tool call: process memory is above the soft limit"
             );
             return Err(ToolCallError::MemoryPressure {
@@ -1297,7 +1542,7 @@ mod tests {
         let report = gov.health_report(&h);
         assert!(report.get("in_flight").is_none(), "{report}");
         assert_eq!(report["rss_bytes"], serde_json::Value::Null);
-        for key in ["overdue", "capacity", "healthy"] {
+        for key in ["overdue", "capacity", "memory_stuck", "healthy"] {
             assert!(report.get(key).is_some(), "{report}");
         }
 
@@ -1337,6 +1582,287 @@ mod tests {
         let h = gov.health();
         assert_eq!((h.in_flight, h.overdue), (0, 0));
         assert!(h.healthy);
+    }
+
+    /// Above the memory soft limit with no call running, every call is
+    /// refused and nothing in flight will free memory, so the governor must
+    /// report itself unhealthy: `/health` then answers 503 and the stuck
+    /// watchdog restarts the process instead of leaving it refusing every
+    /// visitor (PR-04). A 1-byte limit stays exceeded whatever the heap
+    /// hands back.
+    #[tokio::test]
+    async fn memory_pressure_with_no_call_running_is_unhealthy() {
+        if p2a_core::get_process_memory().is_none() {
+            return; // the platform does not report the process memory
+        }
+        let (gov, session) = governor_and_session(ExecConfig {
+            rss_soft_limit_bytes: Some(1),
+            ..Default::default()
+        })
+        .await;
+        let r = gov.run_blocking(&session, "x", |_| Ok(())).await;
+        assert!(
+            matches!(r, Err(ToolCallError::MemoryPressure { .. })),
+            "{r:?}"
+        );
+        let h = gov.health();
+        assert_eq!((h.in_flight, h.overdue), (0, 0));
+        assert!(!h.healthy, "{h:?}");
+        let t0 = Instant::now();
+        let mut watchdog = StuckWatchdog::new(Duration::from_secs(300));
+        assert!(!watchdog.observe(h.healthy, t0));
+        assert!(watchdog.observe(gov.health().healthy, t0 + Duration::from_secs(300)));
+    }
+
+    /// A process memory under test control: `rss` bytes resident, and a
+    /// hand-back that is counted and leaves `after_release` bytes resident
+    /// (or the RSS as it was, when that is `u64::MAX`).
+    #[derive(Clone)]
+    struct FakeMemory {
+        rss: Arc<AtomicU64>,
+        after_release: Arc<AtomicU64>,
+        releases: Arc<AtomicU64>,
+    }
+
+    impl FakeMemory {
+        const UNCHANGED: u64 = u64::MAX;
+
+        fn new(rss: u64, after_release: u64) -> Self {
+            Self {
+                rss: Arc::new(AtomicU64::new(rss)),
+                after_release: Arc::new(AtomicU64::new(after_release)),
+                releases: Arc::new(AtomicU64::new(0)),
+            }
+        }
+
+        fn probe(&self) -> MemoryProbe {
+            let (rss, after, releases) = (
+                Arc::clone(&self.rss),
+                Arc::clone(&self.after_release),
+                Arc::clone(&self.releases),
+            );
+            MemoryProbe {
+                rss: Arc::new({
+                    let rss = Arc::clone(&rss);
+                    move || Some(rss.load(Ordering::SeqCst))
+                }),
+                release: Arc::new(move || {
+                    let left = after.load(Ordering::SeqCst);
+                    if left != Self::UNCHANGED {
+                        rss.store(left, Ordering::SeqCst);
+                    }
+                    releases.fetch_add(1, Ordering::SeqCst);
+                }),
+            }
+        }
+
+        fn set_rss(&self, bytes: u64) {
+            self.rss.store(bytes, Ordering::SeqCst);
+        }
+
+        fn releases(&self) -> u64 {
+            self.releases.load(Ordering::SeqCst)
+        }
+    }
+
+    const LIMIT: u64 = 100 * MIB;
+
+    async fn governor_with_memory(
+        cfg: ExecConfig,
+        memory: &FakeMemory,
+    ) -> (ToolGovernor, Arc<Session>) {
+        let (gov, session) = governor_and_session(ExecConfig {
+            rss_soft_limit_bytes: Some(LIMIT),
+            ..cfg
+        })
+        .await;
+        (gov.with_memory_probe(memory.probe()), session)
+    }
+
+    /// Polls `done` until it holds (a bound, not a timing assertion).
+    async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Memory the allocator kept after the data was freed is handed back
+    /// before a call is refused; once that brings the process under the
+    /// limit, the call runs (PR-04).
+    #[tokio::test]
+    async fn memory_admission_hands_freed_memory_back_and_admits() {
+        let memory = FakeMemory::new(LIMIT + 50 * MIB, LIMIT / 2);
+        let (gov, session) = governor_with_memory(ExecConfig::default(), &memory).await;
+        let r = gov.run_blocking(&session, "x", |_| Ok(7)).await;
+        assert!(matches!(r, Ok(7)), "{r:?}");
+        assert_eq!(memory.releases(), 1);
+        let h = gov.health();
+        assert!(h.healthy && !h.memory_stuck, "{h:?}");
+    }
+
+    /// When the hand-back leaves the process above the limit and nothing
+    /// runs, calls are refused and the governor is unhealthy until the
+    /// memory drops; a drop below the limit re-admits at once. Hand-backs
+    /// are spaced by `MEMORY_RELEASE_INTERVAL`, however many calls arrive.
+    #[tokio::test]
+    async fn memory_left_above_the_limit_is_stuck_until_it_drops() {
+        let memory = FakeMemory::new(LIMIT + MIB, FakeMemory::UNCHANGED);
+        let (gov, session) = governor_with_memory(ExecConfig::default(), &memory).await;
+        for _ in 0..3 {
+            let r = gov.run_blocking(&session, "x", |_| Ok(())).await;
+            assert!(
+                matches!(
+                    r,
+                    Err(ToolCallError::MemoryPressure {
+                        retry_after_secs: 15
+                    })
+                ),
+                "{r:?}"
+            );
+        }
+        let h = gov.health();
+        assert!(h.memory_stuck && !h.healthy, "{h:?}");
+        assert_eq!(memory.releases(), 1, "one hand-back per interval");
+
+        memory.set_rss(LIMIT - MIB);
+        let h = gov.health();
+        assert!(h.healthy && !h.memory_stuck, "{h:?}");
+        let r = gov.run_blocking(&session, "x", |_| Ok(())).await;
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(memory.releases(), 1);
+    }
+
+    /// With nothing running and the process above the limit, `health` (the
+    /// watchdog polls it) hands freed memory back on its own, so the server
+    /// recovers without waiting for a visitor's call.
+    #[tokio::test]
+    async fn health_hands_freed_memory_back_when_nothing_runs() {
+        let memory = FakeMemory::new(LIMIT + 50 * MIB, LIMIT / 2);
+        let (gov, session) = governor_with_memory(ExecConfig::default(), &memory).await;
+        let h = gov.health();
+        assert!(h.healthy, "not stuck before a hand-back has failed: {h:?}");
+        eventually("the background hand-back", || memory.releases() == 1).await;
+        eventually("the RSS to drop", || {
+            gov.health().rss_bytes == Some(LIMIT / 2)
+        })
+        .await;
+        let r = gov.run_blocking(&session, "x", |_| Ok(())).await;
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(memory.releases(), 1);
+    }
+
+    /// Work running within its deadline may still free memory, so the
+    /// process above the limit is not stuck while it runs, and `health`
+    /// leaves the heap alone; once the work ends, a hand-back that does not
+    /// help leaves the governor unhealthy.
+    #[tokio::test]
+    async fn memory_pressure_while_a_call_runs_is_not_stuck() {
+        let memory = FakeMemory::new(LIMIT / 2, FakeMemory::UNCHANGED);
+        let (gov, session) = governor_with_memory(ExecConfig::default(), &memory).await;
+        let gov = Arc::new(gov);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let running = tokio::spawn({
+            let (gov, session) = (Arc::clone(&gov), Arc::clone(&session));
+            async move {
+                gov.run_blocking(&session, "x", move |_| {
+                    let _ = rx.recv();
+                    Ok(())
+                })
+                .await
+            }
+        });
+        eventually("the call to start", || gov.health().in_flight == 1).await;
+        memory.set_rss(LIMIT + MIB);
+        let h = gov.health();
+        assert!(h.healthy && !h.memory_stuck, "{h:?}");
+        assert_eq!(memory.releases(), 0);
+
+        tx.send(()).unwrap();
+        assert!(running.await.unwrap().is_ok());
+        eventually("a failed hand-back once idle", || gov.health().memory_stuck).await;
+        assert_eq!(memory.releases(), 1);
+        assert!(!gov.health().healthy);
+    }
+
+    /// Work past its deadline is detached and does not count as running: a
+    /// process held above the limit by it (or with it) is stuck too, even
+    /// though a permit is still free.
+    #[tokio::test]
+    async fn only_overdue_work_running_counts_as_nothing_running() {
+        let memory = FakeMemory::new(LIMIT / 2, FakeMemory::UNCHANGED);
+        let (gov, session) = governor_with_memory(
+            ExecConfig {
+                concurrency: 2,
+                deadline: Some(Duration::from_millis(1)),
+                ..Default::default()
+            },
+            &memory,
+        )
+        .await;
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let r = gov
+            .run_blocking(&session, "x", move |_| {
+                let _ = rx.recv();
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(r, Err(ToolCallError::DeadlineExceeded { .. })),
+            "{r:?}"
+        );
+        memory.set_rss(LIMIT + MIB);
+        let other = governor_session(&gov).await;
+        let r = gov.run_blocking(&other, "y", |_| Ok(())).await;
+        assert!(
+            matches!(r, Err(ToolCallError::MemoryPressure { .. })),
+            "{r:?}"
+        );
+        let h = gov.health();
+        assert_eq!((h.in_flight, h.overdue, h.capacity), (1, 1, 2));
+        assert!(h.memory_stuck && !h.healthy, "{h:?}");
+        tx.send(()).unwrap();
+        eventually("the overdue work to end", || gov.health().in_flight == 0).await;
+    }
+
+    /// What the gate relies on: glibc keeps the pages of freed heap chunks
+    /// that sit between live ones resident, and `release_free_heap` hands
+    /// them back. 128 MiB of 64 KiB blocks (below glibc's mmap threshold, so
+    /// they come from the heap) are freed except every 16th, which pins the
+    /// heap; at least half of what was freed must leave the RSS.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn release_free_heap_returns_freed_heap_pages() {
+        let rss = || p2a_core::get_process_memory().map(|m| m.rss_bytes as u64);
+        if rss().is_none() {
+            return;
+        }
+        const BLOCK: usize = 64 << 10;
+        const BLOCKS: usize = 2048;
+        let blocks: Vec<Vec<u8>> = (0..BLOCKS).map(|i| vec![i as u8 | 1; BLOCK]).collect();
+        let pinned: Vec<Vec<u8>> = blocks
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, block)| (i % 16 == 15).then_some(block))
+            .collect();
+        let freed = rss().unwrap();
+        release_free_heap();
+        let released = freed.saturating_sub(rss().unwrap());
+        let expected = (BLOCKS - pinned.len()) as u64 * BLOCK as u64 / 2;
+        assert!(
+            released >= expected,
+            "released {released} bytes of freed heap, expected at least {expected}"
+        );
+        assert!(pinned.iter().all(|b| b.len() == BLOCK));
+    }
+
+    /// A second session of `gov`'s session manager.
+    async fn governor_session(gov: &ToolGovernor) -> Arc<Session> {
+        let id = gov.sessions.create_session(None).await.unwrap();
+        gov.sessions.get_session(&id).await.unwrap()
     }
 
     #[test]
