@@ -233,6 +233,26 @@ fn test_data_load_parquet_polars_cannot_decode_is_an_error() {
         .stderr(predicate::str::contains("panicked").not());
 }
 
+/// A parquet file the core loader's schema check passes but polars panics
+/// on is an error too, with exit code 1, not a panic (exit code 101): the
+/// loader catches the unwind. The file is p2a-core's fixture of a float
+/// column whose ARROW:schema is too short to hold its own header (see
+/// `a_panic_in_polars_no_schema_check_rules_out_is_an_error` in p2a-core's
+/// loader). The default panic hook still prints polars' panic to stderr
+/// before the error, so stderr is not checked for its absence.
+#[test]
+fn test_data_load_parquet_polars_panics_on_is_an_error() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../p2a-core/tests/data/arrow_schema_short.parquet");
+    p2a()
+        .args(["data", "load", fixture.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "polars failed while reading the parquet file",
+        ));
+}
+
 /// Test data head command.
 #[test]
 fn test_data_head_command() {
