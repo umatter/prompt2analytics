@@ -465,20 +465,25 @@ impl DbConnection {
         Ok(count.map_or(0, |c| usize::try_from(c.count).unwrap_or(0)))
     }
 
-    /// Bytes the session's conversations store: titles, message contents
-    /// and tool-call arguments, results and errors, as UTF-8 bytes (summed
-    /// here; SurrealQL's `string::len` counts characters). Seeds the
+    /// Bytes the session's conversations and dataset metadata rows store:
+    /// titles, message contents and tool-call arguments, results and
+    /// errors, as UTF-8 bytes (summed here; SurrealQL's `string::len` counts
+    /// characters), and what each dataset metadata row counts
+    /// ([`dataset_meta_bytes`](Self::dataset_meta_bytes)). Seeds the
     /// `session_db_bytes` counter.
     ///
     /// It reads every stored message once, one conversation at a time (each
-    /// through its index); a deleted or cleared conversation releases its
-    /// own bytes instead, so this runs only when a counter is first seeded.
+    /// through its index), and the session's dataset metadata rows; a
+    /// deleted or cleared conversation and a deleted dataset metadata row
+    /// release their own bytes instead, so this runs only when a counter is
+    /// first seeded.
     pub async fn session_stored_bytes(&self, session_id: &str) -> Result<u64, DbError> {
         let conversations = self.list_conversations(session_id).await?;
-        let mut total = conversations
+        let titles = conversations
             .iter()
             .map(|c| c.title.len() as u64)
             .fold(0u64, u64::saturating_add);
+        let mut total = titles.saturating_add(self.dataset_meta_bytes(session_id).await?);
         for conv in &conversations {
             let text = self.conversation_text_bytes(&conv.id_string()).await?;
             total = total.saturating_add(text);
@@ -570,7 +575,7 @@ impl DbConnection {
 
         // Settings and dataset metadata of sessions without a row.
         for (table, stamp) in [("settings", "updated_at"), ("dataset_meta", "loaded_at")] {
-            deleted += self
+            let rows = self
                 .delete_unowned(
                     table,
                     "session_id",
@@ -580,6 +585,12 @@ impl DbConnection {
                     SweptBy::Every,
                 )
                 .await?;
+            if table == "dataset_meta" && rows > 0 {
+                // Their sessions have no row any more; their counters go
+                // too (a dataset metadata row counts against the budget).
+                self.forget_session_bytes_except(&session_ids);
+            }
+            deleted += rows;
         }
 
         // Messages and tool calls of conversations that no longer exist.

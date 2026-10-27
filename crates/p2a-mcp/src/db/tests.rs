@@ -882,6 +882,197 @@ async fn dataset_meta_bounds_the_bytes_of_the_column_names() {
     assert_eq!(saved.column_count, 2);
 }
 
+/// The metadata row of dataset `name` in session `s1`, with `n` column
+/// names of 16 bytes: 128 + 2 + `name` + 3 + 16 `n` bytes against the
+/// session's budget (457 for a 4-byte name and 20 names).
+fn budget_meta(name: &str, n: usize) -> super::models::DatasetMeta {
+    let count = i32::try_from(n).unwrap();
+    super::models::DatasetMeta::new(
+        "s1".into(),
+        name.into(),
+        "csv".into(),
+        2,
+        count,
+        column_names(n, 16),
+    )
+}
+
+/// A session's dataset metadata rows count against its `session_db_bytes`
+/// budget, beside its conversation history: a row under a new name that
+/// would pass the budget is refused and not written, a row replaced under
+/// its name counts only the bytes it adds (refused, with the old row kept,
+/// when they would pass the budget) and releases those it frees, and a
+/// delete releases its rows' bytes; the counter stays in step with the
+/// store. Before, the rows were not counted at all, and they outlive the
+/// session's in-memory datasets (nothing deletes a row when its dataset
+/// leaves the session's map), so the in-memory quotas did not bound them
+/// either.
+#[tokio::test]
+async fn dataset_meta_rows_count_against_the_session_budget() {
+    let budget = 4_000;
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(budget),
+        ..Default::default()
+    })
+    .await;
+    // 457 bytes a row (name "d000"): eight fit, a ninth does not.
+    let mut stored = 0usize;
+    let refused = loop {
+        match db
+            .save_dataset_meta(&budget_meta(&format!("d{stored:03}"), 20))
+            .await
+        {
+            Ok(_) => stored += 1,
+            Err(e) => break e,
+        }
+        assert!(stored <= 100, "rows past the budget");
+    };
+    assert!(matches!(refused, DbError::QuotaExceeded(_)), "{refused:?}");
+    assert_eq!(stored, 8);
+    let rows = db.get_datasets_for_session("s1").await.unwrap();
+    assert_eq!(rows.len(), stored);
+    assert_eq!(counter_gap(&db, "s1").await, None);
+    assert_eq!(db.session_bytes_entry("s1"), Some(8 * 457));
+
+    // The budget is one: a conversation title past it is refused too.
+    let room = usize::try_from(budget - 8 * 457).unwrap();
+    assert!(matches!(
+        db.create_conversation("s1", &"t".repeat(room + 1)).await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+
+    // A row replaced by one of the same size fits at the budget; one that
+    // grows past it is refused and the row stays as it was.
+    db.save_dataset_meta(&budget_meta("d000", 20))
+        .await
+        .unwrap();
+    let grown = db.save_dataset_meta(&budget_meta("d000", 60)).await;
+    assert!(matches!(grown, Err(DbError::QuotaExceeded(_))), "{grown:?}");
+    let kept = db.get_dataset_meta("s1", "d000").await.unwrap().unwrap();
+    assert_eq!(kept.column_names.len(), 20);
+    assert_eq!(counter_gap(&db, "s1").await, None);
+
+    // A smaller replacement frees the difference.
+    db.save_dataset_meta(&budget_meta("d000", 2)).await.unwrap();
+    assert_eq!(db.session_bytes_entry("s1"), Some(8 * 457 - 18 * 16));
+    assert_eq!(counter_gap(&db, "s1").await, None);
+
+    // A delete frees its row: a new name fits again.
+    db.delete_dataset_meta("s1", "d001").await.unwrap();
+    assert_eq!(counter_gap(&db, "s1").await, None);
+    db.save_dataset_meta(&budget_meta("new", 20)).await.unwrap();
+    assert_eq!(counter_gap(&db, "s1").await, None);
+
+    // A longer source path counts what it adds, a shorter one frees it.
+    let path = "data/".repeat(10);
+    db.update_dataset_source_path("s1", "d002", &path)
+        .await
+        .unwrap();
+    assert_eq!(counter_gap(&db, "s1").await, None);
+    let too_long = "p".repeat(budget as usize);
+    assert!(matches!(
+        db.update_dataset_source_path("s1", "d002", &too_long).await,
+        Err(DbError::QuotaExceeded(_))
+    ));
+    db.update_dataset_source_path("s1", "d002", "a.csv")
+        .await
+        .unwrap();
+    assert_eq!(counter_gap(&db, "s1").await, None);
+
+    // Deleting them all frees everything.
+    let deleted = db.delete_all_dataset_meta_for_session("s1").await.unwrap();
+    assert_eq!(deleted, 8);
+    assert_eq!(db.session_bytes_entry("s1"), Some(0));
+    assert_eq!(counter_gap(&db, "s1").await, None);
+    assert_eq!(db.store_turns_in_use(), 0);
+}
+
+/// Dataset metadata rows stored before the session's byte counter is
+/// seeded (by a server without the budget, or before a restart) are part
+/// of its seed: a new row past the budget beside them is refused.
+#[tokio::test]
+async fn stored_dataset_meta_rows_seed_the_session_counter() {
+    let db = test_db().await;
+    for i in 0..8 {
+        db.save_dataset_meta(&budget_meta(&format!("d{i:03}"), 20))
+            .await
+            .unwrap();
+    }
+    let limited = db.clone().with_limits(PersistenceLimits {
+        session_db_bytes: Some(4_000),
+        ..Default::default()
+    });
+    assert_eq!(limited.session_stored_bytes("s1").await.unwrap(), 8 * 457);
+    let refused = limited.save_dataset_meta(&budget_meta("d008", 20)).await;
+    assert!(
+        matches!(refused, Err(DbError::QuotaExceeded(_))),
+        "{refused:?}"
+    );
+    assert_eq!(limited.session_bytes_entry("s1"), Some(8 * 457));
+    assert_eq!(
+        limited.get_datasets_for_session("s1").await.unwrap().len(),
+        8
+    );
+}
+
+/// Saves of one dataset name sent at the same time take turns: one row is
+/// created and the others replace it, and the row is counted once. Before,
+/// each save looked for the row before any had written it, and each
+/// created one.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_saves_of_one_dataset_store_one_row() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100_000),
+        ..Default::default()
+    })
+    .await;
+    let saves: Vec<_> = (0..8)
+        .map(|_| {
+            let db = db.clone();
+            tokio::spawn(async move { db.save_dataset_meta(&budget_meta("same", 20)).await })
+        })
+        .collect();
+    for save in saves {
+        save.await.unwrap().unwrap();
+    }
+    let rows = db.get_datasets_for_session("s1").await.unwrap();
+    assert_eq!(rows.len(), 1, "rows of one dataset");
+    assert_eq!(counter_gap(&db, "s1").await, None);
+}
+
+/// An orphan sweep that deletes the dataset metadata rows of a session
+/// without a session row drops that session's byte counter, which counted
+/// them; a session with a row keeps its rows and its counter.
+#[tokio::test]
+async fn an_orphan_sweep_of_dataset_meta_forgets_the_session_counter() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(100_000),
+        ..Default::default()
+    })
+    .await;
+    db.upsert_session(&super::models::DbSession::new("s1".into(), None))
+        .await
+        .unwrap();
+    db.save_dataset_meta(&budget_meta("kept", 20))
+        .await
+        .unwrap();
+    let mut gone = budget_meta("gone", 20);
+    gone.session_id = "gone".into();
+    db.save_dataset_meta(&gone).await.unwrap();
+    assert!(db.session_bytes_entry("gone").is_some());
+
+    assert_eq!(db.delete_orphans().await.unwrap(), 1);
+    assert_eq!(db.session_bytes_entry("gone"), None);
+    assert!(
+        db.get_datasets_for_session("gone")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(db.get_datasets_for_session("s1").await.unwrap().len(), 1);
+    assert_eq!(counter_gap(&db, "s1").await, None);
+}
+
 /// The message cap counts the conversation's message rows, not its stored
 /// `message_count`: a counter left one or more below the truth (a recount
 /// that lost a write) does not let a message past the cap.

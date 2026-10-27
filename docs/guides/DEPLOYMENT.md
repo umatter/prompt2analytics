@@ -251,9 +251,12 @@ HTTP), and they never depend on the resource profile:
   (1,000) messages answers 422 `quota_exceeded`.
 - **History budget.** `session_db_bytes` (hosted 16 MiB, none when off) caps the
   bytes one session's conversations store: titles, message contents and
-  tool-call arguments, results and errors. A client write past it answers 422
-  `quota_exceeded`; text the server produces (assistant replies, tool results)
-  is truncated to the room left; deleting a conversation frees its bytes.
+  tool-call arguments, results and errors, and also its dataset metadata rows
+  (the dataset listing; each row's texts and kept column names, plus 128 bytes).
+  A client write past it answers 422 `quota_exceeded`; text the server produces
+  (assistant replies, tool results) is truncated to the room left; a dataset
+  whose metadata row would pass it is loaded but not listed; deleting a
+  conversation frees its bytes.
 - **Memory.** While RSS is above `P2A_MEMORY_SOFT_LIMIT_MB`, writes to the store
   answer 503 `memory_pressure` (`Retry-After: 15`).
 - **`user_id`.** Optional, at most 128 bytes of `A-Z a-z 0-9 . _ @ -` (400
@@ -508,7 +511,7 @@ Named budgets:
 | `message_bytes` | one conversation message, title or settings string | 262,144 | 2,097,152 |
 | `conversations_per_session` | conversations one session holds | 50 | none |
 | `messages_per_conversation` | messages one conversation holds | 1,000 | none |
-| `session_db_bytes` | bytes one session's conversation history holds | 16 MiB | none |
+| `session_db_bytes` | bytes one session's conversation history and dataset metadata rows hold | 16 MiB | none |
 | `llm_timeout_secs` | provider call time (total, or idle for streams) | 120 | 900 |
 | `llm_max_tool_iterations` | clamp of a request's `max_tool_iterations` | 25 | 50 |
 | `llm_context_bytes` | dataset block in the system prompt | 24,576 | 65,536 |

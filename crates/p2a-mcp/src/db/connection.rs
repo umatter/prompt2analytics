@@ -60,8 +60,9 @@ pub struct PersistenceLimits {
     pub conversations_per_session: Option<usize>,
     /// Messages one conversation may hold.
     pub messages_per_conversation: Option<usize>,
-    /// Bytes one session's conversation history may hold (titles, message
-    /// contents, tool-call arguments, results and errors).
+    /// Bytes one session's conversation history and dataset metadata may
+    /// hold (titles, message contents, tool-call arguments, results and
+    /// errors, and each dataset metadata row's texts and fixed fields).
     pub session_db_bytes: Option<u64>,
     /// Writes are refused while the process's resident memory is above this.
     pub rss_soft_limit_bytes: Option<u64>,
@@ -85,16 +86,18 @@ impl Default for PersistenceLimits {
 pub struct DbConnection {
     db: Arc<Surreal<Db>>,
     limits: PersistenceLimits,
-    /// Bytes each session's conversation history stores, as counted by the
-    /// `session_db_bytes` budget. An entry is seeded from the store on first
-    /// use (a read of every stored message of the session), lowered by the
-    /// bytes a conversation delete or clear actually removed, and dropped
-    /// when the session's rows are deleted. Only touched when the budget is
-    /// set; shared by clones.
+    /// Bytes each session's conversation history and dataset metadata
+    /// rows store, as counted by the `session_db_bytes` budget. An entry is
+    /// seeded from the store on first use (a read of every stored message
+    /// and dataset metadata row of the session), lowered by the bytes a
+    /// conversation delete or clear or a dataset metadata delete actually
+    /// removed, and dropped when the session's rows are deleted. Only
+    /// touched when the budget is set; shared by clones.
     session_bytes: Arc<Mutex<HashMap<String, u64>>>,
     /// One lock per conversation whose rows a call is changing (and per
-    /// session creating a conversation), with the number of calls holding or
-    /// waiting for it (see [`StoreTurn`]); shared by clones.
+    /// session creating a conversation or changing its dataset metadata),
+    /// with the number of calls holding or waiting for it (see
+    /// [`StoreTurn`]); shared by clones.
     store_turns: StoreTurns,
     /// Conversations deleted recently, for
     /// [`delete_recent_orphans`](Self::delete_recent_orphans); shared by
@@ -123,9 +126,11 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// clear, a message add or content update, a title or archive change, or a
 /// tool-call create, update or status change:
 /// [`conversation_turn`](DbConnection::conversation_turn)), or at creating a
-/// conversation in a session ([`session_turn`](DbConnection::session_turn));
-/// the next call's turn starts when it is dropped. It is `Send` and
-/// `'static`, so the task of [`run_to_end`] can own it.
+/// conversation in a session ([`session_turn`](DbConnection::session_turn)),
+/// or at changing a session's dataset metadata rows
+/// ([`dataset_meta_turn`](DbConnection::dataset_meta_turn)); the next call's
+/// turn starts when it is dropped. It is `Send` and `'static`, so the task
+/// of [`run_to_end`] can own it.
 ///
 /// Two deletes of one conversation that run at the same time conflict in the
 /// store: the in-memory engine hands both the same rows (neither fails), so
@@ -418,8 +423,9 @@ impl DbConnection {
         self.with_session_bytes(session_id, |used| {
             if used.saturating_add(n) > limit {
                 return Err(DbError::QuotaExceeded(format!(
-                    "this session already stores {used} bytes of conversation history and this \
-                     server keeps at most {limit} bytes per session; delete a conversation first"
+                    "this session already stores {used} bytes of conversation history and \
+                     dataset metadata, and this server keeps at most {limit} bytes per session; \
+                     delete a conversation first"
                 )));
             }
             *used += n;
@@ -470,6 +476,16 @@ impl DbConnection {
         }
     }
 
+    /// Drop the byte counter of every session not in `with_row` (an orphan
+    /// sweep deleted rows of sessions without a session row); a later write
+    /// re-seeds it from the store.
+    pub(crate) fn forget_session_bytes_except(&self, with_row: &std::collections::HashSet<String>) {
+        if self.limits.session_db_bytes.is_some() {
+            self.session_bytes_map()
+                .retain(|session_id, _| with_row.contains(session_id));
+        }
+    }
+
     /// Whether the session's byte counter is seeded.
     pub(crate) fn has_session_bytes(&self, session_id: &str) -> bool {
         self.limits.session_db_bytes.is_some() && self.session_bytes_map().contains_key(session_id)
@@ -498,6 +514,14 @@ impl DbConnection {
     /// this key is never a conversation's.
     pub(crate) async fn session_turn(&self, session_id: &str) -> StoreTurn {
         self.turn(format!("session:{session_id}")).await
+    }
+
+    /// Wait for this call's turn at changing session `session_id`'s dataset
+    /// metadata rows (see [`StoreTurn`]): a save reads the row it replaces
+    /// and counts the bytes it adds, a delete releases the bytes it
+    /// removed, and neither may run between another's read and write.
+    pub(crate) async fn dataset_meta_turn(&self, session_id: &str) -> StoreTurn {
+        self.turn(format!("datasets:{session_id}")).await
     }
 
     async fn turn(&self, key: String) -> StoreTurn {
@@ -564,7 +588,7 @@ impl DbConnection {
     }
 
     /// The calls holding or waiting for the store turn `key` (a conversation
-    /// id, or `session:<id>`); 0 when none is.
+    /// id, `session:<id>` or `datasets:<id>`); 0 when none is.
     #[cfg(test)]
     pub(crate) fn store_turn_users(&self, key: &str) -> usize {
         self.store_turns

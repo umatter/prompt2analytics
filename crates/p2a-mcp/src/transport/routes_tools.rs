@@ -452,6 +452,53 @@ mod tests {
             assert_eq!(rows.len(), 1);
         }
 
+        /// A session's metadata rows stay within its `session_db_bytes`
+        /// budget when its datasets leave its map after each call (the rows
+        /// stay): once the rows fill the budget, the capture is refused
+        /// (and logged) and the call still answers. Before, the rows were
+        /// not counted.
+        #[tokio::test]
+        async fn metadata_rows_stop_at_the_session_budget() {
+            let budget: u64 = 3_000;
+            let config = ServerConfig {
+                transport: TransportType::Http,
+                limits: crate::config::LimitsSettings {
+                    profile: None,
+                    overrides: vec![format!("session_db_bytes={budget}")],
+                },
+                ..Default::default()
+            };
+            let (app, state) = build_app_with(&config, ExecConfig::default())
+                .await
+                .unwrap();
+            let store = state
+                .persistent_manager
+                .clone()
+                .expect("an in-memory store");
+            let caller = new_session(&app, &state).await;
+            let cycles = 40;
+            for i in 0..cycles {
+                let body = json!({
+                    "session_id": caller.id,
+                    "arguments": {"name": format!("d{i:02}"), "csv_content": "a,b\n1.5,2.25\n2.75,3.5\n"},
+                });
+                let (status, body) = post(&app, "/api/tools/create_dataset", body).await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                assert_eq!(body["data"]["success"], json!(true), "{body}");
+                // The dataset leaves the session's map; its row stays.
+                caller.datasets.write().await.clear();
+            }
+
+            let db = store.db();
+            let rows = db.get_datasets_for_session(&caller.id).await.unwrap();
+            assert!(
+                !rows.is_empty() && rows.len() < cycles,
+                "{} metadata rows after {cycles} new names",
+                rows.len()
+            );
+            assert!(db.session_stored_bytes(&caller.id).await.unwrap() <= budget);
+        }
+
         /// A wide dataset's metadata row keeps its first
         /// `MAX_STORED_COLUMN_NAMES` column names and its full width.
         #[tokio::test]
