@@ -34,9 +34,9 @@
 //!
 //! - `POST /api/tools/{name}`: hyper drops the handler future when it reads
 //!   the end of the connection while the response is still pending;
-//! - a websocket `Tool` message: a close frame, a read error or the end of
-//!   the stream ends the connection and drops the message being handled
-//!   (`transport::websocket`);
+//! - a websocket `Tool` message: a close frame, a read error, the end of the
+//!   stream or a failed write to the socket ends the connection and drops the
+//!   message being handled (`transport::websocket`);
 //! - the streaming chat (`POST /api/llm/chat/stream`): its task runs the chat
 //!   only while the SSE client listens (`run_until_client_gone` in
 //!   `transport::llm_routes`); when the client goes, the chat future is
