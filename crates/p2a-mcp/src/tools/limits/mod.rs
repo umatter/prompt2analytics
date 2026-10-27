@@ -347,8 +347,8 @@ pub struct EnsembleTier {
 
 /// What a tree-ensemble fit refused by [`Limits::check_ensemble`] could change instead of its
 /// rows.
-#[derive(Debug, Clone)]
-pub struct EnsembleChange<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsembleChange {
     /// The sets of changes to offer, in order: the refusal offers the first whose `cheapest`
     /// is within the limit, and none when no tier's is, so that the changes it offers can
     /// bring the fit within the limit. A tier lists only changes that each lower the bound
@@ -361,7 +361,7 @@ pub struct EnsembleChange<'a> {
     /// the bound within the limit. For "no values of these parameters" to be true, the tiers
     /// together must reach the least memory the tool accepts (a request already there needs
     /// no tier for it).
-    pub parameters: &'a str,
+    pub parameters: &'static str,
 }
 
 /// A tool whose dataset height is limited by a [`RowClass`].
@@ -1112,7 +1112,7 @@ impl Limits {
         tool: &str,
         n_rows: usize,
         settings: &str,
-        change: EnsembleChange<'_>,
+        change: EnsembleChange,
         bound: impl Fn(usize) -> u64,
     ) -> Result<(), LimitViolation> {
         const KNOB: &str = "ensemble_bytes";
@@ -2366,7 +2366,7 @@ mod tests {
 
     /// An [`EnsembleChange`] of one tier, `advice` with its `cheapest` bound, setting
     /// `parameters`.
-    fn one_tier(advice: &str, parameters: &'static str, cheapest: u64) -> EnsembleChange<'static> {
+    fn one_tier(advice: &str, parameters: &'static str, cheapest: u64) -> EnsembleChange {
         EnsembleChange {
             tiers: vec![EnsembleTier {
                 advice: advice.to_string(),
@@ -2377,7 +2377,7 @@ mod tests {
     }
 
     /// An [`EnsembleChange`] whose changes always fit (`cheapest` 0).
-    fn fixable(advice: &'static str) -> EnsembleChange<'static> {
+    fn fixable(advice: &'static str) -> EnsembleChange {
         one_tier(advice, "n_trees", 0)
     }
 

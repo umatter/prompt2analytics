@@ -76,7 +76,7 @@ fn ensemble_refusal(
     tool: &str,
     n_rows: usize,
     settings: &str,
-    change: EnsembleChange<'_>,
+    change: EnsembleChange,
     bound: impl Fn(usize) -> u64,
 ) -> Option<CallToolResult> {
     crate::tools::limits::current()
@@ -160,7 +160,7 @@ fn forest_change(
     config: &CausalForestConfig,
     n_rows: usize,
     n_covariates: usize,
-) -> EnsembleChange<'static> {
+) -> EnsembleChange {
     let knobs: [Knob<CausalForestConfig>; 3] = [
         ("lower", "n_trees", |c, _| c.n_trees = FEWEST_TREES),
         ("lower", "max_depth", |c, _| c.max_depth = SHALLOWEST_TREES),
@@ -204,11 +204,7 @@ fn forest_change(
 /// lowers the bound (one covariate fewer and no propensity trees), so it is offered beside
 /// them as one more way; and, when the request asks for it, as a second tier worded as
 /// required, which the refusal offers only when the first tier cannot fit the rows.
-fn bart_change(
-    config: &BartCausalConfig,
-    n_rows: usize,
-    n_covariates: usize,
-) -> EnsembleChange<'static> {
+fn bart_change(config: &BartCausalConfig, n_rows: usize, n_covariates: usize) -> EnsembleChange {
     let knobs: [Knob<BartCausalConfig>; 3] = [
         ("lower", "n_trees", |c, _| c.n_trees = FEWEST_TREES),
         ("lower", "max_depth", |c, _| c.max_depth = SHALLOWEST_TREES),
@@ -2193,7 +2189,7 @@ mod tests {
     /// bound) or must never name it (the forest's honesty, which can raise it).
     fn check_tiers<C>(
         case: &str,
-        change: &EnsembleChange<'_>,
+        change: &EnsembleChange,
         c: &C,
         without: &C,
         requested: bool,
