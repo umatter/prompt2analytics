@@ -66,27 +66,64 @@ fn created(name: &str, width: usize, malformed: usize) -> String {
     )
 }
 
-/// The lines at `level` ("INFO ", "WARN ", ...) among `lines`.
-fn at<'a>(lines: &'a [String], level: &str) -> Vec<&'a String> {
-    lines
+/// The levels as the fmt layer writes them, after the padding.
+const LEVELS: [&str; 5] = ["TRACE ", "DEBUG ", "INFO ", "WARN ", "ERROR "];
+
+/// The level `line` starts with, if it starts with one.
+fn level_of(line: &str) -> Option<&'static str> {
+    let line = line.trim_start();
+    LEVELS.into_iter().find(|level| line.starts_with(level))
+}
+
+/// The events among `lines`, with their level: each is a line that starts
+/// with a level and the lines after it that do not. The fmt layer writes a
+/// field value that holds newlines (the result text, for one) on lines of
+/// their own, with no level in front. Lines before the first level are left
+/// out.
+fn events(lines: &[String]) -> Vec<(&'static str, &[String])> {
+    let heads: Vec<(usize, &'static str)> = lines
         .iter()
-        .filter(|line| line.trim_start().starts_with(level))
+        .enumerate()
+        .filter_map(|(i, line)| level_of(line).map(|level| (i, level)))
+        .collect();
+    heads
+        .iter()
+        .enumerate()
+        .map(|(k, &(start, level))| {
+            let end = heads.get(k + 1).map_or(lines.len(), |&(next, _)| next);
+            (level, &lines[start..end])
+        })
         .collect()
 }
 
-/// The `[METADATA_CAPTURE]` lines of `lines` at `level`.
-fn capture_lines<'a>(lines: &'a [String], level: &str) -> Vec<&'a String> {
-    at(lines, level)
+/// Every line of the events at `level` ("INFO ", "WARN ", ...) among
+/// `lines`, the lines that continue an event included.
+fn at<'a>(lines: &'a [String], level: &str) -> Vec<&'a String> {
+    events(lines)
         .into_iter()
-        .filter(|line| line.contains("[METADATA_CAPTURE]"))
+        .filter(|&(event_level, _)| event_level == level)
+        .flat_map(|(_, event)| event)
+        .collect()
+}
+
+/// Every line of the `[METADATA_CAPTURE]` events at `level` among `lines`.
+fn capture_lines<'a>(lines: &'a [String], level: &str) -> Vec<&'a String> {
+    events(lines)
+        .into_iter()
+        .filter(|&(event_level, event)| {
+            event_level == level && event[0].contains("[METADATA_CAPTURE]")
+        })
+        .flat_map(|(_, event)| event)
         .collect()
 }
 
 /// A capture logs the same number of info lines for a dataset of 3 columns
 /// and one of 300, with counts and no column name on them (the names are on
-/// a debug line), and reads nothing back after a save. Column lines it
-/// cannot read are one warning with their count. A save the session's
-/// `session_db_bytes` budget refuses is a warning, not an error.
+/// a debug line), and reads nothing back after a save. A line counts at the
+/// level of the event it belongs to, so a multi-line value at info, such as
+/// the result text, shows here. Column lines it cannot read are one warning
+/// with their count. A save the session's `session_db_bytes` budget refuses
+/// is a warning, not an error.
 #[tokio::test]
 async fn the_capture_logs_counts_at_info_and_a_refused_save_as_a_warning() {
     let logs = Logs::default();
@@ -142,6 +179,7 @@ async fn the_capture_logs_counts_at_info_and_a_refused_save_as_a_warning() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+    // Every line of every info event, the lines that continue one included.
     let named: Vec<_> = at(&wide, "INFO ")
         .into_iter()
         .filter(|line| line.contains("wcol"))
