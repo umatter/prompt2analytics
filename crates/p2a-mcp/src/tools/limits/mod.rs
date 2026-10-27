@@ -26,7 +26,8 @@
 //!   every profile. A rule path must therefore not go on into a field whose schema admits an
 //!   array; the schema test in `rules.rs` fails on one that does.
 //! - [`Limits::check_rows`] checks a dataset's height for the tools in [`ROW_RULES`], whose cost
-//!   grows faster than linearly in the number of rows ([`RowClass`]).
+//!   grows faster than linearly in the number of rows ([`RowClass`]), or, for a few, whose
+//!   working memory is too large a multiple of the data ([`RowRule::reason`] says which).
 //! - [`Limits::check_budget`] lets a handler check a quantity it computes itself (for example a
 //!   predicted join size) against a named budget field such as [`Limits::join_output_rows`].
 //! - [`Limits::check_arima_fit`] and [`Limits::check_arima_series`] let the ARIMA handlers
@@ -274,6 +275,10 @@ pub struct ParamRule {
 }
 
 /// How a method's cost grows with the number of dataset rows.
+///
+/// A [`RowRule`] may hold a tool to a class's cap for a reason of its own, which it states in
+/// [`RowRule::reason`]: a tool whose cost is linear in the rows but too large for the session
+/// data quota, or superlinear in another way than the class describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowClass {
     /// Memory grows with the square of the row count (n x n matrices).
@@ -294,8 +299,8 @@ impl RowClass {
         }
     }
 
-    /// Why the class is row-limited, as shown in refusals.
-    fn reason(self) -> &'static str {
+    /// Why the class is row-limited, as shown in refusals; the default [`RowRule::reason`].
+    const fn reason(self) -> &'static str {
         match self {
             RowClass::Dense => "its memory grows with the square of the row count",
             RowClass::Cubic => "its run time grows with the cube of the row count",
@@ -311,8 +316,11 @@ pub struct RowRule {
     pub tool: &'static str,
     /// The request field that names the dataset.
     pub dataset_field: &'static str,
-    /// The tool's cost class.
+    /// The tool's cost class, whose cap applies.
     pub class: RowClass,
+    /// Why the tool is row-limited, completing "this server allows at most N rows for this
+    /// method because ..." in refusals. The class's own reason unless the rule says otherwise.
+    pub reason: &'static str,
 }
 
 /// The active request limits: family caps, row caps, the minimum tolerance and named budgets.
@@ -986,7 +994,7 @@ impl Limits {
                 "The dataset for `{tool}` has {n_rows} rows and {n_cols} columns, but this server \
                  allows at most {cap} rows for this method because {}. Use a sample of at most \
                  {cap} rows, for example with munge_sample.",
-                rule.class.reason()
+                rule.reason
             ),
             tool: tool.to_string(),
             parameter: rule.dataset_field.to_string(),
