@@ -1021,8 +1021,8 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
     }
     assert_eq!(uploads_holding(&bytes), 0);
 
-    // Without them the loader panics on it; the upload's file is removed
-    // all the same.
+    // Without them the loader panics on it, and the upload leaves no file
+    // behind all the same (it is decoded from memory; PR-23).
     let (app, _) = build_app_with(&local(), ExecConfig::default())
         .await
         .unwrap();
