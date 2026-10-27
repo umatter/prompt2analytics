@@ -211,9 +211,14 @@ fn parquet_decoded_bytes_within(
         return Ok(None);
     };
     let mut reader = ParquetReader::new(file);
-    let Ok(metadata) = reader.get_metadata().map(std::sync::Arc::clone) else {
-        return Ok(None);
-    };
+    // polars' own footer type, which polars-io's `FileMetadataRef` names: this
+    // stops compiling when polars reads files with another polars-parquet than
+    // the one the check decompresses dictionaries with (see Cargo.toml).
+    let metadata: std::sync::Arc<polars_parquet::parquet::metadata::FileMetadata> =
+        match reader.get_metadata() {
+            Ok(metadata) => std::sync::Arc::clone(metadata),
+            Err(_) => return Ok(None),
+        };
     let Ok(schema) = reader.schema() else {
         return Ok(None);
     };

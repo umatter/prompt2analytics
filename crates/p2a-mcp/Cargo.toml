@@ -90,7 +90,12 @@ base64.workspace = true
 polars-parquet-format = "=0.1.0"
 # Decompresses a categorical column's dictionary pages before the file is
 # decoded, with polars' own codecs, so each label is counted once over the
-# row groups (tools/handlers/data.rs). Pinned with polars like the above.
+# row groups (tools/handlers/data.rs). Pinned with polars like the above, and
+# tied to it at compile time: the check holds the footer polars' reader
+# returns as this crate's `parquet::metadata::FileMetadata` (polars-io's
+# `FileMetadataRef` is an Arc of it), so a polars that reads with another
+# polars-parquet stops compiling rather than decompressing with a second
+# copy of the codecs.
 polars-parquet = { version = "=0.52.0", default-features = false }
 
 [dev-dependencies]
