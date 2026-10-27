@@ -72,6 +72,7 @@ socket.
 | `orphan_sweep_memory.rs` | what the orphan sweeps of a RocksDB conversation store read and hold, measured with a counting allocator | `#![cfg(feature = "db")]` | `--features full --test orphan_sweep_memory` (not in CI) |
 | `llm_egress.rs` | egress guard, upstream errors and retries, the key rule, the tool allowlist, context budget, chat-loop bounds | `#![cfg(all(feature = "http", feature = "llm"))]`; the conversation test needs `db` | the CI set, plus `--features full` |
 | `isolation.rs` | per-session directories, symbolic links, the disk quota, session export and import, the stale-directory purge | `#![cfg(feature = "http")]` | the CI set |
+| `serve_limits.rs` | `serve` and `start_http_transport` install the request limits of an open public configuration, overrides included, on a bound socket | `#![cfg(feature = "http")]` | the CI set |
 
 Commands for the feature sets CI does not build:
 
@@ -219,6 +220,10 @@ Tests for the resource guards (core) and the server's limits follow these conven
   run in parallel. The exceptions: a test binary whose tests all share one configuration installs
   it once inside a `OnceLock` (`crates/p2a-mcp/tests/isolation.rs`), and p2a-core's
   `global_ceiling_round_trips` sets only a harmless ceiling (`usize::MAX - 1`) and restores `None`.
+  `transport::http::serve` and `start_http_transport` install the limits and policies of the
+  configuration they serve, so a test serves a local configuration without overrides (it installs
+  the defaults) or runs in a binary whose servers all share one configuration
+  (`crates/p2a-mcp/tests/serve_limits.rs`).
 - **Complexity rewrites** need an equivalence test against a naive reference on noisy random data,
   plus R-pinned values where R has the method.
 
