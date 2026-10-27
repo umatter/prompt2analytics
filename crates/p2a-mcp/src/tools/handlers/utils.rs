@@ -1952,10 +1952,15 @@ mod tests {
         };
         let integers: Vec<String> = (0..10_000).map(|i| i.to_string()).collect();
         let floats: Vec<String> = (0..10_000).map(|i| format!("{i}.5")).collect();
-        let strings: Vec<String> = (0..10_000).map(|i| format!("\"s{i}\"")).collect();
+        let strings: Vec<String> = (0..10_000).map(|i| format!("\"{i:030}\"")).collect();
         // Each cell is charged as it is pushed, in each column type whose
         // charge outruns its input. (A bool cell is charged 1 byte and takes
         // at least 4 bytes of input, so the cut-off always comes first.)
+        // String cells are 30 characters long, so that the text charge, and
+        // not only the per-cell slot, is needed for the charge to outrun the
+        // input: 54 bytes charged per 33 bytes read fire the charge at about
+        // 650 bytes in, while the slot alone (24) or the text alone (30)
+        // would leave the cut-off to refuse the file first.
         for (kind, cells) in [
             ("integer", &integers),
             ("float", &floats),
@@ -1973,6 +1978,33 @@ mod tests {
         let err = parse_session_json(nested.as_bytes(), Some(1_000)).unwrap_err();
         assert!(err.contains(charged), "{err}");
         assert!(!err.contains("is larger than"), "{err}");
+        // So is a nested object: each entry is charged for its key and its
+        // nodes (about 66 bytes for 7 to 11 bytes of input).
+        let entries: Vec<String> = (0..10_000).map(|i| format!(r#""k{i}":{i}"#)).collect();
+        let nested_object = format!(
+            r#"{{"datasets":{{"a":{{"data":{{"x":[{{{}}}]}}}}}}}}"#,
+            entries.join(",")
+        );
+        let err = parse_session_json(nested_object.as_bytes(), Some(1_000)).unwrap_err();
+        assert!(err.contains(charged), "nested object: {err}");
+        assert!(!err.contains("is larger than"), "nested object: {err}");
+        // Leading nulls are charged in one go when the first non-null cell
+        // decides the column type, and an all-null column when it is
+        // finished. Both inputs fit the byte budget, so the cut-off cannot
+        // fire and only this in-memory charge can refuse them.
+        let nulls = vec!["null"; 150].join(",");
+        for (kind, cells) in [
+            // 150 I64 slots of 16 bytes at the type decision.
+            ("leading nulls", vec![nulls.clone(), "1".to_string()]),
+            // 150 Str slots of 24 bytes in finish.
+            ("all-null", vec![nulls]),
+        ] {
+            let json = column(&cells);
+            assert!(json.len() < 1_000, "{kind}: {} bytes", json.len());
+            let err = parse_session_json(json.as_bytes(), Some(1_000)).unwrap_err();
+            assert!(err.contains(charged), "{kind}: {err}");
+            assert!(!err.contains("is larger than"), "{kind}: {err}");
+        }
         // The same file passes with room to spare.
         assert!(parse_session_json(column(&integers).as_bytes(), Some(10_000_000)).is_ok());
     }
