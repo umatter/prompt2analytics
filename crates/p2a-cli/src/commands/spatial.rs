@@ -56,7 +56,7 @@ EXAMPLES:
         #[arg(long)]
         coord_y: String,
 
-        /// Number of nearest neighbors for spatial weights, 1 to n - 1 (default: 5)
+        /// Number of nearest neighbors for spatial weights, 1 to n - 1 where n is the number of rows (default: 5)
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
@@ -101,7 +101,7 @@ EXAMPLES:
         #[arg(long)]
         coord_y: String,
 
-        /// Number of nearest neighbors for spatial weights, 1 to n - 1 (default: 5)
+        /// Number of nearest neighbors for spatial weights, 1 to n - 1 where n is the number of rows (default: 5)
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
@@ -138,7 +138,7 @@ EXAMPLES:
         #[arg(long)]
         coord_y: String,
 
-        /// Number of nearest neighbors for spatial weights, 1 to n - 1 (default: 5)
+        /// Number of nearest neighbors for spatial weights, 1 to n - 1 where n is the number of rows (default: 5)
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
@@ -170,7 +170,7 @@ EXAMPLES:
         #[arg(long)]
         coord_y: String,
 
-        /// Number of nearest neighbors for spatial weights, 1 to n - 1 (default: 5)
+        /// Number of nearest neighbors for spatial weights, 1 to n - 1 where n is the number of rows (default: 5)
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 

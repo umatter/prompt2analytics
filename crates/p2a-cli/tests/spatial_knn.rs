@@ -46,9 +46,10 @@ fn commands() -> [Vec<&'static str>; 4] {
     [model("sar"), model("sem"), model("sac"), moran]
 }
 
-/// k = n and k = 0 are refused by every spatial command, in text and JSON
-/// output, with the core's message and exit status 1. Before, k = n was
-/// clamped to n - 1 without a word and k = 0 gave every point no neighbours.
+/// k = n, k = n + 1 and k = 0 are refused by every spatial command, in text
+/// and JSON output, with the core's message and exit status 1. Before, k = n
+/// was clamped to n - 1 without a word and k = 0 gave every point no
+/// neighbours.
 #[test]
 fn k_outside_one_to_n_minus_one_is_refused_with_exit_1() {
     let tmp = tempfile::tempdir().unwrap();
@@ -88,6 +89,21 @@ fn k_of_n_minus_one_still_runs() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"moran_i\""));
+}
+
+/// The `-k` help of every spatial command gives the valid range and says
+/// what its n is.
+#[test]
+fn k_help_names_the_range_and_what_n_is() {
+    for cmd in ["sar", "sem", "sac", "moran"] {
+        p2a()
+            .args(["spatial", cmd, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "1 to n - 1 where n is the number of rows",
+            ));
+    }
 }
 
 /// A coordinate that is not finite is refused, as in MCP; before, the legacy
