@@ -528,8 +528,10 @@ Named budgets:
 
 The hosted `arima_fit_work` of 400,000 allows ARIMA(1,1,1) on 15,384
 observations, and on a release build the slowest fit it allows is bounded at
-about 16 s; the 1e-100 floor keeps that bound, because arithmetic on numbers
-that small takes a much slower path. The margin to the deadline assumes the
+about 16 s; while the budget is set, a column holding a nonzero value below
+1e-100 is refused as well, because the squares and products the fit forms from
+values that small can be subnormal (below about 2.2e-308), and arithmetic on
+those takes a much slower path. The margin to the deadline assumes the
 default 60 s: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a throttled shared
 CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. Raising it
 above about 3.5 times the hosted value lets a fit run past the deadline and keep

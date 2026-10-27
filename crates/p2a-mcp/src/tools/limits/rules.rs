@@ -992,8 +992,11 @@ pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
 /// cover. A whole fit is not believed to stay in that state over its many evaluations: the
 /// intercept starts at the differenced series' mean, the forward-difference gradient moves it
 /// off zero, and where the data are large enough to absorb that step the first line search
-/// reached its minimum step and the fit ended at once. This is a residual risk: a change of the
-/// optimiser (the TS-1 replacement) must examine it again.
+/// reached its minimum step, and in the runs measured the fit ended at the next one: the
+/// reverted step leaves the next L-BFGS update with zero correction pairs, whose 0/0 scaling
+/// made that line search fail its step check (a failed line search does not by itself end the
+/// fit; see [`arima_fit_work`]). This is a residual risk: a change of the optimiser (the TS-1
+/// replacement) must examine it again.
 pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
 
 #[cfg(test)]
@@ -2059,8 +2062,9 @@ mod tests {
     }
 
     /// While the ARIMA work budget is set, a column holding a nonzero value below
-    /// `ARIMA_MIN_MAGNITUDE` is refused, because arithmetic on such values (and on the
-    /// differences and squares the fit forms from them) is far slower than the budget assumes.
+    /// `ARIMA_MIN_MAGNITUDE` is refused, because the differences, products and squares the fit
+    /// forms from such values can be subnormal, and arithmetic on those is far slower than the
+    /// budget assumes.
     /// Zero, NaN and infinities cost no more than other numbers and pass, as does everything when
     /// the budget is off.
     #[test]

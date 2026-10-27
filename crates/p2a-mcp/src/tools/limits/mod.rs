@@ -32,7 +32,8 @@
 //! - [`Limits::check_arima_fit`] and [`Limits::check_arima_series`] let the ARIMA handlers
 //!   refuse a fit before it starts, because the `arima` crate's optimiser cannot be stopped
 //!   once it runs: one whose work exceeds [`Limits::arima_fit_work`], and one whose series holds
-//!   values small enough to slow every operation of it ([`ARIMA_MIN_MAGNITUDE`]).
+//!   a nonzero value below [`ARIMA_MIN_MAGNITUDE`], small enough that the fit's arithmetic on it
+//!   can become subnormal and much slower.
 //!
 //! Every refusal is a [`LimitViolation`] whose message tells an LLM caller what to change. It never
 //! contains filesystem paths, environment variable names or internals; `override_key` names the
@@ -1084,14 +1085,15 @@ impl Limits {
 
     /// Checks the column an ARIMA fit reads for a nonzero value smaller than
     /// [`ARIMA_MIN_MAGNITUDE`] while the [`Limits::arima_fit_work`] budget is set (`None`
-    /// passes): arithmetic on such values is far slower than the budget's time per unit allows
-    /// for. The floor keeps the column, its differences, and their products and squares with
-    /// ordinary-sized coefficients out of that range. It does not cover the MA residual
-    /// recursion at an intercept of exactly 0.0 over a stretch of exact zeros, which can sit in
-    /// the subnormal range (one pass measured about 28 times slower); [`ARIMA_MIN_MAGNITUDE`]
-    /// says why that is not believed to last a whole fit, and records it as a residual risk for
-    /// a change of the optimiser. The ARIMA handlers call it after [`Limits::check_arima_fit`].
-    /// `column` names the series in the refusal.
+    /// passes): the fit's products and squares of such values can be subnormal, and arithmetic
+    /// on those is far slower than the budget's time per unit allows for. The floor keeps the
+    /// column, its differences, and their products and squares with ordinary-sized coefficients
+    /// out of that range. It does not cover the MA residual recursion at an intercept of
+    /// exactly 0.0 over a stretch of exact zeros, which can sit in the subnormal range (one pass
+    /// measured about 28 times slower); [`ARIMA_MIN_MAGNITUDE`] says why that is not believed to
+    /// last a whole fit, and records it as a residual risk for a change of the optimiser. The
+    /// ARIMA handlers call it after [`Limits::check_arima_fit`]. `column` names the series in
+    /// the refusal.
     pub fn check_arima_series(
         &self,
         tool: &str,
