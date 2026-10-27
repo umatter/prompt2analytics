@@ -4,13 +4,16 @@
 //! polars' own counts take memory in proportion to the rows of the frame: `n_unique` of an
 //! unsorted column sorts a copy of it, and grouping by several columns builds the row indices of
 //! every group. [`count`] instead keeps one hash map entry per distinct value seen and stops once
-//! it holds `stop` of them, so that a count takes memory in proportion to `stop`, and a pivot
-//! that cannot pass is refused after reading only as many rows as it takes to be sure. Values
+//! it holds `stop` of them. One column is counted in one set, and a count that cannot pass stops
+//! after reading only as many rows as it takes to be sure. Several columns are counted one
+//! column at a time, in one map of at most `stop` entries at a time plus one 8-byte number per
+//! row of the frame (`count_keys`), so the number of columns does not multiply the maps. Values
 //! are keyed as the pivot groups them ([`Key`]).
 //!
 //! A column of a type that has no key here (lists, arrays, structs, objects) and a partitioned
 //! column are counted by polars instead, exactly and without the bound; there, only the dataset
-//! quotas and the dataset-height refusal of `check_pivot` bound the rows polars reads.
+//! quotas and the refusals `check_pivot` makes before counting (of the rows of the frame, and of
+//! the values its pivot would group) bound what polars reads.
 
 use std::fmt;
 use std::hash::Hash;
@@ -80,14 +83,19 @@ pub(super) fn count(df: &DataFrame, names: &[&str], stop: u64) -> PolarsResult<C
         .iter()
         .map(|name| df.column(name))
         .collect::<PolarsResult<Vec<_>>>()?;
+    let height = df.height();
     let mut keyed = Vec::with_capacity(columns.len());
     for column in &columns {
+        // A column yields one key per row of its own length (a scalar column carries its
+        // length), and every column of a frame has the frame's height, so `count_keys` reads
+        // `height` keys from each. A column of another length, which a frame cannot hold, is
+        // left to polars rather than miscounted.
         match Keyed::of(column)? {
-            Some(k) => keyed.push(k),
-            None => return polars_count(df, names, &columns).map(Count::exact),
+            Some(k) if column.len() == height => keyed.push(k),
+            _ => return polars_count(df, names, &columns).map(Count::exact),
         }
     }
-    let n = count_keys(&keyed, df.height(), stop);
+    let n = count_keys(&keyed, height, stop);
     Ok(Count { n, exact: n < stop })
 }
 
@@ -228,14 +236,16 @@ fn number<K: Hash + Eq>(ids: &mut PlHashMap<K, u64>, key: K) -> u64 {
     *ids.entry(key).or_insert(next)
 }
 
-/// The distinct combinations of the keys of `columns` over their `height` rows, counted up to
-/// `stop` (returned once that many are seen; 0 without columns).
+/// The distinct combinations of the keys of `columns`, each of which has exactly `height` keys
+/// ([`count`] checks it), counted up to `stop` (returned once that many are seen; 0 without
+/// columns).
 ///
-/// One column's keys go into one set. Of several, the values of each column are numbered as
-/// they are first seen, and each prefix of the columns is numbered by the pair (number of the
-/// shorter prefix, number of the next column's value). Every map then holds at most as many
-/// entries as there are distinct combinations, so the count stops as soon as any of them
-/// reaches `stop`.
+/// One column's keys go into one set. Several are numbered one column at a time: each row
+/// carries the number of its combination of the columns read so far, and the next column numbers
+/// the distinct pairs (that number, the row's key in the column) in a map that is dropped once
+/// the column is read. Fewer columns never have more distinct combinations than all of them, so
+/// the count stops as soon as any map reaches `stop`. It holds one map of at most `stop` entries
+/// at a time, plus one number per row, however many columns there are.
 fn count_keys(columns: &[Keyed], height: usize, stop: u64) -> u64 {
     if columns.is_empty() || stop == 0 {
         return 0;
@@ -251,34 +261,21 @@ fn count_keys(columns: &[Keyed], height: usize, stop: u64) -> u64 {
         }
         return seen.len() as u64;
     }
-    let mut keys: Vec<_> = columns.iter().map(Keyed::keys).collect();
-    let mut values: Vec<PlHashMap<Key<'_>, u64>> =
-        columns.iter().map(|_| PlHashMap::default()).collect();
-    let mut prefixes: Vec<PlHashMap<(u64, u64), u64>> =
-        (1..columns.len()).map(|_| PlHashMap::default()).collect();
-    for _ in 0..height {
-        let mut prefix = 0;
-        for (j, column) in keys.iter_mut().enumerate() {
-            let Some(key) = column.next() else {
-                break;
-            };
-            let value = number(&mut values[j], key);
-            if values[j].len() >= stop_len {
+    // Every row starts in combination 0 of no columns.
+    let mut ids = vec![0u64; height];
+    let mut distinct = 0;
+    for column in columns {
+        let mut pairs: PlHashMap<(u64, Key<'_>), u64> = PlHashMap::default();
+        // The column has one key for each of the `height` rows, so each row's number moves on.
+        for (id, key) in ids.iter_mut().zip(column.keys()) {
+            *id = number(&mut pairs, (*id, key));
+            if pairs.len() >= stop_len {
                 return stop;
             }
-            prefix = match j.checked_sub(1) {
-                None => value,
-                Some(p) => {
-                    let id = number(&mut prefixes[p], (prefix, value));
-                    if prefixes[p].len() >= stop_len {
-                        return stop;
-                    }
-                    id
-                }
-            };
         }
+        distinct = pairs.len();
     }
-    prefixes.last().map_or(0, |last| last.len() as u64)
+    distinct as u64
 }
 
 #[cfg(test)]
@@ -482,6 +479,11 @@ mod tests {
             unbounded(&with_scalar, &["a", "s", "b"]),
             groups(&df, &["a", "b"])
         );
+        // A count over several columns stops at the first column whose combinations reach the
+        // bound: `a` alone has 4 values, so the pairs with `c` never need counting.
+        assert_eq!(groups(&df, &["a"]), 4);
+        assert_eq!(count(&df, &["a", "c"], 4).unwrap(), Count::at_least(4));
+        assert_eq!(count(&df, &["a", "c"], 3).unwrap(), Count::at_least(3));
         // Several columns, one without keys: polars counts them.
         let mut with_list = df.clone();
         let lists: Vec<Series> = (0..df.height())
