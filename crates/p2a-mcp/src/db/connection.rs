@@ -642,11 +642,11 @@ impl DbConnection {
     }
 
     /// The lock on the store turns' map, held until the returned guard is
-    /// dropped: meanwhile no turn ends and no call joins one. End turns on
-    /// another thread while holding it, and do not await: `StoreTurn::drop`
-    /// takes this lock, so a turn ended on this thread, or by a task this
-    /// thread's runtime must poll, never ends. The guard is a plain
-    /// [`MutexGuard`], so `unused_must_use` warns of a bare call and
+    /// dropped: meanwhile no turn ends and no call joins one. End turns only
+    /// on another thread while holding it, and do not await:
+    /// `StoreTurn::drop` takes this lock, so ending a turn on this thread,
+    /// or in a task that only this thread polls, deadlocks. The guard is a
+    /// plain [`MutexGuard`], so `unused_must_use` warns of a bare call and
     /// `clippy::await_holding_lock` of an await while it is held.
     #[cfg(test)]
     pub(crate) fn hold_store_turns(&self) -> MutexGuard<'_, StoreTurnMap> {
