@@ -68,9 +68,12 @@ pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), Tran
 /// 10-minute cleanup task), the analytics server, the audit logger, the tool
 /// governor and, with the `db` feature, the persistent session manager. The
 /// HTTP transport, the embedded desktop server and the integration tests all
-/// start from here. Process-wide policies are installed by [`serve`], not
-/// here, so tests can build several apps. Like [`build_app`], it reads
-/// `config` as an HTTP configuration whatever its `transport` field says.
+/// start from here. Process-wide policies (the request limits, the
+/// allocation ceiling, the session-directory switch) are installed by
+/// [`serve`], not here, so tests can build several apps; a caller that serves
+/// the router itself installs them as `serve` does. Like [`build_app`], it
+/// reads `config` as an HTTP configuration whatever its `transport` field
+/// says.
 pub async fn build_app_with(
     config: &ServerConfig,
     exec: ExecConfig,
@@ -132,18 +135,10 @@ pub async fn build_app_with(
 }
 
 /// The request limits of `config`'s resource profile with its overrides
-/// applied, the values `tools::limits::current()` holds once installed. An
+/// applied (`tools::limits::resolve`), the values [`serve`] installs. An
 /// invalid override refuses the start.
-#[cfg(feature = "db")]
 fn resolve_limits(config: &ServerConfig) -> Result<crate::tools::limits::Limits, TransportError> {
-    use crate::config::ResourceProfile;
-    use crate::tools::limits::Limits;
-    match config.resource_profile() {
-        ResourceProfile::Off => Limits::off(),
-        ResourceProfile::Hosted => Limits::hosted(),
-    }
-    .with_overrides(&config.limits.overrides)
-    .map_err(TransportError::Config)
+    crate::tools::limits::resolve(config).map_err(TransportError::Config)
 }
 
 /// The session database must lie outside the path-jail root (INF-1): file
@@ -246,16 +241,18 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 /// guard and Host check follow the socket actually served, not the address
 /// or transport a caller wrote in `config` (the default transport is stdio).
 /// Then it validates the configuration again, so no caller can skip the
-/// guard, builds the app, installs the process-wide policies (allocation
-/// ceiling, session directories) and serves it with graceful shutdown.
+/// guard, resolves its request limits (the resource profile's, with
+/// `--limit-override` (`P2A_LIMIT_OVERRIDES`) applied; an invalid override
+/// refuses the start before anything is spawned), builds the app, installs
+/// the process-wide policies (request limits, allocation ceiling, session
+/// directories) and serves it with graceful shutdown. So an open public
+/// configuration always gets the hosted request limits, whichever public
+/// start function serves it. The installed limits replace any installed
+/// earlier in the process; a local configuration without overrides installs
+/// the off profile, which is also what `tools::limits::current()` returns
+/// while nothing is installed.
 /// Before it returns, every audit entry queued by then is written out; a call
 /// still running after its deadline answer is logged when its work ends.
-/// It does not install the request limits or apply `--limit-override`
-/// (`P2A_LIMIT_OVERRIDES`); `transport::start_transport` does that before it
-/// calls `start_http_transport`. A caller that uses `serve` directly gets the
-/// off profile's request limits, whatever the governor's resource profile,
-/// unless it first calls
-/// `tools::limits::install(tools::limits::resolve(&config)?)`.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     mut config: ServerConfig,
@@ -268,9 +265,11 @@ pub async fn serve(
     config
         .validate()
         .map_err(|e| TransportError::Config(e.to_string()))?;
+    let limits = resolve_limits(&config)?;
     let (app, state) = build_app(&config).await?;
     let exec = state.governor.config().clone();
     crate::exec::install_process_policies(&exec);
+    crate::tools::limits::install(limits);
     log_startup(&config, &exec);
     if let Some(limit) = exec.stuck_exit {
         spawn_stuck_watchdog(state.governor.clone(), limit);
@@ -630,16 +629,21 @@ mod serve_tests {
         let held = crate::audit::gate::hold(&log);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // `serve` installs process-wide policies (the p2a-core allocation
-        // ceiling, the session-directory switch) in this test process, which
-        // the other lib tests share. Resolved as `serve` resolves them (at
-        // the bound address), they must be the defaults.
+        // `serve` installs process-wide policies (the request limits, the
+        // p2a-core allocation ceiling, the session-directory switch) in this
+        // test process, which the other lib tests share. Resolved as `serve`
+        // resolves them (at the bound address), they must be the defaults.
         let mut bound = config.clone();
         bound.http.addr = addr;
         let exec = crate::exec::ExecConfig::from_config(&bound);
         assert!(
             exec.alloc_ceiling_bytes.is_none() && !exec.session_dirs,
             "serve would install a non-default process policy in the shared test process"
+        );
+        assert_eq!(
+            crate::tools::limits::resolve(&bound),
+            Ok(crate::tools::limits::Limits::off()),
+            "serve would install request limits other than the default in the shared test process"
         );
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let mut server = tokio::spawn(serve(listener, config, async {
