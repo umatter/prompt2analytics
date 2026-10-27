@@ -15,8 +15,8 @@
 //!   is `connection_busy`.
 //!
 //! An answer echoes at most [`MAX_ID_BYTES`] of a message's `id`: a message
-//! with a longer one is refused, and that refusal, like any answer that has
-//! no id to echo, carries the id `system`.
+//! with a longer one is refused with the code `id_too_long`, and that
+//! refusal, like any answer that has no id to echo, carries the id `system`.
 //! A parse error, and a tool's refusal of arguments that do not deserialise,
 //! give serde's message, which quotes the offending value, cut to
 //! [`MAX_QUOTE_BYTES`](crate::server::MAX_QUOTE_BYTES) of it
@@ -140,7 +140,9 @@ pub enum ServerMessage {
     /// Request completed
     Done { id: String },
     /// Error occurred. `code` is the machine-readable code of a governor or
-    /// tool-call refusal (for example `server_busy`), when there is one.
+    /// tool-call refusal (for example `server_busy`) or of a message the
+    /// connection refused (`id_too_long`, `connection_busy`), when there is
+    /// one.
     Error {
         id: String,
         message: String,
@@ -287,20 +289,26 @@ impl Incoming {
     }
 }
 
-/// Parse and handle one client message; failures are sent as `error`s.
+/// Parse and handle one client message; failures are sent as `error`s with
+/// the id `system`. Every answer to a message carries its id, so a message
+/// whose id is longer than [`MAX_ID_BYTES`] is refused, with the code
+/// `id_too_long`, before it is handled.
 async fn handle_text(state: &mut WsState, text: &str, tx: &mpsc::Sender<ServerMessage>) {
-    let error = match serde_json::from_str::<ClientMessage>(text) {
-        Ok(client_msg) => match handle_client_message(state, client_msg, tx).await {
-            Ok(()) => return,
-            Err(e) => e,
+    let (message, code) = match serde_json::from_str::<ClientMessage>(text) {
+        Ok(client_msg) => match client_msg.id().filter(|id| id.len() > MAX_ID_BYTES) {
+            Some(id) => (id_too_long(id), Some("id_too_long")),
+            None => match handle_client_message(state, client_msg, tx).await {
+                Ok(()) => return,
+                Err(e) => (e, None),
+            },
         },
-        Err(e) => invalid_format(&e),
+        Err(e) => (invalid_format(&e), None),
     };
     let _ = tx
         .send(ServerMessage::Error {
             id: "system".to_string(),
-            message: error,
-            code: None,
+            message,
+            code: code.map(str::to_string),
         })
         .await;
 }
@@ -409,7 +417,7 @@ impl Waiting {
         if let Some(message) = refusal {
             let id = serde_json::from_str::<MessageId>(&text)
                 .ok()
-                .and_then(|message| message.id);
+                .and_then(|parsed| parsed.id);
             return Some(ServerMessage::Error {
                 id: answer_id(id.as_deref()),
                 message,
@@ -422,17 +430,13 @@ impl Waiting {
     }
 }
 
-/// Handle a client message. Every answer to it carries its id, so a message
-/// whose id is longer than [`MAX_ID_BYTES`] is refused (as `system`) before
-/// it is handled.
+/// Handle a client message whose id, if it has one, [`handle_text`] has
+/// checked against [`MAX_ID_BYTES`]: every answer to it carries that id.
 async fn handle_client_message(
     state: &mut WsState,
     msg: ClientMessage,
     tx: &mpsc::Sender<ServerMessage>,
 ) -> Result<(), String> {
-    if let Some(id) = msg.id().filter(|id| id.len() > MAX_ID_BYTES) {
-        return Err(id_too_long(id));
-    }
     match msg {
         ClientMessage::Auth { session_id } => {
             match state.session_manager.get_session(&session_id).await {
@@ -1022,7 +1026,7 @@ mod tests {
 
     /// Every answer to a message echoes its id: one longer than the bound is
     /// refused before the message is handled, and the refusal does not echo
-    /// it.
+    /// it but has a code of its own, which a parse error does not.
     #[tokio::test]
     async fn a_message_whose_id_is_too_long_is_refused_unechoed() {
         let (mut state, session, tx, mut rx) = authenticated(Default::default()).await;
@@ -1047,7 +1051,7 @@ mod tests {
             match rx.recv().await {
                 Some(ServerMessage::Error { id, message, code }) => {
                     assert_eq!(id, "system");
-                    assert_eq!(code, None);
+                    assert_eq!(code.as_deref(), Some("id_too_long"));
                     assert_eq!(
                         message,
                         format!(
