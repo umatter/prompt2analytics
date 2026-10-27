@@ -350,6 +350,14 @@ impl CausalTree {
         }
     }
 
+    /// The fewest rows a node needs in each part (structure and estimation) to be split:
+    /// two children of `min_node_size` rows. It saturates at `usize::MAX`, more rows than
+    /// any node can hold, so a `min_node_size` above `usize::MAX / 2` stops every split
+    /// instead of overflowing; below that it is exactly `2 * min_node_size`.
+    fn min_rows_to_split(&self) -> usize {
+        self.min_node_size.saturating_mul(2)
+    }
+
     /// Fit the tree using honest splitting.
     ///
     /// The splitting sample is used to determine tree structure,
@@ -406,9 +414,10 @@ impl CausalTree {
         let (n_treated, n_control) = count_treated_control(w_est, est_indices);
 
         // Stop if: max depth reached, too few samples, or no variation in treatment
+        let min_rows = self.min_rows_to_split();
         if depth >= self.max_depth
-            || n_split < 2 * self.min_node_size
-            || n_est < 2 * self.min_node_size
+            || n_split < min_rows
+            || n_est < min_rows
             || n_treated < self.min_node_size
             || n_control < self.min_node_size
         {
@@ -1545,6 +1554,55 @@ mod tests {
         assert_eq!(at(&huge, usize::MAX, usize::MAX), u64::MAX);
         assert_eq!(at(&d, usize::MAX, 4), u64::MAX);
         assert!(at(&d, 0, 0) > 0);
+    }
+
+    /// A `min_node_size` above `usize::MAX / 2` cannot split any node, with or without
+    /// honesty: twice it (the rows a node needs in each part to be split) used to overflow,
+    /// a panic in a debug build and a product wrapped to a small number in a release build.
+    /// Every tree is a single leaf, exactly as at a `min_node_size` of all the rows.
+    #[test]
+    fn a_min_node_size_above_half_of_usize_neither_panics_nor_wraps() {
+        let (x, y, w) = generate_test_data(60, 5);
+        for honesty in [true, false] {
+            let fit = |min_node_size| {
+                let cfg = CausalForestConfig {
+                    honesty,
+                    min_node_size,
+                    ..small_config()
+                };
+                causal_forest_arrays(x.view(), y.view(), w.view(), names3(), cfg).unwrap()
+            };
+            let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+            let want = fit(60);
+            for min_node_size in [usize::MAX / 2 + 1, usize::MAX - 1, usize::MAX] {
+                let got = fit(min_node_size);
+                let case = format!("honesty {honesty}, min_node_size {min_node_size}");
+                assert!(
+                    got.trees
+                        .iter()
+                        .all(|t| matches!(t.root, Some(CausalTreeNode::Leaf { .. }))),
+                    "{case}"
+                );
+                assert_eq!(bits(&got.predictions), bits(&want.predictions), "{case}");
+                assert_eq!(
+                    bits(&got.variance_estimates),
+                    bits(&want.variance_estimates),
+                    "{case}"
+                );
+                assert_eq!(
+                    bits(&[got.ate, got.ate_se, got.oob_error]),
+                    bits(&[want.ate, want.ate_se, want.oob_error]),
+                    "{case}"
+                );
+            }
+        }
+        // The rule itself, which a release build would otherwise wrap without a sign: the
+        // product saturates above `usize::MAX / 2` and is exact up to it.
+        let rows = |min_node_size| CausalTree::new(10, min_node_size, 1).min_rows_to_split();
+        assert_eq!(rows(usize::MAX / 2 + 1), usize::MAX);
+        assert_eq!(rows(usize::MAX), usize::MAX);
+        assert_eq!(rows(usize::MAX / 2), usize::MAX - 1);
+        assert_eq!((rows(0), rows(5)), (0, 10));
     }
 
     /// `run_causal_forest_config` gives the configuration `run_causal_forest` used before it

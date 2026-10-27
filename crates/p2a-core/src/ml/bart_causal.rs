@@ -466,6 +466,14 @@ impl RegressionTree {
         }
     }
 
+    /// The fewest rows a node needs to be split: two children of `min_node_size` rows. It
+    /// saturates at `usize::MAX`, more rows than any node can hold, so a `min_node_size`
+    /// above `usize::MAX / 2` stops every split instead of overflowing; below that it is
+    /// exactly `2 * min_node_size`.
+    fn min_rows_to_split(&self) -> usize {
+        self.min_node_size.saturating_mul(2)
+    }
+
     /// Fit the tree to data.
     fn fit(&mut self, x: ArrayView2<f64>, y: ArrayView1<f64>, rng_state: &mut u64) {
         self.n_features = x.ncols();
@@ -485,7 +493,7 @@ impl RegressionTree {
         let n_samples = indices.len();
 
         // Stopping conditions
-        if depth >= self.max_depth || n_samples < 2 * self.min_node_size {
+        if depth >= self.max_depth || n_samples < self.min_rows_to_split() {
             return self.create_leaf(y, indices);
         }
 
@@ -1613,6 +1621,59 @@ mod tests {
         assert_eq!(at(&huge, usize::MAX, usize::MAX), u64::MAX);
         assert_eq!(at(&d, usize::MAX, 4), u64::MAX);
         assert!(at(&d, 0, 0) > 0);
+    }
+
+    /// A `min_node_size` above `usize::MAX / 2` cannot split any node: twice it (the rows a
+    /// node needs to be split) used to overflow, a panic in a debug build, and in a release
+    /// build a product wrapped to a small number that let the tree go on to draw covariates
+    /// for a split it could not make, which moved the random stream every later subsample
+    /// is drawn from. Every tree is a single leaf, and the fit is exactly the one at a
+    /// `min_node_size` of all the rows.
+    #[test]
+    fn a_min_node_size_above_half_of_usize_neither_panics_nor_wraps() {
+        let (y, w, x) = generate_test_data(60, 3);
+        let fit = |min_node_size| {
+            let cfg = BartCausalConfig {
+                min_node_size,
+                ..small()
+            };
+            bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap()
+        };
+        let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        let want = fit(60);
+        for min_node_size in [usize::MAX / 2 + 1, usize::MAX - 1, usize::MAX] {
+            let got = fit(min_node_size);
+            for ensemble in [&got.ensemble_treated, &got.ensemble_control] {
+                assert!(
+                    ensemble
+                        .as_ref()
+                        .unwrap()
+                        .trees
+                        .iter()
+                        .all(|t| matches!(t.root, Some(TreeNode::Leaf { .. }))),
+                    "min_node_size {min_node_size}"
+                );
+            }
+            for (g, e) in [
+                (&got.cate, &want.cate),
+                (&got.cate_lower, &want.cate_lower),
+                (&got.cate_upper, &want.cate_upper),
+                (&got.cate_se, &want.cate_se),
+            ] {
+                assert_eq!(bits(g), bits(e), "min_node_size {min_node_size}");
+            }
+            assert_eq!(
+                bits(&[got.ate, got.ate_se, got.ate_ci_lower, got.ate_ci_upper]),
+                bits(&[want.ate, want.ate_se, want.ate_ci_lower, want.ate_ci_upper]),
+                "min_node_size {min_node_size}"
+            );
+        }
+        // The rule itself: the product saturates above `usize::MAX / 2` and is exact up to it.
+        let rows = |min_node_size| RegressionTree::new(4, min_node_size, 1).min_rows_to_split();
+        assert_eq!(rows(usize::MAX / 2 + 1), usize::MAX);
+        assert_eq!(rows(usize::MAX), usize::MAX);
+        assert_eq!(rows(usize::MAX / 2), usize::MAX - 1);
+        assert_eq!((rows(0), rows(5)), (0, 10));
     }
 
     /// `run_bart_causal_config` gives the configuration `run_bart_causal` used before it
