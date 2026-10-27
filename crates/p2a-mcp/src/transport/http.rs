@@ -352,19 +352,26 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig) {
     );
 }
 
-/// Exit with code 70 when every tool permit stays held by overdue work for
-/// `limit`, so the platform restarts the machine instead of leaving it
-/// wedged. Set by the hosted profile (300 s) or `--stuck-exit-secs`.
+/// Exit with code 70 when the governor stays unhealthy for `limit` (every
+/// tool permit held by overdue work, or the process stuck above its memory
+/// soft limit with nothing running), so the platform restarts the machine
+/// instead of leaving it wedged. Set by the hosted profile (300 s) or
+/// `--stuck-exit-secs`.
 fn spawn_stuck_watchdog(governor: Arc<ToolGovernor>, limit: Duration) {
     tokio::spawn(async move {
         let mut watchdog = StuckWatchdog::new(limit);
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         loop {
             tick.tick().await;
-            if watchdog.observe(governor.health().healthy, Instant::now()) {
+            let health = governor.health();
+            if watchdog.observe(health.healthy, Instant::now()) {
+                let cause = if health.memory_stuck {
+                    "process memory stayed above the soft limit with no call running"
+                } else {
+                    "tool workers stuck past their deadline"
+                };
                 tracing::error!(
-                    "tool workers stuck past their deadline for {limit:?}; exiting so the \
-                     platform restarts the machine"
+                    "{cause} for {limit:?}; exiting so the platform restarts the machine"
                 );
                 std::process::exit(70);
             }
@@ -564,7 +571,8 @@ pub struct ToolDefinition {
 
 /// Health check endpoint: 200 with `"status": "ok"`, or 503 with
 /// `"status": "degraded"` while every tool permit is held by work past its
-/// deadline. The `governor` object reports in-flight and overdue work; in
+/// deadline or the process is stuck above its memory soft limit
+/// (`GovernorHealth::memory_stuck`). The `governor` object reports in-flight and overdue work; in
 /// open public mode it leaves out the in-flight count and the process memory
 /// (`ToolGovernor::health_report`).
 async fn health_check(State(state): State<AppState>) -> Response {
