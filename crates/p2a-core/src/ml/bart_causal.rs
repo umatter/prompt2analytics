@@ -1308,10 +1308,9 @@ fn estimate_propensity(
     rng_state: &mut u64,
 ) -> EconResult<Array1<f64>> {
     let n = x.nrows();
-    let p = x.ncols();
 
-    // Use a simple ensemble to predict propensity
-    let mtry = (p as f64).sqrt().ceil() as usize;
+    // Use a simple ensemble to predict propensity; `None` draws the default number of
+    // covariates per split (`default_mtry`), as the response surfaces do by default.
     let mut ensemble = TreeEnsemble::new();
     ensemble.fit(
         x,
@@ -1320,7 +1319,7 @@ fn estimate_propensity(
         PROPENSITY_DEPTH,
         5,
         0.632,
-        Some(mtry),
+        None,
         rng_state,
     )?;
 
