@@ -332,20 +332,36 @@ impl RowClass {
     }
 }
 
+/// One set of changes a tree-ensemble fit refused by [`Limits::check_ensemble`] could make to
+/// its settings instead of its rows ([`EnsembleChange::tiers`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsembleTier {
+    /// The changes, completing "or ..." in the refusal (`lower n_trees or max_depth`).
+    pub advice: String,
+    /// The bound for the dataset's rows when the changes in `advice` are made at the values
+    /// of least memory the tool accepts. A change that `advice` adds only as one more way to
+    /// lower the bound (BART's `set include_propensity = false` beside the others) may be left
+    /// out of it: the other changes alone then reach `cheapest`.
+    pub cheapest: u64,
+}
+
 /// What a tree-ensemble fit refused by [`Limits::check_ensemble`] could change instead of its
 /// rows.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EnsembleChange<'a> {
-    /// The changes that lower the fit's memory bound, completing "or ..." in the refusal
-    /// (`lower n_trees or max_depth`).
-    pub advice: &'a str,
-    /// The parameters those changes set (`n_trees or max_depth`), named when no values of them
-    /// bring the bound within the limit.
+    /// The sets of changes to offer, in order: the refusal offers the first whose `cheapest`
+    /// is within the limit, and none when no tier's is, so that the changes it offers can
+    /// bring the fit within the limit. A tier lists only changes that each lower the bound
+    /// from the settings it starts from (the request's own, or those after the change a later
+    /// tier requires). A change that can also raise the bound (turning the forest's honest
+    /// splitting off) belongs in a later tier of its own, worded as required there, so that
+    /// the limit, which only this check knows, decides whether it is offered.
+    pub tiers: Vec<EnsembleTier>,
+    /// Every parameter the tiers can set (`n_trees or max_depth`), named when no tier brings
+    /// the bound within the limit. For "no values of these parameters" to be true, the tiers
+    /// together must reach the least memory the tool accepts (a request already there needs
+    /// no tier for it).
     pub parameters: &'a str,
-    /// The bound for the dataset's rows at the values of `parameters` that give the least
-    /// memory, among the values the tool accepts. The refusal offers `advice` only when it is
-    /// within the limit, so that the advice is true for every input.
-    pub cheapest: u64,
 }
 
 /// A tool whose dataset height is limited by a [`RowClass`].
@@ -1085,8 +1101,9 @@ impl Limits {
     /// height. `settings` names the settings the bound depends on for the refusal
     /// (`n_trees = 2000 and max_depth = 10`), and `change` what the caller could change
     /// instead ([`EnsembleChange`]). The refusal says how many rows the settings allow, when
-    /// any, and offers `change.advice` only when its `cheapest` bound is within the limit;
-    /// otherwise it says that no values of `change.parameters` fit `n_rows` rows.
+    /// any, and offers the advice of the first of `change.tiers` whose `cheapest` bound is
+    /// within the limit; when none is, it says that no values of `change.parameters` fit
+    /// `n_rows` rows.
     /// The handlers call it before they fit: the fits keep every tree they grow, so the
     /// deadline would stop one only after its memory had grown, and the per-allocation ceiling
     /// sees each node on its own.
@@ -1119,24 +1136,22 @@ impl Limits {
         let fit_rows = (bound(lo) <= limit && lo > 0).then_some(lo);
         let bytes =
             |b: u64| p2a_core::memory::format_bytes(usize::try_from(b).unwrap_or(usize::MAX));
-        let EnsembleChange {
-            advice: change_advice,
-            parameters,
-            cheapest,
-        } = change;
+        let EnsembleChange { tiers, parameters } = change;
+        let tier = tiers.iter().find(|t| t.cheapest <= limit);
         let no_setting =
             format!("No values of {parameters} bring it within this limit on {n_rows} rows.");
-        let advice = match (fit_rows, cheapest <= limit) {
-            (Some(r), true) => format!(
+        let advice = match (fit_rows, tier) {
+            (Some(r), Some(t)) => format!(
                 "Use a sample of at most {r} rows at these settings, for example with \
-                 munge_sample, or {change_advice}."
+                 munge_sample, or {}.",
+                t.advice
             ),
-            (None, true) => format!("To run it on {n_rows} rows, {change_advice}."),
-            (Some(r), false) => format!(
+            (None, Some(t)) => format!("To run it on {n_rows} rows, {}.", t.advice),
+            (Some(r), None) => format!(
                 "{no_setting} Use a sample of at most {r} rows at these settings, for example \
                  with munge_sample."
             ),
-            (None, false) => format!("{no_setting} No sample does at these settings either."),
+            (None, None) => format!("{no_setting} No sample does at these settings either."),
         };
         let tool = echo(tool);
         Err(LimitViolation {
@@ -2349,13 +2364,21 @@ mod tests {
         move |rows| c.memory_bound(rows, 4)
     }
 
+    /// An [`EnsembleChange`] of one tier, `advice` with its `cheapest` bound, setting
+    /// `parameters`.
+    fn one_tier(advice: &str, parameters: &'static str, cheapest: u64) -> EnsembleChange<'static> {
+        EnsembleChange {
+            tiers: vec![EnsembleTier {
+                advice: advice.to_string(),
+                cheapest,
+            }],
+            parameters,
+        }
+    }
+
     /// An [`EnsembleChange`] whose changes always fit (`cheapest` 0).
     fn fixable(advice: &'static str) -> EnsembleChange<'static> {
-        EnsembleChange {
-            advice,
-            parameters: "n_trees",
-            cheapest: 0,
-        }
+        one_tier(advice, "n_trees", 0)
     }
 
     /// The hosted `ensemble_bytes` budget admits both tools' defaults, and 1.5 times each
@@ -2395,11 +2418,11 @@ mod tests {
                 "ml_causal_forest",
                 400_000,
                 "n_trees = 2000 and max_depth = 10",
-                EnsembleChange {
-                    advice: "lower n_trees or max_depth",
-                    parameters: "n_trees or max_depth",
+                one_tier(
+                    "lower n_trees or max_depth",
+                    "n_trees or max_depth",
                     cheapest,
-                },
+                ),
                 &bound,
             )
             .unwrap_err();
@@ -2438,11 +2461,11 @@ mod tests {
                 "ml_bart_causal",
                 1_500_000,
                 "n_trees = 1, max_depth = 0 and n_bootstrap = 2",
-                EnsembleChange {
-                    advice: "lower n_trees, max_depth or n_bootstrap",
-                    parameters: "n_trees, max_depth or n_bootstrap",
+                one_tier(
+                    "lower n_trees, max_depth or n_bootstrap",
+                    "n_trees, max_depth or n_bootstrap",
                     cheapest,
-                },
+                ),
                 &bound,
             )
             .unwrap_err();
@@ -2478,11 +2501,7 @@ mod tests {
                 "ml_bart_causal",
                 50,
                 "s",
-                EnsembleChange {
-                    advice: "lower n_trees",
-                    parameters: "n_trees",
-                    cheapest: u64::MAX,
-                },
+                one_tier("lower n_trees", "n_trees", u64::MAX),
                 |_| u64::MAX,
             )
             .unwrap_err();
@@ -2522,11 +2541,7 @@ mod tests {
                     "ml_causal_forest",
                     10,
                     "s",
-                    EnsembleChange {
-                        advice: "lower n_trees",
-                        parameters: "n_trees",
-                        cheapest,
-                    },
+                    one_tier("lower n_trees", "n_trees", cheapest),
                     |rows| 995 + rows as u64,
                 )
                 .unwrap_err()
@@ -2541,6 +2556,71 @@ mod tests {
             at_limit(1_001).contains("No values of n_trees bring it"),
             "{}",
             at_limit(1_001)
+        );
+    }
+
+    /// The refusal offers the first tier whose least memory is within the limit: a later tier
+    /// when the first one's is over it, and none, but the parameters, when every tier's is.
+    #[test]
+    fn ensemble_refusal_offers_the_first_tier_that_fits() {
+        let tight = Limits::off()
+            .with_overrides(&["ensemble_bytes=1000".to_string()])
+            .unwrap();
+        let tiers = |first: u64, second: u64| EnsembleChange {
+            tiers: vec![
+                EnsembleTier {
+                    advice: "lower n_trees".to_string(),
+                    cheapest: first,
+                },
+                EnsembleTier {
+                    advice: "set honesty = false".to_string(),
+                    cheapest: second,
+                },
+            ],
+            parameters: "n_trees or honesty",
+        };
+        let refuse = |change, bound: fn(usize) -> u64| {
+            tight
+                .check_ensemble("ml_causal_forest", 10, "s", change, bound)
+                .unwrap_err()
+                .message
+        };
+        // Some rows fit at the request's settings.
+        let rows = |r: usize| 995 + r as u64;
+        let both = refuse(tiers(900, 800), rows);
+        assert!(both.ends_with("munge_sample, or lower n_trees."), "{both}");
+        let second = refuse(tiers(1_001, 1_000), rows);
+        assert!(
+            second.ends_with("munge_sample, or set honesty = false.") && !second.contains("lower"),
+            "{second}"
+        );
+        let neither = refuse(tiers(1_001, 1_002), rows);
+        assert!(
+            neither.contains("No values of n_trees or honesty bring it within this limit")
+                && !neither.contains("lower")
+                && !neither.contains("set honesty"),
+            "{neither}"
+        );
+        // No rows fit: the tier that fits is the only way to run it.
+        let second = refuse(tiers(5_000, 10), |_| u64::MAX);
+        assert!(
+            second.ends_with("To run it on 10 rows, set honesty = false."),
+            "{second}"
+        );
+        // No tiers at all: the request is already at the least memory its parameters reach.
+        let none = refuse(
+            EnsembleChange {
+                tiers: Vec::new(),
+                parameters: "n_trees",
+            },
+            rows,
+        );
+        assert!(
+            none.contains(
+                "No values of n_trees bring it within this limit on 10 rows. Use a \
+                 sample of at most 5 rows"
+            ),
+            "{none}"
         );
     }
 
