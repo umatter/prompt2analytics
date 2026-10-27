@@ -107,8 +107,10 @@ impl SessionGone {
             }
         }
     }
+}
 
-    /// The answer of the non-streaming chat it ends.
+/// The answer of the non-streaming chat a gone session ends.
+impl IntoResponse for SessionGone {
     fn into_response(self) -> Response {
         (
             self.status(),
@@ -165,6 +167,14 @@ impl ChatSession {
     /// under the id). Otherwise the reason it is gone, and the driver is
     /// woken: the first call to find the session gone records the reason,
     /// and every later call returns it without a lookup.
+    ///
+    /// A session can expire in two ways: this lookup finds it past its TTL
+    /// and removes it (`SessionError::Expired`), or the periodic
+    /// `SessionManager::cleanup_expired` removed it first, and the lookup
+    /// finds no session under the id. The chat's own `Arc` tells the second
+    /// case from a deletion or an eviction: a removed session is no longer
+    /// touched, so an expired one is still past its TTL (as is one deleted or
+    /// evicted once past it, which had expired by then).
     async fn live(&self) -> Result<Arc<Session>, SessionGone> {
         let gone = match self.gone.reason.get() {
             Some(gone) => *gone,
@@ -172,7 +182,16 @@ impl ChatSession {
                 let found = match self.sessions.get_session(&self.session.id).await {
                     Ok(live) if Arc::ptr_eq(&live, &self.session) => return Ok(live),
                     Err(SessionError::Expired) => SessionGone::Expired,
-                    _ => SessionGone::NotFound,
+                    Err(SessionError::NotFound)
+                        if self.session.is_expired(self.sessions.ttl_minutes()).await =>
+                    {
+                        SessionGone::Expired
+                    }
+                    // Replaced by another session under the id, deleted or
+                    // evicted (`get_session` returns no other error).
+                    Ok(_) | Err(SessionError::NotFound | SessionError::MaxSessionsReached) => {
+                        SessionGone::NotFound
+                    }
                 };
                 let gone = *self.gone.reason.get_or_init(|| found);
                 tracing::info!(
@@ -2645,6 +2664,33 @@ mod chat_tests {
             assert_eq!(body["success"], false, "{removal}");
             assert_eq!(body["error"], want.message(), "{removal}");
         }
+    }
+
+    /// A session the periodic cleanup removed for its age, before the chat's
+    /// next tool call looked it up, expired: the chat ends with 410
+    /// `session_expired`, as when that lookup finds it expired itself, not
+    /// with the 404 of a deleted session.
+    #[tokio::test]
+    async fn a_chat_whose_session_the_cleanup_expired_answers_session_expired() {
+        let (governor, chat, sessions) = admitting_parts_with_sessions().await;
+        *chat.session().last_accessed.write().await =
+            chrono::Utc::now() - chrono::Duration::minutes(61);
+        assert_eq!(sessions.cleanup_expired().await, 1);
+        let server = Arc::new(crate::server::AnalyticsServer::new());
+        let executor = SessionToolExecutor::new(governor, server, chat.clone(), no_audit());
+        let gone = chat
+            .run(executor.execute("list_datasets", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(gone, SessionGone::Expired);
+        let resp = gone.into_response();
+        assert_eq!(resp.status(), StatusCode::GONE);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "session_expired");
+        assert_eq!(body["error"], SessionGone::Expired.message());
     }
 
     /// The argument string of a tool call the model did not finish, as a
