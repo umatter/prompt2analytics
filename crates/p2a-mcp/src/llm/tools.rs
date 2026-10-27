@@ -505,8 +505,11 @@ pub fn get_system_prompt_with_context(
     let mut prompt = format!("{}\n\n{}", base, tool_listing);
 
     // The block is fenced and declared to be data: names and values in it
-    // come from the user's files. They are JSON-quoted, so no data line can
-    // equal the closing delimiter.
+    // come from the user's files. context.rs's json_str quotes each one as a
+    // JSON string with every line break escaped (LF, CR, VT, FF, FS, GS, RS,
+    // NEL, U+2028, U+2029), so no data line can equal the closing delimiter
+    // under any line-breaking rule. Plain JSON quoting would not suffice: it
+    // leaves NEL, U+2028 and U+2029 raw.
     if let Some(context) = dataset_context
         && !context.is_empty()
     {

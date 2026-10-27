@@ -148,6 +148,8 @@ pub(crate) fn build_http_client(
 }
 
 pub use anthropic::AnthropicProvider;
+#[cfg(test)]
+pub(crate) use context::test_support::is_any_line_break;
 pub use context::{
     ContextConfig, ContextManager, MAX_COLUMNS_PER_DATASET, MAX_DATASETS_IN_CONTEXT,
     MAX_TOOL_RESULT_BYTES_IN_LOOP, ProcessedContext, build_dataset_context_bounded,
