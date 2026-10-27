@@ -429,7 +429,15 @@ not.
 ### HTTP surface
 
 - **Body cap.** Request bodies above `P2A_MAX_HTTP_BODY_MB` (32 MiB) answer 413
-  with a plain-text body.
+  with the plain-text body `length limit exceeded`; a body sent without a
+  `Content-Length` is cut off at the cap instead. Every route that takes a body
+  parses it as JSON, and outside the hosted profile it takes one up to the cap.
+  In the hosted profile a JSON body may be at most 2 MiB (or the cap, when that
+  is lower), because a body is parsed before the governor's memory admission
+  sees the call; an `upload_dataset` body of 2 MiB carries a file of about
+  1.5 MiB. A JSON body above this limit, and one cut off at the cap, answer 413
+  with the plain-text body `Failed to buffer the request body: length limit
+  exceeded`.
 - **CORS** is the outermost layer, so refusals carry CORS headers. With
   `P2A_CORS_ORIGINS` it allows exactly those origins and the request headers
   `authorization`, `content-type`, `accept` and `x-p2a-session-id`, and exposes
@@ -486,7 +494,7 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--session-evict-idle-minutes` | `P2A_SESSION_EVICT_IDLE_MINUTES` | never | 10 | eviction when the table is full |
 | `--auth-enabled` | `P2A_AUTH_ENABLED` | | | deprecated, no effect (feature `auth`) |
 | `--jwt-secret` | `P2A_JWT_SECRET` | | | deprecated, no effect (feature `auth`) |
-| env only | `P2A_MAX_HTTP_BODY_MB` | 32 | 32 | request bodies and websocket messages, MiB; must be a positive whole number; `0` or an invalid value means the default 32 (there is no unlimited setting) |
+| env only | `P2A_MAX_HTTP_BODY_MB` | 32 | 32 | request bodies and websocket messages, MiB; must be a positive whole number; `0` or an invalid value means the default 32 (there is no unlimited setting); hosted JSON bodies at most 2 MiB ([HTTP surface](#http-surface)) |
 | env only | `P2A_DATA_ROOT` | working directory | same | must exist; resolved once, on first use |
 | env only | `P2A_LLM_ALLOWED_HOSTS` | none (any public host) | api.openai.com, api.anthropic.com, openrouter.ai | comma-separated bare hostnames |
 | env only | `P2A_AUDIT_MAX_MB` | 50 | 50 | audit log rotation size; `0` = never rotate; keeps 3 old files |
@@ -751,7 +759,8 @@ allows cells (`index` when the index columns alone do).
 
 6. **Cap request body size.**
    `P2A_MAX_HTTP_BODY_MB` (default 32) limits memory from oversized uploads and
-   also caps websocket messages and frames.
+   also caps websocket messages and frames. The hosted profile also holds JSON
+   request bodies to 2 MiB (see [HTTP surface](#http-surface)).
 
 7. **Confine the filesystem jail (`P2A_DATA_ROOT`).**
    Set `P2A_DATA_ROOT` to a dedicated, **empty** directory (e.g. `/data`, which
