@@ -57,14 +57,24 @@ fn join_without_on_is_a_usage_error() {
 fn join_errors_say_join_failed_once_and_exit_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
     let session = session_with_two_datasets(tmp.path());
-    let cases: [(&[&str], &str); 3] = [
+    let cases: [(&[&str], &str); 5] = [
         (
             &["--on", "id", "--right-on", "id", "z"],
             "Join failed: left_on has 1 columns but right_on has 2 columns",
         ),
+        // A missing key names its parameter and the dataset that lacks it.
         (
             &["--on", "nope"],
-            "Join failed: Column 'nope' not found in dataset",
+            "Join failed: left_on column 'nope' is not in the left dataset",
+        ),
+        (
+            &["--on", "id", "--right-on", "nope"],
+            "Join failed: right_on column 'nope' is not in the right dataset",
+        ),
+        (
+            &["--on", "x"],
+            "Join failed: left_on column 'x' is not in the right dataset (right_on is not \
+             given, so the left_on names are used for both datasets)",
         ),
         // polars refuses keys of different types; the core wraps its error.
         (&["--on", "id", "--right-on", "code"], "Join failed: "),

@@ -79,10 +79,11 @@ impl JoinType {
 /// # Errors
 ///
 /// [`MungeError::JoinError`] for an empty `left_on`, a `right_on` of
-/// `Some(&[])`, or `left_on` and `right_on` of different lengths;
-/// [`MungeError::ColumnNotFound`] for a key missing from its dataset; any
-/// error polars raises while joining, such as key columns of different data
-/// types, is also returned as [`MungeError::JoinError`].
+/// `Some(&[])`, a key missing from its dataset (the text names `left_on` or
+/// `right_on` and the left or right dataset), or `left_on` and `right_on` of
+/// different lengths; any error polars raises while joining, such as key
+/// columns of different data types, is also returned as
+/// [`MungeError::JoinError`].
 ///
 /// # Example
 ///
@@ -127,6 +128,7 @@ pub struct JoinOptions {
 /// (`right_on`, or `left_on` when it is `None`).
 ///
 /// An empty key list is refused: polars panics when it joins on zero keys.
+/// Every refusal is a [`MungeError::JoinError`].
 fn join_keys<'a>(
     left: &Dataset,
     right: &Dataset,
@@ -146,23 +148,32 @@ fn join_keys<'a>(
         ));
     }
 
-    // Validate left_on columns exist
+    // Every key must exist in its dataset. The error names the key list the
+    // name came from and the dataset that lacks it.
     for col in left_on {
         if left.df().column(col).is_err() {
-            return Err(MungeError::ColumnNotFound(col.to_string()));
+            return Err(MungeError::JoinError(format!(
+                "left_on column '{col}' is not in the left dataset"
+            )));
         }
     }
 
-    // Determine right_on columns
+    // Without right_on, the right dataset is joined on the left_on names.
     let right_on_cols: Vec<&str> = match right_on {
         Some(cols) => cols.to_vec(),
         None => left_on.to_vec(),
     };
 
-    // Validate right_on columns exist
     for col in &right_on_cols {
         if right.df().column(col).is_err() {
-            return Err(MungeError::ColumnNotFound(col.to_string()));
+            return Err(MungeError::JoinError(if right_on.is_some() {
+                format!("right_on column '{col}' is not in the right dataset")
+            } else {
+                format!(
+                    "left_on column '{col}' is not in the right dataset (right_on is not \
+                     given, so the left_on names are used for both datasets)"
+                )
+            }));
         }
     }
 
@@ -676,7 +687,7 @@ mod tests {
         }
         assert!(matches!(
             estimate_join_rows(&l, &r, &["nope"], None, JoinType::Inner),
-            Err(MungeError::ColumnNotFound(_))
+            Err(MungeError::JoinError(_))
         ));
     }
 
@@ -866,6 +877,80 @@ mod tests {
                 3
             );
         });
+    }
+
+    #[test]
+    fn a_missing_key_names_its_parameter_and_dataset() {
+        // A key missing from a dataset is a JoinError that says which key list
+        // the name came from and which dataset lacks it, on every path.
+        let l =
+            Dataset::new(df!("id" => [1i64, 2, 3, 4], "x" => [0.41, 1.37, 2.62, 3.18]).unwrap());
+        let r = Dataset::new(df!("id" => [1i64, 2, 3, 5], "z" => [9.1, 8.4, 6.6, 4.9]).unwrap());
+        let cap = JoinOptions {
+            max_output_rows: Some(1_000),
+        };
+        let cases: [(&[&str], Option<&[&str]>, &str); 4] = [
+            (
+                &["nope"],
+                None,
+                "left_on column 'nope' is not in the left dataset",
+            ),
+            // In the right dataset only: still missing from the left one.
+            (
+                &["z"],
+                Some(&["z"]),
+                "left_on column 'z' is not in the left dataset",
+            ),
+            (
+                &["id"],
+                Some(&["nope"]),
+                "right_on column 'nope' is not in the right dataset",
+            ),
+            // Without right_on the left_on names are looked up on the right.
+            (
+                &["x"],
+                None,
+                "left_on column 'x' is not in the right dataset (right_on is not given, so \
+                 the left_on names are used for both datasets)",
+            ),
+        ];
+        let want_join_error = |res: MungeResult<Dataset>, want: &str, what: &str| match res {
+            Err(MungeError::JoinError(e)) => assert_eq!(e, want, "{what}"),
+            Err(e) => panic!("{what}: expected a JoinError, got {e}"),
+            Ok(_) => panic!("{what}: expected a JoinError, got a dataset"),
+        };
+        for (left_on, right_on, want) in cases {
+            for jt in [
+                JoinType::Inner,
+                JoinType::Left,
+                JoinType::Right,
+                JoinType::Full,
+                JoinType::Semi,
+                JoinType::Anti,
+            ] {
+                let what = format!("{left_on:?} {right_on:?} {jt:?}");
+                want_join_error(join(&l, &r, left_on, right_on, jt, None), want, &what);
+                want_join_error(
+                    join_with(&l, &r, left_on, right_on, jt, None, &cap),
+                    want,
+                    &what,
+                );
+                match estimate_join_rows(&l, &r, left_on, right_on, jt) {
+                    Err(MungeError::JoinError(e)) => assert_eq!(e, want, "{what}"),
+                    other => panic!("{what}: expected a JoinError, got {other:?}"),
+                }
+            }
+            // The displayed text carries the prefix once.
+            assert_eq!(
+                err_text(inner_join(&l, &r, left_on, right_on, None)),
+                format!("Join failed: {want}")
+            );
+            want_join_error(left_join(&l, &r, left_on, right_on, None), want, "left");
+            want_join_error(right_join(&l, &r, left_on, right_on, None), want, "right");
+            want_join_error(full_join(&l, &r, left_on, right_on, None), want, "full");
+            want_join_error(anti_join(&l, &r, left_on, right_on), want, "anti");
+            want_join_error(semi_join(&l, &r, left_on, right_on), want, "semi");
+        }
     }
 
     fn make_orders() -> Dataset {
@@ -1112,7 +1197,7 @@ mod tests {
         let customers = make_customers();
 
         let result = inner_join(&orders, &customers, &["nonexistent"], None, None);
-        assert!(matches!(result, Err(MungeError::ColumnNotFound(_))));
+        assert!(matches!(result, Err(MungeError::JoinError(_))));
     }
 
     #[test]

@@ -1131,8 +1131,8 @@ fn execute_join(
     match result {
         Ok(ds) => store_result(ds, output_name, left, "joined", session, format),
         Err(e) => {
-            // The core's JoinError already reads "Join failed: ..."; only its
-            // other errors (a missing key column) need the prefix.
+            // The core's join refusals are JoinErrors, which already read
+            // "Join failed: ..."; only another error variant needs the prefix.
             let msg = match e {
                 MungeError::JoinError(_) => e.to_string(),
                 _ => format!("Join failed: {e}"),

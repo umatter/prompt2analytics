@@ -2379,8 +2379,8 @@ fn bin_count(bins: &[f64], strategy: &str) -> Result<usize, String> {
 }
 
 /// A join the core refused, as an in-band tool error that says "Join failed:"
-/// once: the core's [`MungeError::JoinError`] already reads that way, so only
-/// its other errors (a key column missing from a dataset) get the prefix here.
+/// once: the core's join refusals are [`MungeError::JoinError`]s, which already
+/// read that way, so only another error variant would get the prefix here.
 fn join_failed(e: &MungeError) -> CallToolResult {
     let text = match e {
         MungeError::JoinError(_) => e.to_string(),
@@ -2539,7 +2539,7 @@ mod tests {
             suffix: None,
             result_name: Some("o".into()),
         };
-        let cases: [(&[&str], Option<&[&str]>, &str); 4] = [
+        let cases: [(&[&str], Option<&[&str]>, &str); 6] = [
             (
                 &[],
                 None,
@@ -2550,10 +2550,22 @@ mod tests {
                 Some(&["id", "y"]),
                 "Join failed: left_on has 1 columns but right_on has 2 columns",
             ),
+            // A missing key names its parameter and the dataset that lacks it.
             (
                 &["nope"],
                 None,
-                "Join failed: Column 'nope' not found in dataset",
+                "Join failed: left_on column 'nope' is not in the left dataset",
+            ),
+            (
+                &["id"],
+                Some(&["nope"]),
+                "Join failed: right_on column 'nope' is not in the right dataset",
+            ),
+            (
+                &["x"],
+                None,
+                "Join failed: left_on column 'x' is not in the right dataset (right_on is not \
+                 given, so the left_on names are used for both datasets)",
             ),
             // polars refuses keys of different types; the core wraps its error.
             (&["id"], Some(&["code"]), "Join failed: "),
