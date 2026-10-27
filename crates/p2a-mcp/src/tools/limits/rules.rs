@@ -1889,48 +1889,59 @@ mod tests {
 
     /// The `arima` crate's fit cannot be stopped once it starts, so the hosted profile bounds
     /// its work before it starts, for both ARIMA tools, at every order the `model_order` cap
-    /// allows; nothing is bounded when limits are off.
+    /// allows (each of p, d and q from 0 to the cap); nothing is bounded when limits are off.
     #[test]
     fn arima_fit_work_is_capped_in_hosted_profile() {
         use super::arima_fit_work;
         let h = Limits::hosted();
         let cap = h.arima_fit_work.expect("hosted ARIMA work budget");
+        let max_order = usize::try_from(h.cap(Family::ModelOrder).expect("hosted model_order"))
+            .expect("model_order cap fits usize");
+        assert_eq!(max_order, 20);
+        let mut checked = 0;
         for tool in ["ts_arima_fit", "ts_arima_forecast"] {
-            for (p, d, q) in [(0, 0, 0), (1, 1, 1), (0, 0, 20), (20, 0, 20), (20, 20, 20)] {
-                let per_obs = arima_fit_work(1, p, d, q);
-                let n_max = usize::try_from(cap / per_obs).unwrap();
-                assert!(h.check_arima_fit(tool, n_max, p, d, q).is_ok());
-                let v = h.check_arima_fit(tool, n_max + 1, p, d, q).unwrap_err();
-                assert_eq!(
-                    (
-                        v.tool.as_str(),
-                        v.parameter.as_str(),
-                        v.requested.clone(),
-                        v.limit.clone(),
-                        v.override_key
-                    ),
-                    (
-                        tool,
-                        "arima_fit_work",
-                        ((n_max as u64 + 1) * per_obs).to_string(),
-                        cap.to_string(),
-                        "arima_fit_work"
-                    )
-                );
-                // Even at the largest orders the cap leaves enough observations to fit
-                // (p + d + q + 10), so the refusal can point to fewer of them.
-                assert!(n_max >= p + d + q + 10, "{p} {d} {q}: {n_max}");
-                assert!(
-                    v.message
-                        .contains(&format!("at most {n_max} observations at these orders")),
-                    "{}",
-                    v.message
-                );
-                for rows in [n_max + 1, usize::MAX] {
-                    assert!(Limits::off().check_arima_fit(tool, rows, p, d, q).is_ok());
+            for p in 0..=max_order {
+                for d in 0..=max_order {
+                    for q in 0..=max_order {
+                        let per_obs = arima_fit_work(1, p, d, q);
+                        let n_max = usize::try_from(cap / per_obs).unwrap();
+                        // Even at the largest orders the cap leaves enough observations to
+                        // fit (p + d + q + 10), so the refusal can point to fewer of them.
+                        assert!(n_max >= p + d + q + 10, "{p} {d} {q}: {n_max}");
+                        assert!(h.check_arima_fit(tool, n_max, p, d, q).is_ok());
+                        let v = h.check_arima_fit(tool, n_max + 1, p, d, q).unwrap_err();
+                        assert!(
+                            v.message
+                                .contains(&format!("at most {n_max} observations at these orders")),
+                            "{p} {d} {q}: {}",
+                            v.message
+                        );
+                        assert_eq!(
+                            (
+                                v.tool.as_str(),
+                                v.parameter.as_str(),
+                                v.requested.clone(),
+                                v.limit.clone(),
+                                v.override_key
+                            ),
+                            (
+                                tool,
+                                "arima_fit_work",
+                                ((n_max as u64 + 1) * per_obs).to_string(),
+                                cap.to_string(),
+                                "arima_fit_work"
+                            ),
+                            "{p} {d} {q}"
+                        );
+                        for rows in [n_max + 1, usize::MAX] {
+                            assert!(Limits::off().check_arima_fit(tool, rows, p, d, q).is_ok());
+                        }
+                        checked += 1;
+                    }
                 }
             }
         }
+        assert_eq!(checked, 2 * 21 * 21 * 21);
         // The fits the tool description suggests run on long series: ARIMA(1,0,1) and
         // ARIMA(1,1,1) on 10,000 observations.
         assert!(h.check_arima_fit("ts_arima_fit", 10_000, 1, 0, 1).is_ok());
