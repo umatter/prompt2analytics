@@ -273,13 +273,19 @@ HTTP), and they never depend on the resource profile:
   dangling.
 - **Writes.** Files are written to a temporary file (mode 0600) beside the
   target and renamed into place, so a link planted at the target is replaced,
-  never followed.
+  never followed. A process stopped in the middle of a write leaves its
+  temporary file (`.<name>.<uuid>.p2a-tmp`); it is removed at a later use of
+  its folder once nobody has written to it for ten minutes.
 - **Per-session directories.** In open public mode each session's root is
   `<data root>/sessions/<session id>/` (mode 0700). Other sessions' directories
   and the shared root are outside it and unreachable. The directory is removed
   with the session, and directories left by an earlier process are purged at
-  the first file access after a restart. A session's directory holds at most
-  `session_disk_bytes` (hosted 64 MiB).
+  the first file access after a restart. With a RocksDB session store
+  (`P2A_DB_PATH`), the directories of stored sessions that can still be adopted
+  (accessed within the session TTL) are kept, so a returning client's files
+  are there for the dataset reload; such a directory goes with the session's
+  rows. A session's directory holds at most `session_disk_bytes` (hosted
+  64 MiB).
 - **Sizes.** `load_dataset` refuses a file larger than `load_file_bytes` (hosted
   64 MiB) before parsing it; `export_dataset`, `export_session` and
   `import_session` are bounded by `export_bytes` (hosted 64 MiB).
@@ -619,7 +625,11 @@ Named budgets:
    reachable by visitors. The disk worst case is `P2A_MAX_SESSIONS` ×
    `session_disk_bytes`, 100 × 64 MiB = 6.25 GiB with the hosted defaults; keep
    that product within the disk the host has, and lower `session_disk_bytes`
-   with `P2A_LIMIT_OVERRIDES` if needed.
+   with `P2A_LIMIT_OVERRIDES` if needed. With a RocksDB store (`P2A_DB_PATH`),
+   the directories kept after a restart for stored sessions that have not come
+   back yet add up to as much again, until the store's sweep deletes those
+   sessions' rows, about one session TTL (plus one sweep period) after the
+   restart.
 
 8. **Keep the session database outside the jail (`P2A_DB_PATH`).**
    File tools can write anywhere under `P2A_DATA_ROOT`, so the server refuses
