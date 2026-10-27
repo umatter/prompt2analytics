@@ -24,14 +24,16 @@
 //!   validation is replaced, never followed, and a write that returns an
 //!   error leaves nothing behind.
 //! - **Leftovers.** A process that stops while writing (killed, or shut down
-//!   before the write ends) leaves its temporary file. Using a root or
-//!   writing into a folder sweeps it: the first time in a process, and again
+//!   before the write ends) leaves its temporary file. Using a root, or a
+//!   path in a folder of it (a file there to read or write, or the folder
+//!   itself), sweeps that folder: the first time in a process, and again
 //!   whenever its last sweep is ten minutes past. A sweep removes the
 //!   temporary files there that nobody has modified for ten minutes and that
 //!   are no write of this process in progress: regular files with exactly
-//!   that name pattern, never a link and never anything in a subfolder. A
-//!   write in progress goes seconds at most between two writes to its file,
-//!   so another process that shares the data root keeps its writes.
+//!   that name pattern, never a link and never anything in a subfolder. The
+//!   writers that use [`write_atomically`] stream into the file, so a write
+//!   in progress goes seconds at most between two writes to it, and another
+//!   process that shares the data root keeps its writes.
 //! - **Messages.** Errors never contain an absolute server path or an
 //!   environment variable name: they echo the caller's input (at most 200
 //!   characters) or a [`display_path`] form, which is relative to the root.
@@ -132,7 +134,8 @@ fn active_root() -> Result<PathBuf, String> {
 /// the session's directory), an absolute one must lie inside it, and a
 /// final-component symlink is refused (see the module documentation). A path
 /// that does not exist yet is accepted when its parent folder exists inside
-/// the root.
+/// the root. The folder the path lies in (or names) is swept for leftover
+/// temporary files when it is due a sweep (see the module documentation).
 ///
 /// Returns the canonical absolute path on success, or a message for the
 /// caller (never containing a server path) on rejection.
@@ -161,6 +164,11 @@ pub fn validate_data_path_for_write(input: &str) -> Result<PathBuf, String> {
 /// `session_disk_bytes` budget, the write is refused (and nothing is left
 /// behind) when the session's directory would exceed it. `target` should come
 /// from [`validate_data_path_for_write`].
+///
+/// `write` must write as it goes (stream into the file), not compute for
+/// minutes before its first byte or between two writes: a temporary file
+/// nobody has modified for ten minutes counts as a leftover for the sweep of
+/// any other process that shares the data root.
 pub fn write_atomically(
     target: &Path,
     write: impl FnOnce(&Path) -> Result<(), String>,
@@ -267,6 +275,20 @@ fn resolve_in(root: &Path, input: &str) -> Result<PathBuf, String> {
     };
     if !canonical.starts_with(root) {
         return Err(outside_error(input));
+    }
+    // The folder the path lies in (or names) is in use: sweep it like the
+    // root, so a folder that is only read from after an interrupted export
+    // does not keep the leftover. `active_root_for` sweeps the root itself.
+    let folder = if meta.is_ok_and(|m| m.is_dir()) {
+        Some(canonical.as_path())
+    } else {
+        canonical.parent()
+    };
+    if let Some(folder) = folder
+        && folder != root
+        && folder.starts_with(root)
+    {
+        sweep_leftover_temp_files(folder);
     }
     Ok(canonical)
 }
@@ -412,16 +434,18 @@ fn dir_usage_bytes(dir: &Path) -> u64 {
 const TMP_SUFFIX: &str = ".p2a-tmp";
 
 /// How long a temporary file must have gone unmodified before a sweep takes
-/// it for a leftover, and how often a folder in use is swept. A write in
-/// progress goes seconds at most between two writes to its file, so a write
-/// of another process that shares the data root is never taken for one.
-/// (A sweep that ran after the writer's last write, as "older than this
-/// process" would, removes a live export of such a process.)
+/// it for a leftover, and how often a folder in use is swept. The writers
+/// that use [`write_atomically`] stream into the file (its doc requires
+/// it), so a write in progress goes seconds at most between two writes to
+/// its file, and a write of another process that shares the data root is
+/// never taken for one. (Removing the files older than this process instead
+/// would remove a live export of such a process that started earlier.)
 const LEFTOVER_IDLE: Duration = Duration::from_secs(10 * 60);
-// The module doc states the idle time as a literal.
+// The module, write_atomically and active_root_for docs state the idle time
+// as a literal.
 const _: () = assert!(
     LEFTOVER_IDLE.as_secs() == 600,
-    "update the ten minutes in the path_jail module doc"
+    "update the ten minutes in the path_jail module, write_atomically and active_root_for docs"
 );
 
 /// Most folders [`SWEPT_DIRS`] remembers; past this it forgets them all, and
@@ -843,7 +867,9 @@ fn data_root() -> Result<PathBuf, String> {
 /// The root paths resolve against: `data_root` when session directories are
 /// off, else the scope's session directory; refused when they are on and no
 /// scope is active. The root's leftover temporary files are removed first
-/// (see [`sweep_leftover_temp_files`]), so no quota check counts them.
+/// when it is due a sweep (see [`sweep_leftover_temp_files`]), so no quota
+/// check counts a leftover the sweep has removed; one younger than ten
+/// minutes still counts.
 fn active_root_for(
     data_root: &Path,
     enabled: bool,
@@ -1237,7 +1263,9 @@ mod tests {
         let (_t, root) = tmp_root();
         fs::create_dir(root.join("sub")).unwrap();
         let leftover = temp_file_at(&root.join("sub"), "out.csv", an_hour_ago());
-        let target = resolve_for_write_in(&root, "sub/out.csv", None).unwrap();
+        // Not through `resolve_for_write_in`, which sweeps the folder too: the
+        // write sweeps it on its own.
+        let target = root.join("sub").join("out.csv");
         write_atomically_in(&target, None, |tmp| {
             fs::write(tmp, "x,y\n1,2.1\n").map_err(|e| e.to_string())
         })
@@ -1247,6 +1275,37 @@ mod tests {
             "the leftover temporary file is still there"
         );
         assert_eq!(fs::read_to_string(&target).unwrap(), "x,y\n1,2.1\n");
+        assert_eq!(fs::read_dir(root.join("sub")).unwrap().count(), 1);
+    }
+
+    /// Reading a file in a folder of the root, or naming the folder, removes
+    /// that folder's leftover temporary files too: a folder that is only read
+    /// from after an interrupted export does not keep its leftover.
+    #[test]
+    fn reading_in_a_folder_removes_its_leftover_temporary_files() {
+        let (_t, root) = tmp_root();
+        for folder in ["sub", "listed", "deeper", "deeper/inner"] {
+            fs::create_dir(root.join(folder)).unwrap();
+        }
+        fs::write(root.join("sub").join("data.csv"), "x,y\n1,2.1\n2,3.9\n").unwrap();
+        let in_sub = temp_file_at(&root.join("sub"), "out.csv", an_hour_ago());
+        let in_listed = temp_file_at(&root.join("listed"), "out.csv", an_hour_ago());
+        let in_deeper = temp_file_at(&root.join("deeper"), "out.csv", an_hour_ago());
+
+        assert_eq!(
+            resolve_in(&root, "sub/data.csv").unwrap(),
+            root.join("sub").join("data.csv")
+        );
+        assert!(!in_sub.exists(), "the leftover in sub/ is still there");
+        assert_eq!(resolve_in(&root, "listed").unwrap(), root.join("listed"));
+        assert!(
+            !in_listed.exists(),
+            "the leftover in listed/ is still there"
+        );
+        // Only the folder the path lies in (or names) is swept, not the ones
+        // above it.
+        resolve_in(&root, "deeper/inner/new.csv").unwrap();
+        assert!(in_deeper.exists());
         assert_eq!(fs::read_dir(root.join("sub")).unwrap().count(), 1);
     }
 
