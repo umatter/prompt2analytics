@@ -2284,8 +2284,18 @@ mod capture_tests {
     use crate::session::SessionManager;
 
     /// A streaming executor on a new live session that tracks datasets in
-    /// `db`, and the session's id.
-    async fn tracking_executor(db: &Arc<DbConnection>) -> (StreamingToolExecutor, String) {
+    /// `db`, the session's id, and the receiver of the executor's events.
+    /// The caller keeps the receiver for the whole test, so the executor
+    /// sends to a client that is still listening; nothing reads it, and its
+    /// buffer of 16 holds every event of the two calls a test makes (a call
+    /// sends at most three).
+    async fn tracking_executor(
+        db: &Arc<DbConnection>,
+    ) -> (
+        StreamingToolExecutor,
+        String,
+        tokio::sync::mpsc::Receiver<ProgressEvent>,
+    ) {
         let sessions = Arc::new(SessionManager::new(SessionConfig {
             ttl_minutes: 60,
             max_sessions: 10,
@@ -2294,7 +2304,7 @@ mod capture_tests {
         let sid = sessions.create_session(None).await.unwrap();
         let session = sessions.get_session(&sid).await.unwrap();
         let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions.clone()));
-        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
         let executor = StreamingToolExecutor::new(
             governor,
             Arc::new(crate::server::AnalyticsServer::new()),
@@ -2303,7 +2313,7 @@ mod capture_tests {
             tx,
         )
         .with_dataset_tracking(db.clone(), sid.clone());
-        (executor, sid)
+        (executor, sid, rx)
     }
 
     /// The capture after a successful `create_dataset` call of the
@@ -2314,7 +2324,7 @@ mod capture_tests {
     #[tokio::test]
     async fn the_loop_capture_runs_off_the_runtime() {
         let db = Arc::new(DbConnection::connect_memory().await.unwrap());
-        let (executor, sid) = tracking_executor(&db).await;
+        let (executor, sid, _rx) = tracking_executor(&db).await;
         let args = serde_json::json!({"name": "d", "csv_content": "a,b\n1.5,2.25\n2.75,3.5\n"});
         let text = executor.execute("create_dataset", args).await.unwrap();
         assert!(text.contains("Successfully created dataset 'd'"), "{text}");
@@ -2337,7 +2347,7 @@ mod capture_tests {
     #[tokio::test]
     async fn a_call_of_another_tool_is_not_captured() {
         let db = Arc::new(DbConnection::connect_memory().await.unwrap());
-        let (executor, sid) = tracking_executor(&db).await;
+        let (executor, sid, _rx) = tracking_executor(&db).await;
         let args = serde_json::json!({"name": "pairs", "csv_content": "x,y\n0.5,1.25\n1.75,2.5\n"});
         executor.execute("create_dataset", args).await.unwrap();
         let listed = executor
