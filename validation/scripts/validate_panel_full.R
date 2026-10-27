@@ -219,9 +219,12 @@ if (!is.null(gmm2_result)) {
 # =============================================================================
 # p2a-core refuses panel GLS when T > N: the T x T error covariance is
 # estimated from N residual vectors, so with T > N its rank is at most N and
-# it has no inverse. pggls returns a generalised-inverse fit on full Grunfeld
-# (N = 10 firms, T = 20 years) instead, which p2a-core does not reproduce, so
-# both GLS tests use the first 10 years, where N = T = 10.
+# it has no inverse. On full Grunfeld (N = 10 firms, T = 20 years) pggls
+# returns a generalised-inverse fit instead, which p2a-core does not
+# reproduce, so both GLS tests use the first 10 years, where N = T = 10.
+# The subset removes only that T > N rank deficiency. It makes the pooled
+# model's Omega invertible (Test 7); the within model's Omega stays
+# singular on any panel (Test 6).
 pdata_sq <- pdata.frame(subset(Grunfeld, year <= 1944), index = c("firm", "year"))
 cat(sprintf("\nPanel GLS subset: %d firms, %d years (p2a-core refuses T > N)\n",
             length(unique(pdata_sq$firm)), length(unique(pdata_sq$year))))
@@ -232,6 +235,9 @@ cat(sprintf("\nPanel GLS subset: %d firms, %d years (p2a-core refuses T > N)\n",
 # Reference values only: no p2a-core test compares FE panel GLS with pggls yet
 # (ECON-33). On full Grunfeld p2a-core refuses it
 # (test_panel_gls_fe_full_grunfeld_is_refused).
+# The within residuals sum to zero in every firm, so Omega is singular on
+# any panel and these values are a generalised-inverse fit here too
+# (ECON-33).
 cat("\n=== Test 6: Panel GLS - Fixed Effects (Grunfeld 1935-1944) ===\n")
 
 fegls_result <- tryCatch({
@@ -263,8 +269,9 @@ if (!is.null(fegls_result)) {
 # =============================================================================
 # The coefficients are the ones test_validate_pooled_gls_square_grunfeld_vs_plm
 # (gls_models.rs) checks to 1e-8. That test does not compare standard
-# errors: p2a-core scales them by rss/df once more than pggls does
-# (ECON-33). On full Grunfeld p2a-core refuses pooled GLS
+# errors: p2a-core's covariance carries an extra rss/df factor, so its
+# standard errors are sqrt(rss/df) times pggls's (ECON-33). On full
+# Grunfeld p2a-core refuses pooled GLS
 # (test_pooled_gls_full_grunfeld_is_refused).
 cat("\n=== Test 7: Panel GLS - Pooled (Grunfeld 1935-1944) ===\n")
 
