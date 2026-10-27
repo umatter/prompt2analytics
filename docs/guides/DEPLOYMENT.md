@@ -200,11 +200,17 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
 - **Row classes.** Methods whose memory grows with the square of the row count
   (`dense_rows`), or whose run time grows with its cube (`cubic_rows`) or square
   (`quadratic_rows`), refuse larger datasets with a message that suggests
-  sampling with `munge_sample`.
+  sampling with `munge_sample`. Two methods are held to a class's cap for a
+  reason of their own, which their refusal states: `regression_smooth_spline`
+  to the quadratic cap (its cost is linear, but its working memory is many
+  times its two columns) and `spatial_panel_gmm` to the cubic cap (its
+  spatial-lag fit runs in time that grows with the rows times the time periods
+  and cannot be stopped once it starts, so the cap applies with or without
+  `lag`).
 - **Named budgets.** Sizes the handlers compute while they run: image pixels,
   table cells, join output, generated data, export and file sizes, spatial
-  links, the work of an ARIMA fit, SQL results, the conversation store and the
-  LLM context.
+  links, the work of an ARIMA fit, the memory of a tree-ensemble fit, SQL
+  results, the conversation store and the LLM context.
 - **Response size.** A tool's text and image output above `response_bytes`
   (16 MiB) is replaced by a refusal.
 
@@ -503,9 +509,9 @@ Row classes and tolerance (Off: none):
 
 | Key | What it bounds | Hosted |
 |---|---|---|
-| `dense_rows` | dataset rows for `ml_hierarchical`, `ml_cutree`, `ml_dbscan`, `regression_smooth_spline` | 5,000 |
-| `cubic_rows` | dataset rows for `ml_tsne`, `ml_cmdscale`, `sar_model`, `sem_model`, `sar_probit_model`, `sem_probit_model`, `spatial_panel_ml`, `spatial_panel_gmm` | 2,000 |
-| `quadratic_rows` | dataset rows for `propensity_matching`, `heterogeneity_test`, `ml_svm`, `regression_loess`, `ts_changepoint` | 50,000 |
+| `dense_rows` | dataset rows for `ml_hierarchical` and `ml_cutree` | 5,000 |
+| `cubic_rows` | dataset rows for `ml_tsne`, `ml_cmdscale`, `sar_model`, `sem_model`, `sar_probit_model`, `sem_probit_model`, `spatial_panel_ml`, and `spatial_panel_gmm` (for its spatial-lag scan) | 2,000 |
+| `quadratic_rows` | dataset rows for `propensity_matching`, `heterogeneity_test`, `ml_svm`, `regression_loess`, `ts_changepoint`, `ml_dbscan`, and `regression_smooth_spline` (for its working memory) | 50,000 |
 | `min_tolerance` | smallest convergence tolerance (`tol`, `eps`, ...) | 1e-15 |
 
 Named budgets:
@@ -527,6 +533,7 @@ Named budgets:
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
 | `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 400,000 | none |
+| `ensemble_bytes` | memory a `ml_causal_forest` or `ml_bart_causal` fit may hold at once (its trees, bootstrap draws and working copies of the data), as the core's bound predicts it from the rows and the settings, checked before the fit starts | 256 MiB | none |
 | `db_result_rows` | rows a SQL tool keeps | 100,000 | none |
 | `db_result_bytes` | estimated bytes a SQL tool keeps | 64 MiB | none |
 | `db_timeout_secs` | run time of one SQL statement | 20 | none |
@@ -555,6 +562,31 @@ default 60 s: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a throttled shared
 CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. Raising it
 above about 3.5 times the hosted value lets a fit run past the deadline and keep
 its slot, since the fit has no checkpoint.
+
+The hosted `ensemble_bytes` of 256 MiB matches the per-allocation ceiling: a
+causal-forest or BART-causal fit keeps every tree it grows, and BART keeps a
+draw for every row and bootstrap replication, so neither the deadline nor the
+ceiling bounds what one fit holds; the handlers refuse a fit whose bound is
+larger before it starts and say how many rows its settings allow. The refusal
+suggests other settings only when the least memory they reach fits the dataset,
+and lists only the changes that still lower the bound from the settings they
+start from: the request's own, or the request's with `honesty` or
+`include_propensity` turned off where the refusal names that change as required.
+It names `honesty = false` or `include_propensity = false` as required only when
+the least memory with the option does not fit the dataset and the least memory
+without it does; when the request asks for the propensity score, BART's refusal
+also offers `include_propensity = false` as one more way to lower the bound,
+while the forest's never does, since turning honesty off can raise it. With four
+covariates the budget admits both tools' defaults on a few hundred thousand
+rows. The bound counts every buffer the fit holds at once, and the fit allocates
+each at its exact length (the recursion's index vectors are sized before they
+are filled), so what an admitted fit holds stays within the bound whatever the
+data. On a release build, a fit whose trees split a few rows off at every level,
+the shape that gives the recursion its largest share of the bound, peaked at 85%
+of its bound. Only the allocator's own overhead (chunk headers and free lists)
+comes on top. Keep the budget at or below the ceiling and well below the room
+the memory admission leaves (`P2A_MEMORY_SOFT_LIMIT_MB` against the machine's
+memory).
 
 ## Must-do checklist
 

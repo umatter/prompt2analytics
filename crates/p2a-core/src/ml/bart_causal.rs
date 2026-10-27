@@ -78,6 +78,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use super::{default_mtry, heap_chunk_bytes, mul, partition_exact, pow2};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -154,6 +155,122 @@ impl Default for BartCausalConfig {
             sample_fraction: 0.632,
             mtry: None,
         }
+    }
+}
+
+/// Trees of the propensity model ([`estimate_propensity`]) and their depth.
+const PROPENSITY_TREES: usize = 50;
+const PROPENSITY_DEPTH: usize = 3;
+
+impl BartCausalConfig {
+    /// An upper bound, in bytes, of what [`bart_causal`] holds at once for a
+    /// dataset of `n_obs` rows and `n_covariates` covariates under this
+    /// configuration: the trees it keeps, its bootstrap draws and the buffers
+    /// that are alive together while it runs. Every buffer it counts is
+    /// allocated at its exact length, the group indices and the index vectors
+    /// of the recursion included, so no vector holds unused capacity. The
+    /// allocator's own overhead (chunk headers and free lists) and the dataset
+    /// itself come on top. Saturates at `u64::MAX`.
+    ///
+    /// The bound holds whatever the data are, because each term counts the
+    /// most the code can allocate:
+    ///
+    /// - **Trees.** The two response-surface ensembles of `n_trees` trees
+    ///   each, kept for the result, and the two ensembles of `n_trees / 4`
+    ///   trees of the bootstrap replicate being fitted; with
+    ///   `include_propensity`, the propensity model's trees too. A tree has at
+    ///   most `2 L - 1` nodes for `L` leaves; `L` is at most `2^max_depth` and
+    ///   at most its subsample divided by `max(min_node_size, 1)`, since every
+    ///   child keeps `min_node_size` rows and at least one. A treated tree and
+    ///   a control tree are fitted on subsamples that together hold at most
+    ///   `sample_fraction` of the rows, so a pair has at most that many rows
+    ///   divided by `max(min_node_size, 1)`, plus two, leaves. Every node is
+    ///   counted at its heap size.
+    /// - **Draws.** The `n_bootstrap x n_obs` matrix of CATE draws, allocated
+    ///   before any fit, the ATE draws, and one unit's draws and their sorted
+    ///   copy when the intervals are computed.
+    /// - **Data and results.** The extracted outcome, treatment and covariates
+    ///   (and the column being extracted, cast to `f64` and copied), the group
+    ///   indices, the covariates the ensembles use (with the propensity score)
+    ///   and their treated and control rows, the predictions; one replicate's
+    ///   resample, its rows and groups and its predictions; the intervals and
+    ///   standard errors, the result's copies and the sorted copy its summary
+    ///   makes.
+    /// - **One tree's working copies.** The subsample's flags, indices and
+    ///   rows, and what the recursion holds: every level on the path to the
+    ///   node being split holds its children's index vectors, together at most
+    ///   the subsample, and the covariates its split drew (`mtry`, at most the
+    ///   ensembles' covariates). The path is at most `max_depth` levels deep
+    ///   and at most the subsample divided by `max(min_node_size, 1)`. The
+    ///   split search's sort order adds one subsample, and the list the
+    ///   covariates are drawn from one covariate list.
+    pub fn memory_bound(&self, n_obs: usize, n_covariates: usize) -> u64 {
+        let n = n_obs as u128;
+        let p = n_covariates as u128;
+        // Covariates of the ensembles: with the propensity score as one more.
+        let q_cols = n_covariates.saturating_add(usize::from(self.include_propensity));
+        let q = q_cols as u128;
+        let s = self.subsample_size(n_obs);
+        let leaf = self.min_node_size.max(1) as u128;
+        let node = heap_chunk_bytes(size_of::<TreeNode>());
+        let tree = size_of::<RegressionTree>() as u128;
+        let pairs = (self.n_trees as u128).saturating_add((self.n_trees / 4) as u128);
+        let pair = mul(2, self.max_leaves_per_pair(n_obs))
+            .saturating_mul(node)
+            .saturating_add(2 * tree);
+        let mut trees = mul(pairs, pair);
+        if self.include_propensity {
+            let one = ((1u128 << (PROPENSITY_DEPTH + 1)) - 1) * node + tree;
+            trees = trees.saturating_add(PROPENSITY_TREES as u128 * one);
+        }
+        let b = self.n_bootstrap as u128;
+        let draws = mul(mul(8, b), n).saturating_add(mul(24, b));
+        // Per row: y, w, and the column being extracted (its cast and its values) (4); the
+        // group indices and the outcome by group (2); the predictions y1, y0 and the CATE
+        // (3); the replicate's resample indices, y and w (3), its group indices and outcome
+        // by group (2) and its predictions (3); the intervals and standard errors (3), the
+        // result's copies (3) and the summary's sorted copy (1); the propensity score (1).
+        let per_row = 4 + 2 + 3 + 3 + 2 + 3 + 3 + 3 + 1 + 1;
+        // Per row and covariate: the extracted covariates, the ensembles' covariates and their
+        // treated and control rows, the replicate's rows and their treated and control rows.
+        let data = mul(mul(8, n), per_row)
+            .saturating_add(mul(mul(8, n), p))
+            .saturating_add(mul(mul(32, n), q));
+        let levels = (s / leaf).min(self.max_depth as u128) + 1;
+        // The covariates one split draws, as `select_features` keeps them.
+        let drawn = self
+            .mtry
+            .unwrap_or_else(|| default_mtry(q_cols))
+            .min(q_cols) as u128;
+        // Subsample flags, indices and rows; the recursion path (each level's child index
+        // vectors and drawn covariates); the split search's order; the list the covariates are
+        // drawn from, or the importance sums and one tree's importances.
+        let work = n
+            .saturating_add(mul(mul(8, s), q.saturating_add(2)))
+            .saturating_add(mul(mul(8, s.saturating_add(drawn)), levels))
+            .saturating_add(mul(8, s))
+            .saturating_add(mul(16, q));
+        u64::try_from(
+            trees
+                .saturating_add(draws)
+                .saturating_add(data)
+                .saturating_add(work),
+        )
+        .unwrap_or(u64::MAX)
+    }
+
+    /// The most leaves a treated tree and a control tree fitted together can
+    /// have for `n_obs` rows ([`Self::memory_bound`]).
+    fn max_leaves_per_pair(&self, n_obs: usize) -> u128 {
+        let s = self.subsample_size(n_obs);
+        let leaf = self.min_node_size.max(1) as u128;
+        (s / leaf + 2).min(pow2(self.max_depth).saturating_mul(2))
+    }
+
+    /// The rows of a subsample drawn from `n_obs` rows, as `subsample` draws it; a treated and a
+    /// control tree draw theirs from groups that together hold `n_obs` rows.
+    fn subsample_size(&self, n_obs: usize) -> u128 {
+        ((n_obs as f64) * self.sample_fraction) as usize as u128
     }
 }
 
@@ -385,9 +502,10 @@ impl RegressionTree {
         // Find best split
         if let Some((best_feature, best_threshold)) = self.find_best_split(x, y, indices, &features)
         {
-            let (left_indices, right_indices): (Vec<usize>, Vec<usize>) = indices
-                .iter()
-                .partition(|&&i| x[[i, best_feature]] <= best_threshold);
+            // Each child's vector at its exact length: every level of the path holds them.
+            let (left_indices, right_indices) = partition_exact(indices.iter().copied(), |i| {
+                x[[i, best_feature]] <= best_threshold
+            });
 
             if left_indices.len() < self.min_node_size || right_indices.len() < self.min_node_size {
                 return self.create_leaf(y, indices);
@@ -595,10 +713,7 @@ impl TreeEnsemble {
         rng_state: &mut u64,
     ) -> EconResult<()> {
         self.n_features = x.ncols();
-        let mtry_value = mtry.unwrap_or_else(|| {
-            let sqrt_p = (self.n_features as f64).sqrt().ceil() as usize;
-            sqrt_p.max(1)
-        });
+        let mtry_value = mtry.unwrap_or_else(|| default_mtry(self.n_features));
 
         self.trees = try_with_capacity(n_trees, "BART trees")?;
 
@@ -850,8 +965,7 @@ pub fn bart_causal_arrays(
     }
 
     // Split data into treated and control
-    let treated_indices: Vec<usize> = (0..n).filter(|&i| treatment[i] > 0.5).collect();
-    let control_indices: Vec<usize> = (0..n).filter(|&i| treatment[i] <= 0.5).collect();
+    let (treated_indices, control_indices) = treated_and_control(&treatment);
 
     let n_treated = treated_indices.len();
     let n_control = control_indices.len();
@@ -1019,17 +1133,29 @@ pub fn run_bart_causal(
     seed: Option<u64>,
 ) -> EconResult<BartCausalResult> {
     let cov_refs: Vec<&str> = covariate_cols.iter().map(|s| s.as_str()).collect();
-
-    let config = BartCausalConfig {
-        n_trees: n_trees.unwrap_or(200),
-        max_depth: max_depth.unwrap_or(4),
-        n_bootstrap: n_bootstrap.unwrap_or(100),
-        include_propensity: include_propensity.unwrap_or(false),
-        seed,
-        ..Default::default()
-    };
-
+    let config = run_bart_causal_config(n_trees, max_depth, n_bootstrap, include_propensity, seed);
     bart_causal(dataset, outcome_col, treatment_col, &cov_refs, config)
+}
+
+/// The configuration [`run_bart_causal`] fits with for these arguments (the
+/// defaults of [`BartCausalConfig`] where an argument is `None`), for example
+/// to check its [`BartCausalConfig::memory_bound`] first.
+pub fn run_bart_causal_config(
+    n_trees: Option<usize>,
+    max_depth: Option<usize>,
+    n_bootstrap: Option<usize>,
+    include_propensity: Option<bool>,
+    seed: Option<u64>,
+) -> BartCausalConfig {
+    let defaults = BartCausalConfig::default();
+    BartCausalConfig {
+        n_trees: n_trees.unwrap_or(defaults.n_trees),
+        max_depth: max_depth.unwrap_or(defaults.max_depth),
+        n_bootstrap: n_bootstrap.unwrap_or(defaults.n_bootstrap),
+        include_propensity: include_propensity.unwrap_or(defaults.include_propensity),
+        seed,
+        ..defaults
+    }
 }
 
 /// Predict CATE for new observations.
@@ -1154,6 +1280,13 @@ fn subsample(n_samples: usize, fraction: f64, rng_state: &mut u64) -> Vec<usize>
     sample
 }
 
+/// The treated rows of `w` (above 0.5) and the control rows (the others), each vector at its
+/// exact length, as [`BartCausalConfig::memory_bound`] counts them. `w` is finite (the caller
+/// checked the treatment), so each row is either treated or control.
+fn treated_and_control(w: &ArrayView1<f64>) -> (Vec<usize>, Vec<usize>) {
+    partition_exact(0..w.len(), |i| w[i] > 0.5)
+}
+
 /// Select rows from a 2D array.
 fn select_rows(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
     let n_features = data.ncols();
@@ -1175,12 +1308,20 @@ fn estimate_propensity(
     rng_state: &mut u64,
 ) -> EconResult<Array1<f64>> {
     let n = x.nrows();
-    let p = x.ncols();
 
-    // Use a simple ensemble to predict propensity
-    let mtry = (p as f64).sqrt().ceil() as usize;
+    // Use a simple ensemble to predict propensity; `None` draws the default number of
+    // covariates per split (`default_mtry`), as the response surfaces do by default.
     let mut ensemble = TreeEnsemble::new();
-    ensemble.fit(x, treatment, 50, 3, 5, 0.632, Some(mtry), rng_state)?;
+    ensemble.fit(
+        x,
+        treatment,
+        PROPENSITY_TREES,
+        PROPENSITY_DEPTH,
+        5,
+        0.632,
+        None,
+        rng_state,
+    )?;
 
     let mut propensity = ensemble.predict(x);
 
@@ -1221,8 +1362,7 @@ fn bootstrap_cate(
         let x_boot = select_rows(&x, &indices);
 
         // Split into treated/control
-        let treated_idx: Vec<usize> = (0..n).filter(|&i| w_boot[i] > 0.5).collect();
-        let control_idx: Vec<usize> = (0..n).filter(|&i| w_boot[i] <= 0.5).collect();
+        let (treated_idx, control_idx) = treated_and_control(&w_boot.view());
 
         // Skip if not enough in either group
         if treated_idx.len() < 5 || control_idx.len() < 5 {
@@ -1337,6 +1477,175 @@ mod tests {
             seed: Some(5),
             ..Default::default()
         }
+    }
+
+    fn count_nodes(node: &TreeNode) -> u128 {
+        match node {
+            TreeNode::Leaf { .. } => 1,
+            TreeNode::Split { left, right, .. } => 1 + count_nodes(left) + count_nodes(right),
+        }
+    }
+
+    fn nodes_of(tree: &RegressionTree) -> u128 {
+        tree.root.as_ref().map_or(0, count_nodes)
+    }
+
+    /// Distinct covariate values, alternating treatment and an outcome that varies with every
+    /// row: every threshold the node-size checks allow is a candidate, so the trees grow as
+    /// large as those checks let them.
+    fn splittable_data(n: usize, seed: u64) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
+        let mut rng = seed;
+        let mut x = Array2::zeros((n, 3));
+        let mut y = Array1::zeros(n);
+        let mut w = Array1::zeros(n);
+        for i in 0..n {
+            for j in 0..3 {
+                x[[i, j]] = (lcg_random(&mut rng) % 1_000_003) as f64 + i as f64 * 1e-7;
+            }
+            w[i] = (i % 2) as f64;
+            y[i] = (lcg_random(&mut rng) % 1000) as f64 / 1000.0 + x[[i, 0]] * 1e-6;
+        }
+        (y, w, x)
+    }
+
+    /// The leaf bound behind `memory_bound` holds for every pair of a treated and a control
+    /// tree of fitted ensembles, at node sizes 0 to 5 and depths 2 to 100.
+    #[test]
+    fn memory_bound_counts_at_least_the_nodes_every_tree_pair_grows() {
+        for (n, min_node_size, max_depth) in [
+            (300, 5, 4),
+            (300, 5, 100),
+            (300, 1, 100),
+            (300, 0, 100),
+            (200, 2, 2),
+            (800, 0, 100),
+        ] {
+            let cfg = BartCausalConfig {
+                n_trees: 4,
+                n_bootstrap: 2,
+                min_node_size,
+                max_depth,
+                seed: Some(9),
+                ..Default::default()
+            };
+            let bound = 2 * cfg.max_leaves_per_pair(n) - 1;
+            let (y, w, x) = splittable_data(n, 3 + n as u64);
+            let fit =
+                bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg.clone()).unwrap();
+            let (t, c) = (
+                fit.ensemble_treated.as_ref().unwrap(),
+                fit.ensemble_control.as_ref().unwrap(),
+            );
+            let most = t
+                .trees
+                .iter()
+                .zip(&c.trees)
+                .map(|(a, b)| nodes_of(a) + nodes_of(b))
+                .max()
+                .unwrap();
+            assert!(
+                most <= bound,
+                "{cfg:?} on {n} rows: a pair has {most} nodes, bound {bound}"
+            );
+            // The trees fill a good part of what the bound allows (it is not loose by orders
+            // of magnitude), also where the depth stops them first.
+            assert!(4 * most >= bound, "{cfg:?} on {n} rows: {most} of {bound}");
+        }
+    }
+
+    /// The group indices of the fit and of every bootstrap replicate are allocated at their
+    /// exact lengths, as `memory_bound` counts them (`filter().collect()` grows a vector by
+    /// pushing and can leave close to twice its length allocated), and so is a subsample. The
+    /// recursion's child vectors come from `partition_exact`, tested in `ml`.
+    #[test]
+    fn group_and_subsample_indices_are_allocated_at_their_lengths() {
+        for (n, every) in [(1_000, 2), (777, 3), (1_000, 997), (61, 1)] {
+            let w = Array1::from_shape_fn(n, |i| if i % every == 0 { 1.0 } else { 0.0 });
+            let (treated, control) = treated_and_control(&w.view());
+            assert_eq!(treated.len() + control.len(), n);
+            assert!(treated.iter().all(|&i| w[i] > 0.5) && control.iter().all(|&i| w[i] < 0.5));
+            assert_eq!(treated.capacity(), treated.len(), "{n} rows, every {every}");
+            assert_eq!(control.capacity(), control.len(), "{n} rows, every {every}");
+        }
+        let mut rng = 3;
+        for (n, fraction) in [(1_000, 0.632), (20, 0.05)] {
+            let sample = subsample(n, fraction, &mut rng);
+            assert_eq!(
+                sample.capacity(),
+                sample.len(),
+                "{n} rows, fraction {fraction}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_bound_grows_with_its_arguments_and_saturates() {
+        let d = BartCausalConfig::default();
+        let at = |cfg: &BartCausalConfig, n: usize, p: usize| cfg.memory_bound(n, p);
+        let base = at(&d, 10_000, 4);
+        let with = |f: fn(&mut BartCausalConfig)| {
+            let mut c = d.clone();
+            f(&mut c);
+            c
+        };
+        // Every level of the recursion's path keeps the covariates its split drew.
+        assert!(at(&with(|c| c.mtry = Some(16)), 10_000, 16) > at(&d, 10_000, 16));
+        assert_eq!(
+            at(&with(|c| c.mtry = Some(16)), 10_000, 16),
+            at(&with(|c| c.mtry = Some(1_000)), 10_000, 16)
+        );
+        assert!(at(&with(|c| c.n_trees = 300), 10_000, 4) > base);
+        assert!(at(&with(|c| c.n_bootstrap = 150), 10_000, 4) > base);
+        assert!(at(&with(|c| c.max_depth = 8), 10_000, 4) > base);
+        assert!(at(&with(|c| c.include_propensity = true), 10_000, 4) > base);
+        assert!(at(&d, 20_000, 4) > base);
+        assert!(at(&d, 10_000, 8) > base);
+        // The draws alone: n_bootstrap x n_obs doubles.
+        assert!(u128::from(base) > 100 * 10_000 * 8);
+        // At the default depth a tree pair has at most 2 * 2^4 leaves however many rows.
+        assert_eq!(d.max_leaves_per_pair(10_000_000), 32);
+        let huge = with(|c| {
+            c.n_trees = usize::MAX;
+            c.max_depth = usize::MAX;
+            c.min_node_size = 0;
+            c.n_bootstrap = usize::MAX;
+        });
+        assert_eq!(at(&huge, usize::MAX, usize::MAX), u64::MAX);
+        assert_eq!(at(&d, usize::MAX, 4), u64::MAX);
+        assert!(at(&d, 0, 0) > 0);
+    }
+
+    /// `run_bart_causal_config` gives the configuration `run_bart_causal` used before it
+    /// existed: the arguments, and the defaults where they are `None`.
+    #[test]
+    fn run_config_takes_the_arguments_and_the_defaults() {
+        let c = run_bart_causal_config(None, None, None, None, None);
+        let d = BartCausalConfig::default();
+        assert_eq!(
+            (
+                c.n_trees,
+                c.max_depth,
+                c.n_bootstrap,
+                c.include_propensity,
+                c.seed
+            ),
+            (200, 4, 100, false, None)
+        );
+        assert_eq!(
+            (c.min_node_size, c.sample_fraction, c.mtry),
+            (d.min_node_size, d.sample_fraction, d.mtry)
+        );
+        let c = run_bart_causal_config(Some(7), Some(2), Some(3), Some(true), Some(9));
+        assert_eq!(
+            (
+                c.n_trees,
+                c.max_depth,
+                c.n_bootstrap,
+                c.include_propensity,
+                c.seed
+            ),
+            (7, 2, 3, true, Some(9))
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The rule tables of the request-limits catalogue: [`PARAM_RULES`] classifies every cost-bearing
 //! request field of the MCP tools, [`ROW_RULES`] names the tools whose cost grows faster than
-//! linearly in the dataset's row count.
+//! linearly in the dataset's row count, or whose working memory is too large a multiple of it.
 
 use super::{Family, ParamRule, RowClass, RowRule, Rule};
 
@@ -8,11 +8,18 @@ const fn p(tool: &'static str, path: &'static str, rule: Rule) -> ParamRule {
     ParamRule { tool, path, rule }
 }
 
+/// A row rule whose refusal gives the class's own reason.
 const fn row(tool: &'static str, class: RowClass) -> RowRule {
+    row_because(tool, class, class.reason())
+}
+
+/// A row rule that holds `tool` to `class`'s cap for `reason` (see [`RowRule::reason`]).
+const fn row_because(tool: &'static str, class: RowClass, reason: &'static str) -> RowRule {
     RowRule {
         tool,
         dataset_field: "dataset",
         class,
+        reason,
     }
 }
 
@@ -402,7 +409,8 @@ pub static PARAM_RULES: &[ParamRule] = {
             "ml_dbscan",
             "eps",
             Exempt(
-                "neighbourhood radius, not a convergence tolerance; dense cost is bounded by dense_rows",
+                "neighbourhood radius, not a convergence tolerance; quadratic_rows bounds the \
+                 rows its queries scan",
             ),
         ),
         p("ml_hierarchical", "distance_threshold", Exempt(CUT_HEIGHT)),
@@ -871,6 +879,8 @@ pub static PARAM_RULES: &[ParamRule] = {
 };
 
 /// Tools whose dataset height is limited, by [`RowClass`]. All take the dataset in `dataset`.
+/// `row_because` holds a tool to a class's cap for a reason the class does not describe, and
+/// its refusal gives that reason.
 ///
 /// Deliberately not row-limited, because their cost is close to linear in the row count:
 /// `hypothesis_cor_test` (Kendall's tau by sort and merge), `stats_ecdf` (evaluation by binary
@@ -886,12 +896,27 @@ pub static ROW_RULES: &[RowRule] = &[
     // the same tree before cutting it.
     row("ml_hierarchical", RowClass::Dense),
     row("ml_cutree", RowClass::Dense),
-    // Dense class: each neighbourhood query can return all n rows, so clustering takes O(n^2)
-    // time when eps covers the data (memory is O(n)).
-    row("ml_dbscan", RowClass::Dense),
-    // The penalty is stored as bands and each solve is O(n), so neither memory nor time grows
-    // with n^2; the Dense row cap is kept as a conservative bound.
-    row("regression_smooth_spline", RowClass::Dense),
+    // Quadratic: neither large-n path stores a neighbourhood (memory is O(n) plus one query
+    // result), but each query can return all n rows, so clustering takes O(n^2) time when eps
+    // covers the data. Both phases check the call's budget per query, so an overrun ends at the
+    // deadline. Below 500 rows a condensed distance matrix is kept, which is small.
+    row("ml_dbscan", RowClass::Quadratic),
+    // Held to the quadratic cap, with its own reason. The penalty is stored as bands and each
+    // solve is O(n): the fit sorts the data once and then runs at most about thirty banded fits
+    // (the GCV search or the df search), each checking the call's budget, so neither memory nor
+    // time grows with n^2. But the fit keeps about twenty arrays the length of the distinct x
+    // values at once (sorted copies, weights, the penalty bands, the banded system and its
+    // factor, and the fit's outputs): on a release build its working memory was about 170 bytes
+    // per distinct x value, ten times its two columns. Without a row cap a dataset well inside
+    // the session data quota would take the hosted process past its memory; at the quadratic
+    // cap the working memory stays near 9 MB (a release-build call at the cap, every x value
+    // distinct, took under a second and grew the process by about 15 MiB, its JSON response
+    // included). A fit that reuses its buffers would let the cap go.
+    row_because(
+        "regression_smooth_spline",
+        RowClass::Quadratic,
+        "its working memory is many times the size of its two columns",
+    ),
     // Cubic: exact t-SNE (no Barnes-Hut) keeps the n x n affinity and similarity matrices and
     // does O(n^2) work per iteration.
     row("ml_tsne", RowClass::Cubic),
@@ -908,9 +933,20 @@ pub static ROW_RULES: &[RowRule] = &[
     // Cubic: the spatial-lag models and the within spatial-error model take the eigenvalues of
     // the dense N x N W of the entities.
     row("spatial_panel_ml", RowClass::Cubic),
-    // The GMM estimator forms P_Z X in O(NT k) memory instead of the NT x NT projection and needs
-    // no eigenvalues; the Cubic row cap is kept as a conservative bound.
-    row("spatial_panel_gmm", RowClass::Cubic),
+    // Held to the cubic cap, with its own reason. The GMM estimator forms P_Z X in O(NT k)
+    // memory instead of the NT x NT projection and needs no eigenvalues, but with `lag` the
+    // panel spatial lag (`splm::spatial_lag_panel`) scans all NT rows once for each of the T
+    // periods, k + 3 times per fit: O(k N T^2) time, quadratic in the rows of a long panel, and
+    // the estimator never checks the call's budget. On a release build a long-panel fit with
+    // many regressors ran for tens of seconds without a checkpoint. The rule cannot see `lag`,
+    // so the cap applies to every call, and the reason says so. The quadratic cap would need
+    // that scan to be linear (rows grouped by period once) or to check the budget.
+    row_because(
+        "spatial_panel_gmm",
+        RowClass::Cubic,
+        "its spatial-lag fit (`lag`) runs in time that grows with the rows times the time \
+         periods and cannot be stopped once it starts, so the cap applies with or without `lag`",
+    ),
     // Quadratic: nearest-neighbour search over all controls.
     row("propensity_matching", RowClass::Quadratic),
     // Quadratic: with matching, each of the B permutations compares every unit with every unit
@@ -1869,6 +1905,67 @@ mod tests {
         assert!(h.check_rows("ts_changepoint", 50_000, 1).is_ok());
         for rows in [50_000, 50_001] {
             assert!(Limits::off().check_rows("ts_changepoint", rows, 1).is_ok());
+        }
+    }
+
+    /// `ml_dbscan` keeps O(n) memory, and only its run time is quadratic (when `eps` covers the
+    /// data), so the quadratic class limits it. `regression_smooth_spline` has linear cost and
+    /// is held to the quadratic cap for its working memory, and `spatial_panel_gmm` to the cubic
+    /// cap for its spatial-lag scan; their refusals say why, not that their memory or time grows
+    /// with the square or cube of the row count, and the one of `spatial_panel_gmm` holds for a
+    /// call without `lag` too.
+    #[test]
+    fn row_refusals_give_the_tools_own_reason() {
+        let h = Limits::hosted();
+        let key = |v: &LimitViolation| (v.limit.clone(), v.override_key);
+
+        assert!(h.check_rows("ml_dbscan", 50_000, 2).is_ok());
+        let v = h.check_rows("ml_dbscan", 50_001, 2).unwrap_err();
+        assert_eq!(key(&v), ("50000".to_string(), "quadratic_rows"));
+        assert!(
+            v.message
+                .contains("because its run time grows with the square of the row count"),
+            "{}",
+            v.message
+        );
+
+        assert!(h.check_rows("regression_smooth_spline", 50_000, 2).is_ok());
+        let v = h
+            .check_rows("regression_smooth_spline", 50_001, 2)
+            .unwrap_err();
+        assert_eq!(key(&v), ("50000".to_string(), "quadratic_rows"));
+        assert!(!v.message.contains("square"), "{}", v.message);
+        assert!(
+            v.message
+                .contains("because its working memory is many times the size of its two columns"),
+            "{}",
+            v.message
+        );
+
+        assert!(h.check_rows("spatial_panel_gmm", 2_000, 5).is_ok());
+        let v = h.check_rows("spatial_panel_gmm", 2_001, 5).unwrap_err();
+        assert_eq!(key(&v), ("2000".to_string(), "cubic_rows"));
+        assert!(!v.message.contains("cube"), "{}", v.message);
+        assert!(
+            v.message.contains(
+                "because its spatial-lag fit (`lag`) runs in time that grows with the rows times \
+                 the time periods and cannot be stopped once it starts, so the cap applies with \
+                 or without `lag`."
+            ),
+            "{}",
+            v.message
+        );
+
+        // The class's own reason where the class describes the tool.
+        let v = h.check_rows("ml_hierarchical", 5_001, 2).unwrap_err();
+        assert!(
+            v.message
+                .contains("because its memory grows with the square of the row count"),
+            "{}",
+            v.message
+        );
+        for tool in ["ml_dbscan", "regression_smooth_spline", "spatial_panel_gmm"] {
+            assert!(Limits::off().check_rows(tool, 10_000_000, 5).is_ok());
         }
     }
 
