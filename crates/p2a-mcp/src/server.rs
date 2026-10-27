@@ -1464,6 +1464,39 @@ fn limit_error(v: LimitViolation) -> McpError {
     )
 }
 
+/// Logs a stdio tool call that panicked and turns it into its JSON-RPC
+/// error: `internal_error` (-32603) with the governed path's text and data
+/// code `internal`. The panic hook has already printed the panic's message
+/// to stderr; the caller is not given it.
+fn panic_error(tool: &str) -> McpError {
+    let tool = crate::tools::limits::echo(tool);
+    tracing::error!(tool, "tool call panicked");
+    McpError::internal_error(
+        format!("tool '{tool}' failed unexpectedly; the session is still usable"),
+        Some(serde_json::json!({ "code": "internal" })),
+    )
+}
+
+/// Runs `fut` to its end, or to a panic while it is polled, which comes
+/// back as `Err` with the panic's payload, like
+/// `futures::FutureExt::catch_unwind` (`futures` is an optional dependency
+/// here, and the stdio transport is always built).
+///
+/// `AssertUnwindSafe` as on the governed path: a panicking call leaves this
+/// server's state as it leaves a session's there. The tokio locks around the
+/// datasets do not poison, and a held guard is released as the panic unwinds.
+async fn catch_panic<F: std::future::Future>(fut: F) -> std::thread::Result<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    std::future::poll_fn(move |cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Ready(output)) => std::task::Poll::Ready(Ok(output)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(panic) => std::task::Poll::Ready(Err(panic)),
+        }
+    })
+    .await
+}
+
 /// Logs a refusal and turns it into the governed path's 422 error.
 #[cfg(feature = "http")]
 fn log_and_convert(v: LimitViolation) -> crate::exec::ToolCallError {
@@ -1592,8 +1625,10 @@ impl std::fmt::Write for QuoteEnds {
 /// limits as the governed HTTP-side path (arguments, dataset rows of this
 /// server's own datasets, response size) before and after delegating to the
 /// tool router, and with `with_audit_logger` each call leaves one audit entry
-/// (origin and session id `stdio`). Deadlines and dataset quotas are
-/// HTTP-only.
+/// (origin and session id `stdio`). A call that panics is answered with the
+/// JSON-RPC error -32603, data code `internal` (the governed path's 500
+/// `internal`), and audited as `internal`; the server goes on serving.
+/// Deadlines and dataset quotas are HTTP-only.
 impl ServerHandler for AnalyticsServer {
     async fn list_tools(
         &self,
@@ -1622,17 +1657,19 @@ impl ServerHandler for AnalyticsServer {
             let declared = self.declared_parameters(&tool);
             (a, crate::audit::sanitize_arguments(&args, &declared))
         });
-        let checked = if known {
-            enforce_request_limits(&limits, &tool, &args, &self.datasets).await
-        } else {
-            Ok(())
-        };
-        if let (true, serde_json::Value::Object(map)) = (had_arguments, args) {
-            request.arguments = Some(map);
-        }
-
-        // The error is paired with its audit outcome.
-        let outcome: Result<CallToolResult, (McpError, &'static str)> = async {
+        // The error is paired with its audit outcome. A panic in the limit
+        // checks, the handler or the size check becomes the `internal`
+        // error, so the call is answered and audited like any other (rmcp
+        // would drop the request's task without a reply).
+        let outcome: Result<CallToolResult, (McpError, &'static str)> = catch_panic(async {
+            let checked = if known {
+                enforce_request_limits(&limits, &tool, &args, &self.datasets).await
+            } else {
+                Ok(())
+            };
+            if let (true, serde_json::Value::Object(map)) = (had_arguments, args) {
+                request.arguments = Some(map);
+            }
             checked.map_err(|v| (limit_error(v), "limit_exceeded"))?;
             // An unknown name gets the router's own error.
             let result = self
@@ -1655,8 +1692,9 @@ impl ServerHandler for AnalyticsServer {
             check_response_size(&limits, &tool, output_bytes)
                 .map_err(|v| (limit_error(v), "limit_exceeded"))?;
             Ok(result)
-        }
-        .await;
+        })
+        .await
+        .unwrap_or_else(|_panic| Err((panic_error(&tool), "internal")));
 
         if let Some((audit, arguments)) = audit {
             let (code, summary) = match &outcome {
@@ -2021,6 +2059,208 @@ mod tests {
             "Failed to parse arguments for 'set_seed': invalid type: string \"seven\", \
              expected u64"
         );
+    }
+
+    // =========================================================================
+    // stdio transport: a tool call that panics
+    // =========================================================================
+
+    type StdioLines =
+        tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>;
+    type StdioWriter = tokio::io::WriteHalf<tokio::io::DuplexStream>;
+
+    /// The name of the test route whose handler panics.
+    const PANICKING_TOOL: &str = "test_handler_panics";
+
+    /// The test route's handler, which panics as a tool with a bug does.
+    async fn handler_that_panics() -> Result<CallToolResult, McpError> {
+        panic!("a bug in a tool handler")
+    }
+
+    fn call_handler_that_panics(
+        _context: ToolCallContext<'_, AnalyticsServer>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_>,
+    > {
+        Box::pin(handler_that_panics())
+    }
+
+    /// A route for [`PANICKING_TOOL`], standing in for any handler panic not
+    /// fixed yet, so the test does not depend on one.
+    fn panicking_route() -> rmcp::handler::server::router::tool::ToolRoute<AnalyticsServer> {
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".into(), "object".into());
+        schema.insert("properties".into(), serde_json::json!({}));
+        rmcp::handler::server::router::tool::ToolRoute::new_dyn(
+            Tool::new(PANICKING_TOOL, "Panics.", Arc::new(schema)),
+            call_handler_that_panics,
+        )
+    }
+
+    async fn send_line(w: &mut StdioWriter, msg: serde_json::Value) {
+        use tokio::io::AsyncWriteExt;
+        w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    async fn next_message(lines: &mut StdioLines) -> serde_json::Value {
+        let line = lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("the server closed the stream");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    /// Serves `server` over an in-memory stream, as the stdio transport does
+    /// over stdin/stdout, and initialises the MCP session.
+    async fn stdio_client(
+        server: AnalyticsServer,
+    ) -> (StdioLines, StdioWriter, tokio::task::JoinHandle<()>) {
+        use rmcp::ServiceExt;
+        use tokio::io::AsyncBufReadExt;
+        let (client, server_end) = tokio::io::duplex(1 << 20);
+        let service = tokio::spawn(async move {
+            let running = server
+                .serve(tokio::io::split(server_end))
+                .await
+                .expect("serve");
+            let _ = running.waiting().await;
+        });
+        let (r, mut w) = tokio::io::split(client);
+        let mut lines = tokio::io::BufReader::new(r).lines();
+        send_line(
+            &mut w,
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2024-11-05", "capabilities": {},
+                "clientInfo": {"name": "server-tests", "version": "0"}}}),
+        )
+        .await;
+        while next_message(&mut lines).await["id"] != 1 {}
+        send_line(
+            &mut w,
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+        (lines, w, service)
+    }
+
+    /// How many ping round trips the reply to a request may come after.
+    /// A reply that comes at all comes within the first: rmcp runs each
+    /// request as a task on the test's current_thread runtime, and the calls
+    /// here wait on nothing outside it. Counting round trips, not seconds,
+    /// keeps the test independent of the machine's speed.
+    const ROUND_TRIPS: u64 = 20;
+
+    /// The reply to request `id`, or `None` when it has not come after
+    /// [`ROUND_TRIPS`] pings sent after it were answered.
+    async fn reply_to(
+        lines: &mut StdioLines,
+        w: &mut StdioWriter,
+        id: u64,
+    ) -> Option<serde_json::Value> {
+        let first_ping = 1_000 * id;
+        let mut ping = first_ping;
+        send_line(
+            w,
+            serde_json::json!({"jsonrpc": "2.0", "id": ping, "method": "ping"}),
+        )
+        .await;
+        loop {
+            let msg = next_message(lines).await;
+            if msg["id"] == id {
+                return Some(msg);
+            }
+            if msg["id"] == ping {
+                if ping - first_ping + 1 == ROUND_TRIPS {
+                    return None;
+                }
+                ping += 1;
+                send_line(
+                    w,
+                    serde_json::json!({"jsonrpc": "2.0", "id": ping, "method": "ping"}),
+                )
+                .await;
+            }
+        }
+    }
+
+    /// A tool call whose handler panics gets a JSON-RPC error over stdio, as
+    /// the governed path answers 500 `internal`, and leaves one audit entry
+    /// with outcome `internal`, in both profiles. The server goes on
+    /// answering.
+    #[test]
+    fn stdio_answers_and_audits_a_tool_call_that_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::AuditConfig {
+            enabled: true,
+            path: dir.path().join("audit.log").to_string_lossy().into_owned(),
+        };
+        // This handle keeps the writer alive until the log is read.
+        let logger = Arc::new(crate::audit::AuditLogger::new(&cfg).unwrap());
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        for limits in [Limits::off(), Limits::hosted()] {
+            crate::tools::limits::with_limits(limits, || {
+                runtime().block_on(async {
+                    let mut server = AnalyticsServer::new().with_audit_logger(logger.clone());
+                    server.tool_router.add_route(panicking_route());
+                    let (mut lines, mut w, service) = stdio_client(server).await;
+                    send_line(
+                        &mut w,
+                        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                            "params": {"name": PANICKING_TOOL, "arguments": {}}}),
+                    )
+                    .await;
+                    let reply = reply_to(&mut lines, &mut w, 2)
+                        .await
+                        .expect("the call that panicked got no reply");
+                    assert_eq!(reply["error"]["code"], -32603, "{reply}");
+                    assert_eq!(
+                        reply["error"]["message"],
+                        format!(
+                            "tool '{PANICKING_TOOL}' failed unexpectedly; the session is still \
+                             usable"
+                        ),
+                        "{reply}"
+                    );
+                    assert_eq!(reply["error"]["data"]["code"], "internal", "{reply}");
+                    // The next call is answered.
+                    send_line(
+                        &mut w,
+                        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                            "params": {"name": "list_datasets", "arguments": {}}}),
+                    )
+                    .await;
+                    let next = reply_to(&mut lines, &mut w, 3)
+                        .await
+                        .expect("the call after the panic got no reply");
+                    assert!(next.get("error").is_none(), "{next}");
+                    assert_ne!(next["result"]["isError"], true, "{next}");
+                    drop(w);
+                    service.abort();
+                });
+            });
+        }
+        runtime().block_on(logger.flush());
+        let text = std::fs::read_to_string(&cfg.path).unwrap();
+        let entries: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .filter(|e: &serde_json::Value| e["tool_name"] == PANICKING_TOOL)
+            .collect();
+        assert_eq!(entries.len(), 2, "{text}");
+        for entry in entries {
+            assert_eq!(entry["origin"], "stdio", "{entry}");
+            assert_eq!(entry["session_id"], "stdio", "{entry}");
+            assert_eq!(entry["outcome"], "internal", "{entry}");
+            assert_eq!(entry["success"], false, "{entry}");
+        }
+        drop(logger);
     }
 
     /// Helper to extract text from Content (Annotated<RawContent>)
