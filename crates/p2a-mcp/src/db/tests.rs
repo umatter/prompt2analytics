@@ -647,6 +647,51 @@ async fn store_turns_leave_the_map() {
     assert_eq!(db.store_turns_in_use(), 0);
 }
 
+/// The next call's turn starts only once the call before it has left the
+/// map: a turn that ends lets the next call in and lowers its count in one
+/// step under the map's lock (`StoreTurn::drop`), so a call that holds a
+/// turn never finds the one before it still counted. Here the test holds
+/// the map's lock while the first holder ends on a thread of its own, and
+/// the waiting call must not get its turn until the lock is free. Before,
+/// the ending turn let the next call in first and took the lock after, so
+/// the next call held its turn while the earlier holder was still in the
+/// map, and the dropped-call tests, which check the map after their last
+/// call, failed now and then on a loaded machine.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_next_turn_starts_after_the_last_holder_left_the_map() {
+    let db = test_db().await;
+    let first = db.conversation_turn("c").await;
+    let (started, start) = std::sync::mpsc::channel();
+    let next = tokio::spawn({
+        let db = db.clone();
+        async move {
+            let turn = db.conversation_turn("c").await;
+            let _ = started.send(());
+            let users = db.store_turn_users("c");
+            drop(turn);
+            users
+        }
+    });
+    assert!(turn_has_users(&db, "c", 2).await);
+    let map = db.hold_store_turns();
+    let ending = std::thread::spawn(move || drop(first));
+    // A negative check: with the lock held here the next turn cannot start,
+    // so a slow machine only waits longer; it never fails because of it.
+    let early = start.recv_timeout(std::time::Duration::from_millis(50));
+    drop(map);
+    ending.join().unwrap();
+    assert!(
+        early.is_err(),
+        "the next call held its turn while the last holder was still in the map"
+    );
+    assert_eq!(
+        next.await.unwrap(),
+        1,
+        "the next call found the last holder"
+    );
+    assert_eq!(db.store_turns_in_use(), 0);
+}
+
 /// Concurrent posts to a conversation one message below its cap: the count
 /// check and the write take turns, so exactly one of them gets in.
 #[tokio::test(flavor = "multi_thread")]
@@ -1629,10 +1674,11 @@ async fn a_dropped_clear_or_delete_leaves_the_count_in_step() {
             {
                 out_of_step.push(format!("{pass} {op:?}: {gap}"));
             }
-            // The dropped call's entry can outlast this test's own turn by
-            // a moment (`StoreTurn::drop` lets the next call in first).
-            assert!(
-                turns_released(&db).await,
+            // This test's own turn came after the dropped call's, which left
+            // the map as it ended (`StoreTurn::drop`).
+            assert_eq!(
+                db.store_turns_in_use(),
+                0,
                 "{pass} {op:?}: a turn stays in use"
             );
         }
@@ -1676,9 +1722,9 @@ async fn a_retry_after_a_dropped_clear_or_delete_waits_for_it() {
         }
         assert_eq!(listed_and_stored(&db, &id).await, (0, 0), "{op:?}");
         assert_counter_matches_store(&db, "s1").await;
-        // The dropped call's entry can outlast the retry by a moment
-        // (`StoreTurn::drop` lets the next call in first).
-        assert!(turns_released(&db).await, "{op:?}: a turn stays in use");
+        // The retry's turn came after the dropped call's, which left the map
+        // as it ended (`StoreTurn::drop`).
+        assert_eq!(db.store_turns_in_use(), 0, "{op:?}: a turn stays in use");
     }
 }
 
@@ -1965,10 +2011,11 @@ async fn a_clear_during_a_tool_call_write_waits_for_it() {
         );
         assert_eq!(rows_in(&db, "tool_calls").await, 0, "dropped {write:?}");
         assert_counter_matches_store(&db, "s1").await;
-        // The dropped write's entry can outlast the clear by a moment
-        // (`StoreTurn::drop` lets the next call in first).
-        assert!(
-            turns_released(&db).await,
+        // The clear's turn came after the dropped write's, which left the
+        // map as it ended (`StoreTurn::drop`).
+        assert_eq!(
+            db.store_turns_in_use(),
+            0,
             "dropped {write:?}: a turn stays in use"
         );
     }
@@ -2116,10 +2163,13 @@ async fn a_write_after_a_dropped_add_or_create_finds_the_cap_reached() {
         let refused = db.create_conversation("s1", "refused").await.map(|_| ());
         let stored = db.count_conversations("s1").await.unwrap() as i64;
         outcomes.push((engine, "create", refused, (stored, stored)));
-        // A dropped call's task lets the next call in before its entry
-        // leaves the map (`StoreTurn::drop`), so the entry can outlast the
-        // next call by a moment.
-        assert!(turns_released(&db).await, "{engine:?}: a turn stays in use");
+        // Each refused call's turn came after the dropped call's, which left
+        // the map as it ended (`StoreTurn::drop`).
+        assert_eq!(
+            db.store_turns_in_use(),
+            0,
+            "{engine:?}: a turn stays in use"
+        );
     }
     // Left: the cases whose second call was not refused, or that do not
     // store (and list) three rows.
@@ -2207,9 +2257,9 @@ async fn a_clear_after_a_dropped_write_waits_for_it() {
         if let Some(gap) = counter_gap(&db, "s1").await {
             problems.push(format!("{write:?}: {gap}"));
         }
-        // The dropped write's entry can outlast the clear by a moment
-        // (`StoreTurn::drop` lets the next call in first).
-        assert!(turns_released(&db).await, "{write:?}: a turn stays in use");
+        // The clear's turn came after the dropped write's, which left the
+        // map as it ended (`StoreTurn::drop`).
+        assert_eq!(db.store_turns_in_use(), 0, "{write:?}: a turn stays in use");
     }
     assert!(problems.is_empty(), "{problems:#?}");
 }

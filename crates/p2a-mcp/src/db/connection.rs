@@ -156,7 +156,9 @@ type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)
 /// `session_db_bytes` and write them in the conversation's turn, so a delete
 /// or clear never runs between the count and the write. The byte counter is
 /// per process, and so are the turns. An entry leaves the map with its last
-/// holder or waiter, also when a waiting call is cancelled.
+/// holder or waiter, also when a waiting call is cancelled. A turn ends and
+/// leaves its entry in one step under the map's lock, so a call that holds a
+/// turn never finds the call before it still counted in the map.
 ///
 /// Every call that takes a turn waits for it in its caller and then moves it
 /// into a task of its own ([`run_to_end`]), which holds it until the store
@@ -176,12 +178,16 @@ pub(crate) struct StoreTurn {
 
 impl Drop for StoreTurn {
     fn drop(&mut self) {
-        // Let the next call in before giving up the entry.
-        self.guard.take();
         let mut turns = self
             .turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Let the next call in before giving up the entry, under the map's
+        // lock: the next call's turn may start at once on another thread,
+        // and any look at the map after that waits for this lock, so it
+        // finds this turn gone. Releasing the guard only wakes the next
+        // waiter and takes no lock on the map, so nothing waits on itself.
+        self.guard.take();
         if let Some((_, users)) = turns.get_mut(&self.key) {
             *users = users.saturating_sub(1);
             if *users == 0 {
@@ -596,6 +602,15 @@ impl DbConnection {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(key)
             .map_or(0, |(_, users)| *users)
+    }
+
+    /// The lock on the store turns' map, held until the returned guard is
+    /// dropped: meanwhile no turn ends and no call joins one.
+    #[cfg(test)]
+    pub(crate) fn hold_store_turns(&self) -> impl Sized + '_ {
+        self.store_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Whether a call holds the store turn `key` (a conversation id, or
