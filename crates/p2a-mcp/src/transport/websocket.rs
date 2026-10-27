@@ -207,7 +207,7 @@ const MAX_WAITING_MESSAGES: usize = 16;
 /// The variable that sets the message cap, the HTTP body cap of
 /// [`super::middleware::max_request_body_bytes`]; the messages waiting on a
 /// connection may take that much together.
-const MESSAGE_CAP_VAR: &str = "P2A_MAX_HTTP_BODY_MB";
+const MESSAGE_CAP_VAR: &str = super::middleware::MAX_HTTP_BODY_VAR;
 
 /// How long a connection that ended may take to send what it still has and
 /// its close frame before the socket is dropped.
