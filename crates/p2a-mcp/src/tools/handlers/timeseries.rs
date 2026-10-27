@@ -10,6 +10,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::limit_refusal;
 use crate::tools::requests::timeseries::*;
 
 use p2a_core::{
@@ -2237,22 +2238,15 @@ fn arima_refusal(
 ) -> Option<CallToolResult> {
     let series = dataset.df().column(column).ok()?.f64().ok()?;
     let limits = crate::tools::limits::current();
-    let v = limits
+    limits
         .check_arima_fit(tool, series.len(), p, d, q)
         .err()
         .or_else(|| {
             limits
                 .check_arima_series(tool, column, series.into_no_null_iter())
                 .err()
-        })?;
-    tracing::info!(
-        tool = %v.tool,
-        knob = v.override_key,
-        requested = %v.requested,
-        limit = %v.limit,
-        "tool request refused by a resource limit"
-    );
-    Some(CallToolResult::error(vec![Content::text(v.message)]))
+        })
+        .map(limit_refusal)
 }
 
 #[cfg(test)]
