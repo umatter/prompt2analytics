@@ -198,7 +198,7 @@ const NAME_BYTE_COPIES: u64 = 4;
 pub const VIEW_BYTES: u64 = 16;
 /// Bytes charged per String or Binary value: its view and the allocation
 /// slack measured around it.
-const VIEW_CHARGE_BYTES: u64 = 18;
+pub(crate) const VIEW_CHARGE_BYTES: u64 = 18;
 /// Bytes charged per category label on top of its text: its slots in the
 /// mapping (hash table entry, id-to-label entry, allocation rounding).
 /// The check before a parquet file is decoded counts it too.
@@ -319,6 +319,20 @@ pub fn structure_bytes<'a>(columns: impl IntoIterator<Item = &'a str>) -> u64 {
                 .saturating_add(COLUMN_OVERHEAD_BYTES)
                 .saturating_add(name_bytes(name.len()))
         })
+}
+
+/// The charge for one column named `name` in a dataset's structure, on top
+/// of its values (one of the terms of [`structure_bytes`]).
+pub(crate) fn column_structure_bytes(name: &str) -> u64 {
+    COLUMN_OVERHEAD_BYTES.saturating_add(name_bytes(name.len()))
+}
+
+/// What the dataset quotas charge for the values of the column `s` (see
+/// [`datasets_bytes_of`]), its structure left out.
+pub(crate) fn series_bytes(s: &Series) -> u64 {
+    let mut charge = DataCharge::default();
+    charge.add_series(s);
+    charge.bytes
 }
 
 /// The charge for a name of `len` bytes.
@@ -1026,10 +1040,69 @@ pub fn dataset_admission_active() -> bool {
 /// pass it. Without installed quotas (stdio, limits off) it admits
 /// everything.
 pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
+    admit_charge(name, at_least).await.map_err(|refused| {
+        if refused.per_session {
+            format!(
+                "Loading this file takes at least {} of memory, so {}. Nothing was loaded; load \
+                 a smaller file or start a new session.",
+                fmt_bytes(refused.added),
+                refused.outcome()
+            )
+        } else {
+            format!(
+                "Loading this file takes at least {} of memory, and {}. Nothing was loaded; try \
+                 again later or load a smaller file.",
+                fmt_bytes(refused.added),
+                refused.outcome()
+            )
+        }
+    })
+}
+
+/// Why [`admit_charge`] refused a dataset: the quota it would pass, and what
+/// the datasets would take with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuotaShortfall {
+    /// What the dataset is charged, its name included.
+    pub(crate) added: u64,
+    /// What the session's datasets (for the session quota) or the server's
+    /// (for the total) would take with it.
+    pub(crate) reached: u64,
+    /// The quota that refused it.
+    pub(crate) limit: u64,
+    /// Whether that is the session quota, rather than the server total.
+    pub(crate) per_session: bool,
+}
+
+impl QuotaShortfall {
+    /// What the dataset would do, as the quota refusals word it: "this
+    /// session's datasets would use X (limit Y per session)", or "the
+    /// server's dataset memory would reach X (limit Y)".
+    pub(crate) fn outcome(&self) -> String {
+        if self.per_session {
+            format!(
+                "this session's datasets would use {} (limit {} per session)",
+                fmt_bytes(self.reached),
+                fmt_bytes(self.limit)
+            )
+        } else {
+            format!(
+                "the server's dataset memory would reach {} (limit {})",
+                fmt_bytes(self.reached),
+                fmt_bytes(self.limit)
+            )
+        }
+    }
+}
+
+/// [`admit_dataset`] with the refusal left to the caller: a tool that is
+/// about to build a dataset of `name` charged at most `bytes` words why the
+/// dataset is that large itself.
+pub(crate) async fn admit_charge(name: &str, bytes: u64) -> Result<(), QuotaShortfall> {
     let Some(admission) = ADMISSION.with(|a| a.borrow().clone()) else {
         return Ok(());
     };
-    let added = at_least.saturating_add(name_bytes(name.len()));
+    let added = bytes.saturating_add(name_bytes(name.len()));
     let held = {
         let datasets = admission.session.datasets.read().await;
         datasets_bytes_of(
@@ -1043,14 +1116,12 @@ pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
     if let Some(limit) = admission.per_session
         && after > limit
     {
-        return Err(format!(
-            "Loading this file takes at least {} of memory, so this session's datasets would \
-             use {} (limit {} per session). Nothing was loaded; load a smaller file or start a \
-             new session.",
-            fmt_bytes(added),
-            fmt_bytes(after),
-            fmt_bytes(limit)
-        ));
+        return Err(QuotaShortfall {
+            added,
+            reached: after,
+            limit,
+            per_session: true,
+        });
     }
     // The reservation only serves the total, so without one nothing is
     // reserved.
@@ -1075,14 +1146,12 @@ pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
     if total > limit {
         admission.reserved.fetch_sub(added, Ordering::SeqCst);
         sessions.release_data_bytes(added);
-        return Err(format!(
-            "Loading this file takes at least {} of memory, and the server's dataset memory \
-             would reach {} (limit {}). Nothing was loaded; try again later or load a smaller \
-             file.",
-            fmt_bytes(added),
-            fmt_bytes(total),
-            fmt_bytes(limit)
-        ));
+        return Err(QuotaShortfall {
+            added,
+            reached: total,
+            limit,
+            per_session: false,
+        });
     }
     Ok(())
 }
