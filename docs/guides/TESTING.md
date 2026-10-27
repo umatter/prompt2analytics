@@ -72,7 +72,8 @@ socket.
 | `orphan_sweep_memory.rs` | what the orphan sweeps of a RocksDB conversation store read and hold, measured with a counting allocator | `#![cfg(feature = "db")]` | `--features full --test orphan_sweep_memory` (not in CI) |
 | `llm_egress.rs` | egress guard, upstream errors and retries, the key rule, the tool allowlist, context budget, chat-loop bounds | `#![cfg(all(feature = "http", feature = "llm"))]`; the conversation test needs `db` | the CI set, plus `--features full` |
 | `isolation.rs` | per-session directories, symbolic links, the disk quota, session export and import, the stale-directory purge | `#![cfg(feature = "http")]` | the CI set |
-| `serve_limits.rs` | `serve` and `start_http_transport` install the request limits of an open public configuration, overrides included, on a bound socket; while it runs, a start of other limits (`serve`, `start_transport` over HTTP or stdio) is refused | `#![cfg(feature = "http")]` | the CI set |
+| `serve_limits.rs` | `serve` and `start_http_transport` install the request limits of an open public configuration, overrides included, on a bound socket; while it runs, a start of other limits (`serve`, `start_transport` over HTTP or stdio, `start_embedded_server`, which returns the refusal) or of the same limits with another allocation ceiling or session-directory setting is refused | `#![cfg(feature = "http")]` | the CI set |
+| `serve_limits_hold.rs` | a server holds its limits until its last connection or websocket session closes: after an aborted `start_http_transport` with a keep-alive connection open, and after a graceful shutdown with a websocket session open, a local start is refused and the old connection keeps the caps; once it closes, the local start is accepted. Its tests run one at a time, since each ends by installing the off profile | `#![cfg(feature = "http")]`; the websocket test needs `websocket` | the CI set, plus `--features full` for the websocket test |
 
 Commands for the feature sets CI does not build:
 
@@ -221,10 +222,13 @@ Tests for the resource guards (core) and the server's limits follow these conven
   it once inside a `OnceLock` (`crates/p2a-mcp/tests/isolation.rs`), and p2a-core's
   `global_ceiling_round_trips` sets only a harmless ceiling (`usize::MAX - 1`) and restores `None`.
   `transport::http::serve` and `start_http_transport` install the limits and policies of the
-  configuration they serve, and refuse a start whose limits differ from those of a server still
-  running in the process. So a test serves a configuration whose resource profile is off and that
-  has no overrides (it installs the off profile, the default), or runs in a binary whose servers
-  all share one configuration (`crates/p2a-mcp/tests/serve_limits.rs`).
+  configuration they serve, and refuse a start whose limits or policies (allocation ceiling,
+  session directories) differ from those of a server still running in the process; a server holds
+  them until its last connection or websocket session has closed, which can be after `serve`
+  returned. So a test serves a configuration whose resource profile is off, that has no overrides
+  and that keeps the default policies (it installs the off profile, the default), or runs in a
+  binary whose servers all share one configuration (`crates/p2a-mcp/tests/serve_limits.rs`), or
+  whose tests run one at a time (`serve_limits_hold.rs`).
 - **Complexity rewrites** need an equivalence test against a naive reference on noisy random data,
   plus R-pinned values where R has the method.
 
