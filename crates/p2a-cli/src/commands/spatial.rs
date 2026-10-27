@@ -56,7 +56,7 @@ EXAMPLES:
         #[arg(long)]
         coord_y: String,
 
-        /// Number of nearest neighbors for spatial weights (default: 5)
+        /// Number of nearest neighbors for spatial weights, 1 to n - 1 (default: 5)
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
@@ -101,7 +101,7 @@ EXAMPLES:
         #[arg(long)]
         coord_y: String,
 
-        /// Number of nearest neighbors for spatial weights (default: 5)
+        /// Number of nearest neighbors for spatial weights, 1 to n - 1 (default: 5)
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
@@ -138,7 +138,7 @@ EXAMPLES:
         #[arg(long)]
         coord_y: String,
 
-        /// Number of nearest neighbors for spatial weights (default: 5)
+        /// Number of nearest neighbors for spatial weights, 1 to n - 1 (default: 5)
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
@@ -170,7 +170,7 @@ EXAMPLES:
         #[arg(long)]
         coord_y: String,
 
-        /// Number of nearest neighbors for spatial weights (default: 5)
+        /// Number of nearest neighbors for spatial weights, 1 to n - 1 (default: 5)
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
@@ -318,8 +318,10 @@ fn build_spatial_weights(
 
     let coords: Vec<(f64, f64)> = x_vals.into_iter().zip(y_vals).collect();
 
-    // Build neighbors and weights
-    let nb = Neighbors::from_knn(&coords, k);
+    // Build neighbors and weights. Like the MCP `spatial_neighbors` tool, refuse
+    // a k outside 1..=n-1 and coordinates that are not finite instead of
+    // clamping k to n - 1 (the legacy `from_knn`).
+    let nb = Neighbors::try_from_knn(&coords, k)?;
     let listw = SpatialWeights::from_neighbors(&nb, style);
 
     Ok(listw)
