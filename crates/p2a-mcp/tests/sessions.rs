@@ -15,7 +15,8 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use p2a_mcp::config::ServerConfig;
 use p2a_mcp::db::DatasetMeta;
 use p2a_mcp::path_jail::allowed_data_root;
-use p2a_mcp::persistent_session::PersistentSessionManager;
+use p2a_mcp::persistent_session::{PersistentSessionManager, RELOAD_LABEL};
+use p2a_mcp::tools::limits;
 use p2a_mcp::transport::http::{AppState, build_app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -115,6 +116,52 @@ where
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     false
+}
+
+/// What the process logs at INFO and above, from the first call on. The
+/// subscriber is the global default because a governed call logs on a
+/// blocking-pool thread, which a test thread's own default never reaches.
+/// Every test in this binary writes here once it is installed, so look a
+/// line up by something only one test logs, such as its session id.
+fn process_logs() -> &'static ProcessLogs {
+    static LOGS: std::sync::OnceLock<ProcessLogs> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let logs = ProcessLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other global subscriber in this test binary");
+        logs
+    })
+}
+
+#[derive(Clone, Default)]
+struct ProcessLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl ProcessLogs {
+    /// The lines logged so far that contain `needle`.
+    fn lines_with(&self, needle: &str) -> Vec<String> {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .lines()
+            .filter(|l| l.contains(needle))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+impl std::io::Write for ProcessLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 // =============================================================================
@@ -305,6 +352,181 @@ async fn reload_respects_the_session_dataset_quota() {
     assert!(!session.datasets.read().await.contains_key("second"));
     let bytes = session.refresh_data_bytes().await;
     assert!(bytes > 0 && bytes <= quota, "{bytes}");
+}
+
+/// A reload checks each source file against `load_file_bytes` before it
+/// parses it, as `load_dataset` does: a file that grew past the budget after
+/// it was loaded is reported failed with its size and the limit (and no
+/// server path), and the session does not get it. The refusal's log line
+/// carries the session id, so an operator can tie it to the session.
+#[test]
+fn reload_refuses_a_source_above_load_file_bytes() {
+    let logs = process_logs();
+    let big_csv = noisy_csv(200, 3);
+    let size = big_csv.len() as u64;
+    let capped = limits::Limits::off()
+        .with_overrides(&[format!("load_file_bytes={}", size - 1)])
+        .unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // The limits are this thread's (`with_limits`, not a process-wide
+    // install); the current-thread runtime runs the route on it, and the
+    // governor hands them to the blocking thread that loads the files.
+    limits::with_limits(capped, || {
+        rt.block_on(async {
+            let (r, state) = app(ServerConfig::default()).await;
+            let sid = new_session(&r).await;
+            let root = allowed_data_root().unwrap();
+            let dir = tempfile::Builder::new()
+                .prefix(".p2a-pr12-")
+                .tempdir_in(&root)
+                .unwrap();
+            let (small, big) = (dir.path().join("small.csv"), dir.path().join("big.csv"));
+            std::fs::write(&small, noisy_csv(3, 1)).unwrap();
+            std::fs::write(&big, &big_csv).unwrap();
+            store_meta(&state, &sid, "small", &small, 0).await;
+            store_meta(&state, &sid, "big", &big, 1).await;
+
+            let (st, body) = call(
+                &r,
+                "POST",
+                &format!("/api/sessions/{sid}/datasets/reload"),
+                Some(&sid),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert_eq!(body["data"]["succeeded"], json!(["small"]), "{body}");
+            assert_eq!(body["data"]["failed"][0]["name"], "big", "{body}");
+            let error = body["data"]["failed"][0]["error"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                error.contains("(load_file_bytes)")
+                    && error.contains(&size.to_string())
+                    && error.contains(&(size - 1).to_string()),
+                "{body}"
+            );
+            assert!(!error.contains(&*root.to_string_lossy()), "{body}");
+            let session = state.session_manager.get_session(&sid).await.unwrap();
+            assert!(session.datasets.read().await.contains_key("small"));
+            assert!(!session.datasets.read().await.contains_key("big"));
+
+            // The session id must come from the reload span's own field, not
+            // from anywhere in the line (the HTTP trace span's URI holds it
+            // too, should that span ever reach this subscriber's level).
+            let reload_span = format!("{RELOAD_LABEL}{{session_id={sid}}}");
+            let refusals = logs.lines_with("request refused by a named budget");
+            assert!(
+                refusals
+                    .iter()
+                    .any(|l| l.contains("dataset=big") && l.contains(&reload_span)),
+                "no refusal logged in span {reload_span}: {refusals:#?}"
+            );
+        })
+    });
+}
+
+/// Only `load_dataset` records the file it loaded as a dataset's source. A
+/// `path` argument to `upload_dataset` or `create_dataset`, which neither
+/// tool reads, is not stored, so a reload skips those datasets instead of
+/// replacing them with that file.
+#[cfg(feature = "llm")]
+#[tokio::test]
+async fn only_load_dataset_records_a_source_path() {
+    use base64::Engine;
+
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let root = allowed_data_root().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-pr12-")
+        .tempdir_in(&root)
+        .unwrap();
+    std::fs::write(dir.path().join("file.csv"), noisy_csv(50, 2)).unwrap();
+    let file = dir
+        .path()
+        .strip_prefix(&root)
+        .unwrap()
+        .join("file.csv")
+        .to_string_lossy()
+        .into_owned();
+    let small = noisy_csv(3, 5);
+    let calls = [
+        ("load_dataset", json!({"path": file, "name": "loaded"})),
+        (
+            "upload_dataset",
+            json!({
+                "content": base64::engine::general_purpose::STANDARD.encode(&small),
+                "filename": "small.csv",
+                "name": "uploaded",
+                "path": file,
+            }),
+        ),
+        (
+            "create_dataset",
+            json!({"csv_content": small, "name": "created", "path": file}),
+        ),
+    ];
+    for (tool, arguments) in calls {
+        let (st, body) = call(
+            &r,
+            "POST",
+            &format!("/api/tools/{tool}"),
+            Some(&sid),
+            Some(json!({"session_id": sid, "arguments": arguments})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{tool}: {body}");
+        assert_eq!(body["data"]["success"], true, "{tool}: {body}");
+    }
+
+    let (st, body) = call(
+        &r,
+        "GET",
+        &format!("/api/sessions/{sid}/datasets"),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let source = |name: &str| {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .map(|d| d["source_path"].clone())
+    };
+    assert_eq!(source("loaded"), Some(json!(file)), "{body}");
+    assert_eq!(source("uploaded"), Some(Value::Null), "{body}");
+    assert_eq!(source("created"), Some(Value::Null), "{body}");
+
+    let (st, body) = call(
+        &r,
+        "POST",
+        &format!("/api/sessions/{sid}/datasets/reload"),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["succeeded"], json!(["loaded"]), "{body}");
+    let mut skipped: Vec<&str> = body["data"]["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    skipped.sort_unstable();
+    assert_eq!(skipped, ["created", "uploaded"], "{body}");
+    let session = state.session_manager.get_session(&sid).await.unwrap();
+    let datasets = session.datasets.read().await;
+    for name in ["uploaded", "created"] {
+        assert_eq!(datasets[name].nrows(), 3, "{name}");
+    }
 }
 
 /// A reload is admitted like a tool call: above the memory soft limit it is

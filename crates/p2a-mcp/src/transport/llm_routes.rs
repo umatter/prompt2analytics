@@ -1086,9 +1086,12 @@ impl StreamingToolExecutor {
             Vec::new()
         };
 
-        // Get source path and file metadata
+        // The file the dataset was loaded from, which a reload loads again.
+        // Only load_dataset reads a `path`; upload_dataset and create_dataset
+        // ignore one a caller adds, so it is not their source.
         let source_path = arguments
             .get("path")
+            .filter(|_| tool_name == "load_dataset")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
