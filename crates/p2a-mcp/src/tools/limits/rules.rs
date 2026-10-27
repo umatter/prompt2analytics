@@ -1812,16 +1812,16 @@ mod tests {
             (
                 "power_anova_test",
                 "groups",
-                json!({"groups": 95, "between_var": 1.0, "within_var": 3.0, "power": 0.8}),
+                json!({"groups": 101, "between_var": 1.0, "within_var": 3.0, "power": 0.8}),
                 "design_groups",
-                "10",
+                "100",
             ),
             (
                 "power_anova_test",
                 "groups",
                 json!({"groups": u64::MAX, "n": 10, "between_var": 1.0}),
                 "design_groups",
-                "10",
+                "100",
             ),
         ];
         for (tool, param, args, key, cap) in cases {
@@ -1873,9 +1873,13 @@ mod tests {
             let args = json!({"n": n, "p1": 0.3, "p2": 0.5});
             assert!(hosted("power_prop_test", args.clone()).is_ok(), "{args}");
         }
+        // Designs with dozens of groups are legitimate; the most groups allowed equals the
+        // hosted `max_groups` budget.
         for args in [
-            json!({"groups": 10, "n": 1e6, "between_var": 1.0, "within_var": 3.0}),
-            json!({"groups": 10, "between_var": 0.0, "within_var": 1.0, "power": 0.8}),
+            json!({"groups": 100, "n": 1e6, "between_var": 1.0, "within_var": 3.0}),
+            json!({"groups": 100, "between_var": 0.0, "within_var": 1.0, "power": 0.8}),
+            json!({"groups": 95, "between_var": 1.0, "within_var": 3.0, "power": 0.8}),
+            json!({"groups": 12, "n": 20, "between_var": 1.0, "within_var": 3.0}),
             json!({"groups": 2, "n": 5.5, "between_var": 1.0}),
         ] {
             assert!(hosted("power_anova_test", args.clone()).is_ok(), "{args}");

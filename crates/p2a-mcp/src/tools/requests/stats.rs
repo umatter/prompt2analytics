@@ -463,7 +463,7 @@ pub struct IsoregRequest {
 pub struct PowerAnovaTestRequest {
     /// Number of groups
     #[schemars(
-        description = "Number of groups (at least 2; required). In the hosted profile at most the server's design_groups limit (10 by default)."
+        description = "Number of groups (at least 2; required). In the hosted profile at most the server's design_groups limit (100 by default)."
     )]
     pub groups: Option<usize>,
 
