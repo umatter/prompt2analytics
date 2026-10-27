@@ -76,13 +76,35 @@ pub(crate) const MAX_HTTP_BODY_VAR: &str = "P2A_MAX_HTTP_BODY_MB";
 /// a JSON body take one up to this size, except in the hosted profile
 /// ([`parsed_body_bytes`]).
 pub(crate) fn max_request_body_bytes() -> usize {
+    body_cap_bytes(std::env::var(MAX_HTTP_BODY_VAR).ok().as_deref())
+}
+
+/// The body cap a `P2A_MAX_HTTP_BODY_MB` value sets, in bytes: the default
+/// 32 MiB when the variable is unset, is not a positive whole number, or is
+/// too large to count in bytes. A value set but not used is logged once per
+/// process, as a warning.
+fn body_cap_bytes(value: Option<&str>) -> usize {
     const DEFAULT_MB: usize = 32;
-    let mb = std::env::var(MAX_HTTP_BODY_VAR)
+    const MIB: usize = 1024 * 1024;
+    let Some(value) = value else {
+        return DEFAULT_MB * MIB;
+    };
+    let bytes = value
+        .parse::<usize>()
         .ok()
-        .and_then(|v| v.parse::<usize>().ok())
         .filter(|&mb| mb > 0)
-        .unwrap_or(DEFAULT_MB);
-    mb * 1024 * 1024
+        .and_then(|mb| mb.checked_mul(MIB));
+    bytes.unwrap_or_else(|| {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "{MAX_HTTP_BODY_VAR}={value:?} is not a positive whole number of MiB \
+                 below {} MiB; using the default {DEFAULT_MB} MiB",
+                usize::MAX / MIB + 1
+            );
+        });
+        DEFAULT_MB * MIB
+    })
 }
 
 /// The largest body the hosted profile parses: 2 MiB, axum's own default for
@@ -387,6 +409,25 @@ mod tests {
         assert_eq!(config.resource_profile(), ResourceProfile::Off);
         let _router = apply_global_middleware(Router::new(), &config);
         assert_eq!(log(), before);
+    }
+
+    /// The cap is `P2A_MAX_HTTP_BODY_MB` MiB; unset, not a positive whole
+    /// number, or too large to count in bytes, it is the default 32 MiB.
+    #[test]
+    fn body_cap_follows_the_variable_and_falls_back_to_32_mib() {
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(body_cap_bytes(None), 32 * MIB);
+        assert_eq!(body_cap_bytes(Some("4")), 4 * MIB);
+        for invalid in ["0", "-1", "4.5", "", "lots"] {
+            assert_eq!(body_cap_bytes(Some(invalid)), 32 * MIB, "{invalid:?}");
+        }
+        let largest = usize::MAX / MIB;
+        assert_eq!(body_cap_bytes(Some(&largest.to_string())), largest * MIB);
+        // One MiB more does not fit in a usize of bytes: the product used to
+        // overflow (a panic in a debug build, a wrap in a release build).
+        for huge in [largest + 1, usize::MAX] {
+            assert_eq!(body_cap_bytes(Some(&huge.to_string())), 32 * MIB, "{huge}");
+        }
     }
 
     #[test]
