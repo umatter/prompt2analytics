@@ -911,6 +911,13 @@ impl StreamingToolExecutor {
     /// `result_text`, so the tool route and the LLM tool loop both run it
     /// on the blocking pool
     /// (`routes_tools::capture_dataset_metadata_off_runtime`).
+    ///
+    /// At info level a capture logs a fixed set of events with counts; the
+    /// result text, the column lines and the column names are at debug,
+    /// and column lines without a dtype are one warning with their count.
+    /// A save that fails is logged and nothing else happens: a refusal by
+    /// the session's `session_db_bytes` budget (`QuotaExceeded`) at warn,
+    /// any other failure at error.
     #[cfg(feature = "db")]
     pub async fn capture_dataset_metadata_static(
         db: Arc<crate::db::DbConnection>,
@@ -942,7 +949,7 @@ impl StreamingToolExecutor {
         } else {
             result_text.to_string()
         };
-        tracing::info!(
+        tracing::debug!(
             result_text = %result_preview,
             "[METADATA_CAPTURE] Full result text"
         );
@@ -1030,13 +1037,17 @@ impl StreamingToolExecutor {
 
         let column_names: Vec<String> = if let Some(start) = columns_start {
             let columns_section = &result_text[start..];
-            let lines_after_columns: Vec<&str> = columns_section.lines().collect();
             tracing::info!(
-                total_lines_in_section = lines_after_columns.len(),
-                first_5_lines = ?lines_after_columns.iter().take(5).collect::<Vec<_>>(),
+                total_lines_in_section = columns_section.lines().count(),
                 "[METADATA_CAPTURE] Lines in Columns section"
             );
+            tracing::debug!(
+                first_5_lines = ?columns_section.lines().take(5).collect::<Vec<_>>(),
+                "[METADATA_CAPTURE] First lines of the Columns section"
+            );
 
+            // Column lines with no '(' before their dtype, logged once.
+            let mut unparsed_lines = 0usize;
             let parsed_columns: Vec<String> = columns_section
                 .lines()
                 .skip(1) // Skip "Columns:" line
@@ -1061,7 +1072,7 @@ impl StreamingToolExecutor {
                     let after_dash = trimmed_line.trim_start_matches('-').trim();
                     let paren_pos = after_dash.find('(');
 
-                    tracing::info!(
+                    tracing::debug!(
                         line_idx = idx,
                         original_line = %line,
                         after_dash = %after_dash,
@@ -1072,14 +1083,15 @@ impl StreamingToolExecutor {
                     match paren_pos {
                         Some(pos) => {
                             let col_name = after_dash[..pos].trim().to_string();
-                            tracing::info!(
+                            tracing::debug!(
                                 extracted_column = %col_name,
                                 "[METADATA_CAPTURE] Extracted column name"
                             );
                             Some(col_name)
                         }
                         None => {
-                            tracing::warn!(
+                            unparsed_lines += 1;
+                            tracing::debug!(
                                 line = %line,
                                 "[METADATA_CAPTURE] Column line has no '(' - cannot extract name"
                             );
@@ -1088,11 +1100,20 @@ impl StreamingToolExecutor {
                     }
                 })
                 .collect();
+            if unparsed_lines > 0 {
+                tracing::warn!(
+                    unparsed_lines,
+                    "[METADATA_CAPTURE] Column line has no '(' - cannot extract name"
+                );
+            }
 
             tracing::info!(
                 num_columns_parsed = parsed_columns.len(),
-                columns = ?parsed_columns,
                 "[METADATA_CAPTURE] Finished parsing columns"
+            );
+            tracing::debug!(
+                columns = ?parsed_columns,
+                "[METADATA_CAPTURE] Parsed column names"
             );
             parsed_columns
         } else {
@@ -1135,7 +1156,6 @@ impl StreamingToolExecutor {
             dataset_name = ?dataset_name,
             dimensions = ?dimensions,
             num_columns = column_names.len(),
-            column_names = ?column_names,
             source_type = %source_type,
             source_path = ?source_path,
             "[METADATA_CAPTURE] Final parsed metadata summary"
@@ -1147,10 +1167,10 @@ impl StreamingToolExecutor {
                 let mut meta = crate::db::DatasetMeta::new(
                     session_id.to_string(),
                     name.clone(),
-                    source_type.clone(),
+                    source_type,
                     *rows,
                     *cols,
-                    column_names.clone(),
+                    column_names,
                 );
                 meta.source_path = source_path;
                 meta.file_size_bytes = file_size_bytes;
@@ -1162,7 +1182,6 @@ impl StreamingToolExecutor {
                     meta_source_type = %meta.source_type,
                     meta_row_count = meta.row_count,
                     meta_column_count = meta.column_count,
-                    meta_column_names = ?meta.column_names,
                     meta_column_names_len = meta.column_names.len(),
                     "[METADATA_CAPTURE] DatasetMeta object before save"
                 );
@@ -1173,37 +1192,23 @@ impl StreamingToolExecutor {
                             dataset = %name,
                             session_id = %session_id,
                             saved_id = %saved_meta.id_string(),
-                            saved_column_names = ?saved_meta.column_names,
                             saved_column_names_len = saved_meta.column_names.len(),
                             "[METADATA_CAPTURE] Successfully saved dataset metadata"
                         );
-
-                        // DEBUG: Immediately read back from DB to verify
-                        match db.get_dataset_meta(session_id, name).await {
-                            Ok(Some(read_back)) => {
-                                tracing::info!(
-                                    read_back_id = %read_back.id_string(),
-                                    read_back_name = %read_back.name,
-                                    read_back_column_names = ?read_back.column_names,
-                                    read_back_column_names_len = read_back.column_names.len(),
-                                    "[METADATA_CAPTURE] Verified: read back from DB"
-                                );
-                            }
-                            Ok(None) => {
-                                tracing::error!(
-                                    "[METADATA_CAPTURE] ERROR: Just saved but cannot read back - not found!"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "[METADATA_CAPTURE] ERROR: Failed to read back from DB"
-                                );
-                            }
-                        }
+                    }
+                    // The session's budget is full: an expected refusal.
+                    Err(e @ crate::db::DbError::QuotaExceeded(_)) => {
+                        tracing::warn!(
+                            dataset = %name,
+                            session_id = %session_id,
+                            error = %e,
+                            "[METADATA_CAPTURE] Failed to save dataset metadata"
+                        );
                     }
                     Err(e) => {
                         tracing::error!(
+                            dataset = %name,
+                            session_id = %session_id,
                             error = %e,
                             "[METADATA_CAPTURE] Failed to save dataset metadata"
                         );
