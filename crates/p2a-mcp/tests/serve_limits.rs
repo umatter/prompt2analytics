@@ -1,16 +1,20 @@
 //! The public HTTP start functions, `transport::http::serve` and
 //! `start_http_transport`, install the request limits of the configuration
-//! they serve, as `transport::start_transport` does: an embedder that starts
-//! an open public server through them gets the hosted floor (the catalogue,
-//! no free-form SQL, no server LLM keys, no loopback Ollama) with its
-//! `limits.overrides` applied (PR-18).
+//! they serve: an embedder that starts an open public server through them
+//! gets the hosted floor (the catalogue, no free-form SQL, no server LLM
+//! keys, no loopback Ollama) with its `limits.overrides` applied (PR-18).
+//!
+//! One process serves one set of request limits: while a server runs, a
+//! start whose limits differ is refused instead of replacing them under it.
 //!
 //! `serve` installs the limits and the process-wide policies (allocation
 //! ceiling, session directories) for the whole process, and the tests of one
-//! binary run in parallel. So every server in this binary serves the open
-//! public configuration of [`open_public`], whose limits are [`expected`];
-//! a test of another configuration belongs in a binary of its own. None of
-//! these tests touches a file, so the session directories stay unused.
+//! binary run in parallel. So every server in this binary that starts serves
+//! the open public configuration of [`open_public`], whose limits are
+//! [`expected`]; the other configurations here are refused before they
+//! install anything, and a test that starts another configuration belongs in
+//! a binary of its own. None of these tests touches a file, so the session
+//! directories stay unused.
 #![cfg(feature = "http")]
 
 use std::net::SocketAddr;
@@ -43,6 +47,52 @@ fn open_public(addr: SocketAddr) -> ServerConfig {
 /// The limits an [`open_public`] server must run under.
 fn expected() -> Limits {
     Limits::hosted().with_overrides(&overrides()).unwrap()
+}
+
+/// A local HTTP configuration on `addr` (loopback, no token, no `--limits
+/// hosted`, no overrides): its limits are the off profile.
+fn local(addr: SocketAddr) -> ServerConfig {
+    let mut c = ServerConfig {
+        transport: TransportType::Http,
+        ..Default::default()
+    };
+    c.http.addr = addr;
+    c
+}
+
+/// An [`open_public`] server started through bind + serve on a free loopback
+/// port and already answering, so it holds its limits: its address, the
+/// sender that stops it and its task.
+async fn running_open_public() -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<p2a_mcp::transport::TransportResult<()>>,
+) {
+    let cfg = open_public("127.0.0.1:0".parse().unwrap());
+    let listener = p2a_mcp::transport::http::bind(&cfg).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(p2a_mcp::transport::http::serve(listener, cfg, async {
+        let _ = stopped.await;
+    }));
+    let (status, created) = request(addr, "POST", "/api/sessions", Some(&json!({}))).await;
+    assert!((200..300).contains(&status), "{status} {created}");
+    (addr, stop, server)
+}
+
+/// Asserts that `e` is the refusal of a start whose limits differ from those
+/// of a running server, and that the installed limits are still [`expected`].
+fn assert_refused_for_other_limits(e: &p2a_mcp::transport::TransportError, what: &str) {
+    assert!(
+        e.to_string()
+            .contains("running under different request limits"),
+        "{what}: {e}"
+    );
+    assert_eq!(
+        *limits::current(),
+        expected(),
+        "{what} replaced the limits of the running open public server"
+    );
 }
 
 /// One HTTP/1.1 request to `addr` (the connection closed after the answer):
@@ -171,4 +221,22 @@ async fn serve_refuses_an_unknown_limit_override() {
         .await
         .expect_err("serve started with an unknown limit override");
     assert!(e.to_string().contains("no_such_limit"), "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_refuses_other_limits_while_an_open_public_server_runs() {
+    let (addr, stop, server) = running_open_public().await;
+
+    let cfg = local("127.0.0.1:0".parse().unwrap());
+    assert_eq!(limits::resolve(&cfg), Ok(Limits::off()));
+    let listener = p2a_mcp::transport::http::bind(&cfg).await.unwrap();
+    let e = p2a_mcp::transport::http::serve(listener, cfg, std::future::ready(()))
+        .await
+        .expect_err("serve started a local configuration next to an open public server");
+    assert_refused_for_other_limits(&e, "serve of a local configuration");
+
+    // The open public server still runs under its limits.
+    assert_serves_open_public_limits(addr).await;
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
 }

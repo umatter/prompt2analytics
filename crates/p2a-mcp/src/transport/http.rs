@@ -8,7 +8,7 @@
 //! and `llm_routes`; CORS, authentication and the body limit in `middleware`.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -30,6 +30,7 @@ use crate::config::{DeploymentMode, ServerConfig, SessionConfig, TransportType};
 use crate::exec::{ExecConfig, StuckWatchdog, ToolGovernor};
 use crate::server::AnalyticsServer;
 use crate::session::SessionManager;
+use crate::tools::limits::Limits;
 use crate::transport::{TransportError, TransportResult};
 
 pub use super::routes_sessions::{
@@ -57,6 +58,17 @@ pub struct AppState {
 /// settings resolved from it (`ExecConfig::from_config`). The configuration
 /// is read as an HTTP one whatever its `transport` field says
 /// (`ServerConfig::as_http`).
+///
+/// It installs nothing process-wide; [`serve`] does. A caller that serves
+/// the router itself (for example with `axum::serve`) makes the same two
+/// calls before it serves, for `config` with its transport set to HTTP and
+/// its address set to the bound socket's:
+/// `tools::limits::install(tools::limits::resolve(&config)?)` and
+/// `exec::install_process_policies(state.governor.config())`. Without them
+/// the router runs under whatever request limits are installed (the off
+/// profile while none are) and without the profile's allocation ceiling and
+/// session directories. Such a caller is not checked against the other
+/// servers of the process either (see [`serve`]).
 pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), TransportError> {
     build_app_with(config, ExecConfig::from_config(config)).await
 }
@@ -70,10 +82,13 @@ pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), Tran
 /// HTTP transport, the embedded desktop server and the integration tests all
 /// start from here. Process-wide policies (the request limits, the
 /// allocation ceiling, the session-directory switch) are installed by
-/// [`serve`], not here, so tests can build several apps; a caller that serves
-/// the router itself installs them as `serve` does. Like [`build_app`], it
-/// reads `config` as an HTTP configuration whatever its `transport` field
-/// says.
+/// [`serve`], not here, so tests can build several apps. A caller that serves
+/// the router itself makes the calls `serve` makes, for `config` with its
+/// transport set to HTTP and its address set to the bound socket's:
+/// `tools::limits::install(tools::limits::resolve(&config)?)` and
+/// `exec::install_process_policies(state.governor.config())` (see
+/// [`build_app`]). Like [`build_app`], it reads `config` as an HTTP
+/// configuration whatever its `transport` field says.
 pub async fn build_app_with(
     config: &ServerConfig,
     exec: ExecConfig,
@@ -137,8 +152,72 @@ pub async fn build_app_with(
 /// The request limits of `config`'s resource profile with its overrides
 /// applied (`tools::limits::resolve`), the values [`serve`] installs. An
 /// invalid override refuses the start.
-fn resolve_limits(config: &ServerConfig) -> Result<crate::tools::limits::Limits, TransportError> {
+fn resolve_limits(config: &ServerConfig) -> Result<Limits, TransportError> {
     crate::tools::limits::resolve(config).map_err(TransportError::Config)
+}
+
+/// The request limits held by the servers running in this process and how
+/// many servers hold them; `None` while none does.
+type Serving = Mutex<Option<(Limits, usize)>>;
+
+/// The process's record of held request limits ([`hold_limits`]).
+static SERVING: Serving = Mutex::new(None);
+
+/// The refusal of a start whose request limits differ from those of a server
+/// still running in this process.
+const LIMITS_CONFLICT: &str = "another server in this process is running under different request \
+     limits (another resource profile, or other --limit-override (P2A_LIMIT_OVERRIDES) entries); \
+     the request limits are process-wide, so stop that server first or serve this configuration \
+     from a process of its own";
+
+/// A running server's hold on the process-wide request limits, taken with
+/// [`hold_limits`]. Dropping it releases the hold, so it is released when the
+/// server returns, when its start fails after the hold was taken and when its
+/// task is aborted.
+#[must_use = "the hold is released as soon as it is dropped"]
+pub(crate) struct LimitsHold {
+    slot: &'static Serving,
+}
+
+impl Drop for LimitsHold {
+    fn drop(&mut self) {
+        let mut serving = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, holders)) = serving.as_mut() {
+            *holders = holders.saturating_sub(1);
+            if *holders == 0 {
+                *serving = None;
+            }
+        }
+    }
+}
+
+/// Hold `limits` for a server that is about to install them and run. The
+/// request limits are process-wide (`tools::limits::install` replaces them),
+/// so a server holds them for as long as it runs, and a start whose limits
+/// differ from those a running server holds is refused with
+/// `TransportError::Config` instead of replacing them under it. Servers with
+/// equal limits share the hold. [`serve`] takes it, and so does
+/// `transport::start_transport` for stdio.
+pub(crate) fn hold_limits(limits: &Limits) -> TransportResult<LimitsHold> {
+    hold_in(&SERVING, limits)
+}
+
+fn hold_in(slot: &'static Serving, limits: &Limits) -> TransportResult<LimitsHold> {
+    let mut serving = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    match serving.as_mut() {
+        None => *serving = Some((limits.clone(), 1)),
+        Some((held, holders)) if held == limits => *holders += 1,
+        Some(_) => return Err(TransportError::Config(LIMITS_CONFLICT.to_string())),
+    }
+    Ok(LimitsHold { slot })
+}
+
+/// Whether installing `resolved` replaces `installed` limits that are not the
+/// off profile. [`serve`] logs a warning then: no running server holds the
+/// installed limits (a server that did would have refused the start), so an
+/// earlier start, or an embedder's own `tools::limits::install`, left them.
+fn replaces_earlier_limits(installed: &Limits, resolved: &Limits) -> bool {
+    installed != resolved && *installed != Limits::off()
 }
 
 /// The session database must lie outside the path-jail root (INF-1): file
@@ -245,12 +324,24 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 /// `--limit-override` (`P2A_LIMIT_OVERRIDES`) applied; an invalid override
 /// refuses the start before anything is spawned), builds the app, installs
 /// the process-wide policies (request limits, allocation ceiling, session
-/// directories) and serves it with graceful shutdown. So an open public
-/// configuration always gets the hosted request limits, whichever public
-/// start function serves it. The installed limits replace any installed
-/// earlier in the process; a local configuration without overrides installs
-/// the off profile, which is also what `tools::limits::current()` returns
-/// while nothing is installed.
+/// directories) and serves it with graceful shutdown.
+///
+/// One process serves one set of request limits. `serve` holds its limits
+/// for as long as it runs and refuses (`TransportError::Config`, before the
+/// app is built) a configuration whose limits differ from those of a server
+/// still running in this process: another `serve`, which every HTTP start
+/// path ends in, or a stdio server from `transport::start_transport`. So
+/// while an open public configuration is served, through whichever public
+/// start function, it keeps the hosted request limits, and no later start in
+/// the process can replace them. While no server runs, the limits it installs
+/// replace the ones installed earlier (with a warning when those were not the
+/// off profile). A configuration whose resource profile is off (not open
+/// public, no `--limits hosted`) and that has no overrides installs the off
+/// profile, which is also what `tools::limits::current()` returns while
+/// nothing is installed. The allocation ceiling and the session-directory
+/// switch are process-wide too but not held: the last server started sets
+/// them.
+///
 /// Before it returns, every audit entry queued by then is written out; a call
 /// still running after its deadline answer is logged when its work ends.
 pub async fn serve(
@@ -266,10 +357,23 @@ pub async fn serve(
         .validate()
         .map_err(|e| TransportError::Config(e.to_string()))?;
     let limits = resolve_limits(&config)?;
+    // Held until `serve` returns (or its task is dropped).
+    let _held = hold_limits(&limits)?;
     let (app, state) = build_app(&config).await?;
     let exec = state.governor.config().clone();
     crate::exec::install_process_policies(&exec);
+    if replaces_earlier_limits(&crate::tools::limits::current(), &limits) {
+        tracing::warn!(
+            "replacing the request limits installed earlier in this process; no running \
+             server holds them"
+        );
+    }
     crate::tools::limits::install(limits);
+    tracing::info!(
+        profile = ?config.resource_profile(),
+        overrides = ?config.limits.overrides,
+        "resource limits"
+    );
     log_startup(&config, &exec);
     if let Some(limit) = exec.stuck_exit {
         spawn_stuck_watchdog(state.governor.clone(), limit);
@@ -680,6 +784,75 @@ mod serve_tests {
                 .iter()
                 .all(|e| e["tool_name"] == "list_datasets" && e["session_id"] == sid.as_str())
         );
+    }
+
+    /// Whether `hold_in` refuses `limits` on `slot`, with the conflict text.
+    fn refused(slot: &'static Serving, limits: &Limits) -> bool {
+        match hold_in(slot, limits) {
+            Ok(_) => false,
+            Err(TransportError::Config(message)) => {
+                assert_eq!(message, LIMITS_CONFLICT);
+                true
+            }
+            Err(e) => panic!("unexpected error {e:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hold_refuses_other_limits_until_its_last_holder_drops_it() {
+        // A slot of its own: the process's `SERVING` is shared with the lib
+        // tests that call `serve`.
+        static SLOT: Serving = Mutex::new(None);
+        let hosted = Limits::hosted();
+        let off = Limits::off();
+        let first = hold_in(&SLOT, &hosted).unwrap();
+        let second = hold_in(&SLOT, &hosted).unwrap();
+        assert!(refused(&SLOT, &off));
+        let overridden = Limits::hosted()
+            .with_overrides(&["lags=1500".to_string()])
+            .unwrap();
+        assert!(
+            refused(&SLOT, &overridden),
+            "other overrides are other limits"
+        );
+        drop(first);
+        assert!(refused(&SLOT, &off), "a holder is still running");
+        drop(second);
+        assert!(SLOT.lock().unwrap().is_none());
+        let local = hold_in(&SLOT, &off).unwrap();
+        assert!(refused(&SLOT, &hosted));
+        drop(local);
+        assert!(SLOT.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_hold_is_released_when_its_task_is_aborted() {
+        static SLOT: Serving = Mutex::new(None);
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _held = hold_in(&SLOT, &Limits::hosted()).unwrap();
+            let _ = held_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        held_rx.await.unwrap();
+        assert!(refused(&SLOT, &Limits::off()));
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        // The aborted task's future, and the hold in it, are dropped.
+        let _local = hold_in(&SLOT, &Limits::off()).unwrap();
+    }
+
+    #[test]
+    fn replacing_limits_other_than_off_is_flagged() {
+        let off = Limits::off();
+        let hosted = Limits::hosted();
+        assert!(replaces_earlier_limits(&hosted, &off));
+        assert!(!replaces_earlier_limits(&hosted, &hosted));
+        assert!(
+            !replaces_earlier_limits(&off, &hosted),
+            "off is the fallback"
+        );
+        assert!(!replaces_earlier_limits(&off, &off));
     }
 }
 
