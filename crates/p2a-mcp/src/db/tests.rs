@@ -1322,14 +1322,10 @@ async fn a_dropped_clear_or_delete_leaves_the_count_in_step() {
             if listed != stored {
                 out_of_step.push(format!("{pass} {op:?}: listed {listed}, stored {stored}"));
             }
-            if session_db_bytes.is_some() {
-                let in_store = db.session_stored_bytes("s1").await.unwrap();
-                let counted = db.session_bytes_entry("s1");
-                if counted != Some(in_store) {
-                    out_of_step.push(format!(
-                        "{pass} {op:?}: counted {counted:?} bytes, stored {in_store}"
-                    ));
-                }
+            if session_db_bytes.is_some()
+                && let Some(gap) = counter_gap(&db, "s1").await
+            {
+                out_of_step.push(format!("{pass} {op:?}: {gap}"));
             }
             assert_eq!(db.store_turns_in_use(), 0);
         }
@@ -1603,14 +1599,10 @@ async fn a_tool_call_write_during_a_clear_waits_for_it() {
             if !left.is_empty() {
                 problems.push(format!("{case}: {} tool calls left", left.len()));
             }
-            if session_db_bytes.is_some() {
-                let stored = db.session_stored_bytes("s1").await.unwrap();
-                let counted = db.session_bytes_entry("s1");
-                if counted != Some(stored) {
-                    problems.push(format!(
-                        "{case}: counted {counted:?} bytes, stored {stored}"
-                    ));
-                }
+            if session_db_bytes.is_some()
+                && let Some(gap) = counter_gap(&db, "s1").await
+            {
+                problems.push(format!("{case}: {gap}"));
             }
             assert_eq!(db.store_turns_in_use(), 0);
         }
@@ -1895,12 +1887,8 @@ async fn a_clear_after_a_dropped_write_waits_for_it() {
         if listed != (0, None) || stored != 0 {
             problems.push(format!("{write:?}: listed {listed:?}, stored {stored}"));
         }
-        let in_store = db.session_stored_bytes("s1").await.unwrap();
-        let counted = db.session_bytes_entry("s1");
-        if counted != Some(in_store) {
-            problems.push(format!(
-                "{write:?}: counted {counted:?} bytes, stored {in_store}"
-            ));
+        if let Some(gap) = counter_gap(&db, "s1").await {
+            problems.push(format!("{write:?}: {gap}"));
         }
         assert_eq!(db.store_turns_in_use(), 0);
     }
