@@ -232,17 +232,25 @@ const ARIMA_FIT_WORK_HOSTED: u64 = 400_000;
 /// the 200 MiB session quota.
 const PIVOT_COLUMNS_HOSTED: usize = 10_000;
 
-/// Hosted [`Limits::pivot_cells`]. polars' pivot first fills one buffer with every output cell
-/// (an `Option` of the value for numbers, an `AnyValue` otherwise), then builds the columns from
-/// it, so its peak memory grows with the output cells, whatever the size of the long table.
+/// Hosted [`Limits::pivot_cells`]. polars' pivot groups every row of the long table by its index
+/// and `on` values, then fills one buffer with every output cell (an `Option` of the value for
+/// numbers, an `AnyValue` otherwise) and builds the columns from it, so its peak memory grows
+/// with the rows it reads as well as with the cells it makes. It reads at most as many rows as
+/// it makes cells ([`Limits::check_pivot`] refuses a taller dataset), so at a given number of
+/// cells the dense pivot, one row for each pair of index values and `on` value, costs the most.
 ///
-/// Measured on a release build of the hosted server, the peak RSS of one pivot grew by about
-/// 25 bytes per cell for f64 values (124 MiB for 5.0 million cells, 216 MiB for 9.0 million) and
-/// by about 65 bytes per cell for string values (253 MiB for 4.0 million cells). At 4,000,000
-/// cells the peak stays near the 256 MiB the hosted server allows a single allocation
-/// (`P2A_MAX_ALLOC_MB`) for string values and near 100 MiB for numbers, while a 100,000 x 40 or
-/// a 10,000 x 400 wide table still fits.
-const PIVOT_CELLS_HOSTED: u64 = 4_000_000;
+/// Measured on a release build of the hosted server, a fresh process for each measurement, a
+/// dense pivot of about 1,000,000 cells raised the peak RSS above the loaded long table by 150
+/// to 200 MiB for f64 values and by 195 to 260 MiB for string values (of 6, 20 and 45 bytes),
+/// as a 1,000 x 1,000, a 100 x 10,000 or a 9,900 x 101 wide table; about 2,000,000 cells raised
+/// it by 310 MiB for numbers and 415 MiB for strings. A sparse pivot, with far fewer rows than
+/// cells, costs about 25 bytes per cell for numbers and 65 for strings. At this value one pivot
+/// peaks at most about 260 MiB above what the session already holds, well under the 700 MiB
+/// soft limit of the hosted 1 GB machine, and a wide table of 100,000 rows and 10 columns, of
+/// 10,000 rows and 100 columns or of 1,000 rows and 1,000 columns still fits. The allocation
+/// ceiling (`P2A_MAX_ALLOC_MB`) bounds p2a-core's own buffers, not polars', so it does not
+/// apply to a pivot.
+const PIVOT_CELLS_HOSTED: u64 = 1_000_000;
 
 /// Number of families; the length of [`Family::ALL`].
 const FAMILY_COUNT: usize = Family::ALL.len();
@@ -2279,7 +2287,7 @@ mod tests {
         );
         assert_eq!(
             (h.pivot_columns, h.pivot_cells),
-            (Some(10_000), Some(4_000_000))
+            (Some(10_000), Some(1_000_000))
         );
         assert_eq!(
             (h.str_split_parts, h.str_pad_width),

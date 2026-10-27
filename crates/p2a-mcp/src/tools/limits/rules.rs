@@ -935,8 +935,8 @@ pub static ROW_RULES: &[RowRule] = &[
 /// string (`dataset`, `on`, `values`) and a required list of strings (`index`) of the tool.
 ///
 /// `munge_pivot` (polars' pivot) puts every distinct value of `on` in a column of its own,
-/// whatever the height of the input, and allocates its rows x columns output in one buffer
-/// before the dataset quotas see the result.
+/// whatever the height of the input, groups every input row by its index and `on` values, and
+/// allocates its rows x columns output in one buffer before the dataset quotas see the result.
 pub static PIVOT_RULES: &[super::PivotRule] = &[super::PivotRule {
     tool: "munge_pivot",
     dataset_field: "dataset",

@@ -205,9 +205,14 @@ before they are deserialised, on the HTTP, LLM, websocket and stdio paths.
   column and of its `index` columns are counted in the dataset it names. A
   pivot whose output would have more than `pivot_columns` columns (the index
   columns plus one per distinct `on` value) or more than `pivot_cells` cells
-  (rows times columns) is refused: polars allocates the whole wide table
-  before the dataset quotas can see it, so a small long table could otherwise
-  make one call's memory peak far above what the quotas allow.
+  (rows times columns) is refused: polars groups the long table and allocates
+  the whole wide table before the dataset quotas can see it, so a long table
+  within the quotas could otherwise make one call's memory peak far above what
+  the quotas allow. Each row of the long table fills one cell, so a dataset
+  with more rows than `pivot_cells` is refused before anything is counted. The
+  counts stop at the first value that cannot pass, so counting takes memory in
+  proportion to the budgets rather than to the rows, and a refusal gives its
+  count as a lower bound (`"requested": "at least 10001"`).
 - **Named budgets.** Sizes the handlers compute while they run: image pixels,
   table cells, join output, generated data, export and file sizes, spatial
   links, the work of an ARIMA fit, SQL results, the conversation store and the
@@ -526,7 +531,7 @@ Named budgets:
 | `join_output_rows` | predicted output rows of a join | 2,000,000 | none |
 | `onehot_levels` | levels a one-hot encoding expands | 500 | none |
 | `pivot_columns` | output columns of `munge_pivot`: the index columns plus one per distinct value of `on`, counted before the pivot | 10,000 | none |
-| `pivot_cells` | output cells of `munge_pivot`: rows (distinct combinations of `index`) × columns, counted before the pivot | 4,000,000 | none |
+| `pivot_cells` | output cells of `munge_pivot`: rows (distinct combinations of `index`) × columns, counted before the pivot, and at least the rows of the long table | 1,000,000 | none |
 | `str_split_parts` | parts `str_split` produces | 100 | none |
 | `str_pad_width` | target width of string padding (no current tool reads it) | 10,000 | none |
 | `generated_cells` | cells `generate_random_data` produces | 10,000,000 | none |
@@ -566,15 +571,28 @@ CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. Raising it
 above about 3.5 times the hosted value lets a fit run past the deadline and keep
 its slot, since the fit has no checkpoint.
 
-The pivot budgets were measured on a release build. polars fills one buffer
-with every output cell before it builds the wide table's columns, so a pivot's
-peak memory grows with its output, not with the long table it reads: about
-25 bytes per cell for numeric values and about 65 bytes for string values, plus
-about 870 bytes per output column. At the hosted `pivot_cells` of 4,000,000 a
-pivot of string values peaks near 256 MiB (the hosted `P2A_MAX_ALLOC_MB`) and
-one of numbers near 100 MiB; at the hosted `pivot_columns` of 10,000 a one-row
-pivot peaks under 10 MiB. A refusal of `pivot_columns` names `on`, one of
-`pivot_cells` names `index`.
+The pivot budgets were measured on a release build of the hosted server, a
+fresh process for each measurement. polars groups every row of the long table
+by its index and `on` values, then fills one buffer with every output cell and
+builds the wide table's columns from it, so a pivot's peak memory grows with
+the rows it reads as well as with the cells it makes. A pivot reads at most as
+many rows as it makes cells, so the costliest pivot of a given size is a dense
+one, with a row for each pair of index values and `on` value. A dense pivot of
+about 1,000,000 cells raised the peak RSS above the loaded long table by 150 to
+200 MiB for numeric values and by 195 to 260 MiB for string values (of 6 to 45
+bytes), whether the wide table was 1,000 × 1,000, 100 × 10,000 or 9,900 × 101;
+about 2,000,000 cells raised it by 310 MiB (numbers) and 415 MiB (strings). A
+sparse pivot, with far fewer rows than cells, costs about 25 bytes per cell for
+numbers and 65 bytes for strings, plus about 870 bytes per output column. At
+the hosted `pivot_cells` of 1,000,000 one pivot therefore peaks at most about
+260 MiB above what the session holds, well under the 700 MiB soft limit of a
+1 GB machine; at the hosted `pivot_columns` of 10,000 a one-row pivot peaks
+under 10 MiB. `P2A_MAX_ALLOC_MB` bounds p2a-core's own buffers, not polars', so
+it does not apply to a pivot. Counting before the pivot added no measurable
+peak to an admitted pivot at the cap; the refusal that counts the most rows
+within the cap peaked 38 MiB above the loaded table. A refusal of
+`pivot_columns` names `on`; one of `pivot_cells` names `index`, or `dataset`
+when the long table alone has more rows than the cap.
 
 ## Must-do checklist
 

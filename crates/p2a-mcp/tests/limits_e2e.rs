@@ -587,29 +587,29 @@ mod http_paths {
         run(limits::resolve(&cfg).unwrap(), async {
             let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
             let sid = new_session(&app).await;
-            // 2,000 rows, each its own `idx` and `key` value: a 2,000 x 2,001 wide table,
-            // 4,002,000 cells, from a long table of 2,000 rows. Its 2,001 columns are within
+            // 1,000 rows, each its own `idx` and `key` value: a 1,000 x 1,001 wide table,
+            // 1,001,000 cells, from a long table of 1,000 rows. Its 1,001 columns are within
             // pivot_columns.
-            create(&app, &sid, "long", &long_csv(2_000, 2_000)).await;
+            create(&app, &sid, "long", &long_csv(1_000, 1_000)).await;
             let (status, body) =
                 post_tool(&app, &sid, "munge_pivot", pivot_args("long", "wide")).await;
             assert_eq!(status, 422, "{body}");
             assert_eq!(body["code"], "limit_exceeded", "{body}");
             assert_eq!(
                 body["details"],
-                json!({"parameter": "index", "requested": "at least 4002000", "limit": "4000000"}),
+                json!({"parameter": "index", "requested": "at least 1001000", "limit": "1000000"}),
                 "{body}"
             );
             let error = body["error"].as_str().unwrap();
             assert!(
-                error.starts_with("`munge_pivot` would make at least 2000 rows")
-                    && error.contains("by 2001 columns")
-                    && error.contains("limit of 4000000 cells (pivot_cells)"),
+                error.starts_with("`munge_pivot` would make at least 1000 rows")
+                    && error.contains("by 1001 columns")
+                    && error.contains("limit of 1000000 cells (pivot_cells)"),
                 "{error}"
             );
             assert_eq!(
                 shapes(&state, &sid).await,
-                [("long".to_string(), (2_000, 3))],
+                [("long".to_string(), (1_000, 3))],
                 "the refused pivot changed the session's datasets"
             );
         });
