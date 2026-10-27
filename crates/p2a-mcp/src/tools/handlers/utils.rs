@@ -1940,29 +1940,41 @@ mod tests {
 
     #[test]
     fn streaming_import_enforces_its_byte_budget() {
-        // Both inputs are far longer than the budget, so the reader cut-off
-        // would refuse them too ("is larger than"). The charge path's own
+        // Every input is far longer than the budget, so the reader cut-off
+        // would refuse it too ("is larger than"). The charge path's own
         // wording shows the charge fired first, long before the cut-off.
         let charged = "needs more than this server's import limit of 1000 bytes in memory";
-        let values: Vec<String> = (0..10_000).map(|i| i.to_string()).collect();
-        let json = format!(
-            r#"{{"datasets":{{"a":{{"data":{{"x":[{}]}}}}}}}}"#,
-            values.join(",")
-        );
-        // Each cell is charged as it is pushed.
-        let err = parse_session_json(json.as_bytes(), Some(1_000)).unwrap_err();
-        assert!(err.contains(charged), "{err}");
-        assert!(!err.contains("is larger than"), "{err}");
+        let column = |cells: &[String]| {
+            format!(
+                r#"{{"datasets":{{"a":{{"data":{{"x":[{}]}}}}}}}}"#,
+                cells.join(",")
+            )
+        };
+        let integers: Vec<String> = (0..10_000).map(|i| i.to_string()).collect();
+        let floats: Vec<String> = (0..10_000).map(|i| format!("{i}.5")).collect();
+        let strings: Vec<String> = (0..10_000).map(|i| format!("\"s{i}\"")).collect();
+        // Each cell is charged as it is pushed, in each column type whose
+        // charge outruns its input. (A bool cell is charged 1 byte and takes
+        // at least 4 bytes of input, so the cut-off always comes first.)
+        for (kind, cells) in [
+            ("integer", &integers),
+            ("float", &floats),
+            ("string", &strings),
+        ] {
+            let err = parse_session_json(column(cells).as_bytes(), Some(1_000)).unwrap_err();
+            assert!(err.contains(charged), "{kind} cells: {err}");
+            assert!(!err.contains("is larger than"), "{kind} cells: {err}");
+        }
         // A nested element is charged while it is read, not after.
         let nested = format!(
             r#"{{"datasets":{{"a":{{"data":{{"x":[[{}]]}}}}}}}}"#,
-            values.join(",")
+            integers.join(",")
         );
         let err = parse_session_json(nested.as_bytes(), Some(1_000)).unwrap_err();
         assert!(err.contains(charged), "{err}");
         assert!(!err.contains("is larger than"), "{err}");
         // The same file passes with room to spare.
-        assert!(parse_session_json(json.as_bytes(), Some(10_000_000)).is_ok());
+        assert!(parse_session_json(column(&integers).as_bytes(), Some(10_000_000)).is_ok());
     }
 
     #[test]
