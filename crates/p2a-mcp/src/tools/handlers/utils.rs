@@ -1940,21 +1940,27 @@ mod tests {
 
     #[test]
     fn streaming_import_enforces_its_byte_budget() {
+        // Both inputs are far longer than the budget, so the reader cut-off
+        // would refuse them too ("is larger than"). The charge path's own
+        // wording shows the charge fired first, long before the cut-off.
+        let charged = "needs more than this server's import limit of 1000 bytes in memory";
         let values: Vec<String> = (0..10_000).map(|i| i.to_string()).collect();
         let json = format!(
             r#"{{"datasets":{{"a":{{"data":{{"x":[{}]}}}}}}}}"#,
             values.join(",")
         );
+        // Each cell is charged as it is pushed.
         let err = parse_session_json(json.as_bytes(), Some(1_000)).unwrap_err();
-        assert!(err.contains("import limit"), "{err}");
-        assert!(err.contains("1000"), "{err}");
+        assert!(err.contains(charged), "{err}");
+        assert!(!err.contains("is larger than"), "{err}");
         // A nested element is charged while it is read, not after.
         let nested = format!(
             r#"{{"datasets":{{"a":{{"data":{{"x":[[{}]]}}}}}}}}"#,
             values.join(",")
         );
         let err = parse_session_json(nested.as_bytes(), Some(1_000)).unwrap_err();
-        assert!(err.contains("import limit"), "{err}");
+        assert!(err.contains(charged), "{err}");
+        assert!(!err.contains("is larger than"), "{err}");
         // The same file passes with room to spare.
         assert!(parse_session_json(json.as_bytes(), Some(10_000_000)).is_ok());
     }
