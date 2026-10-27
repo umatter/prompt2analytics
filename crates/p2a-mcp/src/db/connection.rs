@@ -120,7 +120,10 @@ struct DeletedConversations {
 /// ([`delete_orphans`](DbConnection::delete_orphans)).
 pub(crate) const MAX_REMEMBERED_DELETES: usize = 100_000;
 
-type StoreTurns = Arc<Mutex<HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>>>;
+/// Each store turn's lock and the number of calls holding or waiting for it,
+/// by key.
+type StoreTurnMap = HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>;
+type StoreTurns = Arc<Mutex<StoreTurnMap>>;
 
 /// One call's turn at changing a conversation's rows (a conversation delete or
 /// clear, a message add or content update, a title or archive change, or a
@@ -638,10 +641,14 @@ impl DbConnection {
     }
 
     /// The lock on the store turns' map, held until the returned guard is
-    /// dropped: meanwhile no turn ends and no call joins one.
+    /// dropped: meanwhile no turn ends and no call joins one. End turns on
+    /// another thread while holding it, and do not await: `StoreTurn::drop`
+    /// takes this lock, so a turn ended on this thread, or by a task this
+    /// thread's runtime must poll, never ends. The guard is a plain
+    /// [`MutexGuard`], so `unused_must_use` warns of a bare call and
+    /// `clippy::await_holding_lock` of an await while it is held.
     #[cfg(test)]
-    #[must_use = "the map is free again as soon as the guard is dropped"]
-    pub(crate) fn hold_store_turns(&self) -> impl Sized {
+    pub(crate) fn hold_store_turns(&self) -> MutexGuard<'_, StoreTurnMap> {
         self.store_turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
