@@ -5,7 +5,8 @@
 //! Servers are built in-process and driven with `tower::ServiceExt::oneshot`.
 #![cfg(feature = "http")]
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use axum::Router;
 use axum::body::Body;
@@ -957,19 +958,64 @@ async fn a_parquet_chunk_that_declares_a_negative_count_is_not_loaded() {
     }
 }
 
-/// The `upload_*.parquet` files in the server's temporary folder that hold
-/// exactly `bytes`.
-fn uploads_holding(bytes: &[u8]) -> usize {
-    std::fs::read_dir(std::env::temp_dir())
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("upload_") && name.ends_with(".parquet")
+/// Every regular file under `dir`, at any depth and under any name, that
+/// holds exactly `bytes`. Symlinks are not followed, what cannot be read is
+/// skipped, and a file of another length is never opened.
+fn files_holding(dir: &Path, bytes: &[u8]) -> BTreeSet<PathBuf> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file()
+                && entry
+                    .metadata()
+                    .is_ok_and(|meta| meta.len() == bytes.len() as u64)
+                && std::fs::read(entry.path()).is_ok_and(|held| held == bytes)
+            {
+                out.insert(entry.path());
+            }
+        }
+    }
+    out
+}
+
+/// Every copy of `bytes` the server could have stored: the regular files
+/// holding them under the data root or the temporary folder. Only files
+/// with exactly these bytes are compared, because both folders are shared:
+/// this binary's other tests create and remove their own files in the data
+/// root while this one runs, and other processes use the temporary folder.
+fn copies_of(bytes: &[u8]) -> BTreeSet<PathBuf> {
+    let mut copies = files_holding(&allowed_data_root().unwrap(), bytes);
+    copies.extend(files_holding(&std::env::temp_dir(), bytes));
+    copies
+}
+
+/// The name prefix of the probe that
+/// `a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behind`
+/// puts in the temporary folder to show that [`copies_of`] looks there.
+const PROBE_PREFIX: &str = ".p2a-pr23-probe-";
+
+/// [`copies_of`] without any file named like a probe. The temporary folder
+/// is shared between processes: when two checkouts run this test at once,
+/// one run can create or remove its probe, which holds the same bytes,
+/// between the other run's two scans.
+fn stored_copies_of(bytes: &[u8]) -> BTreeSet<PathBuf> {
+    copies_of(bytes)
+        .into_iter()
+        .filter(|path| {
+            !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(PROBE_PREFIX))
         })
-        .filter(|entry| std::fs::read(entry.path()).is_ok_and(|held| held == bytes))
-        .count()
+        .collect()
 }
 
 #[tokio::test]
@@ -1000,6 +1046,22 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
     let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let upload = json!({"content": content, "filename": "schema.parquet"});
 
+    // The copies are looked for in both places a stored upload could land:
+    // they find this test's own file under the data root, and a probe in
+    // the temporary folder. The sets compared leave out every probe, this
+    // run's and any other run's.
+    let probe = tempfile::Builder::new()
+        .prefix(PROBE_PREFIX)
+        .tempfile()
+        .unwrap();
+    std::fs::write(probe.path(), &bytes).unwrap();
+    let seen = copies_of(&bytes);
+    assert!(seen.contains(&path), "{path:?} not in {seen:?}");
+    assert!(seen.contains(probe.path()), "{probe:?} not in {seen:?}");
+    probe.close().unwrap();
+    let before = stored_copies_of(&bytes);
+    assert!(before.contains(&path), "{path:?} not in {before:?}");
+
     // With the quotas the check refuses it cleanly, and nothing is loaded.
     let (app, _) = app_with_quota(8 * MIB).await;
     for (tool, args) in [
@@ -1019,15 +1081,15 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
             "{tool}: {body}"
         );
     }
-    assert_eq!(uploads_holding(&bytes), 0);
+    assert_eq!(stored_copies_of(&bytes), before, "an upload stored a copy");
 
-    // Without them the loader panics on it; the upload's file is removed
-    // all the same.
+    // Without them the loader panics on it, and the upload leaves no file
+    // behind all the same (it is decoded from memory; PR-23).
     let (app, _) = build_app_with(&local(), ExecConfig::default())
         .await
         .unwrap();
     let sid = new_session(&app).await;
     let (status, body) = call(&app, &sid, "upload_dataset", upload).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert_eq!(uploads_holding(&bytes), 0);
+    assert_eq!(stored_copies_of(&bytes), before, "the upload stored a copy");
 }

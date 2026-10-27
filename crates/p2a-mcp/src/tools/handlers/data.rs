@@ -22,6 +22,7 @@ use crate::tools::handlers::utils::CappedWriter;
 use crate::tools::requests::data::*;
 
 use p2a_core::data::{DataLoader, Dataset, DatasetInfo};
+use p2a_core::polars::io::mmap::MmapBytesReader;
 use p2a_core::polars::prelude::{
     AnyValue, CategoricalPhysical, Column, CsvWriter, DataFrame, DataType, ParquetReader,
     ParquetWriter, SerReader, SerWriter,
@@ -199,24 +200,54 @@ struct DecodedBound {
 /// what no writer produces (see [`read_footer`]), or the call was cancelled
 /// or passed its deadline while the page headers or dictionaries were read.
 fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
-    parquet_decoded_bytes_within(path, &mut DictionaryBudget::default())
+    parquet_decoded_bytes_within(ParquetSource::File(path), &mut DictionaryBudget::default())
 }
 
-/// [`parquet_decoded_bytes`], reading no more dictionary pages than
-/// `budget` allows.
+/// [`parquet_decoded_bytes`] of the parquet file `source`, reading no more
+/// dictionary pages than `budget` allows.
 fn parquet_decoded_bytes_within(
-    path: &Path,
+    source: ParquetSource<'_>,
     budget: &mut DictionaryBudget,
 ) -> Result<Option<DecodedBound>, String> {
-    match read_footer(path)? {
-        Some(footer) => footer_decoded_bytes(path, footer, budget),
+    match read_footer(source)? {
+        Some(footer) => footer_decoded_bytes(source, footer, budget),
         None => Ok(None),
     }
 }
 
+/// Where a parquet file is read from: a file of the data directory, or the
+/// bytes of an upload, which are read where they lie in memory and never
+/// written to disk.
+#[derive(Clone, Copy)]
+enum ParquetSource<'a> {
+    File(&'a Path),
+    Bytes(&'a [u8]),
+}
+
+/// A reader over a [`ParquetSource`].
+type SourceReader<'a> = Box<dyn MmapBytesReader + 'a>;
+
+impl<'a> ParquetSource<'a> {
+    /// A new reader over the file, and its length in bytes; `None` when the
+    /// file cannot be opened or measured.
+    fn open(self) -> Option<(SourceReader<'a>, u64)> {
+        match self {
+            Self::File(path) => {
+                let file = std::fs::File::open(path).ok()?;
+                let len = file.metadata().ok()?.len();
+                Some((Box::new(file), len))
+            }
+            Self::Bytes(bytes) => {
+                let len = u64::try_from(bytes.len()).ok()?;
+                Some((Box::new(std::io::Cursor::new(bytes)), len))
+            }
+        }
+    }
+}
+
 /// A parquet file's footer, read and checked by [`read_footer`].
-struct Footer {
-    reader: ParquetReader<std::fs::File>,
+struct Footer<'a> {
+    reader: ParquetReader<SourceReader<'a>>,
     /// polars' own footer type, which polars-io's `FileMetadataRef` names:
     /// this stops compiling when polars reads files with another
     /// polars-parquet than the one the check decompresses dictionaries with
@@ -225,19 +256,16 @@ struct Footer {
     file_len: u64,
 }
 
-/// Read the footer of the parquet file at `path` and refuse a file whose
+/// Read the footer of the parquet file `source` and refuse a file whose
 /// footer declares what no writer produces and polars' reader does not
 /// survive or should not be made to read: column chunks that overlap or
 /// pass the file's end (see [`check_chunk_ranges`]), or one that declares a
 /// negative number of values (see [`check_chunk_counts`]). Both read the
 /// footer alone, so they run for every parquet load, with quotas or
-/// without (see [`admit_parquet`]). `Ok(None)` when the footer cannot be
-/// read; the loader then reports the file's error.
-fn read_footer(path: &Path) -> Result<Option<Footer>, String> {
-    let Ok(file) = std::fs::File::open(path) else {
-        return Ok(None);
-    };
-    let Ok(file_len) = file.metadata().map(|meta| meta.len()) else {
+/// without (see [`admit_parquet_source`]). `Ok(None)` when the footer
+/// cannot be read; the loader then reports the file's error.
+fn read_footer(source: ParquetSource<'_>) -> Result<Option<Footer<'_>>, String> {
+    let Some((file, file_len)) = source.open() else {
         return Ok(None);
     };
     let mut reader = ParquetReader::new(file);
@@ -266,11 +294,11 @@ fn read_footer(path: &Path) -> Result<Option<Footer>, String> {
     }))
 }
 
-/// [`parquet_decoded_bytes_within`] of the file at `path`, whose footer
+/// [`parquet_decoded_bytes_within`] of the file `source`, whose footer
 /// [`read_footer`] read.
 fn footer_decoded_bytes(
-    path: &Path,
-    footer: Footer,
+    source: ParquetSource<'_>,
+    footer: Footer<'_>,
     budget: &mut DictionaryBudget,
 ) -> Result<Option<DecodedBound>, String> {
     let Footer {
@@ -282,7 +310,7 @@ fn footer_decoded_bytes(
         return Ok(None);
     };
     // A second handle for the page headers: the reader keeps its own.
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some((file, _)) = source.open() else {
         return Ok(None);
     };
     let columns: Vec<(&str, DataType, Vec<LeafDecode>)> = schema
@@ -747,15 +775,15 @@ const CHECKPOINT_HEADERS: u64 = 1 << 10;
 /// Reads the page headers of a parquet file's column chunks, as polars'
 /// page reader (`PageReader`) does before it decodes a chunk, without
 /// decompressing or decoding anything.
-struct PageWalk {
-    file: std::io::BufReader<std::fs::File>,
+struct PageWalk<'a> {
+    file: std::io::BufReader<SourceReader<'a>>,
     file_len: u64,
     /// Headers parsed so far.
     headers: u64,
 }
 
-impl PageWalk {
-    fn new(file: std::io::BufReader<std::fs::File>, file_len: u64) -> Self {
+impl<'a> PageWalk<'a> {
+    fn new(file: std::io::BufReader<SourceReader<'a>>, file_len: u64) -> Self {
         Self {
             file,
             file_len,
@@ -1342,10 +1370,24 @@ enum NotAdmitted {
 
 /// Refuse, before decoding it, a parquet file at `path` that the dataset
 /// quotas would refuse once it was loaded as `name` (see
+/// [`admit_parquet_source`]). Other formats pass: a CSV, Excel, Stata or
+/// SAS file is charged only once decoded, and a CSV can decode to several
+/// times its size on disk.
+async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
+    let is_parquet = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_lowercase().as_str(), "parquet" | "pq"));
+    if !is_parquet {
+        return Ok(());
+    }
+    admit_parquet_source(ParquetSource::File(path), name).await
+}
+
+/// Refuse, before decoding it, the parquet file `source` that the dataset
+/// quotas would refuse once it was loaded as `name` (see
 /// [`session::admit_dataset`]), counting what decoding it allocates on top
-/// of the dataset (see [`parquet_decoded_bytes`]). Other formats pass: a
-/// CSV, Excel, Stata or SAS file is charged only once decoded, and a CSV can
-/// decode to several times its size on disk.
+/// of the dataset (see [`parquet_decoded_bytes`]).
 ///
 /// A parquet file whose footer declares what no writer produces (see
 /// [`read_footer`]) is not loaded whether or not the call has quotas: those
@@ -1358,15 +1400,8 @@ enum NotAdmitted {
 /// schema makes the check panic: polars' schema conversion
 /// (`DataType::from_arrow_field`) panics on some malformed categorical
 /// metadata, and the loader runs the same code.
-async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
-    let is_parquet = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| matches!(e.to_lowercase().as_str(), "parquet" | "pq"));
-    if !is_parquet {
-        return Ok(());
-    }
-    let footer = match std::panic::catch_unwind(|| read_footer(path)) {
+async fn admit_parquet_source(source: ParquetSource<'_>, name: &str) -> Result<(), NotAdmitted> {
+    let footer = match std::panic::catch_unwind(|| read_footer(source)) {
         Ok(Ok(Some(footer))) => footer,
         Ok(Ok(None)) => return Ok(()),
         Ok(Err(reason)) => return Err(NotAdmitted::Unread(reason)),
@@ -1381,7 +1416,7 @@ async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
         return Ok(());
     }
     let bounded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        footer_decoded_bytes(path, footer, &mut DictionaryBudget::default())
+        footer_decoded_bytes(source, footer, &mut DictionaryBudget::default())
     }));
     let bound = match bounded {
         Ok(Ok(Some(bound))) => bound,
@@ -1399,20 +1434,14 @@ async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
         .map_err(|refusal| NotAdmitted::Quota(session::quota_refusal(refusal)))
 }
 
-/// A file removed when this drops, also when the call unwinds.
-struct RemoveOnDrop(PathBuf);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// Load the uploaded parquet file at `path`, a temporary file of the
-/// server's; the loader's error comes without server paths (see
-/// [`without_server_paths`]).
-fn load_parquet_upload(path: &Path) -> Result<Dataset, String> {
-    DataLoader::load(path).map_err(|e| without_server_paths(&e.to_string(), path))
+/// Decode the uploaded parquet file `bytes` where it lies in memory: an
+/// upload is never written to disk, so it needs no writable folder and
+/// stores nothing, and the loader's error names no file.
+fn load_parquet_upload(bytes: &[u8]) -> Result<Dataset, String> {
+    ParquetReader::new(std::io::Cursor::new(bytes))
+        .finish()
+        .map(Dataset::new)
+        .map_err(|e| e.to_string())
 }
 
 /// `text` (an error from a loader or writer) with the absolute forms of
@@ -1719,38 +1748,11 @@ impl AnalyticsServer {
                 }
             }
             "parquet" => {
-                // Written to a new temporary file and loaded from there
-                // (Parquet is a binary format); the file is removed however
-                // the call ends, a panic in the check or the loader
-                // included.
-                let temp_path =
-                    std::env::temp_dir().join(format!("upload_{}.parquet", uuid::Uuid::new_v4()));
-                let created = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&temp_path);
-                let temp = match created {
-                    Ok(mut file) => {
-                        let temp = RemoveOnDrop(temp_path);
-                        if let Err(e) = file.write_all(&decoded) {
-                            return Ok(CallToolResult::error(vec![Content::text(format!(
-                                "Failed to write temp file: {}",
-                                e
-                            ))]));
-                        }
-                        temp
-                    }
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Failed to write temp file: {}",
-                            e
-                        ))]));
-                    }
-                };
-
+                // Checked and loaded from the request's bytes in memory
+                // (see load_parquet_upload): nothing is written to disk.
                 // Refused before decoding when the quotas would refuse the
                 // decoded dataset.
-                match admit_parquet(&temp.0, &id).await {
+                match admit_parquet_source(ParquetSource::Bytes(&decoded), &id).await {
                     Ok(()) => {}
                     Err(NotAdmitted::Quota(refusal)) => return Err(refusal),
                     Err(NotAdmitted::Unread(reason)) => {
@@ -1759,10 +1761,8 @@ impl AnalyticsServer {
                         ))]));
                     }
                 }
-                let result = load_parquet_upload(&temp.0);
-                drop(temp);
 
-                match result {
+                match load_parquet_upload(&decoded) {
                     Ok(ds) => ds,
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2705,9 +2705,8 @@ mod tests {
     }
 
     /// A [`PageWalk`] over the file at `path`.
-    fn walk_of(path: &Path) -> PageWalk {
-        let file = std::fs::File::open(path).unwrap();
-        let file_len = file.metadata().unwrap().len();
+    fn walk_of(path: &Path) -> PageWalk<'_> {
+        let (file, file_len) = ParquetSource::File(path).open().unwrap();
         PageWalk::new(std::io::BufReader::new(file), file_len)
     }
 
@@ -2801,7 +2800,7 @@ mod tests {
             bytes: 100_000,
             ..DictionaryBudget::default()
         };
-        let bounded = parquet_decoded_bytes_within(&repeated, &mut tight)
+        let bounded = parquet_decoded_bytes_within(ParquetSource::File(&repeated), &mut tight)
             .unwrap()
             .unwrap()
             .dataset;
@@ -2810,7 +2809,7 @@ mod tests {
             labels: 10,
             ..DictionaryBudget::default()
         };
-        let bounded = parquet_decoded_bytes_within(&distinct, &mut few)
+        let bounded = parquet_decoded_bytes_within(ParquetSource::File(&distinct), &mut few)
             .unwrap()
             .unwrap()
             .dataset;
@@ -3034,7 +3033,7 @@ mod tests {
     /// The [`LeafDecode`]s of the parquet file at `path`, its leaves in
     /// order.
     fn decodes_of(path: &Path) -> Vec<LeafDecode> {
-        let mut footer = read_footer(path).unwrap().unwrap();
+        let mut footer = read_footer(ParquetSource::File(path)).unwrap().unwrap();
         let schema = footer.reader.schema().unwrap();
         let mut out = Vec::new();
         for field in schema.iter_values() {
@@ -3113,21 +3112,105 @@ mod tests {
     }
 
     #[test]
-    fn an_uploads_load_error_names_no_server_path() {
-        // The loader names the file it could not read; the upload's message
-        // passed that on with the temporary file's absolute path.
+    fn an_upload_decodes_from_its_bytes_and_its_error_names_no_file() {
+        // Pre-fix an upload was written to a file in the server's temporary
+        // folder and loaded from there. From its bytes it decodes to the
+        // frame its file loads to, and the loader's error has no file to
+        // name.
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("upload_gone.parquet");
-        let Err(raw) = DataLoader::load(&missing) else {
-            panic!("a missing file loaded");
+        let path = dir.path().join("d.parquet");
+        let mut df = df!(
+            "x" => [1i64, 2, 3, 4],
+            "y" => [0.5, 1.75, 2.25, 3.1],
+            "s" => ["a", "bb", "ccc", "dddd"],
+        )
+        .unwrap();
+        write_parquet(&mut df, &path, 2);
+        let uploaded = load_parquet_upload(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            uploaded
+                .df()
+                .equals_missing(DataLoader::load(&path).unwrap().df())
+        );
+        let Err(shown) = load_parquet_upload(b"x,y\n1,2\n") else {
+            panic!("CSV text decoded as parquet");
         };
-        let folder = dir.path().display().to_string();
-        assert!(raw.to_string().contains(&folder), "{raw}");
-        let Err(shown) = load_parquet_upload(&missing) else {
-            panic!("a missing file loaded");
-        };
-        assert!(!shown.contains(&folder), "{shown}");
-        assert!(shown.contains("upload_gone.parquet"), "{shown}");
+        assert!(!shown.contains(".parquet"), "{shown}");
+        assert!(
+            !shown.contains(&dir.path().display().to_string()),
+            "{shown}"
+        );
+    }
+
+    /// [`parquet_decoded_bytes`] of the parquet file at `path`, read from
+    /// its bytes in memory, as an upload's are.
+    fn bytes_bound_of(path: &Path) -> Result<Option<DecodedBound>, String> {
+        let bytes = std::fs::read(path).unwrap();
+        parquet_decoded_bytes_within(
+            ParquetSource::Bytes(&bytes),
+            &mut DictionaryBudget::default(),
+        )
+    }
+
+    #[test]
+    fn an_uploads_bytes_are_checked_as_its_file_is() {
+        // An upload is checked from its bytes, a loaded file from disk: the
+        // same file gives the same bound, or the same refusal.
+        use p2a_core::polars::prelude::{Categories, NamedFrom, Series};
+        let dir = tempfile::tempdir().unwrap();
+        // Labels over several row groups: their dictionary pages are read.
+        let labels = dir.path().join("labels.parquet");
+        let dtype =
+            DataType::from_categories(Categories::random("".into(), CategoricalPhysical::U32));
+        let k = Series::new(
+            "k".into(),
+            (0..3_000)
+                .map(|i| format!("s{:04}", i % 700))
+                .collect::<Vec<_>>(),
+        )
+        .cast(&dtype)
+        .unwrap();
+        write_parquet(&mut DataFrame::new(vec![k.into()]).unwrap(), &labels, 1_000);
+        // A list column: its page headers give its entries.
+        let lists = dir.path().join("lists.parquet");
+        let inner = Series::new(
+            "".into(),
+            (0..5_000)
+                .map(|i| (i % 13) as f64 + 0.5)
+                .collect::<Vec<_>>(),
+        );
+        let mut df = DataFrame::new(vec![Series::new("l".into(), [inner]).into()]).unwrap();
+        write_parquet(&mut df, &lists, 1);
+        let [_, honest] = [&labels, &lists].map(|path| {
+            let from_file = parquet_decoded_bytes(path).unwrap().unwrap();
+            assert!(from_file.dataset > 0, "{from_file:?}");
+            assert_eq!(bytes_bound_of(path), Ok(Some(from_file)), "{path:?}");
+            from_file
+        });
+        // A footer that understates the entries: the file's bound still
+        // comes from its page headers, and so does the bytes'.
+        rewrite_footer(&lists, |footer| {
+            for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                chunk.meta_data.as_mut().unwrap().num_values = 1;
+            }
+        });
+        let understated = parquet_decoded_bytes(&lists).unwrap().unwrap();
+        assert_eq!(understated.dataset, honest.dataset, "{understated:?}");
+        assert_eq!(bytes_bound_of(&lists), Ok(Some(understated)));
+        // A chunk that passes the end of the file, and a negative count.
+        rewrite_footer(&labels, |footer| {
+            let chunk = &mut footer.row_groups[0].columns[0];
+            chunk.meta_data.as_mut().unwrap().total_compressed_size = 1 << 40;
+        });
+        rewrite_footer(&lists, |footer| {
+            for chunk in footer.row_groups.iter_mut().flat_map(|g| &mut g.columns) {
+                chunk.meta_data.as_mut().unwrap().num_values = -1;
+            }
+        });
+        for path in [&labels, &lists] {
+            let from_file = parquet_decoded_bytes(path).unwrap_err();
+            assert_eq!(bytes_bound_of(path), Err(from_file), "{path:?}");
+        }
     }
 
     #[test]
