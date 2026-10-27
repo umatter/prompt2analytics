@@ -552,10 +552,9 @@ async fn filled_conversation(db: &DbConnection, session_id: &str, title: &str) -
     id
 }
 
-/// The counter of `session_id` equals what the store holds.
+/// The counter of `session_id` equals what the store holds ([`counter_gap`]).
 async fn assert_counter_matches_store(db: &DbConnection, session_id: &str) {
-    let stored = db.session_stored_bytes(session_id).await.unwrap();
-    assert_eq!(db.session_bytes_entry(session_id), Some(stored));
+    assert_eq!(counter_gap(db, session_id).await, None);
 }
 
 /// Two concurrent deletes (or clears) of one conversation release its bytes
@@ -1586,10 +1585,16 @@ async fn slow_message_deletes(db: &DbConnection) {
 
 /// Drop `call` (named `what` in the failure) while the store runs it: the
 /// call must first hold store turn `key` (a conversation id, or
-/// `session:<id>` for a creation) and then not have finished 100 ms later (a
-/// [`slow_writes`] event makes it last longer). A call dropped before it
-/// holds its turn does nothing, which would leave the dropped-part-way path
-/// untested.
+/// `session:<id>` for a creation) and then not have finished 20 ms later.
+/// A call dropped before it holds its turn does nothing, which would leave
+/// the dropped-part-way path untested; the 20 ms let the reads before its
+/// write run and the write reach the store.
+///
+/// What keeps the "finished before it was dropped" check off the wall
+/// clock is the margin: every call dropped here is held up in the store by
+/// [`slow_writes`] events of at least 200 ms, of which the poll that sees
+/// the turn held (every 10 ms) and these 20 ms take at most 30, so the test
+/// task would have to be starved for some 170 ms for the check to fail.
 async fn drop_while_running(
     db: &DbConnection,
     key: &str,
@@ -1601,7 +1606,7 @@ async fn drop_while_running(
         _ = &mut call => panic!("{what:?} finished before it was seen holding its turn"),
         held = turn_is_held(db, key) => assert!(held, "{what:?} never held its turn"),
     }
-    let dropped = tokio::time::timeout(std::time::Duration::from_millis(100), call).await;
+    let dropped = tokio::time::timeout(std::time::Duration::from_millis(20), call).await;
     assert!(dropped.is_err(), "{what:?} finished before it was dropped");
 }
 
