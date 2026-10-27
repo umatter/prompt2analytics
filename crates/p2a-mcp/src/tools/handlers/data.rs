@@ -192,11 +192,9 @@ struct DecodedBound {
 /// decoding the file allocates.
 ///
 /// `Ok(None)` when the footer cannot be read; the loader then reports the
-/// file's error. `Err` says why the file is not read: its column chunks
-/// overlap or pass its end (see [`check_chunk_ranges`]), one of them
-/// declares a negative number of values (see [`check_chunk_counts`]), or
-/// the call was cancelled or passed its deadline while the page headers or
-/// dictionaries were read.
+/// file's error. `Err` says why the file is not read: its footer declares
+/// what no writer produces (see [`read_footer`]), or the call was cancelled
+/// or passed its deadline while the page headers or dictionaries were read.
 fn parquet_decoded_bytes(path: &Path) -> Result<Option<DecodedBound>, String> {
     parquet_decoded_bytes_within(path, &mut DictionaryBudget::default())
 }
@@ -207,28 +205,44 @@ fn parquet_decoded_bytes_within(
     path: &Path,
     budget: &mut DictionaryBudget,
 ) -> Result<Option<DecodedBound>, String> {
-    let Ok(file) = std::fs::File::open(path) else {
-        return Ok(None);
-    };
-    let mut reader = ParquetReader::new(file);
-    // polars' own footer type, which polars-io's `FileMetadataRef` names: this
-    // stops compiling when polars reads files with another polars-parquet than
-    // the one the check decompresses dictionaries with (see Cargo.toml).
-    let metadata: std::sync::Arc<polars_parquet::parquet::metadata::FileMetadata> =
-        match reader.get_metadata() {
-            Ok(metadata) => std::sync::Arc::clone(metadata),
-            Err(_) => return Ok(None),
-        };
-    let Ok(schema) = reader.schema() else {
-        return Ok(None);
-    };
-    // A second handle for the page headers: the reader keeps its own.
+    match read_footer(path)? {
+        Some(footer) => footer_decoded_bytes(path, footer, budget),
+        None => Ok(None),
+    }
+}
+
+/// A parquet file's footer, read and checked by [`read_footer`].
+struct Footer {
+    reader: ParquetReader<std::fs::File>,
+    /// polars' own footer type, which polars-io's `FileMetadataRef` names:
+    /// this stops compiling when polars reads files with another
+    /// polars-parquet than the one the check decompresses dictionaries with
+    /// (see Cargo.toml).
+    metadata: std::sync::Arc<polars_parquet::parquet::metadata::FileMetadata>,
+    file_len: u64,
+}
+
+/// Read the footer of the parquet file at `path` and refuse a file whose
+/// footer declares what no writer produces and polars' reader does not
+/// survive or should not be made to read: column chunks that overlap or
+/// pass the file's end (see [`check_chunk_ranges`]), or one that declares a
+/// negative number of values (see [`check_chunk_counts`]). Both read the
+/// footer alone, so they run for every parquet load, with quotas or
+/// without (see [`admit_parquet`]). `Ok(None)` when the footer cannot be
+/// read; the loader then reports the file's error.
+fn read_footer(path: &Path) -> Result<Option<Footer>, String> {
     let Ok(file) = std::fs::File::open(path) else {
         return Ok(None);
     };
     let Ok(file_len) = file.metadata().map(|meta| meta.len()) else {
         return Ok(None);
     };
+    let mut reader = ParquetReader::new(file);
+    let metadata: std::sync::Arc<polars_parquet::parquet::metadata::FileMetadata> =
+        match reader.get_metadata() {
+            Ok(metadata) => std::sync::Arc::clone(metadata),
+            Err(_) => return Ok(None),
+        };
     check_chunk_ranges(
         metadata
             .row_groups
@@ -242,6 +256,32 @@ fn parquet_decoded_bytes_within(
             .iter()
             .flat_map(|group| group.parquet_columns().iter().map(|c| c.num_values())),
     )?;
+    Ok(Some(Footer {
+        reader,
+        metadata,
+        file_len,
+    }))
+}
+
+/// [`parquet_decoded_bytes_within`] of the file at `path`, whose footer
+/// [`read_footer`] read.
+fn footer_decoded_bytes(
+    path: &Path,
+    footer: Footer,
+    budget: &mut DictionaryBudget,
+) -> Result<Option<DecodedBound>, String> {
+    let Footer {
+        mut reader,
+        metadata,
+        file_len,
+    } = footer;
+    let Ok(schema) = reader.schema() else {
+        return Ok(None);
+    };
+    // A second handle for the page headers: the reader keeps its own.
+    let Ok(file) = std::fs::File::open(path) else {
+        return Ok(None);
+    };
     let columns: Vec<(&str, DataType)> = schema
         .iter_values()
         .map(|field| (field.name.as_str(), DataType::from_arrow_field(field)))
@@ -1044,23 +1084,47 @@ enum NotAdmitted {
 /// Refuse, before decoding it, a parquet file at `path` that the dataset
 /// quotas would refuse once it was loaded as `name` (see
 /// [`session::admit_dataset`]), counting what decoding it allocates on top
-/// of the dataset (see [`parquet_decoded_bytes`]). Other formats, and calls
-/// without quotas, pass: a CSV, Excel, Stata or SAS file is charged only
-/// once decoded, and a CSV can decode to several times its size on disk. A
-/// file whose footer cannot be read passes too (the loader reports its
-/// error); one the check will not read (see [`parquet_decoded_bytes`]) is
-/// not loaded, and neither is one whose schema makes the check panic:
-/// polars' schema conversion (`DataType::from_arrow_field`) panics on some
-/// malformed categorical metadata, and the loader runs the same code.
+/// of the dataset (see [`parquet_decoded_bytes`]). Other formats pass: a
+/// CSV, Excel, Stata or SAS file is charged only once decoded, and a CSV can
+/// decode to several times its size on disk.
+///
+/// A parquet file whose footer declares what no writer produces (see
+/// [`read_footer`]) is not loaded whether or not the call has quotas: those
+/// checks read the footer alone, and polars' reader does not survive one
+/// of them (a negative count reaches an unchecked conversion before a
+/// reservation). The page headers and dictionaries are read only under
+/// quotas, and a call without them passes after the footer. A file whose
+/// footer cannot be read passes (the loader reports its error); one the
+/// check will not read is not loaded, and neither is one whose footer or
+/// schema makes the check panic: polars' schema conversion
+/// (`DataType::from_arrow_field`) panics on some malformed categorical
+/// metadata, and the loader runs the same code.
 async fn admit_parquet(path: &Path, name: &str) -> Result<(), NotAdmitted> {
     let is_parquet = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| matches!(e.to_lowercase().as_str(), "parquet" | "pq"));
-    if !is_parquet || !session::dataset_admission_active() {
+    if !is_parquet {
         return Ok(());
     }
-    let bound = match std::panic::catch_unwind(|| parquet_decoded_bytes(path)) {
+    let footer = match std::panic::catch_unwind(|| read_footer(path)) {
+        Ok(Ok(Some(footer))) => footer,
+        Ok(Ok(None)) => return Ok(()),
+        Ok(Err(reason)) => return Err(NotAdmitted::Unread(reason)),
+        Err(_) => {
+            tracing::info!("the parquet check panicked reading a file's footer");
+            return Err(NotAdmitted::Unread(
+                "could not read the file's footer".to_string(),
+            ));
+        }
+    };
+    if !session::dataset_admission_active() {
+        return Ok(());
+    }
+    let bounded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        footer_decoded_bytes(path, footer, &mut DictionaryBudget::default())
+    }));
+    let bound = match bounded {
         Ok(Ok(Some(bound))) => bound,
         Ok(Ok(None)) => return Ok(()),
         Ok(Err(reason)) => return Err(NotAdmitted::Unread(reason)),

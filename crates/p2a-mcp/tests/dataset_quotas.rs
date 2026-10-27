@@ -717,12 +717,14 @@ async fn a_parquet_file_with_shared_column_chunks_is_not_loaded() {
 
 #[tokio::test]
 async fn a_parquet_chunk_that_declares_a_negative_count_is_not_loaded() {
-    // A struct of booleans whose column chunk's footer count is negative.
-    // polars takes the count as an unsigned size and reserves room for that
-    // many values before it decodes a nested chunk; in a release build the
-    // allocation fails and the process aborts. Pre-fix the check before
-    // decoding counted the chunk as empty and admitted the file. It is
-    // refused as unreadable, through both tools, and nothing is loaded.
+    // A nested column whose column chunk's footer count is negative. polars
+    // takes the count as an unsigned size and reserves room for that many
+    // values before it decodes a nested chunk, a reservation the allocator
+    // cannot meet. It is refused as unreadable, through both tools, and
+    // nothing is loaded: with the quotas and without them (stdio, or local
+    // HTTP with limits off), since the check reads the footer alone. Pre-fix
+    // the check ran only under quotas, and a server without them passed the
+    // file to polars.
     use polars::prelude::{IntoSeries, StructChunked};
     let dir = data_dir();
     let path = dir.path().join("negative.parquet");
@@ -738,32 +740,41 @@ async fn a_parquet_chunk_that_declares_a_negative_count_is_not_loaded() {
         }
     });
     let content = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&path).unwrap());
-    let (app, _) = app_with_quota(8 * MIB).await;
-    for (tool, args) in [
-        (
-            "upload_dataset",
-            json!({"content": content, "filename": "negative.parquet"}),
-        ),
-        (
-            "load_dataset",
-            json!({"path": path.to_string_lossy(), "name": "negative"}),
-        ),
-    ] {
-        let sid = new_session(&app).await;
-        let (status, body) = call(&app, &sid, tool, args).await;
-        assert_eq!(status, StatusCode::OK, "{tool}: {body}");
-        assert_eq!(body["data"]["success"], json!(false), "{tool}: {body}");
-        let text = body.to_string();
-        assert!(
-            text.contains("declares a negative number of values"),
-            "{tool}: {body}"
-        );
-        assert!(text.contains("Nothing was loaded"), "{tool}: {body}");
-        let (_, listed) = call(&app, &sid, "list_datasets", json!({})).await;
-        assert!(
-            listed.to_string().contains("No datasets currently loaded"),
-            "{tool}: {listed}"
-        );
+    let (quotas, _) = app_with_quota(8 * MIB).await;
+    let (no_quotas, _) = build_app_with(&local(), ExecConfig::default())
+        .await
+        .unwrap();
+    for (app, mode) in [(quotas, "quotas"), (no_quotas, "no quotas")] {
+        for (tool, args) in [
+            (
+                "upload_dataset",
+                json!({"content": content, "filename": "negative.parquet"}),
+            ),
+            (
+                "load_dataset",
+                json!({"path": path.to_string_lossy(), "name": "negative"}),
+            ),
+        ] {
+            let sid = new_session(&app).await;
+            let (status, body) = call(&app, &sid, tool, args).await;
+            assert_eq!(status, StatusCode::OK, "{mode} {tool}: {body}");
+            assert_eq!(
+                body["data"]["success"],
+                json!(false),
+                "{mode} {tool}: {body}"
+            );
+            let text = body.to_string();
+            assert!(
+                text.contains("declares a negative number of values"),
+                "{mode} {tool}: {body}"
+            );
+            assert!(text.contains("Nothing was loaded"), "{mode} {tool}: {body}");
+            let (_, listed) = call(&app, &sid, "list_datasets", json!({})).await;
+            assert!(
+                listed.to_string().contains("No datasets currently loaded"),
+                "{mode} {tool}: {listed}"
+            );
+        }
     }
 }
 
