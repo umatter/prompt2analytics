@@ -939,18 +939,10 @@ impl StreamingToolExecutor {
             "[METADATA_CAPTURE] Starting metadata capture"
         );
 
-        // DEBUG: Log the full result text (truncated for very long results)
-        let result_preview = if result_text.len() > 2000 {
-            format!(
-                "{}...[truncated, total {} bytes]",
-                truncate_str(result_text, 2_000),
-                result_text.len()
-            )
-        } else {
-            result_text.to_string()
-        };
+        // The result text, cut at 2,000 bytes.
         tracing::debug!(
-            result_text = %result_preview,
+            result_text = %truncate_str(result_text, 2_000),
+            result_len = result_text.len(),
             "[METADATA_CAPTURE] Full result text"
         );
 
@@ -1279,9 +1271,13 @@ impl ToolExecutor for StreamingToolExecutor {
 
         // The arguments move into the call; the metadata capture reads only
         // their path and filename (a create_dataset csv_content or an
-        // upload_dataset content can be large), so only those are kept.
+        // upload_dataset content can be large), so only those are kept, and
+        // only for a dataset loader on an executor that tracks datasets.
         #[cfg(feature = "db")]
-        let args_for_metadata = super::routes_tools::capture_fields(&arguments);
+        let args_for_metadata = (self.db.is_some()
+            && self.session_id.is_some()
+            && matches!(name, "load_dataset" | "upload_dataset" | "create_dataset"))
+        .then(|| super::routes_tools::capture_fields(&arguments));
 
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
@@ -1361,13 +1357,13 @@ impl ToolExecutor for StreamingToolExecutor {
                 }
 
                 // Capture dataset metadata for load_dataset, upload_dataset
-                // and create_dataset (separate from tool call tracking: it
-                // needs only db and session_id). It runs on the blocking
-                // pool, as on the tool route, and the call waits until its
-                // row is stored.
+                // and create_dataset, the calls args_for_metadata is kept for
+                // (separate from tool call tracking: it needs only db and
+                // session_id). It runs on the blocking pool, as on the tool
+                // route, and the call waits until its row is stored.
                 #[cfg(feature = "db")]
                 if let (Some(db), Some(session_id)) = (&self.db, &self.session_id)
-                    && matches!(name, "load_dataset" | "upload_dataset" | "create_dataset")
+                    && let Some(args_for_metadata) = args_for_metadata
                     && result.error.is_none()
                 {
                     super::routes_tools::capture_dataset_metadata_off_runtime(
@@ -2286,14 +2282,9 @@ mod capture_tests {
     use crate::exec::ExecConfig;
     use crate::session::SessionManager;
 
-    /// The capture after a successful `create_dataset` call of the
-    /// streaming tool loop runs on a blocking thread, not on the runtime's
-    /// thread (here the test's own, the only worker of a current-thread
-    /// runtime), and the call returns once its row is stored, as on the
-    /// tool route.
-    #[tokio::test]
-    async fn the_loop_capture_runs_off_the_runtime() {
-        let db = Arc::new(DbConnection::connect_memory().await.unwrap());
+    /// A streaming executor on a new live session that tracks datasets in
+    /// `db`, and the session's id.
+    async fn tracking_executor(db: &Arc<DbConnection>) -> (StreamingToolExecutor, String) {
         let sessions = Arc::new(SessionManager::new(SessionConfig {
             ttl_minutes: 60,
             max_sessions: 10,
@@ -2311,6 +2302,18 @@ mod capture_tests {
             tx,
         )
         .with_dataset_tracking(db.clone(), sid.clone());
+        (executor, sid)
+    }
+
+    /// The capture after a successful `create_dataset` call of the
+    /// streaming tool loop runs on a blocking thread, not on the runtime's
+    /// thread (here the test's own, the only worker of a current-thread
+    /// runtime), and the call returns once its row is stored, as on the
+    /// tool route.
+    #[tokio::test]
+    async fn the_loop_capture_runs_off_the_runtime() {
+        let db = Arc::new(DbConnection::connect_memory().await.unwrap());
+        let (executor, sid) = tracking_executor(&db).await;
         let args = serde_json::json!({"name": "d", "csv_content": "a,b\n1.5,2.25\n2.75,3.5\n"});
         let text = executor.execute("create_dataset", args).await.unwrap();
         assert!(text.contains("Successfully created dataset 'd'"), "{text}");
@@ -2326,6 +2329,26 @@ mod capture_tests {
             std::thread::current().id(),
             "the capture ran on the runtime's thread"
         );
+    }
+
+    /// Only a dataset loader's call is captured: a successful call of
+    /// another tool on the same tracking executor starts no capture.
+    #[tokio::test]
+    async fn a_call_of_another_tool_is_not_captured() {
+        let db = Arc::new(DbConnection::connect_memory().await.unwrap());
+        let (executor, sid) = tracking_executor(&db).await;
+        let args = serde_json::json!({"name": "pairs", "csv_content": "x,y\n0.5,1.25\n1.75,2.5\n"});
+        executor.execute("create_dataset", args).await.unwrap();
+        let listed = executor
+            .execute("list_datasets", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(listed.contains("pairs"), "{listed}");
+
+        let threads = super::super::routes_tools::capture_threads::of(&sid);
+        assert_eq!(threads.len(), 1, "captures: {threads:?}");
+        let rows = db.get_datasets_for_session(&sid).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
     }
 }
 
