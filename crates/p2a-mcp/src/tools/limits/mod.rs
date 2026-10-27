@@ -204,6 +204,11 @@ families! {
 /// take about 16 s. Whole fits at this size whose optimiser ran to that bound took up to 9.1 s;
 /// fits that converge stop far sooner. It allows ARIMA(1,1,1) on 15,384 observations,
 /// ARIMA(0,1,0) on 40,000 and the `model_order` caps p = d = q = 20 on 214.
+///
+/// The margin assumes the default 60 s deadline: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a
+/// throttled shared CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. Raised
+/// above about 3.5 times this value, it lets an allowed fit run past the deadline and keep its
+/// slot, since the fit has no checkpoint.
 const ARIMA_FIT_WORK_HOSTED: u64 = 400_000;
 
 /// Number of families; the length of [`Family::ALL`].
@@ -1079,9 +1084,14 @@ impl Limits {
 
     /// Checks the column an ARIMA fit reads for a nonzero value smaller than
     /// [`ARIMA_MIN_MAGNITUDE`] while the [`Limits::arima_fit_work`] budget is set (`None`
-    /// passes): arithmetic on such values, or on the differences and squares the fit forms from
-    /// them, is far slower than the budget's time per unit allows for. The ARIMA handlers call
-    /// it after [`Limits::check_arima_fit`]. `column` names the series in the refusal.
+    /// passes): arithmetic on such values is far slower than the budget's time per unit allows
+    /// for. The floor keeps the column, its differences, and their products and squares with
+    /// ordinary-sized coefficients out of that range. It does not cover the MA residual
+    /// recursion at an intercept of exactly 0.0 over a stretch of exact zeros, which can sit in
+    /// the subnormal range (one pass measured about 28 times slower); [`ARIMA_MIN_MAGNITUDE`]
+    /// says why that is not believed to last a whole fit, and records it as a residual risk for
+    /// a change of the optimiser. The ARIMA handlers call it after [`Limits::check_arima_fit`].
+    /// `column` names the series in the refusal.
     pub fn check_arima_series(
         &self,
         tool: &str,

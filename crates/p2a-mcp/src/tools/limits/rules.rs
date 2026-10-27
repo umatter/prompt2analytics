@@ -937,9 +937,9 @@ pub static ROW_RULES: &[RowRule] = &[
 /// stop it, so an expensive fit has to be refused before it starts. The fit minimises the
 /// conditional sum of squares with L-BFGS (liblbfgs 0.1.0, More-Thuente line search): at most
 /// 200 iterations, the first without a line search and each of the others a line search of at
-/// most 40 evaluations, so at most 1 + 199 x 40 = 7,961 evaluations. The data cannot lower that
-/// bound, because a failed line search is reverted and the next iteration starts, and some
-/// series reach it. One evaluation is the objective and its forward-difference gradient,
+/// most 40 evaluations, so at most 1 + 199 x 40 = 7,961 evaluations. The bound is reachable: a
+/// failed line search is reverted and the next iteration starts instead of ending the fit, and
+/// some series reach it. One evaluation is the objective and its forward-difference gradient,
 /// `p + q + 3` passes over the differenced series. A pass costs at most about one unit per
 /// observation for each of `p + q + 3` terms (the residual, its square and its storage count as
 /// about three), measured on a release build over AR-only, MA-only and mixed orders; an MA term
@@ -973,9 +973,27 @@ pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
 /// every value of the column is a multiple of the spacing of doubles at its smallest nonzero
 /// value `m` (about `m * 2^-52`), a difference of two such multiples rounds to another one, so
 /// every nonzero value of every difference is at least about `m * 2^-53`. From 1e-100 that is
-/// about 1e-116, a residual at least 2^-52 of such a value when it is not zero is about 2e-132,
-/// and its square about 6e-264: ordinary numbers, with a wide margin for the coefficients the fit
-/// multiplies them by. NaN, infinities and zero cost no more than other numbers and pass.
+/// about 1e-116. Where a value of the differenced series is nonzero, the residual the fit forms
+/// at it is, when it is not zero, at least about 2^-52 of that value, about 2e-132, and its
+/// square about 6e-264: ordinary numbers. So the floor covers the column, its differences, and
+/// their products and squares with ordinary-sized coefficients, with a wide margin. NaN,
+/// infinities and zero cost no more than other numbers and pass.
+///
+/// Where a value of the differenced series is zero, the floor bounds nothing. There
+/// `arima::estimate::residuals` gives the residual as
+/// `-(intercept + sum phi_j x_{t-j-1} + sum theta_j e_{t-j-1})`, which the coefficients the
+/// optimiser tries set, and the release-build measurements behind [`arima_fit_work`] cover it,
+/// not the floor. One case is known to leave the ordinary range: at an intercept of exactly 0.0
+/// over a stretch of exact zeros, the MA recursion `e_t = -sum theta_j e_{t-j-1}` decays
+/// geometrically into the subnormal range and, for `|theta| > 1/2`, can stay on a subnormal
+/// rounding fixed point (for example 4 x 2^-1074 at `theta = 0.9`). Exact zeros pass the floor,
+/// and on a release build one pass of the objective in that state was measured at about 28
+/// times the time of a pass over ordinary data, a cost the budget's time per unit does not
+/// cover. A whole fit is not believed to stay in that state over its many evaluations: the
+/// intercept starts at the differenced series' mean, the forward-difference gradient moves it
+/// off zero, and where the data are large enough to absorb that step the first line search
+/// reached its minimum step and the fit ended at once. This is a residual risk: a change of the
+/// optimiser (the TS-1 replacement) must examine it again.
 pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
 
 #[cfg(test)]
