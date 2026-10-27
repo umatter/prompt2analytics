@@ -553,18 +553,20 @@ impl DbConnection {
         let message_id = message_id.to_string();
         let turn = db.conversation_turn(&conversation_id).await;
         run_to_end(turn, async move {
-            let mut session_id = String::new();
-            let mut replaced = 0;
+            // With the `session_db_bytes` budget: the session the content
+            // counts against, and the bytes of the content it replaces.
+            let mut counted = None;
             if db.tracks_session_bytes() {
                 // Read again in the turn: a clear that ran before it took the
                 // message, and its bytes must not be counted for a write that
                 // finds no row. The content it replaces is room for the new
                 // one, released once the write has replaced it.
                 let stored = db.get_message(&message_id).await?;
-                session_id = db.get_conversation(&conversation_id).await?.session_id;
-                replaced = stored.content.len() as u64;
+                let session_id = db.get_conversation(&conversation_id).await?.session_id;
+                let replaced = stored.content.len() as u64;
                 db.fit_session_texts(&session_id, &mut [&mut content], replaced)
                     .await?;
+                counted = Some((session_id, replaced));
             }
             let mut result = db
                 .db()
@@ -580,7 +582,9 @@ impl DbConnection {
                     message_id
                 )));
             };
-            db.release_session_bytes(&session_id, replaced);
+            if let Some((session_id, replaced)) = &counted {
+                db.release_session_bytes(session_id, *replaced);
+            }
             db.update_conversation_after_message(&msg.conversation_id, &msg.content)
                 .await?;
             Ok(msg)

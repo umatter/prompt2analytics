@@ -52,7 +52,7 @@ impl DbConnection {
                 )));
             }
             let tool_call = db
-                .fit_tool_call_texts(&conv.session_id, tool_call, 0)
+                .fit_tool_call_texts(Some(&conv.session_id), tool_call, 0)
                 .await?;
             let created: Option<ToolCall> = db
                 .db()
@@ -101,7 +101,7 @@ impl DbConnection {
                 stored.error.as_deref(),
             );
             let tool_call = db
-                .fit_tool_call_texts(&session_id, tool_call, replaced)
+                .fit_tool_call_texts(session_id.as_deref(), tool_call, replaced)
                 .await?;
 
             let result: Option<ToolCall> = db
@@ -111,20 +111,23 @@ impl DbConnection {
                 .await?;
             let updated =
                 result.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))?;
-            db.release_session_bytes(&session_id, replaced);
+            if let Some(session_id) = &session_id {
+                db.release_session_bytes(session_id, replaced);
+            }
             Ok(updated)
         })
         .await
     }
 
     /// Every text field of `tool_call` cut at a char boundary to
-    /// `message_bytes` and fitted, arguments first, into what session
-    /// `session_id` has left under `session_db_bytes`, with the `replaced`
-    /// bytes of the stored texts the write replaces as room
+    /// `message_bytes` and, given the session `session_id` that owns it,
+    /// fitted, arguments first, into what that session has left under
+    /// `session_db_bytes`, with the `replaced` bytes of the stored texts the
+    /// write replaces as room
     /// ([`fit_session_texts`](Self::fit_session_texts)). Never refused.
     async fn fit_tool_call_texts(
         &self,
-        session_id: &str,
+        session_id: Option<&str>,
         mut tool_call: ToolCall,
         replaced: u64,
     ) -> Result<ToolCall, DbError> {
@@ -135,18 +138,22 @@ impl DbConnection {
         for text in texts.iter_mut() {
             self.truncate_server_text_in_place(text);
         }
-        self.fit_session_texts(session_id, &mut texts, replaced)
-            .await?;
+        if let Some(session_id) = session_id {
+            self.fit_session_texts(session_id, &mut texts, replaced)
+                .await?;
+        }
         Ok(tool_call)
     }
 
     /// The session that owns conversation `conversation_id`, read only when
-    /// the `session_db_bytes` budget needs it (the empty string otherwise).
-    async fn tool_call_session(&self, conversation_id: &str) -> Result<String, DbError> {
+    /// the `session_db_bytes` budget needs it (`None` without the budget).
+    async fn tool_call_session(&self, conversation_id: &str) -> Result<Option<String>, DbError> {
         if !self.tracks_session_bytes() {
-            return Ok(String::new());
+            return Ok(None);
         }
-        Ok(self.get_conversation(conversation_id).await?.session_id)
+        Ok(Some(
+            self.get_conversation(conversation_id).await?.session_id,
+        ))
     }
 
     /// Change the status of tool call `id`, and for a finished call store its
@@ -175,8 +182,9 @@ impl DbConnection {
                     duration_ms,
                 } => (status, Some((field, text)), Some(duration_ms)),
             };
-            let mut session_id = String::new();
-            let mut replaced = 0;
+            // With the `session_db_bytes` budget: the session the text counts
+            // against, and the bytes of the stored text it replaces.
+            let mut counted = None;
             if let Some((field, text)) = &mut text
                 && db.tracks_session_bytes()
             {
@@ -184,10 +192,14 @@ impl DbConnection {
                 // it took the row, and no bytes may be counted for a write
                 // that finds none.
                 let stored = db.get_tool_call(&id).await?;
-                session_id = db.tool_call_session(&stored.conversation_id).await?;
-                replaced = field.stored(&stored).map_or(0, |t| t.len() as u64);
+                let session_id = db
+                    .get_conversation(&stored.conversation_id)
+                    .await?
+                    .session_id;
+                let replaced = field.stored(&stored).map_or(0, |t| t.len() as u64);
                 db.fit_session_texts(&session_id, &mut [text], replaced)
                     .await?;
+                counted = Some((session_id, replaced));
             }
 
             let query = match &text {
@@ -221,7 +233,9 @@ impl DbConnection {
             let updated: Option<ToolCall> = result.take(0)?;
             let updated =
                 updated.ok_or_else(|| DbError::NotFound(format!("Tool call not found: {}", id)))?;
-            db.release_session_bytes(&session_id, replaced);
+            if let Some((session_id, replaced)) = &counted {
+                db.release_session_bytes(session_id, *replaced);
+            }
             Ok(updated)
         })
         .await
