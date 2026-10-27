@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderName, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -16,7 +16,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use super::http::ApiResponse;
-use crate::config::{DeploymentMode, ServerConfig};
+use crate::config::{DeploymentMode, ResourceProfile, ServerConfig};
 
 /// Request headers a browser client may send cross-origin: the bearer token,
 /// JSON bodies, `Accept` and the session header. A `*` wildcard would not
@@ -72,7 +72,9 @@ pub(crate) const MAX_HTTP_BODY_VAR: &str = "P2A_MAX_HTTP_BODY_MB";
 /// Caps memory use from oversized requests (e.g. large base64 dataset uploads)
 /// on a publicly reachable backend. Defaults to 32 MiB; override with the
 /// `P2A_MAX_HTTP_BODY_MB` environment variable. This only limits request
-/// bodies and does not affect SSE/streaming responses.
+/// bodies and does not affect SSE/streaming responses. The routes that parse
+/// a JSON body take one up to this size, except in the hosted profile
+/// ([`parsed_body_bytes`]).
 pub(crate) fn max_request_body_bytes() -> usize {
     const DEFAULT_MB: usize = 32;
     let mb = std::env::var(MAX_HTTP_BODY_VAR)
@@ -83,21 +85,53 @@ pub(crate) fn max_request_body_bytes() -> usize {
     mb * 1024 * 1024
 }
 
+/// The largest body the hosted profile parses: 2 MiB, axum's own default for
+/// its body extractors, which the hosted server has always applied.
+///
+/// A route parses its whole body (a tool call's arguments into
+/// `serde_json::Value`) before the tool governor's memory admission sees the
+/// call, and the parsed value can take much more memory than the body. The
+/// hosted profile keeps the 2 MiB limit until that parse is bounded; raising
+/// it to the body cap is a separate decision.
+const HOSTED_PARSED_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// The largest body the routes that parse one (axum's `Json`, `Bytes`,
+/// `String` and `Form` extractors) accept: the body cap `body_cap`, or in the
+/// hosted profile [`HOSTED_PARSED_BODY_BYTES`] when that is smaller.
+fn parsed_body_bytes(profile: ResourceProfile, body_cap: usize) -> usize {
+    match profile {
+        ResourceProfile::Off => body_cap,
+        ResourceProfile::Hosted => body_cap.min(HOSTED_PARSED_BODY_BYTES),
+    }
+}
+
 /// Apply global middleware to the fully-composed router.
 ///
 /// Must run AFTER all routes (including nested ones) are registered so the
 /// layers cover every route. In axum each `.layer` call wraps everything
-/// before it, so the order below is innermost first: the body limit, the
+/// before it, so the order below is innermost first: the body limits, the
 /// bearer token, the local-mode Host check, then CORS and tracing outermost.
 /// With CORS outside the other layers, preflight requests are answered
 /// before authentication, and 401, 413 and 421 responses carry CORS headers
 /// a browser can read.
+///
+/// There are two body limits. `RequestBodyLimitLayer` holds every body to
+/// the cap ([`max_request_body_bytes`]): a body declared longer answers 413
+/// (plain text `length limit exceeded`) before it is read, and one without a
+/// declared length is cut off at the cap. axum's body extractors apply a
+/// limit of their own, 2 MB unless `DefaultBodyLimit` sets it, and refuse a
+/// longer body with 413 (`Failed to buffer the request body: length limit
+/// exceeded`); it is set to [`parsed_body_bytes`], so outside the hosted
+/// profile the cap is the limit of every route.
 pub(crate) fn apply_global_middleware(router: Router, config: &ServerConfig) -> Router {
     // Shared bearer token, if configured. `None` disables the check (loopback
     // development only; the startup guard forbids this on a public bind).
     let token_state: Option<Arc<str>> = config.http.access_token.as_deref().map(Arc::from);
+    let body_cap = max_request_body_bytes();
+    let parsed = parsed_body_bytes(config.resource_profile(), body_cap);
     let router = router
-        .layer(RequestBodyLimitLayer::new(max_request_body_bytes()))
+        .layer(DefaultBodyLimit::max(parsed))
+        .layer(RequestBodyLimitLayer::new(body_cap))
         .layer(middleware::from_fn_with_state(
             token_state,
             require_access_token,
@@ -243,6 +277,21 @@ mod tests {
         ] {
             assert!(!is_local_host(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn parsed_bodies_follow_the_cap_except_above_2_mib_in_the_hosted_profile() {
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(parsed_body_bytes(ResourceProfile::Off, 32 * MIB), 32 * MIB);
+        assert_eq!(parsed_body_bytes(ResourceProfile::Off, MIB), MIB);
+        assert_eq!(
+            parsed_body_bytes(ResourceProfile::Hosted, 32 * MIB),
+            2 * MIB
+        );
+        assert_eq!(parsed_body_bytes(ResourceProfile::Hosted, MIB), MIB);
+        // axum's own extractor default, which the hosted server applied
+        // before the limit was set explicitly.
+        assert_eq!(HOSTED_PARSED_BODY_BYTES, 2_097_152);
     }
 
     #[test]
