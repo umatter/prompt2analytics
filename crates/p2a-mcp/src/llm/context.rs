@@ -71,8 +71,8 @@ pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
 /// `s` as a JSON string literal: quoted, with quotes, backslashes, every
 /// control character and the Unicode line and paragraph separators escaped,
 /// so a name or value can never start a line of its own under any
-/// line-breaking rule (LF, CR, VT, FF, NEL, U+2028, U+2029). The literal
-/// still decodes to `s`.
+/// line-breaking rule (LF, CR, VT, FF, FS, GS, RS, NEL, U+2028, U+2029). The
+/// literal still decodes to `s`.
 ///
 /// serde_json escapes only U+0000-U+001F, the quote and the backslash; the
 /// rest of [`needs_unicode_escape`] (DEL, the C1 controls with NEL among
@@ -80,6 +80,8 @@ pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
 /// the Basic Multilingual Plane, so one escape each suffices, and serde's
 /// own escapes are ASCII, so the rewrite cannot split one of them.
 fn json_str(s: &str) -> String {
+    use std::fmt::Write as _;
+
     let quoted = serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
     if !quoted.chars().any(needs_unicode_escape) {
         return quoted;
@@ -87,7 +89,8 @@ fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(quoted.len() + 16);
     for c in quoted.chars() {
         if needs_unicode_escape(c) {
-            out.push_str(&format!("\\u{:04x}", u32::from(c)));
+            // Writing to a String cannot fail.
+            let _ = write!(out, "\\u{:04x}", u32::from(c));
         } else {
             out.push(c);
         }
@@ -100,6 +103,28 @@ fn json_str(s: &str) -> String {
 /// one of these.
 fn needs_unicode_escape(c: char) -> bool {
     c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// Test oracle: every character some line-splitting rule breaks a line at,
+/// i.e. Unicode's mandatory breaks (UAX #14 classes BK, CR, LF and NL) and
+/// the separators Python's `str.splitlines` also splits on. Written out by
+/// hand rather than derived from [`needs_unicode_escape`], so the tests do
+/// not just re-check the predicate `json_str` uses. The one copy shared by
+/// the tests here and in `transport::llm_routes`.
+#[cfg(test)]
+pub(crate) fn is_any_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r'
+            | '\u{b}'
+            | '\u{c}'
+            | '\u{1c}'
+            | '\u{1d}'
+            | '\u{1e}'
+            | '\u{85}'
+            | '\u{2028}'
+            | '\u{2029}'
+    )
 }
 
 /// Build the dataset context for the system prompt within the default byte
@@ -1071,24 +1096,6 @@ mod tests {
         );
         let tight = build_dataset_context_bounded(&m, 2_000).unwrap();
         assert!(tight.len() <= 2_000);
-    }
-
-    /// Every character some line-splitting rule breaks a line at: Unicode's
-    /// mandatory breaks (UAX #14 classes BK, CR, LF and NL) and the
-    /// separators Python's `str.splitlines` also splits on.
-    fn is_any_line_break(c: char) -> bool {
-        matches!(
-            c,
-            '\n' | '\r'
-                | '\u{b}'
-                | '\u{c}'
-                | '\u{1c}'
-                | '\u{1d}'
-                | '\u{1e}'
-                | '\u{85}'
-                | '\u{2028}'
-                | '\u{2029}'
-        )
     }
 
     #[test]
