@@ -912,9 +912,9 @@ Auto-discovered guidance:
   (50,000 entities, 10 s), and `duckdb_query_stops_at_timeout` (5 s, `database` feature); in p2a-mcp,
   `each_columns_own_mapping_is_charged_once` (250 ms). The panel tests guard against per-entity work
   turning quadratic; the code keeps no operation count that a deterministic test could check instead.
-  Bounded polling loops with a deadline (the governor and serve tests) fail instead of hanging and
-  are not timing assertions. Do not add ungated timing assertions — they fail on loaded or slower
-  machines and make `cargo test` machine-dependent, which the paper's reviewers will run.
+  Bounded polling loops with a deadline (the governor, serve and websocket tests) fail instead of
+  hanging and are not timing assertions. Do not add ungated timing assertions — they fail on loaded
+  or slower machines and make `cargo test` machine-dependent, which the paper's reviewers will run.
 
 ### Two traps on a dev box: disk and rustdoc
 
