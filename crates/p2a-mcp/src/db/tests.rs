@@ -1629,7 +1629,12 @@ async fn a_dropped_clear_or_delete_leaves_the_count_in_step() {
             {
                 out_of_step.push(format!("{pass} {op:?}: {gap}"));
             }
-            assert_eq!(db.store_turns_in_use(), 0);
+            // The dropped call's entry can outlast this test's own turn by
+            // a moment (`StoreTurn::drop` lets the next call in first).
+            assert!(
+                turns_released(&db).await,
+                "{pass} {op:?}: a turn stays in use"
+            );
         }
     }
     assert!(out_of_step.is_empty(), "{out_of_step:?}");
@@ -1671,7 +1676,9 @@ async fn a_retry_after_a_dropped_clear_or_delete_waits_for_it() {
         }
         assert_eq!(listed_and_stored(&db, &id).await, (0, 0), "{op:?}");
         assert_counter_matches_store(&db, "s1").await;
-        assert_eq!(db.store_turns_in_use(), 0);
+        // The dropped call's entry can outlast the retry by a moment
+        // (`StoreTurn::drop` lets the next call in first).
+        assert!(turns_released(&db).await, "{op:?}: a turn stays in use");
     }
 }
 
