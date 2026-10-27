@@ -68,8 +68,14 @@
 //!
 //! # Installation
 //!
-//! `transport::start_transport` computes the process's limits with [`resolve`] (the deployment's
-//! resource profile plus `P2A_LIMIT_OVERRIDES`) and installs them with [`install`]. Every tool
+//! `transport::start_transport` (for stdio) and, on every HTTP start path (`start_http_transport`,
+//! `start_embedded_server`, `bind` + `serve`), `transport::http::serve` (for the bound socket)
+//! compute the process's limits with [`resolve`] (the deployment's resource profile plus
+//! `P2A_LIMIT_OVERRIDES`) and install them with [`install`]. A caller that serves
+//! `transport::http::build_app`'s router itself installs them (see `build_app`). Each server holds
+//! its limits while any of its connections or websocket sessions is served, and a start whose
+//! limits differ from those of a server still running in the process is refused
+//! (`transport::http::hold_limits`). Every tool
 //! call is checked against [`current`] before its arguments are deserialised: governed HTTP-side
 //! calls in `AnalyticsServer::call_tool_with_session` (the governor carries the limits onto its
 //! blocking thread), stdio calls in the server's `ServerHandler::call_tool`. Handlers read named
