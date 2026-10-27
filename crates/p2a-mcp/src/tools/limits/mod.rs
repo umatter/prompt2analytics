@@ -223,12 +223,16 @@ const ARIMA_FIT_WORK_HOSTED: u64 = 400_000;
 /// and those of `ml_bart_causal` on up to about 220,000 rows (both reach the 60 s deadline well
 /// before that), and 1.5 times each default setting on 18,000 and 162,000 rows.
 ///
-/// The bound counts the buffers a fit holds by their lengths. On a release build in a 1 GiB,
-/// no-swap scope, fits admitted close to the budget (the largest trees and draw matrices it
-/// admits on a few thousand rows, and both defaults on the largest datasets it admits) grew the
+/// The bound counts every buffer a fit holds at once, and the fit allocates each at its exact
+/// length; only the allocator's own overhead and the dataset come on top. On a release build, a
+/// causal-forest fit whose trees split a few rows off at every level, the recursion's largest
+/// share of the bound, peaked at 85% of its bound. In a 1 GiB, no-swap scope, fits with
+/// balanced trees admitted close to the budget (the largest trees and draw matrices it admits
+/// on a few thousand rows, and both defaults on the largest datasets it admits) grew the
 /// process by 53 to 234 MiB, at most about 3 MiB above their bounds (allocator and thread
-/// overhead). With resident data just under the admission limit the same fits peaked at
-/// 852 MiB.
+/// overhead), measured before the fits allocated their index vectors at exact lengths. With
+/// resident data just under the admission limit the same fits peaked at 852 MiB. Keep this in
+/// step with the `ensemble_bytes` paragraph of `docs/guides/DEPLOYMENT.md`.
 const ENSEMBLE_BYTES_HOSTED: u64 = 256 * 1024 * 1024;
 
 /// Number of families; the length of [`Family::ALL`].
@@ -295,8 +299,9 @@ pub struct ParamRule {
 /// How a method's cost grows with the number of dataset rows.
 ///
 /// A [`RowRule`] may hold a tool to a class's cap for a reason of its own, which it states in
-/// [`RowRule::reason`]: a tool whose cost is linear in the rows but too large for the session
-/// data quota, or superlinear in another way than the class describes.
+/// [`RowRule::reason`]: a tool whose cost is linear in the rows but whose working memory is so
+/// large a multiple of its data that a dataset inside the session data quota could exhaust the
+/// process's memory, or one whose cost is superlinear in another way than the class describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowClass {
     /// Memory grows with the square of the row count (n x n matrices).
