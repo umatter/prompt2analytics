@@ -24,6 +24,7 @@ use p2a_core::{
             BinStrategy,
             FillStrategy,
             JoinType,
+            MungeError,
             MutateExpr,
             bin,
             concat,
@@ -736,12 +737,7 @@ impl AnalyticsServer {
             let rows = match estimate_join_rows(&left_ds, &right_ds, &left_on, right_on, join_type)
             {
                 Ok(rows) => rows,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Join failed: {}",
-                        e
-                    ))]));
-                }
+                Err(e) => return Ok(join_failed(&e)),
             };
             if let Err(v) = limits.check_budget(
                 "munge_join",
@@ -755,12 +751,7 @@ impl AnalyticsServer {
 
         let result = match join(&left_ds, &right_ds, &left_on, right_on, join_type, suffix) {
             Ok(ds) => ds,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Join failed: {}",
-                    e
-                ))]));
-            }
+            Err(e) => return Ok(join_failed(&e)),
         };
 
         let result_name = request
@@ -2387,6 +2378,17 @@ fn bin_count(bins: &[f64], strategy: &str) -> Result<usize, String> {
     usize::try_from(v as u64).map_err(|_| invalid())
 }
 
+/// A join the core refused, as an in-band tool error that says "Join failed:"
+/// once: the core's [`MungeError::JoinError`] already reads that way, so only
+/// its other errors (a key column missing from a dataset) get the prefix here.
+fn join_failed(e: &MungeError) -> CallToolResult {
+    let text = match e {
+        MungeError::JoinError(_) => e.to_string(),
+        _ => format!("Join failed: {e}"),
+    };
+    CallToolResult::error(vec![Content::text(text)])
+}
+
 /// A request refused by a resource limit: logged, and returned as an in-band
 /// tool error whose text names the parameter, the requested size and the limit.
 fn refused(v: LimitViolation) -> CallToolResult {
@@ -2510,6 +2512,65 @@ mod tests {
         assert!(server.datasets.blocking_read().get("j").is_none());
         let ok = run(Limits::off(), server.munge_join(Parameters(req())));
         assert!(text(&ok).contains("(400 rows"), "{}", text(&ok));
+    }
+
+    /// A refused join says "Join failed:" once, whether the hosted size
+    /// estimate or the join itself refuses it (the core's join errors already
+    /// carry that prefix).
+    #[test]
+    fn munge_join_errors_say_join_failed_once() {
+        let server = server_with(vec![
+            (
+                "p",
+                df!("id" => [1i64, 2, 3], "x" => [0.4, 1.3, 2.1]).unwrap(),
+            ),
+            (
+                "s",
+                df!("id" => [1i64, 2, 4], "y" => [3.2, 0.7, 1.9], "code" => ["a", "b", "c"])
+                    .unwrap(),
+            ),
+        ]);
+        let req = |left_on: &[&str], right_on: Option<&[&str]>| JoinDatasetsRequest {
+            left: "p".into(),
+            right: "s".into(),
+            left_on: left_on.iter().map(|s| s.to_string()).collect(),
+            right_on: right_on.map(|r| r.iter().map(|s| s.to_string()).collect()),
+            join_type: Some("inner".into()),
+            suffix: None,
+            result_name: Some("o".into()),
+        };
+        let cases: [(&[&str], Option<&[&str]>, &str); 4] = [
+            (
+                &[],
+                None,
+                "Join failed: a join needs at least one key column, but left_on is empty",
+            ),
+            (
+                &["id"],
+                Some(&["id", "y"]),
+                "Join failed: left_on has 1 columns but right_on has 2 columns",
+            ),
+            (
+                &["nope"],
+                None,
+                "Join failed: Column 'nope' not found in dataset",
+            ),
+            // polars refuses keys of different types; the core wraps its error.
+            (&["id"], Some(&["code"]), "Join failed: "),
+        ];
+        for (profile, limits) in [("off", Limits::off()), ("hosted", Limits::hosted())] {
+            for (left_on, right_on, want) in cases {
+                let r = run(
+                    limits.clone(),
+                    server.munge_join(Parameters(req(left_on, right_on))),
+                );
+                assert_eq!(r.is_error, Some(true), "{profile}: {}", text(&r));
+                let t = text(&r);
+                assert!(t.starts_with(want), "{profile}: {t}");
+                assert_eq!(t.matches("Join failed").count(), 1, "{profile}: {t}");
+            }
+        }
+        assert!(server.datasets.blocking_read().get("o").is_none());
     }
 
     #[test]
