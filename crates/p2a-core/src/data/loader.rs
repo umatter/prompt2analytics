@@ -39,13 +39,38 @@ pub enum LoadError {
     #[error("SAS error: {0}")]
     SasError(#[from] super::sas::SasError),
 
-    /// A parquet column whose schema polars cannot turn into a column type.
+    /// A parquet column whose schema polars cannot turn into a column type
+    /// or decode.
     #[error("Cannot read column '{column}': {reason}")]
-    ParquetSchema { column: String, reason: String },
+    ParquetSchema {
+        /// The top-level column (field of the file's ARROW:schema) that is
+        /// refused.
+        column: String,
+        /// What is malformed, naming the nested field when the problem is
+        /// inside one.
+        reason: String,
+    },
+
+    /// polars panicked reading a parquet file, on input that no check
+    /// before decoding rules out; the panic's message (see
+    /// [`DataLoader::load_parquet`]).
+    #[error("polars failed while decoding the parquet file: {0}")]
+    ParquetPanic(String),
 }
 
-/// Refuse a parquet file whose schema polars' conversion to column types
-/// (`DataType::from_arrow_field`) would panic on, naming the column.
+/// The field-metadata keys polars marks a Categorical or Enum type with:
+/// polars-arrow's `DTYPE_ENUM_VALUES_LEGACY`, `DTYPE_ENUM_VALUES_NEW`,
+/// `DTYPE_CATEGORICAL_LEGACY` and `DTYPE_CATEGORICAL_NEW`, which polars
+/// does not re-export.
+const POLARS_TYPE_KEYS: [&str; 4] = [
+    "_PL_ENUM_VALUES",
+    "_PL_ENUM_VALUES2",
+    "_PL_CATEGORICAL",
+    "_PL_CATEGORICAL2",
+];
+
+/// Refuse a parquet file whose polars Categorical or Enum metadata
+/// `DataType::from_arrow_field` would panic on, naming the column.
 ///
 /// polars keeps a Categorical or Enum column's type in the field metadata
 /// of the file's ARROW:schema, as text it parses with `unwrap` and
@@ -53,9 +78,22 @@ pub enum LoadError {
 /// that text the way polars 0.52 parses it, in every field it would reach
 /// (nested list, struct and map fields included), before the reader
 /// converts it; a file polars wrote passes.
+///
+/// It also refuses a dictionary nested in a list, an array or a struct
+/// whose field carries one of polars' type keys over codes other than u8,
+/// u16 or u32 (Arrow C++, pyarrow and R write int32 codes): polars-parquet's
+/// nested decoder leaves those unimplemented and panics. At the top level
+/// polars decodes such a dictionary as strings, and it passes.
+///
+/// This does not rule out every panic polars has on a parquet file. Some
+/// depend on the data rather than the schema: a nested Categorical with
+/// more labels than its code width holds, which also counts the labels
+/// earlier loads put into the same process-wide categories. Others come
+/// from other types, such as an unparsable time zone nested in a list or
+/// struct. [`read_parquet`] catches those.
 fn check_parquet_schema(schema: &ArrowSchema) -> Result<(), LoadError> {
     for field in schema.iter_values() {
-        check_dtype(&field.dtype, field.metadata.as_deref()).map_err(|reason| {
+        check_dtype(&field.dtype, field.metadata.as_deref(), false).map_err(|reason| {
             LoadError::ParquetSchema {
                 column: field.name.to_string(),
                 reason,
@@ -67,25 +105,49 @@ fn check_parquet_schema(schema: &ArrowSchema) -> Result<(), LoadError> {
 
 /// [`check_parquet_schema`] of a field of type `dtype` with the metadata
 /// `md` and the fields nested in it, following `DataType::from_arrow` arm
-/// by arm where it reads metadata or recurses.
-fn check_dtype<M: MetaDataExt>(dtype: &ArrowDataType, md: Option<&M>) -> Result<(), String> {
+/// by arm where it reads metadata or recurses. `nested` when the field is
+/// inside a list, an array or a struct, whose fields polars-parquet's
+/// nested decoder reads.
+fn check_dtype<M: MetaDataExt>(
+    dtype: &ArrowDataType,
+    md: Option<&M>,
+    nested: bool,
+) -> Result<(), String> {
     match dtype {
         // The enum metadata wins over the categorical one, as in polars;
         // a dictionary of other values is read as its values, without
         // metadata.
-        ArrowDataType::Dictionary(_, value, _) => {
+        ArrowDataType::Dictionary(key, value, _) => {
             if let Some(labels) = md.and_then(|md| md.pl_enum_metadata()) {
-                check_enum_metadata(labels)
+                check_enum_metadata(labels)?;
             } else if let Some(categories) = md.and_then(|md| md.pl_categorical_metadata()) {
-                check_categorical_metadata(categories)
+                check_categorical_metadata(categories)?;
             } else {
-                check_dtype::<M>(value, None)
+                check_dtype::<M>(value, None, nested)?;
             }
+            // As polars-parquet's nested decoder decides (deserialize/
+            // nested.rs): any of the four keys sends the dictionary to its
+            // categorical decoder, which has u8, u16 and u32 codes only.
+            let codes = ArrowDataType::from(*key);
+            let decodable = matches!(
+                codes,
+                ArrowDataType::UInt8 | ArrowDataType::UInt16 | ArrowDataType::UInt32
+            );
+            if nested && !decodable && md.is_some_and(|md| has_polars_type_key(md)) {
+                let codes = format!("{codes:?}").to_lowercase();
+                return Err(format!(
+                    "its polars Categorical or Enum metadata comes with {codes} codes, which \
+                     polars decodes in a nested field only as u8, u16 or u32"
+                ));
+            }
+            Ok(())
         }
         ArrowDataType::List(inner)
         | ArrowDataType::LargeList(inner)
-        | ArrowDataType::FixedSizeList(inner, _)
-        | ArrowDataType::Map(inner, _) => check_nested(inner),
+        | ArrowDataType::FixedSizeList(inner, _) => check_nested(inner),
+        // Defensive only: polars-parquet reads a map as a large list
+        // before the schema gets here, so no parquet file reaches this arm.
+        ArrowDataType::Map(inner, _) => check_nested(inner),
         ArrowDataType::Struct(fields) => fields.iter().try_for_each(check_nested),
         _ => Ok(()),
     }
@@ -94,13 +156,24 @@ fn check_dtype<M: MetaDataExt>(dtype: &ArrowDataType, md: Option<&M>) -> Result<
 /// [`check_dtype`] of the field `inner` nested in another, whose reason
 /// names it.
 fn check_nested(inner: &ArrowField) -> Result<(), String> {
-    check_dtype(&inner.dtype, inner.metadata.as_deref())
+    check_dtype(&inner.dtype, inner.metadata.as_deref(), true)
         .map_err(|reason| format!("its nested field '{}': {reason}", shown(&inner.name)))
+}
+
+/// Whether the field metadata `md` has one of [`POLARS_TYPE_KEYS`].
+fn has_polars_type_key<M: MetaDataExt>(md: &M) -> bool {
+    let md = md.into_metadata_ref();
+    POLARS_TYPE_KEYS.iter().any(|key| md.contains_key(*key))
 }
 
 /// At most 40 characters of `text` from a file, for an error message.
 fn shown(text: &str) -> String {
-    match text.char_indices().nth(40) {
+    shown_up_to(text, 40)
+}
+
+/// At most `n` characters of `text`, for an error message.
+fn shown_up_to(text: &str, n: usize) -> String {
+    match text.char_indices().nth(n) {
         Some((at, _)) => format!("{}...", &text[..at]),
         None => text.to_string(),
     }
@@ -173,12 +246,37 @@ fn check_categorical_metadata(categories: &str) -> Result<(), String> {
 
 /// Read a whole parquet file from `reader`, refusing one whose schema
 /// [`check_parquet_schema`] refuses before it is decoded.
+///
+/// Reading the schema and decoding the file both run under `catch_unwind`
+/// as a backstop (see [`polars_unwinding`]), because polars still panics on
+/// some files that no check of the schema rules out: data-dependent ones
+/// (see [`check_parquet_schema`]), and an ARROW:schema too short to hold
+/// its own header, on which polars panics while it reads the schema, before
+/// any check can run. Such a file is [`LoadError::ParquetPanic`] instead of
+/// a panic in the caller. The schema check stays first: it names the
+/// column, and it prints nothing, while the default panic hook still
+/// prints a caught panic's message to stderr.
 fn read_parquet<R: polars::io::mmap::MmapBytesReader>(reader: R) -> Result<DataFrame, LoadError> {
     let mut reader = ParquetReader::new(reader);
     // The reader keeps the schema it reads here for `finish`.
-    let schema = reader.schema()?;
+    let schema = polars_unwinding(|| reader.schema())??;
     check_parquet_schema(&schema)?;
-    Ok(reader.finish()?)
+    Ok(polars_unwinding(move || reader.finish())??)
+}
+
+/// Run `read`, a call into polars' parquet reader, and answer a panic in it
+/// (on this thread, or on polars' thread pool, which resumes it here) as
+/// [`LoadError::ParquetPanic`] with the panic's message. The reader `read`
+/// uses is dropped after a panic, never used again.
+fn polars_unwinding<T>(read: impl FnOnce() -> T) -> Result<T, LoadError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).map_err(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|message| message.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic without a message".to_string());
+        LoadError::ParquetPanic(shown_up_to(&message, 300))
+    })
 }
 
 /// Data loader supporting multiple file formats.
@@ -245,10 +343,22 @@ impl DataLoader {
     /// Load a Parquet file eagerly (entire file into memory).
     ///
     /// A file whose polars type metadata is malformed is refused with
-    /// [`LoadError::ParquetSchema`] naming the column, before it is decoded.
+    /// [`LoadError::ParquetSchema`] naming the column, before it is decoded
+    /// (see [`DataLoader::check_parquet_schema`]). A panic in polars while
+    /// it reads the file is caught and answered as
+    /// [`LoadError::ParquetPanic`].
     pub fn load_parquet(path: impl AsRef<Path>) -> Result<DataFrame, LoadError> {
         let file = std::fs::File::open(path.as_ref())?;
         read_parquet(file)
+    }
+
+    /// Refuse a parquet file's arrow `schema` (polars' `ParquetReader::schema`)
+    /// whose polars Categorical or Enum metadata polars would panic on
+    /// converting or decoding, with [`LoadError::ParquetSchema`] naming the
+    /// column. The loader runs it on every parquet file before decoding;
+    /// a check that converts a schema itself can run it first.
+    pub fn check_parquet_schema(schema: &ArrowSchema) -> Result<(), LoadError> {
+        check_parquet_schema(schema)
     }
 
     /// Load a Parquet file held in memory (an upload, say) eagerly, as
@@ -735,12 +845,80 @@ mod tests {
         frame_of(k)
     }
 
+    /// A frame of a column `k` of one-row arrays of `labels` cast to arrays
+    /// of `dtype` (polars writes them as fixed-size lists).
+    fn array_frame_with(dtype: &DataType, labels: &[&str]) -> DataFrame {
+        // polars casts no list to an array of categoricals; it reshapes.
+        let k = Series::new("k".into(), labels).cast(dtype).unwrap();
+        let shape = [ReshapeDimension::Infer, ReshapeDimension::new_dimension(1)];
+        frame_of(k.reshape_array(&shape).unwrap())
+    }
+
     /// A frame of a column `k` of structs of one field `c` of `labels` cast
     /// to `dtype`.
     fn struct_frame_with(dtype: &DataType, labels: &[&str]) -> DataFrame {
         let c = Series::new("c".into(), labels).cast(dtype).unwrap();
         let k = StructChunked::from_series("k".into(), c.len(), [c].iter()).unwrap();
         frame_of(k.into_series())
+    }
+
+    /// `n` distinct, irregular labels.
+    fn many_labels(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("v{i:03}.{}", (i * 37 + 11) % 101))
+            .collect()
+    }
+
+    /// The parquet file `name` checked in under `tests/data`.
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name)
+    }
+
+    /// Rewrite the footer of the parquet file at `path` with the value of
+    /// its ARROW:schema key replaced by `value`, of any length. The footer
+    /// is thrift's compact encoding, where a key-value pair's value is a
+    /// field header byte, the value's length as a varint, and its bytes;
+    /// nothing in the footer points into the footer, so only the footer
+    /// length at the file's end changes.
+    fn replace_arrow_schema_value(path: &Path, value: &str) {
+        fn varint(bytes: &[u8], mut at: usize) -> (usize, usize) {
+            let (mut n, mut shift) = (0usize, 0);
+            loop {
+                let byte = bytes[at];
+                at += 1;
+                n |= usize::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return (n, at);
+                }
+                shift += 7;
+            }
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let n = bytes.len();
+        assert_eq!(&bytes[n - 4..], b"PAR1");
+        let len = u32::from_le_bytes(bytes[n - 8..n - 4].try_into().unwrap()) as usize;
+        let (body, footer) = bytes[..n - 8].split_at(n - 8 - len);
+        let key = b"ARROW:schema";
+        let at = footer.windows(key.len()).position(|w| w == key).unwrap() + key.len();
+        // The value's field header: field id 2 (a delta of 1), binary.
+        assert_eq!(footer[at], 0x18);
+        let (old_len, start) = varint(footer, at + 1);
+        let mut edited = footer[..=at].to_vec();
+        let mut rest = value.len();
+        while rest >= 0x80 {
+            edited.push((rest & 0x7f) as u8 | 0x80);
+            rest >>= 7;
+        }
+        edited.push(rest as u8);
+        edited.extend_from_slice(value.as_bytes());
+        edited.extend_from_slice(&footer[start + old_len..]);
+        let mut out = body.to_vec();
+        out.extend_from_slice(&edited);
+        out.extend_from_slice(&u32::try_from(edited.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(b"PAR1");
+        std::fs::write(path, out).unwrap();
     }
 
     /// A Categorical column type of polars' categories `name` in the default
@@ -881,15 +1059,138 @@ mod tests {
 
     #[test]
     fn malformed_metadata_of_a_nested_field_is_refused_naming_the_column_and_field() {
-        // polars converts the type of each field nested in a list or a
-        // struct the same way, so the same metadata panicked it there.
+        // polars converts the type of each field nested in a list, an array
+        // (a fixed-size list in the file) or a struct the same way, so the
+        // same metadata panicked it there.
         let dtype = categorical("lab", CategoricalPhysical::U32);
         let text = refusal_of(list_frame_with(&dtype, &["lo", "hi"]), "u32;", "u99;");
+        assert!(text.contains("its nested field '"), "{text}");
+        assert!(text.contains("the code width 'u99'"), "{text}");
+        let text = refusal_of(array_frame_with(&dtype, &["lo", "hi"]), "u32;", "u99;");
         assert!(text.contains("its nested field '"), "{text}");
         assert!(text.contains("the code width 'u99'"), "{text}");
         let text = refusal_of(struct_frame_with(&dtype, &["lo", "hi"]), "u32;", "u99;");
         assert!(text.contains("its nested field 'c'"), "{text}");
         assert!(text.contains("the code width 'u99'"), "{text}");
+    }
+
+    #[test]
+    fn a_nested_dictionary_with_polars_metadata_and_signed_codes_is_refused() {
+        // polars decodes a dictionary nested in a list, an array or a
+        // struct whose field carries polars' Categorical or Enum metadata
+        // (any of its four keys) only from u8, u16 or u32 codes, and calls
+        // unimplemented!() on any other. Arrow C++, pyarrow and R write
+        // int32 codes by default; R arrow 25.0.1 wrote these files, in
+        // crates/p2a-core/tests/data, with
+        //
+        //   library(arrow)
+        //   labels <- c("lo", "hi", "lo", "mid")
+        //   dict <- function(name, md) field(name, dictionary(int32(), utf8()), metadata = md)
+        //   save <- function(k, name) write_parquet(Table$create(x = c(0.3, 1.4, 2.6, 3.7), k = k),
+        //                                           paste0("polars_metadata_signed_", name, ".parquet"))
+        //   lists <- Array$create(as.list(labels), type = list_of(utf8()))
+        //   categorical <- list("_PL_CATEGORICAL2" = "3;lab0;u32;")
+        //   save(lists$cast(list_of(dict("item", categorical))), "list")
+        //   save(lists$cast(fixed_size_list_of(dict("item", list("_PL_CATEGORICAL" = "lexical")), 1L)), "array")
+        //   structs <- Array$create(data.frame(c = labels))
+        //   save(structs$cast(arrow:::struct__(list(dict("c", list("_PL_ENUM_VALUES2" = "2;lo3;mid2;hi"))))), "struct")
+        //   top <- Table$create(x = c(0.3, 1.4, 2.6, 3.7), k = Array$create(labels))
+        //   top <- top$cast(schema(field("x", float64()), dict("k", categorical)))
+        //   write_parquet(top, "polars_metadata_signed_top.parquet")
+        //
+        // Pre-fix each nested one panicked the reader in polars' nested
+        // decoder.
+        for (file, field) in [
+            ("polars_metadata_signed_list.parquet", "item"),
+            ("polars_metadata_signed_array.parquet", "item"),
+            ("polars_metadata_signed_struct.parquet", "c"),
+        ] {
+            let text = parquet_error(&fixture(file));
+            assert!(text.contains("column 'k'"), "{file}: {text}");
+            assert!(
+                text.contains(&format!("its nested field '{field}'")),
+                "{file}: {text}"
+            );
+            assert!(text.contains("int32 codes"), "{file}: {text}");
+        }
+        // At the top level polars decodes such a column as strings, and the
+        // file loads.
+        let top = DataLoader::load_parquet(fixture("polars_metadata_signed_top.parquet")).unwrap();
+        assert_eq!(top.height(), 4);
+        let k = top.column("k").unwrap().cast(&DataType::String).unwrap();
+        let k: Vec<_> = k.str().unwrap().into_iter().flatten().collect();
+        assert_eq!(k, ["lo", "hi", "lo", "mid"]);
+    }
+
+    #[test]
+    fn a_panic_in_polars_no_schema_check_rules_out_is_an_error() {
+        // polars panics on some files whether their schema is well formed
+        // or not; the loader catches the unwind and answers an error. Pre-fix
+        // each of these panicked the reader.
+        let decoding_error = |path: &Path, says: &str| {
+            let text = parquet_error(path);
+            assert!(
+                text.contains("polars failed while decoding the parquet file"),
+                "{text}"
+            );
+            assert!(text.contains(says), "{text}");
+        };
+        let dir = tempfile::tempdir().unwrap();
+        // A nested Categorical whose metadata names u8 codes over more
+        // labels than u8 codes hold: polars unwraps the failed import of a
+        // nested dictionary (at the top level it answers an error). The
+        // categories are polars' own for the whole process, so each case
+        // names its own.
+        let labels = many_labels(300);
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let overflow = "more categories than the maximum allowed";
+        let u32_codes = |name: &str| categorical(name, CategoricalPhysical::U32);
+        for (name, df) in [
+            ("list", list_frame_with(&u32_codes("h5ovflist"), &labels)),
+            (
+                "struct",
+                struct_frame_with(&u32_codes("h5ovfstruct"), &labels),
+            ),
+        ] {
+            let path = parquet_file(dir.path(), &format!("{name}.parquet"), df);
+            edit_arrow_schema(&path, b"u32;", b"u8;;");
+            decoding_error(&path, overflow);
+        }
+        // An ARROW:schema whose base64 decodes to fewer than four bytes:
+        // polars slices its first four before any check.
+        let short = parquet_file(
+            dir.path(),
+            "short.parquet",
+            frame_of(Series::new("k".into(), [0.5, 1.75, 2.25])),
+        );
+        replace_arrow_schema_value(&short, "AAA=");
+        decoding_error(&short, "out of range for slice of length 2");
+        // A list of datetimes whose time zone polars cannot parse: polars
+        // unwraps the nested conversion.
+        let paris = DataType::Datetime(
+            TimeUnit::Microseconds,
+            TimeZone::opt_try_new(Some("Europe/Paris")).unwrap(),
+        );
+        let times = Series::new("".into(), [1_700_000_000_123_456i64, 1_700_000_100_654_321])
+            .cast(&paris)
+            .unwrap();
+        let k = Series::new("k".into(), [times.clone(), times])
+            .cast(&DataType::List(Box::new(paris)))
+            .unwrap();
+        let zoned = parquet_file(dir.path(), "zoned.parquet", frame_of(k));
+        edit_arrow_schema(&zoned, b"Europe/Paris", b"Europe/Parix");
+        decoding_error(&zoned, "Europe/Parix");
+        // The process reads parquet files as before.
+        let fine = list_frame_with(
+            &categorical("h5fine", CategoricalPhysical::U8),
+            &labels[..9],
+        );
+        let path = parquet_file(dir.path(), "fine.parquet", fine.clone());
+        assert!(
+            DataLoader::load_parquet(&path)
+                .unwrap()
+                .equals_missing(&fine)
+        );
     }
 
     #[test]
@@ -908,6 +1209,7 @@ mod tests {
             ("accented", frame_with(&accented, &labels)),
             ("enum", frame_with(&lohi, &labels)),
             ("list", list_frame_with(&cat, &labels)),
+            ("array", array_frame_with(&cat, &labels)),
             ("struct", struct_frame_with(&lohi, &labels)),
         ] {
             let path = parquet_file(dir.path(), &format!("{name}.parquet"), df.clone());
