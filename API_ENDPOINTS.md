@@ -139,7 +139,7 @@ A directory listing inside the server's data root. Registered as `GET /api/sessi
 GET /api/sessions/{session_id}/datasets
 ```
 
-The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404.
+The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404. `column_names` holds the dataset's first column names, at most 1,000 of them and 64 KiB; `column_count` is its full width.
 
 **Response** (captured):
 ```json

@@ -5,16 +5,72 @@ use tracing;
 use super::connection::{DbConnection, DbError};
 use super::models::DatasetMeta;
 
+/// The most column names one dataset's metadata row keeps (the dataset's
+/// first ones; `column_count` keeps its width).
+///
+/// The names are for display (the dataset sidebar and inspector, the chat
+/// input's suggestions). The store's work on a row is quadratic in the
+/// length of an array field: `column_names TYPE array<string>` implicitly
+/// defines `column_names[*]`, and the schema check of a SCHEMAFULL row
+/// (surrealdb-core 2.4 `cleanup_table_fields`) looks each element's path up
+/// in a list of every element's path. The embedded engine runs each query
+/// in a task on the server's async runtime, whoever awaits it, so an
+/// unbounded list let one wide dataset hold a runtime worker for minutes.
+pub const MAX_STORED_COLUMN_NAMES: usize = 1_000;
+
+/// The most bytes of column names one dataset's metadata row keeps: a few
+/// long names stop the list earlier.
+pub const MAX_STORED_COLUMN_NAME_BYTES: usize = 64 * 1024;
+
+/// The longest prefix of `names` within [`MAX_STORED_COLUMN_NAMES`] names
+/// and [`MAX_STORED_COLUMN_NAME_BYTES`] bytes.
+fn stored_column_names(names: &[String]) -> Vec<String> {
+    let mut bytes = 0usize;
+    names
+        .iter()
+        .take(MAX_STORED_COLUMN_NAMES)
+        .take_while(|name| {
+            bytes = bytes.saturating_add(name.len());
+            bytes <= MAX_STORED_COLUMN_NAME_BYTES
+        })
+        .cloned()
+        .collect()
+}
+
+/// `meta` as its row is stored: its column names cut to
+/// [`stored_column_names`], every other field as it is.
+fn stored_meta(meta: &DatasetMeta) -> DatasetMeta {
+    DatasetMeta {
+        id: meta.id.clone(),
+        session_id: meta.session_id.clone(),
+        name: meta.name.clone(),
+        source_path: meta.source_path.clone(),
+        source_type: meta.source_type.clone(),
+        row_count: meta.row_count,
+        column_count: meta.column_count,
+        column_names: stored_column_names(&meta.column_names),
+        loaded_at: meta.loaded_at.clone(),
+        file_size_bytes: meta.file_size_bytes,
+    }
+}
+
 impl DbConnection {
     // ==================== Dataset Meta Operations ====================
 
-    /// Save dataset metadata (upsert based on session_id + name)
+    /// Save dataset metadata (upsert based on session_id + name). The row
+    /// keeps the first column names only, at most
+    /// [`MAX_STORED_COLUMN_NAMES`] of them and
+    /// [`MAX_STORED_COLUMN_NAME_BYTES`] bytes; `column_count` is kept as
+    /// given.
     pub async fn save_dataset_meta(&self, meta: &DatasetMeta) -> Result<DatasetMeta, DbError> {
+        let given_names = meta.column_names.len();
+        let meta = &stored_meta(meta);
         tracing::info!(
             session_id = %meta.session_id,
             name = %meta.name,
             column_names_to_save = ?meta.column_names,
             column_names_len = meta.column_names.len(),
+            given_column_names = given_names,
             "[DB_SAVE_META] Starting save_dataset_meta"
         );
 

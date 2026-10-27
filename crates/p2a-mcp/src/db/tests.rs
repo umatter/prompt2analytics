@@ -771,6 +771,115 @@ async fn a_failed_dataset_meta_delete_keeps_the_session() {
     assert_eq!(db.get_datasets_for_session("s1").await.unwrap().len(), 1);
 }
 
+/// `n` column names of `len` bytes each, distinct and in order.
+fn column_names(n: usize, len: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| {
+            format!("{i:06}_")
+                .chars()
+                .chain(std::iter::repeat('x'))
+                .take(len)
+                .collect()
+        })
+        .collect()
+}
+
+/// `kept` is the first `n` of `names` (compared without printing them).
+fn assert_first(kept: &[String], names: &[String], n: usize) {
+    assert_eq!(kept.len(), n, "names kept, of {}", names.len());
+    assert!(kept == &names[..n], "the kept names are not the first {n}");
+}
+
+/// A dataset's metadata row keeps the first `MAX_STORED_COLUMN_NAMES`
+/// column names and the dataset's full width in `column_count`, when it is
+/// created and when it is replaced: the store's schema check of the row
+/// takes time quadratic in the number of names, on the server's runtime.
+#[tokio::test]
+async fn dataset_meta_keeps_a_bounded_prefix_of_the_column_names() {
+    use super::dataset_meta::MAX_STORED_COLUMN_NAMES as MAX;
+    let db = test_db().await;
+    let width = MAX + 700;
+    let names = column_names(width, 9);
+    let meta = |name: &str, names: Vec<String>| {
+        let count = i32::try_from(names.len()).unwrap();
+        super::models::DatasetMeta::new(
+            "s1".into(),
+            name.into(),
+            "inline_csv".into(),
+            2,
+            count,
+            names,
+        )
+    };
+
+    let created = db
+        .save_dataset_meta(&meta("wide", names.clone()))
+        .await
+        .unwrap();
+    assert_first(&created.column_names, &names, MAX);
+    assert_eq!(created.column_count, i32::try_from(width).unwrap());
+    let stored = db.get_dataset_meta("s1", "wide").await.unwrap().unwrap();
+    assert_first(&stored.column_names, &names, MAX);
+
+    // Saving under the same name replaces the row, bounded the same way.
+    let renamed: Vec<String> = names.iter().map(|n| format!("{n}_v2")).collect();
+    let replaced = db
+        .save_dataset_meta(&meta("wide", renamed.clone()))
+        .await
+        .unwrap();
+    assert_eq!(replaced.id_string(), created.id_string());
+    assert_first(&replaced.column_names, &renamed, MAX);
+    assert_eq!(replaced.column_count, i32::try_from(width).unwrap());
+    let rows = db.get_datasets_for_session("s1").await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_first(&rows[0].column_names, &renamed, MAX);
+
+    // A dataset at the cap, and a narrow one, keep every name.
+    let full = column_names(MAX, 9);
+    let saved = db
+        .save_dataset_meta(&meta("full", full.clone()))
+        .await
+        .unwrap();
+    assert_first(&saved.column_names, &full, MAX);
+    let narrow = column_names(3, 4);
+    let saved = db
+        .save_dataset_meta(&meta("narrow", narrow.clone()))
+        .await
+        .unwrap();
+    assert_first(&saved.column_names, &narrow, 3);
+}
+
+/// The names a metadata row keeps are also bounded in bytes: the longest
+/// prefix of the dataset's names within `MAX_STORED_COLUMN_NAME_BYTES`, so
+/// a few long names do not make a large row either.
+#[tokio::test]
+async fn dataset_meta_bounds_the_bytes_of_the_column_names() {
+    use super::dataset_meta::MAX_STORED_COLUMN_NAME_BYTES as MAX_BYTES;
+    let db = test_db().await;
+    let meta = |name: &str, names: Vec<String>| {
+        let count = i32::try_from(names.len()).unwrap();
+        super::models::DatasetMeta::new("s1".into(), name.into(), "csv".into(), 2, count, names)
+    };
+    // Names of 1 KiB: exactly `fit` of them fill the budget, one more passes it.
+    let fit = MAX_BYTES / 1024;
+    let names = column_names(fit + 6, 1024);
+    let saved = db
+        .save_dataset_meta(&meta("long", names.clone()))
+        .await
+        .unwrap();
+    assert_first(&saved.column_names, &names, fit);
+    assert_eq!(saved.column_count, i32::try_from(fit + 6).unwrap());
+
+    // A first name longer than the whole budget leaves no names.
+    let huge = vec!["y".repeat(MAX_BYTES + 1), "b".into()];
+    let saved = db
+        .save_dataset_meta(&meta("huge", huge.clone()))
+        .await
+        .unwrap();
+    assert_first(&saved.column_names, &huge, 0);
+    assert_eq!(saved.column_count, 2);
+}
+
 /// The message cap counts the conversation's message rows, not its stored
 /// `message_count`: a counter left one or more below the truth (a recount
 /// that lost a write) does not let a message past the cap.
