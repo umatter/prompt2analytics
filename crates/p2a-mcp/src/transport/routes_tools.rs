@@ -60,8 +60,6 @@ pub(super) async fn capture_dataset_metadata_off_runtime(
     let handle = tokio::runtime::Handle::current();
     let (log_session, log_tool) = (session_id.clone(), tool.clone());
     let joined = tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
-        capture_threads::record(&session_id);
         handle.block_on(
             super::llm_routes::StreamingToolExecutor::capture_dataset_metadata_static(
                 db,
@@ -83,16 +81,18 @@ pub(super) async fn capture_dataset_metadata_off_runtime(
     }
 }
 
-/// The thread each session's dataset-metadata capture ran on, for the tests
-/// that check that it is not a runtime worker.
+/// The thread each session's dataset-metadata capture ran on, recorded where
+/// the capture starts (`capture_dataset_metadata_static`), for the tests of
+/// the tool route and of the LLM tool loop that check that it is not a
+/// runtime worker.
 #[cfg(all(test, feature = "db", feature = "llm"))]
-mod capture_threads {
+pub(super) mod capture_threads {
     use std::sync::Mutex;
     use std::thread::ThreadId;
 
     static THREADS: Mutex<Vec<(String, ThreadId)>> = Mutex::new(Vec::new());
 
-    pub(super) fn record(session_id: &str) {
+    pub(in crate::transport) fn record(session_id: &str) {
         THREADS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -100,7 +100,7 @@ mod capture_threads {
     }
 
     /// The threads the captures in `session_id` ran on, in order.
-    pub(super) fn of(session_id: &str) -> Vec<ThreadId> {
+    pub(in crate::transport) fn of(session_id: &str) -> Vec<ThreadId> {
         THREADS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -114,7 +114,7 @@ mod capture_threads {
 /// The two arguments the dataset-metadata capture reads, `path` and
 /// `filename`, copied without the rest of the call's payload. A missing
 /// field becomes null, which the capture reads as absent. The LLM tool loop
-/// (`llm_routes`) can use it for the copy it keeps for its own capture.
+/// (`llm_routes`) keeps the same copy for its own capture.
 #[cfg(any(test, all(feature = "db", feature = "llm")))]
 pub(super) fn capture_fields(arguments: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
