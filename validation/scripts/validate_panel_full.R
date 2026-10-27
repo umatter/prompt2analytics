@@ -236,8 +236,7 @@ cat(sprintf("\nPanel GLS subset: %d firms, %d years (p2a-core refuses T > N)\n",
 # (ECON-33). On full Grunfeld p2a-core refuses it
 # (test_panel_gls_fe_full_grunfeld_is_refused).
 # The within residuals sum to zero in every firm, so Omega is singular on
-# any panel and these values are a generalised-inverse fit here too
-# (ECON-33).
+# any panel and these values are a generalised-inverse fit here too.
 cat("\n=== Test 6: Panel GLS - Fixed Effects (Grunfeld 1935-1944) ===\n")
 
 fegls_result <- tryCatch({

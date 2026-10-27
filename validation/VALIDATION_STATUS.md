@@ -7,7 +7,7 @@
 
 | Metric | Count | Status |
 |--------|-------|--------|
-| **Rust Validation Tests** (`test_validate_*`) | 476 | All Pass (473 run 2026-10-27; 3 need `database`) |
+| **Rust Validation Tests** (`test_validate_*`) | 476 | 473 pass (run 2026-10-27); 3 behind `database` not run |
 | **R Validation Scripts** | 41 | All Pass (2026-08-26; `validate_panel_full.R` re-run 2026-10-27) |
 | **R Expected Value CSVs** | 96 | All Pass |
 | **Total Test Functions** | 2,059 workspace / 1,867 in p2a-core | All pass (0 failures), 2026-08-26 count |
@@ -23,8 +23,8 @@ and 21 in `tests/validation_ml_advanced.rs` and `tests/validation_boosting_metho
 476 in all. The category counts below are the library tests by top-level module
 (`stats::`, `regression::`, `econometrics::`, `forecasting::`, `ml::`), with the 21
 integration tests counted under Machine Learning; the 3 `database` checks are in no
-category. The 473 that build without `database` were run on 2026-10-27 and pass.
-The full `run_validation.sh` was not re-run.
+category. The 473 that build without `database` were run on 2026-10-27 and pass;
+the 3 `database` checks were not run. The full `run_validation.sh` was not re-run.
 
 ### Recent Changes
 
