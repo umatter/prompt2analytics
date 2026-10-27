@@ -913,11 +913,12 @@ impl StreamingToolExecutor {
     /// (`routes_tools::capture_dataset_metadata_off_runtime`).
     ///
     /// At info level a capture logs a fixed set of events with counts; the
-    /// result text, the column lines and the column names are at debug,
-    /// and column lines without a dtype are one warning with their count.
-    /// A save that fails is logged and nothing else happens: a refusal by
-    /// the session's `session_db_bytes` budget (`QuotaExceeded`) at warn,
-    /// any other failure at error.
+    /// full result text, the column lines and the column names are at debug
+    /// (the first line and the Dimensions line stay at info), and column
+    /// lines without a dtype are one warning with their count. A save that
+    /// fails is logged and nothing else happens: a refusal by the session's
+    /// `session_db_bytes` budget (`QuotaExceeded`) at warn, any other
+    /// failure at error.
     #[cfg(feature = "db")]
     pub async fn capture_dataset_metadata_static(
         db: Arc<crate::db::DbConnection>,
@@ -931,7 +932,7 @@ impl StreamingToolExecutor {
         #[cfg(test)]
         super::routes_tools::capture_threads::record(session_id);
 
-        // DEBUG: Log entry point with full context
+        // Entry point: the tool, the session and the result's length.
         tracing::info!(
             tool = tool_name,
             session = session_id,
@@ -1541,13 +1542,13 @@ pub async fn llm_chat_stream(
 /// first come, first served, and the tool calls are read after it. So a
 /// call the dropped chat completed or failed keeps its result, one it left
 /// pending or running is failed here, and content it wrote is replaced by
-/// the stopped text. The exception is an update whose lookup of the
-/// message, made before it waits, fails, so the read does not wait: a
-/// message that is gone took its tool calls with it, and a later write
-/// finds no row, but after a store error the order is not known. A
-/// dataset-metadata capture the dropped chat started runs to its end on the
-/// blocking pool and may land after the cleanup, which leaves dataset
-/// metadata alone.
+/// the stopped text. The one exception: when the update's lookup of the
+/// message, made before it waits for the turn, fails, the tool calls are
+/// read without waiting. A message that is gone took its tool calls with
+/// it, so a later write finds no row; after a store error, the order is not
+/// known. A dataset-metadata capture the dropped chat started runs to its
+/// end on the blocking pool and may land after the cleanup, which leaves
+/// dataset metadata alone.
 async fn run_chat_task<F: std::future::Future<Output = ()>>(
     tx: &tokio::sync::mpsc::Sender<ProgressEvent>,
     chat: F,
