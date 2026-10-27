@@ -105,6 +105,21 @@ fn parsed_body_bytes(profile: ResourceProfile, body_cap: usize) -> usize {
     }
 }
 
+/// What building the router logs in the hosted profile when the body cap
+/// `body_cap` is above [`HOSTED_PARSED_BODY_BYTES`]: an operator who raised
+/// `P2A_MAX_HTTP_BODY_MB` learns that HTTP JSON bodies stay at the hosted
+/// limit, which no setting raises. `None` when the two limits are the same.
+fn hosted_parse_limit_note(profile: ResourceProfile, body_cap: usize) -> Option<String> {
+    let parsed = parsed_body_bytes(profile, body_cap);
+    (profile == ResourceProfile::Hosted && parsed < body_cap).then(|| {
+        format!(
+            "hosted profile: HTTP JSON request bodies are limited to {parsed} bytes; \
+             {MAX_HTTP_BODY_VAR} ({body_cap} bytes) still bounds declared body lengths \
+             and websocket messages"
+        )
+    })
+}
+
 /// Apply global middleware to the fully-composed router.
 ///
 /// Must run AFTER all routes (including nested ones) are registered so the
@@ -119,16 +134,21 @@ fn parsed_body_bytes(profile: ResourceProfile, body_cap: usize) -> usize {
 /// the cap ([`max_request_body_bytes`]): a body declared longer answers 413
 /// (plain text `length limit exceeded`) before it is read, and one without a
 /// declared length is cut off at the cap. axum's body extractors apply a
-/// limit of their own, 2 MB unless `DefaultBodyLimit` sets it, and refuse a
+/// limit of their own, 2 MiB unless `DefaultBodyLimit` sets it, and refuse a
 /// longer body with 413 (`Failed to buffer the request body: length limit
 /// exceeded`); it is set to [`parsed_body_bytes`], so outside the hosted
-/// profile the cap is the limit of every route.
+/// profile the cap is the limit of every route. In the hosted profile with a
+/// cap above 2 MiB, building the router logs the lower JSON limit once
+/// ([`hosted_parse_limit_note`]).
 pub(crate) fn apply_global_middleware(router: Router, config: &ServerConfig) -> Router {
     // Shared bearer token, if configured. `None` disables the check (loopback
     // development only; the startup guard forbids this on a public bind).
     let token_state: Option<Arc<str>> = config.http.access_token.as_deref().map(Arc::from);
     let body_cap = max_request_body_bytes();
     let parsed = parsed_body_bytes(config.resource_profile(), body_cap);
+    if let Some(note) = hosted_parse_limit_note(config.resource_profile(), body_cap) {
+        tracing::info!("{note}");
+    }
     let router = router
         .layer(DefaultBodyLimit::max(parsed))
         .layer(RequestBodyLimitLayer::new(body_cap))
@@ -292,6 +312,81 @@ mod tests {
         // axum's own extractor default, which the hosted server applied
         // before the limit was set explicitly.
         assert_eq!(HOSTED_PARSED_BODY_BYTES, 2_097_152);
+    }
+
+    /// A shared buffer the log lines of a test subscriber go to.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// In the hosted profile, a body cap above 2 MiB does not raise the JSON
+    /// body limit, and building the router says so once: the note names
+    /// both limits and the variable that sets the cap. With the two limits
+    /// equal, or outside the hosted profile, there is nothing to say.
+    #[test]
+    fn a_hosted_router_logs_a_json_body_limit_below_the_cap_once() {
+        const MIB: usize = 1024 * 1024;
+        let note = hosted_parse_limit_note(ResourceProfile::Hosted, 32 * MIB)
+            .expect("a hosted cap above 2 MiB is noted");
+        for part in [
+            "2097152 bytes",
+            "33554432 bytes",
+            MAX_HTTP_BODY_VAR,
+            "websocket",
+        ] {
+            assert!(note.contains(part), "{part}: {note}");
+        }
+        assert_eq!(
+            hosted_parse_limit_note(ResourceProfile::Hosted, 2 * MIB),
+            None
+        );
+        assert_eq!(hosted_parse_limit_note(ResourceProfile::Hosted, MIB), None);
+        assert_eq!(
+            hosted_parse_limit_note(ResourceProfile::Off, 32 * MIB),
+            None
+        );
+
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        // Another test thread may register the note's callsite while no
+        // subscriber is in place, which caches it as disabled: with a second
+        // dispatcher registered, recompute every callsite's interest with
+        // this subscriber in place (as websocket.rs's log test does).
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        let log = || String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+
+        let mut config = ServerConfig::default();
+        config.limits.profile = Some(ResourceProfile::Hosted);
+        assert_eq!(config.resource_profile(), ResourceProfile::Hosted);
+        let _router = apply_global_middleware(Router::new(), &config);
+        // The cap this test process runs with: the default 32 MiB unless its
+        // environment sets another.
+        match hosted_parse_limit_note(ResourceProfile::Hosted, max_request_body_bytes()) {
+            Some(note) => assert_eq!(log().matches(&note).count(), 1, "{}", log()),
+            None => assert!(!log().contains("hosted profile"), "{}", log()),
+        }
+
+        let before = log();
+        config.limits.profile = None;
+        assert_eq!(config.resource_profile(), ResourceProfile::Off);
+        let _router = apply_global_middleware(Router::new(), &config);
+        assert_eq!(log(), before);
     }
 
     #[test]
