@@ -976,6 +976,7 @@ content-type: application/json
 - Clients should honour `Retry-After`; CORS exposes it to browser clients.
 - In the LLM tool loop these refusals reach the model as the tool's error text (`is_error: true`), so it can retry with a smaller request.
 - On the stdio transport a limit refusal is a JSON-RPC invalid-params error (-32602) whose `data.code` is `"limit_exceeded"`, with `parameter`, `requested` and `limit`.
+- On the stdio transport a tool that panics is answered with a JSON-RPC internal error (-32603) whose `data.code` is `"internal"`, and the server goes on serving with its datasets.
 
 **Successful status codes:**
 - `200 OK` - Successful request

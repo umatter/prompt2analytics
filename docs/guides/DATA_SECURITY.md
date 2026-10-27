@@ -137,9 +137,10 @@ refused because its session no longer exists (on any path, including a chat
 whose session was removed while it ran) is not audited.
 
 Each entry records the timestamp, `session_id`, `origin`, `tool_name`, the
-sanitised `arguments`, `success`, `outcome` (`ok`, `tool_error`, `cancelled` or a
-refusal code such as `limit_exceeded`), `duration_ms` and the size of the result
-(content items, text bytes, image bytes).
+sanitised `arguments`, `success`, `outcome` (`ok`, `tool_error`, `cancelled`,
+`internal` for a call that panicked, or a refusal code such as
+`limit_exceeded`), `duration_ms` and the size of the result (content items,
+text bytes, image bytes).
 
 It does not record tool output or API keys. Argument keys that carry data
 values (`content`, `csv_content`, `data`, `rows`, `values`, `filter_value`,
