@@ -28,49 +28,86 @@ pub struct CallToolRequest {
 #[cfg(all(feature = "db", feature = "llm"))]
 const METADATA_TOOLS: [&str; 3] = ["load_dataset", "upload_dataset", "create_dataset"];
 
-/// Store the dataset metadata of a successful `tool` call in `session`,
-/// read from its `result_text`, as governed work of its own
-/// (`ToolGovernor::run_blocking`): memory admission, the session's and a
-/// global permit, the deadline, and the parsing on the blocking pool. The
-/// parsing walks every column line of the result, which `response_bytes`
-/// bounds. The store write is not moved by this: the embedded engine runs
-/// every query in a task on the runtime that opened the store, whoever
-/// awaits it, which is why the row it writes keeps a bounded list of names
-/// (`DbConnection::save_dataset_meta`). A refused or failed capture is
-/// logged and leaves the call's answer as it is.
+/// Store the dataset metadata of a successful `tool` call in `session_id`,
+/// read from its `result_text`, on the blocking pool, and wait until it is
+/// stored, so that a dataset listing made after the call's answer shows it.
+///
+/// The parsing walks every column line of the result, which
+/// `response_bytes` bounds; it runs on a blocking thread
+/// (`Handle::block_on` there, as in `reload_session_datasets`), not on a
+/// runtime worker. The store write is not moved by this: the embedded
+/// engine runs every query in a task on the runtime that opened the store,
+/// whoever awaits it, which is why the row it writes keeps a bounded list
+/// of names (`DbConnection::save_dataset_meta`).
+///
+/// The capture takes no permit of the tool governor and passes no admission
+/// of its own. It follows one governed call that has already succeeded, and
+/// its work is linear in that call's bounded output, so captures cannot
+/// pile up faster than governed calls finish. A second queue would let
+/// other visitors' calls, queued behind the call, hold back its answer and
+/// then refuse its row, which the dataset listing and the reload after a
+/// restart read. Once spawned the capture runs to the end, also when the
+/// client goes away. A capture that fails is logged; the call's answer is
+/// left as it is.
 #[cfg(all(feature = "db", feature = "llm"))]
-async fn capture_dataset_metadata_governed(
-    governor: &crate::exec::ToolGovernor,
-    session: &std::sync::Arc<crate::session::Session>,
+pub(super) async fn capture_dataset_metadata_off_runtime(
     db: std::sync::Arc<crate::db::DbConnection>,
-    tool: &str,
+    session_id: String,
+    tool: String,
     arguments: serde_json::Value,
     result_text: String,
 ) {
     let handle = tokio::runtime::Handle::current();
-    let session_id = session.id.clone();
-    let tool_name = tool.to_string();
-    let captured = governor
-        .run_blocking(session, "dataset_metadata", move |_budget| {
-            handle.block_on(
-                super::llm_routes::StreamingToolExecutor::capture_dataset_metadata_static(
-                    db,
-                    &session_id,
-                    &tool_name,
-                    &arguments,
-                    &result_text,
-                ),
-            );
-            Ok(())
-        })
-        .await;
-    if let Err(e) = captured {
+    let (log_session, log_tool) = (session_id.clone(), tool.clone());
+    let joined = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        capture_threads::record(&session_id);
+        handle.block_on(
+            super::llm_routes::StreamingToolExecutor::capture_dataset_metadata_static(
+                db,
+                &session_id,
+                &tool,
+                &arguments,
+                &result_text,
+            ),
+        );
+    })
+    .await;
+    if let Err(e) = joined {
         tracing::warn!(
-            tool,
-            session_id = %session.id,
+            tool = %log_tool,
+            session_id = %log_session,
             error = %e,
             "[CALL_TOOL] Dataset metadata was not captured"
         );
+    }
+}
+
+/// The thread each session's dataset-metadata capture ran on, for the tests
+/// that check that it is not a runtime worker.
+#[cfg(all(test, feature = "db", feature = "llm"))]
+mod capture_threads {
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+
+    static THREADS: Mutex<Vec<(String, ThreadId)>> = Mutex::new(Vec::new());
+
+    pub(super) fn record(session_id: &str) {
+        THREADS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((session_id.to_string(), std::thread::current().id()));
+    }
+
+    /// The threads the captures in `session_id` ran on, in order.
+    pub(super) fn of(session_id: &str) -> Vec<ThreadId> {
+        THREADS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|(id, _)| id == session_id)
+            .map(|(_, thread)| *thread)
+            .collect()
     }
 }
 
@@ -141,7 +178,7 @@ pub(crate) async fn call_tool(
         .governor
         .call(
             state.server.clone(),
-            session.clone(),
+            session,
             &name,
             arguments,
             CallOrigin::Http,
@@ -172,11 +209,10 @@ pub(crate) async fn call_tool(
                     result_len = result_text.len(),
                     "[CALL_TOOL] Capturing dataset metadata for direct tool call"
                 );
-                capture_dataset_metadata_governed(
-                    &state.governor,
-                    &session,
+                capture_dataset_metadata_off_runtime(
                     persistent_manager.db().clone(),
-                    &name,
+                    session_id,
+                    name,
                     arguments,
                     result_text,
                 )
@@ -212,12 +248,11 @@ mod tests {
         );
     }
 
-    /// The dataset-metadata capture after a call is governed work of its
-    /// own: it needs a permit like a tool call, so it never runs beside work
-    /// that holds every permit, its parsing runs on the blocking pool, and
-    /// the governor's admission and deadline apply to it.
+    /// The dataset-metadata capture after a call runs on the blocking pool
+    /// and needs no permit of its own: the call answers once its row is
+    /// stored, whatever other work holds the governor's permits.
     #[cfg(all(feature = "db", feature = "llm"))]
-    mod governed_capture {
+    mod metadata_capture {
         use std::sync::Arc;
         use std::sync::mpsc;
         use std::time::Duration;
@@ -228,6 +263,7 @@ mod tests {
         use serde_json::{Value, json};
         use tower::ServiceExt;
 
+        use super::super::capture_threads;
         use crate::config::{ServerConfig, TransportType};
         use crate::exec::ExecConfig;
         use crate::session::Session;
@@ -293,8 +329,21 @@ mod tests {
             (release, running, task)
         }
 
+        /// A two-column `create_dataset` call in `session`.
+        fn create_body(session: &Session) -> Value {
+            json!({
+                "session_id": session.id,
+                "arguments": {"name": "d", "csv_content": "a,b\n1.5,2.25\n2.75,3.5\n"},
+            })
+        }
+
+        /// With one global permit, other work queued behind a
+        /// `create_dataset` call takes the permit when the call's work is
+        /// done, and keeps it for longer than the queue wait. The call still
+        /// answers, and its metadata row is stored, while that work holds
+        /// the only permit: the capture does not queue for one.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-        async fn the_capture_waits_for_a_permit() {
+        async fn the_capture_needs_no_permit() {
             let config = ServerConfig {
                 transport: TransportType::Http,
                 ..Default::default()
@@ -302,7 +351,7 @@ mod tests {
             let exec = ExecConfig {
                 concurrency: 1,
                 session_concurrency: 1,
-                queue_wait: Duration::from_secs(60),
+                queue_wait: Duration::from_secs(10),
                 ..Default::default()
             };
             let (app, state) = build_app_with(&config, exec).await.unwrap();
@@ -317,10 +366,7 @@ mod tests {
             // The only permit is held, so the call queues for it.
             let (release_first, first_running, first_task) = hold(&state, &first);
             first_running.await.unwrap();
-            let body = json!({
-                "session_id": caller.id,
-                "arguments": {"name": "d", "csv_content": "a,b\n1.5,2.25\n2.75,3.5\n"},
-            });
+            let body = create_body(&caller);
             let mut call = tokio::spawn({
                 let app = app.clone();
                 async move { post(&app, "/api/tools/create_dataset", body).await }
@@ -331,7 +377,8 @@ mod tests {
                 caller_slots.available_permits() == 0
             })
             .await;
-            // Work queued after the call gets the permit when the call is done.
+            // Work queued after the call gets the permit when the call's work
+            // is done (the semaphores are first in, first out).
             let (release_second, second_running, second_task) = hold(&state, &second);
             let second_slots = second.exec_semaphore(1);
             wait_until("the hold to queue", || {
@@ -340,25 +387,19 @@ mod tests {
             .await;
             release_first.send(()).unwrap();
             second_running.await.unwrap();
-            assert!(caller.datasets.read().await.contains_key("d"));
-
-            // The capture waits for the permit the hold has: no answer yet,
-            // and no metadata row.
             assert!(
-                tokio::time::timeout(Duration::from_millis(500), &mut call)
-                    .await
-                    .is_err(),
-                "the call answered while the capture had no permit"
+                caller.datasets.read().await.contains_key("d"),
+                "the hold ran before the call"
             );
-            let rows = store
-                .db()
-                .get_datasets_for_session(&caller.id)
-                .await
-                .unwrap();
-            assert!(rows.is_empty(), "the capture ran without a permit");
 
-            release_second.send(()).unwrap();
-            let (status, body) = call.await.unwrap();
+            // The hold keeps the only permit until it is released below; the
+            // call answers meanwhile, with its row stored. A capture that
+            // queued for the permit would answer only after the queue wait,
+            // with no row.
+            let answered = tokio::time::timeout(Duration::from_secs(30), &mut call).await;
+            let (status, body) = answered
+                .expect("the call did not answer while the hold had the permit")
+                .unwrap();
             assert_eq!(status, StatusCode::OK, "{body}");
             assert_eq!(body["data"]["success"], json!(true), "{body}");
             let rows = store
@@ -366,12 +407,48 @@ mod tests {
                 .get_datasets_for_session(&caller.id)
                 .await
                 .unwrap();
-            assert_eq!(rows.len(), 1);
+            assert_eq!(rows.len(), 1, "no metadata row for the call's dataset");
             assert_eq!((rows[0].row_count, rows[0].column_count), (2, 2));
             assert_eq!(rows[0].column_names, ["a", "b"]);
+            assert!(!second_task.is_finished(), "the hold ended early");
+            assert_eq!(state.governor.health().in_flight, 1);
+
+            release_second.send(()).unwrap();
             first_task.await.unwrap();
             second_task.await.unwrap();
             assert_eq!(state.governor.health().in_flight, 0);
+        }
+
+        /// The capture's parsing runs on a blocking thread, not on the
+        /// runtime's thread (here the test's own, the only worker of a
+        /// current-thread runtime).
+        #[tokio::test]
+        async fn the_capture_runs_off_the_runtime() {
+            let config = ServerConfig {
+                transport: TransportType::Http,
+                ..Default::default()
+            };
+            let (app, state) = build_app_with(&config, ExecConfig::default())
+                .await
+                .unwrap();
+            let store = state
+                .persistent_manager
+                .clone()
+                .expect("an in-memory store");
+            let caller = new_session(&app, &state).await;
+            let (status, body) =
+                post(&app, "/api/tools/create_dataset", create_body(&caller)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            let threads = capture_threads::of(&caller.id);
+            assert_eq!(threads.len(), 1, "captures: {threads:?}");
+            assert_ne!(threads[0], std::thread::current().id());
+            let rows = store
+                .db()
+                .get_datasets_for_session(&caller.id)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
         }
 
         /// A wide dataset's metadata row keeps its first
