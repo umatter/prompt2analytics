@@ -1436,10 +1436,11 @@ async fn admit_parquet_source(source: ParquetSource<'_>, name: &str) -> Result<(
 
 /// Decode the uploaded parquet file `bytes` where it lies in memory: an
 /// upload is never written to disk, so it needs no writable folder and
-/// stores nothing, and the loader's error names no file.
+/// stores nothing, and the loader's error names no file. The core loader
+/// reads it as it reads a file from a path, so a schema it refuses is
+/// refused here too, with or without the quotas.
 fn load_parquet_upload(bytes: &[u8]) -> Result<Dataset, String> {
-    ParquetReader::new(std::io::Cursor::new(bytes))
-        .finish()
+    DataLoader::load_parquet_bytes(bytes)
         .map(Dataset::new)
         .map_err(|e| e.to_string())
 }

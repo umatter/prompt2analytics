@@ -1083,13 +1083,28 @@ async fn a_parquet_schema_polars_panics_on_is_refused_and_leaves_no_upload_behin
     }
     assert_eq!(stored_copies_of(&bytes), before, "an upload stored a copy");
 
-    // Without them the loader panics on it, and the upload leaves no file
-    // behind all the same (it is decoded from memory; PR-23).
+    // Without them the core loader refuses it, naming the column, and the
+    // upload leaves no file behind all the same (it is decoded from memory;
+    // PR-23). Pre-fix the loader panicked on it, and the call answered a
+    // server failure.
     let (app, _) = build_app_with(&local(), ExecConfig::default())
         .await
         .unwrap();
-    let sid = new_session(&app).await;
-    let (status, body) = call(&app, &sid, "upload_dataset", upload).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    for (tool, args) in [
+        ("upload_dataset", upload),
+        (
+            "load_dataset",
+            json!({"path": path.to_string_lossy(), "name": "schema"}),
+        ),
+    ] {
+        let sid = new_session(&app).await;
+        let (status, body) = call(&app, &sid, tool, args).await;
+        assert_eq!(status, StatusCode::OK, "{tool}: {body}");
+        assert_eq!(body["data"]["success"], json!(false), "{tool}: {body}");
+        assert!(
+            body.to_string().contains("Cannot read column 'k'"),
+            "{tool}: {body}"
+        );
+    }
     assert_eq!(stored_copies_of(&bytes), before, "the upload stored a copy");
 }
