@@ -792,9 +792,17 @@ fn execute_diagnostics(
                         }
 
                         if let Some(ref vifs) = diag.vif {
-                            println!("\nVariance Inflation Factors:");
-                            for vif_result in vifs {
-                                println!("  {}: {:.4}", vif_result.variable, vif_result.vif);
+                            // The intercept has no VIF (car::vif omits it); a NaN or
+                            // infinite VIF of a regressor still prints.
+                            let regressors: Vec<_> = vifs
+                                .iter()
+                                .filter(|v| v.variable != "(Intercept)")
+                                .collect();
+                            if !regressors.is_empty() {
+                                println!("\nVariance Inflation Factors:");
+                                for vif_result in regressors {
+                                    println!("  {}: {:.4}", vif_result.variable, vif_result.vif);
+                                }
                             }
                         }
 

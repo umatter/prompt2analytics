@@ -1047,3 +1047,75 @@ fn test_cli_hac_t_ratio_and_warnings() {
     let v = json(&run(&s, &[&["-F", "json"][..], &args].concat()));
     assert_eq!(v["warnings"], serde_json::json!(h.warnings), "{v}");
 }
+
+// =============================================================================
+// reg diagnostics (exhibit cli_diagnostics)
+// =============================================================================
+
+#[test]
+fn test_validate_cli_diagnostics() {
+    let case = Case::load("ols_diagnostics_grunfeld");
+    let s = grunfeld_session(&case);
+    let out = run(
+        &s,
+        &[
+            "reg",
+            "diagnostics",
+            "grunfeld",
+            "-y",
+            "inv",
+            "-x",
+            "value",
+            "capital",
+        ],
+    );
+    // The VIF lines `  <name>: <v>` between the header and the next empty line.
+    let (names, vifs): (Vec<String>, Vec<f64>) = out
+        .lines()
+        .skip_while(|l| *l != "Variance Inflation Factors:")
+        .skip(1)
+        .take_while(|l| !l.trim().is_empty())
+        .map(|l| {
+            let (name, v) = l
+                .trim()
+                .rsplit_once(": ")
+                .unwrap_or_else(|| panic!("VIF line `{l}`"));
+            (name.to_string(), v.parse::<f64>().unwrap_or(f64::NAN))
+        })
+        .unzip();
+    Check::new(&case)
+        .scalar(
+            "jarque_bera",
+            num_after(&out, "Jarque-Bera Test", "Statistic:"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "jarque_bera_p",
+            num_after(&out, "Jarque-Bera Test", "P-value:"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "breusch_pagan",
+            num_after(&out, "Breusch-Pagan Test", "Statistic:"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "breusch_pagan_p",
+            num_after(&out, "Breusch-Pagan Test", "P-value:"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "durbin_watson",
+            num_after(&out, "", "Durbin-Watson Statistic:"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "condition_number",
+            num_after(&out, "", "Condition Number:"),
+            Tol::printed(4),
+        )
+        .named("vif", &names, &vifs, Tol::printed(4))
+        .finish();
+    assert!(!out.contains("(Intercept):"), "{out}");
+    assert_golden(&golden("cli_diagnostics"), &out);
+}
