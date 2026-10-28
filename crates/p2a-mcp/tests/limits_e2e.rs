@@ -739,6 +739,103 @@ mod http_paths {
         });
     }
 
+    /// A copy of the session's dataset `name`.
+    async fn dataset(state: &AppState, sid: &str, name: &str) -> p2a_core::data::Dataset {
+        let session = state.session_manager.get_session(sid).await.unwrap();
+        let datasets = session.datasets.read().await;
+        datasets.get(name).unwrap().clone()
+    }
+
+    /// `df` with every column in one chunk and its rows in a fixed order
+    /// (every column ascending), to compare joins whatever order they return.
+    fn sorted_rows(df: &polars::prelude::DataFrame) -> polars::prelude::DataFrame {
+        let mut df = df.clone();
+        df.as_single_chunk_par();
+        let names = df.get_column_names_owned();
+        df.sort(
+            names,
+            polars::prelude::SortMultipleOptions::default().with_maintain_order(true),
+        )
+        .unwrap()
+    }
+
+    /// PR-H14: row-binding leaves a dataset's columns in two chunks, and a
+    /// column added next to them is in one. On the hosted governed path,
+    /// every join of such datasets gives the join of their rechunked copies
+    /// (the core aligns the chunks before polars joins).
+    #[test]
+    fn joins_of_row_bound_datasets_with_an_added_column_match_rechunked_joins() {
+        use p2a_core::data::munging::{JoinType, join};
+        let cfg = open_public_config();
+        run(limits::resolve(&cfg).unwrap(), async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            let mut csv = String::from("k,x\n");
+            for i in 0..100 {
+                let x = i as f64 * 0.37 + ((i * 31) % 17) as f64 / 170.0 + 0.1;
+                csv.push_str(&format!("{},{x:.4}\n", i % 10));
+            }
+            create(&app, &sid, "d", &csv).await;
+            for (tool, args) in [
+                (
+                    "munge_concat",
+                    json!({"datasets": ["d", "d"], "result_name": "c"}),
+                ),
+                (
+                    "munge_mutate",
+                    json!({"dataset": "c", "new_column": "z", "expr_type": "constant",
+                           "left": "a constant longer than twelve", "result_name": "c2"}),
+                ),
+                (
+                    "munge_select",
+                    json!({"dataset": "c2", "columns": ["k", "z"], "result_name": "p"}),
+                ),
+            ] {
+                let (status, body) = post_tool(&app, &sid, tool, args).await;
+                assert_eq!(status, 200, "{tool}: {body}");
+                assert_eq!(body["data"]["success"], true, "{tool}: {body}");
+            }
+            let (c2, p) = (
+                dataset(&state, &sid, "c2").await,
+                dataset(&state, &sid, "p").await,
+            );
+            assert!(c2.df().should_rechunk() && p.df().should_rechunk());
+            let flat = |ds: &p2a_core::data::Dataset| {
+                let mut df = ds.df().clone();
+                df.as_single_chunk_par();
+                p2a_core::data::Dataset::new(df)
+            };
+            for (name, jt) in [
+                ("left", JoinType::Left),
+                ("right", JoinType::Right),
+                ("inner", JoinType::Inner),
+                ("full", JoinType::Full),
+            ] {
+                let result = format!("j_{name}");
+                let (status, body) = post_tool(
+                    &app,
+                    &sid,
+                    "munge_join",
+                    json!({"left": "c2", "right": "p", "left_on": ["k"],
+                           "join_type": name, "result_name": result}),
+                )
+                .await;
+                assert_eq!(status, 200, "{name}: {body}");
+                assert_eq!(body["data"]["success"], true, "{name}: {body}");
+                let got = dataset(&state, &sid, &result).await;
+                let want = join(&flat(&c2), &flat(&p), &["k"], None, jt, None).unwrap();
+                // Every key matches: 10 keys of 20 rows on each side.
+                assert_eq!(got.nrows(), 4_000, "{name}");
+                assert_eq!(got.df().shape(), want.df().shape(), "{name}");
+                assert!(
+                    sorted_rows(got.df()).equals_missing(&sorted_rows(want.df())),
+                    "{name}"
+                );
+            }
+            assert_eq!(get_health(&app).await, StatusCode::OK);
+        });
+    }
+
     #[test]
     fn response_cap_refuses_oversized_output() {
         let cfg = open_public_config();
