@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "harness_selftest",
+  "area": "harness",
+  "method": "Harness self-test: Grunfeld inv mean and variance, named and unnamed vectors, NA as null",
+  "reference": "base R mean(), var(), max(), sum()",
+  "call": "mean(d$inv); var(d$inv); c(value = mean(d$value), capital = mean(d$capital)); c(inv = max(d$inv)); d$inv[1:3]; c(sum(d$inv), NA)",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "jsonlite": "2.0.0"
+  },
+  "values": {
+    "n": 200,
+    "inv_mean": 145.95824999999999,
+    "inv_var": 47034.894115012568,
+    "means": {
+      "names": ["value", "capital"],
+      "values": [1081.6811, 276.01715000000002]
+    },
+    "inv_max": {
+      "names": ["inv"],
+      "values": [1486.7]
+    },
+    "inv_first3": [317.60000000000002, 391.80000000000001, 410.60000000000002],
+    "with_na": [29191.650000000001, null]
+  }
+}

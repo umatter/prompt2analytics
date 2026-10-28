@@ -1,0 +1,9 @@
+   Compiling p2a-core v0.2.0 (/repo/crates/p2a-core)
+error[E0425]: cannot find value `x` in this scope
+ --> crates/p2a-core/src/lib.rs:1:1
+  |
+1 | x
+  | ^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `p2a-core` (lib test) due to 1 previous error

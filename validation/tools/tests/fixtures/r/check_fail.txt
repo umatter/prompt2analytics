@@ -1,0 +1,5 @@
+ok     harness_selftest
+
+R reference check FAILED:
+  ols_grunfeld: adj_r2[1]: committed 0.80953670661429034, recomputed 0.8105035253624413
+  committed case orphan_case has no definition in validation/r/cases/

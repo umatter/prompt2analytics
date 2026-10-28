@@ -1,0 +1,4 @@
+{"timeout_seconds": 300, "produced_dir": "produced", "scripts": [
+ {"script": "validate_a.R", "status": "ran", "exit_code": 0, "seconds": 2},
+ {"script": "validate_b.R", "status": "timeout", "exit_code": 124, "seconds": 300}
+]}

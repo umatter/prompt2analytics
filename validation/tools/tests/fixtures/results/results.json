@@ -1,0 +1,31 @@
+{
+ "schema": 1,
+ "commit": "abc1234",
+ "date": "2026-10-21T12:00:00Z",
+ "command": "validation/run_validation.sh",
+ "category": null,
+ "features": {"demo": "--no-default-features --features ci"},
+ "packages": {
+  "demo": {"status": "fail", "exit_code": 101, "selected": 4, "ran": 4, "passed": 3, "failed": 1, "ignored": 0, "errors": []},
+  "p2a-validation": {"status": "pass", "exit_code": 0, "selected": 2, "ran": 2, "passed": 2, "failed": 0, "ignored": 0, "errors": []}
+ },
+ "binaries": {"demo": ["validation_ml_advanced"], "p2a-validation": ["cases"]},
+ "tests": {
+  "demo::ml::kmeans::tests::test_validate_kmeans_dgp": "ok",
+  "demo::stats::tests::test_validate_broken": "failed",
+  "demo::stats::tests::test_validate_demo_mean": "ok",
+  "demo::validation_ml_advanced::test_validate_c50": "ok",
+  "p2a-validation::case::tests::schema_2_is_rejected": "ok",
+  "p2a-validation::cases::harness_selftest_matches_values_recomputed_from_csv": "ok"
+ },
+ "r_check": {"status": "pass", "cases": {"demo_case": "ok"}, "failures": [], "missing_packages": []},
+ "legacy_r": {
+  "timeout_seconds": 300,
+  "scripts": {
+   "validate_a.R": {"status": "ran", "exit_code": 0, "seconds": 2},
+   "validate_b.R": {"status": "timeout", "exit_code": 124, "seconds": 300}
+  },
+  "files": {"legacy_a.csv": "same", "legacy_b.csv": "differs"},
+  "details": {"legacy_b.csv": "row 1, column statistic: 4.12412 vs 4.1200000000000001"}
+ }
+}

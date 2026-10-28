@@ -101,6 +101,8 @@ polars-parquet = { version = "=0.52.0", default-features = false }
 [dev-dependencies]
 polars.workspace = true
 tempfile = "3.10"
+# R reference cases (validation/expected/*.json); path only, never published.
+p2a-validation = { path = "../p2a-validation" }
 
 [features]
 default = []

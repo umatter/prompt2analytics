@@ -1,0 +1,18 @@
+     Running unittests src/lib.rs (target/debug/deps/p2a_mcp-0000000000000000)
+
+running 1 test
+test tools::handlers::regression::tests::test_validate_mcp_regression_ols ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 900 filtered out; finished in 0.10s
+
+     Running unittests src/main.rs (target/debug/deps/p2a_mcp-1111111111111111)
+
+running 1 test
+test tools::handlers::regression::tests::test_validate_mcp_regression_ols ... FAILED
+
+failures:
+    tools::handlers::regression::tests::test_validate_mcp_regression_ols
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 900 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p p2a-mcp --bin p2a-mcp`

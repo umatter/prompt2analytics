@@ -1,0 +1,3 @@
+ok     harness_selftest
+
+R reference check: 1 case(s) match the committed files.

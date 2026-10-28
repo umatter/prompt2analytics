@@ -1,0 +1,22 @@
+     Running unittests src/lib.rs (target/debug/deps/p2a_core-0000000000000000)
+
+running 2 tests
+test stats::ttest::tests::test_validate_one ... ok
+test regression::ols::tests::test_validate_two ... FAILED
+
+failures:
+
+---- regression::ols::tests::test_validate_two stdout ----
+
+thread 'regression::ols::tests::test_validate_two' panicked at crates/p2a-core/src/regression/ols.rs:10:5:
+case ols_grunfeld: 1 of 3 comparisons failed
+  case ols_grunfeld: se[value] rust=0.0057 R=0.0068109544568719536 |diff|=1.1e-3 allowed=6.8e-9
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    regression::ols::tests::test_validate_two
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 1846 filtered out; finished in 0.40s
+
+error: test failed, to rerun pass `-p p2a-core --lib`

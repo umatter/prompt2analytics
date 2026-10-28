@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "demo_var_case",
+  "area": "stats",
+  "method": "Demo variance of x",
+  "reference": "base R var()",
+  "call": "var(d$x)",
+  "dataset": "validation/datasets/d.csv",
+  "datasets": ["validation/datasets/d.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "jsonlite": "2.0.0"
+  },
+  "values": {
+    "var": 0.86333333333333329,
+    "missing": null
+  }
+}

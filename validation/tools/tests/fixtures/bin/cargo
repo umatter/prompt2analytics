@@ -1,0 +1,87 @@
+#!/bin/bash
+# Fake cargo for validation/tools/tests/test_run_validation.sh.
+#   FAKE_CARGO_CALLS     file that every invocation's arguments are appended to
+#   FAKE_CARGO_LIST_DIR  directory with <package>.list files printed for `-- --list`
+#   FAKE_CARGO_MODE      compile_error: print a compile error and exit 101
+#   FAKE_CARGO_FAIL      test name reported FAILED; FAKE_CARGO_DROP: test name not reported
+#   FAKE_CARGO_READ_STDIN  non-empty: a test run reads its standard input to the end, as a
+#                        test that reads stdin (or a child that inherits it) would
+#   CARGO_TERM_COLOR     always: colour the status lines as cargo does
+echo "$*" >> "${FAKE_CARGO_CALLS:-/dev/null}"
+pkg=""
+prev=""
+target="unittests src/lib.rs"
+list=false
+after=false
+names=()
+for a in "$@"; do
+  if $after; then
+    case "$a" in
+      --list) list=true ;;
+      --*) ;;
+      *) names+=("$a") ;;
+    esac
+  else
+    case "$prev" in
+      -p) pkg="$a" ;;
+      --test) target="tests/$a.rs" ;;
+      --bin) target="unittests src/bin/$a.rs" ;;
+    esac
+    case "$a" in
+      --) after=true ;;
+      --lib) target="unittests src/lib.rs" ;;
+      --bins) target="unittests src/main.rs" ;;
+    esac
+  fi
+  prev="$a"
+done
+if [ "${FAKE_CARGO_MODE:-}" = "compile_error" ]; then
+  echo "   Compiling $pkg v0.0.0 (/fake/$pkg)" >&2
+  echo "error[E0425]: cannot find value \`x\` in this scope" >&2
+  echo "error: could not compile \`$pkg\` (lib test) due to 1 previous error" >&2
+  exit 101
+fi
+# Real cargo writes `Running` in bold bright green, padded to 12 columns, when colour is forced.
+colour() {
+  if [ "${CARGO_TERM_COLOR:-}" = always ]; then
+    sed -E $'s/^( *(Finished|Running))/\x1b[1m\x1b[92m\\1\x1b[0m/'
+  else
+    cat
+  fi
+}
+if $list; then
+  f="${FAKE_CARGO_LIST_DIR:-/nonexistent}/$pkg.list"
+  # A package without a list file has one test target with no tests, as cargo prints it.
+  if [ -f "$f" ]; then
+    colour < "$f"
+  else
+    printf '     Running unittests src/lib.rs (target/debug/deps/fake-0000000000000000)\n\n0 tests, 0 benchmarks\n' | colour
+  fi
+  exit 0
+fi
+if [ -n "${FAKE_CARGO_READ_STDIN:-}" ]; then
+  cat > /dev/null
+fi
+echo "     Running $target (target/debug/deps/fake-0000000000000000)" | colour
+echo ""
+echo "running ${#names[@]} tests"
+passed=0
+failed=0
+for n in ${names[@]+"${names[@]}"}; do
+  if [ "$n" = "${FAKE_CARGO_FAIL:-}" ]; then
+    echo "test $n ... FAILED"
+    failed=$((failed + 1))
+  elif [ "$n" = "${FAKE_CARGO_DROP:-}" ]; then
+    :
+  else
+    echo "test $n ... ok"
+    passed=$((passed + 1))
+  fi
+done
+echo ""
+if [ "$failed" -gt 0 ]; then
+  echo "test result: FAILED. $passed passed; $failed failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+  echo "error: test failed, to rerun pass \`-p $pkg\`" >&2
+  exit 101
+fi
+echo "test result: ok. $passed passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
