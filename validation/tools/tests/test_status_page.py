@@ -5,6 +5,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -116,9 +117,11 @@ class Econ82DocsTest(unittest.TestCase):
 
 PAGE = VALIDATION / "VALIDATION_STATUS.md"
 HAND_WRITTEN = ("Fully Validated", "R cross-validated", "DGP-validated", "All Pass", "All pass")
-# Methods REG-57 named that must not be listed as pinned unless a registry entry names them.
+# Methods REG-57 named that must not be listed as pinned unless a registry entry names them
+# in its id or name. "tukey line", not "tukey": the HAC entry's reference names the
+# Tukey-Hanning kernel.
 REG57_NAMES = ("loess", "nonlinear least squares", "smooth spline", "sensemakr", "e-value",
-               "supsmu", "super smoother", "tukey", "resistant line")
+               "supsmu", "super smoother", "tukey line", "resistant line")
 _RUNNING = re.compile(r"^\s*Running (?:unittests )?(\S+)")
 
 
@@ -188,11 +191,34 @@ class StatusPageTest(unittest.TestCase):
         for e in entries:
             with self.subTest(method=e["id"]):
                 self.assertTrue(e["id"].lower() in pinned or e["name"].lower() in pinned)
+        named = " ".join(f"{e['id']} {e['name']}".lower() for e in entries)
         registered = " ".join(f"{e['id']} {e['name']} {e.get('reference', '')}".lower() for e in entries)
         for name in REG57_NAMES:
-            if name not in registered:
-                with self.subTest(unregistered=name):
-                    self.assertNotIn(name, pinned)
+            if name in named:
+                continue  # a registry entry pins this method; the page may list it
+            with self.subTest(unregistered=name):
+                # A guard that only a reference text matches would be skipped silently.
+                self.assertFalse(name in registered,
+                                 f"{name!r} matches a registry reference text, so the guard would never run")
+                self.assertNotIn(name, pinned)
+
+    def test_registered_tests_are_run(self):
+        # run_validation.sh runs only tests with test_validate in their name, so a registered
+        # test without it is never run and its method shows NOT RUN while the run passes.
+        entries = registry_entries()
+        for e in entries:
+            for test in e["tests"]:
+                with self.subTest(method=e["id"], test=test):
+                    self.assertIn("test_validate", test.rsplit("::", 1)[-1])
+        rows = []  # (method cell, status cell) of the rendered table
+        for line in section(self.page, "Methods pinned to R").splitlines():
+            if not line.startswith("|") or line.startswith("| Method |") or line.startswith("|---"):
+                continue
+            rows.append((line.split("|", 2)[1].strip(), line.strip().rstrip("|").rsplit("|", 1)[-1].strip()))
+        self.assertEqual(len(rows), len(entries))
+        for method, status in rows:
+            with self.subTest(method=method):
+                self.assertNotIn(status, ("NOT RUN", "FAIL"))
 
     @unittest.skipUnless(os.environ.get("P2A_CHECK_STATUS_PAGE") == "1",
                          "set P2A_CHECK_STATUS_PAGE=1 with cargo --list outputs in target/*-tests.txt")
@@ -209,8 +235,6 @@ UNREGISTERED_LOESS = "regression::loess::tests::test_validate_loess_against_r"
 def build_render_fixture(tmp):
     """WP01's render fixture (fixtures/tree, fixtures/results/results.json) copied to
     tmp/root, with one more passing test_validate test that no registry entry names."""
-    import shutil
-
     root = tmp / "root"
     shutil.copytree(FIXTURES / "tree", root)
     results = json.loads((FIXTURES / "results" / "results.json").read_text(encoding="utf-8"))
@@ -225,10 +249,6 @@ def render_command(root, out):
             "--root", str(root)]
 
 
-def render_env(root):
-    return dict(os.environ)
-
-
 class RenderFixtureTest(unittest.TestCase):
     """REG-57: render puts a test_validate test that no registry entry names outside 'Methods pinned to R'."""
 
@@ -236,7 +256,7 @@ class RenderFixtureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = build_render_fixture(Path(tmp))
             out = Path(tmp) / "STATUS.md"
-            subprocess.run(render_command(root, out), check=True, env=render_env(root), cwd=root)
+            subprocess.run(render_command(root, out), check=True, cwd=root)
             page = out.read_text(encoding="utf-8")
             self.assertNotIn("regression::loess", section(page, "Methods pinned to R"))
             # render puts these tests under "## Other `test_validate_*` tests", whose first
