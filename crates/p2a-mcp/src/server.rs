@@ -572,6 +572,7 @@ impl AnalyticsServer {
             + Self::survival_router()
             + Self::cleaning_router()
             + Self::search_router();
+        crate::tools::handlers::utils::mark_server_start();
 
         Self {
             datasets: Arc::new(RwLock::new(HashMap::new())),
@@ -635,6 +636,7 @@ impl AnalyticsServer {
             + Self::survival_router()
             + Self::cleaning_router()
             + Self::search_router();
+        crate::tools::handlers::utils::mark_server_start();
 
         Self {
             datasets: session.datasets.clone(),

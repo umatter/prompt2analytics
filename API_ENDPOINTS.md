@@ -862,7 +862,7 @@ The `governor` object reports the tool calls running (`in_flight`), those past t
 }
 ```
 
-The `server_stats` tool leaves out the process RSS and virtual size in the same mode and prints "Process memory: not reported in open public mode" in their place; it still reports the calling session's own datasets.
+The `server_stats` tool leaves out the process RSS, peak RSS and virtual size in the same mode and prints "Process memory: not reported in open public mode" in their place; it still reports the calling session's own datasets.
 
 While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. It does the same with `"memory_stuck": true` while the process stays above its memory soft limit with no call running within its deadline, after the server handed its freed heap memory back to the operating system: every tool call is then refused with `memory_pressure`, so no tool call will run to free it; only work detached past its deadline ending, or sessions being deleted or expiring, can bring the process back under the limit. In the hosted profile the process exits (code 70) when either state lasts `P2A_STUCK_EXIT_SECS` (300 s), so the platform can restart it.
 
