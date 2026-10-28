@@ -101,9 +101,11 @@ Always errors (CI gates on these now):
   `Case::load("<id>")`, `Case::try_load("<id>")` or `load_case("<id>")` while no method
   lists that case together with a test of the crate's package of that name.
 - `registered-test-loads-no-case`: a registry test whose package and name match a scanned
-  `fn test_*` (by its last path segment, as `unregistered-load` does) that loads none of
-  the method's cases with one of the three calls above. A registry test that matches no
-  scanned function is not checked here; `unknown-test` checks that it exists.
+  `fn test_*` (by its last path segment, as `unregistered-load` does) whose body neither
+  loads one of the method's cases with one of the three calls above nor names one in a
+  string literal. The literal counts because a test may load its case through a helper,
+  `grunfeld_case("panel_re_grunfeld")`; comments do not count. A registry test that
+  matches no scanned function is not checked here; `unknown-test` checks that it exists.
 - `missing-doc`: a registry `doc` that does not exist.
 
 Warnings, errors with `--strict` (legacy documentation debt; CI switches to `--strict` once

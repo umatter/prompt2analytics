@@ -598,6 +598,8 @@ class TestLint(TreeCase):
         self.assert_finding(code, out, "ERROR", "unregistered-load", "test_validate_extra", "demo_case")
         lines = [ln for ln in out.splitlines() if "unregistered-load" in ln]
         self.assertEqual(len(lines), 1, out)
+        load_line = text.splitlines().index('            let _ = crate::test_support::load_case("demo_case");') + 1
+        self.assertIn(f"crates/demo/src/lib.rs:{load_line}: ", lines[0])
 
     def test_registered_test_that_loads_no_case(self):
         src = self.path("crates/demo/src/lib.rs")
@@ -607,6 +609,8 @@ class TestLint(TreeCase):
             "no load": 'let c = 1;',
             # It loads a harness case, which is none of demo_var's cases.
             "harness case only": 'let c = p2a_validation::Case::load("selftest_case");',
+            # The case id through a helper, but only in a comment.
+            "case id in a comment only": 'let c = 1; // demo_case("demo_var_case")',
         }
         for label, body in variants.items():
             with self.subTest(label):
@@ -620,6 +624,22 @@ class TestLint(TreeCase):
                 )
                 lines = [ln for ln in out.splitlines() if "registered-test-loads-no-case" in ln]
                 self.assertEqual(len(lines), 1, out)
+        with self.subTest("an async test that loads its case through a helper"):
+            src.write_text(
+                original.replace(
+                    "        #[test]\n        fn test_validate_demo_var() {\n"
+                    '            let c = p2a_validation::Case::load("demo_var_case");\n',
+                    "        fn demo_case(id: &str) -> p2a_validation::Case {\n"
+                    "            p2a_validation::Case::load(id)\n"
+                    "        }\n\n"
+                    "        #[tokio::test]\n        async fn test_validate_demo_var() {\n"
+                    '            let c = demo_case("demo_var_case");\n',
+                )
+            )
+            self.assertIn("async fn test_validate_demo_var", src.read_text())
+            code, out = self.lint()
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("registered-test-loads-no-case", out)
         with self.subTest("a registered test that is not in the sources is not checked here"):
             src.write_text(original)
             self.edit_json(

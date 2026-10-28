@@ -574,6 +574,8 @@ _BLOCK_RE = re.compile(r"/\*|\*/")
 _STR_END_RE = re.compile(r'(?:[^"\\]|\\.)*"', re.S)
 _FN_TEST_RE = re.compile(r"\bfn\s+(test_\w+)")
 _LOAD_RE = re.compile(r'\b(?:Case::(?:try_)?load|load_case)\(\s*"([^"]*)"')
+# A string literal that could be a case id (`grunfeld_case("panel_re_grunfeld")`).
+_ID_LITERAL_RE = re.compile(r'"([a-z0-9_]+)"')
 _CSV_CITATION_RE = re.compile(r"\breference values?\b.*validation/expected/[\w.-]+\.csv")
 
 
@@ -1012,6 +1014,7 @@ def lint(root: Path, test_lists, strict=False) -> list:
             registry_tests.setdefault(cid, set()).update(m["tests"])
     packages = {}
     scanned_loads = {}  # (package, fn name) -> case ids its body loads (all fns of that name)
+    scanned_literals = {}  # (package, fn name) -> id-like string literals of its body
     for path in rust_files(root):
         text = read_text(path)
         if "fn test_" not in text:
@@ -1023,8 +1026,11 @@ def lint(root: Path, test_lists, strict=False) -> list:
         package = packages[crate_dir]
         functions, keep, comments = test_functions(text)
         for name, line, start, end in functions:
-            loads = [(m.group(1), keep.count("\n", 0, start + m.start()) + 1) for m in _LOAD_RE.finditer(keep, start, end)]
+            loads = [(m.group(1), keep.count("\n", 0, m.start()) + 1) for m in _LOAD_RE.finditer(keep, start, end)]
             scanned_loads.setdefault((package, name), set()).update(cid for cid, _ in loads)
+            scanned_literals.setdefault((package, name), set()).update(
+                _ID_LITERAL_RE.findall(keep, start, end)
+            )
             for cid, load_line in loads:
                 if cid not in case_files:
                     findings.append(
@@ -1064,19 +1070,23 @@ def lint(root: Path, test_lists, strict=False) -> list:
                     )
 
     # Registered tests that load none of their method's cases (tests that are not a
-    # scanned `fn test_*` are left to unknown-test).
+    # scanned `fn test_*` are left to unknown-test). A test may load its case through a
+    # helper (`grunfeld_case("panel_re_grunfeld")`), so a string literal of the body (not
+    # a comment) that equals one of the method's case ids counts as a reference too.
     for rel, m, line in methods:
         for tid in m["tests"]:
             key = (tid.split("::", 1)[0], tid.rsplit("::", 1)[-1])
-            if key in scanned_loads and not scanned_loads[key] & set(m["cases"]):
+            if key not in scanned_loads:
+                continue
+            if not (scanned_loads[key] | scanned_literals[key]) & set(m["cases"]):
                 findings.append(
                     Finding(
                         "ERROR",
                         "registered-test-loads-no-case",
                         rel,
                         line,
-                        f"method `{m['id']}`: test {tid} loads none of the method's cases "
-                        f"({', '.join(m['cases'])})",
+                        f"method `{m['id']}`: test {tid} neither loads nor names one of the "
+                        f"method's cases ({', '.join(m['cases'])})",
                     )
                 )
 
