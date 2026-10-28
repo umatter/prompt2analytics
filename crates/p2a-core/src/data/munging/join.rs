@@ -192,6 +192,7 @@ fn join_keys<'a>(
 /// The number of rows `join(left, right, left_on, right_on, join_type, _)`
 /// would return, computed from per-key row counts on both sides (two hash
 /// group-bys and a join of the two count tables; the data are not joined).
+/// [`estimate_join_shape`] also says how often a row of each side repeats.
 ///
 /// Null keys never match, as in [`join`]. The count saturates at `u64::MAX`.
 ///
@@ -217,6 +218,49 @@ pub fn estimate_join_rows(
     right_on: Option<&[&str]>,
     join_type: JoinType,
 ) -> MungeResult<u64> {
+    estimate_join_shape(left, right, left_on, right_on, join_type).map(|shape| shape.rows)
+}
+
+/// What [`estimate_join_shape`] predicts of a join's result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinShape {
+    /// The rows the join returns (what [`estimate_join_rows`] returns).
+    pub rows: u64,
+    /// The most times a row of the left dataset appears in the result: the
+    /// largest right row count of a key that matches, at least 1 when the
+    /// join keeps the unmatched left rows (left and full joins), and 1 for a
+    /// semi or anti join (0 when an inner or right join matches nothing).
+    pub max_left_repeat: u64,
+    /// The most times a row of the right dataset appears in the result: the
+    /// largest left row count of a key that matches, at least 1 when the
+    /// join keeps the unmatched right rows (right and full joins), and 0 for
+    /// a semi or anti join, which returns no right columns.
+    pub max_right_repeat: u64,
+}
+
+/// [`estimate_join_rows`], with how often a row of each dataset repeats in
+/// the result: what the join gathers from each side, at most, is each of
+/// its rows that many times.
+///
+/// # Errors
+///
+/// As [`estimate_join_rows`].
+///
+/// # Example
+///
+/// ```ignore
+/// use p2a_core::data::munging::{estimate_join_shape, JoinType};
+///
+/// let shape = estimate_join_shape(&orders, &customers, &["customer_id"], None, JoinType::Left)?;
+/// // Each customer appears once per order: shape.max_right_repeat orders at most.
+/// ```
+pub fn estimate_join_shape(
+    left: &Dataset,
+    right: &Dataset,
+    left_on: &[&str],
+    right_on: Option<&[&str]>,
+    join_type: JoinType,
+) -> MungeResult<JoinShape> {
     const LEFT_N: &str = "__p2a_left_n";
     const RIGHT_N: &str = "__p2a_right_n";
 
@@ -260,8 +304,10 @@ pub fn estimate_join_rows(
     let (left_n, right_n) = (counts(LEFT_N)?, counts(RIGHT_N)?);
 
     // inner = sum of l * r over matching keys; ml / mr = rows of each side
-    // that have a match.
+    // that have a match; max_l / max_r = the largest count of a matching key
+    // on each side (how often a row of the other side repeats).
     let (mut inner, mut ml, mut mr) = (0u64, 0u64, 0u64);
+    let (mut max_l, mut max_r) = (0u64, 0u64);
     for (i, (l, r)) in left_n.into_iter().zip(right_n.into_iter()).enumerate() {
         if i.is_multiple_of(CHECKPOINT_EVERY) {
             crate::resource::checkpoint().map_err(|e| MungeError::JoinError(e.to_string()))?;
@@ -270,19 +316,30 @@ pub fn estimate_join_rows(
         inner = inner.saturating_add(l.saturating_mul(r));
         ml = ml.saturating_add(l);
         mr = mr.saturating_add(r);
+        max_l = max_l.max(l);
+        max_r = max_r.max(r);
     }
     let unmatched_left = (left.nrows() as u64).saturating_sub(ml);
     let unmatched_right = (right.nrows() as u64).saturating_sub(mr);
 
-    Ok(match join_type {
-        JoinType::Inner => inner,
-        JoinType::Left => inner.saturating_add(unmatched_left),
-        JoinType::Right => inner.saturating_add(unmatched_right),
-        JoinType::Full => inner
-            .saturating_add(unmatched_left)
-            .saturating_add(unmatched_right),
-        JoinType::Semi => ml,
-        JoinType::Anti => unmatched_left,
+    let (rows, max_left_repeat, max_right_repeat) = match join_type {
+        JoinType::Inner => (inner, max_r, max_l),
+        JoinType::Left => (inner.saturating_add(unmatched_left), max_r.max(1), max_l),
+        JoinType::Right => (inner.saturating_add(unmatched_right), max_r, max_l.max(1)),
+        JoinType::Full => (
+            inner
+                .saturating_add(unmatched_left)
+                .saturating_add(unmatched_right),
+            max_r.max(1),
+            max_l.max(1),
+        ),
+        JoinType::Semi => (ml, 1, 0),
+        JoinType::Anti => (unmatched_left, 1, 0),
+    };
+    Ok(JoinShape {
+        rows,
+        max_left_repeat,
+        max_right_repeat,
     })
 }
 
@@ -703,6 +760,80 @@ mod tests {
             estimate_join_rows(&l, &r, &["nope"], None, JoinType::Inner),
             Err(MungeError::JoinError(_))
         ));
+    }
+
+    /// The most times one value of the row-id column `id` appears in `df`
+    /// (nulls, rows the other side added, left out).
+    fn most_repeats(df: &DataFrame, id: &str) -> u64 {
+        let mut seen = std::collections::HashMap::new();
+        for v in df.column(id).unwrap().i64().unwrap().into_iter().flatten() {
+            *seen.entry(v).or_insert(0u64) += 1;
+        }
+        seen.values().copied().max().unwrap_or(0)
+    }
+
+    #[test]
+    fn join_shape_counts_how_often_each_side_repeats() {
+        // Key 1: two left rows, three right rows; key 2 once on each side;
+        // keys 3 and 4 on one side only; a null key on each side.
+        let l = Dataset::new(
+            df!("k" => [Some(1i64), Some(1), Some(2), Some(3), None],
+                "lid" => [0i64, 1, 2, 3, 4])
+            .unwrap(),
+        );
+        let r = Dataset::new(
+            df!("k" => [Some(1i64), Some(1), Some(1), Some(2), Some(4), None],
+                "rid" => [10i64, 11, 12, 13, 14, 15])
+            .unwrap(),
+        );
+        for (jt, rows, left, right) in [
+            (JoinType::Inner, 7u64, 3u64, 2u64),
+            (JoinType::Left, 9, 3, 2),
+            (JoinType::Right, 9, 3, 2),
+            (JoinType::Full, 11, 3, 2),
+            (JoinType::Semi, 3, 1, 0),
+            (JoinType::Anti, 2, 1, 0),
+        ] {
+            let shape = estimate_join_shape(&l, &r, &["k"], None, jt).unwrap();
+            assert_eq!(
+                shape,
+                JoinShape {
+                    rows,
+                    max_left_repeat: left,
+                    max_right_repeat: right
+                },
+                "{jt:?}"
+            );
+            let joined = join(&l, &r, &["k"], None, jt, None).unwrap();
+            assert_eq!(joined.nrows() as u64, rows, "{jt:?}");
+            assert!(most_repeats(joined.df(), "lid") <= left, "{jt:?}");
+            if !matches!(jt, JoinType::Semi | JoinType::Anti) {
+                assert_eq!(most_repeats(joined.df(), "lid"), left, "{jt:?}");
+                assert_eq!(most_repeats(joined.df(), "rid"), right, "{jt:?}");
+            }
+        }
+        // A lookup with unique keys: each left row once, each lookup row
+        // as often as its key repeats on the left; no match at all keeps
+        // each left row once in a left join and none in an inner one.
+        let lookup = Dataset::new(df!("k" => [1i64, 2, 3], "rid" => [20i64, 21, 22]).unwrap());
+        let shape = estimate_join_shape(&l, &lookup, &["k"], None, JoinType::Left).unwrap();
+        assert_eq!(
+            (shape.rows, shape.max_left_repeat, shape.max_right_repeat),
+            (5, 1, 2)
+        );
+        let none = Dataset::new(df!("k" => [7i64, 8], "rid" => [30i64, 31]).unwrap());
+        for (jt, want) in [
+            (JoinType::Left, (5, 1, 0)),
+            (JoinType::Inner, (0, 0, 0)),
+            (JoinType::Full, (7, 1, 1)),
+        ] {
+            let shape = estimate_join_shape(&l, &none, &["k"], None, jt).unwrap();
+            assert_eq!(
+                (shape.rows, shape.max_left_repeat, shape.max_right_repeat),
+                want,
+                "{jt:?}"
+            );
+        }
     }
 
     #[test]

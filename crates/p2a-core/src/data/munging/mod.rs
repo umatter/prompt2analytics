@@ -49,7 +49,7 @@ pub use error::{MungeError, MungeResult};
 // Re-export transform operations
 pub use transform::{
     ArithOp, FilterOp, MutateExpr, drop_columns, filter, filter_and, head, mutate, rename, sample,
-    select, slice, sort, tail,
+    sample_rows, select, slice, sort, tail, take_rows,
 };
 
 // Re-export clean operations
@@ -61,12 +61,14 @@ pub use clean::{
     deduplicate,
     drop_na,
     fill_na,
+    parse_cast_dtype,
     regex_count,
     regex_extract,
     regex_extract_all,
     // Regex and advanced string operations
     regex_replace,
     regex_replace_all,
+    regex_replace_bytes,
     replace,
     str_concat,
     str_length,
@@ -81,8 +83,9 @@ pub use clean::{
 
 // Re-export join operations
 pub use join::{
-    JoinOptions, JoinType, anti_join, concat, cross_join, cross_join_with, estimate_join_rows,
-    full_join, hconcat, inner_join, join, join_with, left_join, right_join, semi_join,
+    JoinOptions, JoinShape, JoinType, anti_join, concat, cross_join, cross_join_with,
+    estimate_join_rows, estimate_join_shape, full_join, hconcat, inner_join, join, join_with,
+    left_join, right_join, semi_join,
 };
 
 // Re-export aggregate operations
