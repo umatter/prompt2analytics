@@ -1030,6 +1030,42 @@ mod tests {
         text
     }
 
+    /// The magic number that starts every zstd frame.
+    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+    #[test]
+    fn zstd_parquet_of_many_pages_a_column_loads_back_exactly() {
+        // polars compresses each page as a zstd frame of its own, and
+        // decompresses all the pages of a column chunk on one zstd context
+        // that it creates for that chunk and reuses from page to page: the
+        // path every zstd Parquet file a user loads or uploads takes, and the
+        // one .github/workflows/audit.yml's zstd exemptions argue about.
+        let x: Vec<f64> = (0..20_000)
+            .map(|i| f64::from(i) * 0.37)
+            .map(|t| t.sin() * 10.0 + t * 1e-3)
+            .collect();
+        let k: Vec<i64> = (0..20_000_i64).map(|i| i * 7919 % 10_007 - 5_000).collect();
+        let mut df = DataFrame::new(vec![
+            Series::new("x".into(), x).into(),
+            Series::new("k".into(), k).into(),
+        ])
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pages.parquet");
+        ParquetWriter::new(std::fs::File::create(&path).unwrap())
+            .with_compression(ParquetCompression::Zstd(None))
+            .with_data_page_size(Some(4096))
+            .finish(&mut df)
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        // About 160 KB a column in pages of about 4 KB: dozens of frames.
+        let frames = bytes.windows(4).filter(|w| *w == ZSTD_MAGIC).count();
+        assert!(frames >= 20, "{frames} zstd frames");
+
+        assert!(DataLoader::load_parquet(&path).unwrap().equals(&df));
+        assert!(DataLoader::load_parquet_bytes(&bytes).unwrap().equals(&df));
+    }
+
     #[test]
     fn parquet_categorical_metadata_polars_panics_on_is_refused_naming_the_column() {
         // polars keeps a Categorical column's categories (name, namespace
