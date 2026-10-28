@@ -86,9 +86,10 @@ When implementing a new method:
   - [ ] **Document test data source if from published work**
 
 - [ ] Validate against reference implementation
-  - [ ] Run same data through R/Python/Stata
-  - [ ] Compare coefficients, SEs, test statistics
-  - [ ] Document any expected differences
+  - [ ] Write an R case (`validation/r/cases/<area>.R`, from `.claude/tooling/validation/templates/r_validation.R.template`)
+  - [ ] `Rscript validation/r/run.R --write <id>`, then `--check`
+  - [ ] Add a `test_validate_*` test that loads the case (`crate::test_support::load_case`) and compares every reported number with `p2a_validation::{Check, Tol}`
+  - [ ] Add the registry entry in `validation/methods/<area>.json`; record any mismatch as a deviation with its finding id
   - [ ] **Cite the reference implementation used**
 
 - [ ] Add MCP tool if user-facing
@@ -116,18 +117,20 @@ When implementing a new method:
 
 When comparing with reference implementations:
 
-1. **Generate test data** with known properties
-2. **Run in reference implementation** (R/Python/Stata)
-3. **Record expected values** (coefficients, SEs, test stats)
-4. **Implement in Rust** following patterns
-5. **Compare results** with tolerance for floating point differences
-6. **Document discrepancies** and their causes
+1. **Choose the data**: a committed dataset (`validation/datasets/`) or seeded simulated data
+   written by the case (`ctx$gen_dataset()`, read back, so R and Rust see the same doubles)
+2. **Write the R case** with the reference R function; `run.R --write` records R's values in
+   `validation/expected/<id>.json`
+3. **Implement in Rust** following patterns
+4. **Compare in the test** with `Check` at the `Tol` tolerances (`validation/README.md`)
+5. **Document discrepancies** as registry deviations with their finding ids; never widen a
+   tolerance to make a test pass
 
-Acceptable tolerances:
-- Coefficients: |diff| < 1e-10
-- Standard errors: |diff| < 1e-8
-- T-statistics: |diff| < 1e-8
-- P-values: |diff| < 1e-6
+Tolerances (`p2a_validation::Tol`, relative; they depend on n):
+- Coefficients: `Tol::coef(n)` (1e-6 / 1e-8 / 1e-10 for n < 100 / ≤ 1000 / > 1000)
+- Standard errors, test statistics, CI bounds: `Tol::se(n)`, `Tol::stat(n)` (1e-5 / 1e-6 / 1e-8)
+- P-values: `Tol::p_value(n)` (SE relative tolerance, abs 1e-12)
+- Iterative estimators (MLE, MAP): `Tol::iterative(rel)` with a comment giving the reason
 
 ## Common Pitfalls
 
@@ -202,22 +205,21 @@ After implementation and testing, complete the following to ensure the method is
 
 ### Validation Documentation
 
-- [ ] Create `validation/[category]/[method].md` following template structure
-  - [ ] Document reference implementations (R/Python packages, versions)
-  - [ ] Add at least 2 test cases (synthetic data + real dataset if available)
-  - [ ] Include R/Python reproduction code with exact seeds
-  - [ ] Create results comparison table with explicit tolerances
-  - [ ] Link to Rust test functions (`test_validate_*`)
+- [ ] Write the R reference case
+  - [ ] `case()` in `validation/r/cases/<area>.R` with the reference R function
+  - [ ] `Rscript validation/r/run.R --write <id>` and `Rscript validation/r/run.R --check`
 
 - [ ] Add Rust validation tests
-  - [ ] Use naming convention: `test_validate_[method]_[scenario]`
-  - [ ] Compare against documented R/Python results
-  - [ ] Apply appropriate tolerances based on sample size
+  - [ ] Use naming convention: `test_validate_<method>_<dataset>[_<variant>]`
+  - [ ] Load the case with `crate::test_support::load_case("<id>")` and compare with `Check`/`Tol`
+  - [ ] Pin every number the method reports (no `if let Ok`, no print-only checks)
 
-- [ ] Update validation indexes
-  - [ ] Add entry to `validation/README.md` method index
-  - [ ] Mark status as "Complete" with link to validation doc
+- [ ] Register and document
+  - [ ] Registry entry in `validation/methods/<area>.json` (cases, tests, quantities, tolerance, deviations)
+  - [ ] Create or update `validation/[category]/[method].md` (R reference, Rust tests, tolerance, status)
+  - [ ] Add or update the `validation/README.md` index row; its status is derived from the registry
   - [ ] Add any new packages to `validation/reference_implementations.md`
+  - [ ] `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt` is clean
 
 ### Performance Benchmarking (Optional for Complex Methods)
 
@@ -250,13 +252,16 @@ section if that repo is not checked out.
 
 **Validation document template**: `validation/README.md`
 
-**Tolerance guidelines**:
-| Sample Size | Coefficients | Standard Errors | p-values |
+**Tolerances** (`p2a_validation::Tol`, relative):
+| Sample Size | `Tol::coef` | `Tol::se` / `Tol::stat` | `Tol::p_value` |
 |-------------|--------------|-----------------|----------|
-| n < 100 | 1e-6 | 1e-4 | 0.01 |
-| n = 100-1000 | 1e-8 | 1e-6 | 0.001 |
-| n > 1000 | 1e-10 | 1e-8 | 0.0001 |
+| n < 100 | 1e-6 | 1e-5 | 1e-5 (abs 1e-12) |
+| n = 100-1000 | 1e-8 | 1e-6 | 1e-6 (abs 1e-12) |
+| n > 1000 | 1e-10 | 1e-8 | 1e-8 (abs 1e-12) |
 
-**Run validation tests**: `cargo test -p p2a-core -- test_validate --nocapture`
+**Run validation**: `validation/run_validation.sh` (or `--rust-only --category <cat>`), and
+`Rscript validation/r/run.R --check` for the R cases
+
+**Lint**: `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`
 
 **Related skill**: Use `/validation-benchmarking` for detailed workflow guidance

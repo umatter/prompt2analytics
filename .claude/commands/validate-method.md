@@ -49,7 +49,12 @@ When the user invokes this command with a method name, follow this workflow:
    - `validation_doc`: Path to validation documentation
    - `test_patterns`: Rust test name patterns
 
-5. Report the artifact status:
+5. Read `validation/methods/*.json` (the methods registry) and find the entries for the method
+   (by `id`, `name` or `doc`): their `cases`, `tests` and `deviations`. The registry is
+   authoritative for tests; `test_patterns` in `method_registry.json` are search hints, and
+   some are stale. A method with no registry entry is not R-pinned.
+
+6. Report the artifact status:
    ```
    === Method: Ordinary Least Squares (ols) ===
    R equivalent: lm() from stats package
@@ -59,7 +64,8 @@ When the user invokes this command with a method name, follow this workflow:
      [X] R benchmark script: ../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_regression.R
      [X] Criterion benchmark: crates/p2a-core/benches/regression_benchmarks.rs (OLS_Standard)
      [X] Validation doc: validation/regression/ols.md
-     [X] Rust tests: test_validate_ols, test_validate_longley
+     [X] Registry: validation/methods/regression.json, id ols (cases ols_grunfeld, ols_mtcars, ols_longley)
+     [X] Registered tests: p2a-core::regression::ols::tests::test_validate_ols_grunfeld, ...
    ```
 
 ### STEP 2: ARTIFACT CHECK
@@ -79,48 +85,50 @@ For each artifact type:
    - If missing: Note that it should be created after validation
 
 4. **Rust Tests**
-   - Search for tests matching the patterns in `test_patterns`
-   - Report which tests exist
+   - Report the registered tests (`tests` of the registry entries) and whether each is in
+     `cargo test -p <pkg> --tests -- --list`
+   - Use `test_patterns` only to find unregistered `test_validate_*` tests, and report those as
+     not R-pinned
 
 ### STEP 3: RUN VALIDATION (if mode includes "validate")
 
 Execute these steps to validate numerical correctness:
 
-1. **Run Rust validation tests:**
+1. **Check the R reference cases:**
    ```bash
-   cargo test -p p2a-core -- {{test_pattern}} --nocapture
+   Rscript validation/r/run.R --check {{case_ids}}
    ```
-   Run for each pattern in `test_patterns`. Capture output.
+   Exit 1 means a recomputed R value differs from the committed case: report it (an R package
+   upgrade or a changed case), do not rewrite the case without the user.
 
-2. **Parse Rust test output:**
-   - Look for coefficient values, standard errors, p-values, R-squared
-   - Note any assertion failures
+2. **Run the registered Rust tests** in the CI feature set of their package:
+   ```bash
+   cargo test -p p2a-core --no-default-features --features ci -- --exact {{registered test paths}}
+   # or the whole category:
+   validation/run_validation.sh --rust-only --category {{category}}
+   ```
 
-3. **Run R validation script (if exists):**
-   - If `r_benchmark_script` exists and contains validation code, run it
-   - Otherwise, check for `validation/scripts/{{method}}_validation.R`
+3. **The comparison happens inside the tests** (`p2a_validation::Check` at the `Tol`
+   tolerances of `validation/README.md`): a failing test lists every quantity that differs,
+   with R's value, Rust's value and the allowed difference. Set `P2A_VALIDATION_VERBOSE=1` to
+   print every comparison. Report the registry `deviations` as known differences, with their
+   finding ids.
 
-4. **Compare results:**
-   - Apply tolerances from registry:
-     - Coefficients: 1e-6 (small), 1e-8 (medium), 1e-10 (large sample)
-     - Standard errors: 1e-4 (small), 1e-6 (medium), 1e-8 (large)
-     - P-values: 0.01 (small), 0.001 (medium), 0.0001 (large)
-   - Report pass/fail for each metric
+4. **If no case exists** for the method: write one from
+   `.claude/tooling/validation/templates/r_validation.R.template` into
+   `validation/r/cases/<area>.R`, run `Rscript validation/r/run.R --write <id>`, add a
+   `test_validate_*` test that loads it (`crate::test_support::load_case`) and compares with
+   `Check`/`Tol`, and add the registry entry. Then run
+   `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`.
 
 5. **Generate validation report:**
    ```
    === Validation Results: OLS ===
 
-   Test: Longley Dataset (n=16)
-     Coefficient β₁: R=0.01506, Rust=0.01506, Diff=2.3e-11 [PASS]
-     SE(β₁): R=0.08492, Rust=0.08492, Diff=1.1e-10 [PASS]
-     R²: R=0.9955, Rust=0.9955, Diff=1e-12 [PASS]
-
-   Test: Synthetic DGP (n=1000)
-     All 5 coefficients within tolerance [PASS]
-     All 5 standard errors within tolerance [PASS]
-
-   Overall: 12/12 checks passed
+   R check: 3 case(s) match the committed files (ols_grunfeld, ols_mtcars, ols_longley)
+   Registered tests: 4/4 passed (p2a-core, ci features)
+   Known deviations: none
+   Unregistered test_validate tests (not R-pinned): none
    ```
 
 ### STEP 4: RUN BENCHMARKS (if mode includes "benchmark")
@@ -176,7 +184,7 @@ Execute these steps to compare performance:
    - Highlight any failures with actionable suggestions
 
 2. **Save markdown report:**
-   - Path: `validation/reports/{{method}}_{{date}}.md`
+   - Path: `validation/reports/{{method}}_{{date}}.md` (gitignored; never commit it)
    - Include:
      - Method summary
      - Validation results table
@@ -191,9 +199,23 @@ Execute these steps to compare performance:
 4. **Update validation doc (if needed):**
    - If performance numbers are missing or outdated, update them
 
+5. **Do not edit `validation/VALIDATION_STATUS.md`.** It is generated, and only
+   `validation/run_validation.sh --write-status` regenerates it (once per wave integration).
+
 ---
 
 ## HANDLING MISSING ARTIFACTS
+
+### Missing R Reference Case
+
+If the method has no registry entry or its cases are missing:
+
+1. Read the template at `.claude/tooling/validation/templates/r_validation.R.template`
+2. Use the R function named as the method's reference (`validation/reference_implementations.md`)
+3. Write the case into `validation/r/cases/<area>.R` (ask the user before writing), then
+   `Rscript validation/r/run.R --write <id>` and `--check <id>`
+4. Add the `test_validate_*` test and the registry entry in `validation/methods/<area>.json`
+5. Update the method doc and the `validation/README.md` index row (status from the registry)
 
 ### Missing R Benchmark Script
 
@@ -245,17 +267,15 @@ Artifacts:
   [X] Validation doc: validation/regression/ols.md
   [X] Rust tests: test_validate_ols, test_validate_longley
 
-Running validation tests...
+Checking R cases and running the registered tests...
+[Rscript validation/r/run.R --check output]
 [cargo test output]
 
 === Validation Results: OLS ===
 
-Test: Longley Dataset (n=16)
-  Coefficient (Intercept): R=-3482.26, Rust=-3482.26, Diff=1.2e-10 [PASS]
-  Coefficient (GNP.deflator): R=0.01506, Rust=0.01506, Diff=2.3e-11 [PASS]
-  R²: R=0.9955, Rust=0.9955, Diff=1e-12 [PASS]
-
-Overall: 12/12 checks passed
+R check: 3 case(s) match the committed files
+Registered tests: 4/4 passed
+Known deviations: none
 
 Running benchmarks...
 [cargo bench output]
@@ -304,11 +324,20 @@ The method registry at `.claude/tooling/validation/method_registry.json` contain
 ## QUICK COMMANDS REFERENCE
 
 ```bash
-# Run Rust validation tests
-cargo test -p p2a-core -- test_validate_{{method}} --nocapture
+# Check the R reference cases (all, or the listed ids)
+Rscript validation/r/run.R --check {{case_ids}}
 
-# Run all validation tests
-cargo test -p p2a-core -- test_validate --nocapture
+# (Re)write one case after changing it
+Rscript validation/r/run.R --write {{case_id}}
+
+# Run the validation tests of a category (CI feature sets)
+validation/run_validation.sh --rust-only --category {{category}}
+
+# Run Rust validation tests of a method, printing every comparison
+P2A_VALIDATION_VERBOSE=1 cargo test -p p2a-core -- test_validate_{{method}} --nocapture
+
+# Registry, case and doc lint
+python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt
 
 # Run Rust benchmarks for a method
 cargo bench -p p2a-core -- {{criterion_group}}
@@ -364,10 +393,11 @@ The command enforces these speedup factors over R:
 
 ### Results differ significantly
 
-1. Verify same random seed (42) in both R and Rust
-2. Check data generation matches (same DGP)
-3. Verify algorithm parameters match (e.g., max iterations)
-4. Some methods have intentional differences (document in validation doc)
+1. R-pinned tests read the case's own dataset (`validation/datasets/` or `datasets/generated/`),
+   so R and Rust see the same doubles; check that the test loads the case with `load_case`
+2. Verify algorithm parameters match (e.g., max iterations, covariance type)
+3. A mismatch is a defect: fix it, or record a registry deviation with its finding id; never
+   widen a tolerance to make it pass
 
 ### Criterion benchmark not running
 
@@ -381,5 +411,7 @@ The command enforces these speedup factors over R:
 
 - `.claude/skills/validation-benchmarking/SKILL.md` - Detailed validation workflow
 - `.claude/tooling/validation/README.md` - Template documentation
-- `validation/README.md` - Validation docs index
+- `validation/README.md` - Validation docs index, the R-pinned workflow and the `Tol` table
+- `validation/methods/README.md` - Methods registry schema
+- `validation/r/run.R` - R reference cases (`--check`, `--write`, `--list`)
 - `../prompt2analytics-paper/performance/comparisons/r_comparison/run_all_benchmarks.R` - Run all R benchmarks

@@ -28,6 +28,9 @@ cargo test -p p2a-core                  # Core library tests only
 cargo test -p p2a-mcp                   # MCP server tests only
 cargo test test_name                    # Run specific test by name
 cargo test -p p2a-core -- test_validate # Run validation tests only
+cargo test -p p2a-validation               # R reference case loader (test-only crate) and its self-tests
+validation/run_validation.sh               # test_validate tests in the CI feature sets + R drift check
+Rscript validation/r/run.R --check         # R reference values still reproduce (needs R + packages)
 
 # Linting
 cargo clippy --all-targets --all-features
@@ -119,6 +122,7 @@ prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.88+) exposin
 - **p2a-mcp**: MCP server exposing 270 tools with LLM integration, plus an HTTP API documented in `API_ENDPOINTS.md`
 - **p2a-chat**: Lightweight terminal REPL that speaks to a running `p2a-mcp` HTTP server (no direct p2a-core dependency). Reach for it when you want to exercise the MCP tool-call path end-to-end from a shell without the Dioxus UI.
 - **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
+- **p2a-validation**: test-only crate (`publish = false`) that loads the R reference cases in `validation/expected/*.json` and compares values (`Case`, `Check`, `Tol`); a dev-dependency of p2a-core, p2a-cli and p2a-mcp.
 
 Out-of-scope directories (ignore when searching unless specifically asked): `archive/`, `_resources/`, `target/`, `crates/p2a-dioxus/node_modules/`.
 
@@ -727,36 +731,72 @@ cd crates/p2a-dioxus && dx serve
 
 ### Validation Framework (`validation/`)
 
-All methods are validated against reference R implementations. Validation has two layers:
+**Two kinds of `test_validate_*` tests.** *R-pinned* tests are registered in
+`validation/methods/*.json`, load a committed R reference case
+(`validation/expected/<case>.json`) through `crate::test_support::load_case` (p2a-core) or
+`p2a_validation::Case::load` (p2a-cli, p2a-mcp), and compare every reported number with
+`p2a_validation::{Check, Tol}`. The others check properties, known DGPs or quoted values.
+Only the first kind may be described as matching R. `validation/README.md` explains both, the
+layout and the workflow.
 
-1. **Rust tests** with `test_validate_*` prefix compare outputs to known R values
-2. **Validation documents** in `validation/[category]/method.md` record R code, expected values, and precision
+**Adding or fixing a method's validation** (the rules for Tiers 2-4):
+1. Add a case to `validation/r/cases/<area>.R` (the R function named as the method's reference;
+   `set.seed()` and `ctx$gen_dataset()` for simulated data, which must have noise).
+2. `Rscript validation/r/run.R --write <id>`, then `--check`.
+3. Write `test_validate_<method>_<dataset>[_<variant>]` in the module it tests, pinning every
+   number the method reports for that call (no `if let Ok`, no print-only checks).
+4. Add the registry entry in `validation/methods/<area>.json` (cases, tests, quantities,
+   tolerance, deviations).
+5. Update the method doc and the `validation/README.md` index row (its status follows the
+   registry: `R-pinned` / `not R-pinned`).
+
+Never widen a tolerance. A mismatch outside the package's findings is a registry deviation
+(`{"finding", "quantity", "note"}`) with a `// deviation <id>` comment that keeps the quantity
+out of the `Check`. Each package owns its own case file, case JSONs, generated datasets and
+registry file. Method docs say "not R-pinned" until a registry entry exists.
 
 ```bash
-# Run all validation tests
-cargo test -p p2a-core -- test_validate
-
-# Run specific method validation
-cargo test -p p2a-core -- test_validate_ols
-cargo test -p p2a-core -- test_validate_hdfe
-
-# Full validation (Rust + R scripts)
-./validation/run_validation.sh
-
-# Filter by category
-./validation/run_validation.sh --category stats
+validation/run_validation.sh                              # every test_validate test (CI feature sets) + R drift check
+validation/run_validation.sh --rust-only --category stats # stats | regression | econometrics | forecasting | ml | cli | mcp
+validation/run_validation.sh --write-status --legacy-r    # full run; regenerates VALIDATION_STATUS.md
+Rscript validation/r/run.R --check                        # recompute every case; exit 1 on a difference > 1e-12 relative
+Rscript validation/r/run.R --write <id>                   # (re)write one case and its generated datasets
+Rscript validation/r/run.R --list
+cargo test -p p2a-core --lib --no-default-features --features ci -- regression::ols::tests::test_validate
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::panel::tests::test_validate
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::hdfe::tests::test_validate
 ```
 
-Tolerance guidelines: coefficients to 1e-10 for n>1000, 1e-6 for n<100. Iterative methods (HDFE, MLE) may have slightly larger differences. See `validation/README.md` for details.
+`run_validation.sh` exits 0 PASS, 1 FAIL (a compile error or zero selected tests is a
+failure), 2 usage error, 3 INCOMPLETE (`Rscript` or `cargo` missing); output goes to
+`validation/reports/<timestamp>-<pid>/` (gitignored). `P2A_VALIDATION_VERBOSE=1` prints every
+comparison a `Check` makes. Use module-path filters as above: they are stable where individual
+test names are not, and the paper's Makefile uses them.
+
+**Status page.** `validation/VALIDATION_STATUS.md` is generated
+(`validation/run_validation.sh --write-status`), never hand-edited. Regenerate it once per
+wave integration, after merging lanes, not inside a lane. CI fails its status-page check
+(`P2A_CHECK_STATUS_PAGE=1`, `validation/tools/tests/test_status_page.py`) when the page's
+per-package `test_validate` counts differ from `cargo test -- --list`.
+
+**Lint.** `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`
+(a CI gate, with the three `--list` outputs CI writes). It checks registry/case/test
+consistency, unregistered `load_case` calls, dead backticked test names and dead links in
+`validation/**/*.md`, `README.md` and `CLAUDE.md`, and dataset rows. Identifiers that only look
+like test names go in `validation/tools/lint_ignore_names.txt`.
+
+**Tolerances.** `p2a_validation::Tol` implements the table in `validation/README.md`
+(coefficients 1e-6/1e-8/1e-10 for n < 100 / ≤ 1000 / > 1000; SEs and statistics
+1e-5/1e-6/1e-8; `Tol::iterative(rel)` documented per test).
 
 Key directories:
-- `validation/regression/` - OLS, robust SEs, GLS, LOESS, sensemakr, E-value
-- `validation/econometrics/` - Panel, IV, DiD, discrete choice, spatial, survival
-- `validation/stats/` - 50+ statistical tests
-- `validation/forecasting/` - ARIMA, MSTL, Holt-Winters
-- `validation/ml/` - Clustering, PCA, t-SNE
-- `validation/datasets/` - Reference datasets (Grunfeld, Longley, Iris)
-- `validation/VALIDATION_STATUS.md` - Current coverage report
+- `validation/r/` - R harness (`harness.R`, `run.R`) and the cases (`cases/<area>.R`)
+- `validation/expected/` - case JSON (one R reference case per file) plus legacy CSV outputs of `validation/scripts/*.R`
+- `validation/methods/` - the methods registry (which tests pin which cases; `methods/README.md`)
+- `validation/datasets/` - Grunfeld, employee training, GDP; `generated/` is written by R cases
+- `validation/tools/` - `validation_status.py` (select, collect, lint, render), the lint ignore list, the tool tests
+- `validation/regression/`, `diagnostics/`, `econometrics/`, `forecasting/`, `timeseries/`, `stats/`, `multivariate/`, `ml/`, `linalg/` - method documents
+- `validation/VALIDATION_STATUS.md` - generated status (which methods are R-pinned, last full run)
 
 ### Rust Benchmarks (`crates/p2a-core/benches/`)
 
@@ -810,10 +850,11 @@ Changing any of these silently changes or breaks a paper exhibit; check the pape
 | `bench_utils.rs` JSON schema and method names emitted by `comprehensive_benchmarks`, `unified_benchmarks`, `benchmark_n10000` | `performance/results/rust_*.json` → `merge_results.R` (name normalization across R/Rust) | Renaming a benchmark or a JSON field drops the method from the speed/memory comparison |
 | MCP **tool names** (270 handlers) | `paper/code/e2e_eval/test_cases.json` expects exact names for the 96 single-turn prompts (`regression_ols`, `panel_fixed_effects`, `rd_estimate`, `ts_arima_fit`, ...); `rescore.py` scores them with an alias table | Renaming a tool turns every single-turn prompt targeting it into a scored miss. Multi-turn (MT1–MT8) scoring only checks that *some* tool was called, so names there are documentation |
 | HTTP API contract in `API_ENDPOINTS.md` (`/api/sessions`, `/api/tools/load_dataset`, `/api/llm/chat/stream`, `/health`) | `run_evaluation.py` (backend URL from `P2A_BASE_URL`, default `localhost:8081`, the Dioxus dev-proxy port used for the paper runs) | Endpoint or SSE event changes break the eval harness |
-| `p2a` **text output format** for `data describe/head`, `reg ols` (text and `--format json`), `panel fe/re/hausman/hdfe`, diagnostics | `paper/code/generate_outputs.sh` → `paper/generated/cli_*.tex`, included verbatim; finds the binary via `SW_REPO`/`P2A`/`P2A_DATA_DIR` (default sibling checkout, release build) | Output formatter changes alter exhibits. `make jss` there re-runs the capture whenever the script is newer than the `.tex` files, so a rebuild after touching the script silently re-captures from whatever `p2a` you have built |
+| `p2a` **text output format** for `data describe/head`, `reg ols` (text and `--format json`), `panel fe/re/hausman/hdfe`, diagnostics | `paper/archive/code/generate_outputs.sh` → `paper/archive/generated/cli_*.tex`, included verbatim; finds the binary via `SW_REPO`/`P2A`/`P2A_DATA_DIR` (default sibling checkout, release build). The paper Makefile does not re-run it | Output formatter changes alter exhibits. Golden copies in `crates/p2a-cli/tests/golden/cli_*.txt` fail the exhibit tests (`p2a-cli::exhibits::test_validate_cli_*`) on any output change; update them with `P2A_UPDATE_GOLDEN=1` only after the R checks in the same test pass |
 | `validation/datasets/` (Grunfeld etc.) | CLI captures above, `rust_validation/scripts/run_validation.sh`, several R benchmark DGPs | Moving a dataset breaks `make generate` |
 | The LLM system prompt and dataset-context format (`llm/context.rs`, `llm/tools.rs`) | e2e evaluation accuracy (`run_evaluation.py` results) | Tier 0 bounded and delimited the dataset block (JSON-quoted names and values, byte and column caps), so re-running the evaluation against a newer `SOFTWARE_VERSION` can shift the accuracy numbers. Tool names and SSE events are unchanged |
-| Counts and claims stated as prose in `paper/sections/*.tex`: "over 200 methods", test-function and validation-test counts, ~62% line coverage, version, Rust version, and the description of what CI runs | none (hand-written) | They drift silently; re-derive them when re-pinning `SOFTWARE_VERSION` |
+| `validation/expected/*.json`, `validation/methods/*.json` | the paper's validation claims (supplementary appendix "numerical validation", introduction footnote, discussion) | A changed reference value or registry entry changes what the paper may claim as R-pinned |
+| Counts and claims stated as prose in `paper/sections/*.tex`: "over 200 methods", test-function and validation-test counts, ~62% line coverage, version, Rust version, and the description of what CI runs | none (hand-written) | They drift silently; re-derive them when re-pinning `SOFTWARE_VERSION`, and re-derive validation counts from the generated `validation/VALIDATION_STATUS.md` |
 
 ### Paper-side code that points back here
 
@@ -869,7 +910,12 @@ Auto-discovered guidance:
 
 - **Gating**: `cargo fmt --all -- --check`; `cargo test --tests` for p2a-core (`ci` feature), p2a-mcp
   (`http,llm,auth,websocket`), p2a-cli (`spectral-analysis`); doctests for p2a-core (`ci`) and p2a-mcp
-  (`http,llm,auth,websocket`) in their own step; plus a wasm32 `cargo check` + host tests for p2a-dioxus (`web`).
+  (`http,llm,auth,websocket`) in their own step; then the validation step: `cargo test -p p2a-validation`,
+  the strict validation lint (`validation_status.py lint --strict` on the three `--list` outputs), the Python
+  unittests in `validation/tools/tests` (including the status-page check, run with `P2A_CHECK_STATUS_PAGE=1`)
+  and the runner self-test `bash validation/tools/tests/test_run_validation.sh`; plus a wasm32 `cargo check` +
+  host tests for p2a-dioxus (`web`). CI does not install R: the R drift check (`Rscript validation/r/run.R
+  --check`) runs in `validation/run_validation.sh` locally.
 - **Doctests are gated** and, as of Oct 2026, p2a-core runs 81 passed / 0 failed / 190 ignored. A doc example
   that stops compiling is a build failure, so keep `use p2a_core::...` paths in doc comments pointing at
   what `mod.rs` actually re-exports. The 190 examples fenced as ignore are NOT compiled and can still rot silently.
@@ -1018,8 +1064,12 @@ let df = df! {
 
 **Validation:**
 - `validation/README.md` - Validation framework overview and method index
-- `validation/VALIDATION_STATUS.md` - Current validation coverage by category
+- `validation/VALIDATION_STATUS.md` - Generated status (R-pinned methods, test counts, last full run)
 - `validation/run_validation.sh` - Master validation runner (Rust + R)
+- `validation/r/run.R` - R reference cases: `--check`, `--write`, `--list`
+- `validation/methods/` - Methods registry (which tests pin which R cases)
+- `validation/tools/validation_status.py` - Results collector, registry lint and status-page renderer
+- `crates/p2a-validation/src/check.rs` - `Tol` and `Check`, the comparison side of the harness
 - `validation/[category]/method.md` - Per-method validation documents with R code and expected values
 
 **GPU Acceleration:**
