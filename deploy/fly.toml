@@ -27,7 +27,7 @@ primary_region = "fra"          # Frankfurt — EU
   # in-process limits described below exist only in images whose /health
   # response has a "governor" object; older images ignore P2A_LIMITS and the
   # other new variables and run without them.
-  image = "ghcr.io/umatter/prompt2analytics/backend:0.1.3"
+  image = "ghcr.io/umatter/prompt2analytics/backend:0.2.0"
 
 [env]
   P2A_HOST = "0.0.0.0"
