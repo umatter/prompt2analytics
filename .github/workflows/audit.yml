@@ -36,8 +36,8 @@ jobs:
         with:
           toolchain: stable
 
-      # The rkyv and rmcp exemptions under "Run cargo audit" rest on facts about
-      # the dependency graph that a feature change (a Dependabot PR, a hand
+      # The rkyv, rmcp and zstd exemptions under "Run cargo audit" rest on facts
+      # about the dependency graph that a feature change (a Dependabot PR, a hand
       # edit) can make false while the --ignore flags keep the audit green.
       # Test them first; each failure names the exemption that no longer holds.
       # --locked: test the committed Cargo.lock, the graph cargo audit reads.
@@ -63,6 +63,31 @@ jobs:
             echo "::error::The RUSTSEC-2026-0189 exemption no longer holds: an rmcp HTTP transport feature is enabled."
             exit 1
           fi
+          # RUSTSEC-2026-0398 is in zstd-safe's seekable module, which only its
+          # `seekable` feature compiles.
+          if ! features=$(cargo tree --locked --workspace --all-features --target all \
+              -e features -i zstd-safe); then
+            echo "::error::cargo tree -i zstd-safe failed, so the RUSTSEC-2026-0398 (zstd-safe) exemption cannot be checked."
+            exit 1
+          fi
+          if grep -F 'zstd-safe feature "seekable"' <<<"$features"; then
+            echo "::error::The RUSTSEC-2026-0398 exemption no longer holds: zstd-safe's seekable feature is enabled."
+            exit 1
+          fi
+          # RUSTSEC-2026-0391 and RUSTSEC-2026-0403 are exempted on how polars
+          # 0.52.0 calls zstd 0.13.3. Another caller, or another version of
+          # either, needs that argument made again; zstd 0.13.3 gone means the
+          # two exemptions (and this check) are to be deleted.
+          if ! callers=$(cargo tree --locked --workspace --all-features --target all \
+              -e normal,build -i zstd@0.13.3 --depth 1 --prefix none --format '{p}'); then
+            echo "::error::cargo tree -i zstd@0.13.3 failed, so the RUSTSEC-2026-0391 and RUSTSEC-2026-0403 (zstd) exemptions cannot be checked; if zstd 0.13.3 is gone, delete them."
+            exit 1
+          fi
+          expected=$'polars-arrow v0.52.0\npolars-parquet v0.52.0\nzstd v0.13.3'
+          if [[ "$(LC_ALL=C sort <<<"$callers")" != "$expected" ]]; then
+            echo "::error::The RUSTSEC-2026-0391 and RUSTSEC-2026-0403 exemptions no longer hold: zstd 0.13.3 is a dependency of $(grep -v '^zstd ' <<<"$callers" | sed -z 's/\n/, /g; s/, $//')."
+            exit 1
+          fi
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -78,8 +103,8 @@ jobs:
       # "Check exemption preconditions" if it has one, as soon as it stops being
       # true. A permanently red audit is one nobody reads, so an advisory that
       # does not apply here is exempted with its reason rather than left failing
-      # the job. The "Check exemption preconditions" step above tests the rkyv
-      # and rmcp conditions on every run.
+      # the job. The "Check exemption preconditions" step above tests the rkyv,
+      # rmcp and zstd conditions on every run.
       #
       # Cargo.lock lists more than is compiled: an optional dependency named in a
       # weak feature (`dep?/feature`) is locked even when nothing enables it.
@@ -109,10 +134,45 @@ jobs:
       #     (calamine no longer holds it; 0.37 uses quick-xml 0.42).
       #     object_store first requires ^0.41 in 0.14.1, and polars 0.53 still uses
       #     object_store 0.13. Revisit when polars moves to object_store >= 0.14.1.
+      #
+      #   The three zstd entries below are held by polars-arrow and
+      #   polars-parquet 0.52, the only users of the zstd crate here (the zstd
+      #   check above), which require zstd ^0.13 and so zstd-safe ^7; the fixes
+      #   are in zstd 0.14.3 and zstd-safe 8.2.0, and polars 0.52 is pinned.
+      #   (zstd-sys's RUSTSEC-2026-0410 was fixed by updating to 2.1.2.) Delete
+      #   all three, and the zstd checks above, when polars requires zstd >=
+      #   0.14.3.
+      #
+      #   RUSTSEC-2026-0391  zstd 0.13.3: a stream decoder or encoder made with
+      #     `with_context` inherits what an abandoned stream left on that
+      #     context. Reached: polars-parquet decompresses the pages of a column
+      #     chunk through `read::Decoder::with_context` on one context, so every
+      #     zstd Parquet file a user loads or uploads, in hosted mode too, runs
+      #     the affected code. Not a disclosure here: polars creates that
+      #     context for one column chunk of one read (BasicDecompressor) and
+      #     drops it with the read, and p2a-mcp's dictionary check passes a new
+      #     one for every page, so what an abandoned page leaves can only reach
+      #     a later page of the same column of the same file, bytes its uploader
+      #     already has. Keep every context to one file.
+      #
+      #   RUSTSEC-2026-0403  zstd-safe 7.2.4: `DCtx::decompress_stream` keeps
+      #     the output position of a failed call inside a legacy frame, which
+      #     extends a `Vec` destination over uninitialized memory. Legacy frames
+      #     are compiled in (zstd's default features), but the flaw is not
+      #     reached: polars decompresses through `read::Decoder` into
+      #     initialized slices, which the advisory lists as unaffected, and
+      #     nothing here calls `write::Decoder` or streams into a `Vec`.
+      #
+      #   RUSTSEC-2026-0398  zstd-safe 7.2.4: `Seekable::decompress`. Not
+      #     compiled: the seekable module needs zstd-safe's `seekable` feature,
+      #     which nothing enables (checked above).
       - name: Run cargo audit
         run: |
           cargo audit \
             --ignore RUSTSEC-2026-0189 \
             --ignore RUSTSEC-2026-0235 \
             --ignore RUSTSEC-2026-0194 \
-            --ignore RUSTSEC-2026-0195
+            --ignore RUSTSEC-2026-0195 \
+            --ignore RUSTSEC-2026-0391 \
+            --ignore RUSTSEC-2026-0403 \
+            --ignore RUSTSEC-2026-0398
