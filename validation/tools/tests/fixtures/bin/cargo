@@ -4,6 +4,8 @@
 #   FAKE_CARGO_LIST_DIR  directory with <package>.list files printed for `-- --list`
 #   FAKE_CARGO_MODE      compile_error: print a compile error and exit 101
 #   FAKE_CARGO_FAIL      test name reported FAILED; FAKE_CARGO_DROP: test name not reported
+#   FAKE_CARGO_READ_STDIN  non-empty: a test run reads its standard input to the end, as a
+#                        test that reads stdin (or a child that inherits it) would
 echo "$*" >> "${FAKE_CARGO_CALLS:-/dev/null}"
 pkg=""
 prev=""
@@ -42,6 +44,9 @@ if $list; then
   f="${FAKE_CARGO_LIST_DIR:-/nonexistent}/$pkg.list"
   if [ -f "$f" ]; then cat "$f"; else printf '\n0 tests, 0 benchmarks\n'; fi
   exit 0
+fi
+if [ -n "${FAKE_CARGO_READ_STDIN:-}" ]; then
+  cat > /dev/null
 fi
 echo "     Running $target (target/debug/deps/fake-0000000000000000)"
 echo ""

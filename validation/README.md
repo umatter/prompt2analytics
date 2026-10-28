@@ -50,7 +50,7 @@ validation/run_validation.sh --rust-only         # Rust only (tests and registry
 validation/run_validation.sh --r-only            # R drift check only: Rscript validation/r/run.R --check
 validation/run_validation.sh --category stats    # one category: stats|regression|econometrics|forecasting|ml|cli|mcp
 validation/run_validation.sh --r-only --legacy-r # also run the legacy validation/scripts/*.R (reported, never counted)
-validation/run_validation.sh --write-status      # also regenerate validation/VALIDATION_STATUS.md
+validation/run_validation.sh --write-status      # also regenerate validation/VALIDATION_STATUS.md (full runs only)
 ```
 
 The Rust step lists the tests of p2a-core, p2a-cli and p2a-mcp on CI's feature sets
@@ -66,9 +66,10 @@ compares the CSVs it produces with `validation/expected/*.csv`.
 Exit codes: 0 PASS, 1 FAIL, 2 usage error, 3 INCOMPLETE (`cargo` or `Rscript` missing for a
 requested step). Results go to `validation/reports/<timestamp>-<pid>/` (gitignored): the
 logs, `results.json` and `report.md`; both record the commit, marked `-dirty` when tracked
-files differ from it. `--release`, `--verbose` (`-v`) and the environment variables
-`P2A_RSCRIPT`, `P2A_LEGACY_R_TIMEOUT` (seconds, default 300) and `PYTHON` are also
-accepted.
+files differ from it. `--write-status` describes the whole suite, so it is refused (exit 2)
+with `--category`, `--rust-only` or `--r-only`. `--release`, `--verbose` (`-v`) and the
+environment variables `P2A_RSCRIPT`, `P2A_LEGACY_R_TIMEOUT` (whole seconds >= 1, default
+300; read only with `--legacy-r`) and `PYTHON` are also accepted.
 
 Direct cargo filters (libtest filters are substrings of the test path, not regexes):
 

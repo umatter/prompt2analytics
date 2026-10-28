@@ -1,0 +1,10 @@
+    Finished `test` profile [optimized] target(s) in 0.40s
+     Running unittests src/lib.rs (target/debug/deps/p2a_core-0000000000000000)
+regression::ols::tests::test_validate_two: test
+stats::ttest::tests::test_validate_one: test
+
+2 tests, 0 benchmarks
+     Running tests/validation_ml_advanced.rs (target/debug/deps/validation_ml_advanced-0000000000000000)
+test_validate_c50_classification: test
+
+1 test, 0 benchmarks

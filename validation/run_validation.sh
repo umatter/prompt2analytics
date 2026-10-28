@@ -24,8 +24,10 @@ Usage: validation/run_validation.sh [--rust-only | --r-only] [--category <cat>] 
                                     [--legacy-r] [--write-status] [--verbose]
   -c is --category, -v is --verbose, -h/--help prints this and exits 0.
   <cat>: stats | regression | econometrics | forecasting | ml | cli | mcp
+  --write-status needs a full run: no --category, --rust-only or --r-only.
 Exit codes: 0 PASS, 1 FAIL, 2 usage error, 3 INCOMPLETE.
-Environment: P2A_RSCRIPT (default Rscript), P2A_LEGACY_R_TIMEOUT (default 300), PYTHON (default python3).
+Environment: P2A_RSCRIPT (default Rscript), PYTHON (default python3),
+  P2A_LEGACY_R_TIMEOUT (whole seconds >= 1, default 300; read only with --legacy-r).
 EOF
 }
 
@@ -83,6 +85,12 @@ if $LEGACY && $RUST_ONLY; then usage_error "--legacy-r runs R scripts; it cannot
 if $WRITE_STATUS && [ -n "$CATEGORY" ]; then
     usage_error "--write-status describes the whole suite; it cannot be combined with --category"
 fi
+if $WRITE_STATUS && $R_ONLY; then
+    usage_error "--write-status describes the whole suite; it cannot be combined with --r-only"
+fi
+if $WRITE_STATUS && $RUST_ONLY; then
+    usage_error "--write-status describes the whole suite; it cannot be combined with --rust-only"
+fi
 RUN_RUST=true
 RUN_R=true
 if $R_ONLY; then RUN_RUST=false; fi
@@ -95,9 +103,14 @@ cd "$PROJECT_ROOT"
 PYTHON="${PYTHON:-python3}"
 P2A_RSCRIPT="${P2A_RSCRIPT:-Rscript}"
 P2A_LEGACY_R_TIMEOUT="${P2A_LEGACY_R_TIMEOUT:-300}"
-case "$P2A_LEGACY_R_TIMEOUT" in
-    '' | *[!0-9]*) usage_error "P2A_LEGACY_R_TIMEOUT must be a number of seconds" ;;
-esac
+# Only --legacy-r reads it. timeout(1) treats 0 as "no limit", so 0 (and leading zeros) are refused.
+if $LEGACY; then
+    case "$P2A_LEGACY_R_TIMEOUT" in
+        '' | *[!0-9]* | 0*)
+            usage_error "P2A_LEGACY_R_TIMEOUT must be a whole number of seconds >= 1 (got '$P2A_LEGACY_R_TIMEOUT')"
+            ;;
+    esac
+fi
 STATUS_PY="validation/tools/validation_status.py"
 REPORT_DIR="validation/reports/$(date +%Y-%m-%d_%H%M%S)-$$"
 RESULTS="$REPORT_DIR/results.json"
@@ -241,7 +254,7 @@ if $RUN_RUST; then
             fi
             list="$REPORT_DIR/$pkg-tests.txt"
             rc=0
-            run_logged "$list" cargo test -p "$pkg" ${FEAT[@]+"${FEAT[@]}"} --tests -- --list || rc=$?
+            run_logged "$list" cargo test -p "$pkg" ${FEAT[@]+"${FEAT[@]}"} --tests -- --list < /dev/null || rc=$?
             if [ "$rc" -ne 0 ]; then
                 status_py collect --package "$pkg" --exit-code "$rc" --features "$features" -o "$RESULTS" "$list" > /dev/null
                 echo "${RED}Rust $pkg: FAIL (cargo test --list exited $rc; see $list)${NC}"
@@ -278,7 +291,9 @@ if $RUN_RUST; then
             fi
             LOGS=()
             max_rc=0
-            while IFS= read -r target; do
+            # The target list is read on fd 3 and cargo gets /dev/null as stdin, so a test
+            # that reads stdin (or a child inheriting it) cannot consume the targets still to run.
+            while IFS= read -r target <&3; do
                 NAMES=()
                 while IFS=$'\t' read -r t name; do
                     [ "$t" = "$target" ] && NAMES+=("$name")
@@ -288,16 +303,16 @@ if $RUN_RUST; then
                 rc=0
                 if $VERBOSE; then
                     run_logged "$log" env P2A_VALIDATION_VERBOSE=1 cargo test -p "$pkg" ${FEAT[@]+"${FEAT[@]}"} \
-                        "${TARGET_ARGS[@]}" -- --exact --nocapture "${NAMES[@]}" || rc=$?
+                        "${TARGET_ARGS[@]}" -- --exact --nocapture "${NAMES[@]}" < /dev/null 3<&- || rc=$?
                 else
                     run_logged "$log" cargo test -p "$pkg" ${FEAT[@]+"${FEAT[@]}"} \
-                        "${TARGET_ARGS[@]}" -- --exact "${NAMES[@]}" || rc=$?
+                        "${TARGET_ARGS[@]}" -- --exact "${NAMES[@]}" < /dev/null 3<&- || rc=$?
                 fi
                 LOGS+=("$log")
                 if [ "$rc" -gt "$max_rc" ]; then
                     max_rc=$rc
                 fi
-            done < <(cut -f1 "$selection" | sort -u)
+            done 3< <(cut -f1 "$selection" | sort -u)
             collect_line "collect: $pkg: " --package "$pkg" --exit-code "$max_rc" --selected "$n" \
                 --features "$features" -o "$RESULTS" "${LOGS[@]}"
             line="$COLLECT_LINE"

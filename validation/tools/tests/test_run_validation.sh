@@ -46,7 +46,7 @@ runner() {
     [ $# -gt 0 ] && shift
     OUT="$(env PATH="$FIX/bin:$PATH" FAKE_CARGO_CALLS="$TREE/calls.txt" \
         FAKE_CARGO_LIST_DIR="$FIX/runner/$list" ${envs[@]+"${envs[@]}"} \
-        bash "$TREE/validation/run_validation.sh" "$@" 2>&1)"
+        bash "$TREE/validation/run_validation.sh" "$@" 2>&1 < /dev/null)"
     RC=$?
 }
 
@@ -189,12 +189,34 @@ finish legacy-timeout
 # 12. Usage errors exit 2.
 new_tree
 for args in "--bogus" "--category nope" "--rust-only --r-only" "--write-status --category stats" \
-    "--category" "--legacy-r --rust-only"; do
+    "--write-status --r-only" "--write-status --rust-only" "--category" "--legacy-r --rust-only"; do
     # shellcheck disable=SC2086
     runner two -- $args
     [ "$RC" -eq 2 ] || REASONS+=("'$args' exited $RC, expected 2")
 done
+for timeout_value in 0 00 -5 abc; do
+    runner two FAKE_R_MODE=pass P2A_LEGACY_R_TIMEOUT="$timeout_value" -- --r-only --legacy-r
+    [ "$RC" -eq 2 ] || REASONS+=("P2A_LEGACY_R_TIMEOUT='$timeout_value' with --legacy-r exited $RC, expected 2")
+done
+expect_out "P2A_LEGACY_R_TIMEOUT must be a whole number of seconds >= 1 (got 'abc')"
+expect_true '[ ! -e "$TREE/validation/reports" ]' "a usage error created a report directory"
 finish usage
+
+# 12b. P2A_LEGACY_R_TIMEOUT is only read with --legacy-r: a bad value does not stop other runs.
+new_tree
+runner two P2A_LEGACY_R_TIMEOUT=abc -- --rust-only
+expect_rc 0
+expect_out "Overall Status: PASS"
+finish legacy-timeout-unused
+
+# 12c. A test that reads stdin cannot swallow the names of the targets still to run.
+new_tree
+runner multi FAKE_CARGO_READ_STDIN=1 -- --rust-only
+expect_rc 0
+expect_out "Rust p2a-core: PASS (selected 3, ran 3"
+expect_true 'calls | grep -v -- "--list" | grep -qF -- "--test validation_ml_advanced -- --exact test_validate_c50_classification"' \
+    "the validation_ml_advanced target did not run"
+finish stdin-isolated
 
 # 13. --write-status renders validation/VALIDATION_STATUS.md.
 new_tree
