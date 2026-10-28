@@ -96,6 +96,60 @@ impl std::fmt::Display for CovarianceType {
     }
 }
 
+impl CovarianceType {
+    /// Short label for output headers: `"classical"`, `"HC0"`, `"HC1"`, `"HC2"`, `"HC3"`.
+    ///
+    /// Every label parses back to its variant (see the [`FromStr`](std::str::FromStr) impl).
+    ///
+    /// ```
+    /// use p2a_core::regression::CovarianceType;
+    /// let t: CovarianceType = "HC1".parse().unwrap();
+    /// assert_eq!(t.short_label(), "HC1");
+    /// assert_eq!(CovarianceType::Standard.short_label(), "classical");
+    /// ```
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            Self::Standard => "classical",
+            Self::HC0 => "HC0",
+            Self::HC1 => "HC1",
+            Self::HC2 => "HC2",
+            Self::HC3 => "HC3",
+        }
+    }
+}
+
+impl std::str::FromStr for CovarianceType {
+    type Err = EconError;
+
+    /// Parse a covariance type, ignoring case and surrounding whitespace:
+    /// `standard` or `classical` give [`CovarianceType::Standard`]; `hc0`, `hc1`, `hc2`
+    /// and `hc3` the HC variants. Anything else is an [`EconError::InvalidSpecification`]
+    /// whose message quotes the input (its first 64 characters) and lists the accepted
+    /// values.
+    fn from_str(s: &str) -> Result<CovarianceType, EconError> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "standard" | "classical" => Ok(Self::Standard),
+            "hc0" => Ok(Self::HC0),
+            "hc1" => Ok(Self::HC1),
+            "hc2" => Ok(Self::HC2),
+            "hc3" => Ok(Self::HC3),
+            _ => {
+                const MAX_CHARS: usize = 64;
+                let mut quoted: String = s.chars().take(MAX_CHARS).collect();
+                if s.chars().nth(MAX_CHARS).is_some() {
+                    quoted.push_str("...");
+                }
+                Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "unknown covariance type '{quoted}'; use 'standard' (or 'classical'), \
+                         'hc0', 'hc1', 'hc2' or 'hc3'"
+                    ),
+                })
+            }
+        }
+    }
+}
+
 /// A single coefficient with its statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OlsCoefficient {
@@ -2503,6 +2557,55 @@ mod tests {
         );
 
         assert!(matches!(result, Err(EconError::ColumnNotFound { .. })));
+    }
+
+    #[test]
+    fn test_covariance_type_from_str_and_short_label() {
+        use CovarianceType::*;
+        for (s, t) in [
+            ("standard", Standard),
+            ("classical", Standard),
+            ("Classical", Standard),
+            (" HC1 ", HC1),
+            ("hc0", HC0),
+            ("Hc2", HC2),
+            ("HC3", HC3),
+        ] {
+            assert_eq!(s.parse::<CovarianceType>().unwrap(), t, "{s:?}");
+        }
+        let all = [Standard, HC0, HC1, HC2, HC3];
+        let labels: Vec<&str> = all.iter().map(|t| t.short_label()).collect();
+        assert_eq!(labels, ["classical", "HC0", "HC1", "HC2", "HC3"]);
+        for t in all {
+            assert_eq!(t.short_label().parse::<CovarianceType>().unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn test_covariance_type_from_str_rejects_unknown() {
+        for s in ["", "hc4", "robust", "HC1 robust", "hç1"] {
+            let e = s.parse::<CovarianceType>();
+            assert!(
+                matches!(&e, Err(EconError::InvalidSpecification { message })
+                    if message.contains("hc0")
+                        && message.contains("classical")
+                        && message.contains(&format!("'{s}'"))),
+                "{s:?}: {e:?}"
+            );
+        }
+        // 200 characters whose byte 64 is not a char boundary: quoted char-based, capped.
+        let long = format!("a{}", "ç".repeat(199));
+        match long.parse::<CovarianceType>() {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.len() < 300, "{} bytes: {message}", message.len());
+                assert!(
+                    message.contains(&format!("'a{}", "ç".repeat(63))),
+                    "{message}"
+                );
+                assert!(!message.contains(&"ç".repeat(64)), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
