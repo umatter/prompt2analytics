@@ -2,16 +2,16 @@
 
 ## Method Overview
 
-Panel GLS (Feasible Generalized Least Squares) estimates panel data models while accounting for heteroskedasticity and/or cross-sectional correlation in the error structure. It transforms the data to achieve efficient estimation when the standard OLS assumptions are violated.
+Panel GLS (Feasible Generalized Least Squares) estimates panel data models while accounting for heteroskedasticity across periods and correlation between the periods of an entity (an unrestricted T × T error covariance, as plm's `pggls`; no N × N cross-sectional correlation). It transforms the data to achieve efficient estimation when the standard OLS assumptions are violated.
 
 **Key Parameters:**
 - `model`: Type of transformation - "within" (fixed effects), "pooling", or "fd" (first difference)
 - Entity and time identifiers for panel structure
 
 **Models Supported:**
-1. **Fixed Effects GLS (FEGLS)**: Within transformation + GLS
+1. **Fixed Effects GLS (FEGLS)**: Within transformation + GLS (see Known Differences 2)
 2. **Pooled GLS**: Standard pooled estimation with GLS variance
-3. **First Difference GLS**: FD transformation + GLS
+3. **First Difference GLS**: FD transformation + GLS (see Known Differences 2)
 
 **Status**: not R-pinned (ECON-36). Since T0-WP14 p2a refuses panels with more distinct
 periods than entities (T > N; ECON-32). The T × T error covariance is estimated from N
@@ -111,23 +111,9 @@ pggls(inv ~ value + capital, data = d, model = "within")   # also "pooling", "fd
 
 ## Performance Comparison
 
-### Fixed Effects GLS
-
-| Dataset Size | Rust (µs) | R (µs)  | Speedup |
-|--------------|-----------|---------|---------|
-| n=100        | 74        | 4,051   | 55x     |
-| n=1,000      | 2,150     | 4,372   | 2x      |
-| n=10,000     | 55,443    | 37,712  | 0.7x    |
-
-### Pooled GLS
-
-| Dataset Size | Rust (µs)  | R (µs)     | Speedup |
-|--------------|------------|------------|---------|
-| n=100        | 65         | 4,051      | 62x     |
-| n=1,000      | 733        | 4,372      | 6x      |
-| n=10,000     | 38,078     | 37,712     | 1x      |
-
-**Analysis**: Rust implementation is significantly faster for small to medium datasets (n <= 1,000). For large datasets (n=10,000), the performance is comparable, with R's plm package leveraging highly optimized C code for the core GLS operations. The Rust implementation could be further optimized by caching intermediate matrices and using SIMD operations.
+No timing is claimed here. Speed comparisons with R come from the benchmark pipeline in the
+paper repository (`performance/` in `../prompt2analytics-paper`), which runs the Rust
+benchmarks of `crates/p2a-core/benches/` against R.
 
 ## References
 
@@ -137,10 +123,15 @@ pggls(inv ~ value + capital, data = d, model = "within")   # also "pooling", "fd
 
 ## Implementation Notes
 
-The Rust implementation follows a simplified GLS approach:
-1. Apply within/pooling/first-difference transformation
-2. Estimate error covariance from OLS residuals
-3. Apply GLS transformation: β_GLS = (X'Ω⁻¹X)⁻¹X'Ω⁻¹y
-4. Compute GLS standard errors from sandwich variance
-
-For full cross-sectional correlation modeling, the implementation can be extended to estimate the full NxN correlation matrix (as done in R's plm).
+`run_panel_gls` (`crates/p2a-core/src/econometrics/panel/gls_models.rs`):
+1. First-step OLS on the within-transformed (FE), untransformed (pooling) or
+   first-differenced (FD) data. The transformation is used only for these first-step
+   residuals.
+2. The T × T error covariance from those residuals, `Omega[s,t] = (1/N) * sum_i(e_is * e_it)`
+   over the entities observed in both periods, as pggls estimates it. A 1e-6 ridge is added
+   to its diagonal when it cannot be inverted.
+3. GLS, β_GLS = (Σ_i X_i'Ω_i⁻¹X_i)⁻¹ Σ_i X_i'Ω_i⁻¹y_i with Ω_i⁻¹ the submatrix of Ω⁻¹ for
+   the entity's periods, on the untransformed data for all three models: FE and FD do not
+   transform the GLS step (ECON-33; FE only drops the intercept column).
+4. The variance (X'Ω⁻¹X)⁻¹ multiplied by rss/df, df = n - k, although Ω already is the
+   error covariance (ECON-33); pggls reports (X'Ω⁻¹X)⁻¹.
