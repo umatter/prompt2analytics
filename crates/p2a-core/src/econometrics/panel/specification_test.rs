@@ -356,7 +356,7 @@ mod tests {
             &array![[1.0, 0.5], [0.5, 1.0]],
         )
         .unwrap();
-        assert!(close(f.statistic, 2.7826086956521738), "{}", f.statistic);
+        assert!(close(f.statistic, 64.0 / 23.0), "{}", f.statistic);
         assert_eq!(f.df, 2);
         assert!(f.warnings.is_empty(), "{:?}", f.warnings);
     }
@@ -413,7 +413,7 @@ mod tests {
             &array![[1.0, 5e-8], [5e-8, 1e-14]],
         )
         .unwrap();
-        assert!(close(f.statistic, 2.7826086956521738), "{}", f.statistic);
+        assert!(close(f.statistic, 64.0 / 23.0), "{}", f.statistic);
         assert_eq!(f.df, 2);
         assert!(f.warnings.is_empty(), "{:?}", f.warnings);
     }

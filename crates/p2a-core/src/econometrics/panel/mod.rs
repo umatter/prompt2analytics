@@ -185,7 +185,7 @@ mod tests {
         let h = run_hausman_test(&dataset, "y", &["x"], "entity").unwrap();
         assert_eq!(h.df, 1);
         assert!(
-            Tol::new(1e-6, 0.0).allows(h.chi2_statistic, 7.3536952100054188e-05),
+            Tol::new(1e-6, 0.0).allows(h.chi2_statistic, 7.353_695_210_005_419e-5),
             "{}",
             h.chi2_statistic
         );
