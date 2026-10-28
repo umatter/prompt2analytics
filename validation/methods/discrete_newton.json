@@ -29,9 +29,10 @@
       "tests": [
         "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j5",
         "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j16",
-        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j30"
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j30",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_ordered_fit_does_not_depend_on_regressor_scale"
       ],
-      "quantities": ["n", "category counts", "null log-likelihood", "finite coefficients, thresholds and log-likelihood", "log-likelihood not above polr's maximum", "converged only above the null model"],
+      "quantities": ["n", "category counts", "null log-likelihood", "finite coefficients, thresholds and log-likelihood", "log-likelihood not above polr's maximum", "converged only above the null model", "fit unchanged when x is multiplied by 1e4 or 1e6 (coefficient divided by the scale)"],
       "tolerance": "counts exact; null log-likelihood 1e-5 (n = 30, 96) and 1e-6 (n = 180) relative",
       "deviations": [
         {"finding": "ECON-4", "quantity": "coefficients, thresholds and log-likelihood (logit and probit)", "note": "the beta score has the wrong sign and the outer-product Hessian divides by p_i twice, so the fit never reaches polr's MLE (converged = false after 100 iterations); T2-WP10 pins logit_*/probit_* of these cases"},
