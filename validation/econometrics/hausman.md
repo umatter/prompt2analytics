@@ -96,6 +96,11 @@ warning appears exactly when one is negative (only `panel_hausman_sim_corr`).
 - phtest uses `solve(D)` and `df = length(d)`, so it stops on a singular D (or returns
   roundoff when D is nearly singular). p2a uses a generalized inverse with `df = rank D`
   and a warning; on the three cases D has full rank and the two agree.
+- A regressor that is constant within every entity, or one that is exactly collinear with
+  others: plm's within model drops the aliased column and phtest compares the common
+  slopes (on a 12 x 5 panel with `x1` noisy and `z = id %% 4`, chisq 0.18337, df 1, p
+  0.6685). p2a refuses the test with fixed effects' `SingularMatrix` error, because FE
+  refuses such a regressor, until drop-and-warn lands (ECON-72).
 
 ## How to run
 

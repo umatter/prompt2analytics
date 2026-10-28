@@ -22,7 +22,12 @@ y_it - ybar_i = (x_it - xbar_i)' beta + (e_it - ebar_i)
   of the slopes follows `vcov`, as plm's `summary(fe, vcov = ...)`: the classical within F
   test on `(K, n - N - K)` df, or with a clustered `vcov` the Wald F `W/K` on `(K, G - 1)` df
   (plm `pwaldtest(test = "F")` with a cluster vcov, its `df2adj`). `PanelResult::f_df`
-  returns the two degrees of freedom.
+  returns the two degrees of freedom. The entity scores sum to `X~'e~ = 0`, so the clustered
+  covariance has rank at most `G - 1`: with `K >= G` slopes, or whenever the slope
+  covariance is singular (judged by its rank, not by whether an inverse succeeds), the F
+  test is not computed. `f_stat` and its p-value are then NaN, a warning says why, and the
+  text output has no F line; plm's `pwaldtest` stops with "system is computationally
+  singular" there.
 - Refused: a non-finite value in `y` or a regressor, and regressors that are exactly
   collinear after removing the entity means (also a regressor that is exactly zero after
   demeaning), whose coefficients are not identified.
@@ -159,6 +164,10 @@ before computing, so R and Rust see the same doubles.
   `econometrics::panel::tests::test_validate_panel_fe_sim_corr` pin every quantity above,
   the classical and the three Arellano standard errors and F tests.
 - Unit tests: `econometrics::panel::linear_models::tests::test_fixed_effects_refuses_non_finite_data`,
+  `econometrics::panel::linear_models::tests::test_fixed_effects_cluster_f_not_computed_when_k_reaches_g`,
+  `econometrics::panel::linear_models::tests::test_wald_statistic_refuses_a_singular_covariance`,
+  `econometrics::panel::linear_models::tests::test_wald_statistic_full_rank`,
+  `econometrics::panel::linear_models::tests::test_f_df_are_those_of_the_f_p_value`,
   `econometrics::panel::tests::test_collinear_regressors_are_refused`,
   `econometrics::panel::tests::test_time_invariant_regressor_fe_refuses_re_warns`.
 - `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_panel_fixed_effects` checks
@@ -177,16 +186,29 @@ freedom exact.
 - Adjusted R-squared: p2a used `(n - N - 1)/df` instead of plm's `(n - 1)/df`. Grunfeld
   0.765517 (was) against plm 0.753110; unbalanced 0.753880 against 0.738498; simulated
   0.517405 against 0.396251 (ECON-73).
-- The entity-clustered (Arellano) option is new; with it the F test is plm's robust Wald F.
+- The entity-clustered (Arellano) option is new; with it the F test is plm's robust Wald F,
+  not computed when the clustered covariance is singular (always when `K >= G`).
 - Non-finite data and exactly collinear regressors are refused. A NaN in `y` gave NaN
   coefficients with SE 0 and p 1; collinear regressors gave the minimum-norm split.
+- A regressor that is constant within every entity (for example a 0/1 firm-level dummy,
+  exactly zero after demeaning) used to give a 0 coefficient with SE 0 next to correct
+  estimates of the other slopes. It is now refused with `SingularMatrix`, which names it, as
+  are exactly collinear regressors; MCP and CLI callers see an error where they used to get
+  a table (see Known differences).
 - The earlier tests used a hand-typed five-firm subset and a full-Grunfeld test at 0.01
   tolerance; both are replaced by the case-pinned tests above. Coefficients, classical
   standard errors, within R-squared and F were already equal to plm.
 
 ## Known differences
 
-None. `panel_fe_synthetic.csv` in `validation/expected/` is a legacy file that no test asserts.
+- A regressor that is constant within every entity, or one that is exactly collinear with
+  others: plm's within model drops the aliased column and estimates the remaining slopes
+  (`plm(y ~ x1 + z, model = "within")` reports `x1` only). p2a refuses the model with
+  `SingularMatrix`, naming the columns involved, until drop-and-warn lands (ECON-72).
+- With a clustered `vcov` and `K >= G`, p2a reports the coefficients and SEs without an F
+  test (NaN and a warning); plm's `pwaldtest` stops with an error.
+
+`panel_fe_synthetic.csv` in `validation/expected/` is a legacy file that no test asserts.
 
 ## How to run
 

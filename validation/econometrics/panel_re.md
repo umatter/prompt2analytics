@@ -305,9 +305,19 @@ freedom exact.
 ## Known differences
 
 - A between regression without full rank (collinear entity means, for example a regressor
-  without between variation) uses a generalized inverse with a warning. On balanced panels this equals plm, which drops the
-  aliased column; on unbalanced panels plm stops (`dgesv: system is exactly singular`) and
-  p2a still returns an estimate.
+  without between variation) uses a generalized inverse with a warning. On balanced panels
+  this equals plm, which drops the aliased column; on unbalanced panels plm stops
+  (`dgesv: system is exactly singular`) and p2a still returns an estimate.
+- A regressor that is constant within every entity (for example a 0/1 firm-level dummy):
+  RE still estimates the model, but the within regression that estimates `sigma2_nu` keeps
+  that column, which is zero after demeaning, and counts it in its degrees of freedom,
+  `n - N - K` instead of plm's `n - N - (K - 1)`; when the demeaned column is exactly zero,
+  the warning about that within regression says so. `sigma2_nu`, and with it theta, the
+  coefficients and the SEs, therefore differ slightly from plm, which drops the column in
+  the within step. On a 12 x 5 panel (`x1` noisy, `z = id %% 4`) plm gives `sigma2_nu`
+  0.6277531 and the intercept 1.5783116 (SE 0.6281355); p2a gives 0.6413999
+  (= 0.6277531 x 47/46) and 1.578287 (SE 0.622577). Drop-and-warn in the within steps
+  (ECON-72, a later package) removes the difference.
 
 ## How to run
 
