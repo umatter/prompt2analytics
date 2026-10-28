@@ -1372,16 +1372,16 @@ mod tests {
     }
 
     // =========================================================================
-    // Validation Tests: Comparison with R's lfe::felm()
+    // DGP-recovery tests on lfe::felm()-style examples
     // =========================================================================
     //
-    // These tests use data and expected values from R's lfe package to validate
-    // our implementation produces equivalent results.
+    // The tests below check that the MAP algorithm recovers known coefficients
+    // and degrees of freedom on small simulated panels; they do not compare with
+    // R output. The R-pinned HDFE tests are `test_validate_hdfe_grunfeld*`
+    // (case `panel_hdfe_grunfeld`, fixest), further down.
     //
     // Reference: Gaure, S. (2013). "lfe: Linear Group Fixed Effects".
     //            The R Journal, 5(2), 104-117.
-    //
-    // The R code to generate reference values is documented in each test.
     // =========================================================================
 
     /// Test data replicating the felm() documentation example.
@@ -1411,18 +1411,13 @@ mod tests {
     ///          -0.09, 0.05, 0.13, -0.08, 0.04, -0.07, 0.06, 0.01, -0.03, 0.09)
     ///
     /// est <- felm(y ~ x1 + x2 | id + firm, data = d)
-    /// summary(est)
-    ///
-    /// # Output:
-    /// # Coefficients:
-    /// #    Estimate Std. Error t value Pr(>|t|)
-    /// # x1  0.99766    0.02834   35.20 6.66e-14 ***
-    /// # x2  0.50051    0.03241   15.44 4.64e-10 ***
-    /// # ---
-    /// # Residual standard error: 0.08121 on 13 degrees of freedom
-    /// # Multiple R-squared (full model): 0.9936
-    /// # F-statistic (full model): 355.1 on 6 and 13 DF
     /// ```
+    ///
+    /// The tests on this data check DGP recovery (beta1 = 1.0, beta2 = 0.5) and
+    /// the degrees of freedom only. No R output is pinned: the figures once quoted
+    /// here (x1 0.99766, se 0.02834) are not what R gives on this data (fixest:
+    /// x1 0.9802154032, se 0.01506135460; x2 0.4826382350, se 0.02363228724;
+    /// 13 residual df). An R-pinned version needs its own reference case.
     fn create_felm_validation_data() -> Dataset {
         let df = df! {
             "x1" => [0.37, -0.56, 0.36, 0.63, 0.40, -0.11, 1.51, -0.09, 2.02, -0.06,
@@ -1462,8 +1457,8 @@ mod tests {
 
     #[test]
     fn test_validate_against_felm_coefficients() {
-        // This test validates our implementation against R's lfe::felm()
-        // See create_felm_validation_data() for the R code.
+        // DGP recovery on the felm()-style example of
+        // create_felm_validation_data() (no R output is compared).
         //
         // The key validation is that we recover coefficients close to
         // the true DGP values (beta1=1.0, beta2=0.5), which demonstrates
@@ -1581,9 +1576,9 @@ mod tests {
 
     #[test]
     fn test_validate_against_felm_r_squared() {
-        // Expected from R's felm():
-        //   Within R² (after projecting out FE): high value expected
-        //   The full model R² is 0.9936, within R² will be similar
+        // DGP check: with coefficients 1.0 and 0.5 and small noise, the within
+        // R² (after projecting out the fixed effects) is high. No R value is
+        // compared.
         let dataset = create_felm_validation_data();
 
         let result = run_hdfe(
@@ -1802,118 +1797,25 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // Validation against real dataset: Grunfeld (1958)
+    // R-pinned validation: Grunfeld (1958), case `panel_hdfe_grunfeld`
+    // (validation/r/cases/panel.R; fixest 0.14.2, plm 2.6.7), registered in
+    // validation/methods/panel.json
+    //
+    // On a balanced firm x year panel the two demeaning projections commute, so
+    // the MAP is exact after one sweep and the README tolerances apply without
+    // an iterative allowance.
+    //
+    // Not compared: `se_cluster_firm` (run_hdfe has no cluster option),
+    // `adj_r2_within_fixest` (fixest's (n - N)/df convention; p2a reports plm's
+    // adjusted within R-squared) and `r2_full` (not reported).
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// Create the classic Grunfeld (1958) investment dataset.
-    ///
-    /// This is the canonical panel data example used in econometrics textbooks
-    /// and the plm R package. It contains investment data for 10 large US firms
-    /// over 20 years (1935-1954).
-    ///
-    /// Variables:
-    /// - inv: Gross investment (millions of dollars)
-    /// - value: Market value of the firm (millions of dollars)
-    /// - capital: Stock of plant and equipment (millions of dollars)
-    /// - firm: Firm identifier (1-10)
-    /// - year: Year (1935-1954)
-    ///
-    /// Reference: Grunfeld, Y. (1958). The Determinants of Corporate Investment.
-    /// Unpublished Ph.D. dissertation, University of Chicago.
-    fn create_grunfeld_dataset() -> Dataset {
-        let inv = vec![
-            317.6, 391.8, 410.6, 257.7, 330.8, 461.2, 512.0, 448.0, 499.6, 547.5, 561.2, 688.1,
-            568.9, 529.2, 555.1, 642.9, 755.9, 891.2, 1304.4, 1486.7, 209.9, 355.3, 469.9, 262.3,
-            230.4, 361.6, 472.8, 445.6, 361.6, 288.2, 258.7, 420.3, 420.5, 494.5, 405.1, 418.8,
-            588.2, 645.5, 641.0, 459.3, 33.1, 45.0, 77.2, 44.6, 48.1, 74.4, 113.0, 91.9, 61.3,
-            56.8, 93.6, 159.9, 147.2, 146.3, 98.3, 93.5, 135.2, 157.3, 179.5, 189.6, 40.29, 72.76,
-            66.26, 51.6, 52.41, 69.41, 68.35, 46.8, 47.4, 59.57, 88.78, 74.12, 62.68, 89.36, 78.98,
-            100.66, 160.62, 145.0, 174.93, 172.49, 39.68, 50.73, 74.24, 53.51, 42.65, 46.48, 61.4,
-            39.67, 62.24, 52.32, 63.21, 59.37, 58.02, 70.34, 67.42, 55.74, 80.3, 85.4, 91.9, 81.43,
-            20.36, 25.98, 25.94, 27.53, 24.6, 28.54, 43.41, 42.81, 27.84, 32.6, 39.03, 50.17,
-            51.85, 64.03, 68.16, 77.34, 95.3, 99.49, 127.52, 135.72, 24.43, 23.21, 32.78, 32.54,
-            26.65, 33.71, 43.5, 34.46, 44.28, 70.8, 44.12, 48.98, 48.51, 50.0, 50.59, 42.53, 64.77,
-            72.68, 73.86, 89.51, 12.93, 25.9, 35.05, 22.89, 18.84, 28.57, 48.51, 43.34, 37.02,
-            37.81, 39.27, 53.46, 55.56, 49.56, 32.04, 32.24, 54.38, 71.78, 90.08, 68.6, 26.63,
-            23.39, 30.65, 20.89, 28.78, 26.93, 32.08, 32.21, 35.69, 62.47, 52.32, 56.95, 54.32,
-            40.53, 32.54, 43.48, 56.49, 65.98, 66.11, 49.34, 2.54, 2.0, 2.19, 1.99, 2.03, 1.81,
-            2.14, 1.86, 0.93, 1.18, 1.36, 2.24, 3.81, 5.66, 4.21, 3.42, 4.67, 6.0, 6.53, 5.12,
-        ];
-
-        let value = vec![
-            3078.5, 4661.7, 5387.1, 2792.2, 4313.2, 4643.9, 4551.2, 3244.1, 4053.7, 4379.3, 4840.9,
-            4900.9, 3526.5, 3254.7, 3700.2, 3755.6, 4833.0, 4924.9, 6241.7, 5593.6, 1362.4, 1807.1,
-            2676.3, 1801.9, 1957.3, 2202.9, 2380.5, 2168.6, 1985.1, 1813.9, 1850.2, 2067.7, 1796.7,
-            1625.8, 1667.0, 1677.4, 2289.5, 2159.4, 2031.3, 2115.5, 1170.6, 2015.8, 2803.3, 2039.7,
-            2256.2, 2132.2, 1834.1, 1588.0, 1749.4, 1687.2, 2007.7, 2208.3, 1656.7, 1604.4, 1431.8,
-            1610.5, 1819.4, 2079.7, 2371.6, 2759.9, 417.5, 837.8, 883.9, 437.9, 679.7, 727.8,
-            643.6, 410.9, 588.4, 698.4, 846.4, 893.8, 579.0, 694.6, 590.3, 693.5, 809.0, 727.0,
-            1001.5, 703.2, 157.7, 167.9, 192.9, 156.7, 191.4, 185.5, 199.6, 189.5, 151.2, 187.7,
-            214.7, 232.9, 249.0, 224.5, 237.3, 240.1, 327.3, 359.4, 398.4, 365.7, 197.0, 210.3,
-            223.1, 216.7, 286.4, 298.0, 276.9, 272.6, 287.4, 330.3, 324.4, 401.9, 407.4, 409.2,
-            482.2, 673.8, 676.9, 702.0, 793.5, 927.3, 138.0, 200.1, 210.1, 161.2, 161.7, 145.1,
-            110.6, 98.1, 108.8, 118.2, 126.5, 156.7, 119.4, 129.1, 134.8, 140.8, 179.0, 178.1,
-            186.8, 192.7, 191.5, 516.0, 729.0, 560.4, 519.9, 628.5, 537.1, 561.2, 617.2, 626.7,
-            737.2, 760.5, 581.4, 662.3, 583.8, 635.2, 723.8, 864.1, 1193.5, 1188.9, 290.6, 291.1,
-            335.0, 246.0, 356.2, 289.8, 268.2, 213.3, 348.2, 374.2, 387.2, 347.4, 291.9, 297.2,
-            276.9, 274.6, 339.9, 474.8, 496.0, 474.5, 70.91, 87.94, 82.2, 58.72, 80.54, 86.47,
-            77.68, 62.16, 62.24, 61.82, 65.85, 69.54, 64.97, 68.0, 71.24, 69.05, 83.04, 74.42,
-            63.51, 58.12,
-        ];
-
-        let capital = vec![
-            2.8, 52.6, 156.9, 209.2, 203.4, 207.2, 255.2, 303.7, 264.1, 201.6, 265.0, 402.2, 761.5,
-            922.4, 1020.1, 1099.0, 1207.7, 1430.5, 1777.3, 2226.3, 53.8, 50.5, 118.1, 260.2, 312.7,
-            254.2, 261.4, 298.7, 301.8, 279.1, 213.8, 132.6, 264.8, 306.9, 351.1, 357.8, 342.1,
-            444.2, 623.6, 669.7, 97.8, 104.4, 118.0, 156.2, 172.6, 186.6, 220.9, 287.8, 319.9,
-            321.3, 319.6, 346.0, 456.4, 543.4, 618.3, 647.4, 671.3, 726.1, 800.3, 888.9, 10.5,
-            10.2, 34.7, 51.8, 64.3, 67.1, 75.2, 71.4, 67.1, 60.5, 54.6, 84.8, 96.8, 110.2, 147.4,
-            163.2, 203.5, 290.6, 346.1, 414.9, 183.2, 204.0, 236.0, 291.7, 323.1, 344.0, 367.7,
-            407.2, 426.6, 470.0, 499.2, 534.6, 566.6, 595.3, 631.4, 662.3, 683.9, 729.3, 774.3,
-            804.9, 6.5, 15.8, 27.7, 39.2, 48.6, 52.5, 61.5, 80.5, 94.4, 92.6, 92.3, 94.2, 111.4,
-            127.4, 149.3, 164.4, 177.2, 200.0, 211.5, 238.7, 100.2, 125.0, 142.4, 165.1, 194.8,
-            222.9, 252.1, 276.3, 300.3, 318.2, 336.2, 351.2, 373.6, 389.4, 406.7, 429.5, 450.6,
-            466.9, 486.2, 511.3, 1.8, 0.8, 7.4, 18.1, 23.5, 26.5, 36.2, 60.8, 84.4, 91.2, 92.4,
-            86.0, 111.1, 130.6, 141.8, 136.7, 129.7, 145.5, 174.8, 213.5, 162.0, 174.0, 183.0,
-            198.0, 208.0, 223.0, 234.0, 248.0, 274.0, 282.0, 316.0, 302.0, 333.0, 359.0, 370.0,
-            376.0, 391.0, 414.0, 443.0, 468.0, 4.5, 4.71, 4.57, 4.56, 4.38, 4.21, 4.12, 3.83, 3.58,
-            3.41, 3.31, 3.23, 3.9, 5.38, 7.39, 8.74, 9.07, 9.93, 11.68, 14.33,
-        ];
-
-        // 10 firms, each with 20 years of data
-        let firm: Vec<i64> = (1..=10).flat_map(|f| std::iter::repeat_n(f, 20)).collect();
-        let year: Vec<i64> = (1..=10).flat_map(|_| 1935..=1954).collect();
-
-        let df = df! {
-            "inv" => inv,
-            "value" => value,
-            "capital" => capital,
-            "firm" => firm,
-            "year" => year,
-        }
-        .unwrap();
-
-        Dataset::new(df)
-    }
-
-    /// Validate HDFE coefficients against R's lfe::felm() using the Grunfeld dataset.
-    ///
-    /// R code to reproduce:
-    /// ```r
-    /// library(plm)
-    /// library(lfe)
-    /// data(Grunfeld)
-    /// est <- felm(inv ~ value + capital | firm + year, data = Grunfeld)
-    /// coef(est)
-    /// #      value    capital
-    /// # 0.11772003 0.35792286
-    /// ```
     #[test]
-    fn test_validate_grunfeld_coefficients() {
-        let dataset = create_grunfeld_dataset();
-
-        let result = run_hdfe(
-            &dataset,
+    fn test_validate_hdfe_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_hdfe_grunfeld");
+        let r = run_hdfe(
+            &ds,
             "inv",
             &["value", "capital"],
             &["firm", "year"],
@@ -1921,192 +1823,70 @@ mod tests {
             CovarianceType::Standard,
         )
         .unwrap();
-
-        // R's felm() gives: value = 0.11772003, capital = 0.35792286
-        let expected_value = 0.11772003;
-        let expected_capital = 0.35792286;
-
-        println!(
-            "Grunfeld coefficients: value={:.8}, capital={:.8}",
-            result.coefficients[0], result.coefficients[1]
-        );
-        println!(
-            "R felm() expected:     value={:.8}, capital={:.8}",
-            expected_value, expected_capital
-        );
-
-        // Allow tolerance of 0.0001 for numerical differences
-        assert!(
-            (result.coefficients[0] - expected_value).abs() < 0.0001,
-            "value coefficient should match R: got {}, expected {}",
-            result.coefficients[0],
-            expected_value
-        );
-        assert!(
-            (result.coefficients[1] - expected_capital).abs() < 0.0001,
-            "capital coefficient should match R: got {}, expected {}",
-            result.coefficients[1],
-            expected_capital
-        );
+        let n = r.n_obs;
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se_iid", &r.variables, &r.std_errors, Tol::se(n))
+            .scalar("r2_within", r.r_squared_within, Tol::stat(n))
+            .scalar("adj_r2_within_plm", r.adj_r_squared_within, Tol::stat(n))
+            .scalar("within_f", r.f_stat, Tol::stat(n))
+            .scalar("within_f_df1", r.variables.len() as f64, Tol::exact())
+            .scalar("within_f_df2", r.df_resid as f64, Tol::exact())
+            .scalar("within_f_p", r.f_p_value, Tol::p_value(n))
+            .scalar("df_resid", r.df_resid as f64, Tol::exact())
+            .scalar("n_obs", n as f64, Tol::exact())
+            .finish();
+        assert_eq!(r.fe_counts, vec![10, 20]);
     }
 
-    /// Validate HDFE standard errors against R's lfe::felm() using the Grunfeld dataset.
-    ///
-    /// R code to reproduce:
-    /// ```r
-    /// library(plm)
-    /// library(lfe)
-    /// data(Grunfeld)
-    /// est <- felm(inv ~ value + capital | firm + year, data = Grunfeld)
-    /// summary(est)$coefficients[, "Std. Error"]
-    /// #      value    capital
-    /// # 0.01375339 0.02272406
-    /// est$df.residual
-    /// # 169
-    /// ```
+    /// HC1 (n / df_resid) standard errors, t and p against fixest's "hetero".
+    /// HC2/HC3 are not pinned (ECON-22).
     #[test]
-    fn test_validate_grunfeld_standard_errors() {
-        let dataset = create_grunfeld_dataset();
-
-        let result = run_hdfe(
-            &dataset,
+    fn test_validate_hdfe_grunfeld_hc1() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_hdfe_grunfeld");
+        let r = run_hdfe(
+            &ds,
             "inv",
             &["value", "capital"],
             &["firm", "year"],
             None,
-            CovarianceType::Standard,
+            CovarianceType::HC1,
         )
         .unwrap();
-
-        // R's felm() gives: SE(value) = 0.01375339, SE(capital) = 0.02272406
-        let expected_se_value = 0.01375339;
-        let expected_se_capital = 0.02272406;
-
-        println!(
-            "Grunfeld SEs: value={:.8}, capital={:.8}",
-            result.std_errors[0], result.std_errors[1]
-        );
-        println!(
-            "R felm() expected: value={:.8}, capital={:.8}",
-            expected_se_value, expected_se_capital
-        );
-        println!("Residual df: {} (R expected: 169)", result.df_resid);
-
-        // Allow tolerance of 0.001 for numerical differences in SEs
-        assert!(
-            (result.std_errors[0] - expected_se_value).abs() < 0.001,
-            "SE(value) should match R: got {}, expected {}",
-            result.std_errors[0],
-            expected_se_value
-        );
-        assert!(
-            (result.std_errors[1] - expected_se_capital).abs() < 0.001,
-            "SE(capital) should match R: got {}, expected {}",
-            result.std_errors[1],
-            expected_se_capital
-        );
-
-        // df_resid should be 169 (n=200, minus 2 coefficients, minus 10 firms, minus 20 years, plus 1 for grand mean)
-        assert_eq!(
-            result.df_resid, 169,
-            "df_resid should be 169 (200 - 2 - 10 - 20 + 1)"
-        );
+        let n = r.n_obs;
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se_hetero", &r.variables, &r.std_errors, Tol::se(n))
+            .named("t_hetero", &r.variables, &r.t_stats, Tol::stat(n))
+            .named("p_hetero", &r.variables, &r.p_values, Tol::p_value(n))
+            .finish();
     }
 
-    /// Validate HDFE R-squared against R's lfe::felm() using the Grunfeld dataset.
-    ///
-    /// R code to reproduce:
-    /// ```r
-    /// library(plm)
-    /// library(lfe)
-    /// data(Grunfeld)
-    /// est <- felm(inv ~ value + capital | firm + year, data = Grunfeld)
-    /// summary(est)$r.squared  # full model: 0.9517
-    /// summary(est)$P.r.squared  # projected (within) R²: 0.7201
-    /// ```
+    /// Firm effects only: the one-way within estimator (fixest, equal to plm's).
     #[test]
-    fn test_validate_grunfeld_r_squared() {
-        let dataset = create_grunfeld_dataset();
-
-        let result = run_hdfe(
-            &dataset,
+    fn test_validate_hdfe_grunfeld_firm_only() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_hdfe_grunfeld");
+        let r = run_hdfe(
+            &ds,
             "inv",
             &["value", "capital"],
-            &["firm", "year"],
+            &["firm"],
             None,
             CovarianceType::Standard,
         )
         .unwrap();
-
-        // R's felm() gives within R² = 0.7201
-        let expected_r2_within = 0.7201;
-
-        println!(
-            "Grunfeld R² (within): {:.4} (R expected: {:.4})",
-            result.r_squared_within, expected_r2_within
-        );
-
-        // Allow tolerance of 0.01 for R²
-        assert!(
-            (result.r_squared_within - expected_r2_within).abs() < 0.01,
-            "Within R² should match R: got {}, expected {}",
-            result.r_squared_within,
-            expected_r2_within
-        );
-    }
-
-    /// Validate that our HDFE with firm FE only matches R's plm within estimator.
-    ///
-    /// R code to reproduce:
-    /// ```r
-    /// library(plm)
-    /// data(Grunfeld)
-    /// pdata <- pdata.frame(Grunfeld, index = c("firm", "year"))
-    /// fe <- plm(inv ~ value + capital, data = pdata, model = "within")
-    /// coef(fe)
-    /// #      value    capital
-    /// # 0.11013083 0.31004929
-    /// ```
-    #[test]
-    fn test_validate_grunfeld_single_fe_matches_within() {
-        let dataset = create_grunfeld_dataset();
-
-        // Single FE (firm only) should match plm's within estimator
-        let result = run_hdfe(
-            &dataset,
-            "inv",
-            &["value", "capital"],
-            &["firm"], // Only firm FE, no year FE
-            None,
-            CovarianceType::Standard,
-        )
-        .unwrap();
-
-        // plm's within estimator gives: value = 0.11013, capital = 0.31005
-        let expected_value = 0.11013083;
-        let expected_capital = 0.31004929;
-
-        println!(
-            "Grunfeld (firm FE only): value={:.8}, capital={:.8}",
-            result.coefficients[0], result.coefficients[1]
-        );
-        println!(
-            "R plm within expected:   value={:.8}, capital={:.8}",
-            expected_value, expected_capital
-        );
-
-        assert!(
-            (result.coefficients[0] - expected_value).abs() < 0.0001,
-            "value coefficient should match R plm within: got {}, expected {}",
-            result.coefficients[0],
-            expected_value
-        );
-        assert!(
-            (result.coefficients[1] - expected_capital).abs() < 0.0001,
-            "capital coefficient should match R plm within: got {}, expected {}",
-            result.coefficients[1],
-            expected_capital
-        );
+        let n = r.n_obs;
+        Check::new(&case)
+            .named(
+                "coef_firm_only",
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(n),
+            )
+            .named("se_firm_only_iid", &r.variables, &r.std_errors, Tol::se(n))
+            .finish();
     }
 
     #[test]

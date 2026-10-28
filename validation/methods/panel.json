@@ -113,6 +113,36 @@
         "validation/expected/hausman_grunfeld.csv",
         "validation/expected/hausman_full.csv"
       ]
+    },
+    {
+      "id": "panel_hdfe",
+      "name": "Two-way fixed effects (MAP)",
+      "category": "econometrics",
+      "reference": "fixest::feols; fixest::fitstat(type = 'wf'); plm::plm(effect = 'twoways')",
+      "doc": "validation/econometrics/hdfe.md",
+      "cases": [
+        "panel_hdfe_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld_hc1",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld_firm_only"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE iid",
+        "SE HC1",
+        "t and p (HC1)",
+        "within R2",
+        "adj. within R2 (plm)",
+        "within F (df1, df2, p)",
+        "df_resid",
+        "n",
+        "firm-only coefficients and SE"
+      ],
+      "tolerance": "validation/README.md, n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
