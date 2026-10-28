@@ -21,7 +21,7 @@ keys:
 |---|---|---|
 | `id` | string, `^[a-z0-9_]+$` | Unique over all registry files. |
 | `name` | string | Human-readable name of the method. |
-| `category` | string | `stats`, `regression`, `econometrics`, `forecasting`, `ml`, `cli` or `mcp`. |
+| `category` | string | `stats`, `regression`, `econometrics`, `forecasting`, `ml`, `cli`, `mcp`, or `interfaces`: CLI exhibit and MCP pins, `validation/methods/interfaces.json`. |
 | `reference` | string | The R function(s) the cases call. |
 | `doc` | string | Repository-relative path of the method document; must exist. |
 | `cases` | non-empty list of strings | Case ids; each needs `validation/expected/<id>.json`. A case may be listed by several methods. |

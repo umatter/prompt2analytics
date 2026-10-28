@@ -44,6 +44,9 @@ from urllib.parse import unquote
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]
 CATEGORIES = ("stats", "regression", "econometrics", "forecasting", "ml", "cli", "mcp")
+# Registry categories: the runner's, plus `interfaces` (validation/methods/interfaces.json:
+# the CLI exhibit and MCP pins, whose tests the runner selects as cli and mcp).
+REGISTRY_CATEGORIES = CATEGORIES + ("interfaces",)
 STATUS_RANK = {"ignored": 0, "ok": 1, "failed": 2}
 SCHEMA = 1
 
@@ -857,9 +860,9 @@ def load_registry(root: Path, findings: list):
                     problems.append(f"`{key}` must be a {typ.__name__}")
             if isinstance(m.get("id"), str) and not ID_RE.match(m["id"]):
                 problems.append("`id` must match ^[a-z0-9_]+$")
-            if isinstance(m.get("category"), str) and m["category"] not in CATEGORIES:
+            if isinstance(m.get("category"), str) and m["category"] not in REGISTRY_CATEGORIES:
                 problems.append(
-                    f"`category` {m['category']!r} must be one of: {', '.join(CATEGORIES)}"
+                    f"`category` {m['category']!r} must be one of: {', '.join(REGISTRY_CATEGORIES)}"
                 )
             for key in ("cases", "tests"):
                 v = m.get(key)

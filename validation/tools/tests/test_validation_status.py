@@ -491,6 +491,21 @@ class TestLint(TreeCase):
             code, text = self.lint()
             self.assert_finding(code, text, "ERROR", "registry", "not valid JSON")
 
+    def test_registry_categories(self):
+        # The runner's categories, plus `interfaces` (validation/methods/interfaces.json).
+        original = self.path("validation/methods/demo.json").read_text()
+        for category in vs.CATEGORIES + ("interfaces",):
+            with self.subTest(category):
+                self.path("validation/methods/demo.json").write_text(original)
+                self.edit_json(
+                    "validation/methods/demo.json",
+                    lambda d, c=category: [m.update(category=c) for m in d["methods"]],
+                )
+                code, text = self.lint()
+                self.assertEqual(code, 0, text)
+                self.assertIn("lint: 0 error(s), 0 warning(s)", text)
+        self.assertNotIn("interfaces", vs.CATEGORIES)  # not a runner/select --category
+
     def test_case_file_errors(self):
         with self.subTest("registry case without JSON"):
             self.edit_json("validation/methods/demo.json", lambda d: self.method(d, "demo_var")["cases"].append("nope_case"))
