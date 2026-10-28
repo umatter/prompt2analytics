@@ -3197,229 +3197,114 @@ mod tests {
         );
     }
 
-    /// mtcars dataset for robust SE testing
-    fn create_mtcars_dataset() -> Dataset {
-        // R's mtcars: mpg, wt, hp, disp
-        // First 20 observations for testing
-        let df = df! {
-            "mpg" => [21.0, 21.0, 22.8, 21.4, 18.7, 18.1, 14.3, 24.4, 22.8, 19.2,
-                      17.8, 16.4, 17.3, 15.2, 10.4, 10.4, 14.7, 32.4, 30.4, 33.9],
-            "wt" => [2.620, 2.875, 2.320, 3.215, 3.440, 3.460, 3.570, 3.190, 3.150, 3.440,
-                     3.440, 4.070, 3.730, 3.780, 5.250, 5.424, 5.345, 2.200, 1.615, 1.835],
-            "hp" => [110.0, 110.0, 93.0, 110.0, 175.0, 105.0, 245.0, 62.0, 95.0, 123.0,
-                     123.0, 180.0, 180.0, 180.0, 205.0, 215.0, 230.0, 66.0, 52.0, 65.0],
-            "disp" => [160.0, 160.0, 108.0, 258.0, 360.0, 225.0, 360.0, 146.7, 140.8, 167.6,
-                       167.6, 275.8, 275.8, 275.8, 472.0, 460.0, 440.0, 78.7, 75.7, 71.1]
+    /// HC0-HC3 on Grunfeld against `sandwich::vcovHC(type = )` (case `ols_grunfeld`).
+    #[test]
+    fn test_validate_ols_robust_se_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+        let mut check = Check::new(&case);
+        for (cov, tag) in [
+            (CovarianceType::HC0, "hc0"),
+            (CovarianceType::HC1, "hc1"),
+            (CovarianceType::HC2, "hc2"),
+            (CovarianceType::HC3, "hc3"),
+        ] {
+            let r = run_ols(&ds, "inv", &["value", "capital"], true, cov).unwrap();
+            assert_eq!(r.cov_type, cov);
+            pin_inference(&mut check, &r, tag);
         }
-        .unwrap();
-        Dataset::new(df)
+        check.finish();
     }
 
-    /// Validation test: HC0 standard errors
-    /// Compared against R's sandwich::vcovHC(fit, type="HC0")
+    /// HC0-HC3 on mtcars, `mpg ~ wt + hp + disp` (case `ols_mtcars`).
     #[test]
-    fn test_validate_robust_se_hc0() {
-        let dataset = create_mtcars_dataset();
-
-        let result_hc0 =
-            run_ols(&dataset, "mpg", &["wt", "hp"], true, CovarianceType::HC0).unwrap();
-        let result_std = run_ols(
-            &dataset,
-            "mpg",
-            &["wt", "hp"],
-            true,
-            CovarianceType::Standard,
-        )
-        .unwrap();
-
-        // Coefficients should be identical regardless of SE type
-        for i in 0..result_hc0.coefficients.len() {
-            assert!(
-                (result_hc0.coefficients[i].estimate - result_std.coefficients[i].estimate).abs()
-                    < 1e-10,
-                "Coefficients should be identical for HC0 and Standard"
-            );
+    fn test_validate_ols_robust_se_mtcars() {
+        let (case, ds) = crate::test_support::load_case("ols_mtcars");
+        let mut check = Check::new(&case);
+        for (cov, tag) in [
+            (CovarianceType::HC0, "hc0"),
+            (CovarianceType::HC1, "hc1"),
+            (CovarianceType::HC2, "hc2"),
+            (CovarianceType::HC3, "hc3"),
+        ] {
+            let r = run_ols(&ds, "mpg", &["wt", "hp", "disp"], true, cov).unwrap();
+            assert_eq!(r.cov_type, cov);
+            pin_inference(&mut check, &r, tag);
         }
-
-        // HC0 SEs should be finite and positive
-        for coef in &result_hc0.coefficients {
-            assert!(
-                coef.std_error > 0.0 && coef.std_error.is_finite(),
-                "HC0 SEs should be positive and finite"
-            );
-        }
+        check.finish();
     }
 
-    /// Validation test: HC1 standard errors (Stata's robust)
-    /// HC1 = HC0 * n/(n-k) small-sample correction
+    // Cluster-robust SEs against `sandwich::vcovCL(type = "HC1")` (CR1: G/(G-1) and
+    // (n-1)/(n-k)). The case's se_cluster_firm_hc0 is deliberately not pinned: p2a offers
+    // CR1 only, and vcovCL(type = "HC0") applies G/(G-1) without (n-1)/(n-k).
+
+    /// One-way clustering by firm (case `ols_grunfeld`).
     #[test]
-    fn test_validate_robust_se_hc1() {
-        let dataset = create_mtcars_dataset();
-
-        let result_hc0 =
-            run_ols(&dataset, "mpg", &["wt", "hp"], true, CovarianceType::HC0).unwrap();
-        let result_hc1 =
-            run_ols(&dataset, "mpg", &["wt", "hp"], true, CovarianceType::HC1).unwrap();
-
-        let n = result_hc1.n_obs as f64;
-        let k = result_hc1.n_params as f64;
-        let correction = (n / (n - k)).sqrt();
-
-        // HC1 SE should equal HC0 SE * sqrt(n/(n-k))
-        for i in 0..result_hc1.coefficients.len() {
-            let expected_hc1 = result_hc0.coefficients[i].std_error * correction;
-            let actual_hc1 = result_hc1.coefficients[i].std_error;
-            assert!(
-                (actual_hc1 - expected_hc1).abs() < 1e-8,
-                "HC1 SE should equal HC0 * sqrt(n/(n-k)): got {}, expected {}",
-                actual_hc1,
-                expected_hc1
-            );
-        }
+    fn test_validate_ols_clustered_grunfeld_firm() {
+        let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+        let r = run_ols_clustered(&ds, "inv", &["value", "capital"], "firm", None).unwrap();
+        assert_eq!((r.n_clusters_1, r.n_clusters_2), (10, None));
+        let n = r.ols.n_obs;
+        let names = r.ols.variable_names.as_slice();
+        Check::new(&case)
+            .named("coef", names, &col(&r.ols, |c| c.estimate), Tol::coef(n))
+            .named(
+                "se_cluster_firm_hc1",
+                names,
+                &col(&r.ols, |c| c.std_error),
+                Tol::se(n),
+            )
+            .named(
+                "p_cluster_firm_hc1",
+                names,
+                &col(&r.ols, |c| c.p_value),
+                Tol::p_value(n),
+            )
+            // What `p2a reg clustered` prints.
+            .scalar(
+                "adj_r2",
+                LinearEstimator::adj_r_squared(&r.ols),
+                Tol::stat(n),
+            )
+            .finish();
     }
 
-    /// Validation test: HC2 and HC3 standard errors
-    /// HC2 uses leverage adjustment, HC3 squares the leverage adjustment
+    /// One-way clustering by year (case `ols_grunfeld`).
     #[test]
-    fn test_validate_robust_se_hc2_hc3() {
-        let dataset = create_mtcars_dataset();
-
-        let result_hc1 =
-            run_ols(&dataset, "mpg", &["wt", "hp"], true, CovarianceType::HC1).unwrap();
-        let result_hc2 =
-            run_ols(&dataset, "mpg", &["wt", "hp"], true, CovarianceType::HC2).unwrap();
-        let result_hc3 =
-            run_ols(&dataset, "mpg", &["wt", "hp"], true, CovarianceType::HC3).unwrap();
-
-        // HC3 >= HC2 >= HC1 (generally, HC3 is most conservative)
-        for i in 0..result_hc1.coefficients.len() {
-            // HC2 and HC3 should both be >= HC1 (in most cases)
-            // Note: This isn't strictly guaranteed for all data, but typical
-            assert!(
-                result_hc3.coefficients[i].std_error >= result_hc2.coefficients[i].std_error * 0.95,
-                "HC3 should generally be >= HC2 (or very close)"
-            );
-        }
-
-        // All should be positive and finite
-        for coef in &result_hc2.coefficients {
-            assert!(coef.std_error > 0.0 && coef.std_error.is_finite());
-        }
-        for coef in &result_hc3.coefficients {
-            assert!(coef.std_error > 0.0 && coef.std_error.is_finite());
-        }
+    fn test_validate_ols_clustered_grunfeld_year() {
+        let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+        let r = run_ols_clustered(&ds, "inv", &["value", "capital"], "year", None).unwrap();
+        assert_eq!((r.n_clusters_1, r.n_clusters_2), (20, None));
+        let n = r.ols.n_obs;
+        let names = r.ols.variable_names.as_slice();
+        Check::new(&case)
+            .named("coef", names, &col(&r.ols, |c| c.estimate), Tol::coef(n))
+            .named(
+                "se_cluster_year_hc1",
+                names,
+                &col(&r.ols, |c| c.std_error),
+                Tol::se(n),
+            )
+            .finish();
     }
 
-    /// Validation test: Clustered standard errors
-    /// Compared against R's sandwich::vcovCL()
+    /// Two-way clustering by firm and year, V_firm + V_year - V_firm∩year, each with its own
+    /// G/(G-1) (vcovCL's default multi0 = FALSE; case `ols_grunfeld`).
     #[test]
-    fn test_validate_clustered_se_one_way() {
-        // Create panel-like data with clustering
-        let n_clusters = 10;
-        let obs_per_cluster = 5;
-
-        let mut y_vec = Vec::new();
-        let mut x_vec = Vec::new();
-        let mut cluster_vec = Vec::new();
-
-        for cluster in 0..n_clusters {
-            // Cluster-level effect
-            let cluster_effect = (cluster as f64) * 0.5;
-            for obs in 0..obs_per_cluster {
-                let x = (cluster * obs_per_cluster + obs) as f64 * 0.1;
-                let noise = ((cluster * 7 + obs * 3) as f64 * 0.789).sin() * 0.5;
-                let y = 1.0 + 2.0 * x + cluster_effect + noise;
-                y_vec.push(y);
-                x_vec.push(x);
-                cluster_vec.push(format!("C{}", cluster));
-            }
-        }
-
-        let df = df! {
-            "y" => y_vec,
-            "x" => x_vec,
-            "cluster" => cluster_vec
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_ols_clustered(&dataset, "y", &["x"], "cluster", None).unwrap();
-
-        // Verify structure
-        assert_eq!(result.n_clusters_1, n_clusters);
-        assert!(result.n_clusters_2.is_none());
-
-        // Clustered SEs should be different from standard SEs
-        let result_std = run_ols(&dataset, "y", &["x"], true, CovarianceType::Standard).unwrap();
-
-        // With clustered data, clustered SEs are typically larger than standard SEs
-        // (not always guaranteed, but expected with clustered errors)
-        assert!(
-            result.ols.coefficients[1].std_error != result_std.coefficients[1].std_error,
-            "Clustered SEs should differ from standard SEs"
-        );
-    }
-
-    /// Validation test: Two-way clustered standard errors
-    #[test]
-    fn test_validate_clustered_se_two_way() {
-        // Create panel data with firm and year clustering
-        // Use larger sample for stable two-way clustering
-        let n_firms = 10;
-        let n_years = 10;
-
-        let mut y_vec = Vec::new();
-        let mut x_vec = Vec::new();
-        let mut firm_vec = Vec::new();
-        let mut year_vec = Vec::new();
-
-        for firm in 0..n_firms {
-            for year in 0..n_years {
-                let x = (firm * n_years + year) as f64 * 0.1;
-                let firm_effect = (firm as f64) * 0.5;
-                let year_effect = (year as f64) * 0.3;
-                let noise = ((firm * 7 + year * 11) as f64 * 0.567).cos() * 0.5;
-                let y = 2.0 + 1.5 * x + firm_effect + year_effect + noise;
-
-                y_vec.push(y);
-                x_vec.push(x);
-                firm_vec.push(format!("F{}", firm));
-                year_vec.push(format!("Y{}", year));
-            }
-        }
-
-        let df = df! {
-            "y" => y_vec,
-            "x" => x_vec,
-            "firm" => firm_vec,
-            "year" => year_vec
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_ols_clustered(&dataset, "y", &["x"], "firm", Some("year")).unwrap();
-
-        // Verify two-way clustering structure
-        assert_eq!(result.n_clusters_1, n_firms);
-        assert_eq!(result.n_clusters_2, Some(n_years));
-
-        // SEs should be positive and finite (two-way clustering can produce slightly different SEs)
-        // For very small cluster counts, SEs may be NaN; check we have valid results
-        let has_valid_se = result
-            .ols
-            .coefficients
-            .iter()
-            .all(|coef| coef.std_error > 0.0 && coef.std_error.is_finite());
-
-        if !has_valid_se {
-            // With insufficient cluster variation, SEs may be unreliable
-            // This is expected behavior - just verify structure is correct
-            eprintln!("Warning: Two-way clustered SEs may be unreliable with this data");
-        }
-
-        // At minimum, verify coefficient estimates are reasonable
-        let intercept_coef = result.ols.coefficients[0].estimate;
-        assert!(intercept_coef.is_finite(), "Intercept should be finite");
+    fn test_validate_ols_clustered_grunfeld_firm_year() {
+        let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+        let r = run_ols_clustered(&ds, "inv", &["value", "capital"], "firm", Some("year")).unwrap();
+        assert_eq!((r.n_clusters_1, r.n_clusters_2), (10, Some(20)));
+        let n = r.ols.n_obs;
+        let names = r.ols.variable_names.as_slice();
+        Check::new(&case)
+            .named("coef", names, &col(&r.ols, |c| c.estimate), Tol::coef(n))
+            .named(
+                "se_cluster_firm_year_hc1",
+                names,
+                &col(&r.ols, |c| c.std_error),
+                Tol::se(n),
+            )
+            .finish();
     }
 
     // ════════════════════════════════════════════════════════════════════════════
