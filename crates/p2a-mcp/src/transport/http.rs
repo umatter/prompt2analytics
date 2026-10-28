@@ -569,9 +569,9 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig) {
         DeploymentMode::OpenPublic => {
             tracing::warn!(
                 "HTTP running OPEN and UNAUTHENTICATED on {addr} (open public mode). \
-                 Session-list and file-browser endpoints are disabled and the hosted resource \
-                 profile applies; isolation relies on unguessable session IDs. Put an edge \
-                 rate-limiter in front for abuse/DoS control."
+                 Session-list, file-browser and database-statistics endpoints are disabled and \
+                 the hosted resource profile applies; isolation relies on unguessable session \
+                 IDs. Put an edge rate-limiter in front for abuse/DoS control."
             );
             if config.http.expose_enumeration {
                 tracing::warn!(
@@ -693,7 +693,10 @@ pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
         let conv_state = super::conversation::ConversationState {
             session_manager: manager,
         };
-        router.nest("/api", super::conversation::conversation_routes(conv_state))
+        router.nest(
+            "/api",
+            super::conversation::conversation_routes(conv_state, config.deployment_mode()),
+        )
     } else {
         tracing::warn!("Conversation routes NOT added (no persistent manager)");
         router

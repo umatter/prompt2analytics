@@ -1283,6 +1283,120 @@ async fn open_public_mode_ignores_user_id() {
     );
 }
 
+/// `GET {uri}` with an optional bearer token: the status and the body as text.
+async fn get_raw(r: &Router, uri: &str, bearer: Option<&str>) -> (StatusCode, String) {
+    let mut req = Request::get(uri);
+    if let Some(t) = bearer {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let resp = r
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A session with one conversation holding one message, created with an
+/// optional bearer token.
+async fn session_with_one_message(r: &Router, bearer: Option<&str>) -> String {
+    let send = |method: &str, uri: String, sid: Option<&str>, body: Value| {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(t) = bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        if let Some(sid) = sid {
+            req = req.header("x-p2a-session-id", sid);
+        }
+        let req = req.body(Body::from(body.to_string())).unwrap();
+        let r = r.clone();
+        async move {
+            let resp = r.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            body
+        }
+    };
+    let body = send("POST", "/api/sessions".into(), None, json!({})).await;
+    let sid = body["data"]["session_id"].as_str().unwrap().to_string();
+    let body = send(
+        "POST",
+        "/api/conversations".into(),
+        Some(&sid),
+        json!({"session_id": sid, "title": "t"}),
+    )
+    .await;
+    let conv = body["data"]["id"].as_str().unwrap();
+    send(
+        "POST",
+        format!("/api/conversations/{conv}/messages"),
+        Some(&sid),
+        json!({"role": "user", "content": "hello"}),
+    )
+    .await;
+    sid
+}
+
+/// `GET /api/db/stats` counts every session, conversation and message in the
+/// store, whoever owns them, and needs no session. An open public server does
+/// not register it, so it answers 404 with an empty body, as the other routes
+/// open mode leaves out do, with or without a session id; `GET /api/db/health`
+/// stays. Local and Authenticated servers still answer the counts.
+#[tokio::test]
+async fn db_stats_is_not_served_in_open_public_mode() {
+    let mut open = ServerConfig::default();
+    open.http.allow_unauthenticated = true;
+    open.http.session_dirs = p2a_mcp::config::SessionDirsSetting::Off;
+    let (r, _) = app(open).await;
+    let sid = session_with_one_message(&r, None).await;
+    assert_eq!(
+        get_raw(&r, "/api/db/stats", None).await,
+        (StatusCode::NOT_FOUND, String::new())
+    );
+    assert_eq!(
+        get_raw(&r, &format!("/api/db/stats?session_id={sid}"), None).await,
+        (StatusCode::NOT_FOUND, String::new())
+    );
+    let (st, _, body) = call_with_headers(&r, "GET", "/api/db/stats", Some(&sid), None).await;
+    assert_eq!((st, body), (StatusCode::NOT_FOUND, Value::Null));
+    let (st, body) = call(&r, "GET", "/api/db/health", None, None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["healthy"], json!(true));
+
+    let counts = json!({"session_count": 1, "conversation_count": 1, "message_count": 1});
+    // Local (the default configuration) and Authenticated keep the route.
+    let (r, _) = app(ServerConfig::default()).await;
+    session_with_one_message(&r, None).await;
+    let (st, body) = get_raw(&r, "/api/db/stats", None).await;
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["data"], counts);
+
+    let mut authenticated = ServerConfig::default();
+    authenticated.http.access_token = Some("test-token".into());
+    let (r, _) = app(authenticated).await;
+    session_with_one_message(&r, Some("test-token")).await;
+    assert_eq!(
+        get_raw(&r, "/api/db/stats", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (st, body) = get_raw(&r, "/api/db/stats", Some("test-token")).await;
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["data"], counts);
+}
+
 // =============================================================================
 // Task 5: the session database outside the data root (INF-1)
 // =============================================================================

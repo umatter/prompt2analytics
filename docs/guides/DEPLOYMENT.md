@@ -61,6 +61,7 @@ mode comes from explicit configuration, never from the bind address alone.
 | Chosen when | no token, a loopback bind and no open-mode flag; the stdio transport is always Local | `P2A_ACCESS_TOKEN` (`--access-token`) is set | no token, and `P2A_ALLOW_UNAUTHENTICATED` (`--allow-unauthenticated`) is set or the bind is not loopback (which needs that flag) |
 | Resource profile | Off unless `P2A_LIMITS=hosted` | Off unless `P2A_LIMITS=hosted` | always Hosted |
 | `GET /api/sessions`, `GET /api/files` | only with `--expose-enumeration` (`P2A_EXPOSE_ENUMERATION`) | registered | never |
+| `GET /api/db/stats` (feature `db`; counts every session, conversation and message in the store) | registered | registered | never |
 | Host check | 421 `misdirected` unless the Host is `localhost` or a loopback IP (any port); a request without a Host header passes | off | off |
 | `/ws` (feature `websocket`) | on | on | off unless `P2A_ENABLE_WS` (`--enable-ws`) |
 | Per-session data directories (`P2A_SESSION_DIRS=auto`) | off | off | on |
@@ -543,7 +544,7 @@ Families (Off: none):
 | `string_bytes` | generator strings, labels, pad and fill strings, regex patterns (UTF-8 bytes) | 4,096 |
 | `tree_depth` | `max_depth`, `maxdepth` | 100 |
 | `power_sample_size` | the sample size `n` of `power_t_test` and `power_anova_test`, per group in two-sample and ANOVA designs (the top of the range in which they solve for `n`); `power_prop_test` is not capped | 1,000,000 |
-| `design_groups` | `power_anova_test` `groups` | 10 |
+| `design_groups` | `power_anova_test` `groups` | 100 |
 
 Row classes and tolerance (Off: none):
 
@@ -672,6 +673,25 @@ table alone has more rows than the cap; `index` when its rows hold more than
 twice the cap in index and `on` values, or when its index makes too many rows;
 and `on` when the distinct `on` values alone make more columns than the cap
 allows cells (`index` when the index columns alone do).
+
+The demo's `deploy/fly.toml` lowers `pivot_cells` to 700,000
+(`P2A_LIMIT_OVERRIDES=pivot_cells=700000`), because on its 1 GB machine a pivot
+peaking up to 350 MiB above the session's data, on top of other sessions'
+datasets near the 500 MiB total, comes close to the machine's memory, and the
+soft limit only gates admission. With the server pinned to one CPU, as on that
+machine, dense pivots of one index column and 1,000 `on` values that fill each
+budget were measured in a fresh process and then a second time in the same
+process, on a dev build (`opt-level = 1`; each measurement taken twice, agreeing
+within 2 MiB). At 700,000 cells they raised the peak RSS by 84 and 55 MiB for
+numeric values and by 134 and 88 MiB for 45-byte string index and values,
+against 131 and 122 MiB and 175 and 150 MiB at 1,000,000: 0.45 to 0.77 times as
+much. Scaled the same way, the worst case of
+about 350 MiB above would fall to about 270 MiB; that case was not re-measured.
+Without the pin, on a 12-thread CPU, the same pivots took more memory (the
+fresh-process ones at 1,000,000 cells 170 and 207 MiB, within the release-build
+ranges above) and the ratio was 0.79 to 0.94, presumably because polars'
+per-thread buffers do not shrink with the budget, so on a machine with more CPUs
+lowering `pivot_cells` buys less.
 
 ## Must-do checklist
 
@@ -976,8 +996,10 @@ Nothing here runs automatically except the two workflows named in steps 0 and
    a quiet time.
 6. **Verify**, with read-only requests:
    - `curl -s https://p2a-api.qamelab.org/health | jq '{status, version, governor}'`
-     shows `X.Y.Z` and a `governor` object;
-   - `GET /api/sessions` answers 405, `GET /api/files` 404 and `GET /ws` 404;
+     shows `X.Y.Z` and a `governor` object whose `capacity` is 1
+     (`P2A_TOOL_CONCURRENCY`);
+   - `GET /api/sessions` answers 405, and `GET /api/files`, `GET /api/db/stats`
+     and `GET /ws` 404;
    - one chat in the web app works, and its conversation list reloads.
 7. **Roll back** by re-pinning the previous tag and running `fly deploy` again.
 8. **Dependency checks.** The Security audit workflow runs weekly and on every
@@ -989,8 +1011,15 @@ Nothing here runs automatically except the two workflows named in steps 0 and
 `deploy/fly.toml` is configured for the open-but-hardened posture: it pins an
 explicit image tag and sets open mode (`P2A_ALLOW_UNAUTHENTICATED=1`),
 `P2A_LIMITS=hosted`, `P2A_DATA_ROOT=/data`, the CORS origin, the LLM host
-allowlist and a restart-on-failure policy. To ship a new backend build, follow
-[Release and redeploy](#release-and-redeploy).
+allowlist and a restart-on-failure policy. It also lowers `pivot_cells` to
+700,000 (see the pivot calibration note under
+[`P2A_LIMIT_OVERRIDES` keys](#p2a_limit_overrides-keys)) and pins
+`P2A_TOOL_CONCURRENCY=1`: the default, one call per vCPU, is 1 on its
+shared-cpu-1x machine as well, but above 1 one call's parallel work in p2a-core
+shares the process's thread pool with the other admitted calls and can hold
+them up far longer than their own work takes, with no `server_busy` answer, so
+resizing the VM must not raise it on its own. To ship a new backend build,
+follow [Release and redeploy](#release-and-redeploy).
 
 Put Cloudflare (or your CDN) in front of `p2a-api.qamelab.org` with a Rate
 Limiting rule as one layer (checklist step 5).

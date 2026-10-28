@@ -127,12 +127,12 @@ pub struct CliArgs {
     /// relies on unguessable, non-enumerable session IDs. On any bind
     /// address, loopback included (for a server behind a same-host reverse
     /// proxy), the flag switches the server to open public mode: the
-    /// session-list and file-browser endpoints are NOT exposed, and the hosted
-    /// resource profile (caps, deadlines, quotas) applies. Abuse and DoS
-    /// protection beyond that is expected to come from an edge layer (a
-    /// reverse proxy or CDN rate limit). Without this flag, the server refuses
-    /// to bind a non-loopback address that has no access token, to avoid an
-    /// accidental open deployment.
+    /// session-list, file-browser and database-statistics endpoints are NOT
+    /// exposed, and the hosted resource profile (caps, deadlines, quotas)
+    /// applies. Abuse and DoS protection beyond that is expected to come from
+    /// an edge layer (a reverse proxy or CDN rate limit). Without this flag,
+    /// the server refuses to bind a non-loopback address that has no access
+    /// token, to avoid an accidental open deployment.
     ///
     /// The `P2A_ALLOW_UNAUTHENTICATED` environment variable enables the same
     /// behavior and accepts any truthy value (`1`, `true`, `yes`, `on`). It is

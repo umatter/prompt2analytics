@@ -205,8 +205,9 @@ families! {
     /// Groups of a planned design (`power_anova_test` `groups`). As with
     /// [`Family::PowerSampleSize`], p2a-core's F quantile does bounded work at any group count,
     /// so the cap is kept as defense in depth, not as a cost bound, and can be raised with
-    /// `P2A_LIMIT_OVERRIDES`.
-    DesignGroups => "design_groups", 10;
+    /// `P2A_LIMIT_OVERRIDES`. It is 100, as is the hosted [`Limits::max_groups`] budget of
+    /// groups compared pairwise: a cap of 10 refused legitimate designs with a few dozen groups.
+    DesignGroups => "design_groups", 100;
 }
 
 /// Hosted [`Limits::arima_fit_work`]: the slowest fit it allows takes about 16 s on a release
@@ -2494,7 +2495,7 @@ mod tests {
             (Family::StringBytes, "string_bytes", 4_096),
             (Family::TreeDepth, "tree_depth", 100),
             (Family::PowerSampleSize, "power_sample_size", 1_000_000),
-            (Family::DesignGroups, "design_groups", 10),
+            (Family::DesignGroups, "design_groups", 100),
         ];
         assert_eq!(Family::ALL.len(), expect.len());
         for &(f, key, cap) in expect {

@@ -25,6 +25,7 @@ use tracing::Instrument;
 
 use super::http::ApiResponse;
 use super::routes_sessions::capacity_response;
+use crate::config::DeploymentMode;
 use crate::db::{Conversation, ConversationWithMessages, DatasetMeta, DbError, Message};
 use crate::exec::{ToolCallError, ToolGovernor};
 use crate::persistent_session::{
@@ -47,13 +48,19 @@ pub struct ConversationState {
     pub session_manager: Arc<PersistentSessionManager>,
 }
 
-/// Create conversation routes.
+/// Create conversation routes for a server in deployment `mode`.
 ///
 /// The dataset reload runs under the tool governor, which the router must
 /// provide as an `Extension<Arc<ToolGovernor>>` layer (`create_router` adds
 /// it).
-pub fn conversation_routes(state: ConversationState) -> Router {
-    Router::new()
+///
+/// `GET /db/stats` counts every session, conversation and message in the
+/// store, whoever owns them, and takes no session id, so it is not registered
+/// in open public mode, where anyone may call it: it answers 404 there, like
+/// the other routes that mode leaves out. Local and Authenticated servers keep
+/// it.
+pub fn conversation_routes(state: ConversationState, mode: DeploymentMode) -> Router {
+    let router = Router::new()
         // Conversation CRUD
         .route("/conversations", post(create_conversation))
         .route("/conversations", get(list_conversations))
@@ -84,9 +91,13 @@ pub fn conversation_routes(state: ConversationState) -> Router {
             post(reload_session_datasets),
         )
         // Database health
-        .route("/db/health", get(db_health))
-        .route("/db/stats", get(db_stats))
-        .with_state(state)
+        .route("/db/health", get(db_health));
+    let router = if mode == DeploymentMode::OpenPublic {
+        router
+    } else {
+        router.route("/db/stats", get(db_stats))
+    };
+    router.with_state(state)
 }
 
 // =============================================================================
