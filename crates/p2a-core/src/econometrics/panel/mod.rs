@@ -35,7 +35,12 @@
 //!
 //! Tests H₀: RE is consistent (Cov(αᵢ, Xᵢₜ) = 0) vs H₁: FE is required.
 //!
-//! H = (β̂ᶠᴱ - β̂ᴿᴱ)'(V̂ᶠᴱ - V̂ᴿᴱ)⁻¹(β̂ᶠᴱ - β̂ᴿᴱ) ~ χ²(k)
+//! H = |d' D⁻ d|,  d = β̂ᶠᴱ - β̂ᴿᴱ,  D = V̂ᶠᴱ - V̂ᴿᴱ (classical covariances,
+//! slopes matched by name),  H ~ χ²(rank D)
+//!
+//! as `plm::phtest`. D⁻ is a generalized inverse when D is singular, and the
+//! absolute value is taken when D is not positive definite; both cases are
+//! reported in `HausmanResult.warnings`. A zero difference is refused.
 //!
 //! # References
 //!
