@@ -58,6 +58,7 @@ use crate::traits::estimator::{
 
 use super::types::{
     ClusterAdjustment, PanelConfig, PanelMethod, PanelResult, PanelVcov, TestDistribution,
+    f_test_df2,
 };
 use super::utils::{demean_by_entity, demean_matrix_by_entity, extract_entity_ids};
 
@@ -89,6 +90,9 @@ pub fn run_fixed_effects(
 /// `summary(fe, vcov = ...)`: the classical within F test on `(K, n - N - K)`
 /// degrees of freedom, or under the Arellano covariance the Wald F `W/K` on
 /// `(K, G - 1)` (plm `pwaldtest(test = "F")` with a cluster vcov, `df2adj`).
+/// The clustered covariance has rank at most `G - 1`, so with `K >= G` slopes,
+/// or whenever the slope covariance is singular, the F test is not computed:
+/// `f_stat` and `f_p_value` are NaN and a warning says why.
 ///
 /// Refused: a non-finite value in `y` or a regressor, and regressors that are
 /// exactly collinear after removing the entity means (the coefficients are not
@@ -201,7 +205,10 @@ pub fn run_fixed_effects_with(
     let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df as f64);
 
     // F test of the slopes with the chosen covariance, as plm's summary: the
-    // classical within F, or the Wald F W/K on (K, G - 1) for a cluster vcov
+    // classical within F, or the Wald F W/K on (K, G - 1) for a cluster vcov.
+    // The entity scores sum to X~'e~ = 0, so the cluster meat has rank at most
+    // G - 1 and the clustered covariance is singular when K > G - 1.
+    let f_df2 = f_test_df2(config.vcov, df, n_groups);
     let (f_stat, f_p_value) = match config.vcov {
         PanelVcov::Classical => {
             let f = if k > 0 && ssr > 0.0 {
@@ -209,12 +216,21 @@ pub fn run_fixed_effects_with(
             } else {
                 0.0
             };
-            (f, f_test_p_value(f, k as f64, df as f64))
+            (f, f_test_p_value(f, k as f64, f_df2 as f64))
+        }
+        PanelVcov::Arellano(_) if k > n_groups - 1 => {
+            warnings.push(format!(
+                "F test not computed: with K = {k} slopes and G = {n_groups} entities the \
+                 clustered covariance matrix of the slopes has rank at most G - 1 = {}, so it \
+                 is singular",
+                n_groups - 1
+            ));
+            (f64::NAN, f64::NAN)
         }
         PanelVcov::Arellano(_) => match wald_statistic(&beta.view(), &vcov.view()) {
             Some(w) => {
                 let f = w / k as f64;
-                (f, f_test_p_value(f, k as f64, (n_groups - 1) as f64))
+                (f, f_test_p_value(f, k as f64, f_df2 as f64))
             }
             None => {
                 warnings.push(
@@ -561,10 +577,7 @@ pub fn run_random_effects_with(
     // Wald test of the slopes with the chosen covariance (plm's summary) and
     // its F form W/K (plm's pwaldtest(test = "F")), whose df2 is G - 1 for a
     // cluster vcov (pwaldtest's df2adj)
-    let f_df2 = match config.vcov {
-        PanelVcov::Classical => df,
-        PanelVcov::Arellano(_) => n_groups - 1,
-    };
+    let f_df2 = f_test_df2(config.vcov, df, n_groups);
     let wald = wald_statistic(&beta.slice(s![1..]), &vcov.slice(s![1.., 1..]));
     let (wald_chi2, wald_df, wald_p_value, f_stat, f_p_value) = match wald {
         Some(w) => {
@@ -662,14 +675,37 @@ fn warn_pseudoinverse(
     }
 }
 
-/// `b' V⁻¹ b`, or `None` when `V` is singular. For a singular matrix
-/// `safe_inverse` may return a pseudoinverse with `Some(condition)` instead of
-/// `Err`; only a clean inverse gives a Wald statistic.
+/// `b' V⁻¹ b`, or `None` when `V` is singular.
+///
+/// The rank is judged as in [`scaled_eigen`], on the unit-diagonal scaling
+/// `S V S` against `100 p ε max(1, λ_max)`, and not by which branch an inverse
+/// takes: Cholesky accepts an exactly singular positive semidefinite matrix
+/// whose last pivot rounds to a tiny positive number (an entity-clustered
+/// covariance with more coefficients than entities less one is such a
+/// matrix). At full rank the statistic comes from the same eigen-pairs,
+/// `Σ_j (u_j' S b)² / λ_j`, which is `b' V⁻¹ b` because
+/// `V⁻¹ = S (S V S)⁻¹ S`.
 fn wald_statistic(b: &ArrayView1<f64>, v: &ArrayView2<f64>) -> Option<f64> {
-    match safe_inverse(v) {
-        Ok((v_inv, None)) => Some(b.dot(&v_inv.dot(b))),
-        Err(_) | Ok((_, Some(_))) => None,
+    let p = v.nrows();
+    if p == 0 || v.ncols() != p || b.len() != p {
+        return None;
     }
+    let sym = Array2::from_shape_fn((p, p), |(i, j)| 0.5 * (v[[i, j]] + v[[j, i]]));
+    let e = scaled_eigen(&sym).ok()?;
+    if e.rank < p {
+        return None;
+    }
+    let sb: Vec<f64> = (0..p).map(|i| e.s[i] * b[i]).collect();
+    let w: f64 = e
+        .lambda
+        .iter()
+        .enumerate()
+        .map(|(j, &l)| {
+            let proj: f64 = (0..p).map(|i| e.u[[i, j]] * sb[i]).sum();
+            proj * proj / l
+        })
+        .sum();
+    w.is_finite().then_some(w)
 }
 
 /// The unit-diagonal scaling `S A S`, `S = diag(A_jj^-1/2)` (0 for a zero
@@ -1041,6 +1077,160 @@ mod tests {
         );
         let m = invalid_message(re(&panel_with("x", 7, f64::NEG_INFINITY)));
         assert!(m.contains("Regressor 'x'"), "{m}");
+    }
+
+    /// A noisy panel of `g` entities and `t` periods with regressors `x1..xk`
+    /// and an entity effect in `y`, all from a splitmix64 stream started at
+    /// `seed`.
+    fn small_noisy_panel(g: usize, t: usize, k: usize, seed: u64) -> (Dataset, Vec<String>) {
+        let mut state = seed;
+        let mut uniform = move || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            (z >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        let n = g * t;
+        let entity: Vec<i64> = (0..n).map(|i| (i / t) as i64).collect();
+        let xs: Vec<Vec<f64>> = (0..k)
+            .map(|_| (0..n).map(|_| uniform()).collect())
+            .collect();
+        let effects: Vec<f64> = (0..g).map(|_| uniform()).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + xs.iter().map(|x| 0.5 * x[i]).sum::<f64>() + effects[i / t] + 0.3 * uniform()
+            })
+            .collect();
+        let names: Vec<String> = (1..=k).map(|j| format!("x{j}")).collect();
+        let mut columns = vec![
+            polars::prelude::Column::new("entity".into(), entity),
+            polars::prelude::Column::new("y".into(), y),
+        ];
+        for (name, x) in names.iter().zip(xs) {
+            columns.push(polars::prelude::Column::new(name.as_str().into(), x));
+        }
+        (
+            Dataset::new(polars::prelude::DataFrame::new(columns).unwrap()),
+            names,
+        )
+    }
+
+    /// Twelve 2-entity panels with 2 regressors (T = 5 or 6) and twelve
+    /// 3-entity panels with 3 regressors: K >= G in each.
+    fn panels_with_k_at_least_g() -> Vec<(Dataset, Vec<String>)> {
+        let mut panels = Vec::new();
+        for g in [2, 3] {
+            for seed in 0..12u64 {
+                panels.push(small_noisy_panel(
+                    g,
+                    5 + (seed % 2) as usize,
+                    g,
+                    1000 * g as u64 + seed,
+                ));
+            }
+        }
+        panels
+    }
+
+    /// Under the entity-clustered covariance the FE scores sum to
+    /// `X~'e~ = 0`, so the cluster meat has rank at most `G - 1`, and with
+    /// `K >= G` slopes the clustered slope covariance is singular. Cholesky
+    /// still accepted some of these matrices (a last pivot that rounds to a
+    /// tiny positive number) and the Wald F came out as 1e15 or more, highly
+    /// significant on noise; plm's `pwaldtest` stops there. The F test is now
+    /// not computed, with a warning naming K and G, and Display has no F line.
+    #[test]
+    fn test_fixed_effects_cluster_f_not_computed_when_k_reaches_g() {
+        let config = PanelConfig {
+            vcov: PanelVcov::Arellano(ClusterAdjustment::Stata),
+        };
+        for (ds, names) in panels_with_k_at_least_g() {
+            let x: Vec<&str> = names.iter().map(String::as_str).collect();
+            let r = run_fixed_effects_with(&ds, "y", &x, "entity", &config).unwrap();
+            let (k, g) = (x.len(), r.n_groups);
+            assert!(
+                r.f_stat.is_nan() && r.f_p_value.is_nan(),
+                "G = {g}, K = {k}: F {} (p {})",
+                r.f_stat,
+                r.f_p_value
+            );
+            let expected = format!("K = {k} slopes and G = {g} entities");
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.starts_with("F test not computed") && w.contains(&expected)),
+                "{:?}",
+                r.warnings
+            );
+            assert!(!r.to_string().contains("F-statistic"), "{r}");
+        }
+    }
+
+    /// The rank of the covariance, not the branch `safe_inverse` takes,
+    /// decides whether a Wald statistic exists: every rank-deficient
+    /// clustered FE covariance above gives `None`, including those that
+    /// Cholesky accepted.
+    #[test]
+    fn test_wald_statistic_refuses_a_singular_covariance() {
+        let config = PanelConfig {
+            vcov: PanelVcov::Arellano(ClusterAdjustment::Stata),
+        };
+        for (ds, names) in panels_with_k_at_least_g() {
+            let x: Vec<&str> = names.iter().map(String::as_str).collect();
+            let r = run_fixed_effects_with(&ds, "y", &x, "entity", &config).unwrap();
+            let w = wald_statistic(&r.coef_arr.view(), &r.vcov.view());
+            assert!(w.is_none(), "G = {}, K = {}: {w:?}", r.n_groups, x.len());
+        }
+        // A zero variance is singular whatever the other entries
+        let v = Array2::from_shape_vec((2, 2), vec![4.0, 0.0, 0.0, 0.0]).unwrap();
+        assert!(wald_statistic(&Array1::from(vec![1.0, 2.0]).view(), &v.view()).is_none());
+    }
+
+    /// The degrees of freedom `PanelResult::f_df` reports are those the
+    /// estimators computed `f_p_value` on (one rule, `f_test_df2`), for both
+    /// estimators and both covariances.
+    #[test]
+    fn test_f_df_are_those_of_the_f_p_value() {
+        let ds = synthetic_panel(10, 4);
+        for vcov in [
+            PanelVcov::Classical,
+            PanelVcov::Arellano(ClusterAdjustment::Stata),
+        ] {
+            let config = PanelConfig { vcov };
+            let fe = run_fixed_effects_with(&ds, "y", &["x"], "entity", &config).unwrap();
+            let re = run_random_effects_with(&ds, "y", &["x"], "entity", &config).unwrap();
+            for r in [fe, re] {
+                let (df1, df2) = r.f_df();
+                assert!(r.f_stat.is_finite(), "{vcov:?}: {}", r.f_stat);
+                assert_eq!(
+                    r.f_p_value,
+                    f_test_p_value(r.f_stat, df1 as f64, df2 as f64),
+                    "{vcov:?} {:?}",
+                    r.method
+                );
+                let want = match vcov {
+                    PanelVcov::Classical => r.df,
+                    PanelVcov::Arellano(_) => 9,
+                };
+                assert_eq!((df1, df2), (1, want), "{vcov:?} {:?}", r.method);
+            }
+        }
+    }
+
+    /// `b' V^-1 b` for an invertible `V`, also after rescaling a regressor
+    /// by 1e7 (the rank decision does not depend on units): 23/11.
+    #[test]
+    fn test_wald_statistic_full_rank() {
+        let b = Array1::from(vec![1.0, -2.0]);
+        let v = Array2::from_shape_vec((2, 2), vec![4.0, 1.0, 1.0, 3.0]).unwrap();
+        let w = wald_statistic(&b.view(), &v.view()).unwrap();
+        assert!((w - 23.0 / 11.0).abs() <= 1e-14, "{w}");
+        let b = Array1::from(vec![1.0, -2e-7]);
+        let v = Array2::from_shape_vec((2, 2), vec![4.0, 1e-7, 1e-7, 3e-14]).unwrap();
+        let w = wald_statistic(&b.view(), &v.view()).unwrap();
+        assert!((w - 23.0 / 11.0).abs() <= 1e-13, "{w}");
     }
 
     /// The cluster meat as one product `G'G` equals the sum of the per-entity

@@ -134,7 +134,9 @@ pub struct PanelResult {
     /// `summary(fe, vcov = ...)`). Random effects: the F form `W/K` of the Wald
     /// test in `wald_chi2` (plm `pwaldtest(test = "F")`). Under the Arellano
     /// covariance the second degrees of freedom are `G - 1`, as plm's `df2adj`
-    /// for a cluster vcov. NaN when the Wald statistic is not computed.
+    /// for a cluster vcov. NaN when the Wald statistic is not computed: the
+    /// slope covariance is singular, as the clustered one always is for
+    /// fixed effects with `K >= G` (its rank is at most `G - 1`).
     pub f_stat: f64,
     /// p-value of `f_stat` on [`PanelResult::f_df`] degrees of freedom
     pub f_p_value: f64,
@@ -215,11 +217,21 @@ impl PanelResult {
             PanelMethod::FixedEffects => self.variables.len(),
             PanelMethod::RandomEffects => self.variables.len().saturating_sub(1),
         };
-        let df2 = match self.vcov_type {
-            PanelVcov::Classical => self.df,
-            PanelVcov::Arellano(_) => self.n_groups.saturating_sub(1),
-        };
-        (df1, df2)
+        (df1, f_test_df2(self.vcov_type, self.df, self.n_groups))
+    }
+}
+
+/// Second degrees of freedom of the panel F test of the slopes: `G - 1`
+/// (`n_groups - 1`) under the entity-clustered (Arellano) covariance, plm
+/// `pwaldtest`'s `df2adj` for a cluster vcov, and the residual degrees of
+/// freedom `df` under the classical one. The one rule behind both the
+/// estimators' `f_p_value` and the degrees of freedom
+/// [`PanelResult::f_df`] reports, so the printed df are those the p-value
+/// was computed on.
+pub(super) fn f_test_df2(vcov: PanelVcov, df: usize, n_groups: usize) -> usize {
+    match vcov {
+        PanelVcov::Classical => df,
+        PanelVcov::Arellano(_) => n_groups.saturating_sub(1),
     }
 }
 
