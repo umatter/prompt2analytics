@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "bgtest",
+      "name": "Breusch-Godfrey test for serial correlation",
+      "category": "regression",
+      "reference": "lmtest::bgtest(order = 1 | 4, type = 'Chisq' | 'F', fill = 0)",
+      "doc": "validation/diagnostics/bgtest.md",
+      "cases": ["diag_bgtest_ar1", "ols_diagnostics_grunfeld"],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_bgtest_ar1",
+        "p2a-core::regression::diagnostics::tests::test_validate_bgtest_grunfeld"
+      ],
+      "quantities": ["LM (Chisq) statistic, orders 1 and 4", "F statistic, orders 1 and 4", "df", "p-values", "lagged-residual coefficients", "auxiliary R2", "n"],
+      "tolerance": "validation/README.md, n = 100 and 200: statistics and R2 1e-6, coefficients 1e-8 relative; p-values 1e-6 relative or 1e-12 absolute; df and n exact",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/bgtest_test.csv"]
+    },
+    {
+      "id": "resettest",
+      "name": "Ramsey RESET test",
+      "category": "regression",
+      "reference": "lmtest::resettest(power = 2:3, type = 'fitted' | 'regressor'); stats::lm for the augmented-model R2",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": ["diag_reset_quad", "ols_diagnostics_grunfeld"],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_reset_quad",
+        "p2a-core::regression::diagnostics::tests::test_validate_reset_grunfeld"
+      ],
+      "quantities": ["F statistic (fitted, regressor)", "df1, df2", "p-values", "R2 of the original and augmented models", "n"],
+      "tolerance": "validation/README.md, n = 100 and 200: statistics and R2 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute; df exact",
+      "deviations": [
+        {"finding": "REG-35", "quantity": "type = 'princomp'", "note": "not implemented: ResetType::PrinComp reuses the fitted-value augmentation; not exercised by any case. On Grunfeld (inv ~ value + capital, powers 2:3) p2a gives the fitted F 19.56011807 where resettest(type = 'princomp') gives 6.108133142 (df 2, 195)"}
+      ],
+      "supersedes_legacy": ["validation/expected/reset_test.csv"]
+    },
+    {
+      "id": "harvtest",
+      "name": "Harvey-Collier test",
+      "category": "regression",
+      "reference": "lmtest::harvtest; strucchange::recresid",
+      "doc": "validation/diagnostics/harvtest.md",
+      "cases": ["diag_harvtest_nonlin", "ols_diagnostics_grunfeld"],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_harvey_collier_nonlin",
+        "p2a-core::regression::diagnostics::tests::test_validate_harvey_collier_grunfeld"
+      ],
+      "quantities": ["|t| statistic (p2a keeps the sign of the mean)", "df", "p-value", "mean and standard error of the recursive residuals", "number of recursive residuals"],
+      "tolerance": "validation/README.md, n = 100 and 200: statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute; counts exact",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/harveycollier_test.csv"]
+    },
+    {
+      "id": "waldtest",
+      "name": "Wald test of nested linear models",
+      "category": "regression",
+      "reference": "lmtest::waldtest(test = 'F' | 'Chisq'); aod::wald.test (legacy reference, equal to the Chisq form)",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": ["diag_wald_sim", "ols_diagnostics_grunfeld"],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_wald_sim",
+        "p2a-core::regression::diagnostics::tests::test_validate_wald_grunfeld"
+      ],
+      "quantities": ["F statistic", "df1, df2", "F p-value", "RSS of both models", "parameter counts", "n"],
+      "tolerance": "validation/README.md, n = 100 and 200: statistics and RSS 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute; counts exact",
+      "deviations": [
+        {"finding": "REG-37", "quantity": "Chisq statistic and p-value", "note": "p2a uses n (RSS_r - RSS_u) / RSS_u; lmtest::waldtest(test = 'Chisq') and aod::wald.test give q F = (n - k) (RSS_r - RSS_u) / RSS_u: diag_wald_sim drop x2 0.01248835701 vs 0.01198882273, drop x2 and x3 514.9909496 vs 494.3913116; Grunfeld drop capital 83.23811806 vs 81.98954629"}
+      ],
+      "supersedes_legacy": ["validation/expected/wald_test.csv"]
+    }
+  ]
+}

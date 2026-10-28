@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "diag_harvtest_nonlin",
+  "area": "regression/diagnostics",
+  "method": "Harvey-Collier test, concave DGP, n = 100 (legacy Test 6 DGP)",
+  "reference": "lmtest::harvtest (statistic is |t|); strucchange::recresid for the signed mean",
+  "call": "harvtest(lm(y ~ x, data = harvtest_nonlin))",
+  "dataset": "validation/datasets/generated/harvtest_nonlin.csv",
+  "datasets": ["validation/datasets/generated/harvtest_nonlin.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "lmtest": "0.9.40",
+    "strucchange": "1.6.0"
+  },
+  "values": {
+    "harvey_collier": 8.4548621946000306,
+    "harvey_collier_df": 97,
+    "harvey_collier_p": 2.8713775944202606e-13,
+    "recresid_mean": -0.85219085409028383,
+    "recresid_sd": 0.99779970990922029,
+    "recresid_se_mean": 0.10079299159182566,
+    "n_recresid": 98,
+    "n_obs": 100
+  }
+}

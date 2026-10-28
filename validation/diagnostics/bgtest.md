@@ -39,56 +39,58 @@ The test procedure:
 
 **Location:** `crates/p2a-core/src/regression/diagnostics.rs`
 
-## R Comparison
+## R reference (pinned)
 
-```r
-library(lmtest)
+Two R reference cases pin the test: the AR(1) DGP of the legacy script
+`validation/scripts/validate_regression_diag.R` (Test 4), ported with the same seed and draws,
+and the Grunfeld regression of the `p2a reg diagnostics` exhibit.
 
-# Generate data with serial correlation
-set.seed(123)
-n <- 100
-x <- 1:n
-e <- numeric(n)
-e[1] <- rnorm(1)
-for(i in 2:n) {
-  e[i] <- 0.7 * e[i-1] + rnorm(1)  # AR(1) errors
-}
-y <- 2 + 0.5 * x + e
+| Case | Data | R code |
+|---|---|---|
+| `diag_bgtest_ar1` | `validation/datasets/generated/bgtest_ar1.csv` (n = 100; `y = 2 + 3 x + e`, `e` AR(1) with rho = 0.5, `set.seed(42)`) | `validation/r/cases/regression_legacy.R` |
+| `ols_diagnostics_grunfeld` | `validation/datasets/grunfeld.csv` (n = 200; `inv ~ value + capital`) | `validation/r/cases/regression.R` |
 
-model <- lm(y ~ x)
+R call: `bgtest(lm(y ~ x), order = 1 | 4, type = "Chisq" | "F")` (lmtest 0.9.40, `fill = 0`).
+The auxiliary R-squared comes from `stats::lm` on the zero-filled lagged residuals.
 
-# Breusch-Godfrey test (order 1)
-bg1 <- bgtest(model, order = 1)
-print(bg1)
-#   Breusch-Godfrey test for serial correlation of order up to 1
-#
-# data:  model
-# LM test = 51.837, df = 1, p-value = 5.929e-13
+| Case | Quantity | R value |
+|---|---|---|
+| `diag_bgtest_ar1` | LM, order 1 (df, p) | 29.41725627 (1, 5.835570525e-08) |
+| | LM, order 4 (df, p) | 29.62679143 (4, 5.829739137e-06) |
+| | F, order 1 (df1, df2, p) | 40.42735812 (1, 97, 6.684182268e-09) |
+| | F, order 4 (df1, df2, p) | 9.893390009 (4, 94, 1.004726915e-06) |
+| | lagged-residual coefficient, order 1 | 0.5430943053 |
+| | lagged-residual coefficients, order 4 | 0.5615690953, -0.04353347514, 0.04124071549, -0.04081137602 |
+| | auxiliary R-squared, orders 1 and 4 | 0.2941725627, 0.2962679143 |
+| `ols_diagnostics_grunfeld` | LM, order 1 (p) | 135.2510384 (2.909552493e-31) |
+| | F, order 1 (p) | 409.4151148 (6.902946376e-50); df (1, 196) |
+| | LM, order 4 (p) | 135.4159814 (2.702716519e-28) |
 
-# Breusch-Godfrey test (order 4)
-bg4 <- bgtest(model, order = 4)
-print(bg4)
+Tests: `test_validate_bgtest_ar1` (every value above for `diag_bgtest_ar1`, and n) and
+`test_validate_bgtest_grunfeld` (the Grunfeld rows; the F df are asserted directly because
+the case does not store them).
 
-# F-test version
-bgf <- bgtest(model, order = 1, type = "F")
-print(bgf)
-```
+Tolerance (`validation/README.md`, n = 100 and 200): statistics and R-squared 1e-6 relative,
+coefficients 1e-8 relative, p-values 1e-6 relative or 1e-12 absolute; df and n exact. The
+methods registry entry is `bgtest` in `validation/methods/regression_diagnostics.json`; it
+records no deviation. These cases supersede the legacy `validation/expected/bgtest_test.csv`,
+whose values they reproduce to the 15 digits it prints.
 
-## Test Cases
+## Property tests
 
-| Test | Order | Type | Expected |
-|------|-------|------|----------|
-| No autocorrelation | 1 | Chisq | p > 0.05 |
-| Strong AR(1) | 1 | Chisq | p < 0.05 |
-| Higher order | 4 | Chisq | Valid statistic |
-| F-test variant | 1 | F | Valid F-statistic |
+- `test_bg_test_basic`
+- `test_bg_test_higher_order`
+- `test_bg_test_f_type`
+- `test_bg_test_with_autocorrelation`
 
 ## Validation Status
+
+R-pinned.
 
 - [x] Core implementation complete
 - [x] Unit tests passing
 - [x] MCP tool exposed
-- [ ] R comparison benchmarks
+- [x] R reference cases pinned (`diag_bgtest_ar1`, `ols_diagnostics_grunfeld`)
 - [ ] Performance benchmarks
 
 ## References

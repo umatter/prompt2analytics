@@ -2807,309 +2807,212 @@ mod tests {
     // VALIDATION TESTS - Comparing against R reference implementations
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Validation test: Breusch-Godfrey test vs R's lmtest::bgtest
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 100
-    /// e_ar <- numeric(n)
-    /// e_ar[1] <- rnorm(1)
-    /// for (i in 2:n) e_ar[i] <- 0.5 * e_ar[i-1] + rnorm(1)
-    /// x <- rnorm(n)
-    /// y_autocor <- 2 + 3*x + e_ar
-    /// model_autocor <- lm(y_autocor ~ x)
-    /// bg1 <- bgtest(model_autocor, order = 1)
-    /// # Order 1: statistic ≈ 29.42, df = 1, p ≈ 5.8e-08
-    /// # Order 4: statistic ≈ 29.63, df = 4, p ≈ 5.8e-06
-    /// ```
+    /// Pinned to case `diag_bgtest_ar1` (lmtest::bgtest on the legacy Test 4 DGP; validation/r/cases/regression_legacy.R).
     #[test]
-    fn test_validate_bgtest_vs_r() {
-        // R reference values from validation/expected/bgtest_test.csv
-        // order,type,statistic,df,p_value
-        // 1,Chisq,29.4172562662552,1,5.83557052462606e-08
-        // 4,Chisq,29.626791428617,4,5.829739137478e-06
-        // 1,F,40.4273581173148,"1,97",6.6841822675455e-09
-
-        // Create data with AR(1) errors (rho = 0.5)
-        let n = 100;
-        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 1.567).sin() * 2.0).collect();
-
-        // Simulate AR(1) errors
-        let mut ar_error = 0.0;
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let innovation = ((i as f64 * 0.876).cos()) * 0.8;
-                ar_error = 0.5 * ar_error + innovation;
-                2.0 + 3.0 * xi + ar_error
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x" => x
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // Test order 1 (Chi-squared)
-        let result_bg1 = bg_test(&dataset, "y", &["x"], 1, BgTestType::Chisq, 0.0).unwrap();
-
-        assert_eq!(result_bg1.order, 1);
-        assert!(matches!(result_bg1.test_type, BgTestType::Chisq));
-        assert!(
-            result_bg1.statistic >= 0.0,
-            "BG statistic should be non-negative"
-        );
-        assert!(
-            result_bg1.p_value >= 0.0 && result_bg1.p_value <= 1.0,
-            "P-value should be in [0,1]"
-        );
-        assert!(
-            (result_bg1.df.0 - 1.0).abs() < 1e-10,
-            "Order 1 should have df=1"
-        );
-
-        // Test order 4
-        let result_bg4 = bg_test(&dataset, "y", &["x"], 4, BgTestType::Chisq, 0.0).unwrap();
-
-        assert_eq!(result_bg4.order, 4);
-        assert!(
-            (result_bg4.df.0 - 4.0).abs() < 1e-10,
-            "Order 4 should have df=4"
-        );
-        assert!(
-            result_bg4.lag_coefficients.len() == 4,
-            "Should have 4 lag coefficients"
-        );
-
-        // Test F-type statistic
-        let result_bg_f = bg_test(&dataset, "y", &["x"], 1, BgTestType::F, 0.0).unwrap();
-
-        assert!(matches!(result_bg_f.test_type, BgTestType::F));
-        assert!(result_bg_f.df.1.is_some(), "F-test should have second df");
-        assert!(result_bg_f.statistic >= 0.0);
-
-        // With AR(1) errors, BG test should detect autocorrelation
-        // (significant result = small p-value or large statistic)
-        // Note: Our simulated data may have different exact values than R
-        // but the structure should be correct
+    fn test_validate_bgtest_ar1() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("diag_bgtest_ar1");
+        let n = case.scalar("n_obs") as usize;
+        let lm1 = bg_test(&ds, "y", &["x"], 1, BgTestType::Chisq, 0.0).unwrap();
+        let lm4 = bg_test(&ds, "y", &["x"], 4, BgTestType::Chisq, 0.0).unwrap();
+        let f1 = bg_test(&ds, "y", &["x"], 1, BgTestType::F, 0.0).unwrap();
+        let f4 = bg_test(&ds, "y", &["x"], 4, BgTestType::F, 0.0).unwrap();
+        let lags = |k: usize| {
+            (1..=k)
+                .map(|j| format!("lag(resid)_{j}"))
+                .collect::<Vec<_>>()
+        };
+        Check::new(&case)
+            .scalar("bgtest1_chisq", lm1.statistic, Tol::stat(n))
+            .scalar("bgtest1_chisq_df", lm1.df.0, Tol::exact())
+            .scalar("bgtest1_chisq_p", lm1.p_value, Tol::p_value(n))
+            .scalar("bgtest4_chisq", lm4.statistic, Tol::stat(n))
+            .scalar("bgtest4_chisq_df", lm4.df.0, Tol::exact())
+            .scalar("bgtest4_chisq_p", lm4.p_value, Tol::p_value(n))
+            .scalar("bgtest1_f", f1.statistic, Tol::stat(n))
+            .scalar("bgtest1_f_df1", f1.df.0, Tol::exact())
+            .scalar("bgtest1_f_df2", f1.df.1.unwrap(), Tol::exact())
+            .scalar("bgtest1_f_p", f1.p_value, Tol::p_value(n))
+            .scalar("bgtest4_f", f4.statistic, Tol::stat(n))
+            .scalar("bgtest4_f_df1", f4.df.0, Tol::exact())
+            .scalar("bgtest4_f_df2", f4.df.1.unwrap(), Tol::exact())
+            .scalar("bgtest4_f_p", f4.p_value, Tol::p_value(n))
+            .named(
+                "bgtest1_lag_coef",
+                &lags(1),
+                &lm1.lag_coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                "bgtest4_lag_coef",
+                &lags(4),
+                &lm4.lag_coefficients,
+                Tol::coef(n),
+            )
+            .scalar("bgtest1_aux_r2", lm1.r_squared, Tol::stat(n))
+            .scalar("bgtest4_aux_r2", lm4.r_squared, Tol::stat(n))
+            .scalar("n_obs", lm1.n_obs as f64, Tol::exact())
+            .finish();
+        // AR(1) errors are detected
+        assert!(lm1.df.1.is_none() && lm1.significant_at_05 && f1.significant_at_05);
     }
 
-    /// Validation test: RESET test vs R's lmtest::resettest
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 100
-    /// x <- runif(n, 1, 10)
-    /// y_quad <- 2 + 3*x + 0.5*x^2 + rnorm(n, 0, 2)  # true quadratic
-    /// model_lin <- lm(y_quad ~ x)  # misspecified linear
-    /// reset_fitted <- resettest(model_lin, power = 2:3, type = "fitted")
-    /// # statistic ≈ 150.25, df1 = 2, df2 = 96, p ≈ 2.7e-30
-    /// ```
+    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::bgtest on Grunfeld; validation/r/cases/regression.R).
     #[test]
-    fn test_validate_reset_vs_r() {
-        // R reference values from validation/expected/reset_test.csv
-        // type,statistic,df1,df2,p_value
-        // fitted,150.246139604789,2,96,2.71488797499869e-30
-        // regressor,150.246139604789,2,96,2.71488797499861e-30
-
-        // Create misspecified model: true y = 2 + 3x + 0.5x^2 but fit y ~ x
-        let n = 100;
-        let x: Vec<f64> = (0..n)
-            .map(|i| 1.0 + 9.0 * (i as f64) / (n as f64))
-            .collect();
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let noise = ((i as f64 * 1.111).sin()) * 2.0;
-                2.0 + 3.0 * xi + 0.5 * xi.powi(2) + noise
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x" => x
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // Test RESET with powers 2:3 and fitted type
-        let result_fitted = reset_test(&dataset, "y", &["x"], &[2, 3], ResetType::Fitted).unwrap();
-
-        assert_eq!(result_fitted.n_obs, 100);
-        assert_eq!(result_fitted.powers, vec![2, 3]);
-        assert!(matches!(result_fitted.reset_type, ResetType::Fitted));
-        assert!(
-            result_fitted.statistic >= 0.0,
-            "RESET F-statistic should be non-negative"
-        );
-        assert_eq!(result_fitted.df.0, 2, "df1 should be 2 (two added terms)");
-
-        // With true quadratic relationship but linear fit, RESET should detect misspecification
-        // (large F-statistic, small p-value)
-        // Note: Our simulated data has a clear quadratic component
-        assert!(
-            result_fitted.statistic > 1.0,
-            "RESET should detect misspecification: F={:.2}",
-            result_fitted.statistic
-        );
-
-        // Test regressor type
-        let result_regressor =
-            reset_test(&dataset, "y", &["x"], &[2, 3], ResetType::Regressor).unwrap();
-
-        assert!(matches!(result_regressor.reset_type, ResetType::Regressor));
-        assert!(result_regressor.statistic >= 0.0);
-
-        // R² of augmented model should be >= original
-        assert!(
-            result_fitted.r2_augmented >= result_fitted.r2_original - 1e-10,
-            "Augmented R² should be >= original R²"
-        );
+    fn test_validate_bgtest_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_diagnostics_grunfeld");
+        let x = ["value", "capital"];
+        let lm1 = bg_test(&ds, "inv", &x, 1, BgTestType::Chisq, 0.0).unwrap();
+        let lm4 = bg_test(&ds, "inv", &x, 4, BgTestType::Chisq, 0.0).unwrap();
+        let f1 = bg_test(&ds, "inv", &x, 1, BgTestType::F, 0.0).unwrap();
+        let n = lm1.n_obs;
+        Check::new(&case)
+            .scalar("bgtest1_chisq", lm1.statistic, Tol::stat(n))
+            .scalar("bgtest1_chisq_p", lm1.p_value, Tol::p_value(n))
+            .scalar("bgtest1_f", f1.statistic, Tol::stat(n))
+            .scalar("bgtest1_f_p", f1.p_value, Tol::p_value(n))
+            .scalar("bgtest4_chisq", lm4.statistic, Tol::stat(n))
+            .scalar("bgtest4_chisq_p", lm4.p_value, Tol::p_value(n))
+            .finish();
+        assert_eq!(n, 200);
+        // R's bgtest(type = "F") parameter is (1, 196); the case does not store df.
+        assert_eq!(f1.df, (1.0, Some(196.0)));
     }
 
-    /// Validation test: Harvey-Collier test vs R's lmtest::harvtest
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 100
-    /// x <- seq(1, 10, length.out = n)
-    /// y_nonlin <- 5 + 2*x - 0.2*x^2 + rnorm(n, 0, 0.5)
-    /// model_nonlin <- lm(y_nonlin ~ x)
-    /// hc_test <- harvtest(model_nonlin)
-    /// # statistic ≈ 8.45, df = 97, p ≈ 2.87e-13
-    /// ```
+    /// Pinned to case `diag_reset_quad` (lmtest::resettest on the legacy Test 5 DGP; validation/r/cases/regression_legacy.R).
     #[test]
-    fn test_validate_harvey_collier_vs_r() {
-        // R reference values from validation/expected/harveycollier_test.csv
-        // statistic,df,p_value
-        // 8.45486219460003,97,2.87137759442026e-13
-
-        // Create data with quadratic relationship (misspecified as linear)
-        let n = 100;
-        let x: Vec<f64> = (0..n)
-            .map(|i| 1.0 + 9.0 * (i as f64) / ((n - 1) as f64))
-            .collect();
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let noise = ((i as f64 * 0.789).sin()) * 0.5;
-                5.0 + 2.0 * xi - 0.2 * xi.powi(2) + noise
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x" => x
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // Run Harvey-Collier test
-        let result = harvey_collier_test(&dataset, "y", &["x"]).unwrap();
-
-        // Check structure
-        assert!(result.n_recursive > 0, "Should have recursive residuals");
-        assert!(result.df > 0, "Should have positive df");
-        assert!(
-            result.p_value >= 0.0 && result.p_value <= 1.0,
-            "P-value should be in [0,1]"
-        );
-
-        // With quadratic misspecification, Harvey-Collier should detect non-linearity
-        // The test examines whether recursive residuals have zero mean
-        // Note: exact values depend on data generation
-        assert!(
-            result.statistic.is_finite(),
-            "Test statistic should be finite"
-        );
+    fn test_validate_reset_quad() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("diag_reset_quad");
+        let n = case.scalar("n_obs") as usize;
+        let rf = reset_test(&ds, "y", &["x"], &[2, 3], ResetType::Fitted).unwrap();
+        let rr = reset_test(&ds, "y", &["x"], &[2, 3], ResetType::Regressor).unwrap();
+        Check::new(&case)
+            .scalar("reset_fitted", rf.statistic, Tol::stat(n))
+            .scalar("reset_fitted_df1", rf.df.0 as f64, Tol::exact())
+            .scalar("reset_fitted_df2", rf.df.1 as f64, Tol::exact())
+            .scalar("reset_fitted_p", rf.p_value, Tol::p_value(n))
+            .scalar("reset_regressor", rr.statistic, Tol::stat(n))
+            .scalar("reset_regressor_df1", rr.df.0 as f64, Tol::exact())
+            .scalar("reset_regressor_df2", rr.df.1 as f64, Tol::exact())
+            .scalar("reset_regressor_p", rr.p_value, Tol::p_value(n))
+            .scalar("r2_original", rf.r2_original, Tol::stat(n))
+            .scalar("r2_augmented_fitted", rf.r2_augmented, Tol::stat(n))
+            .scalar("r2_augmented_regressor", rr.r2_augmented, Tol::stat(n))
+            .scalar("n_obs", rf.n_obs as f64, Tol::exact())
+            .finish();
+        assert_eq!(rf.powers, vec![2, 3]);
+        assert!(rf.significant_at_05);
     }
 
-    /// Validation test: Wald test vs R's aod::wald.test
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 100
-    /// x1 <- rnorm(n); x2 <- rnorm(n); x3 <- rnorm(n)
-    /// y <- 2 + 3*x1 + 0.001*x2 + 1*x3 + rnorm(n, 0, 0.5)
-    /// model_wald <- lm(y ~ x1 + x2 + x3)
-    /// wald_single <- aod::wald.test(b = coef(model_wald), Sigma = vcov(model_wald), Terms = 3)
-    /// # H0: x2 = 0, chi2 ≈ 0.012, df = 1
-    /// wald_multi <- aod::wald.test(b = coef(model_wald), Sigma = vcov(model_wald), Terms = c(3, 4))
-    /// # H0: x2 = x3 = 0, chi2 ≈ 494.39, df = 2
-    /// ```
+    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::resettest on Grunfeld; validation/r/cases/regression.R).
     #[test]
-    fn test_validate_wald_vs_r() {
-        // R reference values from validation/expected/wald_test.csv
-        // restriction,chi2_statistic,df,p_value
-        // x2=0,0.0119888227334756,1,NA
-        // x2=x3=0,494.391311649702,2,NA
+    fn test_validate_reset_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_diagnostics_grunfeld");
+        let x = ["value", "capital"];
+        let rf = reset_test(&ds, "inv", &x, &[2, 3], ResetType::Fitted).unwrap();
+        let rr = reset_test(&ds, "inv", &x, &[2, 3], ResetType::Regressor).unwrap();
+        let n = rf.n_obs;
+        Check::new(&case)
+            .scalar("reset_fitted", rf.statistic, Tol::stat(n))
+            .scalar("reset_fitted_p", rf.p_value, Tol::p_value(n))
+            .scalar("reset_regressor", rr.statistic, Tol::stat(n))
+            .scalar("reset_regressor_p", rr.p_value, Tol::p_value(n))
+            .finish();
+        // R's parameters: resettest prints df1 = 2, df2 = 195 for the fitted type, and
+        // powers 2:3 of two regressors add four terms.
+        assert_eq!(rf.df, (2, 195));
+        assert_eq!(rr.df, (4, 193));
+    }
 
-        // Create data where x1 and x3 are significant, x2 is not
-        let n = 100;
-        let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 1.234).sin()).collect();
-        let x2: Vec<f64> = (0..n).map(|i| (i as f64 * 2.345).sin()).collect();
-        let x3: Vec<f64> = (0..n).map(|i| (i as f64 * 3.456).sin()).collect();
+    /// Pinned to case `diag_harvtest_nonlin` (lmtest::harvtest on the legacy Test 6 DGP; validation/r/cases/regression_legacy.R).
+    #[test]
+    fn test_validate_harvey_collier_nonlin() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("diag_harvtest_nonlin");
+        let n = case.scalar("n_obs") as usize;
+        let r = harvey_collier_test(&ds, "y", &["x"]).unwrap();
+        Check::new(&case)
+            // lmtest::harvtest reports |t|; p2a keeps the sign of the mean recursive residual
+            .scalar("harvey_collier", r.statistic.abs(), Tol::stat(n))
+            .scalar("harvey_collier_df", r.df as f64, Tol::exact())
+            .scalar("harvey_collier_p", r.p_value, Tol::p_value(n))
+            .scalar("recresid_mean", r.mean_recursive, Tol::stat(n))
+            .scalar("recresid_se_mean", r.se_mean, Tol::stat(n))
+            .scalar("n_recresid", r.n_recursive as f64, Tol::exact())
+            .finish();
+        assert_eq!(r.statistic.signum(), case.scalar("recresid_mean").signum());
+    }
 
-        let y: Vec<f64> = (0..n)
-            .map(|i| {
-                let noise = ((i as f64 * 0.567).cos()) * 0.5;
-                2.0 + 3.0 * x1[i] + 0.001 * x2[i] + 1.0 * x3[i] + noise
-            })
-            .collect();
+    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::harvtest on Grunfeld; validation/r/cases/regression.R).
+    #[test]
+    fn test_validate_harvey_collier_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_diagnostics_grunfeld");
+        let r = harvey_collier_test(&ds, "inv", &["value", "capital"]).unwrap();
+        let n = ds.nrows();
+        Check::new(&case)
+            // lmtest::harvtest reports |t|; p2a keeps the sign of the mean recursive residual
+            .scalar("harvey_collier", r.statistic.abs(), Tol::stat(n))
+            .scalar("harvey_collier_p", r.p_value, Tol::p_value(n))
+            .finish();
+        // R's df is n - k - 1 = 196.
+        assert_eq!((r.df, r.n_recursive), (196, 197));
+    }
 
-        let df = df! {
-            "y" => y,
-            "x1" => x1,
-            "x2" => x2,
-            "x3" => x3
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
+    /// Pinned to case `diag_wald_sim` (lmtest::waldtest on the legacy Test 7 DGP; validation/r/cases/regression_legacy.R).
+    #[test]
+    fn test_validate_wald_sim() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("diag_wald_sim");
+        let n = case.scalar("n_obs") as usize;
+        let full = ["x1", "x2", "x3"];
+        let f1 = wald_test(&ds, "y", &full, &["x1", "x3"], true).unwrap();
+        let f2 = wald_test(&ds, "y", &full, &["x1"], true).unwrap();
+        let c1 = wald_test(&ds, "y", &full, &["x1", "x3"], false).unwrap();
+        let c2 = wald_test(&ds, "y", &full, &["x1"], false).unwrap();
+        Check::new(&case)
+            .scalar("wald_drop_x2_f", f1.statistic, Tol::stat(n))
+            .scalar("wald_drop_x2_f_df1", f1.df1 as f64, Tol::exact())
+            .scalar("wald_drop_x2_f_df2", f1.df2.unwrap() as f64, Tol::exact())
+            .scalar("wald_drop_x2_f_p", f1.p_value, Tol::p_value(n))
+            .scalar("wald_drop_x2_x3_f", f2.statistic, Tol::stat(n))
+            .scalar("wald_drop_x2_x3_f_df1", f2.df1 as f64, Tol::exact())
+            .scalar(
+                "wald_drop_x2_x3_f_df2",
+                f2.df2.unwrap() as f64,
+                Tol::exact(),
+            )
+            .scalar("wald_drop_x2_x3_f_p", f2.p_value, Tol::p_value(n))
+            .scalar("rss_unrestricted", f1.rss_unrestricted, Tol::stat(n))
+            .scalar("rss_drop_x2", f1.rss_restricted, Tol::stat(n))
+            .scalar("rss_drop_x2_x3", f2.rss_restricted, Tol::stat(n))
+            .scalar("k_unrestricted", f1.k_unrestricted as f64, Tol::exact())
+            .scalar("k_drop_x2", f1.k_restricted as f64, Tol::exact())
+            .scalar("k_drop_x2_x3", f2.k_restricted as f64, Tol::exact())
+            .scalar("n_obs", f1.n_obs as f64, Tol::exact())
+            .finish();
+        // deviation REG-37: n (RSS_r - RSS_u) / RSS_u, not lmtest's q F (wald_drop_*_chisq, aod_chi2_*)
+        assert_eq!(c1.test_type, "Chisq");
+        assert_eq!((c1.df1, c1.df2), (1, None));
+        assert!(c2.statistic > c1.statistic);
+        assert!(!f1.significant_at_05 && f2.significant_at_05);
+    }
 
-        // Test: is x2 significant? (drop x2 from full model)
-        // Full model: y ~ x1 + x2 + x3
-        // Restricted model: y ~ x1 + x3
-        let result_single =
-            wald_test(&dataset, "y", &["x1", "x2", "x3"], &["x1", "x3"], true).unwrap();
-
-        assert_eq!(result_single.df1, 1, "Single restriction should have df1=1");
-        assert!(
-            result_single.statistic >= 0.0,
-            "Wald statistic should be non-negative"
-        );
-        assert!(result_single.p_value >= 0.0 && result_single.p_value <= 1.0);
-
-        // x2 has tiny coefficient (0.001), so Wald test should NOT reject
-        // (large p-value, small F-statistic)
-        // Note: With small coefficient, p-value should be > 0.05 typically
-
-        // Test: are x2 and x3 jointly significant?
-        // Restricted model: y ~ x1 only
-        let result_multi = wald_test(&dataset, "y", &["x1", "x2", "x3"], &["x1"], true).unwrap();
-
-        assert_eq!(result_multi.df1, 2, "Two restrictions should have df1=2");
-
-        // x3 has coefficient = 1.0, so joint test should be significant
-        // (small p-value, large F-statistic)
-        assert!(
-            result_multi.statistic > result_single.statistic,
-            "Joint test (including significant x3) should have larger statistic"
-        );
-
-        // Test Chi-squared variant
-        let result_chisq =
-            wald_test(&dataset, "y", &["x1", "x2", "x3"], &["x1", "x3"], false).unwrap();
-
-        assert_eq!(result_chisq.test_type, "Chisq");
-        assert!(result_chisq.statistic >= 0.0);
+    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::waldtest on Grunfeld; validation/r/cases/regression.R).
+    #[test]
+    fn test_validate_wald_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_diagnostics_grunfeld");
+        let f = wald_test(&ds, "inv", &["value", "capital"], &["value"], true).unwrap();
+        let n = f.n_obs;
+        Check::new(&case)
+            .scalar("wald_drop_capital_f", f.statistic, Tol::stat(n))
+            .scalar("wald_drop_capital_f_p", f.p_value, Tol::p_value(n))
+            .finish();
+        // deviation REG-37: n (RSS_r - RSS_u) / RSS_u, not lmtest's q F (wald_drop_capital_chisq)
+        assert_eq!((f.df1, f.df2), (1, Some(197)));
     }
 }
