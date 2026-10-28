@@ -856,18 +856,17 @@ mod tests {
                 assert_eq!(inv[[i, j]], want, "[{i},{j}]");
             }
         }
-        // R 4.3.3: solve(I - 0.5 W) for the rook grid on 5 x 5.
+        // R 4.3.3: solve(I - 0.5 W) for the rook grid on 5 x 5 (LAPACK dgesv). Relative
+        // 1e-14 (about 50 ulp at 1.1): faer's x86-64 and aarch64 kernels and LAPACK
+        // round a 25 x 25 LU inverse differently.
         let inv = matrix_inverse(&rook_i_minus_half_w(5).view()).unwrap();
-        assert!(
-            (inv[[0, 0]] - 1.098953394019214).abs() <= 1e-15,
-            "{}",
-            inv[[0, 0]]
-        );
-        assert!(
-            (inv[[12, 12]] - 1.0739348370927317).abs() <= 1e-15,
-            "{}",
-            inv[[12, 12]]
-        );
+        for (i, want) in [(0, 1.098953394019214), (12, 1.0739348370927317)] {
+            assert!(
+                (inv[[i, i]] - want).abs() <= 1e-14 * want,
+                "[{i},{i}]: {} vs R {want}",
+                inv[[i, i]]
+            );
+        }
         for i in 0..25 {
             let s: f64 = inv.row(i).sum();
             assert!((s - 2.0).abs() <= 1e-14, "row {i} sums to {s}");
@@ -941,9 +940,10 @@ mod tests {
         let m = diag_from(16, -1.0);
         let cond = condition_number(&m.view()).unwrap();
         let svd = pseudoinverse(&m.view()).unwrap();
-        // (1) faer 0.22.6's full-pivot candidate (all NaN for this matrix) is rejected.
+        // (1) A non-finite candidate (as faer 0.22.6's full-pivot LU returned for this
+        // matrix) is rejected.
         let inv = verified_inverse(&m.view(), cond, |a| {
-            a.full_piv_lu().solve(&Mat::<f64>::identity(16, 16))
+            Mat::from_fn(a.nrows(), a.ncols(), |_, _| f64::NAN)
         })
         .unwrap();
         assert!(max_abs_residual(&m, &inv) <= 1e-15);
