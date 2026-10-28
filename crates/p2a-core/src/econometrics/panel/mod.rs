@@ -996,26 +996,45 @@ mod tests {
             .scalar("n_obs", n as f64, Tol::exact())
             .scalar("n_groups", r.n_groups as f64, Tol::exact())
             .finish();
+        assert_eq!(r.f_df(), (2, r.df));
         assert_eq!(r.vcov_type, PanelVcov::Classical);
         assert_eq!(r.test_distribution, TestDistribution::StudentT);
 
-        // Entity-clustered (Arellano) SEs, as plm::vcovHC(method = "arellano")
-        for (key, adj) in [
-            ("se_arellano_hc0", ClusterAdjustment::HC0),
-            ("se_arellano_hc1", ClusterAdjustment::HC1),
-            ("se_arellano_sss", ClusterAdjustment::Stata),
+        // Entity-clustered (Arellano) SEs, as plm::vcovHC(method = "arellano"),
+        // and the robust F test of plm's summary(fe, vcov = vcovHC(fe, method =
+        // "arellano", type = ...)), i.e. pwaldtest(fe, test = "F", vcov = ...)
+        // on (K, G - 1) degrees of freedom
+        for (sfx, adj) in [
+            ("hc0", ClusterAdjustment::HC0),
+            ("hc1", ClusterAdjustment::HC1),
+            ("sss", ClusterAdjustment::Stata),
         ] {
             let config = PanelConfig {
                 vcov: PanelVcov::Arellano(adj),
             };
             let rc =
                 run_fixed_effects_with(ds, "inv", &["value", "capital"], "firm", &config).unwrap();
+            let (df1, df2) = rc.f_df();
             Check::new(case)
-                .named(key, &rc.variables, &rc.std_errors, Tol::se(n))
+                .named(
+                    &format!("se_arellano_{sfx}"),
+                    &rc.variables,
+                    &rc.std_errors,
+                    Tol::se(n),
+                )
                 .named("coef", &rc.variables, &rc.coefficients, Tol::coef(n))
+                .scalar(&format!("f_stat_arellano_{sfx}"), rc.f_stat, Tol::stat(n))
+                .scalar(
+                    &format!("f_p_arellano_{sfx}"),
+                    rc.f_p_value,
+                    Tol::p_value(n),
+                )
+                .scalar("f_df1", df1 as f64, Tol::exact())
+                .scalar("f_df2_arellano", df2 as f64, Tol::exact())
                 .finish();
             assert_eq!(rc.vcov_type, PanelVcov::Arellano(adj));
             assert_eq!(rc.test_distribution, TestDistribution::StudentT);
+            assert!(rc.warnings.is_empty(), "{:?}", rc.warnings);
         }
         r
     }
@@ -1140,7 +1159,7 @@ mod tests {
             .scalar("r2", r.r_squared, Tol::stat(n))
             .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
             .scalar("wald_f", r.f_stat, Tol::stat(n))
-            .scalar("wald_f_df2", r.df as f64, Tol::exact())
+            .scalar("wald_f_df2", r.f_df().1 as f64, Tol::exact())
             .scalar("wald_f_p", r.f_p_value, Tol::p_value(n))
             .scalar("df_resid", r.df as f64, Tol::exact())
             .scalar("n_obs", n as f64, Tol::exact())
@@ -1159,11 +1178,15 @@ mod tests {
             assert_eq!(r.theta_by_group.len(), r.n_groups);
         }
 
-        // Entity-clustered (Arellano) SEs, as plm::vcovHC(method = "arellano")
-        for (key, adj) in [
-            ("se_arellano_hc0", ClusterAdjustment::HC0),
-            ("se_arellano_hc1", ClusterAdjustment::HC1),
-            ("se_arellano_sss", ClusterAdjustment::Stata),
+        // Entity-clustered (Arellano) SEs, as plm::vcovHC(method = "arellano"),
+        // and the Wald tests with that covariance: chi-squared as
+        // pwaldtest(re, test = "Chisq", vcov = vcovHC(re, method = "arellano",
+        // type = ...)) (plm's summary(re, vcov = ...)), and its F form as
+        // pwaldtest(re, test = "F", vcov = ...) on (K, G - 1) degrees of freedom
+        for (sfx, adj) in [
+            ("hc0", ClusterAdjustment::HC0),
+            ("hc1", ClusterAdjustment::HC1),
+            ("sss", ClusterAdjustment::Stata),
         ] {
             let config = PanelConfig {
                 vcov: PanelVcov::Arellano(adj),
@@ -1171,25 +1194,34 @@ mod tests {
             let rc =
                 run_random_effects_with(ds, "inv", &["value", "capital"], "firm", &config).unwrap();
             Check::new(case)
-                .named(key, &rc.variables, &rc.std_errors, Tol::se(n))
+                .named(
+                    &format!("se_arellano_{sfx}"),
+                    &rc.variables,
+                    &rc.std_errors,
+                    Tol::se(n),
+                )
                 .named("coef", &rc.variables, &rc.coefficients, Tol::coef(n))
+                .scalar(
+                    &format!("wald_chisq_arellano_{sfx}"),
+                    rc.wald_chi2.unwrap(),
+                    Tol::stat(n),
+                )
+                .scalar(
+                    &format!("wald_p_arellano_{sfx}"),
+                    rc.wald_p_value.unwrap(),
+                    Tol::p_value(n),
+                )
+                .scalar(&format!("wald_f_arellano_{sfx}"), rc.f_stat, Tol::stat(n))
+                .scalar(
+                    &format!("wald_f_p_arellano_{sfx}"),
+                    rc.f_p_value,
+                    Tol::p_value(n),
+                )
+                .scalar("wald_df", rc.f_df().0 as f64, Tol::exact())
+                .scalar("wald_f_df2_arellano", rc.f_df().1 as f64, Tol::exact())
                 .finish();
             assert_eq!(rc.vcov_type, PanelVcov::Arellano(adj));
             assert_eq!(rc.test_distribution, TestDistribution::Normal);
-            if adj == ClusterAdjustment::Stata {
-                // Property check (the case holds no robust Wald): the Wald
-                // statistic uses the chosen covariance.
-                let b_s = ndarray::Array1::from_vec(rc.coefficients[1..].to_vec());
-                let v_ss = rc.vcov.slice(ndarray::s![1.., 1..]).to_owned();
-                let (v_inv, cond) = crate::linalg::matrix_ops::safe_inverse(&v_ss.view()).unwrap();
-                assert_eq!(cond, None);
-                let w = b_s.dot(&v_inv.dot(&b_s));
-                let robust = rc.wald_chi2.unwrap();
-                assert!(
-                    Tol::new(1e-10, 0.0).allows(robust, w),
-                    "robust Wald {robust} vs b' V^-1 b {w}"
-                );
-            }
         }
         r
     }
@@ -1264,7 +1296,92 @@ mod tests {
             fe.std_errors[0]
         );
         assert!(
-            re.warnings.iter().any(|w| w.contains("rank deficient")),
+            re.warnings.iter().any(|w| w.contains("rank deficient")
+                && w.contains("the entity means of the regressors are collinear")),
+            "{:?}",
+            re.warnings
+        );
+    }
+
+    /// 12 entities, 5 periods: `x1` noisy, `x2 = 2 x1` exactly, `z` an integer
+    /// constant within each entity (so its entity means are exact and it is
+    /// exactly zero after demeaning).
+    fn create_collinear_panel_dataset() -> Dataset {
+        let (n_ent, n_t) = (12usize, 5usize);
+        let n = n_ent * n_t;
+        let entity: Vec<i64> = (0..n).map(|i| (i / n_t) as i64).collect();
+        let x1: Vec<f64> = (0..n)
+            .map(|i| ((i * 37) % 101) as f64 / 10.0 + (i / n_t) as f64 * 0.3)
+            .collect();
+        let x2: Vec<f64> = x1.iter().map(|v| 2.0 * v).collect();
+        let z: Vec<f64> = (0..n).map(|i| ((i / n_t) % 4) as f64).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + 0.5 * x1[i]
+                    + 0.3 * z[i]
+                    + ((i / n_t) % 7) as f64 * 0.2
+                    + ((i * 7919) % 1009) as f64 / 1009.0
+                    - 0.5
+            })
+            .collect();
+        Dataset::new(
+            df! { "entity" => entity, "x1" => x1, "x2" => x2, "z" => z, "y" => y }.unwrap(),
+        )
+    }
+
+    /// The message of a `SingularMatrix` error, or a panic naming the result.
+    fn singular_suggestion<T: std::fmt::Debug>(res: crate::errors::EconResult<T>) -> String {
+        match res {
+            Err(crate::errors::EconError::SingularMatrix { suggestion, .. }) => suggestion,
+            other => panic!("expected SingularMatrix, got {other:?}"),
+        }
+    }
+
+    /// Exactly collinear regressors are not identified. FE used to return the
+    /// minimum-norm split, RE a wrong identified combination (x1 + 2 x2), and
+    /// Hausman chi2 0 with p 1. All three refuse, naming the regressors, with
+    /// the classical and the clustered covariance.
+    #[test]
+    fn test_collinear_regressors_are_refused() {
+        let ds = create_collinear_panel_dataset();
+        let x = ["x1", "x2"];
+        for vcov in [
+            PanelVcov::Classical,
+            PanelVcov::Arellano(ClusterAdjustment::Stata),
+        ] {
+            let config = PanelConfig { vcov };
+            for s in [
+                singular_suggestion(run_fixed_effects_with(&ds, "y", &x, "entity", &config)),
+                singular_suggestion(run_random_effects_with(&ds, "y", &x, "entity", &config)),
+            ] {
+                assert!(
+                    s.contains("exactly collinear") && s.contains("involved: x1, x2"),
+                    "{s}"
+                );
+            }
+        }
+        let s = singular_suggestion(run_hausman_test(&ds, "y", &x, "entity"));
+        assert!(s.contains("involved: x1, x2"), "{s}");
+    }
+
+    /// A regressor that is exactly zero after demeaning is not identified by
+    /// FE, which refuses. RE identifies it from the between variation; its
+    /// within step (sigma_e^2) then falls back to a pseudoinverse, which is
+    /// now reported instead of being dropped.
+    #[test]
+    fn test_time_invariant_regressor_fe_refuses_re_warns() {
+        let ds = create_collinear_panel_dataset();
+        let s = singular_suggestion(run_fixed_effects(&ds, "y", &["x1", "z"], "entity"));
+        assert!(
+            s.contains("involved: z") && s.contains("constant within every entity"),
+            "{s}"
+        );
+        let re = run_random_effects(&ds, "y", &["x1", "z"], "entity").unwrap();
+        assert!(re.coefficients.iter().all(|b| b.is_finite()));
+        assert!(
+            re.warnings
+                .iter()
+                .any(|w| w.contains("within regression that estimates sigma_e^2")),
             "{:?}",
             re.warnings
         );

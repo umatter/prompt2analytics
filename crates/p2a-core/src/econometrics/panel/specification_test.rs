@@ -53,8 +53,8 @@ pub struct HausmanResult {
     /// Random Effects estimation results
     pub re_result: PanelResult,
     /// Warnings about the covariance difference (not positive definite,
-    /// singular), followed by the random-effects warnings prefixed with
-    /// `random effects: `.
+    /// singular), followed by the fixed-effects and the random-effects
+    /// warnings, prefixed with `fixed effects: ` and `random effects: `.
     #[serde(default)]
     pub warnings: Vec<String>,
     /// The covariances the statistic is built from.
@@ -293,6 +293,12 @@ pub fn run_hausman_test(
     let p_value = chi_squared_p_value(chi2_statistic, df as f64);
 
     let mut warnings = form.warnings;
+    warnings.extend(
+        fe_result
+            .warnings
+            .iter()
+            .map(|w| format!("fixed effects: {w}")),
+    );
     warnings.extend(
         re_result
             .warnings

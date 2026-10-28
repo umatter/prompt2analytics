@@ -57,6 +57,13 @@
     "se_arellano_sss": {
       "names": ["value", "capital"],
       "values": [0.068456691400360412, 0.062154099093335913]
-    }
+    },
+    "f_stat_arellano_hc0": 109.07786260702177,
+    "f_p_arellano_hc0": 1.5127969593146455e-20,
+    "f_df2_arellano": 59,
+    "f_stat_arellano_hc1": 108.35067685630828,
+    "f_p_arellano_hc1": 1.7667977475017095e-20,
+    "f_stat_arellano_sss": 106.9011694736152,
+    "f_p_arellano_sss": 2.4133243887693092e-20
   }
 }

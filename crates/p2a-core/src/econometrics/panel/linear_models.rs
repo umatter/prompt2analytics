@@ -44,11 +44,12 @@
 //!
 //! R equivalent: `plm::plm()` with `model = "within"` or `model = "random"`
 
-use ndarray::{Array1, Array2, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
 use crate::data::Dataset;
+use crate::econometrics::hdfe::reject_non_finite;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::{DesignError, DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{eig_symmetric, safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{
@@ -83,9 +84,15 @@ pub fn run_fixed_effects(
 /// (plm's default), or the entity-clustered (Arellano) sandwich built from the
 /// demeaned regressors and the within residuals, as plm
 /// `vcovHC(method = "arellano")` with `k = K` slopes. Inference is Student t with
-/// `n - N - K` degrees of freedom; the adjusted within R² is plm's
-/// `1 - (1 - R²)(n - 1)/(n - N - K)`, and `f_stat` stays the classical within F
-/// test whatever the covariance (as plm's `summary` without a `vcov` argument).
+/// `n - N - K` degrees of freedom, and the adjusted within R² is plm's
+/// `1 - (1 - R²)(n - 1)/(n - N - K)`. `f_stat` follows the covariance, as plm's
+/// `summary(fe, vcov = ...)`: the classical within F test on `(K, n - N - K)`
+/// degrees of freedom, or under the Arellano covariance the Wald F `W/K` on
+/// `(K, G - 1)` (plm `pwaldtest(test = "F")` with a cluster vcov, `df2adj`).
+///
+/// Refused: a non-finite value in `y` or a regressor, and regressors that are
+/// exactly collinear after removing the entity means (the coefficients are not
+/// identified).
 pub fn run_fixed_effects_with(
     dataset: &Dataset,
     y_col: &str,
@@ -106,6 +113,7 @@ pub fn run_fixed_effects_with(
 
     let x = design.data;
     let var_names = design.column_names;
+    reject_non_finite_data(&y, y_col, &x, &var_names)?;
     let n = y.len();
     let k = x.ncols();
 
@@ -135,15 +143,28 @@ pub fn run_fixed_effects_with(
     }
 
     // OLS on demeaned data: β = (X̃'X̃)^{-1} X̃'ỹ
+    let mut warnings = Vec::new();
     let xtx_mat = xtx(&x_demeaned.view());
-    let (xtx_inv, _cond_warning) =
-        safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-            context: "X'X in Fixed Effects".to_string(),
-            suggestion: format!(
-                "Check for perfect multicollinearity among variables: {:?}",
-                e
-            ),
-        })?;
+    require_full_rank(
+        &xtx_mat,
+        &var_names,
+        "X'X in Fixed Effects",
+        "after removing the entity means the regressors",
+        " (a regressor that is constant within every entity is zero after demeaning)",
+    )?;
+    let (xtx_inv, cond) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
+        context: "X'X in Fixed Effects".to_string(),
+        suggestion: format!(
+            "Check for perfect multicollinearity among variables: {:?}",
+            e
+        ),
+    })?;
+    warn_pseudoinverse(
+        &mut warnings,
+        "the within regression",
+        "the coefficients may not be identified",
+        cond,
+    );
 
     let xty_vec = xty(&x_demeaned.view(), &y_demeaned);
     let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
@@ -179,13 +200,32 @@ pub fn run_fixed_effects_with(
     // Adjusted within R-squared, plm's r.squared(dfcor = TRUE)
     let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df as f64);
 
-    // F-statistic
-    let f_stat = if k > 0 && ssr > 0.0 {
-        (sst - ssr) / (k as f64) / (ssr / df as f64)
-    } else {
-        0.0
+    // F test of the slopes with the chosen covariance, as plm's summary: the
+    // classical within F, or the Wald F W/K on (K, G - 1) for a cluster vcov
+    let (f_stat, f_p_value) = match config.vcov {
+        PanelVcov::Classical => {
+            let f = if k > 0 && ssr > 0.0 {
+                (sst - ssr) / (k as f64) / (ssr / df as f64)
+            } else {
+                0.0
+            };
+            (f, f_test_p_value(f, k as f64, df as f64))
+        }
+        PanelVcov::Arellano(_) => match wald_statistic(&beta.view(), &vcov.view()) {
+            Some(w) => {
+                let f = w / k as f64;
+                (f, f_test_p_value(f, k as f64, (n_groups - 1) as f64))
+            }
+            None => {
+                warnings.push(
+                    "F test not computed: the clustered covariance matrix of the slopes is \
+                     singular"
+                        .to_string(),
+                );
+                (f64::NAN, f64::NAN)
+            }
+        },
     };
-    let f_p_value = crate::traits::estimator::f_test_p_value(f_stat, k as f64, df as f64);
 
     // t-statistics and p-values
     let beta_vec: Vec<f64> = beta.to_vec();
@@ -232,7 +272,7 @@ pub fn run_fixed_effects_with(
         wald_df: None,
         wald_p_value: None,
         theta_by_group: Vec::new(),
-        warnings: Vec::new(),
+        warnings,
         coef_arr,
         se_arr,
         residuals,
@@ -267,8 +307,9 @@ pub fn run_random_effects(
 ///    weighted by its T_i), its residual quadratic form `quad2` and the trace
 ///    term `M_η = n - tr[(Σ T_i z̄_i z̄_i')⁻¹ Σ T_i² z̄_i z̄_i']`;
 ///    `σ²_η = (quad2 - (N - r) σ²_ν) / M_η`, with `r` the rank of the between
-///    design (K + 1 unless a regressor does not vary between entities). A
-///    negative σ²_η is set to 0 with a warning, as plm.
+///    design (K + 1 unless the entity means of the regressors are collinear,
+///    for example when a regressor does not vary between entities; a warning
+///    then says so). A negative σ²_η is set to 0 with a warning, as plm.
 /// 3. `θ_i = 1 - sqrt(σ²_ν / (T_i σ²_η + σ²_ν))`, quasi-demeaning
 ///    `y*_it = y_it - θ_i ȳ_i`, `X*_it = X_it - θ_i X̄_i`, and OLS on the
 ///    transformed model.
@@ -276,10 +317,15 @@ pub fn run_random_effects(
 /// The covariance is `config.vcov`: classical `s² (X*'X*)⁻¹` with `s²` the
 /// transformed residual variance (plm's `vcov`), or the entity-clustered
 /// (Arellano) sandwich. Inference is normal (z), the joint test of the slopes is
-/// a Wald chi-squared with its F form in `f_stat`, and R² is
-/// `cor(y*, X*b)²`, all as plm's `summary`.
+/// a Wald chi-squared with the chosen covariance, and R² is `cor(y*, X*b)²`, all
+/// as plm's `summary`. `f_stat` is the Wald F form `W/K` (plm
+/// `pwaldtest(test = "F")`) on `(K, n - K - 1)` degrees of freedom, or on
+/// `(K, G - 1)` under the Arellano covariance (plm's `df2adj` for a cluster
+/// vcov).
 ///
-/// Refused: `n <= N + K` (no within degrees of freedom for σ²_ν) and
+/// Refused: a non-finite value in `y` or a regressor, regressors that are
+/// exactly collinear with each other or with the intercept (the coefficients are
+/// not identified), `n <= N + K` (no within degrees of freedom for σ²_ν) and
 /// `N <= K + 1` (the between regression is not estimable, as plm).
 ///
 /// # References
@@ -304,14 +350,17 @@ pub fn run_random_effects_with(
         }
     })?;
 
-    // Design with intercept (column 0, "(Intercept)") and the slopes alone
+    // Design with intercept (column 0, "(Intercept)"); the slopes are 1..
+    if x_cols.is_empty() {
+        return Err(DesignError::NoColumns.into());
+    }
     let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
     let x = design.data;
     let var_names = design.column_names;
-    let x_s = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?.data;
+    reject_non_finite_data(&y, y_col, &x, &var_names)?;
     let n = y.len();
     let p = x.ncols(); // K + 1
-    let k_s = x_s.ncols(); // K
+    let k_s = p - 1; // K
 
     let (entity_ids, n_groups) = extract_entity_ids(dataset, entity_col)?;
 
@@ -344,14 +393,23 @@ pub fn run_random_effects_with(
     let mut warnings = Vec::new();
 
     // Step 1: within regression on the entity-demeaned slopes -> sigma^2_nu
+    // (the demeaned intercept column is zero and is left out of the view)
     let y_w = demean_by_entity(&y, &entity_ids, n_groups);
-    let x_w = demean_matrix_by_entity(&x_s, &entity_ids, n_groups);
-    let (xtx_w_inv, _) =
-        safe_inverse(&xtx(&x_w.view()).view()).map_err(|e| EconError::SingularMatrix {
+    let x_demeaned = demean_matrix_by_entity(&x, &entity_ids, n_groups);
+    let x_w = x_demeaned.slice(s![.., 1..]);
+    let (xtx_w_inv, cond) =
+        safe_inverse(&xtx(&x_w).view()).map_err(|e| EconError::SingularMatrix {
             context: "X'X (demeaned) in Random Effects".to_string(),
             suggestion: format!("Check for perfect multicollinearity: {:?}", e),
         })?;
-    let b_w: Array1<f64> = xtx_w_inv.dot(&xty(&x_w.view(), &y_w));
+    warn_pseudoinverse(
+        &mut warnings,
+        "the within regression that estimates sigma_e^2",
+        "a regressor may not vary within entities, and sigma_e^2 still counts it in its \
+         degrees of freedom",
+        cond,
+    );
+    let b_w: Array1<f64> = xtx_w_inv.dot(&xty(&x_w, &y_w));
     let e_w = &y_w - &x_w.dot(&b_w);
     let sigma2_nu = e_w.dot(&e_w) / (n - n_groups - k_s) as f64;
 
@@ -389,14 +447,16 @@ pub fn run_random_effects_with(
         }
     }
 
-    // Step 3: between regression, rank-aware (a regressor without between
-    // variation makes A singular; plm then drops the aliased column)
-    let (a_inv, rank_b) = between_inverse(&a)?;
+    // Step 3: between regression, rank-aware (collinear entity means, such as
+    // a regressor without between variation, make A singular; plm then drops
+    // the aliased column)
+    let (a_inv, rank_b) = between_inverse(&a, &mut warnings)?;
     if rank_b < p {
         warnings.push(format!(
-            "the Swamy-Arora between regression is rank deficient (rank {rank_b} of {p}): a \
-             regressor does not vary between entities, so a generalized inverse was used (plm \
-             drops the aliased regressor; on balanced panels the result is identical)"
+            "the Swamy-Arora between regression is rank deficient (rank {rank_b} of {p}): the \
+             entity means of the regressors are collinear (for example, a regressor that does \
+             not vary between entities), so a generalized inverse was used (plm drops the \
+             aliased regressor; on balanced panels the result is identical)"
         ));
     }
     let b_between = a_inv.dot(&c);
@@ -442,12 +502,27 @@ pub fn run_random_effects_with(
         }
     }
 
-    // Step 5: OLS on the transformed model
-    let (bread, _) =
-        safe_inverse(&xtx(&x_q.view()).view()).map_err(|e| EconError::SingularMatrix {
-            context: "X'X (quasi-demeaned) in Random Effects".to_string(),
-            suggestion: format!("Check for multicollinearity: {:?}", e),
-        })?;
+    // Step 5: OLS on the transformed model. X* c = 0 exactly when X c = 0
+    // (average over t: (1 - theta_i) xbar_i'c = 0 with theta_i < 1), so its rank
+    // is that of the data with the intercept.
+    let xtx_q = xtx(&x_q.view());
+    require_full_rank(
+        &xtx_q,
+        &var_names,
+        "X'X (quasi-demeaned) in Random Effects",
+        "the regressors and the intercept",
+        "",
+    )?;
+    let (bread, cond) = safe_inverse(&xtx_q.view()).map_err(|e| EconError::SingularMatrix {
+        context: "X'X (quasi-demeaned) in Random Effects".to_string(),
+        suggestion: format!("Check for multicollinearity: {:?}", e),
+    })?;
+    warn_pseudoinverse(
+        &mut warnings,
+        "the quasi-demeaned regression",
+        "the coefficients may not be identified",
+        cond,
+    );
     let beta: Array1<f64> = bread.dot(&xty(&x_q.view(), &y_q));
     let fitted = x_q.dot(&beta);
     let residuals = &y_q - &fitted;
@@ -484,24 +559,25 @@ pub fn run_random_effects_with(
     let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df as f64);
 
     // Wald test of the slopes with the chosen covariance (plm's summary) and
-    // its F form W/K (plm's pwaldtest(test = "F"))
-    let b_s = beta.slice(s![1..]).to_owned();
-    let v_ss = vcov.slice(s![1.., 1..]).to_owned();
-    // For a singular matrix safe_inverse may return a pseudoinverse with
-    // Some(condition) instead of Err; only a clean inverse gives a Wald statistic.
-    let (wald_chi2, wald_df, wald_p_value, f_stat, f_p_value) = match safe_inverse(&v_ss.view()) {
-        Ok((v_inv, None)) => {
-            let w = b_s.dot(&v_inv.dot(&b_s));
+    // its F form W/K (plm's pwaldtest(test = "F")), whose df2 is G - 1 for a
+    // cluster vcov (pwaldtest's df2adj)
+    let f_df2 = match config.vcov {
+        PanelVcov::Classical => df,
+        PanelVcov::Arellano(_) => n_groups - 1,
+    };
+    let wald = wald_statistic(&beta.slice(s![1..]), &vcov.slice(s![1.., 1..]));
+    let (wald_chi2, wald_df, wald_p_value, f_stat, f_p_value) = match wald {
+        Some(w) => {
             let kf = k_s as f64;
             (
                 Some(w),
                 Some(k_s),
                 Some(chi_squared_p_value(w, kf)),
                 w / kf,
-                f_test_p_value(w / kf, kf, df as f64),
+                f_test_p_value(w / kf, kf, f_df2 as f64),
             )
         }
-        Err(_) | Ok((_, Some(_))) => {
+        None => {
             warnings.push(
                 "Wald test not computed: the slope covariance matrix is singular".to_string(),
             );
@@ -556,6 +632,126 @@ pub fn run_random_effects_with(
     })
 }
 
+/// Refuses a non-finite value in `y` or in a column of `x`, as `run_hdfe` does.
+fn reject_non_finite_data(
+    y: &Array1<f64>,
+    y_col: &str,
+    x: &Array2<f64>,
+    names: &[String],
+) -> EconResult<()> {
+    reject_non_finite(y.iter(), &format!("Dependent variable '{y_col}'"))?;
+    for (j, name) in names.iter().enumerate() {
+        reject_non_finite(x.column(j).iter(), &format!("Regressor '{name}'"))?;
+    }
+    Ok(())
+}
+
+/// Records that `safe_inverse` fell back to a pseudoinverse (`Some(cond)`) for
+/// the cross-product matrix of `what`, with its `consequence`.
+fn warn_pseudoinverse(
+    warnings: &mut Vec<String>,
+    what: &str,
+    consequence: &str,
+    cond: Option<f64>,
+) {
+    if let Some(c) = cond {
+        warnings.push(format!(
+            "the cross-product matrix of {what} is ill-conditioned (condition number {c:.2e}), \
+             so a pseudoinverse was used: {consequence}"
+        ));
+    }
+}
+
+/// `b' V⁻¹ b`, or `None` when `V` is singular. For a singular matrix
+/// `safe_inverse` may return a pseudoinverse with `Some(condition)` instead of
+/// `Err`; only a clean inverse gives a Wald statistic.
+fn wald_statistic(b: &ArrayView1<f64>, v: &ArrayView2<f64>) -> Option<f64> {
+    match safe_inverse(v) {
+        Ok((v_inv, None)) => Some(b.dot(&v_inv.dot(b))),
+        Err(_) | Ok((_, Some(_))) => None,
+    }
+}
+
+/// The unit-diagonal scaling `S A S`, `S = diag(A_jj^-1/2)` (0 for a zero
+/// diagonal entry), of a symmetric positive semidefinite `A`, its eigen-pairs,
+/// and its rank judged against `100 p ε max(1, λ_max)`, so that regressor units
+/// do not matter.
+struct ScaledEigen {
+    s: Vec<f64>,
+    lambda: Vec<f64>,
+    u: Array2<f64>,
+    tol: f64,
+    rank: usize,
+}
+
+fn scaled_eigen(a: &Array2<f64>) -> EconResult<ScaledEigen> {
+    let p = a.nrows();
+    let s: Vec<f64> = (0..p)
+        .map(|j| {
+            let d = a[[j, j]];
+            if d > 0.0 { 1.0 / d.sqrt() } else { 0.0 }
+        })
+        .collect();
+    let a_s = Array2::from_shape_fn((p, p), |(i, j)| s[i] * a[[i, j]] * s[j]);
+    let (lambda, u) = symmetric_eigen_pairs(&a_s)?;
+    let lambda_max = lambda.iter().copied().fold(1.0, f64::max);
+    let tol = 100.0 * p as f64 * f64::EPSILON * lambda_max;
+    let rank = lambda.iter().filter(|&&l| l > tol).count();
+    Ok(ScaledEigen {
+        s,
+        lambda,
+        u,
+        tol,
+        rank,
+    })
+}
+
+/// Refuses a cross-product `X'X` of less than full rank (judged as in
+/// [`scaled_eigen`]): exactly collinear columns, or a column that is
+/// identically zero, are not identified. The error names the columns in the
+/// null space, `"{subject} are exactly collinear (rank r of p; involved: ...)"`,
+/// followed by `hint`. A within-demeaned column of rounding residue (a regressor
+/// that does not vary within entities, with entity means that are not exact in
+/// floating point) is not caught here.
+fn require_full_rank(
+    xtx: &Array2<f64>,
+    names: &[String],
+    context: &str,
+    subject: &str,
+    hint: &str,
+) -> EconResult<()> {
+    let p = xtx.nrows();
+    let e = scaled_eigen(xtx)?;
+    if e.rank == p {
+        return Ok(());
+    }
+    let mut involved = vec![false; p];
+    for (j, &l) in e.lambda.iter().enumerate() {
+        if l <= e.tol {
+            for (i, flag) in involved.iter_mut().enumerate() {
+                if e.s[i] == 0.0 || e.u[[i, j]].abs() > 1e-6 {
+                    *flag = true;
+                }
+            }
+        }
+    }
+    let shown: Vec<&str> = names
+        .iter()
+        .zip(&involved)
+        .filter(|&(_, &f)| f)
+        .map(|(n, _)| n.as_str())
+        .collect();
+    Err(EconError::SingularMatrix {
+        context: context.to_string(),
+        suggestion: format!(
+            "{subject} are exactly collinear (rank {} of {p}; involved: {}), so their \
+             coefficients are not identified: drop one of them{hint}",
+            e.rank,
+            shown.join(", ")
+        ),
+    })
+}
+
 /// `cor(a, b)²` from centered sums; 0 when either has no variance.
 fn squared_correlation(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
     let (ma, mb) = (a.mean().unwrap_or(0.0), b.mean().unwrap_or(0.0));
@@ -589,30 +785,35 @@ pub(super) fn symmetric_eigen_pairs(m: &Array2<f64>) -> EconResult<(Vec<f64>, Ar
 
 /// Inverse of the between moment matrix `A = Σ T_i z̄_i z̄_i'` and its rank.
 ///
-/// The rank is judged on the unit-diagonal scaling `S A S`, `S = diag(A_jj^-1/2)`,
-/// against `100 (K + 1) ε max(1, λ_max)`, so regressor units do not matter. At
-/// full rank this is `safe_inverse(A)`; otherwise the generalized inverse
-/// `S (Σ_{λ_j > tol} u_j u_j' / λ_j) S`. Any generalized inverse gives the same
-/// Swamy-Arora `quad2` and trace term, because the range of `Σ T_i² z̄ z̄'` lies
-/// in the range of `A`.
-fn between_inverse(a: &Array2<f64>) -> EconResult<(Array2<f64>, usize)> {
+/// The rank is judged as in [`scaled_eigen`], on `S A S` against
+/// `100 (K + 1) ε max(1, λ_max)`. At full rank this is `safe_inverse(A)` (a
+/// pseudoinverse fallback is recorded in `warnings`); otherwise the generalized
+/// inverse `S (Σ_{λ_j > tol} u_j u_j' / λ_j) S`. Any generalized inverse gives
+/// the same Swamy-Arora `quad2` and trace term, because the range of
+/// `Σ T_i² z̄ z̄'` lies in the range of `A`.
+fn between_inverse(
+    a: &Array2<f64>,
+    warnings: &mut Vec<String>,
+) -> EconResult<(Array2<f64>, usize)> {
     let p = a.nrows();
-    let s: Vec<f64> = (0..p)
-        .map(|j| {
-            let d = a[[j, j]];
-            if d > 0.0 { 1.0 / d.sqrt() } else { 0.0 }
-        })
-        .collect();
-    let a_s = Array2::from_shape_fn((p, p), |(i, j)| s[i] * a[[i, j]] * s[j]);
-    let (lambda, u) = symmetric_eigen_pairs(&a_s)?;
-    let lambda_max = lambda.iter().copied().fold(1.0, f64::max);
-    let tol = 100.0 * p as f64 * f64::EPSILON * lambda_max;
-    let rank = lambda.iter().filter(|&&l| l > tol).count();
+    let ScaledEigen {
+        s,
+        lambda,
+        u,
+        tol,
+        rank,
+    } = scaled_eigen(a)?;
     if rank == p {
-        let (inv, _) = safe_inverse(&a.view()).map_err(|e| EconError::SingularMatrix {
+        let (inv, cond) = safe_inverse(&a.view()).map_err(|e| EconError::SingularMatrix {
             context: "X'X (between) in Random Effects".to_string(),
             suggestion: format!("Check for multicollinearity: {:?}", e),
         })?;
+        warn_pseudoinverse(
+            warnings,
+            "the between regression",
+            "the variance components may be inaccurate",
+            cond,
+        );
         return Ok((inv, p));
     }
     let mut g = Array2::<f64>::zeros((p, p));
@@ -660,16 +861,9 @@ fn cluster_vcov(
     k: usize,
     adj: ClusterAdjustment,
 ) -> EconResult<Array2<f64>> {
-    let (n_clusters, p) = scores.dim();
-    let mut meat = Array2::<f64>::zeros((p, p));
-    for i in 0..n_clusters {
-        resource::checkpoint()?;
-        for a in 0..p {
-            for b in 0..p {
-                meat[[a, b]] += scores[[i, a]] * scores[[i, b]];
-            }
-        }
-    }
+    let n_clusters = scores.nrows();
+    resource::checkpoint()?;
+    let meat = scores.t().dot(scores);
     let (n, k, g) = (n as f64, k as f64, n_clusters as f64);
     let factor = match adj {
         ClusterAdjustment::HC0 => 1.0,
@@ -768,8 +962,8 @@ mod tests {
         }
     }
 
-    /// Classical FE has no entity loop here (its demeaning lives in `utils`);
-    /// the Arellano path checks the budget once per entity.
+    /// Classical FE has no budget check here (its demeaning lives in `utils`);
+    /// the Arellano path checks the budget before the cluster meat.
     #[test]
     fn test_fixed_effects_cluster_stops_when_cancelled() {
         let ds = synthetic_panel(50, 4);
@@ -789,5 +983,89 @@ mod tests {
             run_random_effects(&ds, "y", &["x"], "entity")
         });
         assert!(matches!(res, Err(EconError::Cancelled(_))), "{res:?}");
+    }
+
+    /// `synthetic_panel(10, 4)` with `y[row]` or `x[row]` replaced by `value`.
+    fn panel_with(column: &str, row: usize, value: f64) -> Dataset {
+        let df = synthetic_panel(10, 4).df().clone();
+        let mut v: Vec<f64> = df
+            .column(column)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        v[row] = value;
+        let mut df = df;
+        df.with_column(polars::prelude::Column::new(column.into(), v))
+            .unwrap();
+        Dataset::new(df)
+    }
+
+    /// The message of an `InvalidSpecification` error, or a panic naming `res`.
+    fn invalid_message(res: EconResult<PanelResult>) -> String {
+        match res {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// A NaN in y used to give NaN coefficients with SE 0 and p 1; it is
+    /// refused as in `run_hdfe`, as is an infinite regressor value.
+    #[test]
+    fn test_fixed_effects_refuses_non_finite_data() {
+        let fe = |ds: &Dataset| run_fixed_effects(ds, "y", &["x"], "entity");
+        let m = invalid_message(fe(&panel_with("y", 5, f64::NAN)));
+        assert!(
+            m.contains("Dependent variable 'y'") && m.contains("1 non-finite"),
+            "{m}"
+        );
+        let m = invalid_message(fe(&panel_with("x", 7, f64::INFINITY)));
+        assert!(m.contains("Regressor 'x'"), "{m}");
+        let config = PanelConfig {
+            vcov: PanelVcov::Arellano(ClusterAdjustment::Stata),
+        };
+        let ds = panel_with("y", 0, f64::NAN);
+        invalid_message(run_fixed_effects_with(&ds, "y", &["x"], "entity", &config));
+    }
+
+    /// RE with a NaN in y used to return NaN coefficients, SE 0, p 1 and a
+    /// spurious between-rank warning.
+    #[test]
+    fn test_random_effects_refuses_non_finite_data() {
+        let re = |ds: &Dataset| run_random_effects(ds, "y", &["x"], "entity");
+        let m = invalid_message(re(&panel_with("y", 5, f64::NAN)));
+        assert!(
+            m.contains("Dependent variable 'y'") && m.contains("1 non-finite"),
+            "{m}"
+        );
+        let m = invalid_message(re(&panel_with("x", 7, f64::NEG_INFINITY)));
+        assert!(m.contains("Regressor 'x'"), "{m}");
+    }
+
+    /// The cluster meat as one product `G'G` equals the sum of the per-entity
+    /// outer products `g_i g_i'`.
+    #[test]
+    fn test_cluster_vcov_meat_is_sum_of_outer_products() {
+        let scores =
+            Array2::from_shape_vec((4, 2), vec![0.3, -1.2, 2.1, 0.4, -0.7, 0.9, 1.6, -0.25])
+                .unwrap();
+        let bread = Array2::from_shape_vec((2, 2), vec![2.0, 0.3, 0.3, 1.5]).unwrap();
+        let v = cluster_vcov(&bread, &scores, 20, 2, ClusterAdjustment::HC0).unwrap();
+        let mut meat = Array2::<f64>::zeros((2, 2));
+        for i in 0..4 {
+            for a in 0..2 {
+                for b in 0..2 {
+                    meat[[a, b]] += scores[[i, a]] * scores[[i, b]];
+                }
+            }
+        }
+        let expected = bread.dot(&meat).dot(&bread);
+        for (got, want) in v.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "{got} vs {want}"
+            );
+        }
     }
 }

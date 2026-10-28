@@ -19,8 +19,13 @@ y_it - ybar_i = (x_it - xbar_i)' beta + (e_it - ebar_i)
   entities.
 - Inference: Student t with `df = n - N - K`. R-squared is the within R-squared; the adjusted
   within R-squared is plm's `r.squared(dfcor = TRUE)`, `1 - (1 - R2)(n - 1)/df`. The F test
-  is the classical within F test of the slopes whatever `vcov` is (as plm's `summary`
-  without a `vcov` argument).
+  of the slopes follows `vcov`, as plm's `summary(fe, vcov = ...)`: the classical within F
+  test on `(K, n - N - K)` df, or with a clustered `vcov` the Wald F `W/K` on `(K, G - 1)` df
+  (plm `pwaldtest(test = "F")` with a cluster vcov, its `df2adj`). `PanelResult::f_df`
+  returns the two degrees of freedom.
+- Refused: a non-finite value in `y` or a regressor, and regressors that are exactly
+  collinear after removing the entity means (also a regressor that is exactly zero after
+  demeaning), whose coefficients are not identified.
 
 ## R reference
 
@@ -33,6 +38,8 @@ pd <- pdata.frame(d, index = c("firm", "year"))
 fe <- plm(inv ~ value + capital, data = pd, model = "within")
 summary(fe)$r.squared; summary(fe)$fstatistic
 vcovHC(fe, method = "arellano", type = "HC0")   # also "HC1", "sss"
+# robust F, = summary(fe, vcov = ...)$fstatistic, on (K, G - 1) df
+pwaldtest(fe, test = "F", vcov = vcovHC(fe, method = "arellano", type = "sss"))
 ```
 
 The datasets are `validation/datasets/grunfeld.csv` and the generated
@@ -64,6 +71,13 @@ before computing, so R and Rust see the same doubles.
 | F df1 | 2 |
 | F df2 | 188 |
 | F p-value | 3.74893568134e-60 |
+| F Arellano HC0 (Wald W/K) | 31.7744320126 |
+| F Arellano HC0 p-value | 8.3416798482e-05 |
+| F Arellano HC1 (Wald W/K) | 31.4566876925 |
+| F Arellano HC1 p-value | 8.67856181418e-05 |
+| F Arellano sss (Wald W/K) | 28.45328535 |
+| F Arellano sss p-value | 0.000128502647786 |
+| F Arellano df2 (G - 1) | 9 |
 | σ²_e | 2784.45823078 |
 | df_resid | 188 |
 | n | 200 |
@@ -91,6 +105,13 @@ before computing, so R and Rust see the same doubles.
 | F df1 | 2 |
 | F df2 | 159 |
 | F p-value | 2.39711871119e-49 |
+| F Arellano HC0 (Wald W/K) | 20.3123217299 |
+| F Arellano HC0 p-value | 0.000460736898814 |
+| F Arellano HC1 (Wald W/K) | 20.0747507155 |
+| F Arellano HC1 p-value | 0.000481122056558 |
+| F Arellano sss (Wald W/K) | 18.173553736 |
+| F Arellano sss p-value | 0.000691222929933 |
+| F Arellano df2 (G - 1) | 9 |
 | σ²_e | 3025.93594284 |
 | df_resid | 159 |
 | n | 171 |
@@ -118,6 +139,13 @@ before computing, so R and Rust see the same doubles.
 | F df1 | 2 |
 | F df2 | 238 |
 | F p-value | 1.34804139647e-38 |
+| F Arellano HC0 (Wald W/K) | 109.077862607 |
+| F Arellano HC0 p-value | 1.51279695931e-20 |
+| F Arellano HC1 (Wald W/K) | 108.350676856 |
+| F Arellano HC1 p-value | 1.7667977475e-20 |
+| F Arellano sss (Wald W/K) | 106.901169474 |
+| F Arellano sss p-value | 2.41332438877e-20 |
+| F Arellano df2 (G - 1) | 59 |
 | σ²_e | 0.877888572173 |
 | df_resid | 238 |
 | n | 300 |
@@ -129,7 +157,10 @@ before computing, so R and Rust see the same doubles.
 - `p2a-core`: `econometrics::panel::tests::test_validate_panel_fe_grunfeld`,
   `econometrics::panel::tests::test_validate_panel_fe_grunfeld_unbalanced`,
   `econometrics::panel::tests::test_validate_panel_fe_sim_corr` pin every quantity above,
-  the classical and the three Arellano standard errors.
+  the classical and the three Arellano standard errors and F tests.
+- Unit tests: `econometrics::panel::linear_models::tests::test_fixed_effects_refuses_non_finite_data`,
+  `econometrics::panel::tests::test_collinear_regressors_are_refused`,
+  `econometrics::panel::tests::test_time_invariant_regressor_fe_refuses_re_warns`.
 - `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_panel_fixed_effects` checks
   the `panel_fixed_effects` text against the case at display precision, with the default
   and with `vcov = "cluster-hc0"`.
@@ -146,7 +177,9 @@ freedom exact.
 - Adjusted R-squared: p2a used `(n - N - 1)/df` instead of plm's `(n - 1)/df`. Grunfeld
   0.765517 (was) against plm 0.753110; unbalanced 0.753880 against 0.738498; simulated
   0.517405 against 0.396251 (ECON-73).
-- The entity-clustered (Arellano) option is new.
+- The entity-clustered (Arellano) option is new; with it the F test is plm's robust Wald F.
+- Non-finite data and exactly collinear regressors are refused. A NaN in `y` gave NaN
+  coefficients with SE 0 and p 1; collinear regressors gave the minimum-norm split.
 - The earlier tests used a hand-typed five-firm subset and a full-Grunfeld test at 0.01
   tolerance; both are replaced by the case-pinned tests above. Coefficients, classical
   standard errors, within R-squared and F were already equal to plm.

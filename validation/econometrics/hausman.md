@@ -21,9 +21,10 @@ H = |d' D^- d|,  d = b_FE - b_RE,  D = Var(b_FE) - Var(b_RE),  H ~ chi2(rank D)
   regressor units.
 - `df` is the rank of D. A D that is not positive definite (phtest then takes the absolute
   value) or is singular (generalized inverse) is reported in `HausmanResult.warnings`,
-  followed by the random-effects warnings. A D that is zero to machine precision for every
-  slope (for example, no regressor varies between entities, so FE and RE coincide) is
-  refused with `InvalidSpecification`.
+  followed by the fixed-effects and random-effects warnings. A D that is zero to machine
+  precision for every slope (for example, no regressor varies between entities, so FE and
+  RE coincide) is refused with `InvalidSpecification`. Data that FE or RE refuses
+  (non-finite values, exactly collinear regressors) is refused with their error.
 
 ## R reference
 
@@ -67,7 +68,8 @@ warning appears exactly when one is negative (only `panel_hausman_sim_corr`).
   `test_hausman_form_indefinite_takes_absolute_value`, `test_hausman_form_singular_uses_rank`,
   `test_hausman_form_zero_difference_is_an_error`, `test_hausman_form_units_do_not_matter`;
   and `econometrics::panel::tests::test_hausman_refuses_when_fe_and_re_coincide`,
-  `econometrics::panel::tests::test_hausman_small_panel_recommendation`.
+  `econometrics::panel::tests::test_hausman_small_panel_recommendation`,
+  `econometrics::panel::tests::test_collinear_regressors_are_refused`.
 - `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_hausman_test` checks the
   `hausman_test` text against the case at display precision.
 - Registry: `validation/methods/panel.json`, method `panel_hausman`.

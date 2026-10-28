@@ -65,6 +65,19 @@
     "se_arellano_sss": {
       "names": ["(Intercept)", "value", "capital"],
       "values": [24.843231878737157, 0.013755656846753096, 0.054972777462394679]
-    }
+    },
+    "wald_chisq_arellano_hc0": 78.709583801821708,
+    "wald_p_arellano_hc0": 8.0989933241194713e-18,
+    "wald_chisq_arellano_hc1": 77.528940044794425,
+    "wald_p_arellano_hc1": 1.4615193692890535e-17,
+    "wald_chisq_arellano_sss": 70.126679437502474,
+    "wald_p_arellano_sss": 5.9181373890032145e-16,
+    "wald_f_arellano_hc0": 39.354791900910854,
+    "wald_f_p_arellano_hc0": 3.5512362611025728e-05,
+    "wald_f_df2_arellano": 9,
+    "wald_f_arellano_hc1": 38.764470022397212,
+    "wald_f_p_arellano_hc1": 3.7745489820038654e-05,
+    "wald_f_arellano_sss": 35.063339718751237,
+    "wald_f_p_arellano_sss": 5.6446635187612179e-05
   }
 }

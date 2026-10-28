@@ -128,12 +128,15 @@ pub struct PanelResult {
     /// Adjusted R-squared, plm `r.squared(dfcor = TRUE)`:
     /// `1 - (1 - R²)(n - 1)/df` (fixed effects: within).
     pub adj_r_squared: f64,
-    /// Fixed effects: the classical within F test of the slopes (as plm's
-    /// `summary` without a `vcov` argument, whatever `vcov_type` is). Random
-    /// effects: the F form `W/K` of the Wald test in `wald_chi2` (plm
-    /// `pwaldtest(test = "F")`); NaN when the Wald test is not computed.
+    /// F test of the slopes with the covariance of `vcov_type`, on the degrees
+    /// of freedom [`PanelResult::f_df`] returns. Fixed effects: the classical
+    /// within F test, or under the Arellano covariance the Wald F `W/K` (plm's
+    /// `summary(fe, vcov = ...)`). Random effects: the F form `W/K` of the Wald
+    /// test in `wald_chi2` (plm `pwaldtest(test = "F")`). Under the Arellano
+    /// covariance the second degrees of freedom are `G - 1`, as plm's `df2adj`
+    /// for a cluster vcov. NaN when the Wald statistic is not computed.
     pub f_stat: f64,
-    /// F-statistic p-value
+    /// p-value of `f_stat` on [`PanelResult::f_df`] degrees of freedom
     pub f_p_value: f64,
     /// Number of observations
     pub n_obs: usize,
@@ -200,6 +203,24 @@ pub struct PanelResult {
     /// Used by `LinearEstimator::vcov_matrix`.
     #[serde(skip, default)]
     pub vcov: Array2<f64>,
+}
+
+impl PanelResult {
+    /// Degrees of freedom `(df1, df2)` of `f_stat`: the number of slopes, and
+    /// `G - 1` under the entity-clustered (Arellano) covariance (plm
+    /// `pwaldtest`'s `df2adj` for a cluster vcov) or the residual degrees of
+    /// freedom `df` under the classical one.
+    pub fn f_df(&self) -> (usize, usize) {
+        let df1 = match self.method {
+            PanelMethod::FixedEffects => self.variables.len(),
+            PanelMethod::RandomEffects => self.variables.len().saturating_sub(1),
+        };
+        let df2 = match self.vcov_type {
+            PanelVcov::Classical => self.df,
+            PanelVcov::Arellano(_) => self.n_groups.saturating_sub(1),
+        };
+        (df1, df2)
+    }
 }
 
 impl LinearEstimator for PanelResult {
@@ -292,20 +313,34 @@ impl fmt::Display for PanelResult {
         writeln!(f, "No. Observations: {}", self.n_obs)?;
         writeln!(f, "No. Groups: {}", self.n_groups)?;
         writeln!(f, "Standard errors: {}", self.vcov_type)?;
+        let clustered = match self.vcov_type {
+            PanelVcov::Classical => "",
+            PanelVcov::Arellano(_) => " (clustered)",
+        };
         if fe {
             writeln!(f, "R-squared (within): {:.4}", self.r_squared)?;
             writeln!(f, "Adj. R-squared (within): {:.4}", self.adj_r_squared)?;
-            writeln!(
-                f,
-                "F-statistic: {:.4} (p-value: {:.4})",
-                self.f_stat, self.f_p_value
-            )?;
+            if !self.f_stat.is_nan() {
+                let (df1, df2) = self.f_df();
+                let label = match self.vcov_type {
+                    PanelVcov::Classical => "F-statistic",
+                    PanelVcov::Arellano(_) => "F-statistic (Wald, clustered)",
+                };
+                writeln!(
+                    f,
+                    "{label}: {:.4} on {df1} and {df2} DF (p-value: {:.4})",
+                    self.f_stat, self.f_p_value
+                )?;
+            }
         } else {
             writeln!(f, "R-squared: {:.4}", self.r_squared)?;
             writeln!(f, "Adj. R-squared: {:.4}", self.adj_r_squared)?;
             if let (Some(w), Some(df), Some(p)) = (self.wald_chi2, self.wald_df, self.wald_p_value)
             {
-                writeln!(f, "Wald chi-squared: {w:.4} on {df} DF (p-value: {p:.4})")?;
+                writeln!(
+                    f,
+                    "Wald chi-squared{clustered}: {w:.4} on {df} DF (p-value: {p:.4})"
+                )?;
             }
         }
 

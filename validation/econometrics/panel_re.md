@@ -18,8 +18,9 @@ theta_i = 1 - sqrt(sigma2_nu / (T_i sigma2_eta + sigma2_nu))
   observation-level group means (entity `i` weighted by `T_i`) gives `quad2` and the
   Baltagi-Chang trace term `M_eta = n - tr[(sum T_i zbar zbar')^-1 sum T_i^2 zbar zbar']`;
   `sigma2_eta = (quad2 - (N - r) sigma2_nu) / M_eta` with `r` the rank of the between design
-  (K + 1 unless a regressor does not vary between entities). A negative `sigma2_eta` is set
-  to 0 with a warning, so RE becomes pooled OLS, as plm.
+  (K + 1 unless the entity means of the regressors are collinear, for example when a
+  regressor does not vary between entities; a warning then says so). A negative
+  `sigma2_eta` is set to 0 with a warning, so RE becomes pooled OLS, as plm.
 - `vcov` (`PanelVcov`): `classical` (default, plm's `vcov`: `s^2 (X*'X*)^-1` with `s^2` the
   residual variance of the transformed model, `n - K - 1` df), `cluster` (Arellano
   sandwich with factor `G/(G-1) (n-1)/(n-K-1)`, plm `type = "sss"`), `cluster-hc0` (factor 1),
@@ -27,12 +28,15 @@ theta_i = 1 - sqrt(sigma2_nu / (T_i sigma2_eta + sigma2_nu))
 - Inference: normal (z), as plm's `summary` for random models. R-squared is plm's
   `cor(y*, X*b)^2` of the transformed model; adjusted `1 - (1 - R2)(n - 1)/(n - K - 1)`. The
   joint test of the slopes is the Wald chi-squared `b_s' V_ss^-1 b_s` with the chosen
-  covariance (`wald_chi2`, `wald_df`, `wald_p_value`); `f_stat` is its F form `W/K` on
-  `(K, n - K - 1)` df (plm `pwaldtest(test = "F")`).
+  covariance (`wald_chi2`, `wald_df`, `wald_p_value`); `f_stat` is its F form `W/K` (plm
+  `pwaldtest(test = "F")`) on `(K, n - K - 1)` df, or on `(K, G - 1)` df with a clustered
+  `vcov`, as plm's `df2adj` for a cluster vcov. `PanelResult::f_df` returns the two degrees
+  of freedom.
 - `theta` is the observation-weighted mean `sum T_i theta_i / n` (plm's mean theta);
   `theta_by_group` holds the `theta_i` on unbalanced panels.
-- Refused: `n <= N + K` (no within degrees of freedom) and `N <= K + 1` (the between
-  regression is not estimable, as plm).
+- Refused: a non-finite value in `y` or a regressor, regressors that are exactly collinear
+  with each other or with the intercept (not identified), `n <= N + K` (no within degrees
+  of freedom) and `N <= K + 1` (the between regression is not estimable, as plm).
 
 ## R reference
 
@@ -46,6 +50,10 @@ sqrt(diag(vcov(re))); ercomp(re); summary(re)$r.squared
 summary(re)$fstatistic            # Wald chi-squared for random models
 pwaldtest(re, test = "F")         # its F form W/K
 vcovHC(re, method = "arellano", type = "HC0")   # also "HC1", "sss"
+# Wald tests with that covariance; the F form on (K, G - 1) df (df2adj)
+V <- vcovHC(re, method = "arellano", type = "sss")
+pwaldtest(re, test = "Chisq", vcov = V)   # = summary(re, vcov = V)$fstatistic
+pwaldtest(re, test = "F", vcov = V)
 ```
 
 `panel_re_sim_no_effect` (seed 3, N = 30, T = 4, no entity effect) has a negative Swamy-Arora
@@ -87,6 +95,19 @@ vcovHC(re, method = "arellano", type = "HC0")   # also "HC1", "sss"
 | Wald F (W/K) | 328.836934913 |
 | Wald F df2 | 197 |
 | Wald F p | 1.66948022983e-63 |
+| Wald χ² Arellano HC0 | 78.7095838018 |
+| Wald p Arellano HC0 | 8.09899332412e-18 |
+| Wald χ² Arellano HC1 | 77.5289400448 |
+| Wald p Arellano HC1 | 1.46151936929e-17 |
+| Wald χ² Arellano sss | 70.1266794375 |
+| Wald p Arellano sss | 5.918137389e-16 |
+| Wald F Arellano HC0 | 39.3547919009 |
+| Wald F p Arellano HC0 | 3.5512362611e-05 |
+| Wald F Arellano HC1 | 38.7644700224 |
+| Wald F p Arellano HC1 | 3.774548982e-05 |
+| Wald F Arellano sss | 35.0633397188 |
+| Wald F p Arellano sss | 5.64466351876e-05 |
+| Wald F df2 Arellano (G - 1) | 9 |
 | df_resid | 197 |
 | n | 200 |
 | N | 10 |
@@ -121,6 +142,19 @@ vcovHC(re, method = "arellano", type = "HC0")   # also "HC1", "sss"
 | Wald F (W/K) | 265.730613922 |
 | Wald F df2 | 168 |
 | Wald F p | 9.24343534533e-53 |
+| Wald χ² Arellano HC0 | 53.1324920608 |
+| Wald p Arellano HC0 | 2.90018661669e-12 |
+| Wald χ² Arellano HC1 | 52.2003430773 |
+| Wald p Arellano HC1 | 4.62210198747e-12 |
+| Wald χ² Arellano sss | 47.2566635271 |
+| Wald p Arellano sss | 5.47451813197e-11 |
+| Wald F Arellano HC0 | 26.5662460304 |
+| Wald F p Arellano HC0 | 0.000167554776944 |
+| Wald F Arellano HC1 | 26.1001715387 |
+| Wald F p Arellano HC1 | 0.000179348990794 |
+| Wald F Arellano sss | 23.6283317635 |
+| Wald F p Arellano sss | 0.000262004301222 |
+| Wald F df2 Arellano (G - 1) | 9 |
 | df_resid | 168 |
 | n | 171 |
 | N | 10 |
@@ -155,6 +189,19 @@ vcovHC(re, method = "arellano", type = "HC0")   # also "HC1", "sss"
 | Wald F (W/K) | 207.946893645 |
 | Wald F df2 | 297 |
 | Wald F p | 3.38957678108e-57 |
+| Wald χ² Arellano HC0 | 639.935015337 |
+| Wald p Arellano HC0 | 1.0961677767e-139 |
+| Wald χ² Arellano HC1 | 633.535665184 |
+| Wald p Arellano HC1 | 2.68830327395e-138 |
+| Wald χ² Arellano sss | 625.060271669 |
+| Wald p Arellano sss | 1.86160089266e-136 |
+| Wald F Arellano HC0 | 319.967507668 |
+| Wald F p Arellano HC0 | 2.13426720859e-32 |
+| Wald F Arellano HC1 | 316.767832592 |
+| Wald F p Arellano HC1 | 2.79956843871e-32 |
+| Wald F Arellano sss | 312.530135835 |
+| Wald F p Arellano sss | 4.02578402069e-32 |
+| Wald F df2 Arellano (G - 1) | 59 |
 | df_resid | 297 |
 | n | 300 |
 | N | 60 |
@@ -190,6 +237,19 @@ vcovHC(re, method = "arellano", type = "HC0")   # also "HC1", "sss"
 | Wald F (W/K) | 14.7570030404 |
 | Wald F df2 | 117 |
 | Wald F p | 1.92727208253e-06 |
+| Wald χ² Arellano HC0 | 62.8484988626 |
+| Wald p Arellano HC0 | 2.25227737415e-14 |
+| Wald χ² Arellano HC1 | 61.277286391 |
+| Wald p Arellano HC1 | 4.94090299197e-14 |
+| Wald χ² Arellano sss | 59.7324808518 |
+| Wald p Arellano sss | 1.06968667986e-13 |
+| Wald F Arellano HC0 | 31.4242494313 |
+| Wald F p Arellano HC0 | 5.49826996143e-08 |
+| Wald F Arellano HC1 | 30.6386431955 |
+| Wald F p Arellano HC1 | 7.06126927018e-08 |
+| Wald F Arellano sss | 29.8662404259 |
+| Wald F p Arellano sss | 9.06928231375e-08 |
+| Wald F df2 Arellano (G - 1) | 29 |
 | df_resid | 117 |
 | n | 120 |
 | N | 30 |
@@ -204,13 +264,15 @@ untransformed data, which p2a reported as `r_squared` before Tier 1.
   `econometrics::panel::tests::test_validate_panel_re_grunfeld_unbalanced`,
   `econometrics::panel::tests::test_validate_panel_re_sim_corr`,
   `econometrics::panel::tests::test_validate_panel_re_sim_no_effect` pin every quantity
-  above, the classical and the three Arellano standard errors, and check that the Wald
-  statistic under the clustered covariance is `b_s' V_ss^-1 b_s` of that covariance (the
-  cases hold no robust Wald).
+  above: the classical and the three Arellano standard errors, and the Wald chi-squared
+  and F tests under each Arellano covariance.
 - Unit tests: `econometrics::panel::tests::test_random_effects_between_rank_deficient`,
   `econometrics::panel::linear_models::tests::test_random_effects_needs_within_degrees_of_freedom`,
   `econometrics::panel::linear_models::tests::test_random_effects_needs_more_entities_than_coefficients`,
-  `econometrics::panel::linear_models::tests::test_random_effects_stops_when_cancelled`.
+  `econometrics::panel::linear_models::tests::test_random_effects_stops_when_cancelled`,
+  `econometrics::panel::linear_models::tests::test_random_effects_refuses_non_finite_data`,
+  `econometrics::panel::tests::test_collinear_regressors_are_refused`,
+  `econometrics::panel::tests::test_time_invariant_regressor_fe_refuses_re_warns`.
 - `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_panel_random_effects` checks
   the `panel_random_effects` text against the case at display precision, with the default
   and with `vcov = "cluster"`.
@@ -236,11 +298,14 @@ freedom exact.
   adjusted 0.804136 (plm 0.767163), and `f_stat` an F of the untransformed fit, 402.2732
   (plm Wald chi-squared 657.6739 on 2 df, F form 328.8369).
 - Small panels: `n <= N + K` fell back to pooled OLS; it is now refused.
+- Non-finite data and exactly collinear regressors are refused. A NaN in `y` gave NaN
+  coefficients with SE 0, p 1 and a spurious between-rank warning; collinear regressors
+  gave a wrong identified combination.
 
 ## Known differences
 
-- A between regression without full rank (a regressor without between variation) uses a
-  generalized inverse with a warning. On balanced panels this equals plm, which drops the
+- A between regression without full rank (collinear entity means, for example a regressor
+  without between variation) uses a generalized inverse with a warning. On balanced panels this equals plm, which drops the
   aliased column; on unbalanced panels plm stops (`dgesv: system is exactly singular`) and
   p2a still returns an estimate.
 

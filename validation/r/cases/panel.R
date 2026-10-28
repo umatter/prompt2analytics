@@ -1,9 +1,25 @@
 # validation/r/cases/panel.R -- plm / fixest reference cases for the panel exhibits.
 suppressPackageStartupMessages({ library(plm); library(fixest) })
 
+# Wald tests of the slopes with each Arellano covariance, as pwaldtest with a
+# cluster vcov; the F form then has df2 = G - 1 (plm's df2adj), as summary(m,
+# vcov = ...) reports. Keys <stat>_arellano_<type>, <p>_arellano_<type> and,
+# for the F form, <df2>_arellano.
+.arellano_tests <- function(m, test, stat, p, df2 = NULL) {
+  out <- list()
+  for (type in c("HC0", "HC1", "sss")) {
+    w <- pwaldtest(m, test = test, vcov = vcovHC(m, method = "arellano", type = type))
+    sfx <- tolower(type)
+    out[[paste0(stat, "_arellano_", sfx)]] <- unname(w$statistic)
+    out[[paste0(p, "_arellano_", sfx)]] <- unname(w$p.value)
+    if (!is.null(df2)) out[[paste0(df2, "_arellano")]] <- unname(w$parameter[2])
+  }
+  out
+}
+
 .plm_fe_values <- function(fe) {
   s <- summary(fe); V <- vcov(fe); se <- sqrt(diag(V)); b <- coef(fe); df <- df.residual(fe)
-  list(
+  c(list(
     coef = named(b), se = named(se), t = named(b / se),
     p = named(2 * pt(abs(b / se), df, lower.tail = FALSE)),
     ci95_lower = named(b - qt(0.975, df) * se), ci95_upper = named(b + qt(0.975, df) * se),
@@ -14,7 +30,7 @@ suppressPackageStartupMessages({ library(plm); library(fixest) })
     se_arellano_hc0 = named(sqrt(diag(vcovHC(fe, method = "arellano", type = "HC0")))),
     se_arellano_hc1 = named(sqrt(diag(vcovHC(fe, method = "arellano", type = "HC1")))),
     se_arellano_sss = named(sqrt(diag(vcovHC(fe, method = "arellano", type = "sss"))))
-  )
+  ), .arellano_tests(fe, "F", "f_stat", "f_p", "f_df2"))
 }
 
 .plm_re_values <- function(re) {
@@ -22,7 +38,7 @@ suppressPackageStartupMessages({ library(plm); library(fixest) })
   th <- ec$theta; z <- b / se
   wald <- s$fstatistic   # plm reports a Wald chi-squared for random models
   Xs <- model.matrix(re, model = "random"); ys <- pmodel.response(re, model = "random")
-  list(
+  c(list(
     coef = named(b), se = named(se), z = named(z),
     p = named(2 * pnorm(abs(z), lower.tail = FALSE)),
     ci95_lower = named(b - qnorm(0.975) * se), ci95_upper = named(b + qnorm(0.975) * se),
@@ -38,7 +54,8 @@ suppressPackageStartupMessages({ library(plm); library(fixest) })
     se_arellano_hc0 = named(sqrt(diag(vcovHC(re, method = "arellano", type = "HC0")))),
     se_arellano_hc1 = named(sqrt(diag(vcovHC(re, method = "arellano", type = "HC1")))),
     se_arellano_sss = named(sqrt(diag(vcovHC(re, method = "arellano", type = "sss"))))
-  )
+  ), .arellano_tests(re, "Chisq", "wald_chisq", "wald_p"),
+  .arellano_tests(re, "F", "wald_f", "wald_f_p", "wald_f_df2"))
 }
 
 .phtest_values <- function(fe, re) {

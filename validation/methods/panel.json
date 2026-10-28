@@ -5,7 +5,7 @@
       "id": "panel_fe",
       "name": "Fixed effects (within), classical and entity-clustered (Arellano) SEs",
       "category": "econometrics",
-      "reference": "plm::plm(model = 'within'); plm::vcovHC(method = 'arellano', type = 'HC0'/'HC1'/'sss')",
+      "reference": "plm::plm(model = 'within'); plm::vcovHC(method = 'arellano', type = 'HC0'/'HC1'/'sss'); plm::pwaldtest",
       "doc": "validation/econometrics/panel_fe.md",
       "cases": [
         "panel_fe_grunfeld",
@@ -28,6 +28,7 @@
         "within R2",
         "adj. within R2",
         "F (df1, df2, p)",
+        "F Arellano HC0/HC1/sss (df2 = G - 1, p)",
         "sigma_e^2",
         "df",
         "n",
@@ -75,6 +76,7 @@
         "adj. R2",
         "Wald chi2 (df, p)",
         "Wald F (df2, p)",
+        "Wald chi2 and F Arellano HC0/HC1/sss (F df2 = G - 1, p)",
         "df",
         "n",
         "N"
