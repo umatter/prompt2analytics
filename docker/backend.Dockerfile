@@ -33,14 +33,18 @@ COPY crates/p2a-mcp/Cargo.toml ./crates/p2a-mcp/
 COPY crates/p2a-cli/Cargo.toml ./crates/p2a-cli/
 COPY crates/p2a-chat/Cargo.toml ./crates/p2a-chat/
 COPY crates/p2a-dioxus/Cargo.toml ./crates/p2a-dioxus/
+# p2a-validation is a test-only path dev-dependency of p2a-core, p2a-cli and p2a-mcp: the release
+# build never compiles it, but the workspace does not load without its manifest.
+COPY crates/p2a-validation/Cargo.toml ./crates/p2a-validation/
 
 # Create dummy source files for all workspace members
-RUN mkdir -p crates/p2a-core/src crates/p2a-mcp/src crates/p2a-cli/src crates/p2a-chat/src crates/p2a-dioxus/src && \
+RUN mkdir -p crates/p2a-core/src crates/p2a-mcp/src crates/p2a-cli/src crates/p2a-chat/src crates/p2a-dioxus/src crates/p2a-validation/src && \
     echo "pub fn dummy() {}" > crates/p2a-core/src/lib.rs && \
     echo "fn main() {}" > crates/p2a-mcp/src/main.rs && \
     echo "fn main() {}" > crates/p2a-cli/src/main.rs && \
     echo "fn main() {}" > crates/p2a-chat/src/main.rs && \
-    echo "fn main() {}" > crates/p2a-dioxus/src/main.rs
+    echo "fn main() {}" > crates/p2a-dioxus/src/main.rs && \
+    echo "pub fn dummy() {}" > crates/p2a-validation/src/lib.rs
 
 # Build dependencies only (cached layer) - this may fail but will cache deps
 RUN cargo build --release -p p2a-mcp --features full 2>/dev/null || true

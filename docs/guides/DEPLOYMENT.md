@@ -958,7 +958,7 @@ Nothing here runs automatically except the two workflows named in steps 0 and
 
    ```bash
    cargo update --workspace
-   git diff --stat Cargo.lock      # only the five p2a-* entries may change
+   git diff --stat Cargo.lock      # only the six p2a-* entries may change
    git commit -am "chore: bump workspace version to X.Y.Z"
    ```
 2. **Tag.** The tag push is what builds and publishes the backend image (and the
