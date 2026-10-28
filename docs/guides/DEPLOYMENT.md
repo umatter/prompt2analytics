@@ -129,12 +129,18 @@ websocket `tool` messages runs through one governor
   waits at most `P2A_TOOL_QUEUE_WAIT_SECS` (hosted 10 s) for both, and is then
   refused with 429 `session_busy` (`Retry-After: 2`) or 503 `server_busy`
   (`Retry-After: 5`).
-- **Deadline.** A call that runs longer than `P2A_TOOL_TIMEOUT_SECS` (hosted
-  60 s) plus a 250 ms grace answers 504 `deadline_exceeded`, with
-  `details.limit_secs`. The deadline also cancels the call's budget, and core
-  loops stop at their next checkpoint (`p2a_core::resource::checkpoint`). A
-  client that disconnects cancels its call the same way, and closing a chat
-  stream stops its tool loop.
+- **Deadline.** At `P2A_TOOL_TIMEOUT_SECS` (hosted 60 s) the call's budget
+  runs out, and core loops stop at their next checkpoint
+  (`p2a_core::resource::checkpoint`). A call whose work stops there answers
+  504 `deadline_exceeded`, with `details.limit_secs`, as soon as it has
+  stopped, which for work with checkpoints is a few milliseconds after the
+  deadline (60.02 s was measured with the hosted 60 s). The governor waits
+  for the work at most 250 ms past the deadline: work still running then
+  (work without checkpoints, or work that reached none in that time) is
+  detached, and the call answers 504 at the deadline plus 250 ms. Work that
+  finishes successfully within those 250 ms keeps its result. A client that
+  disconnects cancels its call the same way, and closing a chat stream stops
+  its tool loop.
 - **Panics.** A tool that panics answers 500 `internal`; the session and the
   process survive.
 - **Memory admission.** While the process RSS is above
@@ -168,12 +174,20 @@ websocket `tool` messages runs through one governor
   hand-back with no call running within its deadline (`"memory_stuck": true`:
   every call is refused, so no tool call will run to free it; only work
   detached past its deadline ending, or sessions being deleted or expiring, can
-  bring the process back under the limit). If either state
-  lasts `P2A_STUCK_EXIT_SECS` (hosted 300 s), the process logs an error and
-  exits with exit code 70, so that the platform's restart policy starts a
-  fresh process. A restart discards every in-memory session. A soft
-  limit below the server's idle RSS therefore restarts it every
-  `P2A_STUCK_EXIT_SECS`.
+  bring the process back under the limit). When `P2A_STUCK_EXIT_SECS` is set
+  (hosted 300 s), a watchdog reads the health every 5 s. At the first check
+  at which at least `P2A_STUCK_EXIT_SECS` have passed since the first check
+  that saw either state, with no healthy check in between, the process logs
+  an error and exits with exit code 70, so that the platform's restart
+  policy starts a fresh process. The first check to see the state comes up
+  to 5 s after it begins, and the check that exits up to 5 s after the
+  setting has passed (checks run a little after their 5 s marks, so even a
+  setting that is a multiple of 5 s can take one check more). The exit
+  therefore comes between `P2A_STUCK_EXIT_SECS` and `P2A_STUCK_EXIT_SECS`
+  plus 10 s after `/health` first reports the state: 300 to 310 s in the
+  hosted profile (35 s was measured with the setting at 25). A restart
+  discards every in-memory session. A soft limit below the server's idle
+  RSS therefore restarts it every `P2A_STUCK_EXIT_SECS` plus up to 10 s.
 - **Session capacity.** When `P2A_MAX_SESSIONS` (100) sessions exist, creating
   another evicts the least recently used session that has been idle for at
   least `P2A_SESSION_EVICT_IDLE_MINUTES` (hosted 10); a session with a running
@@ -989,8 +1003,20 @@ Nothing here runs automatically except the two workflows named in steps 0 and
 
    ```bash
    fly config validate --strict -c deploy/fly.toml
-   fly deploy -c deploy/fly.toml
+   fly deploy --ha=false -c deploy/fly.toml
    ```
+
+   `--ha=false` keeps the app on one machine. Every session, dataset and
+   result lives in the memory of one process (`fly.toml` mounts no volume and
+   sets no `P2A_DB_PATH`), so with two machines the sessions are split
+   between two processes, and a visitor's request that Fly's proxy sends to
+   the other machine does not find the session there (a tool call answers 404
+   "Session not found"). A deploy onto an app that has no machines (the first
+   one, or one after the machines were destroyed) otherwise creates a second
+   machine for high availability. `min_machines_running = 1` in `fly.toml` is
+   a floor and does not prevent this. Pass the flag on every deploy; if
+   `fly status` lists two machines, `fly scale count 1 -a p2a-qamelab-backend`
+   returns to one.
 
    A deploy restarts the machine and discards every in-memory session, so pick
    a quiet time.
@@ -1001,7 +1027,8 @@ Nothing here runs automatically except the two workflows named in steps 0 and
    - `GET /api/sessions` answers 405, and `GET /api/files`, `GET /api/db/stats`
      and `GET /ws` 404;
    - one chat in the web app works, and its conversation list reloads.
-7. **Roll back** by re-pinning the previous tag and running `fly deploy` again.
+7. **Roll back** by re-pinning the previous tag and running step 5 again
+   (`fly deploy --ha=false -c deploy/fly.toml`).
 8. **Dependency checks.** The Security audit workflow runs weekly and on every
    change to `Cargo.lock`, any `Cargo.toml` or `audit.yml`. "Dependabot security
    updates" is a repository setting that only the owner can turn on.
@@ -1020,6 +1047,12 @@ shares the process's thread pool with the other admitted calls and can hold
 them up far longer than their own work takes, with no `server_busy` answer, so
 resizing the VM must not raise it on its own. To ship a new backend build,
 follow [Release and redeploy](#release-and-redeploy).
+
+Deploy with `fly deploy --ha=false -c deploy/fly.toml`, never without
+`--ha=false`: the app must run on exactly one machine, because every
+session lives in the memory of one process, and a deploy onto an app with
+no machines would otherwise create two (step 5 of
+[Release and redeploy](#release-and-redeploy)).
 
 Put Cloudflare (or your CDN) in front of `p2a-api.qamelab.org` with a Rate
 Limiting rule as one layer (checklist step 5).

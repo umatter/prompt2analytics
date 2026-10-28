@@ -121,7 +121,7 @@ Registered only with an access token, or on a local server started with `--expos
 DELETE /api/sessions/{session_id}
 ```
 
-Answers 204. It removes the session's datasets, its data directory (open public mode) and its stored conversations, messages, tool calls and settings. An unknown session answers 404.
+Answers 204. Before the answer, the session leaves the server's session table, so later requests no longer find it (`GET /api/sessions/{id}` and tool calls answer 404, a chat stream ends with "Session not found"), and, with the session database, its stored conversations, messages, tool calls, settings and dataset records are deleted. Its datasets go with the session (their memory is freed once no call still running in it holds them). Its data directory (open public mode) is removed off the request: the deletion queues the removal on the server's blocking thread pool before it answers and does not wait for it, so the directory can still exist for a moment after the 204. Once the removal has started, no call (one still running in the deleted session, say) can create the directory again for that id. An unknown session answers 404.
 
 ### List Files
 ```
@@ -445,20 +445,31 @@ An unknown or expired `session_id` does not change the HTTP status: the response
 GET /api/llm/models
 ```
 
-**Response:**
+Lists the models of the server's default local Ollama endpoint (`http://localhost:11434`, its `/api/tags`). It takes no provider configuration, so it never lists another provider's models.
+
+**Response** (200):
 ```json
 {
   "success": true,
   "data": {
-    "provider": "openai",
+    "provider": "ollama",
     "models": [
-      "gpt-4o",
-      "gpt-4o-mini",
-      "gpt-3.5-turbo"
+      "llama3.2:latest",
+      "qwen2.5:7b"
     ]
   }
 }
 ```
+
+The endpoint must pass the server's LLM egress policy, which allows it only while `llm_allow_loopback` is true (the Off profile's default) and `P2A_LLM_ALLOWED_HOSTS` is unset or lists `localhost`. Otherwise the route answers 503 without contacting anything. The hosted profile, which open public mode implies, sets `llm_allow_loopback=false`, so a hosted server answers this unless `P2A_LIMIT_OVERRIDES` sets `llm_allow_loopback=true` (captured, open public server):
+
+```
+HTTP/1.1 503 Service Unavailable
+
+{"success":false,"error":"LLM provider not available: the default local Ollama endpoint is not enabled on this server"}
+```
+
+When the endpoint is allowed but Ollama is not running or does not answer, the route also answers 503, with `"error": "LLM provider not available: "` followed by the reason. Neither 503 carries a `code`.
 
 ### Get LLM Environment Keys
 ```
@@ -864,7 +875,7 @@ The `governor` object reports the tool calls running (`in_flight`), those past t
 
 The `server_stats` tool leaves out the process RSS, peak RSS and virtual size in the same mode and prints "Process memory: not reported in open public mode" in their place; it still reports the calling session's own datasets.
 
-While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. It does the same with `"memory_stuck": true` while the process stays above its memory soft limit with no call running within its deadline, after the server handed its freed heap memory back to the operating system: every tool call is then refused with `memory_pressure`, so no tool call will run to free it; only work detached past its deadline ending, or sessions being deleted or expiring, can bring the process back under the limit. In the hosted profile the process exits (code 70) when either state lasts `P2A_STUCK_EXIT_SECS` (300 s), so the platform can restart it.
+While every slot is held by work past its deadline, `/health` answers 503 with `"status": "degraded"` and `"healthy": false`. It does the same with `"memory_stuck": true` while the process stays above its memory soft limit with no call running within its deadline, after the server handed its freed heap memory back to the operating system: every tool call is then refused with `memory_pressure`, so no tool call will run to free it; only work detached past its deadline ending, or sessions being deleted or expiring, can bring the process back under the limit. With `P2A_STUCK_EXIT_SECS` set (300 s in the hosted profile), a watchdog checks the health every 5 s, and the process exits (code 70), so the platform can restart it, at the first check that finds either state has lasted that long since the first check that saw it: between `P2A_STUCK_EXIT_SECS` and `P2A_STUCK_EXIT_SECS` plus 10 s after `/health` first reports the state, 300 to 310 s in the hosted profile ([DEPLOYMENT.md](docs/guides/DEPLOYMENT.md#execution-governor), "Health and watchdog").
 
 ---
 
