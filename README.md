@@ -547,7 +547,7 @@ Numerical results are checked against R. *R-pinned* tests load a committed R ref
 ```bash
 validation/run_validation.sh                         # all test_validate tests (CI feature sets) + R drift check
 validation/run_validation.sh --rust-only --category econometrics   # stats | regression | econometrics | forecasting | ml | cli | mcp
-validation/run_validation.sh --write-status          # also regenerate VALIDATION_STATUS.md from this run (not with --verbose)
+validation/run_validation.sh --write-status          # also regenerate VALIDATION_STATUS.md from this run
 Rscript validation/r/run.R --check                   # R reference values still reproduce (needs R + packages)
 cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::hdfe::tests::test_validate
 python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt

@@ -46,7 +46,7 @@ validation/
 validation/run_validation.sh                         # all test_validate tests (CI feature sets) + Rscript validation/r/run.R --check
 validation/run_validation.sh --rust-only --category econometrics   # stats | regression | econometrics | forecasting | ml | cli | mcp
 validation/run_validation.sh --r-only                # R drift check only: Rscript validation/r/run.R --check
-validation/run_validation.sh --write-status          # also regenerate VALIDATION_STATUS.md from this run (full runs only; not with --verbose)
+validation/run_validation.sh --write-status          # also regenerate VALIDATION_STATUS.md from this run (full runs only)
 validation/run_validation.sh --legacy-r              # also run scripts/*.R (informational; never counted as passed)
 Rscript validation/r/run.R --check                   # recompute every case in a temp dir; exit 1 on any difference > 1e-12 relative
 Rscript validation/r/run.R --write ols_grunfeld      # (re)write one case JSON and the datasets it generates
@@ -61,9 +61,10 @@ The Rust step lists the tests of p2a-core, p2a-cli and p2a-mcp on CI's feature s
 (`cargo test -p <pkg> --tests -- --list`), keeps the `test_validate` tests, selects a
 category by module path and test binary (`validation/tools/validation_status.py select`),
 and runs them with `--exact`, plus every self-test of `p2a-validation`. A compile error, a
-failing test, fewer tests run than selected, or no selected `test_validate` test is a
-failure. Full runs also lint the methods registry. The R step recomputes every R reference
-case (see "Adding an R-pinned validation" below). `--legacy-r` runs each legacy script in a
+failing test, fewer tests run than selected, a selected test without a parsed result, or no
+selected `test_validate` test is a failure. Full runs also lint the methods registry. The R
+step recomputes every R reference case (see "Adding an R-pinned validation" below).
+`--legacy-r` runs each legacy script in a
 scratch directory with a copy of `validation/datasets`, so tracked files are never written,
 and compares the CSVs it produces with `validation/expected/*.csv`.
 
@@ -72,14 +73,14 @@ selected tests), 2 usage error, 3 INCOMPLETE (`cargo` or `Rscript` missing for a
 step). Results go to `validation/reports/<timestamp>-<pid>/` (gitignored): the logs,
 `results.json` and `report.md`; both record the commit, marked `-dirty` when tracked files
 differ from it. `--write-status` describes the whole suite, so it is refused (exit 2) with
-`--category`, `--rust-only` or `--r-only`. `--release`, `--verbose` (`-v`) and the
-environment variables `P2A_RSCRIPT`, `P2A_LEGACY_R_TIMEOUT` (whole seconds >= 1, default
-300; read only with `--legacy-r`) and `PYTHON` are also accepted. Do not combine
-`--write-status` with `--verbose` until the runner's `--nocapture` parsing is fixed: the
-interleaved output drops tests from the page (they show as NOT RUN) while the run still
-passes (runner defect, open). Regenerate the page without `--verbose`. The runner sets
-`CARGO_TERM_COLOR=never` for cargo, since it parses cargo's output. Set
-`P2A_VALIDATION_VERBOSE=1` to print every comparison a `Check` makes.
+`--category`, `--rust-only` or `--r-only`, and a run in which a selected test has no parsed
+result leaves the page as it was. `--release`, `--verbose` (`-v`) and the environment
+variables `P2A_RSCRIPT`, `P2A_LEGACY_R_TIMEOUT` (whole seconds >= 1, default 300; read only
+with `--legacy-r`) and `PYTHON` are also accepted. `--verbose` shows the cargo output and
+every comparison a `Check` makes, which libtest prints after the test status lines
+(`--show-output`). The runner sets `CARGO_TERM_COLOR=never` for cargo, since it parses
+cargo's output. In a direct cargo run, set `P2A_VALIDATION_VERBOSE=1` to print every
+comparison a `Check` makes.
 
 Direct cargo filters are substrings of the libtest path, not regexes. Module paths such as
 `regression::ols::tests::test_validate`, `econometrics::panel::tests::test_validate` and
