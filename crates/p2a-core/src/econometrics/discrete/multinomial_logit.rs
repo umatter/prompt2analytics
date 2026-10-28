@@ -33,13 +33,28 @@ use crate::traits::estimator::normal_cdf;
 /// passed as the outcome would otherwise create one category per observation.
 const MAX_OUTCOME_CATEGORIES: usize = 100;
 
-/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
-/// SVD fallback). Check the working set against the allocation ceiling before building it.
+/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity or solution,
+/// residual product, SVD fallback). Check the working set against the allocation ceiling
+/// before building it.
 const DENSE_INVERSE_COPIES: usize = 6;
 
 fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
     let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
     resource::check_alloc::<f64>(cells, what)
+}
+
+/// Largest absolute component of a Newton step, or `None` if any component is not
+/// finite. (The fold `max_change.max(change.abs())` it replaces dropped NaN, so an
+/// all-NaN step counted as converged, RF-31.)
+fn max_abs_step(step: &[f64]) -> Option<f64> {
+    let mut m = 0.0f64;
+    for s in step {
+        if !s.is_finite() {
+            return None;
+        }
+        m = m.max(s.abs());
+    }
+    Some(m)
 }
 
 /// Result from multinomial logit regression.
@@ -152,6 +167,16 @@ impl fmt::Display for MultinomResult {
 ///
 /// An outcome with more than 100 distinct values is refused with
 /// `InvalidSpecification` (a method-level cap, like `nnet::multinom`'s `MaxNWts`).
+///
+/// # Convergence
+///
+/// Newton-Raphson on the information matrix, at most 50 steps. `converged == true`
+/// implies that every coefficient and the log-likelihood are finite, and that the
+/// last step came from a regular (not pseudo-) inverse of the information matrix
+/// with largest absolute change below `1e-8`. A non-finite step, or a step from the
+/// pseudoinverse (singular information, as under complete separation), ends the
+/// iteration with `converged = false`, and that step is not applied.
+/// Non-convergence is reported in the result, never as an error.
 ///
 /// # References
 ///
@@ -301,9 +326,10 @@ pub fn run_multinom(
             }
         }
 
-        // Compute gradient and Hessian
+        // Score and information matrix (the negated Hessian of the log-likelihood,
+        // positive definite at any interior point)
         let mut gradient = vec![0.0; n_params];
-        let mut hess_arr = resource::try_zeros2(n_params, n_params, "multinomial logit Hessian")?;
+        let mut info = resource::try_zeros2(n_params, n_params, "multinomial logit Hessian")?;
 
         for i in 0..n {
             if i % 256 == 0 {
@@ -317,7 +343,7 @@ pub fn run_multinom(
                     gradient[cat_idx * k + kk] += x[[i, kk]] * residual;
                 }
 
-                // Hessian
+                // Information
                 for cat_idx2 in 0..n_cats {
                     let w = if cat_idx == cat_idx2 {
                         probs[[i, cat_idx + 1]] * (1.0 - probs[[i, cat_idx + 1]])
@@ -327,7 +353,7 @@ pub fn run_multinom(
 
                     for kk in 0..k {
                         for ll in 0..k {
-                            hess_arr[[cat_idx * k + kk, cat_idx2 * k + ll]] -=
+                            info[[cat_idx * k + kk, cat_idx2 * k + ll]] +=
                                 w * x[[i, kk]] * x[[i, ll]];
                         }
                     }
@@ -335,31 +361,37 @@ pub fn run_multinom(
             }
         }
 
-        let (hess_inv, _) = match safe_inverse(&hess_arr.view()) {
+        let (info_inv, singular) = match safe_inverse(&info.view()) {
             Ok(inv) => inv,
             Err(_) => {
                 // Add small ridge regularization
-                let mut hess_reg = hess_arr.clone();
+                let mut info_reg = info.clone();
                 for i in 0..n_params {
-                    hess_reg[[i, i]] -= 1e-6;
+                    info_reg[[i, i]] += 1e-6;
                 }
-                safe_inverse(&hess_reg.view()).map_err(|e| EconError::SingularMatrix {
+                safe_inverse(&info_reg.view()).map_err(|e| EconError::SingularMatrix {
                     context: "Multinomial logit Hessian".to_string(),
                     suggestion: format!("Model may be unidentified: {}", e),
                 })?
             }
         };
+        drop(info);
 
-        // Newton step
+        // Newton step: beta += I^-1 g (the same iterate as beta -= H^-1 g)
         let grad_arr = Array1::from_vec(gradient);
-        let step = hess_inv.dot(&grad_arr);
+        let step = info_inv.dot(&grad_arr);
+        drop(info_inv);
 
-        // Update beta
-        let mut max_change = 0.0f64;
+        // A non-finite step, or one from the pseudoinverse (singular information: no
+        // regular Newton step exists), ends the iteration unapplied and not converged.
+        let Some(max_change) = max_abs_step(step.as_slice().expect("contiguous")) else {
+            break;
+        };
+        if singular.is_some() {
+            break;
+        }
         for i in 0..n_params {
-            let change = step[i];
-            beta[i] -= change;
-            max_change = max_change.max(change.abs());
+            beta[i] += step[i];
         }
 
         if max_change < tol {
@@ -386,6 +418,7 @@ pub fn run_multinom(
         let log_prob = (exp_xb[y_idx[i]] / sum_exp).ln();
         log_likelihood += log_prob;
     }
+    let converged = converged && log_likelihood.is_finite() && beta.iter().all(|b| b.is_finite());
 
     // Null model log-likelihood
     let log_likelihood_null: f64 = category_counts
@@ -637,10 +670,39 @@ mod tests {
         }
     }
 
+    /// One row per category is complete separation, so no MLE exists. Before Tier 1
+    /// the fit was all NaN and reported `Converged: true (1 iterations)` (RF-31); now
+    /// the estimates are finite and `converged` is false: the iteration runs out of
+    /// steps or stops at the first step that comes from the pseudoinverse (singular
+    /// information), never applying it.
     #[test]
     fn test_multinom_accepts_100_categories() {
         let r = run_multinom(&continuous_y_dataset(100), "y", &["x"], None).unwrap();
         assert_eq!(r.categories.len(), 100);
+        assert!(
+            flat(&r.coefficients).iter().all(|b| b.is_finite()) && r.log_likelihood.is_finite(),
+            "non-finite estimates: LL {}, converged {} after {} iterations",
+            r.log_likelihood,
+            r.converged,
+            r.iterations
+        );
+        assert!(
+            !r.converged,
+            "no MLE exists, yet converged after {} iterations (LL {}, null {})",
+            r.iterations, r.log_likelihood, r.log_likelihood_null
+        );
+    }
+
+    #[test]
+    fn test_max_abs_step_rejects_non_finite() {
+        // The old fold `max_change.max(change.abs())` returned 1.0 for both NaN cases
+        // below and 0.0 for an all-NaN step (f64::max drops NaN), so an all-NaN step
+        // counted as converged.
+        assert_eq!(max_abs_step(&[0.5, -2.0]), Some(2.0));
+        assert_eq!(max_abs_step(&[]), Some(0.0));
+        assert_eq!(max_abs_step(&[1.0, f64::NAN]), None);
+        assert_eq!(max_abs_step(&[f64::INFINITY]), None);
+        assert_eq!(max_abs_step(&[f64::NAN, 1.0]), None);
     }
 
     #[test]
