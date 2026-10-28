@@ -487,8 +487,8 @@ pub fn run_random_effects_with(
     // its F form W/K (plm's pwaldtest(test = "F"))
     let b_s = beta.slice(s![1..]).to_owned();
     let v_ss = vcov.slice(s![1.., 1..]).to_owned();
-    // safe_inverse returns a pseudoinverse with Some(condition) for a singular
-    // matrix, never Err; only a clean inverse gives a Wald statistic.
+    // For a singular matrix safe_inverse may return a pseudoinverse with
+    // Some(condition) instead of Err; only a clean inverse gives a Wald statistic.
     let (wald_chi2, wald_df, wald_p_value, f_stat, f_p_value) = match safe_inverse(&v_ss.view()) {
         Ok((v_inv, None)) => {
             let w = b_s.dot(&v_inv.dot(&b_s));
