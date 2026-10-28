@@ -129,10 +129,11 @@ Writing a case (`validation/r/cases/<area>.R`):
   with round-trip precision and reads it back, so R computes on the doubles Rust will
   read. Data must have noise.
 - Return `list(values = ..., reference = ..., call = ..., packages = ...)`, with
-  `packages` naming at least one R package (its version is recorded; base R cases name
-  `stats` or the package they use). Named vectors (coefficients, SEs, CI bounds) go
-  through `named(x)`, unnamed arrays through `vec(x)`, scalars as plain numbers; `NA`
-  becomes `null` (NaN in Rust).
+  `packages` a character vector of the R packages the case uses (each version is
+  recorded); a base-R-only case returns `character(0)`, which is written as
+  `"packages": {}`. `NULL`, `NA` and empty names are refused. Named vectors
+  (coefficients, SEs, CI bounds) go through `named(x)`, unnamed arrays through `vec(x)`,
+  scalars as plain numbers; `NA` becomes `null` (NaN in Rust).
 - Use the R function the method is validated against, never a re-implementation, and add
   `stopifnot()` checks for the property the case exists to exercise.
 

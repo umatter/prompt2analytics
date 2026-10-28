@@ -8,6 +8,7 @@ Run: python3 -m unittest discover -s validation/tools/tests -v
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 VALIDATION = HERE.parents[1]
 HARNESS = VALIDATION / "r" / "harness.R"
+STATUS = VALIDATION / "tools" / "validation_status.py"
+FIX_TREE = HERE / "fixtures" / "tree"
 RSCRIPT = shutil.which("Rscript")
 
 
@@ -44,21 +47,31 @@ d <- compare_case_files(args[2], args[3])
 writeLines(c(d, "END"))
 """
 
+# Runs cases on the fixture tree's validation/datasets/d.csv. Every case is written to
+# args[3] except demo_var_case, the fixture tree's registered case, which a base-R-only
+# case (packages = character(0)) overwrites in that tree's validation/expected/.
 RUN_CASE_R = r"""
 args <- commandArgs(trailingOnly = TRUE)
 source(args[1])
-root <- args[2]; out <- args[3]; gen <- args[4]
+root <- args[2]; out <- args[3]; gen <- args[4]; tree_expected <- args[5]
 returns <- function(packages) function(ctx) {
-  d <- ctx$dataset("datasets/grunfeld.csv")
+  d <- ctx$dataset("datasets/d.csv")
   res <- list(values = list(n = nrow(d)), reference = "base R nrow()", call = "nrow(d)")
   res$packages <- packages
   res
 }
 case("zz_no_packages", "harness", "no packages", returns(NULL))
 case("zz_empty_package", "harness", "an empty package name", returns(""))
+case("zz_na_package", "harness", "an NA package name", returns(NA_character_))
 case("zz_with_packages", "harness", "packages given", returns("jsonlite"))
+case("demo_var_case", "stats", "Demo variance, base R only", function(ctx) {
+  d <- ctx$dataset("datasets/d.csv")
+  list(values = list(var = var(d$y)), reference = "base R var()", call = "var(d$y)",
+       packages = character(0))
+})
 for (id in names(.harness$cases)) {
-  msg <- tryCatch({ run_case(.harness$cases[[id]], out, gen, root); "written" },
+  dir <- if (id == "demo_var_case") tree_expected else out
+  msg <- tryCatch({ run_case(.harness$cases[[id]], dir, gen, root); "written" },
                   error = function(e) conditionMessage(e))
   cat(id, ": ", msg, "\n", sep = "")
 }
@@ -155,31 +168,54 @@ class TestCompareCaseFiles(unittest.TestCase):
 
 @unittest.skipUnless(R_READY, "Rscript with the R package jsonlite is not installed")
 class TestRunCase(unittest.TestCase):
-    def test_packages_must_name_at_least_one_r_package(self):
+    def test_packages_must_be_a_vector_of_package_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
+            tree = tmp / "tree"
+            shutil.copytree(FIX_TREE, tree)
             script = tmp / "run_case.R"
             script.write_text(RUN_CASE_R)
             out, gen = tmp / "expected", tmp / "generated"
             out.mkdir()
             gen.mkdir()
+            tree_expected = tree / "validation" / "expected"
             p = subprocess.run(
-                [RSCRIPT, str(script), str(HARNESS), str(VALIDATION), str(out), str(gen)],
+                [RSCRIPT, str(script), str(HARNESS), str(tree / "validation"), str(out), str(gen),
+                 str(tree_expected)],
                 capture_output=True,
                 text=True,
                 check=False,
             )
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             results = dict(line.split(": ", 1) for line in p.stdout.splitlines() if ": " in line)
-            for bad in ("zz_no_packages", "zz_empty_package"):
+            for bad in ("zz_no_packages", "zz_empty_package", "zz_na_package"):
                 self.assertTrue(
-                    results.get(bad, "").startswith(f"case {bad}: packages must name"), p.stdout
+                    results.get(bad, "").startswith(
+                        f"case {bad}: packages must be a character vector of R package names"
+                    ),
+                    p.stdout,
                 )
                 self.assertFalse((out / f"{bad}.json").exists(), f"{bad}.json was written")
             self.assertEqual(results.get("zz_with_packages"), "written", p.stdout)
             doc = json.loads((out / "zz_with_packages.json").read_text())
             self.assertIsInstance(doc["packages"], dict)
             self.assertIn("jsonlite", doc["packages"])
+
+            # A base-R-only case (packages = character(0)) records no package: an empty map.
+            self.assertEqual(results.get("demo_var_case"), "written", p.stdout)
+            text = (tree_expected / "demo_var_case.json").read_text()
+            self.assertIn('"packages": {}', text)
+            self.assertEqual(json.loads(text)["packages"], {})
+            # The registered fixture case, now written by R, passes the registry lint.
+            lint = subprocess.run(
+                [sys.executable, str(STATUS), "lint", "--root", str(tree),
+                 "--tests", str(tree / "lists" / "demo-tests.txt")],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(lint.returncode, 0, lint.stdout + lint.stderr)
+            self.assertIn("lint: 0 error(s), 0 warning(s)", lint.stdout)
 
 
 if __name__ == "__main__":

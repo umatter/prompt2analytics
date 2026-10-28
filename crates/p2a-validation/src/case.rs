@@ -357,6 +357,17 @@ mod tests {
     }
 
     #[test]
+    fn empty_packages_map_is_a_base_r_only_case() {
+        // harness.R writes `packages = character(0)` as {} and refuses NULL, which would be [].
+        let head = HEAD.replace(r#""packages": {"jsonlite": "2.0.0"}"#, r#""packages": {}"#);
+        let case = parse(&format!(r#"{{"schema": 1, {head}, "values": {{"a": 1}}}}"#)).unwrap();
+        assert!(case.packages.is_empty());
+        let head = HEAD.replace(r#""packages": {"jsonlite": "2.0.0"}"#, r#""packages": []"#);
+        let text = format!(r#"{{"schema": 1, {head}, "values": {{"a": 1}}}}"#);
+        assert!(matches!(parse(&text), Err(CaseError::Parse(_))));
+    }
+
+    #[test]
     fn null_reads_as_nan() {
         let text = format!(
             r#"{{"schema": 1, {HEAD}, "extra_field": true, "values": {{"a": null, "b": [1, null]}}}}"#

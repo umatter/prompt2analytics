@@ -18,7 +18,7 @@ suppressPackageStartupMessages(library(jsonlite))
 # Register a case. `fn` receives a context `ctx` with ctx$dataset(rel) (read a
 # committed CSV), ctx$gen_dataset(name, df) (write + read back a simulated CSV)
 # and must return list(values = <named list>, reference = <chr>, call = <chr>,
-# packages = <non-empty chr vector>).
+# packages = <chr vector; character(0) for base R only>).
 case <- function(id, area, method, fn) {
   stopifnot(grepl("^[a-z0-9_]+$", id), is.null(.harness$cases[[id]]))
   .harness$cases[[id]] <- list(id = id, area = area, method = method, fn = fn)
@@ -81,9 +81,10 @@ run_case <- function(c, out_dir, gen_dir, data_root) {
   res <- c$fn(ctx)
   .validate_values(c$id, res$values)
   pk <- res$packages
-  # NULL or character(0) would be written as "packages": [], which Rust and the lint reject.
-  if (!is.character(pk) || length(pk) == 0L || anyNA(pk) || !all(nzchar(pk)))
-    stop(sprintf("case %s: packages must name at least one R package (a non-empty character vector)", c$id))
+  # NULL would be written as "packages": [], which Rust and the lint reject;
+  # character(0) (a base-R-only case) is written as "packages": {}.
+  if (is.null(pk) || !is.character(pk) || anyNA(pk) || !all(nzchar(pk)))
+    stop(sprintf("case %s: packages must be a character vector of R package names (character(0) for base R only)", c$id))
   # The analysis dataset: explicit, or the last dataset the case touched.
   ds <- if (!is.null(res$dataset)) res$dataset else utils::tail(used, 1)
   if (length(ds) != 1L || !(ds %in% used)) stop(sprintf("case %s: analysis dataset must be one of the datasets it read", c$id))
