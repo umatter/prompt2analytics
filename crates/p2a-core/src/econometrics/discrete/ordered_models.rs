@@ -44,9 +44,9 @@ fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
 }
 
 /// Largest absolute component of a Newton step, or `None` if any component is not
-/// finite. (The fold `max_change.max(change.abs())` it guards dropped NaN, so an
+/// finite. (The fold `max_change.max(change.abs())` it replaces dropped NaN, so an
 /// all-NaN step counted as converged, RF-31.)
-fn max_abs_step(step: &[f64]) -> Option<f64> {
+fn max_abs_step(step: &Array1<f64>) -> Option<f64> {
     let mut m = 0.0f64;
     for s in step {
         if !s.is_finite() {
@@ -183,12 +183,18 @@ impl fmt::Display for OrderedResult {
 ///
 /// # Convergence
 ///
-/// Newton steps, at most 100. `converged == true` implies that every coefficient,
-/// every threshold and the log-likelihood are finite, and that the last step came
-/// from a regular (not pseudo-) inverse with largest absolute (clamped) change
-/// below `1e-8`. A non-finite score or step, or a step from the pseudoinverse
-/// (singular Hessian), ends the iteration with `converged = false`, and that step
-/// is not applied. Non-convergence is reported in the result, never as an error.
+/// Newton steps on the information matrix (the negated Hessian approximation plus
+/// a 1e-6 ridge, positive definite), at most 100. The inverse takes the Cholesky
+/// path at any conditioning, so ill-conditioning that comes from the scale of a
+/// regressor (values in the thousands, say) neither stops nor truncates the
+/// iteration. `converged == true` implies that every coefficient, every threshold
+/// and the log-likelihood are finite, and that the last step came from a regular
+/// (not pseudo-) inverse with largest absolute (clamped) change below `1e-8`. A
+/// non-finite score or step ends the iteration with `converged = false`, and that
+/// step is not applied. So does a step from the pseudoinverse, which
+/// `safe_inverse` returns only when Cholesky fails in floating point (the ridge
+/// lost to rounding) and the condition number exceeds `1e10`. Non-convergence is
+/// reported in the result, never as an error.
 ///
 /// # Errors
 ///
@@ -205,10 +211,12 @@ pub fn run_ordered_logit(
 /// Run ordered probit regression.
 ///
 /// R equivalent: `MASS::polr(method = "probit")`. The estimates are not yet
-/// polr's (ECON-4, ECON-5; T2-WP10). Convergence is reported as for
-/// [`run_ordered_logit`]: `converged == true` implies finite estimates and
-/// log-likelihood and a last step from a regular inverse; a non-finite or
-/// pseudoinverse step ends the iteration, not converged and not applied.
+/// polr's (ECON-4, ECON-5; T2-WP10). Iteration and convergence are as for
+/// [`run_ordered_logit`]: Newton steps on the positive definite information
+/// matrix (Cholesky at any conditioning); `converged == true` implies finite
+/// estimates and log-likelihood and a last step from a regular inverse; a
+/// non-finite step, or a pseudoinverse step (Cholesky failed in floating point
+/// and cond > 1e10), ends the iteration, not converged and not applied.
 ///
 /// # Errors
 ///
@@ -446,12 +454,18 @@ fn run_ordered_model(
             break;
         }
 
-        // Add regularization to diagonal
+        // Information matrix: the negated Hessian (approximation) plus a 1e-6 ridge.
+        // It is positive definite, so safe_inverse takes its Cholesky path at any
+        // conditioning. (The negative definite Hessian itself always fails
+        // Cholesky, and for cond > 1e10, as with a regressor in the thousands,
+        // safe_inverse answers it with the pseudoinverse.)
+        let mut info = hess;
+        info.mapv_inplace(|v| -v);
         for i in 0..n_params {
-            hess[[i, i]] -= 1e-6;
+            info[[i, i]] += 1e-6;
         }
 
-        let (hess_inv, singular) = match safe_inverse(&hess.view()) {
+        let (info_inv, singular) = match safe_inverse(&info.view()) {
             Ok(inv) => inv,
             Err(_) => {
                 // Fall back to gradient descent step
@@ -462,24 +476,29 @@ fn run_ordered_model(
                 continue;
             }
         };
+        drop(info);
 
-        // Newton step
+        // Newton step: theta += I^-1 g (the same iterate as theta -= H^-1 g)
         let grad_arr = Array1::from_vec(gradient);
-        let step = hess_inv.dot(&grad_arr);
+        let step = info_inv.dot(&grad_arr);
+        drop(info_inv);
 
-        // A non-finite step, or one from the pseudoinverse (singular Hessian), ends
-        // the iteration unapplied and not converged.
-        if max_abs_step(step.as_slice().expect("contiguous")).is_none() || singular.is_some() {
+        // A non-finite step ends the iteration unapplied and not converged; so does
+        // one from the pseudoinverse, which safe_inverse returns only when Cholesky
+        // fails in floating point despite the ridge and cond exceeds 1e10.
+        let Some(max_step) = max_abs_step(&step) else {
+            break;
+        };
+        if singular.is_some() {
             break;
         }
 
-        // Update with step size control
-        let mut max_change = 0.0f64;
+        // Update with step size control: each component clamped to [-2, 2]
         for i in 0..n_params {
-            let change = step[i].clamp(-2.0, 2.0);
-            theta[i] -= change;
-            max_change = max_change.max(change.abs());
+            theta[i] += step[i].clamp(-2.0, 2.0);
         }
+        // The largest clamped change, max_i |clamp(step_i)| = min(max_i |step_i|, 2)
+        let max_change = max_step.min(2.0);
 
         // Ensure thresholds are ordered
         for t in 1..n_thresholds {
@@ -586,6 +605,7 @@ fn subtract_scaled_outer(hess: &mut Array2<f64>, idx: &[usize], val: &[f64], p_i
 mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
+    use ndarray::array;
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
@@ -639,6 +659,70 @@ mod tests {
         pin_ordered(&case, &ds);
     }
 
+    /// `ds` with its column `x` multiplied by `scale` (outcome `y` unchanged).
+    fn with_x_scaled(ds: &Dataset, scale: f64) -> Dataset {
+        let y: Vec<String> = ds
+            .column("y")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_no_null_iter()
+            .map(String::from)
+            .collect();
+        let x: Vec<f64> = ds
+            .column("x")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .map(|v| v * scale)
+            .collect();
+        Dataset::new(df! { "y" => y, "x" => x }.unwrap())
+    }
+
+    /// The fit must not depend on the scale of a regressor. The step used to invert
+    /// the negative definite Hessian, which always takes safe_inverse's fallback,
+    /// and that answers cond > 1e10 with the pseudoinverse. With the rule that a
+    /// pseudoinverse step ends the fit, disc_polr_j5 with x times 1e4 returned its
+    /// starting point after one iteration (coefficient 0, thresholds at their start
+    /// values, the null log-likelihood). On the information matrix (Cholesky) the
+    /// scaled fit is the unscaled one with the coefficient divided by the scale, to
+    /// 1.1e-10 relative (logit) and 7.9e-11 (probit) measured at both scales: the
+    /// 1e-6 ridge is not scale-free. The fits are the non-converged iterates of
+    /// ECON-4.
+    #[test]
+    fn test_ordered_fit_does_not_depend_on_regressor_scale() {
+        type Fit = fn(&Dataset, &str, &[&str]) -> EconResult<OrderedResult>;
+        let fits: [(&str, Fit); 2] = [("logit", run_ordered_logit), ("probit", run_ordered_probit)];
+        let (_case, ds) = crate::test_support::load_case("disc_polr_j5");
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs();
+        for (link, fit) in fits {
+            let base = fit(&ds, "y", &["x"]).unwrap();
+            for scale in [1e4, 1e6] {
+                let r = fit(&with_x_scaled(&ds, scale), "y", &["x"]).unwrap();
+                let want = base.coefficients[0] / scale;
+                assert!(
+                    r.iterations > 1 && close(r.coefficients[0], want),
+                    "{link}, x * {scale:e}: coefficient {} after {} iterations, want {want}",
+                    r.coefficients[0],
+                    r.iterations
+                );
+                for (t, (a, b)) in r.thresholds.iter().zip(&base.thresholds).enumerate() {
+                    assert!(
+                        close(*a, *b),
+                        "{link}, x * {scale:e}: threshold {t} {a} vs {b}"
+                    );
+                }
+                assert!(
+                    close(r.log_likelihood, base.log_likelihood),
+                    "{link}, x * {scale:e}: LL {} vs {}",
+                    r.log_likelihood,
+                    base.log_likelihood
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_validate_ordered_j16() {
         let (case, ds) = crate::test_support::load_case("disc_polr_j16");
@@ -690,8 +774,12 @@ mod tests {
     }
 
     /// 100 categories of one row each. Before Tier 1 the fit was finite, but every
-    /// Newton step used a wrong full-pivot LU inverse (RF-31); it must stay finite
-    /// and may report convergence only above the null model.
+    /// Newton step used a wrong full-pivot LU inverse (RF-31). It must stay finite
+    /// and end before the iteration limit, not converged: here the information
+    /// matrix fails Cholesky in floating point despite its ridge, safe_inverse
+    /// answers with the pseudoinverse, and that step ends the fit (measured: step
+    /// 18). With pseudoinverse steps applied the fit runs all 100 iterations, not
+    /// converged (measured), so the iteration count is what this test can see.
     #[test]
     fn test_ordered_accepts_100_categories() {
         let r = run_ordered_logit(&continuous_y_dataset(100), "y", &["x"]).unwrap();
@@ -708,8 +796,11 @@ mod tests {
             r.iterations
         );
         assert!(
-            !r.converged || r.log_likelihood >= r.log_likelihood_null,
-            "converged below the null model: LL {}, null {}",
+            !r.converged && r.iterations < 100,
+            "expected a stop on a pseudoinverse step: converged {} after {} iterations \
+             (LL {}, null {})",
+            r.converged,
+            r.iterations,
             r.log_likelihood,
             r.log_likelihood_null
         );
@@ -719,11 +810,11 @@ mod tests {
     fn test_ordered_max_abs_step_rejects_non_finite() {
         // The old fold `max_change.max(change.abs())` dropped NaN (f64::max), so the
         // all-NaN steps of RF-31 counted as converged.
-        assert_eq!(max_abs_step(&[0.5, -2.0]), Some(2.0));
-        assert_eq!(max_abs_step(&[]), Some(0.0));
-        assert_eq!(max_abs_step(&[1.0, f64::NAN]), None);
-        assert_eq!(max_abs_step(&[f64::INFINITY]), None);
-        assert_eq!(max_abs_step(&[f64::NAN, 1.0]), None);
+        assert_eq!(max_abs_step(&array![0.5, -2.0]), Some(2.0));
+        assert_eq!(max_abs_step(&Array1::zeros(0)), Some(0.0));
+        assert_eq!(max_abs_step(&array![1.0, f64::NAN]), None);
+        assert_eq!(max_abs_step(&array![f64::INFINITY]), None);
+        assert_eq!(max_abs_step(&array![f64::NAN, 1.0]), None);
     }
 
     #[test]

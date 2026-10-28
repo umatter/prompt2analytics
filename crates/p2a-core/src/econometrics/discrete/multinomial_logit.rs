@@ -46,7 +46,7 @@ fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
 /// Largest absolute component of a Newton step, or `None` if any component is not
 /// finite. (The fold `max_change.max(change.abs())` it replaces dropped NaN, so an
 /// all-NaN step counted as converged, RF-31.)
-fn max_abs_step(step: &[f64]) -> Option<f64> {
+fn max_abs_step(step: &Array1<f64>) -> Option<f64> {
     let mut m = 0.0f64;
     for s in step {
         if !s.is_finite() {
@@ -407,7 +407,7 @@ pub fn run_multinom(
 
         // A non-finite step, or one from the pseudoinverse (singular information: no
         // regular Newton step exists), ends the iteration unapplied and not converged.
-        let Some(max_change) = max_abs_step(step.as_slice().expect("contiguous")) else {
+        let Some(max_change) = max_abs_step(&step) else {
             break;
         };
         if singular.is_some() {
@@ -547,6 +547,7 @@ pub fn run_multinom(
 mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
+    use ndarray::array;
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
@@ -752,11 +753,11 @@ mod tests {
         // The old fold `max_change.max(change.abs())` returned 1.0 for both NaN cases
         // below and 0.0 for an all-NaN step (f64::max drops NaN), so an all-NaN step
         // counted as converged.
-        assert_eq!(max_abs_step(&[0.5, -2.0]), Some(2.0));
-        assert_eq!(max_abs_step(&[]), Some(0.0));
-        assert_eq!(max_abs_step(&[1.0, f64::NAN]), None);
-        assert_eq!(max_abs_step(&[f64::INFINITY]), None);
-        assert_eq!(max_abs_step(&[f64::NAN, 1.0]), None);
+        assert_eq!(max_abs_step(&array![0.5, -2.0]), Some(2.0));
+        assert_eq!(max_abs_step(&Array1::zeros(0)), Some(0.0));
+        assert_eq!(max_abs_step(&array![1.0, f64::NAN]), None);
+        assert_eq!(max_abs_step(&array![f64::INFINITY]), None);
+        assert_eq!(max_abs_step(&array![f64::NAN, 1.0]), None);
     }
 
     #[test]

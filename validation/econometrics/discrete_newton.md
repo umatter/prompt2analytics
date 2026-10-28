@@ -143,8 +143,9 @@ The case files also carry every threshold (`logit_zeta`, `probit_zeta`, named
 `c001|c002`, ...) with its SE, and polr's own null fits.
 
 What is pinned for both links: n and the category counts (exact), the null log-likelihood
-(`Tol::stat(n)`), finite coefficients, thresholds and log-likelihood, a log-likelihood not
-above polr's maximum, and `converged` only above the null model.
+(`Tol::stat(n)`: 1e-5 relative for n = 30 and 96, 1e-6 for n = 180), finite coefficients,
+thresholds and log-likelihood, a log-likelihood not above polr's maximum, and `converged`
+only above the null model.
 
 **Deviations** (owned by T2-WP10): ECON-4, the beta score has the wrong sign and the
 outer-product Hessian divides by `p_i` twice, so the fit never reaches polr's MLE; ECON-5,
@@ -156,8 +157,25 @@ iterations. The polr values are polr's own optimum (BFGS at `reltol = 1e-14`), n
 re-solved, so T2-WP10 either pins them at `Tol::iterative` with the measured need or adds
 tight values to its own case file.
 
+The ordered Newton step, like the multinomial one, solves the information matrix: the
+negated outer-product Hessian plus the 1e-6 ridge, which is positive definite and so takes
+the Cholesky path at any conditioning. The step used to invert the negative definite
+Hessian, which always fails Cholesky; `safe_inverse` then returns the pseudoinverse
+whenever `cond > 1e10`, which means ill-conditioning, not singularity, and a regressor in
+the thousands is enough for it. Under the pseudoinverse-step rule below, `disc_polr_j5`
+with x multiplied by 1e4 then returned its starting point after one iteration
+(coefficient 0, the null log-likelihood). On the information matrix the fit with x
+multiplied by 1e4 or 1e6 is the unscaled one with the coefficient divided by the scale,
+to 1.1e-10 relative (logit) and 7.9e-11 (probit); the difference comes from the ridge,
+which is not scale-free. The j16 and j30 log-likelihoods above are unchanged to the digits
+shown.
+
 The ordered loop has the same contract as the multinomial one: a non-finite score or
 step, or a step from the pseudoinverse, ends the iteration unapplied and not converged.
+On the information matrix a pseudoinverse step occurs only when Cholesky fails in floating
+point despite the ridge and the condition number exceeds 1e10. The 100-category fit of one
+row each (no MLE) stops on such a step, at iteration 18; with pseudoinverse steps applied
+it runs all 100 iterations.
 
 ## Known differences
 
@@ -189,6 +207,7 @@ Helpers and the 100-category fits:
 - `econometrics::discrete::multinomial_logit::tests::test_multinom_accepts_100_categories`
 - `econometrics::discrete::ordered_models::tests::test_ordered_max_abs_step_rejects_non_finite`
 - `econometrics::discrete::ordered_models::tests::test_ordered_accepts_100_categories`
+- `econometrics::discrete::ordered_models::tests::test_ordered_fit_does_not_depend_on_regressor_scale`
 
 Linear algebra (`linalg::matrix_ops::tests::`; R `solve()` values for `-tridiag(-1, 3, -1)`
 and `I - 0.5 W` on a 5 x 5 rook grid):
