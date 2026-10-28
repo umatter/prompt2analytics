@@ -96,8 +96,12 @@ fn partial_piv_lu_inverse(mat: &Mat<f64>) -> Mat<f64> {
 /// `max |A X - I| <= INVERSE_RESIDUAL_FACTOR * n * f64::EPSILON * cond`; if neither
 /// passes, the result is [`LinalgError::SingularMatrix`]. The bound uses `cond`
 /// from the SVD, not the candidate's norm, so a wrong candidate cannot widen it.
-/// Each candidate is dropped before the next is computed, which keeps the working
-/// set within the six n x n copies the discrete-choice callers budget for.
+///
+/// Working set: the LU route holds at most five n x n matrices at once, counting
+/// the caller's (its faer copy, the LU factor, the identity and the solution). The
+/// faer copy and the LU candidate are dropped before the SVD route, so that route
+/// peaks at [`pseudoinverse`]'s own working set: besides the caller's matrix, its
+/// own copy of it, U, V, S^+ and the product, plus faer's SVD workspace.
 fn verified_inverse(
     m: &ArrayView2<f64>,
     cond: f64,
@@ -111,8 +115,9 @@ fn verified_inverse(
         return Ok(faer_to_ndarray(&candidate));
     }
     drop(candidate);
+    drop(mat);
     let pinv = pseudoinverse(m)?;
-    if inverse_residual(&mat, &ndarray_to_faer(&pinv.view())) <= bound {
+    if inverse_residual(&ndarray_to_faer(m), &ndarray_to_faer(&pinv.view())) <= bound {
         return Ok(pinv);
     }
     Err(LinalgError::SingularMatrix)
