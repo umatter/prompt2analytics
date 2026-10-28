@@ -100,7 +100,8 @@ struct Row {
 /// `case <id>: <key>[<name>] rust=<a> R=<e> |diff|=<d> allowed=<t>`.
 ///
 /// Structural problems (unknown key, wrong kind of value, length mismatch, missing,
-/// extra or duplicate names) are failed comparisons too; nothing panics before
+/// extra or duplicate names, R names and values of unequal length) are failed
+/// comparisons too; nothing panics before
 /// [`Check::finish`]. A `Check` that is dropped without `finish` panics, so a test
 /// cannot forget to assert.
 pub struct Check<'a> {
@@ -191,9 +192,18 @@ impl<'a> Check<'a> {
         self
     }
 
-    /// The names and values of a named R vector, or a structural failure.
+    /// The names and values of a named R vector, or a structural failure. Unequal
+    /// lengths cannot come from `Case::try_load`, only from a `Case` deserialised
+    /// directly; they fail here rather than index past R's values.
     fn named_value(&mut self, key: &str) -> Option<(&'a [String], Vec<f64>)> {
         match self.lookup(key)? {
+            Value::Named { names, values } if names.len() != values.len() => {
+                self.structural(
+                    key,
+                    format!("{} R names for {} R values", names.len(), values.len()),
+                );
+                None
+            }
             Value::Named { names, values } => Some((
                 names.as_slice(),
                 values.iter().map(|v| v.unwrap_or(f64::NAN)).collect(),

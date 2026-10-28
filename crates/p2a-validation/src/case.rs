@@ -59,37 +59,59 @@ pub enum Value {
 pub enum CaseError {
     /// No file at this path.
     Missing(PathBuf),
-    /// The file is not valid JSON, does not match schema 1, or holds another case.
+    /// The file at this path exists but could not be read.
+    Io(PathBuf, std::io::Error),
+    /// The file is not valid JSON, does not match schema 1 (including a
+    /// `{names, values}` value whose arrays differ in length), or holds another case.
     Parse(String),
-    /// The file has this schema (0 if absent), not [`SCHEMA`].
-    Schema(u32),
+    /// The file has another schema than [`SCHEMA`].
+    Schema {
+        /// The case file.
+        path: PathBuf,
+        /// The schema it declares (0 if absent).
+        found: u32,
+    },
+}
+
+/// The case id of a case-file path (its file stem).
+fn id_of(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 impl fmt::Display for CaseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CaseError::Missing(p) => {
-                let id = p
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let id = id_of(p);
                 write!(
                     f,
                     "case `{id}` not found at {}; run `Rscript validation/r/run.R --write {id}`",
                     p.display()
                 )
             }
-            CaseError::Schema(n) => write!(
+            CaseError::Io(p, e) => write!(f, "cannot read case file {}: {e}", p.display()),
+            CaseError::Schema { path, found } => write!(
                 f,
-                "case file has schema {n}; this crate reads schema {SCHEMA} \
-                 (regenerate with Rscript validation/r/run.R --write)"
+                "case file {} has schema {found}; this crate reads schema {SCHEMA} \
+                 (regenerate with Rscript validation/r/run.R --write {})",
+                path.display(),
+                id_of(path)
             ),
             CaseError::Parse(m) => write!(f, "cannot parse case file: {m}"),
         }
     }
 }
 
-impl std::error::Error for CaseError {}
+impl std::error::Error for CaseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CaseError::Io(_, e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 /// Parse the text of a case file found at `path`, expected to hold case `id`.
 fn parse_case(id: &str, path: &Path, text: &str) -> Result<Case, CaseError> {
@@ -101,9 +123,23 @@ fn parse_case(id: &str, path: &Path, text: &str) -> Result<Case, CaseError> {
         .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
         .unwrap_or(0);
     if schema != SCHEMA {
-        return Err(CaseError::Schema(schema));
+        return Err(CaseError::Schema {
+            path: path.to_path_buf(),
+            found: schema,
+        });
     }
     let case: Case = serde_json::from_value(doc).map_err(|e| CaseError::Parse(e.to_string()))?;
+    for (k, v) in &case.values {
+        if let Value::Named { names, values } = v
+            && names.len() != values.len()
+        {
+            return Err(CaseError::Parse(format!(
+                "value `{k}` has {} names for {} values",
+                names.len(),
+                values.len()
+            )));
+        }
+    }
     if case.id != id {
         return Err(CaseError::Parse(format!(
             "file {} holds case `{}`, expected `{id}`",
@@ -112,6 +148,17 @@ fn parse_case(id: &str, path: &Path, text: &str) -> Result<Case, CaseError> {
         )));
     }
     Ok(case)
+}
+
+/// Read and parse the case file at `path`, expected to hold case `id`.
+fn read_case(id: &str, path: &Path) -> Result<Case, CaseError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_case(id, path, &text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(CaseError::Missing(path.to_path_buf()))
+        }
+        Err(e) => Err(CaseError::Io(path.to_path_buf(), e)),
+    }
 }
 
 fn to_f64(v: &Option<f64>) -> f64 {
@@ -132,19 +179,7 @@ impl Case {
     /// Load `validation/expected/<id>.json`, returning why it could not be loaded.
     pub fn try_load(id: &str) -> Result<Case, CaseError> {
         let path = validation_dir().join("expected").join(format!("{id}.json"));
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CaseError::Missing(path));
-            }
-            Err(e) => {
-                return Err(CaseError::Parse(format!(
-                    "cannot read {}: {e}",
-                    path.display()
-                )));
-            }
-        };
-        parse_case(id, &path, &text)
+        read_case(id, &path)
     }
 
     /// Absolute path of the analysis dataset (`repo_path(&self.dataset)`).
@@ -240,18 +275,21 @@ mod tests {
     #[test]
     fn schema_2_is_rejected() {
         let text = format!(r#"{{"schema": 2, {HEAD}, "values": {{"a": 1}}}}"#);
-        assert!(matches!(parse(&text), Err(CaseError::Schema(2))));
+        assert!(matches!(
+            parse(&text),
+            Err(CaseError::Schema { found: 2, path }) if path == Path::new("validation/expected/x.json")
+        ));
     }
 
     #[test]
     fn missing_schema_reads_as_0() {
         let text = format!(r#"{{{HEAD}, "values": {{"a": 1}}}}"#);
         let err = parse(&text).unwrap_err();
-        assert!(matches!(err, CaseError::Schema(0)));
-        assert!(
-            err.to_string()
-                .contains("case file has schema 0; this crate reads schema 1"),
-            "{err}"
+        assert!(matches!(err, CaseError::Schema { found: 0, .. }));
+        assert_eq!(
+            err.to_string(),
+            "case file validation/expected/x.json has schema 0; this crate reads schema 1 \
+             (regenerate with Rscript validation/r/run.R --write x)"
         );
     }
 
@@ -277,6 +315,40 @@ mod tests {
             err.to_string().starts_with("cannot parse case file: "),
             "{err}"
         );
+    }
+
+    #[test]
+    fn named_value_with_unequal_lengths_is_a_parse_error() {
+        let text = format!(
+            r#"{{"schema": 1, {HEAD}, "values": {{"a": 1, "v": {{"names": ["x", "y"], "values": [1]}}}}}}"#
+        );
+        match parse(&text) {
+            Err(CaseError::Parse(m)) => {
+                assert_eq!(m, "value `v` has 2 names for 1 values");
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unreadable_file_is_an_io_error_naming_the_path() {
+        // A directory exists but cannot be read as a file: not `Missing`, not `Parse`.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let err = read_case("x", dir).unwrap_err();
+        let CaseError::Io(p, _) = &err else {
+            panic!("expected Io, got {err:?}");
+        };
+        assert_eq!(p, dir);
+        let text = err.to_string();
+        assert!(
+            text.starts_with(&format!("cannot read case file {}: ", dir.display())),
+            "{text}"
+        );
+        let missing = dir.join("no_such_case.json");
+        assert!(matches!(
+            read_case("no_such_case", &missing),
+            Err(CaseError::Missing(p)) if p == missing
+        ));
     }
 
     #[test]

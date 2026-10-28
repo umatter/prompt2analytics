@@ -296,6 +296,38 @@ fn check_structural_problems_are_failures() {
 }
 
 #[test]
+fn check_unequal_r_names_and_values_are_structural_failures() {
+    // Case::try_load rejects such a file; a Case deserialised directly is not checked,
+    // so Check must still not index past R's values or drop unpaired names.
+    let case: Case = serde_json::from_str(
+        r#"{"schema": 1, "id": "bad", "area": "harness", "method": "m", "reference": "r",
+            "call": "c", "dataset": "validation/datasets/grunfeld.csv",
+            "datasets": ["validation/datasets/grunfeld.csv"],
+            "r_version": "R version 4.3.3 (2024-02-29)", "packages": {"jsonlite": "2.0.0"},
+            "values": {"v": {"names": ["a", "b", "c"], "values": [1, 2]}}}"#,
+    )
+    .expect("deserialise the case");
+    let payload = catch_unwind(AssertUnwindSafe(|| {
+        Check::new(&case)
+            .named_subset("v", &["c"], &["c"], &[3.0], Tol::exact())
+            .named("v", &["a", "b"], &[1.0, 2.0], Tol::exact())
+            .finish();
+    }))
+    .expect_err("the check must fail");
+    let text = panic_text(payload);
+    assert!(
+        text.contains("case bad: 2 of 2 comparisons failed"),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("case bad: v: 3 R names for 2 R values")
+            .count(),
+        2,
+        "{text}"
+    );
+}
+
+#[test]
 fn case_accessors_return_values_in_r_order() {
     let case = selftest();
     assert_eq!(case.scalar("n"), 200.0);
