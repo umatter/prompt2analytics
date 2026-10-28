@@ -65,6 +65,8 @@ tokio = { version = "1", features = ["rt", "macros"] }
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.10"
+# R reference cases (validation/expected/*.json); path only, never published.
+p2a-validation = { path = "../p2a-validation" }
 
 [lints]
 workspace = true

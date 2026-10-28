@@ -249,6 +249,10 @@ pub mod forecasting;
 #[cfg(feature = "visualization")]
 pub mod visualization;
 
+// Test-only loader for the R reference cases in validation/expected (see validation/README.md).
+#[cfg(test)]
+pub(crate) mod test_support;
+
 // Re-export foundational types
 pub use errors::{EconError, EconResult, EstimationWarning};
 pub use linalg::{

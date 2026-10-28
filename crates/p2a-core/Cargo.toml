@@ -105,6 +105,8 @@ tempfile = "3.10"
 base64 = { workspace = true }
 # The data loader's tests read back the warning it logs.
 tracing-subscriber = { workspace = true }
+# R reference cases (validation/expected/*.json); path only, never published.
+p2a-validation = { path = "../p2a-validation" }
 memory-stats = "1.2"
 serde_json = { workspace = true }
 chrono = "0.4"
