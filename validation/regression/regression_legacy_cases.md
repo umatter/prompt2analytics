@@ -119,7 +119,7 @@ R values (standard errors; covariance matrices row-major):
 | `kernhac_tukey_hanning_bw4` | 0.2139224548 | 0.1417968863 |
 | `kernhac_tukey_hanning_bw4_vcov` | 0.04576281667, 0.005394890914 | 0.005394890914, 0.02010635695 |
 | `neweywest_default` (legacy row "NeweyWest") | 0.2877355266 | 0.1353875952 |
-| `vcovhac_default` (what the legacy rows "Bartlett" and "Parzen" held, INF-16) | 0.1903233734 | 0.1422489769 |
+| `vcovhac_default` (what the legacy rows "Bartlett" and "Parzen" held before INF-16 was fixed) | 0.1903233734 | 0.1422489769 |
 
 Test: `test_validate_hac_ar1` pins the coefficients, the default bandwidth, and the standard
 errors and covariance matrices of the four pinned kernels at m = 4; it also checks that the
@@ -192,6 +192,6 @@ or more is an `InvalidSpecification` error, one above T/4 adds an entry to
 | `reset_test.csv` | `diag_reset_quad` | values equal to 15 digits |
 | `harveycollier_test.csv` | `diag_harvtest_nonlin` | values equal to 15 digits |
 | `wald_test.csv` | `diag_wald_sim` | `p_value` is `NA`: `aod::wald.test` names its p-value `P`, not `P(> Chi2)`; the case records it |
-| `hac_test.csv` | `hac_ar1` | rows "Bartlett" and "Parzen" hold `vcovHAC(m)`'s default quadratic-spectral estimate, not the kernels they name (INF-16); row "NeweyWest" equals `neweywest_default` |
+| `hac_test.csv` | `hac_ar1` | regenerated (INF-16): rows "Bartlett" and "Parzen" held `vcovHAC(m)`'s default quadratic-spectral estimate, because `vcovHAC` ignores a `kernel` argument; they now hold `kernhac_bartlett_bw4` and `kernhac_parzen_bw4`. Row "NeweyWest" equals `neweywest_default` |
 | `driscoll_kraay_test.csv` | `dk_panel` | coefficients and `ols_se` equal; `dk_se` sums the scores by firm, not by period (above), and is not a Driscoll-Kraay value |
 | `bootstrap_test.csv` | none | not asserted: `vcovBS` resamples with R's RNG (see `validation/regression/vcovBS.md`) |
