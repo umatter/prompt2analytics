@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "panel_re",
+      "name": "Random effects (Swamy-Arora GLS), balanced and unbalanced",
+      "category": "econometrics",
+      "reference": "plm::plm(model = 'random'); plm::ercomp; plm::pwaldtest; plm::vcovHC(method = 'arellano')",
+      "doc": "validation/econometrics/panel_re.md",
+      "cases": [
+        "panel_re_grunfeld",
+        "panel_re_grunfeld_unbalanced",
+        "panel_re_sim_corr",
+        "panel_re_sim_no_effect"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::tests::test_validate_panel_re_grunfeld",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_re_grunfeld_unbalanced",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_re_sim_corr",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_re_sim_no_effect"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE classical",
+        "SE Arellano HC0/HC1/sss",
+        "z",
+        "p (normal)",
+        "95% CI (normal)",
+        "sigma_e^2",
+        "sigma_u^2",
+        "theta mean/min/max",
+        "transformed residual variance",
+        "R2",
+        "adj. R2",
+        "Wald chi2 (df, p)",
+        "Wald F (df2, p)",
+        "df",
+        "n",
+        "N"
+      ],
+      "tolerance": "validation/README.md, n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/panel_re_grunfeld.csv",
+        "validation/expected/panel_re_full.csv"
+      ]
+    }
+  ]
+}

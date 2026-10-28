@@ -16,34 +16,49 @@
 //!
 //! ## Random Effects (GLS) Estimator
 //!
-//! The RE estimator assumes αᵢ is uncorrelated with Xᵢₜ and uses quasi-demeaning:
+//! The RE estimator assumes αᵢ is uncorrelated with Xᵢₜ and uses quasi-demeaning
+//! with a factor per entity:
 //!
-//! (yᵢₜ - θȳᵢ) = (1-θ)α + (Xᵢₜ - θX̄ᵢ)'β + (εᵢₜ - θε̄ᵢ)
+//! (yᵢₜ - θᵢȳᵢ) = (1-θᵢ)α + (Xᵢₜ - θᵢX̄ᵢ)'β + (εᵢₜ - θᵢε̄ᵢ)
 //!
-//! where θ = 1 - √(σ²ₑ / (σ²ₑ + Tσ²ᵤ))
+//! where θᵢ = 1 - √(σ²_ν / (Tᵢσ²_η + σ²_ν)), σ²_ν the idiosyncratic and σ²_η the
+//! individual-effect variance. Both are the Swamy-Arora estimates, with the
+//! Baltagi-Chang between regression on unbalanced panels, as
+//! `plm::ercomp(method = "swar")`; on a balanced panel all θᵢ are equal.
 //!
 //! # References
 //!
 //! - Mundlak, Y. (1978). On the pooling of time series and cross section data.
 //!   *Econometrica*, 46(1), 69-85. https://doi.org/10.2307/1913646
 //!
+//! - Swamy, P.A.V.B. & Arora, S.S. (1972). The exact finite sample properties of
+//!   the estimators of coefficients in the error components regression models.
+//!   *Econometrica*, 40(2), 261-275.
+//!
+//! - Baltagi, B.H. & Chang, Y.-J. (1994). Incomplete panels: A comparative study
+//!   of alternative estimators for the unbalanced one-way error component
+//!   regression model. *Journal of Econometrics*, 62(2), 67-89.
+//!
 //! - Baltagi, B.H. (2013). *Econometric Analysis of Panel Data* (5th ed.).
 //!   Wiley. ISBN: 978-1118672327.
 //!
 //! R equivalent: `plm::plm()` with `model = "within"` or `model = "random"`
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2, s};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
-
-use super::types::{PanelMethod, PanelResult};
-use super::utils::{
-    compute_entity_means, demean_by_entity, demean_matrix_by_entity, extract_entity_ids,
+use crate::linalg::matrix_ops::{eig_symmetric, safe_inverse, xtx, xty};
+use crate::resource;
+use crate::traits::estimator::{
+    SignificanceLevel, chi_squared_p_value, f_test_p_value, normal_cdf, t_test_p_value,
 };
+
+use super::types::{
+    ClusterAdjustment, PanelConfig, PanelMethod, PanelResult, PanelVcov, TestDistribution,
+};
+use super::utils::{demean_by_entity, demean_matrix_by_entity, extract_entity_ids};
 
 /// Run Fixed Effects (within) panel estimation.
 ///
@@ -184,6 +199,13 @@ pub fn run_fixed_effects(
         sigma_u: None,
         sigma_e: Some(sigma2.sqrt()),
         theta: None,
+        vcov_type: PanelVcov::Classical,
+        test_distribution: TestDistribution::StudentT,
+        wald_chi2: None,
+        wald_df: None,
+        wald_p_value: None,
+        theta_by_group: Vec::new(),
+        warnings: Vec::new(),
         coef_arr,
         se_arr,
         residuals,
@@ -191,7 +213,8 @@ pub fn run_fixed_effects(
     })
 }
 
-/// Run Random Effects (GLS) panel estimation.
+/// Run Random Effects (GLS) panel estimation with the default [`PanelConfig`]
+/// (classical covariance, as plm).
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the panel data
@@ -204,23 +227,65 @@ pub fn run_random_effects(
     x_cols: &[&str],
     entity_col: &str,
 ) -> EconResult<PanelResult> {
+    run_random_effects_with(dataset, y_col, x_cols, entity_col, &PanelConfig::default())
+}
+
+/// Run Random Effects (Swamy-Arora GLS) panel estimation, as
+/// `plm::plm(model = "random")` (`ercomp(method = "swar")`, Baltagi-Chang on
+/// unbalanced panels).
+///
+/// One code path serves balanced and unbalanced panels:
+/// 1. σ²_ν from the within regression, `SSR_w / (n - N - K)`.
+/// 2. The between regression on the observation-level group means (each entity
+///    weighted by its T_i), its residual quadratic form `quad2` and the trace
+///    term `M_η = n - tr[(Σ T_i z̄_i z̄_i')⁻¹ Σ T_i² z̄_i z̄_i']`;
+///    `σ²_η = (quad2 - (N - r) σ²_ν) / M_η`, with `r` the rank of the between
+///    design (K + 1 unless a regressor does not vary between entities). A
+///    negative σ²_η is set to 0 with a warning, as plm.
+/// 3. `θ_i = 1 - sqrt(σ²_ν / (T_i σ²_η + σ²_ν))`, quasi-demeaning
+///    `y*_it = y_it - θ_i ȳ_i`, `X*_it = X_it - θ_i X̄_i`, and OLS on the
+///    transformed model.
+///
+/// The covariance is `config.vcov`: classical `s² (X*'X*)⁻¹` with `s²` the
+/// transformed residual variance (plm's `vcov`), or the entity-clustered
+/// (Arellano) sandwich. Inference is normal (z), the joint test of the slopes is
+/// a Wald chi-squared with its F form in `f_stat`, and R² is
+/// `cor(y*, X*b)²`, all as plm's `summary`.
+///
+/// Refused: `n <= N + K` (no within degrees of freedom for σ²_ν) and
+/// `N <= K + 1` (the between regression is not estimable, as plm).
+///
+/// # References
+/// - Swamy, P.A.V.B. & Arora, S.S. (1972). The exact finite sample properties of
+///   the estimators of coefficients in the error components regression models.
+///   *Econometrica*, 40(2), 261-275.
+/// - Baltagi, B.H. & Chang, Y.-J. (1994). Incomplete panels: A comparative study
+///   of alternative estimators for the unbalanced one-way error component
+///   regression model. *Journal of Econometrics*, 62(2), 67-89.
+pub fn run_random_effects_with(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    entity_col: &str,
+    config: &PanelConfig,
+) -> EconResult<PanelResult> {
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
+    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|_| {
         EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: get_column_names(dataset.df()),
         }
     })?;
 
-    // Build design matrix with intercept for RE
+    // Design with intercept (column 0, "(Intercept)") and the slopes alone
     let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
-
     let x = design.data;
     let var_names = design.column_names;
+    let x_s = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?.data;
     let n = y.len();
-    let k = x.ncols();
+    let p = x.ncols(); // K + 1
+    let k_s = x_s.ncols(); // K
 
-    // Extract entity IDs
     let (entity_ids, n_groups) = extract_entity_ids(dataset, entity_col)?;
 
     if n_groups < 2 {
@@ -230,251 +295,148 @@ pub fn run_random_effects(
             context: "At least 2 entities required for panel estimation".to_string(),
         });
     }
+    if n <= n_groups + k_s {
+        return Err(EconError::InsufficientData {
+            required: n_groups + k_s + 1,
+            provided: n,
+            context: "random effects: the within regression that estimates sigma_e^2 needs \
+                      more observations than entities plus slopes"
+                .to_string(),
+        });
+    }
+    if n_groups <= k_s + 1 {
+        return Err(EconError::InsufficientData {
+            required: k_s + 2,
+            provided: n_groups,
+            context: "random effects: the Swamy-Arora between regression needs more entities \
+                      than coefficients (as plm)"
+                .to_string(),
+        });
+    }
 
-    // Swamy-Arora variance component estimation (matches R's plm default)
-    //
-    // Step 1: Within (FE) estimation to get σ²_e
-    // Use only non-intercept columns for the within estimator
-    let x_no_intercept = {
-        let design_no_int = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
-        design_no_int.data
-    };
-    let k_no_int = x_no_intercept.ncols(); // number of slope coefficients
+    let mut warnings = Vec::new();
 
-    let y_demeaned = demean_by_entity(&y, &entity_ids, n_groups);
-    let x_demeaned = demean_matrix_by_entity(&x_no_intercept, &entity_ids, n_groups);
-
-    let xtx_demeaned = xtx(&x_demeaned.view());
-    let (xtx_demeaned_inv, _) =
-        safe_inverse(&xtx_demeaned.view()).map_err(|e| EconError::SingularMatrix {
+    // Step 1: within regression on the entity-demeaned slopes -> sigma^2_nu
+    let y_w = demean_by_entity(&y, &entity_ids, n_groups);
+    let x_w = demean_matrix_by_entity(&x_s, &entity_ids, n_groups);
+    let (xtx_w_inv, _) =
+        safe_inverse(&xtx(&x_w.view()).view()).map_err(|e| EconError::SingularMatrix {
             context: "X'X (demeaned) in Random Effects".to_string(),
             suggestion: format!("Check for perfect multicollinearity: {:?}", e),
         })?;
-    let xty_demeaned = xty(&x_demeaned.view(), &y_demeaned);
-    let beta_fe: Array1<f64> = xtx_demeaned_inv.dot(&xty_demeaned);
-    let residuals_fe = &y_demeaned - &x_demeaned.dot(&beta_fe);
+    let b_w: Array1<f64> = xtx_w_inv.dot(&xty(&x_w.view(), &y_w));
+    let e_w = &y_w - &x_w.dot(&b_w);
+    let sigma2_nu = e_w.dot(&e_w) / (n - n_groups - k_s) as f64;
 
-    // σ²_e = SSR_within / (n - n_groups - k_no_int)
-    let df_fe = n.saturating_sub(n_groups).saturating_sub(k_no_int);
-    let sigma2_e = if df_fe > 0 {
-        residuals_fe.iter().map(|r| r * r).sum::<f64>() / df_fe as f64
-    } else {
-        // Fallback: use pooled OLS residual variance
-        let xtx_mat = xtx(&x.view());
-        let (xtx_inv, _) =
-            safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-                context: "X'X in Random Effects".to_string(),
-                suggestion: format!("Check for perfect multicollinearity: {:?}", e),
-            })?;
-        let xty_vec = xty(&x.view(), &y);
-        let beta_pooled: Array1<f64> = xtx_inv.dot(&xty_vec);
-        let residuals_pooled = &y - &x.dot(&beta_pooled);
-        residuals_pooled.iter().map(|r| r * r).sum::<f64>() / n as f64
-    };
-
-    // Count observations per group
-    let mut group_counts = vec![0usize; n_groups];
-    for &g in &entity_ids {
-        group_counts[g] += 1;
-    }
-
-    // Step 2: Between regression to get σ²_between
-    // Compute group means of y and X (with intercept)
-    let y_means = compute_entity_means(&y, &entity_ids, n_groups);
-
-    // First row of each group, found in one pass (every group has a row)
-    let mut first_row_of_group = vec![usize::MAX; n_groups];
-    for (i, &g) in entity_ids.iter().enumerate() {
-        if first_row_of_group[g] == usize::MAX {
-            first_row_of_group[g] = i;
+    // Step 2: per-entity sums in one pass over the observations
+    let what = "random effects group means";
+    let mut t_i = resource::try_vec(n_groups, 0usize, what)?;
+    let mut ybar = resource::try_vec(n_groups, 0.0f64, what)?;
+    let mut zbar = resource::try_zeros2(n_groups, p, what)?;
+    for (row, &g) in entity_ids.iter().enumerate() {
+        t_i[g] += 1;
+        ybar[g] += y[row];
+        for j in 0..p {
+            zbar[[g, j]] += x[[row, j]];
         }
     }
 
-    // Extract unique group means for y and x (no intercept)
-    let y_between: Array1<f64> = first_row_of_group
-        .iter()
-        .map(|&first_idx| y_means[first_idx])
-        .collect();
-
-    // Build between-regression X matrix: group means of x_cols + intercept
-    let x_between = {
-        let mut xb = ndarray::Array2::zeros((n_groups, k_no_int + 1));
-        // Intercept column
-        for i in 0..n_groups {
-            xb[[i, 0]] = 1.0;
+    // Between moments: A = Σ T_i z̄ z̄', c = Σ T_i z̄ ȳ, B2 = Σ T_i² z̄ z̄'
+    let mut a = Array2::<f64>::zeros((p, p));
+    let mut c = Array1::<f64>::zeros(p);
+    let mut b2 = Array2::<f64>::zeros((p, p));
+    for g in 0..n_groups {
+        resource::checkpoint()?;
+        let tg = t_i[g] as f64;
+        ybar[g] /= tg;
+        for j in 0..p {
+            zbar[[g, j]] /= tg;
         }
-        // Group means of each x column
-        for j in 0..k_no_int {
-            let col = x_no_intercept.column(j).to_owned();
-            let col_means = compute_entity_means(&col, &entity_ids, n_groups);
-            for (g, &first_idx) in first_row_of_group.iter().enumerate() {
-                xb[[g, j + 1]] = col_means[first_idx];
+        for j in 0..p {
+            c[j] += tg * zbar[[g, j]] * ybar[g];
+            for l in 0..p {
+                let zz = zbar[[g, j]] * zbar[[g, l]];
+                a[[j, l]] += tg * zz;
+                b2[[j, l]] += tg * tg * zz;
             }
         }
-        xb
-    };
+    }
 
-    // Between OLS: regress group-mean y on group-mean X
-    let xtx_between = xtx(&x_between.view());
-    let (xtx_between_inv, _) =
-        safe_inverse(&xtx_between.view()).map_err(|e| EconError::SingularMatrix {
-            context: "X'X (between) in Random Effects".to_string(),
-            suggestion: format!("Check for multicollinearity: {:?}", e),
-        })?;
-    let xty_between = xty(&x_between.view(), &y_between);
-    let beta_between: Array1<f64> = xtx_between_inv.dot(&xty_between);
-    let residuals_between = &y_between - &x_between.dot(&beta_between);
+    // Step 3: between regression, rank-aware (a regressor without between
+    // variation makes A singular; plm then drops the aliased column)
+    let (a_inv, rank_b) = between_inverse(&a)?;
+    if rank_b < p {
+        warnings.push(format!(
+            "the Swamy-Arora between regression is rank deficient (rank {rank_b} of {p}): a \
+             regressor does not vary between entities, so a generalized inverse was used (plm \
+             drops the aliased regressor; on balanced panels the result is identical)"
+        ));
+    }
+    let b_between = a_inv.dot(&c);
+    let mut quad2 = 0.0;
+    for g in 0..n_groups {
+        resource::checkpoint()?;
+        let fitted: f64 = (0..p).map(|j| zbar[[g, j]] * b_between[j]).sum();
+        quad2 += t_i[g] as f64 * (ybar[g] - fitted).powi(2);
+    }
+    let m_eta = n as f64 - a_inv.dot(&b2).diag().sum();
+    if m_eta.is_nan() || m_eta <= 0.0 {
+        return Err(EconError::Computation(
+            "random effects: non-positive Swamy-Arora trace term".to_string(),
+        ));
+    }
+    let mut sigma2_eta = (quad2 - (n_groups - rank_b) as f64 * sigma2_nu) / m_eta;
+    if sigma2_eta < 0.0 {
+        sigma2_eta = 0.0;
+        warnings.push(
+            "estimated individual-effect variance is negative and was set to 0 (as plm); \
+             random effects reduces to pooled OLS"
+                .to_string(),
+        );
+    }
 
-    // σ²_between = SSR_between / (N - K - 1) where K = number of slope coefficients
-    let df_between = n_groups.saturating_sub(k_no_int + 1);
-    let sigma2_between = if df_between > 0 {
-        residuals_between.iter().map(|r| r * r).sum::<f64>() / df_between as f64
-    } else {
-        0.0
-    };
-
-    // Step 3: Swamy-Arora σ²_u estimation
-    // Use harmonic mean of T_i for unbalanced panels (matches plm)
-    let t_harmonic: f64 = {
-        let sum_inv = group_counts.iter().map(|&c| 1.0 / c as f64).sum::<f64>();
-        n_groups as f64 / sum_inv
-    };
-
-    // σ²_u = σ²_between - σ²_e / T_harmonic
-    let sigma2_u = (sigma2_between - sigma2_e / t_harmonic).max(0.0);
-
-    // Step 4: Compute theta for quasi-demeaning (per-group for unbalanced panels)
-    // For balanced panels all thetas are identical; for unbalanced, each group has its own
-    // θ_i = 1 - sqrt(σ²_e / (T_i * σ²_u + σ²_e))
-    let theta_per_group: Vec<f64> = group_counts
-        .iter()
-        .map(|&ti| {
-            if sigma2_u > 0.0 {
-                1.0 - (sigma2_e / (ti as f64 * sigma2_u + sigma2_e)).sqrt()
-            } else {
-                0.0
-            }
-        })
-        .collect();
-
-    // Report a representative theta (harmonic-mean based, matches plm summary output)
-    let theta = if sigma2_u > 0.0 {
-        1.0 - (sigma2_e / (t_harmonic * sigma2_u + sigma2_e)).sqrt()
-    } else {
-        0.0
-    };
-
-    // Step 5: Quasi-demean the data using per-group theta
-    // y*_it = y_it - θ_i * ȳ_i
-    let y_quasi = {
-        let mut yq = y.clone();
-        for i in 0..n {
-            let g = entity_ids[i];
-            yq[i] -= theta_per_group[g] * y_means[i];
+    // Step 4: theta_i per entity and the quasi-demeaned model
+    let mut theta_g = resource::try_vec(n_groups, 0.0f64, what)?;
+    for g in 0..n_groups {
+        resource::checkpoint()?;
+        theta_g[g] = if sigma2_eta > 0.0 {
+            1.0 - (sigma2_nu / (t_i[g] as f64 * sigma2_eta + sigma2_nu)).sqrt()
+        } else {
+            0.0
+        };
+    }
+    let mut y_q = resource::try_zeros1(n, "random effects transformed data")?;
+    let mut x_q = resource::try_zeros2(n, p, "random effects transformed data")?;
+    for (row, &g) in entity_ids.iter().enumerate() {
+        let th = theta_g[g];
+        y_q[row] = y[row] - th * ybar[g];
+        for j in 0..p {
+            x_q[[row, j]] = x[[row, j]] - th * zbar[[g, j]];
         }
-        yq
-    };
-    let x_means = {
-        let mut means = ndarray::Array2::zeros((n, k));
-        for j in 0..k {
-            let col = x.column(j).to_owned();
-            let col_means = compute_entity_means(&col, &entity_ids, n_groups);
-            means.column_mut(j).assign(&col_means);
-        }
-        means
-    };
-    let x_quasi = {
-        let mut xq = ndarray::Array2::zeros((n, k));
-        for j in 0..k {
-            for i in 0..n {
-                let g = entity_ids[i];
-                xq[[i, j]] = x[[i, j]] - theta_per_group[g] * x_means[[i, j]];
-            }
-        }
-        xq
-    };
+    }
 
-    // Step 6: GLS on quasi-demeaned data
-    let xtx_quasi = xtx(&x_quasi.view());
-    let (xtx_quasi_inv, _) =
-        safe_inverse(&xtx_quasi.view()).map_err(|e| EconError::SingularMatrix {
+    // Step 5: OLS on the transformed model
+    let (bread, _) =
+        safe_inverse(&xtx(&x_q.view()).view()).map_err(|e| EconError::SingularMatrix {
             context: "X'X (quasi-demeaned) in Random Effects".to_string(),
             suggestion: format!("Check for multicollinearity: {:?}", e),
         })?;
-    let xty_quasi = xty(&x_quasi.view(), &y_quasi);
-    let beta: Array1<f64> = xtx_quasi_inv.dot(&xty_quasi);
+    let beta: Array1<f64> = bread.dot(&xty(&x_q.view(), &y_q));
+    let fitted = x_q.dot(&beta);
+    let residuals = &y_q - &fitted;
+    let df = n - p;
+    let s2 = residuals.dot(&residuals) / df as f64;
 
-    // Residuals (from original data, for R² and diagnostics)
-    let y_hat: Array1<f64> = x.dot(&beta);
-    let residuals = &y - &y_hat;
-
-    // Degrees of freedom: n - k (k includes intercept)
-    let df = n.saturating_sub(k);
-
-    // Entity-clustered standard errors (CR1) — standard for panel RE.
-    // Residuals from original (non-quasi-demeaned) data capture the full error.
-    let g = n_groups;
-    let correction_re = if g > 1 {
-        (g as f64 / (g - 1) as f64) * ((n - 1) as f64 / df as f64)
-    } else {
-        1.0
+    let vcov = match config.vcov {
+        PanelVcov::Classical => &bread * s2,
+        PanelVcov::Arellano(adj) => {
+            let scores = entity_scores(&x_q, &residuals, &entity_ids, n_groups)?;
+            cluster_vcov(&bread, &scores, n, p, adj)?
+        }
     };
-
-    let mut meat_re = ndarray::Array2::<f64>::zeros((k, k));
-    let mut entity_indices_re: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
-    for i in 0..n {
-        entity_indices_re[entity_ids[i]].push(i);
-    }
-    for indices in &entity_indices_re {
-        let mut xe = vec![0.0; k];
-        for &i in indices {
-            let e = residuals[i];
-            for j in 0..k {
-                xe[j] += x_quasi[[i, j]] * e;
-            }
-        }
-        for j in 0..k {
-            for l in 0..k {
-                meat_re[[j, l]] += xe[j] * xe[l];
-            }
-        }
-    }
-
-    let temp_re = xtx_quasi_inv.dot(&meat_re);
-    let vcov = temp_re.dot(&xtx_quasi_inv) * correction_re;
     let std_errors: Vec<f64> = vcov.diag().mapv(|v: f64| v.max(0.0).sqrt()).to_vec();
 
-    // R-squared: plm uses squared correlation between y_hat and y
-    // This is equivalent to 1 - var(residuals)/var(y) when computed properly
-    let y_overall_mean = y.mean().unwrap_or(0.0);
-    let y_hat_mean = y_hat.mean().unwrap_or(0.0);
-    let sst: f64 = y.iter().map(|yi| (yi - y_overall_mean).powi(2)).sum();
-    let cov_y_yhat: f64 = y
-        .iter()
-        .zip(y_hat.iter())
-        .map(|(&yi, &yhi)| (yi - y_overall_mean) * (yhi - y_hat_mean))
-        .sum::<f64>();
-    let ss_yhat: f64 = y_hat.iter().map(|yhi| (yhi - y_hat_mean).powi(2)).sum();
-    let r_squared = if sst > 0.0 && ss_yhat > 0.0 {
-        (cov_y_yhat * cov_y_yhat) / (sst * ss_yhat)
-    } else {
-        0.0
-    };
-
-    // Adjusted R-squared
-    let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df as f64);
-
-    // F-statistic (Wald test: all slope coefficients = 0)
-    let ssr: f64 = residuals.iter().map(|r| r * r).sum();
-    let f_stat = if k > 1 && ssr > 0.0 {
-        (sst - ssr) / ((k - 1) as f64) / (ssr / df as f64)
-    } else {
-        0.0
-    };
-    let f_p_value =
-        crate::traits::estimator::f_test_p_value(f_stat, (k.saturating_sub(1)) as f64, df as f64);
-
-    // t-statistics and p-values
+    // z statistics and normal p-values (plm's summary for random models)
     let beta_vec: Vec<f64> = beta.to_vec();
     let t_stats: Vec<f64> = beta_vec
         .iter()
@@ -483,15 +445,55 @@ pub fn run_random_effects(
         .collect();
     let p_values: Vec<f64> = t_stats
         .iter()
-        .map(|&t| t_test_p_value(t, df as f64))
+        .map(|&z| 2.0 * normal_cdf(-z.abs()))
         .collect();
     let significance: Vec<SignificanceLevel> = p_values
         .iter()
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 
-    let coef_arr = ndarray::Array1::from_vec(beta_vec.clone());
-    let se_arr = ndarray::Array1::from_vec(std_errors.clone());
+    // R-squared: cor(y*, X* b)^2 of the transformed model (plm's r.squared)
+    let r_squared = squared_correlation(&y_q, &fitted);
+    let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df as f64);
+
+    // Wald test of the slopes with the chosen covariance (plm's summary) and
+    // its F form W/K (plm's pwaldtest(test = "F"))
+    let b_s = beta.slice(s![1..]).to_owned();
+    let v_ss = vcov.slice(s![1.., 1..]).to_owned();
+    // safe_inverse returns a pseudoinverse with Some(condition) for a singular
+    // matrix, never Err; only a clean inverse gives a Wald statistic.
+    let (wald_chi2, wald_df, wald_p_value, f_stat, f_p_value) = match safe_inverse(&v_ss.view()) {
+        Ok((v_inv, None)) => {
+            let w = b_s.dot(&v_inv.dot(&b_s));
+            let kf = k_s as f64;
+            (
+                Some(w),
+                Some(k_s),
+                Some(chi_squared_p_value(w, kf)),
+                w / kf,
+                f_test_p_value(w / kf, kf, df as f64),
+            )
+        }
+        Err(_) | Ok((_, Some(_))) => {
+            warnings.push(
+                "Wald test not computed: the slope covariance matrix is singular".to_string(),
+            );
+            (None, None, None, f64::NAN, f64::NAN)
+        }
+    };
+
+    // theta: observation-weighted mean (plm's mean theta); per entity if unbalanced
+    let theta = t_i
+        .iter()
+        .zip(&theta_g)
+        .map(|(&t, &th)| t as f64 * th)
+        .sum::<f64>()
+        / n as f64;
+    let balanced = t_i.iter().all(|&t| t == t_i[0]);
+    let theta_by_group = if balanced { Vec::new() } else { theta_g };
+
+    let coef_arr = Array1::from_vec(beta_vec.clone());
+    let se_arr = Array1::from_vec(std_errors.clone());
 
     Ok(PanelResult {
         method: PanelMethod::RandomEffects,
@@ -510,55 +512,156 @@ pub fn run_random_effects(
         df,
         entity_var: entity_col.to_string(),
         significance,
-        sigma_u: Some(sigma2_u.sqrt()),
-        sigma_e: Some(sigma2_e.sqrt()),
+        sigma_u: Some(sigma2_eta.sqrt()),
+        sigma_e: Some(sigma2_nu.sqrt()),
+        theta: Some(theta),
+        vcov_type: config.vcov,
+        test_distribution: TestDistribution::Normal,
+        wald_chi2,
+        wald_df,
+        wald_p_value,
+        theta_by_group,
+        warnings,
         coef_arr,
         se_arr,
         residuals,
         vcov,
-        theta: Some(theta),
     })
+}
+
+/// `cor(a, b)²` from centered sums; 0 when either has no variance.
+fn squared_correlation(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
+    let (ma, mb) = (a.mean().unwrap_or(0.0), b.mean().unwrap_or(0.0));
+    let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+    for (&ai, &bi) in a.iter().zip(b.iter()) {
+        let (da, db) = (ai - ma, bi - mb);
+        sab += da * db;
+        saa += da * da;
+        sbb += db * db;
+    }
+    if saa > 0.0 && sbb > 0.0 {
+        sab * sab / (saa * sbb)
+    } else {
+        0.0
+    }
+}
+
+/// Eigen-decomposition of a symmetric matrix with each eigenvalue taken as the
+/// Rayleigh quotient `u_j' M u_j` of its eigenvector, so that values and vectors
+/// pair up whatever order the two underlying faer calls return.
+pub(super) fn symmetric_eigen_pairs(m: &Array2<f64>) -> EconResult<(Vec<f64>, Array2<f64>)> {
+    let (_, u) = eig_symmetric(&m.view())?;
+    let lambda = (0..u.ncols())
+        .map(|j| {
+            let col = u.column(j);
+            col.dot(&m.dot(&col))
+        })
+        .collect();
+    Ok((lambda, u))
+}
+
+/// Inverse of the between moment matrix `A = Σ T_i z̄_i z̄_i'` and its rank.
+///
+/// The rank is judged on the unit-diagonal scaling `S A S`, `S = diag(A_jj^-1/2)`,
+/// against `100 (K + 1) ε max(1, λ_max)`, so regressor units do not matter. At
+/// full rank this is `safe_inverse(A)`; otherwise the generalized inverse
+/// `S (Σ_{λ_j > tol} u_j u_j' / λ_j) S`. Any generalized inverse gives the same
+/// Swamy-Arora `quad2` and trace term, because the range of `Σ T_i² z̄ z̄'` lies
+/// in the range of `A`.
+fn between_inverse(a: &Array2<f64>) -> EconResult<(Array2<f64>, usize)> {
+    let p = a.nrows();
+    let s: Vec<f64> = (0..p)
+        .map(|j| {
+            let d = a[[j, j]];
+            if d > 0.0 { 1.0 / d.sqrt() } else { 0.0 }
+        })
+        .collect();
+    let a_s = Array2::from_shape_fn((p, p), |(i, j)| s[i] * a[[i, j]] * s[j]);
+    let (lambda, u) = symmetric_eigen_pairs(&a_s)?;
+    let lambda_max = lambda.iter().copied().fold(1.0, f64::max);
+    let tol = 100.0 * p as f64 * f64::EPSILON * lambda_max;
+    let rank = lambda.iter().filter(|&&l| l > tol).count();
+    if rank == p {
+        let (inv, _) = safe_inverse(&a.view()).map_err(|e| EconError::SingularMatrix {
+            context: "X'X (between) in Random Effects".to_string(),
+            suggestion: format!("Check for multicollinearity: {:?}", e),
+        })?;
+        return Ok((inv, p));
+    }
+    let mut g = Array2::<f64>::zeros((p, p));
+    for (j, &l) in lambda.iter().enumerate() {
+        if l > tol {
+            let col = u.column(j);
+            for r in 0..p {
+                for c in 0..p {
+                    g[[r, c]] += col[r] * col[c] / l;
+                }
+            }
+        }
+    }
+    Ok((
+        Array2::from_shape_fn((p, p), |(i, j)| s[i] * g[[i, j]] * s[j]),
+        rank,
+    ))
+}
+
+/// Per-entity scores `g_i = Σ_t x_it e_it` (an `N × k` matrix).
+fn entity_scores(
+    x: &Array2<f64>,
+    e: &Array1<f64>,
+    entity_ids: &[usize],
+    n_groups: usize,
+) -> EconResult<Array2<f64>> {
+    let k = x.ncols();
+    let mut scores = resource::try_zeros2(n_groups, k, "entity-clustered scores")?;
+    for (row, &g) in entity_ids.iter().enumerate() {
+        for j in 0..k {
+            scores[[g, j]] += x[[row, j]] * e[row];
+        }
+    }
+    Ok(scores)
+}
+
+/// Entity-clustered (Arellano) covariance `c · B M B`, `M = Σ_i g_i g_i'`, for
+/// `bread` B, per-entity `scores` g_i, `n` observations and `k` coefficients.
+/// `c` is 1 (HC0), `n/(n - k)` (HC1) or `G/(G - 1) (n - 1)/(n - k)` (Stata), as
+/// plm `vcovHC(method = "arellano", type = "HC0" | "HC1" | "sss")`.
+fn cluster_vcov(
+    bread: &Array2<f64>,
+    scores: &Array2<f64>,
+    n: usize,
+    k: usize,
+    adj: ClusterAdjustment,
+) -> EconResult<Array2<f64>> {
+    let (n_clusters, p) = scores.dim();
+    let mut meat = Array2::<f64>::zeros((p, p));
+    for i in 0..n_clusters {
+        resource::checkpoint()?;
+        for a in 0..p {
+            for b in 0..p {
+                meat[[a, b]] += scores[[i, a]] * scores[[i, b]];
+            }
+        }
+    }
+    let (n, k, g) = (n as f64, k as f64, n_clusters as f64);
+    let factor = match adj {
+        ClusterAdjustment::HC0 => 1.0,
+        ClusterAdjustment::HC1 => n / (n - k),
+        ClusterAdjustment::Stata => g / (g - 1.0) * (n - 1.0) / (n - k),
+    };
+    Ok(bread.dot(&meat).dot(bread) * factor)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
 
-    const GRUNFELD_CSV: &str = include_str!("../../../../../validation/datasets/grunfeld.csv");
-
-    /// Grunfeld rows for which `keep(firm, year)` holds.
-    fn grunfeld_where(keep: impl Fn(i64, i64) -> bool) -> Dataset {
-        let csv: String = GRUNFELD_CSV
-            .lines()
-            .enumerate()
-            .filter(|(i, line)| {
-                if *i == 0 {
-                    return true;
-                }
-                let mut fields = line.split(',').map(|f| f.trim().parse::<i64>());
-                match (fields.next(), fields.next()) {
-                    (Some(Ok(firm)), Some(Ok(year))) => keep(firm, year),
-                    _ => false,
-                }
-            })
-            .map(|(_, line)| format!("{line}\n"))
-            .collect();
-        Dataset::new(crate::data::DataLoader::from_csv_string(&csv).unwrap())
-    }
-
-    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
-    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "{what}: pin these values: {actual:?}"
-        );
-        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-            assert!(
-                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
-                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
-            );
-        }
+    /// A budget whose token is already cancelled.
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
     }
 
     /// A balanced synthetic panel of `n_ent` entities and `n_t` periods (the
@@ -598,49 +701,52 @@ mod tests {
         );
     }
 
-    /// Characterisation test recorded from the code before the T0-WP14 resource
-    /// bounds (full Grunfeld, and an unbalanced copy); the refactor must not move
-    /// these numbers.
+    /// `n - N - K` within degrees of freedom: 8 rows, 6 entities, 2 slopes.
     #[test]
-    fn test_pinned_random_effects_outputs() {
-        let mut v = Vec::new();
-        for ds in [
-            grunfeld_where(|_, _| true),
-            grunfeld_where(|firm, year| (firm + year) % 7 != 0),
-        ] {
-            let r = run_random_effects(&ds, "inv", &["value", "capital"], "firm").unwrap();
-            v.extend(&r.coefficients);
-            v.extend(&r.std_errors);
-            v.push(r.theta.unwrap());
-            v.push(r.sigma_u.unwrap());
-            v.push(r.sigma_e.unwrap());
-            v.push(r.r_squared);
-        }
-        assert_pinned(
-            "random effects",
-            &v,
-            &[
-                -57.83441490503308,
-                0.10978115223248376,
-                0.308112982830713,
-                168.5470799771813,
-                0.033513202175696935,
-                0.05825701517154266,
-                0.8612236207478787,
-                84.20095070311291,
-                52.767965952630156,
-                0.8061042277659057,
-                -51.80460190637258,
-                0.10171042934454234,
-                0.31778453800732426,
-                144.18764163473352,
-                0.03756116091391904,
-                0.060083300300656194,
-                0.8421608692254301,
-                83.23435669958732,
-                55.00850791319012,
-                0.8021936587934488,
-            ],
+    fn test_random_effects_needs_within_degrees_of_freedom() {
+        let ds = Dataset::new(
+            polars::prelude::df! {
+                "entity" => [1i64, 1, 2, 2, 3, 4, 5, 6],
+                "x1" => [1.0, 2.5, 0.3, 1.9, 3.1, 0.7, 2.2, 1.4],
+                "x2" => [0.4, -0.2, 1.1, 0.8, -0.6, 0.9, 0.1, -1.3],
+                "y" => [2.3, 4.1, 1.2, 3.8, 4.4, 1.9, 3.0, 0.6],
+            }
+            .unwrap(),
         );
+        match run_random_effects(&ds, "y", &["x1", "x2"], "entity") {
+            Err(EconError::InsufficientData { context, .. }) => {
+                assert!(context.contains("within"), "{context}")
+            }
+            other => panic!("expected InsufficientData, got {other:?}"),
+        }
+    }
+
+    /// The between regression needs N > K + 1 entities (as plm): N = 3, K = 2.
+    #[test]
+    fn test_random_effects_needs_more_entities_than_coefficients() {
+        let ds = Dataset::new(
+            polars::prelude::df! {
+                "entity" => [1i64, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+                "x1" => [1.0, 2.5, 0.3, 1.9, 3.1, 0.7, 2.2, 1.4, 0.9, 2.8, 1.6, 0.2],
+                "x2" => [0.4, -0.2, 1.1, 0.8, -0.6, 0.9, 0.1, -1.3, 0.5, -0.4, 1.2, 0.3],
+                "y" => [2.3, 4.1, 1.2, 3.8, 4.4, 1.9, 3.0, 0.6, 2.7, 4.9, 3.3, 1.1],
+            }
+            .unwrap(),
+        );
+        match run_random_effects(&ds, "y", &["x1", "x2"], "entity") {
+            Err(EconError::InsufficientData { context, .. }) => {
+                assert!(context.contains("between"), "{context}")
+            }
+            other => panic!("expected InsufficientData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_random_effects_stops_when_cancelled() {
+        let ds = synthetic_panel(50, 4);
+        let res = resource::with_budget(cancelled(), || {
+            run_random_effects(&ds, "y", &["x"], "entity")
+        });
+        assert!(matches!(res, Err(EconError::Cancelled(_))), "{res:?}");
     }
 }

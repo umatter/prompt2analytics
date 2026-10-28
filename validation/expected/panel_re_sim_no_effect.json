@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "id": "panel_re_sim_no_effect",
+  "area": "econometrics/panel",
+  "method": "Random effects with sigma_u^2 truncated to 0 (simulated, no entity effect)",
+  "reference": "plm::plm(model = 'random'); stats::lm (pooled, theta = 0)",
+  "call": "plm(inv ~ value + capital, data = pdata.frame(d, index = c('firm', 'year')), model = 'random')",
+  "dataset": "validation/datasets/generated/panel_no_effect.csv",
+  "datasets": ["validation/datasets/generated/panel_no_effect.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [2.1333687727321391, 0.45847031816933981, -0.28043923176297264]
+    },
+    "se": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.094894692676952788, 0.11358922933280964, 0.084380349963736112]
+    },
+    "z": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [22.48143402492175, 4.0362129478495641, -3.3235134943561642]
+    },
+    "p": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [6.3068885723059685e-112, 5.4320915354034623e-05, 0.00088891121974448903]
+    },
+    "ci95_lower": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [1.9473785927613148, 0.23583951964537228, -0.44582167869478107]
+    },
+    "ci95_upper": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [2.3193589527029634, 0.68110111669330731, -0.11505678483116424]
+    },
+    "sigma2_idios": 1.1206479206136759,
+    "sigma2_id": 0,
+    "theta_mean": 0,
+    "theta_min": 0,
+    "theta_max": 0,
+    "resid_var_transformed": 1.0799998533154191,
+    "r2": 0.20144153361406963,
+    "adj_r2": 0.18779096153909636,
+    "r2_overall_cor": 0.20144153361406963,
+    "wald_chisq": 29.514006080871983,
+    "wald_df": 2,
+    "wald_p": 3.9004526500744214e-07,
+    "wald_f": 14.757003040435992,
+    "wald_f_df2": 117,
+    "wald_f_p": 1.927272082528745e-06,
+    "df_resid": 117,
+    "n_obs": 120,
+    "n_groups": 30,
+    "se_arellano_hc0": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.087540140147325418, 0.11761422271179704, 0.0724306601942456]
+    },
+    "se_arellano_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.088655346127217816, 0.11911255346918274, 0.073353380962572434]
+    },
+    "se_arellano_sss": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.089794433686033709, 0.12064297023120005, 0.074295861335179028]
+    },
+    "coef_pooled_ols": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [2.1333687727321391, 0.45847031816933981, -0.28043923176297264]
+    }
+  }
+}
