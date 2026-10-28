@@ -691,7 +691,7 @@ mod tests {
     /// 1e-6 ridge is not scale-free. The fits are the non-converged iterates of
     /// ECON-4.
     #[test]
-    fn test_ordered_fit_does_not_depend_on_regressor_scale() {
+    fn test_validate_ordered_j5_regressor_scale() {
         type Fit = fn(&Dataset, &str, &[&str]) -> EconResult<OrderedResult>;
         let fits: [(&str, Fit); 2] = [("logit", run_ordered_logit), ("probit", run_ordered_probit)];
         let (_case, ds) = crate::test_support::load_case("disc_polr_j5");
