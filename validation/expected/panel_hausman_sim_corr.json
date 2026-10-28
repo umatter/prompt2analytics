@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "panel_hausman_sim_corr",
+  "area": "econometrics/panel",
+  "method": "Hausman test (FE vs RE), simulated N = 60, T = 5, effects correlated with x1",
+  "reference": "plm::phtest(fe, re) (method = 'chisq', classical vcov)",
+  "call": "phtest(plm(..., model = 'within'), plm(..., model = 'random'))",
+  "dataset": "validation/datasets/generated/panel_corr_effects.csv",
+  "datasets": ["validation/datasets/generated/panel_corr_effects.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "chisq": 7203.8402746076681,
+    "df": 2,
+    "p": 0,
+    "coef_diff": {
+      "names": ["value", "capital"],
+      "values": [-0.32709460760031539, 0.015824970428748975]
+    },
+    "vdiff_eigen": [-0.00088118036311698729, 1.4858397760111426e-05],
+    "quad_form_signed": 7203.8402746076681
+  }
+}

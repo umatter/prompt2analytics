@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "id": "panel_fe_sim_corr",
+  "area": "econometrics/panel",
+  "method": "Fixed effects (within), simulated N = 60, T = 5, effects correlated with x1",
+  "reference": "plm::plm(model = 'within'); plm::vcovHC(method = 'arellano')",
+  "call": "plm(inv ~ value + capital, data = pdata.frame(d, index = c('firm', 'year')), model = 'within')",
+  "dataset": "validation/datasets/generated/panel_corr_effects.csv",
+  "datasets": ["validation/datasets/generated/panel_corr_effects.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "coef": {
+      "names": ["value", "capital"],
+      "values": [0.93586212815396741, -0.50003122107323317]
+    },
+    "se": {
+      "names": ["value", "capital"],
+      "values": [0.065175489443077536, 0.059704974726798844]
+    },
+    "t": {
+      "names": ["value", "capital"],
+      "values": [14.35911162541132, -8.3750344650726714]
+    },
+    "p": {
+      "names": ["value", "capital"],
+      "values": [4.2701807976826763e-34, 4.7871819801381124e-15]
+    },
+    "ci95_lower": {
+      "names": ["value", "capital"],
+      "values": [0.80746761777303078, -0.61764891850607906]
+    },
+    "ci95_upper": {
+      "names": ["value", "capital"],
+      "values": [1.0642566385349039, -0.38241352364038733]
+    },
+    "r2": 0.5194238520558605,
+    "adj_r2": 0.39625097380127006,
+    "f_stat": 128.61944700974249,
+    "f_df1": 2,
+    "f_df2": 238,
+    "f_p": 1.3480413964670662e-38,
+    "sigma2": 0.87788857217317851,
+    "df_resid": 238,
+    "n_obs": 300,
+    "n_groups": 60,
+    "se_arellano_hc0": {
+      "names": ["value", "capital"],
+      "values": [0.067770208815912933, 0.061530818801712392]
+    },
+    "se_arellano_hc1": {
+      "names": ["value", "capital"],
+      "values": [0.067997245327290831, 0.061736952775431037]
+    },
+    "se_arellano_sss": {
+      "names": ["value", "capital"],
+      "values": [0.068456691400360412, 0.062154099093335913]
+    },
+    "f_stat_arellano_hc0": 109.07786260702177,
+    "f_p_arellano_hc0": 1.5127969593146455e-20,
+    "f_df2_arellano": 59,
+    "f_stat_arellano_hc1": 108.35067685630828,
+    "f_p_arellano_hc1": 1.7667977475017095e-20,
+    "f_stat_arellano_sss": 106.9011694736152,
+    "f_p_arellano_sss": 2.4133243887693092e-20
+  }
+}

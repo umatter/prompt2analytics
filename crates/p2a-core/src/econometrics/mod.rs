@@ -4,8 +4,11 @@
 //!
 //! ## Panel Data (R: plm, fixest)
 //!
-//! - [`run_fixed_effects`] - Within (FE) estimator
-//! - [`run_random_effects`] - GLS (RE) estimator
+//! - [`run_fixed_effects`] - Within (FE) estimator; [`run_fixed_effects_with`] adds
+//!   entity-clustered (Arellano) standard errors
+//! - [`run_random_effects`] - Swamy-Arora GLS (RE) estimator, balanced and unbalanced;
+//!   [`run_random_effects_with`] takes a [`PanelConfig`] (classical or
+//!   entity-clustered [`PanelVcov`])
 //! - [`run_hausman_test`] - FE vs RE specification test
 //! - [`run_hdfe`] - High-dimensional fixed effects (reghdfe-style)
 //! - [`run_feglm`] - GLM with HDFE (logit, probit, poisson)
@@ -248,23 +251,29 @@ pub use medflex::{
 };
 pub use mediation::{MediationConfig, MediationResult, run_mediation_analysis};
 pub use panel::{
+    // Linear panel options (FE/RE covariance)
+    ClusterAdjustment,
     GmmConfig,
     // Arellano-Bond / System GMM
     GmmResult,
     GmmStep,
     GmmTransform,
     HausmanResult,
+    PanelConfig,
     PanelGlsModel,
     // Panel GLS (FGLS)
     PanelGlsResult,
     PanelMethod,
     PanelResult,
+    PanelVcov,
     // Variable Coefficients Model (pvcm) and Mean Group (pmg)
     PvcmResult,
     PvcmType,
+    TestDistribution,
     run_arellano_bond,
     run_fegls,
     run_fixed_effects,
+    run_fixed_effects_with,
     run_gmm,
     run_hausman_test,
     run_panel_gls,
@@ -272,6 +281,7 @@ pub use panel::{
     run_pooled_gls,
     run_pvcm,
     run_random_effects,
+    run_random_effects_with,
 };
 pub use panel_unit_root::{
     PanelModel, PanelUnitRootConfig, PanelUnitRootResult, PanelUnitRootTest, run_panel_unit_root,

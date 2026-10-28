@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "id": "panel_re_sim_corr",
+  "area": "econometrics/panel",
+  "method": "Random effects (Swamy-Arora), simulated N = 60, T = 5, effects correlated with x1",
+  "reference": "plm::plm(model = 'random', random.method = 'swar'); plm::ercomp; plm::vcovHC(method = 'arellano')",
+  "call": "plm(inv ~ value + capital, data = pdata.frame(d, index = c('firm', 'year')), model = 'random')",
+  "dataset": "validation/datasets/generated/panel_corr_effects.csv",
+  "datasets": ["validation/datasets/generated/panel_corr_effects.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [1.1450162458558339, 1.2629567357542828, -0.51585619150198214]
+    },
+    "se": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.12056357701238678, 0.065061581080008021, 0.066677140490567055]
+    },
+    "z": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [9.4971986915931854, 19.411712946249953, -7.73662739143652]
+    },
+    "p": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [2.1561237655852627e-21, 6.1444154771575677e-84, 1.020886875780457e-14]
+    },
+    "ci95_lower": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.90871597706423479, 1.1354383800602346, -0.64654098545561089]
+    },
+    "ci95_upper": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [1.3813165146474331, 1.390475091448331, -0.38517139754835339]
+    },
+    "sigma2_idios": 0.87788857217317884,
+    "sigma2_id": 0.47321992224113496,
+    "theta_mean": 0.47978835937217701,
+    "theta_min": 0.47978835937217701,
+    "theta_max": 0.47978835937217701,
+    "resid_var_transformed": 1.1692901126881203,
+    "r2": 0.58338814940555384,
+    "adj_r2": 0.58058268239818378,
+    "r2_overall_cor": 0.68801569626241066,
+    "wald_chisq": 415.89378728959082,
+    "wald_df": 2,
+    "wald_p": 4.8956635214913354e-91,
+    "wald_f": 207.94689364479541,
+    "wald_f_df2": 297,
+    "wald_f_p": 3.3895767810841842e-57,
+    "df_resid": 297,
+    "n_obs": 300,
+    "n_groups": 60,
+    "se_arellano_hc0": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.15254774351699854, 0.052555965545783893, 0.063597898514184029]
+    },
+    "se_arellano_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.15331625086704684, 0.052820732790973067, 0.063918292977772614]
+    },
+    "se_arellano_sss": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.15435218326488978, 0.053177633693953175, 0.064350178248486101]
+    },
+    "wald_chisq_arellano_hc0": 639.93501533686992,
+    "wald_p_arellano_hc0": 1.0961677766962702e-139,
+    "wald_chisq_arellano_hc1": 633.53566518350124,
+    "wald_p_arellano_hc1": 2.688303273952287e-138,
+    "wald_chisq_arellano_sss": 625.06027166934075,
+    "wald_p_arellano_sss": 1.8616008926632775e-136,
+    "wald_f_arellano_hc0": 319.96750766843496,
+    "wald_f_p_arellano_hc0": 2.134267208589638e-32,
+    "wald_f_df2_arellano": 59,
+    "wald_f_arellano_hc1": 316.76783259175062,
+    "wald_f_p_arellano_hc1": 2.7995684387116697e-32,
+    "wald_f_arellano_sss": 312.53013583467038,
+    "wald_f_p_arellano_sss": 4.0257840206914737e-32
+  }
+}

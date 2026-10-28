@@ -19,17 +19,28 @@
 //!
 //! ## Random Effects (GLS) Estimator
 //!
-//! The RE estimator assumes αᵢ is uncorrelated with Xᵢₜ and uses quasi-demeaning:
+//! The RE estimator assumes αᵢ is uncorrelated with Xᵢₜ and uses quasi-demeaning
+//! with a factor per entity:
 //!
-//! (yᵢₜ - θȳᵢ) = (1-θ)α + (Xᵢₜ - θX̄ᵢ)'β + (εᵢₜ - θε̄ᵢ)
+//! (yᵢₜ - θᵢȳᵢ) = (1-θᵢ)α + (Xᵢₜ - θᵢX̄ᵢ)'β + (εᵢₜ - θᵢε̄ᵢ)
 //!
-//! where θ = 1 - √(σ²ₑ / (σ²ₑ + Tσ²ᵤ))
+//! where θᵢ = 1 - √(σ²_ν / (Tᵢσ²_η + σ²_ν)). The variance components are the
+//! Swamy-Arora (1972) estimates, with the Baltagi-Chang (1994) between regression
+//! on unbalanced panels, as `plm::ercomp(method = "swar")`; one code path serves
+//! balanced and unbalanced panels. The default covariance is plm's classical
+//! `s² (X*'X*)⁻¹` with normal (z) inference; [`PanelConfig`] selects the
+//! entity-clustered (Arellano) alternative ([`PanelVcov`]).
 //!
 //! ## Hausman Test
 //!
 //! Tests H₀: RE is consistent (Cov(αᵢ, Xᵢₜ) = 0) vs H₁: FE is required.
 //!
-//! H = (β̂ᶠᴱ - β̂ᴿᴱ)'(V̂ᶠᴱ - V̂ᴿᴱ)⁻¹(β̂ᶠᴱ - β̂ᴿᴱ) ~ χ²(k)
+//! H = |d' D⁻ d|,  d = β̂ᶠᴱ - β̂ᴿᴱ,  D = V̂ᶠᴱ - V̂ᴿᴱ (classical covariances,
+//! slopes matched by name),  H ~ χ²(rank D)
+//!
+//! as `plm::phtest`. D⁻ is a generalized inverse when D is singular, and the
+//! absolute value is taken when D is not positive definite; both cases are
+//! reported in `HausmanResult.warnings`. A zero difference is refused.
 //!
 //! # References
 //!
@@ -61,10 +72,14 @@ mod types;
 mod utils;
 
 // Re-export core types
-pub use types::{PanelMethod, PanelResult};
+pub use types::{
+    ClusterAdjustment, PanelConfig, PanelMethod, PanelResult, PanelVcov, TestDistribution,
+};
 
 // Re-export linear models (FE/RE)
-pub use linear_models::{run_fixed_effects, run_random_effects};
+pub use linear_models::{
+    run_fixed_effects, run_fixed_effects_with, run_random_effects, run_random_effects_with,
+};
 
 // Re-export Hausman test
 pub use specification_test::{HausmanResult, run_hausman_test};
@@ -153,27 +168,42 @@ mod tests {
         );
     }
 
+    /// x has no between variation, so V_FE = V_RE exactly and the scaled
+    /// difference is roundoff (-1.9e-15). plm reports chisq 2.9e-14, p = 1 from
+    /// that roundoff; p2a refuses.
     #[test]
-    fn test_hausman_test() {
+    fn test_hausman_refuses_when_fe_and_re_coincide() {
         let dataset = create_panel_dataset();
-        let result = run_hausman_test(&dataset, "y", &["x"], "entity").unwrap();
+        match run_hausman_test(&dataset, "y", &["x"], "entity") {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("no testable difference"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
-        // Hausman test should produce FE and RE results
-        assert!(!result.fe_result.coefficients.is_empty());
-        assert!(!result.re_result.coefficients.is_empty());
-
-        // FE coefficient should be close to 2.0 (within variation)
+    /// chisq 7.35e-05 on 1 df (p 0.993) with 3 entities: the low-power note,
+    /// not the removed "nearly identical, RE is more efficient" advice.
+    #[test]
+    fn test_hausman_small_panel_recommendation() {
+        let dataset = create_unbalanced_panel_dataset();
+        let h = run_hausman_test(&dataset, "y", &["x"], "entity").unwrap();
+        assert_eq!(h.df, 1);
         assert!(
-            (result.fe_result.coefficients[0] - 2.0).abs() < 0.3,
-            "FE coefficient should be close to 2.0, got {}",
-            result.fe_result.coefficients[0]
+            Tol::new(1e-6, 0.0).allows(h.chi2_statistic, 7.353_695_210_005_419e-5),
+            "{}",
+            h.chi2_statistic
         );
-
-        // Chi-squared statistic should be non-negative (or NaN if variance matrix issues)
-        assert!(result.chi2_statistic >= 0.0 || result.chi2_statistic.is_nan());
-
-        // Should have a recommendation
-        assert!(!result.recommendation.is_empty());
+        assert!(
+            h.recommendation.contains("low power"),
+            "{}",
+            h.recommendation
+        );
+        assert!(
+            !h.recommendation.contains("nearly identical"),
+            "{}",
+            h.recommendation
+        );
     }
 
     #[test]
@@ -490,303 +520,6 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    // VALIDATION TESTS - Comparing against R's plm package
-    // ════════════════════════════════════════════════════════════════════════════
-
-    /// Grunfeld (1958) dataset for panel data validation
-    /// Classic investment equation: inv ~ value + capital
-    /// 10 firms, 20 years (1935-1954)
-    fn create_grunfeld_dataset() -> Dataset {
-        // Grunfeld data - first 5 firms (50 observations) for tractable testing
-        // From R's plm::data(Grunfeld)
-        // Firm 1: General Motors
-        let df = df! {
-            "firm" => [
-                // Firm 1 (General Motors) - 10 years
-                "GM", "GM", "GM", "GM", "GM", "GM", "GM", "GM", "GM", "GM",
-                // Firm 2 (US Steel) - 10 years
-                "US", "US", "US", "US", "US", "US", "US", "US", "US", "US",
-                // Firm 3 (General Electric) - 10 years
-                "GE", "GE", "GE", "GE", "GE", "GE", "GE", "GE", "GE", "GE",
-                // Firm 4 (Chrysler) - 10 years
-                "CH", "CH", "CH", "CH", "CH", "CH", "CH", "CH", "CH", "CH",
-                // Firm 5 (Atlantic Refining) - 10 years
-                "AR", "AR", "AR", "AR", "AR", "AR", "AR", "AR", "AR", "AR",
-            ],
-            "year" => [
-                1935i64, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-                1935, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-                1935, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-                1935, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-                1935, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-            ],
-            // Gross investment (inv)
-            "inv" => [
-                // GM
-                317.6, 391.8, 410.6, 257.7, 330.8, 461.2, 512.0, 448.0, 499.6, 547.5,
-                // US Steel
-                209.9, 355.3, 469.9, 262.3, 230.4, 361.6, 472.8, 445.6, 361.6, 288.2,
-                // GE
-                33.1, 45.0, 77.2, 44.6, 48.1, 74.4, 113.0, 91.9, 61.3, 56.8,
-                // Chrysler
-                40.29, 72.76, 66.26, 51.60, 52.41, 69.41, 68.35, 46.80, 47.40, 59.57,
-                // Atlantic Refining
-                24.43, 23.21, 32.78, 32.54, 26.65, 33.71, 43.50, 34.46, 44.25, 70.07,
-            ],
-            // Value of firm (value)
-            "value" => [
-                // GM
-                3078.5, 4661.7, 5387.1, 2792.2, 4313.2, 4643.9, 4551.2, 3244.1, 4053.7, 4379.3,
-                // US Steel
-                1362.4, 1807.1, 2676.3, 1801.9, 1957.3, 2202.9, 2380.5, 2168.6, 1985.1, 1813.9,
-                // GE
-                1170.6, 2015.8, 2803.3, 2039.7, 2256.2, 2132.2, 1834.1, 1588.0, 1749.4, 1687.2,
-                // Chrysler
-                191.5, 516.0, 729.0, 560.4, 519.9, 628.5, 537.1, 407.5, 408.4, 443.7,
-                // Atlantic Refining
-                138.0, 200.1, 280.0, 255.2, 306.7, 319.5, 346.0, 374.5, 381.0, 479.5,
-            ],
-            // Capital stock (capital)
-            "capital" => [
-                // GM
-                2.8, 52.6, 156.9, 209.2, 203.4, 207.2, 255.2, 303.7, 264.1, 201.6,
-                // US Steel
-                53.8, 50.5, 118.1, 260.2, 312.7, 254.2, 261.4, 298.7, 301.8, 279.1,
-                // GE
-                97.8, 104.4, 118.0, 156.2, 172.6, 186.6, 220.9, 287.8, 319.9, 321.3,
-                // Chrysler
-                80.1, 66.5, 83.8, 91.2, 92.4, 94.0, 99.0, 104.0, 108.0, 112.0,
-                // Atlantic Refining
-                40.0, 41.3, 46.5, 52.5, 54.3, 56.3, 61.9, 65.0, 64.8, 68.3,
-            ],
-        }
-        .unwrap();
-        Dataset::new(df)
-    }
-
-    /// Validation test: Fixed Effects on Grunfeld data
-    /// Compared against R's plm::plm(model="within")
-    ///
-    /// R code:
-    /// ```r
-    /// library(plm)
-    /// data(Grunfeld)
-    /// pdata <- pdata.frame(Grunfeld, index = c("firm", "year"))
-    /// fe_fit <- plm(inv ~ value + capital, data = pdata, model = "within")
-    /// summary(fe_fit)
-    /// # value: 0.1101308, SE: 0.0115713
-    /// # capital: 0.3100493, SE: 0.0173030
-    /// ```
-    #[test]
-    fn test_validate_panel_fe_grunfeld() {
-        let dataset = create_grunfeld_dataset();
-        let result = run_fixed_effects(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // Structure checks
-        assert_eq!(result.method, PanelMethod::FixedEffects);
-        assert_eq!(result.n_obs, 50);
-        assert_eq!(result.n_groups, 5);
-
-        // Expected values from R's plm (using subset of Grunfeld)
-        // Note: Exact values depend on the subset used
-        // For full Grunfeld: value ≈ 0.110, capital ≈ 0.310
-
-        // Find value and capital indices
-        let value_idx = result.variables.iter().position(|v| v == "value").unwrap();
-        let capital_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "capital")
-            .unwrap();
-
-        // Coefficient on value should be positive (investment increases with firm value)
-        assert!(
-            result.coefficients[value_idx] > 0.0,
-            "Coefficient on 'value' should be positive, got {}",
-            result.coefficients[value_idx]
-        );
-
-        // Coefficient on capital should be positive (investment increases with capital)
-        assert!(
-            result.coefficients[capital_idx] > 0.0,
-            "Coefficient on 'capital' should be positive, got {}",
-            result.coefficients[capital_idx]
-        );
-
-        // R² should indicate reasonable fit (within R² from plm varies depending on calculation)
-        // With 5 firms and our data subset, expect R² > 0.2
-        assert!(
-            result.r_squared > 0.2,
-            "Within R² should be > 0.2, got {}",
-            result.r_squared
-        );
-
-        // Standard errors should be positive and reasonable
-        assert!(
-            result.std_errors[value_idx] > 0.0 && result.std_errors[value_idx] < 1.0,
-            "SE for value should be positive and reasonable, got {}",
-            result.std_errors[value_idx]
-        );
-    }
-
-    /// Validation test: Random Effects on Grunfeld data
-    /// Compared against R's plm::plm(model="random")
-    #[test]
-    fn test_validate_panel_re_grunfeld() {
-        let dataset = create_grunfeld_dataset();
-        let result = run_random_effects(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // Structure checks
-        assert_eq!(result.method, PanelMethod::RandomEffects);
-        assert_eq!(result.n_obs, 50);
-        assert_eq!(result.n_groups, 5);
-
-        // RE includes an intercept
-        assert!(
-            result
-                .variables
-                .iter()
-                .any(|v| v == "const" || v == "(Intercept)"),
-            "RE should include intercept"
-        );
-
-        // Coefficients should be positive
-        let value_idx = result.variables.iter().position(|v| v == "value").unwrap();
-        assert!(
-            result.coefficients[value_idx] > 0.0,
-            "RE coefficient on 'value' should be positive"
-        );
-
-        // Theta (quasi-demeaning factor) should be between 0 and 1
-        if let Some(theta) = result.theta {
-            assert!(
-                (0.0..=1.0).contains(&theta),
-                "Theta should be in [0, 1], got {}",
-                theta
-            );
-        }
-
-        // Variance components should be positive
-        if let Some(sigma_u) = result.sigma_u {
-            assert!(sigma_u >= 0.0, "sigma_u should be non-negative");
-        }
-        if let Some(sigma_e) = result.sigma_e {
-            assert!(sigma_e >= 0.0, "sigma_e should be non-negative");
-        }
-    }
-
-    /// Validation test: Hausman test on Grunfeld data
-    /// Compared against R's plm::phtest()
-    ///
-    /// R code:
-    /// ```r
-    /// library(plm)
-    /// data(Grunfeld)
-    /// pdata <- pdata.frame(Grunfeld, index = c("firm", "year"))
-    /// fe_fit <- plm(inv ~ value + capital, data = pdata, model = "within")
-    /// re_fit <- plm(inv ~ value + capital, data = pdata, model = "random")
-    /// phtest(fe_fit, re_fit)
-    /// # chisq = 2.33, df = 2, p-value = 0.312
-    /// ```
-    #[test]
-    fn test_validate_hausman_grunfeld() {
-        let dataset = create_grunfeld_dataset();
-        let result = run_hausman_test(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // Both FE and RE results should be present
-        assert!(!result.fe_result.coefficients.is_empty());
-        assert!(!result.re_result.coefficients.is_empty());
-
-        // Chi-squared statistic should be non-negative
-        assert!(
-            result.chi2_statistic >= 0.0 || result.chi2_statistic.is_nan(),
-            "Chi-squared statistic should be non-negative, got {}",
-            result.chi2_statistic
-        );
-
-        // Degrees of freedom = number of time-varying regressors
-        assert_eq!(result.df, 2, "df should equal number of regressors (2)");
-
-        // p-value should be valid
-        if !result.p_value.is_nan() {
-            assert!(
-                result.p_value >= 0.0 && result.p_value <= 1.0,
-                "p-value should be in [0, 1], got {}",
-                result.p_value
-            );
-        }
-
-        // Should have a recommendation
-        assert!(!result.recommendation.is_empty());
-    }
-
-    /// Validation test: Synthetic panel where FE is required
-    /// Entity effects are correlated with regressors
-    #[test]
-    fn test_validate_hausman_fe_required() {
-        // Create data where entity effects correlate with x
-        // This should cause Hausman test to reject H0 (prefer FE)
-        let mut y_vec = Vec::new();
-        let mut x_vec = Vec::new();
-        let mut entity_vec = Vec::new();
-
-        let n_entities = 20;
-        let n_periods = 5;
-
-        for entity in 0..n_entities {
-            // Entity effect correlated with x mean
-            let alpha = (entity as f64) * 0.5;
-            for period in 0..n_periods {
-                // x is correlated with entity effect
-                let x = alpha
-                    + (period as f64) * 0.2
-                    + ((entity * 7 + period * 3) as f64 * 0.123).sin() * 0.5;
-                let noise = ((entity * 11 + period * 5) as f64 * 0.456).cos() * 0.3;
-                let y = alpha + 2.0 * x + noise; // True coefficient is 2.0
-
-                y_vec.push(y);
-                x_vec.push(x);
-                entity_vec.push(format!("E{}", entity));
-            }
-        }
-
-        let df = df! {
-            "y" => y_vec,
-            "x" => x_vec,
-            "entity" => entity_vec
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_hausman_test(&dataset, "y", &["x"], "entity").unwrap();
-
-        // FE coefficient should be close to true value (2.0)
-        assert!(
-            (result.fe_result.coefficients[0] - 2.0).abs() < 0.5,
-            "FE coefficient should be close to 2.0, got {}",
-            result.fe_result.coefficients[0]
-        );
-
-        // RE coefficient is biased when x correlates with entity effects
-        // FE and RE coefficients should differ
-        let fe_coef = result.fe_result.coefficients[0];
-        let _re_coef = result
-            .re_result
-            .coefficients
-            .iter()
-            .find(|_| true) // Get first non-intercept
-            .copied()
-            .unwrap_or(0.0);
-
-        // The coefficients should differ when entity effects correlate with x
-        // (This is what the Hausman test detects)
-        println!(
-            "FE coef: {}, RE coef (may include intercept): {:?}",
-            fe_coef, result.re_result.coefficients
-        );
-    }
-
-    // ════════════════════════════════════════════════════════════════════════════
     // FULL VALIDATION TESTS - Exact comparison against R's plm package
     // Using full Grunfeld dataset (10 firms, 20 years = 200 observations)
     // ════════════════════════════════════════════════════════════════════════════
@@ -900,208 +633,6 @@ mod tests {
         .unwrap();
 
         Dataset::new(df)
-    }
-
-    /// Validation test: Fixed Effects on full Grunfeld data
-    /// R reference: plm(inv ~ value + capital, data = pdata, model = "within")
-    /// Expected: value = 0.1101238, capital = 0.3100653, R² = 0.7668
-    #[test]
-    fn test_validate_panel_fe_full_grunfeld() {
-        let dataset = create_full_grunfeld_dataset();
-        let result = run_fixed_effects(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // Structure validation
-        assert_eq!(result.method, PanelMethod::FixedEffects);
-        assert_eq!(result.n_obs, 200);
-        assert_eq!(result.n_groups, 10);
-
-        // R reference values (from plm package)
-        let r_value_coef = 0.1101238;
-        let r_capital_coef = 0.3100653;
-        let r_value_se = 0.01185669;
-        let r_capital_se = 0.01735450;
-        let r_rsq = 0.7668;
-
-        // Find variable indices
-        let value_idx = result.variables.iter().position(|v| v == "value").unwrap();
-        let capital_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "capital")
-            .unwrap();
-
-        // Validate coefficients (tolerance: 1e-3 for FE)
-        assert!(
-            (result.coefficients[value_idx] - r_value_coef).abs() < 0.01,
-            "FE value coef: Rust={:.6}, R={:.6}",
-            result.coefficients[value_idx],
-            r_value_coef
-        );
-        assert!(
-            (result.coefficients[capital_idx] - r_capital_coef).abs() < 0.01,
-            "FE capital coef: Rust={:.6}, R={:.6}",
-            result.coefficients[capital_idx],
-            r_capital_coef
-        );
-
-        // Validate standard errors (tolerance: 1e-2)
-        assert!(
-            (result.std_errors[value_idx] - r_value_se).abs() < 0.01,
-            "FE value SE: Rust={:.6}, R={:.6}",
-            result.std_errors[value_idx],
-            r_value_se
-        );
-        assert!(
-            (result.std_errors[capital_idx] - r_capital_se).abs() < 0.01,
-            "FE capital SE: Rust={:.6}, R={:.6}",
-            result.std_errors[capital_idx],
-            r_capital_se
-        );
-
-        // Validate R-squared (tolerance: 0.05)
-        assert!(
-            (result.r_squared - r_rsq).abs() < 0.05,
-            "FE R²: Rust={:.4}, R={:.4}",
-            result.r_squared,
-            r_rsq
-        );
-    }
-
-    /// Validation test: Random Effects on full Grunfeld data
-    /// R reference: plm(inv ~ value + capital, data = pdata, model = "random")
-    /// Expected: intercept = -57.83, value = 0.1098, capital = 0.3081
-    #[test]
-    fn test_validate_panel_re_full_grunfeld() {
-        let dataset = create_full_grunfeld_dataset();
-        let result = run_random_effects(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // Structure validation
-        assert_eq!(result.method, PanelMethod::RandomEffects);
-        assert_eq!(result.n_obs, 200);
-        assert_eq!(result.n_groups, 10);
-
-        // R reference values
-        let r_value_coef = 0.1097812;
-        let r_capital_coef = 0.3081130;
-        let r_sigma_u = 84.200951; // individual effect std dev
-        let r_sigma_e = 52.767966; // idiosyncratic std dev
-        let r_theta = 0.8612;
-
-        // Find variable indices
-        let value_idx = result.variables.iter().position(|v| v == "value").unwrap();
-        let capital_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "capital")
-            .unwrap();
-
-        // Validate coefficients (tolerance: 1e-2 for RE)
-        assert!(
-            (result.coefficients[value_idx] - r_value_coef).abs() < 0.02,
-            "RE value coef: Rust={:.6}, R={:.6}",
-            result.coefficients[value_idx],
-            r_value_coef
-        );
-        assert!(
-            (result.coefficients[capital_idx] - r_capital_coef).abs() < 0.02,
-            "RE capital coef: Rust={:.6}, R={:.6}",
-            result.coefficients[capital_idx],
-            r_capital_coef
-        );
-
-        // Validate variance components if available
-        // Note: Variance component estimation can differ between implementations
-        // due to different estimation methods (Swamy-Arora, Wallace-Hussain, etc.)
-        // We use loose tolerances here as the key validation is on coefficients
-        if let Some(sigma_u) = result.sigma_u {
-            // Just check positivity and reasonable magnitude
-            assert!(
-                sigma_u > 0.0 && sigma_u < 500.0,
-                "RE sigma_u should be positive and reasonable, got {}",
-                sigma_u
-            );
-            // Log for debugging
-            eprintln!(
-                "Note: RE sigma_u: Rust={:.4}, R={:.4} (may differ by estimation method)",
-                sigma_u, r_sigma_u
-            );
-        }
-        if let Some(sigma_e) = result.sigma_e {
-            assert!(
-                sigma_e > 0.0 && sigma_e < 500.0,
-                "RE sigma_e should be positive and reasonable, got {}",
-                sigma_e
-            );
-            eprintln!(
-                "Note: RE sigma_e: Rust={:.4}, R={:.4} (may differ by estimation method)",
-                sigma_e, r_sigma_e
-            );
-        }
-        if let Some(theta) = result.theta {
-            // Theta should be in [0, 1]
-            assert!(
-                (0.0..=1.0).contains(&theta),
-                "RE theta should be in [0, 1], got {}",
-                theta
-            );
-            eprintln!(
-                "Note: RE theta: Rust={:.4}, R={:.4} (may differ by estimation method)",
-                theta, r_theta
-            );
-        }
-    }
-
-    /// Validation test: Hausman test on full Grunfeld data
-    /// R reference: phtest(fe_fit, re_fit)
-    /// Expected: chi2 = 2.33, df = 2, p = 0.312
-    #[test]
-    fn test_validate_hausman_full_grunfeld() {
-        let dataset = create_full_grunfeld_dataset();
-        let result = run_hausman_test(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // R reference values
-        let r_chi2 = 2.330367;
-        let r_df = 2;
-        let r_pvalue = 0.311865;
-
-        // Validate test statistic
-        // Note: Hausman test can be sensitive to variance matrix estimation
-        // The key insight is whether we reject at typical significance levels
-        // With R p = 0.31, we don't reject H0 (RE is acceptable)
-        if !result.chi2_statistic.is_nan() {
-            // Log for debugging
-            eprintln!(
-                "Hausman test: chi2={:.4} (R={:.4}), p={:.4} (R={:.4})",
-                result.chi2_statistic, r_chi2, result.p_value, r_pvalue
-            );
-
-            // Chi-squared should be non-negative
-            assert!(
-                result.chi2_statistic >= 0.0,
-                "Hausman chi2 should be non-negative, got {}",
-                result.chi2_statistic
-            );
-
-            // If chi2 is very small or zero, this typically indicates
-            // FE and RE give very similar coefficients (which is the case here)
-            // The qualitative conclusion (don't reject H0) would be the same
-        }
-
-        // Validate degrees of freedom
-        assert_eq!(result.df, r_df, "Hausman df should be {}", r_df);
-
-        // Validate p-value (qualitative: should not reject at 5% level)
-        if !result.p_value.is_nan() && result.chi2_statistic > 0.0 {
-            // Both R and our implementation should suggest not rejecting H0
-            // p > 0.05 means we don't reject the null that RE is consistent
-            eprintln!(
-                "Qualitative check: p={:.4}, R p={:.4} - both suggest RE is acceptable",
-                result.p_value, r_pvalue
-            );
-        }
-
-        // Qualitative validation: p > 0.05 suggests RE is acceptable (don't reject H0)
-        // This matches R's result where p = 0.31
     }
 
     /// Panel GLS on full Grunfeld (N = 10 firms, T = 20 years) is refused.
@@ -1432,5 +963,493 @@ mod tests {
                 println!("GMM Two-step failed: {:?}", e);
             }
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // R-PINNED VALIDATION: validation/r/cases/panel.R (plm 2.6.7), case files in
+    // validation/expected/, registered in validation/methods/panel.json
+    // ════════════════════════════════════════════════════════════════════════════
+
+    use crate::traits::estimator::LinearEstimator;
+    use p2a_validation::{Case, Check, Tol};
+
+    /// Every FE number plm reports for `inv ~ value + capital`, entity `firm`.
+    fn check_fe(case: &Case, ds: &Dataset) -> PanelResult {
+        let r = run_fixed_effects(ds, "inv", &["value", "capital"], "firm").unwrap();
+        let n = r.n_obs;
+        let (lo, hi): (Vec<f64>, Vec<f64>) = r.confidence_intervals(0.95).into_iter().unzip();
+        Check::new(case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se", &r.variables, &r.std_errors, Tol::se(n))
+            .named("t", &r.variables, &r.t_stats, Tol::stat(n))
+            .named("p", &r.variables, &r.p_values, Tol::p_value(n))
+            .named("ci95_lower", &r.variables, &lo, Tol::stat(n))
+            .named("ci95_upper", &r.variables, &hi, Tol::stat(n))
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("f_stat", r.f_stat, Tol::stat(n))
+            .scalar("f_df1", r.variables.len() as f64, Tol::exact())
+            .scalar("f_df2", r.df as f64, Tol::exact())
+            .scalar("f_p", r.f_p_value, Tol::p_value(n))
+            .scalar("sigma2", r.sigma_e.unwrap().powi(2), Tol::stat(n))
+            .scalar("df_resid", r.df as f64, Tol::exact())
+            .scalar("n_obs", n as f64, Tol::exact())
+            .scalar("n_groups", r.n_groups as f64, Tol::exact())
+            .finish();
+        assert_eq!(r.f_df(), (2, r.df));
+        assert_eq!(r.vcov_type, PanelVcov::Classical);
+        assert_eq!(r.test_distribution, TestDistribution::StudentT);
+
+        // Entity-clustered (Arellano) SEs, as plm::vcovHC(method = "arellano"),
+        // and the robust F test of plm's summary(fe, vcov = vcovHC(fe, method =
+        // "arellano", type = ...)), i.e. pwaldtest(fe, test = "F", vcov = ...)
+        // on (K, G - 1) degrees of freedom
+        for (sfx, adj) in [
+            ("hc0", ClusterAdjustment::HC0),
+            ("hc1", ClusterAdjustment::HC1),
+            ("sss", ClusterAdjustment::Stata),
+        ] {
+            let config = PanelConfig {
+                vcov: PanelVcov::Arellano(adj),
+            };
+            let rc =
+                run_fixed_effects_with(ds, "inv", &["value", "capital"], "firm", &config).unwrap();
+            let (df1, df2) = rc.f_df();
+            Check::new(case)
+                .named(
+                    &format!("se_arellano_{sfx}"),
+                    &rc.variables,
+                    &rc.std_errors,
+                    Tol::se(n),
+                )
+                .named("coef", &rc.variables, &rc.coefficients, Tol::coef(n))
+                .scalar(&format!("f_stat_arellano_{sfx}"), rc.f_stat, Tol::stat(n))
+                .scalar(
+                    &format!("f_p_arellano_{sfx}"),
+                    rc.f_p_value,
+                    Tol::p_value(n),
+                )
+                .scalar("f_df1", df1 as f64, Tol::exact())
+                .scalar("f_df2_arellano", df2 as f64, Tol::exact())
+                .finish();
+            assert_eq!(rc.vcov_type, PanelVcov::Arellano(adj));
+            assert_eq!(rc.test_distribution, TestDistribution::StudentT);
+            assert!(rc.warnings.is_empty(), "{:?}", rc.warnings);
+        }
+        r
+    }
+
+    #[test]
+    fn test_validate_panel_fe_grunfeld() {
+        let (c, d) = crate::test_support::load_case("panel_fe_grunfeld");
+        check_fe(&c, &d);
+    }
+
+    #[test]
+    fn test_validate_panel_fe_grunfeld_unbalanced() {
+        let (c, d) = crate::test_support::load_case("panel_fe_grunfeld_unbalanced");
+        check_fe(&c, &d);
+    }
+
+    #[test]
+    fn test_validate_panel_fe_sim_corr() {
+        let (c, d) = crate::test_support::load_case("panel_fe_sim_corr");
+        check_fe(&c, &d);
+    }
+
+    /// `plm::phtest(fe, re)` for `inv ~ value + capital`, entity `firm`.
+    /// `vdiff_eigen` and `quad_form_signed` are not p2a outputs; the sign pattern
+    /// of the eigenvalues is checked through the warning below.
+    fn check_hausman(case: &Case, ds: &Dataset) -> HausmanResult {
+        let h = run_hausman_test(ds, "inv", &["value", "capital"], "firm").unwrap();
+        let n = h.fe_result.n_obs;
+        let slopes = &h.fe_result.variables;
+        let diff: Vec<f64> = slopes
+            .iter()
+            .map(|s| {
+                let i = h.fe_result.variables.iter().position(|v| v == s).unwrap();
+                let j = h.re_result.variables.iter().position(|v| v == s).unwrap();
+                h.fe_result.coefficients[i] - h.re_result.coefficients[j]
+            })
+            .collect();
+        Check::new(case)
+            .scalar("chisq", h.chi2_statistic, Tol::stat(n))
+            .scalar("df", h.df as f64, Tol::exact())
+            .scalar("p", h.p_value, Tol::p_value(n))
+            .named("coef_diff", slopes, &diff, Tol::stat(n))
+            .finish();
+        assert_eq!(
+            h.vcov_method,
+            "classical FE and RE covariance (plm::phtest default)"
+        );
+        // Var(b_FE) - Var(b_RE) is indefinite only for sim_corr.
+        let indefinite = case.vector("vdiff_eigen").iter().any(|&l| l < 0.0);
+        assert_eq!(
+            h.warnings
+                .iter()
+                .any(|w| w.contains("not positive definite")),
+            indefinite,
+            "{:?}",
+            h.warnings
+        );
+        assert!(
+            !h.recommendation.contains("nearly identical"),
+            "{}",
+            h.recommendation
+        );
+        h
+    }
+
+    #[test]
+    fn test_validate_hausman_grunfeld() {
+        let (c, d) = crate::test_support::load_case("panel_hausman_grunfeld");
+        let h = check_hausman(&c, &d);
+        assert_eq!(
+            h.recommendation,
+            "Fail to reject H0 (p=0.312), but note: Hausman test may have low power with 10 \
+             entities and 200 observations. Consider theoretical arguments for model choice."
+        );
+    }
+
+    #[test]
+    fn test_validate_hausman_grunfeld_unbalanced() {
+        let (c, d) = crate::test_support::load_case("panel_hausman_grunfeld_unbalanced");
+        check_hausman(&c, &d);
+    }
+
+    /// Entity effects correlated with `value`: phtest rejects (chi2 7203.84).
+    #[test]
+    fn test_validate_hausman_sim_corr() {
+        let (c, d) = crate::test_support::load_case("panel_hausman_sim_corr");
+        check_hausman(&c, &d);
+    }
+
+    /// Every RE number plm reports for `inv ~ value + capital`, entity `firm`,
+    /// with the classical covariance and the three Arellano variants.
+    /// Not compared: `r2_overall_cor` (Stata's "overall" R², which p2a reported as
+    /// `r_squared` before ECON-73; it is not a p2a output any more).
+    fn check_re(case: &Case, ds: &Dataset, balanced: bool) -> PanelResult {
+        let r = run_random_effects(ds, "inv", &["value", "capital"], "firm").unwrap();
+        let n = r.n_obs;
+        let (lo, hi): (Vec<f64>, Vec<f64>) = r.confidence_intervals(0.95).into_iter().unzip();
+        let theta = r.theta.unwrap();
+        let (tmin, tmax) = if r.theta_by_group.is_empty() {
+            (theta, theta)
+        } else {
+            let g = &r.theta_by_group;
+            (
+                g.iter().copied().fold(f64::INFINITY, f64::min),
+                g.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            )
+        };
+        let resid_var = r.residuals.iter().map(|e| e * e).sum::<f64>() / r.df as f64;
+        Check::new(case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se", &r.variables, &r.std_errors, Tol::se(n))
+            .named("z", &r.variables, &r.t_stats, Tol::stat(n))
+            .named("p", &r.variables, &r.p_values, Tol::p_value(n))
+            .named("ci95_lower", &r.variables, &lo, Tol::stat(n))
+            .named("ci95_upper", &r.variables, &hi, Tol::stat(n))
+            .scalar("sigma2_idios", r.sigma_e.unwrap().powi(2), Tol::stat(n))
+            .scalar("sigma2_id", r.sigma_u.unwrap().powi(2), Tol::stat(n))
+            .scalar("theta_mean", theta, Tol::stat(n))
+            .scalar("theta_min", tmin, Tol::stat(n))
+            .scalar("theta_max", tmax, Tol::stat(n))
+            .scalar("resid_var_transformed", resid_var, Tol::stat(n))
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("wald_f", r.f_stat, Tol::stat(n))
+            .scalar("wald_f_df2", r.f_df().1 as f64, Tol::exact())
+            .scalar("wald_f_p", r.f_p_value, Tol::p_value(n))
+            .scalar("df_resid", r.df as f64, Tol::exact())
+            .scalar("n_obs", n as f64, Tol::exact())
+            .scalar("n_groups", r.n_groups as f64, Tol::exact())
+            .finish();
+        Check::new(case)
+            .scalar("wald_chisq", r.wald_chi2.unwrap(), Tol::stat(n))
+            .scalar("wald_df", r.wald_df.unwrap() as f64, Tol::exact())
+            .scalar("wald_p", r.wald_p_value.unwrap(), Tol::p_value(n))
+            .finish();
+        assert_eq!(r.test_distribution, TestDistribution::Normal);
+        assert_eq!(r.vcov_type, PanelVcov::Classical);
+        if balanced {
+            assert!(r.theta_by_group.is_empty(), "{:?}", r.theta_by_group);
+        } else {
+            assert_eq!(r.theta_by_group.len(), r.n_groups);
+        }
+
+        // Entity-clustered (Arellano) SEs, as plm::vcovHC(method = "arellano"),
+        // and the Wald tests with that covariance: chi-squared as
+        // pwaldtest(re, test = "Chisq", vcov = vcovHC(re, method = "arellano",
+        // type = ...)) (plm's summary(re, vcov = ...)), and its F form as
+        // pwaldtest(re, test = "F", vcov = ...) on (K, G - 1) degrees of freedom
+        for (sfx, adj) in [
+            ("hc0", ClusterAdjustment::HC0),
+            ("hc1", ClusterAdjustment::HC1),
+            ("sss", ClusterAdjustment::Stata),
+        ] {
+            let config = PanelConfig {
+                vcov: PanelVcov::Arellano(adj),
+            };
+            let rc =
+                run_random_effects_with(ds, "inv", &["value", "capital"], "firm", &config).unwrap();
+            Check::new(case)
+                .named(
+                    &format!("se_arellano_{sfx}"),
+                    &rc.variables,
+                    &rc.std_errors,
+                    Tol::se(n),
+                )
+                .named("coef", &rc.variables, &rc.coefficients, Tol::coef(n))
+                .scalar(
+                    &format!("wald_chisq_arellano_{sfx}"),
+                    rc.wald_chi2.unwrap(),
+                    Tol::stat(n),
+                )
+                .scalar(
+                    &format!("wald_p_arellano_{sfx}"),
+                    rc.wald_p_value.unwrap(),
+                    Tol::p_value(n),
+                )
+                .scalar(&format!("wald_f_arellano_{sfx}"), rc.f_stat, Tol::stat(n))
+                .scalar(
+                    &format!("wald_f_p_arellano_{sfx}"),
+                    rc.f_p_value,
+                    Tol::p_value(n),
+                )
+                .scalar("wald_df", rc.f_df().0 as f64, Tol::exact())
+                .scalar("wald_f_df2_arellano", rc.f_df().1 as f64, Tol::exact())
+                .finish();
+            assert_eq!(rc.vcov_type, PanelVcov::Arellano(adj));
+            assert_eq!(rc.test_distribution, TestDistribution::Normal);
+        }
+        r
+    }
+
+    #[test]
+    fn test_validate_panel_re_grunfeld() {
+        let (c, d) = crate::test_support::load_case("panel_re_grunfeld");
+        let r = check_re(&c, &d, true);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn test_validate_panel_re_grunfeld_unbalanced() {
+        let (c, d) = crate::test_support::load_case("panel_re_grunfeld_unbalanced");
+        let r = check_re(&c, &d, false);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn test_validate_panel_re_sim_corr() {
+        let (c, d) = crate::test_support::load_case("panel_re_sim_corr");
+        let r = check_re(&c, &d, true);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    /// plm sets the negative Swamy-Arora sigma_u^2 (-0.0440) to 0, so theta = 0
+    /// and random effects is pooled OLS.
+    #[test]
+    fn test_validate_panel_re_sim_no_effect() {
+        let (c, d) = crate::test_support::load_case("panel_re_sim_no_effect");
+        let r = check_re(&c, &d, true);
+        assert_eq!(r.sigma_u, Some(0.0));
+        assert_eq!(r.theta, Some(0.0));
+        Check::new(&c)
+            .named(
+                "coef_pooled_ols",
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(r.n_obs),
+            )
+            .finish();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("was set to 0 (as plm)")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// x = 1..4 for every entity: no between variation, so the between design
+    /// has rank 1 of 2 and plm drops the aliased column. With `N - r` in the
+    /// Swamy-Arora formula the RE slope and its SE equal the within ones exactly
+    /// (plm: coefficients 5.083333333, 1.983333333; SEs 2.866860459, 0.0401386486).
+    #[test]
+    fn test_random_effects_between_rank_deficient() {
+        let ds = create_panel_dataset();
+        let fe = run_fixed_effects(&ds, "y", &["x"], "entity").unwrap();
+        let re = run_random_effects(&ds, "y", &["x"], "entity").unwrap();
+        let j = re.variables.iter().position(|v| v == "x").unwrap();
+        let tol = Tol::new(1e-10, 1e-14);
+        assert!(
+            tol.allows(re.coefficients[j], fe.coefficients[0]),
+            "RE slope {} vs FE slope {}",
+            re.coefficients[j],
+            fe.coefficients[0]
+        );
+        assert!(
+            tol.allows(re.std_errors[j], fe.std_errors[0]),
+            "RE se {} vs FE se {}",
+            re.std_errors[j],
+            fe.std_errors[0]
+        );
+        assert!(
+            re.warnings.iter().any(|w| w.contains("rank deficient")
+                && w.contains("the entity means of the regressors are collinear")),
+            "{:?}",
+            re.warnings
+        );
+    }
+
+    /// 12 entities, 5 periods: `x1` noisy, `x2 = 2 x1` exactly, `z` an integer
+    /// constant within each entity (so its entity means are exact and it is
+    /// exactly zero after demeaning).
+    fn create_collinear_panel_dataset() -> Dataset {
+        let (n_ent, n_t) = (12usize, 5usize);
+        let n = n_ent * n_t;
+        let entity: Vec<i64> = (0..n).map(|i| (i / n_t) as i64).collect();
+        let x1: Vec<f64> = (0..n)
+            .map(|i| ((i * 37) % 101) as f64 / 10.0 + (i / n_t) as f64 * 0.3)
+            .collect();
+        let x2: Vec<f64> = x1.iter().map(|v| 2.0 * v).collect();
+        let z: Vec<f64> = (0..n).map(|i| ((i / n_t) % 4) as f64).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + 0.5 * x1[i]
+                    + 0.3 * z[i]
+                    + ((i / n_t) % 7) as f64 * 0.2
+                    + ((i * 7919) % 1009) as f64 / 1009.0
+                    - 0.5
+            })
+            .collect();
+        Dataset::new(
+            df! { "entity" => entity, "x1" => x1, "x2" => x2, "z" => z, "y" => y }.unwrap(),
+        )
+    }
+
+    /// The message of a `SingularMatrix` error, or a panic naming the result.
+    fn singular_suggestion<T: std::fmt::Debug>(res: crate::errors::EconResult<T>) -> String {
+        match res {
+            Err(crate::errors::EconError::SingularMatrix { suggestion, .. }) => suggestion,
+            other => panic!("expected SingularMatrix, got {other:?}"),
+        }
+    }
+
+    /// Exactly collinear regressors are not identified. FE used to return the
+    /// minimum-norm split, RE a wrong identified combination (x1 + 2 x2), and
+    /// Hausman chi2 0 with p 1. All three refuse, naming the regressors, with
+    /// the classical and the clustered covariance.
+    #[test]
+    fn test_collinear_regressors_are_refused() {
+        let ds = create_collinear_panel_dataset();
+        let x = ["x1", "x2"];
+        for vcov in [
+            PanelVcov::Classical,
+            PanelVcov::Arellano(ClusterAdjustment::Stata),
+        ] {
+            let config = PanelConfig { vcov };
+            for s in [
+                singular_suggestion(run_fixed_effects_with(&ds, "y", &x, "entity", &config)),
+                singular_suggestion(run_random_effects_with(&ds, "y", &x, "entity", &config)),
+            ] {
+                assert!(
+                    s.contains("exactly collinear") && s.contains("involved: x1, x2"),
+                    "{s}"
+                );
+            }
+        }
+        let s = singular_suggestion(run_hausman_test(&ds, "y", &x, "entity"));
+        assert!(s.contains("involved: x1, x2"), "{s}");
+    }
+
+    /// A regressor that is exactly zero after demeaning is not identified by
+    /// FE, which refuses. RE identifies it from the between variation; its
+    /// within step (sigma_e^2) then falls back to a pseudoinverse, which is
+    /// now reported instead of being dropped.
+    #[test]
+    fn test_time_invariant_regressor_fe_refuses_re_warns() {
+        let ds = create_collinear_panel_dataset();
+        let s = singular_suggestion(run_fixed_effects(&ds, "y", &["x1", "z"], "entity"));
+        assert!(
+            s.contains("involved: z") && s.contains("constant within every entity"),
+            "{s}"
+        );
+        let re = run_random_effects(&ds, "y", &["x1", "z"], "entity").unwrap();
+        assert!(re.coefficients.iter().all(|b| b.is_finite()));
+        assert!(
+            re.warnings
+                .iter()
+                .any(|w| w.contains("within regression that estimates sigma_e^2")),
+            "{:?}",
+            re.warnings
+        );
+    }
+
+    #[test]
+    fn test_panel_vcov_parse_and_display() {
+        let accepted = [
+            ("classical", PanelVcov::Classical, "classical"),
+            (
+                "cluster",
+                PanelVcov::Arellano(ClusterAdjustment::Stata),
+                "clustered by entity (Arellano, CR1/sss)",
+            ),
+            (
+                "cluster-hc0",
+                PanelVcov::Arellano(ClusterAdjustment::HC0),
+                "clustered by entity (Arellano, HC0)",
+            ),
+            (
+                "cluster-hc1",
+                PanelVcov::Arellano(ClusterAdjustment::HC1),
+                "clustered by entity (Arellano, HC1)",
+            ),
+        ];
+        for (s, v, shown) in accepted {
+            assert_eq!(s.parse::<PanelVcov>().unwrap(), v);
+            assert_eq!(v.to_string(), shown);
+        }
+        assert_eq!(
+            " Cluster ".parse::<PanelVcov>().unwrap(),
+            PanelVcov::Arellano(ClusterAdjustment::Stata)
+        );
+        for bad in ["robust", "", "hc1"] {
+            match bad.parse::<PanelVcov>() {
+                Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains("cluster-hc1"), "{message}")
+                }
+                other => panic!("{bad:?} parsed as {other:?}"),
+            }
+        }
+    }
+
+    /// JSON written before the new fields existed still deserialises.
+    #[test]
+    fn test_panel_result_json_without_new_fields() {
+        let r =
+            run_random_effects(&create_unbalanced_panel_dataset(), "y", &["x"], "entity").unwrap();
+        let mut v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        for key in [
+            "vcov_type",
+            "test_distribution",
+            "wald_chi2",
+            "wald_df",
+            "wald_p_value",
+            "theta_by_group",
+            "warnings",
+        ] {
+            obj.remove(key);
+        }
+        let old: PanelResult = serde_json::from_value(v).unwrap();
+        assert_eq!(old.vcov_type, PanelVcov::Classical);
+        assert_eq!(old.test_distribution, TestDistribution::StudentT);
+        assert_eq!(old.wald_chi2, None);
+        assert_eq!(old.wald_df, None);
+        assert_eq!(old.wald_p_value, None);
+        assert!(old.theta_by_group.is_empty());
+        assert!(old.warnings.is_empty());
     }
 }

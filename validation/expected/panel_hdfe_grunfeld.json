@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "id": "panel_hdfe_grunfeld",
+  "area": "econometrics/hdfe",
+  "method": "Two-way fixed effects (firm + year), Grunfeld",
+  "reference": "fixest::feols(inv ~ value + capital | firm + year); plm::plm(effect = 'twoways') for the adjusted within R-squared",
+  "call": "feols(inv ~ value + capital | firm + year, grunfeld, vcov = 'iid' / 'hetero' / ~firm)",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "fixest": "0.14.2",
+    "plm": "2.6.7"
+  },
+  "values": {
+    "coef": {
+      "names": ["value", "capital"],
+      "values": [0.11771585508260649, 0.35791627307342799]
+    },
+    "se_iid": {
+      "names": ["value", "capital"],
+      "values": [0.013751283003648231, 0.02271901088257252]
+    },
+    "se_hetero": {
+      "names": ["value", "capital"],
+      "values": [0.019179920521311625, 0.054402664258544321]
+    },
+    "se_cluster_firm": {
+      "names": ["value", "capital"],
+      "values": [0.010824429476863713, 0.047848396592588868]
+    },
+    "t_hetero": {
+      "names": ["value", "capital"],
+      "values": [6.1374527048643079, 6.579021045227849]
+    },
+    "p_hetero": {
+      "names": ["value", "capital"],
+      "values": [5.78157933597686e-09, 5.6916865295592247e-10]
+    },
+    "r2_within": 0.72014521292440636,
+    "adj_r2_within_plm": 0.6704668483547741,
+    "adj_r2_within_fixest": 0.71683332195309757,
+    "r2_full": 0.95169339968122235,
+    "within_f": 217.44230687636974,
+    "within_f_df1": 2,
+    "within_f_df2": 169,
+    "within_f_p": 1.8442362049977378e-47,
+    "df_resid": 169,
+    "n_obs": 200,
+    "coef_firm_only": {
+      "names": ["value", "capital"],
+      "values": [0.11012380412071852, 0.31006534130013913]
+    },
+    "se_firm_only_iid": {
+      "names": ["value", "capital"],
+      "values": [0.011856694214043839, 0.017354502775552564]
+    }
+  }
+}

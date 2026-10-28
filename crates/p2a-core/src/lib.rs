@@ -71,8 +71,8 @@
 //!
 //! | Method | Description | Function |
 //! |--------|-------------|----------|
-//! | **Fixed Effects** | Within estimator | [`run_fixed_effects`] |
-//! | **Random Effects** | GLS estimator | [`run_random_effects`] |
+//! | **Fixed Effects** | Within estimator; classical or entity-clustered SEs | [`run_fixed_effects`], [`run_fixed_effects_with`] |
+//! | **Random Effects** | Swamy-Arora GLS, balanced and unbalanced; classical or entity-clustered SEs | [`run_random_effects`], [`run_random_effects_with`] |
 //! | **Hausman Test** | FE vs RE specification test | [`run_hausman_test`] |
 //! | **HDFE** | High-dimensional fixed effects | [`run_hdfe`] |
 //! | **FEGLM** | GLM with fixed effects | [`run_feglm`] |
@@ -558,6 +558,8 @@ pub use econometrics::{
     CbpsMethod,
     CbpsResult,
     CellProbabilities,
+    // Linear panel options (FE/RE covariance)
+    ClusterAdjustment,
     CohortTimeEffect,
     // Staggered DiD (Callaway-Sant'Anna)
     ComparisonGroup,
@@ -668,6 +670,7 @@ pub use econometrics::{
     // Ordered logit/probit
     OrderedModelType,
     OrderedResult,
+    PanelConfig,
     PanelGlsModel,
     // Panel GLS (FGLS)
     PanelGlsResult,
@@ -677,6 +680,7 @@ pub use econometrics::{
     PanelUnitRootResult,
     // Panel unit root tests
     PanelUnitRootTest,
+    PanelVcov,
     PlaceboResults,
     PoolingWeights,
     PreTrendTest,
@@ -758,6 +762,7 @@ pub use econometrics::{
     // Synthetic control
     SynthConfig,
     SynthResult,
+    TestDistribution,
     // Survival analysis
     TiesMethod,
     TimeAggregation,
@@ -819,6 +824,7 @@ pub use econometrics::{
     run_fegls,
     run_first_stage_diagnostics,
     run_fixed_effects,
+    run_fixed_effects_with,
     run_fuzzy_rd,
     run_general_gmm,
     run_gformula,
@@ -855,6 +861,7 @@ pub use econometrics::{
     run_probit,
     run_pvcm,
     run_random_effects,
+    run_random_effects_with,
     run_rd,
     run_rd_multi,
     run_rd_multi_dataset,

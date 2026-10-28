@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "panel_fe",
+      "name": "Fixed effects (within), classical and entity-clustered (Arellano) SEs",
+      "category": "econometrics",
+      "reference": "plm::plm(model = 'within'); plm::vcovHC(method = 'arellano', type = 'HC0'/'HC1'/'sss'); plm::pwaldtest",
+      "doc": "validation/econometrics/panel_fe.md",
+      "cases": [
+        "panel_fe_grunfeld",
+        "panel_fe_grunfeld_unbalanced",
+        "panel_fe_sim_corr"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::tests::test_validate_panel_fe_grunfeld",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_fe_grunfeld_unbalanced",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_fe_sim_corr",
+        "p2a-mcp::tools::handlers::panel::tests::test_validate_mcp_panel_fixed_effects"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE classical",
+        "SE Arellano HC0/HC1/sss",
+        "t",
+        "p",
+        "95% CI",
+        "within R2",
+        "adj. within R2",
+        "F (df1, df2, p)",
+        "F Arellano HC0/HC1/sss (df2 = G - 1, p)",
+        "sigma_e^2",
+        "df",
+        "n",
+        "N"
+      ],
+      "tolerance": "validation/README.md, n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/panel_fe_grunfeld.csv",
+        "validation/expected/panel_fe_full.csv",
+        "validation/expected/grunfeld_full.csv"
+      ]
+    },
+    {
+      "id": "panel_re",
+      "name": "Random effects (Swamy-Arora GLS), balanced and unbalanced",
+      "category": "econometrics",
+      "reference": "plm::plm(model = 'random'); plm::ercomp; plm::pwaldtest; plm::vcovHC(method = 'arellano')",
+      "doc": "validation/econometrics/panel_re.md",
+      "cases": [
+        "panel_re_grunfeld",
+        "panel_re_grunfeld_unbalanced",
+        "panel_re_sim_corr",
+        "panel_re_sim_no_effect"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::tests::test_validate_panel_re_grunfeld",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_re_grunfeld_unbalanced",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_re_sim_corr",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_re_sim_no_effect",
+        "p2a-mcp::tools::handlers::panel::tests::test_validate_mcp_panel_random_effects"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE classical",
+        "SE Arellano HC0/HC1/sss",
+        "z",
+        "p (normal)",
+        "95% CI (normal)",
+        "sigma_e^2",
+        "sigma_u^2",
+        "theta mean/min/max",
+        "transformed residual variance",
+        "R2",
+        "adj. R2",
+        "Wald chi2 (df, p)",
+        "Wald F (df2, p)",
+        "Wald chi2 and F Arellano HC0/HC1/sss (F df2 = G - 1, p)",
+        "df",
+        "n",
+        "N"
+      ],
+      "tolerance": "validation/README.md, n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/panel_re_grunfeld.csv",
+        "validation/expected/panel_re_full.csv"
+      ]
+    },
+    {
+      "id": "panel_hausman",
+      "name": "Hausman test FE vs RE (phtest)",
+      "category": "econometrics",
+      "reference": "plm::phtest (method = 'chisq')",
+      "doc": "validation/econometrics/hausman.md",
+      "cases": [
+        "panel_hausman_grunfeld",
+        "panel_hausman_grunfeld_unbalanced",
+        "panel_hausman_sim_corr"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::tests::test_validate_hausman_grunfeld",
+        "p2a-core::econometrics::panel::tests::test_validate_hausman_grunfeld_unbalanced",
+        "p2a-core::econometrics::panel::tests::test_validate_hausman_sim_corr",
+        "p2a-mcp::tools::handlers::panel::tests::test_validate_mcp_hausman_test"
+      ],
+      "quantities": [
+        "chi2",
+        "df",
+        "p",
+        "coefficient differences",
+        "positive-definiteness of V_FE - V_RE (warning)"
+      ],
+      "tolerance": "validation/README.md, n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/hausman_grunfeld.csv",
+        "validation/expected/hausman_full.csv"
+      ]
+    },
+    {
+      "id": "panel_hdfe",
+      "name": "Two-way fixed effects (MAP)",
+      "category": "econometrics",
+      "reference": "fixest::feols; fixest::fitstat(type = 'wf'); plm::plm(effect = 'twoways')",
+      "doc": "validation/econometrics/hdfe.md",
+      "cases": [
+        "panel_hdfe_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld_hc1",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld_firm_only"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE iid",
+        "SE HC1",
+        "t and p (HC1)",
+        "within R2",
+        "adj. within R2 (plm)",
+        "within F (df1, df2, p)",
+        "df_resid",
+        "n",
+        "firm-only coefficients and SE"
+      ],
+      "tolerance": "validation/README.md, n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

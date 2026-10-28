@@ -1,196 +1,227 @@
-# Validation: Panel Fixed Effects
+# Validation: Panel Fixed Effects (within)
 
-## Method Overview
+## Method and options
 
-Panel Fixed Effects (FE) estimation controls for time-invariant unobserved heterogeneity by demeaning the data within each entity. Also known as the "within estimator."
+The within estimator demeans `y` and the regressors by entity and runs OLS on the demeaned
+data, which removes every time-invariant entity effect:
 
-**Model**:
 ```
-y_it = α_i + X_it β + ε_it
+y_it - ybar_i = (x_it - xbar_i)' beta + (e_it - ebar_i)
 ```
 
-where α_i are entity-specific intercepts that are differenced out.
+- Core: `p2a_core::run_fixed_effects(dataset, y, x, entity)` (classical covariance) and
+  `p2a_core::run_fixed_effects_with(dataset, y, x, entity, &PanelConfig { vcov })`.
+- MCP tool: `panel_fixed_effects`, with the optional `vcov` argument.
+- `vcov` (`PanelVcov`): `classical` (default, as plm: `s^2 (X~'X~)^-1` with
+  `s^2 = SSR / (n - N - K)`), `cluster` (entity-clustered Arellano sandwich with Stata's
+  small-sample factor `G/(G-1) (n-1)/(n-K)`, plm `type = "sss"`), `cluster-hc0` (factor 1),
+  `cluster-hc1` (factor `n/(n-K)`). `K` is the number of slopes, `G = N` the number of
+  entities.
+- Inference: Student t with `df = n - N - K`. R-squared is the within R-squared; the adjusted
+  within R-squared is plm's `r.squared(dfcor = TRUE)`, `1 - (1 - R2)(n - 1)/df`. The F test
+  of the slopes follows `vcov`, as plm's `summary(fe, vcov = ...)`: the classical within F
+  test on `(K, n - N - K)` df, or with a clustered `vcov` the Wald F `W/K` on `(K, G - 1)` df
+  (plm `pwaldtest(test = "F")` with a cluster vcov, its `df2adj`). `PanelResult::f_df`
+  returns the two degrees of freedom. The entity scores sum to `X~'e~ = 0`, so the clustered
+  covariance has rank at most `G - 1`: with `K >= G` slopes, or whenever the slope
+  covariance is singular (judged by its rank, not by whether an inverse succeeds), the F
+  test is not computed. `f_stat` and its p-value are then NaN, a warning says why, and the
+  text output has no F line; plm's `pwaldtest` stops with "system is computationally
+  singular" there.
+- Refused: a non-finite value in `y` or a regressor, and regressors that are exactly
+  collinear after removing the entity means (also a regressor that is exactly zero after
+  demeaning), whose coefficients are not identified.
 
-**Key Parameters**:
-- `y_col`: Dependent variable
-- `x_cols`: Independent variables (time-varying)
-- `entity_col`: Entity identifier for fixed effects
+## R reference
 
-## Reference Implementations
+Cases `panel_fe_grunfeld`, `panel_fe_grunfeld_unbalanced` and `panel_fe_sim_corr`, defined in
+`validation/r/cases/panel.R` and written to `validation/expected/<id>.json` by
+`Rscript validation/r/run.R --write`. R 4.3.3, plm 2.6.7:
 
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| plm | R | `plm(model="within")` | 2.6-x |
-| lfe | R | `felm(y ~ x | entity)` | 2.8-x |
-| linearmodels | Python | `PanelOLS(entity_effects=True)` | 5.x |
-
-## Test Cases
-
-### Test 1: Grunfeld Dataset - Entity Fixed Effects
-
-**Dataset**: `validation/datasets/grunfeld.csv` (n=200, 10 firms × 20 years)
-
-**R Code**:
 ```r
-library(plm)
-
-data(Grunfeld)
-pdata <- pdata.frame(Grunfeld, index = c("firm", "year"))
-
-# Fixed Effects (within) estimator
-fe_fit <- plm(inv ~ value + capital, data = pdata, model = "within")
-summary(fe_fit)
-
-# Expected output:
-#            Estimate  Std. Error t-value  Pr(>|t|)
-# value     0.1101308  0.0115713  9.5178  < 2.2e-16 ***
-# capital   0.3100493  0.0173030 17.9188  < 2.2e-16 ***
-# ---
-# Total Sum of Squares:    9359900
-# Residual Sum of Squares: 523478
-# R-Squared:      0.94405
-# Adj. R-Squared: 0.94095
-# F-statistic: 1586.1 on 2 and 188 DF, p-value: < 2.22e-16
+pd <- pdata.frame(d, index = c("firm", "year"))
+fe <- plm(inv ~ value + capital, data = pd, model = "within")
+summary(fe)$r.squared; summary(fe)$fstatistic
+vcovHC(fe, method = "arellano", type = "HC0")   # also "HC1", "sss"
+# robust F, = summary(fe, vcov = ...)$fstatistic, on (K, G - 1) df
+pwaldtest(fe, test = "F", vcov = vcovHC(fe, method = "arellano", type = "sss"))
 ```
 
-**Results Comparison**:
+The datasets are `validation/datasets/grunfeld.csv` and the generated
+`validation/datasets/generated/grunfeld_unbalanced.csv` and
+`validation/datasets/generated/panel_corr_effects.csv`, which R writes and reads back
+before computing, so R and Rust see the same doubles.
 
-| Statistic | R's plm | p2a Rust | Difference | Tolerance |
-|-----------|---------|----------|------------|-----------|
-| β(value) | 0.1101308 | 0.1101308 | < 1e-6 | 1e-5 |
-| β(capital) | 0.3100493 | 0.3100493 | < 1e-6 | 1e-5 |
-| SE(value) | 0.0115713 | ~0.0115713 | < 1e-5 | 1e-4 |
-| SE(capital) | 0.0173030 | ~0.0173030 | < 1e-5 | 1e-4 |
-| Within R² | 0.94405 | ~0.94405 | < 1e-4 | 1e-3 |
-| df_resid | 188 | 188 | 0 | exact |
+## Pinned values (R, 12 significant digits; the case files hold 17)
 
-**Rust Test**: `crates/p2a-core/src/econometrics/panel.rs::tests::test_validate_fe_grunfeld`
+#### `panel_fe_grunfeld`: Grunfeld (balanced, N = 10, T = 20, n = 200)
 
----
+| quantity | `value` | `capital` |
+|---|---|---|
+| coefficient | 0.110123804121 | 0.3100653413 |
+| SE (classical) | 0.011856694214 | 0.0173545027756 |
+| t | 9.28790117487 | 17.8665643902 |
+| p | 3.92110843164e-17 | 2.22000669284e-42 |
+| 95% CI lower | 0.0867345457897 | 0.27583076113 |
+| 95% CI upper | 0.133513062452 | 0.34429992147 |
+| SE Arellano HC0 | 0.0143421437124 | 0.0497926087238 |
+| SE Arellano HC1 | 0.0144143967828 | 0.0500434546878 |
+| SE Arellano sss | 0.0151560754389 | 0.0526183915915 |
 
-### Test 2: Synthetic Panel with Known DGP
+| quantity | value |
+|---|---|
+| within R² | 0.766757583748 |
+| adj. within R² | 0.753110421095 |
+| F | 309.014175168 |
+| F df1 | 2 |
+| F df2 | 188 |
+| F p-value | 3.74893568134e-60 |
+| F Arellano HC0 (Wald W/K) | 31.7744320126 |
+| F Arellano HC0 p-value | 8.3416798482e-05 |
+| F Arellano HC1 (Wald W/K) | 31.4566876925 |
+| F Arellano HC1 p-value | 8.67856181418e-05 |
+| F Arellano sss (Wald W/K) | 28.45328535 |
+| F Arellano sss p-value | 0.000128502647786 |
+| F Arellano df2 (G - 1) | 9 |
+| σ²_e | 2784.45823078 |
+| df_resid | 188 |
+| n | 200 |
+| N | 10 |
 
-**Data Generating Process**:
-```
-y_it = α_i + 2.0 × x_it + ε_it
-α_i ~ N(0, 1), ε_it ~ N(0, 0.5)
-```
+#### `panel_fe_grunfeld_unbalanced`: Grunfeld without the rows where `(firm + year) %% 7 == 0` (n = 171)
 
-**R Code**:
-```r
-library(plm)
+| quantity | `value` | `capital` |
+|---|---|---|
+| coefficient | 0.0994514002277 | 0.321189365789 |
+| SE (classical) | 0.013732594315 | 0.0192878456077 |
+| t | 7.24199651911 | 16.6524231022 |
+| p | 1.79102212411e-11 | 1.11003372717e-36 |
+| 95% CI lower | 0.072329578464 | 0.283095943762 |
+| 95% CI upper | 0.126573221991 | 0.359282787817 |
+| SE Arellano HC0 | 0.0184394267895 | 0.0517539659599 |
+| SE Arellano HC1 | 0.018548214912 | 0.0520593017415 |
+| SE Arellano sss | 0.0194942831613 | 0.0547146328711 |
 
-set.seed(42)
-n_entities <- 100
-n_periods <- 10
-n <- n_entities * n_periods
+| quantity | value |
+|---|---|
+| within R² | 0.755418407833 |
+| adj. within R² | 0.738497668752 |
+| F | 245.544903403 |
+| F df1 | 2 |
+| F df2 | 159 |
+| F p-value | 2.39711871119e-49 |
+| F Arellano HC0 (Wald W/K) | 20.3123217299 |
+| F Arellano HC0 p-value | 0.000460736898814 |
+| F Arellano HC1 (Wald W/K) | 20.0747507155 |
+| F Arellano HC1 p-value | 0.000481122056558 |
+| F Arellano sss (Wald W/K) | 18.173553736 |
+| F Arellano sss p-value | 0.000691222929933 |
+| F Arellano df2 (G - 1) | 9 |
+| σ²_e | 3025.93594284 |
+| df_resid | 159 |
+| n | 171 |
+| N | 10 |
 
-entity <- rep(1:n_entities, each = n_periods)
-time <- rep(1:n_periods, n_entities)
-alpha <- rnorm(n_entities)  # Entity effects
-x <- rnorm(n)
-y <- alpha[entity] + 2.0 * x + rnorm(n, 0, 0.5)
+#### `panel_fe_sim_corr`: simulated, effects correlated with `value` (N = 60, T = 5, n = 300)
 
-data <- data.frame(y = y, x = x, entity = factor(entity), time = factor(time))
-pdata <- pdata.frame(data, index = c("entity", "time"))
+| quantity | `value` | `capital` |
+|---|---|---|
+| coefficient | 0.935862128154 | -0.500031221073 |
+| SE (classical) | 0.0651754894431 | 0.0597049747268 |
+| t | 14.3591116254 | -8.37503446507 |
+| p | 4.27018079768e-34 | 4.78718198014e-15 |
+| 95% CI lower | 0.807467617773 | -0.617648918506 |
+| 95% CI upper | 1.06425663853 | -0.38241352364 |
+| SE Arellano HC0 | 0.0677702088159 | 0.0615308188017 |
+| SE Arellano HC1 | 0.0679972453273 | 0.0617369527754 |
+| SE Arellano sss | 0.0684566914004 | 0.0621540990933 |
 
-fe_fit <- plm(y ~ x, data = pdata, model = "within")
-coef(fe_fit)
-# x should be approximately 2.0
-```
+| quantity | value |
+|---|---|
+| within R² | 0.519423852056 |
+| adj. within R² | 0.396250973801 |
+| F | 128.61944701 |
+| F df1 | 2 |
+| F df2 | 238 |
+| F p-value | 1.34804139647e-38 |
+| F Arellano HC0 (Wald W/K) | 109.077862607 |
+| F Arellano HC0 p-value | 1.51279695931e-20 |
+| F Arellano HC1 (Wald W/K) | 108.350676856 |
+| F Arellano HC1 p-value | 1.7667977475e-20 |
+| F Arellano sss (Wald W/K) | 106.901169474 |
+| F Arellano sss p-value | 2.41332438877e-20 |
+| F Arellano df2 (G - 1) | 59 |
+| σ²_e | 0.877888572173 |
+| df_resid | 238 |
+| n | 300 |
+| N | 60 |
 
-**Validation Criteria**:
-- Coefficient within 0.1 of true value (2.0)
-- Correct degrees of freedom: n - k - (n_entities - 1)
 
----
+## Tests
 
-### Test 3: Time-Invariant Variable (Should Be Dropped)
+- `p2a-core`: `econometrics::panel::tests::test_validate_panel_fe_grunfeld`,
+  `econometrics::panel::tests::test_validate_panel_fe_grunfeld_unbalanced`,
+  `econometrics::panel::tests::test_validate_panel_fe_sim_corr` pin every quantity above,
+  the classical and the three Arellano standard errors and F tests.
+- Unit tests: `econometrics::panel::linear_models::tests::test_fixed_effects_refuses_non_finite_data`,
+  `econometrics::panel::linear_models::tests::test_fixed_effects_cluster_f_not_computed_when_k_reaches_g`,
+  `econometrics::panel::linear_models::tests::test_wald_statistic_refuses_a_singular_covariance`,
+  `econometrics::panel::linear_models::tests::test_wald_statistic_full_rank`,
+  `econometrics::panel::linear_models::tests::test_f_df_are_those_of_the_f_p_value`,
+  `econometrics::panel::tests::test_collinear_regressors_are_refused`,
+  `econometrics::panel::tests::test_time_invariant_regressor_fe_refuses_re_warns`.
+- `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_panel_fixed_effects` checks
+  the `panel_fixed_effects` text against the case at display precision, with the default
+  and with `vcov = "cluster-hc0"`.
+- Registry: `validation/methods/panel.json`, method `panel_fe`.
 
-Fixed effects cannot estimate coefficients on time-invariant variables.
+## Tolerance
 
-**R Code**:
-```r
-library(plm)
+`validation/README.md`, n = 120-300: coefficients 1e-8 relative, standard errors and
+statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute; counts and degrees of
+freedom exact.
 
-set.seed(42)
-n_entities <- 50
-n_periods <- 5
-n <- n_entities * n_periods
+## What changed in Tier 1
 
-entity <- rep(1:n_entities, each = n_periods)
-time <- rep(1:n_periods, n_entities)
-x_varying <- rnorm(n)  # Time-varying
-x_invariant <- rep(rnorm(n_entities), each = n_periods)  # Time-invariant
+- Adjusted R-squared: p2a used `(n - N - 1)/df` instead of plm's `(n - 1)/df`. Grunfeld
+  0.765517 (was) against plm 0.753110; unbalanced 0.753880 against 0.738498; simulated
+  0.517405 against 0.396251 (ECON-73).
+- The entity-clustered (Arellano) option is new; with it the F test is plm's robust Wald F,
+  not computed when the clustered covariance is singular (always when `K >= G`).
+- Non-finite data and exactly collinear regressors are refused. A NaN in `y` gave NaN
+  coefficients with SE 0 and p 1; collinear regressors gave the minimum-norm split.
+- A regressor that is constant within every entity (for example a 0/1 firm-level dummy,
+  exactly zero after demeaning) used to give a 0 coefficient with SE 0 next to correct
+  estimates of the other slopes. It is now refused with `SingularMatrix`, which names it, as
+  are exactly collinear regressors; MCP and CLI callers see an error where they used to get
+  a table (see Known differences).
+- The earlier tests used a hand-typed five-firm subset and a full-Grunfeld test at 0.01
+  tolerance; both are replaced by the case-pinned tests above. Coefficients, classical
+  standard errors, within R-squared and F were already equal to plm.
 
-y <- x_invariant + 2.0 * x_varying + rnorm(n, 0, 0.5)
+## Known differences
 
-data <- data.frame(y = y, x_varying = x_varying, x_invariant = x_invariant,
-                   entity = factor(entity), time = factor(time))
-pdata <- pdata.frame(data, index = c("entity", "time"))
+- A regressor that is constant within every entity, or one that is exactly collinear with
+  others: plm's within model drops the aliased column and estimates the remaining slopes
+  (`plm(y ~ x1 + z, model = "within")` reports `x1` only). p2a refuses the model with
+  `SingularMatrix`, naming the columns involved, until drop-and-warn lands (ECON-72).
+- With a clustered `vcov` and `K >= G`, p2a reports the coefficients and SEs without an F
+  test (NaN and a warning); plm's `pwaldtest` stops with an error.
 
-# x_invariant will be dropped
-fe_fit <- plm(y ~ x_varying + x_invariant, data = pdata, model = "within")
-summary(fe_fit)
-# Only x_varying coefficient estimated
-```
+`panel_fe_synthetic.csv` in `validation/expected/` is a legacy file that no test asserts.
 
-**Validation Criteria**:
-- Time-invariant variable is dropped or NA
-- Warning/error is produced
-
----
-
-### Test 4: Unbalanced Panel
-
-**R Code**:
-```r
-library(plm)
-
-set.seed(42)
-# Create unbalanced panel (some entities have fewer observations)
-data <- data.frame(
-  entity = c(rep(1, 5), rep(2, 3), rep(3, 4)),
-  time = c(1:5, 1:3, 2:5),
-  x = rnorm(12),
-  y = c(rnorm(5), rnorm(3) + 2, rnorm(4) + 4)
-)
-
-pdata <- pdata.frame(data, index = c("entity", "time"))
-fe_fit <- plm(y ~ x, data = pdata, model = "within")
-summary(fe_fit)
-```
-
-**Validation Criteria**:
-- Handles unbalanced panel correctly
-- Correct degrees of freedom calculation
-
----
-
-## Numerical Precision Summary
-
-| Dataset | n | Coefficient Precision | SE Precision |
-|---------|---|----------------------|--------------|
-| Grunfeld | 200 | < 1e-6 | < 1e-5 |
-| Synthetic | 1000 | < 1e-8 | < 1e-6 |
-
-## Known Differences
-
-1. **Intercept reporting**: R's plm doesn't report an intercept; the overall mean is absorbed.
-2. **R² computation**: Within R² vs. overall R² may differ across implementations.
-3. **Robust SEs**: p2a provides robust SEs via separate function; plm uses `vcovHC`.
-
-## Running the Tests
+## How to run
 
 ```bash
-# Run FE validation tests
-cargo test -p p2a-core -- panel::tests::test_validate_fe
-
-# Run with output
-cargo test -p p2a-core -- fixed_effects --nocapture
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::panel::tests::test_validate_panel_fe
+cargo test -p p2a-mcp --lib --no-default-features --features "http,llm,auth,websocket" -- tools::handlers::panel::tests
+Rscript validation/r/run.R --check
 ```
 
 ## References
 
-- Wooldridge, J.M. (2010). *Econometric Analysis of Cross Section and Panel Data*, 2nd ed. MIT Press. Chapter 10.
-- Baltagi, B.H. (2013). *Econometric Analysis of Panel Data*, 5th ed. Wiley.
+- Baltagi, B.H. (2013). *Econometric Analysis of Panel Data*, 5th ed. Wiley. Chapter 2.
+- Arellano, M. (1987). Computing robust standard errors for within-groups estimators.
+  *Oxford Bulletin of Economics and Statistics*, 49(4), 431-434.
+- Croissant, Y. & Millo, G. (2008). Panel data econometrics in R: The plm package.
+  *Journal of Statistical Software*, 27(2), 1-43.
