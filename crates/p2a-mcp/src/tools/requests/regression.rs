@@ -37,6 +37,18 @@ pub struct OlsRequest {
     /// Independent variables (X) column names
     #[schemars(description = "Names of the independent variable (X) columns.")]
     pub x: Vec<String>,
+
+    /// Standard-error type (default HC1)
+    #[serde(default)]
+    #[schemars(
+        description = "Standard errors: 'hc1' (default, heteroskedasticity-robust), 'hc0', 'hc2', 'hc3', or 'standard' (classical, as R's summary(lm))."
+    )]
+    pub cov_type: Option<String>,
+
+    /// Whether to include an intercept (default true)
+    #[serde(default)]
+    #[schemars(description = "Include an intercept term (default true).")]
+    pub intercept: Option<bool>,
 }
 
 /// Request for regression diagnostics.
