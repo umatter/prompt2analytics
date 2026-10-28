@@ -117,6 +117,10 @@ fix it, or record a registry deviation and leave the quantity out with a
 3. If a new R package is used, add it to `validation/reference_implementations.md` and to the
    prerequisites in `validation/README.md`.
 4. Run `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`.
+5. Adding, removing or renaming a `test_validate` test changes the counts CI checks:
+   regenerate `validation/VALIDATION_STATUS.md` with `validation/run_validation.sh
+   --write-status` before the change reaches main (during the review campaign: at the wave
+   integration, not in a lane).
 
 ---
 

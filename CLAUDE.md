@@ -749,6 +749,10 @@ layout and the workflow.
    tolerance, deviations).
 5. Update the method doc and the `validation/README.md` index row (its status follows the
    registry: `R-pinned` / `not R-pinned`).
+6. Adding, removing or renaming a `test_validate` test changes the counts CI checks:
+   regenerate `validation/VALIDATION_STATUS.md` with `validation/run_validation.sh
+   --write-status` before the change reaches main (during the review campaign: at the wave
+   integration, not in a lane).
 
 Never widen a tolerance. A mismatch outside the package's findings is a registry deviation
 (`{"finding", "quantity", "note"}`) with a `// deviation <id>` comment that keeps the quantity
@@ -765,6 +769,13 @@ Rscript validation/r/run.R --list
 cargo test -p p2a-core --lib --no-default-features --features ci -- regression::ols::tests::test_validate
 cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::panel::tests::test_validate
 cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::hdfe::tests::test_validate
+# the test lists the lint and the status-page check read, exactly as CI writes them; any
+# directory works (keep the <package>-tests.txt names, pass the files to --tests and set
+# P2A_TEST_LISTS to their glob for the status-page check)
+cargo test -p p2a-core --tests --no-default-features --features ci -- --list > target/p2a-core-tests.txt 2>&1
+cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket" -- --list > target/p2a-mcp-tests.txt 2>&1
+cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis -- --list > target/p2a-cli-tests.txt 2>&1
+python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt
 ```
 
 `run_validation.sh` exits 0 PASS, 1 FAIL (a compile error or zero selected tests is a
@@ -777,13 +788,17 @@ test names are not, and the paper's Makefile uses them.
 (`validation/run_validation.sh --write-status`), never hand-edited. Regenerate it once per
 wave integration, after merging lanes, not inside a lane. CI fails its status-page check
 (`P2A_CHECK_STATUS_PAGE=1`, `validation/tools/tests/test_status_page.py`) when the page's
-per-package `test_validate` counts differ from `cargo test -- --list`.
+per-package `test_validate` counts differ from `cargo test -- --list`. Do not combine
+`--write-status` with `--verbose` until the runner's `--nocapture` parsing is fixed: the
+interleaved output drops tests from the page (they show as NOT RUN) while the run still
+passes. Regenerate the page without `--verbose`.
 
 **Lint.** `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`
-(a CI gate, with the three `--list` outputs CI writes). It checks registry/case/test
-consistency, unregistered `load_case` calls, dead backticked test names and dead links in
-`validation/**/*.md`, `README.md` and `CLAUDE.md`, and dataset rows. Identifiers that only look
-like test names go in `validation/tools/lint_ignore_names.txt`.
+(a CI gate, with the three `--list` outputs CI writes; the commands that write them are in
+the block above, and the tool exits 2 when a list file is missing). It checks
+registry/case/test consistency, unregistered `load_case` calls, dead backticked test names
+and dead links in `validation/**/*.md`, `README.md` and `CLAUDE.md`, and dataset rows.
+Identifiers that only look like test names go in `validation/tools/lint_ignore_names.txt`.
 
 **Tolerances.** `p2a_validation::Tol` implements the table in `validation/README.md`
 (coefficients 1e-6/1e-8/1e-10 for n < 100 / ≤ 1000 / > 1000; SEs and statistics

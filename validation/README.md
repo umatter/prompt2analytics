@@ -46,7 +46,7 @@ validation/
 validation/run_validation.sh                         # all test_validate tests (CI feature sets) + Rscript validation/r/run.R --check
 validation/run_validation.sh --rust-only --category econometrics   # stats | regression | econometrics | forecasting | ml | cli | mcp
 validation/run_validation.sh --r-only                # R drift check only: Rscript validation/r/run.R --check
-validation/run_validation.sh --write-status          # also regenerate VALIDATION_STATUS.md from this run (full runs only)
+validation/run_validation.sh --write-status          # also regenerate VALIDATION_STATUS.md from this run (full runs only; not with --verbose)
 validation/run_validation.sh --legacy-r              # also run scripts/*.R (informational; never counted as passed)
 Rscript validation/r/run.R --check                   # recompute every case in a temp dir; exit 1 on any difference > 1e-12 relative
 Rscript validation/r/run.R --write ols_grunfeld      # (re)write one case JSON and the datasets it generates
@@ -74,7 +74,10 @@ step). Results go to `validation/reports/<timestamp>-<pid>/` (gitignored): the l
 differ from it. `--write-status` describes the whole suite, so it is refused (exit 2) with
 `--category`, `--rust-only` or `--r-only`. `--release`, `--verbose` (`-v`) and the
 environment variables `P2A_RSCRIPT`, `P2A_LEGACY_R_TIMEOUT` (whole seconds >= 1, default
-300; read only with `--legacy-r`) and `PYTHON` are also accepted. The runner sets
+300; read only with `--legacy-r`) and `PYTHON` are also accepted. Do not combine
+`--write-status` with `--verbose` until the runner's `--nocapture` parsing is fixed: the
+interleaved output drops tests from the page (they show as NOT RUN) while the run still
+passes (runner defect, open). Regenerate the page without `--verbose`. The runner sets
 `CARGO_TERM_COLOR=never` for cargo, since it parses cargo's output. Set
 `P2A_VALIDATION_VERBOSE=1` to print every comparison a `Check` makes.
 
@@ -180,6 +183,10 @@ This is the workflow every new or fixed validation follows.
 5. **Update the method document** and this README's index row.
 6. **Run** `python3 validation/tools/validation_status.py lint --strict --tests
    target/*-tests.txt` and `validation/run_validation.sh`.
+7. **Regenerate the status page.** Adding, removing or renaming a `test_validate` test
+   changes the counts CI checks: regenerate `VALIDATION_STATUS.md` with
+   `validation/run_validation.sh --write-status` before the change reaches main (during the
+   review campaign: at the wave integration, not in a lane).
 
 A mismatch is a defect. Fix it, or record a deviation `{"finding", "quantity", "note"}` in the
 registry and keep that quantity out of the `Check` with a `// deviation <finding id>` comment.

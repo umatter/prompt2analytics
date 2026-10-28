@@ -296,6 +296,10 @@ validation/
 5. **Update the method document** and the `validation/README.md` index row.
 6. **Run** `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`
    and `validation/run_validation.sh`.
+7. **Regenerate the status page.** Adding, removing or renaming a `test_validate` test changes
+   the counts CI checks: regenerate `validation/VALIDATION_STATUS.md` with
+   `validation/run_validation.sh --write-status` before the change reaches main (during the
+   review campaign: at the wave integration, not in a lane).
 
 A mismatch is a defect: fix it, or record a registry deviation and keep the quantity out of
 the `Check` with a `// deviation <finding id>` comment. Never widen a tolerance to make it pass.

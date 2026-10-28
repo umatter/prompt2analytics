@@ -547,13 +547,13 @@ Numerical results are checked against R. *R-pinned* tests load a committed R ref
 ```bash
 validation/run_validation.sh                         # all test_validate tests (CI feature sets) + R drift check
 validation/run_validation.sh --rust-only --category econometrics   # stats | regression | econometrics | forecasting | ml | cli | mcp
-validation/run_validation.sh --write-status          # also regenerate VALIDATION_STATUS.md from this run
+validation/run_validation.sh --write-status          # also regenerate VALIDATION_STATUS.md from this run (not with --verbose)
 Rscript validation/r/run.R --check                   # R reference values still reproduce (needs R + packages)
 cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::hdfe::tests::test_validate
 python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt
 ```
 
-`run_validation.sh` exits 0 (PASS), 1 (FAIL, including a compile error or zero selected tests), 2 (usage error) or 3 (INCOMPLETE: `Rscript` missing).
+`run_validation.sh` exits 0 (PASS), 1 (FAIL, including a compile error or zero selected tests), 2 (usage error) or 3 (INCOMPLETE: `cargo` or `Rscript` missing for a requested step).
 
 ### Tolerances (`p2a_validation::Tol`, R-pinned tests)
 

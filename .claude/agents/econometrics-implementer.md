@@ -220,6 +220,7 @@ After implementation and testing, complete the following to ensure the method is
   - [ ] Add or update the `validation/README.md` index row; its status is derived from the registry
   - [ ] Add any new packages to `validation/reference_implementations.md`
   - [ ] `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt` is clean
+  - [ ] A `test_validate` test was added, removed or renamed: `validation/VALIDATION_STATUS.md` is regenerated with `validation/run_validation.sh --write-status` before the change reaches main (during the review campaign: at the wave integration, not in a lane)
 
 ### Performance Benchmarking (Optional for Complex Methods)
 
