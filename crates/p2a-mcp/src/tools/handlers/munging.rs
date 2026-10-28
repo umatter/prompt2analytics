@@ -4773,7 +4773,7 @@ mod tests {
         match refused {
             Err(ToolCallError::QuotaExceeded(message)) => {
                 assert!(message.starts_with("str_concat was not run"), "{message}");
-                assert!(message.contains("limit 1.00 MB per session"), "{message}");
+                assert!(message.contains("limit 1.00 MiB per session"), "{message}");
             }
             other => panic!("expected a quota refusal, got {other:?}"),
         }

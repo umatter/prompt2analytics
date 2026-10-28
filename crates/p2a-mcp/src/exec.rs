@@ -73,7 +73,6 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use p2a_core::memory::format_bytes;
 use p2a_core::resource::{self, Budget, CancelToken};
 use rmcp::model::ErrorCode;
 use serde::Serialize;
@@ -599,8 +598,10 @@ fn lock_release(state: &Mutex<ReleaseState>) -> MutexGuard<'_, ReleaseState> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// An RSS or soft limit for a log field, in the quota refusals' format
+/// (powers of 1024, labelled MiB and so on).
 fn rss_text(bytes: u64) -> String {
-    format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
+    fmt_bytes(bytes)
 }
 
 impl MemoryGate {
@@ -1878,6 +1879,63 @@ mod tests {
         assert!(!gate.claim_release(t0 + MEMORY_RELEASE_INTERVAL - Duration::from_millis(1)));
         assert!(gate.claim_release(t0 + MEMORY_RELEASE_INTERVAL));
         assert!(!gate.claim_release(t0 + MEMORY_RELEASE_INTERVAL));
+    }
+
+    /// Collects what a test's log subscriber writes.
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+
+    impl Logs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The memory gate's log fields name the unit of their figures: the
+    /// RSS and the limit are powers of 1024 and say MiB. They said "MB",
+    /// so a 700 MiB soft limit was logged as "700.00 MB".
+    #[test]
+    fn memory_log_fields_name_mib() {
+        // A second registered dispatcher, so that the subscriber set on this
+        // thread decides the callsites' interest even when another test
+        // reached them first without one (see `db::tests`).
+        static OTHER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        OTHER.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new()));
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let logs = logs.clone();
+                move || logs.clone()
+            })
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .finish();
+        let (before, limit) = (714 * MIB + MIB / 2, 700 * MIB);
+        let memory = FakeMemory::new(before, FakeMemory::UNCHANGED);
+        let gate = MemoryGate::new(Some(limit), memory.probe());
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(gate.release_job(before, limit, true)(), Some(before));
+        });
+        let text = logs.text();
+        assert!(text.contains("stays above the soft limit"), "{text}");
+        for field in [
+            "rss_before=714.50 MiB",
+            "rss_after=714.50 MiB",
+            "limit=700.00 MiB",
+        ] {
+            assert!(text.contains(field), "{field}: {text}");
+        }
     }
 
     /// The stuck watchdog's exit line names every cause that holds.

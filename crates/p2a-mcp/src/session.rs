@@ -546,11 +546,29 @@ fn lock<T>(m: &StdMutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// `bytes` as the dataset quota refusals print them: the tool governor's
-/// (`exec`), a dataset reload's (`persistent_session`) and the check before
-/// a file is decoded ([`admit_dataset`]), one format for all.
+/// `bytes` as the server prints memory figures, one format for all: the
+/// dataset quota refusals (the tool governor's in `exec`, a dataset
+/// reload's in `persistent_session`, the check before a file is decoded,
+/// [`admit_dataset`], and a munging tool's before it builds), the memory
+/// fields of the governor's log lines and `server_stats`. The units are
+/// powers of 1024 and are labelled so (KiB, MiB, GiB), since the quotas and
+/// the memory soft limit are set in MiB (`P2A_SESSION_DATA_MB` and the
+/// others): a refusal names its limit as it was set, "200.00 MiB".
 pub(crate) fn fmt_bytes(bytes: u64) -> String {
-    p2a_core::memory::format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
+    const KIB: u64 = 1 << 10;
+    const MIB: u64 = 1 << 20;
+    const GIB: u64 = 1 << 30;
+    // Two decimals: the precision an f64 loses above 2^53 bytes never shows.
+    let scaled = |unit: u64| bytes as f64 / unit as f64;
+    if bytes >= GIB {
+        format!("{:.2} GiB", scaled(GIB))
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", scaled(MIB))
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", scaled(KIB))
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// Whether a session last accessed at `last_accessed` has expired at `now`
@@ -2075,6 +2093,43 @@ mod tests {
                 "future was not ready on its first poll; it needs a runtime or hit a contended lock"
             ),
         }
+    }
+
+    /// Memory figures are powers of 1024 and are labelled so: the quotas
+    /// are set in MiB (`P2A_SESSION_DATA_MB`), and a 200 MiB limit printed
+    /// as "200.00 MB" named a unit 4.6% smaller than the one counted.
+    #[test]
+    fn byte_figures_are_labelled_in_binary_units() {
+        assert_eq!(fmt_bytes(0), "0 bytes");
+        assert_eq!(fmt_bytes(1023), "1023 bytes");
+        assert_eq!(fmt_bytes(1536), "1.50 KiB");
+        assert_eq!(fmt_bytes(200 << 20), "200.00 MiB");
+        assert_eq!(fmt_bytes((1 << 30) - (1 << 20)), "1023.00 MiB");
+        assert_eq!(fmt_bytes(3 << 30), "3.00 GiB");
+        assert!(fmt_bytes(u64::MAX).ends_with(" GiB"));
+    }
+
+    /// The quota refusals name what the datasets would use and the limit in
+    /// the unit the limit is set in.
+    #[test]
+    fn quota_refusals_name_their_figures_in_mib() {
+        let mut refused = QuotaShortfall {
+            added: 40 << 20,
+            reached: 240 << 20,
+            limit: 200 << 20,
+            per_session: true,
+        };
+        assert_eq!(
+            refused.outcome(),
+            "this session's datasets would use 240.00 MiB (limit 200.00 MiB per session)"
+        );
+        refused.per_session = false;
+        refused.limit = 500 << 20;
+        refused.reached = 520 << 20;
+        assert_eq!(
+            refused.outcome(),
+            "the server's dataset memory would reach 520.00 MiB (limit 500.00 MiB)"
+        );
     }
 
     #[test]
