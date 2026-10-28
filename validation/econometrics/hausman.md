@@ -52,6 +52,9 @@ Datasets: `validation/datasets/grunfeld.csv`,
 | `panel_hausman_grunfeld_unbalanced` | 2.7465769254 | 2 | 0.253272710745 | -0.00226382783349 | 0.00341383099639 | 2.24420764387e-06, 5.91442991045e-05 |
 | `panel_hausman_sim_corr` | 7203.84027461 | 2 | 0 | -0.3270946076 | 0.0158249704287 | -0.000881180363117, 1.48583977601e-05 |
 
+At full precision (as in `validation/expected/panel_hausman_grunfeld.json`), phtest's Grunfeld
+statistic is χ² = 2.330366893675463 on 2 df, p = 0.3118654460548856.
+
 
 The eigenvalues are not a p2a output; the test checks that the "not positive definite"
 warning appears exactly when one is negative (only `panel_hausman_sim_corr`).
