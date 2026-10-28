@@ -163,27 +163,42 @@ mod tests {
         );
     }
 
+    /// x has no between variation, so V_FE = V_RE exactly and the scaled
+    /// difference is roundoff (-1.9e-15). plm reports chisq 2.9e-14, p = 1 from
+    /// that roundoff; p2a refuses.
     #[test]
-    fn test_hausman_test() {
+    fn test_hausman_refuses_when_fe_and_re_coincide() {
         let dataset = create_panel_dataset();
-        let result = run_hausman_test(&dataset, "y", &["x"], "entity").unwrap();
+        match run_hausman_test(&dataset, "y", &["x"], "entity") {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("no testable difference"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
-        // Hausman test should produce FE and RE results
-        assert!(!result.fe_result.coefficients.is_empty());
-        assert!(!result.re_result.coefficients.is_empty());
-
-        // FE coefficient should be close to 2.0 (within variation)
+    /// chisq 7.35e-05 on 1 df (p 0.993) with 3 entities: the low-power note,
+    /// not the removed "nearly identical, RE is more efficient" advice.
+    #[test]
+    fn test_hausman_small_panel_recommendation() {
+        let dataset = create_unbalanced_panel_dataset();
+        let h = run_hausman_test(&dataset, "y", &["x"], "entity").unwrap();
+        assert_eq!(h.df, 1);
         assert!(
-            (result.fe_result.coefficients[0] - 2.0).abs() < 0.3,
-            "FE coefficient should be close to 2.0, got {}",
-            result.fe_result.coefficients[0]
+            Tol::new(1e-6, 0.0).allows(h.chi2_statistic, 7.3536952100054188e-05),
+            "{}",
+            h.chi2_statistic
         );
-
-        // Chi-squared statistic should be non-negative (or NaN if variance matrix issues)
-        assert!(result.chi2_statistic >= 0.0 || result.chi2_statistic.is_nan());
-
-        // Should have a recommendation
-        assert!(!result.recommendation.is_empty());
+        assert!(
+            h.recommendation.contains("low power"),
+            "{}",
+            h.recommendation
+        );
+        assert!(
+            !h.recommendation.contains("nearly identical"),
+            "{}",
+            h.recommendation
+        );
     }
 
     #[test]
@@ -500,192 +515,6 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    // VALIDATION TESTS - Comparing against R's plm package
-    // ════════════════════════════════════════════════════════════════════════════
-
-    /// Grunfeld (1958) dataset for panel data validation
-    /// Classic investment equation: inv ~ value + capital
-    /// 10 firms, 20 years (1935-1954)
-    fn create_grunfeld_dataset() -> Dataset {
-        // Grunfeld data - first 5 firms (50 observations) for tractable testing
-        // From R's plm::data(Grunfeld)
-        // Firm 1: General Motors
-        let df = df! {
-            "firm" => [
-                // Firm 1 (General Motors) - 10 years
-                "GM", "GM", "GM", "GM", "GM", "GM", "GM", "GM", "GM", "GM",
-                // Firm 2 (US Steel) - 10 years
-                "US", "US", "US", "US", "US", "US", "US", "US", "US", "US",
-                // Firm 3 (General Electric) - 10 years
-                "GE", "GE", "GE", "GE", "GE", "GE", "GE", "GE", "GE", "GE",
-                // Firm 4 (Chrysler) - 10 years
-                "CH", "CH", "CH", "CH", "CH", "CH", "CH", "CH", "CH", "CH",
-                // Firm 5 (Atlantic Refining) - 10 years
-                "AR", "AR", "AR", "AR", "AR", "AR", "AR", "AR", "AR", "AR",
-            ],
-            "year" => [
-                1935i64, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-                1935, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-                1935, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-                1935, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-                1935, 1936, 1937, 1938, 1939, 1940, 1941, 1942, 1943, 1944,
-            ],
-            // Gross investment (inv)
-            "inv" => [
-                // GM
-                317.6, 391.8, 410.6, 257.7, 330.8, 461.2, 512.0, 448.0, 499.6, 547.5,
-                // US Steel
-                209.9, 355.3, 469.9, 262.3, 230.4, 361.6, 472.8, 445.6, 361.6, 288.2,
-                // GE
-                33.1, 45.0, 77.2, 44.6, 48.1, 74.4, 113.0, 91.9, 61.3, 56.8,
-                // Chrysler
-                40.29, 72.76, 66.26, 51.60, 52.41, 69.41, 68.35, 46.80, 47.40, 59.57,
-                // Atlantic Refining
-                24.43, 23.21, 32.78, 32.54, 26.65, 33.71, 43.50, 34.46, 44.25, 70.07,
-            ],
-            // Value of firm (value)
-            "value" => [
-                // GM
-                3078.5, 4661.7, 5387.1, 2792.2, 4313.2, 4643.9, 4551.2, 3244.1, 4053.7, 4379.3,
-                // US Steel
-                1362.4, 1807.1, 2676.3, 1801.9, 1957.3, 2202.9, 2380.5, 2168.6, 1985.1, 1813.9,
-                // GE
-                1170.6, 2015.8, 2803.3, 2039.7, 2256.2, 2132.2, 1834.1, 1588.0, 1749.4, 1687.2,
-                // Chrysler
-                191.5, 516.0, 729.0, 560.4, 519.9, 628.5, 537.1, 407.5, 408.4, 443.7,
-                // Atlantic Refining
-                138.0, 200.1, 280.0, 255.2, 306.7, 319.5, 346.0, 374.5, 381.0, 479.5,
-            ],
-            // Capital stock (capital)
-            "capital" => [
-                // GM
-                2.8, 52.6, 156.9, 209.2, 203.4, 207.2, 255.2, 303.7, 264.1, 201.6,
-                // US Steel
-                53.8, 50.5, 118.1, 260.2, 312.7, 254.2, 261.4, 298.7, 301.8, 279.1,
-                // GE
-                97.8, 104.4, 118.0, 156.2, 172.6, 186.6, 220.9, 287.8, 319.9, 321.3,
-                // Chrysler
-                80.1, 66.5, 83.8, 91.2, 92.4, 94.0, 99.0, 104.0, 108.0, 112.0,
-                // Atlantic Refining
-                40.0, 41.3, 46.5, 52.5, 54.3, 56.3, 61.9, 65.0, 64.8, 68.3,
-            ],
-        }
-        .unwrap();
-        Dataset::new(df)
-    }
-
-    /// Validation test: Hausman test on Grunfeld data
-    /// Compared against R's plm::phtest()
-    ///
-    /// R code:
-    /// ```r
-    /// library(plm)
-    /// data(Grunfeld)
-    /// pdata <- pdata.frame(Grunfeld, index = c("firm", "year"))
-    /// fe_fit <- plm(inv ~ value + capital, data = pdata, model = "within")
-    /// re_fit <- plm(inv ~ value + capital, data = pdata, model = "random")
-    /// phtest(fe_fit, re_fit)
-    /// # chisq = 2.33, df = 2, p-value = 0.312
-    /// ```
-    #[test]
-    fn test_validate_hausman_grunfeld() {
-        let dataset = create_grunfeld_dataset();
-        let result = run_hausman_test(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // Both FE and RE results should be present
-        assert!(!result.fe_result.coefficients.is_empty());
-        assert!(!result.re_result.coefficients.is_empty());
-
-        // Chi-squared statistic should be non-negative
-        assert!(
-            result.chi2_statistic >= 0.0 || result.chi2_statistic.is_nan(),
-            "Chi-squared statistic should be non-negative, got {}",
-            result.chi2_statistic
-        );
-
-        // Degrees of freedom = number of time-varying regressors
-        assert_eq!(result.df, 2, "df should equal number of regressors (2)");
-
-        // p-value should be valid
-        if !result.p_value.is_nan() {
-            assert!(
-                result.p_value >= 0.0 && result.p_value <= 1.0,
-                "p-value should be in [0, 1], got {}",
-                result.p_value
-            );
-        }
-
-        // Should have a recommendation
-        assert!(!result.recommendation.is_empty());
-    }
-
-    /// Validation test: Synthetic panel where FE is required
-    /// Entity effects are correlated with regressors
-    #[test]
-    fn test_validate_hausman_fe_required() {
-        // Create data where entity effects correlate with x
-        // This should cause Hausman test to reject H0 (prefer FE)
-        let mut y_vec = Vec::new();
-        let mut x_vec = Vec::new();
-        let mut entity_vec = Vec::new();
-
-        let n_entities = 20;
-        let n_periods = 5;
-
-        for entity in 0..n_entities {
-            // Entity effect correlated with x mean
-            let alpha = (entity as f64) * 0.5;
-            for period in 0..n_periods {
-                // x is correlated with entity effect
-                let x = alpha
-                    + (period as f64) * 0.2
-                    + ((entity * 7 + period * 3) as f64 * 0.123).sin() * 0.5;
-                let noise = ((entity * 11 + period * 5) as f64 * 0.456).cos() * 0.3;
-                let y = alpha + 2.0 * x + noise; // True coefficient is 2.0
-
-                y_vec.push(y);
-                x_vec.push(x);
-                entity_vec.push(format!("E{}", entity));
-            }
-        }
-
-        let df = df! {
-            "y" => y_vec,
-            "x" => x_vec,
-            "entity" => entity_vec
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_hausman_test(&dataset, "y", &["x"], "entity").unwrap();
-
-        // FE coefficient should be close to true value (2.0)
-        assert!(
-            (result.fe_result.coefficients[0] - 2.0).abs() < 0.5,
-            "FE coefficient should be close to 2.0, got {}",
-            result.fe_result.coefficients[0]
-        );
-
-        // RE coefficient is biased when x correlates with entity effects
-        // FE and RE coefficients should differ
-        let fe_coef = result.fe_result.coefficients[0];
-        let _re_coef = result
-            .re_result
-            .coefficients
-            .iter()
-            .find(|_| true) // Get first non-intercept
-            .copied()
-            .unwrap_or(0.0);
-
-        // The coefficients should differ when entity effects correlate with x
-        // (This is what the Hausman test detects)
-        println!(
-            "FE coef: {}, RE coef (may include intercept): {:?}",
-            fe_coef, result.re_result.coefficients
-        );
-    }
-
-    // ════════════════════════════════════════════════════════════════════════════
     // FULL VALIDATION TESTS - Exact comparison against R's plm package
     // Using full Grunfeld dataset (10 firms, 20 years = 200 observations)
     // ════════════════════════════════════════════════════════════════════════════
@@ -799,59 +628,6 @@ mod tests {
         .unwrap();
 
         Dataset::new(df)
-    }
-
-    /// Validation test: Hausman test on full Grunfeld data
-    /// R reference: phtest(fe_fit, re_fit)
-    /// Expected: chi2 = 2.33, df = 2, p = 0.312
-    #[test]
-    fn test_validate_hausman_full_grunfeld() {
-        let dataset = create_full_grunfeld_dataset();
-        let result = run_hausman_test(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // R reference values
-        let r_chi2 = 2.330367;
-        let r_df = 2;
-        let r_pvalue = 0.311865;
-
-        // Validate test statistic
-        // Note: Hausman test can be sensitive to variance matrix estimation
-        // The key insight is whether we reject at typical significance levels
-        // With R p = 0.31, we don't reject H0 (RE is acceptable)
-        if !result.chi2_statistic.is_nan() {
-            // Log for debugging
-            eprintln!(
-                "Hausman test: chi2={:.4} (R={:.4}), p={:.4} (R={:.4})",
-                result.chi2_statistic, r_chi2, result.p_value, r_pvalue
-            );
-
-            // Chi-squared should be non-negative
-            assert!(
-                result.chi2_statistic >= 0.0,
-                "Hausman chi2 should be non-negative, got {}",
-                result.chi2_statistic
-            );
-
-            // If chi2 is very small or zero, this typically indicates
-            // FE and RE give very similar coefficients (which is the case here)
-            // The qualitative conclusion (don't reject H0) would be the same
-        }
-
-        // Validate degrees of freedom
-        assert_eq!(result.df, r_df, "Hausman df should be {}", r_df);
-
-        // Validate p-value (qualitative: should not reject at 5% level)
-        if !result.p_value.is_nan() && result.chi2_statistic > 0.0 {
-            // Both R and our implementation should suggest not rejecting H0
-            // p > 0.05 means we don't reject the null that RE is consistent
-            eprintln!(
-                "Qualitative check: p={:.4}, R p={:.4} - both suggest RE is acceptable",
-                result.p_value, r_pvalue
-            );
-        }
-
-        // Qualitative validation: p > 0.05 suggests RE is acceptable (don't reject H0)
-        // This matches R's result where p = 0.31
     }
 
     /// Panel GLS on full Grunfeld (N = 10 firms, T = 20 years) is refused.
@@ -1255,6 +1031,73 @@ mod tests {
     fn test_validate_panel_fe_sim_corr() {
         let (c, d) = crate::test_support::load_case("panel_fe_sim_corr");
         check_fe(&c, &d);
+    }
+
+    /// `plm::phtest(fe, re)` for `inv ~ value + capital`, entity `firm`.
+    /// `vdiff_eigen` and `quad_form_signed` are not p2a outputs; the sign pattern
+    /// of the eigenvalues is checked through the warning below.
+    fn check_hausman(case: &Case, ds: &Dataset) -> HausmanResult {
+        let h = run_hausman_test(ds, "inv", &["value", "capital"], "firm").unwrap();
+        let n = h.fe_result.n_obs;
+        let slopes = &h.fe_result.variables;
+        let diff: Vec<f64> = slopes
+            .iter()
+            .map(|s| {
+                let i = h.fe_result.variables.iter().position(|v| v == s).unwrap();
+                let j = h.re_result.variables.iter().position(|v| v == s).unwrap();
+                h.fe_result.coefficients[i] - h.re_result.coefficients[j]
+            })
+            .collect();
+        Check::new(case)
+            .scalar("chisq", h.chi2_statistic, Tol::stat(n))
+            .scalar("df", h.df as f64, Tol::exact())
+            .scalar("p", h.p_value, Tol::p_value(n))
+            .named("coef_diff", slopes, &diff, Tol::stat(n))
+            .finish();
+        assert_eq!(
+            h.vcov_method,
+            "classical FE and RE covariance (plm::phtest default)"
+        );
+        // Var(b_FE) - Var(b_RE) is indefinite only for sim_corr.
+        let indefinite = case.vector("vdiff_eigen").iter().any(|&l| l < 0.0);
+        assert_eq!(
+            h.warnings
+                .iter()
+                .any(|w| w.contains("not positive definite")),
+            indefinite,
+            "{:?}",
+            h.warnings
+        );
+        assert!(
+            !h.recommendation.contains("nearly identical"),
+            "{}",
+            h.recommendation
+        );
+        h
+    }
+
+    #[test]
+    fn test_validate_hausman_grunfeld() {
+        let (c, d) = crate::test_support::load_case("panel_hausman_grunfeld");
+        let h = check_hausman(&c, &d);
+        assert_eq!(
+            h.recommendation,
+            "Fail to reject H0 (p=0.312), but note: Hausman test may have low power with 10 \
+             entities and 200 observations. Consider theoretical arguments for model choice."
+        );
+    }
+
+    #[test]
+    fn test_validate_hausman_grunfeld_unbalanced() {
+        let (c, d) = crate::test_support::load_case("panel_hausman_grunfeld_unbalanced");
+        check_hausman(&c, &d);
+    }
+
+    /// Entity effects correlated with `value`: phtest rejects (chi2 7203.84).
+    #[test]
+    fn test_validate_hausman_sim_corr() {
+        let (c, d) = crate::test_support::load_case("panel_hausman_sim_corr");
+        check_hausman(&c, &d);
     }
 
     /// Every RE number plm reports for `inv ~ value + capital`, entity `firm`,

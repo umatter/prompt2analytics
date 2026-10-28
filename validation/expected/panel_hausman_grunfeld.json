@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "panel_hausman_grunfeld",
+  "area": "econometrics/panel",
+  "method": "Hausman test (FE vs RE), Grunfeld (balanced, N = 10, T = 20)",
+  "reference": "plm::phtest(fe, re) (method = 'chisq', classical vcov)",
+  "call": "phtest(plm(..., model = 'within'), plm(..., model = 'random'))",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "chisq": 2.3303668936754631,
+    "df": 2,
+    "p": 0.31186544605488559,
+    "coef_diff": {
+      "names": ["value", "capital"],
+      "values": [0.00034265188823462411, 0.0019523584694262075]
+    },
+    "vdiff_eigen": [1.6238549826880485e-06, 3.4871602785259518e-05],
+    "quad_form_signed": 2.3303668936754631
+  }
+}

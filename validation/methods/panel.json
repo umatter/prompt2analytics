@@ -83,6 +83,36 @@
         "validation/expected/panel_re_grunfeld.csv",
         "validation/expected/panel_re_full.csv"
       ]
+    },
+    {
+      "id": "panel_hausman",
+      "name": "Hausman test FE vs RE (phtest)",
+      "category": "econometrics",
+      "reference": "plm::phtest (method = 'chisq')",
+      "doc": "validation/econometrics/hausman.md",
+      "cases": [
+        "panel_hausman_grunfeld",
+        "panel_hausman_grunfeld_unbalanced",
+        "panel_hausman_sim_corr"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::tests::test_validate_hausman_grunfeld",
+        "p2a-core::econometrics::panel::tests::test_validate_hausman_grunfeld_unbalanced",
+        "p2a-core::econometrics::panel::tests::test_validate_hausman_sim_corr"
+      ],
+      "quantities": [
+        "chi2",
+        "df",
+        "p",
+        "coefficient differences",
+        "positive-definiteness of V_FE - V_RE (warning)"
+      ],
+      "tolerance": "validation/README.md, n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/hausman_grunfeld.csv",
+        "validation/expected/hausman_full.csv"
+      ]
     }
   ]
 }

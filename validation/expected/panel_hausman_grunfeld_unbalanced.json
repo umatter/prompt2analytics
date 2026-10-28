@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "panel_hausman_grunfeld_unbalanced",
+  "area": "econometrics/panel",
+  "method": "Hausman test (FE vs RE), Grunfeld without rows where (firm + year) %% 7 == 0",
+  "reference": "plm::phtest(fe, re) (method = 'chisq', classical vcov)",
+  "call": "phtest(plm(..., model = 'within'), plm(..., model = 'random'))",
+  "dataset": "validation/datasets/generated/grunfeld_unbalanced.csv",
+  "datasets": ["validation/datasets/grunfeld.csv", "validation/datasets/generated/grunfeld_unbalanced.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "chisq": 2.7465769253964765,
+    "df": 2,
+    "p": 0.25327271074478747,
+    "coef_diff": {
+      "names": ["value", "capital"],
+      "values": [-0.0022638278334911055, 0.0034138309963877567]
+    },
+    "vdiff_eigen": [2.2442076438727043e-06, 5.9144299104457986e-05],
+    "quad_form_signed": 2.7465769253964765
+  }
+}
