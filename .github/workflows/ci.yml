@@ -123,6 +123,22 @@ jobs:
           cargo test -p p2a-core --doc --no-default-features --features ci
           cargo test -p p2a-mcp --doc --no-default-features --features "http,llm,auth,websocket"
 
+      - name: Validation harness, registry lint and runner tests
+        # p2a-validation is the test-only loader for validation/expected/*.json;
+        # its tests parse every committed case. The test lists use the feature
+        # sets of "Run tests (cheap subset)", so they reuse its builds (no
+        # recompilation), and feed the registry lint
+        # (validation/methods/*.json against the case files and the tests). CI
+        # does not install R: the R drift check runs in run_validation.sh locally.
+        run: |
+          cargo test -p p2a-validation
+          cargo test -p p2a-core --tests --no-default-features --features ci -- --list > target/p2a-core-tests.txt 2>&1
+          cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket" -- --list > target/p2a-mcp-tests.txt 2>&1
+          cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis -- --list > target/p2a-cli-tests.txt 2>&1
+          python3 validation/tools/validation_status.py lint --tests target/p2a-core-tests.txt target/p2a-mcp-tests.txt target/p2a-cli-tests.txt
+          python3 -m unittest discover -s validation/tools/tests -v
+          bash validation/tools/tests/test_run_validation.sh
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -171,6 +187,7 @@ jobs:
           cargo clippy -p p2a-mcp --no-default-features --features "http,llm,auth,websocket"
           cargo clippy -p p2a-cli --no-default-features --features spectral-analysis
           cargo clippy -p p2a-chat
+          cargo clippy -p p2a-validation --all-targets
 
   dioxus-check:
     name: Dioxus (web) check
