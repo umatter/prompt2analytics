@@ -2,3 +2,4 @@
 # Used by: validation/tools/validation_status.py lint (rule dead-test-name).
 test_type
 test_name
+test_support
