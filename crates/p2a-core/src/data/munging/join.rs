@@ -31,6 +31,31 @@ use super::CHECKPOINT_EVERY;
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
+use std::borrow::Cow;
+
+/// `df` with all its columns chunked alike: `df` itself when they already
+/// are, otherwise a copy with every column in one chunk. Every frame handed
+/// to a polars join goes through here.
+///
+/// A polars hash join on one numeric key gathers the rows of every column by
+/// (chunk, row) ids taken from the key column's chunks, which is sound only
+/// when all columns share that chunk layout. polars rechunks a frame whose
+/// columns differ, but for the join types other than left it does so after
+/// selecting the key columns, which keep their old chunks; a right join then
+/// gathers single-chunk columns with ids into later chunks (an abort in a
+/// debug build, an out-of-bounds read in a release build). Row-binding
+/// datasets and then adding or binding a column builds such a frame. A frame
+/// that is already aligned is not copied; a misaligned one is copied once,
+/// the copy polars itself makes of it in a keyed join.
+fn chunk_aligned(df: &DataFrame) -> Cow<'_, DataFrame> {
+    if df.should_rechunk() {
+        let mut df = df.clone();
+        df.as_single_chunk_par();
+        Cow::Owned(df)
+    } else {
+        Cow::Borrowed(df)
+    }
+}
 
 /// Type of join operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,9 +306,9 @@ pub fn estimate_join_shape(
     let left_counts = key_counts(left, left_on, LEFT_N)?;
     let right_counts = key_counts(right, &right_keys, RIGHT_N)?;
     // Null keys never match (the JoinArgs default), as in `join`.
-    let matched = left_counts
+    let matched = chunk_aligned(&left_counts)
         .join(
-            &right_counts,
+            &chunk_aligned(&right_counts),
             left_on.iter().copied(),
             right_keys.iter().copied(),
             JoinArgs::new(polars::prelude::JoinType::Inner),
@@ -384,11 +409,10 @@ pub fn join_with(
     // Set up join arguments
     let suffix_str: PlSmallStr = suffix.unwrap_or("_right").into();
 
-    // Perform the join
-    let result = left
-        .df()
+    // Perform the join, on frames whose columns are chunked alike.
+    let result = chunk_aligned(left.df())
         .join(
-            right.df(),
+            &chunk_aligned(right.df()),
             left_on_str.as_slice(),
             right_on_str.as_slice(),
             JoinArgs::new(join_type.to_polars()).with_suffix(Some(suffix_str)),
@@ -666,9 +690,13 @@ pub fn cross_join_with(
 
     let suffix_str: PlSmallStr = suffix.unwrap_or("_right").into();
 
-    let result = left
-        .df()
-        .cross_join(right.df(), Some(suffix_str), None, MaintainOrderJoin::None)
+    let result = chunk_aligned(left.df())
+        .cross_join(
+            &chunk_aligned(right.df()),
+            Some(suffix_str),
+            None,
+            MaintainOrderJoin::None,
+        )
         .map_err(|e| MungeError::JoinError(format!("Cross join failed: {}", e)))?;
 
     Ok(Dataset::new(result))
@@ -1341,6 +1369,225 @@ mod tests {
 
         let result = inner_join(&orders, &customers, &["nonexistent"], None, None);
         assert!(matches!(result, Err(MungeError::JoinError(_))));
+    }
+
+    /// `ds` with every column in one chunk.
+    fn rechunked(ds: &Dataset) -> Dataset {
+        let mut df = ds.df().clone();
+        df.as_single_chunk_par();
+        Dataset::new(df)
+    }
+
+    /// `df` in a fixed row order (every column ascending, nulls first), so
+    /// that two joins can be compared whatever order polars returns.
+    fn sorted_rows(df: &DataFrame) -> DataFrame {
+        let mut df = df.clone();
+        df.as_single_chunk_par();
+        let names: Vec<PlSmallStr> = df.get_column_names_owned();
+        df.sort(
+            names,
+            SortMultipleOptions::default().with_maintain_order(true),
+        )
+        .unwrap()
+    }
+
+    /// Datasets laid out as row-binding, adding a column and selecting
+    /// leave them: the row-bound columns `k` (an integer key), `g` (a float
+    /// key), `x`, `id` and `slot` are in two chunks, the added columns in
+    /// one. `w` differs on every row, so a row gathered from the wrong place
+    /// shows; (`id`, `slot`) is unique, for a pivot.
+    fn differently_chunked() -> (Dataset, Dataset) {
+        use crate::data::munging::{MutateExpr, mutate, select};
+        let n = 60;
+        let part = |rows: std::ops::Range<i64>| {
+            let k: Vec<i64> = rows.clone().map(|i| i % 7).collect();
+            let g: Vec<f64> = rows.clone().map(|i| (i % 5) as f64 + 0.25).collect();
+            let x: Vec<f64> = rows.clone().map(|i| i as f64 * 0.37 + 0.1).collect();
+            let id: Vec<i64> = rows.clone().map(|i| i / 3).collect();
+            let slot: Vec<String> = rows.map(|i| format!("s{}", i % 3)).collect();
+            Dataset::new(df!("k" => k, "g" => g, "x" => x, "id" => id, "slot" => slot).unwrap())
+        };
+        let bound = concat(&[&part(0..n), &part(n..2 * n)]).unwrap();
+        let z = mutate(
+            &bound,
+            "z",
+            MutateExpr::Constant("a constant longer than twelve".into()),
+        )
+        .unwrap();
+        let w: Vec<f64> = (0..2 * n).map(|i| (i as f64 * 1.3).sin() + 0.01).collect();
+        let mut df = z.df().clone();
+        df.with_column(Column::new("w".into(), w)).unwrap();
+        let wide = Dataset::new(df);
+        let narrow = select(&wide, &["k", "g", "z", "w"]).unwrap();
+        for ds in [&wide, &narrow] {
+            assert!(ds.df().column("k").unwrap().n_chunks() > 1);
+            assert_eq!(ds.df().column("w").unwrap().n_chunks(), 1);
+            assert!(ds.df().should_rechunk());
+        }
+        (wide, narrow)
+    }
+
+    #[test]
+    fn joins_of_differently_chunked_frames_match_joins_of_rechunked_ones() {
+        // polars' left and right hash joins on one numeric key gather rows by
+        // (chunk, row) ids taken from the key column's chunks; when the other
+        // columns are chunked differently those ids point past them.
+        let (wide, narrow) = differently_chunked();
+        // Row-bound columns, aligned with each other, next to a scalar
+        // column (one value, materialised as one chunk).
+        let mut df = crate::data::munging::select(&wide, &["k", "g", "x"])
+            .unwrap()
+            .df()
+            .clone();
+        assert!(!df.should_rechunk());
+        let rows = df.height();
+        df.with_column(Column::new_scalar("one".into(), Scalar::from(1i64), rows))
+            .unwrap();
+        let scalar = Dataset::new(df);
+        let pairs = [
+            (&wide, &narrow),
+            (&narrow, &wide),
+            (&wide, &wide),
+            (&scalar, &narrow),
+            (&narrow, &scalar),
+        ];
+        let keys: [&[&str]; 4] = [&["k"], &["g"], &["z"], &["k", "z"]];
+        for (l, r) in pairs {
+            let (l1, r1) = (rechunked(l), rechunked(r));
+            let in_both = |c: &&str| l.df().column(c).is_ok() && r.df().column(c).is_ok();
+            for on in keys.into_iter().filter(|on| on.iter().all(in_both)) {
+                for jt in [
+                    JoinType::Inner,
+                    JoinType::Left,
+                    JoinType::Right,
+                    JoinType::Full,
+                    JoinType::Semi,
+                    JoinType::Anti,
+                ] {
+                    let what = format!("{jt:?} on {on:?}");
+                    let got = join(l, r, on, None, jt, None).unwrap();
+                    let want = join(&l1, &r1, on, None, jt, None).unwrap();
+                    assert_eq!(got.nrows(), want.nrows(), "{what}");
+                    assert!(
+                        sorted_rows(got.df()).equals_missing(&sorted_rows(want.df())),
+                        "{what}"
+                    );
+                    let rows = estimate_join_rows(l, r, on, None, jt).unwrap();
+                    assert_eq!(rows, want.nrows() as u64, "{what}");
+                    let capped = JoinOptions {
+                        max_output_rows: Some(rows),
+                    };
+                    let got = join_with(l, r, on, None, jt, None, &capped).unwrap();
+                    assert_eq!(got.nrows(), want.nrows(), "{what}, capped");
+                }
+            }
+            let got = cross_join(l, r, None).unwrap();
+            let want = cross_join(&l1, &r1, None).unwrap();
+            assert!(
+                sorted_rows(got.df()).equals_missing(&sorted_rows(want.df())),
+                "cross"
+            );
+        }
+    }
+
+    #[test]
+    fn other_kernels_on_differently_chunked_frames_match_rechunked_frames() {
+        // Outside the joins, polars gathers by (chunk, row) ids only for a
+        // window expression mapped by join, which no kernel here uses: the
+        // others gather by row index column by column. This holds them to
+        // that on the layout the join test uses.
+        use crate::data::munging::{
+            AggFn, AggSpec, cumsum, deduplicate, filter, group_by, head, lag, lead, melt,
+            one_hot_encode, pivot, rank, sample, sample_rows, slice, sort, stack, tail, take_rows,
+            value_counts,
+        };
+        type Kernel = dyn Fn(&Dataset) -> MungeResult<Dataset>;
+        let (wide, narrow) = differently_chunked();
+        // Kernels whose row order is part of the result, then kernels
+        // compared as sets of rows (a group order is not fixed).
+        let ordered: Vec<(&str, Box<Kernel>)> = vec![
+            ("filter", Box::new(|d| filter(d, "k", ">", "2"))),
+            ("sort", Box::new(|d| sort(d, &["g", "w"], &[true, false]))),
+            (
+                "sample",
+                Box::new(|d| sample(d, Some(50), None, true, Some(7))),
+            ),
+            (
+                "take_rows",
+                Box::new(|d| take_rows(d, &sample_rows(d.nrows(), 40, false, 3)?)),
+            ),
+            ("head", Box::new(|d| head(d, 70))),
+            ("tail", Box::new(|d| tail(d, 70))),
+            ("slice", Box::new(|d| slice(d, 55, 20))),
+            (
+                "melt",
+                Box::new(|d| melt(d, &["k", "z"], &["x", "w"], "variable", "value")),
+            ),
+            (
+                "stack",
+                Box::new(|d| stack(d, &["x", "w"], "stacked", "source")),
+            ),
+            ("lag", Box::new(|d| lag(d, "w", 1, Some(&["k"])))),
+            ("lead", Box::new(|d| lead(d, "w", 2, Some(&["k", "z"])))),
+            ("rank", Box::new(|d| rank(d, "w", false))),
+            ("cumsum", Box::new(|d| cumsum(d, "w", false))),
+            ("one_hot", Box::new(|d| one_hot_encode(d, "slot", false))),
+            ("concat", Box::new(|d| concat(&[d, d]))),
+        ];
+        let unordered: Vec<(&str, Box<Kernel>)> = vec![
+            (
+                "deduplicate",
+                Box::new(|d| deduplicate(d, Some(&["k", "g"]), "first")),
+            ),
+            (
+                "group_by",
+                Box::new(|d| {
+                    group_by(
+                        d,
+                        &["k", "z"],
+                        &[
+                            AggSpec::new("w", AggFn::Min),
+                            AggSpec::new("w", AggFn::Max).with_alias("w_max"),
+                            AggSpec::new("g", AggFn::Count),
+                        ],
+                    )
+                }),
+            ),
+            ("value_counts", Box::new(|d| value_counts(d, "k"))),
+            ("pivot", Box::new(|d| pivot(d, &["id"], "slot", "w"))),
+        ];
+        // Columns in name order: stack's id columns and one_hot's dummies
+        // come in hash order, which differs from call to call.
+        let by_name = |ds: &Dataset| {
+            let mut names = ds.df().get_column_names_owned();
+            names.sort();
+            ds.df().select(names).unwrap()
+        };
+        let wide1 = rechunked(&wide);
+        for (name, kernel) in &ordered {
+            let (got, want) = (kernel(&wide).unwrap(), kernel(&wide1).unwrap());
+            assert!(by_name(&got).equals_missing(&by_name(&want)), "{name}");
+        }
+        for (name, kernel) in &unordered {
+            let (got, want) = (kernel(&wide).unwrap(), kernel(&wide1).unwrap());
+            assert!(
+                sorted_rows(got.df()).equals_missing(&sorted_rows(want.df())),
+                "{name}"
+            );
+        }
+        // The narrow dataset has no `x`, `id` or `slot`: the kernels that do
+        // not name them.
+        let narrow1 = rechunked(&narrow);
+        for (name, kernel) in &ordered {
+            if ["melt", "stack", "one_hot"].contains(name) {
+                continue;
+            }
+            let (got, want) = (kernel(&narrow).unwrap(), kernel(&narrow1).unwrap());
+            assert!(
+                by_name(&got).equals_missing(&by_name(&want)),
+                "{name}, narrow"
+            );
+        }
     }
 
     #[test]
