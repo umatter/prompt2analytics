@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ols",
+      "name": "OLS with classical standard errors and fit statistics",
+      "category": "regression",
+      "reference": "stats::lm; stats::summary.lm; stats::confint; stats::logLik; stats::AIC; stats::BIC",
+      "doc": "validation/regression/ols.md",
+      "cases": ["ols_grunfeld", "ols_mtcars", "ols_longley"],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_grunfeld",
+        "p2a-core::regression::ols::tests::test_validate_ols_raw_grunfeld",
+        "p2a-core::regression::ols::tests::test_validate_ols_mtcars",
+        "p2a-core::regression::ols::tests::test_validate_ols_longley"
+      ],
+      "quantities": ["coefficients", "SE classical", "t", "p", "95% CI", "R2", "adj. R2", "sigma", "F, its df and p", "logLik", "AIC", "BIC", "n", "df_resid", "the same through LinearEstimator"],
+      "tolerance": "validation/README.md: Grunfeld (n = 200) coefficients 1e-8, SE and statistics 1e-6; mtcars (n = 32) and Longley (n = 16) coefficients 1e-6, SE and statistics 1e-5 (relative); p-values also 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/ols_longley.csv"]
+    },
+    {
+      "id": "linear_estimator_defaults",
+      "name": "LinearEstimator default p-values, CI, adjusted R2, logLik, AIC and BIC on an OLS fit",
+      "category": "regression",
+      "reference": "stats::summary.lm; stats::confint; stats::logLik; stats::AIC; stats::BIC",
+      "doc": "validation/regression/ols.md",
+      "cases": ["ols_grunfeld"],
+      "tests": ["p2a-core::traits::estimator::tests::test_validate_linear_estimator_defaults_grunfeld"],
+      "quantities": ["t", "p", "95% CI", "adj. R2", "sigma", "logLik", "AIC", "BIC"],
+      "tolerance": "validation/README.md, n = 200: statistics 1e-6 relative; p-values also 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ols_robust_se",
+      "name": "OLS heteroskedasticity-consistent standard errors (HC0-HC3)",
+      "category": "regression",
+      "reference": "sandwich::vcovHC(type = 'HC0' | 'HC1' | 'HC2' | 'HC3')",
+      "doc": "validation/regression/ols_robust_se.md",
+      "cases": ["ols_grunfeld", "ols_mtcars"],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_robust_se_grunfeld",
+        "p2a-core::regression::ols::tests::test_validate_ols_robust_se_mtcars",
+        "p2a-core::regression::ols::tests::test_validate_ols_raw_grunfeld"
+      ],
+      "quantities": ["SE HC0, HC1, HC2, HC3", "t", "p", "95% CI"],
+      "tolerance": "validation/README.md: SE 1e-6 (n = 200) and 1e-5 (n = 32) relative",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/ols_robust_se_mtcars.csv"]
+    },
+    {
+      "id": "ols_clustered",
+      "name": "OLS with one- and two-way cluster-robust standard errors (CR1)",
+      "category": "regression",
+      "reference": "sandwich::vcovCL(cluster = ~firm | ~year | ~firm + year, type = 'HC1')",
+      "doc": "validation/regression/ols_clustered.md",
+      "cases": ["ols_grunfeld"],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_clustered_grunfeld_firm",
+        "p2a-core::regression::ols::tests::test_validate_ols_clustered_grunfeld_year",
+        "p2a-core::regression::ols::tests::test_validate_ols_clustered_grunfeld_firm_year"
+      ],
+      "quantities": ["SE clustered by firm", "SE clustered by year", "SE two-way firm + year", "p (firm)", "adj. R2 through LinearEstimator", "cluster counts"],
+      "tolerance": "validation/README.md, n = 200: SE 1e-6 relative; p-values also 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "stepwise",
+      "name": "Stepwise selection by AIC and BIC (forward, backward, both)",
+      "category": "regression",
+      "reference": "stats::step; stats::extractAIC",
+      "doc": "validation/regression/ols.md",
+      "cases": ["step_legacy", "step_borderline"],
+      "tests": [
+        "p2a-core::regression::step::tests::test_validate_step_legacy",
+        "p2a-core::regression::step::tests::test_validate_step_borderline"
+      ],
+      "quantities": ["selected variables", "final criterion (extractAIC scale)", "full-model t", "logLik", "AIC", "BIC"],
+      "tolerance": "validation/README.md, n = 100-120: statistics 1e-6 relative; selections exact",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/step_test.csv"]
+    },
+    {
+      "id": "regression_diagnostics_exhibit",
+      "name": "Regression diagnostics printed by `p2a reg diagnostics` (Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF, condition number)",
+      "category": "regression",
+      "reference": "tseries::jarque.bera.test; lmtest::bptest (studentized); lmtest::dwtest; car::vif; base::kappa(model.matrix, exact = TRUE)",
+      "doc": "validation/diagnostics/regression_diagnostics.md",
+      "cases": ["ols_diagnostics_grunfeld"],
+      "tests": ["p2a-core::regression::diagnostics::tests::test_validate_diagnostics_grunfeld"],
+      "quantities": ["JB and p", "BP (studentized) and p", "DW", "VIF", "condition number", "n", "parameters"],
+      "tolerance": "validation/README.md, n = 200: statistics 1e-6 relative; p-values also 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
