@@ -9,7 +9,7 @@ members = [
     "crates/p2a-dioxus",
 ]
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors = ["prompt2analytics contributors"]
 license = "MIT OR Apache-2.0"
