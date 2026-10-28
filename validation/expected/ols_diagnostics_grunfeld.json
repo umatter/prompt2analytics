@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "id": "ols_diagnostics_grunfeld",
+  "area": "regression",
+  "method": "Regression diagnostics printed by `p2a reg diagnostics`, Grunfeld pooled",
+  "reference": "tseries::jarque.bera.test; lmtest::bptest (studentized); lmtest::dwtest; car::vif; base::kappa(exact = TRUE); lmtest::bgtest; lmtest::resettest; lmtest::harvtest",
+  "call": "lm(inv ~ value + capital, data = grunfeld)",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "lmtest": "0.9.40",
+    "car": "3.1.5",
+    "tseries": "0.10.63"
+  },
+  "values": {
+    "jarque_bera": 89.571761033718531,
+    "jarque_bera_p": 0,
+    "breusch_pagan": 55.247084212166833,
+    "breusch_pagan_df": 2,
+    "breusch_pagan_p": 1.0075070474936277e-12,
+    "breusch_pagan_nonstudentized": 142.02216371915205,
+    "breusch_pagan_nonstudentized_p": 1.4463686316610949e-31,
+    "durbin_watson": 0.35818526971627723,
+    "durbin_watson_p_greater": 2.1007969397610251e-32,
+    "vif": {
+      "names": ["value", "capital"],
+      "values": [1.3137727956493841, 1.3137727956493841]
+    },
+    "condition_number": 2457.5938073301068,
+    "bgtest1_chisq": 135.25103842881529,
+    "bgtest1_chisq_p": 2.9095524934001322e-31,
+    "bgtest1_f": 409.41511475676231,
+    "bgtest1_f_p": 6.9029463764017079e-50,
+    "reset_fitted": 19.560118069077234,
+    "reset_fitted_p": 1.8116597829824153e-08,
+    "harvey_collier": 1.469927271309776,
+    "harvey_collier_p": 0.14318483984355307,
+    "reset_regressor": 9.627880716546926,
+    "reset_regressor_p": 4.0440256446410542e-07,
+    "bgtest4_chisq": 135.41598144858455,
+    "bgtest4_chisq_p": 2.7027165188732877e-28,
+    "wald_drop_capital_f": 81.989546293315811,
+    "wald_drop_capital_f_p": 1.3473701051203997e-16,
+    "wald_drop_capital_chisq": 81.989546293315811,
+    "wald_drop_capital_chisq_p": 1.3680836872216867e-19
+  }
+}

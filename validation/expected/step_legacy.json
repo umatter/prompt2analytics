@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "step_legacy",
+  "area": "regression",
+  "method": "Stepwise AIC/BIC (validate_regression_diag.R DGP)",
+  "reference": "stats::step; stats::extractAIC",
+  "call": "step(lm(y ~ x1 + x2 + x3), ...)",
+  "dataset": "validation/datasets/generated/step_legacy.csv",
+  "datasets": ["validation/datasets/generated/step_legacy.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "forward_vars": [1, 1, 0],
+    "forward_aic": -160.62381890999552,
+    "backward_vars": [1, 1, 0],
+    "backward_aic": -160.62381890999552,
+    "both_vars": [1, 1, 0],
+    "both_aic": -160.62381890999552,
+    "backward_bic_vars": [1, 1, 0],
+    "backward_bic": -152.80830835203125,
+    "full_t": {
+      "names": ["(Intercept)", "x1", "x2", "x3"],
+      "values": [45.224999146254831, 69.976775934693237, 30.42197778431861, -0.35588800410547722]
+    },
+    "full_log_lik": -58.516020535374679,
+    "full_aic": 127.03204107074936,
+    "full_bic": 140.05789200068983
+  }
+}

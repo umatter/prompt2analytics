@@ -1,0 +1,154 @@
+{
+  "schema": 1,
+  "id": "ols_grunfeld",
+  "area": "regression",
+  "method": "OLS with classical, HC0-HC3 and clustered SEs, Grunfeld pooled",
+  "reference": "stats::lm; sandwich::vcovHC; sandwich::vcovCL(type = 'HC1')",
+  "call": "lm(inv ~ value + capital, data = grunfeld)",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-42.714369436559359, 0.11556215636055213, 0.23067848873196961]
+    },
+    "se_classical": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [9.5116760314238729, 0.0058357095572206304, 0.025475801476508936]
+    },
+    "t_classical": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-4.4907300559273917, 19.802588738770414, 9.054807910348833]
+    },
+    "p_classical": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [1.2073565413848341e-05, 9.5427026857834243e-49, 1.3473701051204194e-16]
+    },
+    "ci95_lower_classical": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-61.472146314223878, 0.1040536758955365, 0.18043819477144296]
+    },
+    "ci95_upper_classical": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-23.95659255889484, 0.12707063682556774, 0.28091878269249626]
+    },
+    "se_hc0": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [11.487562855581498, 0.0067596792900536723, 0.048497663239300846]
+    },
+    "t_hc0": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-3.7183143172797175, 17.095804608747134, 4.7564866701667317]
+    },
+    "p_hc0": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.00026139046231253061, 8.8975505908933565e-41, 3.8006157460500429e-06]
+    },
+    "ci95_lower_hc0": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-65.368751293264324, 0.10223153455757054, 0.13503726387049408]
+    },
+    "ci95_upper_hc0": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-20.059987579854401, 0.12889277816353373, 0.32631971359344514]
+    },
+    "se_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [11.574701117099652, 0.0068109544568719536, 0.048865539534342223]
+    },
+    "t_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-3.6903215905468301, 16.967101614364047, 4.7206782311254543]
+    },
+    "p_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.00028980093362191437, 2.1657545153051088e-40, 4.4535950263908392e-06]
+    },
+    "ci95_lower_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-65.540594831844174, 0.10213041587613471, 0.13431178274201885]
+    },
+    "ci95_upper_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-19.88814404127454, 0.12899389684496954, 0.3270451947219204]
+    },
+    "se_hc2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [12.667874294420187, 0.0069550258013053997, 0.053165053831057199]
+    },
+    "t_hc2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-3.3718655903756276, 16.615633020205632, 4.338911975242187]
+    },
+    "p_hc2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.00089861854131832925, 2.4745450766813879e-39, 2.2859468378682328e-05]
+    },
+    "ci95_lower_hc2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-67.696418735127025, 0.10184629579840923, 0.12583280074203634]
+    },
+    "ci95_upper_hc2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-17.732320137991685, 0.12927801692269503, 0.33552417672190288]
+    },
+    "se_hc3": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [14.01349546658532, 0.0071626662443800559, 0.058509866205313933]
+    },
+    "t_hc3": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-3.0480881474868458, 16.13395800079671, 3.9425571051984241]
+    },
+    "p_hc3": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.0026190786719832372, 7.0722212906810741e-38, 0.00011197063521871759]
+    },
+    "ci95_lower_hc3": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-70.350090036162342, 0.10143681243405722, 0.11529240831928474]
+    },
+    "ci95_upper_hc3": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-15.078648836956376, 0.12968750028704704, 0.3460645691446545]
+    },
+    "r2": 0.81240801254472839,
+    "adj_r2": 0.8105035253624413,
+    "sigma": 94.408403332254977,
+    "f_stat": 426.57573130481285,
+    "f_df1": 2,
+    "f_df2": 197,
+    "f_p": 2.5799247071944057e-72,
+    "log_lik": -1191.8023603678728,
+    "aic": 2391.6047207357456,
+    "bic": 2404.7979902019379,
+    "extract_aic": 1822.0293074538763,
+    "extract_bic": 1831.9242595535204,
+    "n_obs": 200,
+    "df_resid": 197,
+    "se_cluster_firm_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [20.425202928473897, 0.015894336687058763, 0.084967112635540076]
+    },
+    "se_cluster_firm_hc0": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [20.322304526199204, 0.015814263952602135, 0.084539064005291056]
+    },
+    "se_cluster_year_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [10.272890949869057, 0.0079094934972788414, 0.03867233748282798]
+    },
+    "se_cluster_firm_year_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [19.716680683803034, 0.016395149450111585, 0.079543189287480331]
+    },
+    "p_cluster_firm_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.03778713089939461, 8.2231585740631649e-12, 0.0072178736108888791]
+    }
+  }
+}
