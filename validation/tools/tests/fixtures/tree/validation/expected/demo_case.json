@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "demo_case",
+  "area": "stats",
+  "method": "Demo mean of x",
+  "reference": "base R mean()",
+  "call": "mean(d$x)",
+  "dataset": "validation/datasets/d.csv",
+  "datasets": ["validation/datasets/d.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "jsonlite": "2.0.0"
+  },
+  "values": {
+    "mean": 2.0333333333333332,
+    "first2": [1.1, 1.9],
+    "coef": {
+      "names": ["x"],
+      "values": [2.0333333333333332]
+    }
+  }
+}

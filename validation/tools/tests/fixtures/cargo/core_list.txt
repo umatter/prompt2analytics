@@ -1,0 +1,19 @@
+    Finished `test` profile [optimized] target(s) in 0.40s
+     Running unittests src/lib.rs (target/debug/deps/p2a_core-0000000000000000)
+data::database::tests::test_validate_read_only_allows_select: test
+diagnostics::iv::tests::test_validate_weak_iv_warning: test
+econometrics::did::tests::test_validate_did_2x2: test
+regression::ols::tests::test_validate_two: test
+stats::ttest::tests::test_other: test
+stats::ttest::tests::test_validate_one: test
+stats::ttest::benches::bench_validate_ttest: bench
+
+6 tests, 1 benchmark
+     Running tests/validation_ml_advanced.rs (target/debug/deps/validation_ml_advanced-0000000000000000)
+test_validate_c50_classification: test
+
+1 test, 0 benchmarks
+     Running tests/validation_new_methods.rs (target/debug/deps/validation_new_methods-0000000000000000)
+test_negbin_vs_r: test
+
+1 test, 0 benchmarks

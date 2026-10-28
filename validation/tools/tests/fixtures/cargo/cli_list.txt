@@ -1,0 +1,12 @@
+     Running unittests src/main.rs (target/debug/deps/p2a-0000000000000000)
+output::shell_quote_tests::joins_arguments: test
+
+1 test, 0 benchmarks
+     Running tests/exhibits.rs (target/debug/deps/exhibits-0000000000000000)
+test_validate_cli_ols: test
+
+1 test, 0 benchmarks
+     Running tests/tier2/main.rs (target/debug/deps/tier2-0000000000000000)
+wp21_stats_viz::test_validate_cli_t_test: test
+
+1 test, 0 benchmarks

@@ -1,0 +1,25 @@
+   Compiling p2a-core v0.2.0 (/repo/crates/p2a-core)
+    Finished `test` profile [optimized] target(s) in 1m 02s
+     Running unittests src/lib.rs (target/debug/deps/p2a_core-0000000000000000)
+
+running 3 tests
+test stats::ttest::tests::test_validate_one ... ok
+test regression::ols::tests::test_validate_two ... ok
+test ml::advanced_clustering_mod::advanced::tests::test_hdbscan_full_benchmark ... ignored
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 1846 filtered out; finished in 0.52s
+
+     Running tests/validation_ml_advanced.rs (target/debug/deps/validation_ml_advanced-0000000000000000)
+
+running 1 test
+test test_validate_c50_classification ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.10s
+
+   Doc-tests p2a_core
+
+running 1 test
+test crates/p2a-core/src/lib.rs - (line 10) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+

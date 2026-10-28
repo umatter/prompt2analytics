@@ -1,0 +1,7 @@
+    Finished `test` profile [optimized] target(s) in 0.30s
+     Running unittests src/lib.rs (target/debug/deps/demo-0000000000000000)
+stats::tests::test_selftest: test
+stats::tests::test_validate_demo_mean: test
+stats::tests::test_validate_demo_var: test
+
+3 tests, 0 benchmarks

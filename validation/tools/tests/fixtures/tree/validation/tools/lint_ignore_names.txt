@@ -1,0 +1,4 @@
+# Identifiers in Markdown that look like Rust test names but are not tests (one per line).
+# Used by: validation/tools/validation_status.py lint (rule dead-test-name).
+test_type
+test_name

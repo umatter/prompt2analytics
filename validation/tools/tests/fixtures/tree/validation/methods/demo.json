@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "demo_mean",
+      "name": "Demo mean",
+      "category": "stats",
+      "reference": "base R mean()",
+      "doc": "validation/stats/demo.md",
+      "cases": ["demo_case"],
+      "tests": ["demo::stats::tests::test_validate_demo_mean"],
+      "quantities": ["mean"],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative",
+      "deviations": [
+        {"finding": "REG-50", "quantity": "QS kernel SEs", "note": "the demo has no QS kernel; this entry exercises the deviation list"}
+      ],
+      "supersedes_legacy": ["validation/expected/legacy_a.csv"]
+    },
+    {
+      "id": "demo_var",
+      "name": "Demo variance",
+      "category": "stats",
+      "reference": "base R var()",
+      "doc": "validation/stats/demo.md",
+      "cases": ["demo_var_case"],
+      "tests": ["demo::stats::tests::test_validate_demo_var"],
+      "quantities": ["variance"],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
