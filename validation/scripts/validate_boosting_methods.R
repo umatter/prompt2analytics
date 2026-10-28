@@ -258,7 +258,9 @@ if (requireNamespace("BART", quietly = TRUE)) {
     ntree = 50,
     nskip = 100,
     ndpost = 200,
-    printevery = 0
+    # wbart takes iterations modulo printevery, so 0 crashes it; a value above
+    # nskip + ndpost keeps it silent.
+    printevery = 1000L
   )
   bart_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
 
