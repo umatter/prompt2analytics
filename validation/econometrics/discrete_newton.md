@@ -122,7 +122,12 @@ inverse with largest absolute change below 1e-8. A non-finite step, or a step fr
 pseudoinverse (singular information), ends the iteration with `converged = false` and is
 not applied. With 100 categories of one row each (complete separation, no MLE) the fit
 stops at its first pseudoinverse step, iteration 35, with finite estimates; without that
-rule it reported `converged = true` with a log-likelihood of -5e16.
+rule it reported `converged = true` with a log-likelihood of -5e16. That fit takes 32.7 s
+in an opt-level 0 build (CI's profile), so the tests check the same behaviour on 20
+categories of one row each (38 parameters, 0.5 s): the fit stops at iteration 42, and
+without the rule it reports `converged = true` at iteration 45 with a log-likelihood of
+-1.5e18. The 100-category test checks only that the category cap admits 100 categories
+and refuses 101.
 
 Tolerances (`validation/README.md`): n = 400-500 coefficients 1e-8, SE and statistics
 1e-6; n = 30 coefficients 1e-6, SE and statistics 1e-5 (relative); p-values also 1e-12
@@ -200,11 +205,12 @@ R-pinned (load a case):
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j16`
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j30`
 
-Helpers and the 100-category fits:
+Helpers, the category cap, the separated fits and regressor scale:
 
 - `econometrics::discrete::multinomial_logit::tests::test_softmax_into_log_sum_exp`
 - `econometrics::discrete::multinomial_logit::tests::test_max_abs_step_rejects_non_finite`
 - `econometrics::discrete::multinomial_logit::tests::test_multinom_accepts_100_categories`
+- `econometrics::discrete::multinomial_logit::tests::test_multinom_one_row_per_category_does_not_converge`
 - `econometrics::discrete::ordered_models::tests::test_ordered_max_abs_step_rejects_non_finite`
 - `econometrics::discrete::ordered_models::tests::test_ordered_accepts_100_categories`
 - `econometrics::discrete::ordered_models::tests::test_ordered_fit_does_not_depend_on_regressor_scale`

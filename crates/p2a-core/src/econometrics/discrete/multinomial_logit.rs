@@ -725,15 +725,45 @@ mod tests {
         }
     }
 
-    /// One row per category is complete separation, so no MLE exists. Before Tier 1
-    /// the fit was all NaN and reported `Converged: true (1 iterations)` (RF-31); now
-    /// the estimates are finite and `converged` is false: the iteration runs out of
-    /// steps or stops at the first step that comes from the pseudoinverse (singular
-    /// information), never applying it.
+    /// The category cap admits 100 categories and refuses 101. The cap is checked
+    /// before the first budget checkpoint, so under a cancelled budget 100
+    /// categories get past it to the Newton loop (`Cancelled`), and 101 do not.
+    /// A full fit of 100 one-row categories runs 35 Newton iterations on 198
+    /// parameters (32.7 s in an opt-level 0 build, as CI's), so its behaviour is
+    /// checked on 20 categories in
+    /// test_multinom_one_row_per_category_does_not_converge.
     #[test]
     fn test_multinom_accepts_100_categories() {
-        let r = run_multinom(&continuous_y_dataset(100), "y", &["x"], None).unwrap();
-        assert_eq!(r.categories.len(), 100);
+        let run = |n| {
+            resource::with_budget(cancelled(), || {
+                run_multinom(&continuous_y_dataset(n), "y", &["x"], None)
+            })
+            .unwrap_err()
+        };
+        let e = run(100);
+        assert!(
+            matches!(e, EconError::Cancelled(_)),
+            "100 categories: {e:?}"
+        );
+        let e = run(101);
+        assert!(
+            matches!(e, EconError::InvalidSpecification { .. }),
+            "101 categories: {e:?}"
+        );
+    }
+
+    /// One row per category is complete separation, so no MLE exists. Before Tier 1
+    /// the 100-category fit was all NaN and reported `Converged: true (1 iterations)`
+    /// (RF-31). The estimates must be finite and `converged` false: the iteration
+    /// runs out of steps or stops at the first step that comes from the
+    /// pseudoinverse (singular information), never applying it. Measured on 20
+    /// categories (38 parameters): the stop comes at step 42; with pseudoinverse
+    /// steps applied, the fit reports `converged = true` at step 45 with a
+    /// log-likelihood of -1.5e18.
+    #[test]
+    fn test_multinom_one_row_per_category_does_not_converge() {
+        let r = run_multinom(&continuous_y_dataset(20), "y", &["x"], None).unwrap();
+        assert_eq!(r.categories.len(), 20);
         assert!(
             flat(&r.coefficients).iter().all(|b| b.is_finite()) && r.log_likelihood.is_finite(),
             "non-finite estimates: LL {}, converged {} after {} iterations",
