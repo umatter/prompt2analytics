@@ -917,8 +917,8 @@ impl SessionManager {
         })
     }
 
-    /// Dataset bytes reserved by files being decoded.
-    #[cfg(test)]
+    /// Dataset bytes reserved by calls admitting datasets now (files being
+    /// decoded, results being built).
     fn reserved_data_bytes(&self) -> u64 {
         self.reserved_data_bytes.load(Ordering::SeqCst)
     }
@@ -1099,6 +1099,20 @@ impl QuotaShortfall {
 /// about to build a dataset of `name` charged at most `bytes` words why the
 /// dataset is that large itself.
 pub(crate) async fn admit_charge(name: &str, bytes: u64) -> Result<(), QuotaShortfall> {
+    check_charge(name, bytes, true).await
+}
+
+/// Whether [`admit_charge`] would admit a dataset of `name` charged `bytes`
+/// now, without reserving anything against the total: for a tool that
+/// checks what its result takes at least before work that grows with the
+/// result (drawing a sample's rows), and admits the result with
+/// [`admit_charge`] once it knows its size.
+pub(crate) async fn charge_fits(name: &str, bytes: u64) -> Result<(), QuotaShortfall> {
+    check_charge(name, bytes, false).await
+}
+
+/// [`admit_charge`] (`reserve`) or [`charge_fits`].
+async fn check_charge(name: &str, bytes: u64, reserve: bool) -> Result<(), QuotaShortfall> {
     let Some(admission) = ADMISSION.with(|a| a.borrow().clone()) else {
         return Ok(());
     };
@@ -1132,20 +1146,26 @@ pub(crate) async fn admit_charge(name: &str, bytes: u64) -> Result<(), QuotaShor
     // Reserve first, so two files decoding at once see each other, and
     // record it in the call's admission at once: its guard then releases it
     // however this future ends, also when it is dropped at the await below
-    // or unwinds from it.
-    let reserved = sessions.reserve_data_bytes(added);
-    admission.reserved.fetch_add(added, Ordering::SeqCst);
+    // or unwinds from it. A check without reserving counts what is reserved
+    // so far.
+    let others_reserved = if reserve {
+        let reserved = sessions.reserve_data_bytes(added);
+        admission.reserved.fetch_add(added, Ordering::SeqCst);
+        reserved.saturating_sub(added)
+    } else {
+        sessions.reserved_data_bytes()
+    };
     // Read without holding a dataset lock (the total takes the registry's).
     let others = sessions
         .total_data_bytes()
         .await
         .saturating_sub(admission.session.data_bytes());
-    let total = others
-        .saturating_add(after)
-        .saturating_add(reserved.saturating_sub(added));
+    let total = others.saturating_add(after).saturating_add(others_reserved);
     if total > limit {
-        admission.reserved.fetch_sub(added, Ordering::SeqCst);
-        sessions.release_data_bytes(added);
+        if reserve {
+            admission.reserved.fetch_sub(added, Ordering::SeqCst);
+            sessions.release_data_bytes(added);
+        }
         return Err(QuotaShortfall {
             added,
             reached: total,
@@ -1945,6 +1965,42 @@ mod tests {
         assert_eq!(m.reserved_data_bytes(), 0);
         let _second = DatasetAdmission::install(None, total, b, m.clone());
         assert!(admit_dataset("d", six).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_charge_that_fits_is_checked_without_reserving_it() {
+        // charge_fits checks as admit_charge does but reserves nothing, so
+        // a tool can check part of its result before it admits all of it.
+        let m = Arc::new(SessionManager::new(cfg(10, None)));
+        let a = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let b = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let total = Some(10 << 20);
+        let six = 6 << 20;
+        let first = DatasetAdmission::install(None, total, a.clone(), m.clone());
+        charge_fits("d", six).await.unwrap();
+        charge_fits("d", six).await.unwrap();
+        assert_eq!(m.reserved_data_bytes(), 0);
+        admit_charge("d", six).await.unwrap();
+        let reserved = m.reserved_data_bytes();
+        assert!(reserved >= six);
+        {
+            // Another call's check counts what the first one reserved, and
+            // adds nothing to it.
+            let _second = DatasetAdmission::install(None, total, b, m.clone());
+            let shortfall = charge_fits("d", six).await.unwrap_err();
+            assert!(!shortfall.per_session && shortfall.reached > 10 << 20);
+            assert_eq!(m.reserved_data_bytes(), reserved);
+        }
+        drop(first);
+        assert_eq!(m.reserved_data_bytes(), 0);
+        let _third = DatasetAdmission::install(Some(1 << 20), None, a, m.clone());
+        assert!(charge_fits("d", 2 << 20).await.unwrap_err().per_session);
     }
 
     #[tokio::test]

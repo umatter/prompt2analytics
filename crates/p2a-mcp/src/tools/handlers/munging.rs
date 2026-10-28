@@ -9,6 +9,7 @@ use rmcp::{
     tool, tool_router,
 };
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 
 use crate::server::AnalyticsServer;
 use crate::tools::limits::{self, Family, LimitViolation};
@@ -33,7 +34,7 @@ use p2a_core::{
             drop_columns,
             // Clean operations
             drop_na,
-            estimate_join_rows,
+            estimate_join_shape,
             fill_na,
             // Transform operations
             filter,
@@ -58,6 +59,7 @@ use p2a_core::{
             rename,
             replace,
             sample,
+            sample_rows,
             select,
             sort,
             standardize,
@@ -66,6 +68,7 @@ use p2a_core::{
             str_split,
             str_split_part_count,
             str_substring,
+            take_rows,
             to_lowercase,
             to_uppercase,
             // String operations
@@ -737,15 +740,17 @@ impl AnalyticsServer {
             .unwrap_or_else(|| format!("{}_{}", request.left, request.right));
 
         // With a join_output_rows budget or dataset quotas, predict the
-        // result size from per-key counts before joining: its rows, and what
-        // the rows of both datasets' columns take.
+        // result size from per-key counts before joining: its rows, how often
+        // a row of each dataset repeats in it, and so what the rows of both
+        // datasets' columns take.
         let limits = limits::current();
         if limits.join_output_rows.is_some() || bound::active() {
-            let rows = match estimate_join_rows(&left_ds, &right_ds, &left_on, right_on, join_type)
-            {
-                Ok(rows) => rows,
-                Err(e) => return Ok(join_failed(&e)),
-            };
+            let shape =
+                match estimate_join_shape(&left_ds, &right_ds, &left_on, right_on, join_type) {
+                    Ok(shape) => shape,
+                    Err(e) => return Ok(join_failed(&e)),
+                };
+            let rows = shape.rows;
             if let Err(v) = limits.check_budget(
                 "munge_join",
                 "join_output_rows",
@@ -758,16 +763,30 @@ impl AnalyticsServer {
                 let bytes = bound::join(
                     left_ds.df(),
                     right_ds.df(),
-                    rows,
+                    &shape,
                     suffix.unwrap_or("_right"),
                 );
+                let repeats = shape.max_left_repeat.max(shape.max_right_repeat);
+                let mut advice = vec!["select fewer columns first (munge_select)"];
+                if repeats > 1 {
+                    advice.insert(0, "join on keys that repeat less");
+                } else {
+                    advice.push("filter the rows first");
+                }
                 bound::admit(
                     "munge_join",
                     &result_name,
                     bytes,
-                    || format!("{rows} joined rows (`left_on`, `join_type` {join_type_name})"),
-                    "join on keys that repeat less, select fewer columns first or start a new \
-                     session",
+                    || {
+                        let cause =
+                            format!("{rows} joined rows (`left_on`, `join_type` {join_type_name})");
+                        if repeats > 1 {
+                            format!("{cause}, a row of one dataset repeated up to {repeats} times")
+                        } else {
+                            cause
+                        }
+                    },
+                    &advice,
                 )
                 .await?;
             }
@@ -837,7 +856,7 @@ impl AnalyticsServer {
                         request.datasets.len()
                     )
                 },
-                "list fewer datasets, filter their rows first or start a new session",
+                &["list fewer datasets", "filter their rows first"],
             )
             .await?;
         }
@@ -940,8 +959,11 @@ impl AnalyticsServer {
                 &result_name,
                 bytes,
                 || format!("{} `aggs` over up to {groups} groups", agg_specs.len()),
-                "list fewer aggregations, group by fewer distinct values, filter the rows first \
-                 or start a new session",
+                &[
+                    "list fewer aggregations",
+                    "group by fewer distinct values",
+                    "filter the rows first",
+                ],
             )
             .await?;
         }
@@ -1146,7 +1168,7 @@ impl AnalyticsServer {
                         id_vars.len()
                     )
                 },
-                "list fewer value_vars or id_vars, filter the rows first or start a new session",
+                &["list fewer value_vars or id_vars", "filter the rows first"],
             )
             .await?;
         }
@@ -1272,9 +1294,19 @@ impl AnalyticsServer {
 
         // A constant written into every null of a String column, or a mean
         // that widens a column to Float64, can make the result far larger.
-        if bound::active()
-            && let Some(bytes) = bound::fill_na(dataset.df(), columns.as_deref(), &strategy)
-        {
+        let bounded = if bound::active() {
+            match bound::fill_na(dataset.df(), columns.as_deref(), &strategy) {
+                Ok(bounded) => bounded,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Fill NA failed: {e}"
+                    ))]));
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(bytes) = bounded {
             bound::admit(
                 "munge_fill_na",
                 &result_name,
@@ -1305,8 +1337,11 @@ impl AnalyticsServer {
                         ),
                     }
                 },
-                "fill fewer columns, use a shorter constant, filter the rows first or start a \
-                 new session",
+                &[
+                    "fill fewer columns",
+                    "use a shorter constant",
+                    "filter the rows first",
+                ],
             )
             .await?;
         }
@@ -1462,10 +1497,26 @@ impl AnalyticsServer {
             .result_name
             .clone()
             .unwrap_or_else(|| request.dataset.clone());
-        if let Err(refused) =
-            admit_case_mapped(&dataset, &request.column, &result_name, false).await
-        {
-            return refused;
+        // A case mapping can take up to three times a character's bytes.
+        if bound::active() {
+            let bounded = match bound::case_mapped(dataset.df(), &request.column, false) {
+                Ok(bounded) => bounded,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "To lowercase failed: {e}"
+                    ))]));
+                }
+            };
+            if let Some(bytes) = bounded {
+                bound::admit(
+                    "str_to_lowercase",
+                    &result_name,
+                    bytes,
+                    || "converting `column` to lowercase".to_string(),
+                    &["filter the rows first"],
+                )
+                .await?;
+            }
         }
 
         let result = match to_lowercase(&dataset, &request.column) {
@@ -1511,9 +1562,26 @@ impl AnalyticsServer {
             .result_name
             .clone()
             .unwrap_or_else(|| request.dataset.clone());
-        if let Err(refused) = admit_case_mapped(&dataset, &request.column, &result_name, true).await
-        {
-            return refused;
+        // A case mapping can take up to three times a character's bytes.
+        if bound::active() {
+            let bounded = match bound::case_mapped(dataset.df(), &request.column, true) {
+                Ok(bounded) => bounded,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "To uppercase failed: {e}"
+                    ))]));
+                }
+            };
+            if let Some(bytes) = bounded {
+                bound::admit(
+                    "str_to_uppercase",
+                    &result_name,
+                    bytes,
+                    || "converting `column` to uppercase".to_string(),
+                    &["filter the rows first"],
+                )
+                .await?;
+            }
         }
 
         let result = match to_uppercase(&dataset, &request.column) {
@@ -1588,7 +1656,7 @@ impl AnalyticsServer {
                             request.new_value.len()
                         )
                     },
-                    "use a shorter new_value, filter the rows first or start a new session",
+                    &["use a shorter new_value", "filter the rows first"],
                 )
                 .await?;
             }
@@ -1673,8 +1741,10 @@ impl AnalyticsServer {
                         request.replacement.len()
                     )
                 },
-                "use a shorter replacement or fewer group references, a pattern that matches \
-                 less, or start a new session",
+                &[
+                    "use a shorter replacement or fewer group references",
+                    "a pattern that matches less",
+                ],
             )
             .await?;
         }
@@ -1865,8 +1935,11 @@ impl AnalyticsServer {
                     &result_name,
                     bytes,
                     || format!("splitting `column` by `pattern` into {parts} columns"),
-                    "set max_splits, split a smaller dataset, filter the rows first or start a \
-                     new session",
+                    &[
+                        "set max_splits",
+                        "split a smaller dataset",
+                        "filter the rows first",
+                    ],
                 )
                 .await?;
             }
@@ -1948,8 +2021,11 @@ impl AnalyticsServer {
                         dataset.nrows()
                     )
                 },
-                "concatenate fewer or shorter columns, use a shorter separator, filter the rows \
-                 first or start a new session",
+                &[
+                    "concatenate fewer or shorter columns",
+                    "use a shorter separator",
+                    "filter the rows first",
+                ],
             )
             .await?;
         }
@@ -2181,7 +2257,7 @@ impl AnalyticsServer {
                         dataset.nrows()
                     )
                 },
-                "list fewer columns, filter the rows first or start a new session",
+                &["list fewer columns", "filter the rows first"],
             )
             .await?;
         }
@@ -2291,19 +2367,29 @@ impl AnalyticsServer {
                 None => format!("bin_{}", n_bins.saturating_sub(1)).len(),
             };
             if let Some(bytes) = bound::bin(dataset.df(), &request.column, longest) {
-                bound::admit(
-                    "munge_bin",
-                    &result_name,
-                    bytes,
-                    || {
+                let rows = dataset.nrows();
+                let (cause, advice): (String, &[&str]) = if labels.is_some() {
+                    (
                         format!(
-                            "a label of up to {longest} bytes (`labels`) on each of {} rows",
-                            dataset.nrows()
-                        )
-                    },
-                    "use shorter labels, filter the rows first or start a new session",
-                )
-                .await?;
+                            "a label of up to {longest} bytes (`labels`) on each of {rows} rows"
+                        ),
+                        &["use shorter labels", "filter the rows first"],
+                    )
+                } else if n_bins > 1 {
+                    (
+                        format!(
+                            "the bin labels bin_0..bin_{} (`bins`) on each of {rows} rows",
+                            n_bins - 1
+                        ),
+                        &["filter the rows first"],
+                    )
+                } else {
+                    (
+                        format!("the bin label bin_0 (`bins`) on each of {rows} rows"),
+                        &["filter the rows first"],
+                    )
+                };
+                bound::admit("munge_bin", &result_name, bytes, || cause, advice).await?;
             }
         }
 
@@ -2400,8 +2486,10 @@ impl AnalyticsServer {
                             dataset.nrows()
                         )
                     },
-                    "encode a column with fewer distinct values, filter the rows first or start \
-                     a new session",
+                    &[
+                        "encode a column with fewer distinct values",
+                        "filter the rows first",
+                    ],
                 )
                 .await?;
             }
@@ -2468,7 +2556,7 @@ impl AnalyticsServer {
                 &result_name,
                 bytes,
                 || format!("the new column of `column` on {} rows", dataset.nrows()),
-                "filter the rows first or start a new session",
+                &["filter the rows first"],
             )
             .await?;
         }
@@ -2533,25 +2621,70 @@ impl AnalyticsServer {
             .unwrap_or_else(|| format!("{}_sample", request.dataset));
 
         // With replacement, `n` can be far above the dataset's rows (without,
-        // polars refuses that).
+        // polars refuses that), and the sample draws a row index for each
+        // sampled row before it gathers them.
+        let mut drawn = None;
         if bound::active() {
-            let rows = if replace {
-                request.n
+            let cause = || format!("{} sampled rows (`n`)", request.n);
+            let advice: &[&str] = &[
+                "sample fewer rows",
+                "select fewer columns first (munge_select)",
+            ];
+            let df = dataset.df();
+            if replace && bound::has_text(df) {
+                // What a String column takes depends on the rows drawn: draw
+                // them once the rest of the result fits (its views alone take
+                // more than the row indices), then count their text.
+                let rows = request.n as u64;
+                let without_text = bound::sample_without_text(df, rows);
+                bound::refuse_unless_part_fits(
+                    "munge_sample",
+                    &result_name,
+                    without_text,
+                    "its text",
+                    cause,
+                    advice,
+                )
+                .await?;
+                // Without a seed, any seed: the rows drawn are the sample's.
+                let seed = seed.unwrap_or_else(|| RandomState::new().hash_one(rows));
+                let picked = match sample_rows(dataset.nrows(), request.n, true, seed) {
+                    Ok(picked) => picked,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Sample failed: {e}"
+                        ))]));
+                    }
+                };
+                let bytes = match bound::sample_drawn(df, &picked) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Sample failed: {e}"
+                        ))]));
+                    }
+                };
+                bound::admit("munge_sample", &result_name, bytes, cause, advice).await?;
+                drawn = Some(picked);
             } else {
-                request.n.min(dataset.nrows())
-            };
-            let bytes = bound::sample(dataset.df(), rows as u64, replace);
-            bound::admit(
-                "munge_sample",
-                &result_name,
-                bytes,
-                || format!("{} sampled rows (`n`)", request.n),
-                "sample fewer rows, sample fewer columns or start a new session",
-            )
-            .await?;
+                let (rows, indices) = if replace {
+                    let rows = request.n as u64;
+                    (rows, rows.saturating_mul(bound::ROW_INDEX_BYTES))
+                } else {
+                    (request.n.min(dataset.nrows()) as u64, 0)
+                };
+                // A column narrower than a row index (a Boolean, an Int8)
+                // takes less than the indices drawn for it.
+                let bytes = bound::sample(df, rows, replace).max(indices);
+                bound::admit("munge_sample", &result_name, bytes, cause, advice).await?;
+            }
         }
 
-        let result = match sample(&dataset, Some(request.n), None, replace, seed) {
+        let result = match drawn {
+            Some(picked) => take_rows(&dataset, &picked),
+            None => sample(&dataset, Some(request.n), None, replace, seed),
+        };
+        let result = match result {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2646,21 +2779,24 @@ impl AnalyticsServer {
         if bound::active()
             && let Some(bytes) = bound::mutate(dataset.df(), &request.new_column, &expr)
         {
-            bound::admit(
-                "munge_mutate",
-                &result_name,
-                bytes,
-                || {
+            let rows = dataset.nrows();
+            let (cause, advice): (String, &[&str]) = match &expr {
+                MutateExpr::Constant(value) if value.parse::<f64>().is_err() => (
                     format!(
-                        "the new column (`expr_type` {}, a {}-byte `left`) on {} rows",
-                        request.expr_type,
-                        request.left.len(),
-                        dataset.nrows()
-                    )
-                },
-                "use a shorter constant, filter the rows first or start a new session",
-            )
-            .await?;
+                        "the new column (`expr_type` constant, a {}-byte `left`) on {rows} rows",
+                        value.len()
+                    ),
+                    &["use a shorter constant", "filter the rows first"],
+                ),
+                _ => (
+                    format!(
+                        "the new Float64 column `new_column` (`expr_type` {}) on {rows} rows",
+                        request.expr_type
+                    ),
+                    &["filter the rows first"],
+                ),
+            };
+            bound::admit("munge_mutate", &result_name, bytes, || cause, advice).await?;
         }
 
         let result = match mutate(&dataset, &request.new_column, expr) {
@@ -2760,8 +2896,10 @@ impl AnalyticsServer {
                     &result_name,
                     bytes,
                     || format!("casting {parameters} on {} rows", dataset.nrows()),
-                    "cast fewer columns, to a narrower type, filter the rows first or start a \
-                     new session",
+                    &[
+                        "cast fewer columns or to a narrower type",
+                        "filter the rows first",
+                    ],
                 )
                 .await?;
             }
@@ -2847,40 +2985,6 @@ fn refused(v: LimitViolation) -> CallToolResult {
     CallToolResult::error(vec![Content::text(v.message)])
 }
 
-/// Admit the result of `str_to_uppercase` (`upper`) or `str_to_lowercase`
-/// against the dataset quotas before it is built (a case mapping can take up
-/// to three times a character's bytes). The `Err` is the handler's answer.
-async fn admit_case_mapped(
-    dataset: &Dataset,
-    column: &str,
-    result_name: &str,
-    upper: bool,
-) -> Result<(), Result<CallToolResult, McpError>> {
-    if !bound::active() {
-        return Ok(());
-    }
-    let (tool, case) = if upper {
-        ("str_to_uppercase", "uppercase")
-    } else {
-        ("str_to_lowercase", "lowercase")
-    };
-    match bound::case_mapped(dataset.df(), column, upper) {
-        Err(e) => Err(Ok(CallToolResult::error(vec![Content::text(format!(
-            "To {case} failed: {e}"
-        ))]))),
-        Ok(None) => Ok(()),
-        Ok(Some(bytes)) => bound::admit(
-            tool,
-            result_name,
-            bytes,
-            || format!("converting `column` to {case}"),
-            "filter the rows first or start a new session",
-        )
-        .await
-        .map_err(Err),
-    }
-}
-
 /// Upper bounds of munging results, admitted against the dataset quotas
 /// before a tool builds them (see the module).
 mod bound;
@@ -2891,7 +2995,7 @@ mod tests {
     use crate::config::SessionConfig;
     use crate::session::{DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager};
     use crate::tools::limits::{self, Limits};
-    use p2a_core::data::munging::{JoinType, MungeResult, cast_columns, concat};
+    use p2a_core::data::munging::{JoinShape, JoinType, MungeResult, cast_columns, concat};
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
     use std::sync::Arc;
@@ -3190,10 +3294,28 @@ mod tests {
             quota: Option<u64>,
             call: impl std::future::Future<Output = Result<CallToolResult, McpError>>,
         ) -> Result<CallToolResult, McpError> {
-            let _admission = quota.map(|q| {
+            self.call_with(quota.map(|q| (Some(q), None)), call)
+        }
+
+        /// Run a handler's call with only a server total of `total` bytes
+        /// installed, no session quota.
+        fn call_total(
+            &self,
+            total: u64,
+            call: impl std::future::Future<Output = Result<CallToolResult, McpError>>,
+        ) -> Result<CallToolResult, McpError> {
+            self.call_with(Some((None, Some(total))), call)
+        }
+
+        fn call_with(
+            &self,
+            quotas: Option<(Option<u64>, Option<u64>)>,
+            call: impl std::future::Future<Output = Result<CallToolResult, McpError>>,
+        ) -> Result<CallToolResult, McpError> {
+            let _admission = quotas.map(|(per_session, total)| {
                 DatasetAdmission::install(
-                    Some(q),
-                    None,
+                    per_session,
+                    total,
                     Arc::clone(&self.session),
                     Arc::clone(&self.manager),
                 )
@@ -3800,6 +3922,393 @@ mod tests {
         );
     }
 
+    /// `n` rows of a key `k` (50 values, each repeated), a number `x` and a
+    /// String `note` of a few bytes, but for one 4,000-byte note.
+    fn one_long_note(n: usize) -> DataFrame {
+        let note: Vec<String> = (0..n)
+            .map(|i| {
+                if i == 7 {
+                    "N".repeat(4_000)
+                } else {
+                    format!("note {}", i % 10)
+                }
+            })
+            .collect();
+        df!(
+            "k" => (0..n).map(|i| (i % 50) as i64).collect::<Vec<_>>(),
+            "x" => noise(n),
+            "note" => note
+        )
+        .unwrap()
+    }
+
+    /// A lookup table of the 50 keys of [`one_long_note`], each once.
+    fn lookup() -> DataFrame {
+        df!(
+            "k" => (0..50i64).collect::<Vec<_>>(),
+            "label" => (0..50).map(|k| format!("label {k}")).collect::<Vec<_>>(),
+            "w" => noise(50)
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn munge_join_charges_each_side_by_how_often_its_rows_repeat() {
+        let qs = QuotaSession::new(vec![("a", one_long_note(2_000)), ("b", lookup())]);
+        let req = |left: &str, right: &str, how: &str, result: &str| JoinDatasetsRequest {
+            left: left.into(),
+            right: right.into(),
+            left_on: vec!["k".into()],
+            right_on: None,
+            join_type: Some(how.into()),
+            suffix: None,
+            result_name: Some(result.into()),
+        };
+        // Each row of `a` appears once and each row of `b` up to 40 times:
+        // about 200 kB, although one note is 4,000 bytes.
+        for (left, right, how) in [("a", "b", "left"), ("a", "b", "inner"), ("b", "a", "right")] {
+            let quota = qs.held() + (256 << 10);
+            let result = format!("{left}_{how}_{right}");
+            let ran = qs
+                .call(
+                    Some(quota),
+                    qs.server
+                        .munge_join(Parameters(req(left, right, how, &result))),
+                )
+                .unwrap_or_else(|e| panic!("{how} join refused: {}", e.message));
+            assert_ne!(ran.is_error, Some(true), "{}", text(&ran));
+            assert_eq!(qs.frame(&result).height(), 2_000);
+        }
+        // A join whose rows repeat on neither side is not told to use keys
+        // that repeat less.
+        let one_to_one = refused_before_building(
+            qs.call(
+                Some(qs.held() + 1_024),
+                qs.server
+                    .munge_join(Parameters(req("b", "b", "inner", "bb"))),
+            ),
+        );
+        assert!(
+            !one_to_one.contains("repeat") && one_to_one.contains("munge_select"),
+            "{one_to_one}"
+        );
+        let many_to_one = refused_before_building(
+            qs.call(
+                Some(qs.held() + 1_024),
+                qs.server
+                    .munge_join(Parameters(req("a", "b", "left", "ab"))),
+            ),
+        );
+        assert!(
+            many_to_one.contains("up to 40 times") && many_to_one.contains("repeat less"),
+            "{many_to_one}"
+        );
+    }
+
+    #[test]
+    fn munge_sample_bounds_a_bootstrap_by_the_rows_it_draws() {
+        let qs = QuotaSession::new(vec![("d", one_long_note(2_000))]);
+        let req = |n: usize, seed: Option<u64>, result: &str| SampleDatasetRequest {
+            dataset: "d".into(),
+            n,
+            replace: Some(true),
+            seed,
+            result_name: Some(result.into()),
+        };
+        // A bootstrap of the 2,000 rows: about 100 kB, although one note is
+        // 4,000 bytes.
+        for (seed, result) in [(Some(1), "boot"), (None, "unseeded")] {
+            let quota = qs.held() + (256 << 10);
+            let ran = qs
+                .call(
+                    Some(quota),
+                    qs.server.munge_sample(Parameters(req(2_000, seed, result))),
+                )
+                .unwrap_or_else(|e| panic!("bootstrap refused: {}", e.message));
+            assert_ne!(ran.is_error, Some(true), "{}", text(&ran));
+            assert_eq!(qs.frame(result).height(), 2_000);
+        }
+        // The same rows as the sample without quotas draws.
+        let free = qs
+            .call(
+                None,
+                qs.server
+                    .munge_sample(Parameters(req(2_000, Some(1), "free"))),
+            )
+            .unwrap();
+        assert_ne!(free.is_error, Some(true), "{}", text(&free));
+        assert!(qs.frame("boot").equals_missing(&qs.frame("free")));
+        // Far more rows than the quota holds are refused before any is
+        // drawn, with advice the tool can follow.
+        let message = refused_before_building(
+            qs.call(
+                Some(qs.held() + (256 << 10)),
+                qs.server
+                    .munge_sample(Parameters(req(200_000, Some(1), "big"))),
+            ),
+        );
+        assert!(
+            message.contains("200000 sampled rows (`n`)")
+                && message.contains("select fewer columns first (munge_select)")
+                && !message.contains("sample fewer columns"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn munge_fill_na_charges_a_forward_or_backward_fill_its_filled_text() {
+        // A 4,000-byte value on the first row, a short one on every tenth and
+        // nulls between: a forward fill copies the long value into the nine
+        // nulls after it, a backward fill into none.
+        let s: Vec<Option<String>> = (0..2_000)
+            .map(|i| match i {
+                0 => Some("L".repeat(4_000)),
+                i if i % 10 == 0 => Some(format!("kept {i}")),
+                _ => None,
+            })
+            .collect();
+        let qs = QuotaSession::new(vec![("d", df!("s" => s, "x" => noise(2_000)).unwrap())]);
+        for strategy in ["forward", "backward"] {
+            let quota = qs.held() + (256 << 10);
+            let ran = qs
+                .call(
+                    Some(quota),
+                    qs.server.munge_fill_na(Parameters(FillNaRequest {
+                        dataset: "d".into(),
+                        columns: Some(vec!["s".into()]),
+                        strategy: strategy.into(),
+                        result_name: Some(strategy.into()),
+                    })),
+                )
+                .unwrap_or_else(|e| panic!("{strategy} fill refused: {}", e.message));
+            assert_ne!(ran.is_error, Some(true), "{}", text(&ran));
+            // A backward fill leaves the nulls after the last value.
+            let nulls = if strategy == "forward" { 0 } else { 9 };
+            let filled = qs.frame(strategy);
+            assert_eq!(
+                filled.column("s").unwrap().null_count(),
+                nulls,
+                "{strategy}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_by_the_server_total_says_to_try_again_later() {
+        let qs = QuotaSession::new(vec![("d", df!("s" => short_strings(2_000)).unwrap())]);
+        let req = StrConcatRequest {
+            dataset: "d".into(),
+            columns: vec!["s".into(), "s".into()],
+            new_column: "c".into(),
+            separator: Some("|".repeat(1_000)),
+            result_name: Some("big".into()),
+        };
+        let total = qs.held() + (64 << 10);
+        let message =
+            refused_before_building(qs.call_total(total, qs.server.str_concat(Parameters(req))));
+        assert!(
+            message.contains("the server's dataset memory would reach")
+                && message.contains("use a shorter separator")
+                && message.ends_with("or try again later.")
+                && !message.contains("new session"),
+            "{message}"
+        );
+        assert!(!qs.has("big"));
+    }
+
+    #[test]
+    fn munge_bin_names_the_labels_it_writes_in_a_refusal() {
+        let qs = QuotaSession::new(vec![("d", df!("x" => noise(2_000)).unwrap())]);
+        let req = |strategy: &str, bins: Vec<f64>, labels: Option<Vec<String>>| BinColumnRequest {
+            dataset: "d".into(),
+            column: "x".into(),
+            strategy: strategy.into(),
+            bins,
+            labels,
+            result_name: Some("b".into()),
+        };
+        let auto = refused_before_building(
+            qs.call(
+                Some(qs.held() + 1_024),
+                qs.server
+                    .munge_bin(Parameters(req("uniform", vec![4.0], None))),
+            ),
+        );
+        assert!(
+            auto.contains("the bin labels bin_0..bin_3 (`bins`) on each of 2000 rows")
+                && !auto.contains("`labels`")
+                && !auto.contains("shorter labels"),
+            "{auto}"
+        );
+        let given = refused_before_building(qs.call(
+            Some(qs.held() + 1_024),
+            qs.server.munge_bin(Parameters(req(
+                "custom",
+                vec![-1e9, 0.0, 1e9],
+                Some(vec!["low".into(), "high".into()]),
+            ))),
+        ));
+        assert!(
+            given.contains("a label of up to 4 bytes (`labels`)")
+                && given.contains("use shorter labels"),
+            "{given}"
+        );
+    }
+
+    #[test]
+    fn munge_mutate_names_what_makes_its_column_large() {
+        let qs = QuotaSession::new(vec![(
+            "d",
+            df!("x" => noise(2_000), "y" => noise(2_000)).unwrap(),
+        )]);
+        let req = |expr_type: &str, left: &str, operator: Option<&str>, right: Option<&str>| {
+            MutateColumnRequest {
+                dataset: "d".into(),
+                new_column: "c".into(),
+                expr_type: expr_type.into(),
+                left: left.into(),
+                operator: operator.map(Into::into),
+                right: right.map(Into::into),
+                result_name: Some("m".into()),
+            }
+        };
+        for (expr_type, left, operator, right) in [
+            ("arithmetic", "x", Some("*"), Some("y")),
+            ("function", "x", Some("log"), None),
+            ("constant", "2.5", None, None),
+        ] {
+            let message = refused_before_building(
+                qs.call(
+                    Some(qs.held() + 1_024),
+                    qs.server
+                        .munge_mutate(Parameters(req(expr_type, left, operator, right))),
+                ),
+            );
+            assert!(
+                message.contains(&format!(
+                    "the new Float64 column `new_column` (`expr_type` {expr_type}) on 2000 rows"
+                )) && !message.contains("-byte")
+                    && !message.contains("shorter constant"),
+                "{message}"
+            );
+        }
+        let constant = refused_before_building(
+            qs.call(
+                Some(qs.held() + 1_024),
+                qs.server
+                    .munge_mutate(Parameters(req("constant", &"q".repeat(20), None, None))),
+            ),
+        );
+        assert!(
+            constant.contains("a 20-byte `left`") && constant.contains("use a shorter constant"),
+            "{constant}"
+        );
+    }
+
+    /// A column name the dataset lacks is the tool's own error, not a quota
+    /// refusal of a result that cannot be built.
+    #[test]
+    fn a_missing_column_is_reported_by_the_tool_not_refused_by_a_quota() {
+        let qs = QuotaSession::new(vec![(
+            "d",
+            df!("id" => noise(2_000), "x" => noise(2_000)).unwrap(),
+        )]);
+        let melt = MeltDatasetRequest {
+            dataset: "d".into(),
+            id_vars: vec!["id".into()],
+            value_vars: vec!["x".into(), "nope".into()],
+            variable_name: None,
+            value_name: None,
+            result_name: Some("long".into()),
+        };
+        let mutate = |expr_type: &str, left: &str, operator: &str, right: Option<&str>| {
+            MutateColumnRequest {
+                dataset: "d".into(),
+                new_column: "c".into(),
+                expr_type: expr_type.into(),
+                left: left.into(),
+                operator: Some(operator.into()),
+                right: right.map(Into::into),
+                result_name: Some("m".into()),
+            }
+        };
+        let quota = qs.held() + 1_024;
+        let mut answers = vec![(
+            "Melt failed",
+            qs.call(Some(quota), qs.server.munge_melt(Parameters(melt))),
+        )];
+        for request in [
+            mutate("arithmetic", "x", "+", Some("nope")),
+            mutate("arithmetic", "nope", "+", Some("x")),
+            mutate("function", "nope", "log", None),
+        ] {
+            answers.push((
+                "Mutate failed",
+                qs.call(Some(quota), qs.server.munge_mutate(Parameters(request))),
+            ));
+        }
+        for (want, answer) in answers {
+            let answer = answer.unwrap_or_else(|e| panic!("refused by a quota: {}", e.message));
+            assert_eq!(answer.is_error, Some(true), "{}", text(&answer));
+            assert!(
+                text(&answer).starts_with(want) && text(&answer).contains("nope"),
+                "{}",
+                text(&answer)
+            );
+        }
+        assert!(!qs.has("long") && !qs.has("m"));
+    }
+
+    #[test]
+    fn munge_group_by_charges_a_numeric_aggregate_its_own_width() {
+        let qs = QuotaSession::new(vec![(
+            "d",
+            df!("id" => (0..4_000i64).collect::<Vec<_>>(), "x" => noise(4_000)).unwrap(),
+        )]);
+        // Five Float64 aggregates of 4,000 groups: about 200 kB.
+        let ran = qs
+            .call(
+                Some(qs.held() + (256 << 10)),
+                qs.server.munge_group_by(Parameters(GroupByRequest {
+                    dataset: "d".into(),
+                    by: vec!["id".into()],
+                    aggs: ["sum", "mean", "median", "std", "var"]
+                        .iter()
+                        .map(|f| vec!["x".to_string(), f.to_string()])
+                        .collect(),
+                    result_name: Some("g".into()),
+                })),
+            )
+            .unwrap_or_else(|e| panic!("group-by refused: {}", e.message));
+        assert_ne!(ran.is_error, Some(true), "{}", text(&ran));
+        assert_eq!(qs.frame("g").height(), 4_000);
+    }
+
+    /// `munge_cast` bounds a cast to every type name the core casts to (so
+    /// that no cast the core accepts is built without a bound).
+    #[test]
+    fn munge_cast_bounds_every_type_name_the_core_casts_to() {
+        let df = df!("x" => [1.5f64, 2.5], "s" => ["2", "x"]).unwrap();
+        let ds = Dataset::new(df.clone());
+        for name in [
+            "int", "int64", "integer", "int32", "float", "float64", "double", "float32", "string",
+            "str", "text", "bool", "boolean", "Float", "STRING",
+        ] {
+            assert!(
+                p2a_core::data::munging::cast(&ds, "x", name).is_ok(),
+                "{name}"
+            );
+            for column in ["x", "s"] {
+                assert!(
+                    bound::cast(&df, &[(column, name)]).unwrap().is_some(),
+                    "{column} {name}"
+                );
+            }
+        }
+        assert!(p2a_core::data::munging::cast(&ds, "x", "utf9").is_err());
+        assert_eq!(bound::cast(&df, &[("x", "utf9")]), Ok(None));
+    }
+
     /// A frame of two chunks with nulls, inline and out-of-line strings,
     /// characters whose case mapping grows, numbers, booleans, repeated keys
     /// and a Categorical column.
@@ -3839,6 +4348,61 @@ mod tests {
         let mut df = part(0, 40);
         df.vstack_mut(&part(40, 25)).unwrap();
         assert!(df.max_n_chunks() > 1);
+        df
+    }
+
+    /// A String column `name` of `df`'s height chunked like `df`'s columns
+    /// (in [`mixed_frame`], arrays of 40 and 25 rows): polars gathers every
+    /// column of a frame by the arrays of its key columns.
+    fn chunked_like(
+        df: &DataFrame,
+        name: &str,
+        value: impl Fn(usize) -> Option<String>,
+    ) -> StringChunked {
+        let height = df.height();
+        let split = if df.max_n_chunks() > 1 { 40 } else { height };
+        let mut column = StringChunked::from_iter_options(name.into(), (0..split).map(&value));
+        if split < height {
+            column
+                .append(&StringChunked::from_iter_options(
+                    name.into(),
+                    (split..height).map(&value),
+                ))
+                .unwrap();
+        }
+        column
+    }
+
+    /// `df` with a String column `f` and its Binary copy `fb`: mostly
+    /// nulls, a value every eleventh row and two long values, each followed
+    /// and preceded by nulls across the end of the first array (row 40 of
+    /// [`mixed_frame`]).
+    fn with_sparse_text(df: &DataFrame) -> DataFrame {
+        let f = chunked_like(df, "f", |i| match i {
+            38 => Some("F".repeat(300)),
+            47 => Some("B".repeat(200)),
+            i if i % 11 == 0 => Some(format!("v{i}")),
+            _ => None,
+        });
+        let fb = f.as_binary().with_name("fb".into());
+        let mut df = df.clone();
+        df.with_column(f.into_column()).unwrap();
+        df.with_column(fb.into_column()).unwrap();
+        df
+    }
+
+    /// `df` with a String column `note` of short values but one 300-byte
+    /// value.
+    fn with_one_long_note(df: &DataFrame) -> DataFrame {
+        let note = chunked_like(df, "note", |i| {
+            Some(if i == 5 {
+                "#".repeat(300)
+            } else {
+                format!("n{}", i % 4)
+            })
+        });
+        let mut df = df.clone();
+        df.with_column(note.into_column()).unwrap();
         df
     }
 
@@ -3943,10 +4507,35 @@ mod tests {
                 }
                 covers(
                     &format!("munge_fill_na {strategy:?} {columns:?}"),
-                    bound::fill_na(&df, columns, &strategy),
+                    bound::fill_na(&df, columns, &strategy).unwrap(),
                     built,
                 );
             }
+        }
+        // Mostly nulls, two long values, a fill that crosses the arrays: the
+        // filled text is counted exactly.
+        let sparse = with_sparse_text(&df);
+        let sparse_ds = Dataset::new(sparse.clone());
+        for strategy in [FillStrategy::Forward, FillStrategy::Backward] {
+            let columns = Some(&["f", "fb"][..]);
+            let built = fill_na(&sparse_ds, columns, strategy.clone());
+            if let Ok(built) = &built {
+                for c in ["f", "fb"] {
+                    let filled = built.df().column(c).unwrap().as_materialized_series();
+                    let source = sparse.column(c).unwrap().as_materialized_series();
+                    let forward = matches!(strategy, FillStrategy::Forward);
+                    assert_eq!(
+                        bound::filled_text(source, forward).unwrap(),
+                        bound::text_bytes(filled),
+                        "{strategy:?} {c}"
+                    );
+                }
+            }
+            covers(
+                &format!("munge_fill_na of sparse text {strategy:?}"),
+                bound::fill_na(&sparse, columns, &strategy).unwrap(),
+                built,
+            );
         }
         for expr in [
             MutateExpr::Constant(long.clone()),
@@ -4015,18 +4604,73 @@ mod tests {
                 sample(&ds, Some(n), None, replace, Some(7)),
             );
         }
-        for join_type in [
+        // A sample with replacement whose rows are drawn first: the drawn
+        // rows' text, exactly.
+        for (n, seed) in [(500usize, 7u64), (3, 1), (0, 2)] {
+            let rows = sample_rows(df.height(), n, true, seed).unwrap();
+            let taken = take_rows(&ds, &rows).unwrap();
+            for c in ["s", "t"] {
+                assert_eq!(
+                    bound::drawn_text(df.column(c).unwrap().as_materialized_series(), &rows)
+                        .unwrap(),
+                    bound::text_bytes(taken.df().column(c).unwrap().as_materialized_series()),
+                    "{c}"
+                );
+            }
+            let drawn = bound::sample_drawn(&df, &rows).unwrap();
+            assert!(bound::sample_without_text(&df, n as u64) <= drawn);
+            covers("munge_sample of drawn rows", Some(drawn), Ok(taken));
+        }
+        let joins = [
             JoinType::Inner,
             JoinType::Left,
             JoinType::Right,
             JoinType::Full,
-        ] {
-            let rows = estimate_join_rows(&ds, &other, &["k"], None, join_type).unwrap();
+        ];
+        for join_type in joins {
+            let shape = estimate_join_shape(&ds, &other, &["k"], None, join_type).unwrap();
             covers(
                 "munge_join",
-                Some(bound::join(&df, other.df(), rows, "_right")),
+                Some(bound::join(&df, other.df(), &shape, "_right")),
                 join(&ds, &other, &["k"], None, join_type, None),
             );
+        }
+        // One long value in a text column of each side: a 1:1 join (on the
+        // unique `i`) and a many-to-one join on a lookup of `k` are charged
+        // each row as often as it repeats, not every row at the longest
+        // value.
+        let noted = with_one_long_note(&df);
+        let noted_ds = Dataset::new(noted.clone());
+        let lookup = Dataset::new(
+            df!(
+                "k" => (0..6i64).collect::<Vec<_>>(),
+                "label" => (0..6).map(|k| if k == 2 { "L".repeat(200) } else { format!("k{k}") })
+                    .collect::<Vec<_>>()
+            )
+            .unwrap(),
+        );
+        let pairs = Dataset::new(noted.select(["i", "note"]).unwrap());
+        for (what, right, on) in [("1:1", &pairs, "i"), ("many-to-one", &lookup, "k")] {
+            for join_type in joins {
+                let shape = estimate_join_shape(&noted_ds, right, &[on], None, join_type).unwrap();
+                let bytes = bound::join(&noted, right.df(), &shape, "_right");
+                // Every row at a column's longest value, as for any rows.
+                let any = JoinShape {
+                    max_left_repeat: shape.rows,
+                    max_right_repeat: shape.rows,
+                    ..shape
+                };
+                let at_longest = bound::join(&noted, right.df(), &any, "_right");
+                assert!(
+                    bytes + 10_000 < at_longest,
+                    "{what} {join_type:?}: {bytes} vs {at_longest}"
+                );
+                covers(
+                    &format!("munge_join {what} {join_type:?}"),
+                    Some(bytes),
+                    join(&noted_ds, right, &[on], None, join_type, None),
+                );
+            }
         }
         let aggs: Vec<AggSpec> = [
             ("x", AggFn::Count),

@@ -13,12 +13,19 @@
 //! dataset in place of any of the same name, would pass the session quota,
 //! or the server's would pass the total (`session::admit_charge`). The bound
 //! covers what is stored, not the working memory of the kernel that builds
-//! it. Without installed quotas (stdio, the off profile, HTTP without
-//! quotas) nothing is predicted: [`active`] is false.
+//! it, except that a sample with replacement is charged at least the row
+//! indices it draws. What a sample with replacement copies of a text column
+//! depends on the rows it draws: it checks the rest of its result first
+//! without reserving it (`session::charge_fits`), draws the rows, and is
+//! admitted with their text counted. Without installed quotas (stdio, the
+//! off profile, HTTP without quotas) nothing is predicted: [`active`] is
+//! false.
 
 use std::collections::HashSet;
 
-use p2a_core::data::munging::{AggFn, AggSpec, FillStrategy, MutateExpr};
+use p2a_core::data::munging::{
+    AggFn, AggSpec, FillStrategy, JoinShape, MutateExpr, parse_cast_dtype,
+};
 use p2a_core::polars::prelude::*;
 use rmcp::ErrorData as McpError;
 
@@ -41,18 +48,51 @@ pub(super) fn active() -> bool {
 /// Admit the dataset `tool` is about to store as `result_name`, charged
 /// at most `bytes`, or refuse it. The refusal says what makes the result
 /// that large (`cause`, naming the request parameters), which quota it
-/// would pass, and what to change (`advice`); the governor answers it as
+/// would pass, and what to change (`advice`, the tool's own options; a
+/// refusal by the session quota adds "start a new session", one by the
+/// server total "try again later"); the governor answers it as
 /// `quota_exceeded`.
 pub(super) async fn admit(
     tool: &str,
     result_name: &str,
     bytes: u64,
     cause: impl FnOnce() -> String,
-    advice: &str,
+    advice: &[&str],
 ) -> Result<(), McpError> {
     let Err(shortfall) = session::admit_charge(result_name, bytes).await else {
         return Ok(());
     };
+    Err(refusal(tool, bytes, "", &shortfall, cause(), advice))
+}
+
+/// [`admit`] for a part of the result, `bytes` at most for all of it but
+/// `left_out`, without admitting it: a tool checks this before work that
+/// grows with its result (drawing a sample's rows) and admits the whole
+/// result once that work tells its size.
+pub(super) async fn refuse_unless_part_fits(
+    tool: &str,
+    result_name: &str,
+    bytes: u64,
+    left_out: &str,
+    cause: impl FnOnce() -> String,
+    advice: &[&str],
+) -> Result<(), McpError> {
+    let Err(shortfall) = session::charge_fits(result_name, bytes).await else {
+        return Ok(());
+    };
+    let part = format!(" without {left_out}");
+    Err(refusal(tool, bytes, &part, &shortfall, cause(), advice))
+}
+
+/// The quota refusal of [`admit`] and [`refuse_unless_part_fits`].
+fn refusal(
+    tool: &str,
+    bytes: u64,
+    part: &str,
+    shortfall: &session::QuotaShortfall,
+    cause: String,
+    advice: &[&str],
+) -> McpError {
     tracing::info!(
         tool,
         requested = bytes,
@@ -60,13 +100,24 @@ pub(super) async fn admit(
         per_session = shortfall.per_session,
         "munging result refused by a dataset quota before it was built"
     );
-    Err(session::quota_refusal(format!(
-        "{tool} was not run: {} would make its result take up to {}, so {}. Nothing was \
-         built; {advice}.",
-        cause(),
+    // A new session has a quota of its own; the server's total frees up as
+    // other sessions end.
+    let last = if shortfall.per_session {
+        "start a new session"
+    } else {
+        "try again later"
+    };
+    let options = if advice.is_empty() {
+        last.to_string()
+    } else {
+        format!("{} or {last}", advice.join(", "))
+    };
+    session::quota_refusal(format!(
+        "{tool} was not run: {cause} would make its result take up to {}{part}, so {}. \
+         Nothing was built; {options}.",
         session::fmt_bytes(bytes),
         shortfall.outcome()
-    )))
+    ))
 }
 
 /// A cooperative-cancellation checkpoint every [`CHECKPOINT_EVERY`] rows
@@ -163,6 +214,16 @@ impl Bound {
         let values = gathered_values(source.as_materialized_series(), self.rows, self.chunks, how);
         self.column(name, values);
     }
+
+    /// [`Bound::gathered`] of each source row at most `times` times: the
+    /// smaller of that bound and the one for any rows (`Gather::Any`), as
+    /// both hold.
+    pub(super) fn gathered_at_most(&mut self, name: &str, source: &Column, times: u64) {
+        let s = source.as_materialized_series();
+        let repeated = gathered_values(s, self.rows, self.chunks, Gather::Repeat(times));
+        let any = gathered_values(s, self.rows, self.chunks, Gather::Any);
+        self.column(name, repeated.min(any));
+    }
 }
 
 /// How a tool gathers a source column's rows into its result, which
@@ -175,13 +236,16 @@ pub(super) enum Gather {
     /// Each source row at most once (a sample without replacement, a
     /// group's key or first value).
     Once,
-    /// Each source row exactly this many times (a melt).
+    /// Each source row at most this many times (a melt's id columns, a
+    /// join's columns of one side).
     Repeat(u64),
     /// Each source row once, and each of this many nulls filled with
-    /// another row's value (a forward or backward fill).
+    /// another row's value (a forward or backward fill of a nested column;
+    /// a String or Binary column's fill is counted exactly, see
+    /// [`filled_text`]).
     Fill(u64),
-    /// Any rows, any number of times (a join, a sample with
-    /// replacement).
+    /// Any rows, any number of times (a sample with replacement whose rows
+    /// are not drawn yet).
     Any,
 }
 
@@ -539,13 +603,14 @@ pub(super) fn split(df: &DataFrame, column: &str, prefix: &str, parts: usize) ->
 /// `munge_fill_na` of `columns` (every column when `None`): a String
 /// column filled with a constant is copied with each null replaced, a
 /// numeric column filled with its mean or median becomes Float64, a
-/// forward or backward fill gathers, and any other fill keeps the
-/// column's type and width.
+/// forward or backward fill copies the value each null takes (counted
+/// exactly for a String or Binary column, see [`filled_text`]), and any
+/// other fill keeps the column's type and width.
 pub(super) fn fill_na(
     df: &DataFrame,
     columns: Option<&[&str]>,
     strategy: &FillStrategy,
-) -> Option<u64> {
+) -> Result<Option<u64>, String> {
     let names: Vec<&str> = match columns {
         Some(names) => names.to_vec(),
         None => df
@@ -556,7 +621,9 @@ pub(super) fn fill_na(
     };
     let mut bound = Bound::keeping(df, &names);
     for name in names {
-        let column = df.column(name).ok()?;
+        let Ok(column) = df.column(name) else {
+            return Ok(None);
+        };
         let dtype = column.dtype();
         match strategy {
             FillStrategy::Constant(_) | FillStrategy::Zero if dtype == &DataType::String => {
@@ -572,6 +639,13 @@ pub(super) fn fill_na(
             FillStrategy::Mean | FillStrategy::Median if dtype.is_primitive_numeric() => {
                 bound.fixed(name, 8);
             }
+            FillStrategy::Forward | FillStrategy::Backward
+                if matches!(dtype, DataType::String | DataType::Binary) =>
+            {
+                let forward = matches!(strategy, FillStrategy::Forward);
+                let text = filled_text(column.as_materialized_series(), forward)?;
+                bound.string(name, text);
+            }
             FillStrategy::Forward | FillStrategy::Backward => {
                 let nulls = column.null_count() as u64;
                 bound.gathered(name, column, Gather::Fill(nulls))
@@ -579,13 +653,75 @@ pub(super) fn fill_na(
             _ => bound.column(name, session::series_bytes(column.as_materialized_series())),
         }
     }
-    Some(bound.bytes())
+    Ok(Some(bound.bytes()))
+}
+
+/// The text of the String or Binary column `s` after a forward (`forward`)
+/// or backward fill, counted in one pass without building it: each value's
+/// own bytes (a null slot's too), and for each null the bytes of the last
+/// value before it (forward) or the first after it (backward). A null with
+/// no such value stays null and adds nothing.
+pub(super) fn filled_text(s: &Series, forward: bool) -> Result<u64, String> {
+    let Some(ca) = as_views(s)? else {
+        return Ok(text_bytes(s));
+    };
+    let mut text = 0u64;
+    // The length of the value a null takes, once a value was passed.
+    let mut fill: Option<u64> = None;
+    let mut row = 0usize;
+    let mut visit = |length: u32, valid: bool| -> Result<(), String> {
+        checkpoint(row)?;
+        row += 1;
+        let length = u64::from(length);
+        text = text.saturating_add(length);
+        if valid {
+            fill = Some(length);
+        } else if let Some(fill) = fill {
+            text = text.saturating_add(fill);
+        }
+        Ok(())
+    };
+    if forward {
+        for arr in ca.downcast_iter() {
+            for (i, view) in arr.views().iter().enumerate() {
+                visit(view.length, arr.get(i).is_some())?;
+            }
+        }
+    } else {
+        for arr in ca.downcast_iter().rev() {
+            for (i, view) in arr.views().iter().enumerate().rev() {
+                visit(view.length, arr.get(i).is_some())?;
+            }
+        }
+    }
+    Ok(text)
+}
+
+/// The String or Binary column `s` as Binary, sharing its views and
+/// buffers (`None` for another type).
+fn as_views(s: &Series) -> Result<Option<BinaryChunked>, String> {
+    Ok(match s.dtype() {
+        DataType::String => Some(s.str().map_err(|e| e.to_string())?.as_binary()),
+        DataType::Binary => Some(s.binary().map_err(|e| e.to_string())?.clone()),
+        _ => None,
+    })
 }
 
 /// `munge_mutate`: the column `new_column`, a constant on every row
 /// (Float64 when it parses as a number, else String) or a Float64
 /// computed from columns.
 pub(super) fn mutate(df: &DataFrame, new_column: &str, expr: &MutateExpr) -> Option<u64> {
+    // A column the expression names must exist (the tool reports it).
+    match expr {
+        MutateExpr::Arithmetic(a, _, b) => {
+            df.column(a).ok()?;
+            df.column(b).ok()?;
+        }
+        MutateExpr::ArithmeticConst(c, _, _) | MutateExpr::Function(_, c) => {
+            df.column(c).ok()?;
+        }
+        MutateExpr::Constant(_) | MutateExpr::Copy(_) => {}
+    }
     let mut bound = Bound::keeping(df, &[new_column]);
     match expr {
         MutateExpr::Constant(value) if value.parse::<f64>().is_err() => {
@@ -687,6 +823,9 @@ pub(super) fn melt(
     variable_name: &str,
     value_name: &str,
 ) -> Option<u64> {
+    for v in value_vars {
+        df.column(v).ok()?;
+    }
     let height = df.height() as u64;
     let times = value_vars.len() as u64;
     let rows = height.saturating_mul(times);
@@ -701,6 +840,10 @@ pub(super) fn melt(
     bound.fixed(value_name, 8);
     Some(bound.bytes())
 }
+
+/// The bytes of one row index of polars (`IdxSize`): a sample with
+/// replacement draws one per sampled row before it gathers them.
+pub(super) const ROW_INDEX_BYTES: u64 = std::mem::size_of::<IdxSize>() as u64;
 
 /// `munge_sample` of `rows` rows, with `replacement` or without: every
 /// column gathered.
@@ -717,20 +860,94 @@ pub(super) fn sample(df: &DataFrame, rows: u64, replacement: bool) -> u64 {
     bound.bytes()
 }
 
-/// `munge_join` of `rows` predicted rows: every column of both frames
-/// gathered (the right key columns too, which polars may drop), a right
-/// column whose name the left has renamed with `suffix`.
-pub(super) fn join(left: &DataFrame, right: &DataFrame, rows: u64, suffix: &str) -> u64 {
-    let chunks = (left.max_n_chunks() as u64).saturating_add(right.max_n_chunks() as u64);
-    let mut bound = Bound::new(rows, chunks);
-    for column in left.get_columns() {
-        bound.gathered(column.name(), column, Gather::Any);
-    }
-    for column in right.get_columns() {
-        if left.column(column.name()).is_ok() {
-            bound.gathered(&format!("{}{suffix}", column.name()), column, Gather::Any);
+/// Whether `df` has a String or Binary column, whose text a sample with
+/// replacement can only bound once its rows are drawn.
+pub(super) fn has_text(df: &DataFrame) -> bool {
+    df.get_columns()
+        .iter()
+        .any(|c| matches!(c.dtype(), DataType::String | DataType::Binary))
+}
+
+/// [`sample`]'s bound of a sample with replacement of `rows` rows, with the
+/// text of its String and Binary columns left out (their views counted):
+/// every other column is bounded as [`sample_drawn`] bounds it, so this is
+/// never above [`sample_drawn`], whichever rows are drawn.
+pub(super) fn sample_without_text(df: &DataFrame, rows: u64) -> u64 {
+    let mut bound = Bound::new(rows, df.max_n_chunks() as u64);
+    for column in df.get_columns() {
+        if matches!(column.dtype(), DataType::String | DataType::Binary) {
+            bound.string(column.name(), 0);
         } else {
             bound.gathered(column.name(), column, Gather::Any);
+        }
+    }
+    bound.bytes()
+}
+
+/// `munge_sample` of the drawn rows `drawn` (`p2a_core::data::munging::
+/// sample_rows`): every column gathered as [`sample`] gathers it with
+/// replacement, but a String or Binary column's text counted exactly, as
+/// the bytes of the drawn rows' values.
+pub(super) fn sample_drawn(df: &DataFrame, drawn: &IdxCa) -> Result<u64, String> {
+    let mut bound = Bound::new(drawn.len() as u64, df.max_n_chunks() as u64);
+    for column in df.get_columns() {
+        if matches!(column.dtype(), DataType::String | DataType::Binary) {
+            let text = drawn_text(column.as_materialized_series(), drawn)?;
+            bound.string(column.name(), text);
+        } else {
+            bound.gathered(column.name(), column, Gather::Any);
+        }
+    }
+    Ok(bound.bytes())
+}
+
+/// The bytes of the values of the String or Binary column `s` at the rows
+/// `drawn` (each as often as it is drawn; a null slot's bytes too).
+pub(super) fn drawn_text(s: &Series, drawn: &IdxCa) -> Result<u64, String> {
+    let Some(ca) = as_views(s)? else {
+        return Ok(0);
+    };
+    let arrays: Vec<_> = ca.downcast_iter().collect();
+    // The first row of each array, to find the array a row is in.
+    let mut starts = Vec::with_capacity(arrays.len());
+    let mut first = 0usize;
+    for arr in &arrays {
+        starts.push(first);
+        first += arr.len();
+    }
+    let mut text = 0u64;
+    for (i, row) in drawn.iter().enumerate() {
+        checkpoint(i)?;
+        let Some(row) = row else { continue };
+        let row = row as usize;
+        let array = starts
+            .partition_point(|&start| start <= row)
+            .saturating_sub(1);
+        let length = arrays
+            .get(array)
+            .and_then(|arr| arr.views().get(row - starts[array]))
+            .map_or(0, |view| u64::from(view.length));
+        text = text.saturating_add(length);
+    }
+    Ok(text)
+}
+
+/// `munge_join` of the predicted `shape`: every column of both frames
+/// gathered (the right key columns too, which polars may drop), each row of
+/// a side at most as often as the shape says it repeats, and a right
+/// column whose name the left has renamed with `suffix`.
+pub(super) fn join(left: &DataFrame, right: &DataFrame, shape: &JoinShape, suffix: &str) -> u64 {
+    let chunks = (left.max_n_chunks() as u64).saturating_add(right.max_n_chunks() as u64);
+    let mut bound = Bound::new(shape.rows, chunks);
+    for column in left.get_columns() {
+        bound.gathered_at_most(column.name(), column, shape.max_left_repeat);
+    }
+    for column in right.get_columns() {
+        let times = shape.max_right_repeat;
+        if left.column(column.name()).is_ok() {
+            bound.gathered_at_most(&format!("{}{suffix}", column.name()), column, times);
+        } else {
+            bound.gathered_at_most(column.name(), column, times);
         }
     }
     bound.bytes()
@@ -765,9 +982,16 @@ pub(super) fn group_by(df: &DataFrame, by: &[&str], aggs: &[AggSpec]) -> Option<
             || fixed_width(dtype).is_some();
         match spec.agg_fn {
             AggFn::Count | AggFn::NUnique => bound.fixed(&name, 8),
-            // A number of up to 16 bytes, or a null String.
+            // A null String for a String column; otherwise a number of the
+            // column's width, at least 8 bytes (a mean is Float64, a sum of
+            // small integers Int64).
             AggFn::Sum | AggFn::Mean | AggFn::Median | AggFn::Std | AggFn::Var if scalar => {
-                bound.fixed(&name, VIEW_CHARGE_BYTES)
+                let width = if dtype == &DataType::String {
+                    VIEW_CHARGE_BYTES
+                } else {
+                    fixed_width(dtype).unwrap_or(8).max(8)
+                };
+                bound.fixed(&name, width)
             }
             // One value of the group (each source value at most once),
             // or a type a dataset rarely holds.
@@ -777,17 +1001,9 @@ pub(super) fn group_by(df: &DataFrame, by: &[&str], aggs: &[AggSpec]) -> Option<
     Some((bound.bytes(), groups))
 }
 
-/// A type `munge_cast` takes (the core's names for it), or `None`.
+/// A type `munge_cast` takes, by the core's own names for it, or `None`.
 fn cast_target(name: &str) -> Option<DataType> {
-    Some(match name.to_lowercase().as_str() {
-        "int" | "int64" | "integer" => DataType::Int64,
-        "int32" => DataType::Int32,
-        "float" | "float64" | "double" => DataType::Float64,
-        "float32" => DataType::Float32,
-        "string" | "str" | "text" => DataType::String,
-        "bool" | "boolean" => DataType::Boolean,
-        _ => return None,
-    })
+    parse_cast_dtype(name).ok()
 }
 
 /// The longest text polars writes for one value of `dtype` cast to
