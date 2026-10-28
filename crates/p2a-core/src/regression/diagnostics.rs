@@ -2371,6 +2371,51 @@ mod tests {
         assert!(jb.unwrap().statistic < 10.0);
     }
 
+    /// The `p2a reg diagnostics` exhibit on Grunfeld against tseries::jarque.bera.test,
+    /// lmtest::bptest (studentized), lmtest::dwtest, car::vif and
+    /// kappa(model.matrix, exact = TRUE) (case `ols_diagnostics_grunfeld`).
+    #[test]
+    fn test_validate_diagnostics_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_diagnostics_grunfeld");
+        let d = run_diagnostics(&ds, "inv", &["value", "capital"]).unwrap();
+        let n = d.n_obs;
+        let jb = d
+            .jarque_bera
+            .as_ref()
+            .expect("Jarque-Bera is computed for n = 200");
+        let bp = d.breusch_pagan.as_ref().expect("Breusch-Pagan is computed");
+        let dw = d.durbin_watson.as_ref().expect("Durbin-Watson is computed");
+        // car::vif reports no intercept row (p2a's is NaN; T1-WP05 drops it from the text output).
+        let (names, vif): (Vec<&str>, Vec<f64>) = d
+            .vif
+            .as_ref()
+            .expect("VIF is computed")
+            .iter()
+            .filter(|v| v.variable != "(Intercept)")
+            .map(|v| (v.variable.as_str(), v.vif))
+            .unzip();
+        assert_eq!((d.n_obs, d.n_params), (200, 3));
+        Check::new(&case)
+            .scalar("jarque_bera", jb.statistic, Tol::stat(n))
+            .scalar("jarque_bera_p", jb.p_value, Tol::p_value(n))
+            // Studentized (Koenker), as bptest's default.
+            .scalar("breusch_pagan", bp.statistic, Tol::stat(n))
+            .scalar("breusch_pagan_p", bp.p_value, Tol::p_value(n))
+            .scalar("durbin_watson", dw.statistic, Tol::stat(n))
+            .named("vif", &names, &vif, Tol::stat(n))
+            .scalar(
+                "condition_number",
+                d.condition_number.expect("condition number is computed"),
+                Tol::stat(n),
+            )
+            .finish();
+        // Not pinned: breusch_pagan_df (TestResult has no df field; chi2(k - 1) = 2 is
+        // implied), durbin_watson_p_greater (p2a computes no DW p-value),
+        // breusch_pagan_nonstudentized (not offered), bgtest*/reset*/harvey_collier*/wald*
+        // (T1-WP04 pins them).
+    }
+
     #[test]
     fn test_bg_test_basic() {
         let dataset = create_test_dataset();

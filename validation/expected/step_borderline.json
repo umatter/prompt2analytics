@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "step_borderline",
+  "area": "regression",
+  "method": "Stepwise AIC where R keeps a regressor with |t| ~ 1.55",
+  "reference": "stats::step; stats::extractAIC",
+  "call": "step(lm(y ~ x1 + x2 + x3), direction = 'backward')",
+  "dataset": "validation/datasets/generated/step_borderline.csv",
+  "datasets": ["validation/datasets/generated/step_borderline.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "forward_vars": [1, 1, 0],
+    "forward_aic": 12.510295911347013,
+    "backward_vars": [1, 1, 0],
+    "backward_aic": 12.510295911347013,
+    "both_vars": [1, 1, 0],
+    "both_aic": 12.510295911347013,
+    "backward_bic_vars": [1, 0, 0],
+    "backward_bic": 18.502771746590071,
+    "full_t": {
+      "names": ["(Intercept)", "x1", "x2", "x3"],
+      "values": [11.219507751102094, 8.4370868060195789, 1.5661025236591966, -0.44271946167502119]
+    },
+    "full_log_lik": -173.42647791215913,
+    "full_aic": 356.85295582431826,
+    "full_bic": 370.7904145382285
+  }
+}

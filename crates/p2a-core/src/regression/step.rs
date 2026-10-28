@@ -51,7 +51,8 @@ pub struct StepRecord {
     pub df: usize,
     /// Residual sum of squares
     pub rss: f64,
-    /// AIC (or BIC depending on k)
+    /// Criterion `n ln(RSS/n) + k·p` (R `extractAIC`): the "AIC" column of R's
+    /// `step()`, with k = 2 for AIC and ln n for BIC
     pub criterion: f64,
 }
 
@@ -92,7 +93,7 @@ impl std::fmt::Display for StepResult {
         writeln!(
             f,
             "{:>5} {:>15} {:>6} {:>12} {:>12}",
-            "Step", "Action", "Df", "RSS", &self.criterion_name
+            "Step", "Action", "Df", "RSS", self.criterion_name
         )?;
         writeln!(f, "{:-<55}", "")?;
 
@@ -437,21 +438,22 @@ fn fit_model(
     run_ols(dataset, y_col, &x_cols, intercept, CovarianceType::Standard)
 }
 
-/// Compute the information criterion (AIC/BIC).
+/// Compute the information criterion as R's `extractAIC.lm` does:
+/// `n ln(RSS/n) + k p`, with p the number of coefficients (intercept included) and
+/// k = 2 for AIC or ln n for BIC.
 ///
-/// IC = -2 * log_likelihood + k * n_params
-///
-/// For linear models: IC = n * log(RSS/n) + k * p
+/// It differs from `AIC()`/`BIC()` of the same model by the constant
+/// `n (1 + ln 2π) + k`, which is the same for every candidate, so the selections are
+/// those of R's `step()`, and the printed values are the "AIC" column `step()`,
+/// `add1()` and `drop1()` print.
 fn compute_criterion(model: &OlsResult, k: f64) -> f64 {
-    // Use the AIC from OlsResult and adjust for different k
-    // OlsResult.aic uses k=2, so: aic = -2*ll + 2*p
-    // We want: -2*ll + k*p = aic - 2*p + k*p = aic + (k-2)*p
-    model.aic + (k - 2.0) * model.n_params as f64
+    let n = model.n_obs as f64;
+    n * (model.ssr / n).ln() + k * model.n_params as f64
 }
 
-/// Compute residual sum of squares from model.
+/// Residual sum of squares of the model.
 fn compute_rss(model: &OlsResult) -> f64 {
-    model.residual_std_error.powi(2) * model.df_resid as f64
+    model.ssr
 }
 
 // ============================================================================
@@ -530,7 +532,8 @@ pub struct TermEvaluation {
     pub df: usize,
     /// Residual sum of squares
     pub rss: f64,
-    /// AIC/BIC criterion value
+    /// Criterion `n ln(RSS/n) + k·p` (R `extractAIC`): the "AIC" column of R's
+    /// `add1()`/`drop1()`
     pub criterion: f64,
     /// Change in criterion (negative = improvement)
     pub delta_criterion: f64,
@@ -846,199 +849,86 @@ mod tests {
     // VALIDATION TESTS - Comparing against R reference implementations
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Validation test: Stepwise selection vs R's stats::step
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 100
-    /// x1 <- rnorm(n); x2 <- rnorm(n); x3 <- rnorm(n)
-    /// y <- 2 + 3*x1 + 1.5*x2 + rnorm(n, 0, 0.5)  # x3 is noise
-    /// full_model <- lm(y ~ x1 + x2 + x3, data = df_step)
-    /// null_model <- lm(y ~ 1, data = df_step)
-    /// step_forward <- step(null_model, scope = list(lower=null, upper=full), direction="forward")
-    /// step_backward <- step(full_model, direction="backward")
-    /// # All methods should select x1 and x2, exclude x3
-    /// # Final AIC ≈ 125.16
-    /// ```
-    #[test]
-    fn test_validate_step_vs_r() {
-        // R reference values from validation/expected/step_test.csv
-        // method,aic,n_vars,has_x1,has_x2,has_x3
-        // forward,125.163887730939,2,TRUE,TRUE,FALSE
-        // backward,125.163887730939,2,TRUE,TRUE,FALSE
-        // both,125.163887730939,2,TRUE,TRUE,FALSE
+    // R-pinned tests (validation/r/cases/regression.R, cases step_legacy and
+    // step_borderline; registry validation/methods/regression.json).
 
-        // Create data where x1 and x2 are important, x3 is noise
-        let n = 100;
-        let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 1.234).sin()).collect();
-        let x2: Vec<f64> = (0..n).map(|i| (i as f64 * 2.345).sin()).collect();
-        let x3: Vec<f64> = (0..n).map(|i| (i as f64 * 3.456).sin()).collect(); // noise
+    const CAND: [&str; 3] = ["x1", "x2", "x3"];
 
-        let y: Vec<f64> = (0..n)
-            .map(|i| {
-                let noise = ((i as f64 * 0.567).cos()) * 0.5;
-                2.0 + 3.0 * x1[i] + 1.5 * x2[i] + noise // x3 not in true model
+    /// R's `sel()`: 1 if the term is in the final model.
+    fn vars(r: &StepResult) -> Vec<f64> {
+        CAND.iter()
+            .map(|v| {
+                if r.final_variables.iter().any(|f| f == v) {
+                    1.0
+                } else {
+                    0.0
+                }
             })
-            .collect();
-
-        let df = DataFrame::new(vec![
-            Column::new("y".into(), y),
-            Column::new("x1".into(), x1),
-            Column::new("x2".into(), x2),
-            Column::new("x3".into(), x3),
-        ])
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // Test forward selection
-        let result_forward = step(
-            &dataset,
-            "y",
-            &[],                 // No required variables
-            &["x1", "x2", "x3"], // Candidate pool
-            None,                // Start from null model
-            true,                // With intercept
-            StepConfig {
-                direction: StepDirection::Forward,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        // Should select x1 and x2
-        assert!(
-            result_forward.final_variables.contains(&"x1".to_string()),
-            "Forward selection should include x1"
-        );
-        assert!(
-            result_forward.final_variables.contains(&"x2".to_string()),
-            "Forward selection should include x2"
-        );
-        // x3 should NOT be selected (or if selected, AIC should be higher)
-        // Note: Due to random variation, x3 might occasionally be included
-
-        // Test backward elimination
-        let result_backward = step(
-            &dataset,
-            "y",
-            &[],
-            &["x1", "x2", "x3"],
-            None, // Start from full model
-            true,
-            StepConfig {
-                direction: StepDirection::Backward,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        // Should keep x1 and x2
-        assert!(
-            result_backward.final_variables.contains(&"x1".to_string()),
-            "Backward elimination should keep x1"
-        );
-        assert!(
-            result_backward.final_variables.contains(&"x2".to_string()),
-            "Backward elimination should keep x2"
-        );
-
-        // Test bidirectional
-        let result_both = step(
-            &dataset,
-            "y",
-            &[],
-            &["x1", "x2", "x3"],
-            Some(&["x1"]), // Start with x1
-            true,
-            StepConfig {
-                direction: StepDirection::Both,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert!(
-            result_both.final_variables.contains(&"x1".to_string()),
-            "Both directions should keep x1"
-        );
-
-        // All methods should give similar final AIC
-        // (within reasonable tolerance since data is simulated)
-        let forward_aic = result_forward.final_model.aic;
-        let backward_aic = result_backward.final_model.aic;
-        let both_aic = result_both.final_model.aic;
-
-        // AIC values should be positive and finite
-        assert!(forward_aic.is_finite() && forward_aic > 0.0);
-        assert!(backward_aic.is_finite() && backward_aic > 0.0);
-        assert!(both_aic.is_finite() && both_aic > 0.0);
-
-        // Verify step history is recorded
-        assert!(
-            result_forward.n_steps >= 1,
-            "Forward should take at least 1 step"
-        );
-        assert!(
-            result_backward.n_steps >= 0,
-            "Backward steps should be >= 0"
-        );
+            .collect()
     }
 
-    /// Validation test: Stepwise selection with BIC criterion
+    fn final_criterion(r: &StepResult) -> f64 {
+        r.steps.last().unwrap().criterion
+    }
+
+    /// Forward from the intercept-only model, backward and both from the full model (as
+    /// the R case does); backward BIC through the MCP/CLI wrapper `run_step`.
+    fn pin_step(case: &p2a_validation::Case, ds: &Dataset) {
+        use p2a_validation::{Check, Tol};
+        let n = ds.nrows();
+        let run = |direction| {
+            step(
+                ds,
+                "y",
+                &[],
+                &CAND,
+                None,
+                true,
+                StepConfig {
+                    direction,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let (fw, bw, bo) = (
+            run(StepDirection::Forward),
+            run(StepDirection::Backward),
+            run(StepDirection::Both),
+        );
+        let bic = run_step(ds, "y", &[], &CAND, "backward", true, true).unwrap();
+        let full = run_ols(ds, "y", &CAND, true, CovarianceType::Standard).unwrap();
+        let t: Vec<f64> = full.coefficients.iter().map(|c| c.t_value).collect();
+        assert_eq!(bic.criterion_name, "BIC");
+        Check::new(case)
+            .vector("forward_vars", &vars(&fw), Tol::exact())
+            .scalar("forward_aic", final_criterion(&fw), Tol::stat(n))
+            .vector("backward_vars", &vars(&bw), Tol::exact())
+            .scalar("backward_aic", final_criterion(&bw), Tol::stat(n))
+            .vector("both_vars", &vars(&bo), Tol::exact())
+            .scalar("both_aic", final_criterion(&bo), Tol::stat(n))
+            .vector("backward_bic_vars", &vars(&bic), Tol::exact())
+            .scalar("backward_bic", final_criterion(&bic), Tol::stat(n))
+            .named("full_t", full.variable_names.as_slice(), &t, Tol::stat(n))
+            .scalar("full_log_lik", full.log_likelihood, Tol::stat(n))
+            .scalar("full_aic", full.aic, Tol::stat(n))
+            .scalar("full_bic", full.bic, Tol::stat(n))
+            .finish();
+    }
+
+    /// The DGP of validate_regression_diag.R (seed 42, n = 100): every direction keeps
+    /// x1 and x2.
     #[test]
-    fn test_validate_step_bic() {
-        // Create data where only x1 is truly important
-        let n = 100;
-        let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 1.111).sin()).collect();
-        let x2: Vec<f64> = (0..n).map(|i| (i as f64 * 2.222).sin()).collect();
-        let x3: Vec<f64> = (0..n).map(|i| (i as f64 * 3.333).sin()).collect();
+    fn test_validate_step_legacy() {
+        let (case, ds) = crate::test_support::load_case("step_legacy");
+        pin_step(&case, &ds);
+    }
 
-        let y: Vec<f64> = (0..n)
-            .map(|i| {
-                let noise = ((i as f64 * 0.444).cos()) * 0.3;
-                1.0 + 5.0 * x1[i] + noise
-            })
-            .collect();
-
-        let df = DataFrame::new(vec![
-            Column::new("y".into(), y),
-            Column::new("x1".into(), x1),
-            Column::new("x2".into(), x2),
-            Column::new("x3".into(), x3),
-        ])
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // BIC penalizes complexity more than AIC
-        let result_bic = step(
-            &dataset,
-            "y",
-            &[],
-            &["x1", "x2", "x3"],
-            None,
-            true,
-            StepConfig {
-                direction: StepDirection::Forward,
-                use_bic: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(result_bic.criterion_name, "BIC");
-
-        // BIC should still select x1 (the only true predictor)
-        assert!(
-            result_bic.final_variables.contains(&"x1".to_string()),
-            "BIC should select x1"
-        );
-
-        // BIC tends to select simpler models than AIC
-        // With only x1 being important, BIC should give a model with 1-2 variables
-        assert!(
-            result_bic.final_variables.len() <= 3,
-            "BIC should select a parsimonious model"
-        );
+    /// Seed 5, n = 120, full-model |t(x2)| = 1.566: R's step() keeps x2 by AIC and drops
+    /// it by BIC (REG-20).
+    #[test]
+    fn test_validate_step_borderline() {
+        let (case, ds) = crate::test_support::load_case("step_borderline");
+        pin_step(&case, &ds);
     }
 }

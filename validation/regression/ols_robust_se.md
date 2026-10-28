@@ -2,216 +2,100 @@
 
 ## Method Overview
 
-Heteroskedasticity-consistent (HC) standard errors provide valid inference when the homoskedasticity assumption is violated. The HC estimators are also known as "White's standard errors" or "robust standard errors".
-
-**Types**:
-- **HC0**: White's (1980) original estimator
-- **HC1**: HC0 with small-sample correction: n/(n-k)
-- **HC2**: HC1 with leverage adjustment
-- **HC3**: MacKinnon-White (1985), most conservative
+Heteroskedasticity-consistent (HC) standard errors give valid inference when the
+homoskedasticity assumption fails. `run_ols` and `run_ols_raw` compute them with
+`cov_type = HC0 | HC1 | HC2 | HC3`; coefficients, R² and the other fit statistics do not
+depend on the choice (see [ols.md](ols.md)).
 
 **Formula**:
 ```
-V̂_HC = (X'X)⁻¹ X' diag(û²ᵢ × wᵢ) X (X'X)⁻¹
+V̂_HC = (X'X)⁻¹ X' diag(ûᵢ² ωᵢ) X (X'X)⁻¹
 ```
 
-Where wᵢ depends on the HC type:
-- HC0: wᵢ = 1
-- HC1: wᵢ = n/(n-k)
-- HC2: wᵢ = 1/(1-hᵢᵢ)
-- HC3: wᵢ = 1/(1-hᵢᵢ)²
+with n observations, k coefficients and leverage hᵢᵢ = xᵢ'(X'X)⁻¹xᵢ:
 
-## Reference Implementations
+| Type | ωᵢ | Reference |
+|---|---|---|
+| HC0 | 1 | White (1980) |
+| HC1 | n/(n − k) | the CLI and MCP default; Stata's `robust` |
+| HC2 | 1/(1 − hᵢᵢ) | MacKinnon and White (1985) |
+| HC3 | 1/(1 − hᵢᵢ)² | MacKinnon and White (1985); `sandwich`'s default |
 
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| sandwich | R | `vcovHC()` | 3.0-x |
-| statsmodels | Python | `cov_type='HC0'` etc. | 0.14.x |
+t, p and the 95% CI use the HC standard error with n − k degrees of freedom, as
+`lmtest::coeftest(fit, vcov = vcovHC(fit, type = ...))` does.
 
-## Test Cases
+## Reference Implementation
 
-### Test 1: Heteroskedastic Data
+`sandwich::vcovHC(fit, type = "HC0" | "HC1" | "HC2" | "HC3")`, sandwich 3.1.3 (R 4.3.3),
+in `validation/r/cases/regression.R` ([source](../r/cases/regression.R)):
 
-**Data Generating Process**:
-```
-y = 2.0 + 1.5 × x + ε
-ε ~ N(0, σ²(x)) where σ(x) = 0.1 + 0.3|x|
-```
-
-This creates heteroskedastic errors where variance increases with |x|.
-
-**R Code**:
 ```r
-library(sandwich)
-library(lmtest)
-
-set.seed(42)
-n <- 100
-x <- runif(n, -5, 5)
-sigma <- 0.1 + 0.3 * abs(x)
-y <- 2.0 + 1.5 * x + rnorm(n, 0, sigma)
-
-fit <- lm(y ~ x)
-
-# Standard SEs (biased under heteroskedasticity)
-coef(summary(fit))[, "Std. Error"]
-
-# Robust SEs
-sqrt(diag(vcovHC(fit, type = "HC0")))
-sqrt(diag(vcovHC(fit, type = "HC1")))
-sqrt(diag(vcovHC(fit, type = "HC2")))
-sqrt(diag(vcovHC(fit, type = "HC3")))
+V  <- vcovHC(m, type = t); se <- sqrt(diag(V))
+p  <- 2 * pt(abs(coef(m) / se), m$df.residual, lower.tail = FALSE)
+ci <- coef(m) + c(-1, 1) * qt(0.975, m$df.residual) * se
 ```
 
-**Expected Ordering**:
-SE_standard < SE_HC0 ≈ SE_HC1 < SE_HC2 < SE_HC3
+The cases `ols_grunfeld` (`lm(inv ~ value + capital)` on `validation/datasets/grunfeld.csv`,
+n = 200) and `ols_mtcars` (`lm(mpg ~ wt + hp + disp)` on all 32 rows of
+`datasets::mtcars`, `validation/datasets/generated/mtcars.csv`) hold the SE, t, p and CI
+bounds for each type. `Rscript validation/r/run.R --check` recomputes them.
 
-**Validation Criteria**:
-- Each HC type produces different SEs
-- HC3 > HC2 > HC1 ≈ HC0 (in general)
-- All HC types larger than standard SEs (with heteroskedasticity)
+### `ols_grunfeld`
 
----
+| SE | (Intercept) | value | capital |
+|---|---|---|---|
+| HC0 | 11.487562855581498 | 0.006759679290053672 | 0.048497663239300846 |
+| HC1 | 11.574701117099652 | 0.006810954456871954 | 0.04886553953434222 |
+| HC2 | 12.667874294420187 | 0.0069550258013054 | 0.0531650538310572 |
+| HC3 | 14.01349546658532 | 0.007162666244380056 | 0.05850986620531393 |
 
-### Test 2: Homoskedastic Data (Baseline)
+HC1 p-values (the `p2a reg ols --robust hc1` exhibit): 0.00028980093362191437,
+2.165754515305109e-40, 4.453595026390839e-06.
 
-**R Code**:
-```r
-library(sandwich)
+### `ols_mtcars`
 
-set.seed(42)
-n <- 100
-x <- runif(n, -5, 5)
-y <- 2.0 + 1.5 * x + rnorm(n, 0, 0.5)  # Constant variance
+| SE | (Intercept) | wt | hp | disp |
+|---|---|---|---|---|
+| HC0 | 2.2617298610195706 | 0.9062358470344324 | 0.008660583993070133 | 0.007842552849312815 |
+| HC1 | 2.4178909261060477 | 0.9688068717759363 | 0.00925855373469901 | 0.008384041657084677 |
+| HC2 | 2.4663339455531585 | 0.9887621746138576 | 0.01096541857387077 | 0.008797659447440553 |
+| HC3 | 2.71026981081267 | 1.0808620677984107 | 0.014374570077587197 | 0.010121375444370815 |
 
-fit <- lm(y ~ x)
+## Tests
 
-# Under homoskedasticity, all SEs should be similar
-se_standard <- coef(summary(fit))[, "Std. Error"]
-se_hc0 <- sqrt(diag(vcovHC(fit, type = "HC0")))
-se_hc1 <- sqrt(diag(vcovHC(fit, type = "HC1")))
-se_hc2 <- sqrt(diag(vcovHC(fit, type = "HC2")))
-se_hc3 <- sqrt(diag(vcovHC(fit, type = "HC3")))
+In `crates/p2a-core/src/regression/ols.rs` (registry entry `ols_robust_se` in
+`validation/methods/regression.json`):
 
-# Should be approximately equal
-cbind(standard = se_standard, HC0 = se_hc0, HC1 = se_hc1, HC2 = se_hc2, HC3 = se_hc3)
-```
+| Test | Case | Pins |
+|---|---|---|
+| `test_validate_ols_robust_se_grunfeld` | `ols_grunfeld` | for HC0, HC1, HC2 and HC3: coefficients, SE, t, p and both CI bounds |
+| `test_validate_ols_robust_se_mtcars` | `ols_mtcars` | the same |
+| `test_validate_ols_raw_grunfeld` | `ols_grunfeld` | HC1 through `run_ols_raw` |
 
-**Validation Criteria**:
-- HC1 ≈ standard SEs (within 10%)
-- HC3 slightly larger than others
-- All p-values lead to same inference conclusions
+Tolerances (`validation/README.md`, relative): SE, t and CI 1e-6 for n = 200 and 1e-5 for
+n = 32; coefficients 1e-8 and 1e-6; p-values the same relative tolerance or 1e-12
+absolute.
 
----
+Measured agreement: SEs within **8.1e-15** relative on Grunfeld and **3.6e-14** on
+mtcars; t within 8.8e-15 and 3.9e-12; CI bounds within 5.4e-13 and 3.1e-13; p-values
+within 6e-16 and 3.8e-13 absolute.
 
-### Test 3: Comparison with sandwich Package
-
-**R Code**:
-```r
-library(sandwich)
-
-# Use built-in dataset
-data(mtcars)
-fit <- lm(mpg ~ wt + hp + disp, data = mtcars)
-
-# Get all HC variants
-se_hc0 <- sqrt(diag(vcovHC(fit, type = "HC0")))
-se_hc1 <- sqrt(diag(vcovHC(fit, type = "HC1")))
-se_hc2 <- sqrt(diag(vcovHC(fit, type = "HC2")))
-se_hc3 <- sqrt(diag(vcovHC(fit, type = "HC3")))
-
-print(rbind(HC0 = se_hc0, HC1 = se_hc1, HC2 = se_hc2, HC3 = se_hc3))
-```
-
-**Results Comparison**:
-
-| Coefficient | R HC0 | R HC1 | R HC2 | R HC3 | Tolerance |
-|-------------|-------|-------|-------|-------|-----------|
-| (Intercept) | X.XX | X.XX | X.XX | X.XX | 1e-6 |
-| wt | X.XX | X.XX | X.XX | X.XX | 1e-6 |
-| hp | X.XX | X.XX | X.XX | X.XX | 1e-6 |
-| disp | X.XX | X.XX | X.XX | X.XX | 1e-6 |
-
-**Rust Test**: `crates/p2a-core/src/regression/ols.rs::tests::test_validate_hc_se`
-
----
-
-### Test 4: Small Sample Properties
-
-**R Code**:
-```r
-library(sandwich)
-
-set.seed(42)
-n <- 15  # Small sample
-x <- rnorm(n)
-y <- 1 + 2*x + rnorm(n, 0, 0.5)
-
-fit <- lm(y ~ x)
-
-# Small sample correction matters more here
-se_hc1 <- sqrt(diag(vcovHC(fit, type = "HC1")))
-se_hc3 <- sqrt(diag(vcovHC(fit, type = "HC3")))
-
-# HC3/HC1 ratio should be larger for small samples
-ratio <- se_hc3 / se_hc1
-print(ratio)  # Should be > 1
-```
-
-**Validation Criteria**:
-- HC3/HC1 ratio increases as n decreases
-- For n=15, expect ratio around 1.1-1.3
-
----
-
-## Mathematical Details
-
-### HC0 (White, 1980)
-```
-V̂_HC0 = (X'X)⁻¹ X' diag(û²) X (X'X)⁻¹
-```
-
-### HC1 (Small-sample correction)
-```
-V̂_HC1 = (n/(n-k)) × V̂_HC0
-```
-
-### HC2 (Leverage adjustment)
-```
-V̂_HC2 = (X'X)⁻¹ X' diag(û²ᵢ/(1-hᵢᵢ)) X (X'X)⁻¹
-```
-where hᵢᵢ = xᵢ'(X'X)⁻¹xᵢ is the i-th diagonal of the hat matrix.
-
-### HC3 (MacKinnon-White, 1985)
-```
-V̂_HC3 = (X'X)⁻¹ X' diag(û²ᵢ/(1-hᵢᵢ)²) X (X'X)⁻¹
-```
-
-## Numerical Precision Summary
-
-| HC Type | SE Precision vs R |
-|---------|------------------|
-| HC0 | < 1e-10 |
-| HC1 | < 1e-10 |
-| HC2 | < 1e-8 |
-| HC3 | < 1e-8 |
-
-HC2 and HC3 may have slightly larger differences due to leverage computation.
+A deliberate perturbation of the HC1 factor (n/(n − k − 1) instead of n/(n − k)) makes the
+three tests fail (for example `se_hc1[value] rust=0.006828307235204594 R=0.006810954456871954`).
 
 ## Known Differences
 
-1. **Default type**: R's sandwich uses HC3 by default; p2a uses HC1 as default robust SE.
-2. **Stata compatibility**: Stata's `robust` option corresponds to HC1.
-3. **Leverage computation**: Small numerical differences in leverage may propagate to HC2/HC3.
+1. **Default type**: `sandwich::vcovHC` defaults to HC3; the p2a CLI and MCP default to
+   HC1. The tests name the type explicitly.
+2. **Leverage clamp**: `compute_leverage` clamps hᵢᵢ below 1 − 1e-10 so that the HC2 and
+   HC3 weights stay finite at hᵢᵢ = 1; `sandwich` applies no clamp (its ωᵢ is 0/0 or
+   infinite there). The clamp never binds on these data.
 
 ## Running the Tests
 
 ```bash
-# Run HC SE validation tests
-cargo test -p p2a-core -- test_robust
-
-# Compare all HC types
-cargo test -p p2a-core -- test_hc --nocapture
+cargo test -p p2a-core --lib --no-default-features --features ci -- regression::ols::tests::test_validate_ols_robust_se
+P2A_VALIDATION_VERBOSE=1 cargo test -p p2a-core --lib --no-default-features --features ci -- test_validate_ols_robust_se --nocapture
 ```
 
 ## References
