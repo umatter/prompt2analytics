@@ -543,7 +543,70 @@ fn subtract_scaled_outer(hess: &mut Array2<f64>, idx: &[usize], val: &[f64], p_i
 mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    /// RF-31: with 16 or more categories the Newton step went through faer 0.22's
+    /// full-pivot LU, which returned NaN, and the NaN fit was reported as converged.
+    /// The estimates are not polr's until ECON-4 is fixed (T2-WP10; deviation in
+    /// validation/methods/discrete_newton.json), so this pins n, the category counts
+    /// and the null log-likelihood, and requires finite estimates and an honest
+    /// convergence flag.
+    fn pin_ordered(case: &p2a_validation::Case, ds: &Dataset) {
+        for (link, r) in [
+            ("logit", run_ordered_logit(ds, "y", &["x"]).unwrap()),
+            ("probit", run_ordered_probit(ds, "y", &["x"]).unwrap()),
+        ] {
+            let n = r.n_obs;
+            let finite = r
+                .coefficients
+                .iter()
+                .chain(&r.thresholds)
+                .all(|v| v.is_finite())
+                && r.log_likelihood.is_finite();
+            assert!(finite, "{link}: non-finite estimates\n{r}");
+            // The MLE maximises the likelihood: no finite iterate can lie above polr's.
+            let ll_max = case.scalar(&format!("{link}_loglik"));
+            assert!(
+                r.log_likelihood <= ll_max + 1e-8 * ll_max.abs(),
+                "{link}: {} > polr {ll_max}",
+                r.log_likelihood
+            );
+            assert!(
+                !r.converged || r.log_likelihood >= r.log_likelihood_null,
+                "{link}: converged below the null model\n{r}"
+            );
+            // deviation ECON-4: coefficients, thresholds and log-likelihood vs
+            // <link>_coef/_zeta/_loglik (T2-WP10)
+            // deviation ECON-5: standard errors are the 0.1 placeholder (T2-WP10)
+            let counts: Vec<f64> = r.category_counts.iter().map(|&c| c as f64).collect();
+            assert_eq!(r.thresholds.len(), r.categories.len() - 1);
+            Check::new(case)
+                .scalar("n", n as f64, Tol::exact())
+                .named("counts", &r.categories, &counts, Tol::exact())
+                .scalar("null_loglik", r.log_likelihood_null, Tol::stat(n))
+                .finish();
+        }
+    }
+
+    /// Control: 5 categories (5 parameters), below the size where the old LU failed.
+    #[test]
+    fn test_validate_ordered_j5() {
+        let (case, ds) = crate::test_support::load_case("disc_polr_j5");
+        pin_ordered(&case, &ds);
+    }
+
+    #[test]
+    fn test_validate_ordered_j16() {
+        let (case, ds) = crate::test_support::load_case("disc_polr_j16");
+        pin_ordered(&case, &ds);
+    }
+
+    #[test]
+    fn test_validate_ordered_j30() {
+        let (case, ds) = crate::test_support::load_case("disc_polr_j30");
+        pin_ordered(&case, &ds);
+    }
 
     fn create_ordered_dataset() -> Dataset {
         let df = df! {

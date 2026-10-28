@@ -496,7 +496,108 @@ pub fn run_multinom(
 mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    fn flat(v: &[Vec<f64>]) -> Vec<f64> {
+        v.iter().flatten().copied().collect()
+    }
+
+    /// "<category>:<variable>", the names the case files use (reference category excluded).
+    fn flat_names(r: &MultinomResult) -> Vec<String> {
+        r.categories[1..]
+            .iter()
+            .flat_map(|c| r.variables.iter().map(move |v| format!("{c}:{v}")))
+            .collect()
+    }
+
+    /// Every number run_multinom reports, against the tight nnet::multinom fit of `case`.
+    fn pin_multinom(case: &p2a_validation::Case, r: &MultinomResult) {
+        let n = r.n_obs;
+        let names = flat_names(r);
+        let counts: Vec<f64> = r.category_counts.iter().map(|&c| c as f64).collect();
+        Check::new(case)
+            .scalar("n", n as f64, Tol::exact())
+            .named("counts", &r.categories, &counts, Tol::exact())
+            .named("coef_tight", &names, &flat(&r.coefficients), Tol::coef(n))
+            .named("se_tight", &names, &flat(&r.std_errors), Tol::se(n))
+            .named("z_tight", &names, &flat(&r.z_stats), Tol::stat(n))
+            .named("p_tight", &names, &flat(&r.p_values), Tol::p_value(n))
+            .scalar("loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("null_loglik", r.log_likelihood_null, Tol::stat(n))
+            .scalar("aic", r.aic, Tol::stat(n))
+            .scalar("bic", r.bic, Tol::stat(n))
+            .finish();
+        // Not pinned: loglik_pkg (nnet at its own optimum; equals loglik to 1e-12),
+        // max_abs_xb (a property of the case), start_hessian_*
+        // (test_validate_multinom_start_hessian_mn8).
+        assert!(r.converged && r.iterations < 50, "{r}");
+    }
+
+    /// RF-31: an ordinary 8-category fit (35 parameters). Its Hessian is negative
+    /// definite, so the old Newton step went through faer 0.22's full-pivot LU, which
+    /// inverted it wrongly (coefficients of 2e11, log-likelihood -inf).
+    #[test]
+    fn test_validate_multinom_mn8() {
+        let (case, ds) = crate::test_support::load_case("disc_multinom_mn8");
+        let r = run_multinom(&ds, "y", &["x1", "x2", "x3", "x4"], None).unwrap();
+        pin_multinom(&case, &r);
+    }
+
+    /// The first matrix run_multinom's Newton loop inverted on disc_multinom_mn8 (the
+    /// Hessian at beta = 0, built in the same summation order): well conditioned, not
+    /// positive definite, and inverted to rounding by safe_inverse's LU fallback.
+    #[test]
+    fn test_validate_multinom_start_hessian_mn8() {
+        use crate::linalg::matrix_ops::{cholesky, condition_number, eig_symmetric};
+        let (case, ds) = crate::test_support::load_case("disc_multinom_mn8");
+        let dm = DesignMatrix::from_dataframe(ds.df(), &["x1", "x2", "x3", "x4"], true).unwrap();
+        let x = dm.view();
+        let (n, k) = x.dim();
+        let n_cats = case.names("counts").len() - 1;
+        let p = 1.0 / (n_cats + 1) as f64; // every probability at beta = 0
+        let mut h = Array2::<f64>::zeros((n_cats * k, n_cats * k));
+        for i in 0..n {
+            for c in 0..n_cats {
+                for c2 in 0..n_cats {
+                    let w = if c == c2 { p * (1.0 - p) } else { -p * p };
+                    for kk in 0..k {
+                        for ll in 0..k {
+                            h[[c * k + kk, c2 * k + ll]] -= w * x[[i, kk]] * x[[i, ll]];
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            cholesky(&h.view()).is_err(),
+            "the start Hessian must not be PD"
+        );
+        let kappa = condition_number(&h.view()).unwrap();
+        let (eigen, _) = eig_symmetric(&h.view()).unwrap();
+        let max_eigen = eigen.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Check::new(&case)
+            .scalar("start_hessian_kappa", kappa, Tol::stat(n))
+            .scalar("start_hessian_max_eigen", max_eigen, Tol::stat(n))
+            .finish();
+        let (inv, w) = safe_inverse(&h.view()).unwrap();
+        assert_eq!(w, None);
+        let prod = h.dot(&inv);
+        let mut r = 0.0f64;
+        for (idx, v) in prod.indexed_iter() {
+            let d = (v - if idx.0 == idx.1 { 1.0 } else { 0.0 }).abs();
+            r = if d.is_nan() { f64::INFINITY } else { r.max(d) };
+        }
+        assert!(r <= 1e-12, "max |H X - I| = {r}");
+    }
+
+    /// Control: 4 overlapping categories, 9 parameters.
+    #[test]
+    fn test_validate_multinom_j4() {
+        let (case, ds) = crate::test_support::load_case("disc_multinom_j4");
+        let r = run_multinom(&ds, "y", &["x1", "x2"], None).unwrap();
+        pin_multinom(&case, &r);
+    }
 
     fn create_multinomial_dataset() -> Dataset {
         let df = df! {
