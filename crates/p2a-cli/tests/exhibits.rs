@@ -22,8 +22,8 @@
 use p2a_core::regression::{CovarianceType, OlsCoefficient};
 use p2a_core::traits::t_test_p_value;
 use p2a_core::{
-    ClusterAdjustment, DataLoader, Dataset, PanelVcov, run_ols, run_ols_clustered,
-    run_random_effects, run_vcov_hac,
+    ClusterAdjustment, DataLoader, Dataset, PanelVcov, run_hausman_test, run_ols,
+    run_ols_clustered, run_random_effects, run_vcov_hac,
 };
 use p2a_validation::golden::assert_golden;
 use p2a_validation::text::{coefficient_rows, labelled};
@@ -1637,4 +1637,128 @@ fn test_cli_panel_vcov_rejects_unknown() {
             assert!(stderr.contains(allowed), "{allowed} missing in {stderr}");
         }
     }
+}
+
+// =============================================================================
+// panel hausman (exhibit cli_hausman)
+// =============================================================================
+
+const HAUSMAN: [&str; 10] = [
+    "panel", "hausman", "grunfeld", "-y", "inv", "-x", "value", "capital", "--entity", "firm",
+];
+
+#[test]
+fn test_validate_cli_hausman() {
+    let case = Case::load("panel_hausman_grunfeld");
+    let s = grunfeld_session(&case);
+    let out = run(&s, &HAUSMAN);
+    Check::new(&case)
+        .scalar(
+            "chisq",
+            num_after(&out, "", "Chi-squared statistic:"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "df",
+            num_after(&out, "", "Degrees of freedom:"),
+            Tol::exact(),
+        )
+        .scalar("p", num_after(&out, "", "P-value:"), Tol::printed(4))
+        .finish();
+    let h = run_hausman_test(
+        &dataset(&case.dataset_path()),
+        "inv",
+        &["value", "capital"],
+        "firm",
+    )
+    .unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    let p_line = lines
+        .iter()
+        .position(|l| l.starts_with("P-value:"))
+        .unwrap_or_else(|| panic!("no P-value line in\n{out}"));
+    assert_eq!(
+        lines.get(p_line + 1).copied(),
+        Some(format!("Covariance: {}", h.vcov_method).as_str()),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("\nRecommendation: {}\n", h.recommendation)),
+        "{out}"
+    );
+    assert!(h.warnings.is_empty(), "{:?}", h.warnings);
+    assert!(!out.contains("Warnings:"), "{out}");
+    assert_golden(&golden("cli_hausman"), &out);
+}
+
+#[test]
+fn test_validate_cli_hausman_json() {
+    let case = Case::load("panel_hausman_grunfeld");
+    let s = grunfeld_session(&case);
+    let v = json(&run(&s, &as_json(&HAUSMAN)));
+    let n = 200;
+    Check::new(&case)
+        .scalar("chisq", json_f64(&v["chi2_statistic"]), Tol::stat(n))
+        .scalar("p", json_f64(&v["p_value"]), Tol::p_value(n))
+        .scalar("df", json_f64(&v["df"]), Tol::exact())
+        .finish();
+    let h = run_hausman_test(
+        &dataset(&case.dataset_path()),
+        "inv",
+        &["value", "capital"],
+        "firm",
+    )
+    .unwrap();
+    assert_eq!(v["vcov_method"], h.vcov_method.as_str());
+    assert_eq!(v["warnings"], serde_json::json!([]));
+    let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        [
+            "chi2_statistic",
+            "df",
+            "p_value",
+            "recommendation",
+            "test",
+            "vcov_method",
+            "warnings"
+        ]
+    );
+}
+
+#[test]
+fn test_validate_cli_hausman_sim_corr() {
+    let case = Case::load("panel_hausman_sim_corr");
+    let s = session(&case.dataset_path());
+    let out = run(&s, &HAUSMAN);
+    Check::new(&case)
+        .scalar(
+            "chisq",
+            num_after(&out, "", "Chi-squared statistic:"),
+            Tol::printed(4),
+        )
+        .scalar("p", num_after(&out, "", "P-value:"), Tol::printed(4))
+        .finish();
+    let h = run_hausman_test(
+        &dataset(&case.dataset_path()),
+        "inv",
+        &["value", "capital"],
+        "firm",
+    )
+    .unwrap();
+    assert!(
+        !h.warnings.is_empty(),
+        "Var(b_FE) - Var(b_RE) is indefinite here and should be warned about"
+    );
+    let after_recommendation = out
+        .split_once("\nRecommendation: ")
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("no recommendation in\n{out}"));
+    assert_eq!(warnings_block(after_recommendation), h.warnings, "{out}");
+
+    let v = json(&run(&s, &as_json(&HAUSMAN)));
+    Check::new(&case)
+        .scalar("chisq", json_f64(&v["chi2_statistic"]), Tol::stat(300))
+        .finish();
+    assert_eq!(v["warnings"], serde_json::json!(h.warnings), "{v}");
 }

@@ -593,13 +593,18 @@ fn execute_hausman(
             match run_hausman_test(ds, dep_var, &x_cols, entity) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "test": "Hausman",
-                            "chi2_statistic": result.chi2_statistic,
-                            "p_value": result.p_value,
-                            "df": result.df,
-                            "recommendation": result.recommendation,
-                        });
+                        let json = sorted_object([
+                            ("test".to_string(), "Hausman".into()),
+                            ("chi2_statistic".to_string(), result.chi2_statistic.into()),
+                            ("p_value".to_string(), result.p_value.into()),
+                            ("df".to_string(), result.df.into()),
+                            (
+                                "recommendation".to_string(),
+                                result.recommendation.clone().into(),
+                            ),
+                            ("vcov_method".to_string(), result.vcov_method.clone().into()),
+                            ("warnings".to_string(), result.warnings.clone().into()),
+                        ]);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -610,7 +615,14 @@ fn execute_hausman(
                         println!("\nChi-squared statistic: {:.4}", result.chi2_statistic);
                         println!("Degrees of freedom: {}", result.df);
                         println!("P-value: {:.4}", result.p_value);
+                        println!("Covariance: {}", result.vcov_method);
                         println!("\nRecommendation: {}", result.recommendation);
+                        if !result.warnings.is_empty() {
+                            println!("\nWarnings:");
+                            for w in &result.warnings {
+                                println!("  - {w}");
+                            }
+                        }
                     }
                 },
                 Err(e) => {
