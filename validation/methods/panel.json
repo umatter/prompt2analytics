@@ -2,6 +2,45 @@
   "schema": 1,
   "methods": [
     {
+      "id": "panel_fe",
+      "name": "Fixed effects (within), classical and entity-clustered (Arellano) SEs",
+      "category": "econometrics",
+      "reference": "plm::plm(model = 'within'); plm::vcovHC(method = 'arellano', type = 'HC0'/'HC1'/'sss')",
+      "doc": "validation/econometrics/panel_fe.md",
+      "cases": [
+        "panel_fe_grunfeld",
+        "panel_fe_grunfeld_unbalanced",
+        "panel_fe_sim_corr"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::tests::test_validate_panel_fe_grunfeld",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_fe_grunfeld_unbalanced",
+        "p2a-core::econometrics::panel::tests::test_validate_panel_fe_sim_corr"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE classical",
+        "SE Arellano HC0/HC1/sss",
+        "t",
+        "p",
+        "95% CI",
+        "within R2",
+        "adj. within R2",
+        "F (df1, df2, p)",
+        "sigma_e^2",
+        "df",
+        "n",
+        "N"
+      ],
+      "tolerance": "validation/README.md, n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/panel_fe_grunfeld.csv",
+        "validation/expected/panel_fe_full.csv",
+        "validation/expected/grunfeld_full.csv"
+      ]
+    },
+    {
       "id": "panel_re",
       "name": "Random effects (Swamy-Arora GLS), balanced and unbalanced",
       "category": "econometrics",

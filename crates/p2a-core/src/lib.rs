@@ -71,7 +71,7 @@
 //!
 //! | Method | Description | Function |
 //! |--------|-------------|----------|
-//! | **Fixed Effects** | Within estimator | [`run_fixed_effects`] |
+//! | **Fixed Effects** | Within estimator; classical or entity-clustered SEs | [`run_fixed_effects`], [`run_fixed_effects_with`] |
 //! | **Random Effects** | Swamy-Arora GLS, balanced and unbalanced; classical or entity-clustered SEs | [`run_random_effects`], [`run_random_effects_with`] |
 //! | **Hausman Test** | FE vs RE specification test | [`run_hausman_test`] |
 //! | **HDFE** | High-dimensional fixed effects | [`run_hdfe`] |
@@ -824,6 +824,7 @@ pub use econometrics::{
     run_fegls,
     run_first_stage_diagnostics,
     run_fixed_effects,
+    run_fixed_effects_with,
     run_fuzzy_rd,
     run_general_gmm,
     run_gformula,

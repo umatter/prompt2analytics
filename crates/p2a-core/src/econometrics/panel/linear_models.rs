@@ -60,7 +60,8 @@ use super::types::{
 };
 use super::utils::{demean_by_entity, demean_matrix_by_entity, extract_entity_ids};
 
-/// Run Fixed Effects (within) panel estimation.
+/// Run Fixed Effects (within) panel estimation with the default [`PanelConfig`]
+/// (classical covariance, as plm).
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the panel data
@@ -73,8 +74,27 @@ pub fn run_fixed_effects(
     x_cols: &[&str],
     entity_col: &str,
 ) -> EconResult<PanelResult> {
+    run_fixed_effects_with(dataset, y_col, x_cols, entity_col, &PanelConfig::default())
+}
+
+/// Run Fixed Effects (within) panel estimation, as `plm::plm(model = "within")`.
+///
+/// The covariance is `config.vcov`: classical `s² (X̃'X̃)⁻¹` of the within model
+/// (plm's default), or the entity-clustered (Arellano) sandwich built from the
+/// demeaned regressors and the within residuals, as plm
+/// `vcovHC(method = "arellano")` with `k = K` slopes. Inference is Student t with
+/// `n - N - K` degrees of freedom; the adjusted within R² is plm's
+/// `1 - (1 - R²)(n - 1)/(n - N - K)`, and `f_stat` stays the classical within F
+/// test whatever the covariance (as plm's `summary` without a `vcov` argument).
+pub fn run_fixed_effects_with(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    entity_col: &str,
+    config: &PanelConfig,
+) -> EconResult<PanelResult> {
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
+    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|_| {
         EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: get_column_names(dataset.df()),
@@ -137,8 +157,15 @@ pub fn run_fixed_effects(
     let sigma2 = ssr / df as f64;
 
     // Classical (homoskedastic) FE variance, matching R's
-    // `plm(..., model = "within")` default: Var(β̂) = sigma^2 * (X̃'X̃)^{-1}.
-    let vcov = &xtx_inv * sigma2;
+    // `plm(..., model = "within")` default: Var(β̂) = sigma^2 * (X̃'X̃)^{-1};
+    // or the entity-clustered sandwich (plm vcovHC(method = "arellano")).
+    let vcov = match config.vcov {
+        PanelVcov::Classical => &xtx_inv * sigma2,
+        PanelVcov::Arellano(adj) => {
+            let scores = entity_scores(&x_demeaned, &residuals, &entity_ids, n_groups)?;
+            cluster_vcov(&xtx_inv, &scores, n, k, adj)?
+        }
+    };
     let std_errors: Vec<f64> = vcov.diag().mapv(|v: f64| v.max(0.0).sqrt()).to_vec();
 
     // R-squared (within)
@@ -149,8 +176,8 @@ pub fn run_fixed_effects(
         .sum();
     let r_squared = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
 
-    // Adjusted R-squared
-    let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - n_groups - 1) as f64) / (df as f64);
+    // Adjusted within R-squared, plm's r.squared(dfcor = TRUE)
+    let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df as f64);
 
     // F-statistic
     let f_stat = if k > 0 && ssr > 0.0 {
@@ -199,7 +226,7 @@ pub fn run_fixed_effects(
         sigma_u: None,
         sigma_e: Some(sigma2.sqrt()),
         theta: None,
-        vcov_type: PanelVcov::Classical,
+        vcov_type: config.vcov,
         test_distribution: TestDistribution::StudentT,
         wald_chi2: None,
         wald_df: None,
@@ -739,6 +766,20 @@ mod tests {
             }
             other => panic!("expected InsufficientData, got {other:?}"),
         }
+    }
+
+    /// Classical FE has no entity loop here (its demeaning lives in `utils`);
+    /// the Arellano path checks the budget once per entity.
+    #[test]
+    fn test_fixed_effects_cluster_stops_when_cancelled() {
+        let ds = synthetic_panel(50, 4);
+        let config = PanelConfig {
+            vcov: PanelVcov::Arellano(ClusterAdjustment::Stata),
+        };
+        let res = resource::with_budget(cancelled(), || {
+            run_fixed_effects_with(&ds, "y", &["x"], "entity", &config)
+        });
+        assert!(matches!(res, Err(EconError::Cancelled(_))), "{res:?}");
     }
 
     #[test]

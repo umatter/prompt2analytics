@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "id": "panel_fe_grunfeld",
+  "area": "econometrics/panel",
+  "method": "Fixed effects (within), Grunfeld (balanced, N = 10, T = 20)",
+  "reference": "plm::plm(model = 'within'); plm::vcovHC(method = 'arellano')",
+  "call": "plm(inv ~ value + capital, data = pdata.frame(d, index = c('firm', 'year')), model = 'within')",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "coef": {
+      "names": ["value", "capital"],
+      "values": [0.11012380412071845, 0.31006534130013874]
+    },
+    "se": {
+      "names": ["value", "capital"],
+      "values": [0.011856694214043837, 0.017354502775552554]
+    },
+    "t": {
+      "names": ["value", "capital"],
+      "values": [9.2879011748722231, 17.866564390247504]
+    },
+    "p": {
+      "names": ["value", "capital"],
+      "values": [3.921108431637912e-17, 2.2200066928419149e-42]
+    },
+    "ci95_lower": {
+      "names": ["value", "capital"],
+      "values": [0.086734545789700981, 0.27583076112997851]
+    },
+    "ci95_upper": {
+      "names": ["value", "capital"],
+      "values": [0.13351306245173594, 0.34429992147029898]
+    },
+    "r2": 0.7667575837481404,
+    "adj_r2": 0.75311042109510606,
+    "f_stat": 309.01417516828036,
+    "f_df1": 2,
+    "f_df2": 188,
+    "f_p": 3.7489356813360138e-60,
+    "sigma2": 2784.4582307779351,
+    "df_resid": 188,
+    "n_obs": 200,
+    "n_groups": 10,
+    "se_arellano_hc0": {
+      "names": ["value", "capital"],
+      "values": [0.014342143712350326, 0.049792608723773134]
+    },
+    "se_arellano_hc1": {
+      "names": ["value", "capital"],
+      "values": [0.014414396782794223, 0.050043454687797743]
+    },
+    "se_arellano_sss": {
+      "names": ["value", "capital"],
+      "values": [0.015156075438903816, 0.052618391591451666]
+    }
+  }
+}

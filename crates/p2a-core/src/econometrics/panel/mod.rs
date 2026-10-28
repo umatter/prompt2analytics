@@ -72,7 +72,9 @@ pub use types::{
 };
 
 // Re-export linear models (FE/RE)
-pub use linear_models::{run_fixed_effects, run_random_effects, run_random_effects_with};
+pub use linear_models::{
+    run_fixed_effects, run_fixed_effects_with, run_random_effects, run_random_effects_with,
+};
 
 // Re-export Hausman test
 pub use specification_test::{HausmanResult, run_hausman_test};
@@ -572,71 +574,6 @@ mod tests {
         Dataset::new(df)
     }
 
-    /// Validation test: Fixed Effects on Grunfeld data
-    /// Compared against R's plm::plm(model="within")
-    ///
-    /// R code:
-    /// ```r
-    /// library(plm)
-    /// data(Grunfeld)
-    /// pdata <- pdata.frame(Grunfeld, index = c("firm", "year"))
-    /// fe_fit <- plm(inv ~ value + capital, data = pdata, model = "within")
-    /// summary(fe_fit)
-    /// # value: 0.1101308, SE: 0.0115713
-    /// # capital: 0.3100493, SE: 0.0173030
-    /// ```
-    #[test]
-    fn test_validate_panel_fe_grunfeld() {
-        let dataset = create_grunfeld_dataset();
-        let result = run_fixed_effects(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // Structure checks
-        assert_eq!(result.method, PanelMethod::FixedEffects);
-        assert_eq!(result.n_obs, 50);
-        assert_eq!(result.n_groups, 5);
-
-        // Expected values from R's plm (using subset of Grunfeld)
-        // Note: Exact values depend on the subset used
-        // For full Grunfeld: value ≈ 0.110, capital ≈ 0.310
-
-        // Find value and capital indices
-        let value_idx = result.variables.iter().position(|v| v == "value").unwrap();
-        let capital_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "capital")
-            .unwrap();
-
-        // Coefficient on value should be positive (investment increases with firm value)
-        assert!(
-            result.coefficients[value_idx] > 0.0,
-            "Coefficient on 'value' should be positive, got {}",
-            result.coefficients[value_idx]
-        );
-
-        // Coefficient on capital should be positive (investment increases with capital)
-        assert!(
-            result.coefficients[capital_idx] > 0.0,
-            "Coefficient on 'capital' should be positive, got {}",
-            result.coefficients[capital_idx]
-        );
-
-        // R² should indicate reasonable fit (within R² from plm varies depending on calculation)
-        // With 5 firms and our data subset, expect R² > 0.2
-        assert!(
-            result.r_squared > 0.2,
-            "Within R² should be > 0.2, got {}",
-            result.r_squared
-        );
-
-        // Standard errors should be positive and reasonable
-        assert!(
-            result.std_errors[value_idx] > 0.0 && result.std_errors[value_idx] < 1.0,
-            "SE for value should be positive and reasonable, got {}",
-            result.std_errors[value_idx]
-        );
-    }
-
     /// Validation test: Hausman test on Grunfeld data
     /// Compared against R's plm::phtest()
     ///
@@ -862,71 +799,6 @@ mod tests {
         .unwrap();
 
         Dataset::new(df)
-    }
-
-    /// Validation test: Fixed Effects on full Grunfeld data
-    /// R reference: plm(inv ~ value + capital, data = pdata, model = "within")
-    /// Expected: value = 0.1101238, capital = 0.3100653, R² = 0.7668
-    #[test]
-    fn test_validate_panel_fe_full_grunfeld() {
-        let dataset = create_full_grunfeld_dataset();
-        let result = run_fixed_effects(&dataset, "inv", &["value", "capital"], "firm").unwrap();
-
-        // Structure validation
-        assert_eq!(result.method, PanelMethod::FixedEffects);
-        assert_eq!(result.n_obs, 200);
-        assert_eq!(result.n_groups, 10);
-
-        // R reference values (from plm package)
-        let r_value_coef = 0.1101238;
-        let r_capital_coef = 0.3100653;
-        let r_value_se = 0.01185669;
-        let r_capital_se = 0.01735450;
-        let r_rsq = 0.7668;
-
-        // Find variable indices
-        let value_idx = result.variables.iter().position(|v| v == "value").unwrap();
-        let capital_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "capital")
-            .unwrap();
-
-        // Validate coefficients (tolerance: 1e-3 for FE)
-        assert!(
-            (result.coefficients[value_idx] - r_value_coef).abs() < 0.01,
-            "FE value coef: Rust={:.6}, R={:.6}",
-            result.coefficients[value_idx],
-            r_value_coef
-        );
-        assert!(
-            (result.coefficients[capital_idx] - r_capital_coef).abs() < 0.01,
-            "FE capital coef: Rust={:.6}, R={:.6}",
-            result.coefficients[capital_idx],
-            r_capital_coef
-        );
-
-        // Validate standard errors (tolerance: 1e-2)
-        assert!(
-            (result.std_errors[value_idx] - r_value_se).abs() < 0.01,
-            "FE value SE: Rust={:.6}, R={:.6}",
-            result.std_errors[value_idx],
-            r_value_se
-        );
-        assert!(
-            (result.std_errors[capital_idx] - r_capital_se).abs() < 0.01,
-            "FE capital SE: Rust={:.6}, R={:.6}",
-            result.std_errors[capital_idx],
-            r_capital_se
-        );
-
-        // Validate R-squared (tolerance: 0.05)
-        assert!(
-            (result.r_squared - r_rsq).abs() < 0.05,
-            "FE R²: Rust={:.4}, R={:.4}",
-            result.r_squared,
-            r_rsq
-        );
     }
 
     /// Validation test: Hausman test on full Grunfeld data
@@ -1319,6 +1191,71 @@ mod tests {
 
     use crate::traits::estimator::LinearEstimator;
     use p2a_validation::{Case, Check, Tol};
+
+    /// Every FE number plm reports for `inv ~ value + capital`, entity `firm`.
+    fn check_fe(case: &Case, ds: &Dataset) -> PanelResult {
+        let r = run_fixed_effects(ds, "inv", &["value", "capital"], "firm").unwrap();
+        let n = r.n_obs;
+        let (lo, hi): (Vec<f64>, Vec<f64>) = r.confidence_intervals(0.95).into_iter().unzip();
+        Check::new(case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se", &r.variables, &r.std_errors, Tol::se(n))
+            .named("t", &r.variables, &r.t_stats, Tol::stat(n))
+            .named("p", &r.variables, &r.p_values, Tol::p_value(n))
+            .named("ci95_lower", &r.variables, &lo, Tol::stat(n))
+            .named("ci95_upper", &r.variables, &hi, Tol::stat(n))
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("f_stat", r.f_stat, Tol::stat(n))
+            .scalar("f_df1", r.variables.len() as f64, Tol::exact())
+            .scalar("f_df2", r.df as f64, Tol::exact())
+            .scalar("f_p", r.f_p_value, Tol::p_value(n))
+            .scalar("sigma2", r.sigma_e.unwrap().powi(2), Tol::stat(n))
+            .scalar("df_resid", r.df as f64, Tol::exact())
+            .scalar("n_obs", n as f64, Tol::exact())
+            .scalar("n_groups", r.n_groups as f64, Tol::exact())
+            .finish();
+        assert_eq!(r.vcov_type, PanelVcov::Classical);
+        assert_eq!(r.test_distribution, TestDistribution::StudentT);
+
+        // Entity-clustered (Arellano) SEs, as plm::vcovHC(method = "arellano")
+        for (key, adj) in [
+            ("se_arellano_hc0", ClusterAdjustment::HC0),
+            ("se_arellano_hc1", ClusterAdjustment::HC1),
+            ("se_arellano_sss", ClusterAdjustment::Stata),
+        ] {
+            let config = PanelConfig {
+                vcov: PanelVcov::Arellano(adj),
+            };
+            let rc =
+                run_fixed_effects_with(ds, "inv", &["value", "capital"], "firm", &config).unwrap();
+            Check::new(case)
+                .named(key, &rc.variables, &rc.std_errors, Tol::se(n))
+                .named("coef", &rc.variables, &rc.coefficients, Tol::coef(n))
+                .finish();
+            assert_eq!(rc.vcov_type, PanelVcov::Arellano(adj));
+            assert_eq!(rc.test_distribution, TestDistribution::StudentT);
+        }
+        r
+    }
+
+    #[test]
+    fn test_validate_panel_fe_grunfeld() {
+        let (c, d) = crate::test_support::load_case("panel_fe_grunfeld");
+        check_fe(&c, &d);
+    }
+
+    #[test]
+    fn test_validate_panel_fe_grunfeld_unbalanced() {
+        let (c, d) = crate::test_support::load_case("panel_fe_grunfeld_unbalanced");
+        check_fe(&c, &d);
+    }
+
+    #[test]
+    fn test_validate_panel_fe_sim_corr() {
+        let (c, d) = crate::test_support::load_case("panel_fe_sim_corr");
+        check_fe(&c, &d);
+    }
 
     /// Every RE number plm reports for `inv ~ value + capital`, entity `firm`,
     /// with the classical covariance and the three Arellano variants.

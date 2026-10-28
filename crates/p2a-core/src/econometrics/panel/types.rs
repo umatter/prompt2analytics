@@ -27,7 +27,8 @@ pub enum ClusterAdjustment {
 }
 
 /// Coefficient covariance of the linear panel estimators
-/// ([`run_random_effects_with`](crate::econometrics::run_random_effects_with)).
+/// ([`run_fixed_effects_with`](crate::econometrics::run_fixed_effects_with),
+/// [`run_random_effects_with`](crate::econometrics::run_random_effects_with)).
 ///
 /// Parsed from `classical`, `cluster` (= `Arellano(Stata)`), `cluster-hc0` and
 /// `cluster-hc1`, ignoring case and surrounding white space:

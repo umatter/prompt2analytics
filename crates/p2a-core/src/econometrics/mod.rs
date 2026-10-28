@@ -4,7 +4,8 @@
 //!
 //! ## Panel Data (R: plm, fixest)
 //!
-//! - [`run_fixed_effects`] - Within (FE) estimator
+//! - [`run_fixed_effects`] - Within (FE) estimator; [`run_fixed_effects_with`] adds
+//!   entity-clustered (Arellano) standard errors
 //! - [`run_random_effects`] - Swamy-Arora GLS (RE) estimator, balanced and unbalanced;
 //!   [`run_random_effects_with`] takes a [`PanelConfig`] (classical or
 //!   entity-clustered [`PanelVcov`])
@@ -272,6 +273,7 @@ pub use panel::{
     run_arellano_bond,
     run_fegls,
     run_fixed_effects,
+    run_fixed_effects_with,
     run_gmm,
     run_hausman_test,
     run_panel_gls,

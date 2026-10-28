@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "id": "panel_fe_grunfeld_unbalanced",
+  "area": "econometrics/panel",
+  "method": "Fixed effects (within), Grunfeld without rows where (firm + year) %% 7 == 0",
+  "reference": "plm::plm(model = 'within'); plm::vcovHC(method = 'arellano')",
+  "call": "plm(inv ~ value + capital, data = pdata.frame(d, index = c('firm', 'year')), model = 'within')",
+  "dataset": "validation/datasets/generated/grunfeld_unbalanced.csv",
+  "datasets": ["validation/datasets/grunfeld.csv", "validation/datasets/generated/grunfeld_unbalanced.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "coef": {
+      "names": ["value", "capital"],
+      "values": [0.099451400227656014, 0.32118936578924129]
+    },
+    "se": {
+      "names": ["value", "capital"],
+      "values": [0.013732594315007715, 0.019287845607650071]
+    },
+    "t": {
+      "names": ["value", "capital"],
+      "values": [7.241996519111483, 16.652423102238494]
+    },
+    "p": {
+      "names": ["value", "capital"],
+      "values": [1.7910221241101339e-11, 1.1100337271688519e-36]
+    },
+    "ci95_lower": {
+      "names": ["value", "capital"],
+      "values": [0.07232957846404367, 0.28309594376168867]
+    },
+    "ci95_upper": {
+      "names": ["value", "capital"],
+      "values": [0.12657322199126836, 0.3592827878167939]
+    },
+    "r2": 0.75541840783290826,
+    "adj_r2": 0.73849766875216605,
+    "f_stat": 245.5449034025734,
+    "f_df1": 2,
+    "f_df2": 159,
+    "f_p": 2.3971187111920292e-49,
+    "sigma2": 3025.935942835501,
+    "df_resid": 159,
+    "n_obs": 171,
+    "n_groups": 10,
+    "se_arellano_hc0": {
+      "names": ["value", "capital"],
+      "values": [0.018439426789481971, 0.051753965959866144]
+    },
+    "se_arellano_hc1": {
+      "names": ["value", "capital"],
+      "values": [0.018548214912038889, 0.052059301741500121]
+    },
+    "se_arellano_sss": {
+      "names": ["value", "capital"],
+      "values": [0.019494283161250795, 0.054714632871063838]
+    }
+  }
+}
