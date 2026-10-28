@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "runner_mean",
+      "name": "Runner fixture mean",
+      "category": "stats",
+      "reference": "base R mean()",
+      "doc": "validation/stats/runner.md",
+      "cases": ["runner_case"],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_two",
+        "p2a-core::stats::ttest::tests::test_validate_one"
+      ],
+      "quantities": ["mean"],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

@@ -216,6 +216,98 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(pkg["status"], "fail")
         self.assertIn("selected 4 tests, ran 3", pkg["errors"])
 
+    def selection(self, *lines):
+        path = Path(self._tmp.name) / "selected.txt"
+        path.write_text("".join(line + "\n" for line in lines))
+        return path
+
+    CLI_SELECTION = (
+        "--test exhibits\ttest_validate_cli_hausman_sim_corr",
+        "--test exhibits\ttest_validate_cli_ols",
+        "--test exhibits\ttest_validate_cli_re",
+    )
+
+    def test_selected_test_without_parsed_result_is_fail(self):
+        # A real p2a-cli log run with --nocapture: a Check line split the status line of
+        # test_validate_cli_hausman_sim_corr, so it has no parsed result, although
+        # libtest's totals count all three tests.
+        log = FIX / "cargo/cli_run_nocapture_interleaved.txt"
+        parsed = vs.parse_cargo_log(log.read_text(), "p2a-cli")
+        self.assertNotIn("p2a-cli::exhibits::test_validate_cli_hausman_sim_corr", parsed["tests"])
+        self.assertEqual(parsed["totals"]["passed"], 3)
+
+        sel = self.selection(*self.CLI_SELECTION)
+        code, text, results = self.collect(
+            "--package", "p2a-cli", "--exit-code", "0", "--selected", "3", "--selection", sel, log
+        )
+        self.assertEqual(code, 1, text)
+        missing = "p2a-cli::exhibits::test_validate_cli_hausman_sim_corr"
+        self.assertIn("collect: p2a-cli: fail (selected 3, ran 3: 3 passed, 0 failed, 0 ignored)", text)
+        self.assertIn(f"collect: p2a-cli: missing: {missing}\n", text)
+        self.assertIn("collect: p2a-cli: error: 1 selected test(s) without a parsed result", text)
+        pkg = results["packages"]["p2a-cli"]
+        self.assertEqual(pkg["status"], "fail")
+        self.assertEqual(pkg["missing"], [missing])
+        self.assertEqual(pkg["unexpected"], [])
+        self.assertNotIn(missing, results["tests"])
+
+    def test_selection_fully_parsed_is_pass(self):
+        log = Path(self._tmp.name) / "cli.txt"
+        log.write_text(
+            "     Running tests/exhibits.rs (target/debug/deps/exhibits-0)\n"
+            "test test_validate_cli_hausman_sim_corr ... ok\n"
+            "test test_validate_cli_re ... ok\n"
+            "test test_validate_cli_ols ... ok\n"
+            "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        )
+        sel = self.selection(*self.CLI_SELECTION)
+        code, text, results = self.collect("--package", "p2a-cli", "--selection", sel, log)
+        self.assertEqual(code, 0, text)
+        self.assertIn("collect: p2a-cli: pass (selected 3, ran 3", text)
+        pkg = results["packages"]["p2a-cli"]
+        self.assertEqual((pkg["selected"], pkg["missing"], pkg["unexpected"]), (3, [], []))
+
+    def test_lib_selection_ids_and_unexpected_result(self):
+        # --lib and --bins names take the package prefix; a parsed result for a test that
+        # was not selected is a failure too (it would add a row to the page).
+        sel = self.selection(
+            "--lib\tstats::ttest::tests::test_validate_one",
+            "--lib\tstats::ttest::tests::test_validate_three",
+            "--test validation_ml_advanced\ttest_validate_c50_classification",
+        )
+        code, text, results = self.collect(
+            "--package", "p2a-core", "--selection", sel, FIX / "cargo/core_run_ok.txt"
+        )
+        self.assertEqual(code, 1, text)
+        pkg = results["packages"]["p2a-core"]
+        self.assertEqual(pkg["status"], "fail")
+        self.assertEqual(pkg["missing"], ["p2a-core::stats::ttest::tests::test_validate_three"])
+        self.assertEqual(
+            pkg["unexpected"],
+            [
+                "p2a-core::ml::advanced_clustering_mod::advanced::tests::test_hdbscan_full_benchmark",
+                "p2a-core::regression::ols::tests::test_validate_two",
+            ],
+        )
+        self.assertIn(
+            "collect: p2a-core: unexpected: p2a-core::regression::ols::tests::test_validate_two\n",
+            text,
+        )
+        self.assertIn("collect: p2a-core: error: 2 parsed result(s) for tests not selected", text)
+
+    def test_selection_usage_errors(self):
+        sel = self.selection(*self.CLI_SELECTION)
+        code, text, _ = self.collect("--package", "p2a-cli", "--selected", "2", "--selection", sel)
+        self.assertEqual(code, 2, text)
+        self.assertIn("--selected 2 does not match the 3 line(s) of", text)
+        bad = self.selection("test_validate_cli_ols")
+        code, text, _ = self.collect("--package", "p2a-cli", "--selection", bad)
+        self.assertEqual(code, 2, text)
+        self.assertIn("not a `<target>\\t<libtest name>` line", text)
+        code, text, _ = self.collect("--selection", sel)
+        self.assertEqual(code, 2, text)
+        self.assertIn("--selection needs --package", text)
+
     def test_selected_zero_is_no_tests(self):
         code, text, results = self.collect("--package", "p2a-cli", "--selected", "0")
         self.assertEqual(code, 0, text)

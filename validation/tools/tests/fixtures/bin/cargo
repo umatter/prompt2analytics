@@ -4,20 +4,31 @@
 #   FAKE_CARGO_LIST_DIR  directory with <package>.list files printed for `-- --list`
 #   FAKE_CARGO_MODE      compile_error: print a compile error and exit 101
 #   FAKE_CARGO_FAIL      test name reported FAILED; FAKE_CARGO_DROP: test name not reported
+#   FAKE_CARGO_GARBLE    test name whose status line is split by output that libtest does
+#                        not capture (as observed in a real run); it still counts as passed
 #   FAKE_CARGO_READ_STDIN  non-empty: a test run reads its standard input to the end, as a
 #                        test that reads stdin (or a child that inherits it) would
 #   CARGO_TERM_COLOR     always: colour the status lines as cargo does
+#   P2A_VALIDATION_VERBOSE  1: each test prints a Check line to stderr. Libtest's parallel
+#                        runner writes `test <name> ... `, `ok` and the newline separately,
+#                        so with --nocapture the Check output lands between them (the lines
+#                        reproduce a real p2a-cli run); with --show-output libtest captures it
+#                        and prints it in a `successes:` section after the status lines.
 echo "$*" >> "${FAKE_CARGO_CALLS:-/dev/null}"
 pkg=""
 prev=""
 target="unittests src/lib.rs"
 list=false
 after=false
+nocapture=false
+show_output=false
 names=()
 for a in "$@"; do
   if $after; then
     case "$a" in
       --list) list=true ;;
+      --nocapture) nocapture=true ;;
+      --show-output) show_output=true ;;
       --*) ;;
       *) names+=("$a") ;;
     esac
@@ -65,19 +76,45 @@ fi
 echo "     Running $target (target/debug/deps/fake-0000000000000000)" | colour
 echo ""
 echo "running ${#names[@]} tests"
+verbose=false
+[ "${P2A_VALIDATION_VERBOSE:-}" = 1 ] && verbose=true
+check_line() { echo "ok   case fake: $1 rust=1.1 R=1.1 |diff|=0e0 allowed=0e0"; }
 passed=0
 failed=0
+successes=()
 for n in ${names[@]+"${names[@]}"}; do
   if [ "$n" = "${FAKE_CARGO_FAIL:-}" ]; then
     echo "test $n ... FAILED"
     failed=$((failed + 1))
   elif [ "$n" = "${FAKE_CARGO_DROP:-}" ]; then
     :
+  elif [ "$n" = "${FAKE_CARGO_GARBLE:-}" ]; then
+    printf 'test %s ... \nokok\n' "$n"
+    passed=$((passed + 1))
+  elif $verbose && $nocapture; then
+    line="$(check_line "$n")"
+    printf 'test %s ... ' "$n"
+    printf '\nok  ' >&2
+    printf 'ok'
+    printf ' %s\n' "${line#ok   }" >&2
+    printf '\n'
+    passed=$((passed + 1))
   else
     echo "test $n ... ok"
     passed=$((passed + 1))
+    successes+=("$n")
   fi
 done
+if $verbose && $show_output && [ ${#successes[@]} -gt 0 ]; then
+  printf '\nsuccesses:\n\n'
+  for n in "${successes[@]}"; do
+    printf -- '---- %s stdout ----\n%s\n\n' "$n" "$(check_line "$n")"
+  done
+  printf '\nsuccesses:\n'
+  for n in "${successes[@]}"; do
+    printf '    %s\n' "$n"
+  done
+fi
 echo ""
 if [ "$failed" -gt 0 ]; then
   echo "test result: FAILED. $passed passed; $failed failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"

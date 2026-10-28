@@ -11,6 +11,9 @@ Subcommands (each takes --root DIR, default: the repository containing this scri
   collect  Turn cargo test logs (--package), the R drift check log of
            `Rscript validation/r/run.R --check` (--r-check) and a legacy-script run
            (--legacy) into results.json (-o), merging into an existing file.
+           --selection FILE (select's output) fails the package when a selected test
+           has no parsed result or a parsed result was not selected, and prints a
+           `collect: <pkg>: missing: <id>` or `... unexpected: <id>` line for each.
   lint     Check validation/methods/*.json against the case files in
            validation/expected/, the test lists (--tests <pkg>-tests.txt ...) and the
            tests that load cases; report legacy documentation debt as warnings
@@ -438,7 +441,31 @@ def package_summary(name: str, pkg: dict) -> str:
     return f"{name}: {pkg['status']} ({detail})"
 
 
-def collect_package(results: dict, package: str, logs, exit_code, selected, features) -> dict:
+def read_selection(path, package: str) -> list:
+    """The test ids of a `select` output file (`<target>\\t<libtest name>` lines), in file
+    order, one per line: --test <binary> names are `<package>::<binary>::<name>`, the
+    other targets' `<package>::<name>`, as parse_cargo_log names them."""
+    ids = []
+    for no, line in enumerate(read_text(path).splitlines(), start=1):
+        if not line.strip():
+            continue
+        target, sep, name = line.partition("\t")
+        if not sep or not name.strip() or not re.match(r"^--(?:lib|bins|bin \S+|test \S+)$", target):
+            raise UsageError(f"{path}:{no}: not a `<target>\\t<libtest name>` line: {line!r}")
+        if target.startswith("--test "):
+            ids.append(f"{package}::{target[len('--test '):]}::{name.strip()}")
+        else:
+            ids.append(f"{package}::{name.strip()}")
+    return ids
+
+
+def collect_package(
+    results: dict, package: str, logs, exit_code, selected, features, selection=None
+) -> dict:
+    """Merge the cargo logs of one package into `results`. `selected` is the number of
+    tests asked for; `selection` (ids, see read_selection) is compared with the ids parsed
+    from the logs: a selected test without a parsed result, or a parsed result for a test
+    not selected, fails the package, whatever libtest's totals say."""
     prefix = package + "::"
     tests = {k: v for k, v in results.get("tests", {}).items() if not k.startswith(prefix)}
     merged, binaries, compile_errors = {}, set(), []
@@ -474,6 +501,25 @@ def collect_package(results: dict, package: str, logs, exit_code, selected, feat
         status = "fail"
     if selected is not None and ran != selected:
         errors.append(f"selected {selected} tests, ran {ran}")
+    missing = unexpected = None
+    if selection is not None:
+        # libtest's totals count a test whose status line could not be parsed, so only
+        # the ids say whether every selected test has a result.
+        wanted = set(selection)
+        missing = sorted(wanted - set(merged))
+        unexpected = sorted(set(merged) - wanted)
+        if (missing or unexpected) and status == "pass":
+            status = "fail"
+        if missing:
+            errors.append(
+                f"{len(missing)} selected test(s) without a parsed result: " + ", ".join(missing[:3])
+                + (", ..." if len(missing) > 3 else "")
+            )
+        if unexpected:
+            errors.append(
+                f"{len(unexpected)} parsed result(s) for tests not selected: " + ", ".join(unexpected[:3])
+                + (", ..." if len(unexpected) > 3 else "")
+            )
     if status == "pass" and selected == 0:
         status = "no_tests"
     tests.update(merged)
@@ -490,6 +536,8 @@ def collect_package(results: dict, package: str, logs, exit_code, selected, feat
         "failed": failed,
         "ignored": ignored,
         "errors": errors,
+        "missing": missing,
+        "unexpected": unexpected,
     }
     results.setdefault("packages", {})[package] = pkg
     return pkg
@@ -517,14 +565,28 @@ def cmd_collect(args) -> int:
         results.setdefault(key, {})
     if args.logs and not args.package:
         raise UsageError("cargo logs need --package")
+    if args.selection and not args.package:
+        raise UsageError("--selection needs --package")
+    selected, selection = args.selected, None
+    if args.selection:
+        selection = read_selection(args.selection, args.package)
+        if selected is None:
+            selected = len(selection)
+        elif selected != len(selection):
+            raise UsageError(
+                f"--selected {selected} does not match the {len(selection)} line(s) of {args.selection}"
+            )
     rc = 0
     if args.package:
         pkg = collect_package(
-            results, args.package, args.logs, args.exit_code, args.selected, args.features
+            results, args.package, args.logs, args.exit_code, selected, args.features, selection
         )
         print("collect: " + package_summary(args.package, pkg))
         for e in pkg["errors"]:
             print(f"collect: {args.package}: error: {e}")
+        for key in ("missing", "unexpected"):
+            for tid in pkg[key] or ():
+                print(f"collect: {args.package}: {key}: {tid}")
         if pkg["status"] in ("fail", "compile_error"):
             rc = 1
     if args.r_check:
@@ -1434,6 +1496,7 @@ def main(argv=None) -> int:
     p.add_argument("--package")
     p.add_argument("--exit-code", type=int)
     p.add_argument("--selected", type=int)
+    p.add_argument("--selection", metavar="SELECT_OUTPUT")
     p.add_argument("--features")
     p.add_argument("--command")
     p.add_argument("--category")
