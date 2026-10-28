@@ -91,5 +91,28 @@ class ReadmeIndexTest(unittest.TestCase):
         self.assertEqual(sorted(set(self.by_doc) - indexed), [])
 
 
+class Econ82DocsTest(unittest.TestCase):
+    """ECON-82: parity docs report R's numbers, cite existing tests and claim no approximate p2a values."""
+
+    def read(self, rel):
+        return (VALIDATION / rel).read_text(encoding="utf-8")
+
+    def test_hausman_doc_shows_phtest_statistic(self):
+        self.assertIn("2.330366893675463", self.read("econometrics/hausman.md"))
+
+    def test_no_approximate_parity_cells(self):
+        for rel in ("econometrics/gmm.md", "econometrics/pggls.md", "econometrics/feglm.md"):
+            with self.subTest(doc=rel):
+                self.assertEqual(re.findall(r"\|\s*~\s*-?[0-9]", self.read(rel)), [])
+
+    def test_docs_report_the_r_values(self):
+        for rel, value in (("econometrics/gmm.md", "0.6719522974788301"),
+                           ("econometrics/pggls.md", "0.0009197911431547233"),
+                           ("econometrics/pggls.md", "-13.74653219816151"),
+                           ("econometrics/feglm.md", "2.93615099246126")):
+            with self.subTest(doc=rel):
+                self.assertIn(value, self.read(rel))
+
+
 if __name__ == "__main__":
     unittest.main()
