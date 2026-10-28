@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "diag_reset_quad",
+  "area": "regression/diagnostics",
+  "method": "RESET test (fitted and regressor, powers 2:3), quadratic DGP, n = 100 (legacy Test 5 DGP)",
+  "reference": "lmtest::resettest(power = 2:3, type = 'fitted' | 'regressor'); R-squared of the augmented models from stats::lm",
+  "call": "resettest(lm(y ~ x, data = reset_quad), power = 2:3, type = 'fitted')",
+  "dataset": "validation/datasets/generated/reset_quad.csv",
+  "datasets": ["validation/datasets/generated/reset_quad.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "lmtest": "0.9.40"
+  },
+  "values": {
+    "reset_fitted": 150.24613960478879,
+    "reset_fitted_df1": 2,
+    "reset_fitted_df2": 96,
+    "reset_fitted_p": 2.714887974998689e-30,
+    "reset_regressor": 150.24613960478891,
+    "reset_regressor_df1": 2,
+    "reset_regressor_df2": 96,
+    "reset_regressor_p": 2.7148879749986119e-30,
+    "r2_original": 0.97522695649902646,
+    "r2_augmented_fitted": 0.99400187014780084,
+    "r2_augmented_regressor": 0.99400187014780084,
+    "n_obs": 100
+  }
+}

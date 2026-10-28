@@ -134,3 +134,9 @@ python3 validation/tools/validation_status.py lint --tests target/p2a-core-tests
 
 `validation/run_validation.sh` runs the lint with the lists of p2a-core, p2a-cli and
 p2a-mcp on every full run (no `--category`).
+
+## Legacy citations converted in later tiers
+
+- `validation/scripts/validate_iv.R` simulates n = 200 `rnorm` data, while the Rust IV
+  fixture in `econometrics/iv.rs` is n = 100 sin/cos data, so `iv_basic.csv` cannot be
+  compared (INF-2). It becomes a harness case with ECON-3 (Tier 2).

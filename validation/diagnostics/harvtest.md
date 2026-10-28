@@ -19,101 +19,65 @@ where β̂_{t-1} is estimated using observations 1 to t-1.
 
 | Package | Language | Function | Version Tested |
 |---------|----------|----------|----------------|
-| lmtest | R | `harvtest()` | 0.9-40 |
-| strucchange | R | `recresid()` | 1.5-3 |
+| lmtest | R | `harvtest()` | 0.9.40 |
+| strucchange | R | `recresid()` | 1.6.0 |
 
-## Test Cases
+## R reference (pinned)
 
-### Test 1: Linear Relationship (No Misspecification)
+Two R reference cases pin the test: the concave DGP of the legacy script
+`validation/scripts/validate_regression_diag.R` (Test 6), ported with the same seed and draws,
+and the Grunfeld regression of the `p2a reg diagnostics` exhibit.
 
-**Data Generation:**
-```r
-set.seed(42)
-n <- 50
-x <- 1:n
-y <- 2 + 3 * x + rnorm(n, 0, 2)
-```
+| Case | Data | R code |
+|---|---|---|
+| `diag_harvtest_nonlin` | `validation/datasets/generated/harvtest_nonlin.csv` (n = 100; `x = seq(1, 10, length.out = 100)`, `y = 5 + 2 x - 0.2 x^2 + N(0, 0.5^2)`, `set.seed(42)`), fitted linearly | `validation/r/cases/regression_legacy.R` |
+| `ols_diagnostics_grunfeld` | `validation/datasets/grunfeld.csv` (n = 200; `inv ~ value + capital`) | `validation/r/cases/regression.R` |
 
-**R Code:**
-```r
-library(lmtest)
-model <- lm(y ~ x)
-harvtest(model)
-```
+R call: `harvtest(lm(y ~ x))` (lmtest 0.9.40); the signed mean and standard error of the
+recursive residuals come from `strucchange::recresid` (1.6.0).
 
-**Expected Results:**
+| Case | Quantity | R value |
+|---|---|---|
+| `diag_harvtest_nonlin` | \|t\| (df, p) | 8.454862195 (97, 2.871377594e-13) |
+| | mean of the recursive residuals | -0.8521908541 |
+| | standard error of that mean, `sd(w) / sqrt(98)` | 0.1007929916 |
+| | number of recursive residuals | 98 |
+| `ols_diagnostics_grunfeld` | \|t\| (p) | 1.469927271 (0.1431848398); df 196, 197 recursive residuals |
 
-| Metric | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| t-stat | ~0.5 | ~0.5 | ±0.5 | ✅ |
-| p-value | >0.05 | >0.05 | - | ✅ |
-| Interpretation | Fail to reject | Fail to reject | - | ✅ |
+Tests: `test_validate_harvey_collier_nonlin` (every value above for `diag_harvtest_nonlin`, and
+the sign of p2a's statistic against the sign of the mean) and
+`test_validate_harvey_collier_grunfeld` (the Grunfeld row; df and the residual count are
+asserted directly because the case does not store them).
 
-**Rust Test:** `crates/p2a-core/src/regression/diagnostics.rs::tests::test_harvey_collier_linear`
+## Property tests
 
-### Test 2: Quadratic Relationship (Misspecification)
-
-**Data Generation:**
-```r
-set.seed(123)
-n <- 50
-x <- 1:n
-y <- 1 + x + 0.05 * x^2 + rnorm(n, 0, 1)
-```
-
-**R Code:**
-```r
-model <- lm(y ~ x)  # Misspecified linear model
-harvtest(model)
-```
-
-**Expected Results:**
-
-| Metric | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| t-stat | >2.0 | >2.0 | ±1.0 | ✅ |
-| p-value | <0.05 | <0.05 | - | ✅ |
-| Interpretation | Reject H0 | Reject H0 | - | ✅ |
-
-**Rust Test:** `crates/p2a-core/src/regression/diagnostics.rs::tests::test_harvey_collier_quadratic`
-
-### Test 3: Multiple Regressors
-
-**Data Generation:**
-```r
-set.seed(456)
-n <- 60
-x1 <- rnorm(n)
-x2 <- rnorm(n)
-y <- 1 + 2*x1 + 3*x2 + rnorm(n, 0, 0.5)
-```
-
-**Expected Results:**
-- With truly linear DGP, Harvey-Collier should fail to reject
-- Test verifies extension to multiple regressors
+- `test_harvey_collier_linear`
+- `test_harvey_collier_quadratic`
+- `test_harvey_collier_displays`
+- `test_recursive_residuals_basic`
 
 ## Numerical Precision Summary
 
-- **t-statistic**: Match R within ±0.5 (sensitive to recursive computation)
-- **p-value**: Match R within ±0.1 for moderate p-values
-- **Degrees of freedom**: Exact match (n - k - 1)
+The tolerances of `validation/README.md` for n = 100 and 200:
+
+- **t-statistic, mean and standard error of the recursive residuals**: 1e-6 relative
+- **p-value**: 1e-6 relative or 1e-12 absolute
+- **Degrees of freedom and residual count**: exact (df = n - k - 1)
+
+The methods registry entry is `harvtest` in `validation/methods/regression_diagnostics.json`;
+it records no deviation. These cases supersede the legacy
+`validation/expected/harveycollier_test.csv`, whose values they reproduce to the 15 digits it
+prints.
 
 ## Known Differences
 
 1. **Observation ordering**: R allows `order.by` parameter for custom ordering; Rust uses data order
 2. **Recursive computation**: Sequential matrix operations may accumulate small numerical differences
 3. **Starting point**: Both start at observation k+1 (first observation with full degrees of freedom)
-
-## Performance Comparison
-
-| Dataset Size | Rust (µs) | R (µs) | Speedup |
-|--------------|-----------|--------|---------|
-| n=50         | ~150      | ~300   | ~2x     |
-| n=100        | ~400      | ~600   | ~1.5x   |
-| n=500        | ~5,000    | ~8,000 | ~1.6x   |
-| n=1,000      | ~20,000   | ~30,000| ~1.5x   |
-
-*Note: Performance dominated by sequential OLS computations. Performance will be updated after running benchmarks.*
+4. **Sign of the statistic**: p2a reports the signed t of the mean recursive residual;
+   `harvtest` reports |t|. The p-value is the same two-sided value.
+5. **Cost**: p2a refits the regression for every recursive residual, O(n^2 k^2) in total
+   (REG-38, Tier 4).
 
 ## Implementation Notes
 

@@ -1,0 +1,140 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "bgtest",
+      "name": "Breusch-Godfrey test for serial correlation",
+      "category": "regression",
+      "reference": "lmtest::bgtest(order = 1 | 4, type = 'Chisq' | 'F', fill = 0)",
+      "doc": "validation/diagnostics/bgtest.md",
+      "cases": ["diag_bgtest_ar1", "ols_diagnostics_grunfeld"],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_bgtest_ar1",
+        "p2a-core::regression::diagnostics::tests::test_validate_bgtest_grunfeld"
+      ],
+      "quantities": ["LM (Chisq) statistic, orders 1 and 4", "F statistic, orders 1 and 4", "df", "p-values", "lagged-residual coefficients", "auxiliary R2", "n"],
+      "tolerance": "validation/README.md, n = 100 and 200: statistics and R2 1e-6, coefficients 1e-8 relative; p-values 1e-6 relative or 1e-12 absolute; df and n exact",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/bgtest_test.csv"]
+    },
+    {
+      "id": "resettest",
+      "name": "Ramsey RESET test",
+      "category": "regression",
+      "reference": "lmtest::resettest(power = 2:3, type = 'fitted' | 'regressor'); stats::lm for the augmented-model R2",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": ["diag_reset_quad", "ols_diagnostics_grunfeld"],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_reset_quad",
+        "p2a-core::regression::diagnostics::tests::test_validate_reset_grunfeld"
+      ],
+      "quantities": ["F statistic (fitted, regressor)", "df1, df2", "p-values", "R2 of the original and augmented models", "n"],
+      "tolerance": "validation/README.md, n = 100 and 200: statistics and R2 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute; df exact",
+      "deviations": [
+        {"finding": "REG-35", "quantity": "type = 'princomp'", "note": "not implemented: ResetType::PrinComp reuses the fitted-value augmentation; not exercised by any case. On Grunfeld (inv ~ value + capital, powers 2:3) p2a gives the fitted F 19.56011807 where resettest(type = 'princomp') gives 6.108133142 (df 2, 195)"}
+      ],
+      "supersedes_legacy": ["validation/expected/reset_test.csv"]
+    },
+    {
+      "id": "harvtest",
+      "name": "Harvey-Collier test",
+      "category": "regression",
+      "reference": "lmtest::harvtest; strucchange::recresid",
+      "doc": "validation/diagnostics/harvtest.md",
+      "cases": ["diag_harvtest_nonlin", "ols_diagnostics_grunfeld"],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_harvey_collier_nonlin",
+        "p2a-core::regression::diagnostics::tests::test_validate_harvey_collier_grunfeld"
+      ],
+      "quantities": ["|t| statistic (p2a keeps the sign of the mean)", "df", "p-value", "mean and standard error of the recursive residuals", "number of recursive residuals"],
+      "tolerance": "validation/README.md, n = 100 and 200: statistics 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute; counts exact",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/harveycollier_test.csv"]
+    },
+    {
+      "id": "waldtest",
+      "name": "Wald test of nested linear models",
+      "category": "regression",
+      "reference": "lmtest::waldtest(test = 'F' | 'Chisq'); aod::wald.test (legacy reference, equal to the Chisq form)",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": ["diag_wald_sim", "ols_diagnostics_grunfeld"],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_wald_sim",
+        "p2a-core::regression::diagnostics::tests::test_validate_wald_grunfeld"
+      ],
+      "quantities": ["F statistic", "df1, df2", "F p-value", "RSS of both models", "parameter counts", "n"],
+      "tolerance": "validation/README.md, n = 100 and 200: statistics and RSS 1e-6 relative; p-values 1e-6 relative or 1e-12 absolute; counts exact",
+      "deviations": [
+        {"finding": "REG-37", "quantity": "Chisq statistic and p-value", "note": "p2a uses n (RSS_r - RSS_u) / RSS_u; lmtest::waldtest(test = 'Chisq') and aod::wald.test give q F = (n - k) (RSS_r - RSS_u) / RSS_u: diag_wald_sim drop x2 0.01248835701 vs 0.01198882273, drop x2 and x3 514.9909496 vs 494.3913116; Grunfeld drop capital 83.23811806 vs 81.98954629"}
+      ],
+      "supersedes_legacy": ["validation/expected/wald_test.csv"]
+    },
+    {
+      "id": "hac",
+      "name": "HAC (kernel) covariance for OLS",
+      "category": "regression",
+      "reference": "sandwich::NeweyWest(lag = m, prewhite = FALSE) for Bartlett; sandwich::kernHAC(kernel =, bw = m, prewhite = FALSE, adjust = FALSE) for Parzen, Truncated, Tukey-Hanning",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": ["hac_ar1"],
+      "tests": ["p2a-core::regression::ols::tests::test_validate_hac_ar1"],
+      "quantities": ["coefficients", "default bandwidth (floor(4 (n/100)^(2/9)))", "SE and covariance matrix: Bartlett (default and m = 4), Parzen, Truncated, Tukey-Hanning (m = 4)"],
+      "tolerance": "validation/README.md, n = 100: coefficients 1e-8, SE and covariance entries 1e-6 relative; bandwidth exact",
+      "deviations": [
+        {"finding": "REG-50", "quantity": "Quadratic Spectral SEs", "note": "the QS kernel is truncated at the bandwidth: p2a 0.2284575999 / 0.1414513262 vs kernHAC(kernel = 'Quadratic Spectral', bw = 4, prewhite = FALSE, adjust = FALSE) 0.2300539548 / 0.1392422079 (kernhac_qs_bw4)"},
+        {"finding": "REG-50", "quantity": "Bartlett bandwidth convention", "note": "p2a's Bartlett bandwidth m weights lag j by 1 - j/(m + 1), i.e. NeweyWest(lag = m) = kernHAC(bw = m + 1) (pinned); kernHAC(kernel = 'Bartlett', bw = 4) is 0.2102028704 / 0.1464461033 (kernhac_bartlett_bw4) where p2a's m = 4 gives 0.2204664393 / 0.1429954779. Parzen, Truncated and Tukey-Hanning use j/m and match kernHAC(bw = m)"},
+        {"finding": "REG-22", "quantity": "prewhitened SEs", "note": "prewhiten = true fits a scalar AR(1) to the residuals: p2a 0.2908704449 / 0.3059566437 vs NeweyWest(lag = 4, prewhite = TRUE) 0.2858936714 / 0.1360607244 (neweywest_lag4_prewhite)"},
+        {"finding": "REG-61", "quantity": "default bandwidth and small-sample adjustment", "note": "the default bandwidth is the fixed rule floor(4 (n/100)^(2/9)) = 4, not bwNeweyWest (2.513298742, bw_neweywest); there is no adjust = TRUE option: kernhac_*_bw4_adjust hold the adjusted values, e.g. Parzen 0.1977403619 / 0.1432982597 where p2a gives the unadjusted 0.1957529711 / 0.1418580397"}
+      ],
+      "supersedes_legacy": ["validation/expected/hac_test.csv"]
+    },
+    {
+      "id": "driscoll_kraay",
+      "name": "Driscoll-Kraay covariance for pooled OLS",
+      "category": "regression",
+      "reference": "sandwich::vcovPL(cluster = ~firm, order.by = ~time, kernel = 'Bartlett', lag = 2, adjust = FALSE); plm::vcovSCC(maxlag = 2) as a cross-check",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": ["dk_panel"],
+      "tests": ["p2a-core::regression::ols::tests::test_validate_driscoll_kraay_panel"],
+      "quantities": ["coefficients", "default bandwidth (floor(T^(1/4)))", "number of periods", "n", "classical OLS SE (cross-check)"],
+      "tolerance": "validation/README.md, n = 200: coefficients 1e-8, SE 1e-6 relative; counts exact",
+      "deviations": [
+        {"finding": "REG-24", "quantity": "Driscoll-Kraay SEs, covariance, t and p", "note": "scores are averaged within period and the meat is multiplied by T: p2a 0.02186774128 / 0.04533713058 = sqrt(T)/N (0.4472135955) x vcovPL 0.04889775602 / 0.1013769059 (vcovpl_lag2 = vcovscc_lag2). The legacy reference vcovPL(cluster = ~time, order.by = ~time) aggregates by firm, not period (legacy_vcovpl_cluster_time), and is not a Driscoll-Kraay value"},
+        {"finding": "REG-50", "quantity": "non-Bartlett kernels", "note": "Parzen, Tukey-Hanning and QS use the j/m bandwidth convention while vcovPL uses bw = lag + 1; not pinned, and no case holds a vcovPL value for them, so there is no R or p2a value to record"}
+      ],
+      "supersedes_legacy": ["validation/expected/driscoll_kraay_test.csv"]
+    },
+    {
+      "id": "quantreg",
+      "name": "Quantile regression",
+      "category": "regression",
+      "reference": "quantreg::rq(method = 'br'); quantreg::summary.rq(se = 'iid' | 'nid')",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": ["quantreg_hetero"],
+      "tests": ["p2a-core::regression::quantreg::tests::test_validate_quantreg_hetero"],
+      "quantities": ["check-loss objective at tau = 0.25, 0.5, 0.75", "residual df", "n"],
+      "tolerance": "validation/README.md, n = 100: objective 1e-6 relative (statistic row); df and n exact",
+      "deviations": [
+        {"finding": "REG-52", "quantity": "coefficients", "note": "IRLS with an absolute 1e-4 weight cap approximates the LP solution: relative differences from rq of 1.8e-5 / 5.5e-8 (tau 0.25), 2.8e-5 / 7.7e-6 (0.5), 1.0e-6 / 1.8e-6 (0.75) against the 1e-8 coefficient tolerance; tau 0.5 p2a 1.348696693 / 3.169975618 vs rq 1.348734984 / 3.169951199 (coef_tau50); the objective is within 2.3e-7 of rq's minimum"},
+        {"finding": "REG-26", "quantity": "standard errors, t, p", "note": "about sqrt(n) too small and an iid Silverman/Epanechnikov sparsity: tau 0.5 p2a 0.05028920546 / 0.008320075224 vs summary.rq iid 0.4807247768 / 0.07953329683, nid 0.1798711171 / 0.1079530876"},
+        {"finding": "REG-64", "quantity": "95% confidence intervals", "note": "use 1.96 instead of a t quantile, around the REG-26 SEs: tau 0.5 slope p2a 3.153668270 to 3.186282965, i.e. estimate +/- 1.96 x 0.008320075224, where a t(98) interval on the same SE would use 1.984467455; no case holds an R interval (summary.rq's default rank-inversion intervals are not recorded)"}
+      ],
+      "supersedes_legacy": ["validation/expected/quantreg_test.csv"]
+    },
+    {
+      "id": "gls",
+      "name": "GLS with AR(1) errors",
+      "category": "regression",
+      "reference": "nlme::gls(correlation = corAR1(form = ~t)) (REML)",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": ["gls_ar1"],
+      "tests": ["p2a-core::regression::gls::tests::test_validate_gls_ar1_nlme"],
+      "quantities": ["coefficients, SE, t, p and sigma at nlme's REML phi", "residual df", "n"],
+      "tolerance": "validation/README.md, n = 50: coefficients 1e-6, SE, t and sigma 1e-5 relative; p-values 1e-5 relative or 1e-12 absolute; counts exact",
+      "deviations": [
+        {"finding": "REG-43", "quantity": "estimated rho ('ar1_auto') and the fit that uses it", "note": "the lag-1 correlation of the OLS residuals, 0.6541921822, not nlme's REML 0.6819761522 (phi) or ML 0.6532503857 (phi_ml)"},
+        {"finding": "REG-9", "quantity": "log-likelihood, AIC, BIC", "note": "omit -0.5 log|Omega| and use SSE/(n - p): at phi p2a gives -93.62614993, AIC 193.2522999, BIC 198.9883689 (post Tier 0) vs nlme REML logLik -79.12921201, AIC 166.2584240, BIC 173.7432281"}
+      ],
+      "supersedes_legacy": ["validation/expected/gls_ar1_test.csv"]
+    }
+  ]
+}

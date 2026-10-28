@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "id": "dk_panel",
+  "area": "regression/hac",
+  "method": "Driscoll-Kraay standard errors, pooled OLS, N = 10, T = 20 (legacy Test 10 DGP)",
+  "reference": "sandwich::vcovPL(cluster = ~firm, order.by = ~time, kernel = 'Bartlett', lag =, adjust = FALSE | TRUE); plm::vcovSCC(maxlag =) as a cross-check",
+  "call": "vcovPL(lm(y ~ x, data = dk_panel), cluster = ~firm, order.by = ~time, lag = 2, adjust = FALSE)",
+  "dataset": "validation/datasets/generated/dk_panel.csv",
+  "datasets": ["validation/datasets/generated/dk_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3",
+    "plm": "2.6.7"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.6707069223645019, 3.0392506814690523]
+    },
+    "se_ols": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.10731844612505689, 0.11034928785405378]
+    },
+    "lag": 2,
+    "n_periods": 20,
+    "n_obs": 200,
+    "vcovpl_lag2": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.048897756016038782, 0.10137690588728233]
+    },
+    "vcovpl_lag2_adjust": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.049144093877437615, 0.10188762401069298]
+    },
+    "vcovscc_lag2": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.048897756016038789, 0.10137690588728231]
+    },
+    "legacy_vcovpl_cluster_time": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.41157833697750751, 0.13313763974938586]
+    }
+  }
+}

@@ -669,90 +669,39 @@ mod tests {
     // VALIDATION TESTS - Comparing against R reference implementations
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Validation test: Quantile regression vs R's quantreg::rq
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 100
-    /// x <- runif(n, 0, 10)
-    /// y <- 2 + 3 * x + rnorm(n, 0, 1 + 0.5 * x)  # heteroskedastic errors
-    /// qr_multi <- rq(y ~ x, tau = c(0.25, 0.5, 0.75))
-    /// # tau=0.25: intercept ≈ 1.38, slope ≈ 2.77
-    /// # tau=0.50: intercept ≈ 1.35, slope ≈ 3.17
-    /// # tau=0.75: intercept ≈ 1.74, slope ≈ 3.47
-    /// ```
+    /// Case `quantreg_hetero` (quantreg::rq on the legacy Test 1 DGP; validation/r/cases/regression_legacy.R).
+    /// IRLS approximates the LP optimum, so the objective is pinned and the coefficients are a
+    /// registry deviation.
     #[test]
-    fn test_validate_quantreg_vs_r() {
-        // R reference values from validation/expected/quantreg_test.csv
-        // tau,intercept,slope
-        // 0.25,1.38040742655124,2.7682582131913
-        // 0.5,1.34873498412664,3.16995119875667
-        // 0.75,1.74064142504961,3.46707615957026
-
-        // Create heteroskedastic data similar to R
-        let n = 100;
-        let x: Vec<f64> = (0..n).map(|i| 10.0 * (i as f64) / (n as f64)).collect();
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                // True model: y = 2 + 3*x + heteroskedastic noise
-                let noise_scale = 1.0 + 0.5 * xi;
-                let noise = ((i as f64 * 1.234).sin()) * noise_scale;
-                2.0 + 3.0 * xi + noise
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x" => x
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // Test tau = 0.25
-        let result_25 = run_quantreg(&dataset, "y", &["x"], 0.25).unwrap();
-
-        assert_eq!(result_25.tau, 0.25);
-        assert_eq!(result_25.n_obs, 100);
-        assert!(
-            result_25.coefficients[1].estimate > 0.0,
-            "Slope should be positive"
-        );
-
-        // Test tau = 0.50 (median)
-        let result_50 = run_quantreg(&dataset, "y", &["x"], 0.50).unwrap();
-
-        assert_eq!(result_50.tau, 0.5);
-        // Slope should be close to true value (3)
-        assert!(
-            (result_50.coefficients[1].estimate - 3.0).abs() < 1.0,
-            "Median regression slope should be close to 3: got {}",
-            result_50.coefficients[1].estimate
-        );
-
-        // Test tau = 0.75
-        let result_75 = run_quantreg(&dataset, "y", &["x"], 0.75).unwrap();
-
-        assert_eq!(result_75.tau, 0.75);
-
-        // Key property: With heteroskedastic errors where variance increases with x,
-        // the slope should increase with tau (higher quantiles have steeper slopes)
-        // This is because the "spread" of y increases with x
-        assert!(
-            result_25.coefficients[1].estimate < result_75.coefficients[1].estimate + 0.5,
-            "With increasing heteroskedasticity, higher quantiles tend to have steeper slopes"
-        );
-
-        // All slopes should be in reasonable range around true value (3)
-        for result in [&result_25, &result_50, &result_75] {
+    fn test_validate_quantreg_hetero() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("quantreg_hetero");
+        let n = case.scalar("n_obs") as usize;
+        let mut check = Check::new(&case);
+        let mut slopes = Vec::new();
+        for (tau, tag) in [(0.25, "tau25"), (0.5, "tau50"), (0.75, "tau75")] {
+            let r = run_quantreg(&ds, "y", &["x"], tau).unwrap();
+            let key = format!("objective_{tag}");
+            check.scalar(&key, r.objective, Tol::stat(n));
             assert!(
-                result.coefficients[1].estimate > 1.0 && result.coefficients[1].estimate < 5.0,
-                "Quantile regression slope should be in reasonable range: got {}",
-                result.coefficients[1].estimate
+                r.objective >= case.scalar(&key) * (1.0 - 1e-12),
+                "objective below rq's LP minimum at tau = {tau}"
             );
+            assert!(r.iterations < 100, "IRLS did not converge at tau = {tau}");
+            // deviation REG-52: coefficients (coef_<tag>); deviation REG-26: std_error, t, p
+            //   (se_iid_<tag>, se_nid_<tag>); deviation REG-64: 95% CI uses 1.96.
+            slopes.push(r.coefficients[1].estimate);
         }
+        let r = run_quantreg(&ds, "y", &["x"], 0.5).unwrap();
+        check
+            .scalar("rdf", r.df as f64, Tol::exact())
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .finish();
+        // kept from the old test
+        assert!(
+            slopes[0] < slopes[1] && slopes[1] < slopes[2],
+            "slopes increase with tau: {slopes:?}"
+        );
     }
 
     /// Validation test: Quantile regression with multiple quantiles

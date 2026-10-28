@@ -11,7 +11,7 @@
 # - RESET Test (lmtest::resettest)
 # - Harvey-Collier Test (lmtest::harvtest)
 # - Wald Test (aod::wald.test)
-# - HAC (sandwich::vcovHAC, NeweyWest)
+# - HAC (sandwich::kernHAC, NeweyWest)
 # - Bootstrap (sandwich::vcovBS)
 # - Driscoll-Kraay (sandwich::vcovPL)
 # - Super Smoother (stats::supsmu)
@@ -305,6 +305,7 @@ wald_multi <- aod::wald.test(
 cat("\nWald Test (H0: x2 = x3 = 0):\n")
 print(wald_multi)
 
+# NOTE: aod::wald.test names its p-value "P", so the p_value column below is NA. Superseded by the diag_wald_sim case (validation/r/cases/regression_legacy.R).
 wald_expected <- data.frame(
   restriction = c("x2=0", "x2=x3=0"),
   chi2_statistic = c(wald_single$result$chi2["chi2"], wald_multi$result$chi2["chi2"]),
@@ -339,9 +340,16 @@ hac_nw <- NeweyWest(model_hac)
 cat("\nNewey-West HAC Variance:\n")
 print(hac_nw)
 
-# vcovHAC with different kernels
-hac_bartlett <- vcovHAC(model_hac, kernel = "Bartlett")
-hac_parzen <- vcovHAC(model_hac, kernel = "Parzen")
+# Kernel HAC with an explicit kernel and bandwidth (INF-16). vcovHAC() has no
+# `kernel` argument: it silently ignores one and returns its default
+# (Andrews quadratic-spectral) estimate, which is what both rows held before.
+# bw is p2a's default lag for this n, floor(4 (n/100)^(2/9)) = 4; no
+# prewhitening and no small-sample adjustment, as p2a. kernHAC weights lag j by
+# k(j / bw), so p2a's Bartlett bandwidth m equals kernHAC(bw = m + 1), i.e.
+# NeweyWest(lag = m); see the hac_ar1 case in validation/r/cases/regression_legacy.R.
+hac_bw <- floor(4 * (n / 100)^(2 / 9))
+hac_bartlett <- kernHAC(model_hac, kernel = "Bartlett", bw = hac_bw, prewhite = FALSE, adjust = FALSE)
+hac_parzen <- kernHAC(model_hac, kernel = "Parzen", bw = hac_bw, prewhite = FALSE, adjust = FALSE)
 
 hac_expected <- data.frame(
   kernel = c("Bartlett", "Parzen", "NeweyWest"),
@@ -409,6 +417,7 @@ df_panel <- data.frame(y = y, x = x, firm = factor(firm), time = time)
 model_pool <- lm(y ~ x, data = df_panel)
 
 # Driscoll-Kraay SEs (panel-robust, accounts for cross-sectional dependence)
+# NOTE: with the same variable in cluster and order.by, sandwich derives order.by from the occurrence index within each period (= firm here), so this sums scores by firm: dk_se is not a Driscoll-Kraay value. Superseded by the dk_panel case (vcovPL(cluster = ~firm, order.by = ~time)).
 dk_vcov <- vcovPL(model_pool, cluster = ~ time, order.by = ~ time)
 cat("\nDriscoll-Kraay Variance:\n")
 print(dk_vcov)

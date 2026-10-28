@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "diag_bgtest_ar1",
+  "area": "regression/diagnostics",
+  "method": "Breusch-Godfrey test, AR(1) errors (rho = 0.5), n = 100 (legacy Test 4 DGP)",
+  "reference": "lmtest::bgtest(order = 1 | 4, type = 'Chisq' | 'F', fill = 0)",
+  "call": "bgtest(lm(y ~ x, data = bgtest_ar1), order = 1)",
+  "dataset": "validation/datasets/generated/bgtest_ar1.csv",
+  "datasets": ["validation/datasets/generated/bgtest_ar1.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "lmtest": "0.9.40"
+  },
+  "values": {
+    "bgtest1_chisq": 29.417256266255215,
+    "bgtest1_chisq_df": 1,
+    "bgtest1_chisq_p": 5.835570524626062e-08,
+    "bgtest4_chisq": 29.626791428617043,
+    "bgtest4_chisq_df": 4,
+    "bgtest4_chisq_p": 5.8297391374780047e-06,
+    "bgtest1_f": 40.427358117314782,
+    "bgtest1_f_df1": 1,
+    "bgtest1_f_df2": 97,
+    "bgtest1_f_p": 6.6841822675455007e-09,
+    "bgtest4_f": 9.8933900088736362,
+    "bgtest4_f_df1": 4,
+    "bgtest4_f_df2": 94,
+    "bgtest4_f_p": 1.0047269149654707e-06,
+    "bgtest1_lag_coef": {
+      "names": ["lag(resid)_1"],
+      "values": [0.54309430531736491]
+    },
+    "bgtest4_lag_coef": {
+      "names": ["lag(resid)_1", "lag(resid)_2", "lag(resid)_3", "lag(resid)_4"],
+      "values": [0.56156909531975596, -0.04353347513857983, 0.041240715488874549, -0.040811376015280919]
+    },
+    "bgtest1_aux_r2": 0.29417256266255215,
+    "bgtest4_aux_r2": 0.29626791428617044,
+    "n_obs": 100
+  }
+}

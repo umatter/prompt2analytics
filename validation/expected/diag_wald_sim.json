@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "diag_wald_sim",
+  "area": "regression/diagnostics",
+  "method": "Wald test of nested linear models, n = 100 (legacy Test 7 DGP)",
+  "reference": "lmtest::waldtest(test = 'F' | 'Chisq') (vcov = classical); aod::wald.test (the legacy reference, equal to the Chisq form)",
+  "call": "waldtest(lm(y ~ x1 + x2 + x3), lm(y ~ x1 + x3), test = 'F')",
+  "dataset": "validation/datasets/generated/wald_sim.csv",
+  "datasets": ["validation/datasets/generated/wald_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "lmtest": "0.9.40",
+    "aod": "1.3.3"
+  },
+  "values": {
+    "wald_drop_x2_f": 0.011988822733475643,
+    "wald_drop_x2_f_df1": 1,
+    "wald_drop_x2_f_df2": 96,
+    "wald_drop_x2_f_p": 0.91303964632162571,
+    "wald_drop_x2_chisq": 0.011988822733475643,
+    "wald_drop_x2_chisq_p": 0.912811090816535,
+    "wald_drop_x2_x3_f": 247.19565582485083,
+    "wald_drop_x2_x3_f_df1": 2,
+    "wald_drop_x2_x3_f_df2": 96,
+    "wald_drop_x2_x3_f_p": 1.3623892796754556e-38,
+    "wald_drop_x2_x3_chisq": 494.39131164970166,
+    "wald_drop_x2_x3_chisq_p": 4.4084987786744329e-108,
+    "aod_chi2_x2": 0.011988822733475643,
+    "aod_chi2_x2_p": 0.91281109081653489,
+    "aod_chi2_x2_x3": 494.39131164970166,
+    "aod_chi2_x2_x3_p": 0,
+    "rss_unrestricted": 18.870758040217556,
+    "rss_drop_x2": 18.873114687852876,
+    "rss_drop_x2_x3": 116.05345407487701,
+    "k_unrestricted": 4,
+    "k_drop_x2": 3,
+    "k_drop_x2_x3": 2,
+    "n_obs": 100
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "id": "hac_ar1",
+  "area": "regression/hac",
+  "method": "HAC standard errors, AR(1) errors (rho = 0.6), n = 100, explicit kernels and bandwidth (legacy Test 8 DGP)",
+  "reference": "sandwich::kernHAC(kernel =, bw =, prewhite = FALSE, adjust = FALSE | TRUE); sandwich::NeweyWest(lag =, prewhite = FALSE | TRUE); sandwich::vcovHAC (legacy default)",
+  "call": "kernHAC(lm(y ~ x, data = hac_ar1), kernel = 'Parzen', bw = 4, prewhite = FALSE, adjust = FALSE)",
+  "dataset": "validation/datasets/generated/hac_ar1.csv",
+  "datasets": ["validation/datasets/generated/hac_ar1.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.0841738674378587, 3.0038968169837981]
+    },
+    "bw_rule": 4,
+    "kernhac_bartlett_bw4": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.2102028704051577, 0.14644610333736596]
+    },
+    "kernhac_bartlett_bw4_vcov": [0.044185246726567526, 0.0050680185205819453, 0.0050680185205819453, 0.021446461182698467],
+    "kernhac_bartlett_bw4_adjust": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.21233696441194866, 0.14793290392599623]
+    },
+    "kernhac_parzen_bw4": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.19575297112206416, 0.1418580396785723]
+    },
+    "kernhac_parzen_bw4_vcov": [0.038319225703115689, 0.0046482655920105495, 0.0046482655920105495, 0.020123703421447394],
+    "kernhac_parzen_bw4_adjust": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.19774036188260855, 0.14329825974649829]
+    },
+    "kernhac_qs_bw4": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.23005395477920321, 0.13924220790152425]
+    },
+    "kernhac_qs_bw4_vcov": [0.052924822109551677, 0.0063569497189731776, 0.0063569497189731776, 0.019388392461291301],
+    "kernhac_qs_bw4_adjust": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.23238958780451133, 0.14065587062079266]
+    },
+    "kernhac_truncated_bw4": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.25746119591269701, 0.12826803497074948]
+    },
+    "kernhac_truncated_bw4_vcov": [0.066286267400796156, 0.006057068548826529, 0.0060570685488265299, 0.016452688795257412],
+    "kernhac_truncated_bw4_adjust": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.26007508217466618, 0.12957028191041453]
+    },
+    "kernhac_tukey_hanning_bw4": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.21392245481326325, 0.14179688625778164]
+    },
+    "kernhac_tukey_hanning_bw4_vcov": [0.045762816673332658, 0.0053948909136449057, 0.0053948909136449057, 0.02010635695240226],
+    "kernhac_tukey_hanning_bw4_adjust": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.2160943120664732, 0.14323648546287851]
+    },
+    "kernhac_bartlett_bw5": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.22046643930860146, 0.1429954779187449]
+    },
+    "neweywest_lag4": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.22046643930860146, 0.1429954779187449]
+    },
+    "neweywest_lag4_vcov": [0.048605450861413248, 0.0052658285262308603, 0.0052658285262308603, 0.020447706705210258],
+    "neweywest_lag4_prewhite": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.28589367143890404, 0.13606072444983666]
+    },
+    "neweywest_default": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.28773552664769253, 0.13538759519687102]
+    },
+    "vcovhac_default": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.19032337344886144, 0.14224897694889432]
+    },
+    "bw_neweywest": 2.5132987419582817,
+    "bw_andrews_qs": 0.62615280805086082,
+    "n_obs": 100
+  }
+}
