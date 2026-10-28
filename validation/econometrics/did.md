@@ -71,7 +71,8 @@ summary(did_fit)
 | β(treat) | 2.0 | ~2.0 | ~2.0 | 0.3 |
 | β(post) | 3.0 | ~3.0 | ~3.0 | 0.3 |
 
-**Rust Test**: `crates/p2a-core/src/econometrics/did.rs::tests::test_validate_classic_did`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with X-10):
+- `econometrics::did::tests::test_validate_did_classic_2x2` (`crates/p2a-core/src/econometrics/did.rs`): the ATT is within 0.5 of the DGP's 5.0, the group means are within 0.5 of theirs, and the ATT equals the manual difference in differences.
 
 ---
 

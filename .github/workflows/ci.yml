@@ -131,7 +131,12 @@ jobs:
         # (validation/methods/*.json against the case files and the tests). CI
         # does not install R: the R drift check runs in run_validation.sh locally.
         # The test lists are parsed, so they are written without colour codes
-        # (validation_status.py strips them too).
+        # (validation_status.py strips them too). The lint is strict since
+        # T1-WP06: dead test names and links in validation docs, README.md and
+        # CLAUDE.md fail the build. The status-page check fails when
+        # validation/VALIDATION_STATUS.md's test_validate counts differ from
+        # cargo's --list; regenerate it with
+        # validation/run_validation.sh --write-status (needs R).
         env:
           CARGO_TERM_COLOR: never
         run: |
@@ -139,8 +144,8 @@ jobs:
           cargo test -p p2a-core --tests --no-default-features --features ci -- --list > target/p2a-core-tests.txt 2>&1
           cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket" -- --list > target/p2a-mcp-tests.txt 2>&1
           cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis -- --list > target/p2a-cli-tests.txt 2>&1
-          python3 validation/tools/validation_status.py lint --tests target/p2a-core-tests.txt target/p2a-mcp-tests.txt target/p2a-cli-tests.txt
-          python3 -m unittest discover -s validation/tools/tests -v
+          python3 validation/tools/validation_status.py lint --strict --tests target/p2a-core-tests.txt target/p2a-mcp-tests.txt target/p2a-cli-tests.txt
+          P2A_CHECK_STATUS_PAGE=1 python3 -m unittest discover -s validation/tools/tests -v
           bash validation/tools/tests/test_run_validation.sh
 
   clippy:

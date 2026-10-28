@@ -8,7 +8,7 @@ This directory contains validation documentation for forecasting methods.
 |--------|------|--------------|-----------|
 | ARIMA | [arima.md](arima.md) | `run_arima()`, `forecast_arima()` | R `forecast::Arima()` |
 | MSTL | [mstl.md](mstl.md) | `run_mstl()` | R `forecast::mstl()` |
-| Changepoint | [changepoint.md](changepoint.md) | `run_changepoint()` | R `changepoint`, Python `ruptures` |
+| Changepoint | no validation document yet | `run_changepoint()` | R `changepoint`, Python `ruptures` |
 
 ## Key Test Cases
 
@@ -19,5 +19,5 @@ This directory contains validation documentation for forecasting methods.
 ## Running Tests
 
 ```bash
-cargo test -p p2a-core -- forecasting::tests::test_validate
+validation/run_validation.sh --rust-only --category forecasting
 ```

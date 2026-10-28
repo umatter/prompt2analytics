@@ -76,13 +76,9 @@ cat("95% CI:", result$effect - 1.96*result$se, ",", result$effect + 1.96*result$
 
 ### Rust Test
 
-```rust
-#[test]
-fn test_validate_ipw_ate_lalonde() {
-    // See crates/p2a-core/src/econometrics/treatment.rs
-    // test_ipw_ate_basic
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with CAUS-92):
+- `econometrics::treatment::tests::test_validate_ipw_ate_vs_r` (`crates/p2a-core/src/econometrics/treatment.rs`): the effect is within 0.3 of the DGP's 0.75, 0.01 < SE < 0.3, and the CI contains the effect. `validation/expected/ipw_weightit.csv` is not read.
+- `econometrics::treatment::tests::test_ipw_ate_basic` (`crates/p2a-core/src/econometrics/treatment.rs`): group sizes, an effect in (0, 2) and a finite positive SE.
 
 ## Test Case 2: Synthetic Data with Known DGP
 

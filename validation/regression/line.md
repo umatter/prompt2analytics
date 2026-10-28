@@ -42,21 +42,8 @@ print(fit$coefficients)
 - Intercept: ~0.0
 - Slope: ~2.0
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_line_simple() {
-    let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-    let y = vec![2.1, 3.9, 6.2, 7.8, 10.1, 12.0, 14.2, 15.9, 17.8, 20.1];
-
-    let result = line(&x, &y, None).unwrap();
-
-    // Slope should be approximately 2.0
-    assert!((result.slope - 2.0).abs() < 0.1);
-    // Intercept should be approximately 0.0
-    assert!(result.intercept.abs() < 0.5);
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-12 for the estimator and REG-44 for the tests):
+- `regression::line::tests::test_validate_line_clean_data` (`crates/p2a-core/src/regression/line.rs`): the slope is within 0.1 of 0.5 and the intercept within 0.5 of 2.0.
 
 ### Test Case 2: With Outliers (Resistance Test)
 
@@ -69,19 +56,8 @@ fit <- line(x, y)
 print(fit$coefficients)
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_line_outlier_resistant() {
-    let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-    let y = vec![2.0, 4.0, 6.0, 8.0, 100.0, 12.0, 14.0, 16.0, 18.0, 20.0];
-
-    let result = line(&x, &y, None).unwrap();
-
-    // Despite outlier, slope should be close to 2.0
-    assert!((result.slope - 2.0).abs() < 0.5);
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-12 for the estimator and REG-44 for the tests):
+- `regression::line::tests::test_validate_line_with_outliers` (`crates/p2a-core/src/regression/line.rs`): R's `line()` values typed into the test (intercept 2.42169727298821, slope 0.475089391721295), checked within 1.0 and 0.1. A quoted-value check, not R-pinned.
 
 ### Test Case 3: Comparison with OLS
 

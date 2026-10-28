@@ -10,8 +10,11 @@ This directory contains tooling to support the `/validate-method` slash command,
 ├── method_registry.json           # Central index of all methods and artifacts
 └── templates/
     ├── r_benchmark.R.template     # Template for R benchmark scripts
-    └── r_validation.R.template    # Template for R validation scripts
+    └── r_validation.R.template    # Template for an R reference case (validation/r/cases/<area>.R)
 ```
+
+R-pinned validation lives in `validation/` (`r/`, `methods/`, `expected/`; see
+`validation/README.md`); this directory holds the benchmark/artifact index and templates.
 
 ## Method Registry
 
@@ -52,7 +55,7 @@ The `method_registry.json` file maps each p2a-core method to its artifacts:
 | `criterion_benchmark` | Path to Criterion benchmark file |
 | `criterion_group` | Criterion benchmark group name |
 | `validation_doc` | Path to validation documentation |
-| `test_patterns` | Rust test name patterns for validation |
+| `test_patterns` | Rust test name patterns: search hints only, some are stale. The authoritative list of the tests that pin a method is `validation/methods/*.json` |
 
 ### Categories
 
@@ -88,22 +91,28 @@ The `r_benchmark.R.template` provides a standardized structure for R benchmark s
 - `{{DATA_GENERATION_CODE}}` - R code to generate test data
 - `{{BENCHMARK_CODE}}` - R code being benchmarked
 
-### R Validation Template
+### R Validation Template (an R reference case)
 
-The `r_validation.R.template` provides structure for validation scripts:
-
-1. **Setup**: Load packages, set tolerances
-2. **Test Cases**: Generate synthetic data with known DGP
-3. **R Model Fitting**: Fit R model and extract results
-4. **Comparison**: Compare against Rust results
-5. **Output**: Generate markdown tables for validation docs
+The `r_validation.R.template` is one `case()` for `validation/r/cases/<area>.R`. The case reads
+a committed dataset (or writes a seeded simulated one with `ctx$gen_dataset()`), fits the
+reference R function and returns every number p2a reports for that call. `Rscript
+validation/r/run.R --write <id>` writes `validation/expected/<id>.json`; the Rust test loads it
+with `crate::test_support::load_case` and compares with `p2a_validation::{Check, Tol}`; the
+comparison happens in the Rust test, not in R. A commented Rust test skeleton is at the end
+of the template.
 
 **Template Variables:**
-- `{{TOLERANCE_COEF}}` - Coefficient tolerance (e.g., 1e-8)
-- `{{TOLERANCE_SE}}` - Standard error tolerance (e.g., 1e-6)
-- `{{SYNTHETIC_DATA_CODE}}` - R code for synthetic data
-- `{{R_FIT_CODE}}` - R code to fit model
-- `{{COMPARISON_CODE}}` - R code to compare results
+- `{{AREA_FILE}}` - The case file and registry stem (`regression`, `panel`, ...)
+- `{{CASE_ID}}` - Case id, `^[a-z0-9_]+$` with an area prefix (`ols_`, `panel_`, `diag_`, ...)
+- `{{AREA}}` - The case's area (`regression`, `econometrics/panel`, ...)
+- `{{METHOD_NAME}}`, `{{DATASET_LABEL}}` - The case's method description
+- `{{LIBRARY_CALLS}}` - `library()` calls of the reference packages
+- `{{DATASET}}` - A committed dataset in `validation/datasets/`; or `{{SEED}}`,
+  `{{GENERATED_NAME}}` and `{{COLUMNS}}` for simulated data
+- `{{R_FIT_CALL}}` - The reference R call
+- `{{EXTRA_VALUES}}` - Every other number p2a reports (statistics, p-values, fit statistics, ...)
+- `{{R_REFERENCE}}`, `{{R_CALL_TEXT}}`, `{{PACKAGES}}` - Recorded in the case JSON
+- `{{METHOD}}`, `{{RUST_CALL}}` - The Rust test skeleton
 
 ## Using the Templates
 
@@ -121,15 +130,16 @@ When the `/validate-method` command encounters a missing R benchmark script:
 
 ## Tolerance Guidelines
 
-From the registry's `tolerances` section:
+R-pinned tests use `p2a_validation::Tol` (`crates/p2a-validation/src/check.rs`; the table in
+`validation/README.md`), not the registry's `tolerances` section:
 
-| Sample Size | Coefficients | Std Errors | P-values |
+| Sample Size | `Tol::coef` | `Tol::se`, `Tol::stat` | `Tol::p_value` |
 |-------------|--------------|------------|----------|
-| n < 100     | 1e-6         | 1e-4       | 0.01     |
-| n = 100-1000| 1e-8         | 1e-6       | 0.001    |
-| n > 1000    | 1e-10        | 1e-8       | 0.0001   |
+| n < 100     | 1e-6         | 1e-5       | 1e-5 (abs 1e-12) |
+| n = 100-1000| 1e-8         | 1e-6       | 1e-6 (abs 1e-12) |
+| n > 1000    | 1e-10        | 1e-8       | 1e-8 (abs 1e-12) |
 
-**Iterative methods** (HDFE, MLE-based): 1e-5 tolerance
+**Iterative methods** (HDFE, MLE-based): `Tol::iterative(rel)`, with a comment giving the reason.
 
 ## Performance Requirements
 
@@ -158,12 +168,19 @@ If Rust is slower than R, the validation reports a warning.
    }
    ```
 
-2. **Run `/validate-method new_method`**:
+2. **Write the R reference case** from `templates/r_validation.R.template` into
+   `validation/r/cases/<area>.R`, then `Rscript validation/r/run.R --write <id>` and `--check`.
+
+3. **Add the `test_validate_*` test** (`load_case` + `Check`/`Tol`) and the registry entry in
+   `validation/methods/<area>.json`, then run
+   `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`.
+
+4. **Run `/validate-method new_method`**:
    - Command will report missing artifacts
    - Offer to generate R benchmark from template
    - Run validation and benchmarks
 
-3. **Fill in remaining fields** after artifacts are created
+5. **Fill in remaining fields** after artifacts are created
 
 ## Related Files
 
@@ -172,7 +189,10 @@ If Rust is slower than R, the validation reports a warning.
 - **R Benchmarks**: `../prompt2analytics-paper/performance/comparisons/r_comparison/`
 - **Criterion Benchmarks**: `crates/p2a-core/benches/`
 - **Validation Docs**: `validation/`
-- **Validation Reports**: `validation/reports/`
+- **R reference harness and cases**: `validation/r/` (`run.R --check | --write | --list`)
+- **Methods registry (authoritative test list)**: `validation/methods/`
+- **Status tool and lint**: `validation/tools/validation_status.py`
+- **Validation Reports**: `validation/reports/` (gitignored)
 
 ## Maintenance
 
@@ -181,10 +201,11 @@ If Rust is slower than R, the validation reports a warning.
 When new methods are added to p2a-core:
 
 1. Add entry to `method_registry.json`
-2. Create R benchmark script (or use template)
-3. Add Criterion benchmark
-4. Create validation documentation
-5. Run `/validate-method` to verify
+2. Write the R reference case, the `test_validate_*` test and the `validation/methods/` entry
+3. Create R benchmark script (or use template)
+4. Add the benchmark to `crates/p2a-core/benches/`
+5. Create validation documentation
+6. Run `/validate-method` to verify
 
 ### Keeping Benchmarks Current
 

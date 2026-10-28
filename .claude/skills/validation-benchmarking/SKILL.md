@@ -26,7 +26,7 @@ Document validation of prompt2analytics implementations against reference implem
 | Regression | stats | statsmodels | `lm()` / `OLS()` |
 | Robust SEs | sandwich | statsmodels | `vcovHC()` / `get_robustcov_results()` |
 | Clustered SEs | sandwich | linearmodels | `vcovCL()` / `fit(cov_type='clustered')` |
-| Panel FE | plm, lfe | linearmodels | `plm()`, `felm()` / `PanelOLS()` |
+| Panel FE, HDFE | plm, fixest | linearmodels | `plm()`, `feols()` / `PanelOLS()` |
 | Panel RE | plm | linearmodels | `plm(model='random')` |
 | IV/2SLS | AER | linearmodels | `ivreg()` / `IV2SLS()` |
 | Logit/Probit | stats | statsmodels | `glm()` / `Logit()`, `Probit()` |
@@ -38,36 +38,26 @@ Document validation of prompt2analytics implementations against reference implem
 | PCA | stats | sklearn | `prcomp()` / `PCA()` |
 | Random Forest | randomForest | sklearn | `randomForest()` / `RandomForestClassifier()` |
 
-### Step 2: Create Test Cases
+### Step 2: Create the R Reference Case
 
-**Minimum Requirements**:
-- At least 2 test cases per method
-- One synthetic data case (known DGP for coefficient verification)
-- One real/standard dataset case (e.g., Grunfeld, Longley, iris)
+A method is validated by an R reference case that a Rust test loads, not by values copied into
+a test. See `validation/README.md` ("Adding an R-pinned validation") for the full rules.
 
-**Test Data Sources**:
-- `validation/datasets/grunfeld.csv` - Panel data
-- `validation/datasets/longley.csv` - Collinear regression data
-- R built-in datasets: `mtcars`, `iris`, `AirPassengers`
+**Test data**:
+- Committed data in `validation/datasets/*.csv` (`grunfeld.csv` for panels), read with
+  `ctx$dataset("datasets/grunfeld.csv")`.
+- R's own datasets and simulated data go through a seeded `ctx$gen_dataset()` in the case,
+  which writes `validation/datasets/generated/<name>.csv` and reads it back
+  (e.g. `longley` is `validation/datasets/generated/longley.csv`, written by case `ols_longley`).
+- Data must have noise; at least one real/standard dataset and, where useful, a simulated one
+  that exercises the property the method must get right.
 
-**R Code Template**:
-```r
-# Set seed for reproducibility
-set.seed(42)
+**R case template**: `.claude/tooling/validation/templates/r_validation.R.template`. Copy it into
+`validation/r/cases/<area>.R`, then:
 
-# Generate data
-n <- 1000
-x <- rnorm(n)
-y <- 2 + 3*x + rnorm(n, 0, 0.5)
-data <- data.frame(y = y, x = x)
-
-# Fit model
-fit <- lm(y ~ x, data = data)
-summary(fit)
-
-# Extract results
-coef(fit)
-sqrt(diag(vcov(fit)))  # Standard errors
+```bash
+Rscript validation/r/run.R --write <case_id>
+Rscript validation/r/run.R --check <case_id>
 ```
 
 ### Step 3: Document Results
@@ -76,52 +66,61 @@ sqrt(diag(vcov(fit)))  # Standard errors
 
 **Required Sections**:
 1. **Method Overview** - Brief description
-2. **Reference Implementations** - Table of packages
-3. **Test Cases** - With R/Python code
-4. **Results Comparison** - Table with tolerances
-5. **Numerical Precision Summary**
-6. **Known Differences** - Any intentional deviations
-7. **References** - Academic citations
+2. **Reference Implementations** - Table of packages, with versions
+3. **Test Cases** - With R code and R's values
+4. **R reference** - `validation/r/cases/<file>.R`, case `<id>`
+5. **Rust tests** - libtest paths and what each checks
+6. **Tolerance** - with the `Tol` used
+7. **Status** - R-pinned (registry `validation/methods/<area>.json`, id `<id>`) or not R-pinned
+   (with the finding that adds the case)
+8. **Known Differences** - each with its finding id
+9. **References** - Academic citations
 
-**Results Comparison Table Format**:
-```markdown
-| Statistic | R | p2a Rust | Difference | Tolerance |
-|-----------|---|----------|------------|-----------|
-| β₀ | 2.0012 | 2.0012 | 1e-10 | 1e-8 |
-| β₁ | 2.9987 | 2.9987 | 2e-11 | 1e-8 |
-| SE(β₁) | 0.0158 | 0.0158 | 5e-12 | 1e-6 |
-```
+No `~` values in comparison tables and no hand-written `#[test]` code: cite the tests that exist.
 
-### Step 4: Add Rust Validation Tests
+### Step 4: Add the Rust Validation Test
 
-**Naming Convention**: `test_validate_[method]_[scenario]`
+**Naming Convention**: `test_validate_<method>_<dataset>[_<variant>]`
 
 **Test Location**: Same file as implementation, in `#[cfg(test)]` module
 
 **Template**:
 ```rust
 #[test]
-fn test_validate_ols_longley() {
-    // Load reference data
-    let dataset = Dataset::from_csv("validation/datasets/longley.csv").unwrap();
-
-    // Run p2a implementation
-    let result = run_ols(&dataset, "y", &["x1", "x2"], true, CovarianceType::Standard).unwrap();
-
-    // Compare to R results (from validation/regression/ols.md)
-    let expected_coef = vec![2.0012, 2.9987];
-    for (i, (actual, expected)) in result.coefficients().iter().zip(expected_coef.iter()).enumerate() {
-        assert!((actual - expected).abs() < 1e-4,
-            "Coefficient {} differs: {} vs {}", i, actual, expected);
-    }
+fn test_validate_ols_grunfeld() {
+    use p2a_validation::{Check, Tol};
+    let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+    let r = run_ols(&ds, "inv", &["value", "capital"], true, CovarianceType::HC1).unwrap();
+    let n = r.n_obs;
+    let names = r.variable_names.as_slice();
+    let coef: Vec<f64> = r.coefficients.iter().map(|c| c.estimate).collect();
+    let se: Vec<f64> = r.coefficients.iter().map(|c| c.std_error).collect();
+    Check::new(&case)
+        .named("coef", names, &coef, Tol::coef(n))
+        .named("se_hc1", names, &se, Tol::se(n))
+        .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+        .finish();
 }
 ```
 
-### Step 5: Update Indexes
+Pin every number the method reports for that call. p2a-cli and p2a-mcp tests use
+`p2a_validation::Case::load`. No `if let Ok`, no print-only checks. A mismatch is a defect:
+fix it, or record a registry deviation and leave the quantity out with a
+`// deviation <finding id>` comment; never widen a tolerance to make it pass.
 
-1. Add entry to `validation/README.md` method index
-2. Mark status as "Complete" with link to validation doc
-3. If new R/Python package used, add to `validation/reference_implementations.md`
+### Step 5: Register and Update Indexes
+
+1. Add the registry entry in `validation/methods/<area>.json` (cases, tests, quantities,
+   tolerance, deviations; schema in `validation/methods/README.md`).
+2. Add or update the row in the `validation/README.md` method index. Its status follows the
+   registry (`R-pinned`, `R-pinned, known deviations (...)` or `not R-pinned`), never "Complete".
+3. If a new R package is used, add it to `validation/reference_implementations.md` and to the
+   prerequisites in `validation/README.md`.
+4. Run `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`.
+5. Adding, removing or renaming a `test_validate` test changes the counts CI checks:
+   regenerate `validation/VALIDATION_STATUS.md` with `validation/run_validation.sh
+   --write-status` before the change reaches main (during the review campaign: at the wave
+   integration, not in a lane).
 
 ---
 
@@ -221,13 +220,18 @@ write.csv(
 
 ## Tolerance Guidelines
 
-| Sample Size | Coefficient Tolerance | SE Tolerance | p-value Tolerance |
-|-------------|----------------------|--------------|-------------------|
-| n < 100 | 1e-6 | 1e-4 | 0.01 |
-| n = 100-1000 | 1e-8 | 1e-6 | 0.001 |
-| n > 1000 | 1e-10 | 1e-8 | 0.0001 |
+R-pinned tests use `p2a_validation::Tol` (`crates/p2a-validation/src/check.rs`, the table in
+`validation/README.md`):
 
-**Note**: Iterative methods (HDFE, MLE) may have larger tolerances (1e-5).
+| Quantity | `Tol` | n < 100 | 100 ≤ n ≤ 1000 | n > 1000 | abs |
+|---|---|---|---|---|---|
+| coefficients | `Tol::coef(n)` | 1e-6 | 1e-8 | 1e-10 | 1e-12 |
+| standard errors | `Tol::se(n)` | 1e-5 | 1e-6 | 1e-8 | 1e-14 |
+| statistics, R², CI bounds | `Tol::stat(n)` | 1e-5 | 1e-6 | 1e-8 | 1e-14 |
+| p-values | `Tol::p_value(n)` | 1e-5 | 1e-6 | 1e-8 | 1e-12 |
+| iterative (MAP, MLE) | `Tol::iterative(rel)` | documented per test | | | 1e-12 |
+| CLI text, d decimals | `Tol::printed(d)` | | | | 0.5·10^-d + 1e-12 |
+| counts, df | `Tol::exact()` | exact | | | |
 
 ---
 
@@ -236,12 +240,12 @@ write.csv(
 After completing validation and benchmarking, verify:
 
 ### Required (All items mandatory)
-- [ ] `validation/[category]/[method].md` created
-- [ ] At least 2 test cases documented (synthetic + real)
-- [ ] R/Python reproduction code included
-- [ ] Results comparison table with explicit tolerances
-- [ ] Rust `test_validate_*` tests pass
-- [ ] `validation/README.md` index updated
+- [ ] R case written in `validation/r/cases/<area>.R`, and `Rscript validation/r/run.R --check` is clean
+- [ ] `test_validate_*` test loads the case with `load_case` and compares with `Check`/`Tol`
+- [ ] Test registered in `validation/methods/<area>.json`
+- [ ] `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt` is clean
+- [ ] `validation/run_validation.sh --rust-only --category <cat>` passes
+- [ ] `validation/[category]/[method].md` created or updated, and the `validation/README.md` index row follows the registry
 
 ### Performance (All items mandatory for new methods)
 - [ ] Criterion benchmark added to `crates/p2a-core/benches/`
@@ -256,11 +260,18 @@ After completing validation and benchmarking, verify:
 ## Quick Commands
 
 ```bash
-# Run validation tests for a specific method
-cargo test -p p2a-core -- test_validate_[method] --nocapture
+# Write and check an R reference case
+Rscript validation/r/run.R --write <case_id>
+Rscript validation/r/run.R --check
 
-# Run all validation tests
-cargo test -p p2a-core -- test_validate --nocapture
+# Run the validation tests of one category (CI feature sets)
+validation/run_validation.sh --rust-only --category <cat>
+
+# Run validation tests for a specific method, printing every comparison
+P2A_VALIDATION_VERBOSE=1 cargo test -p p2a-core -- test_validate_[method] --nocapture
+
+# Registry, case and doc lint (needs the cargo --list outputs in target/*-tests.txt)
+python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt
 
 # Run Rust benchmarks for a specific method (MANDATORY)
 cargo bench -p p2a-core -- [method_name]
@@ -282,8 +293,9 @@ Rscript ../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark
 When implementing a new method, execute these commands in order:
 
 ```bash
-# 1. Run Rust validation tests
-cargo test -p p2a-core -- test_validate_[method] --nocapture
+# 1. Check the R case and run the Rust validation tests
+Rscript validation/r/run.R --check
+validation/run_validation.sh --rust-only --category <cat>
 
 # 2. Run Rust performance benchmarks
 cargo bench -p p2a-core -- [method]

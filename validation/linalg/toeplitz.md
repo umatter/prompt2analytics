@@ -36,20 +36,8 @@ print(mat)
 [4,]  0.125 0.250 0.500 1.000
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_toeplitz_symmetric() {
-    let x = vec![1.0, 0.5, 0.25, 0.125];
-    let mat = toeplitz(&x).unwrap();
-
-    assert_eq!(mat.dim(), (4, 4));
-    assert!((mat[[0, 0]] - 1.0).abs() < 1e-10);
-    assert!((mat[[0, 1]] - 0.5).abs() < 1e-10);
-    assert!((mat[[1, 0]] - 0.5).abs() < 1e-10);  // Symmetric
-    assert!((mat[[0, 3]] - 0.125).abs() < 1e-10);
-}
-```
+**Rust tests** (exact-value unit tests; not registered as R-pinned: `toeplitz()` output is fully determined by its input):
+- `linalg::toeplitz::tests::test_toeplitz_symmetric` (`crates/p2a-core/src/linalg/toeplitz.rs`): every entry of `toeplitz(c(1, 2, 3))` and its symmetry.
 
 ### Test Case 2: AR(1) Autocovariance Structure
 
@@ -61,22 +49,8 @@ sigma2 <- 1 / (1 - rho^2)  # Variance
 cov_matrix <- sigma2 * toeplitz(acf)
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_toeplitz_acf() {
-    let rho: f64 = 0.8;
-    let acf: Vec<f64> = (0..5).map(|i| rho.powi(i as i32)).collect();
-    let mat = toeplitz_acf(&acf).unwrap();
-
-    // Check it's symmetric positive definite (eigenvalues > 0)
-    assert_eq!(mat.dim(), (5, 5));
-    // Diagonal should be 1.0
-    for i in 0..5 {
-        assert!((mat[[i, i]] - 1.0).abs() < 1e-10);
-    }
-}
-```
+**Rust tests** (exact-value unit tests; not registered as R-pinned: `toeplitz()` output is fully determined by its input):
+- `linalg::toeplitz::tests::test_toeplitz_acf` (`crates/p2a-core/src/linalg/toeplitz.rs`): the unit diagonal and the first off-diagonal of the AR(1) autocorrelation matrix with rho = 0.5 (4 × 4).
 
 ### Test Case 3: Asymmetric Toeplitz
 
@@ -88,23 +62,8 @@ row <- c(1, -1, -2, -3)  # First element must match
 # Manual construction or use package
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_toeplitz_asymmetric() {
-    let col = vec![1.0, 2.0, 3.0, 4.0];
-    let row = vec![1.0, -1.0, -2.0, -3.0];
-    let mat = toeplitz_asymmetric(&col, &row).unwrap();
-
-    assert_eq!(mat.dim(), (4, 4));
-    // First column matches col
-    assert!((mat[[0, 0]] - 1.0).abs() < 1e-10);
-    assert!((mat[[1, 0]] - 2.0).abs() < 1e-10);
-    // First row matches row
-    assert!((mat[[0, 1]] - (-1.0)).abs() < 1e-10);
-    assert!((mat[[0, 2]] - (-2.0)).abs() < 1e-10);
-}
-```
+**Rust tests** (exact-value unit tests; not registered as R-pinned: `toeplitz()` output is fully determined by its input):
+- `linalg::toeplitz::tests::test_toeplitz_asymmetric` (`crates/p2a-core/src/linalg/toeplitz.rs`): the dimensions and seven entries of the 3 × 4 matrix with first column (1, 2, 3) and first row (1, 4, 5, 6).
 
 ## Numerical Precision Summary
 

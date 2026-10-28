@@ -8,24 +8,24 @@ This directory contains validation documentation for machine learning methods.
 | Method | File | p2a Function | Reference |
 |--------|------|--------------|-----------|
 | K-means | [kmeans.md](kmeans.md) | `kmeans()` | R `stats::kmeans()`, sklearn |
-| DBSCAN | [dbscan.md](dbscan.md) | `dbscan()` | sklearn, R `dbscan` |
-| Hierarchical | [hierarchical.md](hierarchical.md) | `hierarchical()` | R `hclust()`, scipy |
+| DBSCAN | no validation document yet | `dbscan()` | sklearn, R `dbscan` |
+| Hierarchical | no validation document yet | `hierarchical()` | R `hclust()`, scipy |
 
 ### Dimensionality Reduction
 | Method | File | p2a Function | Reference |
 |--------|------|--------------|-----------|
 | PCA | [pca.md](pca.md) | `pca()` | R `prcomp()`, sklearn |
-| t-SNE | [tsne.md](tsne.md) | `tsne()` | sklearn, R `Rtsne` |
+| t-SNE | no validation document yet | `tsne()` | sklearn, R `Rtsne` |
 
 ### Supervised Learning
 | Method | File | p2a Function | Reference |
 |--------|------|--------------|-----------|
-| Random Forest | [random_forest.md](random_forest.md) | `random_forest()` | sklearn, R `randomForest` |
-| SVM | [svm.md](svm.md) | `linear_svm()` | sklearn, R `e1071` |
+| Random Forest | no validation document yet | `random_forest()` | sklearn, R `randomForest` |
+| SVM | no validation document yet | `linear_svm()` | sklearn, R `e1071` |
 
 ## Key Test Datasets
 
-- **Iris**: Classic classification dataset (n=150, k=4)
+- **Iris**: R's `iris` (via `datasets::iris`; no committed CSV)
 - **Synthetic clusters**: Known cluster assignments
 - **High-dimensional data**: For dimensionality reduction
 
@@ -40,5 +40,5 @@ ML methods often have stochastic elements. Validation approaches:
 ## Running Tests
 
 ```bash
-cargo test -p p2a-core -- ml::tests::test_validate
+validation/run_validation.sh --rust-only --category ml
 ```

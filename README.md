@@ -504,8 +504,11 @@ prompt2analytics/
 │       └── state/         # State management (Dioxus signals)
 ├── validation/            # Validation against R references
 │   ├── [category]/        # Per-method validation docs (R code + expected values)
-│   ├── datasets/          # Reference datasets (Grunfeld, Longley, Iris)
-│   ├── scripts/           # R validation scripts
+│   ├── r/                 # R reference harness and cases (run.R --check | --write)
+│   ├── expected/          # R reference cases (JSON) and legacy CSV outputs
+│   ├── methods/           # Registry: which tests pin which R cases
+│   ├── datasets/          # Reference data (Grunfeld, ...); generated/ written by R cases
+│   ├── scripts/           # Legacy R validation scripts
 │   └── run_validation.sh  # Master validation runner
 └── docs/                  # Guides, design notes, security docs
 ```
@@ -537,65 +540,55 @@ For a complete list, see the tool definitions in `crates/p2a-mcp/src/tools/handl
 
 ## Validation
 
-All methods are validated against reference R implementations to ensure numerical correctness. Validation uses a two-layer approach:
-
-1. **Rust unit tests** (`test_validate_*` prefix) compare outputs to known R results at tight tolerances
-2. **Validation documents** (`validation/`) record the R code, expected values, and precision analysis for each method
+Numerical results are checked against R. *R-pinned* tests load a committed R reference case (`validation/expected/<case>.json`, produced by `validation/r/cases/*.R`) and compare every reported number at the tolerances in `validation/README.md`; they are registered in `validation/methods/*.json`. Other `test_validate_*` tests check properties, known data-generating processes or quoted values. `validation/VALIDATION_STATUS.md` is generated from a full run and lists which methods are R-pinned.
 
 ### Running Validation Tests
 
 ```bash
-# All validation tests
-cargo test -p p2a-core -- test_validate
-
-# Specific method
-cargo test -p p2a-core -- test_validate_ols
-cargo test -p p2a-core -- test_validate_hdfe
-
-# Full validation (Rust + R scripts)
-./validation/run_validation.sh
-
-# Rust only (faster)
-./validation/run_validation.sh --rust-only
-
-# Filter by category
-./validation/run_validation.sh --category stats
+validation/run_validation.sh                         # all test_validate tests (CI feature sets) + R drift check
+validation/run_validation.sh --rust-only --category econometrics   # stats | regression | econometrics | forecasting | ml | cli | mcp
+validation/run_validation.sh --write-status          # also regenerate VALIDATION_STATUS.md from this run (not with --verbose)
+Rscript validation/r/run.R --check                   # R reference values still reproduce (needs R + packages)
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::hdfe::tests::test_validate
+python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt
 ```
 
-### Tolerance Guidelines
+`run_validation.sh` exits 0 (PASS), 1 (FAIL, including a compile error or zero selected tests), 2 (usage error) or 3 (INCOMPLETE: `cargo` or `Rscript` missing for a requested step).
 
-| Sample Size | Coefficient Tolerance | SE Tolerance |
-|-------------|----------------------|--------------|
-| n < 100     | 1e-6                 | 1e-5         |
-| n = 100-1000| 1e-8                 | 1e-6         |
-| n > 1000    | 1e-10                | 1e-8         |
+### Tolerances (`p2a_validation::Tol`, R-pinned tests)
 
-For iterative methods (HDFE, MLE), slightly larger differences are expected due to convergence criteria.
+| Quantity | n < 100 | 100 ≤ n ≤ 1000 | n > 1000 |
+|---|---|---|---|
+| coefficients (`Tol::coef`) | 1e-6 | 1e-8 | 1e-10 |
+| standard errors (`Tol::se`) | 1e-5 | 1e-6 | 1e-8 |
+| test statistics, R², CI bounds (`Tol::stat`) | 1e-5 | 1e-6 | 1e-8 |
+
+Relative tolerances; iterative methods use `Tol::iterative(rel)` with a documented reason. See `validation/README.md` for the full table.
 
 ### Validation Directory Structure
 
 ```
 validation/
-├── README.md                    # Validation framework overview
-├── VALIDATION_STATUS.md         # Current coverage report
-├── run_validation.sh            # Master validation runner
-├── reference_implementations.md # Catalog of R/Python reference packages
-├── regression/                  # OLS, robust SEs, GLS, LOESS, sensemakr, E-value
-├── econometrics/                # Panel, IV, DiD, discrete choice, spatial, survival
-│   └── timeseries/              # VAR, VARMA, VECM, IRF
-├── forecasting/                 # ARIMA, MSTL, Holt-Winters, changepoint
-├── stats/                       # 50+ statistical tests (t-test, ANOVA, Fisher, etc.)
-├── diagnostics/                 # JB, BP, DW, VIF, Breusch-Godfrey, RESET
-├── ml/                          # K-means, DBSCAN, PCA, t-SNE, Random Forest
-├── multivariate/                # MANOVA, CCA, factor analysis
-├── linalg/                      # Matrix operation validation
-├── spatial/                     # Moran's I, SAR, SEM
-├── datasets/                    # Reference datasets (Grunfeld, Longley, Iris)
-├── scripts/                     # R validation scripts
-└── reports/                     # Generated validation reports
+├── README.md                 # what "validated" means, running, adding an R-pinned validation, method index
+├── VALIDATION_STATUS.md      # generated by tools/validation_status.py render; never edited by hand
+├── reference_implementations.md
+├── run_validation.sh         # test_validate tests in the CI feature sets + R drift check
+├── r/harness.R               # case(), named(), vec(), dataset CSV and case JSON writers, comparator
+├── r/run.R                   # --check [ids] | --write [ids] | --list
+├── r/cases/<area>.R          # R reference cases, one file per area
+├── expected/<case>.json      # one R reference case per file (schema 1)
+├── expected/*.csv            # legacy outputs of scripts/*.R; asserted only where a registry entry supersedes them
+├── methods/<area>.json       # registry: method -> cases, tests, quantities, tolerance, deviations
+├── datasets/                 # committed reference data; datasets/generated/ is written by R cases
+├── tools/                    # validation_status.py (select | collect | lint | render), lint_ignore_names.txt, tests/
+├── scripts/*.R               # legacy R scripts; run only with run_validation.sh --legacy-r
+├── r_comparison/             # legacy one-off comparison scripts (feglm, survival, synth)
+├── reports/                  # run output (gitignored)
+└── <category>/<method>.md    # method documents: regression/, diagnostics/, econometrics/ (+ timeseries/),
+                              #   forecasting/, timeseries/, stats/, multivariate/, ml/, linalg/
 ```
 
-Each validation document records: method overview, reference R/Python code, test cases with expected values, numerical precision analysis, and known differences.
+Each validation document records: method overview, reference R code, test cases with R's values, the Rust tests and what they check, its status (R-pinned or not) and known differences with their finding ids.
 
 ## Performance Benchmarking
 

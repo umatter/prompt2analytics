@@ -7,7 +7,7 @@ This directory contains validation documentation for time series econometric met
 | Method | File | p2a Function | Reference |
 |--------|------|--------------|-----------|
 | VAR | [var.md](var.md) | `run_var()` | R `vars::VAR()` |
-| VARMA | [varma.md](varma.md) | `run_varma()` | R custom |
+| VARMA | no validation document yet | `run_varma()` | R custom |
 | VECM | [vecm.md](vecm.md) | `run_vecm()` | R `vars::vec2var()`, `urca::ca.jo()` |
 | IRF | [irf.md](irf.md) | `run_var_irf()` | R `vars::irf()` |
 

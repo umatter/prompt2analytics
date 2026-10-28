@@ -48,7 +48,8 @@ print(fit)
 | epsilon variance | 15099.80 | ~15100 | 100.0 |
 | log-likelihood | ~-632.5 | ~-632.5 | 1.0 |
 
-**Rust Test**: `crates/p2a-core/src/forecasting/structts.rs::tests::test_struct_ts_local_level`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-27 for the estimator):
+- `forecasting::structts::tests::test_validate_structts_local_level_tracks_data` (`crates/p2a-core/src/forecasting/structts.rs`): n = 150 and the filtered level stays within 10 of the data. No `StructTS` value is compared.
 
 ### Test 2: Local Linear Trend Model
 
@@ -72,7 +73,8 @@ print(fit)
 | slope variance | varies | varies | 20% |
 | epsilon variance | varies | varies | 20% |
 
-**Rust Test**: `crates/p2a-core/src/forecasting/structts.rs::tests::test_struct_ts_local_trend`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-27 for the estimator):
+- `forecasting::structts::tests::test_validate_structts_trend_model_positive_slope` (`crates/p2a-core/src/forecasting/structts.rs`): the average slope on linearly trending data exceeds 0.5. No `StructTS` value is compared.
 
 ### Test 3: Basic Structural Model (BSM)
 
@@ -97,7 +99,9 @@ tsdiag(fit)
 | seas variance | varies | varies | 20% |
 | epsilon variance | varies | varies | 20% |
 
-**Rust Test**: `crates/p2a-core/src/forecasting/structts.rs::tests::test_struct_ts_bsm`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-27 for the estimator):
+- `forecasting::structts::tests::test_validate_structts_bsm_components_sum_to_data` (`crates/p2a-core/src/forecasting/structts.rs`): seasonal and slope components are returned and fitted + residual equals the data within 1e-10.
+- `forecasting::structts::tests::test_validate_structts_loglikelihood_computed` (`crates/p2a-core/src/forecasting/structts.rs`): a finite log-likelihood for each model type. No `StructTS` value is compared.
 
 ## Numerical Precision Summary
 

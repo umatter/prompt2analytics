@@ -94,33 +94,8 @@ the true parameters approximately.
 
 ### Rust Test
 
-```rust
-#[test]
-fn test_sphet_sar_validation() {
-    // Create test data matching R setup
-    let (dataset, listw) = create_test_data_with_spatial_structure();
-
-    let config = SphetConfig {
-        model: SphetModel::SpatialLag,
-        het: true,
-        se_type: SphetSE::Robust,
-        ..Default::default()
-    };
-
-    let result = run_sphet(&dataset, "y", &["x"], &listw, config).unwrap();
-
-    // Check that spatial lag parameter is in reasonable range
-    assert!(result.lambda.unwrap().abs() < 1.0);
-
-    // Check that coefficients are estimated
-    assert_eq!(result.coefficients.len(), 2);
-
-    // Check standard errors are positive
-    for se in &result.std_errors {
-        assert!(*se > 0.0);
-    }
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with SPAT-18 for the tests and SPAT-8 for the estimator):
+- `econometrics::sphet::tests::test_sphet_sar` (`crates/p2a-core/src/econometrics/sphet.rs`): n = 25, two coefficients, abs(lambda) < 1, sigma2 > 0 and every SE > 0. `sphet` and `spdep` are not installed on the reference machine, so no R value is compared.
 
 ## Test Case 2: Spatial Error Model (SEM) with GMM
 

@@ -44,7 +44,8 @@ print(mds$GOF)
 | GOF[2] | ~1.0 | ~1.0 | 1e-4 | PASS |
 | n_positive_eig | 2 | 2 | exact | PASS |
 
-**Rust Test**: `crates/p2a-core/src/ml/reduction.rs::tests::test_cmdscale_basic`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ML-98):
+- `ml::reduction::tests::test_cmdscale_basic` (`crates/p2a-core/src/ml/reduction.rs`): dimensions and gof[0], gof[1] > 0.9. No R value is compared.
 
 ### Test 2: Random Distance Matrix
 
@@ -57,19 +58,25 @@ mds <- cmdscale(d, k = 2, eig = TRUE)
 # Reconstruct distances and compare
 ```
 
-**Rust Test**: `crates/p2a-core/src/ml/reduction.rs::tests::test_cmdscale_from_data`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ML-98):
+- `ml::reduction::tests::test_cmdscale_from_data` (`crates/p2a-core/src/ml/reduction.rs`): dimensions of the result for a 4-point data-matrix input (a unit square), not the `set.seed(42)` data above.
 
 ### Test 3: Known European Cities Distance
 
 Standard benchmark using geographic distances between European cities.
 
-**Rust Test**: `crates/p2a-core/src/ml/reduction.rs::tests::test_cmdscale_eurodist`
+No Rust test runs the eurodist data.
+
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ML-98):
+- `ml::reduction::tests::test_validate_cmdscale_vs_r` (`crates/p2a-core/src/ml/reduction.rs`): a 4-point square configuration; dimensions and gof[0] > 0.95. No R value is compared.
+- `ml::reduction::tests::test_cmdscale_gof` (`crates/p2a-core/src/ml/reduction.rs`): both GOF values in [0, 1], gof[1] ≤ gof[0] + 0.01.
+- `ml::reduction::tests::test_validate_cmdscale_matches_r` (`crates/p2a-core/src/ml/reduction.rs`), added in Tier 0 (T0-WP16): the 8 × 2 points (up to sign) and all eight eigenvalues within 1e-9 absolute of `cmdscale(dist(x), k = 2, eig = TRUE)`, Euclidean and Manhattan, with R 4.3.3 values typed into the test. A quoted-value check, not R-pinned; GOF is not compared.
 
 ## Numerical Precision Summary
 
 - Point coordinates may differ in sign (reflection) but preserve distances
 - Eigenvalues match R within 1e-6 tolerance
-- GOF measures match R within 1e-4 tolerance
+- GOF is not compared with R; p2a's gof[0] is not one of R's two measures (ML-98)
 
 ## Known Differences
 

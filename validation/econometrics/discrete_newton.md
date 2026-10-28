@@ -204,8 +204,9 @@ R-pinned (load a case):
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5`
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j16`
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j30`
+- `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5_regressor_scale` (on `disc_polr_j5`'s dataset with x multiplied by 1e4 or 1e6: n, the category counts and the null log-likelihood against the case, and the fit unchanged apart from the coefficient divided by the scale)
 
-Helpers, the category cap, the separated fits and regressor scale:
+Helpers, the category cap and the separated fits:
 
 - `econometrics::discrete::multinomial_logit::tests::test_softmax_into_log_sum_exp`
 - `econometrics::discrete::multinomial_logit::tests::test_max_abs_step_rejects_non_finite`
@@ -213,7 +214,6 @@ Helpers, the category cap, the separated fits and regressor scale:
 - `econometrics::discrete::multinomial_logit::tests::test_multinom_one_row_per_category_does_not_converge`
 - `econometrics::discrete::ordered_models::tests::test_ordered_max_abs_step_rejects_non_finite`
 - `econometrics::discrete::ordered_models::tests::test_ordered_accepts_100_categories`
-- `econometrics::discrete::ordered_models::tests::test_ordered_fit_does_not_depend_on_regressor_scale`
 
 Linear algebra (`linalg::matrix_ops::tests::`; R `solve()` values for `-tridiag(-1, 3, -1)`
 and `I - 0.5 W` on a 5 x 5 rook grid):
