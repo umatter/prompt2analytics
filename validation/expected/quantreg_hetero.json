@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "id": "quantreg_hetero",
+  "area": "regression/quantreg",
+  "method": "Quantile regression (tau = 0.25, 0.5, 0.75), heteroskedastic errors, n = 100 (legacy Test 1 DGP)",
+  "reference": "quantreg::rq(method = 'br'); quantreg::summary.rq(se = 'iid' | 'nid')",
+  "call": "rq(y ~ x, tau = 0.25, data = quantreg_hetero)",
+  "dataset": "validation/datasets/generated/quantreg_hetero.csv",
+  "datasets": ["validation/datasets/generated/quantreg_hetero.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "quantreg": "6.1"
+  },
+  "values": {
+    "n_obs": 100,
+    "rdf": 98,
+    "coef_tau25": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.380407426551238, 2.7682582131912987]
+    },
+    "objective_tau25": 111.28561420761872,
+    "se_iid_tau25": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.30915974418725783, 0.051148796329350571]
+    },
+    "se_nid_tau25": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.29824513300304373, 0.14112748069211051]
+    },
+    "coef_tau50": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3487349841266367, 3.1699511987566726]
+    },
+    "objective_tau50": 133.80525751476506,
+    "se_iid_tau50": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.48072477683550652, 0.07953329682514744]
+    },
+    "se_nid_tau50": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.17987111706382683, 0.107953087584705]
+    },
+    "coef_tau75": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.7406414250496087, 3.4670761595702593]
+    },
+    "objective_tau75": 106.30087369098629,
+    "se_iid_tau75": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.55935148703558002, 0.092541657912529204]
+    },
+    "se_nid_tau75": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.61951152820404232, 0.16437751946671322]
+    }
+  }
+}

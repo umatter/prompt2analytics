@@ -932,94 +932,36 @@ mod tests {
     // VALIDATION TESTS - Comparing against R reference implementations
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Validation test: GLS with AR(1) correlation vs R's nlme::gls
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 50
-    /// t <- 1:n
-    /// rho <- 0.6
-    /// e <- numeric(n)
-    /// e[1] <- rnorm(1)
-    /// for (i in 2:n) e[i] <- rho * e[i-1] + rnorm(1)
-    /// x <- runif(n, 0, 10)
-    /// y <- 5 + 2 * x + e
-    /// df_gls <- data.frame(y = y, x = x, t = t)
-    /// gls_ar1 <- gls(y ~ x, data = df_gls, correlation = corAR1(form = ~ t))
-    /// # intercept ≈ 4.85, x ≈ 2.02, rho_estimated ≈ 0.68
-    /// ```
+    /// Case `gls_ar1` (nlme::gls REML on the legacy Test 2 DGP; validation/r/cases/regression_legacy.R):
+    /// coefficients, SEs, t, p and sigma at nlme's phi.
     #[test]
-    fn test_validate_gls_ar1_vs_r() {
-        // R reference values from validation/expected/gls_ar1_test.csv
-        // variable,coefficient,std_error,rho_estimated
-        // (Intercept),4.85191118973168,0.568046731531856,0.681976152163743
-        // x,2.02327802253436,0.0518800086380412,0.681976152163743
-
-        // Create AR(1) correlated data
-        let n = 50;
-        let x: Vec<f64> = (0..n).map(|i| 10.0 * (i as f64) / (n as f64)).collect();
-
-        // Simulate AR(1) errors (rho ≈ 0.6)
-        let mut ar_error = 0.0;
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let innovation = ((i as f64 * 1.567).sin()) * 0.8;
-                ar_error = 0.6 * ar_error + innovation;
-                5.0 + 2.0 * xi + ar_error
-            })
-            .collect();
-
-        // Build design matrix (with intercept)
-        let mut x_mat = Array2::<f64>::zeros((n, 2));
-        for i in 0..n {
-            x_mat[[i, 0]] = 1.0; // intercept
-            x_mat[[i, 1]] = x[i];
-        }
-        let y_arr = Array1::from_vec(y);
-
-        // Fit GLS with known rho = 0.6
-        let result = gls(
-            &y_arr.view(),
-            &x_mat.view(),
-            CorrelationStructure::AR1 { rho: 0.6 },
-        )
-        .unwrap();
-
-        // Check structure
-        assert_eq!(result.n_obs, 50);
-        // n_params = number of coefficients + 1 for sigma = 3
-        assert_eq!(
-            result.n_params, 3,
-            "n_params should be 2 coefficients + 1 for sigma"
-        );
-        assert!(result.correlation.contains("AR(1)"));
-        assert!((result.correlation_param.unwrap() - 0.6).abs() < 1e-10);
-
-        // Coefficients should be close to true values (5, 2)
-        // With rho = 0.6, GLS should recover coefficients better than OLS
+    fn test_validate_gls_ar1_nlme() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("gls_ar1");
+        let n = case.scalar("n_obs") as usize;
+        let phi = case.scalar("phi");
+        let names = ["(Intercept)", "x"];
+        let g = run_gls(&ds, "y", &["x"], true, "ar1", Some(phi)).unwrap();
+        Check::new(&case)
+            .named("coef", &names, &g.coefficients, Tol::coef(n))
+            .named("se", &names, &g.std_errors, Tol::se(n))
+            .named("t", &names, &g.t_values, Tol::stat(n))
+            .named("p", &names, &g.p_values, Tol::p_value(n))
+            .scalar("sigma", g.sigma, Tol::stat(n))
+            .scalar("df_resid", g.df_residual as f64, Tol::exact())
+            .scalar("n_obs", g.n_obs as f64, Tol::exact())
+            .finish();
+        // deviation REG-9: log_likelihood, aic, bic (log_lik_reml, aic_reml, bic_reml, log_lik_ml).
+        // deviation REG-43: "ar1_auto" estimates rho as the lag-1 correlation of OLS residuals,
+        //   not REML/ML (phi, phi_ml).
+        assert_eq!(g.n_params, 3);
+        assert!(g.correlation.contains("AR(1)") && g.correlation_param == Some(phi));
+        let auto = run_gls(&ds, "y", &["x"], true, "ar1_auto", None).unwrap();
+        let rho = auto.correlation_param.unwrap();
         assert!(
-            (result.coefficients[0] - 5.0).abs() < 1.0,
-            "GLS intercept should be close to 5: got {}",
-            result.coefficients[0]
+            rho > 0.0 && rho < 1.0,
+            "AR(1) errors with rho = 0.6 give a positive estimate: {rho}"
         );
-        assert!(
-            (result.coefficients[1] - 2.0).abs() < 0.3,
-            "GLS slope should be close to 2: got {}",
-            result.coefficients[1]
-        );
-
-        // Standard errors should be positive
-        assert!(
-            result.std_errors[0] > 0.0,
-            "Intercept SE should be positive"
-        );
-        assert!(result.std_errors[1] > 0.0, "Slope SE should be positive");
-
-        // R² should be high for this well-fitting model
-        assert!(result.r_squared > 0.9, "R² should be > 0.9");
     }
 
     /// Validation test: GLS with automatic rho estimation

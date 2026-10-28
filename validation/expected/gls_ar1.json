@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "gls_ar1",
+  "area": "regression/gls",
+  "method": "GLS with AR(1) errors, nlme REML, n = 50 (legacy Test 2 DGP)",
+  "reference": "nlme::gls(correlation = corAR1(form = ~t)) (REML); method = 'ML' for coef_ml, phi_ml, log_lik_ml",
+  "call": "gls(y ~ x, data = gls_ar1, correlation = corAR1(form = ~t))",
+  "dataset": "validation/datasets/generated/gls_ar1.csv",
+  "datasets": ["validation/datasets/generated/gls_ar1.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "nlme": "3.1.164"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [4.8519111897316751, 2.0232780225343605]
+    },
+    "se": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.56804673153185625, 0.051880008638041201]
+    },
+    "t": {
+      "names": ["(Intercept)", "x"],
+      "values": [8.5413944318409971, 38.99918438045102]
+    },
+    "p": {
+      "names": ["(Intercept)", "x"],
+      "values": [3.3890502526794624e-11, 5.2576632614932603e-38]
+    },
+    "phi": 0.68197615216374263,
+    "sigma": 1.5739438334474458,
+    "log_lik_reml": -79.129212011233321,
+    "aic_reml": 166.25842402246664,
+    "bic_reml": 173.7432280660982,
+    "coef_ml": {
+      "names": ["(Intercept)", "x"],
+      "values": [4.8395404541780547, 2.0236337576205692]
+    },
+    "phi_ml": 0.65325038568374949,
+    "log_lik_ml": -77.239685525334835,
+    "df_resid": 48,
+    "n_obs": 50
+  }
+}

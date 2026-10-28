@@ -172,3 +172,45 @@ case("dk_panel", "regression/hac", "Driscoll-Kraay standard errors, pooled OLS, 
        reference = "sandwich::vcovPL(cluster = ~firm, order.by = ~time, kernel = 'Bartlett', lag =, adjust = FALSE | TRUE); plm::vcovSCC(maxlag =) as a cross-check",
        call = "vcovPL(lm(y ~ x, data = dk_panel), cluster = ~firm, order.by = ~time, lag = 2, adjust = FALSE)", packages = c("sandwich", "plm"))
 })
+
+# Test 1: quantile regression, heteroskedastic errors.
+case("quantreg_hetero", "regression/quantreg", "Quantile regression (tau = 0.25, 0.5, 0.75), heteroskedastic errors, n = 100 (legacy Test 1 DGP)", function(ctx) {
+  set.seed(42); n <- 100
+  x <- runif(n, 0, 10)
+  y <- 2 + 3 * x + rnorm(n, 0, 1 + 0.5 * x)
+  d <- ctx$gen_dataset("quantreg_hetero", data.frame(y = y, x = x))
+  v <- list(n_obs = nrow(d), rdf = summary(rq(y ~ x, tau = 0.5, data = d), se = "nid")$rdf)
+  for (tau in c(0.25, 0.5, 0.75)) {
+    q <- rq(y ~ x, tau = tau, data = d); tag <- sprintf("tau%02d", round(100 * tau))
+    v[[paste0("coef_", tag)]] <- named(coef(q))
+    v[[paste0("objective_", tag)]] <- q$rho
+    v[[paste0("se_iid_", tag)]] <- named(suppressWarnings(summary(q, se = "iid"))$coefficients[, "Std. Error"])   # tau = 0.75: "Solution may be nonunique" from the sparsity fits
+    v[[paste0("se_nid_", tag)]] <- named(summary(q, se = "nid")$coefficients[, "Std. Error"])
+  }
+  list(values = v,
+       reference = "quantreg::rq(method = 'br'); quantreg::summary.rq(se = 'iid' | 'nid')",
+       call = "rq(y ~ x, tau = 0.25, data = quantreg_hetero)", packages = "quantreg")
+})
+
+# Test 2: GLS with AR(1) errors, REML (nlme default).
+case("gls_ar1", "regression/gls", "GLS with AR(1) errors, nlme REML, n = 50 (legacy Test 2 DGP)", function(ctx) {
+  set.seed(42); n <- 50
+  t <- 1:n
+  e <- .legacy_ar_series(n, 0.6)
+  x <- runif(n, 0, 10)
+  y <- 5 + 2 * x + e
+  d <- ctx$gen_dataset("gls_ar1", data.frame(y = y, x = x, t = t))
+  g <- gls(y ~ x, data = d, correlation = corAR1(form = ~t))
+  phi <- unname(coef(g$modelStruct$corStruct, unconstrained = FALSE))
+  gf <- gls(y ~ x, data = d, correlation = corAR1(phi, form = ~t, fixed = TRUE))   # same fit with phi held fixed
+  gml <- gls(y ~ x, data = d, correlation = corAR1(form = ~t), method = "ML")
+  tt <- summary(g)$tTable
+  stopifnot(isTRUE(all.equal(coef(g), coef(gf), tolerance = 1e-10)), isTRUE(all.equal(g$sigma, gf$sigma, tolerance = 1e-10)))
+  list(values = list(
+    coef = named(coef(g)), se = named(tt[, "Std.Error"]), t = named(tt[, "t-value"]), p = named(tt[, "p-value"]),
+    phi = phi, sigma = g$sigma, log_lik_reml = as.numeric(logLik(g)), aic_reml = AIC(g), bic_reml = BIC(g),
+    coef_ml = named(coef(gml)), phi_ml = unname(coef(gml$modelStruct$corStruct, unconstrained = FALSE)), log_lik_ml = as.numeric(logLik(gml)),
+    df_resid = n - length(coef(g)), n_obs = n),
+    reference = "nlme::gls(correlation = corAR1(form = ~t)) (REML); method = 'ML' for coef_ml, phi_ml, log_lik_ml",
+    call = "gls(y ~ x, data = gls_ar1, correlation = corAR1(form = ~t))", packages = "nlme")
+})

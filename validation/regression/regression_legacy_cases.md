@@ -184,6 +184,82 @@ Bandwidth bounds since Tier 0 (REG-1, `428d7cf`), with T in place of n: a user b
 or more is an `InvalidSpecification` error, one above T/4 adds an entry to
 `DriscollKraayResult.warnings`, and the default bandwidth never warns.
 
+## Quantile regression (quantreg_hetero)
+
+DGP (legacy Test 1): `set.seed(42)`, n = 100, `x ~ U(0, 10)`, `y = 2 + 3 x + N(0, (1 + 0.5 x)^2)`
+(heteroskedastic); data `validation/datasets/generated/quantreg_hetero.csv`.
+
+R calls (quantreg 6.1): `rq(y ~ x, tau = 0.25 | 0.5 | 0.75)` (Barrodale-Roberts simplex) and
+its check-loss objective `$rho`; `summary.rq(se = "iid" | "nid")` for the standard errors.
+
+| Key | Value |
+|---|---|
+| `objective_tau25`, `objective_tau50`, `objective_tau75` | 111.2856142, 133.8052575, 106.3008737 |
+| `rdf`, `n_obs` | 98, 100 |
+| `coef_tau25` | 1.380407427, 2.768258213 |
+| `coef_tau50` | 1.348734984, 3.169951199 |
+| `coef_tau75` | 1.740641425, 3.467076160 |
+| `se_iid_tau50`, `se_nid_tau50` | 0.4807247768, 0.07953329683; 0.1798711171, 0.1079530876 |
+| `se_iid_tau25`, `se_nid_tau25` | 0.3091597442, 0.05114879633; 0.2982451330, 0.1411274807 |
+| `se_iid_tau75`, `se_nid_tau75` | 0.5593514870, 0.09254165791; 0.6195115282, 0.1643775195 |
+
+Test: `test_validate_quantreg_hetero` pins the objective at the three quantiles, the residual
+df and n. It also asserts that p2a's objective is not below rq's linear-programming minimum, that
+IRLS converges (fewer than 100 iterations; it takes 30, 23 and 52), and that the slope increases
+with tau. p2a's IRLS objective exceeds rq's minimum by 2.2e-7, 7.4e-8 and 1.4e-7 relative.
+Tolerance: objective 1e-6 relative (the statistic row), counts exact.
+
+Deviations (left out of the test):
+
+| Finding | Quantity | R | p2a |
+|---|---|---|---|
+| REG-52 | coefficients, tau = 0.5 (`coef_tau50`) | 1.348734984, 3.169951199 | 1.348696693, 3.169975618 (relative gaps 2.8e-5, 7.7e-6; at tau 0.25: 1.8e-5, 5.5e-8; at tau 0.75: 1.0e-6, 1.8e-6) |
+| REG-26 | standard errors, tau = 0.5 (`se_iid_tau50`, `se_nid_tau50`) | iid 0.4807247768, 0.07953329683; nid 0.1798711171, 0.1079530876 | 0.05028920546, 0.008320075224 |
+| REG-64 | 95% confidence intervals | not recorded | estimate +/- 1.96 SE (slope at tau 0.5: 3.153668270 to 3.186282965) |
+
+`test_validate_quantreg_multi` and `test_validate_quantreg_median_simple` cite no R values and
+are not registered (REG-44, Tier 3).
+
+## GLS AR(1) (gls_ar1)
+
+DGP (legacy Test 2): `set.seed(42)`, n = 50, `t = 1:50`, AR(1) errors
+`e[i] = 0.6 e[i - 1] + N(0, 1)`, `x ~ U(0, 10)`, `y = 5 + 2 x + e`; data
+`validation/datasets/generated/gls_ar1.csv` (columns `y, x, t`).
+
+R calls (nlme 3.1.164): `gls(y ~ x, correlation = corAR1(form = ~t))` (REML, the default), the
+same fit with phi held fixed (checked equal), and `method = "ML"`.
+
+| Key | (Intercept) | x |
+|---|---|---|
+| `coef` | 4.851911190 | 2.023278023 |
+| `se` | 0.5680467315 | 0.05188000864 |
+| `t` | 8.541394432 | 38.99918438 |
+| `p` | 3.389050253e-11 | 5.257663261e-38 |
+| `coef_ml` | 4.839540454 | 2.023633758 |
+
+`phi` (REML) = 0.6819761522, `sigma` = 1.573943833, `df_resid` = 48, `n_obs` = 50;
+`log_lik_reml` = -79.12921201, `aic_reml` = 166.2584240, `bic_reml` = 173.7432281;
+`phi_ml` = 0.6532503857, `log_lik_ml` = -77.23968553.
+
+Test: `test_validate_gls_ar1_nlme` runs `run_gls(..., "ar1", Some(phi))` at nlme's REML phi and
+pins the coefficients, standard errors, t, p, sigma, residual df and n. This is exact since the
+Tier 0 whitening fix (REG-10, `fa155d0`): coefficients, standard errors, t and sigma agree with
+nlme to about 1e-15. p2a reports p = 0 for the slope where R gives 5.3e-38, inside the 1e-12
+absolute p-value tolerance. Tolerance (n = 50): coefficients 1e-6, standard errors, t and sigma
+1e-5 relative, p-values 1e-5 relative or 1e-12 absolute, counts exact.
+
+Deviations (left out of the test):
+
+| Finding | Quantity | R | p2a |
+|---|---|---|---|
+| REG-43 | estimated rho, `"ar1_auto"` (`phi`, `phi_ml`) | REML 0.6819761522, ML 0.6532503857 | 0.6541921822, the lag-1 correlation of the OLS residuals |
+| REG-9 | log-likelihood, AIC, BIC at phi (`log_lik_reml`, `aic_reml`, `bic_reml`) | -79.12921201, 166.2584240, 173.7432281 | -93.62614993, 193.2522999, 198.9883689 (omits -0.5 log\|Omega\| and uses SSE/(n - p)) |
+
+T0-WP14's `test_validate_gls_fixed_correlation_vs_nlme` pins fixed-rho AR(1), compound-symmetry
+and identity fits on its own 30-point data to `nlme::gls` at 1e-8, with the R values quoted in
+the test; it loads no case and is not registered. `test_validate_gls_ar1_auto` and
+`test_validate_gls_compound_symmetry` cite no R values and are not registered (REG-44, Tier 3).
+
 ## Legacy files superseded
 
 | Legacy file (`validation/expected/`) | Superseded by | Note |
@@ -195,3 +271,6 @@ or more is an `InvalidSpecification` error, one above T/4 adds an entry to
 | `hac_test.csv` | `hac_ar1` | regenerated (INF-16): rows "Bartlett" and "Parzen" held `vcovHAC(m)`'s default quadratic-spectral estimate, because `vcovHAC` ignores a `kernel` argument; they now hold `kernhac_bartlett_bw4` and `kernhac_parzen_bw4`. Row "NeweyWest" equals `neweywest_default` |
 | `driscoll_kraay_test.csv` | `dk_panel` | coefficients and `ols_se` equal; `dk_se` sums the scores by firm, not by period (above), and is not a Driscoll-Kraay value |
 | `bootstrap_test.csv` | none | not asserted: `vcovBS` resamples with R's RNG (see `validation/regression/vcovBS.md`) |
+| `quantreg_test.csv` | `quantreg_hetero` | coefficients equal to 15 digits; p2a's coefficients are a deviation (REG-52), its objective is pinned |
+| `gls_ar1_test.csv` | `gls_ar1` | coefficients, standard errors and `rho_estimated` (= `phi`) equal to 15 digits |
+| `step_test.csv` | `step_legacy` (T1-WP02, `validation/r/cases/regression.R`) | |
