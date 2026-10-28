@@ -5,7 +5,10 @@
 # and docs/guides/DEPLOYMENT.md (DEPLOYMENT.md, "Release and redeploy", lists
 # the steps).
 #
-# Deploy:   fly config validate --strict -c deploy/fly.toml && fly deploy -c deploy/fly.toml
+# Deploy:   fly config validate --strict -c deploy/fly.toml && fly deploy --ha=false -c deploy/fly.toml
+#           --ha=false keeps the app on one machine: every session lives in
+#           one process's memory (see min_machines_running below), and a
+#           deploy onto an app with no machines would otherwise create two.
 # Cert:     fly certs add p2a-api.qamelab.org -a p2a-qamelab-backend
 #
 # Prereqs:
@@ -139,10 +142,11 @@ primary_region = "fra"          # Frankfurt — EU
   # /health answers 503 with "status": "degraded" while every tool slot is held
   # by work past its deadline, or while RSS stays above the 700 MiB soft limit
   # with no call running within its deadline after the server handed its freed
-  # heap memory back ("memory_stuck": every call is refused). If that lasts
+  # heap memory back ("memory_stuck": every call is refused). The stuck
+  # watchdog checks every 5 s; once a check finds that this has lasted
   # P2A_STUCK_EXIT_SECS (300 s in the hosted profile), the process exits with
-  # code 70 and the restart policy below starts it again. A restart discards
-  # every in-memory session.
+  # code 70, 300 to 310 s after /health first reports it, and the restart
+  # policy below starts it again. A restart discards every in-memory session.
   [[http_service.checks]]
     path = "/health"
     interval = "15s"
