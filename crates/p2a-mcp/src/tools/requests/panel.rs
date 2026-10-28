@@ -40,7 +40,7 @@ pub struct PanelFERequest {
     #[schemars(
         description = "Standard errors: 'classical' (default, as plm), 'cluster' (entity-clustered Arellano, Stata small-sample), 'cluster-hc0', 'cluster-hc1'."
     )]
-    #[serde(default)]
+    #[serde(alias = "se_type")]
     pub vcov: Option<String>,
 }
 
@@ -70,7 +70,7 @@ pub struct PanelRERequest {
     #[schemars(
         description = "Standard errors: 'classical' (default, as plm), 'cluster' (entity-clustered Arellano, Stata small-sample), 'cluster-hc0', 'cluster-hc1'."
     )]
-    #[serde(default)]
+    #[serde(alias = "se_type")]
     pub vcov: Option<String>,
 }
 

@@ -31,16 +31,20 @@ use p2a_core::regression::CovarianceType;
 
 /// The `vcov` option of `panel_fixed_effects` and `panel_random_effects`
 /// (`PanelVcov::from_str`; absent means classical). A refusal names the caller's
-/// value cut to the echo bound.
+/// value, trimmed as the parser trims it and cut to the echo bound; the message
+/// is built here, so it does not depend on the core error's wording.
 fn panel_config(vcov: Option<&str>) -> Result<PanelConfig, String> {
     let Some(s) = vcov else {
         return Ok(PanelConfig::default());
     };
     s.parse::<PanelVcov>()
         .map(|vcov| PanelConfig { vcov })
-        .map_err(|e| {
-            let shown = crate::tools::limits::echo(s);
-            format!("Invalid vcov: {}", e.to_string().replace(s, shown))
+        .map_err(|_| {
+            format!(
+                "Invalid vcov '{}': expected one of: classical, cluster, cluster-hc0, \
+                 cluster-hc1",
+                crate::tools::limits::echo(s.trim())
+            )
         })
 }
 
@@ -515,6 +519,12 @@ mod tests {
             t.contains("Standard errors: clustered by entity (Arellano, CR1/sss)"),
             "{t}"
         );
+        let wald = format!(
+            "Wald chi-squared (clustered): {:.4} on {} DF",
+            case.scalar("wald_chisq_arellano_sss"),
+            case.scalar("wald_df")
+        );
+        assert!(t.contains(&wald), "missing `{wald}` in\n{t}");
     }
 
     #[test]
@@ -554,6 +564,16 @@ mod tests {
             t.contains("Standard errors: clustered by entity (Arellano, HC0)"),
             "{t}"
         );
+        // The F test follows the clustered covariance (plm's summary with a
+        // vcov argument) and says so.
+        let f = format!(
+            "F-statistic (Wald, clustered): {:.4} on {} and {} DF (p-value: {:.4})",
+            case.scalar("f_stat_arellano_hc0"),
+            case.scalar("f_df1"),
+            case.scalar("f_df2_arellano"),
+            case.scalar("f_p_arellano_hc0")
+        );
+        assert!(t.contains(&f), "missing `{f}` in\n{t}");
     }
 
     #[test]
@@ -589,22 +609,69 @@ mod tests {
         for r in [&fe, &re] {
             assert_eq!(r.is_error, Some(true));
             let t = text(r);
-            assert!(t.starts_with("Invalid vcov: "), "{t}");
-            assert!(t.contains("robust"), "{t}");
-            assert!(
-                t.contains("classical, cluster, cluster-hc0, cluster-hc1"),
-                "{t}"
+            assert_eq!(
+                t,
+                "Invalid vcov 'robust': expected one of: classical, cluster, cluster-hc0, \
+                 cluster-hc1"
             );
         }
-        let long = "x".repeat(300);
+        // A long value, also one padded with leading spaces, is echoed cut to
+        // 64 characters (after the trim the parser applies).
+        for long in [
+            "x".repeat(300),
+            format!("{}{}", " ".repeat(10), "x".repeat(300)),
+        ] {
+            let r = rt
+                .block_on(server.panel_random_effects(Parameters(request(json!({"vcov": long})))))
+                .unwrap();
+            assert_eq!(r.is_error, Some(true));
+            let t = text(&r);
+            let shown = t
+                .strip_prefix("Invalid vcov '")
+                .and_then(|rest| rest.split_once("': expected one of:"))
+                .map(|(v, _)| v)
+                .unwrap_or_else(|| panic!("unexpected refusal: {t}"));
+            assert_eq!(shown, "x".repeat(64), "{t}");
+        }
+    }
+
+    /// `se_type`, the name `panel_hdfe` uses, reaches the strict parser: a
+    /// valid value gives the clustered SEs, an invalid one is refused rather
+    /// than ignored.
+    #[test]
+    fn test_mcp_panel_vcov_accepts_se_type_alias() {
+        let (case, rt, server) = case_server("panel_fe_grunfeld");
         let r = rt
-            .block_on(server.panel_random_effects(Parameters(request(json!({"vcov": long})))))
+            .block_on(
+                server.panel_fixed_effects(Parameters(request(json!({"se_type": "cluster"})))),
+            )
             .unwrap();
-        assert_eq!(r.is_error, Some(true));
+        assert_ne!(r.is_error, Some(true));
         let t = text(&r);
+        for name in case.names("coef") {
+            let se = format!("{:>12.4}", case.named("se_arellano_sss", name));
+            assert!(t.contains(&se), "missing `{se}` in\n{t}");
+        }
         assert!(
-            t.contains(&"x".repeat(64)) && !t.contains(&"x".repeat(65)),
+            t.contains("Standard errors: clustered by entity (Arellano, CR1/sss)"),
             "{t}"
         );
+        let (case, rt, server) = case_server("panel_re_grunfeld");
+        let r = rt
+            .block_on(
+                server.panel_random_effects(Parameters(request(json!({"se_type": "cluster"})))),
+            )
+            .unwrap();
+        assert_ne!(r.is_error, Some(true));
+        let t = text(&r);
+        for name in case.names("coef") {
+            let se = format!("{:>12.4}", case.named("se_arellano_sss", name));
+            assert!(t.contains(&se), "missing `{se}` in\n{t}");
+        }
+        let r = rt
+            .block_on(server.panel_random_effects(Parameters(request(json!({"se_type": "hc1"})))))
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).starts_with("Invalid vcov 'hc1'"), "{}", text(&r));
     }
 }
