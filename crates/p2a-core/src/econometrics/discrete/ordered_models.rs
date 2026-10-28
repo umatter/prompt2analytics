@@ -33,13 +33,28 @@ use crate::traits::estimator::{logistic_cdf, logistic_pdf, normal_cdf, normal_pd
 /// passed as the outcome would otherwise create one category per observation.
 const MAX_OUTCOME_CATEGORIES: usize = 100;
 
-/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
-/// SVD fallback). Check the working set against the allocation ceiling before building it.
+/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity or solution,
+/// residual product, SVD fallback). Check the working set against the allocation ceiling
+/// before building it.
 const DENSE_INVERSE_COPIES: usize = 6;
 
 fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
     let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
     resource::check_alloc::<f64>(cells, what)
+}
+
+/// Largest absolute component of a Newton step, or `None` if any component is not
+/// finite. (The fold `max_change.max(change.abs())` it guards dropped NaN, so an
+/// all-NaN step counted as converged, RF-31.)
+fn max_abs_step(step: &[f64]) -> Option<f64> {
+    let mut m = 0.0f64;
+    for s in step {
+        if !s.is_finite() {
+            return None;
+        }
+        m = m.max(s.abs());
+    }
+    Some(m)
 }
 
 /// Type of ordered discrete choice model.
@@ -161,7 +176,19 @@ impl fmt::Display for OrderedResult {
 
 /// Run ordered logit regression (proportional odds model).
 ///
-/// R equivalent: `MASS::polr()`
+/// R equivalent: `MASS::polr()`. The estimates are not yet polr's: the beta score
+/// has the wrong sign and the Hessian is an outer-product approximation, so the fit
+/// does not reach the MLE (ECON-4, T2-WP10), and the standard errors are a 0.1
+/// placeholder (ECON-5).
+///
+/// # Convergence
+///
+/// Newton steps, at most 100. `converged == true` implies that every coefficient,
+/// every threshold and the log-likelihood are finite, and that the last step came
+/// from a regular (not pseudo-) inverse with largest absolute (clamped) change
+/// below `1e-8`. A non-finite score or step, or a step from the pseudoinverse
+/// (singular Hessian), ends the iteration with `converged = false`, and that step
+/// is not applied. Non-convergence is reported in the result, never as an error.
 ///
 /// # Errors
 ///
@@ -177,7 +204,11 @@ pub fn run_ordered_logit(
 
 /// Run ordered probit regression.
 ///
-/// R equivalent: `MASS::polr(method = "probit")`
+/// R equivalent: `MASS::polr(method = "probit")`. The estimates are not yet
+/// polr's (ECON-4, ECON-5; T2-WP10). Convergence is reported as for
+/// [`run_ordered_logit`]: `converged == true` implies finite estimates and
+/// log-likelihood and a last step from a regular inverse; a non-finite or
+/// pseudoinverse step ends the iteration, not converged and not applied.
 ///
 /// # Errors
 ///
@@ -410,12 +441,17 @@ fn run_ordered_model(
             subtract_scaled_outer(&mut hess, &score_idx, &score_val, p_i);
         }
 
+        // A non-finite score ends the iteration, not converged.
+        if !gradient.iter().all(|g| g.is_finite()) {
+            break;
+        }
+
         // Add regularization to diagonal
         for i in 0..n_params {
             hess[[i, i]] -= 1e-6;
         }
 
-        let (hess_inv, _) = match safe_inverse(&hess.view()) {
+        let (hess_inv, singular) = match safe_inverse(&hess.view()) {
             Ok(inv) => inv,
             Err(_) => {
                 // Fall back to gradient descent step
@@ -430,6 +466,12 @@ fn run_ordered_model(
         // Newton step
         let grad_arr = Array1::from_vec(gradient);
         let step = hess_inv.dot(&grad_arr);
+
+        // A non-finite step, or one from the pseudoinverse (singular Hessian), ends
+        // the iteration unapplied and not converged.
+        if max_abs_step(step.as_slice().expect("contiguous")).is_none() || singular.is_some() {
+            break;
+        }
 
         // Update with step size control
         let mut max_change = 0.0f64;
@@ -478,6 +520,7 @@ fn run_ordered_model(
         let p_i = (p_high - p_low).max(1e-15);
         log_likelihood += p_i.ln();
     }
+    let converged = converged && log_likelihood.is_finite() && theta.iter().all(|t| t.is_finite());
 
     // Null model: thresholds only
     let log_likelihood_null: f64 = category_counts
@@ -646,10 +689,41 @@ mod tests {
         }
     }
 
+    /// 100 categories of one row each. Before Tier 1 the fit was finite, but every
+    /// Newton step used a wrong full-pivot LU inverse (RF-31); it must stay finite
+    /// and may report convergence only above the null model.
     #[test]
     fn test_ordered_accepts_100_categories() {
         let r = run_ordered_logit(&continuous_y_dataset(100), "y", &["x"]).unwrap();
         assert_eq!(r.categories.len(), 100);
+        assert!(
+            r.coefficients
+                .iter()
+                .chain(&r.thresholds)
+                .all(|v| v.is_finite())
+                && r.log_likelihood.is_finite(),
+            "non-finite estimates: LL {}, converged {} after {} iterations",
+            r.log_likelihood,
+            r.converged,
+            r.iterations
+        );
+        assert!(
+            !r.converged || r.log_likelihood >= r.log_likelihood_null,
+            "converged below the null model: LL {}, null {}",
+            r.log_likelihood,
+            r.log_likelihood_null
+        );
+    }
+
+    #[test]
+    fn test_ordered_max_abs_step_rejects_non_finite() {
+        // The old fold `max_change.max(change.abs())` dropped NaN (f64::max), so the
+        // all-NaN steps of RF-31 counted as converged.
+        assert_eq!(max_abs_step(&[0.5, -2.0]), Some(2.0));
+        assert_eq!(max_abs_step(&[]), Some(0.0));
+        assert_eq!(max_abs_step(&[1.0, f64::NAN]), None);
+        assert_eq!(max_abs_step(&[f64::INFINITY]), None);
+        assert_eq!(max_abs_step(&[f64::NAN, 1.0]), None);
     }
 
     #[test]
