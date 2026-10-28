@@ -93,7 +93,7 @@ impl std::fmt::Display for StepResult {
         writeln!(
             f,
             "{:>5} {:>15} {:>6} {:>12} {:>12}",
-            "Step", "Action", "Df", "RSS", &self.criterion_name
+            "Step", "Action", "Df", "RSS", self.criterion_name
         )?;
         writeln!(f, "{:-<55}", "")?;
 
