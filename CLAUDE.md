@@ -788,10 +788,8 @@ test names are not, and the paper's Makefile uses them.
 (`validation/run_validation.sh --write-status`), never hand-edited. Regenerate it once per
 wave integration, after merging lanes, not inside a lane. CI fails its status-page check
 (`P2A_CHECK_STATUS_PAGE=1`, `validation/tools/tests/test_status_page.py`) when the page's
-per-package `test_validate` counts differ from `cargo test -- --list`. Do not combine
-`--write-status` with `--verbose` until the runner's `--nocapture` parsing is fixed: the
-interleaved output drops tests from the page (they show as NOT RUN) while the run still
-passes. Regenerate the page without `--verbose`.
+per-package `test_validate` counts differ from `cargo test -- --list`. A run in which a
+selected test has no parsed result fails and leaves the page as it was.
 
 **Lint.** `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`
 (a CI gate, with the three `--list` outputs CI writes; the commands that write them are in

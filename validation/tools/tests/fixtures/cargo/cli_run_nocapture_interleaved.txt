@@ -1,0 +1,12 @@
+     Running tests/exhibits.rs (target/debug/deps/exhibits-f252076d6b62fc39)
+
+running 3 tests
+ok   case panel_re_grunfeld: n_groups rust=10.0 R=10.0 |diff|=0e0 allowed=0e0
+ok   case panel_re_grunfeld: wald_chisq rust=657.6739 R=657.6738698256663 |diff|=3.017433368768252e-5 allowed=5.0000001000000005e-5test test_validate_cli_hausman_sim_corr ... 
+okok  
+ case panel_re_grunfeld: wald_df rust=2.0 R=2.0 |diff|=0e0 allowed=0e0
+ok   case panel_re_grunfeld: wald_p rust=0.0 R=1.541465188654344e-143 |diff|=1.541465188654344e-143 allowed=5.0000001000000005e-5
+test test_validate_cli_re ... ok
+test test_validate_cli_ols ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.21s

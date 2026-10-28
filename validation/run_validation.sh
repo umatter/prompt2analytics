@@ -5,7 +5,11 @@
 # listed with `cargo test -- --list`, selected by module path and test binary
 # (validation/tools/validation_status.py select) and run with --exact per test binary,
 # plus every self-test of p2a-validation. A non-zero cargo exit, a compile error, fewer
-# tests run than selected, or no selected test_validate test at all is a failure.
+# tests run than selected, a selected test without a parsed result (or a parsed result
+# for a test not selected), or no selected test_validate test at all is a failure; with
+# such a result mismatch, --write-status leaves validation/VALIDATION_STATUS.md alone.
+# --verbose runs the tests with P2A_VALIDATION_VERBOSE=1 and libtest's --show-output, so
+# the comparisons are printed after the status lines the logs are parsed from.
 # Full runs (no --category) also lint the methods registry (validation/methods/).
 #
 # R: the drift check `Rscript validation/r/run.R --check`, which recomputes every R
@@ -135,6 +139,9 @@ fi
 
 FAILURES=()
 INCOMPLETE=false
+# A package whose parsed test ids differ from its selection (collect's missing/unexpected
+# lines): the results cannot describe the suite, so the status page is not written.
+RESULTS_MISMATCH=false
 SCRATCH_DIRS=()
 
 cleanup() {
@@ -305,8 +312,12 @@ if $RUN_RUST; then
                 log="$REPORT_DIR/$pkg-run-$(slug_of "$target").txt"
                 rc=0
                 if $VERBOSE; then
+                    # --show-output, not --nocapture: libtest writes a status line in
+                    # several writes, and uncaptured Check output of the tests still
+                    # running lands between them, so the parser loses the line. Captured
+                    # output is printed after the status lines instead.
                     run_logged "$log" env P2A_VALIDATION_VERBOSE=1 cargo test -p "$pkg" ${FEAT[@]+"${FEAT[@]}"} \
-                        "${TARGET_ARGS[@]}" -- --exact --nocapture "${NAMES[@]}" < /dev/null 3<&- || rc=$?
+                        "${TARGET_ARGS[@]}" -- --exact --show-output "${NAMES[@]}" < /dev/null 3<&- || rc=$?
                 else
                     run_logged "$log" cargo test -p "$pkg" ${FEAT[@]+"${FEAT[@]}"} \
                         "${TARGET_ARGS[@]}" -- --exact "${NAMES[@]}" < /dev/null 3<&- || rc=$?
@@ -317,17 +328,28 @@ if $RUN_RUST; then
                 fi
             done 3< <(cut -f1 "$selection" | sort -u)
             collect_line "collect: $pkg: " --package "$pkg" --exit-code "$max_rc" --selected "$n" \
-                --features "$features" -o "$RESULTS" "${LOGS[@]}"
+                --selection "$selection" --features "$features" -o "$RESULTS" "${LOGS[@]}"
             line="$COLLECT_LINE"
             pkg_status="${line#collect: "$pkg": }"
             pkg_status="${pkg_status%% *}"
             detail="${line#*(}"
             detail="${detail%)}"
+            mismatch="$(grep -F -e "collect: $pkg: missing: " -e "collect: $pkg: unexpected: " "$COLLECT_OUT" || true)"
+            if [ -n "$mismatch" ]; then
+                RESULTS_MISMATCH=true
+            fi
             if [ "$pkg_status" = pass ]; then
                 echo "${GREEN}Rust $pkg: PASS ($detail)${NC}"
             else
                 echo "${RED}Rust $pkg: FAIL ($detail)${NC}"
                 grep -F -- "collect: $pkg: error: " "$COLLECT_OUT" | sed "s/^collect: $pkg: error: /  /" || true
+                if [ -n "$mismatch" ]; then
+                    printf '%s\n' "$mismatch" | head -n 20 | sed "s/^collect: $pkg: /  /" || true
+                    count="$(printf '%s\n' "$mismatch" | grep -c .)"
+                    if [ "$count" -gt 20 ]; then
+                        echo "  ... and $((count - 20)) more (listed in $RESULTS)"
+                    fi
+                fi
                 fail "Rust $pkg: $pkg_status ($detail)"
             fi
         done
@@ -461,7 +483,12 @@ fi
 # ------------------------------------------------------------------------------------
 RENDER=(render --results "$RESULTS" -o "$REPORT_DIR/report.md")
 if $WRITE_STATUS; then
-    RENDER+=(-o validation/VALIDATION_STATUS.md)
+    if $RESULTS_MISMATCH; then
+        echo "${RED}validation/VALIDATION_STATUS.md not written: the parsed test results do not match the selection (see above)${NC}"
+        fail "validation/VALIDATION_STATUS.md not written (parsed test results do not match the selection)"
+    else
+        RENDER+=(-o validation/VALIDATION_STATUS.md)
+    fi
 fi
 status_py "${RENDER[@]}"
 if [ "$STATUS_RC" -ne 0 ]; then
