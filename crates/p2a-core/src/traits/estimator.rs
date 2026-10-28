@@ -101,21 +101,14 @@ pub trait LinearEstimator {
         coefs / ses
     }
 
-    /// Compute two-sided p-values from t-statistics.
+    /// Compute two-sided p-values from t-statistics with `degrees_of_freedom()` df.
+    ///
+    /// Goes through [`t_test_p_value`]: a NaN t-statistic (for example from a NaN or
+    /// zero standard error) gives a NaN p-value, an infinite one gives 0, and df = 0
+    /// gives NaN. It never panics.
     fn p_values(&self) -> Array1<f64> {
-        let t_stats = self.t_stats();
         let df = self.degrees_of_freedom() as f64;
-
-        if !df.is_finite() || df <= 0.0 {
-            // Return NaN for invalid degrees of freedom (NaN, Inf, <= 0)
-            return Array1::from_elem(t_stats.len(), f64::NAN);
-        }
-
-        let t_dist = match StudentsT::new(0.0, 1.0, df) {
-            Ok(d) => d,
-            Err(_) => return Array1::from_elem(t_stats.len(), f64::NAN),
-        };
-        t_stats.mapv(|t| 2.0 * (1.0 - t_dist.cdf(t.abs())))
+        self.t_stats().mapv(|t| t_test_p_value(t, df))
     }
 
     /// Get significance levels for each coefficient.
@@ -163,18 +156,20 @@ pub trait LinearEstimator {
         f64::NAN
     }
 
-    /// Compute adjusted R-squared.
-    /// Adj R² = 1 - (1 - R²) * (n - 1) / (n - k - 1)
+    /// Compute adjusted R-squared: `1 - (1 - R²)(n - 1)/df`, with
+    /// df = `degrees_of_freedom()` = n - k, where k counts every coefficient including
+    /// the intercept (R `summary.lm`). Assumes a model with an intercept. NaN when
+    /// df = 0, and NaN whenever `r_squared()` is (its default).
     fn adj_r_squared(&self) -> f64 {
         let r2 = self.r_squared();
         let n = self.n_obs() as f64;
-        let k = self.coefficients().len() as f64;
+        let df = self.degrees_of_freedom();
 
-        if n - k - 1.0 <= 0.0 {
+        if df == 0 {
             return f64::NAN;
         }
 
-        1.0 - (1.0 - r2) * (n - 1.0) / (n - k - 1.0)
+        1.0 - (1.0 - r2) * (n - 1.0) / df as f64
     }
 
     /// Residual standard error: sqrt(SSR / (n - k))
@@ -190,7 +185,7 @@ pub trait LinearEstimator {
         (ssr / df).sqrt()
     }
 
-    /// Log-likelihood (assuming normally distributed errors).
+    /// Gaussian log-likelihood at the ML error variance σ̂² = SSR/n (R `logLik` for `lm`).
     fn log_likelihood(&self) -> f64 {
         let residuals = self.residuals();
         let n = self.n_obs() as f64;
@@ -203,19 +198,25 @@ pub trait LinearEstimator {
         -n / 2.0 * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln())
     }
 
-    /// Akaike Information Criterion: AIC = 2k - 2*ln(L)
+    /// Akaike Information Criterion: AIC = 2(k + 1) - 2 ln L, with k coefficients.
+    ///
+    /// The error variance counts as a parameter, as in R's `AIC` for `lm`.
+    /// Implementors with another parameter count override this.
     fn aic(&self) -> f64 {
-        let k = self.coefficients().len() as f64;
+        let p = self.coefficients().len() as f64 + 1.0;
         let ll = self.log_likelihood();
-        2.0 * k - 2.0 * ll
+        2.0 * p - 2.0 * ll
     }
 
-    /// Bayesian Information Criterion: BIC = k*ln(n) - 2*ln(L)
+    /// Bayesian Information Criterion: BIC = (k + 1) ln n - 2 ln L, with k coefficients.
+    ///
+    /// The error variance counts as a parameter, as in R's `BIC` for `lm`.
+    /// Implementors with another parameter count override this.
     fn bic(&self) -> f64 {
-        let k = self.coefficients().len() as f64;
+        let p = self.coefficients().len() as f64 + 1.0;
         let n = self.n_obs() as f64;
         let ll = self.log_likelihood();
-        k * n.ln() - 2.0 * ll
+        p * n.ln() - 2.0 * ll
     }
 }
 
@@ -398,5 +399,164 @@ mod tests {
         assert!((normal_cdf(0.0) - 0.5).abs() < 1e-10);
         assert!(normal_cdf(3.0) > 0.99);
         assert!(normal_cdf(-3.0) < 0.01);
+    }
+
+    use crate::regression::{CovarianceType, OlsResult, run_ols};
+    use ndarray::array;
+    use p2a_validation::{Check, Tol};
+
+    /// Delegates only the required methods (and `r_squared`) to an `OlsResult`, so every
+    /// other method runs its trait default.
+    struct DefaultsOnly<'a>(&'a OlsResult);
+
+    impl LinearEstimator for DefaultsOnly<'_> {
+        fn coefficients(&self) -> &Array1<f64> {
+            LinearEstimator::coefficients(self.0)
+        }
+        fn std_errors(&self) -> &Array1<f64> {
+            LinearEstimator::std_errors(self.0)
+        }
+        fn residuals(&self) -> &Array1<f64> {
+            LinearEstimator::residuals(self.0)
+        }
+        fn vcov_matrix(&self) -> &Array2<f64> {
+            LinearEstimator::vcov_matrix(self.0)
+        }
+        fn variable_names(&self) -> &[String] {
+            &self.0.variable_names
+        }
+        fn degrees_of_freedom(&self) -> usize {
+            self.0.df_resid
+        }
+        fn n_obs(&self) -> usize {
+            self.0.n_obs
+        }
+        fn r_squared(&self) -> f64 {
+            self.0.r_squared
+        }
+    }
+
+    /// Fixed arrays for the NaN and degrees-of-freedom cases.
+    struct Fixed {
+        b: Array1<f64>,
+        se: Array1<f64>,
+        e: Array1<f64>,
+        v: Array2<f64>,
+        names: Vec<String>,
+        df: usize,
+        n: usize,
+        r2: f64,
+    }
+
+    impl Fixed {
+        /// Four coefficients, n = 10, df = 6, R² = 0.5; residuals with noise.
+        fn new(b: Array1<f64>, se: Array1<f64>) -> Fixed {
+            Fixed {
+                b,
+                se,
+                e: array![0.3, -0.1, 0.25, -0.4, 0.05, 0.12, -0.2, 0.33, -0.15, -0.2],
+                v: Array2::zeros((4, 4)),
+                names: ["(Intercept)", "x1", "x2", "x3"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                df: 6,
+                n: 10,
+                r2: 0.5,
+            }
+        }
+    }
+
+    impl LinearEstimator for Fixed {
+        fn coefficients(&self) -> &Array1<f64> {
+            &self.b
+        }
+        fn std_errors(&self) -> &Array1<f64> {
+            &self.se
+        }
+        fn residuals(&self) -> &Array1<f64> {
+            &self.e
+        }
+        fn vcov_matrix(&self) -> &Array2<f64> {
+            &self.v
+        }
+        fn variable_names(&self) -> &[String] {
+            &self.names
+        }
+        fn degrees_of_freedom(&self) -> usize {
+            self.df
+        }
+        fn n_obs(&self) -> usize {
+            self.n
+        }
+        fn r_squared(&self) -> f64 {
+            self.r2
+        }
+    }
+
+    /// The trait defaults on `lm(inv ~ value + capital)` (case `ols_grunfeld`) give what
+    /// summary.lm, confint, logLik, AIC and BIC give (REG-3).
+    #[test]
+    fn test_validate_linear_estimator_defaults_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+        let r = run_ols(
+            &ds,
+            "inv",
+            &["value", "capital"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let d = DefaultsOnly(&r);
+        let n = d.n_obs();
+        let names = d.variable_names();
+        let (lo, hi): (Vec<f64>, Vec<f64>) = d.confidence_intervals_95().into_iter().unzip();
+        Check::new(&case)
+            .named("t_classical", names, &d.t_stats().to_vec(), Tol::stat(n))
+            .named(
+                "p_classical",
+                names,
+                &d.p_values().to_vec(),
+                Tol::p_value(n),
+            )
+            .named("ci95_lower_classical", names, &lo, Tol::stat(n))
+            .named("ci95_upper_classical", names, &hi, Tol::stat(n))
+            .scalar("adj_r2", d.adj_r_squared(), Tol::stat(n))
+            .scalar("sigma", d.residual_std_error(), Tol::stat(n))
+            .scalar("log_lik", d.log_likelihood(), Tol::stat(n))
+            .scalar("aic", d.aic(), Tol::stat(n))
+            .scalar("bic", d.bic(), Tol::stat(n))
+            .finish();
+    }
+
+    /// A NaN or zero standard error gives the `t_test_p_value` convention, never a panic
+    /// (the core half of CLI-6).
+    #[test]
+    fn test_default_p_values_are_nan_safe() {
+        let f = Fixed::new(array![1.0, 2.0, 3.0, 0.0], array![0.5, f64::NAN, 0.0, 0.0]);
+        let p = f.p_values();
+        assert_eq!(p.len(), 4);
+        // t = 2
+        assert!((p[0] - t_test_p_value(2.0, 6.0)).abs() <= 1e-15, "{p:?}");
+        // t = 2 / NaN
+        assert!(p[1].is_nan(), "{p:?}");
+        // t = 3 / 0 = +inf
+        assert_eq!(p[2], 0.0, "{p:?}");
+        // t = 0 / 0
+        assert!(p[3].is_nan(), "{p:?}");
+    }
+
+    /// Adjusted R² divides by the residual df, which already counts the intercept.
+    #[test]
+    fn test_default_adj_r_squared_uses_residual_df() {
+        let mut f = Fixed::new(array![1.0, 2.0, 3.0, 0.5], array![0.5, 0.4, 0.3, 0.2]);
+        // 1 - (1 - 0.5) * 9 / 6
+        assert!(
+            (f.adj_r_squared() - 0.25).abs() <= 1e-15,
+            "{}",
+            f.adj_r_squared()
+        );
+        f.df = 0;
+        assert!(f.adj_r_squared().is_nan(), "{}", f.adj_r_squared());
     }
 }
