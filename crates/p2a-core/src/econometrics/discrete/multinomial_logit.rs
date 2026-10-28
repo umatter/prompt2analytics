@@ -57,6 +57,31 @@ fn max_abs_step(step: &[f64]) -> Option<f64> {
     Some(m)
 }
 
+/// Category probabilities of one observation by log-sum-exp (RF-32).
+///
+/// `xb[j]` is the linear predictor of non-reference category `j + 1`; the reference
+/// category has 0. With `m = max(0, max_j xb_j)` and
+/// `s = exp(-m) + sum_j exp(xb_j - m)`: `probs[0] = exp(-m) / s` and
+/// `probs[j + 1] = exp(xb_j - m) / s`. Returns `ln sum_c exp(eta_c) = m + ln s`, so
+/// `ln p_c = eta_c - (return value)`. No overflow for any finite `xb`; this replaces
+/// the clamp `exp(x'b).min(1e10)`, which biased the score and the likelihood once a
+/// linear predictor exceeded ln(1e10) = 23.03.
+fn softmax_into(xb: &[f64], probs: &mut [f64]) -> f64 {
+    let m = xb.iter().fold(0.0f64, |m, &v| m.max(v));
+    let e0 = (-m).exp();
+    probs[0] = e0;
+    let mut s = e0;
+    for (p, &v) in probs[1..].iter_mut().zip(xb) {
+        let e = (v - m).exp();
+        *p = e;
+        s += e;
+    }
+    for p in probs.iter_mut() {
+        *p /= s;
+    }
+    m + s.ln()
+}
+
 /// Result from multinomial logit regression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultinomResult {
@@ -299,6 +324,9 @@ pub fn run_multinom(
     let tol = 1e-8;
     let mut converged = false;
     let mut iterations = 0;
+    // Linear predictors and probabilities of one observation (reference category first)
+    let mut xb_i = vec![0.0; n_cats];
+    let mut probs_i = vec![0.0; j];
 
     for iter in 0..max_iter {
         resource::checkpoint()?;
@@ -309,20 +337,15 @@ pub fn run_multinom(
             if i % 256 == 0 {
                 resource::checkpoint()?;
             }
-            let mut exp_xb = vec![0.0; j];
-            exp_xb[0] = 1.0; // Reference category (beta = 0)
-
-            for cat_idx in 0..n_cats {
-                let mut xb = 0.0;
+            for (cat_idx, xb) in xb_i.iter_mut().enumerate() {
+                *xb = 0.0;
                 for kk in 0..k {
-                    xb += x[[i, kk]] * beta[cat_idx * k + kk];
+                    *xb += x[[i, kk]] * beta[cat_idx * k + kk];
                 }
-                exp_xb[cat_idx + 1] = xb.exp().min(1e10); // Prevent overflow
             }
-
-            let sum_exp: f64 = exp_xb.iter().sum();
+            softmax_into(&xb_i, &mut probs_i);
             for jj in 0..j {
-                probs[[i, jj]] = exp_xb[jj] / sum_exp;
+                probs[[i, jj]] = probs_i[jj];
             }
         }
 
@@ -400,23 +423,22 @@ pub fn run_multinom(
         }
     }
 
-    // Compute final log-likelihood
+    // Compute final log-likelihood: ln p_y = eta_y - logsumexp(eta), eta_0 = 0
     let mut log_likelihood = 0.0;
     for i in 0..n {
-        let mut exp_xb = vec![0.0; j];
-        exp_xb[0] = 1.0;
-
-        for cat_idx in 0..n_cats {
-            let mut xb = 0.0;
+        for (cat_idx, xb) in xb_i.iter_mut().enumerate() {
+            *xb = 0.0;
             for kk in 0..k {
-                xb += x[[i, kk]] * beta[cat_idx * k + kk];
+                *xb += x[[i, kk]] * beta[cat_idx * k + kk];
             }
-            exp_xb[cat_idx + 1] = xb.exp().min(1e10);
         }
-
-        let sum_exp: f64 = exp_xb.iter().sum();
-        let log_prob = (exp_xb[y_idx[i]] / sum_exp).ln();
-        log_likelihood += log_prob;
+        let lse = softmax_into(&xb_i, &mut probs_i);
+        let eta_y = if y_idx[i] == 0 {
+            0.0
+        } else {
+            xb_i[y_idx[i] - 1]
+        };
+        log_likelihood += eta_y - lse;
     }
     let converged = converged && log_likelihood.is_finite() && beta.iter().all(|b| b.is_finite());
 
@@ -440,17 +462,13 @@ pub fn run_multinom(
         if i % 256 == 0 {
             resource::checkpoint()?;
         }
-        let mut exp_xb = vec![0.0; j];
-        exp_xb[0] = 1.0;
-        for cat_idx in 0..n_cats {
-            let mut xb = 0.0;
+        for (cat_idx, xb) in xb_i.iter_mut().enumerate() {
+            *xb = 0.0;
             for kk in 0..k {
-                xb += x[[i, kk]] * beta[cat_idx * k + kk];
+                *xb += x[[i, kk]] * beta[cat_idx * k + kk];
             }
-            exp_xb[cat_idx + 1] = xb.exp().min(1e10);
         }
-        let sum_exp: f64 = exp_xb.iter().sum();
-        let probs_i: Vec<f64> = exp_xb.iter().map(|e| e / sum_exp).collect();
+        softmax_into(&xb_i, &mut probs_i);
 
         for cat_idx in 0..n_cats {
             for cat_idx2 in 0..n_cats {
@@ -630,6 +648,42 @@ mod tests {
         let (case, ds) = crate::test_support::load_case("disc_multinom_j4");
         let r = run_multinom(&ds, "y", &["x1", "x2"], None).unwrap();
         pin_multinom(&case, &r);
+    }
+
+    /// RF-32: 5 well-separated categories; at the MLE a linear predictor exceeds
+    /// ln(1e10) = 23.03, where the old `exp(x'b).min(1e10)` clamp stopped the fit at
+    /// a log-likelihood above the true maximum.
+    #[test]
+    fn test_validate_multinom_sep5() {
+        let (case, ds) = crate::test_support::load_case("disc_multinom_sep5");
+        let r = run_multinom(&ds, "y", &["x"], None).unwrap();
+        pin_multinom(&case, &r);
+    }
+
+    #[test]
+    fn test_softmax_into_log_sum_exp() {
+        // (1) Ordinary predictors.
+        let mut p = [0.0; 3];
+        let lse = softmax_into(&[0.3, -1.2], &mut p);
+        let e = [1.0, 0.3f64.exp(), (-1.2f64).exp()];
+        let s: f64 = e.iter().sum();
+        for (pc, ec) in p.iter().zip(e) {
+            assert!((pc - ec / s).abs() <= 1e-15, "{p:?}");
+        }
+        assert!((p.iter().sum::<f64>() - 1.0).abs() <= 1e-15, "{p:?}");
+        assert!((lse - s.ln()).abs() <= 1e-15, "{lse}");
+        // (2) exp(800) overflows; log-sum-exp does not.
+        let lse = softmax_into(&[800.0, 799.0], &mut p);
+        let want = [0.0, 0.7310585786300049, 0.2689414213699951];
+        for (pc, wc) in p.iter().zip(want) {
+            assert!((pc - wc).abs() <= 1e-15, "{p:?}");
+        }
+        assert!((lse - 800.3132616875182).abs() <= 1e-12, "{lse}");
+        // (3) Above ln(1e10): the clamp gave p[1] = 1e10 / (1 + 1e10) = 1 - 1e-10.
+        let mut p = [0.0; 2];
+        softmax_into(&[30.0], &mut p);
+        assert!((p[1] - 0.9999999999999065).abs() <= 1e-16, "{p:?}");
+        assert!((p[0] - 9.3576229688393e-14).abs() <= 1e-27, "{p:?}");
     }
 
     fn create_multinomial_dataset() -> Dataset {
