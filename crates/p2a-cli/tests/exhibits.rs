@@ -19,9 +19,12 @@
 //! R checks run first, a golden copy can never hold a number that disagrees
 //! with R.
 
+use p2a_core::regression::{CovarianceType, OlsCoefficient};
+use p2a_core::traits::t_test_p_value;
+use p2a_core::{DataLoader, Dataset, run_ols, run_ols_clustered, run_vcov_hac};
 use p2a_validation::golden::assert_golden;
-use p2a_validation::text::coefficient_rows;
-use p2a_validation::{Case, Tol};
+use p2a_validation::text::{coefficient_rows, labelled};
+use p2a_validation::{Case, Check, Tol};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -539,4 +542,508 @@ fn test_validate_cli_data_head() {
         assert_eq!(printed, expected, "row {i}\n{out}");
     }
     assert_golden(&golden("cli_data_head"), &out);
+}
+
+// =============================================================================
+// reg ols, reg clustered, reg hac (exhibits cli_ols, cli_ols_json)
+// =============================================================================
+
+/// The case's dataset as the core loads it, for in-process comparisons.
+fn dataset(path: &Path) -> Dataset {
+    Dataset::new(
+        DataLoader::load_csv(path).unwrap_or_else(|e| panic!("load {}: {e}", path.display())),
+    )
+}
+
+/// Parsed `-F json` output.
+fn json(out: &str) -> Value {
+    serde_json::from_str(out).unwrap_or_else(|e| panic!("not JSON ({e}):\n{out}"))
+}
+
+/// The lines under `Warnings:` (`  - <text>`), without the prefix.
+fn warnings_block(text: &str) -> Vec<String> {
+    text.lines()
+        .skip_while(|l| *l != "Warnings:")
+        .skip(1)
+        .take_while(|l| l.starts_with("  - "))
+        .map(|l| l["  - ".len()..].to_string())
+        .collect()
+}
+
+/// The whitespace-split tokens of the rows of a report's coefficient table.
+fn row_tokens(text: &str) -> Vec<Vec<String>> {
+    let rule = "-".repeat(60);
+    text.lines()
+        .skip_while(|l| !l.starts_with("Variable "))
+        .skip(2)
+        .take_while(|l| *l != rule)
+        .map(|l| l.split_whitespace().map(str::to_string).collect())
+        .collect()
+}
+
+/// A p-value token: the value at 4 decimals plus at most its stars.
+fn assert_p_token(tok: &str, p: f64, line: &[String]) {
+    let printed = format!("{p:.4}");
+    let rest = tok.strip_prefix(&printed);
+    assert!(
+        rest.is_some_and(|r| ["", ".", "*", "**", "***"].contains(&r)),
+        "p token `{tok}` is not {printed} plus stars in {line:?}"
+    );
+}
+
+/// Each printed row is the in-process coefficient at print precision: a NaN
+/// prints `NaN`, never `0.000`.
+fn assert_rows_match(text: &str, coefficients: &[OlsCoefficient]) {
+    let rows = row_tokens(text);
+    assert_eq!(rows.len(), coefficients.len(), "{text}");
+    for (tokens, c) in rows.iter().zip(coefficients) {
+        assert_eq!(tokens.len(), 5, "{tokens:?}");
+        assert_eq!(tokens[0], c.name, "{tokens:?}");
+        assert_eq!(tokens[1], format!("{:.6}", c.estimate), "{tokens:?}");
+        assert_eq!(tokens[2], format!("{:.6}", c.std_error), "{tokens:?}");
+        assert_eq!(tokens[3], format!("{:.3}", c.t_value), "{tokens:?}");
+        assert_p_token(&tokens[4], c.p_value, tokens);
+    }
+}
+
+/// Printed and in-process value of the same computation. The CLI prints the
+/// shortest representation that reads back exactly, but serde_json's default
+/// float parser (no `float_roundtrip` feature) is not correctly rounded and can
+/// be an ulp or two off, so the comparison allows a few ulps.
+const SAME_COMPUTATION: Tol = Tol::new(1e-15, 0.0);
+
+/// A JSON number equals `expected`, `null` standing for NaN.
+fn assert_json_num(v: &Value, expected: f64, what: &str) {
+    let actual = json_f64(v);
+    assert!(
+        SAME_COMPUTATION.allows(actual, expected),
+        "{what}: JSON {v} vs in-process {expected:e}"
+    );
+}
+
+/// Each JSON coefficient object holds the in-process numbers.
+fn assert_json_rows_match(v: &Value, coefficients: &[OlsCoefficient]) {
+    let rows = v["coefficients"].as_array().expect("coefficients array");
+    assert_eq!(rows.len(), coefficients.len(), "{v}");
+    for (row, c) in rows.iter().zip(coefficients) {
+        assert_eq!(row["name"], c.name.as_str());
+        assert_json_num(&row["coefficient"], c.estimate, &c.name);
+        assert_json_num(&row["std_error"], c.std_error, &c.name);
+        assert_json_num(&row["t_value"], c.t_value, &c.name);
+        assert_json_num(&row["p_value"], c.p_value, &c.name);
+    }
+}
+
+/// The JSON `warnings` key: the list when `expected` is non-empty, else absent.
+fn assert_json_warnings(v: &Value, expected: &[String]) {
+    if expected.is_empty() {
+        assert!(v.get("warnings").is_none(), "{v}");
+    } else {
+        assert_eq!(v["warnings"], serde_json::json!(expected), "{v}");
+    }
+}
+
+const OLS: [&str; 8] = [
+    "reg", "ols", "grunfeld", "-y", "inv", "-x", "value", "capital",
+];
+
+#[test]
+fn test_validate_cli_ols() {
+    let case = Case::load("ols_grunfeld");
+    let s = grunfeld_session(&case);
+    let out = run(&s, &[&OLS[..], &["--robust", "hc1"]].concat());
+    let t = table(&out);
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::printed(6))
+        .named("se_hc1", &t.names, &t.se, Tol::printed(6))
+        .named("t_hc1", &t.names, &t.stat, Tol::printed(3))
+        .named("p_hc1", &t.names, &t.p, Tol::printed(4))
+        .scalar("r2", labelled(&out, "R-squared:").unwrap(), Tol::printed(6))
+        .scalar(
+            "adj_r2",
+            labelled(&out, "Adj. R-squared:").unwrap(),
+            Tol::printed(6),
+        )
+        .scalar(
+            "n_obs",
+            labelled(&out, "Observations:").unwrap(),
+            Tol::exact(),
+        )
+        .finish();
+    assert!(
+        out.contains("\nStandard errors: HC1 (heteroskedasticity-robust)\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("t-value") && !out.contains("Warnings:"),
+        "{out}"
+    );
+    assert_golden(&golden("cli_ols"), &out);
+}
+
+#[test]
+fn test_validate_cli_ols_json() {
+    let case = Case::load("ols_grunfeld");
+    let s = grunfeld_session(&case);
+    let out = run(
+        &s,
+        &[&["-F", "json"][..], &OLS, &["--robust", "hc1"]].concat(),
+    );
+    let v = json(&out);
+    let t = json_table(&v, "t_value");
+    let n = 200;
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::coef(n))
+        .named("se_hc1", &t.names, &t.se, Tol::se(n))
+        .named("t_hc1", &t.names, &t.stat, Tol::stat(n))
+        .named("p_hc1", &t.names, &t.p, Tol::p_value(n))
+        .scalar("r2", json_f64(&v["r_squared"]), Tol::stat(n))
+        .scalar("adj_r2", json_f64(&v["adj_r_squared"]), Tol::stat(n))
+        .scalar("n_obs", json_f64(&v["n_observations"]), Tol::exact())
+        .finish();
+    assert_eq!(v["se_type"], "HC1");
+    assert_eq!(v["r_squared_type"], "ordinary");
+    assert_eq!(v["statistic"], "t");
+    assert_eq!(v["method"], "OLS Regression");
+    assert!(v.get("warnings").is_none(), "{out}");
+    assert_json_golden(&golden("cli_ols_json"), &out);
+}
+
+#[test]
+fn test_validate_cli_ols_standard() {
+    let case = Case::load("ols_grunfeld");
+    let s = grunfeld_session(&case);
+    let out = run(&s, &[&OLS[..], &["--robust", "standard"]].concat());
+    let t = table(&out);
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::printed(6))
+        .named("se_classical", &t.names, &t.se, Tol::printed(6))
+        .named("t_classical", &t.names, &t.stat, Tol::printed(3))
+        .named("p_classical", &t.names, &t.p, Tol::printed(4))
+        .finish();
+    assert!(out.contains("\nStandard errors: classical\n"), "{out}");
+
+    let out = run(
+        &s,
+        &[&["-F", "json"][..], &OLS, &["--robust", "standard"]].concat(),
+    );
+    let v = json(&out);
+    let t = json_table(&v, "t_value");
+    let n = 200;
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::coef(n))
+        .named("se_classical", &t.names, &t.se, Tol::se(n))
+        .named("t_classical", &t.names, &t.stat, Tol::stat(n))
+        .named("p_classical", &t.names, &t.p, Tol::p_value(n))
+        .finish();
+    assert_eq!(v["se_type"], "classical");
+}
+
+/// X-20: the default is HC1, and the output says so.
+#[test]
+fn test_cli_ols_default_is_hc1() {
+    let s = session(&p2a_validation::repo_path(GRUNFELD));
+    let default = run(&s, &OLS);
+    let hc1 = run(&s, &[&OLS[..], &["--robust", "hc1"]].concat());
+    assert_eq!(default, hc1);
+    assert!(
+        default.contains("\nStandard errors: HC1 (heteroskedasticity-robust)\n"),
+        "{default}"
+    );
+}
+
+#[test]
+fn test_validate_cli_clustered() {
+    let case = Case::load("ols_grunfeld");
+    let s = grunfeld_session(&case);
+    let args = [
+        "reg",
+        "clustered",
+        "grunfeld",
+        "-y",
+        "inv",
+        "-x",
+        "value",
+        "capital",
+        "--cluster",
+        "firm",
+    ];
+    let out = run(&s, &args);
+    let t = table(&out);
+    let n = 200;
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::printed(6))
+        .named("se_cluster_firm_hc1", &t.names, &t.se, Tol::printed(6))
+        .named("p_cluster_firm_hc1", &t.names, &t.p, Tol::printed(4))
+        .scalar(
+            "adj_r2",
+            labelled(&out, "Adj. R-squared:").unwrap(),
+            Tol::printed(6),
+        )
+        .finish();
+    // R has no t key for the clustered fit: t = coef / se, derived from the case.
+    let coef = case.by_names("coef", &t.names);
+    let se = case.by_names("se_cluster_firm_hc1", &t.names);
+    for (i, name) in t.names.iter().enumerate() {
+        let expected = coef[i] / se[i];
+        assert!(
+            Tol::printed(3).allows(t.stat[i], expected),
+            "t[{name}] printed {} vs R {expected}",
+            t.stat[i]
+        );
+    }
+    let g = csv_levels(&case.dataset_path(), "firm");
+    assert!(
+        out.contains(&format!(
+            "\nStandard errors: clustered by firm (CR1, G = {g})\n"
+        )),
+        "{out}"
+    );
+    let r = run_ols_clustered(
+        &dataset(&case.dataset_path()),
+        "inv",
+        &["value", "capital"],
+        "firm",
+        None,
+    )
+    .unwrap();
+    assert!(
+        !r.ols.warnings.is_empty(),
+        "G = 10 clusters should be warned about"
+    );
+    assert_eq!(warnings_block(&out), r.ols.warnings, "{out}");
+
+    let out = run(&s, &[&["-F", "json"][..], &args].concat());
+    let v = json(&out);
+    let t = json_table(&v, "t_value");
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::coef(n))
+        .named("se_cluster_firm_hc1", &t.names, &t.se, Tol::se(n))
+        .named("p_cluster_firm_hc1", &t.names, &t.p, Tol::p_value(n))
+        .scalar("adj_r2", json_f64(&v["adj_r_squared"]), Tol::stat(n))
+        .finish();
+    let coef = case.by_names("coef", &t.names);
+    let se = case.by_names("se_cluster_firm_hc1", &t.names);
+    for (i, name) in t.names.iter().enumerate() {
+        let expected = coef[i] / se[i];
+        assert!(
+            Tol::stat(n).allows(t.stat[i], expected),
+            "t[{name}] {} vs R {expected}",
+            t.stat[i]
+        );
+    }
+    assert_eq!(v["se_type"], "cluster:firm");
+    assert_eq!(v["n_clusters"], g);
+    assert!(v.get("n_clusters_2").is_none(), "{out}");
+    assert_eq!(v["warnings"], serde_json::json!(r.ols.warnings));
+}
+
+/// CLI-6: an aliased regressor (a column given twice) must not abort the CLI;
+/// the table shows the core's numbers, NaN included, and its warnings.
+#[test]
+fn test_cli_ols_aliased_regressor_no_panic() {
+    let path = p2a_validation::repo_path(GRUNFELD);
+    let s = session(&path);
+    let args = [
+        "reg", "ols", "grunfeld", "-y", "inv", "-x", "value", "capital", "value",
+    ];
+    let r = run_ols(
+        &dataset(&path),
+        "inv",
+        &["value", "capital", "value"],
+        true,
+        CovarianceType::HC1,
+    )
+    .unwrap();
+    let names: Vec<&str> = r.coefficients.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["(Intercept)", "value", "capital", "value"]);
+
+    let out = p2a(&s, &args);
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{}\n{stdout}\n{stderr}", out.status);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_rows_match(&stdout, &r.coefficients);
+    for w in &r.warnings {
+        assert!(
+            stdout.contains(&format!("\n  - {w}\n")),
+            "missing `{w}` in\n{stdout}"
+        );
+    }
+
+    let out = p2a(&s, &[&["-F", "json"][..], &args].concat());
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{}\n{stdout}\n{stderr}", out.status);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    let v = json(&stdout);
+    assert_json_rows_match(&v, &r.coefficients);
+    assert_json_warnings(&v, &r.warnings);
+}
+
+/// CLI-6 for `reg clustered`. The core's cluster-robust standard errors of an
+/// aliased design are not reproducible from run to run (the cluster meat is a
+/// parallel sum over a `HashMap` of clusters, and the singular bread turns its
+/// last-bit noise into NaN in one run and a finite value in the next), so the
+/// SEs are checked for what the CLI does with them, not against an in-process
+/// run: a NaN SE gives a NaN t and p, a finite one t = c / s.
+#[test]
+fn test_cli_clustered_aliased_regressor_no_panic() {
+    let path = p2a_validation::repo_path(GRUNFELD);
+    let s = session(&path);
+    let args = [
+        "reg",
+        "clustered",
+        "grunfeld",
+        "-y",
+        "inv",
+        "-x",
+        "value",
+        "capital",
+        "value",
+        "--cluster",
+        "firm",
+    ];
+    let r = run_ols_clustered(
+        &dataset(&path),
+        "inv",
+        &["value", "capital", "value"],
+        "firm",
+        None,
+    )
+    .unwrap();
+
+    let out = p2a(&s, &args);
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{}\n{stdout}\n{stderr}", out.status);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    let rows = row_tokens(&stdout);
+    assert_eq!(rows.len(), r.ols.coefficients.len(), "{stdout}");
+    for (tokens, c) in rows.iter().zip(&r.ols.coefficients) {
+        assert_eq!(tokens.len(), 5, "{tokens:?}");
+        assert_eq!(tokens[0], c.name, "{tokens:?}");
+        assert_eq!(tokens[1], format!("{:.6}", c.estimate), "{tokens:?}");
+        if tokens[2] == "NaN" {
+            assert_eq!(tokens[3..], ["NaN", "NaN"], "{tokens:?}");
+        }
+    }
+    assert_eq!(warnings_block(&stdout), r.ols.warnings, "{stdout}");
+
+    let out = p2a(&s, &[&["-F", "json"][..], &args].concat());
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{}\n{stdout}\n{stderr}", out.status);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    let v = json(&stdout);
+    let rows = v["coefficients"].as_array().expect("coefficients array");
+    assert_eq!(rows.len(), r.ols.coefficients.len(), "{v}");
+    for (row, c) in rows.iter().zip(&r.ols.coefficients) {
+        assert_eq!(row["name"], c.name.as_str());
+        assert_json_num(&row["coefficient"], c.estimate, &c.name);
+        let (b, se) = (json_f64(&row["coefficient"]), json_f64(&row["std_error"]));
+        if se.is_nan() {
+            assert!(
+                row["t_value"].is_null() && row["p_value"].is_null(),
+                "{row}"
+            );
+        } else {
+            let expected = b / se;
+            if expected.is_finite() {
+                let t = json_f64(&row["t_value"]);
+                assert!(
+                    Tol::new(1e-12, 0.0).allows(t, expected),
+                    "t {t} vs c/s {expected}"
+                );
+            } else {
+                assert!(row["t_value"].is_null(), "{row}");
+            }
+        }
+    }
+    assert_json_warnings(&v, &r.ols.warnings);
+}
+
+/// The rows of the `reg hac` table: name, coef, HAC SE, t, p (stars dropped).
+fn hac_rows(text: &str) -> Vec<Vec<String>> {
+    text.lines()
+        .skip_while(|l| !l.starts_with("Variable "))
+        .skip(2)
+        .take_while(|l| !l.trim().is_empty())
+        .map(|l| l.split_whitespace().take(5).map(str::to_string).collect())
+        .collect()
+}
+
+/// CLI-6 (`reg hac`): t is c / s, also when the HAC SE is zero, and the
+/// estimator's warnings are printed.
+#[test]
+fn test_cli_hac_t_ratio_and_warnings() {
+    let path = p2a_validation::repo_path(GRUNFELD);
+    let s = session(&path);
+    let ds = dataset(&path);
+
+    // (a) A duplicated regressor: the second `value` absorbs nothing and its
+    // HAC SE can be exactly 0, so c / s is infinite, never 0.
+    let h = run_vcov_hac(
+        &ds,
+        "inv",
+        &["value", "capital", "value"],
+        None,
+        Some("bartlett"),
+        false,
+    )
+    .unwrap();
+    let args = [
+        "reg", "hac", "grunfeld", "-y", "inv", "-x", "value", "capital", "value",
+    ];
+    let out = run(&s, &args);
+    let rows = hac_rows(&out);
+    assert_eq!(rows.len(), h.coefficients.len(), "{out}");
+    let df = (h.n_obs - h.n_params) as f64;
+    for (i, row) in rows.iter().enumerate() {
+        let t = h.coefficients[i] / h.std_errors[i];
+        assert_eq!(row[3], format!("{t:.4}"), "{row:?}\n{out}");
+        assert_eq!(
+            row[4],
+            format!("{:.4}", t_test_p_value(t, df)),
+            "{row:?}\n{out}"
+        );
+    }
+    assert_eq!(warnings_block(&out), h.warnings, "{out}");
+    let v = json(&run(&s, &[&["-F", "json"][..], &args].concat()));
+    let t_json = v["t_values"].as_array().expect("t_values");
+    for (i, tj) in t_json.iter().enumerate() {
+        let t = h.coefficients[i] / h.std_errors[i];
+        if t.is_finite() {
+            assert_json_num(tj, t, "t_values");
+        } else {
+            assert!(tj.is_null(), "non-finite t {t} must be null: {tj}");
+        }
+    }
+
+    // (b) A bandwidth above n/4 is warned about (T0-WP14).
+    let h = run_vcov_hac(
+        &ds,
+        "inv",
+        &["value", "capital"],
+        Some(60),
+        Some("bartlett"),
+        false,
+    )
+    .unwrap();
+    assert!(!h.warnings.is_empty(), "--lags 60 of 200 should warn");
+    let args = [
+        "reg", "hac", "grunfeld", "-y", "inv", "-x", "value", "capital", "--lags", "60",
+    ];
+    let out = run(&s, &args);
+    assert_eq!(warnings_block(&out), h.warnings, "{out}");
+    let v = json(&run(&s, &[&["-F", "json"][..], &args].concat()));
+    assert_eq!(v["warnings"], serde_json::json!(h.warnings), "{v}");
 }
