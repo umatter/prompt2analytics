@@ -1,0 +1,4 @@
+     Running tests/cases.rs (target/debug/deps/cases-0000000000000000)
+harness_selftest_matches_values_recomputed_from_csv: test
+
+1 test, 0 benchmarks

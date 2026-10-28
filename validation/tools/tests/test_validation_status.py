@@ -140,6 +140,24 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(code, 0, text)
         self.assertEqual(results["packages"]["p2a-cli"]["status"], "no_tests")
 
+    def test_should_panic_and_ignored_with_reason(self):
+        text = (
+            "     Running tests/cases.rs (target/debug/deps/cases-0)\n"
+            "test check_panics_when_nothing_compared - should panic ... ok\n"
+            "test check_named_rejects_extra_name - should panic ... FAILED\n"
+            "test slow_case ... ignored, needs the database feature\n"
+            "test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out\n"
+        )
+        tests = vs.parse_cargo_log(text, "p2a-validation")["tests"]
+        self.assertEqual(
+            tests,
+            {
+                "p2a-validation::cases::check_panics_when_nothing_compared": "ok",
+                "p2a-validation::cases::check_named_rejects_extra_name": "failed",
+                "p2a-validation::cases::slow_case": "ignored",
+            },
+        )
+
     def test_duplicate_ids_keep_worst_status(self):
         parsed = vs.parse_cargo_log((FIX / "cargo/mcp_lib_main.txt").read_text(), "p2a-mcp")
         self.assertEqual(

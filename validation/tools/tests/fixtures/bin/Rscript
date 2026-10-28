@@ -1,0 +1,27 @@
+#!/bin/bash
+# Fake Rscript for validation/tools/tests/test_run_validation.sh.
+#   FAKE_R_MODE       pass (default) or fail: the output of validation/r/run.R --check
+#   FAKE_LEGACY_MODE  write: a legacy script writes validation/expected/{legacy_a,new_c}.csv
+#                     relative to the working directory; sleep: it sleeps 5 s
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "${1:-}" in
+  *validation/r/run.R)
+    if [ "${FAKE_R_MODE:-pass}" = "fail" ]; then
+      cat "$here/../r/check_fail.txt"
+      exit 1
+    fi
+    printf 'ok     harness_selftest\n\nR reference check: 1 case(s) match the committed files.\n'
+    exit 0
+    ;;
+esac
+case "${FAKE_LEGACY_MODE:-}" in
+  write)
+    mkdir -p validation/expected
+    printf 'term,estimate\nx,9.5\n' > validation/expected/legacy_a.csv
+    printf 'term,value\nz,1.5\n' > validation/expected/new_c.csv
+    ;;
+  sleep)
+    sleep 5
+    ;;
+esac
+exit 0

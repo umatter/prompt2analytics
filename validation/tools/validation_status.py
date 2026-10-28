@@ -74,7 +74,7 @@ def read_json(path):
 TARGET_RE = re.compile(r"^\s*Running (unittests )?(\S+)( \(.*\))?\s*$")
 DOC_RE = re.compile(r"^\s*Doc-tests ")
 LIST_RE = re.compile(r"^(\S+): (test|bench)$")
-RUN_RE = re.compile(r"(?:^|\s)test (\S+) \.\.\. (ok|FAILED|ignored)\b")
+RUN_RE = re.compile(r"(?:^|\s)test (\S+)(?: - should panic)? \.\.\. (ok|FAILED|ignored)\b")
 TOTALS_RE = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;")
 COMPILE_ERROR_RE = re.compile(r"^error\[E\d+\]")
 RUN_STATUS = {"ok": "ok", "FAILED": "failed", "ignored": "ignored"}
