@@ -22,30 +22,56 @@ use crate::tools::requests::panel::{
 };
 
 use p2a_core::econometrics::{
-    GmmConfig, GmmResult, GmmStep, GmmTransform, HdfeConfig, HdfeResult, PanelGlsModel,
-    PanelGlsResult, PanelModel, PanelUnitRootConfig, PanelUnitRootTest, PvcmType,
-    run_fixed_effects, run_gmm, run_hausman_test, run_hdfe, run_panel_gls, run_panel_unit_root,
-    run_pmg, run_pvcm, run_random_effects,
+    GmmConfig, GmmResult, GmmStep, GmmTransform, HdfeConfig, HdfeResult, PanelConfig,
+    PanelGlsModel, PanelGlsResult, PanelModel, PanelUnitRootConfig, PanelUnitRootTest, PanelVcov,
+    PvcmType, run_fixed_effects_with, run_gmm, run_hausman_test, run_hdfe, run_panel_gls,
+    run_panel_unit_root, run_pmg, run_pvcm, run_random_effects_with,
 };
 use p2a_core::regression::CovarianceType;
+
+/// The `vcov` option of `panel_fixed_effects` and `panel_random_effects`
+/// (`PanelVcov::from_str`; absent means classical). A refusal names the caller's
+/// value cut to the echo bound.
+fn panel_config(vcov: Option<&str>) -> Result<PanelConfig, String> {
+    let Some(s) = vcov else {
+        return Ok(PanelConfig::default());
+    };
+    s.parse::<PanelVcov>()
+        .map(|vcov| PanelConfig { vcov })
+        .map_err(|e| {
+            let shown = crate::tools::limits::echo(s);
+            format!("Invalid vcov: {}", e.to_string().replace(s, shown))
+        })
+}
 
 #[tool_router(router = panel_router, vis = "pub")]
 impl AnalyticsServer {
     /// Run Fixed Effects panel regression.
     #[tool(
-        description = "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers. Controls ONE fixed effect dimension. For multiple simultaneous FEs (e.g., firm + year), use panel_hdfe instead."
+        description = "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers. Controls ONE fixed effect dimension. For multiple simultaneous FEs (e.g., firm + year), use panel_hdfe instead. Standard errors are classical by default (as plm); set vcov = 'cluster' for entity-clustered (Arellano) standard errors."
     )]
     pub async fn panel_fixed_effects(
         &self,
         Parameters(request): Parameters<PanelFERequest>,
     ) -> Result<CallToolResult, McpError> {
+        let config = match panel_config(request.vcov.as_deref()) {
+            Ok(c) => c,
+            Err(msg) => return crate::tools::common::error_text(msg),
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_fixed_effects(dataset, &request.y, &x_refs, &request.entity_var) {
+        let result = match run_fixed_effects_with(
+            dataset,
+            &request.y,
+            &x_refs,
+            &request.entity_var,
+            &config,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -62,19 +88,30 @@ impl AnalyticsServer {
 
     /// Run Random Effects panel regression.
     #[tool(
-        description = "Run Random Effects (GLS) panel regression. Assumes individual effects are uncorrelated with regressors. More efficient than FE if assumption holds."
+        description = "Run Random Effects (Swamy-Arora GLS) panel regression, as plm::plm(model = 'random'). Assumes individual effects are uncorrelated with regressors. More efficient than FE if assumption holds. Standard errors are classical by default (as plm), with z statistics and a Wald chi-squared test of the slopes; set vcov = 'cluster' for entity-clustered (Arellano) standard errors."
     )]
     pub async fn panel_random_effects(
         &self,
         Parameters(request): Parameters<PanelRERequest>,
     ) -> Result<CallToolResult, McpError> {
+        let config = match panel_config(request.vcov.as_deref()) {
+            Ok(c) => c,
+            Err(msg) => return crate::tools::common::error_text(msg),
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_random_effects(dataset, &request.y, &x_refs, &request.entity_var) {
+        let result = match run_random_effects_with(
+            dataset,
+            &request.y,
+            &x_refs,
+            &request.entity_var,
+            &config,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -91,7 +128,7 @@ impl AnalyticsServer {
 
     /// Run Hausman specification test.
     #[tool(
-        description = "Run Hausman specification test to choose between Fixed Effects and Random Effects. Tests H0: RE is consistent. If p-value < 0.05, use Fixed Effects."
+        description = "Run Hausman specification test to choose between Fixed Effects and Random Effects, using the classical FE and RE covariances as plm::phtest. Tests H0: RE is consistent. If p-value < 0.05, use Fixed Effects."
     )]
     pub async fn hausman_test(
         &self,
@@ -406,5 +443,168 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(
             result.to_string(),
         )]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::common::test_support::{server_with, text};
+    use p2a_validation::Case;
+    use serde_json::{Value, json};
+
+    /// The case and a server holding its dataset as `grunfeld`.
+    fn case_server(id: &str) -> (Case, tokio::runtime::Runtime, AnalyticsServer) {
+        let case = Case::load(id);
+        let df = p2a_core::data::DataLoader::load_csv(case.dataset_path()).unwrap();
+        let (rt, server) = server_with(vec![("grunfeld", df)]);
+        (case, rt, server)
+    }
+
+    /// `inv ~ value + capital` by `firm` on `grunfeld`, plus `extra` keys.
+    fn request<T: serde::de::DeserializeOwned>(extra: Value) -> T {
+        let mut v = json!({"dataset": "grunfeld", "y": "inv", "x": ["value", "capital"], "entity_var": "firm"});
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// A coefficient row of the `PanelResult` Display table (without the stars).
+    fn row(name: &str, coef: f64, se: f64, stat: f64, p: f64) -> String {
+        format!("{name:<20} {coef:>12.4} {se:>12.4} {stat:>10.2} {p:>10.3}")
+    }
+
+    #[test]
+    fn test_validate_mcp_panel_random_effects() {
+        let (case, rt, server) = case_server("panel_re_grunfeld");
+        let r = rt
+            .block_on(server.panel_random_effects(Parameters(request(json!({})))))
+            .unwrap();
+        assert_ne!(r.is_error, Some(true));
+        let t = text(&r);
+        for name in case.names("coef") {
+            let expected = row(
+                name,
+                case.named("coef", name),
+                case.named("se", name),
+                case.named("z", name),
+                case.named("p", name),
+            );
+            assert!(t.contains(&expected), "missing `{expected}` in\n{t}");
+        }
+        let wald = format!(
+            "Wald chi-squared: {:.4} on {} DF",
+            case.scalar("wald_chisq"),
+            case.scalar("wald_df")
+        );
+        assert!(t.contains(&wald), "missing `{wald}` in\n{t}");
+        assert!(t.contains("Standard errors: classical"), "{t}");
+        assert!(!t.contains("168.5471"), "{t}");
+
+        let r = rt
+            .block_on(server.panel_random_effects(Parameters(request(json!({"vcov": "cluster"})))))
+            .unwrap();
+        assert_ne!(r.is_error, Some(true));
+        let t = text(&r);
+        for name in case.names("coef") {
+            let se = format!("{:>12.4}", case.named("se_arellano_sss", name));
+            assert!(t.contains(&se), "missing `{se}` in\n{t}");
+        }
+        assert!(
+            t.contains("Standard errors: clustered by entity (Arellano, CR1/sss)"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn test_validate_mcp_panel_fixed_effects() {
+        let (case, rt, server) = case_server("panel_fe_grunfeld");
+        let r = rt
+            .block_on(server.panel_fixed_effects(Parameters(request(json!({})))))
+            .unwrap();
+        assert_ne!(r.is_error, Some(true));
+        let t = text(&r);
+        for name in case.names("coef") {
+            let expected = row(
+                name,
+                case.named("coef", name),
+                case.named("se", name),
+                case.named("t", name),
+                case.named("p", name),
+            );
+            assert!(t.contains(&expected), "missing `{expected}` in\n{t}");
+        }
+        let adj = format!("Adj. R-squared (within): {:.4}", case.scalar("adj_r2"));
+        assert!(t.contains(&adj), "missing `{adj}` in\n{t}");
+        assert!(t.contains("Standard errors: classical"), "{t}");
+
+        let r = rt
+            .block_on(
+                server.panel_fixed_effects(Parameters(request(json!({"vcov": "cluster-hc0"})))),
+            )
+            .unwrap();
+        assert_ne!(r.is_error, Some(true));
+        let t = text(&r);
+        for name in case.names("coef") {
+            let se = format!("{:>12.4}", case.named("se_arellano_hc0", name));
+            assert!(t.contains(&se), "missing `{se}` in\n{t}");
+        }
+        assert!(
+            t.contains("Standard errors: clustered by entity (Arellano, HC0)"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn test_validate_mcp_hausman_test() {
+        let (case, rt, server) = case_server("panel_hausman_grunfeld");
+        let r = rt
+            .block_on(server.hausman_test(Parameters(request(json!({})))))
+            .unwrap();
+        assert_ne!(r.is_error, Some(true));
+        let t = text(&r);
+        for line in [
+            format!("Chi2 Statistic: {:.4}", case.scalar("chisq")),
+            format!("Degrees of Freedom: {}", case.scalar("df")),
+            format!("P-Value: {:.4}", case.scalar("p")),
+            "Covariance: classical FE and RE covariance (plm::phtest default)".to_string(),
+        ] {
+            assert!(t.contains(&line), "missing `{line}` in\n{t}");
+        }
+        assert!(!t.contains("nearly identical"), "{t}");
+    }
+
+    /// An unknown vcov is a tool error naming the allowed values, raised before
+    /// the dataset is looked up; a long value is echoed cut to the echo bound.
+    #[test]
+    fn test_mcp_panel_vcov_rejects_unknown() {
+        let (rt, server) = server_with(vec![]);
+        let fe = rt
+            .block_on(server.panel_fixed_effects(Parameters(request(json!({"vcov": "robust"})))))
+            .unwrap();
+        let re = rt
+            .block_on(server.panel_random_effects(Parameters(request(json!({"vcov": "robust"})))))
+            .unwrap();
+        for r in [&fe, &re] {
+            assert_eq!(r.is_error, Some(true));
+            let t = text(r);
+            assert!(t.starts_with("Invalid vcov: "), "{t}");
+            assert!(t.contains("robust"), "{t}");
+            assert!(
+                t.contains("classical, cluster, cluster-hc0, cluster-hc1"),
+                "{t}"
+            );
+        }
+        let long = "x".repeat(300);
+        let r = rt
+            .block_on(server.panel_random_effects(Parameters(request(json!({"vcov": long})))))
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains(&"x".repeat(64)) && !t.contains(&"x".repeat(65)),
+            "{t}"
+        );
     }
 }

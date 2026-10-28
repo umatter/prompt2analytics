@@ -15,7 +15,8 @@
       "tests": [
         "p2a-core::econometrics::panel::tests::test_validate_panel_fe_grunfeld",
         "p2a-core::econometrics::panel::tests::test_validate_panel_fe_grunfeld_unbalanced",
-        "p2a-core::econometrics::panel::tests::test_validate_panel_fe_sim_corr"
+        "p2a-core::econometrics::panel::tests::test_validate_panel_fe_sim_corr",
+        "p2a-mcp::tools::handlers::panel::tests::test_validate_mcp_panel_fixed_effects"
       ],
       "quantities": [
         "coefficients",
@@ -56,7 +57,8 @@
         "p2a-core::econometrics::panel::tests::test_validate_panel_re_grunfeld",
         "p2a-core::econometrics::panel::tests::test_validate_panel_re_grunfeld_unbalanced",
         "p2a-core::econometrics::panel::tests::test_validate_panel_re_sim_corr",
-        "p2a-core::econometrics::panel::tests::test_validate_panel_re_sim_no_effect"
+        "p2a-core::econometrics::panel::tests::test_validate_panel_re_sim_no_effect",
+        "p2a-mcp::tools::handlers::panel::tests::test_validate_mcp_panel_random_effects"
       ],
       "quantities": [
         "coefficients",
@@ -98,7 +100,8 @@
       "tests": [
         "p2a-core::econometrics::panel::tests::test_validate_hausman_grunfeld",
         "p2a-core::econometrics::panel::tests::test_validate_hausman_grunfeld_unbalanced",
-        "p2a-core::econometrics::panel::tests::test_validate_hausman_sim_corr"
+        "p2a-core::econometrics::panel::tests::test_validate_hausman_sim_corr",
+        "p2a-mcp::tools::handlers::panel::tests::test_validate_mcp_hausman_test"
       ],
       "quantities": [
         "chi2",

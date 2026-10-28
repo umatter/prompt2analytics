@@ -35,6 +35,13 @@ pub struct PanelFERequest {
     )]
     #[serde(alias = "unit_col", alias = "entity_col", alias = "entity")]
     pub entity_var: String,
+
+    /// Standard-error type
+    #[schemars(
+        description = "Standard errors: 'classical' (default, as plm), 'cluster' (entity-clustered Arellano, Stata small-sample), 'cluster-hc0', 'cluster-hc1'."
+    )]
+    #[serde(default)]
+    pub vcov: Option<String>,
 }
 
 /// Request for Panel Random Effects regression.
@@ -58,6 +65,13 @@ pub struct PanelRERequest {
     )]
     #[serde(alias = "unit_col", alias = "entity_col", alias = "entity")]
     pub entity_var: String,
+
+    /// Standard-error type
+    #[schemars(
+        description = "Standard errors: 'classical' (default, as plm), 'cluster' (entity-clustered Arellano, Stata small-sample), 'cluster-hc0', 'cluster-hc1'."
+    )]
+    #[serde(default)]
+    pub vcov: Option<String>,
 }
 
 /// Request for Hausman specification test.
