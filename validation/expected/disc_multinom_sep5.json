@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "disc_multinom_sep5",
+  "area": "econometrics/discrete",
+  "method": "nnet::multinom, 5 well-separated categories x 6 rows (a linear predictor above ln(1e10) at the MLE)",
+  "reference": "nnet::multinom(factor(y) ~ x) re-solved by Newton's method on the analytic score and information (*_tight; nnet's vcov at reltol 1e-16 agrees to 1e-6)",
+  "call": "multinom(factor(y) ~ x, data = multinom_sep5, Hess = TRUE, reltol = 1e-16)",
+  "dataset": "validation/datasets/generated/multinom_sep5.csv",
+  "datasets": ["validation/datasets/generated/multinom_sep5.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "nnet": "7.3.19"
+  },
+  "values": {
+    "n": 30,
+    "counts": {
+      "names": ["c001", "c002", "c003", "c004", "c005"],
+      "values": [6, 6, 6, 6, 6]
+    },
+    "coef_tight": {
+      "names": ["c002:(Intercept)", "c002:x", "c003:(Intercept)", "c003:x", "c004:(Intercept)", "c004:x", "c005:(Intercept)", "c005:x"],
+      "values": [-1.3389418495257168, 1.3948684411343866, -9.5480797805901041, 4.9014356783694186, -22.240028046657478, 8.2894569333466102, -25.745747121894112, 9.0364255900047574]
+    },
+    "se_tight": {
+      "names": ["c002:(Intercept)", "c002:x", "c003:(Intercept)", "c003:x", "c004:(Intercept)", "c004:x", "c005:(Intercept)", "c005:x"],
+      "values": [1.0733922999037846, 0.81858815307773258, 5.3069281551645329, 2.3231238973816968, 8.9280629014556361, 3.0235852645171826, 9.5458509259873754, 3.1100677305740749]
+    },
+    "z_tight": {
+      "names": ["c002:(Intercept)", "c002:x", "c003:(Intercept)", "c003:x", "c004:(Intercept)", "c004:x", "c005:(Intercept)", "c005:x"],
+      "values": [-1.2473928214742507, 1.7039929491893475, -1.7991726101093375, 2.1098468677859317, -2.4910250176476079, 2.7415985355618213, -2.6970615109654146, 2.9055398058282029]
+    },
+    "p_tight": {
+      "names": ["c002:(Intercept)", "c002:x", "c003:(Intercept)", "c003:x", "c004:(Intercept)", "c004:x", "c005:(Intercept)", "c005:x"],
+      "values": [0.21225349740473215, 0.088382404494530553, 0.071991380669941832, 0.03487154802450991, 0.012737515054614823, 0.0061141019280205244, 0.0069954347175221225, 0.0036662021326541454]
+    },
+    "loglik": -22.634860813681762,
+    "null_loglik": -48.28313737302301,
+    "aic": 61.269721627363523,
+    "bic": 72.479300680660771,
+    "loglik_pkg": -22.634860813681787,
+    "max_abs_xb": 34.760846747506456,
+    "start_hessian_kappa": 215.5462533923417,
+    "start_hessian_max_eigen": -0.34483787572652558
+  }
+}
