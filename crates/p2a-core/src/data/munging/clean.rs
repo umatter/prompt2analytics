@@ -355,7 +355,7 @@ pub fn cast(dataset: &Dataset, column: &str, dtype: &str) -> MungeResult<Dataset
         return Err(MungeError::ColumnNotFound(column.to_string()));
     }
 
-    let target_dtype = parse_dtype(dtype)?;
+    let target_dtype = parse_cast_dtype(dtype)?;
     let col = df.column(column)?;
     let casted = col.cast(&target_dtype)?;
 
@@ -379,7 +379,15 @@ pub fn cast_columns(dataset: &Dataset, casts: &[(&str, &str)]) -> MungeResult<Da
     Ok(result)
 }
 
-fn parse_dtype(dtype: &str) -> MungeResult<DataType> {
+/// The data type [`cast`] and [`cast_columns`] cast to for the type name
+/// `dtype` (case-insensitive): `int`, `int64` or `integer` (Int64), `int32`,
+/// `float`, `float64` or `double` (Float64), `float32`, `string`, `str` or
+/// `text` (String), `bool` or `boolean` (Boolean).
+///
+/// # Errors
+///
+/// [`MungeError::InvalidExpression`] for any other name.
+pub fn parse_cast_dtype(dtype: &str) -> MungeResult<DataType> {
     match dtype.to_lowercase().as_str() {
         "int" | "int64" | "integer" => Ok(DataType::Int64),
         "int32" => Ok(DataType::Int32),

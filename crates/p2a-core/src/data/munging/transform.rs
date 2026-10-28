@@ -660,6 +660,41 @@ pub fn sample(
     Ok(Dataset::new(sampled))
 }
 
+/// The row indices [`sample`] takes for `n` rows of a dataset of `height`
+/// rows with `seed`, in the order it takes them:
+/// `take_rows(dataset, &sample_rows(dataset.nrows(), n, r, seed)?)` is
+/// `sample(dataset, Some(n), None, r, Some(seed))`. A caller that has to
+/// know which rows a sample takes before the sample is built draws them
+/// with this.
+///
+/// # Errors
+///
+/// [`MungeError::InvalidExpression`] when `height` is above polars' largest
+/// row index, and polars' error for `n` above `height` without replacement
+/// (as [`sample`]).
+pub fn sample_rows(
+    height: usize,
+    n: usize,
+    with_replacement: bool,
+    seed: u64,
+) -> MungeResult<IdxCa> {
+    let rows = IdxSize::try_from(height).map_err(|_| {
+        MungeError::InvalidExpression(format!("cannot sample a dataset of {height} rows"))
+    })?;
+    let all = IdxCa::from_vec(PlSmallStr::EMPTY, (0..rows).collect());
+    Ok(all.sample_n(n, with_replacement, false, Some(seed))?)
+}
+
+/// The rows `rows` of `dataset`, in that order (a row may be taken more than
+/// once).
+///
+/// # Errors
+///
+/// Polars' error for a row index that `dataset` does not have.
+pub fn take_rows(dataset: &Dataset, rows: &IdxCa) -> MungeResult<Dataset> {
+    Ok(Dataset::new(dataset.df().take(rows)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,6 +710,45 @@ mod tests {
         }
         .unwrap();
         Dataset::new(df)
+    }
+
+    #[test]
+    fn sample_rows_are_the_rows_sample_takes() {
+        let part = |rows: std::ops::Range<i64>| {
+            df! {
+                "i" => rows.clone().collect::<Vec<_>>(),
+                "s" => rows
+                    .map(|i| (i % 4 != 0).then(|| format!("value {i}")))
+                    .collect::<Vec<_>>(),
+            }
+            .unwrap()
+        };
+        let mut df = part(0..40);
+        df.vstack_mut(&part(40..57)).unwrap();
+        let ds = Dataset::new(df);
+        for (n, replace) in [
+            (0, true),
+            (10, true),
+            (200, true),
+            (0, false),
+            (20, false),
+            (57, false),
+        ] {
+            for seed in [0, 1, 42, u64::MAX] {
+                let want = sample(&ds, Some(n), None, replace, Some(seed)).unwrap();
+                let rows = sample_rows(ds.nrows(), n, replace, seed).unwrap();
+                assert_eq!(rows.len(), n);
+                let got = take_rows(&ds, &rows).unwrap();
+                assert!(
+                    got.df().equals_missing(want.df()),
+                    "n {n}, replace {replace}, seed {seed}"
+                );
+            }
+        }
+        // Without replacement, no more rows than the dataset has.
+        assert!(sample_rows(57, 58, false, 1).is_err());
+        assert!(sample(&ds, Some(58), None, false, Some(1)).is_err());
+        assert_eq!(sample_rows(0, 5, true, 1).unwrap().len(), 0);
     }
 
     #[test]
