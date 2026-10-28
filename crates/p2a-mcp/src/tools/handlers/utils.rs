@@ -27,6 +27,8 @@ use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// A writer that refuses to pass more than `cap` bytes to `inner`: the shared
 /// byte cap for exports. A write that would take the total past the cap is
@@ -936,6 +938,40 @@ fn process_memory_redacted() -> bool {
     REDACT_PROCESS_MEMORY.try_with(Cell::get).unwrap_or(true)
 }
 
+/// When the server started (see [`mark_server_start`]).
+static SERVER_START: OnceLock<Instant> = OnceLock::new();
+
+/// Record now as the server's start, unless a start is recorded already.
+/// `AnalyticsServer::new` and `AnalyticsServer::with_session` call it, so
+/// the start is when the transport built its server, before it served a
+/// call. `server_stats` counts the uptime from it rather than from the
+/// server instance answering: every HTTP call runs on a session server
+/// built for that call.
+pub(crate) fn mark_server_start() {
+    SERVER_START.get_or_init(Instant::now);
+}
+
+/// How long the server has run (see [`mark_server_start`]).
+fn server_uptime() -> Duration {
+    SERVER_START.get_or_init(Instant::now).elapsed()
+}
+
+/// The process's peak resident set size: `VmHWM` of `/proc/self/status`
+/// (in KiB there).
+#[cfg(target_os = "linux")]
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    kib.checked_mul(1024)
+}
+
+/// The process's peak resident set size: not read on this platform.
+#[cfg(not(target_os = "linux"))]
+fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
 #[tool_router(router = utils_router, vis = "pub")]
 impl AnalyticsServer {
     // ========================================================================
@@ -1007,16 +1043,24 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<ServerStatsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::{format_bytes, get_process_memory};
+        use crate::session::{datasets_bytes_of, fmt_bytes};
+        use p2a_core::get_process_memory;
 
         let include_datasets = request.include_datasets.unwrap_or(true);
         let include_history = request.include_history.unwrap_or(false);
 
         let datasets = self.datasets.read().await;
-        let profiler = self.memory_profiler.read().await;
 
-        // Get detailed stats with dataset dimensions
-        let stats = profiler.stats_with_datasets(datasets.iter().map(|(k, v)| (k.as_str(), v)));
+        // Each dataset as the dataset quotas charge it (its name, values and
+        // structure), so that the total is what a quota check counts.
+        let mut sizes: Vec<(&str, u64, &Dataset)> = datasets
+            .iter()
+            .map(|(name, d)| (name.as_str(), datasets_bytes_of([(name.as_str(), d)]), d))
+            .collect();
+        sizes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let total = sizes
+            .iter()
+            .fold(0u64, |total, (_, bytes, _)| total.saturating_add(*bytes));
 
         let mut output = String::new();
         output.push_str("Server Memory Statistics\n");
@@ -1025,40 +1069,41 @@ impl AnalyticsServer {
 
         // Summary section
         output.push_str("## Summary\n\n");
-        output.push_str(&format!(
-            "Total Dataset Memory: {}\n",
-            stats.dataset_memory_formatted
-        ));
-        output.push_str(&format!("Datasets Loaded: {}\n", stats.dataset_count));
-        output.push_str(&format!(
-            "Peak Memory: {}\n",
-            format_bytes(profiler.peak_memory())
-        ));
-        output.push_str(&format!(
-            "Uptime: {:.1}s\n",
-            profiler.elapsed().as_secs_f64()
-        ));
+        output.push_str(&format!("Total Dataset Memory: {}\n", fmt_bytes(total)));
+        output.push_str(&format!("Datasets Loaded: {}\n", sizes.len()));
+        output.push_str(&format!("Uptime: {:.1}s\n", server_uptime().as_secs_f64()));
 
-        // Process memory (if available). Withheld in open public mode, as
-        // `/health` withholds it: see `redact_process_memory`.
+        // Process memory, where the platform reports it. Withheld in open
+        // public mode, as `/health` withholds it: see
+        // `redact_process_memory`. The peak is the process's too.
         if process_memory_redacted() {
             output.push_str("\nProcess memory: not reported in open public mode\n");
-        } else if let Some(ref proc_mem) = stats.process_memory {
-            output.push_str(&format!("\nProcess RSS: {}\n", proc_mem.rss_formatted));
-            output.push_str(&format!(
-                "Process Virtual: {}\n",
-                proc_mem.virtual_formatted
-            ));
-        } else if let Some(proc_mem) = get_process_memory() {
-            output.push_str(&format!("\nProcess RSS: {}\n", proc_mem.rss_formatted));
-            output.push_str(&format!(
-                "Process Virtual: {}\n",
-                proc_mem.virtual_formatted
-            ));
+        } else {
+            let current = get_process_memory();
+            // Read after the current figures, so it is never below them.
+            let peak = peak_rss_bytes();
+            if current.is_some() || peak.is_some() {
+                output.push('\n');
+            }
+            if let Some(current) = &current {
+                output.push_str(&format!(
+                    "Process RSS: {}\n",
+                    fmt_bytes(current.rss_bytes as u64)
+                ));
+            }
+            if let Some(peak) = peak {
+                output.push_str(&format!("Peak Process RSS: {}\n", fmt_bytes(peak)));
+            }
+            if let Some(current) = &current {
+                output.push_str(&format!(
+                    "Process Virtual: {}\n",
+                    fmt_bytes(current.virtual_bytes as u64)
+                ));
+            }
         }
 
         // Per-dataset breakdown
-        if include_datasets && !stats.datasets.is_empty() {
+        if include_datasets && !sizes.is_empty() {
             output.push_str("\n## Datasets (by memory usage)\n\n");
             output.push_str(&format!(
                 "{:<30} {:>12} {:>10} {:>10}\n",
@@ -1067,22 +1112,27 @@ impl AnalyticsServer {
             output.push_str(&"-".repeat(64));
             output.push('\n');
 
-            for ds in &stats.datasets {
+            for (name, bytes, dataset) in &sizes {
                 output.push_str(&format!(
                     "{:<30} {:>12} {:>10} {:>10}\n",
-                    table_name(&ds.name),
-                    ds.memory_formatted,
-                    ds.rows,
-                    ds.columns
+                    table_name(name),
+                    fmt_bytes(*bytes),
+                    dataset.nrows(),
+                    dataset.ncols()
                 ));
             }
         }
 
-        // Memory history
+        // Memory history: what this server instance's profiler recorded,
+        // which is the datasets `load_dataset` loaded through it, at an
+        // estimate of their size.
         if include_history {
+            let profiler = self.memory_profiler.read().await;
             let history = profiler.history();
             if !history.is_empty() {
-                output.push_str("\n## Recent Memory History\n\n");
+                output.push_str(
+                    "\n## Recent Memory History (datasets loaded with load_dataset, estimated)\n\n",
+                );
                 output.push_str(&format!(
                     "{:>12} {:>15} {:>10}\n",
                     "Time (ms)", "Memory", "Datasets"
@@ -1100,7 +1150,7 @@ impl AnalyticsServer {
                     output.push_str(&format!(
                         "{:>12} {:>15} {:>10}\n",
                         snapshot.time_offset_ms,
-                        format_bytes(snapshot.total_bytes),
+                        fmt_bytes(snapshot.total_bytes as u64),
                         snapshot.dataset_count
                     ));
                 }
@@ -1108,7 +1158,6 @@ impl AnalyticsServer {
         }
 
         drop(datasets);
-        drop(profiler);
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
@@ -2285,6 +2334,113 @@ mod tests {
         text(&result)
     }
 
+    /// The rest of the line of `text` that starts with `label`.
+    fn line_after<'a>(text: &'a str, label: &str) -> Option<&'a str> {
+        text.lines().find_map(|line| line.strip_prefix(label))
+    }
+
+    /// The seconds of `server_stats`'s "Uptime: 12.3s" line.
+    fn uptime_secs(shown: &str) -> f64 {
+        line_after(shown, "Uptime: ")
+            .and_then(|s| s.strip_suffix('s'))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("no uptime: {shown}"))
+    }
+
+    /// The bytes of a figure as `fmt_bytes` prints it ("1.50 KiB").
+    fn figure_bytes(figure: &str) -> f64 {
+        let (value, unit) = figure.split_once(' ').expect("a value and a unit");
+        let scale = match unit {
+            "bytes" => 1.0,
+            "KiB" => 1024.0,
+            "MiB" => 1024.0 * 1024.0,
+            "GiB" => 1024.0 * 1024.0 * 1024.0,
+            other => panic!("unknown unit {other:?} in {figure:?}"),
+        };
+        value.parse::<f64>().expect("a number") * scale
+    }
+
+    /// `server_stats` counts the uptime from the server's start, not from
+    /// the server instance answering. Every HTTP call runs on a session
+    /// server built for it, whose own profiler started then, so a server
+    /// running for hours said "Uptime: 0.0s".
+    #[test]
+    fn server_stats_counts_uptime_from_the_server_start() {
+        // The server a transport builds when it starts.
+        let _started = AnalyticsServer::new();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // `server_stats_text` asks a server built now, as a call's is.
+        let shown = server_stats_text(None);
+        assert!(uptime_secs(&shown) >= 0.5, "{shown}");
+    }
+
+    /// Outside open public mode `server_stats` reports the process's peak
+    /// RSS. Its "Peak Memory" was the peak of a per-server estimate of
+    /// datasets loaded with `load_dataset`, which on the HTTP path (a
+    /// server per call) was always "0 bytes".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn server_stats_reports_the_peak_process_rss() {
+        let shown = server_stats_text(None);
+        assert!(!shown.contains("Peak Memory"), "{shown}");
+        let peak = figure_bytes(line_after(&shown, "Peak Process RSS: ").expect(&shown));
+        let rss = figure_bytes(line_after(&shown, "Process RSS: ").expect(&shown));
+        // Read after the current RSS, which it is never below (2-decimal
+        // rounding aside).
+        assert!(rss > 0.0 && peak >= rss * 0.99, "{shown}");
+    }
+
+    /// `server_stats` sizes each dataset as the dataset quotas charge it,
+    /// so its total is what a quota refusal counts. It printed an estimate
+    /// 10% above the values instead, so a session within its 200 MiB quota
+    /// could be shown holding more than 200.
+    #[tokio::test]
+    async fn server_stats_sizes_datasets_as_the_quotas_charge_them() {
+        let server = AnalyticsServer::new();
+        {
+            let n = 20_000usize;
+            let wide = df! {
+                "x" => (0..n).map(|i| i as f64 * 0.37 + (i % 7) as f64).collect::<Vec<_>>(),
+                "y" => (0..n).map(|i| (i % 13) as f64 - 0.5 * i as f64).collect::<Vec<_>>(),
+                "k" => (0..n).map(|i| (i % 101) as i64).collect::<Vec<_>>(),
+            }
+            .unwrap();
+            let labels = df! {
+                "s" => (0..n).map(|i| format!("label-{}", i % 97)).collect::<Vec<_>>(),
+            }
+            .unwrap();
+            let mut datasets = server.datasets.write().await;
+            datasets.insert("wide".into(), Dataset::new(wide));
+            datasets.insert("labels".into(), Dataset::new(labels));
+        }
+        let result = server
+            .server_stats(Parameters(ServerStatsRequest {
+                include_datasets: Some(true),
+                include_history: Some(false),
+            }))
+            .await
+            .expect("server_stats answers in-band");
+        let shown = text(&result);
+        let datasets = server.datasets.read().await;
+        let total = crate::session::datasets_bytes(&datasets);
+        assert_eq!(
+            line_after(&shown, "Total Dataset Memory: "),
+            Some(crate::session::fmt_bytes(total).as_str()),
+            "{shown}"
+        );
+        for (name, dataset) in datasets.iter() {
+            let charge = crate::session::datasets_bytes_of([(name.as_str(), dataset)]);
+            let row = shown
+                .lines()
+                .find(|line| line.split_whitespace().next() == Some(name.as_str()))
+                .unwrap_or_else(|| panic!("no row for {name}: {shown}"));
+            assert!(
+                row.contains(&crate::session::fmt_bytes(charge)),
+                "{name} is charged {charge} bytes: {shown}"
+            );
+        }
+    }
+
     #[test]
     fn server_stats_withholds_process_memory_when_redacted() {
         let withheld = server_stats_text(Some(true));
@@ -2292,6 +2448,8 @@ mod tests {
             !withheld.contains("Process RSS") && !withheld.contains("Process Virtual"),
             "{withheld}"
         );
+        // The peak RSS is process memory too.
+        assert!(!withheld.contains("Peak"), "{withheld}");
         assert!(
             withheld.contains("Process memory: not reported"),
             "{withheld}"
@@ -2465,5 +2623,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The hosted path the smoke run took: a governed call in open public
+    /// mode under the hosted quotas, on a session server built for the
+    /// call. `server_stats` counts the uptime from the server's start (it
+    /// said "Uptime: 0.0s"), totals the session's datasets as the quota
+    /// check charges them (it showed more than the quota counted), and
+    /// withholds the peak RSS with the other process figures.
+    #[cfg(feature = "http")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn governed_server_stats_agrees_with_the_server_and_its_quotas() {
+        use crate::config::{ServerConfig, SessionConfig, TransportType};
+        use crate::exec::{CallOrigin, ExecConfig, ToolGovernor};
+        use crate::session::{SessionManager, fmt_bytes};
+        use crate::transport::http::ContentItem;
+        use std::sync::Arc;
+
+        let mut open = ServerConfig {
+            transport: TransportType::Http,
+            ..Default::default()
+        };
+        open.http.allow_unauthenticated = true;
+        let exec = ExecConfig {
+            // This test process's RSS is not a server's: no admission limit.
+            rss_soft_limit_bytes: None,
+            audit: None,
+            ..ExecConfig::from_config(&open)
+        };
+        assert!(exec.redact_health && exec.session_data_bytes.is_some());
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let id = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&id).await.unwrap();
+        let n = 50_000usize;
+        let frame = df! {
+            "a" => (0..n).map(|i| i as f64 * 0.21 + (i % 11) as f64).collect::<Vec<_>>(),
+            "b" => (0..n).map(|i| (i % 17) as f64 - i as f64 * 0.03).collect::<Vec<_>>(),
+        }
+        .unwrap();
+        session
+            .datasets
+            .write()
+            .await
+            .insert("d".into(), Dataset::new(frame));
+        let charged = session.refresh_data_bytes().await;
+        let governor = ToolGovernor::new(exec, sessions);
+
+        // The server the transport built at startup, then a while later a
+        // call.
+        let server = Arc::new(AnalyticsServer::new());
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let result = governor
+            .call(
+                server,
+                Arc::clone(&session),
+                "server_stats",
+                serde_json::json!({"include_datasets": true}),
+                CallOrigin::Http,
+            )
+            .await
+            .expect("server_stats runs");
+        assert!(result.success);
+        let text = match result.content.first() {
+            Some(ContentItem::Text { text }) => text.clone(),
+            other => panic!("no text content: {other:?}"),
+        };
+        assert!(uptime_secs(&text) >= 0.5, "{text}");
+        assert_eq!(
+            line_after(&text, "Total Dataset Memory: "),
+            Some(fmt_bytes(charged).as_str()),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Peak") && text.contains("Process memory: not reported"),
+            "{text}"
+        );
     }
 }

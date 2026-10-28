@@ -1723,10 +1723,8 @@ mod tests {
         assert_eq!(put(&a, &sm, "y", 0.2, q).await, Ok(()));
         // The refusals name the size the datasets would reach and the limit.
         let refused = put(&a, &sm, "z", 0.3, q).await.unwrap_err();
-        let (three, two) = (
-            p2a_core::memory::format_bytes(3 * one as usize),
-            p2a_core::memory::format_bytes(2 * one as usize),
-        );
+        let (three, two) = (fmt_bytes(3 * one), fmt_bytes(2 * one));
+        assert!(three.ends_with(" KiB"), "{three}");
         assert!(
             refused.contains(&format!("would use {three} (limit {two} per session)")),
             "{refused}"
@@ -1735,7 +1733,7 @@ mod tests {
         assert_eq!(a.data_bytes(), 2 * one);
         assert_eq!(put(&b, &sm, "x", 0.5, q).await, Ok(()));
         let refused = put(&b, &sm, "y", 0.6, q).await.unwrap_err();
-        let four = p2a_core::memory::format_bytes(4 * one as usize);
+        let four = fmt_bytes(4 * one);
         assert!(
             refused.contains(&format!("would reach {four} (limit {three})")),
             "{refused}"

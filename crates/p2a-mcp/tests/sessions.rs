@@ -346,11 +346,7 @@ async fn reload_respects_the_session_dataset_quota() {
     let error = body["data"]["failed"][0]["error"]
         .as_str()
         .unwrap_or_default();
-    let limit = p2a_core::memory::format_bytes(1 << 20);
-    assert!(
-        error.contains(&format!("(limit {limit} per session)")),
-        "{body}"
-    );
+    assert!(error.contains("(limit 1.00 MiB per session)"), "{body}");
     let session = state.session_manager.get_session(&sid).await.unwrap();
     assert!(!session.datasets.read().await.contains_key("second"));
     let bytes = session.refresh_data_bytes().await;
@@ -476,7 +472,7 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
 
     // Replaced at the stored path by 4,000,000 rows: 32 MB once decoded.
     // Pre-fix the reload decoded it in full and only then refused it at the
-    // insert ("this session's datasets would use 30.53 MB ...").
+    // insert ("this session's datasets would use 30.53 MiB ...").
     levels_parquet(&stored, 4_000_000, None);
     let body = reload(&r, &sid).await;
     assert_eq!(body["data"]["succeeded"], json!(["small"]), "{body}");
@@ -484,11 +480,10 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
     let error = body["data"]["failed"][0]["error"]
         .as_str()
         .unwrap_or_default();
-    let limit = p2a_core::memory::format_bytes(8 << 20);
     assert!(
         error.starts_with("Loading this file takes at least")
             && error.contains("Nothing was loaded")
-            && error.contains(&format!("(limit {limit} per session)")),
+            && error.contains("(limit 8.00 MiB per session)"),
         "{body}"
     );
     assert!(!error.contains(&*root.to_string_lossy()), "{body}");

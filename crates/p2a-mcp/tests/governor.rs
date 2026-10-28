@@ -586,6 +586,9 @@ async fn session_quota_rolls_back_the_new_dataset() {
         msg.contains("per session") && msg.contains("undone"),
         "{msg}"
     );
+    // Its figures are powers of 1024 and say so: the 1,000,000-byte limit
+    // is 976.56 KiB (it read "976.56 KB", a unit of 1,000 bytes).
+    assert!(msg.contains(" MiB (limit 976.56 KiB per session)"), "{msg}");
     let (_, _, b) = call(&app, &sid, "list_datasets", json!({})).await;
     let listing = b.to_string();
     assert!(
