@@ -23,6 +23,8 @@
 //! let standardized = standardize(&data, &["x1", "x2"])?;
 //! ```
 
+use std::fmt::Write as _;
+
 use super::CHECKPOINT_EVERY;
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
@@ -476,15 +478,17 @@ pub fn bin(
         }
     }
 
-    // Create bin assignments
+    // Create bin assignments. Each row's label goes straight into the
+    // column's builder (an auto label through one reused buffer), so the
+    // labels take no allocation per row beyond the column itself.
     let bin_name = format!("{}_binned", column);
-    let mut bin_values: Vec<String> = Vec::with_capacity(df.height());
+    let mut builder = StringChunkedBuilder::new(bin_name.into(), df.height());
+    let mut auto_label = String::new();
 
-    for i in 0..df.height() {
+    for (i, val) in float_ca.into_iter().enumerate() {
         if i.is_multiple_of(CHECKPOINT_EVERY) {
             crate::resource::checkpoint().map_err(feature_err)?;
         }
-        let val = float_ca.get(i);
         let bin_idx = match val {
             // The edges are sorted (checked above), so `partition_point` is
             // the unique j with edges[j-1] < v <= edges[j]; values at or below
@@ -496,16 +500,18 @@ pub fn bin(
             None => 0, // Assign nulls to first bin
         };
 
-        let label = if let Some(lbls) = labels {
-            lbls.get(bin_idx).copied().unwrap_or("unknown").to_string()
+        if let Some(lbls) = labels {
+            builder.append_value(lbls.get(bin_idx).copied().unwrap_or("unknown"));
         } else {
             // Use auto-generated labels
-            format!("bin_{}", bin_idx)
-        };
-        bin_values.push(label);
+            auto_label.clear();
+            write!(auto_label, "bin_{bin_idx}")
+                .map_err(|e| MungeError::FeatureError(e.to_string()))?;
+            builder.append_value(auto_label.as_str());
+        }
     }
 
-    let bin_col = Column::new(bin_name.into(), bin_values);
+    let bin_col = builder.finish().into_column();
     let mut result = df.clone();
     result
         .with_column(bin_col)
@@ -976,6 +982,55 @@ mod tests {
         let ew: Vec<f64> = (0..=7).map(|i| mn + i as f64 * step).collect();
         let out = bin(&ds, "x", BinStrategy::EqualWidth(7), None).unwrap();
         assert_eq!(labels_of(&out, "x_binned"), bin_reference(&tied, &ew));
+    }
+
+    /// The binned column is the String column of one label per row that
+    /// the per-row assignment gives (auto labels, given labels, nulls in the
+    /// first bin), from a column of several chunks.
+    #[test]
+    fn bin_column_holds_each_rows_label() {
+        let values: Vec<Option<f64>> = (0..300)
+            .map(|i| (i % 7 != 3).then(|| (i as f64 * 0.61).sin() * 9.0 + 0.2))
+            .collect();
+        let mut x = Float64Chunked::from_iter_options("x".into(), values[..120].iter().copied());
+        x.append(&Float64Chunked::from_iter_options(
+            "x".into(),
+            values[120..].iter().copied(),
+        ))
+        .unwrap();
+        let ds = Dataset::new(DataFrame::new(vec![x.into_column()]).unwrap());
+        assert!(ds.df().max_n_chunks() > 1);
+        let edges = vec![-10.0, -3.0, 0.0, 4.5, 10.0];
+        let long = "a label longer than a view holds inline";
+        let given = ["neg", long, "", "pos"];
+        let want_auto = bin_reference(&values, &edges);
+        let want_given: Vec<String> = want_auto
+            .iter()
+            .map(|l| given[l["bin_".len()..].parse::<usize>().unwrap()].to_string())
+            .collect();
+        for (labels, want) in [(None, &want_auto), (Some(&given[..]), &want_given)] {
+            let out = bin(&ds, "x", BinStrategy::Custom(edges.clone()), labels).unwrap();
+            let got = out.df().column("x_binned").unwrap();
+            assert_eq!(got.dtype(), &DataType::String);
+            assert_eq!(got.null_count(), 0);
+            let expected = Column::new("x_binned".into(), want.clone());
+            assert!(
+                got.as_materialized_series()
+                    .equals_missing(expected.as_materialized_series()),
+                "{labels:?}"
+            );
+            assert!(
+                out.df()
+                    .column("x")
+                    .unwrap()
+                    .equals_missing(ds.df().column("x").unwrap())
+            );
+        }
+        // Equal-width and quantile bins name their bins as before, too.
+        let ca = ds.df().column("x").unwrap().f64().unwrap().clone();
+        let q = quantile_edges(&ca, "x", 6).unwrap();
+        let out = bin(&ds, "x", BinStrategy::Quantile(6), None).unwrap();
+        assert_eq!(labels_of(&out, "x_binned"), bin_reference(&values, &q));
     }
 
     #[test]
