@@ -42,37 +42,8 @@ print(mt)
 # Standard errors...
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_model_tables_means() {
-    let values = vec![5.1, 4.9, 5.2, 4.8, 5.0,
-                      7.2, 6.8, 7.1, 7.0, 6.9,
-                      9.0, 9.2, 8.9, 9.1, 9.0];
-
-    let df = create_dataframe_from_values(&values, 3, 5);
-    let dataset = Dataset::new(df);
-    let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
-
-    let result = model_tables(&anova, TableType::Means, true).unwrap();
-
-    // Grand mean should be ~7
-    assert!((result.grand_mean - 7.0).abs() < 0.1);
-
-    // Group means
-    assert_eq!(result.values.len(), 3);
-    assert!((result.values[0] - 5.0).abs() < 0.1);  // Group A
-    assert!((result.values[1] - 7.0).abs() < 0.1);  // Group B
-    assert!((result.values[2] - 9.0).abs() < 0.1);  // Group C
-
-    // SE should be sqrt(MSE/n)
-    let se = result.se.unwrap();
-    let expected_se = (anova.ms_within / 5.0).sqrt();
-    for s in &se {
-        assert!((*s - expected_se).abs() < 0.01);
-    }
-}
-```
+**Rust tests** (not R-pinned: no `model.tables` value is compared, and p2a's SE definition differs from R's; the R-pinned case comes with STAT-75):
+- `stats::modeltables::tests::test_model_tables_means` (`crates/p2a-core/src/stats/modeltables.rs`): the table type, the grand mean within 0.1 of 7.0, three groups with positive means and positive SEs.
 
 ### Test Case 2: One-Way ANOVA Effects
 
@@ -87,28 +58,8 @@ print(mt)
 #    -2   0   2
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_model_tables_effects() {
-    let dataset = create_test_dataset();
-    let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
-
-    let result = model_tables(&anova, TableType::Effects, true).unwrap();
-
-    // Effects are deviations from grand mean
-    // Group A: 5 - 7 = -2
-    // Group B: 7 - 7 = 0
-    // Group C: 9 - 7 = 2
-    assert!((result.values[0] - (-2.0)).abs() < 0.1);
-    assert!((result.values[1] - 0.0).abs() < 0.1);
-    assert!((result.values[2] - 2.0).abs() < 0.1);
-
-    // Effects should sum to approximately zero
-    let sum: f64 = result.values.iter().sum();
-    assert!(sum.abs() < 0.01);
-}
-```
+**Rust tests** (not R-pinned: no `model.tables` value is compared, and p2a's SE definition differs from R's; the R-pinned case comes with STAT-75):
+- `stats::modeltables::tests::test_model_tables_effects` (`crates/p2a-core/src/stats/modeltables.rs`): the table type and effects that sum to within 0.5 of zero.
 
 ### Test Case 3: Two-Way ANOVA
 
@@ -128,31 +79,8 @@ mt <- model.tables(fit, "means")
 print(mt)
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_model_tables_two_way() {
-    // 2x2 design with 3 replicates per cell
-    let data = vec![
-        vec![vec![10.0, 11.0, 12.0], vec![15.0, 16.0, 17.0]],  // A1
-        vec![vec![20.0, 21.0, 22.0], vec![25.0, 26.0, 27.0]],  // A2
-    ];
-    let factor_a = vec!["A1".to_string(), "A2".to_string()];
-    let factor_b = vec!["B1".to_string(), "B2".to_string()];
-
-    let result = model_tables_two_way(&data, &factor_a, &factor_b, TableType::Means, true).unwrap();
-
-    // Grand mean = (10+11+12+15+16+17+20+21+22+25+26+27) / 12 = 18.5
-    assert!((result.grand_mean - 18.5).abs() < 0.1);
-
-    // Cell means
-    let cells = result.cell_values.unwrap();
-    assert!((cells[0][0] - 11.0).abs() < 0.1);  // A1, B1: mean of 10,11,12
-    assert!((cells[0][1] - 16.0).abs() < 0.1);  // A1, B2: mean of 15,16,17
-    assert!((cells[1][0] - 21.0).abs() < 0.1);  // A2, B1: mean of 20,21,22
-    assert!((cells[1][1] - 26.0).abs() < 0.1);  // A2, B2: mean of 25,26,27
-}
-```
+**Rust tests** (not R-pinned: no `model.tables` value is compared, and p2a's SE definition differs from R's; the R-pinned case comes with STAT-75):
+- `stats::modeltables::tests::test_model_tables_two_way` (`crates/p2a-core/src/stats/modeltables.rs`): hand-computed grand mean (6.5) and the four cell means, within 1e-10.
 
 ### Test Case 4: Two-Way Effects with Interaction
 
@@ -164,35 +92,8 @@ print(mt)
 # Shows main effects and interaction effects
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_model_tables_two_way_effects() {
-    let data = vec![
-        vec![vec![10.0, 11.0, 12.0], vec![15.0, 16.0, 17.0]],
-        vec![vec![20.0, 21.0, 22.0], vec![25.0, 26.0, 27.0]],
-    ];
-    let factor_a = vec!["A1".to_string(), "A2".to_string()];
-    let factor_b = vec!["B1".to_string(), "B2".to_string()];
-
-    let result = model_tables_two_way(&data, &factor_a, &factor_b, TableType::Effects, true).unwrap();
-
-    // Main effect of A: A1 mean - grand mean, A2 mean - grand mean
-    // A1 mean = (11 + 16) / 2 = 13.5; effect = 13.5 - 18.5 = -5
-    // A2 mean = (21 + 26) / 2 = 23.5; effect = 23.5 - 18.5 = 5
-    assert!((result.factor_a_values[0] - (-5.0)).abs() < 0.1);
-    assert!((result.factor_a_values[1] - 5.0).abs() < 0.1);
-
-    // Main effect of B
-    // B1 mean = (11 + 21) / 2 = 16; effect = 16 - 18.5 = -2.5
-    // B2 mean = (16 + 26) / 2 = 21; effect = 21 - 18.5 = 2.5
-    assert!((result.factor_b_values[0] - (-2.5)).abs() < 0.1);
-    assert!((result.factor_b_values[1] - 2.5).abs() < 0.1);
-
-    // Interaction effects should exist (may be zero in additive model)
-    assert!(result.interaction.is_some());
-}
-```
+**Rust tests** (not R-pinned: no `model.tables` value is compared, and p2a's SE definition differs from R's; the R-pinned case comes with STAT-75):
+- `stats::modeltables::tests::test_model_tables_two_way_effects` (`crates/p2a-core/src/stats/modeltables.rs`): hand-computed main effects (±3.0, ±1.5) within 1e-10 and that an interaction table is returned.
 
 ## Numerical Precision Summary
 

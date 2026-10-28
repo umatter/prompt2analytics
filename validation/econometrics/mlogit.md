@@ -70,7 +70,8 @@ summary(result)
 | β_price | ~-0.1 | ~-0.1 | 0.05 |
 | Log-likelihood | ~-3.3 | ~-3.3 | 0.1 |
 
-**Rust Test**: `crates/p2a-core/src/econometrics/discrete.rs::tests::test_mlogit_basic`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-81):
+- `econometrics::discrete::conditional_logit::tests::test_mlogit_basic` (`crates/p2a-core/src/econometrics/discrete/conditional_logit.rs`; a copy of the same test is `econometrics::discrete::tests::test_mlogit_basic` in `discrete/mod.rs`): 5 choice situations, 3 alternatives, 2 coefficients and a negative cost coefficient.
 
 ---
 
@@ -90,7 +91,8 @@ result <- mlogit(chosen ~ price | income, data = mdata)
 summary(result)
 ```
 
-**Rust Test**: `crates/p2a-core/src/econometrics/discrete.rs::tests::test_mlogit_with_individual_specific`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-81):
+- `econometrics::discrete::conditional_logit::tests::test_validate_mlogit_with_individual_vars` (`crates/p2a-core/src/econometrics/discrete/conditional_logit.rs`): the dimensions of beta and gamma and a finite log-likelihood.
 
 ---
 

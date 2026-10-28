@@ -66,7 +66,9 @@ coef(var_fit$varresult$y2)
 | A[2,1] (y1.l1 in y2 eq) | 0.1 | ~0.1 | ~0.1 | 0.1 |
 | A[2,2] (y2.l1 in y2 eq) | 0.6 | ~0.6 | ~0.6 | 0.1 |
 
-**Rust Test**: `crates/p2a-core/src/econometrics/timeseries.rs::tests::test_validate_var1`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-80 and X-12):
+- `econometrics::timeseries::tests::test_validate_var_vs_r` (`crates/p2a-core/src/econometrics/timeseries.rs`): dimensions, finite AIC, BIC and log-likelihood, positive residual variances. No `vars::VAR` value is compared.
+- `econometrics::timeseries::tests::test_validate_var_coefficient_estimation` (`crates/p2a-core/src/econometrics/timeseries.rs`): the y1 lag coefficients lie in (-0.5, 1.5) and (-0.7, 1.3).
 
 ---
 
@@ -176,10 +178,10 @@ summary(var_fit)$corres
 
 ```bash
 # Run VAR validation tests
-cargo test -p p2a-core -- timeseries::tests::test_var
+cargo test -p p2a-core --lib -- econometrics::timeseries::tests::test_validate_var
 
 # Run with output
-cargo test -p p2a-core -- var --nocapture
+cargo test -p p2a-core --lib -- econometrics::timeseries::tests::test_validate_var --nocapture
 ```
 
 ## References

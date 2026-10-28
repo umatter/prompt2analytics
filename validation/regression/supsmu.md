@@ -39,25 +39,8 @@ plot(x, y)
 lines(fit$x, fit$y, col = "red")
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_supsmu_sine() {
-    let x: Vec<f64> = (1..=100).map(|i| i as f64 / 100.0).collect();
-    let y: Vec<f64> = x.iter()
-        .enumerate()
-        .map(|(i, &xi)| (xi * 2.0 * PI).sin() + noise(i))
-        .collect();
-
-    let result = supsmu(&x, &y, None, None, false, 0.0).unwrap();
-
-    // Check that smoothed values follow sine pattern
-    // Correlation with true sine should be high
-    let true_sine: Vec<f64> = x.iter().map(|&xi| (xi * 2.0 * PI).sin()).collect();
-    let corr = correlation(&result.y, &true_sine);
-    assert!(corr > 0.9);
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-31 for the estimator and REG-44 for the tests):
+- `regression::supsmu::tests::test_validate_supsmu_sine_wave` (`crates/p2a-core/src/regression/supsmu.rs`): on the first 20 rows of the legacy `supsmu_test.csv` (R's input and smoothed values, typed into the test), the smoothed values lie in (-1.5, 1.5), are smoother than the input, and correlate above 0.9 with R's. A loose comparison, not R-pinned.
 
 ### Test Case 2: Fixed Span
 
@@ -69,20 +52,8 @@ fit <- supsmu(x, y, span = 0.2)
 print(fit$y[1:5])
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_supsmu_fixed_span() {
-    let x: Vec<f64> = (1..=50).map(|i| i as f64 / 50.0).collect();
-    let y: Vec<f64> = x.iter().map(|&xi| xi * xi).collect();
-
-    let result = supsmu(&x, &y, None, Some(0.2), false, 0.0).unwrap();
-
-    // With fixed span, output should be smooth
-    assert_eq!(result.x.len(), x.len());
-    assert_eq!(result.y.len(), y.len());
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-31 for the estimator and REG-44 for the tests):
+- `regression::supsmu::tests::test_validate_supsmu_fixed_span` (`crates/p2a-core/src/regression/supsmu.rs`): n = 50 and, on linear data, more than 40 smoothed values increase.
 
 ### Test Case 3: Comparison with R Output
 
@@ -98,27 +69,8 @@ print(round(fit$y[1:5], 6))
 # [1] 0.298291 0.509294 0.687844 0.816543 0.886892
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_supsmu_r_comparison() {
-    let x: Vec<f64> = (1..=20).map(|i| i as f64 / 20.0).collect();
-    let noise = vec![0.1, -0.05, 0.08, -0.12, 0.03, -0.07, 0.11, -0.02,
-                     0.06, -0.09, 0.04, -0.08, 0.07, -0.03, 0.09, -0.06,
-                     0.02, -0.1, 0.05, -0.04];
-    let y: Vec<f64> = x.iter().zip(noise.iter())
-        .map(|(&xi, &n)| (xi * 2.0 * PI).sin() + n)
-        .collect();
-
-    let result = supsmu(&x, &y, None, Some(0.2), false, 0.0).unwrap();
-
-    // Compare with R output (allowing for minor numerical differences)
-    let r_output = vec![0.298291, 0.509294, 0.687844, 0.816543, 0.886892];
-    for (i, &expected) in r_output.iter().enumerate() {
-        assert!((result.y[i] - expected).abs() < 0.01);
-    }
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-31 for the estimator and REG-44 for the tests):
+- `regression::supsmu::tests::test_validate_supsmu_sine_wave` (`crates/p2a-core/src/regression/supsmu.rs`): on the first 20 rows of the legacy `supsmu_test.csv` (R's input and smoothed values, typed into the test), the smoothed values lie in (-1.5, 1.5), are smoother than the input, and correlate above 0.9 with R's. A loose comparison, not R-pinned.
 
 ### Test Case 4: Bass Enhancement
 
@@ -131,22 +83,8 @@ fit_bass5 <- supsmu(x, y, bass = 5)
 # bass=5 should be smoother
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_supsmu_bass() {
-    let x: Vec<f64> = (1..=100).map(|i| i as f64).collect();
-    let y: Vec<f64> = x.iter().map(|&xi| (xi / 10.0).sin()).collect();
-
-    let result_bass0 = supsmu(&x, &y, None, None, false, 0.0).unwrap();
-    let result_bass5 = supsmu(&x, &y, None, None, false, 5.0).unwrap();
-
-    // Higher bass should produce smoother output (lower variance)
-    let var0 = variance(&result_bass0.y);
-    let var5 = variance(&result_bass5.y);
-    // Bass enhancement reduces variance
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-31 for the estimator and REG-44 for the tests):
+- `regression::supsmu::tests::test_supsmu_bass_parameter` (`crates/p2a-core/src/regression/supsmu.rs`): the bass value is stored (0 and 10). No smoothed value is compared.
 
 ## Numerical Precision Summary
 

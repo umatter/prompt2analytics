@@ -89,30 +89,8 @@ cat("95% CI:", result$estimates$ATE$CI, "\n")
 
 ### Rust Test
 
-```rust
-#[test]
-fn test_validate_tmle_continuous() {
-    // DGP: Y = 0.3*W1 + 0.2*W2 + 0.5*A + noise
-    // True ATE = 0.5
-    let dataset = create_tmle_validation_data(1000, 42);
-
-    let config = TmleConfig {
-        q_model: QModel::Linear,  // Continuous outcome
-        ..Default::default()
-    };
-
-    let result = tmle(&dataset, "Y", "A", &["W1", "W2"], config).unwrap();
-
-    // ATE should be close to 0.5
-    assert!((result.ate - 0.5).abs() < 0.1);
-
-    // SE should be reasonable
-    assert!(result.ate_se > 0.01 && result.ate_se < 0.1);
-
-    // 95% CI should contain true value
-    assert!(result.ate_ci_lower < 0.5 && result.ate_ci_upper > 0.5);
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with CAUS-99):
+- `econometrics::tmle::tests::test_validate_tmle_continuous_outcome` (`crates/p2a-core/src/econometrics/tmle.rs`): a finite ATE and SE > 0. The test also passes when the estimator returns `Err`.
 
 ## Test Case 2: Binary Outcome
 
@@ -156,23 +134,8 @@ cat("ATE (Risk Difference):", result$estimates$ATE$psi, "\n")
 
 ### Rust Test
 
-```rust
-#[test]
-fn test_validate_tmle_binary() {
-    let dataset = create_tmle_binary_data(1000, 123);
-
-    let config = TmleConfig {
-        q_model: QModel::Logistic,  // Binary outcome
-        ..Default::default()
-    };
-
-    let result = tmle(&dataset, "Y", "A", &["W1", "W2"], config).unwrap();
-
-    // ATE should be positive (treatment increases outcome probability)
-    assert!(result.ate > 0.0);
-    assert!(result.ate_se > 0.0 && result.ate_se.is_finite());
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with CAUS-99):
+- `econometrics::tmle::tests::test_validate_tmle_vs_r` (`crates/p2a-core/src/econometrics/tmle.rs`): abs(ATE) < 0.5, 0.01 < SE < 0.2, the CI contains the estimate and the p-value lies in [0, 1], on an LCG-generated dataset that differs from the R data above. No R value is compared.
 
 ## Tolerances
 

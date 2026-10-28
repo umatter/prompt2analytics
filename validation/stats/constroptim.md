@@ -47,24 +47,9 @@ print(result$value)
 # [1] 0
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_constroptim_2d() {
-    let f = |x: &[f64]| (x[0] - 2.0).powi(2) + (x[1] - 3.0).powi(2);
-    let grad = |x: &[f64]| vec![2.0 * (x[0] - 2.0), 2.0 * (x[1] - 3.0)];
-    let ui = vec![vec![1.0, 1.0]];  // x + y >= 1
-    let ci = vec![1.0];
-
-    let config = ConstrOptimConfig::default();
-    let result = constr_optim(&[0.5, 0.5], &f, Some(&grad), &ui, &ci, config).unwrap();
-
-    // Unconstrained minimum is (2, 3), which satisfies x + y >= 1
-    assert!((result.par[0] - 2.0).abs() < 0.01);
-    assert!((result.par[1] - 3.0).abs() < 0.01);
-    assert!(result.value < 0.001);
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
+- `stats::constroptim::tests::test_validate_constr_optim_quadratic` (`crates/p2a-core/src/stats/constroptim.rs`): the value improves on the start (2.0) and stays below 1.5 while x + y ≥ 0.99; R's optimum (0.5 at (0.5, 0.5)) is quoted in a comment but not compared.
+- `stats::constroptim::tests::test_validate_constr_optim_nelder_mead` (`crates/p2a-core/src/stats/constroptim.rs`): Nelder-Mead on (x - 1)² + (y - 2)² with x, y ≥ 0; the solution is within 0.2 of (1, 2).
 
 ### Test Case 2: Active Constraint
 
@@ -83,28 +68,8 @@ print(result$value)
 # Approximately 12.5
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_constroptim_active() {
-    let f = |x: &[f64]| x[0].powi(2) + x[1].powi(2);
-    let grad = |x: &[f64]| vec![2.0 * x[0], 2.0 * x[1]];
-    let ui = vec![vec![1.0, 1.0]];  // x + y >= 5
-    let ci = vec![5.0];
-
-    let config = ConstrOptimConfig::default();
-    let result = constr_optim(&[3.0, 3.0], &f, Some(&grad), &ui, &ci, config).unwrap();
-
-    // Minimum on constraint: x = y = 2.5
-    assert!((result.par[0] - 2.5).abs() < 0.1);
-    assert!((result.par[1] - 2.5).abs() < 0.1);
-    assert!((result.value - 12.5).abs() < 0.5);
-
-    // Constraint should be satisfied
-    let constraint_value = result.par[0] + result.par[1];
-    assert!(constraint_value >= 4.99);  // >= 5 with tolerance
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
+- `stats::constroptim::tests::test_validate_constr_optim_binding_constraint` (`crates/p2a-core/src/stats/constroptim.rs`): minimise x² subject to x ≥ 1; x within 0.1 and the value within 0.2 of 1.0.
 
 ### Test Case 3: Multiple Constraints (Box Constraints)
 
@@ -120,28 +85,8 @@ print(result$par)
 # [1] 2 2  (corner of box closest to (3,4))
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_constroptim_box() {
-    let f = |x: &[f64]| (x[0] - 3.0).powi(2) + (x[1] - 4.0).powi(2);
-    // x >= 0, y >= 0, x <= 2, y <= 2
-    let ui = vec![
-        vec![1.0, 0.0],   // x >= 0
-        vec![0.0, 1.0],   // y >= 0
-        vec![-1.0, 0.0],  // -x >= -2 (i.e., x <= 2)
-        vec![0.0, -1.0],  // -y >= -2 (i.e., y <= 2)
-    ];
-    let ci = vec![0.0, 0.0, -2.0, -2.0];
-
-    let config = ConstrOptimConfig::default();
-    let result = constr_optim(&[1.0, 1.0], &f, None::<fn(&[f64]) -> Vec<f64>>, &ui, &ci, config).unwrap();
-
-    // Should be at corner (2, 2)
-    assert!((result.par[0] - 2.0).abs() < 0.1);
-    assert!((result.par[1] - 2.0).abs() < 0.1);
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
+- `stats::constroptim::tests::test_validate_constr_optim_linear_three_constraints` (`crates/p2a-core/src/stats/constroptim.rs`): the value within 0.2 of R's printed -1.0 and the three constraints satisfied within 0.01.
 
 ### Test Case 4: Higher Dimensional
 
@@ -157,29 +102,7 @@ print(result$par)
 # Should be approximately 0, 1, 2, ..., 9
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_constroptim_10d() {
-    let f = |x: &[f64]| x.iter().enumerate()
-        .map(|(i, &xi)| (xi - i as f64).powi(2))
-        .sum::<f64>();
-    let ui: Vec<Vec<f64>> = (0..10).map(|i| {
-        let mut row = vec![0.0; 10];
-        row[i] = 1.0;
-        row
-    }).collect();
-    let ci = vec![0.0; 10];
-
-    let config = ConstrOptimConfig::default();
-    let result = constr_optim(&vec![5.0; 10], &f, None::<fn(&[f64]) -> Vec<f64>>, &ui, &ci, config).unwrap();
-
-    // x[i] should be close to i (unconstrained minimum satisfies constraints)
-    for i in 0..10 {
-        assert!((result.par[i] - i as f64).abs() < 0.1);
-    }
-}
-```
+**Rust tests**: no Rust test runs the 10-dimensional case (not R-pinned; the R-pinned case comes with STAT-62).
 
 ## Numerical Precision Summary
 

@@ -63,7 +63,9 @@ irf_result$irf$y1
 | h=5 | ~0.1 | ~0.1 | 0.05 |
 | h=10 | ~0.0 | ~0.0 | 0.02 |
 
-**Rust Test**: `crates/p2a-core/src/econometrics/timeseries.rs::tests::test_validate_irf`
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-80):
+- `econometrics::timeseries::tests::test_validate_var_irf_structure` (`crates/p2a-core/src/econometrics/timeseries.rs`): the shape of the IRF array, a non-zero own-shock response at step 0, and a step-10 response no larger than twice step 0.
+- `econometrics::timeseries::tests::test_validate_var_non_orthogonalized_irf` (`crates/p2a-core/src/econometrics/timeseries.rs`): the orthogonalized flags of both IRFs; its only numeric assertion is `diff >= 0.0`.
 
 ---
 
@@ -189,7 +191,7 @@ Precision decreases with horizon due to compounding matrix powers.
 cargo test -p p2a-core -- irf
 
 # Run with output
-cargo test -p p2a-core -- timeseries::tests::test_irf --nocapture
+cargo test -p p2a-core --lib -- econometrics::timeseries::tests::test_validate_var --nocapture
 ```
 
 ## References

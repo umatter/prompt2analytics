@@ -41,30 +41,8 @@ print(se)
 # Expected: sqrt(MSE * (1/5 + 1/5)) = sqrt(MSE * 0.4)
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_se_contrast_pairwise() {
-    let values = vec![5.1, 4.9, 5.2, 4.8, 5.0,
-                      7.2, 6.8, 7.1, 7.0, 6.9,
-                      9.0, 9.2, 8.9, 9.1, 9.0];
-    let groups = vec!["A", "A", "A", "A", "A",
-                      "B", "B", "B", "B", "B",
-                      "C", "C", "C", "C", "C"];
-
-    let df = create_dataframe(&values, &groups);
-    let dataset = Dataset::new(df);
-    let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
-
-    // A vs B contrast
-    let contrast = vec![1.0, -1.0, 0.0];
-    let se = se_contrast_single(&anova, &contrast).unwrap();
-
-    // SE = sqrt(MSE * (1/5 + 1/5))
-    let expected_se = (anova.ms_within * 0.4).sqrt();
-    assert!((se - expected_se).abs() < 1e-6);
-}
-```
+**Rust tests** (not R-pinned: no `se.contrast` value is compared; the R-pinned case comes with STAT-66):
+- `stats::secontrast::tests::test_se_contrast_basic` (`crates/p2a-core/src/stats/secontrast.rs`): one SE, in (0, 1).
 
 ### Test Case 2: Treatment Contrasts
 
@@ -84,25 +62,8 @@ se <- se.contrast(fit, contrasts)
 print(se)
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_se_contrast_treatment() {
-    // Generate 4-group data
-    let dataset = create_four_group_dataset();
-    let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
-
-    let contrasts = generate_contrasts(4, ContrastType::Treatment);
-    let result = se_contrast(&anova, &contrasts).unwrap();
-
-    // Should have 3 contrasts (k-1)
-    assert_eq!(result.se.len(), 3);
-    // All SEs should be positive
-    for se in &result.se {
-        assert!(*se > 0.0);
-    }
-}
-```
+**Rust tests** (not R-pinned: no `se.contrast` value is compared; the R-pinned case comes with STAT-66):
+- `stats::secontrast::tests::test_generate_contrasts_treatment` (`crates/p2a-core/src/stats/secontrast.rs`): the treatment contrast matrix (k - 1 rows, exact entries, rows summing to zero).
 
 ### Test Case 3: Helmert Contrasts
 
@@ -115,28 +76,8 @@ se <- se.contrast(fit, contrasts)
 print(se)
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_se_contrast_helmert() {
-    let dataset = create_four_group_dataset();
-    let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
-
-    let contrasts = generate_contrasts(4, ContrastType::Helmert);
-    let result = se_contrast(&anova, &contrasts).unwrap();
-
-    // Helmert contrasts
-    // c1: [-1, 1, 0, 0]  (group 2 vs group 1)
-    // c2: [-1/2, -1/2, 1, 0]  (group 3 vs mean of 1,2)
-    // c3: [-1/3, -1/3, -1/3, 1]  (group 4 vs mean of 1,2,3)
-
-    // Each should sum to zero
-    for c in &contrasts {
-        let sum: f64 = c.iter().sum();
-        assert!(sum.abs() < 1e-10);
-    }
-}
-```
+**Rust tests** (not R-pinned: no `se.contrast` value is compared; the R-pinned case comes with STAT-66):
+- `stats::secontrast::tests::test_generate_contrasts_helmert` (`crates/p2a-core/src/stats/secontrast.rs`): the Helmert contrast matrix entries within 1e-10.
 
 ### Test Case 4: Contrast Estimate and T-statistic
 
@@ -153,22 +94,8 @@ t_stat <- estimate / se
 print(c(estimate = estimate, se = se, t = t_stat))
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_contrast_t_statistic() {
-    let dataset = create_test_dataset();
-    let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
-
-    let contrast = vec![1.0, -1.0, 0.0, 0.0];
-    let estimate = estimate_contrast(&anova, &contrast).unwrap();
-    let se = se_contrast_single(&anova, &contrast).unwrap();
-    let t = contrast_t_statistic(&anova, &contrast).unwrap();
-
-    // t = estimate / SE
-    assert!((t - estimate / se).abs() < 1e-10);
-}
-```
+**Rust tests** (not R-pinned: no `se.contrast` value is compared; the R-pinned case comes with STAT-66):
+- `stats::secontrast::tests::test_contrast_t_statistic` (`crates/p2a-core/src/stats/secontrast.rs`): the t statistic is negative with abs(t) > 2.
 
 ## Numerical Precision Summary
 

@@ -182,12 +182,17 @@ Trace test critical values (asymptotic, no constant in CE):
 
 ## Running the Tests
 
+**Status**: not R-pinned. No committed R case is compared; the VECM estimates are placeholders (ECON-52, estimator), and the R-pinned case comes with ECON-80.
+
+**Rust tests**:
+- `econometrics::timeseries::tests::test_validate_vecm_structure` (`crates/p2a-core/src/econometrics/timeseries.rs`): rank, lags and dimensions, eigenvalues in [0, 1] and non-negative trace statistics. No `urca::ca.jo` value is compared.
+
 ```bash
 # Run VECM validation tests
 cargo test -p p2a-core -- vecm
 
 # Run with output
-cargo test -p p2a-core -- timeseries::tests::test_vecm --nocapture
+cargo test -p p2a-core --lib -- econometrics::timeseries::tests::test_validate_vecm_structure --nocapture
 ```
 
 ## References

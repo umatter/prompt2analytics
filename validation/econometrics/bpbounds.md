@@ -112,17 +112,9 @@ With perfect compliance:
 
 ## Rust Test Functions
 
-```rust
-#[test]
-fn test_validate_bpbounds_synthetic() {
-    // See test_validate_against_r in bpbounds.rs
-}
-
-#[test]
-fn test_validate_bpbounds_perfect_compliance() {
-    // See test_perfect_compliance in bpbounds.rs
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-80 for the tests and ECON-56 for the monotone bound):
+- `econometrics::bpbounds::tests::test_validate_against_r` (`crates/p2a-core/src/econometrics/bpbounds.rs`): the bounds lie in [-1, 1] with lower ≤ upper, and the Wald ratio equals its own formula within 1e-10. R's `bpbounds` is not installed on the reference machine, so no R value is compared.
+- `econometrics::bpbounds::tests::test_perfect_compliance` (`crates/p2a-core/src/econometrics/bpbounds.rs`): with perfect compliance the Wald estimate is within 0.01 of 0.4.
 
 ## Validation Results
 

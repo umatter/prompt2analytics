@@ -127,13 +127,13 @@ x <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 y <- c(2.1, 4.3, 5.8, 8.2, 10.1, 11.9, 14.2, 15.8, 18.3, 20.0)
 cor.test(x, y, method = "pearson")
 
-# Expected:
-# r = 0.9994855
-# t = 93.80296
-# p-value = 1.156e-13
+# R 4.3.3 gives:
+# r = 0.9995163215771916
+# t = 90.90631431969589 (df = 8)
+# p-value = 2.393055765222379e-13
 ```
 
-**Rust test**: `test_cor_test_basic` in `stats/cortest.rs`
+**Rust test**: `stats::cortest::tests::test_validate_pearson_correlation` (`crates/p2a-core/src/stats/cortest.rs`). It uses different data (y = 1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0; R 4.3.3 gives r 0.999070526757068, t 65.5554248847905, p 3.26167845639871e-12) and checks r within 0.001 of a quoted 0.999071, t > 50, p < 0.001 and df = 8. Not R-pinned (cor.test estimator findings STAT-20, STAT-22, STAT-47).
 
 ### power.t.test Validation
 
@@ -141,11 +141,11 @@ cor.test(x, y, method = "pearson")
 # R code
 power.t.test(n = 30, delta = 0.5, sd = 1, sig.level = 0.05, type = "two.sample")
 
-# Expected:
-# power = 0.4778965
+# R 4.3.3 gives:
+# power = 0.4778409859409388
 ```
 
-**Rust test**: `test_power_t_test_sample_size` in `stats/power.rs`
+**Rust test**: `stats::power::tests::test_validate_power_t_test_compute_power` (`crates/p2a-core/src/stats/power.rs`): power within 0.1 of a quoted 0.477841. Not R-pinned (STAT-33).
 
 ### smooth.spline Validation
 
@@ -155,12 +155,12 @@ x <- 1:20
 y <- sin(x/5)
 result <- smooth.spline(x, y, df = 6)
 
-# Expected:
-# df ≈ 6.0
-# lambda varies based on algorithm
+# R 4.3.3 gives:
+# df = 6.000793539100071
+# lambda = 0.0005617122726951194
 ```
 
-**Rust test**: `test_smooth_spline_df` in `regression/smooth_spline.rs`
+**Rust test**: `regression::smooth_spline::tests::test_validate_smooth_spline_against_r` (`crates/p2a-core/src/regression/smooth_spline.rs`): on the same x and y, df within 1 of 6 and every residual below 0.5. No R value is compared. Not R-pinned (REG-29, REG-30).
 
 ### spline Validation
 
@@ -196,13 +196,13 @@ smokers <- c(83, 90, 129, 70)
 patients <- c(86, 93, 136, 82)
 prop.trend.test(smokers, patients)
 
-# Expected:
-# X-squared = 12.64813
+# R 4.3.3 gives:
+# X-squared = 8.22492228519771
 # df = 1
-# p-value = 0.0003768
+# p-value = 0.004131897477641487
 ```
 
-**Rust test**: `test_prop_trend_test_basic` in `stats/proptest.rs`
+**Rust test**: `stats::proptrendtest::tests::test_prop_trend_basic` (`crates/p2a-core/src/stats/proptrendtest.rs`). It uses other data (5, 10, 15, 20 successes out of 50 each) and checks p < 0.05 and df = 1. Not R-pinned.
 
 ## Known Differences
 

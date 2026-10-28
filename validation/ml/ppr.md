@@ -48,35 +48,8 @@ print(fit$alpha)  # Should be close to c(0.707, 0.707, 0)
 print(cor(fit$fitted.values, y))  # Should be high
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_ppr_simple() {
-    let mut rng = ChaCha8Rng::seed_from_u64(42);
-    let n = 200;
-    let p = 3;
-
-    let x_data: Vec<f64> = (0..(n * p)).map(|_| rng.gen::<f64>() - 0.5).collect();
-    let x = Array2::from_shape_vec((n, p), x_data).unwrap();
-
-    // y = sin(x1 + x2) + noise
-    let y: Vec<f64> = (0..n).map(|i| {
-        let proj = x[[i, 0]] + x[[i, 1]];
-        (2.0 * proj).sin() + rng.gen::<f64>() * 0.1
-    }).collect();
-
-    let config = PprConfig { nterms: 1, ..Default::default() };
-    let result = ppr(x.view(), &y, None, config).unwrap();
-
-    // Alpha should point in (1, 1, 0) direction
-    let alpha_norm = (result.alpha[0][0].powi(2) + result.alpha[0][1].powi(2)).sqrt();
-    assert!(alpha_norm > 0.9);  // First two components dominate
-
-    // Fitted values should correlate well with actual
-    let corr = correlation(&result.fitted, &y);
-    assert!(corr > 0.8);
-}
-```
+**Rust tests** (not R-pinned: no `ppr()` value is compared; the R-pinned case comes with ML-107 for the tests and ML-34 for the smoother options):
+- `ml::ppr::tests::test_ppr_basic` (`crates/p2a-core/src/ml/ppr.rs`): nterms, n, p and the lengths of the fitted values and residuals on its own 15-row dataset.
 
 ### Test Case 2: Multiple Terms
 
@@ -92,32 +65,8 @@ fit <- ppr(x, y, nterms = 2)
 print(summary(fit))
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_ppr_two_terms() {
-    let mut rng = ChaCha8Rng::seed_from_u64(42);
-    let n = 300;
-    let p = 4;
-
-    let x_data: Vec<f64> = (0..(n * p)).map(|_| rng.gen::<f64>() - 0.5).collect();
-    let x = Array2::from_shape_vec((n, p), x_data).unwrap();
-
-    let y: Vec<f64> = (0..n).map(|i| {
-        (x[[i, 0]] + x[[i, 1]]).sin() + (x[[i, 2]] - x[[i, 3]]).cos()
-    }).collect();
-
-    let config = PprConfig { nterms: 2, ..Default::default() };
-    let result = ppr(x.view(), &y, None, config).unwrap();
-
-    // Should have found 2 terms
-    assert_eq!(result.alpha.len(), 2);
-
-    // Good fit
-    let corr = correlation(&result.fitted, &y);
-    assert!(corr > 0.7);
-}
-```
+**Rust tests** (not R-pinned: no `ppr()` value is compared; the R-pinned case comes with ML-107 for the tests and ML-34 for the smoother options):
+- `ml::ppr::tests::test_ppr_multiple_terms` (`crates/p2a-core/src/ml/ppr.rs`): at most 2 terms and a non-empty goodness-of-fit vector (n = 50).
 
 ### Test Case 3: Comparison with R Output
 
@@ -132,21 +81,9 @@ print(round(fit$alpha, 6))
 print(round(fit$fitted.values[1:5], 6))
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_ppr_r_comparison() {
-    // Use fixed seed data matching R
-    let x = /* ... */;
-    let y = /* ... */;
-
-    let config = PprConfig { nterms: 1, ..Default::default() };
-    let result = ppr(x.view(), &y, None, config).unwrap();
-
-    // Compare alpha directions (signs may differ)
-    // Compare fitted values with tolerance
-}
-```
+**Rust tests** (not R-pinned: no `ppr()` value is compared; the R-pinned case comes with ML-107 for the tests and ML-34 for the smoother options):
+- `ml::ppr::tests::test_ppr_with_weights` (`crates/p2a-core/src/ml/ppr.rs`): n with case weights.
+- `ml::ppr::tests::test_ppr_predict` (`crates/p2a-core/src/ml/ppr.rs`): the number of predictions. No test compares fitted values, directions or ridge functions with R.
 
 ## Numerical Precision Summary
 

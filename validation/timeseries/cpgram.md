@@ -37,21 +37,8 @@ cumspec <- cumsum(spec$spec) / sum(spec$spec)
 # For white noise, cumspec should be approximately linear
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_cpgram_white_noise() {
-    let mut rng = ChaCha8Rng::seed_from_u64(42);
-    let x: Vec<f64> = (0..256).map(|_| rng.gen::<f64>() - 0.5).collect();
-
-    let result = cpgram(&x, None).unwrap();
-
-    // For white noise, cumulative periodogram should be approximately linear
-    // Check that the KS statistic is not significant (< critical value)
-    let (ks_stat, p_value) = white_noise_test(&x, None).unwrap();
-    assert!(p_value > 0.05);  // Should not reject white noise hypothesis
-}
-```
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-9 for the estimator):
+- `forecasting::cpgram::tests::test_cpgram_white_noise` (`crates/p2a-core/src/forecasting/cpgram.rs`): max deviation < 1 on zero-mean data.
 
 ### Test Case 2: Non-White Noise (AR Process)
 
@@ -63,17 +50,7 @@ x <- arima.sim(n = 256, list(ar = 0.9))
 cpgram(x)  # Should deviate from bands at low frequencies
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_cpgram_ar1() {
-    // AR(1) with rho = 0.9 should fail white noise test
-    let x = generate_ar1_series(256, 0.9, 42);
-
-    let (ks_stat, p_value) = white_noise_test(&x, None).unwrap();
-    assert!(p_value < 0.05);  // Should reject white noise hypothesis
-}
-```
+**Rust tests**: no AR(1) test exists (not R-pinned; the R-pinned case comes with TS-22).
 
 ### Test Case 3: Periodogram Values
 
@@ -85,27 +62,13 @@ print(spec$spec)
 print(cumsum(spec$spec) / sum(spec$spec))
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_validate_cpgram_simple() {
-    let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    let result = cpgram(&x, None).unwrap();
+**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-9 for the estimator):
+- `forecasting::cpgram::tests::test_cpgram_basic` (`crates/p2a-core/src/forecasting/cpgram.rs`): n, taper 0.1, equal lengths, a last value within 0.01 of 1 and frequencies in (0, 0.5].
+- `forecasting::cpgram::tests::test_cpgram_confidence_bands` (`crates/p2a-core/src/forecasting/cpgram.rs`): 0 ≤ lower ≤ upper ≤ 1.
+- `forecasting::cpgram::tests::test_validate_periodogram_against_r` (`crates/p2a-core/src/forecasting/cpgram.rs`), added in Tier 0 (T0-WP18): the periodogram of the deterministic series `mk(16)` (formula in the test; R `Mod(fft(x - mean(x)))^2/16`, ordinates 2-9) within 1e-9 relative of R 4.3.3 values typed into the test.
+- `forecasting::cpgram::tests::test_validate_cpgram_untapered_against_r` (`crates/p2a-core/src/forecasting/cpgram.rs`), added in Tier 0 (T0-WP18): the untapered cumulative periodogram of `mk(65)` (the body of `stats::cpgram` with `taper = 0`, 32 values) within 1e-10 relative of R 4.3.3 values typed into the test.
 
-    // Check basic properties
-    assert!(result.frequencies.len() > 0);
-    assert!(result.cumulative_periodogram.len() == result.frequencies.len());
-
-    // Cumulative periodogram should end at 1.0
-    let last = *result.cumulative_periodogram.last().unwrap();
-    assert!((last - 1.0).abs() < 1e-10);
-
-    // Should be monotonically increasing
-    for i in 1..result.cumulative_periodogram.len() {
-        assert!(result.cumulative_periodogram[i] >= result.cumulative_periodogram[i-1]);
-    }
-}
-```
+The two Tier 0 tests are quoted-value checks, not R-pinned. The default tapered case is not compared with R (TS-9).
 
 ## Numerical Precision Summary
 
