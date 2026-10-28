@@ -6917,7 +6917,7 @@ name = "p2a-chat"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "colored",
  "env_logger",
@@ -6936,7 +6936,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "colored",
