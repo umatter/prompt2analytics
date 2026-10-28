@@ -18,7 +18,7 @@ suppressPackageStartupMessages(library(jsonlite))
 # Register a case. `fn` receives a context `ctx` with ctx$dataset(rel) (read a
 # committed CSV), ctx$gen_dataset(name, df) (write + read back a simulated CSV)
 # and must return list(values = <named list>, reference = <chr>, call = <chr>,
-# packages = <chr vector>).
+# packages = <non-empty chr vector>).
 case <- function(id, area, method, fn) {
   stopifnot(grepl("^[a-z0-9_]+$", id), is.null(.harness$cases[[id]]))
   .harness$cases[[id]] <- list(id = id, area = area, method = method, fn = fn)
@@ -81,6 +81,9 @@ run_case <- function(c, out_dir, gen_dir, data_root) {
   res <- c$fn(ctx)
   .validate_values(c$id, res$values)
   pk <- res$packages
+  # NULL or character(0) would be written as "packages": [], which Rust and the lint reject.
+  if (!is.character(pk) || length(pk) == 0L || anyNA(pk) || !all(nzchar(pk)))
+    stop(sprintf("case %s: packages must name at least one R package (a non-empty character vector)", c$id))
   # The analysis dataset: explicit, or the last dataset the case touched.
   ds <- if (!is.null(res$dataset)) res$dataset else utils::tail(used, 1)
   if (length(ds) != 1L || !(ds %in% used)) stop(sprintf("case %s: analysis dataset must be one of the datasets it read", c$id))
@@ -99,16 +102,29 @@ run_case <- function(c, out_dir, gen_dir, data_root) {
 }
 
 # Numeric comparison of two case documents (used by --check). Returns a
-# character vector of differences (empty = identical within rel 1e-12).
+# character vector of differences (empty = identical within rel 1e-12). Each
+# value must also keep its kind (scalar, unnamed array or {names, values}), its
+# names and the position of every null (R NA).
 compare_case_files <- function(a_path, b_path, rel = 1e-12) {
   a <- jsonlite::fromJSON(a_path, simplifyVector = FALSE)
   b <- jsonlite::fromJSON(b_path, simplifyVector = FALSE)
   diffs <- character(0)
   ka <- names(a$values); kb <- names(b$values)
   if (!setequal(ka, kb)) diffs <- c(diffs, sprintf("value keys differ: %s vs %s", paste(ka, collapse = ","), paste(kb, collapse = ",")))
-  num <- function(v) if (is.list(v) && !is.null(v$values)) unlist(lapply(v$values, function(z) if (is.null(z)) NA_real_ else z)) else if (is.null(v)) NA_real_ else unlist(v)
+  kind <- function(v) if (!is.list(v)) "scalar" else if (is.null(names(v))) "array" else "named"
+  # fromJSON reads null as NULL, which unlist() would drop: map it to NA in place.
+  num <- function(v) {
+    vals <- if (kind(v) == "named") v$values else v
+    if (is.null(vals)) return(NA_real_)
+    vapply(vals, function(z) if (is.null(z)) NA_real_ else as.numeric(z), 0)
+  }
+  nms <- function(v) vapply(v$names, function(z) if (is.null(z)) NA_character_ else as.character(z), "")
   for (k in intersect(ka, kb)) {
-    x <- num(a$values[[k]]); y <- num(b$values[[k]])
+    va <- a$values[[k]]; vb <- b$values[[k]]
+    if (kind(va) != kind(vb)) { diffs <- c(diffs, sprintf("%s: kind differs: %s vs %s", k, kind(va), kind(vb))); next }
+    if (kind(va) == "named" && !identical(nms(va), nms(vb)))
+      diffs <- c(diffs, sprintf("%s: names differ: %s vs %s", k, paste(nms(va), collapse = ","), paste(nms(vb), collapse = ",")))
+    x <- num(va); y <- num(vb)
     if (length(x) != length(y)) { diffs <- c(diffs, sprintf("%s: length %d vs %d", k, length(x), length(y))); next }
     bad <- which(xor(is.na(x), is.na(y)) | (!is.na(x) & !is.na(y) & abs(x - y) > rel * pmax(abs(x), abs(y), 1e-300)))
     if (length(bad)) diffs <- c(diffs, sprintf("%s[%s]: committed %s, recomputed %s", k, paste(bad, collapse = ","),

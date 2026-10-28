@@ -127,9 +127,11 @@ Writing a case (`validation/r/cases/<area>.R`):
   `ctx$gen_dataset(name, df)`, which writes `validation/datasets/generated/<name>.csv`
   with round-trip precision and reads it back, so R computes on the doubles Rust will
   read. Data must have noise.
-- Return `list(values = ..., reference = ..., call = ..., packages = ...)`. Named
-  vectors (coefficients, SEs, CI bounds) go through `named(x)`, unnamed arrays through
-  `vec(x)`, scalars as plain numbers; `NA` becomes `null` (NaN in Rust).
+- Return `list(values = ..., reference = ..., call = ..., packages = ...)`, with
+  `packages` naming at least one R package (its version is recorded; base R cases name
+  `stats` or the package they use). Named vectors (coefficients, SEs, CI bounds) go
+  through `named(x)`, unnamed arrays through `vec(x)`, scalars as plain numbers; `NA`
+  becomes `null` (NaN in Rust).
 - Use the R function the method is validated against, never a re-implementation, and add
   `stopifnot()` checks for the property the case exists to exercise.
 
@@ -142,8 +144,9 @@ Rscript validation/r/run.R --write [ids]     # (re)write validation/expected/<id
 ```
 
 `--check` fails (exit 1) when a recomputed value differs from the committed file by more
-than 1e-12 relative, when a generated dataset differs, when a committed case has no
-definition, or when a generated dataset belongs to no case. That is what fails when an R
+than 1e-12 relative, changes its kind (scalar, unnamed array or named vector), its names
+or the position of an `NA`, when a generated dataset differs, when a committed case has
+no definition, or when a generated dataset belongs to no case. That is what fails when an R
 package upgrade changes a reference value; R writes tracked files only under `--write`.
 The harness needs R >= 4.3 with `jsonlite`, and the cases use `plm`, `fixest`,
 `sandwich`, `lmtest`, `car`, `tseries`, `quantreg`, `nlme`, `aod`, `strucchange`, `nnet`
