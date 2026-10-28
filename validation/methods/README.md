@@ -86,17 +86,22 @@ Always errors (CI gates on these now):
 
 - `registry`: a registry file that does not parse, has another schema, has no `methods`
   list, or a method with a missing, extra or mistyped key, an invalid id, a duplicate id,
-  an invalid deviation or a `supersedes_legacy` path that does not exist.
+  a `category` outside the list above, an invalid deviation or a `supersedes_legacy` path
+  that does not exist.
 - `case-file`: a registry case without its JSON; a `validation/expected/*.json` that does
-  not parse as a schema-1 case, whose `id` is not its file name, whose `dataset` or
-  `datasets` paths do not exist, or whose `dataset` is not in `datasets`; a test that loads
-  a case id that has no file.
+  not parse as a schema-1 case (a `{names, values}` value needs as many names as values),
+  whose `id` is not its file name, whose `dataset` or `datasets` paths do not exist, or
+  whose `dataset` is not in `datasets`; a test that loads a case id that has no file.
 - `orphan-case`: a schema-1 case that no method lists (cases of area `harness` are exempt).
 - `unknown-test`: a registry test id that is not in its package's `--tests` list (packages
   without a list are named in a `note:` line instead).
 - `unregistered-load`: a `fn test_*` in `crates/*/src` or `crates/*/tests` that calls
   `Case::load("<id>")`, `Case::try_load("<id>")` or `load_case("<id>")` while no method
   lists that case together with a test of the crate's package of that name.
+- `registered-test-loads-no-case`: a registry test whose package and name match a scanned
+  `fn test_*` (by its last path segment, as `unregistered-load` does) that loads none of
+  the method's cases with one of the three calls above. A registry test that matches no
+  scanned function is not checked here; `unknown-test` checks that it exists.
 - `missing-doc`: a registry `doc` that does not exist.
 
 Warnings, errors with `--strict` (legacy documentation debt; CI switches to `--strict` once
@@ -107,9 +112,10 @@ it is cleared):
 - `dead-link`: a relative Markdown link in `validation/**/*.md` whose target does not exist.
 - `dead-test-name`: a test name in `validation/**/*.md`, `README.md` or `CLAUDE.md` (in
   inline code, or in a fenced `cargo test` command, `fn` line or `::` path) that matches no
-  test, neither exactly nor as a prefix (libtest filters are substring prefixes of the
-  path). Identifiers that only look like test names go into
-  `validation/tools/lint_ignore_names.txt`.
+  test, neither exactly nor as a prefix (a libtest filter matches every test whose path
+  contains it; the lint counts a name as live when it equals, or is a prefix of, the last
+  path segment of a listed test or of a `fn test_*` in `crates/`). Identifiers that only
+  look like test names go into `validation/tools/lint_ignore_names.txt`.
 - `missing-dataset`: a `**File**:` entry in `validation/datasets/README.md` with no file.
 
 `validation/reports/` (run output) and `validation/tools/tests/fixtures/` (the lint's own

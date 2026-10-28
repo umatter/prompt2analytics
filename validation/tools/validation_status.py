@@ -76,7 +76,8 @@ DOC_RE = re.compile(r"^\s*Doc-tests ")
 LIST_RE = re.compile(r"^(\S+): (test|bench)$")
 RUN_RE = re.compile(r"(?:^|\s)test (\S+)(?: - should panic)? \.\.\. (ok|FAILED|ignored)\b")
 TOTALS_RE = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;")
-COMPILE_ERROR_RE = re.compile(r"^error\[E\d+\]")
+# rustc's `error[E0425]: ...` lines and cargo's `error: could not compile `<crate>` ...`.
+COMPILE_ERROR_RE = re.compile(r"^(?:error\[E\d+\]|error: could not compile\b)")
 RUN_STATUS = {"ok": "ok", "FAILED": "failed", "ignored": "ignored"}
 
 
@@ -141,7 +142,7 @@ def parse_cargo_log(text: str, package: str) -> dict:
     compile_errors = []
     current = None  # None: before any target; False: doc tests or an uncollected target
     for line in text.splitlines():
-        if COMPILE_ERROR_RE.match(line) or "could not compile" in line:
+        if COMPILE_ERROR_RE.match(line):
             compile_errors.append(line.strip())
             continue
         m = TARGET_RE.match(line)
@@ -372,16 +373,25 @@ def collect_legacy(json_path: Path, root: Path) -> dict:
 
 
 def git_commit(root: Path) -> str:
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
+    """Short HEAD commit of `root`, with `-dirty` appended when tracked files differ
+    from it (staged or not; untracked files do not count), or "unknown"."""
+
+    def git(*args):
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(root), *args], capture_output=True, text=True, check=False
+            )
+        except OSError:
+            return None
+        return out.stdout.strip() if out.returncode == 0 else None
+
+    commit = git("rev-parse", "--short", "HEAD")
+    if not commit:
         return "unknown"
-    return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else "unknown"
+    status = git("status", "--porcelain", "--untracked-files=no")
+    if status is None:
+        return "unknown"
+    return commit + "-dirty" if status else commit
 
 
 def package_summary(name: str, pkg: dict) -> str:
@@ -415,7 +425,8 @@ def collect_package(results: dict, package: str, logs, exit_code, selected, feat
         passed, failed, ignored = (values.count(s) for s in ("ok", "failed", "ignored"))
     ran = passed + failed  # an ignored test did not run
     errors = []
-    if exit_code:
+    # Compile errors in a log fail the package even when no exit code was passed.
+    if exit_code or compile_errors:
         status = "compile_error" if compile_errors else "fail"
         errors.extend(compile_errors[:20])
         if not compile_errors:
@@ -765,6 +776,7 @@ def _value_ok(v) -> bool:
         return (
             isinstance(names, list)
             and isinstance(values, list)
+            and len(names) == len(values)
             and all(isinstance(x, str) for x in names)
             and all(num(x) for x in values)
         )
@@ -813,6 +825,10 @@ def load_registry(root: Path, findings: list):
                     problems.append(f"`{key}` must be a {typ.__name__}")
             if isinstance(m.get("id"), str) and not ID_RE.match(m["id"]):
                 problems.append("`id` must match ^[a-z0-9_]+$")
+            if isinstance(m.get("category"), str) and m["category"] not in CATEGORIES:
+                problems.append(
+                    f"`category` {m['category']!r} must be one of: {', '.join(CATEGORIES)}"
+                )
             for key in ("cases", "tests"):
                 v = m.get(key)
                 if isinstance(v, list) and (not v or not all(isinstance(x, str) and x for x in v)):
@@ -886,7 +902,10 @@ def load_cases(root: Path, findings: list) -> dict:
         else:
             for k, v in values.items():
                 if not _value_ok(v):
-                    problems.append(f"value `{k}` is not a number, an array or {{names, values}}")
+                    problems.append(
+                        f"value `{k}` is not a number, an array or {{names, values}} "
+                        "with as many names as values"
+                    )
         dataset = doc.get("dataset")
         if isinstance(dataset, str) and dataset not in datasets:
             problems.append(f"dataset {dataset} is not listed in `datasets`")
@@ -957,6 +976,7 @@ def lint(root: Path, test_lists, strict=False) -> list:
         for cid in m["cases"]:
             registry_tests.setdefault(cid, set()).update(m["tests"])
     packages = {}
+    scanned_loads = {}  # (package, fn name) -> case ids its body loads (all fns of that name)
     for path in rust_files(root):
         text = read_text(path)
         if "fn test_" not in text:
@@ -969,6 +989,7 @@ def lint(root: Path, test_lists, strict=False) -> list:
         functions, keep, comments = test_functions(text)
         for name, line, start, end in functions:
             loads = [(m.group(1), keep.count("\n", 0, start + m.start()) + 1) for m in _LOAD_RE.finditer(keep, start, end)]
+            scanned_loads.setdefault((package, name), set()).update(cid for cid, _ in loads)
             for cid, load_line in loads:
                 if cid not in case_files:
                     findings.append(
@@ -1006,6 +1027,23 @@ def lint(root: Path, test_lists, strict=False) -> list:
                             f"test `{name}` cites a legacy CSV as its reference values but loads no R case",
                         )
                     )
+
+    # Registered tests that load none of their method's cases (tests that are not a
+    # scanned `fn test_*` are left to unknown-test).
+    for rel, m, line in methods:
+        for tid in m["tests"]:
+            key = (tid.split("::", 1)[0], tid.rsplit("::", 1)[-1])
+            if key in scanned_loads and not scanned_loads[key] & set(m["cases"]):
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        "registered-test-loads-no-case",
+                        rel,
+                        line,
+                        f"method `{m['id']}`: test {tid} loads none of the method's cases "
+                        f"({', '.join(m['cases'])})",
+                    )
+                )
 
     # Documentation debt.
     for path in validation_markdown(root):

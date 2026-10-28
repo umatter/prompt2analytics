@@ -125,6 +125,28 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(pkg["status"], "compile_error")
         self.assertTrue(any(e.startswith("error[E0425]") for e in pkg["errors"]), pkg["errors"])
 
+    def test_compile_error_without_exit_code_is_compile_error(self):
+        # A log with compile errors is never a pass, even when no exit code is given.
+        code, text, results = self.collect("--package", "p2a-core", FIX / "cargo/compile_error.txt")
+        self.assertEqual(code, 1, text)
+        pkg = results["packages"]["p2a-core"]
+        self.assertEqual(pkg["status"], "compile_error")
+        self.assertIsNone(pkg["exit_code"])
+        self.assertTrue(any(e.startswith("error[E0425]") for e in pkg["errors"]), pkg["errors"])
+        self.assertIn("collect: p2a-core: compile_error (ran 0", text)
+
+    def test_could_not_compile_in_test_output_is_not_a_compile_error(self):
+        log = Path(self._tmp.name) / "run.txt"
+        log.write_text(
+            "     Running unittests src/lib.rs (target/debug/deps/p2a_core-0)\n"
+            "test stats::tests::test_validate_x ... ok\n"
+            "note: the message said it could not compile the expression\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        )
+        code, text, results = self.collect("--package", "p2a-core", "--selected", "1", log)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(results["packages"]["p2a-core"]["status"], "pass")
+
     def test_selected_but_not_run_is_fail(self):
         # Ignored tests did not run: a selected test that is #[ignore]d is not validated.
         code, text, results = self.collect(
@@ -234,6 +256,33 @@ class TestCollect(unittest.TestCase):
             b.write_text("k,w\nx,1.0\ny,NA\n")
             self.assertEqual(vs.compare_csv(a, b)[0], "differs")
 
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_commit_is_marked_dirty_when_tracked_files_changed(self):
+        repo = Path(self._tmp.name) / "repo"
+        repo.mkdir()
+
+        def git(*args):
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                 "-c", "commit.gpgsign=false", *args],
+                check=True, capture_output=True,
+            )
+
+        self.assertEqual(vs.git_commit(repo), "unknown")
+        git("init", "-q")
+        self.assertEqual(vs.git_commit(repo), "unknown")  # no commit yet
+        (repo / "a.txt").write_text("one\n")
+        git("add", "a.txt")
+        git("commit", "-q", "--no-verify", "-m", "one")
+        clean = vs.git_commit(repo)
+        self.assertRegex(clean, r"^[0-9a-f]{7,}$")
+        (repo / "untracked.txt").write_text("x\n")
+        self.assertEqual(vs.git_commit(repo), clean)  # untracked files do not count
+        (repo / "a.txt").write_text("two\n")
+        self.assertEqual(vs.git_commit(repo), clean + "-dirty")
+        git("add", "a.txt")
+        self.assertEqual(vs.git_commit(repo), clean + "-dirty")  # staged, not committed
+
     def test_malformed_results_file_is_usage_error(self):
         self.out.write_text("{not json")
         code, text = run("collect", "-o", self.out, "--r-check", FIX / "r/check_ok.txt")
@@ -328,6 +377,7 @@ class TestLint(TreeCase):
                 supersedes_legacy=["validation/expected/gone.csv"]
             ),
             "schema 2": lambda d: d.update(schema=2),
+            "unknown category": lambda d: self.method(d, "demo_mean").update(category="statistics"),
         }
         original = self.path("validation/methods/demo.json").read_text()
         for label, fn in mutations.items():
@@ -353,6 +403,9 @@ class TestLint(TreeCase):
             "id differs": lambda d: d.update(id="other_case"),
             "dataset not in datasets": lambda d: d.update(datasets=[]),
             "text value": lambda d: d["values"].update(mean="text"),
+            "names and values of unequal length": lambda d: d["values"].update(
+                pair={"names": ["a", "b"], "values": [1.0]}
+            ),
         }
         original = self.path("validation/expected/demo_case.json").read_text()
         for label, fn in cases.items():
@@ -404,6 +457,36 @@ class TestLint(TreeCase):
         self.assert_finding(code, out, "ERROR", "unregistered-load", "test_validate_extra", "demo_case")
         lines = [ln for ln in out.splitlines() if "unregistered-load" in ln]
         self.assertEqual(len(lines), 1, out)
+
+    def test_registered_test_that_loads_no_case(self):
+        src = self.path("crates/demo/src/lib.rs")
+        original = src.read_text()
+        variants = {
+            # The registered test loads nothing at all.
+            "no load": 'let c = 1;',
+            # It loads a harness case, which is none of demo_var's cases.
+            "harness case only": 'let c = p2a_validation::Case::load("selftest_case");',
+        }
+        for label, body in variants.items():
+            with self.subTest(label):
+                src.write_text(
+                    original.replace('let c = p2a_validation::Case::load("demo_var_case");', body)
+                )
+                code, out = self.lint()
+                self.assert_finding(
+                    code, out, "ERROR", "registered-test-loads-no-case",
+                    "demo_var", "demo::stats::tests::test_validate_demo_var", "demo_var_case",
+                )
+                lines = [ln for ln in out.splitlines() if "registered-test-loads-no-case" in ln]
+                self.assertEqual(len(lines), 1, out)
+        with self.subTest("a registered test that is not in the sources is not checked here"):
+            src.write_text(original)
+            self.edit_json(
+                "validation/methods/demo.json",
+                lambda d: self.method(d, "demo_var")["tests"].append("demo::stats::tests::test_validate_gone"),
+            )
+            code, out = self.lint(tests=False)
+            self.assertEqual(code, 0, out)
 
     def test_load_in_comment_or_string_is_not_a_load(self):
         src = self.path("crates/demo/src/lib.rs")
