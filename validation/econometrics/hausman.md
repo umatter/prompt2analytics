@@ -1,198 +1,112 @@
-# Validation: Hausman Specification Test
+# Validation: Hausman Specification Test (FE vs RE)
 
-## Method Overview
+## Method and options
 
-The Hausman test compares Fixed Effects (FE) and Random Effects (RE) estimators to determine which is more appropriate. It tests whether the entity effects are correlated with the regressors.
+H0: the entity effects are uncorrelated with the regressors (random effects is consistent
+and efficient); H1: they are correlated (use fixed effects). As `plm::phtest` (method
+"chisq"):
 
-**Null Hypothesis**: H₀: RE is consistent (use RE)
-**Alternative**: H₁: RE is inconsistent, FE is consistent (use FE)
-
-**Test Statistic**:
 ```
-H = (β_FE - β_RE)' [Var(β_FE) - Var(β_RE)]⁻¹ (β_FE - β_RE) ~ χ²(k)
+H = |d' D^- d|,  d = b_FE - b_RE,  D = Var(b_FE) - Var(b_RE),  H ~ chi2(rank D)
 ```
 
-where k is the number of time-varying regressors.
+- Core: `p2a_core::run_hausman_test(dataset, y, x, entity)`; MCP tool: `hausman_test`.
+- Both models are estimated with their classical covariances (phtest's default), whatever
+  covariance the caller uses for FE or RE elsewhere; `HausmanResult.vcov_method` says so.
+- The slopes are matched by name (the RE intercept is skipped).
+- D is symmetrised, scaled by the FE standard errors (`D_s = S D S`,
+  `S = diag(Var(b_FE)_jj^-1/2)`) and eigen-decomposed; eigenvalues with
+  `|lambda| <= 100 k eps max(1, max|lambda|)` are dropped. When D is invertible the
+  statistic equals phtest's exactly, and the scaling makes the rank decision independent of
+  regressor units.
+- `df` is the rank of D. A D that is not positive definite (phtest then takes the absolute
+  value) or is singular (generalized inverse) is reported in `HausmanResult.warnings`,
+  followed by the random-effects warnings. A D that is zero to machine precision for every
+  slope (for example, no regressor varies between entities, so FE and RE coincide) is
+  refused with `InvalidSpecification`.
 
-## Reference Implementations
+## R reference
 
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| plm | R | `phtest()` | 2.6-x |
+Cases `panel_hausman_grunfeld`, `panel_hausman_grunfeld_unbalanced` and
+`panel_hausman_sim_corr`, defined in `validation/r/cases/panel.R`. R 4.3.3, plm 2.6.7:
 
-## Test Cases
-
-### Test 1: Grunfeld Dataset - Hausman Test
-
-**Dataset**: `validation/datasets/grunfeld.csv` (n=200)
-
-**R Code**:
 ```r
-library(plm)
-
-data(Grunfeld)
-pdata <- pdata.frame(Grunfeld, index = c("firm", "year"))
-
-# Estimate both models
-fe_fit <- plm(inv ~ value + capital, data = pdata, model = "within")
-re_fit <- plm(inv ~ value + capital, data = pdata, model = "random")
-
-# Hausman test
-phtest(fe_fit, re_fit)
-
-# Expected output:
-#         Hausman Test
-# data:  inv ~ value + capital
-# chisq = 2.3304, df = 2, p-value = 0.3119
-# alternative hypothesis: one model is inconsistent
+pd <- pdata.frame(d, index = c("firm", "year"))
+fe <- plm(inv ~ value + capital, data = pd, model = "within")
+re <- plm(inv ~ value + capital, data = pd, model = "random")
+phtest(fe, re)
+eigen(vcov(fe)[cn, cn] - vcov(re)[cn, cn])   # cn = names(coef(fe))
 ```
 
-**Results Comparison**:
+Datasets: `validation/datasets/grunfeld.csv`,
+`validation/datasets/generated/grunfeld_unbalanced.csv` and
+`validation/datasets/generated/panel_corr_effects.csv` (entity effects correlated with
+`value`, so the test must reject).
 
-| Statistic | R's phtest | p2a Rust | Tolerance |
-|-----------|------------|----------|-----------|
-| χ² statistic | 2.33 | ~2.33 | 0.1 |
-| df | 2 | 2 | exact |
-| p-value | 0.312 | ~0.312 | 0.01 |
+## Pinned values (R, 12 significant digits; the case files hold 17)
 
-**Interpretation**: p-value > 0.05 → fail to reject H₀ → RE is acceptable
+| case | χ² | df | p | coef. difference `value` | coef. difference `capital` | eigenvalues of V_FE - V_RE |
+|---|---|---|---|---|---|---|
+| `panel_hausman_grunfeld` | 2.33036689368 | 2 | 0.311865446055 | 0.000342651888235 | 0.00195235846943 | 1.62385498269e-06, 3.48716027853e-05 |
+| `panel_hausman_grunfeld_unbalanced` | 2.7465769254 | 2 | 0.253272710745 | -0.00226382783349 | 0.00341383099639 | 2.24420764387e-06, 5.91442991045e-05 |
+| `panel_hausman_sim_corr` | 7203.84027461 | 2 | 0 | -0.3270946076 | 0.0158249704287 | -0.000881180363117, 1.48583977601e-05 |
 
-**Rust Test**: `crates/p2a-core/src/econometrics/panel.rs::tests::test_validate_hausman_grunfeld`
 
----
+The eigenvalues are not a p2a output; the test checks that the "not positive definite"
+warning appears exactly when one is negative (only `panel_hausman_sim_corr`).
 
-### Test 2: Synthetic Data Where FE Is Required
+## Tests
 
-Create data where entity effects are correlated with regressors (RE invalid).
+- `p2a-core`: `econometrics::panel::tests::test_validate_hausman_grunfeld`,
+  `econometrics::panel::tests::test_validate_hausman_grunfeld_unbalanced`,
+  `econometrics::panel::tests::test_validate_hausman_sim_corr` pin the statistic, df,
+  p-value and coefficient differences, the covariance label, the warning, and (Grunfeld)
+  the recommendation text.
+- Unit tests of the quadratic form in
+  `econometrics::panel::specification_test::tests`: `test_hausman_form_full_rank`,
+  `test_hausman_form_indefinite_takes_absolute_value`, `test_hausman_form_singular_uses_rank`,
+  `test_hausman_form_zero_difference_is_an_error`, `test_hausman_form_units_do_not_matter`;
+  and `econometrics::panel::tests::test_hausman_refuses_when_fe_and_re_coincide`,
+  `econometrics::panel::tests::test_hausman_small_panel_recommendation`.
+- `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_hausman_test` checks the
+  `hausman_test` text against the case at display precision.
+- Registry: `validation/methods/panel.json`, method `panel_hausman`.
 
-**R Code**:
-```r
-library(plm)
+## Tolerance
 
-set.seed(42)
-n_entities <- 100
-n_periods <- 10
-n <- n_entities * n_periods
+`validation/README.md`, n = 120-300: statistics 1e-6 relative, p-values 1e-6 relative or
+1e-12 absolute; df exact.
 
-entity <- rep(1:n_entities, each = n_periods)
-time <- rep(1:n_periods, n_entities)
+## What changed in Tier 1
 
-# Entity effect correlated with x
-alpha <- rnorm(n_entities)
-x <- alpha[entity] + rnorm(n)  # x is correlated with entity effect!
-y <- alpha[entity] + 2.0 * x + rnorm(n, 0, 0.5)
+- The statistic used only the diagonal of D, floored negative entries and dropped them, and
+  its RE covariance was wrong (ECON-1). It returned chi2 0.0000, p 1.0000 on Grunfeld (phtest
+  2.3304, p 0.3119) and recommended random effects as "FE and RE produce nearly identical
+  estimates"; that p > 0.90 recommendation is removed (ECON-2). With the corrected RE
+  covariance alone, the diagonal formula would still give 0.6381 (Grunfeld), 1.3499
+  (unbalanced) and 7212.01 (simulated, where it drops the negative direction).
+- `df` was the number of slopes; it is now the rank of D.
 
-data <- data.frame(y = y, x = x, entity = factor(entity), time = factor(time))
-pdata <- pdata.frame(data, index = c("entity", "time"))
+## Known differences
 
-fe_fit <- plm(y ~ x, data = pdata, model = "within")
-re_fit <- plm(y ~ x, data = pdata, model = "random")
+- A zero difference (FE and RE coincide) is refused. phtest returns roundoff there (for
+  example chisq 2.9e-14, p = 1 on a panel whose regressor has no between variation).
+- phtest uses `solve(D)` and `df = length(d)`, so it stops on a singular D (or returns
+  roundoff when D is nearly singular). p2a uses a generalized inverse with `df = rank D`
+  and a warning; on the three cases D has full rank and the two agree.
 
-phtest(fe_fit, re_fit)
-# Should reject H0 (low p-value) → use FE
-```
-
-**Validation Criteria**:
-- p-value < 0.05 (reject H₀)
-- Large χ² statistic
-
----
-
-### Test 3: Synthetic Data Where RE Is Valid
-
-Create data where entity effects are uncorrelated with regressors (RE valid).
-
-**R Code**:
-```r
-library(plm)
-
-set.seed(42)
-n_entities <- 100
-n_periods <- 10
-n <- n_entities * n_periods
-
-entity <- rep(1:n_entities, each = n_periods)
-time <- rep(1:n_periods, n_entities)
-
-# Entity effect uncorrelated with x
-alpha <- rnorm(n_entities)
-x <- rnorm(n)  # x is independent of entity effect
-y <- alpha[entity] + 2.0 * x + rnorm(n, 0, 0.5)
-
-data <- data.frame(y = y, x = x, entity = factor(entity), time = factor(time))
-pdata <- pdata.frame(data, index = c("entity", "time"))
-
-fe_fit <- plm(y ~ x, data = pdata, model = "within")
-re_fit <- plm(y ~ x, data = pdata, model = "random")
-
-phtest(fe_fit, re_fit)
-# Should fail to reject H0 (high p-value) → RE is acceptable
-```
-
-**Validation Criteria**:
-- p-value > 0.05 (fail to reject H₀)
-- Small χ² statistic
-
----
-
-### Test 4: Multiple Regressors
-
-**R Code**:
-```r
-library(plm)
-
-data(Grunfeld)
-pdata <- pdata.frame(Grunfeld, index = c("firm", "year"))
-
-# With multiple regressors
-fe_fit <- plm(inv ~ value + capital, data = pdata, model = "within")
-re_fit <- plm(inv ~ value + capital, data = pdata, model = "random")
-
-phtest(fe_fit, re_fit)
-# df = 2 (number of time-varying regressors)
-```
-
-**Validation Criteria**:
-- Degrees of freedom = number of regressors in FE model
-- Test uses difference in coefficients for all regressors
-
----
-
-## Test Statistic Details
-
-The Hausman statistic is computed as:
-```
-H = (β̂_FE - β̂_RE)' [V̂(β̂_FE) - V̂(β̂_RE)]⁻¹ (β̂_FE - β̂_RE)
-```
-
-Under H₀, the difference in variance matrices is positive semi-definite.
-
-**Note**: In practice, the variance difference matrix may not be positive definite due to numerical issues. Some implementations use a generalized inverse.
-
-## Numerical Precision Summary
-
-| Dataset | χ² Precision | p-value Precision |
-|---------|-------------|-------------------|
-| Grunfeld | < 0.1 | < 0.01 |
-| Synthetic | < 0.5 | < 0.02 |
-
-## Known Differences
-
-1. **Variance estimation**: Different variance estimators may give different results.
-2. **Regularization**: Some implementations add small diagonal to avoid singularity.
-3. **One-sided test**: Standard Hausman is two-sided; some argue for one-sided.
-
-## Running the Tests
+## How to run
 
 ```bash
-# Run Hausman test validation
-cargo test -p p2a-core -- hausman
-
-# Run with output
-cargo test -p p2a-core -- test_hausman --nocapture
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::panel::tests::test_validate_hausman
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::panel::specification_test
+cargo test -p p2a-mcp --lib --no-default-features --features "http,llm,auth,websocket" -- tools::handlers::panel::tests
+Rscript validation/r/run.R --check
 ```
 
 ## References
 
-- Hausman, J.A. (1978). "Specification Tests in Econometrics". *Econometrica*, 46(6), 1251-1271.
-- Baltagi, B.H. (2013). *Econometric Analysis of Panel Data*, 5th ed. Wiley. Chapter 4.
+- Hausman, J.A. (1978). Specification tests in econometrics. *Econometrica*, 46(6),
+  1251-1271.
+- Croissant, Y. & Millo, G. (2008). Panel data econometrics in R: The plm package.
+  *Journal of Statistical Software*, 27(2), 1-43.

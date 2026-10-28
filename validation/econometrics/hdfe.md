@@ -1,233 +1,115 @@
 # Validation: High-Dimensional Fixed Effects (HDFE)
 
-## Method Overview
+## Method and options
 
-High-Dimensional Fixed Effects (HDFE) estimation uses the Method of Alternating Projections (MAP) to efficiently absorb multiple categorical variables without creating dummy variables. This is essential for panel data with many fixed effect dimensions.
+`run_hdfe` absorbs one or more categorical fixed-effect dimensions with the method of
+alternating projections (MAP) and runs OLS on the demeaned data, without dummy variables.
 
-**Key Parameters**:
-- `y_col`: Outcome variable
-- `x_cols`: Predictor variables
-- `fe_cols`: Fixed effect variables to absorb
-- `se_type`: Standard error type (Standard, HC0-HC3)
-- `config`: Optional configuration (tolerance, max iterations, acceleration)
+- Core: `p2a_core::run_hdfe(dataset, y, x, fe_cols, config, se_type)`; MCP tool:
+  `panel_hdfe`.
+- `se_type` (`CovarianceType`): `Standard` (iid) or HC0-HC3; HC1 uses `n / df_resid`. There
+  is no cluster option.
+- `config` (`HdfeConfig`): tolerance, iteration limit and acceleration of the MAP; invalid
+  controls and non-finite data are refused.
+- Degrees of freedom: `df_resid = n - K - (sum of levels - redundant levels)`.
+- Fit statistics: within R-squared, adjusted within R-squared in plm's convention
+  `1 - (1 - R2)(n - 1)/df_resid`, and the within F test of the slopes.
 
-**Use Cases**:
-- Two-way fixed effects (firm + year)
-- Multi-way fixed effects (firm + year + industry)
-- Large panel datasets with many FE levels
+## R reference
 
-## Reference Implementations
+Case `panel_hdfe_grunfeld`, defined in `validation/r/cases/panel.R`. R 4.3.3, fixest 0.14.2,
+plm 2.6.7, on `validation/datasets/grunfeld.csv`:
 
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| lfe | R | `felm()` | 2.8-8 |
-| plm | R | `plm(model="within")` | 2.6-3 |
-
-**Primary Reference**:
-> Gaure, S. (2013). "lfe: Linear Group Fixed Effects". *The R Journal*, 5(2), 104-117.
-> https://journal.r-project.org/articles/RJ-2013-031/
-
-## Test Cases
-
-### Test 1: Grunfeld Dataset - Two-Way Fixed Effects
-
-**Dataset**: `validation/datasets/grunfeld.csv` (n=200, 10 firms × 20 years)
-
-The Grunfeld (1958) investment dataset is the canonical panel data example, containing investment data for 10 large US firms over 20 years (1935-1954).
-
-**R Code**:
 ```r
-library(plm)
-library(lfe)
-
-# Load data
-data(Grunfeld)
-
-# Two-way fixed effects: firm + year
-est <- felm(inv ~ value + capital | firm + year, data = Grunfeld)
-summary(est)
-
-# Expected output:
-#              Estimate Std. Error t value  Pr(>|t|)
-# value       0.1177200  0.0137534   8.559 4.06e-15 ***
-# capital     0.3579229  0.0227241  15.749  < 2e-16 ***
-# ---
-# Residual standard error: 52.77 on 169 degrees of freedom
-# Multiple R-squared(proj model): 0.7668,   Adjusted R-squared: 0.6716
-# F-statistic(proj model): 277.8 on 2 and 169 DF,  p-value: < 2.2e-16
+h <- feols(inv ~ value + capital | firm + year, g, vcov = "iid")
+se(summary(h, vcov = "iid")); se(summary(h, vcov = "hetero"))
+r2(h, "wr2"); fitstat(h, "wf")
+summary(plm(inv ~ value + capital, data = pdata.frame(g, index = c("firm", "year")),
+            model = "within", effect = "twoways"))$r.squared["adjrsq"]
+feols(inv ~ value + capital | firm, g, vcov = "iid")   # firm effects only
 ```
 
-**Results Comparison**:
+## Pinned values (R, 12 significant digits; the case file holds 17)
 
-| Statistic | R's felm() | p2a Rust | Difference | Tolerance |
-|-----------|------------|----------|------------|-----------|
-| β(value) | 0.11772003 | 0.11771586 | 4.2e-6 | 1e-4 |
-| β(capital) | 0.35792286 | 0.35791627 | 6.6e-6 | 1e-4 |
-| SE(value) | 0.01375339 | 0.01375128 | 2.1e-6 | 1e-4 |
-| SE(capital) | 0.02272406 | 0.02271901 | 5.1e-6 | 1e-4 |
-| df_resid | 169 | 169 | 0 | exact |
-| within R² | 0.7201 | 0.7201 | 0 | 1e-4 |
+| quantity | `value` | `capital` |
+|---|---|---|
+| coefficient (firm + year) | 0.117715855083 | 0.357916273073 |
+| SE iid | 0.0137512830036 | 0.0227190108826 |
+| SE hetero (HC1) | 0.0191799205213 | 0.0544026642585 |
+| t (HC1) | 6.13745270486 | 6.57902104523 |
+| p (HC1) | 5.78157933598e-09 | 5.69168652956e-10 |
+| SE clustered by firm (not pinned) | 0.0108244294769 | 0.0478483965926 |
+| coefficient (firm only) | 0.110123804121 | 0.3100653413 |
+| SE iid (firm only) | 0.011856694214 | 0.0173545027756 |
 
-**Rust Test**: `crates/p2a-core/src/econometrics/hdfe.rs::tests::test_validate_grunfeld_coefficients`
+| quantity | value |
+|---|---|
+| within R² | 0.720145212924 |
+| adj. within R² (plm convention, pinned) | 0.670466848355 |
+| adj. within R² (fixest `war2`, not pinned) | 0.716833321953 |
+| full-model R² (not pinned) | 0.951693399681 |
+| within F | 217.442306876 |
+| within F df1 | 2 |
+| within F df2 | 169 |
+| within F p | 1.844236205e-47 |
+| df_resid | 169 |
+| n | 200 |
 
----
 
-### Test 2: Grunfeld Dataset - Single Fixed Effect (Firm Only)
+## Tests
 
-**R Code**:
-```r
-library(plm)
-data(Grunfeld)
+- R-pinned (`p2a-core`, registered as method `panel_hdfe` in `validation/methods/panel.json`):
+  - `econometrics::hdfe::tests::test_validate_hdfe_grunfeld`: firm + year, iid SEs:
+    coefficients, SEs, within R-squared, adjusted within R-squared (plm), within F with its
+    df and p-value, `df_resid`, n, and the level counts (10, 20).
+  - `econometrics::hdfe::tests::test_validate_hdfe_grunfeld_hc1`: HC1 SEs, t and p
+    against fixest's `hetero`.
+  - `econometrics::hdfe::tests::test_validate_hdfe_grunfeld_firm_only`: firm effects only,
+    coefficients and iid SEs (the one-way within estimator).
+- DGP recovery (no R values compared): `econometrics::hdfe::tests::test_validate_against_felm_coefficients`,
+  `econometrics::hdfe::tests::test_validate_against_felm_standard_errors`,
+  `econometrics::hdfe::tests::test_validate_against_felm_r_squared`,
+  `econometrics::hdfe::tests::test_validate_single_fe_against_within_estimator`,
+  `econometrics::hdfe::tests::test_validate_large_panel_coefficient_recovery`. They check
+  that known coefficients and degrees of freedom are recovered on simulated panels.
 
-pdata <- pdata.frame(Grunfeld, index = c("firm", "year"))
-fe <- plm(inv ~ value + capital, data = pdata, model = "within")
-coef(fe)
-#      value    capital
-# 0.11013083 0.31004929
+On a balanced firm x year panel the two demeaning projections commute, so the MAP is exact
+after one sweep and the Grunfeld pins need no iterative allowance.
 
-# Standard errors
-summary(fe)$coefficients[, "Std. Error"]
-#      value    capital
-# 0.01157131 0.01730293
-```
+## Tolerance
 
-**Results Comparison**:
+`validation/README.md`, n = 120-300: coefficients 1e-8 relative, standard errors and
+statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute; counts and degrees of
+freedom exact.
 
-| Statistic | R's plm | p2a Rust | Difference | Tolerance |
-|-----------|---------|----------|------------|-----------|
-| β(value) | 0.11013083 | 0.11012380 | 7.0e-6 | 1e-4 |
-| β(capital) | 0.31004929 | 0.31006534 | 1.6e-5 | 1e-4 |
+## What changed in Tier 1
 
-**Rust Test**: `crates/p2a-core/src/econometrics/hdfe.rs::tests::test_validate_grunfeld_single_fe_matches_within`
+`run_hdfe` is unchanged; its tests were not pinned to R. They compared with literals R does
+not produce (felm coefficients 0.11772003, 0.35792286 and SEs 0.01375339, 0.02272406, firm-only
+0.11013083, 0.31004929; within R-squared 0.7201) at tolerances of 1e-4 to 1e-2, on an
+inline copy of the dataset. The page also quoted a felm table for Grunfeld and an R output
+for the small simulated example (x1 0.99766, SE 0.02834) that R does not give: fixest on
+that data gives x1 0.9802154032 (SE 0.01506135460) and x2 0.4826382350 (SE 0.02363228724)
+with 13 residual df. Both are removed.
 
----
+## Known differences
 
-### Test 3: Synthetic Data - Two-Way FE with Known DGP
+- The adjusted within R-squared follows plm (0.6704668484), not fixest's `war2`
+  (0.7168333220), which uses a different degrees-of-freedom convention.
+- No cluster option, so fixest's firm-clustered SEs are not compared.
+- HC2 and HC3 are not pinned (ECON-22).
 
-**Data Generating Process**:
-```
-y = 1.0 × x1 + 0.5 × x2 + α_id + γ_firm + ε
-```
-
-Where:
-- True coefficients: β₁ = 1.0, β₂ = 0.5
-- ID effects: [0.5, -0.3, 0.2]
-- Firm effects: [1.0, 0.0, -0.5]
-- ε ~ small noise (|ε| < 0.15)
-
-**R Code**:
-```r
-library(lfe)
-
-# Synthetic data (n=20)
-x1 <- c(0.37, -0.56, 0.36, 0.63, 0.40, -0.11, 1.51, -0.09, 2.02, -0.06,
-        1.30, 2.29, -1.39, -0.28, -0.13, 0.64, -0.28, -2.66, 2.40, -0.13)
-x2 <- c(-0.31, -1.78, -0.17, 0.98, -1.07, -0.14, -0.43, -0.62, 1.04, -0.66,
-        -0.68, 0.18, -0.32, 1.10, -1.25, -0.57, 0.82, 0.69, 0.55, -0.06)
-id <- factor(c(1, 2, 1, 3, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2))
-firm <- factor(c(1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3, 3, 1, 1))
-
-id.eff <- c(0.5, -0.3, 0.2)
-firm.eff <- c(1.0, 0.0, -0.5)
-noise <- c(0.1, -0.05, 0.08, -0.12, 0.03, 0.07, -0.04, 0.11, -0.06, 0.02,
-           -0.09, 0.05, 0.13, -0.08, 0.04, -0.07, 0.06, 0.01, -0.03, 0.09)
-
-y <- 1.0 * x1 + 0.5 * x2 + id.eff[id] + firm.eff[firm] + noise
-
-d <- data.frame(y = y, x1 = x1, x2 = x2, id = id, firm = firm)
-est <- felm(y ~ x1 + x2 | id + firm, data = d)
-summary(est)
-```
-
-**Results Comparison**:
-
-| Parameter | True Value | R's felm() | p2a Rust | Tolerance |
-|-----------|------------|------------|----------|-----------|
-| β(x1) | 1.0 | ~1.0 | ~1.0 | 0.05 |
-| β(x2) | 0.5 | ~0.5 | ~0.5 | 0.05 |
-| df_resid | 13 | 13 | 13 | exact |
-
-**Rust Test**: `crates/p2a-core/src/econometrics/hdfe.rs::tests::test_validate_against_felm_coefficients`
-
----
-
-### Test 4: Single Fixed Effect (Within Estimator Equivalence)
-
-**Data Generating Process**:
-```
-y = 2.0 × x + α_id + ε
-```
-
-**R Code**:
-```r
-library(lfe)
-library(plm)
-
-# Panel: 3 entities, 4 time periods
-d <- data.frame(
-  id = factor(rep(1:3, each=4)),
-  t = rep(1:4, 3),
-  x = c(1.0, 2.0, 3.0, 4.0,    # id=1
-        1.5, 2.5, 3.5, 4.5,    # id=2
-        2.0, 3.0, 4.0, 5.0)    # id=3
-)
-
-noise <- c(0.1, -0.1, 0.05, -0.05, 0.08, -0.08, 0.03, -0.03, 0.06, -0.06, 0.02, -0.02)
-d$y <- 2.0 * d$x + c(rep(0, 4), rep(5, 4), rep(10, 4)) + noise
-
-# felm with single FE
-est_felm <- felm(y ~ x | id, data = d)
-coef(est_felm)
-
-# plm within estimator (should match)
-pdata <- pdata.frame(d, index=c("id", "t"))
-est_plm <- plm(y ~ x, data=pdata, model="within")
-coef(est_plm)
-
-# Both should give coefficient ≈ 2.0
-```
-
-**Validation Criteria**:
-- Coefficient within 0.05 of true value (2.0)
-- Single FE converges in 1 iteration
-- Result matches standard within-estimator
-
-**Rust Test**: `crates/p2a-core/src/econometrics/hdfe.rs::tests::test_single_fe_matches_within_estimator`
-
----
-
-## Numerical Precision Summary
-
-| Dataset | n | Coefficient Precision | SE Precision |
-|---------|---|----------------------|--------------|
-| Grunfeld | 200 | < 1e-5 | < 1e-5 |
-| Synthetic | 20 | < 1e-6 | < 1e-6 |
-
-The implementation produces **numerically identical results** to R, with differences only in the 5th-6th decimal place due to floating-point arithmetic.
-
-## Known Differences
-
-1. **Acceleration**: p2a uses Gearhart-Koshy acceleration by default (configurable); R's lfe uses different acceleration.
-
-2. **Standard Errors**: p2a computes standard or HC0-HC3 SEs; felm additionally supports clustered SEs.
-
-3. **Degrees of Freedom**: Both use the same adjustment: `df = n - k - (Σ levels - redundant)`.
-
-## Running the Tests
+## How to run
 
 ```bash
-# Run all HDFE validation tests
-cargo test -p p2a-core -- hdfe::tests::test_validate
-
-# Run Grunfeld validation specifically
-cargo test -p p2a-core -- test_validate_grunfeld
-
-# Run with output to see computed values
-cargo test -p p2a-core -- hdfe::tests --nocapture
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::hdfe::tests::test_validate
+Rscript validation/r/run.R --check
 ```
 
 ## References
 
-- Gaure, S. (2013). "lfe: Linear Group Fixed Effects". *The R Journal*, 5(2), 104-117. https://journal.r-project.org/articles/RJ-2013-031/
-- Grunfeld, Y. (1958). "The Determinants of Corporate Investment". Unpublished Ph.D. dissertation, University of Chicago.
-- Croissant, Y. & Millo, G. (2008). "Panel Data Econometrics in R: The plm Package". *Journal of Statistical Software*, 27(2).
+- Gaure, S. (2013). lfe: Linear Group Fixed Effects. *The R Journal*, 5(2), 104-117.
+- Berge, L. (2018). Efficient estimation of maximum likelihood models with multiple
+  fixed-effects: the R package FENmlm. *CREA Discussion Papers* 13 (fixest).
+- Grunfeld, Y. (1958). *The Determinants of Corporate Investment*. Ph.D. dissertation,
+  University of Chicago.
