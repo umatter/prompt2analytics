@@ -3308,116 +3308,107 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    // VALIDATION TESTS - HAC, Bootstrap, Driscoll-Kraay vs R
+    // VALIDATION TESTS - HAC and Driscoll-Kraay (R cases); bootstrap property test
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Validation test: HAC (Newey-West) standard errors vs R's sandwich::vcovHAC
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 100
-    /// e_hac <- numeric(n)
-    /// e_hac[1] <- rnorm(1)
-    /// for (i in 2:n) e_hac[i] <- 0.6 * e_hac[i-1] + rnorm(1)
-    /// x <- rnorm(n)
-    /// y_hac <- 2 + 3*x + e_hac
-    /// model_hac <- lm(y_hac ~ x)
-    /// hac_bartlett <- vcovHAC(model_hac, kernel = "Bartlett")
-    /// # Bartlett intercept_se ≈ 0.190, x_se ≈ 0.142
-    /// ```
+    /// Pinned to case `hac_ar1` (sandwich::NeweyWest / kernHAC on the legacy Test 8 DGP; validation/r/cases/regression_legacy.R).
     #[test]
-    fn test_validate_hac_vs_r() {
-        // R reference values from validation/expected/hac_test.csv
-        // kernel,intercept_se,x_se
-        // Bartlett,0.190323373448861,0.142248976948894
-        // Parzen,0.190323373448861,0.142248976948894
-        // NeweyWest,0.287735526647693,0.135387595196871
-
-        // Create test data similar to R's set.seed(42)
-        // We can't exactly replicate R's RNG, but we test structure and reasonableness
-        let n = 100;
-        // Simulated AR(1) errors with rho ≈ 0.6
-        let x: Vec<f64> = (0..n)
-            .map(|i| {
-                let seed = (i as f64 * 1.23456).sin();
-                seed * 2.0
-            })
-            .collect();
-
-        let mut y = Vec::with_capacity(n);
-        let mut ar_error = 0.0;
-        for i in 0..n {
-            let innovation = ((i as f64) * 0.987).cos() * 0.5;
-            ar_error = 0.6 * ar_error + innovation;
-            y.push(2.0 + 3.0 * x[i] + ar_error);
-        }
-
-        let df = df! {
-            "y" => y,
-            "x" => x
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // Test Bartlett kernel
-        let result_bartlett =
-            run_vcov_hac(&dataset, "y", &["x"], None, Some("bartlett"), false).unwrap();
-
-        // Verify structure
-        assert_eq!(result_bartlett.n_obs, 100);
-        assert_eq!(result_bartlett.n_params, 2);
-        assert!(matches!(result_bartlett.kernel, HacKernel::Bartlett));
-
-        // HAC SEs should be positive and finite
+    fn test_validate_hac_ar1() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("hac_ar1");
+        let n = case.scalar("n_obs") as usize;
+        let bw = case.scalar("bw_rule") as usize; // 4 = floor(4 (n/100)^(2/9))
+        let hac = |bw: Option<usize>, k: &str, pw: bool| {
+            run_vcov_hac(&ds, "y", &["x"], bw, Some(k), pw).unwrap()
+        };
+        let auto = hac(None, "bartlett", false);
+        let bartlett = hac(Some(bw), "bartlett", false);
+        let parzen = hac(Some(bw), "parzen", false);
+        let truncated = hac(Some(bw), "truncated", false);
+        let tukey = hac(Some(bw), "tukey-hanning", false);
+        Check::new(&case)
+            .named("coef", &auto.names, &auto.coefficients, Tol::coef(n))
+            .scalar("bw_rule", auto.bandwidth as f64, Tol::exact())
+            // p2a's Bartlett bandwidth m weights lag j by 1 - j/(m + 1):
+            // NeweyWest(lag = m) = kernHAC(bw = m + 1)
+            .named(
+                "neweywest_lag4",
+                &bartlett.names,
+                &bartlett.std_errors,
+                Tol::se(n),
+            )
+            .vector("neweywest_lag4_vcov", &bartlett.vcov.concat(), Tol::se(n))
+            .named(
+                "kernhac_bartlett_bw5",
+                &bartlett.names,
+                &bartlett.std_errors,
+                Tol::se(n),
+            )
+            .named(
+                "kernhac_parzen_bw4",
+                &parzen.names,
+                &parzen.std_errors,
+                Tol::se(n),
+            )
+            .vector("kernhac_parzen_bw4_vcov", &parzen.vcov.concat(), Tol::se(n))
+            .named(
+                "kernhac_truncated_bw4",
+                &truncated.names,
+                &truncated.std_errors,
+                Tol::se(n),
+            )
+            .vector(
+                "kernhac_truncated_bw4_vcov",
+                &truncated.vcov.concat(),
+                Tol::se(n),
+            )
+            .named(
+                "kernhac_tukey_hanning_bw4",
+                &tukey.names,
+                &tukey.std_errors,
+                Tol::se(n),
+            )
+            .vector(
+                "kernhac_tukey_hanning_bw4_vcov",
+                &tukey.vcov.concat(),
+                Tol::se(n),
+            )
+            .finish();
+        assert_eq!(auto.std_errors, bartlett.std_errors); // default bandwidth = bw_rule
+        // Tier 0 (REG-1, 428d7cf): a user bandwidth above n/4 warns; 4 <= 100/4, and the
+        // default never warns
         assert!(
-            result_bartlett.std_errors[0] > 0.0,
-            "Intercept HAC SE should be positive"
+            [&auto, &bartlett, &parzen, &truncated, &tukey]
+                .iter()
+                .all(|r| r.warnings.is_empty())
         );
+        // deviation REG-50: "qs" truncates the QS kernel at the bandwidth (kernhac_qs_bw4),
+        //   and p2a's Bartlett bandwidth m is kernHAC(bw = m + 1), not kernhac_bartlett_bw4.
+        // deviation REG-22: prewhiten = true is a scalar AR(1) on the residuals
+        //   (neweywest_lag4_prewhite).
+        // deviation REG-61: default bandwidth is the fixed rule, not bwNeweyWest
+        //   (bw_neweywest); no adjust = TRUE (kernhac_*_adjust).
+        let qs = hac(Some(bw), "qs", false);
+        let prewhitened = hac(Some(bw), "bartlett", true);
         assert!(
-            result_bartlett.std_errors[1] > 0.0,
-            "Slope HAC SE should be positive"
+            qs.std_errors
+                .iter()
+                .chain(&prewhitened.std_errors)
+                .all(|s| s.is_finite() && *s > 0.0)
         );
-
-        // Compare with Parzen kernel
-        let result_parzen =
-            run_vcov_hac(&dataset, "y", &["x"], None, Some("parzen"), false).unwrap();
-        assert!(matches!(result_parzen.kernel, HacKernel::Parzen));
-        assert!(result_parzen.std_errors[0] > 0.0);
-        assert!(result_parzen.std_errors[1] > 0.0);
-
-        // HAC SEs with different kernels may vary significantly due to kernel shape differences
-        // and bandwidth selection. Just verify both are positive and finite.
-        let ratio_intercept = result_bartlett.std_errors[0] / result_parzen.std_errors[0];
+        assert!(prewhitened.prewhiten && matches!(qs.kernel, HacKernel::QuadraticSpectral));
         assert!(
-            ratio_intercept > 0.0 && ratio_intercept.is_finite(),
-            "Bartlett and Parzen HAC SEs should both be valid: ratio={:.3}",
-            ratio_intercept
+            matches!(auto.kernel, HacKernel::Bartlett)
+                && matches!(parzen.kernel, HacKernel::Parzen)
         );
+        assert_eq!((auto.n_obs, auto.n_params), (n, 2));
     }
 
-    /// Validation test: Bootstrap standard errors vs R's sandwich::vcovBS
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 50
-    /// x <- rnorm(n)
-    /// y <- 2 + 3*x + rnorm(n, 0, 1 + abs(x))  # heteroskedastic
-    /// model_boot <- lm(y ~ x)
-    /// boot_pairs <- vcovBS(model_boot, type = "xy", R = 200)
-    /// boot_wild <- vcovBS(model_boot, type = "wild", R = 200)
-    /// # pairs: intercept_se ≈ 0.278, x_se ≈ 0.340
-    /// # wild: intercept_se ≈ 0.264, x_se ≈ 0.337
-    /// ```
+    /// Property test, not R-pinned: sandwich::vcovBS resamples with R's RNG, which cannot be
+    /// reproduced; see validation/regression/vcovBS.md.
     #[test]
-    fn test_validate_bootstrap_vs_r() {
-        // R reference values from validation/expected/bootstrap_test.csv
-        // type,intercept_se,x_se
-        // pairs,0.277844051365052,0.339916719646178
-        // wild,0.264331021065564,0.336983987495054
-
-        // Create heteroskedastic data similar to R
+    fn test_bootstrap_pairs_and_wild_on_heteroskedastic_data() {
+        // Create heteroskedastic data
         let n = 50;
         let x: Vec<f64> = (0..n).map(|i| (i as f64 * 2.345).sin() * 2.0).collect();
 
@@ -3484,94 +3475,36 @@ mod tests {
         );
     }
 
-    /// Validation test: Driscoll-Kraay standard errors vs R's sandwich::vcovPL
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n_firms <- 10; n_periods <- 20
-    /// firm <- rep(1:n_firms, each = n_periods)
-    /// time <- rep(1:n_periods, n_firms)
-    /// x <- rnorm(n_total)
-    /// firm_fe <- rep(rnorm(n_firms), each = n_periods)
-    /// y <- 2 + 3*x + firm_fe + rnorm(n_total)
-    /// model_pool <- lm(y ~ x, data = df_panel)
-    /// dk_vcov <- vcovPL(model_pool, cluster = ~ time, order.by = ~ time)
-    /// # DK intercept_se ≈ 0.412, x_se ≈ 0.133
-    /// # OLS intercept_se ≈ 0.107, x_se ≈ 0.110
-    /// ```
+    /// Case `dk_panel` (sandwich::vcovPL / plm::vcovSCC on the legacy Test 10 DGP;
+    /// validation/r/cases/regression_legacy.R). Only the parts p2a reproduces are pinned.
     #[test]
-    fn test_validate_driscoll_kraay_vs_r() {
-        // R reference values from validation/expected/driscoll_kraay_test.csv
-        // variable,coefficient,dk_se,ols_se
-        // (Intercept),1.6707069223645,0.411578336977508,0.107318446125057
-        // x,3.03925068146905,0.133137639749386,0.110349287854054
-
-        // Create panel data similar to R
-        let n_firms = 10;
-        let n_periods = 20;
-
-        let mut y_vec = Vec::new();
-        let mut x_vec = Vec::new();
-        let mut time_vec = Vec::new();
-
-        for firm in 0..n_firms {
-            // Firm fixed effect
-            let firm_fe = (firm as f64 * 0.7123).sin() * 2.0;
-
-            for period in 1..=n_periods {
-                let x = ((firm * n_periods + period) as f64 * 0.4567).cos() * 2.0;
-                let noise = ((firm * 13 + period * 7) as f64 * 0.321).sin() * 0.5;
-                let y = 2.0 + 3.0 * x + firm_fe + noise;
-
-                y_vec.push(y);
-                x_vec.push(x);
-                time_vec.push(period as i64);
-            }
-        }
-
-        let df = df! {
-            "y" => y_vec,
-            "x" => x_vec,
-            "time" => time_vec
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // Test Driscoll-Kraay SEs
-        let result_dk = run_vcov_driscoll_kraay(&dataset, "y", &["x"], "time", None, None).unwrap();
-
-        assert_eq!(result_dk.n_obs, n_firms * n_periods);
-        assert_eq!(result_dk.n_periods, n_periods);
-        assert!(
-            result_dk.std_errors[0] > 0.0,
-            "DK intercept SE should be positive"
-        );
-        assert!(
-            result_dk.std_errors[1] > 0.0,
-            "DK slope SE should be positive"
-        );
-
-        // Compare with OLS SEs
-        let result_ols = run_ols(&dataset, "y", &["x"], true, CovarianceType::Standard).unwrap();
-
-        // DK SEs typically larger than OLS due to cross-sectional correlation
-        // (This is the main use case for DK: panels with cross-sectional dependence)
-        // Note: This isn't always the case depending on correlation structure
-        let dk_intercept_se = result_dk.std_errors[0];
-        let ols_intercept_se = result_ols.coefficients[0].std_error;
-
-        // Just verify both are reasonable (positive and finite)
-        assert!(dk_intercept_se > 0.0 && dk_intercept_se.is_finite());
-        assert!(ols_intercept_se > 0.0 && ols_intercept_se.is_finite());
-
-        // DK and OLS SEs should differ (DK accounts for cross-sectional dependence)
-        // In most panel data settings, DK SEs will be larger
-        let ratio = dk_intercept_se / ols_intercept_se;
+    fn test_validate_driscoll_kraay_panel() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("dk_panel");
+        let n = case.scalar("n_obs") as usize;
+        let dk = run_vcov_driscoll_kraay(&ds, "y", &["x"], "time", None, None).unwrap();
+        let ols = run_ols(&ds, "y", &["x"], true, CovarianceType::Standard).unwrap();
+        let ols_se: Vec<f64> = ols.coefficients.iter().map(|c| c.std_error).collect();
+        Check::new(&case)
+            .named("coef", &dk.names, &dk.coefficients, Tol::coef(n))
+            .named("se_ols", &dk.names, &ols_se, Tol::se(n))
+            // default bandwidth floor(T^(1/4)) = vcovPL's lag = "NW1987"; Bartlett
+            // 1 - j/(m + 1) = vcovPL's bw = lag + 1
+            .scalar("lag", dk.bandwidth as f64, Tol::exact())
+            .scalar("n_periods", dk.n_periods as f64, Tol::exact())
+            .scalar("n_obs", dk.n_obs as f64, Tol::exact())
+            .finish();
+        // deviation REG-24: std_errors, vcov, t_stats and p_values average the scores within
+        //   period and scale by T; here they are sqrt(T)/N = 0.4472 times vcovpl_lag2
+        //   (= vcovscc_lag2).
+        assert_eq!(dk.n_units, 10);
+        assert!(matches!(dk.kernel, HacKernel::Bartlett));
+        // Tier 0 (REG-1, 428d7cf) warns only for a user bandwidth above T/4
+        assert!(dk.warnings.is_empty());
+        let ratio = dk.std_errors[0] / ols_se[0];
         assert!(
             (ratio - 1.0).abs() > 0.01,
-            "DK and OLS SEs should differ: ratio={:.3}",
-            ratio
+            "DK and OLS SEs should differ: ratio={ratio:.3}"
         );
     }
 

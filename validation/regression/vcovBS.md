@@ -5,7 +5,7 @@
 Bootstrap covariance estimation provides an alternative to asymptotic variance estimation when the standard assumptions may not hold. The bootstrap creates many resampled datasets and estimates the model on each, then uses the empirical distribution of coefficients to estimate the covariance matrix.
 
 **Key Parameters:**
-- `n_boot`: Number of bootstrap replications (default: 999)
+- `n_boot`: Number of bootstrap replications (default: 999); at least 10, fewer is an `InvalidSpecification` error (Tier 0, `c3e808e`)
 - `bootstrap_type`: Method for resampling
 
 **Bootstrap Types:**
@@ -17,64 +17,40 @@ Bootstrap covariance estimation provides an alternative to asymptotic variance e
 
 | Package | Language | Function | Version Tested |
 |---------|----------|----------|----------------|
-| sandwich | R | `vcovBS()` | 3.1-0 |
+| sandwich | R | `vcovBS()` | 3.1.3 (legacy script only) |
 | statsmodels | Python | `OLSResults.get_robustcov_results()` | N/A |
 
-## Test Cases
+## Validation
 
-### Test 1: OLS with Heteroskedastic Errors
+Not R-pinned: R draws with Mersenne Twister, p2a with ChaCha8Rng, so no seed matches.
+`sandwich::vcovBS` cannot be reproduced from another RNG, and no R reference case exists for
+this method. The legacy script `validation/scripts/validate_regression_diag.R` (Test 9) writes
+`vcovBS(lm(y ~ x), type = "xy" | "wild", R = 200)` on its own simulated data to
+`validation/expected/bootstrap_test.csv`; that file is not asserted by any test.
 
-**Data Generation:**
-```r
-set.seed(42)
-n <- 100
-x <- rnorm(n)
-errors <- rnorm(n, 0, 0.5 + abs(x))  # Heteroskedastic
-y <- 5 + 2 * x + errors
-```
+Property tests (`crates/p2a-core/src/regression/ols.rs`):
 
-**R Code:**
-```r
-library(sandwich)
-model <- lm(y ~ x)
-vcovBS(model, R = 999, type = "xy")  # Pairs bootstrap
-vcovBS(model, R = 999, type = "residual")  # Residual bootstrap
-vcovBS(model, R = 999, type = "wild")  # Wild bootstrap
-```
-
-**Results Comparison:**
-
-| Method | R SE (intercept) | Rust SE (intercept) | Tolerance | Status |
-|--------|------------------|---------------------|-----------|--------|
-| Pairs  | ~0.08            | ~0.08               | ±0.02     | ✅     |
-| Resid  | ~0.07            | ~0.07               | ±0.02     | ✅     |
-| Wild   | ~0.08            | ~0.08               | ±0.02     | ✅     |
-
-**Note**: Bootstrap SEs vary due to random resampling. Tests use fixed seeds for reproducibility.
-
-**Rust Test:** `crates/p2a-core/src/regression/ols.rs::tests::test_bootstrap_*`
-
-## Numerical Precision Summary
-
-- **Bootstrap SEs**: Match R within 10-20% (expected variation due to randomness)
-- **Covariance matrix**: Positive semi-definite, diagonal matches SE²
-- **Convergence**: >90% of replications should converge for well-specified models
+- `test_bootstrap_pairs`, `test_bootstrap_residual`, `test_bootstrap_wild`: each resampling
+  scheme returns positive standard errors and reports its type
+- `test_bootstrap_vcov_positive_semidefinite`: the diagonal of the covariance matrix is
+  non-negative and equals the squared standard errors
+- `test_bootstrap_type_parsing`, `test_bootstrap_displays_correctly`
+- `test_bootstrap_pairs_and_wild_on_heteroskedastic_data`: pairs and wild standard errors on
+  heteroskedastic data are within a factor of 2 of each other, and more than 90% of the
+  replications converge
+- `test_pinned_hac_dk_bootstrap_outputs` (Tier 0, `df73f11`): characterisation pin of the
+  seeded output, so a change to the resampling code is visible
+- `test_bootstrap_rejects_too_few_replications`,
+  `test_bootstrap_impossible_replication_count_is_an_error`,
+  `test_bootstrap_replicate_storage_respects_alloc_ceiling` and
+  `test_bootstrap_stops_when_cancelled` (Tier 0, `c3e808e`): the `n_boot >= 10` bound, the
+  replicate-storage ceiling and cancellation
 
 ## Known Differences
 
 1. **Random number generation**: Rust uses ChaCha8Rng, R uses Mersenne Twister. Results with same seed will differ.
 2. **Wild bootstrap weights**: R may use different weight distributions (Rademacher, Mammen). Rust uses Rademacher.
 3. **Handling of singularities**: Rust skips singular bootstrap samples; R may fail entirely.
-
-## Performance Comparison
-
-| Dataset Size | Rust (µs) | R (µs)   | Speedup |
-|--------------|-----------|----------|---------|
-| n=100        | ~500      | ~15,000  | ~30x    |
-| n=500        | ~2,500    | ~40,000  | ~16x    |
-| n=1,000      | ~5,000    | ~80,000  | ~16x    |
-
-*Performance based on 200 bootstrap replications. Rust benefits from compiled code and efficient random number generation.*
 
 ## References
 

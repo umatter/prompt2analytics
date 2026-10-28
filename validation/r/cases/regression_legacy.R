@@ -110,3 +110,65 @@ case("diag_wald_sim", "regression/diagnostics", "Wald test of nested linear mode
     reference = "lmtest::waldtest(test = 'F' | 'Chisq') (vcov = classical); aod::wald.test (the legacy reference, equal to the Chisq form)",
     call = "waldtest(lm(y ~ x1 + x2 + x3), lm(y ~ x1 + x3), test = 'F')", packages = c("lmtest", "aod"))
 })
+
+# Test 8: HAC with explicit kernels and bandwidths (INF-16). p2a's default bandwidth
+# for n = 100 is floor(4 (n/100)^(2/9)) = 4. kernHAC weights lag j by k(j / bw);
+# NeweyWest(lag = L) is the Bartlett kernel with bw = L + 1.
+case("hac_ar1", "regression/hac", "HAC standard errors, AR(1) errors (rho = 0.6), n = 100, explicit kernels and bandwidth (legacy Test 8 DGP)", function(ctx) {
+  set.seed(42); n <- 100
+  e_hac <- .legacy_ar_series(n, 0.6)
+  x <- rnorm(n)
+  y <- 2 + 3 * x + e_hac
+  d <- ctx$gen_dataset("hac_ar1", data.frame(y = y, x = x))
+  m <- lm(y ~ x, data = d)
+  bw <- floor(4 * (nrow(d) / 100)^(2 / 9))
+  kern <- c(bartlett = "Bartlett", parzen = "Parzen", qs = "Quadratic Spectral", truncated = "Truncated", tukey_hanning = "Tukey-Hanning")
+  v <- list(coef = named(coef(m)), bw_rule = bw)
+  for (k in names(kern)) {
+    V <- kernHAC(m, kernel = kern[[k]], bw = bw, prewhite = FALSE, adjust = FALSE)
+    v[[sprintf("kernhac_%s_bw%d", k, bw)]] <- .legacy_se(V)
+    v[[sprintf("kernhac_%s_bw%d_vcov", k, bw)]] <- .legacy_vcov(V)
+    v[[sprintf("kernhac_%s_bw%d_adjust", k, bw)]] <- .legacy_se(kernHAC(m, kernel = kern[[k]], bw = bw, prewhite = FALSE, adjust = TRUE))
+  }
+  v[[sprintf("kernhac_bartlett_bw%d", bw + 1)]] <- .legacy_se(kernHAC(m, kernel = "Bartlett", bw = bw + 1, prewhite = FALSE, adjust = FALSE))
+  v[[sprintf("neweywest_lag%d", bw)]] <- .legacy_se(NeweyWest(m, lag = bw, prewhite = FALSE))
+  v[[sprintf("neweywest_lag%d_vcov", bw)]] <- .legacy_vcov(NeweyWest(m, lag = bw, prewhite = FALSE))
+  v[[sprintf("neweywest_lag%d_prewhite", bw)]] <- .legacy_se(NeweyWest(m, lag = bw, prewhite = TRUE))
+  v$neweywest_default <- .legacy_se(NeweyWest(m))     # legacy hac_test.csv row "NeweyWest"
+  v$vcovhac_default <- .legacy_se(vcovHAC(m))         # what the legacy rows "Bartlett" and "Parzen" really were (INF-16)
+  v$bw_neweywest <- bwNeweyWest(m); v$bw_andrews_qs <- bwAndrews(m)
+  v$n_obs <- nobs(m)
+  b4 <- v[[sprintf("kernhac_bartlett_bw%d", bw)]]$values; p4 <- v[[sprintf("kernhac_parzen_bw%d", bw)]]$values
+  stopifnot(bw == 4, all(abs(b4 - p4) > 1e-3),
+            isTRUE(all.equal(v[[sprintf("neweywest_lag%d", bw)]]$values, v[[sprintf("kernhac_bartlett_bw%d", bw + 1)]]$values, tolerance = 1e-13)))
+  list(values = v,
+       reference = "sandwich::kernHAC(kernel =, bw =, prewhite = FALSE, adjust = FALSE | TRUE); sandwich::NeweyWest(lag =, prewhite = FALSE | TRUE); sandwich::vcovHAC (legacy default)",
+       call = "kernHAC(lm(y ~ x, data = hac_ar1), kernel = 'Parzen', bw = 4, prewhite = FALSE, adjust = FALSE)", packages = "sandwich")
+})
+
+# Test 10: Driscoll-Kraay. The legacy call vcovPL(cluster = ~time, order.by = ~time)
+# does not aggregate by period: with the same variable in both formulas, sandwich
+# keeps cluster = time and derives order.by from the occurrence index within each
+# period (= firm here), so it sums scores by firm. It is recorded for comparison
+# with the legacy CSV only; the Driscoll-Kraay references are the vcovPL/vcovSCC values.
+case("dk_panel", "regression/hac", "Driscoll-Kraay standard errors, pooled OLS, N = 10, T = 20 (legacy Test 10 DGP)", function(ctx) {
+  set.seed(42)
+  n_firms <- 10; n_periods <- 20; n_total <- n_firms * n_periods
+  firm <- rep(1:n_firms, each = n_periods); time <- rep(1:n_periods, n_firms)
+  x <- rnorm(n_total)
+  firm_fe <- rep(rnorm(n_firms), each = n_periods)
+  y <- 2 + 3 * x + firm_fe + rnorm(n_total)
+  d <- ctx$gen_dataset("dk_panel", data.frame(y = y, x = x, firm = firm, time = time))
+  m <- lm(y ~ x, data = d)
+  lag <- floor(n_periods^(1 / 4))
+  pm <- plm(y ~ x, data = pdata.frame(d, index = c("firm", "time")), model = "pooling")
+  v <- list(coef = named(coef(m)), se_ols = .legacy_se(vcov(m)), lag = lag, n_periods = n_periods, n_obs = nobs(m))
+  v[[sprintf("vcovpl_lag%d", lag)]] <- .legacy_se(vcovPL(m, cluster = ~firm, order.by = ~time, lag = lag, adjust = FALSE))
+  v[[sprintf("vcovpl_lag%d_adjust", lag)]] <- .legacy_se(vcovPL(m, cluster = ~firm, order.by = ~time, lag = lag, adjust = TRUE))
+  v[[sprintf("vcovscc_lag%d", lag)]] <- .legacy_se(vcovSCC(pm, maxlag = lag))
+  v$legacy_vcovpl_cluster_time <- .legacy_se(vcovPL(m, cluster = ~time, order.by = ~time))
+  stopifnot(lag == 2, isTRUE(all.equal(v[[sprintf("vcovpl_lag%d", lag)]]$values, v[[sprintf("vcovscc_lag%d", lag)]]$values, tolerance = 1e-12)))
+  list(values = v,
+       reference = "sandwich::vcovPL(cluster = ~firm, order.by = ~time, kernel = 'Bartlett', lag =, adjust = FALSE | TRUE); plm::vcovSCC(maxlag =) as a cross-check",
+       call = "vcovPL(lm(y ~ x, data = dk_panel), cluster = ~firm, order.by = ~time, lag = 2, adjust = FALSE)", packages = c("sandwich", "plm"))
+})
