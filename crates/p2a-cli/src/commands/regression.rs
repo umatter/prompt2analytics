@@ -2,7 +2,7 @@
 
 use clap::{Subcommand, ValueEnum};
 use p2a_core::regression::CovarianceType;
-use p2a_core::{LinearEstimator, run_diagnostics, run_ols, run_ols_clustered};
+use p2a_core::{run_diagnostics, run_ols, run_ols_clustered};
 use p2a_core::{run_loess, run_quantreg};
 // Additional regression methods
 use ndarray::Array1;
@@ -14,8 +14,8 @@ use p2a_core::{
 use p2a_core::{run_gls, run_line, run_smooth_spline, run_step, run_supsmu, run_vcov_hac};
 
 use crate::output::{
-    OutputFormat, format_regression_results, print_error, validate_column_exists,
-    validate_columns_exist, validate_sample_size,
+    CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, print_error,
+    se_label, validate_column_exists, validate_columns_exist, validate_sample_size,
 };
 use crate::progress::Progress;
 use crate::session::SessionManager;
@@ -71,7 +71,7 @@ EXAMPLES:
         #[arg(long, default_value = "true")]
         intercept: bool,
 
-        /// Robust standard errors type
+        /// Standard errors: hc1 (default, heteroskedasticity-robust), hc0, hc2, hc3, or standard (classical, as R's summary(lm))
         #[arg(short, long, default_value = "hc1")]
         robust: RobustSE,
     },
@@ -595,45 +595,29 @@ fn execute_ols(
                     progress.finish_and_clear();
                     log::info!(
                         "OLS completed: n={}, R²={:.4}, Adj R²={:.4}",
-                        result.n_obs(),
-                        result.r_squared(),
-                        result.adj_r_squared()
+                        result.n_obs,
+                        result.r_squared,
+                        result.adj_r_squared
                     );
-                    log::debug!("Degrees of freedom: {}", result.degrees_of_freedom());
+                    log::debug!("Degrees of freedom: {}", result.df_resid);
 
-                    // Build coefficient table
-                    let coeffs = result.coefficients();
-                    let ses = result.std_errors();
-                    let p_vals = result.p_values();
-
-                    // Calculate t-values manually
-                    let t_vals: Vec<f64> = coeffs
-                        .iter()
-                        .zip(ses.iter())
-                        .map(|(c, s)| if *s > 0.0 { c / s } else { 0.0 })
-                        .collect();
-
-                    let mut var_names = Vec::new();
-                    if intercept {
-                        var_names.push("(Intercept)".to_string());
-                    }
-                    var_names.extend(indep_vars.iter().cloned());
-
-                    let coef_table: Vec<(String, f64, f64, f64, f64)> = var_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), coeffs[i], ses[i], t_vals[i], p_vals[i]))
-                        .collect();
-
-                    let output = format_regression_results(
-                        "OLS Regression",
-                        &coef_table,
-                        result.r_squared(),
-                        result.adj_r_squared(),
-                        result.n_obs(),
-                        format,
-                    );
-                    println!("{}", output);
+                    // The table comes from the result's coefficient records, so
+                    // an aliased column prints the core's NaN, never a made-up 0.
+                    let se_type = se_label(result.cov_type);
+                    let report = RegressionReport {
+                        method: "OLS Regression",
+                        coefficients: result.coefficients.iter().map(CoefRow::from).collect(),
+                        statistic: StatKind::T,
+                        r_squared: ("R-squared", result.r_squared),
+                        adj_r_squared: ("Adj. R-squared", result.adj_r_squared),
+                        n_obs: result.n_obs,
+                        se_type: &se_type,
+                        se_type_json: result.cov_type.short_label(),
+                        r_squared_type: "ordinary",
+                        extra_json: serde_json::Map::new(),
+                        warnings: &result.warnings,
+                    };
+                    println!("{}", format_regression_report(&report, format));
                 }
                 Err(e) => {
                     progress.finish_and_clear();
@@ -675,35 +659,29 @@ fn execute_clustered(
             // run_ols_clustered takes cluster1 and optional cluster2 for two-way clustering
             match run_ols_clustered(ds, dep_var, &x_cols, cluster, None) {
                 Ok(result) => {
-                    // OlsClusteredResult has .ols field which implements LinearEstimator
-                    let coeffs = result.ols.coefficients();
-                    let ses = result.ols.std_errors();
-                    let p_vals = result.ols.p_values();
-                    let t_vals: Vec<f64> = coeffs
-                        .iter()
-                        .zip(ses.iter())
-                        .map(|(c, s)| if *s > 0.0 { c / s } else { 0.0 })
-                        .collect();
-
-                    // Intercept is always included by run_ols_clustered
-                    let mut var_names = vec!["(Intercept)".to_string()];
-                    var_names.extend(indep_vars.iter().cloned());
-
-                    let coef_table: Vec<(String, f64, f64, f64, f64)> = var_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), coeffs[i], ses[i], t_vals[i], p_vals[i]))
-                        .collect();
-
-                    let output = format_regression_results(
-                        &format!("Clustered OLS (cluster: {})", cluster),
-                        &coef_table,
-                        result.ols.r_squared(),
-                        result.ols.adj_r_squared(),
-                        result.ols.n_obs(),
-                        format,
-                    );
-                    println!("{}", output);
+                    let second = result.cluster_var_2.as_deref().zip(result.n_clusters_2);
+                    let (se_type, se_type_json) =
+                        clustered_se_label(&result.cluster_var_1, result.n_clusters_1, second);
+                    let mut extra_json = serde_json::Map::new();
+                    extra_json.insert("n_clusters".to_string(), result.n_clusters_1.into());
+                    if let Some(g2) = result.n_clusters_2 {
+                        extra_json.insert("n_clusters_2".to_string(), g2.into());
+                    }
+                    let method = format!("Clustered OLS (cluster: {})", cluster);
+                    let report = RegressionReport {
+                        method: &method,
+                        coefficients: result.ols.coefficients.iter().map(CoefRow::from).collect(),
+                        statistic: StatKind::T,
+                        r_squared: ("R-squared", result.ols.r_squared),
+                        adj_r_squared: ("Adj. R-squared", result.ols.adj_r_squared),
+                        n_obs: result.ols.n_obs,
+                        se_type: &se_type,
+                        se_type_json: &se_type_json,
+                        r_squared_type: "ordinary",
+                        extra_json,
+                        warnings: &result.ols.warnings,
+                    };
+                    println!("{}", format_regression_report(&report, format));
                 }
                 Err(e) => {
                     print_error(&format!("Clustered regression failed: {}", e), format);
@@ -715,6 +693,25 @@ fn execute_clustered(
         }
     }
     Ok(())
+}
+
+/// The `Standard errors:` text and the JSON `se_type` of a cluster-robust fit,
+/// whose covariance is `sandwich::vcovCL(type = "HC1")`: the CR1 factor
+/// `G/(G-1) (n-1)/(n-k)`, per dimension for two-way clustering.
+///
+/// One-way: `("clustered by firm (CR1, G = 10)", "cluster:firm")`; two-way:
+/// `("clustered by firm and year (two-way CR1, G = 10 and 20)", "cluster:firm+year")`.
+fn clustered_se_label(var1: &str, g1: usize, second: Option<(&str, usize)>) -> (String, String) {
+    match second {
+        None => (
+            format!("clustered by {var1} (CR1, G = {g1})"),
+            format!("cluster:{var1}"),
+        ),
+        Some((var2, g2)) => (
+            format!("clustered by {var1} and {var2} (two-way CR1, G = {g1} and {g2})"),
+            format!("cluster:{var1}+{var2}"),
+        ),
+    }
 }
 
 fn execute_diagnostics(
@@ -795,9 +792,17 @@ fn execute_diagnostics(
                         }
 
                         if let Some(ref vifs) = diag.vif {
-                            println!("\nVariance Inflation Factors:");
-                            for vif_result in vifs {
-                                println!("  {}: {:.4}", vif_result.variable, vif_result.vif);
+                            // The intercept has no VIF (car::vif omits it); a NaN or
+                            // infinite VIF of a regressor still prints.
+                            let regressors: Vec<_> = vifs
+                                .iter()
+                                .filter(|v| v.variable != "(Intercept)")
+                                .collect();
+                            if !regressors.is_empty() {
+                                println!("\nVariance Inflation Factors:");
+                                for vif_result in regressors {
+                                    println!("  {}: {:.4}", vif_result.variable, vif_result.vif);
+                                }
                             }
                         }
 
@@ -1548,13 +1553,15 @@ fn execute_hac(
                         Err(_) => (f64::NAN, hac_result.n_obs),
                     };
 
-                    // Compute t-values and p-values from coefficients and HAC standard errors
+                    // t = c / s from the coefficients and HAC standard errors. A
+                    // zero or NaN SE gives an infinite or NaN t (printed as such,
+                    // null in JSON), never a made-up 0.
                     let coefficients: Vec<f64> = hac_result.coefficients.to_vec();
                     let std_errors: Vec<f64> = hac_result.std_errors.to_vec();
                     let t_values: Vec<f64> = coefficients
                         .iter()
                         .zip(std_errors.iter())
-                        .map(|(c, s)| if *s > 0.0 { c / s } else { 0.0 })
+                        .map(|(c, s)| c / s)
                         .collect();
 
                     let df = (hac_result.n_obs - hac_result.n_params) as f64;
@@ -1563,7 +1570,7 @@ fn execute_hac(
 
                     match format {
                         OutputFormat::Json => {
-                            let json = serde_json::json!({
+                            let mut json = serde_json::json!({
                                 "method": "OLS with HAC Standard Errors",
                                 "kernel": "Bartlett (Newey-West)",
                                 "bandwidth": hac_result.bandwidth,
@@ -1574,6 +1581,9 @@ fn execute_hac(
                                 "n_obs": n_obs_display,
                                 "r_squared": r_squared,
                             });
+                            if !hac_result.warnings.is_empty() {
+                                json["warnings"] = serde_json::json!(hac_result.warnings);
+                            }
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
@@ -1621,6 +1631,12 @@ fn execute_hac(
                             println!("\n---");
                             println!("R-squared: {:.4}", r_squared);
                             println!("Observations: {}", n_obs_display);
+                            if !hac_result.warnings.is_empty() {
+                                println!("\nWarnings:");
+                                for w in &hac_result.warnings {
+                                    println!("  - {w}");
+                                }
+                            }
                         }
                     }
                 }
@@ -1630,4 +1646,27 @@ fn execute_hac(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clustered_se_label;
+
+    #[test]
+    fn clustered_label() {
+        assert_eq!(
+            clustered_se_label("firm", 10, None),
+            (
+                "clustered by firm (CR1, G = 10)".to_string(),
+                "cluster:firm".to_string()
+            )
+        );
+        assert_eq!(
+            clustered_se_label("firm", 10, Some(("year", 20))),
+            (
+                "clustered by firm and year (two-way CR1, G = 10 and 20)".to_string(),
+                "cluster:firm+year".to_string()
+            )
+        );
+    }
 }

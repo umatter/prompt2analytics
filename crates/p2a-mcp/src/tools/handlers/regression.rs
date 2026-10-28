@@ -33,6 +33,8 @@ use crate::tools::requests::regression::{
     RidgeRequest, SmoothSplineRequest, StepRequest, SupsmuRequest, WaldTestRequest,
 };
 
+use p2a_core::data::Dataset;
+use p2a_core::regression::OlsResult;
 use p2a_core::regression::{
     BgTestType, CorrelationStructure, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType,
     SmoothSplineConfig, bg_test, gls, harvey_collier_test, quantreg_multi, reset_test,
@@ -41,35 +43,58 @@ use p2a_core::regression::{
     run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline, smooth_spline_predict, supsmu, wald_test,
 };
 
+/// The intercept flag and covariance type of an OLS request: `intercept`
+/// defaults to true and `cov_type` to HC1 (parsed case-insensitively by
+/// `CovarianceType::from_str`). An unknown `cov_type` is an error naming the
+/// allowed values, with the caller's value cut to the echo bound.
+fn ols_options(request: &OlsRequest) -> Result<(bool, CovarianceType), String> {
+    let intercept = request.intercept.unwrap_or(true);
+    let cov_type = match request.cov_type.as_deref() {
+        None => CovarianceType::HC1,
+        Some(raw) => raw.parse::<CovarianceType>().map_err(|_| {
+            format!(
+                "Invalid cov_type '{}': expected one of: standard (or classical), hc0, hc1, \
+                 hc2, hc3",
+                crate::tools::limits::echo(raw.trim())
+            )
+        })?,
+    };
+    Ok((intercept, cov_type))
+}
+
+/// Runs the OLS a request describes on `dataset`.
+fn run_ols_request(dataset: &Dataset, request: &OlsRequest) -> Result<OlsResult, String> {
+    let (intercept, cov_type) = ols_options(request)?;
+    let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+    run_ols(dataset, &request.y, &x_refs, intercept, cov_type)
+        .map_err(|e| format!("Regression failed: {e}"))
+}
+
 #[tool_router(router = regression_router, vis = "pub")]
 impl AnalyticsServer {
     /// Run OLS regression.
     #[tool(
-        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. For comparing group means with a single categorical predictor, consider anova_one_way instead."
+        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. For comparing group means with a single categorical predictor, consider anova_one_way instead."
     )]
     pub async fn regression_ols(
         &self,
         Parameters(request): Parameters<OlsRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // An unknown cov_type is refused before the dataset is looked up.
+        if let Err(msg) = ols_options(&request) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-
-        let result = match run_ols(dataset, &request.y, &x_refs, true, CovarianceType::HC1) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Regression failed: {}",
-                    e
-                ))]));
-            }
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        match run_ols_request(dataset, &request) {
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )])),
+            Err(msg) => Ok(CallToolResult::error(vec![Content::text(msg)])),
+        }
     }
 
     /// Run regression diagnostics.
@@ -1254,5 +1279,213 @@ impl AnalyticsServer {
                 e
             ))])),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::common::test_support::{server_with, text};
+    use p2a_core::data::{DataLoader, Dataset};
+    use p2a_validation::{Case, Check, Tol};
+    use serde_json::{Value, json};
+
+    /// `inv ~ value + capital` on `grunfeld`, plus `extra` keys.
+    fn request(extra: Value) -> OlsRequest {
+        let mut v = json!({"dataset": "grunfeld", "y": "inv", "x": ["value", "capital"]});
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// The case and a server holding its dataset as `grunfeld`.
+    fn case_server(id: &str) -> (Case, tokio::runtime::Runtime, AnalyticsServer) {
+        let case = Case::load(id);
+        let df = DataLoader::load_csv(case.dataset_path()).unwrap();
+        let (rt, server) = server_with(vec![("grunfeld", df)]);
+        (case, rt, server)
+    }
+
+    /// Rows `name est se t p` of the `OlsResult` Display table: the lines after
+    /// the dashed rule under `Coefficients:`, up to the next empty line.
+    fn rows(text: &str) -> Vec<(String, Vec<f64>)> {
+        text.lines()
+            .skip_while(|l| *l != "Coefficients:")
+            .skip(3)
+            .take_while(|l| !l.trim().is_empty())
+            .map(|l| {
+                let tokens: Vec<&str> = l.split_whitespace().collect();
+                let numbers = tokens[1..5]
+                    .iter()
+                    .map(|t| {
+                        t.parse::<f64>()
+                            .unwrap_or_else(|_| panic!("`{t}` in `{l}`"))
+                    })
+                    .collect();
+                (tokens[0].to_string(), numbers)
+            })
+            .collect()
+    }
+
+    fn call(
+        rt: &tokio::runtime::Runtime,
+        server: &AnalyticsServer,
+        extra: Value,
+    ) -> CallToolResult {
+        rt.block_on(server.regression_ols(Parameters(request(extra))))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_validate_mcp_regression_ols() {
+        let (case, rt, server) = case_server("ols_grunfeld");
+        for (extra, label, se_key) in [
+            (json!({}), CovarianceType::HC1, "se_hc1"),
+            (
+                json!({"cov_type": "standard"}),
+                CovarianceType::Standard,
+                "se_classical",
+            ),
+        ] {
+            let r = call(&rt, &server, extra);
+            assert_ne!(r.is_error, Some(true));
+            let t = text(&r);
+            assert!(
+                t.contains(&format!("Standard Errors: {label}")),
+                "missing `Standard Errors: {label}` in\n{t}"
+            );
+            let (names, values): (Vec<String>, Vec<Vec<f64>>) = rows(&t).into_iter().unzip();
+            let se: Vec<f64> = values.iter().map(|v| v[1]).collect();
+            let coef: Vec<f64> = values.iter().map(|v| v[0]).collect();
+            Check::new(&case)
+                .named("coef", &names, &coef, Tol::printed(4))
+                .named(se_key, &names, &se, Tol::printed(4))
+                .finish();
+        }
+    }
+
+    /// Every cov_type spelling, through the request-to-estimator path, against
+    /// sandwich::vcovHC / lm at full tolerance.
+    #[test]
+    fn test_validate_mcp_regression_ols_cov_types() {
+        let case = Case::load("ols_grunfeld");
+        let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
+        for (spelling, key) in [
+            (None, "hc1"),
+            (Some("standard"), "classical"),
+            (Some("classical"), "classical"),
+            (Some("hc0"), "hc0"),
+            (Some("HC1"), "hc1"),
+            (Some("hc2"), "hc2"),
+            (Some("Hc3"), "hc3"),
+        ] {
+            let extra = match spelling {
+                Some(s) => json!({"cov_type": s}),
+                None => json!({}),
+            };
+            let r = run_ols_request(&ds, &request(extra)).unwrap();
+            let n = r.n_obs;
+            let names: Vec<&str> = r.coefficients.iter().map(|c| c.name.as_str()).collect();
+            let pick = |f: fn(&p2a_core::regression::OlsCoefficient) -> f64| -> Vec<f64> {
+                r.coefficients.iter().map(f).collect()
+            };
+            Check::new(&case)
+                .named("coef", &names, &pick(|c| c.estimate), Tol::coef(n))
+                .named(
+                    &format!("se_{key}"),
+                    &names,
+                    &pick(|c| c.std_error),
+                    Tol::se(n),
+                )
+                .named(
+                    &format!("t_{key}"),
+                    &names,
+                    &pick(|c| c.t_value),
+                    Tol::stat(n),
+                )
+                .named(
+                    &format!("p_{key}"),
+                    &names,
+                    &pick(|c| c.p_value),
+                    Tol::p_value(n),
+                )
+                .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+                .finish();
+        }
+    }
+
+    /// An unknown cov_type is a tool error naming the allowed values; a long
+    /// value is echoed cut to 64 characters.
+    #[test]
+    fn test_mcp_regression_ols_rejects_unknown_cov_type() {
+        let (_case, rt, server) = case_server("ols_grunfeld");
+        let r = call(&rt, &server, json!({"cov_type": "hc4"}));
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(t.contains("cov_type") && t.contains("'hc4'"), "{t}");
+        let lower = t.to_lowercase();
+        assert!(lower.contains("standard") && lower.contains("hc1"), "{t}");
+
+        let long = "x".repeat(200);
+        let r = call(&rt, &server, json!({"cov_type": long}));
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(t.contains(&format!("'{}'", "x".repeat(64))), "{t}");
+        assert!(!t.contains(&"x".repeat(65)), "{t}");
+    }
+
+    /// No R case for the no-intercept model: this checks the option plumbing.
+    #[test]
+    fn test_mcp_regression_ols_intercept_false() {
+        let (case, rt, server) = case_server("ols_grunfeld");
+        let r = call(&rt, &server, json!({"intercept": false}));
+        assert_ne!(r.is_error, Some(true));
+        let t = text(&r);
+        let rows = rows(&t);
+        assert!(rows.iter().all(|(name, _)| name != "(Intercept)"), "{t}");
+        assert_eq!(rows.len(), 2, "{t}");
+        let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
+        let expected = run_ols(
+            &ds,
+            "inv",
+            &["value", "capital"],
+            false,
+            CovarianceType::HC1,
+        )
+        .unwrap();
+        for ((name, v), c) in rows.iter().zip(&expected.coefficients) {
+            assert_eq!(name, &c.name);
+            assert_eq!(format!("{:.4}", v[1]), format!("{:.4}", c.std_error), "{t}");
+        }
+    }
+
+    #[test]
+    fn test_mcp_regression_ols_schema_documents_options() {
+        let tool = AnalyticsServer::regression_router()
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "regression_ols")
+            .expect("regression_ols is advertised");
+        let description = tool.description.as_deref().unwrap_or("");
+        assert!(
+            description.contains("HC1") && description.contains("cov_type = 'standard'"),
+            "{description}"
+        );
+        let properties = tool.input_schema["properties"].as_object().unwrap();
+        assert!(
+            properties.contains_key("cov_type") && properties.contains_key("intercept"),
+            "{properties:?}"
+        );
+        let required: Vec<&str> = tool
+            .input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert!(
+            !required.contains(&"cov_type") && !required.contains(&"intercept"),
+            "{required:?}"
+        );
     }
 }

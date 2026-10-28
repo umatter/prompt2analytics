@@ -1,15 +1,22 @@
 //! Panel data estimation commands
 
 use clap::Subcommand;
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use p2a_core::regression::CovarianceType;
 use p2a_core::run_arellano_bond;
+use p2a_core::{
+    ClusterAdjustment, PanelConfig, PanelResult, PanelVcov, TestDistribution,
+    run_fixed_effects_with, run_hausman_test, run_hdfe, run_random_effects_with,
+};
 use p2a_core::{GlmFamily, run_feglm};
 use p2a_core::{PanelGlsModel, run_panel_gls};
 use p2a_core::{PanelModel, PanelUnitRootConfig, PanelUnitRootTest, run_panel_unit_root};
 use p2a_core::{PvcmType, run_pvcm};
-use p2a_core::{run_fixed_effects, run_hausman_test, run_hdfe, run_random_effects};
 
-use crate::output::{OutputFormat, format_regression_results, print_error};
+use crate::output::{
+    CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, print_error,
+    se_label, sorted_object,
+};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -19,6 +26,9 @@ pub enum PanelCommands {
 EXAMPLES:
     # Entity fixed effects
     p2a panel fe mydata -y revenue -x employees capital --entity firm_id
+
+    # Entity-clustered (Arellano) standard errors
+    p2a panel fe mydata -y revenue -x employees capital --entity firm_id --vcov cluster
 ")]
     Fe {
         /// Dataset name
@@ -35,6 +45,10 @@ EXAMPLES:
         /// Entity (group) column for fixed effects
         #[arg(long)]
         entity: String,
+
+        /// Standard errors: classical (default, as plm), cluster (entity-clustered Arellano, Stata small-sample factor), cluster-hc0, cluster-hc1
+        #[arg(long, default_value = "classical", value_parser = panel_vcov_parser())]
+        vcov: PanelVcov,
     },
 
     /// Random Effects estimation
@@ -42,6 +56,9 @@ EXAMPLES:
 EXAMPLES:
     # Random effects with GLS
     p2a panel re mydata -y revenue -x employees capital --entity firm_id
+
+    # Entity-clustered (Arellano) standard errors
+    p2a panel re mydata -y revenue -x employees capital --entity firm_id --vcov cluster
 ")]
     Re {
         /// Dataset name
@@ -58,6 +75,10 @@ EXAMPLES:
         /// Entity (group) column
         #[arg(long)]
         entity: String,
+
+        /// Standard errors: classical (default, as plm), cluster (entity-clustered Arellano, Stata small-sample factor), cluster-hc0, cluster-hc1
+        #[arg(long, default_value = "classical", value_parser = panel_vcov_parser())]
+        vcov: PanelVcov,
     },
 
     /// Hausman test (Fixed vs Random Effects)
@@ -300,13 +321,15 @@ pub fn execute(
             dep_var,
             indep_vars,
             entity,
-        } => execute_fe(dataset, dep_var, indep_vars, entity, format, session),
+            vcov,
+        } => execute_fe(dataset, dep_var, indep_vars, entity, *vcov, format, session),
         PanelCommands::Re {
             dataset,
             dep_var,
             indep_vars,
             entity,
-        } => execute_re(dataset, dep_var, indep_vars, entity, format, session),
+            vcov,
+        } => execute_re(dataset, dep_var, indep_vars, entity, *vcov, format, session),
         PanelCommands::Hausman {
             dataset,
             dep_var,
@@ -372,6 +395,7 @@ fn execute_fe(
     dep_var: &str,
     indep_vars: &[String],
     entity: &str,
+    vcov: PanelVcov,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -389,42 +413,36 @@ fn execute_fe(
     match dataset {
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
+            let config = PanelConfig { vcov };
 
-            // run_fixed_effects takes 4 args: dataset, y_col, x_cols, entity_col
-            match run_fixed_effects(ds, dep_var, &x_cols, entity) {
+            match run_fixed_effects_with(ds, dep_var, &x_cols, entity, &config) {
                 Ok(result) => {
-                    // PanelResult uses fields, not methods
-                    let coeffs = &result.coefficients;
-                    let ses = &result.std_errors;
-                    let p_vals = &result.p_values;
-                    let t_vals = &result.t_stats;
-
-                    let var_names = &result.variables;
-
-                    let coef_table: Vec<(String, f64, f64, f64, f64)> = var_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), coeffs[i], ses[i], t_vals[i], p_vals[i]))
-                        .collect();
-
-                    let output = format_regression_results(
-                        "Fixed Effects (Within) Estimation",
-                        &coef_table,
-                        result.r_squared,
-                        result.adj_r_squared,
-                        result.n_obs,
-                        format,
-                    );
-                    println!("{}", output);
+                    let se_type = result.vcov_type.to_string();
+                    let se_type_json = panel_se_json(result.vcov_type, entity);
+                    let mut extra_json = serde_json::Map::new();
+                    extra_json.insert("n_groups".to_string(), result.n_groups.into());
+                    extra_json.insert("f_statistic".to_string(), result.f_stat.into());
+                    extra_json.insert("f_p_value".to_string(), result.f_p_value.into());
+                    let report = RegressionReport {
+                        method: "Fixed Effects (Within) Estimation",
+                        coefficients: panel_rows(&result),
+                        statistic: stat_kind(result.test_distribution),
+                        r_squared: ("R-squared (within)", result.r_squared),
+                        adj_r_squared: ("Adj. R-squared (within)", result.adj_r_squared),
+                        n_obs: result.n_obs,
+                        se_type: &se_type,
+                        se_type_json: &se_type_json,
+                        r_squared_type: "within",
+                        extra_json,
+                        warnings: &result.warnings,
+                    };
+                    println!("{}", format_regression_report(&report, format));
 
                     match format {
                         OutputFormat::Json => {}
                         _ => {
                             println!("\nNumber of groups: {}", result.n_groups);
-                            println!(
-                                "F-statistic: {:.4} (p-value: {:.4})",
-                                result.f_stat, result.f_p_value
-                            );
+                            print_panel_f_line(&result);
                         }
                     }
                 }
@@ -445,6 +463,7 @@ fn execute_re(
     dep_var: &str,
     indep_vars: &[String],
     entity: &str,
+    vcov: PanelVcov,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -462,41 +481,77 @@ fn execute_re(
     match dataset {
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
+            let config = PanelConfig { vcov };
 
-            // run_random_effects takes 4 args: dataset, y_col, x_cols, entity_col
-            match run_random_effects(ds, dep_var, &x_cols, entity) {
+            match run_random_effects_with(ds, dep_var, &x_cols, entity, &config) {
                 Ok(result) => {
-                    let coeffs = &result.coefficients;
-                    let ses = &result.std_errors;
-                    let p_vals = &result.p_values;
-                    let t_vals = &result.t_stats;
-
-                    let var_names = &result.variables;
-
-                    let coef_table: Vec<(String, f64, f64, f64, f64)> = var_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), coeffs[i], ses[i], t_vals[i], p_vals[i]))
-                        .collect();
-
-                    let output = format_regression_results(
-                        "Random Effects (GLS) Estimation",
-                        &coef_table,
-                        result.r_squared,
-                        result.adj_r_squared,
-                        result.n_obs,
-                        format,
-                    );
-                    println!("{}", output);
+                    let se_type = result.vcov_type.to_string();
+                    let se_type_json = panel_se_json(result.vcov_type, entity);
+                    let theta_range = theta_range(&result);
+                    let mut extra_json = serde_json::Map::new();
+                    extra_json.insert("n_groups".to_string(), result.n_groups.into());
+                    extra_json.insert("f_statistic".to_string(), result.f_stat.into());
+                    extra_json.insert("f_p_value".to_string(), result.f_p_value.into());
+                    if let Some(df) = result.wald_df {
+                        extra_json.insert("wald_df".to_string(), df.into());
+                    }
+                    let optional = [
+                        ("wald_chi2", result.wald_chi2),
+                        ("wald_p_value", result.wald_p_value),
+                        ("sigma_u", result.sigma_u),
+                        ("sigma_e", result.sigma_e),
+                        ("theta", result.theta),
+                        ("theta_min", theta_range.map(|(lo, _)| lo)),
+                        ("theta_max", theta_range.map(|(_, hi)| hi)),
+                    ];
+                    for (key, value) in optional {
+                        if let Some(value) = value {
+                            extra_json.insert(key.to_string(), value.into());
+                        }
+                    }
+                    let report = RegressionReport {
+                        method: "Random Effects (GLS) Estimation",
+                        coefficients: panel_rows(&result),
+                        statistic: stat_kind(result.test_distribution),
+                        r_squared: ("R-squared", result.r_squared),
+                        adj_r_squared: ("Adj. R-squared", result.adj_r_squared),
+                        n_obs: result.n_obs,
+                        se_type: &se_type,
+                        se_type_json: &se_type_json,
+                        r_squared_type: "cor(y*, X*b)^2 (plm)",
+                        extra_json,
+                        warnings: &result.warnings,
+                    };
+                    println!("{}", format_regression_report(&report, format));
 
                     match format {
                         OutputFormat::Json => {}
                         _ => {
                             println!("\nNumber of groups: {}", result.n_groups);
-                            println!(
-                                "F-statistic: {:.4} (p-value: {:.4})",
-                                result.f_stat, result.f_p_value
-                            );
+                            if let (Some(w), Some(df), Some(p)) =
+                                (result.wald_chi2, result.wald_df, result.wald_p_value)
+                            {
+                                let label = match result.vcov_type {
+                                    PanelVcov::Classical => "Wald chi-squared",
+                                    PanelVcov::Arellano(_) => "Wald chi-squared (clustered)",
+                                };
+                                println!("{label}: {w:.4} on {df} DF (p-value: {p:.4})");
+                            } else {
+                                print_panel_f_line(&result);
+                            }
+                            if let (Some(u), Some(e), Some(theta)) =
+                                (result.sigma_u, result.sigma_e, result.theta)
+                            {
+                                match theta_range {
+                                    None => println!(
+                                        "sigma_u: {u:.4}, sigma_e: {e:.4}, theta: {theta:.4}"
+                                    ),
+                                    Some((lo, hi)) => println!(
+                                        "sigma_u: {u:.4}, sigma_e: {e:.4}, theta (mean): \
+                                         {theta:.4}, range {lo:.4}-{hi:.4}"
+                                    ),
+                                }
+                            }
                         }
                     }
                 }
@@ -538,13 +593,18 @@ fn execute_hausman(
             match run_hausman_test(ds, dep_var, &x_cols, entity) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "test": "Hausman",
-                            "chi2_statistic": result.chi2_statistic,
-                            "p_value": result.p_value,
-                            "df": result.df,
-                            "recommendation": result.recommendation,
-                        });
+                        let json = sorted_object([
+                            ("test".to_string(), "Hausman".into()),
+                            ("chi2_statistic".to_string(), result.chi2_statistic.into()),
+                            ("p_value".to_string(), result.p_value.into()),
+                            ("df".to_string(), result.df.into()),
+                            (
+                                "recommendation".to_string(),
+                                result.recommendation.clone().into(),
+                            ),
+                            ("vcov_method".to_string(), result.vcov_method.clone().into()),
+                            ("warnings".to_string(), result.warnings.clone().into()),
+                        ]);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -555,7 +615,14 @@ fn execute_hausman(
                         println!("\nChi-squared statistic: {:.4}", result.chi2_statistic);
                         println!("Degrees of freedom: {}", result.df);
                         println!("P-value: {:.4}", result.p_value);
+                        println!("Covariance: {}", result.vcov_method);
                         println!("\nRecommendation: {}", result.recommendation);
+                        if !result.warnings.is_empty() {
+                            println!("\nWarnings:");
+                            for w in &result.warnings {
+                                println!("  - {w}");
+                            }
+                        }
                     }
                 },
                 Err(e) => {
@@ -597,29 +664,48 @@ fn execute_hdfe(
             // run_hdfe takes 6 args: dataset, y_col, x_cols, fe_cols, config: Option<HdfeConfig>, cov_type
             match run_hdfe(ds, dep_var, &x_cols, &fe_refs, None, CovarianceType::HC1) {
                 Ok(result) => {
-                    // HdfeResult uses fields, not methods
-                    let coeffs = &result.coefficients;
-                    let ses = &result.std_errors;
-                    let p_vals = &result.p_values;
-                    let t_vals = &result.t_stats;
-
-                    let var_names = &result.variables;
-
-                    let coef_table: Vec<(String, f64, f64, f64, f64)> = var_names
+                    let method = format!("High-Dimensional FE ({})", fe_cols.join(", "));
+                    let se_type = se_label(result.cov_type);
+                    let fe_dimensions: Vec<serde_json::Value> = result
+                        .fe_dimensions
                         .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), coeffs[i], ses[i], t_vals[i], p_vals[i]))
+                        .zip(&result.fe_counts)
+                        .map(|(name, levels)| {
+                            sorted_object([
+                                ("name".to_string(), name.clone().into()),
+                                ("levels".to_string(), (*levels).into()),
+                            ])
+                        })
                         .collect();
-
-                    let output = format_regression_results(
-                        &format!("High-Dimensional FE ({})", fe_cols.join(", ")),
-                        &coef_table,
-                        result.r_squared_within,
-                        result.adj_r_squared_within,
-                        result.n_obs,
-                        format,
+                    let mut extra_json = serde_json::Map::new();
+                    // n_groups: the levels of the first --fe column.
+                    extra_json.insert(
+                        "n_groups".to_string(),
+                        result.fe_counts.first().copied().unwrap_or(0).into(),
                     );
-                    println!("{}", output);
+                    extra_json.insert("f_statistic".to_string(), result.f_stat.into());
+                    extra_json.insert("f_p_value".to_string(), result.f_p_value.into());
+                    extra_json.insert("fe_dimensions".to_string(), fe_dimensions.into());
+                    let report = RegressionReport {
+                        method: &method,
+                        coefficients: CoefRow::from_slices(
+                            &result.variables,
+                            &result.coefficients,
+                            &result.std_errors,
+                            &result.t_stats,
+                            &result.p_values,
+                        ),
+                        statistic: StatKind::T,
+                        r_squared: ("R-squared (within)", result.r_squared_within),
+                        adj_r_squared: ("Adj. R-squared (within)", result.adj_r_squared_within),
+                        n_obs: result.n_obs,
+                        se_type: &se_type,
+                        se_type_json: result.cov_type.short_label(),
+                        r_squared_type: "within",
+                        extra_json,
+                        warnings: &[],
+                    };
+                    println!("{}", format_regression_report(&report, format));
 
                     match format {
                         OutputFormat::Json => {}
@@ -647,6 +733,78 @@ fn execute_hdfe(
         }
     }
     Ok(())
+}
+
+/// `--vcov` values, parsed into [`PanelVcov`]; clap lists them in its error.
+fn panel_vcov_parser() -> impl TypedValueParser<Value = PanelVcov> {
+    PossibleValuesParser::new(["classical", "cluster", "cluster-hc0", "cluster-hc1"])
+        .try_map(|s: String| s.parse::<PanelVcov>().map_err(|e| e.to_string()))
+}
+
+/// JSON `se_type` of a panel covariance: `classical`, `cluster:<entity>`
+/// (Stata factor), `cluster-hc0:<entity>` or `cluster-hc1:<entity>`.
+fn panel_se_json(vcov: PanelVcov, entity: &str) -> String {
+    match vcov {
+        PanelVcov::Classical => "classical".to_string(),
+        PanelVcov::Arellano(ClusterAdjustment::Stata) => format!("cluster:{entity}"),
+        PanelVcov::Arellano(ClusterAdjustment::HC0) => format!("cluster-hc0:{entity}"),
+        PanelVcov::Arellano(ClusterAdjustment::HC1) => format!("cluster-hc1:{entity}"),
+    }
+}
+
+/// t for Student t inference, z for normal inference (random effects).
+fn stat_kind(dist: TestDistribution) -> StatKind {
+    match dist {
+        TestDistribution::StudentT => StatKind::T,
+        TestDistribution::Normal => StatKind::Z,
+    }
+}
+
+/// The coefficient rows of a panel result.
+fn panel_rows(result: &PanelResult) -> Vec<CoefRow> {
+    CoefRow::from_slices(
+        &result.variables,
+        &result.coefficients,
+        &result.std_errors,
+        &result.t_stats,
+        &result.p_values,
+    )
+}
+
+/// Smallest and largest θ_i of an unbalanced random-effects fit; `None` when
+/// the panel is balanced (one θ).
+fn theta_range(result: &PanelResult) -> Option<(f64, f64)> {
+    if result.theta_by_group.is_empty() {
+        return None;
+    }
+    let g = &result.theta_by_group;
+    Some((
+        g.iter().copied().fold(f64::INFINITY, f64::min),
+        g.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    ))
+}
+
+/// The F line after a panel table. Classical: `F-statistic: F (p-value: p)`.
+/// Under the entity-clustered covariance the statistic is a Wald F on
+/// (K, G - 1) degrees of freedom, as plm, and the line says so. A NaN F (a
+/// singular clustered covariance) prints nothing.
+fn print_panel_f_line(result: &PanelResult) {
+    if result.f_stat.is_nan() {
+        return;
+    }
+    match result.vcov_type {
+        PanelVcov::Classical => println!(
+            "F-statistic: {:.4} (p-value: {:.4})",
+            result.f_stat, result.f_p_value
+        ),
+        PanelVcov::Arellano(_) => {
+            let (df1, df2) = result.f_df();
+            println!(
+                "F-statistic (Wald, clustered): {:.4} on {df1} and {df2} DF (p-value: {:.4})",
+                result.f_stat, result.f_p_value
+            );
+        }
+    }
 }
 
 fn execute_feglm(

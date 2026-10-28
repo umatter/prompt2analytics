@@ -1,0 +1,12 @@
+
+Hausman Test Results
+==================================================
+H0: Random Effects is consistent
+H1: Fixed Effects is preferred
+
+Chi-squared statistic: 2.3304
+Degrees of freedom: 2
+P-value: 0.3119
+Covariance: classical FE and RE covariance (plm::phtest default)
+
+Recommendation: Fail to reject H0 (p=0.312), but note: Hausman test may have low power with 10 entities and 200 observations. Consider theoretical arguments for model choice.

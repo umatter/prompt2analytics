@@ -1,0 +1,248 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "cli_data_exhibits",
+      "name": "CLI data describe, data head (exhibits cli_data_describe, cli_data_head)",
+      "category": "interfaces",
+      "reference": "read.csv; row count = nobs(lm(inv ~ value + capital)) of ols_grunfeld",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "ols_grunfeld"
+      ],
+      "tests": [
+        "p2a-cli::exhibits::test_validate_cli_data_describe",
+        "p2a-cli::exhibits::test_validate_cli_data_head"
+      ],
+      "quantities": [
+        "rows (= R's n)",
+        "columns and column names (CSV header)",
+        "column types (Int64 exactly when every CSV value is an integer)",
+        "first five rows (CSV values, exact)",
+        "golden copies of both exhibits"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE, R2; 3 for t/z; 4 for p and test statistics); -F json and MCP at validation/README.md for n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute (p-values below 1e-12 compare equal, X-17)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_reg_ols",
+      "name": "CLI reg ols, reg clustered (exhibits cli_ols, cli_ols_json)",
+      "category": "interfaces",
+      "reference": "stats::lm; sandwich::vcovHC(type = 'HC1'); sandwich::vcovCL(cluster = ~firm, type = 'HC1')",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "ols_grunfeld"
+      ],
+      "tests": [
+        "p2a-cli::exhibits::test_validate_cli_ols",
+        "p2a-cli::exhibits::test_validate_cli_ols_json",
+        "p2a-cli::exhibits::test_validate_cli_ols_standard",
+        "p2a-cli::exhibits::test_validate_cli_clustered"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE HC1 (CLI default) and classical",
+        "SE clustered by firm (CR1, vcovCL HC1)",
+        "t (clustered: coef / SE from the case)",
+        "p",
+        "R2",
+        "adj. R2",
+        "n",
+        "SE label (text) and se_type, r_squared_type, statistic (JSON)",
+        "number of clusters",
+        "warnings (clustered)",
+        "golden copies of cli_ols and cli_ols_json"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE, R2; 3 for t/z; 4 for p and test statistics); -F json and MCP at validation/README.md for n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute (p-values below 1e-12 compare equal, X-17)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_reg_diagnostics",
+      "name": "CLI reg diagnostics (exhibit cli_diagnostics)",
+      "category": "interfaces",
+      "reference": "tseries::jarque.bera.test; lmtest::bptest; lmtest::dwtest; car::vif; kappa(model.matrix(m), exact = TRUE)",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "ols_diagnostics_grunfeld"
+      ],
+      "tests": [
+        "p2a-cli::exhibits::test_validate_cli_diagnostics"
+      ],
+      "quantities": [
+        "Jarque-Bera statistic and p",
+        "Breusch-Pagan (studentized) statistic and p",
+        "Durbin-Watson statistic",
+        "VIF per regressor (names as car::vif: no intercept row)",
+        "condition number",
+        "golden copy of cli_diagnostics"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE, R2; 3 for t/z; 4 for p and test statistics); -F json and MCP at validation/README.md for n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute (p-values below 1e-12 compare equal, X-17)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_panel_fe",
+      "name": "CLI panel fe incl. --vcov (exhibit cli_fe)",
+      "category": "interfaces",
+      "reference": "plm::plm(model = 'within'); plm::vcovHC(method = 'arellano', type = 'sss'/'HC1'/'HC0'); plm::pwaldtest",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "panel_fe_grunfeld"
+      ],
+      "tests": [
+        "p2a-cli::exhibits::test_validate_cli_fe",
+        "p2a-cli::exhibits::test_validate_cli_fe_json",
+        "p2a-cli::exhibits::test_validate_cli_fe_vcov"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE classical",
+        "SE Arellano sss/HC1/HC0 (--vcov cluster, cluster-hc1, cluster-hc0)",
+        "t (Arellano: coef / SE from the case)",
+        "p",
+        "within R2",
+        "adj. within R2",
+        "F and its p",
+        "F Arellano sss/HC1/HC0 (Wald F, df2 = G - 1) and its p",
+        "n",
+        "N",
+        "SE label (text) and se_type, r_squared_type, statistic (JSON)",
+        "golden copy of cli_fe"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE, R2; 3 for t/z; 4 for p and test statistics); -F json and MCP at validation/README.md for n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute (p-values below 1e-12 compare equal, X-17)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_panel_re",
+      "name": "CLI panel re incl. --vcov (exhibit cli_re)",
+      "category": "interfaces",
+      "reference": "plm::plm(model = 'random'); plm::ercomp; summary.plm; plm::pwaldtest; plm::vcovHC(method = 'arellano', type = 'sss'/'HC1'/'HC0')",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "panel_re_grunfeld",
+        "panel_re_grunfeld_unbalanced",
+        "panel_re_sim_no_effect"
+      ],
+      "tests": [
+        "p2a-cli::exhibits::test_validate_cli_re",
+        "p2a-cli::exhibits::test_validate_cli_re_json",
+        "p2a-cli::exhibits::test_validate_cli_re_vcov_cluster",
+        "p2a-cli::exhibits::test_validate_cli_re_unbalanced",
+        "p2a-cli::exhibits::test_validate_cli_re_no_effect"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE classical",
+        "SE Arellano sss/HC0/HC1",
+        "z (Arellano: coef / SE from the case)",
+        "p",
+        "R2 (plm cor(y*, X*b)^2)",
+        "adj. R2",
+        "Wald chi2, df and p",
+        "Wald chi2 and p under Arellano sss/HC0/HC1",
+        "F form W/K and its p (classical and Arellano HC0/HC1)",
+        "sigma_u",
+        "sigma_e",
+        "theta (mean) and its range (unbalanced)",
+        "n",
+        "N",
+        "warnings (sigma_u^2 truncated at 0)",
+        "SE label (text) and se_type, r_squared_type, statistic (JSON)",
+        "golden copy of cli_re"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE, R2; 3 for t/z; 4 for p and test statistics); -F json and MCP at validation/README.md for n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute (p-values below 1e-12 compare equal, X-17)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_panel_hdfe",
+      "name": "CLI panel hdfe (exhibit cli_hdfe)",
+      "category": "interfaces",
+      "reference": "fixest::feols(inv ~ value + capital | firm + year, vcov = 'hetero'); fixest::fitstat('wf'); adj. within R2 from plm(effect = 'twoways')",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "panel_hdfe_grunfeld"
+      ],
+      "tests": [
+        "p2a-cli::exhibits::test_validate_cli_hdfe",
+        "p2a-cli::exhibits::test_validate_cli_hdfe_json"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE HC1 (fixest hetero)",
+        "t",
+        "p",
+        "within R2",
+        "adj. within R2 (plm)",
+        "within F and its p",
+        "n",
+        "fixed-effect levels (CSV counts)",
+        "n_groups",
+        "fe_dimensions",
+        "SE label (text) and se_type, r_squared_type, statistic (JSON)",
+        "golden copy of cli_hdfe"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE, R2; 3 for t/z; 4 for p and test statistics); -F json and MCP at validation/README.md for n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute (p-values below 1e-12 compare equal, X-17)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_panel_hausman",
+      "name": "CLI panel hausman (exhibit cli_hausman)",
+      "category": "interfaces",
+      "reference": "plm::phtest(plm(model = 'within'), plm(model = 'random'))",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "panel_hausman_grunfeld",
+        "panel_hausman_sim_corr"
+      ],
+      "tests": [
+        "p2a-cli::exhibits::test_validate_cli_hausman",
+        "p2a-cli::exhibits::test_validate_cli_hausman_json",
+        "p2a-cli::exhibits::test_validate_cli_hausman_sim_corr"
+      ],
+      "quantities": [
+        "chi2 statistic",
+        "df",
+        "p",
+        "covariance line and JSON vcov_method",
+        "recommendation",
+        "warnings (Var(b_FE) - Var(b_RE) indefinite)",
+        "JSON keys",
+        "golden copy of cli_hausman"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE, R2; 3 for t/z; 4 for p and test statistics); -F json and MCP at validation/README.md for n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute (p-values below 1e-12 compare equal, X-17)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_regression_ols",
+      "name": "MCP regression_ols (cov_type, intercept)",
+      "category": "interfaces",
+      "reference": "stats::lm; sandwich::vcovHC(type = 'HC0'/'HC1'/'HC2'/'HC3')",
+      "doc": "validation/regression/ols.md",
+      "cases": [
+        "ols_grunfeld"
+      ],
+      "tests": [
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_ols",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_ols_cov_types"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE classical/HC0/HC1 (default)/HC2/HC3",
+        "t",
+        "p",
+        "adj. R2",
+        "cov_type spellings (standard, classical, hc0, HC1, hc2, Hc3, default)",
+        "Standard Errors line of the tool text"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE, R2; 3 for t/z; 4 for p and test statistics); -F json and MCP at validation/README.md for n = 120-300: coefficients 1e-8, SE and statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute (p-values below 1e-12 compare equal, X-17)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
