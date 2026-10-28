@@ -101,12 +101,41 @@ Execute these steps to validate numerical correctness:
    Exit 1 means a recomputed R value differs from the committed case: report it (an R package
    upgrade or a changed case), do not rewrite the case without the user.
 
-2. **Run the registered Rust tests** in the CI feature set of their package:
+2. **Run the registered Rust tests** (the `tests` of the registry entries) with the runner,
+   once per category they fall into:
    ```bash
-   cargo test -p p2a-core --no-default-features --features ci -- --exact {{registered test paths}}
-   # or the whole category:
    validation/run_validation.sh --rust-only --category {{category}}
    ```
+   A test's category is `cli` for p2a-cli, `mcp` for p2a-mcp, and otherwise the first module
+   of its path (`diagnostics` counts as `econometrics`; the `validation_ml*` and
+   `validation_boosting_methods` binaries as `ml`). The runner uses each package's CI feature
+   set and fails when a test fails, does not compile, or fewer tests run than it selected. It
+   selects only tests with `test_validate` in their name, in the categories stats |
+   regression | econometrics | forecasting | ml | cli | mcp; run a registered test outside
+   them (such as `p2a-core::traits::...`) with the direct form below. Before reporting a
+   registered test as passed, find its id in the `tests` map of the run's `results.json`
+   (the runner prints its path as `Results: ...`) with the status `ok`; a missing id is a
+   failure.
+
+   Direct form, one test or several of one test binary: a registry id is
+   `<package>::<libtest path>` for a unit test and `<package>::<binary>::<name>` for an
+   integration test (`crates/<package>/tests/<binary>.rs`). Drop the `<package>::` prefix.
+   A unit test runs with `--lib` (`--bins` for p2a-cli, which has no library), an
+   integration test with `--test <binary>` and the bare name. Use the package's CI feature
+   set: p2a-core `--no-default-features --features ci`, p2a-cli `--no-default-features
+   --features spectral-analysis`, p2a-mcp `--no-default-features --features
+   "http,llm,auth,websocket"`.
+   ```bash
+   # p2a-core::regression::ols::tests::test_validate_ols_grunfeld
+   cargo test -p p2a-core --lib --no-default-features --features ci -- --exact regression::ols::tests::test_validate_ols_grunfeld
+   # p2a-cli::exhibits::test_validate_cli_ols
+   cargo test -p p2a-cli --test exhibits --no-default-features --features spectral-analysis -- --exact test_validate_cli_ols
+   # p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_ols
+   cargo test -p p2a-mcp --lib --no-default-features --features "http,llm,auth,websocket" -- --exact tools::handlers::regression::tests::test_validate_mcp_regression_ols
+   ```
+   `--exact` with a name that matches nothing runs 0 tests and still exits 0. The `N passed`
+   of the `test result:` line must equal the number of names given; any other count, 0
+   passed included, is a failure, never a pass.
 
 3. **The comparison happens inside the tests** (`p2a_validation::Check` at the `Tol`
    tolerances of `validation/README.md`): a failing test lists every quantity that differs,
@@ -119,14 +148,17 @@ Execute these steps to validate numerical correctness:
    `validation/r/cases/<area>.R`, run `Rscript validation/r/run.R --write <id>`, add a
    `test_validate_*` test that loads it (`crate::test_support::load_case`) and compares with
    `Check`/`Tol`, and add the registry entry. Then run
-   `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`.
+   `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`,
+   after writing the three lists with `cargo test -p <package> --tests <CI feature set> --
+   --list > target/<package>-tests.txt 2>&1` (the commands are in CLAUDE.md's validation
+   block).
 
 5. **Generate validation report:**
    ```
    === Validation Results: OLS ===
 
    R check: 3 case(s) match the committed files (ols_grunfeld, ols_mtcars, ols_longley)
-   Registered tests: 4/4 passed (p2a-core, ci features)
+   Registered tests: 4/4 passed (p2a-core, ci features; each id found with status ok)
    Known deviations: none
    Unregistered test_validate tests (not R-pinned): none
    ```
@@ -216,6 +248,9 @@ If the method has no registry entry or its cases are missing:
    `Rscript validation/r/run.R --write <id>` and `--check <id>`
 4. Add the `test_validate_*` test and the registry entry in `validation/methods/<area>.json`
 5. Update the method doc and the `validation/README.md` index row (status from the registry)
+6. A new `test_validate` test changes the counts CI checks: `validation/VALIDATION_STATUS.md`
+   must be regenerated with `validation/run_validation.sh --write-status` before the change
+   reaches main (during the review campaign: at the wave integration, not in a lane)
 
 ### Missing R Benchmark Script
 
@@ -265,16 +300,17 @@ Artifacts:
   [X] R benchmark script: ../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_regression.R
   [X] Criterion benchmark: crates/p2a-core/benches/regression_benchmarks.rs (OLS_Standard)
   [X] Validation doc: validation/regression/ols.md
-  [X] Rust tests: test_validate_ols, test_validate_longley
+  [X] Registry: validation/methods/regression.json, id ols (cases ols_grunfeld, ols_mtcars, ols_longley)
+  [X] Registered tests: p2a-core::regression::ols::tests::test_validate_ols_grunfeld, ...
 
 Checking R cases and running the registered tests...
 [Rscript validation/r/run.R --check output]
-[cargo test output]
+[validation/run_validation.sh --rust-only --category regression output]
 
 === Validation Results: OLS ===
 
 R check: 3 case(s) match the committed files
-Registered tests: 4/4 passed
+Registered tests: 4/4 passed (each id found in results.json with status ok)
 Known deviations: none
 
 Running benchmarks...
