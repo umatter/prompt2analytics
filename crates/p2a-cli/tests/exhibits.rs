@@ -21,7 +21,10 @@
 
 use p2a_core::regression::{CovarianceType, OlsCoefficient};
 use p2a_core::traits::t_test_p_value;
-use p2a_core::{DataLoader, Dataset, run_ols, run_ols_clustered, run_vcov_hac};
+use p2a_core::{
+    ClusterAdjustment, DataLoader, Dataset, PanelVcov, run_ols, run_ols_clustered,
+    run_random_effects, run_vcov_hac,
+};
 use p2a_validation::golden::assert_golden;
 use p2a_validation::text::{coefficient_rows, labelled};
 use p2a_validation::{Case, Check, Tol};
@@ -1118,4 +1121,520 @@ fn test_validate_cli_diagnostics() {
         .finish();
     assert!(!out.contains("(Intercept):"), "{out}");
     assert_golden(&golden("cli_diagnostics"), &out);
+}
+
+// =============================================================================
+// panel fe, panel re, panel hdfe (exhibits cli_fe, cli_re, cli_hdfe)
+// =============================================================================
+
+const FE: [&str; 10] = [
+    "panel", "fe", "grunfeld", "-y", "inv", "-x", "value", "capital", "--entity", "firm",
+];
+const RE: [&str; 10] = [
+    "panel", "re", "grunfeld", "-y", "inv", "-x", "value", "capital", "--entity", "firm",
+];
+const HDFE: [&str; 11] = [
+    "panel", "hdfe", "grunfeld", "-y", "inv", "-x", "value", "capital", "--fe", "firm", "year",
+];
+
+/// `args` with `extra` appended.
+fn with(args: &[&'static str], extra: &[&'static str]) -> Vec<&'static str> {
+    [args, extra].concat()
+}
+
+/// `-F json` and `args`.
+fn as_json(args: &[&'static str]) -> Vec<&'static str> {
+    [&["-F", "json"][..], args].concat()
+}
+
+/// `case[coef] / case[se]` for `names` (R reports no t for a sandwich covariance).
+fn derived_t(case: &Case, se_key: &str, names: &[String]) -> Vec<f64> {
+    let coef = case.by_names("coef", names);
+    let se = case.by_names(se_key, names);
+    coef.iter().zip(&se).map(|(b, s)| b / s).collect()
+}
+
+/// Every `actual` within `tol` of `expected`.
+fn assert_all(what: &str, actual: &[f64], expected: &[f64], tol: Tol) {
+    assert_eq!(actual.len(), expected.len(), "{what}");
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert!(tol.allows(*a, *e), "{what}[{i}]: {a} vs R {e}");
+    }
+}
+
+#[test]
+fn test_validate_cli_fe() {
+    let case = Case::load("panel_fe_grunfeld");
+    let s = grunfeld_session(&case);
+    let out = run(&s, &FE);
+    let t = table(&out);
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::printed(6))
+        .named("se", &t.names, &t.se, Tol::printed(6))
+        .named("t", &t.names, &t.stat, Tol::printed(3))
+        .named("p", &t.names, &t.p, Tol::printed(4))
+        .scalar(
+            "r2",
+            labelled(&out, "R-squared (within):").unwrap(),
+            Tol::printed(6),
+        )
+        .scalar(
+            "adj_r2",
+            labelled(&out, "Adj. R-squared (within):").unwrap(),
+            Tol::printed(6),
+        )
+        .scalar(
+            "n_obs",
+            labelled(&out, "Observations:").unwrap(),
+            Tol::exact(),
+        )
+        .scalar(
+            "n_groups",
+            labelled(&out, "Number of groups:").unwrap(),
+            Tol::exact(),
+        )
+        .scalar(
+            "f_stat",
+            num_after(&out, "", "F-statistic:"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "f_p",
+            num_after(&out, "F-statistic:", "(p-value:"),
+            Tol::printed(4),
+        )
+        .finish();
+    assert!(
+        out.contains(&format!("\nStandard errors: {}\n", PanelVcov::Classical)),
+        "{out}"
+    );
+    assert!(out.contains("t-value") && !out.contains("z-value"), "{out}");
+    assert_golden(&golden("cli_fe"), &out);
+}
+
+#[test]
+fn test_validate_cli_fe_json() {
+    let case = Case::load("panel_fe_grunfeld");
+    let s = grunfeld_session(&case);
+    let v = json(&run(&s, &as_json(&FE)));
+    let t = json_table(&v, "t_value");
+    let n = 200;
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::coef(n))
+        .named("se", &t.names, &t.se, Tol::se(n))
+        .named("t", &t.names, &t.stat, Tol::stat(n))
+        .named("p", &t.names, &t.p, Tol::p_value(n))
+        .scalar("r2", json_f64(&v["r_squared"]), Tol::stat(n))
+        .scalar("adj_r2", json_f64(&v["adj_r_squared"]), Tol::stat(n))
+        .scalar("n_obs", json_f64(&v["n_observations"]), Tol::exact())
+        .scalar("n_groups", json_f64(&v["n_groups"]), Tol::exact())
+        .scalar("f_stat", json_f64(&v["f_statistic"]), Tol::stat(n))
+        .scalar("f_p", json_f64(&v["f_p_value"]), Tol::p_value(n))
+        .finish();
+    assert_eq!(v["r_squared_type"], "within");
+    assert_eq!(v["se_type"], "classical");
+    assert_eq!(v["statistic"], "t");
+}
+
+#[test]
+fn test_validate_cli_fe_vcov() {
+    let case = Case::load("panel_fe_grunfeld");
+    let s = grunfeld_session(&case);
+    let n = 200;
+    for (flag, adj, json_se) in [
+        ("cluster", "sss", "cluster:firm"),
+        ("cluster-hc1", "hc1", "cluster-hc1:firm"),
+        ("cluster-hc0", "hc0", "cluster-hc0:firm"),
+    ] {
+        let v = json(&run(&s, &as_json(&with(&FE, &["--vcov", flag]))));
+        let t = json_table(&v, "t_value");
+        let se_key = format!("se_arellano_{adj}");
+        Check::new(&case)
+            .named("coef", &t.names, &t.coef, Tol::coef(n))
+            .named(&se_key, &t.names, &t.se, Tol::se(n))
+            .scalar(
+                &format!("f_stat_arellano_{adj}"),
+                json_f64(&v["f_statistic"]),
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("f_p_arellano_{adj}"),
+                json_f64(&v["f_p_value"]),
+                Tol::p_value(n),
+            )
+            .finish();
+        assert_all(
+            &format!("t ({flag})"),
+            &t.stat,
+            &derived_t(&case, &se_key, &t.names),
+            Tol::stat(n),
+        );
+        assert_eq!(v["se_type"], json_se, "{flag}");
+    }
+
+    let out = run(&s, &with(&FE, &["--vcov", "cluster"]));
+    let t = table(&out);
+    Check::new(&case)
+        .named("se_arellano_sss", &t.names, &t.se, Tol::printed(6))
+        .scalar(
+            "f_stat_arellano_sss",
+            num_after(&out, "", "F-statistic (Wald, clustered):"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "f_df2_arellano",
+            nums_on_line(&out, "F-statistic (Wald, clustered):")[2],
+            Tol::exact(),
+        )
+        .finish();
+    assert!(
+        out.contains(&format!(
+            "\nStandard errors: {}\n",
+            PanelVcov::Arellano(ClusterAdjustment::Stata)
+        )),
+        "{out}"
+    );
+    assert_eq!(run(&s, &with(&FE, &["--vcov", "classical"])), run(&s, &FE));
+}
+
+#[test]
+fn test_validate_cli_re() {
+    let case = Case::load("panel_re_grunfeld");
+    let s = grunfeld_session(&case);
+    let out = run(&s, &RE);
+    let header = out
+        .lines()
+        .find(|l| l.starts_with("Variable "))
+        .unwrap_or_else(|| panic!("no table header in\n{out}"));
+    assert!(
+        header.contains("z-value") && !header.contains("t-value"),
+        "{header}"
+    );
+    let t = table(&out);
+    let wald = nums_on_line(&out, "Wald chi-squared:");
+    assert_eq!(wald.len(), 3, "{wald:?}");
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::printed(6))
+        .named("se", &t.names, &t.se, Tol::printed(6))
+        .named("z", &t.names, &t.stat, Tol::printed(3))
+        .named("p", &t.names, &t.p, Tol::printed(4))
+        .scalar("r2", labelled(&out, "R-squared:").unwrap(), Tol::printed(6))
+        .scalar(
+            "adj_r2",
+            labelled(&out, "Adj. R-squared:").unwrap(),
+            Tol::printed(6),
+        )
+        .scalar(
+            "n_obs",
+            labelled(&out, "Observations:").unwrap(),
+            Tol::exact(),
+        )
+        .scalar(
+            "n_groups",
+            labelled(&out, "Number of groups:").unwrap(),
+            Tol::exact(),
+        )
+        .scalar("wald_chisq", wald[0], Tol::printed(4))
+        .scalar("wald_df", wald[1], Tol::exact())
+        .scalar("wald_p", wald[2], Tol::printed(4))
+        .finish();
+    for (key, expected) in [
+        ("sigma_u:", case.scalar("sigma2_id").sqrt()),
+        ("sigma_e:", case.scalar("sigma2_idios").sqrt()),
+        ("theta:", case.scalar("theta_mean")),
+    ] {
+        let printed = num_after(&out, "", key);
+        assert!(
+            Tol::printed(4).allows(printed, expected),
+            "{key} {printed} vs R {expected}"
+        );
+    }
+    assert!(out.contains("\nStandard errors: classical\n"), "{out}");
+    assert!(!out.contains("F-statistic:"), "{out}");
+    assert_golden(&golden("cli_re"), &out);
+}
+
+#[test]
+fn test_validate_cli_re_json() {
+    let case = Case::load("panel_re_grunfeld");
+    let s = grunfeld_session(&case);
+    let v = json(&run(&s, &as_json(&RE)));
+    let t = json_table(&v, "z_value");
+    let n = 200;
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::coef(n))
+        .named("se", &t.names, &t.se, Tol::se(n))
+        .named("z", &t.names, &t.stat, Tol::stat(n))
+        .named("p", &t.names, &t.p, Tol::p_value(n))
+        .scalar("r2", json_f64(&v["r_squared"]), Tol::stat(n))
+        .scalar("adj_r2", json_f64(&v["adj_r_squared"]), Tol::stat(n))
+        .scalar("wald_chisq", json_f64(&v["wald_chi2"]), Tol::stat(n))
+        .scalar("wald_df", json_f64(&v["wald_df"]), Tol::exact())
+        .scalar("wald_p", json_f64(&v["wald_p_value"]), Tol::p_value(n))
+        .scalar("wald_f", json_f64(&v["f_statistic"]), Tol::stat(n))
+        .scalar("wald_f_p", json_f64(&v["f_p_value"]), Tol::p_value(n))
+        .scalar("sigma2_id", json_f64(&v["sigma_u"]).powi(2), Tol::stat(n))
+        .scalar(
+            "sigma2_idios",
+            json_f64(&v["sigma_e"]).powi(2),
+            Tol::stat(n),
+        )
+        .scalar("theta_mean", json_f64(&v["theta"]), Tol::stat(n))
+        .scalar("n_groups", json_f64(&v["n_groups"]), Tol::exact())
+        .scalar("n_obs", json_f64(&v["n_observations"]), Tol::exact())
+        .finish();
+    for row in v["coefficients"].as_array().unwrap() {
+        assert!(row.get("t_value").is_none(), "{row}");
+    }
+    assert_eq!(v["statistic"], "z");
+    assert_eq!(v["se_type"], "classical");
+    assert_eq!(v["r_squared_type"], "cor(y*, X*b)^2 (plm)");
+    assert!(
+        v.get("theta_min").is_none() && v.get("theta_max").is_none(),
+        "{v}"
+    );
+}
+
+#[test]
+fn test_validate_cli_re_vcov_cluster() {
+    let case = Case::load("panel_re_grunfeld");
+    let s = grunfeld_session(&case);
+    let n = 200;
+    let out = run(&s, &with(&RE, &["--vcov", "cluster"]));
+    let t = table(&out);
+    let wald = nums_on_line(&out, "Wald chi-squared (clustered):");
+    assert_eq!(wald.len(), 3, "{wald:?}");
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::printed(6))
+        .named("se_arellano_sss", &t.names, &t.se, Tol::printed(6))
+        .scalar("wald_chisq_arellano_sss", wald[0], Tol::printed(4))
+        .scalar("wald_df", wald[1], Tol::exact())
+        .scalar("wald_p_arellano_sss", wald[2], Tol::printed(4))
+        .finish();
+    assert_all(
+        "z (cluster)",
+        &t.stat,
+        &derived_t(&case, "se_arellano_sss", &t.names),
+        Tol::printed(3),
+    );
+    assert!(
+        out.contains(&format!(
+            "\nStandard errors: {}\n",
+            PanelVcov::Arellano(ClusterAdjustment::Stata)
+        )),
+        "{out}"
+    );
+    for (flag, adj) in [("cluster-hc0", "hc0"), ("cluster-hc1", "hc1")] {
+        let v = json(&run(&s, &as_json(&with(&RE, &["--vcov", flag]))));
+        let t = json_table(&v, "z_value");
+        Check::new(&case)
+            .named(&format!("se_arellano_{adj}"), &t.names, &t.se, Tol::se(n))
+            .scalar(
+                &format!("wald_chisq_arellano_{adj}"),
+                json_f64(&v["wald_chi2"]),
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("wald_p_arellano_{adj}"),
+                json_f64(&v["wald_p_value"]),
+                Tol::p_value(n),
+            )
+            .scalar(
+                &format!("wald_f_arellano_{adj}"),
+                json_f64(&v["f_statistic"]),
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("wald_f_p_arellano_{adj}"),
+                json_f64(&v["f_p_value"]),
+                Tol::p_value(n),
+            )
+            .finish();
+        assert_eq!(v["se_type"], format!("{flag}:firm"));
+    }
+}
+
+#[test]
+fn test_validate_cli_re_unbalanced() {
+    let case = Case::load("panel_re_grunfeld_unbalanced");
+    let s = session(&case.dataset_path());
+    let out = run(&s, &RE);
+    let t = table(&out);
+    let theta = nums_on_line(&out, "theta (mean):");
+    assert_eq!(theta.len(), 3, "{theta:?}");
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::printed(6))
+        .named("se", &t.names, &t.se, Tol::printed(6))
+        .named("z", &t.names, &t.stat, Tol::printed(3))
+        .named("p", &t.names, &t.p, Tol::printed(4))
+        .scalar(
+            "n_obs",
+            labelled(&out, "Observations:").unwrap(),
+            Tol::exact(),
+        )
+        .scalar(
+            "n_groups",
+            labelled(&out, "Number of groups:").unwrap(),
+            Tol::exact(),
+        )
+        .scalar("theta_mean", theta[0], Tol::printed(4))
+        .scalar("theta_min", theta[1], Tol::printed(4))
+        .scalar("theta_max", theta[2], Tol::printed(4))
+        .finish();
+    for (key, expected) in [
+        ("sigma_u:", case.scalar("sigma2_id").sqrt()),
+        ("sigma_e:", case.scalar("sigma2_idios").sqrt()),
+    ] {
+        let printed = num_after(&out, "", key);
+        assert!(
+            Tol::printed(4).allows(printed, expected),
+            "{key} {printed} vs R {expected}"
+        );
+    }
+
+    let v = json(&run(&s, &as_json(&RE)));
+    let n = 171;
+    Check::new(&case)
+        .scalar("theta_mean", json_f64(&v["theta"]), Tol::stat(n))
+        .scalar("theta_min", json_f64(&v["theta_min"]), Tol::stat(n))
+        .scalar("theta_max", json_f64(&v["theta_max"]), Tol::stat(n))
+        .scalar("n_obs", json_f64(&v["n_observations"]), Tol::exact())
+        .finish();
+}
+
+#[test]
+fn test_validate_cli_re_no_effect() {
+    let case = Case::load("panel_re_sim_no_effect");
+    let s = session(&case.dataset_path());
+    let out = run(&s, &RE);
+    let t = table(&out);
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::printed(6))
+        .named("se", &t.names, &t.se, Tol::printed(6))
+        .finish();
+    for (key, expected) in [
+        ("sigma_u:", case.scalar("sigma2_id").sqrt()),
+        ("theta:", case.scalar("theta_mean")),
+    ] {
+        let printed = num_after(&out, "", key);
+        assert!(
+            Tol::printed(4).allows(printed, expected),
+            "{key} {printed} vs R {expected}"
+        );
+    }
+    let r = run_random_effects(
+        &dataset(&case.dataset_path()),
+        "inv",
+        &["value", "capital"],
+        "firm",
+    )
+    .unwrap();
+    assert!(
+        !r.warnings.is_empty(),
+        "the negative variance estimate should be warned about"
+    );
+    assert_eq!(warnings_block(&out), r.warnings, "{out}");
+    let v = json(&run(&s, &as_json(&RE)));
+    assert_eq!(v["warnings"], serde_json::json!(r.warnings), "{v}");
+}
+
+#[test]
+fn test_validate_cli_hdfe() {
+    let case = Case::load("panel_hdfe_grunfeld");
+    let s = grunfeld_session(&case);
+    let out = run(&s, &HDFE);
+    let t = table(&out);
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::printed(6))
+        .named("se_hetero", &t.names, &t.se, Tol::printed(6))
+        .named("t_hetero", &t.names, &t.stat, Tol::printed(3))
+        .named("p_hetero", &t.names, &t.p, Tol::printed(4))
+        .scalar(
+            "r2_within",
+            labelled(&out, "R-squared (within):").unwrap(),
+            Tol::printed(6),
+        )
+        .scalar(
+            "adj_r2_within_plm",
+            labelled(&out, "Adj. R-squared (within):").unwrap(),
+            Tol::printed(6),
+        )
+        .scalar(
+            "n_obs",
+            labelled(&out, "Observations:").unwrap(),
+            Tol::exact(),
+        )
+        .scalar(
+            "within_f",
+            num_after(&out, "", "F-statistic:"),
+            Tol::printed(4),
+        )
+        .scalar(
+            "within_f_p",
+            num_after(&out, "F-statistic:", "(p-value:"),
+            Tol::printed(4),
+        )
+        .finish();
+    for fe in ["firm", "year"] {
+        let levels = csv_levels(&case.dataset_path(), fe);
+        assert!(
+            out.contains(&format!("\n  {fe}: {levels} levels\n")),
+            "{out}"
+        );
+    }
+    assert!(
+        out.contains("\nStandard errors: HC1 (heteroskedasticity-robust)\n"),
+        "{out}"
+    );
+    assert_golden(&golden("cli_hdfe"), &out);
+}
+
+#[test]
+fn test_validate_cli_hdfe_json() {
+    let case = Case::load("panel_hdfe_grunfeld");
+    let s = grunfeld_session(&case);
+    let v = json(&run(&s, &as_json(&HDFE)));
+    let t = json_table(&v, "t_value");
+    let n = 200;
+    // The MAP demeaning converges to ~1e-15 on this balanced panel, so the
+    // standard tolerances apply (no Tol::iterative).
+    Check::new(&case)
+        .named("coef", &t.names, &t.coef, Tol::coef(n))
+        .named("se_hetero", &t.names, &t.se, Tol::se(n))
+        .named("t_hetero", &t.names, &t.stat, Tol::stat(n))
+        .named("p_hetero", &t.names, &t.p, Tol::p_value(n))
+        .scalar("r2_within", json_f64(&v["r_squared"]), Tol::stat(n))
+        .scalar(
+            "adj_r2_within_plm",
+            json_f64(&v["adj_r_squared"]),
+            Tol::stat(n),
+        )
+        .scalar("within_f", json_f64(&v["f_statistic"]), Tol::stat(n))
+        .scalar("within_f_p", json_f64(&v["f_p_value"]), Tol::p_value(n))
+        .scalar("n_obs", json_f64(&v["n_observations"]), Tol::exact())
+        .finish();
+    let path = case.dataset_path();
+    let (firm, year) = (csv_levels(&path, "firm"), csv_levels(&path, "year"));
+    assert_eq!(v["n_groups"], firm);
+    assert_eq!(
+        v["fe_dimensions"],
+        serde_json::json!([{"levels": firm, "name": "firm"}, {"levels": year, "name": "year"}])
+    );
+    assert_eq!(v["r_squared_type"], "within");
+    assert_eq!(v["se_type"], "HC1");
+    assert_eq!(v["statistic"], "t");
+}
+
+#[test]
+fn test_cli_panel_vcov_rejects_unknown() {
+    let s = session(&p2a_validation::repo_path(GRUNFELD));
+    for cmd in [&FE, &RE] {
+        let out = p2a(&s, &with(cmd, &["--vcov", "robust"]));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("invalid value 'robust'"), "{stderr}");
+        for allowed in ["classical", "cluster", "cluster-hc0", "cluster-hc1"] {
+            assert!(stderr.contains(allowed), "{allowed} missing in {stderr}");
+        }
+    }
 }

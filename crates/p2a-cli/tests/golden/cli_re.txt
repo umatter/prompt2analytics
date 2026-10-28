@@ -1,0 +1,21 @@
+
+Random Effects (GLS) Estimation Results
+============================================================
+
+Variable         Coefficient   Std. Error    z-value    p-value
+------------------------------------------------------------
+(Intercept)       -57.834415    28.898935     -2.001     0.0454*
+value               0.109781     0.010493     10.463     0.0000***
+capital             0.308113     0.017180     17.934     0.0000***
+------------------------------------------------------------
+R-squared: 0.769503
+Adj. R-squared: 0.767163
+Observations: 200
+Standard errors: classical
+
+Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1
+
+
+Number of groups: 10
+Wald chi-squared: 657.6739 on 2 DF (p-value: 0.0000)
+sigma_u: 84.2010, sigma_e: 52.7680, theta: 0.8612
