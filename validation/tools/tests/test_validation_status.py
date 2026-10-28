@@ -5,6 +5,7 @@ Run: python3 -m unittest discover -s validation/tools/tests -v
 
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 FIX = HERE / "fixtures"
@@ -315,6 +317,17 @@ class TestCollect(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git"), "git not installed")
     def test_commit_is_marked_dirty_when_tracked_files_changed(self):
+        # Isolated from the caller's git: without a ceiling, git looks for a repository
+        # above the temporary directory (TMPDIR inside a work tree), and a git hook
+        # exports GIT_INDEX_FILE (and may export GIT_DIR) to the suite it runs.
+        isolated = {"GIT_CEILING_DIRECTORIES": os.path.realpath(self._tmp.name)}
+        with mock.patch.dict(os.environ, isolated):
+            for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR"):
+                os.environ.pop(var, None)
+            self.check_dirty_marking()
+
+    def check_dirty_marking(self):
         repo = Path(self._tmp.name) / "repo"
         repo.mkdir()
 
