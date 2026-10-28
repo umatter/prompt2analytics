@@ -121,7 +121,7 @@ Registered only with an access token, or on a local server started with `--expos
 DELETE /api/sessions/{session_id}
 ```
 
-Answers 204. Before the answer, the session leaves the server's session table, so later requests no longer find it (`GET /api/sessions/{id}` and tool calls answer 404, a chat stream ends with "Session not found"), and, with the session database, its stored conversations, messages, tool calls, settings and dataset records are deleted. Its datasets go with the session (their memory is freed once no call still running in it holds them). Its data directory (open public mode) is removed off the request: the deletion queues the removal on the server's blocking thread pool before it answers and does not wait for it, so the directory can still exist for a moment after the 204. Once the removal has started, no call (one still running in the deleted session, say) can create the directory again for that id. An unknown session answers 404.
+Answers 204. Before the answer, the session leaves the server's session table, so later requests no longer find it (`GET /api/sessions/{id}` and tool calls answer 404, a chat stream ends with "Session not found"), and, with the session database, its stored conversations, messages, tool calls, settings and dataset records are deleted. Its datasets go with the session (their memory is freed once no call still running in it holds them). Its data directory (open public mode) is removed off the request: the deletion queues the removal on the server's blocking thread pool before it answers and does not wait for it, so the directory can still exist for a moment after the 204. Once the removal has started, no call (one still running in the deleted session, say) can create the directory again for that id while the server remembers the id as removed, which it does for the most recent 65,536 removed sessions. An unknown session answers 404.
 
 ### List Files
 ```
@@ -461,7 +461,7 @@ Lists the models of the server's default local Ollama endpoint (`http://localhos
 }
 ```
 
-The endpoint must pass the server's LLM egress policy, which allows it only while `llm_allow_loopback` is true (the Off profile's default) and `P2A_LLM_ALLOWED_HOSTS` is unset or lists `localhost`. Otherwise the route answers 503 without contacting anything. The hosted profile, which open public mode implies, sets `llm_allow_loopback=false`, so a hosted server answers this unless `P2A_LIMIT_OVERRIDES` sets `llm_allow_loopback=true` (captured, open public server):
+The endpoint must pass the server's LLM egress policy, which allows it only while `llm_allow_loopback` is true (the Off profile's default) and `P2A_LLM_ALLOWED_HOSTS` is unset or lists `localhost`. Otherwise the route answers 503 without contacting anything. The hosted profile, which open public mode implies, sets `llm_allow_loopback=false`, so a hosted server answers this unless `P2A_LIMIT_OVERRIDES` sets `llm_allow_loopback=true` and `P2A_LLM_ALLOWED_HOSTS` is unset or lists `localhost` (the shipped `deploy/fly.toml` lists only the three provider hosts) (captured, open public server):
 
 ```
 HTTP/1.1 503 Service Unavailable

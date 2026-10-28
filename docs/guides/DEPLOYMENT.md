@@ -174,8 +174,10 @@ websocket `tool` messages runs through one governor
   hand-back with no call running within its deadline (`"memory_stuck": true`:
   every call is refused, so no tool call will run to free it; only work
   detached past its deadline ending, or sessions being deleted or expiring, can
-  bring the process back under the limit). When `P2A_STUCK_EXIT_SECS` is set
-  (hosted 300 s), a watchdog reads the health every 5 s. At the first check
+  bring the process back under the limit). In the hosted profile a watchdog
+  runs with `P2A_STUCK_EXIT_SECS` at 300 s unless the variable says otherwise
+  (`0` turns it off); in the other profiles it runs only when the variable is
+  set. It reads the health every 5 s. At the first check
   at which at least `P2A_STUCK_EXIT_SECS` have passed since the first check
   that saw either state, with no healthy check in between, the process logs
   an error and exits with exit code 70, so that the platform's restart
@@ -1006,16 +1008,15 @@ Nothing here runs automatically except the two workflows named in steps 0 and
    fly deploy --ha=false -c deploy/fly.toml
    ```
 
-   `--ha=false` keeps the app on one machine. Every session, dataset and
-   result lives in the memory of one process (`fly.toml` mounts no volume and
-   sets no `P2A_DB_PATH`), so with two machines the sessions are split
-   between two processes, and a visitor's request that Fly's proxy sends to
-   the other machine does not find the session there (a tool call answers 404
+   `--ha=false` keeps the app on one machine. Every session, dataset and result
+   lives in the memory of one process, so with two machines the sessions are
+   split between two processes, and a visitor's request that Fly's proxy sends
+   to the other machine does not find the session there (a tool call answers 404
    "Session not found"). A deploy onto an app that has no machines (the first
    one, or one after the machines were destroyed) otherwise creates a second
-   machine for high availability. `min_machines_running = 1` in `fly.toml` is
-   a floor and does not prevent this. Pass the flag on every deploy; if
-   `fly status` lists two machines, `fly scale count 1 -a p2a-qamelab-backend`
+   machine for high availability. `min_machines_running = 1` in `fly.toml` is a
+   floor and does not prevent this. Pass the flag on every deploy; if `fly
+   status` lists two machines, `fly scale count 1 -a p2a-qamelab-backend`
    returns to one.
 
    A deploy restarts the machine and discards every in-memory session, so pick
