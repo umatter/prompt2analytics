@@ -33,13 +33,53 @@ use crate::traits::estimator::normal_cdf;
 /// passed as the outcome would otherwise create one category per observation.
 const MAX_OUTCOME_CATEGORIES: usize = 100;
 
-/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
-/// SVD fallback). Check the working set against the allocation ceiling before building it.
+/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity or solution,
+/// residual product, SVD fallback). Check the working set against the allocation ceiling
+/// before building it.
 const DENSE_INVERSE_COPIES: usize = 6;
 
 fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
     let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
     resource::check_alloc::<f64>(cells, what)
+}
+
+/// Largest absolute component of a Newton step, or `None` if any component is not
+/// finite. (The fold `max_change.max(change.abs())` it replaces dropped NaN, so an
+/// all-NaN step counted as converged, RF-31.)
+fn max_abs_step(step: &Array1<f64>) -> Option<f64> {
+    let mut m = 0.0f64;
+    for s in step {
+        if !s.is_finite() {
+            return None;
+        }
+        m = m.max(s.abs());
+    }
+    Some(m)
+}
+
+/// Category probabilities of one observation by log-sum-exp (RF-32).
+///
+/// `xb[j]` is the linear predictor of non-reference category `j + 1`; the reference
+/// category has 0. With `m = max(0, max_j xb_j)` and
+/// `s = exp(-m) + sum_j exp(xb_j - m)`: `probs[0] = exp(-m) / s` and
+/// `probs[j + 1] = exp(xb_j - m) / s`. Returns `ln sum_c exp(eta_c) = m + ln s`, so
+/// `ln p_c = eta_c - (return value)`. No overflow for any finite `xb`; this replaces
+/// the clamp `exp(x'b).min(1e10)`, which biased the score and the likelihood once a
+/// linear predictor exceeded ln(1e10) = 23.03.
+fn softmax_into(xb: &[f64], probs: &mut [f64]) -> f64 {
+    let m = xb.iter().fold(0.0f64, |m, &v| m.max(v));
+    let e0 = (-m).exp();
+    probs[0] = e0;
+    let mut s = e0;
+    for (p, &v) in probs[1..].iter_mut().zip(xb) {
+        let e = (v - m).exp();
+        *p = e;
+        s += e;
+    }
+    for p in probs.iter_mut() {
+        *p /= s;
+    }
+    m + s.ln()
 }
 
 /// Result from multinomial logit regression.
@@ -152,6 +192,16 @@ impl fmt::Display for MultinomResult {
 ///
 /// An outcome with more than 100 distinct values is refused with
 /// `InvalidSpecification` (a method-level cap, like `nnet::multinom`'s `MaxNWts`).
+///
+/// # Convergence
+///
+/// Newton-Raphson on the information matrix, at most 50 steps. `converged == true`
+/// implies that every coefficient and the log-likelihood are finite, and that the
+/// last step came from a regular (not pseudo-) inverse of the information matrix
+/// with largest absolute change below `1e-8`. A non-finite step, or a step from the
+/// pseudoinverse (singular information, as under complete separation), ends the
+/// iteration with `converged = false`, and that step is not applied.
+/// Non-convergence is reported in the result, never as an error.
 ///
 /// # References
 ///
@@ -274,6 +324,9 @@ pub fn run_multinom(
     let tol = 1e-8;
     let mut converged = false;
     let mut iterations = 0;
+    // Linear predictors and probabilities of one observation (reference category first)
+    let mut xb_i = vec![0.0; n_cats];
+    let mut probs_i = vec![0.0; j];
 
     for iter in 0..max_iter {
         resource::checkpoint()?;
@@ -284,26 +337,22 @@ pub fn run_multinom(
             if i % 256 == 0 {
                 resource::checkpoint()?;
             }
-            let mut exp_xb = vec![0.0; j];
-            exp_xb[0] = 1.0; // Reference category (beta = 0)
-
-            for cat_idx in 0..n_cats {
-                let mut xb = 0.0;
+            for (cat_idx, xb) in xb_i.iter_mut().enumerate() {
+                *xb = 0.0;
                 for kk in 0..k {
-                    xb += x[[i, kk]] * beta[cat_idx * k + kk];
+                    *xb += x[[i, kk]] * beta[cat_idx * k + kk];
                 }
-                exp_xb[cat_idx + 1] = xb.exp().min(1e10); // Prevent overflow
             }
-
-            let sum_exp: f64 = exp_xb.iter().sum();
+            softmax_into(&xb_i, &mut probs_i);
             for jj in 0..j {
-                probs[[i, jj]] = exp_xb[jj] / sum_exp;
+                probs[[i, jj]] = probs_i[jj];
             }
         }
 
-        // Compute gradient and Hessian
+        // Score and information matrix (the negated Hessian of the log-likelihood,
+        // positive definite at any interior point)
         let mut gradient = vec![0.0; n_params];
-        let mut hess_arr = resource::try_zeros2(n_params, n_params, "multinomial logit Hessian")?;
+        let mut info = resource::try_zeros2(n_params, n_params, "multinomial logit Hessian")?;
 
         for i in 0..n {
             if i % 256 == 0 {
@@ -317,7 +366,7 @@ pub fn run_multinom(
                     gradient[cat_idx * k + kk] += x[[i, kk]] * residual;
                 }
 
-                // Hessian
+                // Information
                 for cat_idx2 in 0..n_cats {
                     let w = if cat_idx == cat_idx2 {
                         probs[[i, cat_idx + 1]] * (1.0 - probs[[i, cat_idx + 1]])
@@ -327,7 +376,7 @@ pub fn run_multinom(
 
                     for kk in 0..k {
                         for ll in 0..k {
-                            hess_arr[[cat_idx * k + kk, cat_idx2 * k + ll]] -=
+                            info[[cat_idx * k + kk, cat_idx2 * k + ll]] +=
                                 w * x[[i, kk]] * x[[i, ll]];
                         }
                     }
@@ -335,31 +384,37 @@ pub fn run_multinom(
             }
         }
 
-        let (hess_inv, _) = match safe_inverse(&hess_arr.view()) {
+        let (info_inv, singular) = match safe_inverse(&info.view()) {
             Ok(inv) => inv,
             Err(_) => {
                 // Add small ridge regularization
-                let mut hess_reg = hess_arr.clone();
+                let mut info_reg = info.clone();
                 for i in 0..n_params {
-                    hess_reg[[i, i]] -= 1e-6;
+                    info_reg[[i, i]] += 1e-6;
                 }
-                safe_inverse(&hess_reg.view()).map_err(|e| EconError::SingularMatrix {
+                safe_inverse(&info_reg.view()).map_err(|e| EconError::SingularMatrix {
                     context: "Multinomial logit Hessian".to_string(),
                     suggestion: format!("Model may be unidentified: {}", e),
                 })?
             }
         };
+        drop(info);
 
-        // Newton step
+        // Newton step: beta += I^-1 g (the same iterate as beta -= H^-1 g)
         let grad_arr = Array1::from_vec(gradient);
-        let step = hess_inv.dot(&grad_arr);
+        let step = info_inv.dot(&grad_arr);
+        drop(info_inv);
 
-        // Update beta
-        let mut max_change = 0.0f64;
+        // A non-finite step, or one from the pseudoinverse (singular information: no
+        // regular Newton step exists), ends the iteration unapplied and not converged.
+        let Some(max_change) = max_abs_step(&step) else {
+            break;
+        };
+        if singular.is_some() {
+            break;
+        }
         for i in 0..n_params {
-            let change = step[i];
-            beta[i] -= change;
-            max_change = max_change.max(change.abs());
+            beta[i] += step[i];
         }
 
         if max_change < tol {
@@ -368,24 +423,24 @@ pub fn run_multinom(
         }
     }
 
-    // Compute final log-likelihood
+    // Compute final log-likelihood: ln p_y = eta_y - logsumexp(eta), eta_0 = 0
     let mut log_likelihood = 0.0;
     for i in 0..n {
-        let mut exp_xb = vec![0.0; j];
-        exp_xb[0] = 1.0;
-
-        for cat_idx in 0..n_cats {
-            let mut xb = 0.0;
+        for (cat_idx, xb) in xb_i.iter_mut().enumerate() {
+            *xb = 0.0;
             for kk in 0..k {
-                xb += x[[i, kk]] * beta[cat_idx * k + kk];
+                *xb += x[[i, kk]] * beta[cat_idx * k + kk];
             }
-            exp_xb[cat_idx + 1] = xb.exp().min(1e10);
         }
-
-        let sum_exp: f64 = exp_xb.iter().sum();
-        let log_prob = (exp_xb[y_idx[i]] / sum_exp).ln();
-        log_likelihood += log_prob;
+        let lse = softmax_into(&xb_i, &mut probs_i);
+        let eta_y = if y_idx[i] == 0 {
+            0.0
+        } else {
+            xb_i[y_idx[i] - 1]
+        };
+        log_likelihood += eta_y - lse;
     }
+    let converged = converged && log_likelihood.is_finite() && beta.iter().all(|b| b.is_finite());
 
     // Null model log-likelihood
     let log_likelihood_null: f64 = category_counts
@@ -407,17 +462,13 @@ pub fn run_multinom(
         if i % 256 == 0 {
             resource::checkpoint()?;
         }
-        let mut exp_xb = vec![0.0; j];
-        exp_xb[0] = 1.0;
-        for cat_idx in 0..n_cats {
-            let mut xb = 0.0;
+        for (cat_idx, xb) in xb_i.iter_mut().enumerate() {
+            *xb = 0.0;
             for kk in 0..k {
-                xb += x[[i, kk]] * beta[cat_idx * k + kk];
+                *xb += x[[i, kk]] * beta[cat_idx * k + kk];
             }
-            exp_xb[cat_idx + 1] = xb.exp().min(1e10);
         }
-        let sum_exp: f64 = exp_xb.iter().sum();
-        let probs_i: Vec<f64> = exp_xb.iter().map(|e| e / sum_exp).collect();
+        softmax_into(&xb_i, &mut probs_i);
 
         for cat_idx in 0..n_cats {
             for cat_idx2 in 0..n_cats {
@@ -496,7 +547,145 @@ pub fn run_multinom(
 mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
+    use ndarray::array;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    fn flat(v: &[Vec<f64>]) -> Vec<f64> {
+        v.iter().flatten().copied().collect()
+    }
+
+    /// "<category>:<variable>", the names the case files use (reference category excluded).
+    fn flat_names(r: &MultinomResult) -> Vec<String> {
+        r.categories[1..]
+            .iter()
+            .flat_map(|c| r.variables.iter().map(move |v| format!("{c}:{v}")))
+            .collect()
+    }
+
+    /// Every number run_multinom reports, against the tight nnet::multinom fit of `case`.
+    fn pin_multinom(case: &p2a_validation::Case, r: &MultinomResult) {
+        let n = r.n_obs;
+        let names = flat_names(r);
+        let counts: Vec<f64> = r.category_counts.iter().map(|&c| c as f64).collect();
+        Check::new(case)
+            .scalar("n", n as f64, Tol::exact())
+            .named("counts", &r.categories, &counts, Tol::exact())
+            .named("coef_tight", &names, &flat(&r.coefficients), Tol::coef(n))
+            .named("se_tight", &names, &flat(&r.std_errors), Tol::se(n))
+            .named("z_tight", &names, &flat(&r.z_stats), Tol::stat(n))
+            .named("p_tight", &names, &flat(&r.p_values), Tol::p_value(n))
+            .scalar("loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("null_loglik", r.log_likelihood_null, Tol::stat(n))
+            .scalar("aic", r.aic, Tol::stat(n))
+            .scalar("bic", r.bic, Tol::stat(n))
+            .finish();
+        // Not pinned: loglik_pkg (nnet at its own optimum; equals loglik to 1e-12),
+        // max_abs_xb (a property of the case), start_hessian_*
+        // (test_validate_multinom_start_hessian_mn8).
+        assert!(r.converged && r.iterations < 50, "{r}");
+    }
+
+    /// RF-31: an ordinary 8-category fit (35 parameters). Its Hessian is negative
+    /// definite, so the old Newton step went through faer 0.22's full-pivot LU, which
+    /// inverted it wrongly (coefficients of 2e11, log-likelihood -inf).
+    #[test]
+    fn test_validate_multinom_mn8() {
+        let (case, ds) = crate::test_support::load_case("disc_multinom_mn8");
+        let r = run_multinom(&ds, "y", &["x1", "x2", "x3", "x4"], None).unwrap();
+        pin_multinom(&case, &r);
+    }
+
+    /// The first matrix run_multinom's Newton loop inverted on disc_multinom_mn8 (the
+    /// Hessian at beta = 0, built in the same summation order): well conditioned, not
+    /// positive definite, and inverted to rounding by safe_inverse's LU fallback.
+    #[test]
+    fn test_validate_multinom_start_hessian_mn8() {
+        use crate::linalg::matrix_ops::{cholesky, condition_number, eig_symmetric};
+        let (case, ds) = crate::test_support::load_case("disc_multinom_mn8");
+        let dm = DesignMatrix::from_dataframe(ds.df(), &["x1", "x2", "x3", "x4"], true).unwrap();
+        let x = dm.view();
+        let (n, k) = x.dim();
+        let n_cats = case.names("counts").len() - 1;
+        let p = 1.0 / (n_cats + 1) as f64; // every probability at beta = 0
+        let mut h = Array2::<f64>::zeros((n_cats * k, n_cats * k));
+        for i in 0..n {
+            for c in 0..n_cats {
+                for c2 in 0..n_cats {
+                    let w = if c == c2 { p * (1.0 - p) } else { -p * p };
+                    for kk in 0..k {
+                        for ll in 0..k {
+                            h[[c * k + kk, c2 * k + ll]] -= w * x[[i, kk]] * x[[i, ll]];
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            cholesky(&h.view()).is_err(),
+            "the start Hessian must not be PD"
+        );
+        let kappa = condition_number(&h.view()).unwrap();
+        let (eigen, _) = eig_symmetric(&h.view()).unwrap();
+        let max_eigen = eigen.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Check::new(&case)
+            .scalar("start_hessian_kappa", kappa, Tol::stat(n))
+            .scalar("start_hessian_max_eigen", max_eigen, Tol::stat(n))
+            .finish();
+        let (inv, w) = safe_inverse(&h.view()).unwrap();
+        assert_eq!(w, None);
+        let prod = h.dot(&inv);
+        let mut r = 0.0f64;
+        for (idx, v) in prod.indexed_iter() {
+            let d = (v - if idx.0 == idx.1 { 1.0 } else { 0.0 }).abs();
+            r = if d.is_nan() { f64::INFINITY } else { r.max(d) };
+        }
+        assert!(r <= 1e-12, "max |H X - I| = {r}");
+    }
+
+    /// Control: 4 overlapping categories, 9 parameters.
+    #[test]
+    fn test_validate_multinom_j4() {
+        let (case, ds) = crate::test_support::load_case("disc_multinom_j4");
+        let r = run_multinom(&ds, "y", &["x1", "x2"], None).unwrap();
+        pin_multinom(&case, &r);
+    }
+
+    /// RF-32: 5 well-separated categories; at the MLE a linear predictor exceeds
+    /// ln(1e10) = 23.03, where the old `exp(x'b).min(1e10)` clamp stopped the fit at
+    /// a log-likelihood above the true maximum.
+    #[test]
+    fn test_validate_multinom_sep5() {
+        let (case, ds) = crate::test_support::load_case("disc_multinom_sep5");
+        let r = run_multinom(&ds, "y", &["x"], None).unwrap();
+        pin_multinom(&case, &r);
+    }
+
+    #[test]
+    fn test_softmax_into_log_sum_exp() {
+        // (1) Ordinary predictors.
+        let mut p = [0.0; 3];
+        let lse = softmax_into(&[0.3, -1.2], &mut p);
+        let e = [1.0, 0.3f64.exp(), (-1.2f64).exp()];
+        let s: f64 = e.iter().sum();
+        for (pc, ec) in p.iter().zip(e) {
+            assert!((pc - ec / s).abs() <= 1e-15, "{p:?}");
+        }
+        assert!((p.iter().sum::<f64>() - 1.0).abs() <= 1e-15, "{p:?}");
+        assert!((lse - s.ln()).abs() <= 1e-15, "{lse}");
+        // (2) exp(800) overflows; log-sum-exp does not.
+        let lse = softmax_into(&[800.0, 799.0], &mut p);
+        let want = [0.0, 0.7310585786300049, 0.2689414213699951];
+        for (pc, wc) in p.iter().zip(want) {
+            assert!((pc - wc).abs() <= 1e-15, "{p:?}");
+        }
+        assert!((lse - 800.3132616875182).abs() <= 1e-12, "{lse}");
+        // (3) Above ln(1e10): the clamp gave p[1] = 1e10 / (1 + 1e10) = 1 - 1e-10.
+        let mut p = [0.0; 2];
+        softmax_into(&[30.0], &mut p);
+        assert!((p[1] - 0.9999999999999065).abs() <= 1e-16, "{p:?}");
+        assert!((p[0] - 9.3576229688393e-14).abs() <= 1e-27, "{p:?}");
+    }
 
     fn create_multinomial_dataset() -> Dataset {
         let df = df! {
@@ -536,10 +725,69 @@ mod tests {
         }
     }
 
+    /// The category cap admits 100 categories and refuses 101. The cap is checked
+    /// before the first budget checkpoint, so under a cancelled budget 100
+    /// categories get past it to the Newton loop (`Cancelled`), and 101 do not.
+    /// A full fit of 100 one-row categories runs 35 Newton iterations on 198
+    /// parameters (32.7 s in an opt-level 0 build, as CI's), so its behaviour is
+    /// checked on 20 categories in
+    /// test_multinom_one_row_per_category_does_not_converge.
     #[test]
     fn test_multinom_accepts_100_categories() {
-        let r = run_multinom(&continuous_y_dataset(100), "y", &["x"], None).unwrap();
-        assert_eq!(r.categories.len(), 100);
+        let run = |n| {
+            resource::with_budget(cancelled(), || {
+                run_multinom(&continuous_y_dataset(n), "y", &["x"], None)
+            })
+            .unwrap_err()
+        };
+        let e = run(100);
+        assert!(
+            matches!(e, EconError::Cancelled(_)),
+            "100 categories: {e:?}"
+        );
+        let e = run(101);
+        assert!(
+            matches!(e, EconError::InvalidSpecification { .. }),
+            "101 categories: {e:?}"
+        );
+    }
+
+    /// One row per category is complete separation, so no MLE exists. Before Tier 1
+    /// the 100-category fit was all NaN and reported `Converged: true (1 iterations)`
+    /// (RF-31). The estimates must be finite and `converged` false: the iteration
+    /// runs out of steps or stops at the first step that comes from the
+    /// pseudoinverse (singular information), never applying it. Measured on 20
+    /// categories (38 parameters): the stop comes at step 42; with pseudoinverse
+    /// steps applied, the fit reports `converged = true` at step 45 with a
+    /// log-likelihood of -1.5e18.
+    #[test]
+    fn test_multinom_one_row_per_category_does_not_converge() {
+        let r = run_multinom(&continuous_y_dataset(20), "y", &["x"], None).unwrap();
+        assert_eq!(r.categories.len(), 20);
+        assert!(
+            flat(&r.coefficients).iter().all(|b| b.is_finite()) && r.log_likelihood.is_finite(),
+            "non-finite estimates: LL {}, converged {} after {} iterations",
+            r.log_likelihood,
+            r.converged,
+            r.iterations
+        );
+        assert!(
+            !r.converged,
+            "no MLE exists, yet converged after {} iterations (LL {}, null {})",
+            r.iterations, r.log_likelihood, r.log_likelihood_null
+        );
+    }
+
+    #[test]
+    fn test_max_abs_step_rejects_non_finite() {
+        // The old fold `max_change.max(change.abs())` returned 1.0 for both NaN cases
+        // below and 0.0 for an all-NaN step (f64::max drops NaN), so an all-NaN step
+        // counted as converged.
+        assert_eq!(max_abs_step(&array![0.5, -2.0]), Some(2.0));
+        assert_eq!(max_abs_step(&Array1::zeros(0)), Some(0.0));
+        assert_eq!(max_abs_step(&array![1.0, f64::NAN]), None);
+        assert_eq!(max_abs_step(&array![f64::INFINITY]), None);
+        assert_eq!(max_abs_step(&array![f64::NAN, 1.0]), None);
     }
 
     #[test]

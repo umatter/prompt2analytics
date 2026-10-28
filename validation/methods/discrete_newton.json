@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "multinom_newton_nnet",
+      "name": "Multinomial logit (run_multinom): Newton-Raphson fit, standard errors, z, p, log-likelihood, AIC, BIC",
+      "category": "econometrics",
+      "reference": "nnet::multinom(Hess = TRUE, reltol = 1e-16) re-solved by Newton's method on the analytic score and information",
+      "doc": "validation/econometrics/discrete_newton.md",
+      "cases": ["disc_multinom_mn8", "disc_multinom_sep5", "disc_multinom_j4"],
+      "tests": [
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_mn8",
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_start_hessian_mn8",
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_sep5",
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_j4"
+      ],
+      "quantities": ["coefficients", "SE", "z", "p", "log-likelihood", "null log-likelihood", "AIC", "BIC", "n", "category counts", "converged", "condition number and largest eigenvalue of the starting Hessian"],
+      "tolerance": "validation/README.md: n = 400-500 coefficients 1e-8, SE and statistics 1e-6; n = 30 coefficients 1e-6, SE and statistics 1e-5 (relative); p-values also 1e-12 absolute; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ordered_newton_many_categories",
+      "name": "Ordered logit and probit (run_ordered_logit, run_ordered_probit) with 5, 16 and 30 categories: finite estimates, honest convergence flag, category counts and null log-likelihood",
+      "category": "econometrics",
+      "reference": "MASS::polr(method = 'logistic' | 'probit', Hess = TRUE, control = list(reltol = 1e-14)); null log-likelihood sum_j n_j log(n_j / n)",
+      "doc": "validation/econometrics/discrete_newton.md",
+      "cases": ["disc_polr_j5", "disc_polr_j16", "disc_polr_j30"],
+      "tests": [
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j5",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j16",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j30",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_ordered_fit_does_not_depend_on_regressor_scale"
+      ],
+      "quantities": ["n", "category counts", "null log-likelihood", "finite coefficients, thresholds and log-likelihood", "log-likelihood not above polr's maximum", "converged only above the null model", "fit unchanged when x is multiplied by 1e4 or 1e6 (coefficient divided by the scale)"],
+      "tolerance": "counts exact; null log-likelihood 1e-5 (n = 30, 96) and 1e-6 (n = 180) relative",
+      "deviations": [
+        {"finding": "ECON-4", "quantity": "coefficients, thresholds and log-likelihood (logit and probit)", "note": "the beta score has the wrong sign and the outer-product Hessian divides by p_i twice, so the fit never reaches polr's MLE (converged = false after 100 iterations); T2-WP10 pins logit_*/probit_* of these cases"},
+        {"finding": "ECON-5", "quantity": "standard errors", "note": "hard-coded 0.1; T2-WP10 computes them from the observed information"}
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
