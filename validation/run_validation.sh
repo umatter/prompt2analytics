@@ -102,6 +102,9 @@ cd "$PROJECT_ROOT"
 
 PYTHON="${PYTHON:-python3}"
 P2A_RSCRIPT="${P2A_RSCRIPT:-Rscript}"
+# The cargo logs are parsed; keep them free of colour codes even when the caller's
+# environment forces colour (validation_status.py also strips them).
+export CARGO_TERM_COLOR=never
 P2A_LEGACY_R_TIMEOUT="${P2A_LEGACY_R_TIMEOUT:-300}"
 # Only --legacy-r reads it. timeout(1) treats 0 as "no limit", so 0 (and leading zeros) are refused.
 if $LEGACY; then

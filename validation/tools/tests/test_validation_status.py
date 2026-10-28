@@ -5,6 +5,7 @@ Run: python3 -m unittest discover -s validation/tools/tests -v
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,44 @@ def run(*args):
         check=False,
     )
     return p.returncode, p.stdout + p.stderr
+
+
+# The styles cargo 1.99 writes with CARGO_TERM_COLOR=always (or --color always): a status
+# word right-aligned to 12 columns in bold bright green, and errors in bold bright red,
+# rustc's with the message in bold.
+GREEN, RED, BOLD, RESET = "\x1b[1m\x1b[92m", "\x1b[1m\x1b[91m", "\x1b[1m", "\x1b[0m"
+_STATUS_LINE_RE = re.compile(r"^( *(?:Compiling|Finished|Running|Doc-tests))( .*)$")
+
+# Lines captured from `cargo test -p p2a-validation --color always` and rustc
+# --color=always (the build paths shortened); cargo_colour must reproduce them.
+REAL_COLOURED_LINES = [
+    "\x1b[1m\x1b[92m    Finished\x1b[0m `test` profile [optimized] target(s) in 0.29s",
+    "\x1b[1m\x1b[92m     Running\x1b[0m unittests src/lib.rs "
+    "(target/debug/deps/p2a_validation-7cafe02d9be3df34)",
+    "\x1b[1m\x1b[92m     Running\x1b[0m tests/cases.rs (target/debug/deps/cases-5745df7f86c3d631)",
+    "\x1b[1m\x1b[92m   Doc-tests\x1b[0m p2a_validation",
+    "\x1b[1m\x1b[91merror[E0425]\x1b[0m\x1b[1m: cannot find value `x` in this scope\x1b[0m",
+]
+
+
+def cargo_colour(text: str) -> str:
+    """`text` (plain cargo output) with the escape codes cargo and rustc write when colour
+    is forced: status lines, rustc's `error[E...]` lines and cargo's `error:` lines."""
+    out = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\n")
+        end = line[len(body):]
+        m = _STATUS_LINE_RE.match(body)
+        e = re.match(r"^(error\[E\d+\])(: .*)$", body)
+        c = re.match(r"^error:( .*)$", body)
+        if m:
+            body = f"{GREEN}{m.group(1)}{RESET}{m.group(2)}"
+        elif e:
+            body = f"{RED}{e.group(1)}{RESET}{BOLD}{e.group(2)}{RESET}"
+        elif c:
+            body = f"{RED}error{RESET}{BOLD}:{RESET}{c.group(1)}"
+        out.append(body + end)
+    return "".join(out)
 
 
 class TreeCase(unittest.TestCase):
@@ -134,6 +173,24 @@ class TestCollect(unittest.TestCase):
         self.assertIsNone(pkg["exit_code"])
         self.assertTrue(any(e.startswith("error[E0425]") for e in pkg["errors"]), pkg["errors"])
         self.assertIn("collect: p2a-core: compile_error (ran 0", text)
+
+    def test_coloured_compile_error_log_is_compile_error(self):
+        # CARGO_TERM_COLOR=always (CI sets it for the whole workflow) colours rustc's
+        # error[E...] and cargo's "error: could not compile" lines.
+        log = Path(self._tmp.name) / "compile_error.txt"
+        log.write_text(cargo_colour((FIX / "cargo/compile_error.txt").read_text()))
+        self.assertIn(f"{RED}error[E0425]{RESET}", log.read_text())
+        code, text, results = self.collect("--package", "p2a-core", log)
+        self.assertEqual(code, 1, text)
+        pkg = results["packages"]["p2a-core"]
+        self.assertEqual(pkg["status"], "compile_error")
+        self.assertEqual(
+            pkg["errors"],
+            [
+                "error[E0425]: cannot find value `x` in this scope",
+                "error: could not compile `p2a-core` (lib test) due to 1 previous error",
+            ],
+        )
 
     def test_could_not_compile_in_test_output_is_not_a_compile_error(self):
         log = Path(self._tmp.name) / "run.txt"
@@ -343,6 +400,36 @@ class TestSelect(unittest.TestCase):
         code, _ = self.select("--category", "nope")
         self.assertEqual(code, 2)
 
+    def test_coloured_list_selects_like_plain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for fixture, package in (("cargo/core_list.txt", "p2a-core"), ("cargo/cli_list.txt", "p2a-cli")):
+                coloured = Path(tmp) / Path(fixture).name
+                coloured.write_text(cargo_colour((FIX / fixture).read_text()))
+                for args in ([], ["--category", "ml"], ["--all"]):
+                    with self.subTest(fixture=fixture, args=args):
+                        code, plain = self.select(*args, fixture=fixture, package=package)
+                        self.assertEqual(code, 0)
+                        code, lines = self.select(*args, fixture=coloured, package=package)
+                        self.assertEqual(code, 0, lines)
+                        self.assertEqual(lines, plain)
+                        if args == ["--all"]:
+                            self.assertTrue(lines)
+
+    def test_list_without_running_line_is_usage_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            texts = {
+                "no output": "",
+                "no target line": "stats::ttest::tests::test_validate_one: test\n\n1 test, 0 benchmarks\n",
+                "a compile error": (FIX / "cargo/compile_error.txt").read_text(),
+            }
+            for label, text in texts.items():
+                with self.subTest(label):
+                    path = Path(tmp) / "p2a-core.list"
+                    path.write_text(text)
+                    code, lines = self.select(fixture=path)
+                    self.assertEqual(code, 2, lines)
+                    self.assertTrue(any(str(path) in ln and "Running" in ln for ln in lines), lines)
+
     def test_category_of(self):
         b = {"validation_ml_advanced", "validation_boosting_methods", "validation_new_methods"}
         self.assertEqual(vs.category_of("p2a-core::diagnostics::iv::tests::test_validate_x", b), "econometrics")
@@ -433,6 +520,32 @@ class TestLint(TreeCase):
         code, text = self.lint(tests=False)
         self.assertEqual(code, 0, text)
         self.assertIn("note: tests of demo not checked", text)
+
+    def test_coloured_test_list(self):
+        # CI forces colour (CARGO_TERM_COLOR=always): the `Running` lines of the --list
+        # files then start with escape codes.
+        lst = self.path("lists/demo-tests.txt")
+        lst.write_text(cargo_colour(lst.read_text()))
+        self.assertIn(f"{GREEN}     Running{RESET}", lst.read_text())
+        code, text = self.lint()
+        self.assertEqual(code, 0, text)
+        self.assertIn("lint: 0 error(s), 0 warning(s)", text)
+        # The coloured list is read, not skipped: a test it lacks is still unknown.
+        self.edit_json(
+            "validation/methods/demo.json",
+            lambda d: self.method(d, "demo_var")["tests"].append("demo::stats::tests::test_validate_gone"),
+        )
+        code, text = self.lint()
+        self.assert_finding(code, text, "ERROR", "unknown-test", "test_validate_gone")
+        lines = [ln for ln in text.splitlines() if "unknown-test" in ln]
+        self.assertEqual(len(lines), 1, text)
+
+    def test_test_list_without_running_line_is_usage_error(self):
+        lst = self.path("lists/demo-tests.txt")
+        lst.write_text("".join(ln for ln in lst.read_text().splitlines(keepends=True) if "Running" not in ln))
+        code, text = self.lint()
+        self.assertEqual(code, 2, text)
+        self.assertIn(f"test list {lst} has no cargo `Running <target>` line", text)
 
     def test_tests_file_name_must_end_in_tests_txt(self):
         shutil.copy(self.path("lists/demo-tests.txt"), self.path("lists/demo.txt"))
@@ -580,6 +693,58 @@ class TestLint(TreeCase):
         (reports / "report.md").write_text("[a](nope.md)\n")
         code, text = self.lint("--strict")
         self.assertEqual(code, 0, text)
+
+
+class TestColouredOutput(unittest.TestCase):
+    """cargo output with forced colour parses exactly like the plain fixtures."""
+
+    def test_helper_reproduces_cargo_and_rustc_codes(self):
+        for real in REAL_COLOURED_LINES:
+            with self.subTest(real=real):
+                plain = vs.strip_ansi(real)
+                self.assertNotIn("\x1b", plain)
+                self.assertEqual(cargo_colour(plain), real)
+
+    def test_strip_ansi(self):
+        self.assertEqual(
+            vs.strip_ansi("a\x1b[38;5;9mb\x1b[0m \x1b(B\x1b[mc \x1b]8;;https://x\x1b\\d\x1b]8;;\x07"),
+            "ab c d",
+        )
+
+    def test_lists(self):
+        for fixture, package in (("cargo/core_list.txt", "p2a-core"), ("cargo/cli_list.txt", "p2a-cli")):
+            with self.subTest(fixture):
+                plain = (FIX / fixture).read_text()
+                coloured = cargo_colour(plain)
+                self.assertIn(f"{GREEN}     Running{RESET}", coloured)
+                self.assertTrue(vs.parse_test_list(plain, package))
+                self.assertEqual(vs.parse_test_list(coloured, package), vs.parse_test_list(plain, package))
+                self.assertEqual(vs.list_binaries(coloured, package), vs.list_binaries(plain, package))
+
+    def test_run_logs(self):
+        for fixture, package in (
+            ("cargo/core_run_ok.txt", "p2a-core"),
+            ("cargo/core_run_failed.txt", "p2a-core"),
+            ("cargo/compile_error.txt", "p2a-core"),
+            ("cargo/mcp_lib_main.txt", "p2a-mcp"),
+        ):
+            with self.subTest(fixture):
+                plain = (FIX / fixture).read_text()
+                coloured = cargo_colour(plain)
+                self.assertNotEqual(coloured, plain)
+                self.assertEqual(vs.parse_cargo_log(coloured, package), vs.parse_cargo_log(plain, package))
+        ok = vs.parse_cargo_log(cargo_colour((FIX / "cargo/core_run_ok.txt").read_text()), "p2a-core")
+        self.assertEqual(len(ok["tests"]), 4)  # the doc test after `Doc-tests` is not collected
+        self.assertEqual(ok["binaries"], ["validation_ml_advanced"])
+        err = vs.parse_cargo_log(cargo_colour((FIX / "cargo/compile_error.txt").read_text()), "p2a-core")
+        self.assertEqual(len(err["compile_errors"]), 2)
+
+    def test_r_check(self):
+        for fixture in ("r/check_ok.txt", "r/check_fail.txt"):
+            with self.subTest(fixture):
+                plain = (FIX / fixture).read_text()
+                coloured = "".join(f"{BOLD}{ln}{RESET}\n" for ln in plain.splitlines())
+                self.assertEqual(vs.parse_r_check(coloured), vs.parse_r_check(plain))
 
 
 class TestScanner(unittest.TestCase):

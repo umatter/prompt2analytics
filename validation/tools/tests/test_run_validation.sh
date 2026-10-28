@@ -218,6 +218,20 @@ expect_true 'calls | grep -v -- "--list" | grep -qF -- "--test validation_ml_adv
     "the validation_ml_advanced target did not run"
 finish stdin-isolated
 
+# 12d. Colour forced in the caller's environment (CARGO_TERM_COLOR=always): the runner
+# turns it off for cargo, so its logs carry no escape codes, and the selection still works.
+new_tree
+runner two CARGO_TERM_COLOR=always -- --rust-only
+expect_rc 0
+expect_out "Rust p2a-core: PASS (selected 2, ran 2"
+expect_out "registry lint: lint: 0 error(s)"
+expect_out "Overall Status: PASS"
+report_dir="$(dirname "$(results_file)")"
+ESC=$'\x1b'
+expect_true '[ -f "$report_dir/p2a-core-tests.txt" ]' "no p2a-core-tests.txt in the report directory"
+expect_true '! grep -qF -- "$ESC" "$report_dir"/*.txt' "a cargo log in the report directory has escape codes"
+finish colour-forced
+
 # 13. --write-status renders validation/VALIDATION_STATUS.md.
 new_tree
 runner two FAKE_R_MODE=pass -- --write-status

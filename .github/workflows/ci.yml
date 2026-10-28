@@ -130,6 +130,10 @@ jobs:
         # recompilation), and feed the registry lint
         # (validation/methods/*.json against the case files and the tests). CI
         # does not install R: the R drift check runs in run_validation.sh locally.
+        # The test lists are parsed, so they are written without colour codes
+        # (validation_status.py strips them too).
+        env:
+          CARGO_TERM_COLOR: never
         run: |
           cargo test -p p2a-validation
           cargo test -p p2a-core --tests --no-default-features --features ci -- --list > target/p2a-core-tests.txt 2>&1

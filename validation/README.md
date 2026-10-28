@@ -69,7 +69,8 @@ logs, `results.json` and `report.md`; both record the commit, marked `-dirty` wh
 files differ from it. `--write-status` describes the whole suite, so it is refused (exit 2)
 with `--category`, `--rust-only` or `--r-only`. `--release`, `--verbose` (`-v`) and the
 environment variables `P2A_RSCRIPT`, `P2A_LEGACY_R_TIMEOUT` (whole seconds >= 1, default
-300; read only with `--legacy-r`) and `PYTHON` are also accepted.
+300; read only with `--legacy-r`) and `PYTHON` are also accepted. The runner sets
+`CARGO_TERM_COLOR=never` for cargo, since it parses cargo's output.
 
 Direct cargo filters (libtest filters are substrings of the test path, not regexes):
 

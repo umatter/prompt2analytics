@@ -18,7 +18,9 @@ Subcommands (each takes --root DIR, default: the repository containing this scri
   render   Write the whole validation status page from results.json.
 
 Exit codes: 0 ok; 1 lint errors (or warnings with --strict), or a collected package
-or R check that did not pass; 2 usage error or unreadable/malformed input.
+or R check that did not pass; 2 usage error or unreadable/malformed input (a test list
+for select or lint --tests without a cargo `Running` line is malformed). Terminal
+colour codes in cargo and R output (CARGO_TERM_COLOR=always) are ignored.
 
 Used by validation/run_validation.sh and CI; see validation/README.md and
 validation/methods/README.md. Python 3.9+, standard library only.
@@ -71,6 +73,20 @@ def read_json(path):
 # cargo output: targets, --list lines, run lines
 # --------------------------------------------------------------------------------------
 
+# Terminal escape sequences: CSI (colours; with CARGO_TERM_COLOR=always cargo writes
+# `\x1b[1m\x1b[92m     Running\x1b[0m ...` and rustc `\x1b[1m\x1b[91merror[E0425]\x1b[0m`),
+# OSC (hyperlinks, ended by BEL or ST), charset designations (terminfo's sgr0 is
+# `\x1b(B\x1b[m`) and the other two-byte escapes.
+ANSI_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b\n]*(?:\x07|\x1b\\)|[()*+][ -~]|[@-Z\\-_])"
+)
+
+
+def strip_ansi(text: str) -> str:
+    """`text` without terminal escape sequences, so coloured logs parse like plain ones."""
+    return ANSI_RE.sub("", text)
+
+
 TARGET_RE = re.compile(r"^\s*Running (unittests )?(\S+)( \(.*\))?\s*$")
 DOC_RE = re.compile(r"^\s*Doc-tests ")
 LIST_RE = re.compile(r"^(\S+): (test|bench)$")
@@ -99,13 +115,16 @@ def target_of(path: str, package: str):
 
 
 def _scan_list(text: str, package: str):
-    """([(id, target, raw name)], binaries) of `cargo test -- --list` output."""
+    """([(id, target, raw name)], binaries, number of `Running` lines) of
+    `cargo test -- --list` output."""
     entries = []
     binaries = set()
     current = None
-    for line in text.splitlines():
+    targets = 0
+    for line in strip_ansi(text).splitlines():
         m = TARGET_RE.match(line)
         if m:
+            targets += 1
             current = target_of(m.group(2), package)
             if current and current[2]:
                 binaries.add(current[2])
@@ -117,7 +136,20 @@ def _scan_list(text: str, package: str):
         if m and current is not None and m.group(2) == "test":
             target, prefix, _ = current
             entries.append((prefix + m.group(1), target, m.group(1)))
-    return entries, binaries
+    return entries, binaries, targets
+
+
+def read_test_list(path, package: str) -> str:
+    """The text of a `cargo test -p <package> --tests -- --list` output file. A file
+    without a `Running` line names no test target (a cargo error, or output this tool
+    cannot read), so every test would look absent: that is a usage error."""
+    text = read_text(path)
+    if not _scan_list(text, package)[2]:
+        raise UsageError(
+            f"test list {path} has no cargo `Running <target>` line; expected the output "
+            f"of `cargo test -p {package} --tests -- --list`"
+        )
+    return text
 
 
 def parse_test_list(text: str, package: str) -> dict:
@@ -141,7 +173,7 @@ def parse_cargo_log(text: str, package: str) -> dict:
     binaries = set()
     compile_errors = []
     current = None  # None: before any target; False: doc tests or an uncollected target
-    for line in text.splitlines():
+    for line in strip_ansi(text).splitlines():
         if COMPILE_ERROR_RE.match(line):
             compile_errors.append(line.strip())
             continue
@@ -215,7 +247,7 @@ def select_tests(list_text: str, package: str, category=None, all_tests=False) -
     """Sorted [(target flag, raw libtest name)] to run."""
     if category is not None and category not in CATEGORIES:
         raise UsageError(f"unknown category {category!r} (one of: {', '.join(CATEGORIES)})")
-    entries, binaries = _scan_list(list_text, package)
+    entries, binaries, _ = _scan_list(list_text, package)
     chosen = set()
     for tid, target, raw in entries:
         if not all_tests and not is_validate(tid):
@@ -240,7 +272,7 @@ R_MISSING_PKG_RE = re.compile(r"there is no package called [‘'](\S+?)[’']")
 def parse_r_check(text: str) -> dict:
     """{"status": pass|fail|missing|error, "cases": {id: ok|failed}, "failures": [...],
     "missing_packages": [...]} of `Rscript validation/r/run.R --check` output."""
-    lines = text.splitlines()
+    lines = strip_ansi(text).splitlines()
     cases, failures, missing = {}, [], []
     passed = failed = in_block = False
     for line in lines:
@@ -930,7 +962,7 @@ def lint(root: Path, test_lists, strict=False) -> list:
         if not lf.name.endswith("-tests.txt") or lf.name == "-tests.txt":
             raise UsageError(f"test list {lf} must be named <package>-tests.txt")
         package = lf.name[: -len("-tests.txt")]
-        lists[package] = set(parse_test_list(read_text(lf), package))
+        lists[package] = set(parse_test_list(read_test_list(lf, package), package))
 
     methods = load_registry(root, findings)
     cases = load_cases(root, findings)
@@ -1362,7 +1394,8 @@ def cmd_render(args) -> int:
 
 
 def cmd_select(args) -> int:
-    for target, name in select_tests(read_text(args.list_file), args.package, args.category, args.all):
+    text = read_test_list(args.list_file, args.package)
+    for target, name in select_tests(text, args.package, args.category, args.all):
         print(f"{target}\t{name}")
     return 0
 

@@ -80,7 +80,9 @@ An example entry (the shape of the panel random-effects pin; not a registered me
 `python3 validation/tools/validation_status.py lint [--tests <pkg>-tests.txt ...] [--strict]`
 prints one line per finding (`ERROR [rule] <path>[:<line>]: <message>` or `WARNING ...`) and
 a summary line. A `--tests` file is the output of `cargo test -p <pkg> --tests -- --list`
-and must be named `<pkg>-tests.txt`.
+and must be named `<pkg>-tests.txt`. Colour codes in it (`CARGO_TERM_COLOR=always`) are
+ignored; a file with no cargo `Running <target>` line is a usage error (exit 2), since
+every registered test would otherwise look absent.
 
 Always errors (CI gates on these now):
 
