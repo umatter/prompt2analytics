@@ -689,17 +689,24 @@ mod tests {
     /// scaled fit is the unscaled one with the coefficient divided by the scale, to
     /// 1.1e-10 relative (logit) and 7.9e-11 (probit) measured at both scales: the
     /// 1e-6 ridge is not scale-free. The fits are the non-converged iterates of
-    /// ECON-4.
+    /// ECON-4. Each scaled fit is also checked against polr's case: n, the category
+    /// counts and the null log-likelihood do not depend on the scale of x.
     #[test]
     fn test_validate_ordered_j5_regressor_scale() {
         type Fit = fn(&Dataset, &str, &[&str]) -> EconResult<OrderedResult>;
         let fits: [(&str, Fit); 2] = [("logit", run_ordered_logit), ("probit", run_ordered_probit)];
-        let (_case, ds) = crate::test_support::load_case("disc_polr_j5");
+        let (case, ds) = crate::test_support::load_case("disc_polr_j5");
         let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs();
         for (link, fit) in fits {
             let base = fit(&ds, "y", &["x"]).unwrap();
             for scale in [1e4, 1e6] {
                 let r = fit(&with_x_scaled(&ds, scale), "y", &["x"]).unwrap();
+                let counts: Vec<f64> = r.category_counts.iter().map(|&c| c as f64).collect();
+                Check::new(&case)
+                    .scalar("n", r.n_obs as f64, Tol::exact())
+                    .named("counts", &r.categories, &counts, Tol::exact())
+                    .scalar("null_loglik", r.log_likelihood_null, Tol::stat(r.n_obs))
+                    .finish();
                 let want = base.coefficients[0] / scale;
                 assert!(
                     r.iterations > 1 && close(r.coefficients[0], want),

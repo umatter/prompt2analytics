@@ -204,7 +204,7 @@ R-pinned (load a case):
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5`
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j16`
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j30`
-- `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5_regressor_scale` (loads `disc_polr_j5`'s dataset and checks the fit is unchanged when x is multiplied by 1e4 or 1e6)
+- `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5_regressor_scale` (on `disc_polr_j5`'s dataset with x multiplied by 1e4 or 1e6: n, the category counts and the null log-likelihood against the case, and the fit unchanged apart from the coefficient divided by the scale)
 
 Helpers, the category cap and the separated fits:
 
