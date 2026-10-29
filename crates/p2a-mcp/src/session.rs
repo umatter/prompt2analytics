@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock, PoisonError, Weak}
 use tokio::sync::{RwLock, Semaphore, broadcast};
 use uuid::Uuid;
 
-use p2a_core::data::{CleaningSession, Dataset};
+use p2a_core::data::{CleaningSession, Dataset, OperationRecord};
 use p2a_core::polars::prelude::{
     CategoricalMapping, ChunkedArray, DataFrame, DataType, FrozenCategories, PolarsNumericType,
     PolarsResult, Series,
@@ -51,7 +51,8 @@ pub struct Session {
     exec_slots: OnceLock<Arc<Semaphore>>,
     /// Tool calls currently running in this session.
     active_calls: AtomicUsize,
-    /// Cached in-memory size of `datasets`, in bytes.
+    /// Cached in-memory size of the session's state (`datasets`,
+    /// `cleaning_sessions`, `spatial_weights`), in bytes.
     data_bytes: AtomicU64,
     /// The shared-mapping part of `data_bytes`, cached with it.
     shared_labels: StdMutex<SharedLabels>,
@@ -136,18 +137,17 @@ impl Session {
         }
     }
 
-    /// The cached in-memory size of this session's datasets, in bytes (as of
-    /// the last [`refresh_data_bytes`](Self::refresh_data_bytes)).
+    /// The cached in-memory size of this session's state (datasets, cleaning
+    /// sessions and spatial weights, see [`session_state_bytes`]), in bytes,
+    /// as of the last [`refresh_data_bytes`](Self::refresh_data_bytes).
     pub fn data_bytes(&self) -> u64 {
         self.data_bytes.load(Ordering::SeqCst)
     }
 
-    /// Recompute the size of this session's datasets, cache it and return it.
+    /// Recompute the size of this session's state ([`session_state_bytes`]),
+    /// cache it and return it.
     pub async fn refresh_data_bytes(&self) -> u64 {
-        let charge = {
-            let datasets = self.datasets.read().await;
-            datasets_charge(datasets.iter().map(|(name, d)| (name.as_str(), d)))
-        };
+        let charge = self.state_charge().await;
         // Both under the mutex, which the server total reads them under, so
         // it never pairs one charge's shared part with another's bytes.
         let mut shared = lock(&self.shared_labels);
@@ -159,6 +159,108 @@ impl Session {
         drop(shared);
         charge.bytes
     }
+
+    /// One charge over the session's three maps. Each map is read-locked in
+    /// turn and its lock dropped before the next is taken, so this never
+    /// holds two of them at once (a handler may hold the datasets and then
+    /// take the weights).
+    async fn state_charge(&self) -> DataCharge {
+        let mut charge = {
+            let datasets = self.datasets.read().await;
+            datasets_charge(datasets.iter().map(|(name, d)| (name.as_str(), d)))
+        };
+        self.charge_other_state(&mut charge).await;
+        charge
+    }
+
+    /// Add the session's cleaning sessions and spatial weights to `charge`,
+    /// each map read-locked in turn.
+    async fn charge_other_state(&self, charge: &mut DataCharge) {
+        charge.add_cleaning_sessions(&*self.cleaning_sessions.read().await);
+        charge.add_spatial_weights(&*self.spatial_weights.read().await);
+    }
+
+    /// Copy the session's datasets, cleaning sessions and spatial weights,
+    /// read-locking each map in turn (never two at once), so that a call can
+    /// be undone ([`restore_state`](Self::restore_state)).
+    pub async fn snapshot_state(&self) -> SessionStateSnapshot {
+        let datasets = self.datasets.read().await.clone();
+        let cleaning_sessions = self.cleaning_sessions.read().await.clone();
+        let spatial_weights = self.spatial_weights.read().await.clone();
+        SessionStateSnapshot {
+            datasets,
+            cleaning_sessions,
+            spatial_weights,
+        }
+    }
+
+    /// Put `snapshot` back as the session's state, write-locking each map in
+    /// turn in the order [`snapshot_state`](Self::snapshot_state) reads
+    /// them, then recompute the cached charge (its shared labels included).
+    pub async fn restore_state(&self, snapshot: SessionStateSnapshot) {
+        let SessionStateSnapshot {
+            datasets,
+            cleaning_sessions,
+            spatial_weights,
+        } = snapshot;
+        *self.datasets.write().await = datasets;
+        *self.cleaning_sessions.write().await = cleaning_sessions;
+        *self.spatial_weights.write().await = spatial_weights;
+        self.refresh_data_bytes().await;
+    }
+}
+
+/// A session's datasets, cleaning sessions and spatial weights, copied
+/// before a quota-checked call so that it can be undone
+/// ([`Session::snapshot_state`], [`Session::restore_state`]).
+///
+/// A snapshot is cheap where it can be: the datasets' columns are
+/// reference-counted and a `SpatialWeights` clone shares its lists (O(1)).
+/// A cleaning session is copied with its checkpoints' quality profiles and
+/// its audit trail, a cost bounded by what the session quota itself counts
+/// for them, and paid only when a quota is configured.
+#[derive(Clone)]
+pub struct SessionStateSnapshot {
+    pub datasets: HashMap<String, Dataset>,
+    pub cleaning_sessions: HashMap<String, CleaningSession>,
+    pub spatial_weights: HashMap<String, SpatialWeights>,
+}
+
+impl fmt::Debug for SessionStateSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionStateSnapshot")
+            .field("datasets", &self.datasets.keys().collect::<Vec<_>>())
+            .field(
+                "cleaning_sessions",
+                &self.cleaning_sessions.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "spatial_weights",
+                &self.spatial_weights.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl SessionStateSnapshot {
+    /// What the session quotas charge for this state: the datasets
+    /// ([`datasets_bytes`]), the cleaning sessions
+    /// ([`cleaning_sessions_bytes`]) and the spatial weights
+    /// ([`spatial_weights_map_bytes`]), summed (saturating).
+    pub fn bytes(&self) -> u64 {
+        let mut charge = datasets_charge(self.datasets.iter().map(|(name, d)| (name.as_str(), d)));
+        charge.add_cleaning_sessions(&self.cleaning_sessions);
+        charge.add_spatial_weights(&self.spatial_weights);
+        charge.bytes
+    }
+}
+
+/// What the session quotas charge for `session`'s state, the figure
+/// [`Session::refresh_data_bytes`] caches: its datasets, cleaning sessions
+/// and spatial weights, each map read under its lock in turn, without
+/// cloning anything.
+pub async fn session_state_bytes(session: &Session) -> u64 {
+    session.state_charge().await.bytes
 }
 
 /// Keeps a session's active-call count raised while it lives.
@@ -216,7 +318,8 @@ pub(crate) const VIEW_CHARGE_BYTES: u64 = 18;
 /// The check before a parquet file is decoded counts it too.
 pub(crate) const LABEL_OVERHEAD_BYTES: u64 = 160;
 
-/// What the dataset quotas charge for some datasets.
+/// What the dataset quotas charge for some datasets (and, for the session
+/// quotas, a session's cleaning sessions and spatial weights).
 #[derive(Debug, Default)]
 struct DataCharge {
     /// The bytes charged.
@@ -545,6 +648,126 @@ fn datasets_charge<'a>(entries: impl IntoIterator<Item = (&'a str, &'a Dataset)>
         charge.add_frame(dataset.df());
     }
     charge
+}
+
+// What the session quotas charge for a session's other state (MCP-4): the
+// cleaning sessions started with `cleaning_session_start` and the spatial
+// weights stored by `spatial_neighbors`, which live in the session next to
+// its datasets. Each is charged in the same `DataCharge` as the datasets, so
+// a category mapping a checkpoint shares with a dataset is counted once in
+// the server total. A checkpoint that shares its columns with a dataset (the
+// first one always does) is charged for each holder, so the figure is an
+// upper bound. Their names and map keys are free-form strings no request
+// limit caps, so they are charged one byte per byte.
+//
+// - Spatial weights: a `SpatialWeights` keeps its own neighbour lists (one
+//   index per link) next to its sparse rows (an index and a weight per
+//   link), and each observation costs three vector headers. Clones share
+//   all of it (T0-WP17), so this is an upper bound. The eigenvalue cache is
+//   not charged: the model tools fill it, and charging it would make a model
+//   call grow the session and be refused.
+// - Cleaning sessions: every checkpoint is a dataset, charged as one (no
+//   name), and keeps a quality profile; every operation, failed ones and
+//   rollbacks included, appends an audit record with strings the request
+//   chose. The profile's fixed part is charged per column; the top values a
+//   profile keeps per string column are copies of that checkpoint's data.
+
+/// Bytes charged per column of every cleaning checkpoint for its quality
+/// profile.
+pub const CHECKPOINT_PROFILE_BYTES_PER_COLUMN: u64 = 1024;
+/// Bytes charged per cleaning audit record, on top of its strings.
+pub const AUDIT_RECORD_BYTES: u64 = 256;
+/// Bytes charged per neighbour link of spatial weights: its index in the
+/// neighbour lists and its index and weight in the sparse rows.
+const WEIGHTS_LINK_BYTES: u64 = 24;
+/// Bytes charged per observation of spatial weights: the vector headers of
+/// its neighbour list and of its sparse row's indices and weights.
+const WEIGHTS_ROW_BYTES: u64 = 72;
+
+impl DataCharge {
+    /// Charge spatial weights stored under their names.
+    fn add_spatial_weights(&mut self, map: &HashMap<String, SpatialWeights>) {
+        for (name, weights) in map {
+            self.add(name.len() as u64);
+            self.add(spatial_weights_bytes(weights));
+        }
+    }
+
+    /// Charge cleaning sessions stored under their ids.
+    fn add_cleaning_sessions(&mut self, map: &HashMap<String, CleaningSession>) {
+        for (id, session) in map {
+            self.add(id.len() as u64);
+            self.add_cleaning_session(session);
+        }
+    }
+
+    /// Charge one cleaning session: its dataset name, each checkpoint (its
+    /// frame and its profile), each audit record and its metadata.
+    fn add_cleaning_session(&mut self, cs: &CleaningSession) {
+        self.add(cs.dataset_name.len() as u64);
+        for checkpoint in (0..).map_while(|i| cs.get_checkpoint_dataset(i)) {
+            let df = checkpoint.df();
+            self.add_frame(df);
+            self.add(CHECKPOINT_PROFILE_BYTES_PER_COLUMN.saturating_mul(df.width() as u64));
+        }
+        for record in &cs.audit_trail {
+            self.add(audit_record_bytes(record));
+        }
+        for (key, value) in &cs.metadata {
+            self.add((key.len() as u64).saturating_add(value.len() as u64));
+        }
+    }
+}
+
+/// What the session quotas charge for spatial weights: 24 bytes per
+/// neighbour link and 72 per observation (the eigenvalue cache is not
+/// charged).
+pub fn spatial_weights_bytes(w: &SpatialWeights) -> u64 {
+    WEIGHTS_LINK_BYTES
+        .saturating_mul(w.neighbors().n_links() as u64)
+        .saturating_add(WEIGHTS_ROW_BYTES.saturating_mul(w.n() as u64))
+}
+
+/// What the session quotas charge for a session's spatial weights: each
+/// name and [`spatial_weights_bytes`].
+pub fn spatial_weights_map_bytes(map: &HashMap<String, SpatialWeights>) -> u64 {
+    let mut charge = DataCharge::default();
+    charge.add_spatial_weights(map);
+    charge.bytes
+}
+
+/// What the session quotas charge for one cleaning audit record:
+/// [`AUDIT_RECORD_BYTES`] and its strings (operation type, description,
+/// error, and each parameter's key and value).
+pub fn audit_record_bytes(r: &OperationRecord) -> u64 {
+    let strings = [
+        r.operation_type.len(),
+        r.description.len(),
+        r.error.as_ref().map_or(0, String::len),
+    ]
+    .into_iter()
+    .chain(r.parameters.iter().flat_map(|(k, v)| [k.len(), v.len()]))
+    .fold(0u64, |bytes, len| bytes.saturating_add(len as u64));
+    AUDIT_RECORD_BYTES.saturating_add(strings)
+}
+
+/// What the session quotas charge for one cleaning session: its dataset
+/// name; each checkpoint charged as a dataset is (what
+/// `datasets_bytes_of([("", checkpoint)])` gives) plus
+/// [`CHECKPOINT_PROFILE_BYTES_PER_COLUMN`] per column; each audit record
+/// ([`audit_record_bytes`]); and its metadata strings.
+pub fn cleaning_session_bytes(cs: &CleaningSession) -> u64 {
+    let mut charge = DataCharge::default();
+    charge.add_cleaning_session(cs);
+    charge.bytes
+}
+
+/// What the session quotas charge for a session's cleaning sessions: each
+/// id and [`cleaning_session_bytes`].
+pub fn cleaning_sessions_bytes(map: &HashMap<String, CleaningSession>) -> u64 {
+    let mut charge = DataCharge::default();
+    charge.add_cleaning_sessions(map);
+    charge.bytes
 }
 
 /// The shared-mapping part of a session's cached charge.
@@ -907,7 +1130,8 @@ impl SessionManager {
         self.sessions.read().await.len()
     }
 
-    /// The cached dataset bytes of every session, summed, with the labels
+    /// The cached state bytes of every session ([`Session::data_bytes`]:
+    /// datasets, cleaning sessions, spatial weights), summed, with the labels
     /// of shared categorical mappings counted once each and in full. A label
     /// stays in its mapping while any column of the mapping lives, also after
     /// the dataset that brought it is gone, so the labels a session is
@@ -1063,9 +1287,10 @@ pub fn dataset_admission_active() -> bool {
 /// Admit a dataset that will be stored as `name` and charged at least
 /// `at_least` bytes (for a file, what decoding it must allocate), before it
 /// is built. It is refused when the session's datasets, with it in place of
-/// any dataset of that name, would pass the session quota, or when the
-/// server's datasets and the files other calls are decoding would pass the
-/// total. An admitted dataset is reserved against the total until the call
+/// any dataset of that name, and the session's cleaning sessions and spatial
+/// weights would pass the session quota, or when the
+/// server's session data and the files other calls are decoding would pass
+/// the total. An admitted dataset is reserved against the total until the call
 /// ends, so files decoding at once in different sessions cannot together
 /// pass it. Without installed quotas (stdio, limits off) it admits
 /// everything.
@@ -1155,6 +1380,13 @@ async fn check_charge(name: &str, bytes: u64, reserve: bool) -> Result<(), Quota
                 .filter(|(held, _)| held.as_str() != name)
                 .map(|(held, d)| (held.as_str(), d)),
         )
+    };
+    // The session's cleaning sessions and spatial weights count against its
+    // quota too (each map read-locked in turn, the datasets' lock dropped).
+    let held = {
+        let mut other = DataCharge::default();
+        admission.session.charge_other_state(&mut other).await;
+        held.saturating_add(other.bytes)
     };
     let after = held.saturating_add(added);
     if let Some(limit) = admission.per_session
@@ -2250,6 +2482,164 @@ mod tests {
             refused.outcome(),
             "the server's dataset memory would reach 520.00 MiB (limit 500.00 MiB)"
         );
+    }
+
+    /// Row-standardised kNN weights over the 40 fixture points: 40 x k links.
+    fn knn_weights(k: usize) -> SpatialWeights {
+        use p2a_core::{Neighbors, WeightStyle};
+        SpatialWeights::from_neighbors(
+            &Neighbors::from_knn(&test_fixtures::spatial_coords(), k),
+            WeightStyle::RowStd,
+        )
+    }
+
+    #[test]
+    fn spatial_weights_bytes_counts_links_and_rows() {
+        use p2a_core::{Neighbors, WeightStyle};
+        // 24 bytes a link (its neighbour index, and its index and weight in
+        // the sparse rows) and 72 an observation (three vector headers).
+        assert_eq!(spatial_weights_bytes(&knn_weights(4)), 24 * 160 + 72 * 40);
+        assert_eq!(spatial_weights_bytes(&knn_weights(4)), 6_720);
+        assert_eq!(spatial_weights_bytes(&knn_weights(20)), 22_080);
+        let isolates = SpatialWeights::from_neighbors(
+            &Neighbors::from_indices(vec![vec![], vec![]]),
+            WeightStyle::RowStd,
+        );
+        assert_eq!(spatial_weights_bytes(&isolates), 144);
+        // The name is charged too.
+        let map = HashMap::from([("w4".to_string(), knn_weights(4))]);
+        assert_eq!(spatial_weights_map_bytes(&map), 6_722);
+    }
+
+    #[test]
+    fn cleaning_session_bytes_counts_checkpoints_profiles_and_audit() {
+        let ds = test_fixtures::cleaning_fixture();
+        // A checkpoint is charged as a dataset is (no name), plus 1 KiB per
+        // column for its quality profile.
+        let frame = datasets_bytes_of([("", &ds)]);
+        let one = frame + 1024 * 2;
+        let mut cs = CleaningSession::new(ds.clone(), "cl");
+        assert_eq!(cleaning_session_bytes(&cs), 2 + one);
+        cs.apply_operation("noop", "noop", HashMap::new(), |d| Ok(d.clone()))
+            .unwrap();
+        // A second checkpoint and an audit record of 256 + 4 + 4 bytes.
+        assert_eq!(cleaning_session_bytes(&cs), 2 + 2 * one + 264);
+        // A failed operation adds no checkpoint, but its record: 256 + 4 + 4
+        // + "boom" 4 + "k" 1 + "vv" 2.
+        let failed = cs.apply_operation(
+            "fail",
+            "fail",
+            HashMap::from([("k".to_string(), "vv".to_string())]),
+            |_| Err("boom".to_string()),
+        );
+        assert!(failed.is_err());
+        assert_eq!(cleaning_session_bytes(&cs), 2 + 2 * one + 264 + 271);
+        let map = HashMap::from([("c1".to_string(), cs.clone())]);
+        assert_eq!(
+            cleaning_sessions_bytes(&map),
+            2 + cleaning_session_bytes(&cs)
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_bytes_match_live_bytes_and_restore_round_trips() {
+        let s = test_fixtures::session_with("sp", test_fixtures::spatial_fixture()).await;
+        s.spatial_weights
+            .write()
+            .await
+            .insert("w4".into(), knn_weights(4));
+        let cs = CleaningSession::new(test_fixtures::cleaning_fixture(), "cl");
+        let cs_bytes = cleaning_session_bytes(&cs);
+        s.cleaning_sessions.write().await.insert("c1".into(), cs);
+        let snap = s.snapshot_state().await;
+        let b = snap.bytes();
+        let datasets = datasets_bytes(&*s.datasets.read().await);
+        assert_eq!(b, datasets + (2 + cs_bytes) + 6_722);
+        assert_eq!(session_state_bytes(&s).await, b);
+
+        s.spatial_weights
+            .write()
+            .await
+            .insert("w20".into(), knn_weights(20));
+        s.cleaning_sessions.write().await.remove("c1");
+        s.datasets
+            .write()
+            .await
+            .insert("extra".into(), test_fixtures::cleaning_fixture());
+        s.restore_state(snap).await;
+        let keys = |names: Vec<&String>| {
+            let mut names: Vec<String> = names.into_iter().cloned().collect();
+            names.sort();
+            names
+        };
+        assert_eq!(keys(s.datasets.read().await.keys().collect()), ["sp"]);
+        assert_eq!(
+            keys(s.cleaning_sessions.read().await.keys().collect()),
+            ["c1"]
+        );
+        assert_eq!(
+            keys(s.spatial_weights.read().await.keys().collect()),
+            ["w4"]
+        );
+        assert_eq!(s.data_bytes(), b);
+    }
+
+    #[tokio::test]
+    async fn refresh_data_bytes_counts_all_session_state() {
+        let m = SessionManager::new(cfg(10, None));
+        let s = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        s.datasets
+            .write()
+            .await
+            .insert("sp".into(), test_fixtures::spatial_fixture());
+        let base = s.refresh_data_bytes().await;
+        s.spatial_weights
+            .write()
+            .await
+            .insert("w4".into(), knn_weights(4));
+        assert_eq!(s.refresh_data_bytes().await, base + 6_722);
+        assert_eq!(s.data_bytes(), base + 6_722);
+        assert_eq!(m.total_data_bytes().await, base + 6_722);
+    }
+
+    #[tokio::test]
+    async fn admission_counts_spatial_weights_and_cleaning_sessions() {
+        // The check before a dataset is built counts the session's other
+        // state against its quota too: pre-fix it summed the datasets only.
+        let m = Arc::new(SessionManager::new(cfg(10, None)));
+        let s = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let df =
+            df! {"x" => (0..100_000).map(|i| i as f64 * 0.5 + 0.1).collect::<Vec<_>>()}.unwrap();
+        s.datasets
+            .write()
+            .await
+            .insert("x".into(), Dataset::new(df));
+        let dx = s.refresh_data_bytes().await;
+        let _admission = DatasetAdmission::install(Some(dx + 1_000), None, s.clone(), m.clone());
+        // Reloading "x" in place (4 bytes are its name's charge) fits alone...
+        assert!(admit_dataset("x", dx - 4).await.is_ok());
+        // ...but not next to 6,722 bytes of weights,
+        s.spatial_weights
+            .write()
+            .await
+            .insert("w4".into(), knn_weights(4));
+        let refusal = admit_dataset("x", dx - 4).await.unwrap_err();
+        assert!(refusal.contains("per session"), "{refusal}");
+        s.spatial_weights.write().await.clear();
+        assert!(admit_dataset("x", dx - 4).await.is_ok());
+        // ...nor next to a cleaning session.
+        s.cleaning_sessions.write().await.insert(
+            "c1".into(),
+            CleaningSession::new(test_fixtures::cleaning_fixture(), "cl"),
+        );
+        let refusal = admit_dataset("x", dx - 4).await.unwrap_err();
+        assert!(refusal.contains("per session"), "{refusal}");
     }
 
     #[test]

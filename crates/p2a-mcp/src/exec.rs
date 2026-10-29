@@ -18,8 +18,8 @@
 //!    future driving the call is dropped, as it is when the client goes
 //!    away (see below);
 //! 5. a wall-clock deadline (504) and panic isolation (500, session intact);
-//! 6. per-session and total dataset-byte quotas that undo the call that
-//!    crossed them;
+//! 6. per-session and total session-data quotas (datasets, cleaning-session
+//!    checkpoints and spatial weights) that undo the call that crossed them;
 //! 7. one audit entry per call (when auditing is configured), with the call's
 //!    origin and outcome, written where the work ends; refusals before the
 //!    work starts (memory, session or server busy) are recorded too.
@@ -85,7 +85,8 @@ use crate::config::{
 };
 use crate::server::AnalyticsServer;
 use crate::session::{
-    DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager, datasets_bytes, fmt_bytes,
+    DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager, SessionStateSnapshot,
+    fmt_bytes,
 };
 use crate::tools::limits::{self, LimitViolation};
 use crate::transport::http::{ApiResponse, ToolResult};
@@ -122,9 +123,13 @@ pub struct ExecConfig {
     pub stuck_exit: Option<Duration>,
     /// Refuse new calls while the process RSS is above this.
     pub rss_soft_limit_bytes: Option<u64>,
-    /// In-memory dataset bytes per session (MCP-10).
+    /// In-memory bytes of session state (datasets, cleaning-session
+    /// checkpoints, spatial weights; `session::session_state_bytes`) per
+    /// session (MCP-10).
     pub session_data_bytes: Option<u64>,
-    /// In-memory dataset bytes over all sessions (MCP-10).
+    /// In-memory bytes of session state (datasets, cleaning-session
+    /// checkpoints, spatial weights; `session::session_state_bytes`) over
+    /// all sessions (MCP-10).
     pub total_data_bytes: Option<u64>,
     /// Installed via `p2a_core::resource::set_alloc_ceiling_bytes`.
     pub alloc_ceiling_bytes: Option<usize>,
@@ -963,7 +968,7 @@ impl ToolGovernor {
                         });
                         handle.block_on(async {
                             let snapshot = if quotas.any() {
-                                Some(s.datasets.read().await.clone())
+                                Some(s.snapshot_state().await)
                             } else {
                                 None
                             };
@@ -972,8 +977,8 @@ impl ToolGovernor {
                                     Ok(result) => result,
                                     Err(e) => {
                                         // A result refused for its size comes from work
-                                        // that ran: undo dataset growth past a quota
-                                        // before reporting the refusal.
+                                        // that ran: undo session-state growth past a
+                                        // quota before reporting the refusal.
                                         if let Some(snapshot) = snapshot {
                                             checked.set(true);
                                             quotas.enforce(&s, &sessions, snapshot).await?;
@@ -1193,11 +1198,11 @@ fn result_outcome(result: &ToolResult, budget: &Budget) -> &'static str {
     }
 }
 
-/// Run `refresh`, the refresh of session `session_id`'s cached dataset
+/// Run `refresh`, the refresh of session `session_id`'s cached state
 /// charge after a call that did not reach its quota check, on `handle`.
-/// Charging walks whatever the failed call left in the datasets; a panic
-/// there is logged and the cache left as it was, so the call's audit entry
-/// and its own outcome (its panic included) still follow.
+/// Charging walks whatever the failed call left in the session's state; a
+/// panic there is logged and the cache left as it was, so the call's audit
+/// entry and its own outcome (its panic included) still follow.
 fn refresh_after_call(
     handle: &tokio::runtime::Handle,
     session_id: &str,
@@ -1207,7 +1212,7 @@ fn refresh_after_call(
     if refreshed.is_err() {
         tracing::error!(
             session_id,
-            "charging the session's datasets after a call that did not finish panicked; the \
+            "charging the session's data after a call that did not finish panicked; the \
              cached charge is left as it was"
         );
     }
@@ -1218,7 +1223,8 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// The dataset-byte quotas of one call.
+/// The session-data quotas of one call (datasets, cleaning sessions and
+/// spatial weights; `session::session_state_bytes`).
 #[derive(Debug, Clone, Copy)]
 struct Quotas {
     per_session: Option<u64>,
@@ -1230,28 +1236,30 @@ impl Quotas {
         self.per_session.is_some() || self.total.is_some()
     }
 
-    /// Refuse a call that grew the session's datasets past a quota, restoring
-    /// `snapshot`. A call that does not grow the data is never refused. The
+    /// Refuse a call that grew the session's state (datasets, cleaning
+    /// sessions, spatial weights) past a quota, restoring `snapshot` in all
+    /// three. A call that does not grow the state is never refused. The
     /// rollback assumes one call per session at a time, which is why
     /// `ExecConfig::from_config` defaults the session concurrency to 1 when a
     /// quota applies.
     ///
-    /// A call that left every dataset as it found it (most calls only read
-    /// them) is passed without charging anything: the session's cached
-    /// charge is still that of its datasets, since every change to them is
-    /// made by a governed call, which refreshes the charge at its quota check
-    /// or after the call when it does not reach the check, or by a reload,
-    /// which refreshes it too.
+    /// A call that left the state as it found it (most calls only read it)
+    /// is passed without charging anything ([`state_unchanged`]): the
+    /// session's cached charge is still that of its state, since every
+    /// change to the three maps is made by a governed call, which refreshes
+    /// the charge at its quota check or after the call when it does not
+    /// reach the check, or, for the datasets, by a reload, which refreshes it
+    /// too.
     async fn enforce(
         &self,
         session: &Session,
         sessions: &SessionManager,
-        snapshot: HashMap<String, p2a_core::data::Dataset>,
+        snapshot: SessionStateSnapshot,
     ) -> Result<(), ToolCallError> {
-        if datasets_unchanged(&snapshot, &*session.datasets.read().await) {
+        if state_unchanged(&snapshot, session).await {
             return Ok(());
         }
-        let before = datasets_bytes(&snapshot);
+        let before = snapshot.bytes();
         let after = session.refresh_data_bytes().await;
         if after <= before {
             return Ok(());
@@ -1261,8 +1269,9 @@ impl Quotas {
             && after > limit
         {
             refusal = Some(format!(
-                "This session's datasets would use {} (limit {} per session). The change was \
-                 undone; use a smaller dataset or start a new session.",
+                "This session's data (datasets, cleaning-session checkpoints and spatial \
+                 weights) would use {} (limit {} per session). The change was undone; use a \
+                 smaller dataset or start a new session.",
                 fmt_bytes(after),
                 fmt_bytes(limit)
             ));
@@ -1273,8 +1282,8 @@ impl Quotas {
             let total = sessions.total_data_bytes().await;
             if total > limit {
                 refusal = Some(format!(
-                    "The server's dataset memory is full ({} of {}). The change was undone; \
-                     try again later or use a smaller dataset.",
+                    "The server's memory for session data is full ({} of {}). The change was \
+                     undone; try again later or use a smaller dataset.",
                     fmt_bytes(total),
                     fmt_bytes(limit)
                 ));
@@ -1283,13 +1292,48 @@ impl Quotas {
         match refusal {
             None => Ok(()),
             Some(message) => {
-                *session.datasets.write().await = snapshot;
-                session.refresh_data_bytes().await;
-                tracing::info!(session_id = %session.id, "dataset quota exceeded; change undone");
+                session.restore_state(snapshot).await;
+                tracing::info!(
+                    session_id = %session.id,
+                    "session data quota exceeded; change undone"
+                );
                 Err(ToolCallError::QuotaExceeded(message))
             }
         }
     }
+}
+
+/// Whether `session` holds exactly the state of `snapshot`: the datasets
+/// unchanged ([`datasets_unchanged`]), the same weights names each holding
+/// the same weights (`SpatialWeights::same_weights`: a clone, as the
+/// eigenvalue write-back stores, is the same; weights built again are not),
+/// and the same cleaning-session ids each with as many audit records and
+/// metadata entries as before (every cleaning operation, failed ones and
+/// rollbacks included, appends a record). Each map is read-locked in turn.
+async fn state_unchanged(snapshot: &SessionStateSnapshot, session: &Session) -> bool {
+    if !datasets_unchanged(&snapshot.datasets, &*session.datasets.read().await) {
+        return false;
+    }
+    let weights_unchanged = {
+        let current = session.spatial_weights.read().await;
+        current.len() == snapshot.spatial_weights.len()
+            && snapshot.spatial_weights.iter().all(|(name, before)| {
+                current
+                    .get(name)
+                    .is_some_and(|now| now.same_weights(before))
+            })
+    };
+    if !weights_unchanged {
+        return false;
+    }
+    let current = session.cleaning_sessions.read().await;
+    current.len() == snapshot.cleaning_sessions.len()
+        && snapshot.cleaning_sessions.iter().all(|(id, before)| {
+            current.get(id).is_some_and(|now| {
+                now.audit_trail.len() == before.audit_trail.len()
+                    && now.metadata.len() == before.metadata.len()
+            })
+        })
 }
 
 /// Whether `current` holds exactly the datasets of `snapshot`: the same
@@ -2339,5 +2383,324 @@ mod tests {
         ] {
             assert!(!datasets_unchanged(&snapshot, &current), "{what}");
         }
+    }
+}
+
+/// The session quotas count the session's spatial weights and cleaning
+/// sessions, which live in the `Session` (MCP-4), and a call that crosses a
+/// quota is undone in all of the session's state. The weights of the k = 4
+/// and k = 20 fixtures are charged 6,720 and 22,080 bytes (24 per link, 72
+/// per observation), plus their names.
+#[cfg(test)]
+mod session_state_quota_tests {
+    use super::*;
+    use crate::session::test_fixtures::{cleaning_fixture, spatial_fixture};
+    use crate::transport::http::ContentItem;
+
+    fn manager() -> Arc<SessionManager> {
+        Arc::new(SessionManager::new(crate::config::SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 8,
+            evict_idle_minutes: None,
+        }))
+    }
+
+    /// A session of `m` holding `ds` as `name`.
+    async fn session_in(
+        m: &SessionManager,
+        name: &str,
+        ds: p2a_core::data::Dataset,
+    ) -> Arc<Session> {
+        let s = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        s.datasets.write().await.insert(name.to_string(), ds);
+        s
+    }
+
+    fn nb(k: usize, w: &str) -> serde_json::Value {
+        serde_json::json!({"dataset": "sp", "x_coord": "x", "y_coord": "y", "method": "knn",
+                           "k": k, "weights_name": w})
+    }
+
+    fn moran(w: &str) -> serde_json::Value {
+        serde_json::json!({"dataset": "sp", "variable": "v", "weights": w})
+    }
+
+    fn text(r: &ToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| match c {
+                ContentItem::Text { text } => Some(text.as_str()),
+                ContentItem::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    async fn run(
+        g: &ToolGovernor,
+        s: &Arc<Session>,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, ToolCallError> {
+        g.call(
+            Arc::new(AnalyticsServer::new()),
+            Arc::clone(s),
+            tool,
+            args,
+            CallOrigin::Http,
+        )
+        .await
+    }
+
+    fn knn_weights(k: usize) -> p2a_core::SpatialWeights {
+        p2a_core::SpatialWeights::from_neighbors(
+            &p2a_core::Neighbors::from_knn(&crate::session::test_fixtures::spatial_coords(), k),
+            p2a_core::WeightStyle::RowStd,
+        )
+    }
+
+    /// The governor's no-charge fast path sees every change to the
+    /// session's state, not only to its datasets: pre-fix a call that only
+    /// stored weights or changed a cleaning session was never charged.
+    #[tokio::test]
+    async fn state_unchanged_sees_weights_and_cleaning_changes() {
+        use p2a_core::data::CleaningSession;
+        let s = Session::new("state".into(), None);
+        s.datasets
+            .write()
+            .await
+            .insert("sp".into(), spatial_fixture());
+        s.spatial_weights
+            .write()
+            .await
+            .insert("w4".into(), knn_weights(4));
+        s.cleaning_sessions
+            .write()
+            .await
+            .insert("c1".into(), CleaningSession::new(cleaning_fixture(), "cl"));
+        let snap = s.snapshot_state().await;
+        assert!(state_unchanged(&snap, &s).await);
+
+        // The eigenvalue write-back stores a clone of the same weights.
+        let same = s.spatial_weights.read().await["w4"].clone();
+        s.spatial_weights.write().await.insert("w4".into(), same);
+        assert!(state_unchanged(&snap, &s).await);
+        // Weights built again are other weights, though equal.
+        s.spatial_weights
+            .write()
+            .await
+            .insert("w4".into(), knn_weights(4));
+        assert!(!state_unchanged(&snap, &s).await, "rebuilt weights");
+        s.restore_state(snap.clone()).await;
+        assert!(state_unchanged(&snap, &s).await);
+        s.spatial_weights
+            .write()
+            .await
+            .insert("w5".into(), knn_weights(5));
+        assert!(!state_unchanged(&snap, &s).await, "added weights");
+        s.restore_state(snap.clone()).await;
+        s.spatial_weights.write().await.remove("w4");
+        assert!(!state_unchanged(&snap, &s).await, "removed weights");
+
+        // Every cleaning operation, failed ones and rollbacks included,
+        // grows the audit trail.
+        s.restore_state(snap.clone()).await;
+        let applied = s
+            .cleaning_sessions
+            .write()
+            .await
+            .get_mut("c1")
+            .unwrap()
+            .apply_operation("noop", "noop", HashMap::new(), |d| Ok(d.clone()));
+        assert!(applied.is_ok());
+        assert!(!state_unchanged(&snap, &s).await, "applied operation");
+        s.restore_state(snap.clone()).await;
+        let failed = s
+            .cleaning_sessions
+            .write()
+            .await
+            .get_mut("c1")
+            .unwrap()
+            .apply_operation("fail", "fail", HashMap::new(), |_| Err("boom".into()));
+        assert!(failed.is_err());
+        assert!(!state_unchanged(&snap, &s).await, "failed operation");
+        s.restore_state(snap.clone()).await;
+        let rolled = s
+            .cleaning_sessions
+            .write()
+            .await
+            .get_mut("c1")
+            .unwrap()
+            .rollback_to(0);
+        assert!(rolled.is_ok());
+        assert!(!state_unchanged(&snap, &s).await, "rollback");
+        s.restore_state(snap.clone()).await;
+        s.cleaning_sessions.write().await.remove("c1");
+        assert!(
+            !state_unchanged(&snap, &s).await,
+            "removed cleaning session"
+        );
+
+        // A dataset change, as before.
+        s.restore_state(snap.clone()).await;
+        assert!(state_unchanged(&snap, &s).await);
+        s.datasets
+            .write()
+            .await
+            .insert("extra".into(), cleaning_fixture());
+        assert!(!state_unchanged(&snap, &s).await, "added dataset");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_quota_counts_spatial_weights_and_rolls_them_back() {
+        let m = manager();
+        let s = session_in(&m, "sp", spatial_fixture()).await;
+        let base = s.refresh_data_bytes().await;
+        let g = ToolGovernor::new(
+            ExecConfig {
+                session_data_bytes: Some(base + 6_722 + 1_000),
+                ..Default::default()
+            },
+            Arc::clone(&m),
+        );
+        let stored = run(&g, &s, "spatial_neighbors", nb(4, "w4")).await.unwrap();
+        assert!(stored.success, "{}", text(&stored));
+        // Pre-fix: base (the weights were never counted).
+        assert_eq!(s.data_bytes(), base + 6_722);
+        match run(&g, &s, "spatial_neighbors", nb(20, "w20")).await {
+            Err(ToolCallError::QuotaExceeded(m)) => assert!(
+                m.contains("per session") && m.contains("spatial weights") && m.contains("undone"),
+                "{m}"
+            ),
+            other => panic!("expected QuotaExceeded, got {other:?}"),
+        }
+        assert_eq!(s.data_bytes(), base + 6_722);
+        // The weights stored before are kept, the refused ones are gone.
+        let kept = run(&g, &s, "moran_test", moran("w4")).await.unwrap();
+        assert!(kept.success, "{}", text(&kept));
+        let gone = run(&g, &s, "moran_test", moran("w20")).await.unwrap();
+        assert!(!gone.success, "{}", text(&gone));
+        assert!(gone.error.unwrap_or_default().contains("not found"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_quota_counts_cleaning_checkpoints_and_rolls_them_back() {
+        let m = manager();
+        let s = session_in(&m, "cl", cleaning_fixture()).await;
+        let base = s.refresh_data_bytes().await;
+        // A cleaning session's first checkpoint is charged as the dataset is
+        // (less the dataset name's 8 bytes), plus 1 KiB per column for its
+        // profile and its id and name: more than half the dataset's charge.
+        let tight = ToolGovernor::new(
+            ExecConfig {
+                session_data_bytes: Some(base + base / 2),
+                ..Default::default()
+            },
+            Arc::clone(&m),
+        );
+        match run(
+            &tight,
+            &s,
+            "cleaning_session_start",
+            serde_json::json!({"dataset": "cl"}),
+        )
+        .await
+        {
+            Err(ToolCallError::QuotaExceeded(m)) => {
+                assert!(m.contains("cleaning") && m.contains("undone"), "{m}")
+            }
+            other => panic!("expected QuotaExceeded, got {other:?}"),
+        }
+        let listed = run(&tight, &s, "list_cleaning_sessions", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            text(&listed).contains("No active cleaning sessions."),
+            "{}",
+            text(&listed)
+        );
+        assert_eq!(s.data_bytes(), base);
+
+        // A session that fits is kept; an operation whose checkpoint would
+        // cross the quota is undone, checkpoint and audit record alike.
+        let roomy = ToolGovernor::new(
+            ExecConfig {
+                session_data_bytes: Some(base * 4),
+                ..Default::default()
+            },
+            Arc::clone(&m),
+        );
+        let started = run(
+            &roomy,
+            &s,
+            "cleaning_session_start",
+            serde_json::json!({"dataset": "cl"}),
+        )
+        .await
+        .unwrap();
+        assert!(started.success, "{}", text(&started));
+        let id = text(&started)
+            .lines()
+            .find_map(|l| l.strip_prefix("Session ID: "))
+            .unwrap()
+            .trim()
+            .to_string();
+        let held = s.data_bytes();
+        assert!(held > base + base / 2, "{held} {base}");
+        let full = ToolGovernor::new(
+            ExecConfig {
+                session_data_bytes: Some(held + 1_000),
+                ..Default::default()
+            },
+            Arc::clone(&m),
+        );
+        let apply = serde_json::json!({"session_id": id, "operation": "drop_na"});
+        match run(&full, &s, "cleaning_session_apply", apply).await {
+            Err(ToolCallError::QuotaExceeded(m)) => assert!(m.contains("undone"), "{m}"),
+            other => panic!("expected QuotaExceeded, got {other:?}"),
+        }
+        assert_eq!(s.data_bytes(), held);
+        let status = run(
+            &full,
+            &s,
+            "cleaning_session_status",
+            serde_json::json!({"session_id": id}),
+        )
+        .await
+        .unwrap();
+        let status = text(&status);
+        assert!(status.contains("Checkpoints: 1 (current: #0)"), "{status}");
+        assert!(status.contains("Operations: 0"), "{status}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn total_quota_counts_spatial_weights_of_every_session() {
+        let m = manager();
+        let a = session_in(&m, "sp", spatial_fixture()).await;
+        let b = session_in(&m, "sp", spatial_fixture()).await;
+        let (ba, bb) = (a.refresh_data_bytes().await, b.refresh_data_bytes().await);
+        let g = ToolGovernor::new(
+            ExecConfig {
+                total_data_bytes: Some(ba + bb + 6_722 + 1_000),
+                ..Default::default()
+            },
+            Arc::clone(&m),
+        );
+        let stored = run(&g, &a, "spatial_neighbors", nb(4, "w4")).await.unwrap();
+        assert!(stored.success, "{}", text(&stored));
+        assert_eq!(m.total_data_bytes().await, ba + bb + 6_722);
+        match run(&g, &b, "spatial_neighbors", nb(20, "w20")).await {
+            Err(ToolCallError::QuotaExceeded(m)) => {
+                assert!(m.contains("server") && m.contains("undone"), "{m}")
+            }
+            other => panic!("expected QuotaExceeded, got {other:?}"),
+        }
+        let gone = run(&g, &b, "moran_test", moran("w20")).await.unwrap();
+        assert!(!gone.success, "{}", text(&gone));
+        assert!(gone.error.unwrap_or_default().contains("not found"));
+        assert_eq!(m.total_data_bytes().await, ba + bb + 6_722);
     }
 }
