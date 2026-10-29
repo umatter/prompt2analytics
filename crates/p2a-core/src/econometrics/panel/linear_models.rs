@@ -47,9 +47,10 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::econometrics::hdfe::reject_non_finite;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignError, DesignMatrix, get_column_names};
+use crate::linalg::design::{DesignError, DesignMatrix};
 use crate::linalg::matrix_ops::{eig_symmetric, safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{
@@ -105,15 +106,12 @@ pub fn run_fixed_effects_with(
     config: &PanelConfig,
 ) -> EconResult<PanelResult> {
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let y = DesignMatrix::extract_column(dataset.df(), y_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     // Build design matrix without intercept for FE
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let x = design.data;
     let var_names = design.column_names;
@@ -359,18 +357,15 @@ pub fn run_random_effects_with(
     config: &PanelConfig,
 ) -> EconResult<PanelResult> {
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let y = DesignMatrix::extract_column(dataset.df(), y_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     // Design with intercept (column 0, "(Intercept)"); the slopes are 1..
     if x_cols.is_empty() {
         return Err(DesignError::NoColumns.into());
     }
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
     let var_names = design.column_names;
     reject_non_finite_data(&y, y_col, &x, &var_names)?;
@@ -1038,45 +1033,52 @@ mod tests {
         Dataset::new(df)
     }
 
-    /// The message of an `InvalidSpecification` error, or a panic naming `res`.
-    fn invalid_message(res: EconResult<PanelResult>) -> String {
+    /// The column and count of a `NullValues` or `NonFiniteValues` error.
+    fn named_refusal(res: EconResult<PanelResult>) -> (&'static str, String, usize) {
         match res {
-            Err(EconError::InvalidSpecification { message }) => message,
-            other => panic!("expected InvalidSpecification, got {other:?}"),
+            Err(EconError::NullValues { column, count }) => ("NullValues", column, count),
+            Err(EconError::NonFiniteValues { column, count }) => ("NonFiniteValues", column, count),
+            other => panic!("expected NullValues or NonFiniteValues, got {other:?}"),
         }
     }
 
     /// A NaN in y used to give NaN coefficients with SE 0 and p 1; it is
-    /// refused as in `run_hdfe`, as is an infinite regressor value.
+    /// refused by the shared extraction rule (DesignMatrix: NaN is missing,
+    /// Inf is refused), as in `run_hdfe`, as is an infinite regressor value.
     #[test]
     fn test_fixed_effects_refuses_non_finite_data() {
         let fe = |ds: &Dataset| run_fixed_effects(ds, "y", &["x"], "entity");
-        let m = invalid_message(fe(&panel_with("y", 5, f64::NAN)));
-        assert!(
-            m.contains("Dependent variable 'y'") && m.contains("1 non-finite"),
-            "{m}"
+        assert_eq!(
+            named_refusal(fe(&panel_with("y", 5, f64::NAN))),
+            ("NullValues", "y".to_string(), 1)
         );
-        let m = invalid_message(fe(&panel_with("x", 7, f64::INFINITY)));
-        assert!(m.contains("Regressor 'x'"), "{m}");
+        assert_eq!(
+            named_refusal(fe(&panel_with("x", 7, f64::INFINITY))),
+            ("NonFiniteValues", "x".to_string(), 1)
+        );
         let config = PanelConfig {
             vcov: PanelVcov::Arellano(ClusterAdjustment::Stata),
         };
         let ds = panel_with("y", 0, f64::NAN);
-        invalid_message(run_fixed_effects_with(&ds, "y", &["x"], "entity", &config));
+        assert_eq!(
+            named_refusal(run_fixed_effects_with(&ds, "y", &["x"], "entity", &config)),
+            ("NullValues", "y".to_string(), 1)
+        );
     }
 
     /// RE with a NaN in y used to return NaN coefficients, SE 0, p 1 and a
-    /// spurious between-rank warning.
+    /// spurious between-rank warning; the shared extraction rule refuses it.
     #[test]
     fn test_random_effects_refuses_non_finite_data() {
         let re = |ds: &Dataset| run_random_effects(ds, "y", &["x"], "entity");
-        let m = invalid_message(re(&panel_with("y", 5, f64::NAN)));
-        assert!(
-            m.contains("Dependent variable 'y'") && m.contains("1 non-finite"),
-            "{m}"
+        assert_eq!(
+            named_refusal(re(&panel_with("y", 5, f64::NAN))),
+            ("NullValues", "y".to_string(), 1)
         );
-        let m = invalid_message(re(&panel_with("x", 7, f64::NEG_INFINITY)));
-        assert!(m.contains("Regressor 'x'"), "{m}");
+        assert_eq!(
+            named_refusal(re(&panel_with("x", 7, f64::NEG_INFINITY))),
+            ("NonFiniteValues", "x".to_string(), 1)
+        );
     }
 
     /// A noisy panel of `g` entities and `t` periods with regressors `x1..xk`

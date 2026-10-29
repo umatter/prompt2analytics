@@ -746,10 +746,10 @@ pub fn econ_error_from_design(err: DesignError, df: &DataFrame) -> EconError {
             available: get_column_names(df),
         },
         DesignError::NonNumericColumn(column) => EconError::NonNumericColumn { column },
-        DesignError::NullValues(column, rows) => EconError::NullValues {
-            column,
-            count: rows.len(),
-        },
+        DesignError::NullValues { column, count, .. } => EconError::NullValues { column, count },
+        DesignError::NonFinite { column, count, .. } => {
+            EconError::NonFiniteValues { column, count }
+        }
         DesignError::EmptyDataset => EconError::EmptyDataset,
         DesignError::NoColumns => EconError::InvalidSpecification {
             message: "No independent variables specified".to_string(),
@@ -1669,9 +1669,23 @@ mod tests {
             econ_error_from_design(DesignError::NonNumericColumn("a".into()), &df),
             EconError::NonNumericColumn { column } if column == "a"
         ));
+        let null = DesignError::NullValues {
+            column: "a".into(),
+            count: 7,
+            first_rows: vec![0, 3, 4, 5, 9],
+        };
         assert!(matches!(
-            econ_error_from_design(DesignError::NullValues("a".into(), vec![0, 3]), &df),
-            EconError::NullValues { column, count: 2 } if column == "a"
+            econ_error_from_design(null, &df),
+            EconError::NullValues { column, count: 7 } if column == "a"
+        ));
+        let inf = DesignError::NonFinite {
+            column: "b".into(),
+            count: 2,
+            first_rows: vec![1, 6],
+        };
+        assert!(matches!(
+            econ_error_from_design(inf, &df),
+            EconError::NonFiniteValues { column, count: 2 } if column == "b"
         ));
         assert!(matches!(
             econ_error_from_design(DesignError::EmptyDataset, &df),

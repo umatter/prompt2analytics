@@ -54,8 +54,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf, normal_pdf};
@@ -903,12 +904,8 @@ pub fn run_feglm(
     validate_config(&config)?;
 
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let y = DesignMatrix::extract_column(dataset.df(), y_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     reject_non_finite(y.iter(), &format!("Dependent variable '{}'", y_col))?;
 
     // Validate y for binomial families
@@ -943,7 +940,8 @@ pub fn run_feglm(
     }
 
     // Build design matrix WITHOUT intercept (FE absorbs the constant)
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
     let var_names = design.column_names;
     for (j, name) in var_names.iter().enumerate() {
@@ -1835,6 +1833,18 @@ mod tests {
         );
     }
 
+    /// The column and count of a `NullValues` or `NonFiniteValues` error.
+    fn named_refusal(res: EconResult<FeglmResult>) -> (&'static str, String, usize) {
+        match res {
+            Err(EconError::NullValues { column, count }) => ("NullValues", column, count),
+            Err(EconError::NonFiniteValues { column, count }) => ("NonFiniteValues", column, count),
+            Err(e) => panic!("expected NullValues or NonFiniteValues, got: {e}"),
+            Ok(_) => panic!("expected NullValues or NonFiniteValues, got Ok"),
+        }
+    }
+
+    /// A NaN or Inf in y or a regressor is refused by the shared extraction rule
+    /// (DesignMatrix: NaN is missing, Inf is refused), naming the column.
     #[test]
     fn test_feglm_rejects_non_finite_outcome() {
         let ds = ppml_panel(|i| {
@@ -1844,9 +1854,16 @@ mod tests {
                 3.0 + (i % 4) as f64
             }
         });
-        expect_invalid(
-            run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Poisson, None),
-            "non-finite",
+        assert_eq!(
+            named_refusal(run_feglm(
+                &ds,
+                "y",
+                &["x"],
+                &["id"],
+                GlmFamily::Poisson,
+                None
+            )),
+            ("NullValues", "y".to_string(), 1)
         );
         let ds = ppml_panel(|i| {
             if i == 5 {
@@ -1855,9 +1872,9 @@ mod tests {
                 3.0 + (i % 4) as f64
             }
         });
-        expect_invalid(
-            run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Logit, None),
-            "non-finite",
+        assert_eq!(
+            named_refusal(run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Logit, None)),
+            ("NonFiniteValues", "y".to_string(), 1)
         );
         // a non-finite regressor is refused too
         let mut x: Vec<f64> = (0..40).map(|i| ((i * 7) % 11) as f64 / 10.0).collect();
@@ -1870,9 +1887,16 @@ mod tests {
             }
             .unwrap(),
         );
-        expect_invalid(
-            run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Poisson, None),
-            "Regressor 'x'",
+        assert_eq!(
+            named_refusal(run_feglm(
+                &ds,
+                "y",
+                &["x"],
+                &["id"],
+                GlmFamily::Poisson,
+                None
+            )),
+            ("NullValues", "x".to_string(), 1)
         );
     }
 

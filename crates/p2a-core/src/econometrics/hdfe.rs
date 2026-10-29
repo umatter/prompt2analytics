@@ -38,9 +38,9 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::DesignMatrix;
-use crate::linalg::design::get_column_names;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::regression::CovarianceType;
 use crate::resource;
@@ -732,16 +732,13 @@ pub fn run_hdfe(
     }
 
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let y = DesignMatrix::extract_column(dataset.df(), y_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     reject_non_finite(y.iter(), &format!("Dependent variable '{}'", y_col))?;
 
     // Build design matrix WITHOUT intercept (FE absorbs the constant)
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
     let var_names = design.column_names;
     for (j, name) in var_names.iter().enumerate() {
@@ -1920,6 +1917,8 @@ mod tests {
         );
     }
 
+    /// A NaN in y is refused by the shared extraction rule (DesignMatrix: NaN is
+    /// a missing value), naming the column.
     #[test]
     fn test_hdfe_rejects_non_finite_data() {
         // create_balanced_panel's columns with y[0] = NaN
@@ -1945,17 +1944,20 @@ mod tests {
             }
             .unwrap(),
         );
-        expect_invalid(
-            run_hdfe(
-                &ds_nan,
-                "y",
-                &["x"],
-                &["firm", "year"],
-                None,
-                CovarianceType::HC1,
-            ),
-            "non-finite",
-        );
+        match run_hdfe(
+            &ds_nan,
+            "y",
+            &["x"],
+            &["firm", "year"],
+            None,
+            CovarianceType::HC1,
+        ) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!(column, "y");
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected NullValues for y, got {other:?}"),
+        }
     }
 
     #[test]

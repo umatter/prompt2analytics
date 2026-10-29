@@ -4,8 +4,8 @@
 //! The model is Y = Xβ + ε where Var(ε) = σ²Ω.
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::DesignError;
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
 use crate::resource;
@@ -447,8 +447,9 @@ pub fn run_gls(
     correlation_param: Option<f64>,
 ) -> EconResult<GlsResult> {
     let df = dataset.df();
-    let design = DesignMatrix::from_dataframe(df, x_cols, intercept).map_err(map_design_err)?;
-    let y = DesignMatrix::extract_column(df, y_col).map_err(map_design_err)?;
+    let design = DesignMatrix::from_dataframe(df, x_cols, intercept)
+        .map_err(|e| econ_error_from_design(e, df))?;
+    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
     dispatch_gls(&y, &design.data, correlation_type, correlation_param)
 }
 
@@ -484,25 +485,6 @@ fn dispatch_gls(
         }
     };
     gls(&y.view(), &x.view(), correlation)
-}
-
-fn map_design_err(e: DesignError) -> EconError {
-    match e {
-        DesignError::ColumnNotFound(c) => EconError::ColumnNotFound {
-            column: c,
-            available: Vec::new(),
-        },
-        DesignError::NonNumericColumn(c) => EconError::NonNumericColumn { column: c },
-        DesignError::NullValues(c, indices) => EconError::NullValues {
-            column: c,
-            count: indices.len(),
-        },
-        DesignError::EmptyDataset => EconError::EmptyDataset,
-        DesignError::NoColumns => EconError::InvalidSpecification {
-            message: "No independent variables specified".to_string(),
-        },
-        DesignError::PolarsError(e) => EconError::Internal(e.to_string()),
-    }
 }
 
 #[cfg(test)]
@@ -1059,5 +1041,30 @@ mod tests {
             "CS slope should be close to 1: got {}",
             result.coefficients[1]
         );
+    }
+
+    #[test]
+    fn test_reg32_gls_errors_name_the_column() {
+        let ds = Dataset::new(
+            polars::prelude::df! {
+                "y" => [1.1, 1.9, 3.2, 3.8, 5.1, 6.3],
+                "x1" => [1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0],
+            }
+            .unwrap(),
+        );
+        match run_gls(&ds, "y", &["x1"], true, "identity", None) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!(column, "x1");
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected NullValues for x1, got {other:?}"),
+        }
+        match run_gls(&ds, "y", &["x9"], true, "identity", None) {
+            Err(EconError::ColumnNotFound { column, available }) => {
+                assert_eq!(column, "x9");
+                assert_eq!(available, ["y", "x1"]);
+            }
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
     }
 }
