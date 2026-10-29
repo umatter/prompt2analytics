@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "columns_conventions",
+  "area": "data/columns",
+  "method": "complete.cases, factor level order (C locale), logical to numeric",
+  "reference": "stats::complete.cases; base::factor (levels = sort(unique(x)), LC_COLLATE = C); as.numeric(logical)",
+  "call": "complete.cases(y, n, s); factor(n); factor(s)",
+  "dataset": "validation/datasets/generated/columns_conventions.csv",
+  "datasets": ["validation/datasets/generated/columns_conventions.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "complete_rows": [0, 2, 5, 7, 8, 9],
+    "n_complete": 6,
+    "n_dropped": 4,
+    "missing_y": 2,
+    "missing_n": 1,
+    "missing_s": 1,
+    "n_levels_numeric": [2, 4, 10, 33],
+    "n_codes": [2, 0, 0, -1, 3, 2, 1, 0, 3, 1],
+    "s_level_count": 5,
+    "s_codes": [3, 2, 1, 2, -1, 4, 3, 0, 4, 2],
+    "flag_numeric": [1, 0, 1, 1, 0, null, 1, 0, 0, 1],
+    "mean_y_complete": 6.416666666666667
+  }
+}

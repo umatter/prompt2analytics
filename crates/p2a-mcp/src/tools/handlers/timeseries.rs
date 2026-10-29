@@ -2541,7 +2541,7 @@ mod tests {
                 let t = text_of(&r);
                 assert_eq!(r.is_error, Some(true), "{tool}: {t}");
                 assert!(
-                    t.contains("Column 'y' contains 1 null values") && !t.contains("floor"),
+                    t.contains("Column 'y' contains 1 missing value(s)") && !t.contains("floor"),
                     "{tool}: {t}"
                 );
             }

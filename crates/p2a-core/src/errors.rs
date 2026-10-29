@@ -156,8 +156,17 @@ pub enum EconError {
     #[error("Column '{column}' contains non-numeric values. Ensure all values are numeric.")]
     NonNumericColumn { column: String },
 
-    #[error("Column '{column}' contains {count} null values. Consider imputation or filtering.")]
+    /// Missing cells (null, or NaN in a float column) where the method allows none.
+    #[error(
+        "Column '{column}' contains {count} missing value(s) (null or NaN). Drop or impute them first."
+    )]
     NullValues { column: String, count: usize },
+
+    /// `±Inf` cells in a column a method reads as numbers.
+    #[error(
+        "Column '{column}' contains {count} infinite value(s); remove or recode them before estimating."
+    )]
+    NonFiniteValues { column: String, count: usize },
 
     #[error("Empty dataset: no observations to process")]
     EmptyDataset,
@@ -504,5 +513,25 @@ mod tests {
         assert!(msg.contains("xyz"));
         assert!(!msg.contains("Did you mean"));
         assert!(msg.contains("Available columns"));
+    }
+
+    #[test]
+    fn test_null_and_non_finite_messages() {
+        let null = EconError::NullValues {
+            column: "x".into(),
+            count: 3,
+        };
+        assert_eq!(
+            null.to_string(),
+            "Column 'x' contains 3 missing value(s) (null or NaN). Drop or impute them first."
+        );
+        let inf = EconError::NonFiniteValues {
+            column: "x".into(),
+            count: 2,
+        };
+        assert_eq!(
+            inf.to_string(),
+            "Column 'x' contains 2 infinite value(s); remove or recode them before estimating."
+        );
     }
 }

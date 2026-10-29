@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "data_columns",
+      "name": "Column extraction conventions (complete cases, factor level order, logical and integer columns)",
+      "category": "data",
+      "reference": "stats::complete.cases; base::factor (levels = sort(unique(x)), LC_COLLATE = C); as.numeric(logical); utils::read.csv(na.strings = c(\"NA\", \"\"))",
+      "doc": "validation/README.md",
+      "cases": ["columns_conventions"],
+      "tests": [
+        "p2a-core::data::columns::tests::test_validate_columns_conventions",
+        "p2a-core::data::columns::tests::test_validate_columns_conventions_kept_rows",
+        "p2a-core::data::columns::tests::test_validate_columns_fail_policy",
+        "p2a-core::data::columns::tests::test_validate_columns_min_rows",
+        "p2a-core::data::columns::tests::test_validate_columns_errors_name_the_column",
+        "p2a-core::data::columns::tests::test_validate_columns_matrix_and_summary",
+        "p2a-core::data::columns::tests::test_validate_columns_level_order",
+        "p2a-core::data::columns::tests::test_validate_columns_duplicate_names"
+      ],
+      "quantities": ["complete-case rows", "rows dropped per column", "factor level order (numeric; C-locale text)", "factor codes (all rows and kept rows)", "logical as 0/1", "mean on complete rows"],
+      "tolerance": "exact for rows, counts and codes; 1e-14 relative for the mean of 6 values",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
