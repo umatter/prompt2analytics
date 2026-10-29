@@ -13,11 +13,12 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock, PoisonError, Weak}
 use tokio::sync::{RwLock, Semaphore, broadcast};
 use uuid::Uuid;
 
-use p2a_core::data::Dataset;
+use p2a_core::data::{CleaningSession, Dataset};
 use p2a_core::polars::prelude::{
     CategoricalMapping, ChunkedArray, DataFrame, DataType, FrozenCategories, PolarsNumericType,
     PolarsResult, Series,
 };
+use p2a_core::{MemoryProfiler, SpatialWeights};
 
 use crate::config::SessionConfig;
 
@@ -36,6 +37,14 @@ pub struct Session {
     pub datasets: Arc<RwLock<HashMap<String, Dataset>>>,
     /// Global random seed for ML reproducibility
     pub global_seed: Arc<RwLock<Option<u64>>>,
+    /// Cleaning sessions started with `cleaning_session_start`, keyed by
+    /// cleaning-session id.
+    pub cleaning_sessions: Arc<RwLock<HashMap<String, CleaningSession>>>,
+    /// Spatial weights stored by `spatial_neighbors`, keyed by weights name.
+    pub spatial_weights: Arc<RwLock<HashMap<String, SpatialWeights>>>,
+    /// The profile behind `server_stats`' "Recent Memory History"
+    /// (`include_history`) for this session.
+    pub memory_profiler: Arc<RwLock<MemoryProfiler>>,
     /// Optional user ID (when authentication is enabled)
     pub user_id: Option<String>,
     /// Per-session execution permits, created on first use.
@@ -68,6 +77,9 @@ impl Session {
             last_accessed: RwLock::new(now),
             datasets: Arc::new(RwLock::new(HashMap::new())),
             global_seed: Arc::new(RwLock::new(None)),
+            cleaning_sessions: Arc::new(RwLock::new(HashMap::new())),
+            spatial_weights: Arc::new(RwLock::new(HashMap::new())),
+            memory_profiler: Arc::new(RwLock::new(MemoryProfiler::new())),
             user_id,
             exec_slots: OnceLock::new(),
             active_calls: AtomicUsize::new(0),
@@ -1278,6 +1290,114 @@ impl InMemorySessionStore {
     pub async fn remove(&self, id: &str) -> Option<Arc<Session>> {
         let mut sessions = self.sessions.write().await;
         sessions.remove(id)
+    }
+}
+
+// Fixtures of the session-state tests (T2-WP02, MCP-4): spatial weights and
+// cleaning sessions kept in a `Session` between tool calls. The values the
+// tests pin come from R 4.3.3. spdep is not installed, so its knearneigh
+// (ties broken by the lower index, as p2a does), nb2listw(style = "W") and
+// moran.test(randomisation = TRUE) are written out from their definitions;
+// the fixture is the same doubles in R and Rust (exact integer arithmetic,
+// then one division and one multiplication in the same order):
+//
+//   n <- 40L; i <- seq_len(n); m <- 2147483647
+//   st <- numeric(80); cur <- 20261021
+//   for (j in 1:80) { cur <- (16807 * cur) %% m; st[j] <- cur }
+//   x <- st[2 * i - 1] / m * 10
+//   y <- st[2 * i] / m * 10
+//   v <- x + 0.5 * y + ((7L * i) %% 11L) / 10
+//   D <- as.matrix(dist(cbind(x, y)))
+//   knn <- function(k) {
+//     lapply(i, function(a) {
+//       d <- D[a, ]; d[a] <- Inf
+//       o <- order(d, seq_len(n))          # ties by lower index
+//       gap <- d[o[k + 1]] - d[o[k]]
+//       stopifnot(gap > 1e-9)              # no tie at the k-th neighbour
+//       sort(o[seq_len(k)])
+//     })
+//   }
+//   moran <- function(nb) {
+//     W <- matrix(0, n, n)
+//     for (a in i) W[a, nb[[a]]] <- 1 / length(nb[[a]])
+//     z <- v - mean(v)
+//     S0 <- sum(W); S1 <- 0.5 * sum((W + t(W))^2)
+//     S2 <- sum((rowSums(W) + colSums(W))^2)
+//     I <- (n / S0) * sum(W * outer(z, z)) / sum(z^2)
+//     EI <- -1 / (n - 1)
+//     b2 <- (sum(z^4) / n) / (sum(z^2) / n)^2
+//     VI <- (n * ((n^2 - 3 * n + 3) * S1 - n * S2 + 3 * S0^2) -
+//            b2 * ((n^2 - n) * S1 - 2 * n * S2 + 6 * S0^2)) /
+//           ((n - 1) * (n - 2) * (n - 3) * S0^2) - EI^2
+//     zs <- (I - EI) / sqrt(VI)
+//     c(I = I, EI = EI, VI = VI, z = zs, links = sum(lengths(nb)))
+//   }
+//   cl <- data.frame(id = 1:10,
+//                    v = c(1.5, 2.25, NA, 4.75, 5.5, NA, 7.25, 8.5, NA, 10.75))
+//   nrow(na.omit(cl))                     # 7
+//
+// Output (options(digits = 17)), E[I] = -1/39 = -0.02564102564102564:
+//   k = 4:  I 0.68715919057620856  Var 0.0095894910636934762
+//           z 7.2789719093779635   links 160
+//   k = 5:  I 0.65697404814893101  Var 0.0074262267610125639
+//           z 7.9212144518526779   links 200
+//   k = 20: I 0.29360070720378723  Var 0.00083038505252512487
+//           z 11.078472857400241   links 800
+//   first row: x 5.7023191897675023, y 8.8786224224039465,
+//              v 10.8416304009694748
+#[cfg(test)]
+pub(crate) mod test_fixtures {
+    use super::*;
+    use polars::prelude::df;
+
+    /// The 40 points of the fixture: a Park-Miller generator from 20261021,
+    /// two draws a point, each scaled to [0, 10).
+    pub(crate) fn spatial_coords() -> Vec<(f64, f64)> {
+        const M: u64 = 2_147_483_647;
+        let mut s: u64 = 20_261_021;
+        let mut u = Vec::with_capacity(80);
+        for _ in 0..80 {
+            s = 16_807 * s % M;
+            u.push(s as f64 / M as f64 * 10.0);
+        }
+        (0..40).map(|i| (u[2 * i], u[2 * i + 1])).collect()
+    }
+
+    /// The variable the Moran tests use: x + y / 2 plus a noise term.
+    pub(crate) fn spatial_v() -> Vec<f64> {
+        spatial_coords()
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| x + 0.5 * y + ((7 * (i + 1)) % 11) as f64 / 10.0)
+            .collect()
+    }
+
+    /// The spatial fixture as a dataset: columns `x`, `y` and `v` (Float64).
+    pub(crate) fn spatial_fixture() -> Dataset {
+        let coords = spatial_coords();
+        let x: Vec<f64> = coords.iter().map(|c| c.0).collect();
+        let y: Vec<f64> = coords.iter().map(|c| c.1).collect();
+        Dataset::new(df! {"x" => x, "y" => y, "v" => spatial_v()}.unwrap())
+    }
+
+    /// Ten rows: `id` 1..=10 (Int64) and `v` (Float64) missing in rows 3, 6
+    /// and 9 (1-based); `drop_na` leaves 7 rows, as R's `na.omit` does.
+    pub(crate) fn cleaning_fixture() -> Dataset {
+        Dataset::new(
+            df! {
+                "id" => (1..=10i64).collect::<Vec<_>>(),
+                "v" => [Some(1.5), Some(2.25), None, Some(4.75), Some(5.5), None,
+                        Some(7.25), Some(8.5), None, Some(10.75)],
+            }
+            .unwrap(),
+        )
+    }
+
+    /// A fresh session (not in any manager) holding `ds` as `name`.
+    pub(crate) async fn session_with(name: &str, ds: Dataset) -> Session {
+        let session = Session::new(Uuid::new_v4().to_string(), None);
+        session.datasets.write().await.insert(name.to_string(), ds);
+        session
     }
 }
 
