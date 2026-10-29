@@ -1311,66 +1311,6 @@ impl AnalyticsServer {
     // ========================================================================
 }
 
-/// Helper function to extract a single column as Vec<f64>.
-fn extract_column_f64(dataset: &Dataset, column: &str) -> Result<Vec<f64>, String> {
-    use p2a_core::polars::prelude::*;
-
-    let df = dataset.df();
-    let col = df
-        .column(column)
-        .map_err(|e| format!("Column '{}' not found: {}", column, e))?;
-
-    let values: Vec<f64> = col
-        .cast(&DataType::Float64)
-        .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", column, e))?
-        .f64()
-        .map_err(|e| format!("Column '{}' is not numeric: {}", column, e))?
-        .into_iter()
-        .map(|v: Option<f64>| v.unwrap_or(f64::NAN))
-        .collect();
-
-    Ok(values)
-}
-
-/// Helper function to extract numeric columns into an ndarray matrix.
-fn extract_numeric_matrix(
-    dataset: &Dataset,
-    columns: &[String],
-) -> Result<ndarray::Array2<f64>, String> {
-    use p2a_core::polars::prelude::*;
-
-    let df = dataset.df();
-    let n_rows = df.height();
-    let n_cols = columns.len();
-
-    if columns.is_empty() {
-        return Err("At least one column must be specified".to_string());
-    }
-
-    let mut data = ndarray::Array2::zeros((n_rows, n_cols));
-
-    for (j, col_name) in columns.iter().enumerate() {
-        let col = df
-            .column(col_name)
-            .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
-
-        let values: Vec<f64> = col
-            .cast(&DataType::Float64)
-            .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", col_name, e))?
-            .f64()
-            .map_err(|e| format!("Column '{}' is not numeric: {}", col_name, e))?
-            .into_iter()
-            .map(|v: Option<f64>| v.unwrap_or(f64::NAN))
-            .collect();
-
-        for (i, &val) in values.iter().enumerate() {
-            data[[i, j]] = val;
-        }
-    }
-
-    Ok(data)
-}
-
 // ============================================================================
 // Request limits (every entry path)
 // ============================================================================
