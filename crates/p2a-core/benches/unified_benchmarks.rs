@@ -1942,6 +1942,12 @@ fn main() {
         // (A spectrum cached on `listw` before the loop would ride along in every clone and
         // move the O(n^3) step out of the timing.) With an O(n^3) decomposition
         // in every call, SAR and SEM use slow_config (R: 20 iterations).
+        // These cells are not like-for-like even so: R's eigen method also builds its dense
+        // O(n^3) SE block in every call (49-88% of R's time at n = 1,024), so the merge keeps
+        // them out of the exhibits (exhibit_timing_exclusions). Nor are they a timing gate for
+        // the log-determinant loop: the decomposition dominates them, so a change there does
+        // not show. Time that loop with spatial_benchmarks or a loop over a pre-computed
+        // spectrum, never by caching one here.
         // Keys as R's: beta, its SEs, rho/lambda, their SEs, the log-likelihood. Expected
         // to differ: every SE but SEM's beta SEs (SPAT-4: p2a-core's rho/lambda SE is
         // sqrt(sigma2 / (tr(W^2) + tr(W'W))), the SAR/SAC beta SEs ignore the beta-rho
@@ -2006,6 +2012,8 @@ fn main() {
 
         // SAC (SARAR), one W for lag and error. R: nlminb from four starts; here a 9 x 9
         // grid and coordinate descent (the default SacConfig) on the same likelihood.
+        // run_sac decomposes the one W once; R's timed call does the same (one eigenw()
+        // handed to sacsarlm as pre_eig1 and pre_eig2).
         let sac_config = SacConfig::default();
         if wants("SAC") {
             let mut result = run_benchmark_tracked("SAC", "sacsarlm", n, &slow_config, || {
