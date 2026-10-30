@@ -46,7 +46,11 @@ pub struct Session {
     /// Spatial weights stored by `spatial_neighbors`, keyed by weights name.
     pub spatial_weights: Arc<RwLock<HashMap<String, SpatialWeights>>>,
     /// The profile behind `server_stats`' "Recent Memory History"
-    /// (`include_history`) for this session.
+    /// (`include_history`) for this session. No quota charges it; instead
+    /// its names are pruned to the datasets the session holds at every
+    /// charge refresh ([`refresh_data_bytes`](Self::refresh_data_bytes)),
+    /// which every governed call that changed the state runs when a quota
+    /// applies.
     pub memory_profiler: Arc<RwLock<MemoryProfiler>>,
     /// Optional user ID (when authentication is enabled)
     pub user_id: Option<String>,
@@ -149,18 +153,64 @@ impl Session {
 
     /// Recompute the size of this session's state ([`session_state_bytes`]),
     /// cache it and return it.
+    ///
+    /// The memory profiler's names are then pruned to the datasets the
+    /// session holds (`prune_profiler`). The profiler lives as long as the
+    /// session and no quota charges it, so an entry whose dataset left the
+    /// session (a replacing `import_session` clears the datasets) must not
+    /// stay. When a quota applies, every governed call that changed the
+    /// session's state refreshes the charge (`Quotas::enforce`, or after a
+    /// call that did not finish), so no entry outlives the call that
+    /// removed its dataset, however the dataset left.
     pub async fn refresh_data_bytes(&self) -> u64 {
         let charge = self.state_charge().await;
-        // Both under the mutex, which the server total reads them under, so
-        // it never pairs one charge's shared part with another's bytes.
-        let mut shared = lock(&self.shared_labels);
-        *shared = SharedLabels {
-            bytes: charge.shared_labels,
-            mappings: charge.mappings,
-        };
-        self.data_bytes.store(charge.bytes, Ordering::SeqCst);
-        drop(shared);
+        {
+            // Both under the mutex, which the server total reads them under,
+            // so it never pairs one charge's shared part with another's
+            // bytes.
+            let mut shared = lock(&self.shared_labels);
+            *shared = SharedLabels {
+                bytes: charge.shared_labels,
+                mappings: charge.mappings,
+            };
+            self.data_bytes.store(charge.bytes, Ordering::SeqCst);
+        }
+        self.prune_profiler().await;
         charge.bytes
+    }
+
+    /// Untrack every memory-profiler entry whose name the session's datasets
+    /// lack. The names are collected under the datasets' read lock, which is
+    /// dropped before the profiler's lock is taken (`server_stats` holds the
+    /// datasets and then reads the profiler). When every tracked name is
+    /// held (the common case) nothing else is done, so a refresh that finds
+    /// nothing to prune neither lists the profiler's entries nor adds a
+    /// history row.
+    ///
+    /// `load_dataset` tracks its dataset just before inserting it, so a
+    /// refresh that runs in between, from another call in the same session,
+    /// drops that entry; it is display-only. Under a quota the governor runs
+    /// one call per session at a time.
+    async fn prune_profiler(&self) {
+        let held: HashSet<String> = self.datasets.read().await.keys().cloned().collect();
+        let mut profiler = self.memory_profiler.write().await;
+        let tracked_and_held = held
+            .iter()
+            .filter(|name| profiler.dataset_memory(name).is_some())
+            .count();
+        if tracked_and_held == profiler.dataset_count() {
+            return;
+        }
+        let gone: Vec<String> = profiler
+            .stats()
+            .datasets
+            .into_iter()
+            .map(|tracked| tracked.name)
+            .filter(|name| !held.contains(name))
+            .collect();
+        for name in &gone {
+            profiler.untrack_dataset(name);
+        }
     }
 
     /// One charge over the session's three maps. Each map is read-locked in
@@ -215,11 +265,11 @@ impl Session {
     ///
     /// The memory profiler is not part of a snapshot. `load_dataset` tracks
     /// a dataset before inserting it, so a load the quota refuses would
-    /// leave its entry for the life of the session, counted by no quota.
-    /// The restore therefore untracks every entry whose name the restored
-    /// datasets lack, which keeps the profiler's names a subset of the
-    /// dataset names the charge counts. (An entry the undone call
-    /// re-tracked for a dataset it replaced keeps that call's estimate.)
+    /// leave its entry behind; the charge refresh at the end prunes the
+    /// profiler's names to the restored datasets, as every charge refresh
+    /// does ([`refresh_data_bytes`](Self::refresh_data_bytes)). (An entry
+    /// the undone call re-tracked for a dataset it replaced keeps that
+    /// call's estimate.)
     pub async fn restore_state(&self, snapshot: SessionStateSnapshot) {
         let SessionStateSnapshot {
             datasets,
@@ -229,24 +279,6 @@ impl Session {
         *self.datasets.write().await = datasets;
         *self.cleaning_sessions.write().await = cleaning_sessions;
         *self.spatial_weights.write().await = spatial_weights;
-        // The names under the datasets' read lock, which is dropped before
-        // the profiler's lock is taken (`server_stats` holds the datasets
-        // and then reads the profiler).
-        let held: HashSet<String> = self.datasets.read().await.keys().cloned().collect();
-        let mut profiler = self.memory_profiler.write().await;
-        if profiler.dataset_count() > 0 {
-            let gone: Vec<String> = profiler
-                .stats()
-                .datasets
-                .into_iter()
-                .map(|tracked| tracked.name)
-                .filter(|name| !held.contains(name))
-                .collect();
-            for name in &gone {
-                profiler.untrack_dataset(name);
-            }
-        }
-        drop(profiler);
         self.refresh_data_bytes().await;
     }
 }
@@ -265,8 +297,10 @@ impl Session {
 /// included, while the snapshot holds the original.
 ///
 /// The memory profiler behind `server_stats`' history is not part of a
-/// snapshot; [`Session::restore_state`] untracks its entries for datasets
-/// the restored state does not hold.
+/// snapshot. Its names are pruned to the held datasets at every charge
+/// refresh ([`Session::refresh_data_bytes`]), the one
+/// [`Session::restore_state`] ends with included, so a restore leaves no
+/// entry for a dataset the restored state does not hold.
 #[derive(Clone)]
 pub struct SessionStateSnapshot {
     pub datasets: HashMap<String, Dataset>,
@@ -715,10 +749,12 @@ fn datasets_charge<'a>(entries: impl IntoIterator<Item = (&'a str, &'a Dataset)>
 //   not charged: the model tools fill it, and charging it would make a model
 //   call grow the session and be refused.
 // - Cleaning sessions: every checkpoint is a dataset, charged as one (no
-//   name), and keeps a quality profile; every operation, failed ones and
-//   rollbacks included, appends an audit record with strings the request
-//   chose. The profile's fixed part is charged per column; the top values a
-//   profile keeps per string column are copies of that checkpoint's data.
+//   name), and keeps a quality profile; every cleaning operation that
+//   changes a session appends an audit record (failed operations
+//   included), with strings the request chose; a refused rollback changes
+//   nothing and appends none. The profile's fixed part is charged per
+//   column; the top values a profile keeps per string column are copies of
+//   that checkpoint's data.
 
 /// Bytes charged per column of every cleaning checkpoint for its quality
 /// profile.
@@ -1368,8 +1404,9 @@ pub async fn admit_dataset(name: &str, at_least: u64) -> Result<(), String> {
 pub(crate) struct QuotaShortfall {
     /// What the dataset is charged, its name included.
     pub(crate) added: u64,
-    /// What the session's datasets (for the session quota) or the server's
-    /// (for the total) would take with it.
+    /// What the session's state (for the session quota) or the server's
+    /// (for the total) would take with it: datasets, cleaning sessions and
+    /// spatial weights.
     pub(crate) reached: u64,
     /// The quota that refused it.
     pub(crate) limit: u64,
@@ -1380,7 +1417,11 @@ pub(crate) struct QuotaShortfall {
 impl QuotaShortfall {
     /// What the dataset would do, as the quota refusals word it: "this
     /// session's datasets would use X (limit Y per session)", or "the
-    /// server's dataset memory would reach X (limit Y)".
+    /// server's dataset memory would reach X (limit Y)". X is
+    /// [`reached`](Self::reached), which includes the session's cleaning
+    /// sessions and spatial weights (the admission check adds them), so it
+    /// can exceed what the datasets alone take; the texts are kept because
+    /// tests in other files assert them.
     pub(crate) fn outcome(&self) -> String {
         if self.per_session {
             format!(
@@ -2685,6 +2726,47 @@ mod tests {
         assert_eq!(profiler.dataset_memory("ghost"), None);
         assert_eq!(profiler.dataset_count(), count);
         assert!(profiler.dataset_memory("sp").is_some());
+    }
+
+    /// Every charge refresh prunes the profiler to the held datasets, not
+    /// only a rollback's: pre-fix an entry whose dataset left the session
+    /// any other way (a replacing import clears the map) stayed for the
+    /// life of the session, counted by no quota.
+    #[tokio::test]
+    async fn refresh_data_bytes_untracks_profiler_entries_of_removed_datasets() {
+        let s = test_fixtures::session_with("sp", test_fixtures::spatial_fixture()).await;
+        let sp = s.datasets.read().await["sp"].clone();
+        let a = test_fixtures::cleaning_fixture();
+        {
+            let mut profiler = s.memory_profiler.write().await;
+            profiler.track_dataset("sp", &sp);
+            profiler.track_dataset("a", &a);
+        }
+        s.datasets.write().await.insert("a".into(), a);
+        s.refresh_data_bytes().await;
+        // Both held: nothing is pruned, and no history row is added.
+        let rows = {
+            let profiler = s.memory_profiler.read().await;
+            assert!(profiler.dataset_memory("a").is_some());
+            assert_eq!(profiler.dataset_count(), 2);
+            profiler.history().len()
+        };
+        s.refresh_data_bytes().await;
+        assert_eq!(s.memory_profiler.read().await.history().len(), rows);
+
+        s.datasets.write().await.remove("a");
+        s.refresh_data_bytes().await;
+        {
+            let profiler = s.memory_profiler.read().await;
+            assert_eq!(profiler.dataset_memory("a"), None);
+            assert!(profiler.dataset_memory("sp").is_some());
+            assert_eq!(profiler.dataset_count(), 1);
+        }
+
+        // A cleared map, as a replacing import leaves it.
+        s.datasets.write().await.clear();
+        s.refresh_data_bytes().await;
+        assert_eq!(s.memory_profiler.read().await.dataset_count(), 0);
     }
 
     #[tokio::test]

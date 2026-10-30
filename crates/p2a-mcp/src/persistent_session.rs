@@ -862,7 +862,11 @@ impl DatasetQuotas {
 /// its cleaning sessions and spatial weights, which both quotas count too
 /// (`Session::other_state_bytes`). A refusal names the size the session
 /// would reach and the limit, as a tool call's quota refusal does; it holds
-/// no server path.
+/// no server path. Its texts still say "this session's datasets would use
+/// X" and "the server's dataset memory would reach X", but X includes the
+/// session's cleaning sessions and spatial weights (and, for the total,
+/// every other session's charge), so it can exceed what the datasets
+/// alone take.
 ///
 /// Call it while holding the session's governor permit: the quota rollback
 /// of a tool call assumes one change of a session's datasets at a time.

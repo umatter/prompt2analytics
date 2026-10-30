@@ -1308,8 +1308,10 @@ impl Quotas {
 /// the same weights (`SpatialWeights::same_weights`: a clone, as the
 /// eigenvalue write-back stores, is the same; weights built again are not),
 /// and the same cleaning-session ids each with as many audit records and
-/// metadata entries as before (every cleaning operation, failed ones and
-/// rollbacks included, appends a record). Each map is read-locked in turn.
+/// metadata entries as before (every cleaning operation that changes a
+/// session appends an audit record (failed operations included); a refused
+/// rollback changes nothing and appends none). Each map is read-locked in
+/// turn.
 async fn state_unchanged(snapshot: &SessionStateSnapshot, session: &Session) -> bool {
     if !datasets_unchanged(&snapshot.datasets, &*session.datasets.read().await) {
         return false;
@@ -2505,9 +2507,18 @@ mod session_state_quota_tests {
         s.spatial_weights.write().await.remove("w4");
         assert!(!state_unchanged(&snap, &s).await, "removed weights");
 
-        // Every cleaning operation, failed ones and rollbacks included,
-        // grows the audit trail.
+        // Every cleaning operation that changes a session grows the audit
+        // trail (failed operations included); a refused rollback changes
+        // nothing and appends none.
         s.restore_state(snap.clone()).await;
+        let refused =
+            Arc::make_mut(s.cleaning_sessions.write().await.get_mut("c1").unwrap()).rollback();
+        assert!(refused.is_err());
+        assert!(state_unchanged(&snap, &s).await, "refused rollback");
+        let refused =
+            Arc::make_mut(s.cleaning_sessions.write().await.get_mut("c1").unwrap()).rollback_to(9);
+        assert!(refused.is_err());
+        assert!(state_unchanged(&snap, &s).await, "refused rollback_to");
         let applied = Arc::make_mut(s.cleaning_sessions.write().await.get_mut("c1").unwrap())
             .apply_operation("noop", "noop", HashMap::new(), |d| Ok(d.clone()));
         assert!(applied.is_ok());
@@ -2689,5 +2700,70 @@ mod session_state_quota_tests {
         assert!(!gone.success, "{}", text(&gone));
         assert!(gone.error.unwrap_or_default().contains("not found"));
         assert_eq!(m.total_data_bytes().await, ba + bb + 6_722);
+    }
+
+    /// A dataset that leaves the session through a governed call other
+    /// than a rollback loses its profiler entry at the call's quota check:
+    /// pre-fix only a rollback pruned the profiler, so the entry of a
+    /// dataset a replacing import cleared stayed for the life of the
+    /// session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_replacing_import_untracks_the_cleared_datasets() {
+        let dir = tempfile::Builder::new()
+            .prefix(".p2a-wp02-")
+            .tempdir_in(crate::path_jail::allowed_data_root().unwrap())
+            .unwrap();
+        let csv = dir.path().join("d.csv");
+        let rows: String = (0..20)
+            .map(|i| format!("{},{}\n", i as f64 * 0.5 + 0.13, (i % 7) as f64 * 1.1 - 0.4))
+            .collect();
+        std::fs::write(&csv, format!("x,y\n{rows}")).unwrap();
+        let csv = csv.to_str().unwrap().to_string();
+        let saved = dir.path().join("keep.json").to_str().unwrap().to_string();
+
+        let m = manager();
+        let s = m
+            .get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        let g = ToolGovernor::new(
+            ExecConfig {
+                session_data_bytes: Some(1 << 30),
+                ..Default::default()
+            },
+            Arc::clone(&m),
+        );
+        let ok = |r: Result<ToolResult, ToolCallError>| {
+            let r = r.unwrap();
+            assert!(r.success, "{}", text(&r));
+        };
+        let load = |name: &str| serde_json::json!({"path": csv, "name": name});
+        ok(run(&g, &s, "load_dataset", load("keep")).await);
+        ok(run(
+            &g,
+            &s,
+            "export_session",
+            serde_json::json!({"file_path": saved}),
+        )
+        .await);
+        ok(run(&g, &s, "load_dataset", load("a")).await);
+        {
+            let profiler = s.memory_profiler.read().await;
+            assert!(profiler.dataset_memory("a").is_some());
+            assert!(profiler.dataset_memory("keep").is_some());
+        }
+        ok(run(
+            &g,
+            &s,
+            "import_session",
+            serde_json::json!({"file_path": saved, "merge": false}),
+        )
+        .await);
+        let held: Vec<String> = s.datasets.read().await.keys().cloned().collect();
+        assert_eq!(held, ["keep"]);
+        let profiler = s.memory_profiler.read().await;
+        assert_eq!(profiler.dataset_memory("a"), None);
+        assert!(profiler.dataset_memory("keep").is_some());
+        assert_eq!(profiler.dataset_count(), 1);
     }
 }
