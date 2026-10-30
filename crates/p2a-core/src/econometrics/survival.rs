@@ -17,7 +17,7 @@
 use ndarray::{Array1, Array2, ArrayView1};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF};
+use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
@@ -249,7 +249,7 @@ impl fmt::Display for AftDistribution {
 // =============================================================================
 
 /// Confidence-interval transformation of a Kaplan-Meier curve (R `survfit`'s
-/// `conf.type`). Used by [`run_kaplan_meier_with`], implemented by T2-WP09.
+/// `conf.type`). Used by [`run_kaplan_meier_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum KmConfType {
     /// Interval on log S(t), R's default `"log"`.
@@ -292,7 +292,7 @@ impl fmt::Display for KmConfType {
     }
 }
 
-/// Options of [`run_kaplan_meier_with`] (implemented by T2-WP09).
+/// Options of [`run_kaplan_meier_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct KmConfig {
     /// Confidence level of the pointwise intervals (default 0.95).
@@ -310,9 +310,19 @@ impl Default for KmConfig {
     }
 }
 
-/// Kaplan-Meier estimation with the options of [`KmConfig`].
+/// Kaplan-Meier estimation with the options of [`KmConfig`], as R
+/// `survival::survfit(Surv(time, status) ~ group, conf.type = ...)`.
 ///
-/// Implemented by T2-WP09; until then returns `EconError::NotImplemented`.
+/// One result per group, in R `factor()` order of the group labels (one result without a
+/// group). Every distinct time (events and censorings) is a row, as `survfit()$time`.
+/// Standard errors are Greenwood's on the S scale (`summary(fit)$std.err`), NaN where
+/// S(t) = 0. The pointwise limits are `survival:::survfit_confint` for `conf_type`
+/// "log" (R's default), "log-log" or "plain", NaN where R reports NA. The median and
+/// its limits are `quantile.survfit(probs = 0.5)`, `None` where one is never reached.
+///
+/// The status column is coded as R's `Surv()` codes it (0/1, 1/2 or logical); rows with
+/// a missing time, status or group are dropped and reported in `missing`; times must be
+/// >= 0.
 pub fn run_kaplan_meier_with(
     dataset: &Dataset,
     time_col: &str,
@@ -320,9 +330,50 @@ pub fn run_kaplan_meier_with(
     group_col: Option<&str>,
     config: &KmConfig,
 ) -> EconResult<Vec<KaplanMeierResult>> {
-    Err(EconError::NotImplemented(
-        "T2-WP09: run_kaplan_meier_with".to_string(),
-    ))
+    check_conf_level(config.conf_level)?;
+    let data = extract_survival(
+        dataset.df(),
+        time_col,
+        event_col,
+        group_col,
+        &[],
+        TimeRule::NonNegative,
+        "Kaplan-Meier",
+    )?;
+    let z = two_sided_z(config.conf_level)?;
+
+    let Some(factor) = &data.group else {
+        let km = compute_kaplan_meier(&data.time, &data.event, z, config, None, &data.missing)?;
+        return Ok(vec![km]);
+    };
+
+    // One curve per group, in R factor order.
+    let mut rows_by_level: Vec<Vec<usize>> = vec![Vec::new(); factor.n_levels()];
+    for (i, &code) in factor.codes.iter().enumerate() {
+        rows_by_level[code as usize].push(i);
+    }
+    let mut results = Vec::with_capacity(factor.n_levels());
+    for (label, rows) in factor.levels.iter().zip(&rows_by_level) {
+        checkpoint()?;
+        let time: Vec<f64> = rows.iter().map(|&i| data.time[i]).collect();
+        let event: Vec<bool> = rows.iter().map(|&i| data.event[i]).collect();
+        results.push(compute_kaplan_meier(
+            &time,
+            &event,
+            z,
+            config,
+            Some(label.clone()),
+            &data.missing,
+        )?);
+    }
+    Ok(results)
+}
+
+/// z = qnorm(1 - (1 - conf_level) / 2), from statrs.
+fn two_sided_z(conf_level: f64) -> EconResult<f64> {
+    let normal = Normal::new(0.0, 1.0)
+        .map_err(|e| EconError::Internal(format!("standard normal distribution: {e}")))?;
+    Ok(normal.inverse_cdf(1.0 - (1.0 - conf_level) / 2.0))
 }
 
 /// Result from Kaplan-Meier survival estimation.
@@ -338,17 +389,18 @@ pub fn run_kaplan_meier_with(
 ///   Health and Medical Subjects, 33:1-26.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KaplanMeierResult {
-    /// Group name (if stratified analysis)
+    /// Group label (stratified analysis), as the group column's factor level
     pub group: Option<String>,
-    /// Distinct event times
+    /// Every distinct time (events and censorings), as `survfit()$time`
     pub times: Vec<f64>,
     /// Survival probability S(t) at each time
     pub survival: Vec<f64>,
-    /// Standard errors (Greenwood's formula)
+    /// Standard error of S(t) (Greenwood), as `summary(survfit)$std.err`; NaN where
+    /// S(t) = 0
     pub std_errors: Vec<f64>,
-    /// Lower confidence interval bound
+    /// Lower pointwise limit for `conf_type` (survfit `$lower`); NaN where R reports NA
     pub ci_lower: Vec<f64>,
-    /// Upper confidence interval bound
+    /// Upper pointwise limit for `conf_type` (survfit `$upper`); NaN where R reports NA
     pub ci_upper: Vec<f64>,
     /// Number at risk at each time
     pub n_at_risk: Vec<usize>,
@@ -356,10 +408,12 @@ pub struct KaplanMeierResult {
     pub n_events: Vec<usize>,
     /// Number censored at each time
     pub n_censored: Vec<usize>,
-    /// Median survival time (if estimable)
+    /// Median survival time, as `quantile.survfit(probs = 0.5)`; `None` when S(t) stays
+    /// above 0.5
     pub median_survival: Option<f64>,
-    /// Confidence interval for median survival
-    pub median_ci: Option<(f64, f64)>,
+    /// Lower and upper limit of the median (`quantile.survfit` `$lower`, `$upper`);
+    /// `None` for a limit that is not reached (R NA). A limit can exist without a median.
+    pub median_ci: (Option<f64>, Option<f64>),
     /// Total number of observations
     pub n_obs: usize,
     /// Total number of events
@@ -368,9 +422,36 @@ pub struct KaplanMeierResult {
     pub total_censored: usize,
     /// Confidence level used
     pub conf_level: f64,
+    /// Interval transformation used (R `conf.type`)
+    #[serde(default)]
+    pub conf_type: KmConfType,
     /// Rows dropped from the whole call (all groups) because of missing values.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+}
+
+/// Event times listed in full by the Kaplan-Meier Display; beyond, the first
+/// [`KM_TABLE_HEAD`] and the last [`KM_TABLE_TAIL`].
+const KM_TABLE_MAX_ROWS: usize = 200;
+const KM_TABLE_HEAD: usize = 100;
+const KM_TABLE_TAIL: usize = 50;
+
+/// A confidence level as a percentage: "95" for 0.95, "97.5" for 0.975.
+fn conf_percent(conf_level: f64) -> String {
+    let pct = conf_level * 100.0;
+    if (pct - pct.round()).abs() < 1e-9 {
+        format!("{pct:.0}")
+    } else {
+        format!("{pct}")
+    }
+}
+
+/// `{:.<decimals>}` of a value, or "NA" for NaN / `None` (R's NA).
+fn fmt_or_na(v: Option<f64>, decimals: usize) -> String {
+    match v {
+        Some(x) if !x.is_nan() => format!("{x:.decimals$}"),
+        _ => "NA".to_string(),
+    }
 }
 
 impl fmt::Display for KaplanMeierResult {
@@ -388,60 +469,80 @@ impl fmt::Display for KaplanMeierResult {
             self.total_censored,
             100.0 * self.total_censored as f64 / self.n_obs as f64
         )?;
+        let pct = conf_percent(self.conf_level);
+        let default_note = if self.conf_type == KmConfType::Log {
+            " (R survfit default)"
+        } else {
+            ""
+        };
+        writeln!(
+            f,
+            "Confidence intervals: {pct}%, conf.type = {}{default_note}",
+            self.conf_type
+        )?;
         writeln!(f)?;
 
-        if let Some(median) = self.median_survival {
-            write!(f, "Median Survival: {:.3}", median)?;
-            if let Some((lo, hi)) = self.median_ci {
-                write!(
-                    f,
-                    " ({:.0}% CI: {:.3} - {:.3})",
-                    self.conf_level * 100.0,
-                    lo,
-                    hi
-                )?;
-            }
-            writeln!(f)?;
-        } else {
-            writeln!(
+        let limits = format!(
+            "({pct}% CI: {} - {})",
+            fmt_or_na(self.median_ci.0, 3),
+            fmt_or_na(self.median_ci.1, 3)
+        );
+        match self.median_survival {
+            Some(median) => writeln!(f, "Median Survival: {median:.3} {limits}")?,
+            None => writeln!(
                 f,
-                "Median Survival: NA (survival > 50% at end of follow-up)"
-            )?;
+                "Median Survival: NA, survival > 50% at end of follow-up {limits}"
+            )?,
         }
         writeln!(f)?;
 
         writeln!(
             f,
-            "{:>10} {:>10} {:>10} {:>10} {:>12}",
-            "Time", "At Risk", "Events", "S(t)", "Std.Err"
+            "{:>10} {:>10} {:>10} {:>10} {:>12} {:>11} {:>11}",
+            "Time",
+            "At Risk",
+            "Events",
+            "S(t)",
+            "Std.Err",
+            format!("Lower {pct}%"),
+            format!("Upper {pct}%")
         )?;
-        writeln!(f, "{}", "-".repeat(55))?;
+        writeln!(f, "{}", "-".repeat(80))?;
 
-        // Show first 10 and last 5 time points if many
-        let n = self.times.len();
-        let show_all = n <= 20;
-        let show_indices: Vec<usize> = if show_all {
-            (0..n).collect()
-        } else {
-            let mut idx: Vec<usize> = (0..10).collect();
-            idx.push(usize::MAX); // marker for "..."
-            idx.extend((n.saturating_sub(5))..n);
-            idx
+        // The event times, as R's summary(fit).
+        let rows: Vec<usize> = (0..self.times.len())
+            .filter(|&i| self.n_events[i] > 0)
+            .collect();
+        let row = |f: &mut fmt::Formatter<'_>, i: usize| {
+            writeln!(
+                f,
+                "{:>10.3} {:>10} {:>10} {:>10.4} {:>12} {:>11} {:>11}",
+                self.times[i],
+                self.n_at_risk[i],
+                self.n_events[i],
+                self.survival[i],
+                fmt_or_na(Some(self.std_errors[i]), 4),
+                fmt_or_na(Some(self.ci_lower[i]), 4),
+                fmt_or_na(Some(self.ci_upper[i]), 4)
+            )
         };
-
-        for &i in &show_indices {
-            if i == usize::MAX {
-                writeln!(f, "{:>10}", "...")?;
-            } else {
-                writeln!(
-                    f,
-                    "{:>10.3} {:>10} {:>10} {:>10.4} {:>12.4}",
-                    self.times[i],
-                    self.n_at_risk[i],
-                    self.n_events[i],
-                    self.survival[i],
-                    self.std_errors[i]
-                )?;
+        if rows.is_empty() {
+            writeln!(f, "(no events)")?;
+        } else if rows.len() <= KM_TABLE_MAX_ROWS {
+            for &i in &rows {
+                row(f, i)?;
+            }
+        } else {
+            for &i in &rows[..KM_TABLE_HEAD] {
+                row(f, i)?;
+            }
+            writeln!(
+                f,
+                "... ({} event times not shown)",
+                rows.len() - KM_TABLE_HEAD - KM_TABLE_TAIL
+            )?;
+            for &i in &rows[rows.len() - KM_TABLE_TAIL..] {
+                row(f, i)?;
             }
         }
 
@@ -449,19 +550,21 @@ impl fmt::Display for KaplanMeierResult {
     }
 }
 
-/// Run Kaplan-Meier survival analysis.
+/// Run Kaplan-Meier survival analysis with R `survfit`'s default confidence interval
+/// type, conf.type "log"; use [`run_kaplan_meier_with`] for "log-log" or "plain".
 ///
 /// # Arguments
 ///
 /// * `dataset` - The dataset containing survival data
-/// * `time_col` - Column name for survival/censoring time
-/// * `event_col` - Column name for event indicator (1 = event, 0 = censored)
+/// * `time_col` - Column name for survival/censoring time (>= 0)
+/// * `event_col` - Status column, coded as R's `Surv()`: 0/1, 1/2 or logical
 /// * `group_col` - Optional column for stratified analysis
 /// * `conf_level` - Confidence level (default: 0.95)
 ///
 /// # Returns
 ///
-/// A vector of `KaplanMeierResult`, one per group (or single element if unstratified).
+/// A vector of `KaplanMeierResult`, one per group in R `factor()` order (or a single
+/// element if unstratified).
 ///
 /// # Example
 ///
@@ -481,51 +584,27 @@ pub fn run_kaplan_meier(
     group_col: Option<&str>,
     conf_level: f64,
 ) -> EconResult<Vec<KaplanMeierResult>> {
-    check_conf_level(conf_level)?;
-    let data = extract_survival(
-        dataset.df(),
+    run_kaplan_meier_with(
+        dataset,
         time_col,
         event_col,
         group_col,
-        &[],
-        TimeRule::NonNegative,
-        "Kaplan-Meier",
-    )?;
-
-    let z = normal_quantile(1.0 - (1.0 - conf_level) / 2.0);
-    let Some(factor) = &data.group else {
-        let km = compute_kaplan_meier(&data.time, &data.event, conf_level, z, None, &data.missing)?;
-        return Ok(vec![km]);
-    };
-
-    // One curve per group, in R factor order.
-    let mut rows_by_level: Vec<Vec<usize>> = vec![Vec::new(); factor.n_levels()];
-    for (i, &code) in factor.codes.iter().enumerate() {
-        rows_by_level[code as usize].push(i);
-    }
-    let mut results = Vec::with_capacity(factor.n_levels());
-    for (label, rows) in factor.levels.iter().zip(&rows_by_level) {
-        checkpoint()?;
-        let time: Vec<f64> = rows.iter().map(|&i| data.time[i]).collect();
-        let event: Vec<bool> = rows.iter().map(|&i| data.event[i]).collect();
-        results.push(compute_kaplan_meier(
-            &time,
-            &event,
+        &KmConfig {
             conf_level,
-            z,
-            Some(label.clone()),
-            &data.missing,
-        )?);
-    }
-    Ok(results)
+            conf_type: KmConfType::Log,
+        },
+    )
 }
 
-/// Compute Kaplan-Meier estimate for a single group.
+/// One Kaplan-Meier curve: the product-limit estimate over blocks of exactly equal
+/// times, Greenwood's variance of log S(t) (`sum d / (n (n - d))`, infinite once every
+/// subject at risk has the event, as R), the limits of [`km_confint`] and the median of
+/// [`km_quantile`].
 fn compute_kaplan_meier(
     time: &[f64],
     event: &[bool],
-    conf_level: f64,
     z: f64,
+    config: &KmConfig,
     group: Option<String>,
     missing: &MissingSummary,
 ) -> EconResult<KaplanMeierResult> {
@@ -533,19 +612,9 @@ fn compute_kaplan_meier(
     if n_obs == 0 {
         return Err(EconError::EmptyDataset);
     }
+    let mut order: Vec<usize> = (0..n_obs).collect();
+    order.sort_by(|&a, &b| time[a].total_cmp(&time[b]));
 
-    // Count events and censored at each distinct time using BTreeMap for ordered keys
-    let mut time_data: BTreeMap<OrderedF64, (usize, usize)> = BTreeMap::new();
-    for (&t, &e) in time.iter().zip(event) {
-        let entry = time_data.entry(OrderedF64(t)).or_insert((0, 0));
-        if e {
-            entry.0 += 1; // events
-        } else {
-            entry.1 += 1; // censored
-        }
-    }
-
-    // Compute KM estimates
     let mut times = Vec::new();
     let mut survival = Vec::new();
     let mut std_errors = Vec::new();
@@ -555,68 +624,54 @@ fn compute_kaplan_meier(
     let mut n_events = Vec::new();
     let mut n_censored = Vec::new();
 
-    let mut current_risk = n_obs;
-    let mut current_surv = 1.0;
-    let mut greenwood_sum = 0.0;
+    let mut at_risk = n_obs;
+    let mut surv = 1.0_f64;
+    let mut greenwood = 0.0_f64;
     let mut total_events = 0;
-
-    for (time, (events, censored)) in time_data {
-        let t = time.0;
-        let d = events;
-        let c = censored;
-
-        n_at_risk.push(current_risk);
-        n_events.push(d);
-        n_censored.push(c);
-        times.push(t);
-
-        if d > 0 && current_risk > 0 {
-            // Kaplan-Meier product-limit estimator
-            current_surv *= 1.0 - (d as f64 / current_risk as f64);
-
-            // Greenwood's formula for variance
-            if current_risk > d {
-                greenwood_sum += d as f64 / (current_risk as f64 * (current_risk - d) as f64);
+    let mut i = 0;
+    while i < n_obs {
+        let t = time[order[i]];
+        let mut j = i;
+        let mut d = 0usize;
+        while j < n_obs && time[order[j]] == t {
+            if event[order[j]] {
+                d += 1;
             }
+            j += 1;
         }
 
-        survival.push(current_surv);
+        if d > 0 {
+            surv *= 1.0 - d as f64 / at_risk as f64;
+            greenwood = if at_risk > d {
+                greenwood + d as f64 / (at_risk as f64 * (at_risk - d) as f64)
+            } else {
+                f64::INFINITY
+            };
+        }
+        let se_log = greenwood.sqrt();
+        let (lo, hi) = km_confint(surv, se_log, z, config.conf_type);
 
-        // Standard error via Greenwood's formula
-        let se = current_surv * greenwood_sum.sqrt();
-        std_errors.push(se);
-
-        // Confidence interval using log-log transformation for better coverage
-        // log(-log(S(t))) is approximately normal
-        let (lo, hi) = if current_surv > 0.0 && current_surv < 1.0 {
-            let log_log_s = (-current_surv.ln()).ln();
-            let se_log_log = se / (current_surv * (-current_surv.ln()).abs());
-            let lo_log_log = log_log_s - z * se_log_log;
-            let hi_log_log = log_log_s + z * se_log_log;
-            ((-(-lo_log_log).exp()).exp(), (-(-hi_log_log).exp()).exp())
-        } else if current_surv >= 1.0 {
-            (1.0, 1.0)
-        } else {
-            (0.0, 0.0)
-        };
-        ci_lower.push(lo.max(0.0).min(1.0));
-        ci_upper.push(hi.max(0.0).min(1.0));
+        times.push(t);
+        survival.push(surv);
+        std_errors.push(if surv > 0.0 { surv * se_log } else { f64::NAN });
+        ci_lower.push(lo);
+        ci_upper.push(hi);
+        n_at_risk.push(at_risk);
+        n_events.push(d);
+        n_censored.push(j - i - d);
 
         total_events += d;
-        current_risk -= d + c;
+        at_risk -= j - i;
+        i = j;
     }
 
-    // Find median survival (time when S(t) first drops to 0.5 or below)
-    let median_survival = find_quantile(&times, &survival, 0.5);
-    let median_ci = median_survival.map(|_| {
-        // Simple CI for median using CI of S(t)
-        let lo = find_quantile_from_bound(&times, &ci_upper, 0.5);
-        let hi = find_quantile_from_bound(&times, &ci_lower, 0.5);
-        (
-            lo.unwrap_or(times[0]),
-            hi.unwrap_or(*times.last().unwrap_or(&0.0)),
-        )
-    });
+    // quantile.survfit: the median from 1 - S, its lower limit from 1 - lower and its
+    // upper limit from 1 - upper, each whether or not the median itself exists.
+    let median_survival = km_quantile(&times, &survival, 0.5);
+    let median_ci = (
+        km_quantile(&times, &ci_lower, 0.5),
+        km_quantile(&times, &ci_upper, 0.5),
+    );
 
     Ok(KaplanMeierResult {
         group,
@@ -633,57 +688,135 @@ fn compute_kaplan_meier(
         n_obs,
         total_events,
         total_censored: n_obs - total_events,
-        conf_level,
+        conf_level: config.conf_level,
+        conf_type: config.conf_type,
         missing: missing.clone(),
     })
 }
 
-/// Find time when survival curve crosses a given probability.
-fn find_quantile(times: &[f64], survival: &[f64], prob: f64) -> Option<f64> {
-    for i in 0..survival.len() {
-        if survival[i] <= prob {
-            return Some(times[i]);
+/// The pointwise limits of `survival:::survfit_confint` (survival 3.5.8) with `logse =
+/// TRUE` (`se_log` is the standard error of log S) and `ulimit = TRUE`, NaN where R
+/// gives NA:
+/// - log: `exp(log S -/+ z se)`, the upper capped at 1; NA at S = 0;
+/// - log-log: `exp(-exp(log(-log S) -/+ z se / log S))`; NA at S = 0 and S = 1;
+/// - plain: `S -/+ z S se` clipped to [0, 1]; NA at S = 0 (where se is infinite).
+fn km_confint(s: f64, se_log: f64, z: f64, conf_type: KmConfType) -> (f64, f64) {
+    match conf_type {
+        KmConfType::Log => {
+            if s == 0.0 {
+                return (f64::NAN, f64::NAN);
+            }
+            let w = z * se_log;
+            ((s.ln() - w).exp(), (s.ln() + w).exp().min(1.0))
+        }
+        KmConfType::LogLog => {
+            if s == 0.0 || s == 1.0 {
+                return (f64::NAN, f64::NAN);
+            }
+            let w = z * se_log / s.ln();
+            let l = (-s.ln()).ln();
+            ((-(l - w).exp()).exp(), (-(l + w).exp()).exp())
+        }
+        KmConfType::Plain => {
+            let h = se_log * s * z;
+            // R's pmax(NaN, 0) is NaN; f64::max(NaN, 0.0) would be 0.
+            if h.is_nan() {
+                return (f64::NAN, f64::NAN);
+            }
+            ((s - h).max(0.0), (s + h).min(1.0))
         }
     }
-    None
 }
 
-/// Find quantile from CI bound.
-fn find_quantile_from_bound(times: &[f64], bound: &[f64], prob: f64) -> Option<f64> {
-    for i in 0..bound.len() {
-        if bound[i] <= prob {
-            return Some(times[i]);
+/// `survival:::doquant` for one probability: the time at which `1 - curve` reaches `p`,
+/// with the curve starting at time 0 (`firstx`, R's default for a fit without a start
+/// time). NaN entries of `curve` (R NA) are skipped as R's `approx` skips them.
+fn km_quantile(times: &[f64], curve: &[f64], p: f64) -> Option<f64> {
+    let mut x = Vec::with_capacity(times.len() + 1);
+    x.push(0.0);
+    x.extend_from_slice(times);
+    let mut y = Vec::with_capacity(curve.len() + 1);
+    y.push(0.0);
+    y.extend(curve.iter().map(|c| 1.0 - c));
+    findq(&x, &y, p, f64::EPSILON.sqrt())
+}
+
+/// A port of `survival:::findq` (survival 3.5.8) for one probability `p`, with NaN for
+/// R's NA:
+///
+/// ```text
+/// if (max(y, na.rm = TRUE) < p) return(NA)
+/// xmax <- x[length(x)]
+/// drop duplicated(y) from x and y
+/// indx1 <- approx(y + tol, 1:n, p, method = "constant", f = 1)$y
+/// indx2 <- approx(y - tol, 1:n, p, method = "constant", f = 1)$y
+/// quant <- (x[indx1] + x[indx2]) / 2;  quant[p == 0] <- x[1]
+/// if (!is.na(y[n]) && abs(p - y[n]) < tol) quant <- (x[indx1] + xmax) / 2
+/// ```
+///
+/// `approx(..., method = "constant", f = 1)` at `p` is the first knot (sorted, NA
+/// removed) whose value is at least `p`, and NA outside the knots' range. So the
+/// quantile is the first time the curve reaches `p`, the midpoint of the interval over
+/// which it equals `p` (within `tol`), and, when it ends at `p`, the midpoint of that
+/// time and the last time.
+fn findq(x: &[f64], y: &[f64], p: f64, tol: f64) -> Option<f64> {
+    let max = y
+        .iter()
+        .filter(|v| !v.is_nan())
+        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    if max < p {
+        return None;
+    }
+    let xmax = *x.last()?;
+
+    // duplicated(y): keep the first occurrence of each value (NaN is one value).
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut seen_nan = false;
+    let (mut kx, mut ky) = (Vec::new(), Vec::new());
+    for (&xi, &yi) in x.iter().zip(y) {
+        let first = if yi.is_nan() {
+            !std::mem::replace(&mut seen_nan, true)
+        } else {
+            seen.insert((yi + 0.0).to_bits()) // -0.0 and 0.0 are one value
+        };
+        if first {
+            kx.push(xi);
+            ky.push(yi);
         }
     }
-    None
-}
 
-/// Compute normal quantile (inverse CDF).
-fn normal_quantile(p: f64) -> f64 {
-    // Rational approximation (Abramowitz and Stegun 26.2.23)
-    if p <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if p >= 1.0 {
-        return f64::INFINITY;
-    }
-
-    let t = if p < 0.5 {
-        (-2.0 * p.ln()).sqrt()
-    } else {
-        (-2.0 * (1.0 - p).ln()).sqrt()
+    // approx(): the knots without NA, sorted by value.
+    let mut knots: Vec<(f64, usize)> = ky
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_nan())
+        .map(|(k, &v)| (v, k))
+        .collect();
+    knots.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let index = |shift: f64| -> Option<usize> {
+        let (lo, hi) = (knots.first()?.0 + shift, knots.last()?.0 + shift);
+        if p < lo || p > hi {
+            return None;
+        }
+        let at = knots.partition_point(|&(v, _)| v + shift < p);
+        knots.get(at).map(|&(_, k)| k)
     };
+    let (i1, i2) = (index(tol), index(-tol));
 
-    let c0 = 2.515517;
-    let c1 = 0.802853;
-    let c2 = 0.010328;
-    let d1 = 1.432788;
-    let d2 = 0.189269;
-    let d3 = 0.001308;
-
-    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
-
-    if p < 0.5 { -z } else { z }
+    let mut quant = match (i1, i2) {
+        (Some(a), Some(b)) => Some((kx[a] + kx[b]) / 2.0),
+        _ => None,
+    };
+    if p == 0.0 {
+        quant = kx.first().copied();
+    }
+    if let Some(&y_last) = ky.last()
+        && !y_last.is_nan()
+        && (p - y_last).abs() < tol
+    {
+        quant = i1.map(|a| (kx[a] + xmax) / 2.0);
+    }
+    quant
 }
 
 // =============================================================================
@@ -2454,7 +2587,7 @@ impl fmt::Display for CompetingRisksResult {
             } else {
                 let mut idx: Vec<usize> = (0..5).collect();
                 idx.push(usize::MAX);
-                idx.extend((n.saturating_sub(3))..n);
+                idx.extend((n - 3)..n); // n > 10 here
                 idx
             };
 
@@ -2571,7 +2704,7 @@ pub fn run_competing_risks(
     }
 
     // Compute Aalen-Johansen estimator
-    let z = normal_quantile(1.0 - (1.0 - conf_level) / 2.0);
+    let z = two_sided_z(conf_level)?;
     let mut cifs: Vec<CumulativeIncidence> = event_types_vec
         .iter()
         .map(|&et| CumulativeIncidence {
@@ -2785,75 +2918,285 @@ mod tests {
         // This is the Aalen-Johansen property
     }
 
-    #[test]
-    fn test_normal_quantile() {
-        // Test standard normal quantiles
-        assert!((normal_quantile(0.5) - 0.0).abs() < 0.01);
-        assert!((normal_quantile(0.975) - 1.96).abs() < 0.01);
-        assert!((normal_quantile(0.025) - (-1.96)).abs() < 0.01);
-    }
-
     // =========================================================================
     // Validation Tests: Compare against R's survival package
-    // Reference: validation/r_comparison/survival_comparison.R
+    // Kaplan-Meier and the log-rank test are R-pinned below (validation/r/cases/
+    // survival.R); the Cox, AFT and competing-risk checks are property checks,
+    // not R-pinned (validation/econometrics/survival_models.md).
     // =========================================================================
 
-    /// Create dataset matching R's test case for Kaplan-Meier
-    fn create_r_km_dataset() -> Dataset {
-        // Matches R code:
-        // time <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-        // event <- c(1, 1, 0, 1, 1, 0, 1, 0, 1, 1)
-        let df = df! {
-            "time" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
-            "event" => [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+    /// summary(fit, times = t): the row of the last time <= t, and the number at risk at t
+    /// (at the first time >= t; 0 past the end).
+    fn km_at(km: &KaplanMeierResult, t: f64) -> (usize, usize) {
+        let row = km
+            .times
+            .iter()
+            .rposition(|&x| x <= t)
+            .unwrap_or_else(|| panic!("t = {t} is before the first time"));
+        let n_risk = km
+            .times
+            .iter()
+            .position(|&x| x >= t)
+            .map_or(0, |i| km.n_at_risk[i]);
+        (row, n_risk)
+    }
+
+    /// R NA is null in the case JSON and NaN after `Check`.
+    fn opt(v: Option<f64>) -> f64 {
+        v.unwrap_or(f64::NAN)
+    }
+
+    fn cfg(conf_type: KmConfType) -> KmConfig {
+        KmConfig {
+            conf_level: 0.95,
+            conf_type,
         }
-        .unwrap();
-        Dataset::new(df).with_name("r_km_test")
+    }
+
+    /// The `.km_values` keys of survival.R: summary(fit, times) and quantile(fit, 0.5).
+    fn check_km_summary(
+        check: &mut Check<'_>,
+        km: &KaplanMeierResult,
+        prefix: &str,
+        times: &[f64],
+        n: usize,
+    ) {
+        let rows: Vec<(usize, usize)> = times.iter().map(|&t| km_at(km, t)).collect();
+        let pick = |v: &[f64]| rows.iter().map(|&(r, _)| v[r]).collect::<Vec<f64>>();
+        let n_risk: Vec<f64> = rows.iter().map(|&(_, k)| k as f64).collect();
+        check
+            .vector(&format!("{prefix}_surv"), &pick(&km.survival), Tol::coef(n))
+            .vector(
+                &format!("{prefix}_std_err"),
+                &pick(&km.std_errors),
+                Tol::se(n),
+            )
+            .vector(
+                &format!("{prefix}_lower"),
+                &pick(&km.ci_lower),
+                Tol::stat(n),
+            )
+            .vector(
+                &format!("{prefix}_upper"),
+                &pick(&km.ci_upper),
+                Tol::stat(n),
+            )
+            .vector(&format!("{prefix}_n_risk"), &n_risk, Tol::exact())
+            .scalar(
+                &format!("{prefix}_median"),
+                opt(km.median_survival),
+                Tol::exact(),
+            )
+            .scalar(
+                &format!("{prefix}_median_lower"),
+                opt(km.median_ci.0),
+                Tol::exact(),
+            )
+            .scalar(
+                &format!("{prefix}_median_upper"),
+                opt(km.median_ci.1),
+                Tol::exact(),
+            );
     }
 
     #[test]
-    fn test_validate_km_against_r() {
-        // R's survfit() results for this data (conf.type = "log-log"):
-        // Time  N.risk  N.event  Survival   SE
-        //   1      10        1    0.9000   0.0949
-        //   2       9        1    0.8000   0.1265
-        //   4       7        1    0.6857   0.1533
-        //   5       6        1    0.5714   0.1664
-        //   7       4        1    0.4286   0.1813
-        //   9       2        1    0.2143   0.1712
-        //  10       1        1    0.0000   NA
-        let dataset = create_r_km_dataset();
-        let results = run_kaplan_meier(&dataset, "time", "event", None, 0.95).unwrap();
-
-        assert_eq!(results.len(), 1);
-        let km = &results[0];
-
-        // Validate survival estimates at key times
-        // Allow tolerance of 0.001 as specified in validation doc
-        let r_survival = [0.9, 0.8, 0.6857, 0.5714, 0.4286, 0.2143, 0.0];
-        let r_times = [1.0, 2.0, 4.0, 5.0, 7.0, 9.0, 10.0];
-
-        for (r_time, r_surv) in r_times.iter().zip(r_survival.iter()) {
-            // Find the corresponding survival estimate
-            if let Some(idx) = km.times.iter().position(|t| (t - r_time).abs() < 0.01) {
-                assert!(
-                    (km.survival[idx] - r_surv).abs() < 0.01,
-                    "Survival at t={} should be ~{}, got {}",
-                    r_time,
-                    r_surv,
-                    km.survival[idx]
-                );
-            }
+    fn test_validate_km_lung() {
+        let (case, ds) = load_case("surv_km_lung");
+        let n = ds.nrows();
+        let times = [5.0, 11.0, 100.0, 310.0, 500.0, 765.0];
+        let mut check = Check::new(&case);
+        for (conf_type, tag) in [
+            (KmConfType::Log, "log"),
+            (KmConfType::LogLog, "loglog"),
+            (KmConfType::Plain, "plain"),
+        ] {
+            let km =
+                &run_kaplan_meier_with(&ds, "time", "status", None, &cfg(conf_type)).unwrap()[0];
+            assert_eq!(km.conf_type, conf_type);
+            check_km_summary(&mut check, km, tag, &times, n);
         }
 
-        // Median survival should be ~5-6 (between t=5 and t=7 where S crosses 0.5)
-        if let Some(med) = km.median_survival {
-            assert!(
-                (4.0..=8.0).contains(&med),
-                "Median survival should be ~5-6, got {}",
-                med
+        // The default path is R's default conf.type, over the whole curve.
+        let km = &run_kaplan_meier(&ds, "time", "status", None, 0.95).unwrap()[0];
+        assert_eq!(km.conf_type, KmConfType::Log);
+        let se_log: Vec<f64> = km
+            .std_errors
+            .iter()
+            .zip(&km.survival)
+            .map(|(se, s)| se / s)
+            .collect();
+        check
+            .vector("curve_time", &km.times, Tol::exact())
+            .vector("curve_surv", &km.survival, Tol::coef(n))
+            .vector("curve_std_err_log", &se_log, Tol::se(n))
+            .vector("curve_lower", &km.ci_lower, Tol::stat(n))
+            .vector("curve_upper", &km.ci_upper, Tol::stat(n))
+            .scalar("n", km.n_obs as f64, Tol::exact())
+            .scalar("n_event", km.total_events as f64, Tol::exact())
+            .scalar("unique_times", km.times.len() as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_km_lung_by_sex() {
+        let (case, ds) = load_case("surv_km_lung_by_sex");
+        let km =
+            run_kaplan_meier_with(&ds, "time", "status", Some("sex"), &cfg(KmConfType::LogLog))
+                .unwrap();
+        assert_eq!(km.len(), 2);
+        let mut check = Check::new(&case);
+        for (k, label) in km.iter().zip(["1", "2"]) {
+            assert_eq!(k.group.as_deref(), Some(label));
+            check_km_summary(
+                &mut check,
+                k,
+                &format!("sex{label}"),
+                &[100.0, 300.0, 500.0],
+                k.n_obs,
             );
         }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_km_small() {
+        let (case, ds) = load_case("surv_km_small");
+        let n = ds.nrows();
+        let mut check = Check::new(&case);
+        for (conf_type, tag) in [(KmConfType::Log, "log"), (KmConfType::LogLog, "loglog")] {
+            let km =
+                &run_kaplan_meier_with(&ds, "time", "event", None, &cfg(conf_type)).unwrap()[0];
+            check
+                .vector(&format!("{tag}_time"), &km.times, Tol::exact())
+                .vector(&format!("{tag}_surv"), &km.survival, Tol::coef(n))
+                .vector(&format!("{tag}_std_err_surv"), &km.std_errors, Tol::se(n))
+                .vector(&format!("{tag}_lower"), &km.ci_lower, Tol::stat(n))
+                .vector(&format!("{tag}_upper"), &km.ci_upper, Tol::stat(n))
+                .scalar(
+                    &format!("{tag}_median"),
+                    opt(km.median_survival),
+                    Tol::exact(),
+                )
+                .scalar(
+                    &format!("{tag}_median_lower"),
+                    opt(km.median_ci.0),
+                    Tol::exact(),
+                )
+                .scalar(
+                    &format!("{tag}_median_upper"),
+                    opt(km.median_ci.1),
+                    Tol::exact(),
+                );
+            // S = 0 at the last time: SE and both limits are NA in R.
+            assert_eq!(km.survival[9], 0.0, "{tag}");
+            assert!(
+                km.std_errors[9].is_nan() && km.ci_lower[9].is_nan() && km.ci_upper[9].is_nan(),
+                "{tag}"
+            );
+            assert_eq!(km.median_ci.1, None, "{tag}");
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_km_median_rules() {
+        let (case, ds) = load_case("surv_km_median_rules");
+        let mut check = Check::new(&case);
+        for (conf_type, tag) in [
+            (KmConfType::Log, "log"),
+            (KmConfType::LogLog, "loglog"),
+            (KmConfType::Plain, "plain"),
+        ] {
+            let km = run_kaplan_meier_with(&ds, "time", "event", Some("group"), &cfg(conf_type))
+                .unwrap();
+            let labels: Vec<&str> = km.iter().filter_map(|k| k.group.as_deref()).collect();
+            assert_eq!(labels, ["last", "mid", "never"]);
+            for k in &km {
+                let (g, n) = (k.group.as_deref().unwrap_or(""), k.n_obs);
+                if conf_type == KmConfType::Log {
+                    check
+                        .vector(&format!("{g}_time"), &k.times, Tol::exact())
+                        .vector(&format!("{g}_surv"), &k.survival, Tol::coef(n))
+                        .vector(&format!("{g}_n_risk"), &as_f64(&k.n_at_risk), Tol::exact());
+                }
+                check
+                    .vector(&format!("{g}_{tag}_lower"), &k.ci_lower, Tol::stat(n))
+                    .vector(&format!("{g}_{tag}_upper"), &k.ci_upper, Tol::stat(n))
+                    .scalar(
+                        &format!("{g}_{tag}_median"),
+                        opt(k.median_survival),
+                        Tol::exact(),
+                    )
+                    .scalar(
+                        &format!("{g}_{tag}_median_lower"),
+                        opt(k.median_ci.0),
+                        Tol::exact(),
+                    )
+                    .scalar(
+                        &format!("{g}_{tag}_median_upper"),
+                        opt(k.median_ci.1),
+                        Tol::exact(),
+                    );
+            }
+            if conf_type == KmConfType::Log {
+                let strata_n: Vec<f64> = km.iter().map(|k| k.n_obs as f64).collect();
+                let strata_median: Vec<f64> = km.iter().map(|k| opt(k.median_survival)).collect();
+                check.vector("strata_n", &strata_n, Tol::exact()).vector(
+                    "strata_median",
+                    &strata_median,
+                    Tol::exact(),
+                );
+            }
+            if conf_type == KmConfType::LogLog {
+                // A lower limit although the median is never reached.
+                let never = &km[2];
+                assert_eq!(never.median_survival, None);
+                assert_eq!(never.median_ci, (Some(1.0), None));
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_km_conf_level_and_type_validation() {
+        let (case, ds) = load_case("surv_km_small");
+        for conf_level in [1.0, 0.0, f64::NAN] {
+            let config = KmConfig {
+                conf_level,
+                conf_type: KmConfType::Log,
+            };
+            invalid_spec(
+                run_kaplan_meier_with(&ds, "time", "event", None, &config),
+                "conf_level",
+            );
+        }
+        let km95 =
+            &run_kaplan_meier_with(&ds, "time", "event", None, &cfg(KmConfType::Log)).unwrap()[0];
+        let config90 = KmConfig {
+            conf_level: 0.9,
+            conf_type: KmConfType::Log,
+        };
+        let km90 = &run_kaplan_meier_with(&ds, "time", "event", None, &config90).unwrap()[0];
+        assert_eq!(km90.conf_level, 0.9);
+        for i in 0..km95.times.len() {
+            let (l95, u95, l90, u90) = (
+                km95.ci_lower[i],
+                km95.ci_upper[i],
+                km90.ci_lower[i],
+                km90.ci_upper[i],
+            );
+            if l95.is_finite() && l90.is_finite() {
+                assert!(l90 >= l95, "t[{i}]: lower {l90} < {l95}");
+            }
+            if u95.is_finite() && u90.is_finite() {
+                assert!(u90 <= u95, "t[{i}]: upper {u90} > {u95}");
+            }
+        }
+        // The curve itself does not depend on the confidence level.
+        Check::new(&case)
+            .vector("log_time", &km90.times, Tol::exact())
+            .vector("log_surv", &km90.survival, Tol::coef(km90.n_obs))
+            .finish();
     }
 
     /// Counts as f64, for `Check::vector`.

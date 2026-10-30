@@ -2,6 +2,38 @@
   "schema": 1,
   "methods": [
     {
+      "id": "surv_km",
+      "name": "Kaplan-Meier survival curve, Greenwood SE, log / log-log / plain confidence intervals, median and its limits",
+      "category": "econometrics",
+      "reference": "survival::survfit(conf.type = 'log' | 'log-log' | 'plain'); survival:::quantile.survfit",
+      "doc": "validation/econometrics/survival.md",
+      "cases": [
+        "surv_km_lung",
+        "surv_km_lung_by_sex",
+        "surv_km_small",
+        "surv_km_median_rules"
+      ],
+      "tests": [
+        "p2a-core::econometrics::survival::tests::test_validate_km_lung",
+        "p2a-core::econometrics::survival::tests::test_validate_km_lung_by_sex",
+        "p2a-core::econometrics::survival::tests::test_validate_km_small",
+        "p2a-core::econometrics::survival::tests::test_validate_km_median_rules",
+        "p2a-core::econometrics::survival::tests::test_validate_km_conf_level_and_type_validation"
+      ],
+      "quantities": [
+        "S(t)",
+        "std.err (Greenwood, S scale) and se(log S)",
+        "lower/upper limits (log, log-log, plain)",
+        "n.risk",
+        "median and its lower/upper limits (midpoint, last-point, unreached)",
+        "n, events, distinct times",
+        "stratified order"
+      ],
+      "tolerance": "validation/README.md: n = 10-16 coefficients 1e-6, SE and limits 1e-5; n = 90-228 coefficients 1e-8, SE and limits 1e-6 relative; times, counts and medians exact; CLI text at print precision",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "surv_data_handling",
       "name": "Survival column extraction: Int64 columns, na.omit with a report, Surv() status coding (KM, log-rank, Cox, AFT, competing risks)",
       "category": "econometrics",
