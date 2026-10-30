@@ -76,7 +76,7 @@ cat("95% CI:", result$effect - 1.96*result$se, ",", result$effect + 1.96*result$
 
 ### Rust Test
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with CAUS-92):
+**Rust tests** of the estimate (not R-pinned: no committed R case is compared, and the R case for the IPW effect and SE comes with CAUS-92). The registry entry that makes this document R-pinned, `weighting_na_refusal`, pins only the missing-value refusals ("Missing values and column types" below) and records the estimate as deviation CAUS-92:
 - `econometrics::treatment::tests::test_validate_ipw_ate_vs_r` (`crates/p2a-core/src/econometrics/treatment.rs`): the effect is within 0.3 of the DGP's 0.75, 0.01 < SE < 0.3, and the CI contains the effect. `validation/expected/ipw_weightit.csv` is not read.
 - `econometrics::treatment::tests::test_ipw_ate_basic` (`crates/p2a-core/src/econometrics/treatment.rs`): group sizes, an effect in (0, 2) and a finite positive SE.
 
@@ -176,7 +176,8 @@ unchanged. A NaN cell counts as missing, like a null.
 R: MatchIt 4.8.0 and tmle 2.1.1 refuse missing treatment or covariate values, and WeightIt 2.0.0 refuses a missing treatment; p2a refuses missing values in every column the IPW estimator reads (checked for T2-WP13).
 
 Tests: `test_validate_na_ipw_columns`, `test_validate_na_ipw_nan_outcome_is_missing`, `test_validate_mcp_treatment_ipw_null_outcome_is_named` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
-`weighting_na_refusal`).
+`weighting_na_refusal`). They pin the refused column and the missing count only; no IPW effect
+or SE is compared with R (registry deviation CAUS-92).
 
 ## References
 

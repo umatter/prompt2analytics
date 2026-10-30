@@ -299,7 +299,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Staggered DiD (Callaway-Sant'Anna) | [staggered_did.md](econometrics/staggered_did.md) | R-pinned, known deviations (CAUS-84) |
 | Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
 | Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
-| IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned |
+| IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned, known deviations (CAUS-92) |
 | Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | not R-pinned |
 | TMLE | [tmle.md](econometrics/tmle.md) | not R-pinned |
 | LTMLE (Longitudinal TMLE) | [ltmle.md](econometrics/ltmle.md) | not R-pinned |
@@ -372,7 +372,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Mood test of scale | [mood.md](stats/mood.md) | R-pinned, known deviations (STAT-29) |
 | Bartlett, Fligner-Killeen and F tests of variances | [bartlett.md](stats/bartlett.md) | R-pinned |
 | Pairwise t-tests | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
-| Correlation test (cor.test) | [new_methods.md](stats/new_methods.md) | R-pinned |
+| Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned |
 | Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned |
 
 ### Spatial Econometrics

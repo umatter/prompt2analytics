@@ -2434,6 +2434,7 @@ mod tests {
             run_ipw_treatment(ds, y, d, x, IpwConfig::default())
         };
         na_fixtures::assert_refusals(&case, &ds, true, run);
+        // deviation CAUS-92: the effect and SE are compared across treatment dtypes, not with R
         na_fixtures::assert_treatment_dtypes_agree(&case, &ds, run, |r| {
             vec![r.effect, r.std_error]
         });

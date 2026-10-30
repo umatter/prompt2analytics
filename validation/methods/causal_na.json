@@ -69,7 +69,9 @@
       ],
       "quantities": ["NullValues column and count (missing_y, missing_d_na, missing_x1)"],
       "tolerance": "exact",
-      "deviations": [],
+      "deviations": [
+        {"finding": "CAUS-92", "quantity": "effect and SE (IPW and the other estimators of this entry)", "note": "only the missing-value refusals are pinned; no estimate is compared with R, and the R case for the IPW estimate comes with CAUS-92 (Tier 3)"}
+      ],
       "supersedes_legacy": []
     }
   ]
