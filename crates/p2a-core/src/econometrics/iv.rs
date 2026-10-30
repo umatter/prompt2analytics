@@ -59,9 +59,9 @@ use statrs::distribution::{ContinuousCDF, FisherSnedecor};
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::data::columns::MissingSummary;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, t_test_p_value};
@@ -315,6 +315,42 @@ fn hc1_wald_f(
     }
 }
 
+/// The model's columns on the rows complete in y, X_exog, X_endog and Z (R ivreg
+/// `na.omit`).
+struct IvData {
+    y: Array1<f64>,
+    /// "(Intercept)" and the included exogenous regressors.
+    exog: DesignMatrix,
+    endog: DesignMatrix,
+    instr: DesignMatrix,
+    missing: MissingSummary,
+}
+
+/// One NA-aware request over every model column, in the order y, X_exog, X_endog, Z;
+/// incomplete rows are dropped jointly.
+fn iv_data(
+    dataset: &Dataset,
+    y_col: &str,
+    x_exog: &[&str],
+    x_endog: &[&str],
+    instruments: &[&str],
+) -> EconResult<IvData> {
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_exog)
+        .numerics(x_endog)
+        .numerics(instruments)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    Ok(IvData {
+        y: cols.numeric_array(y_col),
+        exog: cols.matrix(x_exog, true),
+        endog: cols.matrix(x_endog, false),
+        instr: cols.matrix(instruments, false),
+        missing: cols.missing().clone(),
+    })
+}
+
 /// Run Two-Stage Least Squares (2SLS) / Instrumental Variables estimation.
 ///
 /// # Arguments
@@ -351,6 +387,13 @@ fn hc1_wald_f(
 /// F probabilities and `first_stage_partial_r2` the classical partial R². A
 /// first-stage F below 10 (or not computed) adds a weak-instrument warning and makes
 /// `strong_instruments` false. Stock & Yogo (2005) critical values are not computed.
+///
+/// # Missing values
+///
+/// Rows with a missing value (null or NaN) in y, a regressor or an instrument are
+/// dropped from every column (R ivreg `na.omit`), counted in `missing` and noted in
+/// `warnings`; an infinite value is refused (`NonFiniteValues`), a text column is
+/// `NonNumericColumn`.
 pub fn run_iv2sls(
     dataset: &Dataset,
     y_col: &str,
@@ -361,6 +404,12 @@ pub fn run_iv2sls(
 ) -> EconResult<IVResult> {
     let mut warnings = Vec::new();
 
+    if x_endog.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: "At least one endogenous variable is required".to_string(),
+        });
+    }
+
     // Check identification
     if instruments.len() < x_endog.len() {
         return Err(EconError::UnderIdentified {
@@ -369,29 +418,22 @@ pub fn run_iv2sls(
         });
     }
 
-    // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|_e| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
+    // y, [1, X_exog], X_endog and Z on the complete rows
+    let IvData {
+        y,
+        exog: design_exog,
+        endog: design_endog,
+        instr: design_instruments,
+        missing,
+    } = iv_data(dataset, y_col, x_exog, x_endog, instruments)?;
+    if let Some(note) = missing.note() {
+        warnings.push(note);
+    }
     let n = y.len();
-
-    // Build matrices
-    // X_exog: exogenous variables (with intercept)
-    let design_exog = DesignMatrix::from_dataframe(dataset.df(), x_exog, true)?;
     let x_exog_mat = design_exog.data;
     let exog_names = design_exog.column_names;
-
-    // X_endog: endogenous variables
-    let design_endog = DesignMatrix::from_dataframe(dataset.df(), x_endog, false)?;
     let x_endog_mat = design_endog.data;
     let endog_names = design_endog.column_names;
-
-    // Z: instruments only
-    let design_instruments = DesignMatrix::from_dataframe(dataset.df(), instruments, false)?;
     let z_mat = design_instruments.data;
 
     // Full instrument matrix: [X_exog, Z] (all exogenous + excluded instruments)
@@ -661,7 +703,7 @@ pub fn run_iv2sls(
         first_stage_p_values,
         first_stage_partial_r2,
         first_stage_f_type: f_type.to_string(),
-        missing: MissingSummary::none(n),
+        missing,
     })
 }
 
@@ -799,23 +841,23 @@ pub fn run_first_stage_diagnostics(
     instruments: &[&str],
     controls: Option<&[&str]>,
 ) -> EconResult<FirstStageDiagnostics> {
-    // Extract endogenous variable
-    let y = DesignMatrix::extract_column(dataset.df(), endog_var).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: endog_var.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let controls: Vec<&str> = controls.unwrap_or(&[]).to_vec();
 
+    // The endogenous variable, instruments and controls on their complete rows
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(endog_var)
+        .numerics(instruments)
+        .numerics(&controls)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y = cols.numeric_array(endog_var);
     let n = y.len();
 
-    // Build the full regressor set: intercept + instruments + controls
+    // The full regressor set: intercept + instruments + controls
     let mut all_vars: Vec<&str> = instruments.to_vec();
-    if let Some(ctrl) = controls {
-        all_vars.extend(ctrl);
-    }
+    all_vars.extend(&controls);
 
-    let design = DesignMatrix::from_dataframe(dataset.df(), &all_vars, true)?;
+    let design = cols.matrix(&all_vars, true);
     let x = design.data;
     let var_names = design.column_names;
     let k = x.ncols();
@@ -852,8 +894,7 @@ pub fn run_first_stage_diagnostics(
 
     // Partial F of the instruments given the controls: the restricted fit
     // endog ~ [1, controls] against the full first stage (AER's weak-instrument F)
-    let controls: Vec<&str> = controls.unwrap_or(&[]).to_vec();
-    let restricted = DesignMatrix::from_dataframe(dataset.df(), &controls, true)?;
+    let restricted = cols.matrix(&controls, true);
     let (restricted_inv, _) = safe_inverse(&xtx(&restricted.data.view()).view()).map_err(|e| {
         EconError::SingularMatrix {
             context: "[1, controls]'[1, controls] in the first-stage restricted fit".to_string(),
@@ -913,7 +954,7 @@ pub fn run_first_stage_diagnostics(
         f_df: (l, df),
         partial_r_squared,
         controls: controls.iter().map(|s| s.to_string()).collect(),
-        missing: MissingSummary::none(n),
+        missing: cols.missing().clone(),
     })
 }
 
@@ -953,6 +994,9 @@ pub struct SarganTestResult {
     pub null_hypothesis: String,
     /// Interpretation based on p-value
     pub interpretation: String,
+    /// Rows dropped because of missing values (the rows of `run_iv2sls`).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for SarganTestResult {
@@ -974,7 +1018,7 @@ impl fmt::Display for SarganTestResult {
         writeln!(f, "  Overidentifying restrictions: {}", self.df)?;
         writeln!(f)?;
         writeln!(f, "Interpretation: {}", self.interpretation)?;
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -987,6 +1031,9 @@ impl fmt::Display for SarganTestResult {
 ///
 /// - The model must be **over-identified**: number of instruments > number of endogenous variables
 /// - For just-identified models (instruments == endogenous), the test is not defined
+///
+/// The test uses the rows [`run_iv2sls`] uses: rows with a missing value in any model
+/// column are dropped (R ivreg `na.omit`) and reported in `missing`.
 ///
 /// # Test Statistic
 ///
@@ -1054,6 +1101,7 @@ pub fn sargan_test(
             overidentified: false,
             null_hypothesis: "Instruments are valid (uncorrelated with error term)".to_string(),
             interpretation: "Model is exactly identified (instruments = endogenous). Sargan test not applicable.".to_string(),
+            missing: MissingSummary::default(),
         });
     }
 
@@ -1061,19 +1109,18 @@ pub fn sargan_test(
     let iv_result = run_iv2sls(dataset, y_col, x_exog, x_endog, instruments, false)?;
     let n = iv_result.n_obs;
 
-    // Re-extract data to compute residuals and run auxiliary regression
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    // Re-extract the same complete rows to compute residuals and run the auxiliary
+    // regression
+    let IvData {
+        y,
+        exog: design_exog,
+        endog: design_endog,
+        instr: design_z,
+        missing,
+    } = iv_data(dataset, y_col, x_exog, x_endog, instruments)?;
 
     // Build the full X matrix (exogenous + endogenous)
-    let design_exog = DesignMatrix::from_dataframe(dataset.df(), x_exog, true)?;
     let x_exog_mat = design_exog.data;
-
-    let design_endog = DesignMatrix::from_dataframe(dataset.df(), x_endog, false)?;
     let x_endog_mat = design_endog.data;
 
     let k_exog = x_exog_mat.ncols();
@@ -1094,7 +1141,6 @@ pub fn sargan_test(
     let residuals = &y - &y_hat;
 
     // Build the full instrument matrix Z = [exogenous, excluded_instruments]
-    let design_z = DesignMatrix::from_dataframe(dataset.df(), instruments, false)?;
     let z_excl = design_z.data;
 
     let k_z = k_exog + z_excl.ncols(); // exogenous (with intercept) + excluded instruments
@@ -1156,6 +1202,7 @@ pub fn sargan_test(
         overidentified: true,
         null_hypothesis: "Instruments are valid (uncorrelated with error term)".to_string(),
         interpretation,
+        missing,
     })
 }
 
@@ -1597,5 +1644,134 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("WEAK (F < 5)"), "{text}");
+    }
+
+    /// Missing cells in six columns, an Int64 control: ivreg drops the 6 incomplete rows
+    /// (na.omit); the first-stage diagnostics use the complete rows of their own columns.
+    #[test]
+    fn test_validate_iv_na_rows() {
+        let (case, ds) = crate::test_support::load_case("iv_na_rows");
+        assert_eq!(
+            ds.df().column("k").unwrap().dtype(),
+            &polars::prelude::DataType::Int64
+        ); // design 2.2
+        let (exog, endog, instr) = (&["w", "k"], &["x"], &["z1", "z2"]);
+        let r = run_iv2sls(&ds, "y", exog, endog, instr, false).unwrap();
+        let h = run_iv2sls(&ds, "y", exog, endog, instr, true).unwrap();
+        let s = sargan_test(&ds, "y", exog, endog, instr).unwrap();
+        let d = run_first_stage_diagnostics(&ds, "x", instr, Some(exog)).unwrap();
+        let by = |m: &MissingSummary, c: &str| {
+            m.by_column
+                .iter()
+                .find(|(k, _)| k == c)
+                .map_or(0, |(_, v)| *v) as f64
+        };
+        let n = r.n_obs;
+        let (df1, df2) = fs_df(&r);
+        let (names, coefs, ses) = instr_rows(&d);
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se", &r.variables, &r.std_errors, Tol::se(n))
+            .named("se_hc1", &h.variables, &h.std_errors, Tol::se(n))
+            .vector("weak_f", &r.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p", &r.first_stage_p_values, Tol::p_value(n))
+            .vector("weak_f_hc1", &h.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p_hc1", &h.first_stage_p_values, Tol::p_value(n))
+            .vector("weak_df1", &df1, Tol::exact())
+            .vector("weak_df2", &df2, Tol::exact())
+            .scalar("sargan", s.j_statistic, Tol::stat(n))
+            .scalar("sargan_p", s.p_value, Tol::p_value(n))
+            .scalar("n_obs", n as f64, Tol::exact())
+            .scalar("n_dropped", r.missing.n_dropped as f64, Tol::exact())
+            .scalar("missing_y", by(&r.missing, "y"), Tol::exact())
+            .scalar("missing_x", by(&r.missing, "x"), Tol::exact())
+            .scalar("missing_w", by(&r.missing, "w"), Tol::exact())
+            .scalar("missing_k", by(&r.missing, "k"), Tol::exact())
+            .scalar("missing_z1", by(&r.missing, "z1"), Tol::exact())
+            .scalar("missing_z2", by(&r.missing, "z2"), Tol::exact())
+            .scalar("fsd_n_obs", d.n_obs as f64, Tol::exact())
+            .scalar("fsd_partial_f", d.f_statistic, Tol::stat(d.n_obs))
+            .scalar("fsd_partial_p", d.f_pvalue, Tol::p_value(d.n_obs))
+            .scalar("fsd_partial_df1", d.f_df.0 as f64, Tol::exact())
+            .scalar("fsd_partial_df2", d.f_df.1 as f64, Tol::exact())
+            .scalar("fsd_partial_r2", d.partial_r_squared, Tol::stat(d.n_obs))
+            .scalar("fsd_r2", d.r_squared, Tol::stat(d.n_obs))
+            .scalar("fsd_adj_r2", d.adj_r_squared, Tol::stat(d.n_obs))
+            .named("fsd_instr_coef", &names, &coefs, Tol::coef(d.n_obs))
+            .named("fsd_instr_se", &names, &ses, Tol::se(d.n_obs))
+            .finish();
+        let note = "6 of 300 rows dropped because of missing values (y: 2, w: 1, k: 1, x: 1, z1: 1, z2: 1)";
+        assert_eq!(r.missing.note().as_deref(), Some(note));
+        assert!(r.warnings.iter().any(|w| w == note), "{:?}", r.warnings);
+        assert_eq!(s.missing, r.missing);
+        assert_eq!(
+            d.missing.note().as_deref(),
+            Some(
+                "4 of 300 rows dropped because of missing values (x: 1, z1: 1, z2: 1, w: 1, k: 1)"
+            )
+        );
+        let text = r.to_string();
+        assert_eq!(text.matches(note).count(), 1, "{text}"); // printed once
+        assert!(
+            text.trim_end()
+                .ends_with(&format!("Missing values: {note}")),
+            "{text}"
+        );
+        assert!(r.strong_instruments);
+        for t in [s.to_string(), d.to_string()] {
+            assert!(
+                t.trim_end()
+                    .lines()
+                    .last()
+                    .is_some_and(|l| l.starts_with("Missing values: ")),
+                "{t}"
+            );
+        }
+    }
+
+    /// A text column is non-numeric and an unknown column is not found, whichever role
+    /// they take; an Int64 control gives the fit of the same values in Float64.
+    #[test]
+    fn test_validate_na_iv_errors_name_the_column() {
+        let (case, ds) = crate::test_support::load_case("iv_na_rows");
+        assert_eq!(case.dataset, "validation/datasets/generated/iv_na_rows.csv");
+        let non_numeric = |e: &EconError| matches!(e, EconError::NonNumericColumn { column } if column == "label");
+        let e = run_iv2sls(&ds, "label", &["w"], &["x"], &["z1", "z2"], false).unwrap_err();
+        assert!(non_numeric(&e), "{e:?}");
+        let e = run_iv2sls(&ds, "y", &["w"], &["label"], &["z1", "z2"], false).unwrap_err();
+        assert!(non_numeric(&e), "{e:?}");
+        let e = run_iv2sls(&ds, "y", &["w"], &["x"], &["nope", "z2"], false).unwrap_err();
+        assert!(
+            matches!(&e, EconError::ColumnNotFound { column, .. } if column == "nope"),
+            "{e:?}"
+        );
+        let e = run_first_stage_diagnostics(&ds, "label", &["z1"], None).unwrap_err();
+        assert!(non_numeric(&e), "{e:?}");
+        let e = sargan_test(&ds, "label", &[], &["x"], &["z1", "z2"]).unwrap_err();
+        assert!(non_numeric(&e), "{e:?}");
+        let e = run_iv2sls(&ds, "y", &["w"], &[], &["z1", "z2"], false).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("endogenous")),
+            "{e:?}"
+        );
+
+        // the Int64 control `k` as Float64 (nulls kept) gives the same fit
+        let k_f = crate::data::columns::numeric_options(ds.df(), "k").unwrap();
+        let mut df = ds.df().clone();
+        df.with_column(polars::prelude::Column::new("k".into(), k_f))
+            .unwrap();
+        let ds_f = Dataset::new(df);
+        let fit =
+            |d: &Dataset| run_iv2sls(d, "y", &["w", "k"], &["x"], &["z1", "z2"], true).unwrap();
+        let (a, b) = (fit(&ds), fit(&ds_f));
+        let tol = Tol::new(1e-12, 1e-12);
+        for (x, y) in a
+            .coefficients
+            .iter()
+            .chain(&a.std_errors)
+            .zip(b.coefficients.iter().chain(&b.std_errors))
+        {
+            assert!(tol.allows(*x, *y), "Int64 {x} vs Float64 {y}");
+        }
     }
 }
