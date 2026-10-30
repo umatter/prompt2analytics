@@ -368,14 +368,7 @@ fn find_projection_direction_fast(
         compute_projections(x, &alpha, projections);
 
         // Get sort order for projections (reuse buffer)
-        for (i, idx) in sorted_indices.iter_mut().enumerate() {
-            *idx = i;
-        }
-        sorted_indices.sort_unstable_by(|&a, &b| {
-            projections[a]
-                .partial_cmp(&projections[b])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        sort_by_projection(sorted_indices, projections);
 
         // Fit smooth function to (projections, residuals) - fast version
         smooth_and_derivative_fast(
@@ -431,14 +424,7 @@ fn find_projection_direction_fast(
     compute_projections(x, &alpha, projections);
 
     // Sort one more time for final smoothing
-    for (i, idx) in sorted_indices.iter_mut().enumerate() {
-        *idx = i;
-    }
-    sorted_indices.sort_unstable_by(|&a, &b| {
-        projections[a]
-            .partial_cmp(&projections[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_by_projection(sorted_indices, projections);
 
     smooth_and_derivative_fast(
         projections,
@@ -624,17 +610,23 @@ fn smooth_and_derivative_fast(
     }
 }
 
-/// Find the least important term (smallest absolute beta).
+/// `indices` = `0..n` ordered by `projections` (`n = indices.len()`), in the total order of
+/// [`f64::total_cmp`]: a NaN projection sorts last instead of breaking the sort, and `-0.0`
+/// sorts before `0.0`.
+fn sort_by_projection(indices: &mut [usize], projections: &[f64]) {
+    for (i, idx) in indices.iter_mut().enumerate() {
+        *idx = i;
+    }
+    indices.sort_unstable_by(|&a, &b| projections[a].total_cmp(&projections[b]));
+}
+
+/// Find the least important term (smallest absolute beta; a NaN beta counts as largest).
 #[inline]
 fn find_least_important_term(betas: &[f64]) -> usize {
     betas
         .iter()
         .enumerate()
-        .min_by(|(_, a), (_, b)| {
-            a.abs()
-                .partial_cmp(&b.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .min_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
@@ -682,6 +674,20 @@ mod tests {
         let t = CancelToken::new();
         t.cancel();
         Budget::new(None, t)
+    }
+
+    #[test]
+    fn test_ppr_projection_sort_is_total() {
+        // partial_cmp(..).unwrap_or(Equal) is not a total order once a projection is NaN,
+        // and Rust's sort may then panic ("user-provided comparison function does not
+        // correctly implement a total order"; the review saw it through ml_ppr).
+        // total_cmp: -1 < -0 < 0 < 0.5 < 2 < NaN.
+        let projections = [0.5, f64::NAN, -1.0, 0.0, -0.0, 2.0];
+        let mut idx = vec![9usize; 6];
+        sort_by_projection(&mut idx, &projections);
+        assert_eq!(idx, vec![2, 4, 3, 0, 5, 1]);
+        // the backward-elimination minimum: smallest |beta|, NaN last
+        assert_eq!(find_least_important_term(&[f64::NAN, -0.5, 0.25, 3.0]), 2);
     }
 
     fn ppr_data(n: usize) -> (Array2<f64>, Vec<f64>) {

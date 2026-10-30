@@ -64,6 +64,23 @@ summary(pca_result)
 
 Note: PCA loadings are unique up to sign. Compare absolute values or check correlation.
 
+## Missing and non-finite values
+
+- **Core.** `pca` refuses NaN and ±Inf and names the first bad cell in row-major order:
+  "PCA: x must contain only finite values (row 4, column 0 is NaN); remove or impute
+  missing values first". It used to return NaN variances (or an SVD failure). R stops as
+  well: `prcomp(m)` on a matrix with an `NA` gives "infinite or missing values in 'x'"
+  (R 4.3.3).
+- **MCP and CLI.** `ml_pca` and `p2a ml pca` read their columns with the Fail policy: a
+  missing value is an error naming the column, a text column is refused by name ("Column
+  'lab' contains non-numeric values ..."), and integer columns give the same result as the
+  same values stored as decimals.
+- **Tests.** `test_na_pca_refuses_non_finite_input` (`crates/p2a-core/src/ml/reduction.rs`),
+  `test_na_mcp_ml_matrix_tools_name_the_column` and
+  `test_mcp_ml_matrix_tools_int64_equals_float64` (`crates/p2a-mcp/src/tools/handlers/ml.rs`),
+  `test_na_cli_ml_missing_values_refused` (`crates/p2a-cli/tests/tier2/wp17_ml.rs`). They
+  compare p2a with p2a and pin no R number.
+
 ## Running the Tests
 
 ```bash

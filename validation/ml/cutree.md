@@ -80,6 +80,33 @@ print(ct)  # Matrix with columns for each k
 | n=100    | TBD       | TBD    | TBD     |
 | n=200    | TBD       | TBD    | TBD     |
 
+## Missing and non-finite values
+
+- **Core.** `hierarchical` (which `cutree` cuts) refuses NaN and ±Inf and names the first
+  bad cell in row-major order: "hierarchical clustering: x must contain only finite values
+  (row 4, column 0 is NaN); remove or impute missing values first". It used to return a
+  corrupt tree: a NaN row left every nearest-neighbour distance at infinity and the merge
+  loop merged anyway (self-merges, more clusters than requested). The merge loop also
+  returns an error instead of merging when no finite distance is left, which finite data
+  reach when their distances overflow f64 (values around 1e200): "no finite distance
+  remains between the clusters still to be merged ...".
+- **R.** `dist()` uses the coordinates both rows have (scaled up), so
+  `hclust(dist(m), "ward.D2")` clusters a row with one `NA` (heights 1, 1, 1.5275252316519468,
+  10.220893633467998 on the review's rows (0,0), (1,0), (5,5), (6,5), (NA,1); R 4.3.3).
+  p2a does not implement these pairwise-complete distances and refuses the row instead (T2
+  design 1.6, Fail): a documented deviation. With infinite distances (`dist()` of
+  (0,0), (1e200,0), (2e200,0) is Inf Inf Inf), `hclust` stops with "NA/NaN/Inf in foreign
+  function call (arg 10)", as p2a does.
+- **MCP and CLI.** `ml_hierarchical`, `ml_cutree` and `p2a ml hierarchical` read their
+  columns with the Fail policy: a missing value is an error naming the column, and integer
+  columns are numeric.
+- **Tests.** `test_na_hierarchical_refuses_non_finite_input` and
+  `test_hierarchical_errors_when_no_finite_distance_remains`
+  (`crates/p2a-core/src/ml/clustering.rs`), `test_na_mcp_ml_matrix_tools_name_the_column`
+  and `test_mcp_ml_matrix_tools_int64_equals_float64`
+  (`crates/p2a-mcp/src/tools/handlers/ml.rs`), `test_na_cli_ml_missing_values_refused`
+  (`crates/p2a-cli/tests/tier2/wp17_ml.rs`). They compare p2a with p2a and pin no R number.
+
 ## References
 
 - Kaufman, L. and Rousseeuw, P. J. (1990). *Finding Groups in Data*. Wiley.

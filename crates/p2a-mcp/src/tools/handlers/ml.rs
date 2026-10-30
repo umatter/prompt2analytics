@@ -10,11 +10,15 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{extract_numeric_matrix, limit_refusal};
+use crate::tools::common::{
+    MissingSummary, NaPolicy, append_missing_note, limit_refusal, missing_json, numeric_columns,
+    numeric_matrix,
+};
 use crate::tools::limits::{EnsembleChange, EnsembleTier};
 use crate::tools::requests::causal::{BartCausalRequest, CausalForestRequest, HetTxRequest};
 use crate::tools::requests::ml::*;
 
+use p2a_core::Dataset;
 use p2a_core::ml::{
     BartCausalConfig, CausalForestConfig, bart_causal, causal_forest, run_bart_causal_config,
     run_causal_forest_config,
@@ -65,6 +69,50 @@ use p2a_core::{
     shap_values_model,
     tsne,
 };
+
+/// Appended to missing-value errors: these ML methods do not drop incomplete rows (T2 design
+/// 1.6; R's kmeans, prcomp and randomForest refuse NA too).
+const ML_MISSING_HINT: &str =
+    "Use munge_drop_na to remove the incomplete rows or munge_fill_na to impute them.";
+
+/// Tool error "<prefix><message>", with [`ML_MISSING_HINT`] appended when the message is a
+/// missing-value error.
+fn ml_error(prefix: &str, e: impl std::fmt::Display) -> CallToolResult {
+    let message = e.to_string();
+    let text = if message.contains("missing value(s)") {
+        format!("{prefix}{message} {ML_MISSING_HINT}")
+    } else {
+        format!("{prefix}{message}")
+    };
+    CallToolResult::error(vec![Content::text(text)])
+}
+
+/// Features (an n x k matrix in `features` order, allocated fallibly) and the target,
+/// through one row mask under `policy`. The target is requested first, so
+/// [`NaPolicy::Fail`] names it first when both have missing values. An empty `features` is
+/// "At least one feature column must be specified".
+fn features_and_target(
+    dataset: &Dataset,
+    features: &[String],
+    target: &str,
+    policy: NaPolicy,
+) -> Result<(ndarray::Array2<f64>, ndarray::Array1<f64>, MissingSummary), String> {
+    if features.is_empty() {
+        return Err("At least one feature column must be specified".to_string());
+    }
+    let mut names: Vec<&str> = Vec::with_capacity(features.len() + 1);
+    names.push(target);
+    names.extend(features.iter().map(String::as_str));
+    let cols = numeric_columns(dataset, &names, policy)?;
+    let mut x = p2a_core::resource::try_zeros2(cols.n(), features.len(), "feature matrix")
+        .map_err(|e| e.to_string())?;
+    for (j, name) in features.iter().enumerate() {
+        for (cell, &v) in x.column_mut(j).iter_mut().zip(cols.numeric(name)) {
+            *cell = v;
+        }
+    }
+    Ok((x, cols.numeric_array(target), cols.missing().clone()))
+}
 
 /// The refusal of a tree-ensemble fit on `n_rows` rows whose memory bound (`bound`, for a
 /// number of rows at the request's settings) the installed `ensemble_bytes` budget does not
@@ -264,9 +312,9 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
 
         // Use per-tool seed if provided, otherwise fall back to global seed
@@ -283,10 +331,7 @@ impl AnalyticsServer {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "K-means clustering failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("K-means clustering failed: ", e));
             }
         };
 
@@ -307,18 +352,15 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
 
         let result = match dbscan(data.view(), request.eps, request.min_samples) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "DBSCAN clustering failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("DBSCAN clustering failed: ", e));
             }
         };
 
@@ -339,9 +381,9 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
 
         let linkage_method = match request.linkage.as_deref() {
@@ -365,10 +407,7 @@ impl AnalyticsServer {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Hierarchical clustering failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("Hierarchical clustering failed: ", e));
             }
         };
 
@@ -389,9 +428,9 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
 
         let linkage_method = match request.linkage.as_deref() {
@@ -411,10 +450,7 @@ impl AnalyticsServer {
         let hclust = match hierarchical(data.view(), Some(1), linkage_method, None) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Hierarchical clustering failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("Hierarchical clustering failed: ", e));
             }
         };
 
@@ -422,10 +458,7 @@ impl AnalyticsServer {
         let result = match cutree(&hclust, request.k, request.cut_height) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "cutree failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("cutree failed: ", e));
             }
         };
 
@@ -466,18 +499,15 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
 
         let result = match pca(data.view(), request.n_components, false) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "PCA failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("PCA failed: ", e));
             }
         };
 
@@ -498,9 +528,9 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
 
         // Use per-tool seed if provided, otherwise fall back to global seed
@@ -517,10 +547,7 @@ impl AnalyticsServer {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "t-SNE failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("t-SNE failed: ", e));
             }
         };
 
@@ -541,9 +568,9 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
 
         let k = request.k.unwrap_or(2);
@@ -584,10 +611,7 @@ impl AnalyticsServer {
                     serde_json::to_string_pretty(&output).unwrap_or_else(|_| r.to_string()),
                 )]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Classical MDS (cmdscale) failed: {}",
-                e
-            ))])),
+            Err(e) => Ok(ml_error("Classical MDS (cmdscale) failed: ", e)),
         }
     }
 
@@ -603,48 +627,19 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<RandomForestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.features) {
+        let (data, target, _missing) = match features_and_target(
+            dataset,
+            &request.features,
+            &request.target,
+            NaPolicy::Fail,
+        ) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
-
-        // Extract target column
-        let df = dataset.df();
-        let target_col = match df.column(&request.target) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Target column '{}' not found: {}",
-                    request.target, e
-                ))]));
-            }
-        };
-
-        let target_values: Vec<f64> = match target_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Target column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot convert target to numeric: {}",
-                    e
-                ))]));
-            }
-        };
-
-        let target = ndarray::Array1::from_vec(target_values);
 
         // Use per-tool seed if provided, otherwise fall back to global seed
         let global_seed = self.global_seed.read().await;
@@ -662,10 +657,7 @@ impl AnalyticsServer {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Random Forest failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("Random Forest failed: ", e));
             }
         };
 
@@ -676,54 +668,25 @@ impl AnalyticsServer {
 
     /// Run Linear SVM classification.
     #[tool(
-        description = "Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm. Returns weights, bias, support vector count, and predictions."
+        description = "Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm. Returns weights, bias, support vector count, and predictions. Rows with a missing value in the target or a feature are dropped (as e1071::svm's formula interface) and the count is reported."
     )]
     pub async fn ml_svm(
         &self,
         Parameters(request): Parameters<SvmRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.features) {
+        let (data, target, missing) = match features_and_target(
+            dataset,
+            &request.features,
+            &request.target,
+            NaPolicy::Omit,
+        ) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
-
-        // Extract target column
-        let df = dataset.df();
-        let target_col = match df.column(&request.target) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Target column '{}' not found: {}",
-                    request.target, e
-                ))]));
-            }
-        };
-
-        let target_values: Vec<f64> = match target_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Target column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot convert target to numeric: {}",
-                    e
-                ))]));
-            }
-        };
-
-        let target = ndarray::Array1::from_vec(target_values);
 
         let result = match linear_svm(
             data.view(),
@@ -735,65 +698,35 @@ impl AnalyticsServer {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "SVM failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("SVM failed: ", e));
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut out = result.to_string();
+        append_missing_note(&mut out, &missing);
+        Ok(CallToolResult::success(vec![Content::text(out)]))
     }
 
     /// Run Projection Pursuit Regression (PPR).
     #[tool(
-        description = "Projection Pursuit Regression (PPR) - a dimension reduction regression that fits models of the form y = sum(f_k(alpha_k' * x)). Finds optimal projection directions and ridge functions. Returns projection directions, coefficients, fitted values, and goodness-of-fit metrics. Useful for non-linear regression when relationships are complex."
+        description = "Projection Pursuit Regression (PPR) - a dimension reduction regression that fits models of the form y = sum(f_k(alpha_k' * x)). Finds optimal projection directions and ridge functions. Returns projection directions, coefficients, fitted values, and goodness-of-fit metrics. Useful for non-linear regression when relationships are complex. Rows with a missing value in the target or a feature are dropped (as R's ppr formula interface) and reported under \"missing\"."
     )]
     pub async fn ml_ppr(
         &self,
         Parameters(request): Parameters<PprRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.features) {
+        let (data, target, missing) = match features_and_target(
+            dataset,
+            &request.features,
+            &request.target,
+            NaPolicy::Omit,
+        ) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
-
-        // Extract target column
-        let df = dataset.df();
-        let target_col = match df.column(&request.target) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Target column '{}' not found: {}",
-                    request.target, e
-                ))]));
-            }
-        };
-
-        let target_values: Vec<f64> = match target_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Target column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot convert target to numeric: {}",
-                    e
-                ))]));
-            }
+            Err(e) => return Ok(ml_error("", e)),
         };
 
         // Parse smoothing method
@@ -817,18 +750,16 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
+        let target_values = target.to_vec();
         let result = match ppr(data.view(), &target_values, None, config) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "PPR failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("PPR failed: ", e));
             }
         };
 
         // Format output
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "nterms": result.nterms,
             "n_observations": result.n,
             "n_predictors": result.p,
@@ -839,6 +770,9 @@ impl AnalyticsServer {
             "residuals_sample": &result.residuals[..result.n.min(20)],
             "note": if result.n > 20 { Some(format!("Showing first 20 of {} fitted values", result.n)) } else { None }
         });
+        if let Some(m) = missing_json(&missing) {
+            output["missing"] = m;
+        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -847,7 +781,7 @@ impl AnalyticsServer {
 
     /// Run C5.0 Decision Tree classification.
     #[tool(
-        description = "C5.0 Decision Tree for classification (Quinlan's successor to C4.5). Uses information gain ratio for splitting, pessimistic error pruning, and optionally boosting via AdaBoost.M1. Features: automatic feature selection (winnowing), rule extraction, multiclass support. Returns tree structure, rules (if requested), variable importance, and class predictions. Based on R's C50 package."
+        description = "C5.0 Decision Tree for classification (Quinlan's successor to C4.5). Uses information gain ratio for splitting, pessimistic error pruning, and optionally boosting via AdaBoost.M1. Features: automatic feature selection (winnowing), rule extraction, multiclass support. Returns tree structure, rules (if requested), variable importance, and class predictions. Based on R's C50 package. The target can be integer class codes or a text, categorical or boolean column; labels are reported as class_names."
     )]
     pub async fn ml_c50(
         &self,
@@ -878,10 +812,7 @@ impl AnalyticsServer {
         let result = match run_c50(dataset, &request.target, &feature_refs, &config) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "C5.0 failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("C5.0 failed: ", e));
             }
         };
 
@@ -931,6 +862,7 @@ impl AnalyticsServer {
             "n_observations": n_predictions,
             "n_classes": result.n_classes,
             "class_labels": result.class_labels,
+            "class_names": result.class_names,
             "actual_trials": result.actual_trials,
             "accuracy": result.accuracy,
             "error_rate": 1.0 - result.accuracy,
@@ -1283,10 +1215,7 @@ impl AnalyticsServer {
         let result = match run_cubist(dataset, &request.target, &feature_refs, &config) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cubist regression failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("Cubist regression failed: ", e));
             }
         };
 
@@ -1396,48 +1325,19 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<ShapValuesRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let data = match extract_numeric_matrix(dataset, &request.features) {
+        let (data, target, _missing) = match features_and_target(
+            dataset,
+            &request.features,
+            &request.target,
+            NaPolicy::Fail,
+        ) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => return Ok(ml_error("", e)),
         };
-
-        // Extract target column
-        let df = dataset.df();
-        let target_col = match df.column(&request.target) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Target column '{}' not found: {}",
-                    request.target, e
-                ))]));
-            }
-        };
-
-        let target_values: Vec<f64> = match target_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Target column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot convert target to numeric: {}",
-                    e
-                ))]));
-            }
-        };
-
-        let target = ndarray::Array1::from_vec(target_values);
 
         // Limit observations if requested
         let max_obs = request.max_obs.unwrap_or(data.nrows());
@@ -1465,10 +1365,7 @@ impl AnalyticsServer {
         ) {
             Ok(m) => m,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Random Forest training failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("Random Forest training failed: ", e));
             }
         };
 
@@ -1483,10 +1380,7 @@ impl AnalyticsServer {
         let shap_result = match shap_values_model(&model, data_subset.view(), &shap_config) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "SHAP value computation failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("SHAP value computation failed: ", e));
             }
         };
 
@@ -1620,7 +1514,7 @@ impl AnalyticsServer {
 
     /// Run Conditional Inference Trees (ctree) for regression or classification.
     #[tool(
-        description = "Conditional Inference Trees (ctree) - decision trees with unbiased variable selection via permutation tests. Based on Hothorn, Hornik & Zeileis (2006). Unlike CART, ctree uses statistical significance tests for variable selection, avoiding bias towards variables with many possible split points. The tree grows until no significant relationship exists between predictors and response (no pruning needed). Equivalent to R's partykit::ctree."
+        description = "Conditional Inference Trees (ctree) - decision trees with unbiased variable selection via permutation tests. Based on Hothorn, Hornik & Zeileis (2006). Unlike CART, ctree uses statistical significance tests for variable selection, avoiding bias towards variables with many possible split points. The tree grows until no significant relationship exists between predictors and response (no pruning needed). Equivalent to R's partykit::ctree. A text, categorical or boolean target fits a classification tree (at most 10 classes)."
     )]
     pub async fn ml_ctree(
         &self,
@@ -1652,10 +1546,7 @@ impl AnalyticsServer {
         let result = match run_ctree(dataset, &request.target, &feature_refs, &config) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Conditional Inference Trees failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("Conditional Inference Trees failed: ", e));
             }
         };
 
@@ -1702,6 +1593,7 @@ impl AnalyticsServer {
             "n_nodes": result.n_nodes,
             "n_features": n_features,
             "is_classification": result.is_classification,
+            "class_names": result.class_names,
             "n_terminal_nodes": result.n_terminal,
             "depth": result.depth,
             "variable_importance": result.variable_importance,
@@ -1784,10 +1676,7 @@ impl AnalyticsServer {
         let result = match run_mboost(dataset, &request.y_col, &x_cols, &config) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "mboost failed: {}",
-                    e
-                ))]));
+                return Ok(ml_error("mboost failed: ", e));
             }
         };
 
@@ -1826,10 +1715,13 @@ impl AnalyticsServer {
 mod tests {
     use super::*;
     use crate::tools::limits::{Limits, with_limits};
+    use p2a_core::DataLoader;
     use p2a_core::data::Dataset;
     use p2a_core::polars::prelude::*;
     use p2a_core::resource::{Budget, CancelToken, with_budget};
     use rmcp::model::RawContent;
+    use serde::de::DeserializeOwned;
+    use serde_json::{Value, json};
 
     fn text_of(r: &CallToolResult) -> String {
         r.content
@@ -2443,6 +2335,372 @@ mod tests {
             text_of(&b).contains("\"n_bootstrap\": 4"),
             "{}",
             text_of(&b)
+        );
+    }
+
+    // ========================================================================
+    // T2-WP17: missing values and column types through the ML tools
+    // ========================================================================
+
+    /// The 30-row fixture of plans/T2/T2-WP17.md (R cross-check: Appendix A.2, fixture.R).
+    /// Rows listed in `skip` are left out (complete-row comparisons). An empty field is
+    /// missing (T2-WP01 loader).
+    fn fixture_csv(skip: &[usize]) -> String {
+        let mut out =
+            String::from("id,x1,x2,xi,xi_f,y,yi,yi_f,cls,cls_f,cls_b,lab,y_na,x1_na,cls_na\n");
+        for i in (0..30usize).filter(|i| !skip.contains(i)) {
+            let x1 = ((i * 7) % 11) as f64 + 0.5 * ((i * 3) % 5) as f64;
+            let x2 = ((i * 5) % 13) as f64 / 2.0;
+            let xi = (i * 5) % 13;
+            let noise = ((i * 7919) % 101) as f64 / 100.0 - 0.5;
+            let y = 2.0 * x1 - x2 + noise;
+            let yi = y.floor() as i64;
+            let cls = u8::from(x1 - 0.5 * x2 + noise > 3.0);
+            let lab = if cls == 1 { "yes" } else { "no" };
+            let blank_if = |row: usize, v: String| if i == row { String::new() } else { v };
+            out.push_str(&format!(
+                "{i},{x1},{x2},{xi},{xi}.0,{y},{yi},{yi}.0,{cls},{cls}.0,{},{lab},{},{},{}\n",
+                cls == 1,
+                blank_if(4, y.to_string()),
+                blank_if(7, x1.to_string()),
+                blank_if(4, cls.to_string()),
+            ));
+        }
+        out
+    }
+
+    /// "ml" = the fixture; "ml_x1" = without row 7 (x1_na missing); "ml_clean" = without
+    /// rows 4 and 7.
+    async fn server() -> AnalyticsServer {
+        let server = AnalyticsServer::new();
+        {
+            let mut map = server.datasets.write().await;
+            for (name, skip) in [
+                ("ml", &[][..]),
+                ("ml_x1", &[7][..]),
+                ("ml_clean", &[4, 7][..]),
+            ] {
+                let df = DataLoader::from_csv_string(&fixture_csv(skip)).unwrap();
+                map.insert(name.to_string(), Dataset::new(df));
+            }
+        }
+        server
+    }
+
+    fn req<T: DeserializeOwned>(v: Value) -> Parameters<T> {
+        Parameters(serde_json::from_value(v).unwrap())
+    }
+
+    fn json_summary(r: &CallToolResult) -> Value {
+        let text = text_of(r);
+        let json = text.split("JSON Summary:\n").nth(1).expect("JSON Summary");
+        serde_json::from_str(json).unwrap()
+    }
+
+    const X1_MISSING: &str = "Column 'x1_na' contains 1 missing value(s) (null or NaN)";
+
+    #[tokio::test]
+    async fn test_na_mcp_ml_matrix_tools_name_the_column() {
+        // TOOL-3, ML-24, ML-41. Before (legacy helper, nulls -> NaN): ml_kmeans "failed to
+        // converge"; ml_hierarchical and ml_cutree succeed with a corrupt tree; ml_pca
+        // succeeds with NaN%; ml_dbscan, ml_tsne, ml_cmdscale, ml_random_forest and
+        // ml_shap_values fail with Tier 0's "non-finite" message, which names no column.
+        let s = server().await;
+        let cols = json!(["x1_na", "x2"]);
+        let results = vec![
+            (
+                "ml_kmeans",
+                s.ml_kmeans(req(
+                    json!({"dataset": "ml", "columns": cols, "k": 2, "seed": 1}),
+                ))
+                .await
+                .unwrap(),
+            ),
+            (
+                "ml_dbscan",
+                s.ml_dbscan(req(
+                    json!({"dataset": "ml", "columns": cols, "eps": 1.0, "min_samples": 3}),
+                ))
+                .await
+                .unwrap(),
+            ),
+            (
+                "ml_hierarchical",
+                s.ml_hierarchical(req(
+                    json!({"dataset": "ml", "columns": cols, "n_clusters": 2}),
+                ))
+                .await
+                .unwrap(),
+            ),
+            (
+                "ml_cutree",
+                s.ml_cutree(req(json!({"dataset": "ml", "columns": cols, "k": 2})))
+                    .await
+                    .unwrap(),
+            ),
+            (
+                "ml_pca",
+                s.ml_pca(req(json!({"dataset": "ml", "columns": cols})))
+                    .await
+                    .unwrap(),
+            ),
+            (
+                "ml_tsne",
+                s.ml_tsne(req(json!({
+                    "dataset": "ml", "columns": cols, "perplexity": 5.0,
+                    "max_iterations": 50, "seed": 1
+                })))
+                .await
+                .unwrap(),
+            ),
+            (
+                "ml_cmdscale",
+                s.ml_cmdscale(req(json!({"dataset": "ml", "columns": cols})))
+                    .await
+                    .unwrap(),
+            ),
+            (
+                "ml_random_forest",
+                s.ml_random_forest(req(json!({
+                    "dataset": "ml", "features": cols, "target": "y", "n_trees": 10, "seed": 1
+                })))
+                .await
+                .unwrap(),
+            ),
+            (
+                "ml_shap_values",
+                s.ml_shap_values(req(json!({
+                    "dataset": "ml", "features": cols, "target": "y", "n_trees": 5,
+                    "max_obs": 5, "seed": 1
+                })))
+                .await
+                .unwrap(),
+            ),
+        ];
+        for (tool, r) in &results {
+            let t = text_of(r);
+            assert_eq!(r.is_error, Some(true), "{tool}: {t}");
+            assert!(
+                t.contains(X1_MISSING) && t.contains("munge_drop_na"),
+                "{tool}: {t}"
+            );
+        }
+        let rf = s
+            .ml_random_forest(req(json!({
+                "dataset": "ml", "features": ["x1", "x2"], "target": "y_na", "n_trees": 10,
+                "seed": 1
+            })))
+            .await
+            .unwrap();
+        let shap = s
+            .ml_shap_values(req(json!({
+                "dataset": "ml", "features": ["x1", "x2"], "target": "y_na", "n_trees": 5,
+                "max_obs": 5, "seed": 1
+            })))
+            .await
+            .unwrap();
+        for r in [&rf, &shap] {
+            assert_eq!(r.is_error, Some(true), "{}", text_of(r));
+            assert!(
+                text_of(r).contains("Column 'y_na' contains 1 missing value(s)"),
+                "{}",
+                text_of(r)
+            );
+        }
+        // a text column is named as such (after T2-WP01 the legacy helper said "is not
+        // numeric (type str)")
+        let k = s
+            .ml_kmeans(req(
+                json!({"dataset": "ml", "columns": ["x1", "lab"], "k": 2, "seed": 1}),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            text_of(&k).contains("Column 'lab' contains non-numeric values"),
+            "{}",
+            text_of(&k)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_ml_matrix_tools_int64_equals_float64() {
+        // Guard: the legacy helper already cast Int64, so this passes before; it pins that
+        // the migration keeps it.
+        let s = server().await;
+        let k = |c: &str| json!({"dataset": "ml", "columns": ["x1", c], "k": 2, "seed": 1});
+        assert_eq!(
+            text_of(&s.ml_kmeans(req(k("xi"))).await.unwrap()),
+            text_of(&s.ml_kmeans(req(k("xi_f"))).await.unwrap())
+        );
+        let p = |c: &str| json!({"dataset": "ml", "columns": ["x1", c]});
+        assert_eq!(
+            text_of(&s.ml_pca(req(p("xi"))).await.unwrap()),
+            text_of(&s.ml_pca(req(p("xi_f"))).await.unwrap())
+        );
+        let h = |c: &str| json!({"dataset": "ml", "columns": ["x1", c], "n_clusters": 3});
+        assert_eq!(
+            text_of(&s.ml_hierarchical(req(h("xi"))).await.unwrap()),
+            text_of(&s.ml_hierarchical(req(h("xi_f"))).await.unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_na_mcp_svm_omits_incomplete_rows() {
+        // ML-33. e1071::svm's formula interface drops incomplete rows (R: 29 rows for (cls,
+        // x1_na, x2), 28 for (cls_na, x1_na, x2); Appendix A.2). Before: a tool error (the
+        // null became NaN and Tier 0's linear_svm refuses it).
+        let s = server().await;
+        let svm = |ds: &str, target: &str| json!({"dataset": ds, "features": ["x1_na", "x2"], "target": target});
+        let omit = s.ml_svm(req(svm("ml", "cls"))).await.unwrap();
+        let clean = s.ml_svm(req(svm("ml_x1", "cls"))).await.unwrap();
+        assert_ne!(omit.is_error, Some(true), "{}", text_of(&omit));
+        assert_eq!(
+            text_of(&omit),
+            format!(
+                "{}\nMissing values: 1 of 30 rows dropped because of missing values (x1_na: 1)",
+                text_of(&clean)
+            )
+        );
+        let omit = s.ml_svm(req(svm("ml", "cls_na"))).await.unwrap();
+        let clean = s.ml_svm(req(svm("ml_clean", "cls_na"))).await.unwrap();
+        assert_eq!(
+            text_of(&omit),
+            format!(
+                "{}\nMissing values: 2 of 30 rows dropped because of missing values \
+                 (cls_na: 1, x1_na: 1)",
+                text_of(&clean)
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_na_mcp_ppr_omits_incomplete_rows() {
+        // ML-33. R ppr(y_na ~ x1_na + x2) uses 28 rows (na.omit). Before: a tool error
+        // ("non-finite"; before Tier 0 the request panicked in the sort).
+        let s = server().await;
+        let ppr = |ds: &str| json!({"dataset": ds, "features": ["x1_na", "x2"], "target": "y_na", "nterms": 1});
+        let a = s.ml_ppr(req(ppr("ml"))).await.unwrap();
+        assert_ne!(a.is_error, Some(true), "{}", text_of(&a));
+        let a: Value = serde_json::from_str(&text_of(&a)).unwrap();
+        let b = s.ml_ppr(req(ppr("ml_clean"))).await.unwrap();
+        let b: Value = serde_json::from_str(&text_of(&b)).unwrap();
+        assert_eq!(
+            a["missing"],
+            json!({"n_total": 30, "n_used": 28, "n_dropped": 2,
+                   "by_column": {"y_na": 1, "x1_na": 1}})
+        );
+        assert_eq!(b.get("missing"), None);
+        assert_eq!(a["n_observations"], json!(28));
+        for key in [
+            "nterms",
+            "n_observations",
+            "projection_directions",
+            "ridge_coefficients",
+            "gof_rss",
+            "fitted_values_sample",
+            "residuals_sample",
+            "note",
+        ] {
+            assert_eq!(a[key], b[key], "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_na_mcp_tree_tools_integer_and_missing_targets() {
+        // WT-2 through MCP. Before: an Int64 target fails with "Column 'yi' is not numeric",
+        // and y_na / cls_na are fitted with the null read as 0.0.
+        let s = server().await;
+        let cub = |t: &str| {
+            json!({"dataset": "ml", "features": ["x1", "x2"], "target": t, "min_split": 6,
+                   "min_bucket": 3, "seed": 1})
+        };
+        let ctr = |t: &str| {
+            json!({"dataset": "ml", "features": ["x1", "x2"], "target": t, "minsplit": 6,
+                   "minbucket": 3, "seed": 1})
+        };
+        let mbo = |t: &str| {
+            json!({"dataset": "ml", "x_cols": ["x1", "x2"], "y_col": t, "mstop": 20,
+                   "seed": 1})
+        };
+        let c50 =
+            |t: &str| json!({"dataset": "ml", "features": ["x1", "x2"], "target": t, "seed": 1});
+        let pairs = vec![
+            (
+                s.ml_cubist(req(cub("yi"))).await.unwrap(),
+                s.ml_cubist(req(cub("yi_f"))).await.unwrap(),
+            ),
+            (
+                s.ml_ctree(req(ctr("yi"))).await.unwrap(),
+                s.ml_ctree(req(ctr("yi_f"))).await.unwrap(),
+            ),
+            (
+                s.ml_mboost(req(mbo("yi"))).await.unwrap(),
+                s.ml_mboost(req(mbo("yi_f"))).await.unwrap(),
+            ),
+            (
+                s.ml_c50(req(c50("cls"))).await.unwrap(),
+                s.ml_c50(req(c50("cls_f"))).await.unwrap(),
+            ),
+        ];
+        for (int, float) in &pairs {
+            assert_ne!(int.is_error, Some(true), "{}", text_of(int));
+            assert_eq!(text_of(int), text_of(float));
+        }
+        let missing = vec![
+            s.ml_cubist(req(cub("y_na"))).await.unwrap(),
+            s.ml_ctree(req(ctr("y_na"))).await.unwrap(),
+            s.ml_mboost(req(mbo("y_na"))).await.unwrap(),
+        ];
+        for r in &missing {
+            assert_eq!(r.is_error, Some(true), "{}", text_of(r));
+            assert!(
+                text_of(r).contains("Column 'y_na' contains 1 missing value(s)")
+                    && text_of(r).contains("munge_drop_na"),
+                "{}",
+                text_of(r)
+            );
+        }
+        let r = s.ml_c50(req(c50("cls_na"))).await.unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(
+            text_of(&r).contains("Column 'cls_na' contains 1 missing value(s)"),
+            "{}",
+            text_of(&r)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_c50_ctree_text_targets() {
+        // Before: "Column 'lab' is not numeric" for both tools, although the schemas
+        // document categorical targets.
+        let s = server().await;
+        let c50 =
+            |t: &str| json!({"dataset": "ml", "features": ["x1", "x2"], "target": t, "seed": 1});
+        let lab = s.ml_c50(req(c50("lab"))).await.unwrap();
+        let cls = s.ml_c50(req(c50("cls"))).await.unwrap();
+        assert!(
+            text_of(&lab).contains("Class labels: 0 = no, 1 = yes"),
+            "{}",
+            text_of(&lab)
+        );
+        assert_eq!(json_summary(&lab)["class_names"], json!(["no", "yes"]));
+        assert_eq!(json_summary(&cls).get("class_names"), Some(&Value::Null));
+        assert_eq!(
+            json_summary(&lab)["predictions_sample"],
+            json_summary(&cls)["predictions_sample"]
+        );
+        let ctr = |t: &str| {
+            json!({"dataset": "ml", "features": ["x1", "x2"], "target": t, "minsplit": 6,
+                   "minbucket": 3, "seed": 1})
+        };
+        let tree = s.ml_ctree(req(ctr("lab"))).await.unwrap();
+        let summary = json_summary(&tree);
+        assert_eq!(
+            (
+                summary["is_classification"].clone(),
+                summary["class_names"].clone()
+            ),
+            (json!(true), json!(["no", "yes"]))
         );
     }
 }

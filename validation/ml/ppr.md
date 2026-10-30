@@ -105,6 +105,22 @@ print(round(fit$fitted.values[1:5], 6))
 - Rust implementation 3-10x faster than R
 - Memory scales with n * p
 
+## Missing and non-finite values
+
+- **Core.** `ppr` refuses non-finite x, y and weights (Tier 0). The projection sorts and
+  the backward-elimination minimum use the total order of `f64::total_cmp`, so a NaN can no
+  longer break the sort (for finite input only `-0.0` now sorts before `0.0`).
+- **MCP.** `ml_ppr` drops the rows with a missing value in the target or a feature
+  (`NaPolicy::Omit`), as R's formula interface does: `ppr(y_na ~ x1_na + x2, nterms = 1)`
+  uses 28 of the 30 rows of the WP17 fixture (`na.omit` drops rows 4 and 7, 0-based;
+  R 4.3.3). The JSON reports them under `"missing"`
+  (`{"n_total": 30, "n_used": 28, "n_dropped": 2, "by_column": {...}}`), and the fit equals
+  the fit on the complete rows.
+- **Tests.** `ml::ppr::tests::test_ppr_projection_sort_is_total`
+  (`crates/p2a-core/src/ml/ppr.rs`), `test_na_mcp_ppr_omits_incomplete_rows`
+  (`crates/p2a-mcp/src/tools/handlers/ml.rs`). They compare p2a with p2a and pin no R
+  number.
+
 ## References
 
 1. Friedman, J. H., & Stuetzle, W. (1981). Projection Pursuit Regression. JASA, 76(376), 817-823.

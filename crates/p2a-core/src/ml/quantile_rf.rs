@@ -1226,7 +1226,9 @@ pub fn prediction_intervals(
 ///
 /// # Arguments
 /// * `dataset` - Input dataset
-/// * `y_col` - Name of the response column
+/// * `y_col` - Numeric target column. Integer and boolean (0/1) columns are accepted;
+///   a missing value (null or NaN) in the target or a feature is an error naming the
+///   column (`EconError::NullValues`)
 /// * `x_cols` - Names of the feature columns
 /// * `config` - QRF configuration
 pub fn run_quantile_rf(
@@ -1235,35 +1237,9 @@ pub fn run_quantile_rf(
     x_cols: &[&str],
     config: &QuantileRfConfig,
 ) -> EconResult<QuantileRfResult> {
-    use crate::linalg::design::DesignMatrix;
-
-    // Build design matrix
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
-    let x = design.data;
-    let feature_names = design.column_names;
-
-    // Get y column
-    let col_names: Vec<String> = dataset
-        .df()
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let y_series = dataset
-        .df()
-        .column(y_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: col_names.clone(),
-        })?;
-
-    let y: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::Computation(format!("Column '{}' is not numeric", y_col)))?
-        .into_no_null_iter()
-        .collect();
-
-    let y_arr = Array1::from_vec(y);
+    let (x, y_arr, _missing) =
+        super::extract::extract_xy(dataset, y_col, x_cols, crate::data::columns::NaPolicy::Fail)?;
+    let feature_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
     let result = quantile_rf_with_names(x.view(), y_arr.view(), config, Some(feature_names))
         .map_err(EconError::Computation)?;
