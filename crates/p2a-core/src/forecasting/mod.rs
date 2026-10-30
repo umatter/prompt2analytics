@@ -117,7 +117,9 @@ pub mod structts;
 pub mod tsutils;
 
 pub use ar::{ArConfig, ArMethod, ArResult, ar, run_ar, run_ar_with_order};
-pub use arima_model::{ArimaForecastResult, ArimaResult, forecast_arima, run_arima};
+pub use arima_model::{
+    ArimaForecastResult, ArimaResult, ArimaSpec, forecast_arima, run_arima, run_arima_with,
+};
 pub use causal_impact::{
     CausalImpactConfig, CausalImpactModel, CausalImpactResult, CausalImpactSeries,
     CausalImpactSummary, CausalInference, causal_impact, run_causal_impact,
@@ -182,3 +184,92 @@ pub use tsutils::{
     runmed,
     window,
 };
+
+#[cfg(test)]
+pub(crate) mod test_fixtures {
+    //! Case data and assertions shared by the time-series tests (T2-WP16). Tests that
+    //! compare no case value read the data through `arima_series()`, so they are not
+    //! registered R pins.
+
+    use polars::prelude::*;
+
+    use crate::data::Dataset;
+    use crate::errors::EconError;
+
+    /// validation/datasets/generated/arima_series.csv (case arima_css_forecast): a, c, m,
+    /// b, dr, a_na (Float64), t, ai, ai_na (Int64), lab (String); a_na / ai_na are null at
+    /// rows 149 and 150.
+    pub(crate) fn arima_series() -> Dataset {
+        crate::test_support::load_case("arima_css_forecast").1
+    }
+
+    /// `ds` plus "<column>_f64" = `column` cast to Float64 (the same values).
+    pub(crate) fn with_float_copy(ds: &Dataset, column: &str) -> Dataset {
+        let copy = ds
+            .df()
+            .column(column)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .with_name(format!("{column}_f64").into());
+        let mut df = ds.df().clone();
+        df.with_column(copy).unwrap();
+        Dataset::new(df)
+    }
+
+    /// `ds` with `column`'s value at `row` replaced by NaN (Float64 columns only).
+    pub(crate) fn with_nan_at(ds: &Dataset, column: &str, row: usize) -> Dataset {
+        let values: Vec<Option<f64>> = ds
+            .df()
+            .column(column)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i == row { Some(f64::NAN) } else { v })
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Float64Chunked::from_slice_options(column.into(), &values).into_series())
+            .unwrap();
+        Dataset::new(df)
+    }
+
+    /// Equal length and bitwise-equal values (NaN equals NaN).
+    pub(crate) fn assert_same(a: &[f64], b: &[f64]) {
+        assert_eq!(a.len(), b.len(), "lengths differ: {a:?} vs {b:?}");
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            assert!(
+                x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+                "element {i} differs: {x:?} vs {y:?}"
+            );
+        }
+    }
+
+    /// The EconError inside an anyhow::Error (panics with the message otherwise).
+    pub(crate) fn econ(err: &anyhow::Error) -> &EconError {
+        err.downcast_ref::<EconError>()
+            .unwrap_or_else(|| panic!("not an EconError: {err:#}"))
+    }
+
+    pub(crate) fn assert_null_values(err: &EconError, column: &str, count: usize) {
+        assert!(
+            matches!(err, EconError::NullValues { column: c, count: k } if c == column && *k == count),
+            "expected NullValues {{ {column}, {count} }}, got {err:?}"
+        );
+    }
+
+    pub(crate) fn assert_non_numeric(err: &EconError, column: &str) {
+        assert!(
+            matches!(err, EconError::NonNumericColumn { column: c } if c == column),
+            "expected NonNumericColumn {{ {column} }}, got {err:?}"
+        );
+    }
+
+    pub(crate) fn assert_not_found(err: &EconError, column: &str) {
+        assert!(
+            matches!(err, EconError::ColumnNotFound { column: c, .. } if c == column),
+            "expected ColumnNotFound {{ {column} }}, got {err:?}"
+        );
+    }
+}
