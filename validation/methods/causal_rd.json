@@ -7,7 +7,10 @@
       "category": "econometrics",
       "reference": "rdrobust::rdrobust(y, x, c, p, h, b, kernel, vce, nnmatch, level) 4.0.0",
       "doc": "validation/econometrics/rd.md",
-      "cases": ["rd_sharp_fixed_bw", "rd_mass_points_nn"],
+      "cases": [
+        "rd_sharp_fixed_bw",
+        "rd_mass_points_nn"
+      ],
       "tests": [
         "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_fixed_bw",
         "p2a-core::econometrics::rd::tests::test_validate_rd_mass_points_nn",
@@ -25,9 +28,46 @@
       ],
       "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute, counts exact; observed agreement <= 1.7e-12",
       "deviations": [
-        {"finding": "CAUS-28", "quantity": "bandwidths when h and b are not given", "note": "p2a's own MSE-type selector, not rdbwselect; every case passes h and b"}
+        {
+          "finding": "CAUS-28",
+          "quantity": "bandwidths when h and b are not given",
+          "note": "p2a's own MSE-type selector, not rdbwselect; every case passes h and b"
+        }
       ],
-      "supersedes_legacy": ["validation/expected/rd_sharp.csv"]
+      "supersedes_legacy": [
+        "validation/expected/rd_sharp.csv"
+      ]
+    },
+    {
+      "id": "rd_fuzzy",
+      "name": "Fuzzy RD: Wald ratio with the joint conventional and robust variance, one bandwidth for both stages",
+      "category": "econometrics",
+      "reference": "rdrobust::rdrobust(y, x, c, fuzzy, p, h, b, vce, level) 4.0.0",
+      "doc": "validation/econometrics/rd.md",
+      "cases": [
+        "rd_fuzzy_fixed_bw"
+      ],
+      "tests": [
+        "p2a-core::econometrics::rd::tests::test_validate_rd_fuzzy_fixed_bw",
+        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_int64_outcome",
+        "p2a-core::econometrics::rd::tests::test_validate_rd_fuzzy_weak_first_stage_warning"
+      ],
+      "quantities": [
+        "Wald ratio (conventional, bias-corrected)",
+        "joint conventional and robust SE",
+        "CI at 95% and 90%",
+        "first-stage jump, SE and F",
+        "reduced-form jump"
+      ],
+      "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute, counts exact; observed agreement <= 1.7e-12",
+      "deviations": [
+        {
+          "finding": "CAUS-28",
+          "quantity": "bandwidths when h and b are not given",
+          "note": "p2a's own MSE-type selector, not rdbwselect; every case passes h and b"
+        }
+      ],
+      "supersedes_legacy": []
     },
     {
       "id": "rd_multi",
@@ -35,7 +75,9 @@
       "category": "econometrics",
       "reference": "rdrobust::rdrobust(y, x, c = 0, h = 0.3, b = 0.3, vce = 'hc1') 4.0.0 for one cutoff",
       "doc": "validation/econometrics/rdmulti.md",
-      "cases": ["rd_sharp_fixed_bw"],
+      "cases": [
+        "rd_sharp_fixed_bw"
+      ],
       "tests": [
         "p2a-core::econometrics::rdmulti::tests::test_validate_rd_multi_single_cutoff"
       ],
@@ -45,7 +87,11 @@
       ],
       "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute",
       "deviations": [
-        {"finding": "CAUS-77", "quantity": "multi-cutoff pooling and heterogeneity test", "note": "not pinned to rdmulti::rdmc (Tier 3)"}
+        {
+          "finding": "CAUS-77",
+          "quantity": "multi-cutoff pooling and heterogeneity test",
+          "note": "not pinned to rdmulti::rdmc (Tier 3)"
+        }
       ],
       "supersedes_legacy": []
     }

@@ -550,76 +550,129 @@ impl fmt::Display for RdResult {
     }
 }
 
-/// Result from Fuzzy RD estimation.
+/// Result from Fuzzy RD estimation (rdrobust `rdrobust(y, x, fuzzy = t)`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuzzyRdResult {
-    /// Sharp RD result for the outcome.
+    /// Sharp RD of the outcome (reduced form), from the same fit and bandwidths as the
+    /// first stage.
     pub outcome_rd: RdResult,
-    /// Sharp RD result for the treatment (first stage).
+    /// Sharp RD of the treatment (first stage).
     pub first_stage: RdResult,
-    /// Fuzzy RD estimate (Wald estimator: τ_Y / τ_D).
+    /// Conventional Wald ratio `tau_Y,cl / tau_T,cl` (rdrobust `coef[1]`).
     pub tau_fuzzy: f64,
-    /// Standard error for fuzzy estimate.
+    /// Its joint delta-method standard error, covariance of the two jumps included
+    /// (rdrobust `se[1]`).
     pub se_fuzzy: f64,
-    /// P-value for fuzzy estimate.
+    /// Two-sided p-value of the conventional estimate.
     pub p_fuzzy: f64,
-    /// 95% CI for fuzzy estimate.
+    /// Conventional CI at `level`.
     pub ci_fuzzy: (f64, f64),
-    /// Significance level.
+    /// Significance level, from `p_fuzzy_robust` (CCT, as for sharp RD).
     pub significance: SignificanceLevel,
     /// Treatment variable name.
     pub treatment: String,
+    /// Bias-corrected Wald estimate `tau_fuzzy - s'(B_Y, B_T)` (rdrobust `coef[2]`).
+    #[serde(default)]
+    pub tau_fuzzy_bc: f64,
+    /// Robust standard error of the bias-corrected estimate (rdrobust `se[3]`).
+    #[serde(default)]
+    pub se_fuzzy_robust: f64,
+    /// Robust CI at `level`: `tau_fuzzy_bc -/+ z se_fuzzy_robust`.
+    #[serde(default)]
+    pub ci_fuzzy_robust: (f64, f64),
+    /// Two-sided p-value of the robust row.
+    #[serde(default)]
+    pub p_fuzzy_robust: f64,
+    /// Conventional first-stage jump (rdrobust `tau_T[1]`).
+    #[serde(default)]
+    pub first_stage_tau: f64,
+    /// First-stage F: `(tau_T / se_T)^2` with the conventional SE.
+    #[serde(default)]
+    pub first_stage_f: f64,
+    /// Warnings (a weak first stage, ill-conditioned fits).
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Confidence level of every interval.
+    #[serde(default = "default_rd_level")]
+    pub level: f64,
 }
 
 impl fmt::Display for FuzzyRdResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rd = &self.outcome_rd;
         writeln!(f, "Fuzzy RD Estimation Results")?;
         writeln!(f, "===========================")?;
-        writeln!(f, "Outcome: {}", self.outcome_rd.outcome)?;
+        writeln!(f, "Outcome: {}", rd.outcome)?;
         writeln!(f, "Treatment: {}", self.treatment)?;
         writeln!(
             f,
             "Running variable: {} (cutoff = {:.4})",
-            self.outcome_rd.running_var, self.outcome_rd.cutoff
+            rd.running_var, rd.cutoff
         )?;
-        writeln!(f)?;
-
-        writeln!(f, "Fuzzy RD Estimate (LATE):")?;
-        let z = if self.se_fuzzy > 0.0 {
-            self.tau_fuzzy / self.se_fuzzy
-        } else {
-            0.0
-        };
         writeln!(
             f,
-            "  Estimate: {:.4} (SE: {:.4}, z = {:.2}, p = {:.4}){}",
+            "Bandwidth (h): {:.4} (left), {:.4} (right); (b): {:.4} (left), {:.4} (right); \
+             one bandwidth for both stages",
+            rd.h_left, rd.h_right, rd.b_left, rd.b_right
+        )?;
+        writeln!(f, "Kernel: {}, VCE: {}", rd.kernel, rd.vce)?;
+        writeln!(f)?;
+
+        writeln!(
+            f,
+            "Fuzzy RD Estimate (LATE = jump in outcome / jump in treatment):"
+        )?;
+        write_rd_header(f, self.level)?;
+        write_rd_row(
+            f,
+            "Conventional",
             self.tau_fuzzy,
             self.se_fuzzy,
-            z,
             self.p_fuzzy,
-            self.significance.stars()
+            self.ci_fuzzy,
+            "",
         )?;
-        writeln!(
+        write_rd_row(
             f,
-            "  95% CI: [{:.4}, {:.4}]",
-            self.ci_fuzzy.0, self.ci_fuzzy.1
+            "Robust",
+            self.tau_fuzzy_bc,
+            self.se_fuzzy_robust,
+            self.p_fuzzy_robust,
+            self.ci_fuzzy_robust,
+            self.significance.stars(),
         )?;
+        writeln!(f, "{}", "-".repeat(90))?;
         writeln!(f)?;
 
-        writeln!(f, "First Stage (jump in treatment):")?;
         writeln!(
             f,
-            "  Estimate: {:.4} (SE: {:.4})",
-            self.first_stage.tau_robust, self.first_stage.se_robust
+            "First stage (jump in treatment): {:.4} (SE {:.4}), F = {:.2}",
+            self.first_stage_tau, self.first_stage.se_conventional, self.first_stage_f
+        )?;
+        writeln!(
+            f,
+            "Reduced form (jump in outcome):  {:.4} (SE {:.4})",
+            rd.tau_conventional, rd.se_conventional
         )?;
         writeln!(f)?;
-
-        writeln!(f, "Reduced Form (jump in outcome):")?;
         writeln!(
             f,
-            "  Estimate: {:.4} (SE: {:.4})",
-            self.outcome_rd.tau_robust, self.outcome_rd.se_robust
+            "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '\u{2020}' 0.1"
         )?;
+        writeln!(
+            f,
+            "Note: Robust = bias-corrected Wald estimate with the CCT (2014) robust standard \
+             error, as rdrobust(fuzzy = ); Conventional = ratio of the conventional jumps with \
+             the joint delta-method standard error."
+        )?;
+
+        if !self.warnings.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Warnings:")?;
+            for w in &self.warnings {
+                writeln!(f, "  - {}", w)?;
+            }
+        }
 
         Ok(())
     }
@@ -1678,10 +1731,13 @@ pub fn rd_bandwidth(
 /// variable crossing the cutoff. Instead, the probability of treatment jumps
 /// at the cutoff.
 ///
-/// The fuzzy RD estimate uses the Wald estimator:
-/// τ_fuzzy = τ_Y / τ_D
-///
-/// where τ_Y is the jump in outcome and τ_D is the jump in treatment.
+/// As `rdrobust(y, x, fuzzy = t)`: the outcome and the treatment are fitted once, on one
+/// bandwidth (when `h` is not given p2a's selector runs on the outcome), with the same
+/// local-polynomial matrices. The conventional estimate is the Wald ratio
+/// `tau_Y / tau_T` of the conventional jumps; the bias-corrected one is
+/// `tau - s'(tau_Y - tau_Y,bc, tau_T - tau_T,bc)` with `s = (1/tau_T, -tau_Y/tau_T²)`; both
+/// variances come from the combined residuals `res_Y / tau_T - tau_Y / tau_T² res_T`, so the
+/// covariance of the two jumps is included. Every interval uses `config.level`.
 ///
 /// # Arguments
 /// * `dataset` - The dataset
@@ -1698,45 +1754,51 @@ pub fn run_fuzzy_rd(
     cutoff: f64,
     config: RdConfig,
 ) -> EconResult<FuzzyRdResult> {
-    // Run RD on outcome (reduced form)
-    let outcome_rd = run_rd(dataset, outcome, running_var, cutoff, config.clone())?;
+    validate_rd_config(&config)?;
 
-    // Run RD on treatment (first stage)
-    let first_stage = run_rd(dataset, treatment, running_var, cutoff, config.clone())?;
+    // Extract data
+    let df = dataset.df();
+    let read = |name: &str| {
+        DesignMatrix::extract_column(df, name).map_err(|_| EconError::ColumnNotFound {
+            column: name.to_string(),
+            available: get_column_names(df),
+        })
+    };
+    let y = read(outcome)?;
+    let x = read(running_var)?;
+    let t = read(treatment)?;
 
-    // Fuzzy RD estimate: Wald estimator
-    let tau_d = first_stage.tau_robust;
-
-    if tau_d.abs() < 1e-10 {
+    let fit = fit_rd(x.view(), &[y.view(), t.view()], cutoff, &config)?;
+    let (tau_y, tau_y_bc) = fit.jumps(0);
+    let (tau_t, tau_t_bc) = fit.jumps(1);
+    if tau_t.abs() < 1e-10 {
         return Err(EconError::InvalidSpecification {
             message: "First stage is too weak: treatment probability does not jump at cutoff"
                 .to_string(),
         });
     }
+    let outcome_rd = rd_result_from(&fit, 0, outcome, running_var, cutoff, &config);
+    let first_stage = rd_result_from(&fit, 1, treatment, running_var, cutoff, &config);
 
-    let tau_fuzzy = outcome_rd.tau_robust / tau_d;
+    // Wald ratio and its bias correction (rdrobust's s_Y and B_F)
+    let tau_fuzzy = tau_y / tau_t;
+    let s = [1.0 / tau_t, -tau_y / (tau_t * tau_t)];
+    let tau_fuzzy_bc = tau_fuzzy - (s[0] * (tau_y - tau_y_bc) + s[1] * (tau_t - tau_t_bc));
+    let (se_fuzzy, se_fuzzy_robust) = fit.ses(&s);
 
-    // Delta method for SE: SE(τ_Y/τ_D) ≈ sqrt((SE_Y/τ_D)² + (τ_Y·SE_D/τ_D²)²)
-    let se_y = outcome_rd.se_robust;
-    let se_d = first_stage.se_robust;
-    let tau_y = outcome_rd.tau_robust;
+    let (normal, z) = normal_and_z(config.level);
+    let ci = |est: f64, se: f64| (est - z * se, est + z * se);
+    let p_fuzzy = two_sided_p(&normal, tau_fuzzy, se_fuzzy);
+    let p_fuzzy_robust = two_sided_p(&normal, tau_fuzzy_bc, se_fuzzy_robust);
 
-    let se_fuzzy = ((se_y / tau_d).powi(2) + (tau_y * se_d / (tau_d * tau_d)).powi(2)).sqrt();
-
-    // P-value and CI
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    let z = if se_fuzzy > 0.0 {
-        tau_fuzzy / se_fuzzy
-    } else {
-        0.0
-    };
-    let p_fuzzy = 2.0 * (1.0 - normal.cdf(z.abs()));
-
-    let z_crit = normal.inverse_cdf(0.975);
-    let ci_fuzzy = (tau_fuzzy - z_crit * se_fuzzy, tau_fuzzy + z_crit * se_fuzzy);
-
-    let significance = SignificanceLevel::from_p_value(p_fuzzy);
+    let first_stage_f = (tau_t / first_stage.se_conventional).powi(2);
+    let mut warnings = fit.warnings.clone();
+    if first_stage_f < 10.0 {
+        warnings.push(format!(
+            "Weak first stage: F = {first_stage_f:.2} (< 10); the fuzzy RD estimate and its \
+             intervals are unreliable."
+        ));
+    }
 
     Ok(FuzzyRdResult {
         outcome_rd,
@@ -1744,9 +1806,17 @@ pub fn run_fuzzy_rd(
         tau_fuzzy,
         se_fuzzy,
         p_fuzzy,
-        ci_fuzzy,
-        significance,
+        ci_fuzzy: ci(tau_fuzzy, se_fuzzy),
+        significance: SignificanceLevel::from_p_value(p_fuzzy_robust),
         treatment: treatment.to_string(),
+        tau_fuzzy_bc,
+        se_fuzzy_robust,
+        ci_fuzzy_robust: ci(tau_fuzzy_bc, se_fuzzy_robust),
+        p_fuzzy_robust,
+        first_stage_tau: tau_t,
+        first_stage_f,
+        warnings,
+        level: config.level,
     })
 }
 
@@ -2737,35 +2807,229 @@ mod tests {
         close("column 1", &both.column(1).to_vec(), &one(&xm, &y2, 3));
     }
 
+    // =========================================================================
+    // Fuzzy RD: rdrobust(fuzzy = ) at fixed bandwidths (T2-WP11: CAUS-30)
+    // =========================================================================
+
+    /// Pins one fuzzy rdrobust run, `<prefix>_*` keys of `rd_fuzzy_fixed_bw`.
+    fn check_fuzzy(
+        check: &mut Check<'_>,
+        case: &p2a_validation::Case,
+        prefix: &str,
+        f: &FuzzyRdResult,
+    ) {
+        let n = 1000;
+        let k = |s: &str| format!("{prefix}_{s}");
+        check
+            .scalar(&k("coef_conv"), f.tau_fuzzy, Tol::coef(n))
+            .scalar(&k("coef_bc"), f.tau_fuzzy_bc, Tol::coef(n))
+            .scalar(&k("se_conv"), f.se_fuzzy, Tol::se(n))
+            .scalar(&k("se_robust"), f.se_fuzzy_robust, Tol::se(n))
+            .scalar(&k("z_conv"), f.tau_fuzzy / f.se_fuzzy, Tol::stat(n))
+            .scalar(
+                &k("z_robust"),
+                f.tau_fuzzy_bc / f.se_fuzzy_robust,
+                Tol::stat(n),
+            )
+            .scalar(&k("p_conv"), f.p_fuzzy, Tol::p_value(n))
+            .scalar(&k("p_robust"), f.p_fuzzy_robust, Tol::p_value(n))
+            .vector(&k("ci_conv"), &[f.ci_fuzzy.0, f.ci_fuzzy.1], Tol::stat(n))
+            .vector(
+                &k("ci_robust"),
+                &[f.ci_fuzzy_robust.0, f.ci_fuzzy_robust.1],
+                Tol::stat(n),
+            )
+            .vector(
+                &k("n_h"),
+                &[
+                    f.outcome_rd.n_eff_left as f64,
+                    f.outcome_rd.n_eff_right as f64,
+                ],
+                Tol::exact(),
+            )
+            .vector(
+                &k("n_b"),
+                &[f.outcome_rd.n_b_left as f64, f.outcome_rd.n_b_right as f64],
+                Tol::exact(),
+            )
+            .vector(&k("beta_p_left"), &f.outcome_rd.coef_left, Tol::coef(n))
+            .vector(&k("beta_p_right"), &f.outcome_rd.coef_right, Tol::coef(n))
+            .scalar(&k("first_stage_conv"), f.first_stage_tau, Tol::coef(n))
+            .scalar(
+                &k("first_stage_conv"),
+                f.first_stage.tau_conventional,
+                Tol::coef(n),
+            )
+            .scalar(&k("first_stage_bc"), f.first_stage.tau_bc, Tol::coef(n))
+            .scalar(
+                &k("first_stage_se_conv"),
+                f.first_stage.se_conventional,
+                Tol::se(n),
+            )
+            .scalar(
+                &k("first_stage_se_robust"),
+                f.first_stage.se_robust,
+                Tol::se(n),
+            );
+        let f_case =
+            (case.scalar(&k("first_stage_conv")) / case.scalar(&k("first_stage_se_conv"))).powi(2);
+        assert!(
+            Tol::stat(n).allows(f.first_stage_f, f_case),
+            "{prefix}: first-stage F {} vs {f_case}",
+            f.first_stage_f
+        );
+        // one bandwidth for both stages
+        let bw = |r: &RdResult| (r.h_left, r.h_right, r.b_left, r.b_right);
+        assert_eq!(bw(&f.outcome_rd), bw(&f.first_stage), "{prefix}");
+    }
+
     #[test]
-    fn test_validate_fuzzy_rd_structure() {
-        // Test fuzzy RD produces valid structure
-        let dataset = create_fuzzy_rd_dataset();
-        let config = RdConfig::default();
-
-        match run_fuzzy_rd(&dataset, "outcome", "running", "treatment", 0.0, config) {
-            Ok(fuzzy) => {
-                // First stage should exist
-                assert!(fuzzy.first_stage.n_left > 0);
-                assert!(fuzzy.first_stage.n_right > 0);
-
-                // Outcome RD should exist
-                assert!(fuzzy.outcome_rd.n_left > 0);
-                assert!(fuzzy.outcome_rd.n_right > 0);
-
-                // SE should be positive
-                assert!(fuzzy.se_fuzzy > 0.0, "Fuzzy SE should be positive");
-
-                // P-value should be valid
-                assert!(fuzzy.p_fuzzy >= 0.0 && fuzzy.p_fuzzy <= 1.0);
-
-                // CI should contain point estimate
-                assert!(fuzzy.ci_fuzzy.0 <= fuzzy.tau_fuzzy);
-                assert!(fuzzy.ci_fuzzy.1 >= fuzzy.tau_fuzzy);
-            }
-            Err(_) => {
-                // May fail due to weak first stage - that's acceptable
+    fn test_validate_rd_fuzzy_fixed_bw() {
+        let (case, ds) = load_case("rd_fuzzy_fixed_bw");
+        let n = 1000;
+        let mut check = Check::new(&case);
+        for (prefix, cfg) in [
+            ("fuzzy_nn", fixed(TRI, VceType::Nn, 0.4, 0.4, 1)),
+            ("fuzzy_hc1", fixed(TRI, VceType::Hc1, 0.4, 0.4, 1)),
+            ("fuzzy_nn_h03_b05", fixed(TRI, VceType::Nn, 0.3, 0.5, 1)),
+        ] {
+            let f = run_fuzzy_rd(&ds, "yf", "x", "d", 0.0, cfg).unwrap();
+            check_fuzzy(&mut check, &case, prefix, &f);
+            if prefix == "fuzzy_nn" {
+                check.scalar(
+                    "reduced_form_coef_conv",
+                    f.outcome_rd.tau_conventional,
+                    Tol::coef(n),
+                );
             }
         }
+        let f = run_fuzzy_rd(
+            &ds,
+            "yf",
+            "x",
+            "d",
+            0.0,
+            RdConfig {
+                level: 0.90,
+                ..fixed(TRI, VceType::Nn, 0.4, 0.4, 1)
+            },
+        )
+        .unwrap();
+        assert_eq!(f.level, 0.90);
+        check
+            .vector(
+                "fuzzy_level90_ci_conv",
+                &[f.ci_fuzzy.0, f.ci_fuzzy.1],
+                Tol::stat(n),
+            )
+            .vector(
+                "fuzzy_level90_ci_robust",
+                &[f.ci_fuzzy_robust.0, f.ci_fuzzy_robust.1],
+                Tol::stat(n),
+            );
+        check.finish();
+    }
+
+    /// The first stage of a fuzzy fit is the sharp RD of the treatment, here an Int64 column.
+    #[test]
+    fn test_validate_rd_sharp_int64_outcome() {
+        let (case, ds) = load_case("rd_fuzzy_fixed_bw");
+        assert_eq!(ds.df().column("d").unwrap().dtype(), &DataType::Int64);
+        let r = run_rd(&ds, "d", "x", 0.0, fixed(TRI, VceType::Nn, 0.4, 0.4, 1)).unwrap();
+        let n = 1000;
+        Check::new(&case)
+            .scalar(
+                "fuzzy_nn_first_stage_conv",
+                r.tau_conventional,
+                Tol::coef(n),
+            )
+            .scalar("fuzzy_nn_first_stage_bc", r.tau_bc, Tol::coef(n))
+            .scalar(
+                "fuzzy_nn_first_stage_se_conv",
+                r.se_conventional,
+                Tol::se(n),
+            )
+            .scalar("fuzzy_nn_first_stage_se_robust", r.se_robust, Tol::se(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_fuzzy_rd_one_bandwidth_for_both_stages() {
+        let ds = create_fuzzy_rd_dataset();
+        let f = run_fuzzy_rd(
+            &ds,
+            "outcome",
+            "running",
+            "treatment",
+            0.0,
+            RdConfig::default(),
+        )
+        .unwrap();
+        let bw = |r: &RdResult| (r.h_left, r.h_right, r.b_left, r.b_right);
+        assert_eq!(bw(&f.outcome_rd), bw(&f.first_stage));
+        // the selector runs on the outcome, as rdrobust's fuzzy bandwidth would start from it
+        let sharp = run_rd(&ds, "outcome", "running", 0.0, RdConfig::default()).unwrap();
+        assert_eq!(f.outcome_rd.h_left, sharp.h_left);
+        assert_eq!(f.outcome_rd.h_right, sharp.h_right);
+    }
+
+    #[test]
+    fn test_validate_rd_fuzzy_weak_first_stage_warning() {
+        let (case, ds) = load_case("rd_fuzzy_fixed_bw");
+        let n = 1000;
+        let f = run_fuzzy_rd(
+            &ds,
+            "yf",
+            "x",
+            "d",
+            0.0,
+            fixed(TRI, VceType::Nn, 0.2, 0.2, 1),
+        )
+        .unwrap();
+        Check::new(&case)
+            .scalar(
+                "fuzzy_nn_h02_first_stage_conv",
+                f.first_stage.tau_conventional,
+                Tol::coef(n),
+            )
+            .scalar(
+                "fuzzy_nn_h02_first_stage_se_conv",
+                f.first_stage.se_conventional,
+                Tol::se(n),
+            )
+            .finish();
+        let f_case = (case.scalar("fuzzy_nn_h02_first_stage_conv")
+            / case.scalar("fuzzy_nn_h02_first_stage_se_conv"))
+        .powi(2);
+        assert!(f_case < 10.0);
+        assert!(
+            Tol::stat(n).allows(f.first_stage_f, f_case),
+            "F {} vs {f_case}",
+            f.first_stage_f
+        );
+        let expected = format!("Weak first stage: F = {f_case:.2}");
+        assert!(
+            f.warnings.iter().any(|w| w.starts_with(&expected)),
+            "{expected} in {:?}",
+            f.warnings
+        );
+        assert!(f.to_string().contains(&expected), "{f}");
+        let strong = run_fuzzy_rd(
+            &ds,
+            "yf",
+            "x",
+            "d",
+            0.0,
+            fixed(TRI, VceType::Nn, 0.4, 0.4, 1),
+        )
+        .unwrap();
+        assert!(
+            !strong
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("Weak first stage")),
+            "{:?}",
+            strong.warnings
+        );
     }
 }

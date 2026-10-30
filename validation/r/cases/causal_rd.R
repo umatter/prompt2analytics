@@ -15,6 +15,16 @@ suppressPackageStartupMessages(library(rdrobust))
   out
 }
 
+# T2-WP11 addition: the first-stage quantities of a fuzzy fit (rdrobust's tau_T, se_T).
+.rd_first_stage <- function(r, prefix) {
+  out <- list()
+  out[[paste0(prefix, "_first_stage_conv")]] <- r$tau_T[1]
+  out[[paste0(prefix, "_first_stage_bc")]] <- r$tau_T[2]
+  out[[paste0(prefix, "_first_stage_se_conv")]] <- r$se_T[1]
+  out[[paste0(prefix, "_first_stage_se_robust")]] <- r$se_T[3]
+  out
+}
+
 .rd_sim <- function(ctx) {
   set.seed(42)
   n <- 1000
@@ -74,4 +84,28 @@ case("rd_mass_points_nn", "causal/rd", "Sharp RD with a running variable on a 0.
   list(dataset = "validation/datasets/generated/rd_sim.csv", values = v,
        reference = "rdrobust::rdrobust(vce = 'nn', nnmatch = 1 | 3 | 5) with mass points (all ties at the J-th distance kept)",
        call = "rdrobust(d$ym, d$xm, c = 0, h = 0.3, b = 0.4, vce = 'nn', nnmatch = m)", packages = "rdrobust")
+})
+
+case("rd_fuzzy_fixed_bw", "causal/rd", "Fuzzy RD, rdrobust(fuzzy = d) with one bandwidth for both stages", function(ctx) {
+  d <- .rd_sim(ctx)
+  v <- list()
+  for (vce in c("nn", "hc1")) {
+    r <- rdrobust(d$yf, d$x, c = 0, fuzzy = d$d, p = 1, h = 0.4, b = 0.4, vce = vce)
+    v <- c(v, .rd_values(r, paste0("fuzzy_", vce)))
+    v <- c(v, .rd_first_stage(r, paste0("fuzzy_", vce)))   # first_stage_conv/_bc as in the design, plus the SEs
+  }
+  rf <- rdrobust(d$yf, d$x, c = 0, p = 1, h = 0.4, b = 0.4, vce = "nn")
+  v$reduced_form_coef_conv <- rf$coef[1]
+  # T2-WP11 additions (CAUS-30): a bias bandwidth different from h, and a 90% level.
+  r <- rdrobust(d$yf, d$x, c = 0, fuzzy = d$d, p = 1, h = 0.3, b = 0.5, vce = "nn")
+  v <- c(v, .rd_values(r, "fuzzy_nn_h03_b05"), .rd_first_stage(r, "fuzzy_nn_h03_b05"))
+  r <- rdrobust(d$yf, d$x, c = 0, fuzzy = d$d, p = 1, h = 0.4, b = 0.4, vce = "nn", level = 90)
+  v$fuzzy_level90_ci_conv <- vec(r$ci[1, ]); v$fuzzy_level90_ci_robust <- vec(r$ci[3, ])
+  # Plan sync: a weak first stage (F = 9.898 < 10) for the warning test
+  r <- rdrobust(d$yf, d$x, c = 0, fuzzy = d$d, p = 1, h = 0.2, b = 0.2, vce = "nn")
+  v <- c(v, .rd_first_stage(r, "fuzzy_nn_h02"))
+  stopifnot((v$fuzzy_nn_h02_first_stage_conv / v$fuzzy_nn_h02_first_stage_se_conv)^2 < 10)
+  list(dataset = "validation/datasets/generated/rd_sim.csv", values = v,
+       reference = "rdrobust::rdrobust(y, x, fuzzy = d, h, b): ratio estimator with the joint (reduced form, first stage) variance",
+       call = "rdrobust(d$yf, d$x, c = 0, fuzzy = d$d, h = 0.4, b = 0.4, vce = ...)", packages = "rdrobust")
 })

@@ -136,6 +136,65 @@ Tolerances (`validation/README.md`, n = 1000): coefficients 1e-8 relative, SEs, 
 and CI bounds 1e-6 relative, p-values 1e-6 relative plus 1e-12 absolute, counts exact. The
 observed agreement with rdrobust is at most about 1.7e-12 relative.
 
+## Fuzzy RD
+
+**Status:** R-pinned at fixed bandwidths (registry id `rd_fuzzy`, deviation CAUS-28 for the
+bandwidths p2a selects itself).
+
+`run_fuzzy_rd(dataset, y, x, t, c, config)` computes what `rdrobust(y, x, c, fuzzy = t)`
+computes. The bandwidths are resolved once (when `h` is not given p2a's selector runs on the
+outcome), and the outcome and the treatment are fitted together: `D = [y, t]` goes through the
+steps above with the same matrices, so both stages share every bandwidth and window. With the
+conventional jumps `tau_Y`, `tau_T` and the bias-corrected ones `tau_Y,bc`, `tau_T,bc`:
+
+- conventional estimate `tau = tau_Y / tau_T` (rdrobust `coef[1]`);
+- `s = (1/tau_T, -tau_Y/tau_T²)` and the bias-corrected estimate
+  `tau_bc = tau - s · (tau_Y - tau_Y,bc, tau_T - tau_T,bc)` (rdrobust `coef[2]`);
+- the variances use the combined residuals `r_i = res_i · s = res_Y,i/tau_T - tau_Y/tau_T² res_T,i`
+  in step 7, so the covariance of the two jumps is included: `se_fuzzy` (rdrobust `se[1]`) and
+  `se_fuzzy_robust` (`se[3]`);
+- intervals `tau ∓ z se_fuzzy` and `tau_bc ∓ z se_fuzzy_robust` at `config.level`;
+- the first stage `first_stage_tau = tau_T` and `first_stage_f = (tau_T / se_T)²` with the
+  conventional SE of the first stage (rdrobust `tau_T[1]`, `se_T[1]`); a warning when F < 10.
+
+`outcome_rd` and `first_stage` are the sharp results of the two columns from the same fit:
+rdrobust's `se_T` equals the SE of the sharp RD of `t` on the same bandwidths.
+`significance` follows the robust p-value.
+
+Before T2-WP11 the two stages were separate `run_rd` calls (two selector runs when `h` was not
+given), the delta-method SE had no covariance term (0.2598 at h = b = 0.4 against rdrobust's
+0.2413), and the interval was always 95% (finding CAUS-30).
+
+Case `rd_fuzzy_fixed_bw` (same dataset): `rdrobust(yf, x, c = 0, fuzzy = d, p = 1, h = 0.4,
+b = 0.4, vce = v)` for `nn` and `hc1`, `h = 0.3, b = 0.5` (nn), `level = 90`, the reduced form
+`rdrobust(yf, x, h = 0.4, b = 0.4)`, and a weak first stage at `h = b = 0.2`.
+
+| prefix | coef_conv | coef_bc | se_conv | se_robust | ci_robust | first stage conv / bc / se_conv / se_robust |
+|---|---|---|---|---|---|---|
+| `fuzzy_nn` | 0.6416930220442466 | 0.690755958013317 | 0.24134054288160955 | 0.3470342530233884 | 0.01058132068571549, 1.3709305953409185 | 0.4211742981234006 / 0.45274042362516853 / 0.10055911993020157 / 0.15050476117932227 |
+| `fuzzy_hc1` | 0.6416930220442466 | 0.690755958013317 | 0.24372095030116525 | 0.3440482430829733 | 0.01643379262640765, 1.3650781234002265 | same / same / 0.09321659408857996 / 0.14087306353620874 |
+| `fuzzy_nn_h03_b05` | 0.6379259283424029 | 0.6423291960699518 | 0.2604196887356571 | 0.30504621808028354 | 0.04444959501244505, 1.2402087971274585 | 0.4444905369329633 / 0.422598284293907 / 0.11664767556060084 / 0.13643660973802818 |
+
+N_h/N_b: `fuzzy_nn` [216, 180] / [216, 180]; `fuzzy_nn_h03_b05` [161, 138] / [259, 227].
+`reduced_form_coef_conv` 0.2702646081701694; `fuzzy_level90_ci_conv`
+[0.24472315475499373, 1.0386628893334995] and `fuzzy_level90_ci_robust`
+[0.11993540825140148, 1.2615765077752326]. First-stage F: 17.5420681500485 (`fuzzy_nn`),
+14.520208773934074 (`fuzzy_nn_h03_b05`) and 9.898269468659171 at h = b = 0.2
+(`fuzzy_nn_h02_first_stage_*`: 0.4572994934088912, SE 0.14535202408748185).
+
+Tests (registered under `rd_fuzzy`):
+
+- `test_validate_rd_fuzzy_fixed_bw`: every fuzzy run and quantity above, the reduced form and the
+  90% intervals; both stages report the same bandwidths.
+- `test_validate_rd_sharp_int64_outcome`: the sharp RD of the Int64 column `d` equals rdrobust's
+  first stage (`fuzzy_nn_first_stage_*`).
+- `test_validate_rd_fuzzy_weak_first_stage_warning`: at h = b = 0.2 the first stage and its F
+  (9.90) match, and the result carries the warning `Weak first stage: F = 9.90 (< 10); ...`;
+  at h = b = 0.4 it does not.
+
+Not registered: `test_fuzzy_rd_one_bandwidth_for_both_stages` (no R value) checks that the
+selector runs once, on the outcome, and that both stages use its bandwidths.
+
 ## Limits
 
 - Bandwidth selection is p2a's own MSE-type selector, not `rdbwselect` (CAUS-28, a registry
