@@ -59,12 +59,18 @@ use p2a_core::{
     run_twang, sargan_test, sbw, tmle, weightit,
 };
 
-/// The RD tools' `vce` (default nearest-neighbour), or the tool error naming the valid ones.
+/// The RD tools' `vce` (default nearest-neighbour), or the tool error naming the valid ones
+/// (the core message, which names the parameter and the values).
 fn parse_vce(vce: Option<&str>) -> Result<VceType, CallToolResult> {
     match vce {
         None => Ok(VceType::Nn),
-        Some(s) => VceType::parse(s)
-            .map_err(|e| CallToolResult::error(vec![Content::text(format!("Invalid vce: {e}"))])),
+        Some(s) => VceType::parse(s).map_err(|e| {
+            let message = match e {
+                p2a_core::EconError::InvalidSpecification { message } => message,
+                other => other.to_string(),
+            };
+            CallToolResult::error(vec![Content::text(message)])
+        }),
     }
 }
 
@@ -2621,7 +2627,11 @@ mod tests {
         let check = |r: CallToolResult| {
             let out = text(&r);
             assert_eq!(r.is_error, Some(true), "{out}");
-            assert!(out.contains("vce") && out.contains("hc1"), "{out}");
+            // the core message alone, without a second prefix
+            assert!(
+                out.starts_with("Unknown vce 'robust'; use \"nn\"") && out.contains("hc1"),
+                "{out}"
+            );
         };
         let req: RdEstimateRequest = serde_json::from_value(base.clone()).unwrap();
         check(rt.block_on(server.rd_estimate(Parameters(req))).unwrap());

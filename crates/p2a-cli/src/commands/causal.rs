@@ -1487,6 +1487,14 @@ fn print_rd_warnings(warnings: &[String], missing: &p2a_core::data::columns::Mis
     }
 }
 
+/// `--vce` as a `VceType`, or the core message (it names the option and the valid values).
+fn parse_vce_arg(vce: &str) -> Result<VceType, String> {
+    VceType::parse(vce).map_err(|e| match e {
+        p2a_core::EconError::InvalidSpecification { message } => message,
+        other => other.to_string(),
+    })
+}
+
 fn execute_rd(
     dataset_name: &str,
     outcome: &str,
@@ -1501,10 +1509,10 @@ fn execute_rd(
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     // --vce is checked before the session and the dataset
-    let vce = match VceType::parse(vce) {
+    let vce = match parse_vce_arg(vce) {
         Ok(v) => v,
-        Err(e) => {
-            print_error(&format!("Invalid --vce: {e}"), format);
+        Err(message) => {
+            print_error(&message, format);
             return Ok(());
         }
     };
@@ -1647,10 +1655,10 @@ fn execute_fuzzy_rd(
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     // --vce is checked before the session and the dataset
-    let vce = match VceType::parse(vce) {
+    let vce = match parse_vce_arg(vce) {
         Ok(v) => v,
-        Err(e) => {
-            print_error(&format!("Invalid --vce: {e}"), format);
+        Err(message) => {
+            print_error(&message, format);
             return Ok(());
         }
     };

@@ -241,8 +241,9 @@ the bound and the column.
 
 MCP tools (`crates/p2a-mcp/src/tools/handlers/causal.rs`): `rd_estimate`, `rd_fuzzy` and
 `rd_multi` take `vce` (`"nn"`, the default, or `"hc0"` to `"hc3"`, case-insensitive; any other
-value is a tool error listing them, checked before the dataset is read), and `rd_fuzzy` takes
-the bias bandwidth `b` (default `h`). The text they return is the core `Display` output above.
+value is a tool error whose text is the core message `Unknown vce '<value>'; use "nn" ...`,
+checked before the dataset is read), and `rd_fuzzy` takes the bias bandwidth `b` (default
+`h`). The text they return is the core `Display` output above.
 
 - `test_validate_mcp_rd_estimate_vce` (registered under `rd_sharp`): the Conventional and
   Robust rows of `tri_nn_hb` (no `vce`, and `"nn"`), `tri_hc1_hb` (`"hc1"`) and `tri_hc3_hb`

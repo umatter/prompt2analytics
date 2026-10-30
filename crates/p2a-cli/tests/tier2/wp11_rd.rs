@@ -92,11 +92,22 @@ fn test_cli_causal_rd_rejects_unknown_vce() {
     let err = s.err(&[
         "causal", "rd", "none", "-y", "y", "-r", "x", "-c", "0", "--vce", "robust",
     ]);
-    assert!(err.contains("vce") && err.contains("hc1"), "{err}");
+    // the core message alone, without a second prefix
+    let once = |err: &str, value: &str| {
+        assert!(
+            err.contains(&format!("Unknown vce '{value}'; use")) && err.contains("hc1"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("Invalid --vce") && !err.contains("Invalid model specification"),
+            "{err}"
+        );
+    };
+    once(&err, "robust");
     let err = s.err(&[
         "causal", "fuzzy-rd", "none", "-y", "y", "-r", "x", "-t", "d", "-c", "0", "--vce", "hc4",
     ]);
-    assert!(err.contains("vce") && err.contains("hc1"), "{err}");
+    once(&err, "hc4");
 }
 
 #[test]
