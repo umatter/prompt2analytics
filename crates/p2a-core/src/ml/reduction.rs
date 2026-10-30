@@ -4,6 +4,7 @@
 //!
 //! PCA uses SVD via faer for O(nm²) complexity instead of power iteration.
 
+use super::extract::require_finite;
 use crate::errors::{EconError, EconResult};
 use crate::resource::{
     check_alloc, checked_len, checkpoint, try_vec, try_with_capacity, try_zeros2,
@@ -80,6 +81,8 @@ impl std::fmt::Display for PCAResult {
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `n_components` - Number of components to keep (None = keep all)
 /// * `transform` - Whether to return transformed data
+///
+/// Refuses NaN and ±Inf, naming the first non-finite cell (R `prcomp` stops too).
 pub fn pca(
     data: ArrayView2<f64>,
     n_components: Option<usize>,
@@ -91,6 +94,7 @@ pub fn pca(
     if n_samples < 2 {
         return Err("Need at least 2 samples for PCA".to_string());
     }
+    require_finite(&data, "PCA")?;
 
     // Determine number of components
     let max_components = n_samples.min(n_features);
@@ -1111,6 +1115,26 @@ mod tests {
         let t = CancelToken::new();
         t.cancel();
         Budget::new(None, t)
+    }
+
+    #[test]
+    fn test_na_pca_refuses_non_finite_input() {
+        // R prcomp: "infinite or missing values in 'x'". Before the fix: Ok with NaN
+        // variances (or "SVD failed: NoConvergence", depending on the path).
+        let mut x = array![[0.0, 0.0], [1.0, 0.0], [5.0, 5.0], [6.0, 5.0], [9.0, 1.0]];
+        x[[4, 0]] = f64::NAN;
+        let err = pca(x.view(), None, false).unwrap_err();
+        assert!(
+            err.starts_with("PCA: x must contain only finite values (row 4, column 0 is NaN)"),
+            "{err}"
+        );
+        x[[4, 0]] = 9.0;
+        x[[2, 1]] = f64::INFINITY;
+        assert!(
+            pca(x.view(), None, false)
+                .unwrap_err()
+                .contains("row 2, column 1 is inf")
+        );
     }
 
     fn blobs(n: usize, d: usize, seed: u64) -> Array2<f64> {

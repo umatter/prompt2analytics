@@ -8,6 +8,7 @@
 //! then re-queries neighbourhoods serially, so memory is O(n) plus one query
 //! result.
 
+use super::extract::require_finite;
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checked_len, checkpoint, current_budget, try_vec};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
@@ -113,6 +114,8 @@ impl std::fmt::Display for DBSCANResult {
 /// * `tolerance` - Convergence tolerance (default 1e-4)
 /// * `n_init` - Number of initializations to try (default 10)
 /// * `seed` - Optional random seed for reproducibility
+///
+/// Refuses NaN and ±Inf, naming the first non-finite cell (R `kmeans` stops too).
 pub fn kmeans(
     data: ArrayView2<f64>,
     k: usize,
@@ -149,6 +152,7 @@ pub fn kmeans(
             "tolerance must be finite and non-negative (got {tol})"
         ));
     }
+    require_finite(&data, "k-means")?;
 
     let mut rng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
@@ -812,6 +816,10 @@ impl std::fmt::Display for HierarchicalResult {
 /// * `linkage` - Linkage method (single, complete, average, ward)
 /// * `distance_threshold` - If set, cut tree at this distance instead of n_clusters
 ///
+/// Refuses NaN and ±Inf, naming the first non-finite cell, and returns an error when the
+/// distances overflow f64 (as R `hclust`). A row with one missing coordinate is refused:
+/// R's `dist()` would use the coordinates both rows have, which is not implemented here.
+///
 /// # References
 ///
 /// - Murtagh, F. (1983). "A Survey of Recent Advances in Hierarchical Clustering
@@ -831,6 +839,7 @@ pub fn hierarchical(
     if n == 0 {
         return Err("Cannot cluster empty data".to_string());
     }
+    require_finite(&data, "hierarchical clustering")?;
     if n == 1 {
         return Ok(HierarchicalResult {
             labels: vec![0],
@@ -974,6 +983,19 @@ pub fn hierarchical(
                 }
                 c_j = nn[c_i];
             }
+        }
+
+        // No finite distance between two active clusters: every scan above left its
+        // defaults (c_i = 0, possibly inactive or its own neighbour), and merging them
+        // would record self-merges. Finite input reaches this only when the distances
+        // overflow f64; R hclust stops there too.
+        if !min_d.is_finite() || c_i == c_j || !active[c_i] || !active[c_j] {
+            return Err(
+                "hierarchical clustering: no finite distance remains between the \
+                        clusters still to be merged (the data are too large for f64 \
+                        arithmetic); rescale the columns"
+                    .to_string(),
+            );
         }
 
         // Ensure c_i < c_j for canonical ordering in output.
@@ -1583,6 +1605,78 @@ mod tests {
     fn three_clusters(n: usize, d: usize, seed: u64) -> Array2<f64> {
         let mut rng = StdRng::seed_from_u64(seed);
         Array2::from_shape_fn((n, d), |(i, _)| (i % 3) as f64 * 4.0 + rng.r#gen::<f64>())
+    }
+
+    /// The review's ML-24 rows; R: kmeans stops ("NA/NaN/Inf in foreign function call (arg 1)").
+    fn ml24_rows(nan_row: usize) -> Array2<f64> {
+        // nan_row 4 gives the review's (NA, 1) row; nan_row 0 puts the NaN row first (the
+        // self-merge case)
+        let mut m = array![[0.0, 0.0], [1.0, 0.0], [5.0, 5.0], [6.0, 5.0], [9.0, 1.0]];
+        m[[nan_row, 0]] = f64::NAN;
+        m
+    }
+
+    #[test]
+    fn test_na_hierarchical_refuses_non_finite_input() {
+        // ML-24. Before the fix: Ok with a corrupt tree (Ward, n_clusters = 1 reports 2
+        // clusters and merges a cluster twice; with the NaN row first, a self-merge
+        // (0, 0, 0.0, 2)).
+        for linkage in [
+            Linkage::Ward,
+            Linkage::Single,
+            Linkage::Complete,
+            Linkage::Average,
+        ] {
+            for (nan_row, cell) in [(4, "row 4, column 0 is NaN"), (0, "row 0, column 0 is NaN")] {
+                let err =
+                    hierarchical(ml24_rows(nan_row).view(), Some(1), linkage, None).unwrap_err();
+                assert!(
+                    err.starts_with("hierarchical clustering: x must contain only finite values"),
+                    "{linkage:?}: {err}"
+                );
+                assert!(err.contains(cell), "{linkage:?}: {err}");
+            }
+        }
+        let mut inf = ml24_rows(4);
+        inf[[4, 0]] = 9.0;
+        inf[[2, 1]] = f64::NEG_INFINITY;
+        let err = hierarchical(inf.view(), Some(2), Linkage::Ward, None).unwrap_err();
+        assert!(err.contains("row 2, column 1 is -inf"), "{err}");
+        // a single NaN row is refused too (it used to return the one-row tree)
+        let one = array![[f64::NAN, 1.0]];
+        let err = hierarchical(one.view(), None, Linkage::Ward, None).unwrap_err();
+        assert!(err.contains("row 0, column 0 is NaN"), "{err}");
+    }
+
+    #[test]
+    fn test_hierarchical_errors_when_no_finite_distance_remains() {
+        // ML-24's loop: finite data whose squared distances overflow to Inf. R: dist() is
+        // Inf Inf Inf and hclust() stops with "NA/NaN/Inf in foreign function call
+        // (arg 10)". Before the fix (Ward): Ok with n_clusters 3 although 1 was requested
+        // and the self-merges (0, 0, 0.0, 2), (3, 3, 0.0, 4).
+        let big = array![[0.0, 0.0], [1e200, 0.0], [2e200, 0.0]];
+        for linkage in [
+            Linkage::Ward,
+            Linkage::Single,
+            Linkage::Complete,
+            Linkage::Average,
+        ] {
+            let err = hierarchical(big.view(), Some(1), linkage, None).unwrap_err();
+            assert!(
+                err.contains("no finite distance remains"),
+                "{linkage:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_na_kmeans_refuses_non_finite_input() {
+        // Before the fix: "K-means failed to converge" (every inertia is NaN).
+        let err = kmeans(ml24_rows(4).view(), 2, Some(100), None, Some(2), Some(1)).unwrap_err();
+        assert_eq!(
+            err,
+            "k-means: x must contain only finite values (row 4, column 0 is NaN); remove or impute missing values first"
+        );
     }
 
     #[test]

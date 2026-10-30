@@ -196,6 +196,7 @@ mod cubist;
 pub mod dual_tree;
 mod evaluation;
 mod evaluation_fast;
+mod extract;
 mod gbm;
 mod ice;
 pub mod kdtree;
