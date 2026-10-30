@@ -4,7 +4,7 @@
 //! - Parallel pre-trends violations (staggered DiD)
 //! - Anticipation effects (significant pre-treatment coefficients)
 
-use crate::econometrics::{DiDResult, StaggeredDidResult};
+use crate::econometrics::{DiDResult, PreTrendTest, StaggeredDidResult};
 
 use super::{
     Assumption, AssumptionStatus, IdentificationReport, IdentificationWarning, WarningDiagnostics,
@@ -129,8 +129,9 @@ pub fn staggered_did_diagnostics(result: &StaggeredDidResult) -> IdentificationR
 fn check_parallel_trends(result: &StaggeredDidResult, report: &mut IdentificationReport) {
     match &result.pretrend_test {
         Some(test) if !test.p_value.is_finite() => {
-            // The test could not be computed (e.g. too few complete bootstrap
-            // replicates): untestable, not a violation.
+            // The test could not be computed (too many pre-treatment cells, too few
+            // complete bootstrap replicates, a rank-0 covariance): untestable, not a
+            // violation.
             report.add_assumption(Assumption::untestable(
                 "Parallel trends",
                 format!("The pre-trend test could not be computed: {}", test.method),
@@ -147,9 +148,7 @@ fn check_parallel_trends(result: &StaggeredDidResult, report: &mut Identificatio
                     ),
                     "Parallel trends",
                 )
-                .with_remediation(vec![
-                    "Use bootstrap = 0 for analytic standard errors".to_string(),
-                ]),
+                .with_remediation(pretrend_unavailable_remediation(result, test)),
             );
         }
         Some(test) => {
@@ -176,23 +175,29 @@ fn check_parallel_trends(result: &StaggeredDidResult, report: &mut Identificatio
                     WarningSeverity::Caution
                 };
 
+                // the statistic the p-value is computed from: chi-squared, or F
+                // with a bootstrap covariance
+                let (stat_name, stat) = match test.f_stat {
+                    Some(f) => ("Pre-trend F", f),
+                    None => ("Pre-trend χ²", test.chi2),
+                };
                 let warning = IdentificationWarning::new(
                     "PARALLEL_TRENDS_VIOLATED",
                     severity,
                     "Pre-Trends Differ Significantly",
                     format!(
                         "The joint test of pre-treatment effects rejects parallel trends \
-                         (χ² = {:.2}, df = {}, p = {:.4}). This suggests treated and control \
+                         ({}, p = {:.4}). This suggests treated and control \
                          groups were on different trajectories before treatment, which may \
                          bias the estimated treatment effect. Examine the event study plot \
                          to assess the magnitude and pattern of pre-trend divergence.",
-                        test.chi2, test.df, test.p_value
+                        test.statistic_text(),
+                        test.p_value
                     ),
                     "Parallel trends",
                 )
                 .with_diagnostics(
-                    WarningDiagnostics::new("Pre-trend χ²", test.chi2)
-                        .with_threshold(test.p_value, true),
+                    WarningDiagnostics::new(stat_name, stat).with_threshold(test.p_value, true),
                 )
                 .with_remediation(vec![
                     "Examine event study plot for divergence patterns".to_string(),
@@ -227,6 +232,31 @@ fn check_parallel_trends(result: &StaggeredDidResult, report: &mut Identificatio
             );
         }
     }
+}
+
+/// What to do when the pre-trend test was not computed, by the reason: too many
+/// pre-treatment cells (on either path), or, with a bootstrap, too few complete
+/// replicates (the analytic path needs none). The analytic path can also give up
+/// on a rank-0 covariance, where bootstrap advice would be wrong.
+fn pretrend_unavailable_remediation(
+    result: &StaggeredDidResult,
+    test: &PreTrendTest,
+) -> Vec<String> {
+    let mut steps = Vec::new();
+    if test.pre_atts.len() > PreTrendTest::MAX_CELLS {
+        steps.push(format!(
+            "Reduce the number of pre-treatment cells to at most {} (fewer cohorts or periods)",
+            PreTrendTest::MAX_CELLS
+        ));
+    } else if result.config.bootstrap > 0 {
+        steps.push(
+            "Use bootstrap = 0 for analytic standard errors (without covariates), or more \
+             bootstrap replicates"
+                .to_string(),
+        );
+    }
+    steps.push("Inspect the pre-treatment event-study coefficients individually".to_string());
+    steps
 }
 
 /// Check for anticipation effects in pre-treatment periods.
@@ -355,6 +385,8 @@ mod tests {
             chi2: 5.0,
             df: 2,
             p_value: p,
+            f_stat: None,
+            df2: None,
             pre_atts: vec![0.1, 0.2],
             method: String::new(),
         });
@@ -482,19 +514,23 @@ mod tests {
         assert!(warning.is_some());
     }
 
-    /// A pre-trend test that could not be computed (NaN p-value) is untestable,
-    /// not a likely violation.
-    #[test]
-    fn test_pretrend_unavailable_is_not_a_violation() {
+    /// A mock result whose pre-trend test was not computed for `method`, with
+    /// `bootstrap` replicates and `k` pre-treatment cells.
+    fn unavailable(method: &str, bootstrap: usize, k: usize) -> StaggeredDidResult {
         let mut result = create_mock_staggered_result(Some(f64::NAN), false);
+        result.config.bootstrap = bootstrap;
         if let Some(t) = result.pretrend_test.as_mut() {
             t.chi2 = f64::NAN;
             t.df = 0;
-            t.method = "fewer than 2 bootstrap replicates computed every pre-treatment \
-                        ATT(g,t)"
-                .to_string();
+            t.pre_atts = vec![0.1; k];
+            t.method = method.to_string();
         }
-        let report = staggered_did_diagnostics(&result);
+        result
+    }
+
+    /// The remediation of the PRETREND_TEST_UNAVAILABLE warning of `result`.
+    fn unavailable_remediation(result: &StaggeredDidResult) -> Vec<String> {
+        let report = staggered_did_diagnostics(result);
         assert!(
             !report
                 .warnings
@@ -507,6 +543,10 @@ mod tests {
             .find(|w| w.code == "PRETREND_TEST_UNAVAILABLE")
             .expect("PRETREND_TEST_UNAVAILABLE");
         assert_eq!(w.severity, WarningSeverity::Info);
+        assert!(
+            w.message
+                .contains(&result.pretrend_test.as_ref().unwrap().method)
+        );
         let a = report
             .assumptions
             .iter()
@@ -514,6 +554,98 @@ mod tests {
             .expect("parallel trends assumption");
         assert_ne!(a.status, AssumptionStatus::LikelyViolation);
         assert!(!a.testable);
+        w.remediation.clone()
+    }
+
+    /// A pre-trend test that could not be computed (NaN p-value) is untestable,
+    /// not a likely violation, and its remediation fits the reason: bootstrap = 0
+    /// only when the result used a bootstrap, fewer cells when there were too many.
+    #[test]
+    fn test_pretrend_unavailable_is_not_a_violation() {
+        let mentions_bootstrap = |steps: &[String]| steps.iter().any(|s| s.contains("bootstrap"));
+        let inspect = "Inspect the pre-treatment event-study coefficients individually";
+
+        // bootstrap path, too few complete replicates: analytic SEs help
+        let steps = unavailable_remediation(&unavailable(
+            "fewer than 2 bootstrap replicates computed every pre-treatment ATT(g,t)",
+            999,
+            2,
+        ));
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.starts_with("Use bootstrap = 0 for analytic standard errors")),
+            "{steps:?}"
+        );
+
+        // analytic path, rank-0 covariance: no bootstrap advice
+        let steps = unavailable_remediation(&unavailable(
+            "Wald, influence-function covariance of 2 pre-treatment ATT(g,t) (the covariance \
+             has rank 0)",
+            0,
+            2,
+        ));
+        assert!(!mentions_bootstrap(&steps), "{steps:?}");
+        assert_eq!(steps, vec![inspect.to_string()]);
+
+        // more cells than the joint test is computed for, on either path
+        for bootstrap in [0, 999] {
+            let k = PreTrendTest::MAX_CELLS + 1;
+            let method = format!(
+                "{k} pre-treatment ATT(g,t) exceed the {} the joint test is computed for",
+                PreTrendTest::MAX_CELLS
+            );
+            let steps = unavailable_remediation(&unavailable(&method, bootstrap, k));
+            assert!(!mentions_bootstrap(&steps), "{steps:?}");
+            assert_eq!(
+                steps,
+                vec![
+                    "Reduce the number of pre-treatment cells to at most 2000 (fewer cohorts \
+                     or periods)"
+                        .to_string(),
+                    inspect.to_string()
+                ]
+            );
+        }
+    }
+
+    /// A rejection with a bootstrap covariance names the F statistic it was
+    /// computed from, an analytic one the chi-squared statistic.
+    #[test]
+    fn test_pretrend_violation_names_the_reference_distribution() {
+        let mut result = create_mock_staggered_result(Some(0.004), false);
+        let report = staggered_did_diagnostics(&result);
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "PARALLEL_TRENDS_VIOLATED")
+            .expect("PARALLEL_TRENDS_VIOLATED");
+        assert_eq!(w.severity, WarningSeverity::Warning);
+        assert!(
+            w.message.contains("(Chi-squared(2) = 5.00, p = 0.0040)"),
+            "{}",
+            w.message
+        );
+
+        if let Some(t) = result.pretrend_test.as_mut() {
+            t.f_stat = Some(2.4);
+            t.df2 = Some(48);
+        }
+        let report = staggered_did_diagnostics(&result);
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "PARALLEL_TRENDS_VIOLATED")
+            .expect("PARALLEL_TRENDS_VIOLATED");
+        assert!(
+            w.message
+                .contains("(T^2 = 5.00, F(2, 48) = 2.4000, p = 0.0040)"),
+            "{}",
+            w.message
+        );
+        let d = w.diagnostics.as_ref().expect("diagnostics");
+        assert_eq!(d.name, "Pre-trend F");
+        assert_eq!(d.value, 2.4);
     }
 
     #[test]

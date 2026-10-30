@@ -300,7 +300,8 @@ impl fmt::Display for EtwfeResult {
 /// etwfe drop incomplete rows; `EtwfeResult::missing` and the last Display line
 /// report what was dropped. Nothing is imputed: a missing `first_treat` does not make
 /// a unit never treated. A fractional or non-finite `first_treat` or time value is
-/// an error, and a text outcome is `NonNumericColumn`.
+/// an error (an infinite `first_treat` one that says never-treated units are coded
+/// 0), and a text outcome is `NonNumericColumn`.
 ///
 /// # Returns
 ///
@@ -318,6 +319,8 @@ pub fn run_etwfe(
     let config = config.unwrap_or_default();
     let control_cols: &[&str] = x_cols.unwrap_or(&[]);
 
+    // An infinite first_treat is refused with the never-treated code in the message.
+    crate::econometrics::staggered_did::refuse_infinite_first_treat(dataset, first_treat_col, "0")?;
     // One request over every column the model uses: rows with a missing value in
     // any of them are dropped jointly (reported in `missing`), never imputed.
     let cols = ColumnRequest::new(dataset.df())
@@ -1305,6 +1308,30 @@ mod tests {
         match etwfe(&Dataset::new(df)) {
             Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "treat"),
             other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
+        // never-treated units coded as -inf or inf: the error names the column and
+        // the code to use instead
+        let g = i64_col(&ds, "first_treat");
+        let first_never = g.iter().position(|&g| g == 0).unwrap();
+        for (code, shown) in [(f64::NEG_INFINITY, "-inf"), (f64::INFINITY, "inf")] {
+            let ft: Vec<f64> = g
+                .iter()
+                .map(|&g| if g == 0 { code } else { g as f64 })
+                .collect();
+            let mut df = ds.df().clone();
+            df.with_column(Column::new("first_treat".into(), ft))
+                .unwrap();
+            match etwfe(&Dataset::new(df)) {
+                Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                    message,
+                    format!(
+                        "Column 'first_treat' (the first treatment period) is {shown} in row \
+                         {first_never} (0-based); never-treated units must be coded 0, not \
+                         infinity."
+                    )
+                ),
+                other => panic!("expected InvalidSpecification, got {other:?}"),
+            }
         }
     }
 }

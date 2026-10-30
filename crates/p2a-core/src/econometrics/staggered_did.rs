@@ -49,19 +49,28 @@
 //!   with covariates). The event-study and overall influence functions include the
 //!   term for the estimated weights (did's `wif`), and the pre-trend test is the
 //!   Wald statistic `a' V^+ a` with the influence-function covariance of the
-//!   pre-treatment cells (generalized inverse, df = rank, if V is singular). The
-//!   joint test is computed for at most 2000 pre-treatment cells (its cost is cubic
-//!   in their number); above that it is reported as not computed.
+//!   pre-treatment cells on chi-squared(rank V) (generalized inverse, df = rank, if
+//!   V is singular).
 //! - `bootstrap >= 50`: a unit bootstrap; values 1 to 49 are refused. Every
 //!   replicate resamples units, computes all cells, the aggregates (with the
 //!   replicate's own cohort shares) and the pre-trend vector; the reported SEs are
-//!   the SDs of those replicate statistics, and the pre-trend Wald test uses their
-//!   covariance. A replicate in which a needed cell cannot be computed (no treated
+//!   the SDs of those replicate statistics. The pre-trend statistic `W = a' V^+ a`
+//!   uses the covariance V of the m replicates that computed every pre-treatment
+//!   cell, so it is Hotelling's T^2: with r = rank V, `F = (m - r) W / (r (m - 1))`
+//!   is referred to F(r, m - r), which accounts for the Monte Carlo error in V (a
+//!   chi-squared(r) reference over-rejects at small B). With m <= r it is not
+//!   computed. A replicate in which a needed cell cannot be computed (no treated
 //!   or comparison unit drawn, or a drawn unit without its base period) is dropped
 //!   for that statistic, and one warning says how many replicates were affected
 //!   and the fewest any SE used. The replicate cell estimator is the unconditional
 //!   difference in mean changes, also under IPW/DR with covariates (CAUS-36). The
 //!   cost is O(B (units + table entries + cells)) plus the aggregates.
+//!
+//! On both paths the joint pre-trend test over k pre-treatment cells costs
+//! O(n k^2 + k^3), with n the units (analytic) or the replicates used (bootstrap):
+//! the covariance is accumulated over blocks of rows with a budget check per block.
+//! It is computed for at most 2000 pre-treatment cells; above that it is reported
+//! as not computed.
 //!
 //! # References
 //!
@@ -73,7 +82,7 @@
 //!
 //! - Stata package: `csdid` (https://github.com/friosavila/csdid)
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, s};
 use rand::SeedableRng;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -86,7 +95,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{eig_symmetric, safe_inverse};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
-use statrs::distribution::{ContinuousCDF, Normal};
+use statrs::distribution::{ContinuousCDF, FisherSnedecor, Normal};
 
 /// Fewest bootstrap replicates accepted (`bootstrap = 0` is the analytic path).
 const MIN_BOOTSTRAP: usize = 50;
@@ -255,20 +264,50 @@ pub struct AggregatedEffect {
 }
 
 /// Pre-trend test result.
+///
+/// With analytic standard errors the statistic `W = a' V^+ a` uses the
+/// influence-function covariance and the p-value is chi-squared(`df`). With a
+/// bootstrap covariance estimated from m replicates, `W` is Hotelling's T^2 and the
+/// p-value is from `F = (m - df) W / (df (m - 1))` on F(`df`, `df2` = m - df), which
+/// accounts for the Monte Carlo error in V.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreTrendTest {
-    /// Chi-squared statistic
+    /// Wald statistic `a' V^+ a` (Hotelling's T^2 with a bootstrap covariance)
     pub chi2: f64,
-    /// Degrees of freedom
+    /// Degrees of freedom: the rank of V (the numerator df of the F reference)
     pub df: usize,
-    /// p-value
+    /// p-value: chi-squared(`df`), or F(`df`, `df2`) with a bootstrap covariance
     pub p_value: f64,
+    /// The F statistic of a bootstrap covariance; `None` with chi-squared(`df`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub f_stat: Option<f64>,
+    /// Denominator df (replicates used minus `df`) of a bootstrap covariance
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub df2: Option<usize>,
     /// Pre-treatment ATT estimates (should be ~0 under parallel trends)
     pub pre_atts: Vec<f64>,
     /// How the covariance of the pre-treatment ATT(g,t) was obtained, e.g.
     /// "Wald, influence-function covariance of 9 pre-treatment ATT(g,t)".
     #[serde(default)]
     pub method: String,
+}
+
+impl PreTrendTest {
+    /// The most pre-treatment cells the joint test is computed for; with more it is
+    /// reported as not computed (NaN p-value, `pre_atts` still filled).
+    pub const MAX_CELLS: usize = MAX_PRETREND_CELLS;
+
+    /// The statistic and its reference distribution as printed:
+    /// "Chi-squared(9) = 7.26", or "T^2 = 12.31, F(9, 191) = 1.2967" with a
+    /// bootstrap covariance.
+    pub fn statistic_text(&self) -> String {
+        match (self.f_stat, self.df2) {
+            (Some(f), Some(df2)) => {
+                format!("T^2 = {:.2}, F({}, {df2}) = {f:.4}", self.chi2, self.df)
+            }
+            _ => format!("Chi-squared({}) = {:.2}", self.df, self.chi2),
+        }
+    }
 }
 
 /// Result from Callaway-Sant'Anna staggered DiD estimation.
@@ -388,8 +427,9 @@ impl fmt::Display for StaggeredDidResult {
                 writeln!(f, "  Method: {}", pretrend.method)?;
                 writeln!(
                     f,
-                    "  Chi-squared({}) = {:.2}, p-value = {:.4}",
-                    pretrend.df, pretrend.chi2, pretrend.p_value
+                    "  {}, p-value = {:.4}",
+                    pretrend.statistic_text(),
+                    pretrend.p_value
                 )?;
                 if pretrend.p_value < 0.05 {
                     writeln!(f, "  WARNING: Pre-trends may be violated")?;
@@ -429,6 +469,45 @@ fn level_label(level: f64) -> String {
     format!("{}", (level * 100.0 * 1e6).round() / 1e6)
 }
 
+/// Refuse an infinite first-treatment period before the columns are extracted, with
+/// an error that names the column and the never-treated code `never` ("0", "0 or
+/// negative"). Coding never-treated units as infinity is common, and the
+/// time-index error alone would not say what to use instead. A missing column or a
+/// column that is not floating point is left to the extractor.
+pub(crate) fn refuse_infinite_first_treat(
+    dataset: &Dataset,
+    name: &str,
+    never: &str,
+) -> EconResult<()> {
+    let Ok(col) = dataset.df().column(name) else {
+        return Ok(());
+    };
+    if !col.dtype().is_float() {
+        return Ok(());
+    }
+    let polars_err = |e: polars::prelude::PolarsError| {
+        EconError::Computation(format!("reading column '{name}': {e}"))
+    };
+    let cast = col
+        .cast(&polars::prelude::DataType::Float64)
+        .map_err(polars_err)?;
+    let infinite = cast
+        .f64()
+        .map_err(polars_err)?
+        .iter()
+        .enumerate()
+        .find_map(|(i, v)| v.filter(|x| x.is_infinite()).map(|x| (i, x)));
+    match infinite {
+        Some((row, x)) => Err(EconError::InvalidSpecification {
+            message: format!(
+                "Column '{name}' (the first treatment period) is {x} in row {row} (0-based); \
+                 never-treated units must be coded {never}, not infinity."
+            ),
+        }),
+        None => Ok(()),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Main Estimation Function
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -454,7 +533,9 @@ fn level_label(level: f64) -> String {
 /// missing value (null or NaN) in the outcome, the first treatment period, the time, the
 /// unit or a covariate is dropped from every column, and `StaggeredDidResult::missing`,
 /// the warnings and the last Display line report what was dropped. Infinite values,
-/// fractional periods and text outcomes are refused with an error naming the column.
+/// fractional periods and text outcomes are refused with an error naming the column;
+/// an infinite first treatment period is refused with one that says never-treated
+/// units are coded 0 or negative.
 ///
 /// # Model
 ///
@@ -484,8 +565,9 @@ fn level_label(level: f64) -> String {
 /// `ResourceLimit` error. Every (g, t) cell and every replicate honours the
 /// cooperative cancellation budget (`p2a_core::resource`). The SE of every cell
 /// and aggregate is the SD of its replicate statistics, each aggregate recomputed
-/// with the replicate's cohort counts, and the pre-trend test uses the replicate
-/// covariance. A replicate that draws a unit without a base-period row has no
+/// with the replicate's cohort counts, and the pre-trend test is Hotelling's T^2
+/// with the replicate covariance, on F(r, m - r) (module docs). A replicate that
+/// draws a unit without a base-period row has no
 /// estimate for that cell (unbalanced panels, CAUS-85) and is dropped for the
 /// statistics that need the cell; a warning counts them and, when a statistic
 /// keeps fewer than 50 replicates, recommends `bootstrap = 0`. Replicates ignore
@@ -549,6 +631,7 @@ pub fn run_staggered_did(
         ));
     }
 
+    refuse_infinite_first_treat(dataset, treatment_time, "0 or negative")?;
     // One request over every column the estimator uses: rows with a missing
     // value in any of them are dropped jointly (reported in `missing`).
     let mut request = ColumnRequest::new(dataset.df())
@@ -1790,12 +1873,59 @@ fn pretrend_cells(atts: &[GroupTimeATT], base_period: i32) -> Vec<usize> {
         .collect()
 }
 
-/// The joint pre-trend test is computed for at most this many pre-treatment cells:
-/// its covariance is k x k and its eigendecomposition costs O(k^3).
+/// The joint pre-trend test is computed for at most this many pre-treatment cells
+/// k. Forming their k x k covariance from n units (or n bootstrap replicates) costs
+/// O(n k^2) and its eigendecomposition O(k^3), so the test costs O(n k^2 + k^3).
 const MAX_PRETREND_CELLS: usize = 2000;
 
-/// The Wald test that the pre-treatment ATT(g,t) `pre` are jointly zero,
-/// `a' V^+ a` with the joint covariance of the cells (`None` without pre cells).
+/// Rows (units or replicates) per block when the pre-trend covariance is
+/// accumulated; the budget is checked once per block.
+const PRETREND_BLOCK_ROWS: usize = 4096;
+
+/// `scale * X'X` for the `n_rows x k` matrix X, accumulated over blocks of at most
+/// [`PRETREND_BLOCK_ROWS`] rows: `fill(r0, block)` writes rows `r0..r0 + block.nrows()`
+/// of X into `block`. X is never held whole, and the budget is checked before every
+/// block, so the O(n_rows k^2) product can be cancelled.
+fn blocked_gram(
+    n_rows: usize,
+    k: usize,
+    scale: f64,
+    mut fill: impl FnMut(usize, ndarray::ArrayViewMut2<f64>),
+) -> EconResult<Array2<f64>> {
+    let mut v = resource::try_zeros2(k, k, "pre-trend covariance")?;
+    let rows = PRETREND_BLOCK_ROWS.min(n_rows);
+    let mut block = resource::try_zeros2(rows, k, "pre-trend covariance block")?;
+    let mut r0 = 0;
+    while r0 < n_rows {
+        resource::checkpoint()?;
+        let len = rows.min(n_rows - r0);
+        fill(r0, block.slice_mut(s![..len, ..]));
+        let b = block.slice(s![..len, ..]);
+        ndarray::linalg::general_mat_mul(scale, &b.t(), &b, 1.0, &mut v);
+        r0 += len;
+    }
+    Ok(v)
+}
+
+/// Hotelling's F for a statistic `w = a' V^+ a` whose covariance V (rank `rank`) is
+/// the sample covariance of `used` bootstrap replicates: `F = (m - r) w / (r (m - 1))`
+/// on F(r, m - r), with m = `used` and r = `rank`. Returns the F statistic, the
+/// denominator df and the p-value; `None` when `rank` is 0 or `used <= rank`.
+fn hotelling_f(w: f64, rank: usize, used: usize) -> Option<(f64, usize, f64)> {
+    if rank == 0 || used <= rank {
+        return None;
+    }
+    let df2 = used - rank;
+    let f = df2 as f64 * w / (rank as f64 * (used - 1) as f64);
+    let p = FisherSnedecor::new(rank as f64, df2 as f64).map_or(f64::NAN, |d| d.sf(f));
+    Some((f, df2, p))
+}
+
+/// The joint test that the pre-treatment ATT(g,t) `pre` are zero, `W = a' V^+ a`
+/// with the joint covariance V of the cells (`None` without pre cells): on
+/// chi-squared(rank V) with the influence-function covariance, and as Hotelling's
+/// T^2 on F(r, m - r) ([`hotelling_f`]) with the covariance of m bootstrap
+/// replicates.
 fn pretrend_wald(
     atts: &[GroupTimeATT],
     pre: &[usize],
@@ -1811,6 +1941,8 @@ fn pretrend_wald(
         chi2: f64::NAN,
         df: 0,
         p_value: f64::NAN,
+        f_stat: None,
+        df2: None,
         pre_atts: a.clone(),
         method,
     };
@@ -1820,28 +1952,39 @@ fn pretrend_wald(
              computed for"
         ))));
     }
-    let (v, method) = match joint {
+    // V, and (used, drawn) replicates for a bootstrap covariance
+    let (v, replicates) = match joint {
         Joint::Influence { inf, .. } => {
+            // V = IF'IF / n^2 over the pre columns, block by block of units
             let n_units = inf.nrows();
-            let mut sub = resource::try_zeros2(n_units, k, "pre-trend influence functions")?;
-            for (j, &c) in pre.iter().enumerate() {
-                sub.column_mut(j).assign(&inf.column(c));
-            }
-            resource::checkpoint()?;
-            let mut v = resource::try_zeros2(k, k, "pre-trend covariance")?;
             let n = n_units as f64;
-            ndarray::linalg::general_mat_mul(1.0 / (n * n), &sub.t(), &sub, 0.0, &mut v);
-            (
-                v,
-                format!("Wald, influence-function covariance of {k} pre-treatment ATT(g,t)"),
-            )
+            let v = blocked_gram(n_units, k, 1.0 / (n * n), |r0, mut block| {
+                let len = block.nrows();
+                for (j, &c) in pre.iter().enumerate() {
+                    block.column_mut(j).assign(&inf.slice(s![r0..r0 + len, c]));
+                }
+            })?;
+            (v, None)
         }
         Joint::Replicates { draws } => {
-            // the replicates in which every pre-treatment cell was computed
+            // the replicates in which every pre-treatment cell was computed, and
+            // the mean of each pre cell over them
             let n_reps = draws.cells.nrows();
-            let complete: Vec<usize> = (0..n_reps)
-                .filter(|&b| pre.iter().all(|&c| draws.cells[[b, c]].is_finite()))
-                .collect();
+            let mut complete: Vec<usize> =
+                resource::try_with_capacity(n_reps, "pre-trend bootstrap replicates")?;
+            let mut mean = resource::try_vec(k, 0.0, "pre-trend bootstrap means")?;
+            for b in 0..n_reps {
+                if b % PRETREND_BLOCK_ROWS == 0 {
+                    resource::checkpoint()?;
+                }
+                let row = draws.cells.row(b);
+                if pre.iter().all(|&c| row[c].is_finite()) {
+                    complete.push(b);
+                    for (m, &c) in mean.iter_mut().zip(pre) {
+                        *m += row[c];
+                    }
+                }
+            }
             let used = complete.len();
             if used < 2 {
                 return Ok(Some(not_computed(
@@ -1849,35 +1992,48 @@ fn pretrend_wald(
                         .to_string(),
                 )));
             }
-            let mut x = resource::try_zeros2(used, k, "pre-trend bootstrap draws")?;
-            for (i, &b) in complete.iter().enumerate() {
-                for (j, &c) in pre.iter().enumerate() {
-                    x[[i, j]] = draws.cells[[b, c]];
+            for m in &mut mean {
+                *m /= used as f64;
+            }
+            // V = X'X / (m - 1) with X the centred complete replicates
+            let v = blocked_gram(used, k, 1.0 / (used - 1) as f64, |r0, mut block| {
+                for (i, mut row) in block.rows_mut().into_iter().enumerate() {
+                    let b = complete[r0 + i];
+                    for (j, &c) in pre.iter().enumerate() {
+                        row[j] = draws.cells[[b, c]] - mean[j];
+                    }
                 }
-            }
-            for mut col in x.columns_mut() {
-                let mean = col.sum() / used as f64;
-                col.mapv_inplace(|v| v - mean);
-            }
-            resource::checkpoint()?;
-            let mut v = resource::try_zeros2(k, k, "pre-trend covariance")?;
-            ndarray::linalg::general_mat_mul(1.0 / (used - 1) as f64, &x.t(), &x, 0.0, &mut v);
-            (
-                v,
-                format!(
-                    "Wald, bootstrap covariance of {k} pre-treatment ATT(g,t) ({used} of \
-                     {n_reps} replicates)"
-                ),
-            )
+            })?;
+            (v, Some((used, n_reps)))
         }
     };
     resource::checkpoint()?;
-    let (chi2, rank) = wald_ginv(&a, &v)?;
+    let (w, rank) = wald_ginv(&a, &v)?;
+    let method = match replicates {
+        None => format!("Wald, influence-function covariance of {k} pre-treatment ATT(g,t)"),
+        Some((used, n_reps)) => format!(
+            "Hotelling T^2, bootstrap covariance of {k} pre-treatment ATT(g,t) ({used} of \
+             {n_reps} replicates)"
+        ),
+    };
     if rank == 0 {
         return Ok(Some(not_computed(format!(
             "{method} (the covariance has rank 0)"
         ))));
     }
+    let (p_value, f_stat, df2, method) = match replicates {
+        None => (chi_squared_p_value(w, rank as f64), None, None, method),
+        Some((used, _)) => match hotelling_f(w, rank, used) {
+            Some((f, df2, p)) => (p, Some(f), Some(df2), format!("{method}, F({rank}, {df2})")),
+            None => {
+                return Ok(Some(not_computed(format!(
+                    "{method}: {used} replicates do not exceed the rank {rank} of the \
+                     covariance, so F({rank}, {used} - {rank}) has no denominator degrees of \
+                     freedom"
+                ))));
+            }
+        },
+    };
     if rank < k {
         warnings.push(format!(
             "the covariance of the {k} pre-treatment ATT(g,t) is singular (rank {rank}); a \
@@ -1885,9 +2041,11 @@ fn pretrend_wald(
         ));
     }
     Ok(Some(PreTrendTest {
-        chi2,
+        chi2: w,
         df: rank,
-        p_value: chi_squared_p_value(chi2, rank as f64),
+        p_value,
+        f_stat,
+        df2,
         pre_atts: a,
         method,
     }))
@@ -2308,39 +2466,128 @@ mod tests {
         }
     }
 
+    /// Parallel trends hold in the DGP, so the joint test does not reject at 1%,
+    /// analytically (W = 16.55370047, df 9, p = 0.05618128981 with did's formulas)
+    /// and with the 9 x 9 covariance of 50 bootstrap replicates, which is referred
+    /// to Hotelling's F(9, m - 9) rather than chi-squared(9).
     #[test]
     fn test_pretrend_test() {
-        // Analytic covariance: W = 16.55370047, df 9, p = 0.05618128981 (did formulas).
-        // A 9 x 9 covariance from 50 bootstrap replicates would inflate the statistic.
         let dataset = create_staggered_dataset();
-        let config = StaggeredDidConfig {
-            bootstrap: 0,
-            seed: Some(42),
-            min_obs_per_cell: 3,
-            ..Default::default()
-        };
+        for bootstrap in [0, 50] {
+            let config = StaggeredDidConfig {
+                bootstrap,
+                seed: Some(42),
+                min_obs_per_cell: 3,
+                ..Default::default()
+            };
+            let result = run_staggered_did(
+                &dataset,
+                "outcome",
+                "first_treat",
+                "year",
+                "unit",
+                None,
+                config,
+            )
+            .unwrap();
+            let pretrend = result.pretrend_test.as_ref().expect("pre-trend test");
+            assert!(
+                pretrend.p_value > 0.01,
+                "bootstrap {bootstrap}: the pre-trend test should not reject parallel trends, \
+                 got {pretrend:?}"
+            );
+            assert_eq!(pretrend.df, 9, "bootstrap {bootstrap}");
+            let shown = format!("{result}");
+            if bootstrap == 0 {
+                assert_eq!((pretrend.f_stat, pretrend.df2), (None, None));
+                assert!(shown.contains("  Chi-squared(9) = "), "{shown}");
+            } else {
+                let df2 = pretrend.df2.expect("F denominator df");
+                let f = pretrend.f_stat.expect("F statistic");
+                assert!(df2 <= 50 - 9, "{df2}");
+                assert!(
+                    pretrend.method.ends_with(&format!(", F(9, {df2})")),
+                    "{}",
+                    pretrend.method
+                );
+                let line = format!(
+                    "  T^2 = {:.2}, F(9, {df2}) = {f:.4}, p-value = {:.4}",
+                    pretrend.chi2, pretrend.p_value
+                );
+                assert!(shown.contains(&line), "{line:?} not in\n{shown}");
+                assert!(!shown.contains("Chi-squared("), "{shown}");
+            }
+        }
+    }
 
-        let result = run_staggered_did(
-            &dataset,
-            "outcome",
-            "first_treat",
-            "year",
-            "unit",
-            None,
-            config,
-        )
+    /// Hotelling's F for a bootstrap covariance against R:
+    /// `pf((m - r) / (r * (m - 1)) * W, r, m - r, lower.tail = FALSE)`.
+    #[test]
+    fn test_pretrend_hotelling_f_matches_pf() {
+        // (W, r, m, F, p) with F and p from R 4.3.3
+        let cases = [
+            (16.5, 9, 50, 1.534013605442177, 0.1685901927291372),
+            (3.2, 2, 200, 1.591959798994975, 0.20612021667265973),
+            (250.0, 10, 11, 2.5, 0.4587204829251879),
+        ];
+        for (w, r, m, f_r, p_r) in cases {
+            let (f, df2, p) = hotelling_f(w, r, m).expect("F test");
+            assert_eq!(df2, m - r);
+            assert!(rel_close(f, f_r, 1e-14), "F {f} vs {f_r}");
+            assert!(rel_close(p, p_r, 1e-10), "p {p} vs {p_r}");
+        }
+        // no denominator degrees of freedom, or nothing to test
+        assert!(hotelling_f(4.0, 9, 9).is_none());
+        assert!(hotelling_f(4.0, 9, 5).is_none());
+        assert!(hotelling_f(4.0, 0, 50).is_none());
+    }
+
+    /// The blocked covariance equals the naive `scale * X'X` over several blocks of
+    /// noisy rows, and the budget is checked before every block: cancelling during
+    /// the first block stops the product before the second.
+    #[test]
+    fn test_pretrend_blocked_gram_matches_naive_and_checks_every_block() {
+        let (n, k) = (2 * PRETREND_BLOCK_ROWS + 17, 5);
+        let x = Array2::from_shape_fn((n, k), |(i, j)| {
+            ((i * 7 + j * 13) % 29) as f64 * 0.1 - 1.4 + ((i * j) % 5) as f64 * 0.03
+        });
+        let scale = 1.0 / (n - 1) as f64;
+        let mut fills = Vec::new();
+        let v = blocked_gram(n, k, scale, |r0, mut block| {
+            fills.push((r0, block.nrows()));
+            block.assign(&x.slice(s![r0..r0 + block.nrows(), ..]));
+        })
         .unwrap();
-
-        // Should have pre-trend test
-        assert!(result.pretrend_test.is_some());
-
-        let pretrend = result.pretrend_test.unwrap();
-        // Under correct parallel trends, p-value should be > 0.05
-        assert!(
-            pretrend.p_value > 0.01,
-            "Pre-trend test p-value should not reject parallel trends, got {}",
-            pretrend.p_value
+        assert_eq!(
+            fills,
+            [
+                (0, PRETREND_BLOCK_ROWS),
+                (PRETREND_BLOCK_ROWS, PRETREND_BLOCK_ROWS),
+                (2 * PRETREND_BLOCK_ROWS, 17)
+            ]
         );
+        for i in 0..k {
+            for j in 0..k {
+                let naive: f64 = (0..n).map(|r| x[[r, i]] * x[[r, j]]).sum::<f64>() * scale;
+                assert!(
+                    rel_close(v[[i, j]], naive, 1e-12),
+                    "({i}, {j}): {} vs {naive}",
+                    v[[i, j]]
+                );
+            }
+        }
+
+        let token = CancelToken::new();
+        let mut blocks = 0;
+        let res = with_budget(Budget::new(None, token.clone()), || {
+            blocked_gram(n, k, scale, |r0, mut block| {
+                blocks += 1;
+                token.cancel();
+                block.assign(&x.slice(s![r0..r0 + block.nrows(), ..]));
+            })
+        });
+        expect_cancelled(res);
+        assert_eq!(blocks, 1);
     }
 
     #[test]
@@ -3246,11 +3493,32 @@ mod tests {
             let pt = r.pretrend_test.as_ref().unwrap();
             assert!(rel_close(pt.chi2, w, 1e-8), "{what}: W {} vs {w}", pt.chi2);
             assert_eq!(pt.df, 9, "{what}");
+            // Hotelling's T^2: F = (m - 9) W / (9 (m - 1)) on F(9, m - 9)
+            let f = (m - kp) as f64 * w / (kp as f64 * (m - 1) as f64);
+            let p = FisherSnedecor::new(kp as f64, (m - kp) as f64)
+                .unwrap()
+                .sf(f);
+            assert_eq!(pt.df2, Some(m - kp), "{what}");
             assert!(
-                pt.method
-                    .starts_with("Wald, bootstrap covariance of 9 pre-treatment ATT(g,t)"),
-                "{what}: {}",
-                pt.method
+                rel_close(pt.f_stat.unwrap(), f, 1e-8),
+                "{what}: F {:?} vs {f}",
+                pt.f_stat
+            );
+            assert!(
+                rel_close(pt.p_value, p, 1e-8),
+                "{what}: p {} vs {p}",
+                pt.p_value
+            );
+            // the chi-squared(9) p-value ignores the error in V and is smaller
+            assert!(chi_squared_p_value(w, kp as f64) < p, "{what}");
+            assert_eq!(
+                pt.method,
+                format!(
+                    "Hotelling T^2, bootstrap covariance of 9 pre-treatment ATT(g,t) ({m} of \
+                     200 replicates), F(9, {})",
+                    m - kp
+                ),
+                "{what}"
             );
         }
     }
@@ -3638,6 +3906,22 @@ mod tests {
             ),
             other => panic!("expected InvalidSpecification, got {other:?}"),
         }
+        // never-treated units coded as infinity: the error says how to code them
+        let g = i64s(&ds, "first_treat");
+        let first_never = g.iter().position(|&g| g == 0).unwrap();
+        let ft: Vec<f64> = g
+            .iter()
+            .map(|&g| if g == 0 { f64::INFINITY } else { g as f64 })
+            .collect();
+        let inf = replace_col(&ds, "first_treat", Column::new("first_treat".into(), ft));
+        let message = expect_invalid(run(&inf, "unit", cfg()), "Column 'first_treat'");
+        assert_eq!(
+            message,
+            format!(
+                "Column 'first_treat' (the first treatment period) is inf in row {first_never} \
+                 (0-based); never-treated units must be coded 0 or negative, not infinity."
+            )
+        );
         // a first treatment period that varies within a unit (unit 1 is cohort 3)
         let mut ft = i64s(&ds, "first_treat");
         ft[row_of(&ds, 1, 3)] = 5;

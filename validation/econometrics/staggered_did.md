@@ -100,16 +100,27 @@ R-pinned (`validation/methods/causal_did.json`, method `staggered_did_cs`):
   `estimation_method`; without covariates the three methods coincide, as in did).
 - `bootstrap >= 50`: a unit bootstrap (the T0 table-based resampler, same random stream). Every
   replicate computes all cells, the aggregates with the replicate's own cohort counts and the
-  pre-trend vector; the reported SEs are the SDs of those replicate statistics and the pre-trend
-  test uses their covariance. A replicate that cannot compute a needed cell (no treated or
-  comparison unit drawn, or a drawn unit without its base period on an unbalanced panel) is
-  dropped for that statistic; one warning gives the number of affected replicates and the fewest
-  any SE used, and recommends `bootstrap = 0` when that is below 50. A pre-trend test with fewer
-  than 2 complete replicates is reported as not computed (and the identification diagnostics
-  call it untestable). The replicate cell estimator ignores covariates (CAUS-36).
+  pre-trend vector; the reported SEs are the SDs of those replicate statistics. A replicate that
+  cannot compute a needed cell (no treated or comparison unit drawn, or a drawn unit without its
+  base period on an unbalanced panel) is dropped for that statistic; one warning gives the number
+  of affected replicates and the fewest any SE used, and recommends `bootstrap = 0` when that is
+  below 50. The replicate cell estimator ignores covariates (CAUS-36).
+- The bootstrap pre-trend test (CAUS-86) uses the covariance V of the m replicates that computed
+  every pre-treatment cell, so `W = a' V^+ a` is Hotelling's T^2: with r = rank V it reports
+  `F = (m - r) W / (r (m - 1))` on F(r, m - r) (method text "Hotelling T^2, bootstrap covariance
+  of k pre-treatment ATT(g,t) (m of B replicates), F(r, m - r)"; Display "T^2 = .., F(r, m - r) =
+  .., p-value = .."). A chi-squared(r) reference ignores the Monte Carlo error in V and
+  over-rejects: in the sampling model (a ~ N(0, I_k), V the sample covariance of B independent
+  N(0, I_k) draws; 4000 replications in R) the 5% test rejects 15.6% (k = 9, B = 50), 7.0%
+  (k = 9, B = 200), 90.7% (k = 30, B = 50) and 18.6% (k = 30, B = 200) of the time, against
+  5.1%, 5.2%, 5.4% and 5.1% with the F reference. The test is not computed with fewer than 2
+  complete replicates or with m <= r (the identification diagnostics call it untestable).
 - `bootstrap` 1..=49 and a `confidence_level` outside (0, 1) are `InvalidSpecification` errors.
-  Every CI uses `confidence_level` (statrs normal quantile); the joint pre-trend test is computed
-  for at most 2000 pre-treatment cells.
+  Every CI uses `confidence_level` (statrs normal quantile).
+- The joint pre-trend test over k pre-treatment cells costs O(n k^2 + k^3), with n the units
+  (analytic) or the replicates used (bootstrap): V is accumulated over blocks of 4096 rows with a
+  budget check per block, then eigendecomposed. It is computed for at most 2000 pre-treatment
+  cells (`PreTrendTest::MAX_CELLS`); above that it is reported as not computed.
 
 ## Comparison sets
 
@@ -131,14 +142,18 @@ report it. `did` itself drops units without the needed periods.
   R `factor()` order).
 - `treatment_time` and `time_col` hold whole numbers or dates; a fractional or infinite value is
   an error naming the column and row. `treatment_time` must be constant within each unit
-  (did::att_gt requires it); never-treated units are coded 0 or negative.
+  (did::att_gt requires it); never-treated units are coded 0 or negative, and an infinite
+  `treatment_time` (a common never-treated code) is refused with an error that says so.
 - A text outcome is `NonNumericColumn`, an absent column `ColumnNotFound`.
 - `n_never_treated` and `n_treated` count units.
 
 Fixture tests (not R-pinned; they compare two Rust runs): `test_na_staggered_did_omits_missing_rows`,
 `test_na_staggered_did_errors_name_the_column`. Bootstrap tests:
 `test_staggered_did_bootstrap_aggregates_are_replicate_sds` (every SE equals the SD of the
-replicate statistic recomputed from the reference replicates),
+replicate statistic recomputed from the reference replicates, and the pre-trend T^2, F and
+p-value equal those of the reference replicates' covariance), `test_pretrend_test` (no rejection
+under parallel trends, analytic and with B = 50), `test_pretrend_hotelling_f_matches_pf` (F and
+p against R's `pf`), `test_pretrend_blocked_gram_matches_naive_and_checks_every_block`,
 `test_staggered_did_bootstrap_reports_dropped_replicates`, `test_staggered_did_bootstrap_ses_pinned`,
 `test_bootstrap_draws_match_reference`; argument checks: `test_staggered_did_bootstrap_below_50_is_error`,
 `test_staggered_did_analytic_with_covariates_not_implemented`,

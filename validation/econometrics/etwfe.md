@@ -83,7 +83,8 @@ controls through one `ColumnRequest`:
   pooled unit "0" (or ""), a missing treatment or control as 0.0;
 - unit ids may be integers, fractional numbers, strings, categoricals or dates; time and
   `first_treat` hold whole numbers or dates (a fractional or infinite value is an error);
-  never-treated units are coded 0;
+  never-treated units are coded 0, and an infinite `first_treat` (a common never-treated code,
+  which used to run as a cohort without post cells) is refused with an error that says so;
 - a text outcome is `NonNumericColumn`, an absent column `ColumnNotFound`.
 
 Fixture tests, not R-pinned (`crates/p2a-core/src/econometrics/etwfe.rs`):
