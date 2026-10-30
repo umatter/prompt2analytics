@@ -135,6 +135,38 @@ cor.test(x, y, method = "pearson")
 
 **Rust test**: `stats::cortest::tests::test_validate_pearson_correlation` (`crates/p2a-core/src/stats/cortest.rs`). It uses different data (y = 1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0; R 4.3.3 gives r 0.999070526757068, t 65.5554248847905, p 3.26167845639871e-12) and checks r within 0.001 of a quoted 0.999071, t > 50, p < 0.001 and df = 8. Not R-pinned (cor.test estimator findings STAT-20, STAT-22, STAT-47).
 
+#### cor.test with missing values (R-pinned)
+
+`p2a_core::stats::cortest::run_cor_test_dataset(dataset, x_col, y_col, method, alternative,
+conf_level)` runs `cor.test` on two dataset columns. It reads both through the shared
+extractor in one request and keeps the complete pairs, as `cor.test` does
+(`complete.cases(x, y)`); the drop is reported in `CorTestResult.missing`. Integer columns are
+accepted; a text column is `NonNumericColumn`. `run_cor_test` (slices) is unchanged.
+
+```r
+# case stat_two_sample_na, validation/r/cases/stats_onesample.R
+# (validation/datasets/generated/two_sample_na.csv: x and y have 7 values each, 6 complete pairs)
+ct <- cor.test(d$x, d$y)
+
+# R 4.3.3 gives:
+# r = 0.9782906634777736
+# t = 9.441251753133958 (df = 4)
+# p-value = 0.0007018271843026733
+# 95% CI: (0.8091413571114043, 0.9977196153804951), 6 pairs
+```
+
+Before T2-WP06 the MCP handler extracted the columns itself and read nulls as 0 (r 0.80 on this
+dataset); T2-WP20 moves it to `run_cor_test_dataset`.
+
+**Rust tests:** `stats::cortest::tests::test_validate_cor_test_two_sample_na` (r, t, df, p,
+CI, n; `missing`) and `stats::cortest::tests::test_validate_na_cor_test_columns` (Int64 against
+Float64, text, absent column, unknown method). Tolerance `validation/README.md`, n < 100: r 1e-6,
+t and CI 1e-5 relative, p `Tol::p_value`; df and counts exact.
+
+**Status:** Pearson, two-sided, on dataset columns: R-pinned (registry
+`validation/methods/stats_onesample.json`, id `cor_test_pearson`). The Kendall and Spearman
+variants and `run_cor_test` on slices stay not R-pinned (STAT-20, STAT-22, STAT-47).
+
 ### power.t.test Validation
 
 ```r

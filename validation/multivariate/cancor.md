@@ -82,6 +82,8 @@ Tests with minimal dimensions to verify basic correctness.
 
 3. **Centering**: Our implementation centers data by default (xcenter=true, ycenter=true), matching R's default behavior.
 
+4. **Missing values**: `run_cancor` refuses a null or NaN cell with `NullValues` naming the column, as R's `cancor` refuses NA; integer columns are accepted (T2-WP06; `stats::cancor::tests::test_na_cancor_columns`). Not R-pinned (STAT-16).
+
 ## Performance Comparison
 
 | Dataset Size | Rust (µs) | R (µs) | Speedup |

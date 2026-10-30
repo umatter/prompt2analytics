@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use super::ttest::{Alternative, two_sample_t_test};
 use super::wilcoxon::{WilcoxonConfig, wilcoxon_rank_sum};
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, Columns, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::traits::SignificanceLevel;
@@ -141,6 +142,10 @@ pub struct PairwiseTTestResult {
     pub pooled_sd: Option<f64>,
     /// Total number of comparisons
     pub n_comparisons: usize,
+    /// Rows dropped because of a missing response or a missing label (dataset wrapper;
+    /// nothing for slices).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl PairwiseTTestResult {
@@ -259,6 +264,9 @@ impl std::fmt::Display for PairwiseTTestResult {
 
         writeln!(f, "---")?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -559,10 +567,19 @@ pub fn pairwise_t_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToString>(
         group_means,
         pooled_sd,
         n_comparisons,
+        missing: MissingSummary::none(values.len()),
     })
 }
 
 /// Perform pairwise t-tests using dataset columns.
+///
+/// The response and the factor are read in one request: a row with a missing response (null
+/// or NaN) or a missing label is dropped from both, as R does, and the drop is reported in
+/// `missing`. Integer, decimal and boolean responses are accepted and labels come from the
+/// column as stored (a text label "NA" is a level like any other; the CSV loader reads the
+/// token NA as missing). A text response is refused (`EconError::NonNumericColumn`), as are
+/// infinite values (`EconError::NonFiniteValues`). The core function orders the groups by
+/// label text.
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -588,84 +605,45 @@ pub fn run_pairwise_t_test(
     alternative: Alternative,
     p_adjust_method: PValueAdjustMethod,
 ) -> EconResult<PairwiseTTestResult> {
-    let df = dataset.df();
+    let cols = response_and_factor(dataset, response, factor)?;
+    let labels = labels_of(&cols, factor)?;
+    let mut result = pairwise_t_test(
+        cols.numeric(response),
+        &labels,
+        pool_sd,
+        alternative,
+        p_adjust_method,
+    )?;
+    result.missing = cols.missing().clone();
+    Ok(result)
+}
 
-    // Extract response values
-    let response_col = df.column(response).map_err(|_| EconError::ColumnNotFound {
-        column: response.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Extract factor values
-    let factor_col = df.column(factor).map_err(|_| EconError::ColumnNotFound {
-        column: factor.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Convert to vectors, handling missing values
-    let mut values: Vec<f64> = Vec::new();
-    let mut groups: Vec<String> = Vec::new();
-
-    let response_f64 = response_col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: response.to_string(),
-        })?;
-
-    // Handle factor as either String or numeric
-    let factor_str: Vec<String> = if let Ok(str_col) = factor_col.str() {
-        str_col
-            .into_iter()
-            .map(|opt| opt.unwrap_or("NA").to_string())
-            .collect()
-    } else if let Ok(f64_col) = factor_col.f64() {
-        f64_col
-            .into_iter()
-            .map(|opt| match opt {
-                Some(v) => v.to_string(),
-                None => "NA".to_string(),
-            })
-            .collect()
-    } else if let Ok(i64_col) = factor_col.i64() {
-        i64_col
-            .into_iter()
-            .map(|opt| match opt {
-                Some(v) => v.to_string(),
-                None => "NA".to_string(),
-            })
-            .collect()
-    } else {
-        return Err(EconError::InvalidSpecification {
-            message: format!("Factor column '{}' must be string or numeric", factor),
-        });
-    };
-
-    for (resp, grp) in response_f64.into_iter().zip(factor_str.into_iter()) {
-        if let Some(v) = resp {
-            if grp != "NA" {
-                values.push(v);
-                groups.push(grp);
-            }
-        }
-    }
-
-    if values.is_empty() {
+/// The response and the factor of a pairwise test in one request: a row with a missing
+/// response or label is dropped from both (`pairwise.t.test` and `pairwise.wilcox.test` do
+/// the same). Nothing left is the wrappers' "No valid observations" error.
+fn response_and_factor(dataset: &Dataset, response: &str, factor: &str) -> EconResult<Columns> {
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(response)
+        .factor(factor)
+        .na(NaPolicy::Omit)
+        .min_rows(0, "pairwise test")
+        .extract()?;
+    if cols.n() == 0 {
         return Err(EconError::InsufficientData {
             required: 2,
             provided: 0,
             context: "No valid observations after removing missing values".to_string(),
         });
     }
+    Ok(cols)
+}
 
-    pairwise_t_test(&values, &groups, pool_sd, alternative, p_adjust_method)
+/// The label of each kept row, as stored in the factor column.
+fn labels_of<'a>(cols: &'a Columns, factor: &str) -> EconResult<Vec<&'a str>> {
+    let f = cols.factor(factor);
+    let mut labels = resource::try_with_capacity(cols.n(), "group labels")?;
+    labels.extend((0..cols.n()).map(|i| f.label(i)));
+    Ok(labels)
 }
 
 /// `k(k-1)/2`, the number of pairwise comparisons among `k` groups (checked).
@@ -730,6 +708,10 @@ pub struct PairwiseWilcoxResult {
     pub exact: bool,
     /// Warning message (if any, e.g., ties present)
     pub warning: Option<String>,
+    /// Rows dropped because of a missing response or a missing label (dataset wrapper;
+    /// nothing for slices).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl PairwiseWilcoxResult {
@@ -838,6 +820,9 @@ impl std::fmt::Display for PairwiseWilcoxResult {
 
         writeln!(f, "---")?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -997,10 +982,19 @@ pub fn pairwise_wilcox_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToStr
         n_comparisons,
         exact: all_exact,
         warning,
+        missing: MissingSummary::none(values.len()),
     })
 }
 
 /// Perform pairwise Wilcoxon rank sum tests using dataset columns.
+///
+/// The response and the factor are read in one request: a row with a missing response (null
+/// or NaN) or a missing label is dropped from both, as R does, and the drop is reported in
+/// `missing`. Integer, decimal and boolean responses are accepted and labels come from the
+/// column as stored (a text label "NA" is a level like any other; the CSV loader reads the
+/// token NA as missing). A text response is refused (`EconError::NonNumericColumn`), as are
+/// infinite values (`EconError::NonFiniteValues`). The core function orders the groups by
+/// label text.
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -1026,84 +1020,17 @@ pub fn run_pairwise_wilcox_test(
     p_adjust_method: PValueAdjustMethod,
     exact: Option<bool>,
 ) -> EconResult<PairwiseWilcoxResult> {
-    let df = dataset.df();
-
-    // Extract response values
-    let response_col = df.column(response).map_err(|_| EconError::ColumnNotFound {
-        column: response.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Extract factor values
-    let factor_col = df.column(factor).map_err(|_| EconError::ColumnNotFound {
-        column: factor.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Convert to vectors, handling missing values
-    let mut values: Vec<f64> = Vec::new();
-    let mut groups: Vec<String> = Vec::new();
-
-    let response_f64 = response_col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: response.to_string(),
-        })?;
-
-    // Handle factor as either String or numeric
-    let factor_str: Vec<String> = if let Ok(str_col) = factor_col.str() {
-        str_col
-            .into_iter()
-            .map(|opt| opt.unwrap_or("NA").to_string())
-            .collect()
-    } else if let Ok(f64_col) = factor_col.f64() {
-        f64_col
-            .into_iter()
-            .map(|opt| match opt {
-                Some(v) => v.to_string(),
-                None => "NA".to_string(),
-            })
-            .collect()
-    } else if let Ok(i64_col) = factor_col.i64() {
-        i64_col
-            .into_iter()
-            .map(|opt| match opt {
-                Some(v) => v.to_string(),
-                None => "NA".to_string(),
-            })
-            .collect()
-    } else {
-        return Err(EconError::InvalidSpecification {
-            message: format!("Factor column '{}' must be string or numeric", factor),
-        });
-    };
-
-    for (resp, grp) in response_f64.into_iter().zip(factor_str.into_iter()) {
-        if let Some(v) = resp {
-            if grp != "NA" {
-                values.push(v);
-                groups.push(grp);
-            }
-        }
-    }
-
-    if values.is_empty() {
-        return Err(EconError::InsufficientData {
-            required: 2,
-            provided: 0,
-            context: "No valid observations after removing missing values".to_string(),
-        });
-    }
-
-    pairwise_wilcox_test(&values, &groups, alternative, p_adjust_method, exact)
+    let cols = response_and_factor(dataset, response, factor)?;
+    let labels = labels_of(&cols, factor)?;
+    let mut result = pairwise_wilcox_test(
+        cols.numeric(response),
+        &labels,
+        alternative,
+        p_adjust_method,
+        exact,
+    )?;
+    result.missing = cols.missing().clone();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1614,5 +1541,108 @@ mod tests {
 
         assert!((result.group_medians[0] - 3.0).abs() < 0.01);
         assert!((result.group_medians[1] - 12.0).abs() < 0.01);
+    }
+
+    // ========================================================================
+    // Missing values and integer columns (case stat_pairwise_mahalanobis_na,
+    // validation/r/cases/stats_onesample.R)
+    // ========================================================================
+
+    /// X-8: pairwise.t.test (pooled SD, Holm and unadjusted) on an Int64 response with
+    /// missing values in rows 4 and 18.
+    #[test]
+    fn test_validate_pairwise_t_test_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_pairwise_mahalanobis_na");
+        let r = run_pairwise_t_test(
+            &ds,
+            "y",
+            "g",
+            true,
+            Alternative::TwoSided,
+            PValueAdjustMethod::Holm,
+        )
+        .unwrap();
+        let sizes: Vec<f64> = r.group_sizes.iter().map(|&n| n as f64).collect();
+        let mut check = Check::new(&case);
+        check
+            .vector("pairwise_p", &r.p_values_adj, Tol::p_value(28))
+            .vector("pairwise_p_raw", &r.p_values_raw, Tol::p_value(28))
+            .vector("pairwise_t", &r.t_statistics, Tol::stat(28))
+            .named("pairwise_group_n", &r.group_names, &sizes, Tol::exact())
+            .named(
+                "pairwise_group_mean",
+                &r.group_names,
+                &r.group_means,
+                Tol::coef(28),
+            )
+            .scalar("pairwise_pooled_sd", r.pooled_sd.unwrap(), Tol::stat(28));
+        for df in &r.df {
+            check.scalar("pairwise_df", *df, Tol::exact());
+        }
+        check.finish();
+        assert_eq!(r.missing.by_column, vec![("y".to_string(), 2)]);
+    }
+
+    #[test]
+    fn test_validate_na_pairwise_tests_missing_rows_and_errors() {
+        let (_case, ds) = crate::test_support::load_case("stat_pairwise_mahalanobis_na");
+        // p-values not pinned: the Wilcoxon tie variance is STAT-42 (Tier 4)
+        let w = run_pairwise_wilcox_test(
+            &ds,
+            "y",
+            "g",
+            Alternative::TwoSided,
+            PValueAdjustMethod::Holm,
+            None,
+        )
+        .unwrap();
+        assert_eq!(w.group_sizes, [9, 9, 10]);
+        assert_eq!(w.missing.n_dropped, 2);
+        assert_eq!(
+            w.to_string().lines().last().unwrap(),
+            format!("Missing values: {}", w.missing.note().unwrap())
+        );
+        let t = run_pairwise_t_test(
+            &ds,
+            "y",
+            "g",
+            true,
+            Alternative::TwoSided,
+            PValueAdjustMethod::Holm,
+        )
+        .unwrap();
+        assert_eq!(
+            t.to_string().lines().last().unwrap(),
+            format!("Missing values: {}", t.missing.note().unwrap())
+        );
+        let tt = |resp| {
+            run_pairwise_t_test(
+                &ds,
+                resp,
+                "g",
+                true,
+                Alternative::TwoSided,
+                PValueAdjustMethod::Holm,
+            )
+        };
+        let wt = |resp| {
+            run_pairwise_wilcox_test(
+                &ds,
+                resp,
+                "g",
+                Alternative::TwoSided,
+                PValueAdjustMethod::Holm,
+                None,
+            )
+        };
+        assert!(matches!(tt("g"), Err(EconError::NonNumericColumn { column }) if column == "g"));
+        assert!(matches!(wt("g"), Err(EconError::NonNumericColumn { column }) if column == "g"));
+        assert!(
+            matches!(tt("nope"), Err(EconError::ColumnNotFound { column, .. }) if column == "nope")
+        );
+        assert!(
+            matches!(wt("nope"), Err(EconError::ColumnNotFound { column, .. }) if column == "nope")
+        );
     }
 }

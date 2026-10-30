@@ -56,6 +56,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::traits::SignificanceLevel;
 
@@ -135,6 +136,11 @@ pub struct TTestResult {
     pub n: usize,
     /// Second sample size (for two-sample tests)
     pub n_2: Option<usize>,
+
+    /// Rows dropped because of missing values (dataset wrapper `t_test`; nothing for slices).
+    /// A two-sample test sums the two columns' summaries, a paired test drops whole pairs.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for TTestResult {
@@ -191,6 +197,9 @@ impl std::fmt::Display for TTestResult {
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -263,6 +272,7 @@ pub fn one_sample_t_test(
         std_error,
         n,
         n_2: None,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -377,6 +387,7 @@ pub fn two_sample_t_test(
         std_error,
         n: n1,
         n_2: Some(n2),
+        missing: MissingSummary::none(n1 + n2),
     })
 }
 
@@ -440,6 +451,18 @@ pub fn paired_t_test(
 ///
 /// Convenience wrapper that extracts data from a Dataset.
 ///
+/// Missing values (null or NaN) are dropped as R's `t.test` drops them, and counted in
+/// `missing`:
+///
+/// | Test | Policy |
+/// |---|---|
+/// | one-sample (`y_col` is `None`) | the column's missing values are dropped (`x[!is.na(x)]`) |
+/// | two-sample | each column drops its own missing values (`t.test(x, y)`) |
+/// | paired | a pair with a missing value in either column is dropped (`complete.cases(x, y)`) |
+///
+/// Integer, decimal and boolean columns are accepted; a text column is refused
+/// (`EconError::NonNumericColumn`), as are infinite values (`EconError::NonFiniteValues`).
+///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
 /// * `x_col` - Name of first variable column
@@ -473,55 +496,39 @@ pub fn t_test(
 ) -> EconResult<TTestResult> {
     let df = dataset.df();
 
-    // Extract x values
-    let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
-        column: x_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let x: Vec<f64> = x_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: x_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
     match y_col {
+        Some(y_name) if paired => {
+            let cols = ColumnRequest::new(df)
+                .numerics(&[x_col, y_name])
+                .na(NaPolicy::Omit)
+                .extract()?;
+            let mut result = paired_t_test(
+                cols.numeric(x_col),
+                cols.numeric(y_name),
+                mu,
+                alternative,
+                conf_level,
+            )?;
+            result.missing = cols.missing().clone();
+            Ok(result)
+        }
         Some(y_name) => {
-            // Extract y values
-            let y_series = df.column(y_name).map_err(|_| EconError::ColumnNotFound {
-                column: y_name.to_string(),
-                available: df
-                    .get_column_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            })?;
-            let y: Vec<f64> = y_series
-                .f64()
-                .map_err(|_| EconError::NonNumericColumn {
-                    column: y_name.to_string(),
-                })?
-                .into_no_null_iter()
-                .collect();
-
-            if paired {
-                paired_t_test(&x, &y, mu, alternative, conf_level)
-            } else {
-                two_sample_t_test(&x, &y, mu, alternative, var_equal, conf_level)
-            }
+            let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
+            let (y, missing_y) = numeric_column(df, y_name, NaPolicy::Omit)?;
+            let mut result = two_sample_t_test(&x, &y, mu, alternative, var_equal, conf_level)?;
+            result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
+            Ok(result)
         }
         None => {
+            let (x, missing) = numeric_column(df, x_col, NaPolicy::Omit)?;
             if paired {
                 return Err(EconError::InvalidSpecification {
                     message: "Paired test requires two columns".to_string(),
                 });
             }
-            one_sample_t_test(&x, mu, alternative, conf_level)
+            let mut result = one_sample_t_test(&x, mu, alternative, conf_level)?;
+            result.missing = missing;
+            Ok(result)
         }
     }
 }
@@ -834,5 +841,178 @@ mod tests {
         assert!((result.estimate - 6.0).abs() < 0.001);
         assert!((result.conf_int_lower - 4.244022).abs() < 0.1);
         assert!((result.conf_int_upper - 7.755978).abs() < 0.1);
+    }
+
+    // ========================================================================
+    // Missing values and integer columns (case stat_two_sample_na,
+    // validation/r/cases/stats_onesample.R)
+    // ========================================================================
+
+    /// X-2/X-8/TOOL-9: one-sample, Welch, pooled and paired t-tests with missing cells;
+    /// Welch on Int64 columns.
+    #[test]
+    fn test_validate_t_test_two_sample_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let run = |x: &str, y: Option<&str>, paired: bool, eq: bool| {
+            t_test(&ds, x, y, 0.0, Alternative::TwoSided, paired, eq, 0.95)
+                .unwrap_or_else(|e| panic!("{x} {y:?}: {e}"))
+        };
+        let one = run("x", None, false, false);
+        let welch = run("x", Some("y"), false, false);
+        let pooled = run("x", Some("y"), false, true);
+        let paired = run("x", Some("y"), true, false);
+        Check::new(&case)
+            .scalar("one_t", one.t_statistic, Tol::stat(7))
+            .scalar("one_df", one.df, Tol::exact())
+            .scalar("one_p", one.p_value, Tol::p_value(7))
+            .vector(
+                "one_ci",
+                &[one.conf_int_lower, one.conf_int_upper],
+                Tol::stat(7),
+            )
+            .scalar("one_mean", one.estimate, Tol::coef(7))
+            .scalar("one_se", one.std_error, Tol::se(7))
+            .scalar("n_x", one.n as f64, Tol::exact())
+            .scalar("welch_t", welch.t_statistic, Tol::stat(14))
+            .scalar("welch_df", welch.df, Tol::stat(14))
+            .scalar("welch_p", welch.p_value, Tol::p_value(14))
+            .vector(
+                "welch_ci",
+                &[welch.conf_int_lower, welch.conf_int_upper],
+                Tol::stat(14),
+            )
+            .vector(
+                "welch_est",
+                &[welch.estimate, welch.estimate_2.unwrap()],
+                Tol::coef(14),
+            )
+            .scalar("welch_se", welch.std_error, Tol::se(14))
+            .scalar("n_y", welch.n_2.unwrap() as f64, Tol::exact())
+            .scalar("pooled_t", pooled.t_statistic, Tol::stat(14))
+            .scalar("pooled_df", pooled.df, Tol::exact())
+            .scalar("pooled_p", pooled.p_value, Tol::p_value(14))
+            .vector(
+                "pooled_ci",
+                &[pooled.conf_int_lower, pooled.conf_int_upper],
+                Tol::stat(14),
+            )
+            .scalar("pooled_se", pooled.std_error, Tol::se(14))
+            .scalar("paired_t", paired.t_statistic, Tol::stat(6))
+            .scalar("paired_df", paired.df, Tol::exact())
+            .scalar("paired_p", paired.p_value, Tol::p_value(6))
+            .vector(
+                "paired_ci",
+                &[paired.conf_int_lower, paired.conf_int_upper],
+                Tol::stat(6),
+            )
+            .scalar("paired_est", paired.estimate, Tol::coef(6))
+            .scalar("paired_se", paired.std_error, Tol::se(6))
+            .scalar("n_pairs", paired.n as f64, Tol::exact())
+            .finish();
+        // Int64 with nulls (pre-fix: NonNumericColumn)
+        let iw = run("xi", Some("yi"), false, false);
+        Check::new(&case)
+            .scalar("int_welch_t", iw.t_statistic, Tol::stat(38))
+            .scalar("int_welch_df", iw.df, Tol::stat(38))
+            .scalar("int_welch_p", iw.p_value, Tol::p_value(38))
+            .vector(
+                "int_welch_ci",
+                &[iw.conf_int_lower, iw.conf_int_upper],
+                Tol::stat(38),
+            )
+            .vector(
+                "int_welch_est",
+                &[iw.estimate, iw.estimate_2.unwrap()],
+                Tol::coef(38),
+            )
+            .scalar("int_welch_se", iw.std_error, Tol::se(38))
+            .scalar("n_xi", iw.n as f64, Tol::exact())
+            .scalar("n_yi", iw.n_2.unwrap() as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_na_t_test_missing_rows() {
+        let (_case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let tt = |x, y, paired| {
+            t_test(&ds, x, y, 0.0, Alternative::TwoSided, paired, false, 0.95).unwrap()
+        };
+        let one = tt("x", None, false);
+        assert_eq!(
+            (
+                one.missing.n_total,
+                one.missing.n_used,
+                one.missing.n_dropped
+            ),
+            (22, 7, 15)
+        );
+        assert_eq!(one.missing.by_column, vec![("x".to_string(), 15)]);
+        // each sample on its own (t.test(x, y))
+        let welch = tt("x", Some("y"), false);
+        assert_eq!(
+            welch.missing.by_column,
+            vec![("x".to_string(), 15), ("y".to_string(), 15)]
+        );
+        assert_eq!((welch.n, welch.n_2), (7, Some(7)));
+        // complete pairs (complete.cases(x, y))
+        let paired = tt("x", Some("y"), true);
+        assert_eq!(
+            (
+                paired.missing.n_total,
+                paired.missing.n_used,
+                paired.missing.n_dropped
+            ),
+            (22, 6, 16)
+        );
+        assert_eq!(
+            paired.missing.by_column,
+            vec![("x".to_string(), 15), ("y".to_string(), 15)]
+        );
+        assert_eq!(
+            paired.to_string().lines().last().unwrap(),
+            format!("Missing values: {}", paired.missing.note().unwrap())
+        );
+        assert!(!tt("id", None, false).to_string().contains("Missing values"));
+        // a NaN cell counts as missing (the harness cannot write NaN: the one inline fixture)
+        let nan = Dataset::new(df!("v" => [5.1, f64::NAN, 7.3, 5.9, 6.8, 7.7, 6.1, 6.2]).unwrap());
+        let r = t_test(
+            &nan,
+            "v",
+            None,
+            0.0,
+            Alternative::TwoSided,
+            false,
+            false,
+            0.95,
+        )
+        .unwrap();
+        assert_eq!(
+            (r.n, r.missing.by_column.clone()),
+            (7, vec![("v".to_string(), 1)])
+        );
+    }
+
+    #[test]
+    fn test_validate_na_t_test_errors() {
+        let (_case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let tt = |x, y, paired| t_test(&ds, x, y, 0.0, Alternative::TwoSided, paired, false, 0.95);
+        assert!(
+            matches!(tt("g", None, false), Err(EconError::NonNumericColumn { column }) if column == "g")
+        );
+        assert!(
+            matches!(tt("x", Some("g"), false), Err(EconError::NonNumericColumn { column }) if column == "g")
+        );
+        assert!(
+            matches!(tt("x", Some("g"), true), Err(EconError::NonNumericColumn { column }) if column == "g")
+        );
+        assert!(
+            matches!(tt("nope", None, false), Err(EconError::ColumnNotFound { column, .. }) if column == "nope")
+        );
+        let inf = Dataset::new(df!("v" => [1.0, f64::INFINITY, 2.0, 3.0]).unwrap());
+        assert!(matches!(
+            t_test(&inf, "v", None, 0.0, Alternative::TwoSided, false, false, 0.95),
+            Err(EconError::NonFiniteValues { column, count: 1 }) if column == "v"
+        ));
     }
 }

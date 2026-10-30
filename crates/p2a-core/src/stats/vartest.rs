@@ -45,6 +45,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
@@ -103,6 +104,10 @@ pub struct VarTestResult {
     pub n_x: usize,
     /// Sample size of second group
     pub n_y: usize,
+    /// Rows dropped because of missing values (dataset wrapper; nothing for slices). Each
+    /// sample drops its own missing values; the summary sums the two columns.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for VarTestResult {
@@ -161,6 +166,9 @@ impl std::fmt::Display for VarTestResult {
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -279,12 +287,16 @@ pub fn var_test(
         null_value: ratio,
         n_x,
         n_y,
+        missing: MissingSummary::none(n_x + n_y),
     })
 }
 
 /// Perform F test using dataset columns.
 ///
-/// Convenience wrapper that extracts data from a Dataset.
+/// Convenience wrapper that extracts data from a Dataset. Each column drops its own missing
+/// values (null or NaN), as `var.test(x, y)` does, and the drop is reported in `missing`.
+/// Integer, decimal and boolean columns are accepted; a text column is refused
+/// (`EconError::NonNumericColumn`), as are infinite values (`EconError::NonFiniteValues`).
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -307,42 +319,11 @@ pub fn run_var_test(
     conf_level: f64,
 ) -> EconResult<VarTestResult> {
     let df = dataset.df();
-
-    // Extract x values
-    let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
-        column: x_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let x: Vec<f64> = x_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: x_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract y values
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let y: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    var_test(&x, &y, ratio, alternative, conf_level)
+    let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
+    let (y, missing_y) = numeric_column(df, y_col, NaPolicy::Omit)?;
+    let mut result = var_test(&x, &y, ratio, alternative, conf_level)?;
+    result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
+    Ok(result)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -655,5 +636,58 @@ mod tests {
             "CI upper mismatch: Rust={}, R=1.597058",
             result.conf_int_upper
         );
+    }
+
+    // ========================================================================
+    // Missing values and integer columns (case stat_two_sample_na,
+    // validation/r/cases/stats_onesample.R)
+    // ========================================================================
+
+    /// X-2/X-8: var.test on Int64 columns with nulls, each sample dropping its own.
+    #[test]
+    fn test_validate_var_test_two_sample_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_var_test(&ds, "xi", "yi", 1.0, Alternative::TwoSided, 0.95).unwrap();
+        Check::new(&case)
+            .scalar("var_f", r.f_statistic, Tol::stat(38))
+            .vector("var_df", &[r.df_num, r.df_denom], Tol::exact())
+            .scalar("var_p", r.p_value, Tol::p_value(38))
+            .vector(
+                "var_ci",
+                &[r.conf_int_lower, r.conf_int_upper],
+                Tol::stat(38),
+            )
+            .scalar("var_est", r.estimate, Tol::coef(38))
+            .scalar("var_x", r.var_x, Tol::stat(38))
+            .scalar("var_y", r.var_y, Tol::stat(38))
+            .scalar("n_xi", r.n_x as f64, Tol::exact())
+            .scalar("n_yi", r.n_y as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_na_var_test_missing_rows_and_errors() {
+        let (_case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_var_test(&ds, "x", "y", 1.0, Alternative::TwoSided, 0.95).unwrap();
+        assert_eq!((r.n_x, r.n_y), (7, 7));
+        assert_eq!(
+            r.missing.by_column,
+            vec![("x".to_string(), 15), ("y".to_string(), 15)]
+        );
+        assert_eq!(
+            r.to_string().lines().last().unwrap(),
+            format!("Missing values: {}", r.missing.note().unwrap())
+        );
+        for (x, y) in [("g", "y"), ("x", "g")] {
+            assert!(
+                matches!(run_var_test(&ds, x, y, 1.0, Alternative::TwoSided, 0.95), Err(EconError::NonNumericColumn { column }) if column == "g"),
+                "{x} {y}"
+            );
+        }
+        assert!(matches!(
+            run_var_test(&ds, "nope", "y", 1.0, Alternative::TwoSided, 0.95),
+            Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
+        ));
     }
 }

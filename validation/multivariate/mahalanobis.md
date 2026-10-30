@@ -81,6 +81,46 @@ mahalanobis(x, center, cov_mat)
 
 **Rust Test:** `crates/p2a-core/src/stats/mahalanobis.rs::tests::test_mahalanobis_inverted`
 
+## Missing values (R-pinned)
+
+`run_mahalanobis(dataset, columns, center, cov)` reads the columns through the shared extractor
+in one request and drops every row with a missing value (null or NaN) in any of them. The centre
+and the covariance are computed from the kept rows, and the distances are reported for the kept
+rows only. `MahalanobisResult.rows` gives the original (0-based) row of each distance and
+`MahalanobisResult.missing` what was dropped; the array-level `mahalanobis()` sets `rows` to
+0..n. Integer columns are accepted; a text column is `NonNumericColumn`. Before T2-WP06 a null
+was read as 0, which moved the centre, inflated the covariance and produced a spurious outlier
+(a distance of 14.757 for row 6 of the case below).
+
+**R Code** (case `stat_pairwise_mahalanobis_na` in `validation/r/cases/stats_onesample.R`;
+dataset `validation/datasets/generated/pairwise_mahalanobis_na.csv`, 30 rows, `a` missing in
+row 7, 1-based):
+```r
+set.seed(9)   # columns as in the case file
+cc <- complete.cases(d$a, d$b); X <- as.matrix(d[cc, c("a", "b")])
+md <- mahalanobis(X, colMeans(X), cov(X))
+```
+
+| Quantity | R |
+|---|---|
+| distances | 29 values, the first five 0.7548069130399198, 1.5348361624055533, 1.5870751414280628, 0.22951689971894934, 0.3896433925385543 (all in `validation/expected/stat_pairwise_mahalanobis_na.json`) |
+| kept rows (0-based) | 0-29 without 6 |
+| centre a, b | 4.871103448275862, 2.411896551724138 |
+| n | 29 |
+
+**Rust tests:**
+- `stats::mahalanobis::tests::test_validate_mahalanobis_na` (every distance, the rows, the centre, n)
+- `stats::mahalanobis::tests::test_validate_na_mahalanobis_columns` (Int64 against Float64, text and absent columns)
+- `tier2::wp06_onesample::test_validate_mcp_multivariate_mahalanobis` (p2a-mcp: `n_obs`, `center`, the ten printed `first_10_distances` and `summary.mean_distance` at `Tol::printed(4)`)
+
+The MCP tool numbers its `first_10_distances` by kept row; labelling them with `rows` is
+T2-WP20's part.
+
+**Tolerance:** `validation/README.md`, n < 100: distances 1e-5 relative (`Tol::stat`), centre
+1e-6 (`Tol::coef`); rows and counts exact.
+
+**Status:** R-pinned (registry `validation/methods/stats_onesample.json`, id `mahalanobis`).
+
 ## Numerical Precision Summary
 
 | Component | Tolerance | Notes |

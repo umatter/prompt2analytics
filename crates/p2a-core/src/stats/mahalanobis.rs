@@ -18,6 +18,7 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/mahalanobis.html>
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
 use faer::prelude::*;
@@ -37,6 +38,12 @@ pub struct MahalanobisResult {
     pub n_vars: usize,
     /// Whether the inverse covariance was provided directly.
     pub inverted: bool,
+    /// Original (0-based) row index of each distance; 0..n for the array-level function.
+    #[serde(default)]
+    pub rows: Vec<usize>,
+    /// Rows dropped because of missing values (dataset wrapper; nothing for a matrix).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Compute squared Mahalanobis distance for observations.
@@ -156,12 +163,17 @@ pub fn mahalanobis(
         }
     };
 
+    let mut rows = crate::resource::try_with_capacity(n, "row indices")?;
+    rows.extend(0..n);
+
     Ok(MahalanobisResult {
         distances,
         center: center_vec.to_vec(),
         n_obs: n,
         n_vars: p,
         inverted,
+        rows,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -327,6 +339,14 @@ pub fn mahalanobis_single(
 
 /// Convenience function to compute Mahalanobis distance from a Dataset.
 ///
+/// Rows with a missing value (null or NaN) in any of the columns are dropped; the centre and
+/// the covariance are computed from the kept rows (as R's
+/// `mahalanobis(X, colMeans(X), cov(X))` on `X[complete.cases(X), ]`), and the distances are
+/// those of the kept rows. `rows` maps each distance back to its (0-based) dataset row and
+/// `missing` reports the drop. Integer, decimal and boolean columns are accepted; a text
+/// column is refused (`EconError::NonNumericColumn`), as are infinite values
+/// (`EconError::NonFiniteValues`).
+///
 /// # Arguments
 ///
 /// * `dataset` - Dataset containing the observations
@@ -336,52 +356,34 @@ pub fn mahalanobis_single(
 ///
 /// # Returns
 ///
-/// `MahalanobisResult` with distances for each row.
+/// `MahalanobisResult` with distances for each complete row.
 pub fn run_mahalanobis(
     dataset: &Dataset,
     columns: &[&str],
     center: Option<&[f64]>,
     cov: Option<ArrayView2<f64>>,
 ) -> EconResult<MahalanobisResult> {
-    let df = dataset.df();
-    let n = df.height();
-    let p = columns.len();
-
-    if p == 0 {
+    if columns.is_empty() {
         return Err(EconError::InvalidSpecification {
             message: "Must specify at least one column".to_string(),
         });
     }
 
-    // Extract data into matrix
-    let mut data = Array2::zeros((n, p));
-    for (j, col_name) in columns.iter().enumerate() {
-        let available: Vec<String> = df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: available.clone(),
-        })?;
-
-        let values = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-
-        for (i, val) in values.into_no_null_iter().enumerate() {
-            if i < n {
-                data[[i, j]] = val;
-            }
-        }
-    }
+    let cols = ColumnRequest::new(dataset.df())
+        .numerics(columns)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let data = cols.matrix(columns, false).data;
 
     // Convert center if provided
     let center_arr = center.map(|c| Array1::from_vec(c.to_vec()));
     let center_view = center_arr.as_ref().map(|a| a.view());
 
-    mahalanobis(data.view(), center_view, cov, false)
+    let mut result = mahalanobis(data.view(), center_view, cov, false)?;
+    result.rows.clear();
+    result.rows.extend_from_slice(cols.rows());
+    result.missing = cols.missing().clone();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -518,5 +520,59 @@ mod tests {
             assert!(*d >= 0.0, "Distance {} should be non-negative", i);
             assert!(*d < 10.0, "Distance {} seems too large: {}", i, d);
         }
+    }
+
+    // ========================================================================
+    // Missing values and integer columns (case stat_pairwise_mahalanobis_na,
+    // validation/r/cases/stats_onesample.R)
+    // ========================================================================
+
+    /// X-2/X-8: distances on the complete rows (a is missing in 0-based row 6), with centre
+    /// and covariance from those rows.
+    #[test]
+    fn test_validate_mahalanobis_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_pairwise_mahalanobis_na");
+        let r = run_mahalanobis(&ds, &["a", "b"], None, None).unwrap();
+        let rows: Vec<f64> = r.rows.iter().map(|&i| i as f64).collect();
+        Check::new(&case)
+            .vector("mahalanobis_complete", &r.distances, Tol::stat(29))
+            .vector("mahalanobis_rows", &rows, Tol::exact())
+            .named("mahalanobis_center", &["a", "b"], &r.center, Tol::coef(29))
+            .scalar("n_complete", r.n_obs as f64, Tol::exact())
+            .finish();
+        assert_eq!(r.missing.by_column, vec![("a".to_string(), 1)]);
+    }
+
+    #[test]
+    fn test_validate_na_mahalanobis_columns() {
+        use polars::prelude::*;
+        let (_case, ds) = crate::test_support::load_case("stat_pairwise_mahalanobis_na");
+        // Int64 accepted: id (Int64, complete) gives the same distances as its Float64 copy
+        let mut df = ds.df().clone();
+        let id_f = df
+            .column("id")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .with_name("id_f".into());
+        df.with_column(id_f).unwrap();
+        let ds2 = Dataset::new(df);
+        let a = run_mahalanobis(&ds2, &["id", "b"], None, None).unwrap();
+        let b = run_mahalanobis(&ds2, &["id_f", "b"], None, None).unwrap();
+        assert_eq!(a.rows, (0..30).collect::<Vec<_>>());
+        assert!(a.missing.is_empty());
+        assert_eq!(a.distances.len(), 30);
+        for (x, y) in a.distances.iter().zip(&b.distances) {
+            assert!((x - y).abs() <= 1e-12 * y.abs().max(1.0), "{x} vs {y}");
+        }
+        assert!(matches!(
+            run_mahalanobis(&ds, &["a", "g"], None, None),
+            Err(EconError::NonNumericColumn { column }) if column == "g"
+        ));
+        assert!(matches!(
+            run_mahalanobis(&ds, &["a", "nope"], None, None),
+            Err(EconError::ColumnNotFound { .. })
+        ));
     }
 }

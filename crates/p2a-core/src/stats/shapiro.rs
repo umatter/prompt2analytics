@@ -12,56 +12,77 @@
 //!   for normality". *Journal of the Royal Statistical Society Series C*, 44(4), 547-551.
 //! - R Core Team. `stats::shapiro.test()` function.
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/shapiro.test.html>
+//! - R Core Team. `src/library/stats/src/swilk.c`, the C implementation of AS R94 that
+//!   `shapiro.test` calls; this module is a port of it.
 //!
 //! # Mathematical Background
 //!
-//! ## W Statistic
+//! ## W statistic
 //!
-//! The Shapiro-Wilk test statistic W is defined as:
-//!
-//! ```text
-//! W = (∑aᵢx₍ᵢ₎)² / ∑(xᵢ - x̄)²
-//! ```
-//!
-//! Where:
-//! - x₍ᵢ₎ is the i-th order statistic (i-th smallest value)
-//! - x̄ is the sample mean
-//! - aᵢ are coefficients derived from expected order statistics
-//!
-//! The coefficients a = (a₁, ..., aₙ) are computed as:
+//! For the sorted sample x₍₁₎ ≤ … ≤ x₍ₙ₎,
 //!
 //! ```text
-//! a = m'V⁻¹ / ||m'V⁻¹||
+//! W = (Σ aᵢ x₍ᵢ₎)² / Σ (xᵢ - x̄)²
 //! ```
 //!
-//! Where m is the vector of expected values of order statistics from a standard
-//! normal distribution, and V is their variance-covariance matrix.
+//! The exact coefficients a = m'V⁻¹ / ‖m'V⁻¹‖ need the covariance matrix V of the normal
+//! order statistics, which neither R nor p2a computes. Both use Royston's approximation
+//! (Royston 1992, 1995; AS R94):
 //!
-//! ## P-Value Approximation
+//! - mᵢ = Φ⁻¹((i - 3/8) / (n + 1/4)), the Blom scores;
+//! - the largest coefficient aₙ, and for n > 5 also aₙ₋₁, is the normalised Blom score
+//!   plus a polynomial in 1/√n; the other coefficients are the Blom scores rescaled so that
+//!   Σ aᵢ² = 1. For n = 3 the coefficients are exact, (-√½, 0, √½);
+//! - W is computed as the squared correlation of the data and the coefficients, through
+//!   1 - W, which keeps its precision for W close to 1.
 //!
-//! Following Royston (1995), the p-value is computed using a normal approximation
-//! after transforming W. The transformation depends on sample size:
-//! - For n = 3: exact distribution
-//! - For 4 ≤ n ≤ 11: polynomial approximation
-//! - For n ≥ 12: log transformation with normal approximation
+//! ## P-value
+//!
+//! - n = 3: the exact distribution, p = (6/π)(asin √W - π/3).
+//! - 4 ≤ n ≤ 11: with γ = -2.273 + 0.459 n, y = -ln(γ - ln(1 - W)) is approximately
+//!   normal; its mean and log standard deviation are cubic polynomials in n, and p is the
+//!   upper normal tail at y.
+//! - 12 ≤ n ≤ 5000: ln(1 - W) is approximately normal; its mean is a cubic and its log
+//!   standard deviation a quadratic polynomial in ln n, and p is the upper normal tail.
+//!
+//! As `shapiro.test` does, missing values (NaN) are dropped, a sample whose range is below
+//! 1 is divided by its range, and a sample with a range below 1e-10 ("all values
+//! identical"), with infinite values, or with fewer than 3 or more than 5000 values is
+//! refused.
 
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
+use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use crate::traits::SignificanceLevel;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Constants for Royston's Algorithm
+// Constants of swilk.c (Royston 1995, AS R94)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Polynomial coefficients for W-to-z transformation (small samples, n <= 11).
-const G: [f64; 4] = [-2.273, 0.459, 0.0, 0.0];
-
-/// Polynomial coefficients for W-to-z transformation (large samples, n >= 12).
-const C3: [f64; 4] = [0.544, -0.39978, 0.025054, -0.6714e-3];
+/// Coefficients of gamma(n) for 4 <= n <= 11 (swilk.c `g`).
+const G: [f64; 2] = [-2.273, 0.459];
+/// Polynomial correction of a_n in 1/sqrt(n) (swilk.c `c1`).
+const C1: [f64; 6] = [0.0, 0.221157, -0.147981, -2.07119, 4.434685, -2.706056];
+/// Polynomial correction of a_(n-1) in 1/sqrt(n) (swilk.c `c2`).
+const C2: [f64; 6] = [0.0, 0.042981, -0.293762, -1.752461, 5.682633, -3.582633];
+/// Mean of -ln(gamma - ln(1 - W)) in n, 4 <= n <= 11 (swilk.c `c3`).
+const C3: [f64; 4] = [0.544, -0.39978, 0.025054, -6.714e-4];
+/// Log standard deviation of the same in n (swilk.c `c4`).
 const C4: [f64; 4] = [1.3822, -0.77857, 0.062767, -0.0020322];
+/// Mean of ln(1 - W) in ln(n), n >= 12 (swilk.c `c5`).
+const C5: [f64; 4] = [-1.5861, -0.31082, -0.083751, 0.0038915];
+/// Log standard deviation of the same in ln(n) (swilk.c `c6`).
+const C6: [f64; 3] = [-0.4803, -0.082676, 0.0030302];
+/// swilk.c's literal for 6/pi (gives R's 0.99999999999999334 at W = 1 for n = 3).
+const PI6: f64 = 1.909_859_317_102_74;
+/// swilk.c's literal for asin(sqrt(3/4)) = pi/3.
+const STQR: f64 = 1.047_197_551_196_60;
+/// shapiro.test refuses a sample whose range is below this ("all 'x' values are identical").
+const SMALL_RANGE: f64 = 1e-10;
 
 /// Minimum and maximum sample sizes.
 const MIN_N: usize = 3;
@@ -93,6 +114,10 @@ pub struct ShapiroWilkResult {
 
     /// Whether the null hypothesis (normality) is rejected at α = 0.05
     pub reject_normality: bool,
+
+    /// Rows dropped because of missing values (dataset wrapper; nothing for a slice).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for ShapiroWilkResult {
@@ -129,6 +154,9 @@ impl std::fmt::Display for ShapiroWilkResult {
         }
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
         Ok(())
     }
 }
@@ -147,6 +175,11 @@ impl std::fmt::Display for ShapiroWilkResult {
 /// # Returns
 /// * `ShapiroWilkResult` containing the W statistic and p-value
 ///
+/// # Errors
+/// As `shapiro.test`: fewer than 3 or more than 5000 non-missing values, or a range below
+/// 1e-10 ("all values identical"). An infinite value is refused too. NaN values are
+/// dropped; a sample whose range is below 1 is divided by its range first.
+///
 /// # Example
 /// ```ignore
 /// let x = vec![0.1, 0.5, 0.2, 0.8, 0.4, 0.9, 0.3, 0.7, 0.6];
@@ -157,44 +190,51 @@ impl std::fmt::Display for ShapiroWilkResult {
 /// # References
 /// - R equivalent: `shapiro.test(x)`
 pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
-    // Filter out NaN values
-    let data: Vec<f64> = x.iter().copied().filter(|v| !v.is_nan()).collect();
-    let n = data.len();
-
-    // Check sample size constraints
+    // Missing values (NaN) are dropped; an infinite value is refused (R's shapiro.test would
+    // compute on a range of Inf).
+    let mut n = 0usize;
+    for v in x.iter().filter(|v| !v.is_nan()) {
+        if v.is_infinite() {
+            return Err(EconError::InvalidSpecification {
+                message: "Shapiro-Wilk test: x contains infinite values".to_string(),
+            });
+        }
+        n += 1;
+    }
     if n < MIN_N {
         return Err(EconError::InsufficientData {
             required: MIN_N,
             provided: n,
-            context: "Shapiro-Wilk test requires at least 3 observations".to_string(),
+            context: "Shapiro-Wilk test requires at least 3 non-missing values".to_string(),
         });
     }
     if n > MAX_N {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "Shapiro-Wilk test is limited to {} observations (got {}). \
-                 For larger samples, consider other normality tests.",
-                MAX_N, n
+                "Shapiro-Wilk test: sample size must be between {MIN_N} and {MAX_N} (got {n})"
             ),
         });
     }
 
-    // Sort data to get order statistics
-    let mut sorted = data.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Order statistics (n <= 5000 here).
+    let mut sorted: Vec<f64> = resource::try_with_capacity(n, "Shapiro-Wilk sample")?;
+    sorted.extend(x.iter().copied().filter(|v| !v.is_nan()));
+    sorted.sort_by(f64::total_cmp);
 
-    // Compute mean and sum of squared deviations
-    let mean: f64 = data.iter().sum::<f64>() / n as f64;
-    let ss: f64 = data.iter().map(|&xi| (xi - mean).powi(2)).sum();
-
-    if ss < 1e-15 {
+    // shapiro.test: refuse a constant sample, rescale a small range (R PR#1768).
+    let range = sorted[n - 1] - sorted[0];
+    if range < SMALL_RANGE {
         return Err(EconError::InvalidSpecification {
-            message: "Sample has zero variance - all values are identical".to_string(),
+            message: "Shapiro-Wilk test: all 'x' values are identical".to_string(),
         });
     }
+    if range < 1.0 {
+        for v in &mut sorted {
+            *v /= range;
+        }
+    }
 
-    // Compute the W statistic using Royston's algorithm
-    let (w, p_value) = compute_w_and_pvalue(&sorted, ss)?;
+    let (w, p_value) = swilk(&sorted)?;
 
     Ok(ShapiroWilkResult {
         test_name: "Shapiro-Wilk Normality Test".to_string(),
@@ -203,12 +243,16 @@ pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
         significance: SignificanceLevel::from_p_value(p_value),
         n,
         reject_normality: p_value < 0.05,
+        missing: MissingSummary::none(n),
     })
 }
 
 /// Perform Shapiro-Wilk test using a dataset column.
 ///
-/// Convenience wrapper that extracts data from a Dataset.
+/// Missing values (null or NaN) are dropped, as `shapiro.test` does
+/// (`x[complete.cases(x)]`), and counted in `missing`; integer, decimal and boolean columns
+/// are accepted; infinite values are refused (`EconError::NonFiniteValues`), as is a text
+/// column (`EconError::NonNumericColumn`).
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -222,286 +266,134 @@ pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
 /// }
 /// ```
 pub fn run_shapiro_wilk(dataset: &Dataset, column: &str) -> EconResult<ShapiroWilkResult> {
-    let df = dataset.df();
-
-    let series = df.column(column).map_err(|_| EconError::ColumnNotFound {
-        column: column.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let x: Vec<f64> = series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: column.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    shapiro_wilk_test(&x)
+    let (x, missing) = numeric_column(dataset.df(), column, NaPolicy::Omit)?;
+    let mut result = shapiro_wilk_test(&x)?;
+    result.missing = missing;
+    Ok(result)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Internal Algorithm Implementation
+// swilk.c (AS R94)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Compute W statistic and p-value using Royston's algorithm.
-///
-/// This implements the algorithm from Royston (1995) which:
-/// 1. Computes the 'a' coefficients from normal order statistics
-/// 2. Calculates W = (sum(a_i * x_(i)))^2 / SS
-/// 3. Transforms W to a normal deviate for p-value calculation
-fn compute_w_and_pvalue(sorted: &[f64], ss: f64) -> EconResult<(f64, f64)> {
-    let n = sorted.len();
-    let nf = n as f64;
-
-    // Compute the 'a' coefficients
-    let a = compute_coefficients(n)?;
-
-    // Compute the numerator: (sum of a_i * x_(i))^2
-    // Only use the first n/2 coefficients due to symmetry
-    let half = n / 2;
-    let mut sum_ax = 0.0;
-    for i in 0..half {
-        sum_ax += a[i] * (sorted[n - 1 - i] - sorted[i]);
+/// `cc[0] + cc[1] x + ... + cc[k] x^k`, evaluated in the order of swilk.c's `poly`.
+fn poly(cc: &[f64], x: f64) -> f64 {
+    let last = cc.len() - 1;
+    let mut ret = cc[0];
+    if cc.len() > 1 {
+        let mut p = x * cc[last];
+        for &c in cc[1..last].iter().rev() {
+            p = (p + c) * x;
+        }
+        ret += p;
     }
-
-    // W = (sum_ax)^2 / SS
-    let w = sum_ax.powi(2) / ss;
-
-    // Clamp W to valid range [0, 1]
-    let w = w.clamp(0.0, 1.0);
-
-    // Compute p-value using appropriate method for sample size
-    let p_value = if n == 3 {
-        // Exact p-value for n = 3
-        compute_pvalue_n3(w)
-    } else if n <= 11 {
-        // Polynomial approximation for small samples (4 <= n <= 11)
-        compute_pvalue_small(w, nf)
-    } else {
-        // Log transformation for larger samples (n >= 12)
-        compute_pvalue_large(w, nf)
-    };
-
-    Ok((w, p_value.clamp(0.0, 1.0)))
+    ret
 }
 
-/// Compute the 'a' coefficients for the W statistic.
-///
-/// Uses the standard algorithm based on expected normal order statistics (Blom's formula),
-/// but with a fast rational approximation for the normal quantile function
-/// instead of the slower iterative methods.
-///
-/// The coefficients satisfy: sum(a_i^2) = 0.5 (we only store n/2 coefficients due to symmetry)
-fn compute_coefficients(n: usize) -> EconResult<Vec<f64>> {
-    let nf = n as f64;
-    let half = n / 2;
+/// W and its p-value for a sorted sample with 3 <= n <= 5000 and a range of at least
+/// 1e-10: R's `swilk.c`, line by line (its order of additions included).
+fn swilk(x: &[f64]) -> EconResult<(f64, f64)> {
+    let n = x.len();
+    let nn2 = n / 2;
+    let an = n as f64;
 
-    // Compute expected normal order statistics using Blom's approximation:
-    // m_i = Φ^(-1)((i - 3/8) / (n + 1/4))
-    // We only need the upper half due to symmetry: m[n-1-i] = -m[i]
-    let mut m: Vec<f64> = Vec::with_capacity(half);
-    for i in 0..half {
-        // For the coefficient a[i], we need m[n-1-i] (the upper order statistics)
-        let rank = n - i; // rank of upper order statistic (1-indexed: n, n-1, ..., n-half+1)
-        let p = (rank as f64 - 0.375) / (nf + 0.25);
-        m.push(fast_norm_quantile(p));
-    }
-
-    // Compute sum of squared m values
-    // Due to symmetry: sum(m_i^2) for all n = 2 * sum(m_i^2) for upper half
-    let m_sq_sum: f64 = m.iter().map(|&mi| mi * mi).sum();
-
-    // The 'a' coefficients are proportional to m, normalized so that sum(a_i^2) = 0.5
-    // (We only store half, and each is used twice in the W computation due to symmetry)
-    // a = m / sqrt(2 * sum(m^2))
-    let scale = if m_sq_sum > 1e-15 {
-        (0.5 / m_sq_sum).sqrt()
+    // Coefficients a[0..nn2] (swilk.c's 1-based a[1..=nn2]), for the upper half.
+    let mut a: Vec<f64> = resource::try_vec(nn2, 0.0, "Shapiro-Wilk coefficients")?;
+    if n == 3 {
+        a[0] = std::f64::consts::FRAC_1_SQRT_2;
     } else {
-        return Err(EconError::Internal(
-            "Failed to compute Shapiro-Wilk coefficients: degenerate case".to_string(),
-        ));
-    };
+        let normal = Normal::standard();
+        let an25 = an + 0.25;
+        let mut summ2 = 0.0;
+        for (i, ai) in a.iter_mut().enumerate() {
+            let m = normal.inverse_cdf(((i + 1) as f64 - 0.375) / an25);
+            *ai = m;
+            summ2 += m * m;
+        }
+        summ2 *= 2.0;
+        let ssumm2 = summ2.sqrt();
+        let rsn = 1.0 / an.sqrt();
+        let a1 = poly(&C1, rsn) - a[0] / ssumm2;
 
-    let a: Vec<f64> = m.iter().map(|&mi| mi * scale).collect();
-
-    Ok(a)
-}
-
-/// Fast normal quantile approximation (Wichura's AS241 rational approximation).
-/// Much faster than iterative methods, accurate to ~1e-9.
-#[inline]
-fn fast_norm_quantile(p: f64) -> f64 {
-    // Handle edge cases
-    if p <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if p >= 1.0 {
-        return f64::INFINITY;
-    }
-    if (p - 0.5).abs() < 1e-15 {
-        return 0.0;
-    }
-
-    // Constants for rational approximation (Wichura AS241)
-    const A: [f64; 4] = [
-        3.387_132_872_796_366_5,
-        1.331_416_678_917_843_8e2,
-        1.971_590_950_306_551_3e3,
-        1.373_169_376_550_946e4,
-    ];
-    const B: [f64; 4] = [
-        1.0,
-        4.231_333_070_160_091e1,
-        6.871_870_074_920_579e2,
-        5.394_196_021_424_751e3,
-    ];
-    const C: [f64; 4] = [
-        1.423_437_110_749_683_5,
-        4.630_337_846_156_546,
-        5.769_497_221_460_691,
-        3.647_848_324_763_204_5,
-    ];
-    const D: [f64; 4] = [
-        1.0,
-        2.053_191_626_637_759,
-        1.676_384_830_183_803_8,
-        6.897_673_349_851e-1,
-    ];
-    const E: [f64; 4] = [
-        6.657_904_643_501_103,
-        5.463_784_911_164_114,
-        1.784_826_539_917_291_3,
-        2.965_605_718_285_048_7e-1,
-    ];
-    const F: [f64; 4] = [
-        1.0,
-        5.998_322_065_558_88e-1,
-        1.369_298_809_227_358e-1,
-        1.487_536_129_085_061_5e-2,
-    ];
-
-    let q = p - 0.5;
-
-    if q.abs() <= 0.425 {
-        // Central region
-        let r = 0.180625 - q * q;
-        let num = ((A[3] * r + A[2]) * r + A[1]) * r + A[0];
-        let den = ((B[3] * r + B[2]) * r + B[1]) * r + B[0];
-        q * num / den
-    } else {
-        // Tail regions
-        let r = if q < 0.0 { p } else { 1.0 - p };
-        let r = (-r.ln()).sqrt();
-
-        let result = if r <= 5.0 {
-            let r = r - 1.6;
-            let num = ((C[3] * r + C[2]) * r + C[1]) * r + C[0];
-            let den = ((D[3] * r + D[2]) * r + D[1]) * r + D[0];
-            num / den
+        // Normalise the coefficients that are not replaced by a polynomial.
+        let (i1, fac) = if n > 5 {
+            let a2 = -a[1] / ssumm2 + poly(&C2, rsn);
+            let fac = ((summ2 - 2.0 * (a[0] * a[0]) - 2.0 * (a[1] * a[1]))
+                / (1.0 - 2.0 * (a1 * a1) - 2.0 * (a2 * a2)))
+                .sqrt();
+            a[1] = a2;
+            (2, fac)
         } else {
-            let r = r - 5.0;
-            let num = ((E[3] * r + E[2]) * r + E[1]) * r + E[0];
-            let den = ((F[3] * r + F[2]) * r + F[1]) * r + F[0];
-            num / den
+            let fac = ((summ2 - 2.0 * (a[0] * a[0])) / (1.0 - 2.0 * (a1 * a1))).sqrt();
+            (1, fac)
         };
-
-        if q < 0.0 { -result } else { result }
-    }
-}
-
-/// Evaluate a polynomial at point x using Horner's method.
-fn poly_eval(coeffs: &[f64], x: f64) -> f64 {
-    let mut result = 0.0;
-    for (i, &c) in coeffs.iter().enumerate() {
-        result += c * x.powi(i as i32);
-    }
-    result
-}
-
-/// Compute exact p-value for n = 3.
-fn compute_pvalue_n3(w: f64) -> f64 {
-    // For n = 3, the distribution of W is known exactly
-    // P(W <= w) = 6/pi * (arcsin(sqrt(w)) - arcsin(sqrt(3)/2))
-    // for w >= 3/4 (minimum possible W for n=3)
-
-    let pi = std::f64::consts::PI;
-
-    if w >= 1.0 {
-        return 1.0;
-    }
-    if w < 0.75 {
-        return 0.0;
+        a[0] = a1;
+        for ai in &mut a[i1..] {
+            *ai /= -fac;
+        }
     }
 
-    let sqrt_w = w.sqrt();
-    let asin_w = sqrt_w.asin();
-    let asin_min = (3.0_f64.sqrt() / 2.0).asin();
+    // W as the squared correlation of the data and the coefficients (swilk.c's two loops;
+    // i and j are its indices, sign(i - j) * a[min(i, j)] the coefficient of x[i]).
+    let range = x[n - 1] - x[0];
+    let mut sx = x[0] / range;
+    let mut sa = -a[0];
+    let mut i = 1usize;
+    let mut j = n - 1;
+    while i < n {
+        sx += x[i] / range;
+        i += 1;
+        if i != j {
+            let sign = if i > j { 1.0 } else { -1.0 };
+            sa += sign * a[i.min(j) - 1];
+        }
+        j -= 1;
+    }
+    sa /= an;
+    sx /= an;
 
-    // CDF for W
-    let cdf = 6.0 / pi * (asin_w - asin_min);
+    let (mut ssa, mut ssx, mut sax) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        let j = n - 1 - i;
+        let asa = if i != j {
+            let sign = if i > j { 1.0 } else { -1.0 };
+            sign * a[i.min(j)] - sa
+        } else {
+            -sa
+        };
+        let xsx = x[i] / range - sx;
+        ssa += asa * asa;
+        ssx += xsx * xsx;
+        sax += asa * xsx;
+    }
 
-    // Return p-value (upper tail probability)
-    (1.0 - cdf).clamp(0.0, 1.0)
-}
+    // w1 = 1 - W, computed directly to keep its precision for W near 1. The guard against
+    // a negative rounding result keeps ln and asin defined; it changes no regular sample.
+    let ssassx = (ssa * ssx).sqrt();
+    let w1 = ((ssassx - sax) * (ssassx + sax) / (ssa * ssx)).max(0.0);
+    let w = 1.0 - w1;
 
-/// Compute p-value for small samples (4 <= n <= 11).
-fn compute_pvalue_small(w: f64, n: f64) -> f64 {
-    // Use gamma transformation as in Royston (1992)
-    // Transform W to approximately normal
-
-    let gamma = poly_eval(&G, n);
-
-    // Transform: y = -log(1 - W)
-    let y = if w >= 1.0 {
-        10.0 // Very large value for perfect normality
+    // Significance level.
+    if n == 3 {
+        let pw = PI6 * (w.min(1.0).sqrt().asin() - STQR);
+        return Ok((w, pw.max(0.0)));
+    }
+    let normal = Normal::standard();
+    let y = w1.ln();
+    let xx = an.ln();
+    let (y, m, s) = if n <= 11 {
+        let gamma = poly(&G, an);
+        if y >= gamma {
+            // Unreachable for a valid sample (it needs W far below its minimum); kept as in
+            // swilk.c.
+            return Ok((w, 1e-99));
+        }
+        (-(gamma - y).ln(), poly(&C3, an), poly(&C4, an).exp())
     } else {
-        -(1.0 - w).ln()
+        (y, poly(&C5, xx), poly(&C6, xx).exp())
     };
-
-    // Mean and variance of transformed statistic
-    let mu = gamma;
-    let sigma = 1.0 / n.sqrt();
-
-    // Standardize
-    let z = (y - mu) / sigma;
-
-    // P-value from standard normal (upper tail)
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    1.0 - normal.cdf(z)
-}
-
-/// Compute p-value for large samples (n >= 12).
-fn compute_pvalue_large(w: f64, n: f64) -> f64 {
-    // Royston (1995) transformation for large samples
-    // Uses log transformation of (1 - W)
-
-    let ln_n = n.ln();
-
-    // Mean of transformed W
-    let mu = poly_eval(&C3, ln_n);
-
-    // Standard deviation of transformed W
-    let sigma = (poly_eval(&C4, ln_n)).exp();
-
-    // Transform W to y = ln(1 - W)
-    let y = if w >= 1.0 {
-        -10.0 // Very negative for perfect normality
-    } else {
-        (1.0 - w).ln()
-    };
-
-    // Standardize to z-score
-    let z = (y - mu) / sigma;
-
-    // P-value from standard normal
-    // Note: smaller W (more negative y) means more evidence against normality
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    normal.cdf(z)
+    // Upper tail, as pnorm(y, m, s, lower.tail = FALSE).
+    Ok((w, normal.sf((y - m) / s)))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -589,129 +481,175 @@ mod tests {
     }
 
     // ========================================================================
-    // Validation Tests Against R
+    // Validation against R (case stat_shapiro_wilk, validation/r/cases/stats_onesample.R)
     // ========================================================================
-    //
-    // These tests compare results with R's shapiro.test() function.
-    // Tolerances are set based on the accuracy of the polynomial approximations.
 
+    const SHAPIRO_COLUMNS: [&str; 17] = [
+        "n3_124",
+        "n3_123",
+        "n4",
+        "n5",
+        "n8_rnorm",
+        "n10_unif",
+        "n11_rnorm",
+        "n12_rnorm",
+        "n15_exp",
+        "n20_rnorm",
+        "n30_exp",
+        "n50_rnorm",
+        "n100_qnorm",
+        "n200_exp",
+        "n40_ties",
+        "n25_int",
+        "n5000_rnorm",
+    ];
+
+    /// STAT-1: W and p of the swilk.c port against shapiro.test, n = 3 to 5000 (ties,
+    /// integer data).
     #[test]
-    fn test_validate_shapiro_normal_against_r() {
-        // R: set.seed(123); shapiro.test(rnorm(20))
-        // W = 0.9629, p-value = 0.5987
-        // Note: Results depend on random seed, so we use fixed data
+    fn test_validate_shapiro_wilk_swilk() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_shapiro_wilk");
+        let mut check = Check::new(&case);
+        for col in SHAPIRO_COLUMNS {
+            let (x, _) = numeric_column(ds.df(), col, NaPolicy::Omit).unwrap();
+            let r = shapiro_wilk_test(&x).unwrap_or_else(|e| panic!("{col}: {e}"));
+            check
+                .scalar(&format!("{col}_w"), r.w_statistic, Tol::stat(r.n))
+                .scalar(&format!("{col}_p"), r.p_value, Tol::p_value(r.n))
+                .scalar(&format!("{col}_n"), r.n as f64, Tol::exact());
+            assert_eq!(r.reject_normality, r.p_value < 0.05, "{col}");
+        }
+        check.finish();
+    }
 
-        // Data generated by R: set.seed(42); round(rnorm(20), 4)
-        let x = vec![
-            1.3710, -0.5647, 0.3631, 0.6329, 0.4043, -0.1062, 1.5115, -0.0947, 2.0184, -0.0627,
-            1.3048, 2.2866, -1.3888, -0.2788, -0.1333, 0.6360, -0.2843, -2.6565, -2.4405, 1.3201,
-        ];
+    fn generated(name: &str) -> Dataset {
+        let p = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        Dataset::new(crate::data::DataLoader::load_csv(p).unwrap())
+    }
 
-        let result = shapiro_wilk_test(&x).unwrap();
-
-        // R gives: W = 0.9341, p-value = 0.1836
-        // We allow larger tolerance due to approximation differences
-        assert!(
-            result.w_statistic > 0.85 && result.w_statistic < 1.0,
-            "W statistic out of expected range: {}",
-            result.w_statistic
-        );
-        assert!(result.n == 20);
+    /// X-2/X-8: NA-padded Float64 columns and Int64 columns, through run_shapiro_wilk.
+    #[test]
+    fn test_validate_shapiro_wilk_columns() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_shapiro_wilk");
+        let rows = ds.df().height(); // 5000
+        // Float64 columns first (pre-fix: the padding was read as 4995 zeros), Int64 columns
+        // last (pre-fix: NonNumericColumn), so a pre-fix run reports the wrong numbers before
+        // it panics.
+        let (int_cols, float_cols): (Vec<&str>, Vec<&str>) = SHAPIRO_COLUMNS
+            .into_iter()
+            .partition(|c| ["n3_124", "n3_123", "n25_int"].contains(c));
+        for group in [float_cols, int_cols] {
+            let mut check = Check::new(&case);
+            for col in group {
+                let r = run_shapiro_wilk(&ds, col).unwrap_or_else(|e| panic!("{col}: {e}"));
+                check
+                    .scalar(&format!("{col}_w"), r.w_statistic, Tol::stat(r.n))
+                    .scalar(&format!("{col}_p"), r.p_value, Tol::p_value(r.n))
+                    .scalar(&format!("{col}_n"), r.n as f64, Tol::exact());
+                assert_eq!(
+                    (r.missing.n_total, r.missing.n_used, r.missing.n_dropped),
+                    (rows, r.n, rows - r.n),
+                    "{col}"
+                );
+                let want = if r.n == rows {
+                    vec![]
+                } else {
+                    vec![(col.to_string(), rows - r.n)]
+                };
+                assert_eq!(r.missing.by_column, want, "{col}");
+            }
+            check.finish();
+        }
     }
 
     #[test]
-    fn test_validate_shapiro_uniform_against_r() {
-        // R: shapiro.test(1:10 / 10)
-        // Uniform data on [0.1, 1.0]
-        // R: W = 0.9703, p-value = 0.8922
-        // Note: Perfectly uniform data is NOT normally distributed, so W can vary.
-        // The key test is that the computation completes and returns valid values.
-        let x: Vec<f64> = (1..=10).map(|i| i as f64 / 10.0).collect();
-
-        let result = shapiro_wilk_test(&x).unwrap();
-
-        // Uniform data should give W in valid range
-        // Note: Our approximation may differ from R due to different coefficient methods
-        assert!(
-            result.w_statistic > 0.70 && result.w_statistic <= 1.0,
-            "W should be in valid range: {}",
-            result.w_statistic
+    fn test_validate_na_shapiro_wilk_columns() {
+        let (case, ds) = crate::test_support::load_case("stat_shapiro_wilk");
+        // a NaN cell counts as missing (the harness cannot write NaN: the one inline fixture)
+        let nan = Dataset::new(df!("x" => [1.2, f64::NAN, 2.3, 3.1, 4.5, 5.2]).unwrap());
+        let r = run_shapiro_wilk(&nan, "x").unwrap();
+        assert_eq!(r.n, 5);
+        assert_eq!(r.missing.by_column, vec![("x".to_string(), 1)]);
+        assert!(p2a_validation::Tol::stat(5).allows(r.w_statistic, case.scalar("n5_w")));
+        let text = r.to_string();
+        assert_eq!(
+            text.lines().last().unwrap(),
+            format!("Missing values: {}", r.missing.note().unwrap())
         );
-        assert_eq!(result.n, 10);
-        assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
+        // complete column: no note
+        assert!(
+            !run_shapiro_wilk(&ds, "n5000_rnorm")
+                .unwrap()
+                .to_string()
+                .contains("Missing values")
+        );
+        // text column and absent column
+        let ts = generated("two_sample_na");
+        assert!(
+            matches!(run_shapiro_wilk(&ts, "g"), Err(EconError::NonNumericColumn { column }) if column == "g")
+        );
+        assert!(
+            matches!(run_shapiro_wilk(&ds, "nope"), Err(EconError::ColumnNotFound { column, .. }) if column == "nope")
+        );
+    }
+
+    /// shapiro.test rescales a sample whose range is below 1 (PR#1768) and refuses only a
+    /// range below 1e-10: W and p do not depend on the scale.
+    #[test]
+    fn test_validate_shapiro_wilk_rescales_small_range() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case("stat_shapiro_wilk");
+        let (n5, _) = numeric_column(ds.df(), "n5", NaPolicy::Omit).unwrap();
+        let tiny: Vec<f64> = n5.iter().map(|v| v * 1e-6).collect();
+        let r = shapiro_wilk_test(&tiny).unwrap();
+        assert!(
+            Tol::stat(5).allows(r.w_statistic, case.scalar("n5_w")),
+            "{}",
+            r.w_statistic
+        );
+        assert!(
+            Tol::p_value(5).allows(r.p_value, case.scalar("n5_p")),
+            "{}",
+            r.p_value
+        );
+        // Range 2e-10 (sum of squares 3e-20) is a valid sample for R: it is (0, 0, 0, 1)
+        // rescaled, W 0.62977626491370753, p 0.0012407259319772808 for both (R 4.3.3).
+        let a = shapiro_wilk_test(&[0.0, 0.0, 0.0, 2e-10]).unwrap();
+        let b = shapiro_wilk_test(&[0.0, 0.0, 0.0, 1.0]).unwrap();
+        assert!(
+            (a.w_statistic - b.w_statistic).abs() <= 1e-12
+                && (a.p_value - b.p_value).abs() <= 1e-12 * b.p_value,
+            "{a:?} vs {b:?}"
+        );
     }
 
     #[test]
-    fn test_validate_shapiro_exponential_against_r() {
-        // R: shapiro.test(rexp(15))
-        // Exponential data should strongly reject normality
-        // Using fixed exponential-like data
-        let x = vec![
-            0.05, 0.12, 0.18, 0.27, 0.41, 0.58, 0.82, 1.15, 1.63, 2.30, 3.25, 4.59, 6.49, 9.17,
-            12.96,
-        ];
-
-        let result = shapiro_wilk_test(&x).unwrap();
-
-        // Exponential data should have low W and reject normality
+    fn test_shapiro_wilk_input_errors() {
+        // R: "all 'x' values are identical" (range < 1e-10), "sample size must be between 3
+        // and 5000"
+        let same = shapiro_wilk_test(&[5.0, 5.0 + 1e-12, 5.0, 5.0]).unwrap_err();
         assert!(
-            result.w_statistic < 0.90,
-            "W should be low for exponential data: {}",
-            result.w_statistic
+            matches!(&same, EconError::InvalidSpecification { message } if message.contains("identical")),
+            "{same}"
         );
-        assert_eq!(result.n, 15);
-    }
-
-    #[test]
-    fn test_validate_shapiro_small_sample_against_r() {
-        // R: shapiro.test(c(1.2, 2.3, 3.1, 4.5, 5.2))
-        // W = 0.9856, p-value = 0.9609
-        let x = vec![1.2, 2.3, 3.1, 4.5, 5.2];
-
-        let result = shapiro_wilk_test(&x).unwrap();
-
-        // Small sample with roughly linear data should have high W
+        assert!(matches!(
+            shapiro_wilk_test(&[1.0, f64::NAN, 2.0]),
+            Err(EconError::InsufficientData { provided: 2, .. })
+        ));
+        let big: Vec<f64> = (0..5001).map(|i| (i as f64 * 0.37).sin()).collect();
+        let e = shapiro_wilk_test(&big).unwrap_err();
         assert!(
-            result.w_statistic > 0.90,
-            "W should be high for small linear sample: {}",
-            result.w_statistic
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("5000")),
+            "{e}"
         );
-        assert_eq!(result.n, 5);
-    }
-
-    #[test]
-    fn test_validate_shapiro_n3_against_r() {
-        // R: shapiro.test(c(1, 2, 3))
-        // W = 1, p-value = 1 (perfectly linear is perfectly "normal-looking")
-        let x = vec![1.0, 2.0, 3.0];
-
-        let result = shapiro_wilk_test(&x).unwrap();
-
-        // n=3 with any non-constant data should give high W
+        let inf = shapiro_wilk_test(&[1.0, 2.0, f64::INFINITY, 4.0]).unwrap_err();
         assert!(
-            result.w_statistic >= 0.75,
-            "W for n=3 should be at least 0.75: {}",
-            result.w_statistic
+            matches!(&inf, EconError::InvalidSpecification { message } if message.contains("infinite")),
+            "{inf}"
         );
-        assert_eq!(result.n, 3);
-    }
-
-    #[test]
-    fn test_validate_shapiro_large_sample_against_r() {
-        // Test with larger sample (n > 50)
-        // Generate standard normal-ish looking data
-        let x: Vec<f64> = (0..100)
-            .map(|i| {
-                let t = i as f64 / 99.0;
-                // Approximate inverse normal CDF using rational approximation
-                2.0 * (t - 0.5) + 0.1 * ((t - 0.5) * 10.0).sin()
-            })
-            .collect();
-
-        let result = shapiro_wilk_test(&x).unwrap();
-
-        assert_eq!(result.n, 100);
-        assert!(result.w_statistic > 0.0 && result.w_statistic <= 1.0);
-        assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
     }
 }

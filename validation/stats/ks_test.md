@@ -144,6 +144,37 @@ result <- ks.test(x, y)
 
 **Rust Test:** `crates/p2a-core/src/stats/ks.rs::tests::test_validate_ks_larger_sample_against_r`
 
+## Two-sample test with missing values and integer columns
+
+**R Code** (case `stat_two_sample_na` in `validation/r/cases/stats_onesample.R`; `xi`, `yi` are
+Int64 columns of `validation/datasets/generated/two_sample_na.csv` with 20 and 18 values and ties):
+```r
+ks2 <- suppressWarnings(ks.test(d$xi, d$yi))   # each sample drops its own NA
+```
+
+| Quantity | R | Status |
+|---|---|---|
+| D | 0.3333333333333333 | pinned (`Tol::stat`) |
+| n, m | 20, 18 | pinned (exact) |
+| p-value | 0.15653867760174539 (exact, conditional on ties) | **known deviation STAT-27** |
+
+**Known deviation (STAT-27):** p2a computes the asymptotic Kolmogorov p-value with Stephens'
+correction (0.19563779265722 on this case); R 4.3.3 reports the exact p-value conditional on
+the ties. For comparison, R's `ks.test(..., exact = FALSE)` gives 0.24318687396544358. The
+p-value is left out of the test's `Check` until STAT-27 is fixed.
+
+**Missing values:** `ks_test` and `run_ks_test` read each column through the shared extractor:
+the one-sample test and each sample of the two-sample test drop their own missing values (null
+or NaN; `ks.test` does the same), report them in `KsTestResult.missing` and in a last Display
+line `Missing values: ...`, and accept integer columns. A text column is `NonNumericColumn`.
+
+**Rust tests:**
+- `stats::ks::tests::test_validate_ks_test_two_sample_na` (D, n, m)
+- `stats::ks::tests::test_validate_na_ks_test_missing_rows_and_errors` (one- and two-sample `missing`, Display line, text and absent columns)
+
+**Status:** R-pinned with a known deviation (registry `validation/methods/stats_onesample.json`,
+id `ks_test_two_sample`).
+
 ## Numerical Precision Summary
 
 | Test Case | D Statistic Match | P-value Match |

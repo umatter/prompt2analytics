@@ -25,6 +25,7 @@ use ndarray::{Array1, Array2, ArrayView2};
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, Columns, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{faer_ref_to_ndarray, faer_to_ndarray, matmul, ndarray_to_faer};
 use crate::resource;
@@ -366,7 +367,9 @@ pub fn cancor(
 /// - An empty X or Y column list.
 /// - A column listed twice within X, or twice within Y (that set's covariance would be
 ///   singular). A column shared by X and Y is allowed; R gives a canonical correlation of 1.
-/// - A missing or non-numeric column.
+/// - An absent column (`ColumnNotFound`), a text column (`NonNumericColumn`), a missing value
+///   (null or NaN: `NullValues`, as R's `cancor` refuses NA) or an infinite value
+///   (`NonFiniteValues`). Integer, decimal and boolean columns are accepted.
 /// - Everything [`cancor`] refuses, the rank bound included.
 pub fn run_cancor(
     dataset: &Dataset,
@@ -397,46 +400,15 @@ pub fn run_cancor(
         }
     }
 
-    let df = dataset.df();
-    let n = df.height();
-
-    // Get available columns for error messages
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Extract X matrix
-    let mut x_data = resource::try_zeros2(n, x_cols.len(), "X data matrix")?;
-    for (j, col_name) in x_cols.iter().enumerate() {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: available_cols.clone(),
-        })?;
-        let values = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-        // Chunk-aware iteration: `get(i)` scans the chunk list of a stacked frame per call
-        for (cell, v) in x_data.column_mut(j).iter_mut().zip(values) {
-            *cell = v.unwrap_or(f64::NAN);
-        }
-    }
-
-    // Extract Y matrix
-    let mut y_data = resource::try_zeros2(n, y_cols.len(), "Y data matrix")?;
-    for (j, col_name) in y_cols.iter().enumerate() {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: available_cols.clone(),
-        })?;
-        let values = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-        for (cell, v) in y_data.column_mut(j).iter_mut().zip(values) {
-            *cell = v.unwrap_or(f64::NAN);
-        }
-    }
+    // Both sets in one request (a column shared by X and Y is read once). Missing values are
+    // refused as R's cancor() refuses NA.
+    let cols = ColumnRequest::new(dataset.df())
+        .numerics(x_cols)
+        .numerics(y_cols)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let x_data = data_matrix(&cols, x_cols, "X data matrix")?;
+    let y_data = data_matrix(&cols, y_cols, "Y data matrix")?;
 
     let mut result = cancor(&x_data.view(), &y_data.view(), xcenter, ycenter)?;
 
@@ -445,6 +417,18 @@ pub fn run_cancor(
     result.y_names = Some(y_cols.iter().map(|s| s.to_string()).collect());
 
     Ok(result)
+}
+
+/// The n x k matrix of the extracted columns `names`, allocated through
+/// [`resource::try_zeros2`].
+fn data_matrix(cols: &Columns, names: &[&str], what: &str) -> EconResult<Array2<f64>> {
+    let mut data = resource::try_zeros2(cols.n(), names.len(), what)?;
+    for (j, name) in names.iter().enumerate() {
+        for (cell, &v) in data.column_mut(j).iter_mut().zip(cols.numeric(name)) {
+            *cell = v;
+        }
+    }
+    Ok(data)
 }
 
 /// Center a matrix by subtracting column means (faer version).
@@ -857,5 +841,42 @@ mod tests {
         // Check coefficient dimensions
         assert_eq!(result.xcoef.dim(), (3, 2));
         assert_eq!(result.ycoef.dim(), (2, 2));
+    }
+
+    fn generated(name: &str) -> Dataset {
+        let p = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        Dataset::new(crate::data::DataLoader::load_csv(p).unwrap())
+    }
+
+    /// X-8: an Int64 column gives the result of its Float64 copy; a null is refused as R's
+    /// cancor() refuses NA (no R values: STAT-16 is open).
+    #[test]
+    fn test_na_cancor_columns() {
+        // id Int64 (complete), b Float64, a with one null
+        let ds = generated("pairwise_mahalanobis_na");
+        let mut df = ds.df().clone();
+        let id_f = df
+            .column("id")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .with_name("id_f".into());
+        df.with_column(id_f).unwrap();
+        let ds2 = Dataset::new(df);
+        let i = run_cancor(&ds2, &["id"], &["b"], true, true).unwrap();
+        let f = run_cancor(&ds2, &["id_f"], &["b"], true, true).unwrap();
+        assert!((i.cor[0] - f.cor[0]).abs() <= 1e-12);
+        assert!(matches!(
+            run_cancor(&ds, &["a"], &["b"], true, true),
+            Err(EconError::NullValues { column, count: 1 }) if column == "a"
+        ));
+        assert!(matches!(
+            run_cancor(&ds, &["g"], &["b"], true, true),
+            Err(EconError::NonNumericColumn { column }) if column == "g"
+        ));
+        assert!(matches!(
+            run_cancor(&ds, &["nope"], &["b"], true, true),
+            Err(EconError::ColumnNotFound { .. })
+        ));
     }
 }

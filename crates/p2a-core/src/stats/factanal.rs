@@ -18,6 +18,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{
     eig_symmetric, faer_to_ndarray, matmul, matrix_inverse, ndarray_to_faer,
@@ -1402,6 +1403,10 @@ fn correlation_matrix(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
 }
 
 /// Run factor analysis from Dataset.
+///
+/// Missing values (null or NaN) are refused with `EconError::NullValues` naming the column,
+/// as R's `factanal` refuses NA; integer, decimal and boolean columns are accepted, a text
+/// column is `NonNumericColumn` and an infinite value `NonFiniteValues`.
 pub fn run_factanal(
     dataset: &crate::data::Dataset,
     columns: &[&str],
@@ -1409,39 +1414,18 @@ pub fn run_factanal(
     rotation: RotationMethod,
     scores: ScoresMethod,
 ) -> EconResult<FactorAnalysisResult> {
-    // Extract data from dataset columns
     let df = dataset.df();
-    let n = df.height();
-    let p = columns.len();
-
-    if n == 0 {
+    if df.height() == 0 {
         return Err(EconError::EmptyDataset);
     }
 
-    // Build data matrix
-    let mut data = Array2::zeros((n, p));
-    for (j, col_name) in columns.iter().enumerate() {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: dataset.column_names(),
-        })?;
-
-        let values = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-
-        for (i, val) in values.iter().enumerate() {
-            match val {
-                Some(v) => data[[i, j]] = v,
-                None => {
-                    return Err(EconError::NullValues {
-                        column: col_name.to_string(),
-                        count: col.null_count(),
-                    });
-                }
-            }
-        }
-    }
+    // Missing values are refused, as R's factanal() refuses NA.
+    let data = ColumnRequest::new(df)
+        .numerics(columns)
+        .na(NaPolicy::Fail)
+        .extract()?
+        .matrix(columns, false)
+        .data;
 
     let mut result = factanal(&data.view(), n_factors, rotation, scores)?;
     result.var_names = Some(columns.iter().map(|s| s.to_string()).collect());
@@ -1657,5 +1641,74 @@ mod tests {
 
         // 3. Convergence check
         assert!(result.converged, "Factor analysis did not converge");
+    }
+
+    fn generated(name: &str) -> crate::data::Dataset {
+        let p = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        crate::data::Dataset::new(crate::data::DataLoader::load_csv(p).unwrap())
+    }
+
+    /// X-8: an Int64 column gives the result of its Float64 copy; a null or NaN cell is
+    /// refused as R's factanal() refuses NA (no R values: STAT-23 is open).
+    #[test]
+    fn test_na_factanal_columns() {
+        use crate::data::Dataset;
+        use polars::prelude::*;
+        // year is Int64
+        let path = p2a_validation::repo_path("validation/datasets/grunfeld.csv");
+        let ds = Dataset::new(crate::data::DataLoader::load_csv(path).unwrap());
+        let mut df = ds.df().clone();
+        let year_f = df
+            .column("year")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .with_name("year_f".into());
+        df.with_column(year_f).unwrap();
+        let ds2 = Dataset::new(df);
+        let run = |c: &str| {
+            run_factanal(
+                &ds2,
+                &["inv", "value", "capital", c],
+                1,
+                RotationMethod::None,
+                ScoresMethod::None,
+            )
+        };
+        let (i, f) = (run("year"), run("year_f"));
+        assert!(
+            !matches!(i, Err(EconError::NonNumericColumn { .. })),
+            "{i:?}"
+        );
+        match (i, f) {
+            (Ok(a), Ok(b)) => {
+                assert!(
+                    (a.chi_squared - b.chi_squared).abs() <= 1e-9 * b.chi_squared.abs().max(1.0)
+                );
+                for (x, y) in a.uniquenesses.iter().zip(b.uniquenesses.iter()) {
+                    assert!((x - y).abs() <= 1e-9);
+                }
+            }
+            (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
+            (a, b) => panic!("Int64 and Float64 columns disagree: {a:?} vs {b:?}"),
+        }
+        let pm = generated("pairwise_mahalanobis_na");
+        assert!(matches!(
+            run_factanal(&pm, &["a", "b", "id"], 1, RotationMethod::None, ScoresMethod::None),
+            Err(EconError::NullValues { column, count: 1 }) if column == "a"
+        ));
+        // a NaN cell is missing too (inline fixture; the harness cannot write NaN)
+        let nan = Dataset::new(
+            df!(
+                "u" => [1.0, 2.1, f64::NAN, 3.9, 5.2, 6.1],
+                "v" => [2.0, 2.9, 4.2, 5.1, 5.8, 7.2],
+                "w" => [0.5, 1.7, 2.2, 2.8, 4.1, 4.4]
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            run_factanal(&nan, &["u", "v", "w"], 1, RotationMethod::None, ScoresMethod::None),
+            Err(EconError::NullValues { column, count: 1 }) if column == "u"
+        ));
     }
 }

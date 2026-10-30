@@ -36,10 +36,11 @@
 //! non-normal, consider using Levene's test instead, which is more robust.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use crate::traits::{SignificanceLevel, chi_squared_p_value};
 
 /// Result of Bartlett's test for homogeneity of variances.
@@ -61,6 +62,10 @@ pub struct BartlettResult {
     pub pooled_variance: f64,
     /// Group-wise statistics
     pub group_stats: Vec<BartlettGroupStats>,
+    /// Rows dropped because of a missing value or a missing group label (dataset wrapper;
+    /// nothing for slices).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Statistics for a single group in Bartlett's test.
@@ -120,6 +125,9 @@ impl std::fmt::Display for BartlettResult {
                 f,
                 "\nConclusion: Fail to reject H₀ - no significant difference in variances."
             )?;
+        }
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
         }
         Ok(())
     }
@@ -232,10 +240,18 @@ pub fn bartlett_test(groups: &[(String, Vec<f64>)]) -> EconResult<BartlettResult
         n_obs: n_total,
         pooled_variance,
         group_stats,
+        missing: MissingSummary::none(n_total),
     })
 }
 
 /// Perform Bartlett's test from a Dataset with a response and grouping variable.
+///
+/// The response and the factor are read in one request: a row with a missing value (null or
+/// NaN) or a missing label is dropped from both, as `bartlett.test(y ~ g)` does
+/// (`model.frame`, `na.omit`), and the drop is reported in `missing`. Groups come in R's
+/// factor order (numeric labels numerically, text in byte order). Integer, decimal and
+/// boolean responses are accepted; a text response is refused
+/// (`EconError::NonNumericColumn`), as are infinite values (`EconError::NonFiniteValues`).
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -258,82 +274,36 @@ pub fn run_bartlett_test(
     response_col: &str,
     factor_col: &str,
 ) -> EconResult<BartlettResult> {
-    let df = dataset.df();
-    let n_rows = df.height();
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(response_col)
+        .factor(factor_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let groups = values_by_level(cols.numeric(response_col), cols.factor(factor_col))?;
+    let mut result = bartlett_test(&groups)?;
+    result.missing = cols.missing().clone();
+    Ok(result)
+}
 
-    // Get response column
-    let response = df
-        .column(response_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: response_col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    let response_values: Vec<Option<f64>> = response
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: response_col.to_string(),
-        })?
-        .into_iter()
-        .collect();
-
-    // Get factor column
-    let factor = df
-        .column(factor_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: factor_col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    // Extract factor values as strings
-    let factor_values: Vec<String> = if let Ok(str_col) = factor.str() {
-        str_col
-            .into_iter()
-            .map(|opt| opt.map(|s| s.to_string()).unwrap_or_default())
-            .collect()
-    } else if let Ok(int_col) = factor.i64() {
-        int_col
-            .into_iter()
-            .map(|opt| opt.map(|v| v.to_string()).unwrap_or_default())
-            .collect()
-    } else if let Ok(float_col) = factor.f64() {
-        float_col
-            .into_iter()
-            .map(|opt| opt.map(|v| v.to_string()).unwrap_or_default())
-            .collect()
-    } else {
-        return Err(EconError::NonNumericColumn {
-            column: format!("{} (cannot extract factor values)", factor_col),
-        });
-    };
-
-    // Group data by factor
-    let mut grouped: HashMap<String, Vec<f64>> = HashMap::new();
-
-    for i in 0..n_rows {
-        let group = &factor_values[i];
-        if group.is_empty() {
-            continue;
-        }
-
-        if let Some(value) = response_values[i] {
-            grouped.entry(group.clone()).or_default().push(value);
-        }
+/// The values of each factor level, in level order (R `split(x, g)`); levels without a
+/// value are left out.
+pub(crate) fn values_by_level(
+    values: &[f64],
+    factor: &Factor,
+) -> EconResult<Vec<(String, Vec<f64>)>> {
+    let counts = factor.counts();
+    let mut groups: Vec<(String, Vec<f64>)> = Vec::with_capacity(factor.n_levels());
+    for (label, &count) in factor.levels.iter().zip(&counts) {
+        groups.push((
+            label.clone(),
+            resource::try_with_capacity(count, "group values")?,
+        ));
     }
-
-    // Convert to vector and sort by group name for consistent ordering
-    let mut groups: Vec<(String, Vec<f64>)> = grouped.into_iter().collect();
-    groups.sort_by(|a, b| a.0.cmp(&b.0));
-
-    bartlett_test(&groups)
+    for (&value, &code) in values.iter().zip(&factor.codes) {
+        groups[code as usize].1.push(value);
+    }
+    groups.retain(|(_, g)| !g.is_empty());
+    Ok(groups)
 }
 
 #[cfg(test)]
@@ -515,5 +485,58 @@ mod tests {
         assert_eq!(result.group_stats[0].n, 3);
         assert_eq!(result.group_stats[1].n, 5);
         assert_eq!(result.group_stats[2].n, 4);
+    }
+
+    // ========================================================================
+    // Missing values and integer columns (case stat_two_sample_na,
+    // validation/r/cases/stats_onesample.R)
+    // ========================================================================
+
+    /// X-2/X-8: bartlett.test(xi ~ g) on an Int64 response; xi and g are missing in rows
+    /// 21-22 (model.frame drops both).
+    #[test]
+    fn test_validate_bartlett_test_two_sample_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_bartlett_test(&ds, "xi", "g").unwrap();
+        let names: Vec<&str> = r.group_stats.iter().map(|g| g.group.as_str()).collect();
+        let vars: Vec<f64> = r.group_stats.iter().map(|g| g.variance).collect();
+        let ns: Vec<f64> = r.group_stats.iter().map(|g| g.n as f64).collect();
+        Check::new(&case)
+            .scalar("bartlett_k2", r.statistic, Tol::stat(20))
+            .scalar("bartlett_df", r.df as f64, Tol::exact())
+            .scalar("bartlett_p", r.p_value, Tol::p_value(20))
+            .named("bartlett_group_var", &names, &vars, Tol::stat(20))
+            .scalar("bartlett_pooled_var", r.pooled_variance, Tol::stat(20))
+            .named("group_n", &names, &ns, Tol::exact())
+            .scalar("n_xi_g", r.n_obs as f64, Tol::exact())
+            .finish();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(
+            r.missing.by_column,
+            vec![("xi".to_string(), 2), ("g".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn test_validate_na_bartlett_test_errors() {
+        let (_case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_bartlett_test(&ds, "xi", "g").unwrap();
+        assert_eq!(
+            r.to_string().lines().last().unwrap(),
+            format!("Missing values: {}", r.missing.note().unwrap())
+        );
+        assert!(matches!(
+            run_bartlett_test(&ds, "g", "id"),
+            Err(EconError::NonNumericColumn { column }) if column == "g"
+        ));
+        assert!(matches!(
+            run_bartlett_test(&ds, "nope", "g"),
+            Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
+        ));
+        assert!(matches!(
+            run_bartlett_test(&ds, "xi", "nope"),
+            Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
+        ));
     }
 }

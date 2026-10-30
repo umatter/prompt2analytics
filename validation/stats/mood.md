@@ -101,6 +101,38 @@ mood.test(x, y)
 | has_ties | TRUE | TRUE | PASS |
 | p-value in [0,1] | TRUE | TRUE | PASS |
 
+### Test 5: Missing values and integer columns (R-pinned)
+
+**R Code** (case `stat_two_sample_na` in `validation/r/cases/stats_onesample.R`; `mi`, `mj` are
+tie-free Int64 columns of `validation/datasets/generated/two_sample_na.csv` with 15 and 12
+values, the rest missing):
+```r
+mt_nt <- mood.test(d$mi, d$mj)   # each sample drops its own NA
+```
+
+| Quantity | R | Tolerance |
+|---|---|---|
+| Z | 3.074157339784952 | `Tol::stat(27)` |
+| p-value | 0.002110980682689112 | `Tol::p_value(27)` |
+| T (sum of squared rank deviations of `mi`, cross-check) | 1348 | `Tol::stat(27)` |
+| n_x, n_y | 15, 12 | exact |
+
+**Missing values:** `run_mood_test` reads each column through the shared extractor and drops its
+own missing values (null or NaN), as `mood.test` does; the drop is reported in
+`MoodTestResult.missing` and a last Display line `Missing values: ...`. Integer columns are
+accepted; a text column is `NonNumericColumn`. Before T2-WP06, nulls were read as 0 and
+integer columns were refused.
+
+The tied integer pair `xi`/`yi` of the same case is not pinned: see STAT-29 under Known
+Differences.
+
+**Rust tests:**
+- `stats::mood::tests::test_validate_mood_test_two_sample_na` (Z, p, T, n)
+- `stats::mood::tests::test_validate_na_mood_test_missing_rows_and_errors` (`missing`, Display line, text and absent columns)
+
+**Status:** R-pinned with a known deviation (registry `validation/methods/stats_onesample.json`,
+id `mood_test`).
+
 ## Numerical Precision Summary
 
 - Z-scores match R within 0.5 for equal-scale data
@@ -111,7 +143,13 @@ mood.test(x, y)
 
 1. **Exact vs Asymptotic:** R uses asymptotic (normal) approximation for all sample sizes. Our implementation also uses asymptotic approximation.
 
-2. **Tie handling:** Both use Mielke (1967) variance adjustment for ties.
+2. **Tie handling (known deviation STAT-29):** R scores each tied observation by Mielke's
+   (1967) average of the squared rank deviations over the positions the tie occupies; p2a
+   squares the deviation of the midrank. Only the variance correction for ties is shared. On
+   the tied integer pair `xi`/`yi` of case `stat_two_sample_na`, R gives z -2.667468897704627
+   (p 0.007642496253585789) and p2a -2.698344723655288 (p 0.006968523851116348). The tied
+   values are left out of the test's `Check` until STAT-29 is fixed; the tie-free pair
+   `mi`/`mj` is pinned.
 
 ## Performance Comparison
 
