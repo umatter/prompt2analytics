@@ -22,7 +22,8 @@
         "p2a-core::diagnostics::iv::tests::test_validate_iv_diagnostics_weak_controls",
         "p2a-core::diagnostics::iv::tests::test_validate_iv_diagnostics_two_endog",
         "p2a-core::econometrics::iv::tests::test_validate_iv_na_rows",
-        "p2a-core::econometrics::iv::tests::test_validate_na_iv_errors_name_the_column"
+        "p2a-core::econometrics::iv::tests::test_validate_na_iv_errors_name_the_column",
+        "p2a-core::econometrics::general_gmm::tests::test_validate_na_gmm_iv_omit_equals_complete_rows"
       ],
       "quantities": [
         "coefficients",
