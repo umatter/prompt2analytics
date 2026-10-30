@@ -3287,30 +3287,29 @@ fn main() {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
 
-        // Extract arrays for gls()
-        let design = DesignMatrix::from_dataframe(dataset.df(), &["x1"], true).unwrap();
-        let x_mat = design.data.clone();
-        let y_col = dataset
-            .df()
-            .column("y")
-            .unwrap()
-            .as_materialized_series()
-            .f64()
-            .unwrap();
-        let y_arr: Array1<f64> = y_col.into_iter().map(|v| v.unwrap_or(0.0)).collect();
-
-        let mut result = run_benchmark_tracked("GLS", "AR1", n, &slow_config, || {
+        // The design matrix and y are built inside the timed call, as R's
+        // nlme::gls times its formula and model-frame step (and as OLS_HAC does)
+        let fit_gls = || {
+            let design = DesignMatrix::from_dataframe(dataset.df(), &["x1"], true).ok()?;
+            let y_arr: Array1<f64> = dataset
+                .df()
+                .column("y")
+                .ok()?
+                .as_materialized_series()
+                .f64()
+                .ok()?
+                .into_iter()
+                .map(|v| v.unwrap_or(0.0))
+                .collect();
             gls(
                 &y_arr.view(),
-                &x_mat.view(),
+                &design.data.view(),
                 CorrelationStructure::AR1 { rho: 0.5 },
             )
-        });
-        if let Ok(ref g) = gls(
-            &y_arr.view(),
-            &x_mat.view(),
-            CorrelationStructure::AR1 { rho: 0.5 },
-        ) {
+            .ok()
+        };
+        let mut result = run_benchmark_tracked("GLS", "AR1", n, &slow_config, &fit_gls);
+        if let Some(ref g) = fit_gls() {
             let mut outputs = BTreeMap::new();
             capture_vec(&mut outputs, "coefficients", &g.coefficients);
             capture_vec(&mut outputs, "std_errors", &g.std_errors);
@@ -4807,12 +4806,9 @@ fn main() {
 
         // Mood
         if wants("Mood") {
-            // g1, g2 as R's variance section draws them (oneway_n<n>.csv)
-            let (local_g1, local_g2) =
-                match load_csv_columns_array2(&data_dir, "oneway", n, &["g1", "g2"]) {
-                    Some(a) => (a.column(0).to_vec(), a.column(1).to_vec()),
-                    None => (g1.clone(), g2.clone()),
-                };
+            // g1, g2 of groups_n<n>.csv (the loop top)
+            let local_g1 = g1.clone();
+            let local_g2 = g2.clone();
             let mut result = run_benchmark_tracked("Mood", "test", n, &config, || {
                 mood_test(&local_g1, &local_g2, Alternative::TwoSided)
             });
@@ -4850,12 +4846,9 @@ fn main() {
 
         // Var_Test (F-test for equality of variances)
         if wants("Var_Test") {
-            // g1, g2 as R's variance section draws them (oneway_n<n>.csv)
-            let (local_g1, local_g2) =
-                match load_csv_columns_array2(&data_dir, "oneway", n, &["g1", "g2"]) {
-                    Some(a) => (a.column(0).to_vec(), a.column(1).to_vec()),
-                    None => (g1.clone(), g2.clone()),
-                };
+            // g1, g2 of groups_n<n>.csv (the loop top)
+            let local_g1 = g1.clone();
+            let local_g2 = g2.clone();
             let mut result = run_benchmark_tracked("Var_Test", "F-test", n, &config, || {
                 var_test(&local_g1, &local_g2, 1.0, Alternative::TwoSided, 0.95)
             });
@@ -4873,17 +4866,9 @@ fn main() {
 
         // Oneway (Welch ANOVA)
         if wants("Oneway") {
-            // g1, g2, g3 as R's variance section draws them (oneway_n<n>.csv);
-            // R stacks them into y ~ group with levels g1, g2, g3
-            let local_groups: Vec<(String, Vec<f64>)> =
-                match load_csv_columns_array2(&data_dir, "oneway", n, &["g1", "g2", "g3"]) {
-                    Some(a) => ["g1", "g2", "g3"]
-                        .iter()
-                        .enumerate()
-                        .map(|(j, name)| (name.to_string(), a.column(j).to_vec()))
-                        .collect(),
-                    None => groups.clone(),
-                };
+            // g1, g2, g3 of groups_n<n>.csv (the loop top); R stacks them into
+            // y ~ group with levels g1, g2, g3
+            let local_groups = groups.clone();
             let mut result = run_benchmark_tracked("Oneway", "Welch", n, &config, || {
                 oneway_test(&local_groups, false)
             });
