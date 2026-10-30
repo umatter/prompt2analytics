@@ -43,6 +43,10 @@
       "values": [0, 0, 0, 0, 0]
     },
     "na_identical": 1,
-    "dot_identical": 1
+    "dot_identical": 1,
+    "canon_na_rows_y": [1, 6],
+    "canon_na_rows_n": [3],
+    "canon_na_rows_s": [4],
+    "canon_na_rows_flag": [5]
   }
 }

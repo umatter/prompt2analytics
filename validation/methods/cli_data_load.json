@@ -9,7 +9,7 @@
       "doc": "docs/guides/CLI_REFERENCE.md",
       "cases": ["columns_conventions", "cli_na_strings"],
       "tests": ["p2a-cli::tier2::wp03_flags::test_validate_cli_data_load_na_strings"],
-      "quantities": ["missing cells per column", "complete rows", "rows dropped", "column classes (integer, numeric, character, logical)", "identical() to the case file"],
+      "quantities": ["missing cells per column", "missing-row positions", "complete rows", "rows dropped", "column classes (integer, numeric, character, logical)", "identical() to the case file"],
       "tolerance": "exact (positions, counts, class codes, identical as 0/1)",
       "deviations": [],
       "supersedes_legacy": []

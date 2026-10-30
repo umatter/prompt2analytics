@@ -430,18 +430,13 @@ fn test_validate_cli_data_load_na_strings() {
         }
         c.finish();
     }
-    // the missing rows of n, s and flag are the R NA positions of the case
-    let r_rows = |key: &str, missing: fn(f64) -> bool| -> Vec<usize> {
-        case.vector(key)
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| missing(**v))
-            .map(|(i, _)| i)
-            .collect()
-    };
-    assert_eq!(nulls(rows, "n"), r_rows("n_codes", |v| v == -1.0));
-    assert_eq!(nulls(rows, "s"), r_rows("s_codes", |v| v == -1.0));
-    assert_eq!(nulls(rows, "flag"), r_rows("flag_numeric", f64::is_nan));
+    // R: the 0-based rows of the missing cells of each column of the case file
+    let mut c = Check::new(&read);
+    for col in ["y", "n", "s", "flag"] {
+        let positions: Vec<f64> = nulls(rows, col).into_iter().map(|i| i as f64).collect();
+        c.vector(&format!("canon_na_rows_{col}"), &positions, Tol::exact());
+    }
+    c.finish();
 
     // the recorded command keeps the flag for script export
     let dot_s = dot.to_str().unwrap();

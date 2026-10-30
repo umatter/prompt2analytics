@@ -41,7 +41,10 @@ case("cli_na_strings", "data/na_strings", "read.csv na.strings on NA- and .-code
     dot_class = class_codes(d_dot), raw_class = class_codes(d_raw),
     canon_missing = missing(canon), na_missing = missing(d_na),
     dot_missing = missing(d_dot), raw_missing = missing(d_raw),
-    na_identical = as.numeric(identical(d_na, canon)), dot_identical = as.numeric(identical(d_dot, canon))),
+    na_identical = as.numeric(identical(d_na, canon)), dot_identical = as.numeric(identical(d_dot, canon)),
+    # 0-based rows of the missing cells of each column of the case file
+    canon_na_rows_y = vec(which(is.na(canon$y)) - 1), canon_na_rows_n = vec(which(is.na(canon$n)) - 1),
+    canon_na_rows_s = vec(which(is.na(canon$s)) - 1), canon_na_rows_flag = vec(which(is.na(canon$flag)) - 1)),
     reference = "utils::read.csv (default na.strings = \"NA\"; na.strings = \".\") on NA- and .-coded copies of the case file; identical() to read.csv(case file, na.strings = c(\"NA\", \"\"))",
     call = "read.csv(na_file); read.csv(dot_file, na.strings = \".\"); read.csv(dot_file)",
     packages = character(0))
