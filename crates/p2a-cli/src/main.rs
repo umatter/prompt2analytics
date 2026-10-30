@@ -584,6 +584,20 @@ mod cli_definition_tests {
                 ..
             })
         ));
+        // any case is accepted (execute_save lowercases it); other names are a usage error
+        let cli = parse(&["data", "save", "d", "-o", "x", "--file-format", "CSV"]);
+        assert!(
+            matches!(cli.command, Commands::Data(DataCommands::Save { ref file_format, .. }) if file_format.as_deref() == Some("CSV"))
+        );
+        let e = Cli::try_parse_from(["p2a", "data", "save", "d", "-o", "x", "-f", "xlsx"])
+            .err()
+            .expect("xlsx is not a file format");
+        assert_eq!(e.kind(), clap::error::ErrorKind::InvalidValue);
+        assert!(
+            e.to_string()
+                .contains("[possible values: csv, parquet, json]"),
+            "{e}"
+        );
     }
 
     #[test]

@@ -148,6 +148,43 @@ fn test_cli_data_save_file_format() {
         ]);
         assert!(e.contains("--file-format"), "{bad}: {e}");
     }
+    // the format name and the extension are case-insensitive, as in `data load`
+    s.ok(&[
+        "data",
+        "save",
+        "grunfeld",
+        "--output",
+        p("g3.dat").to_str().unwrap(),
+        "--file-format",
+        "CSV",
+    ]);
+    assert_same_csv(&p("g3.dat"), &g);
+    s.ok(&[
+        "data",
+        "save",
+        "grunfeld",
+        "--output",
+        p("g4.CSV").to_str().unwrap(),
+    ]);
+    assert_same_csv(&p("g4.CSV"), &g);
+    // clap refuses an unknown --file-format (usage error, exit 2) and lists the allowed values
+    let out = s.run(&[
+        "data",
+        "save",
+        "grunfeld",
+        "--output",
+        p("g.xlsx").to_str().unwrap(),
+        "--file-format",
+        "xlsx",
+    ]);
+    assert_no_panic(&out, "data save --file-format xlsx");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.code() == Some(2) && stderr.contains("[possible values: csv, parquet, json]"),
+        "{:?}\n{stderr}",
+        out.status.code()
+    );
+    assert!(!p("g.xlsx").exists());
 }
 
 /// CLI-12: a recorded command keeps its subcommand flags (-q, -v) and a global typed after the

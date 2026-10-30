@@ -42,7 +42,8 @@ p2a data describe <DATASET>
 # Preview first N rows
 p2a data head <DATASET> [-n ROWS]
 
-# Save a dataset (the format comes from the extension unless --file-format is given)
+# Save a dataset (the format comes from the extension unless --file-format is given;
+# both are case-insensitive)
 p2a data save <DATASET> --output <FILE> [--file-format csv|parquet|json]
 ```
 

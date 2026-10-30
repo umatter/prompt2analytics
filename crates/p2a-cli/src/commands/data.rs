@@ -106,8 +106,8 @@ EXAMPLES:
         #[arg(short, long)]
         output: PathBuf,
 
-        /// File format (csv, parquet, json); overrides the file extension
-        #[arg(short = 'f', long)]
+        /// File format (csv, parquet, json; any case); overrides the file extension
+        #[arg(short = 'f', long, value_parser = ["csv", "parquet", "json"], ignore_case = true)]
         file_format: Option<String>,
     },
 }
@@ -569,8 +569,10 @@ fn execute_save(
         }
     };
 
-    // Determine format from option or extension
-    let output_format = fmt.or_else(|| output.extension().and_then(|ext| ext.to_str()));
+    // Determine format from option or extension, in any case (as `execute_load` reads extensions)
+    let output_format = fmt
+        .or_else(|| output.extension().and_then(|ext| ext.to_str()))
+        .map(str::to_ascii_lowercase);
 
     // Show progress spinner for file saving
     let progress = Progress::spinner(
@@ -581,7 +583,7 @@ fn execute_save(
         quiet,
     );
 
-    let result: Result<&str, String> = match output_format {
+    let result: Result<&str, String> = match output_format.as_deref() {
         Some("csv") => ds.to_csv(output).map(|_| "CSV").map_err(|e| e.to_string()),
         Some("parquet") => ds
             .to_parquet(output)
