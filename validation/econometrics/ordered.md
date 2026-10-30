@@ -177,6 +177,11 @@ Not R-pinned (error paths, derivatives and fixtures):
   `NonNumericColumn`, `ColumnNotFound` and no regressor.
 - `econometrics::discrete::ordered_models::tests::test_ordered_accepts_100_categories`:
   100 categories of one row each converge to polr's MLE (inline R values).
+- `econometrics::discrete::ordered_models::tests::test_ordered_config_is_validated`:
+  `max_iter = 0` and a `tol` that is NaN, 0 or negative are `InvalidSpecification`
+  naming the field.
+- `econometrics::discrete::ordered_models::tests::test_ordered_iteration_limit_is_reported`:
+  `max_iter = 2` ends the fit with `converged = false` and a "did not converge" warning.
 - `p2a-mcp` `tier2::wp10_ordered_count::test_mcp_ordered_model_text_outcome_asks_for_levels`:
   the MCP tool error for a text outcome mentions `levels`.
 

@@ -16,7 +16,7 @@
 //!
 //! R equivalent: `MASS::polr()`
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
@@ -28,6 +28,9 @@ use crate::data::columns::{self, ColumnRequest, Columns, Factor, MissingSummary,
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::cholesky_inverse;
 use crate::resource;
+use crate::traits::estimator::logistic_cdf;
+
+use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits, newton_step};
 
 /// Most outcome categories an ordered logit/probit accepts.
 ///
@@ -36,22 +39,6 @@ use crate::resource;
 /// that is rebuilt and inverted every Newton iteration, so a continuous column
 /// passed as the outcome would otherwise create one category per observation.
 const MAX_OUTCOME_CATEGORIES: usize = 100;
-
-/// The m x m matrices a fit holds at once: the Hessian, its damped copy, and inside
-/// `cholesky_inverse` the faer copy, the factor, the identity and the solution (the
-/// covariance). Check the working set against the allocation ceiling before building it.
-const DENSE_INVERSE_COPIES: usize = 6;
-
-/// Step halvings before the line search gives up.
-const MAX_HALVINGS: usize = 30;
-
-/// Levenberg damping attempts when the observed information is not positive definite.
-const MAX_DAMPING: usize = 20;
-
-fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
-    let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
-    resource::check_alloc::<f64>(cells, what)
-}
 
 /// Largest absolute component of a Newton step, or `None` if any component is not
 /// finite. (The fold `max_change.max(change.abs())` it replaces dropped NaN, so an
@@ -376,7 +363,6 @@ pub fn run_ordered_model_with(
     let mut hess = resource::try_zeros2(n_params, n_params, hessian_what)?;
     let mut work = resource::try_zeros2(n_params, n_params, hessian_what)?;
     let mut grad = resource::try_vec(n_params, 0.0, "ordered model score")?;
-    let mut trial_grad = resource::try_vec(n_params, 0.0, "ordered model score")?;
 
     // Start at the null-model MLE: beta = 0, zeta_j = F^-1(P_j) with P_j the
     // cumulative category shares, so the first log-likelihood is the null one.
@@ -388,7 +374,15 @@ pub fn run_ordered_model_with(
     }
     let mut trial = theta.clone();
 
-    let mut ll = ordered_loglik(&x, codes, j, &theta, model_type, &mut grad, Some(&mut hess))?;
+    let mut ll = ordered_loglik(
+        &x,
+        codes,
+        j,
+        &theta,
+        model_type,
+        Some(&mut grad),
+        Some(&mut hess),
+    )?;
     let mut ll_prev = f64::NAN;
     let mut warnings: Vec<String> = Vec::new();
     let mut converged = false;
@@ -447,8 +441,8 @@ pub fn run_ordered_model_with(
                 *t = th + s * d;
             }
             if trial[k..].windows(2).all(|w| w[0] < w[1]) {
-                let ll_trial =
-                    ordered_loglik(&x, codes, j, &trial, model_type, &mut trial_grad, None)?;
+                // the log-likelihood alone; score and Hessian once, at the accepted point
+                let ll_trial = ordered_loglik(&x, codes, j, &trial, model_type, None, None)?;
                 if ll_trial.is_finite() && ll_trial >= ll - 1e-12 * ll.abs() {
                     accepted = true;
                     break;
@@ -466,7 +460,15 @@ pub fn run_ordered_model_with(
         }
         std::mem::swap(&mut theta, &mut trial);
         ll_prev = ll;
-        ll = ordered_loglik(&x, codes, j, &theta, model_type, &mut grad, Some(&mut hess))?;
+        ll = ordered_loglik(
+            &x,
+            codes,
+            j,
+            &theta,
+            model_type,
+            Some(&mut grad),
+            Some(&mut hess),
+        )?;
     }
     if !converged && !stopped {
         let max_score = grad.iter().fold(0.0f64, |m, g| m.max(g.abs()));
@@ -545,33 +547,8 @@ pub fn run_ordered_model_with(
     })
 }
 
-/// The Newton step `(-H + lambda I)^-1 g`: `lambda = 0` first; when that matrix is not
-/// positive definite, `lambda = 1e-8 max(1, max diag(-H))`, ten times larger on each of
-/// up to [`MAX_DAMPING`] attempts (Levenberg). `None` if every attempt fails. `work`
-/// holds the damped copy.
-fn newton_step(hess: &Array2<f64>, grad: &[f64], work: &mut Array2<f64>) -> Option<Array1<f64>> {
-    let m = grad.len();
-    let max_diag = (0..m).fold(1.0f64, |acc, i| acc.max(-hess[[i, i]]));
-    let mut lambda = 0.0;
-    for attempt in 0..=MAX_DAMPING {
-        work.zip_mut_with(hess, |w, h| *w = -h);
-        for i in 0..m {
-            work[[i, i]] += lambda;
-        }
-        if let Ok(inv) = cholesky_inverse(&work.view()) {
-            return Some(inv.dot(&ArrayView1::from(grad)));
-        }
-        lambda = if attempt == 0 {
-            1e-8 * max_diag
-        } else {
-            lambda * 10.0
-        };
-    }
-    None
-}
-
 /// Log-likelihood of the ordered model at `theta = (beta, zeta)`, with its score in
-/// `grad` and, when `hess` is given, its observed Hessian (polr's model,
+/// `grad` and its observed Hessian in `hess` when they are given (polr's model,
 /// `P(y <= j) = F(zeta_j - x'beta)`). `NEG_INFINITY` when some observation has
 /// probability 0 (then `grad` and `hess` are incomplete).
 ///
@@ -589,12 +566,14 @@ fn ordered_loglik(
     n_cat: usize,
     theta: &[f64],
     link: OrderedModelType,
-    grad: &mut [f64],
+    mut grad: Option<&mut [f64]>,
     mut hess: Option<&mut Array2<f64>>,
 ) -> EconResult<f64> {
     let k = x.ncols();
     let (beta, zeta) = theta.split_at(k);
-    grad.fill(0.0);
+    if let Some(g) = grad.as_deref_mut() {
+        g.fill(0.0);
+    }
     if let Some(h) = hess.as_deref_mut() {
         h.fill(0.0);
     }
@@ -614,6 +593,9 @@ fn ordered_loglik(
             return Ok(f64::NEG_INFINITY);
         }
         ll += p.ln();
+        if grad.is_none() && hess.is_none() {
+            continue;
+        }
         let (fu, fpu) = upper.map_or((0.0, 0.0), |u| link_density(u, link));
         let (fl, fpl) = lower.map_or((0.0, 0.0), |l| link_density(l, link));
 
@@ -631,8 +613,10 @@ fn ordered_loglik(
             idx.push(k + c);
             dp.push(fu);
         }
-        for (&a, &d) in idx.iter().zip(&dp) {
-            grad[a] += d / p;
+        if let Some(g) = grad.as_deref_mut() {
+            for (&a, &d) in idx.iter().zip(&dp) {
+                g[a] += d / p;
+            }
         }
 
         if let Some(h) = hess.as_deref_mut() {
@@ -686,14 +670,7 @@ fn interval_probability(lower: Option<f64>, upper: Option<f64>, link: OrderedMod
 /// `F(u)`.
 fn link_cdf(u: f64, link: OrderedModelType) -> f64 {
     match link {
-        OrderedModelType::Logit => {
-            if u >= 0.0 {
-                1.0 / (1.0 + (-u).exp())
-            } else {
-                let e = u.exp();
-                e / (1.0 + e)
-            }
-        }
+        OrderedModelType::Logit => logistic_cdf(u),
         OrderedModelType::Probit => Normal::standard().cdf(u),
     }
 }
@@ -941,9 +918,9 @@ mod tests {
     /// The fit is now polr's maximum-likelihood fit, so this pins the coefficient, the cut
     /// points, their standard errors and the log-likelihood of both links, besides n,
     /// the category counts and the null log-likelihood. The case values are polr's
-    /// optimum (BFGS, reltol = 1e-14): coefficients within 1.6e-9, cut points within
-    /// 1.2e-7, SEs within 1.8e-6 relative of the polished MLE (T2-WP10 Appendix B.5),
-    /// inside the tolerances below.
+    /// optimum (BFGS, reltol = 1e-14): coefficients within 8.6e-9, cut points within
+    /// 1.2e-7, SEs within 1.8e-6 relative of the polished MLE (measured in R as
+    /// validation/econometrics/discrete_newton.md describes), inside the tolerances below.
     fn pin_ordered(case: &Case, ds: &Dataset) {
         for (link, model) in [
             ("logit", OrderedModelType::Logit),
@@ -1176,14 +1153,16 @@ mod tests {
         for link in [OrderedModelType::Logit, OrderedModelType::Probit] {
             let mut g = vec![0.0; m];
             let mut hess = Array2::zeros((m, m));
-            ordered_loglik(&x, &codes, 3, &theta, link, &mut g, Some(&mut hess)).unwrap();
+            ordered_loglik(&x, &codes, 3, &theta, link, Some(&mut g), Some(&mut hess)).unwrap();
             for kk in 0..m {
                 let (mut up, mut dn) = (theta, theta);
                 up[kk] += h;
                 dn[kk] -= h;
                 let (mut g_up, mut g_dn) = (vec![0.0; m], vec![0.0; m]);
-                let ll_up = ordered_loglik(&x, &codes, 3, &up, link, &mut g_up, None).unwrap();
-                let ll_dn = ordered_loglik(&x, &codes, 3, &dn, link, &mut g_dn, None).unwrap();
+                let ll_up =
+                    ordered_loglik(&x, &codes, 3, &up, link, Some(&mut g_up), None).unwrap();
+                let ll_dn =
+                    ordered_loglik(&x, &codes, 3, &dn, link, Some(&mut g_dn), None).unwrap();
                 let fd = (ll_up - ll_dn) / (2.0 * h);
                 assert!(
                     (fd - g[kk]).abs() <= 1e-6 * (1.0 + g[kk].abs()),
@@ -1404,6 +1383,65 @@ mod tests {
         invalid_message(run_ordered_logit(&ds, "y", &[]));
     }
 
+    /// `max_iter` and `tol` are validated; the message names the field.
+    #[test]
+    fn test_ordered_config_is_validated() {
+        let ds = ordered_data();
+        let bad = [
+            (
+                OrderedConfig {
+                    max_iter: 0,
+                    ..OrderedConfig::default()
+                },
+                "max_iter",
+            ),
+            (
+                OrderedConfig {
+                    tol: f64::NAN,
+                    ..OrderedConfig::default()
+                },
+                "tol",
+            ),
+            (
+                OrderedConfig {
+                    tol: 0.0,
+                    ..OrderedConfig::default()
+                },
+                "tol",
+            ),
+            (
+                OrderedConfig {
+                    tol: -1e-8,
+                    ..OrderedConfig::default()
+                },
+                "tol",
+            ),
+        ];
+        for (config, field) in bad {
+            let message = invalid_message(run_ordered_model_with(&ds, "y", &["x1", "x2"], &config));
+            assert!(message.contains(field), "{field}: {message}");
+        }
+    }
+
+    /// An iteration limit the fit cannot meet ends it with `converged = false` and a
+    /// warning, not an error.
+    #[test]
+    fn test_ordered_iteration_limit_is_reported() {
+        let ds = ordered_data();
+        let config = OrderedConfig {
+            max_iter: 2,
+            ..OrderedConfig::default()
+        };
+        let r = run_ordered_model_with(&ds, "y", &["x1", "x2"], &config).unwrap();
+        assert!(!r.converged, "{r}");
+        assert_eq!(r.iterations, 2);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("did not converge")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
     // ---- resource bounds (T0-WP14) ------------------------------------------------------
 
     fn cancelled() -> Budget {
@@ -1436,13 +1474,13 @@ mod tests {
     }
 
     /// 100 categories of one row each (T0's cap fixture) have an MLE: the old loop (wrong
-    /// score sign) stopped on a pseudoinverse step at iteration 18 instead. R (T2-WP10 Appendix
-    /// B.5): `i <- 0:99; x <- ((i * 7) %% 13) + 0.1 * i; yv <- i + 0.5;
+    /// score sign) stopped on a pseudoinverse step at iteration 18 instead. R (MASS
+    /// 7.3.60.0.1): `i <- 0:99; x <- ((i * 7) %% 13) + 0.1 * i; yv <- i + 0.5;
     /// MASS::polr(factor(yv) ~ x, method = "logistic", control = list(reltol = 1e-15,
     /// maxit = 100000))` (convergence 0), polished by Newton steps on the analytic score
-    /// to max |grad| 8.8e-13: coefficient 0.27537780315599802, log-likelihood
-    /// -437.01698120738473. A cap fixture, not a validation dataset: the values stay
-    /// inline.
+    /// (`.polish` and `.polr_grad` of validation/r/cases/discrete.R) to max |grad|
+    /// 8.8e-13: coefficient 0.27537780315599802, log-likelihood -437.01698120738473. A
+    /// cap fixture, not a validation dataset: the values stay inline.
     #[test]
     fn test_ordered_accepts_100_categories() {
         let r = run_ordered_logit(&continuous_y_dataset(100), "y", &["x"]).unwrap();

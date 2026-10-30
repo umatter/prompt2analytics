@@ -151,11 +151,13 @@ What is pinned for both links: the coefficient and every cut point (`Tol::iterat
 their standard errors (`Tol::iterative(1e-5)`), the log-likelihood and the null
 log-likelihood (`Tol::stat(n)`: 1e-5 relative for n = 30 and 96, 1e-6 for n = 180), n and
 the category counts (exact), and `converged = true` with no warning. The case values are
-polr's own optimum (BFGS at `reltol = 1e-14`), not re-solved: measured against the
-Newton-polished MLE (T2-WP10 plan, Appendix B.5) they are within 1.6e-9 relative for the
-coefficients, 1.2e-7 for the cut points, 1.8e-6 for the standard errors and 1.3e-15 for the
-log-likelihood, well inside those tolerances, so no polished values are added to this case
-file. The fits are `run_ordered_model_with` with `levels` set to polr's level order (the
+polr's own optimum (BFGS at `reltol = 1e-14`), not re-solved. Against the Newton-polished
+MLE (each fit polished with `.polish` and `.polr_grad` of `validation/r/cases/discrete.R`
+until max |grad| < 1e-9, SEs from its `.polr_hess`; R 4.3.3, MASS 7.3.60.0.1) they are
+within 8.6e-9 relative for the coefficients (j30, probit), 1.2e-7 for the cut points,
+1.8e-6 for the standard errors and 1.3e-15 for the log-likelihood, over both links and the
+three cases. That is well inside those tolerances, so no polished values are added to this
+case file. The fits are `run_ordered_model_with` with `levels` set to polr's level order (the
 sorted labels `c001`, `c002`, ...), since a text outcome needs its order (ECON-19).
 
 The ordered estimator is Newton-Raphson on the analytic score and observed Hessian (T2-WP10,

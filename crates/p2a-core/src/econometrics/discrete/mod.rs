@@ -42,6 +42,7 @@ mod conditional_logit;
 mod count_models;
 mod mixed_logit;
 mod multinomial_logit;
+mod newton;
 mod ordered_models;
 mod types;
 
