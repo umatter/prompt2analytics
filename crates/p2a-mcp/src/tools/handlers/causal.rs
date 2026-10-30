@@ -1570,77 +1570,51 @@ impl AnalyticsServer {
         through prediction intervals that account for both in-sample and out-of-sample variance. \
         Supports multiple constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (sparse with sum=1). \
         Developed by Cattaneo, Feng & Titiunik (2021) in JASA. \
-        Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics."
+        Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics. \
+        Units may be identified by text or integer ids; the panel must be balanced."
     )]
     pub async fn scpi(
         &self,
         Parameters(request): Parameters<ScpiRequest>,
     ) -> Result<CallToolResult, McpError> {
         use ndarray::{Array1, Array2};
-        use p2a_core::polars::prelude::{ChunkCompareEq, PolarsError};
+        use p2a_core::data::columns::{ColumnRequest, NaPolicy};
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        // Extract unique units and times
-        let units: Vec<String> = match df.column(&request.unit_col) {
-            Ok(col) => match col.str() {
-                Ok(str_col) => str_col
-                    .into_iter()
-                    .filter_map(|s| s.map(|s| s.to_string()))
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect(),
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Unit column '{}' must be string type",
-                        request.unit_col
-                    ))]));
-                }
-            },
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unit column '{}' not found",
-                    request.unit_col
-                ))]));
-            }
+        // Units (text or integer ids, as factor levels), whole-number times and the outcome
+        // in one extractor request; a missing value is a tool error naming the column.
+        let cols = match ColumnRequest::new(dataset.df())
+            .factor(&request.unit_col)
+            .time_index(&request.time_col)
+            .numeric(&request.outcome)
+            .na(NaPolicy::Fail)
+            .extract()
+        {
+            Ok(c) => c,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         };
+        let units = cols.factor(&request.unit_col);
+        let time_of_row = cols.time_index(&request.time_col);
+        let outcome = cols.numeric(&request.outcome);
 
-        let mut times: Vec<i64> = match df.column(&request.time_col) {
-            Ok(col) => match col.i64() {
-                Ok(int_col) => int_col
-                    .into_iter()
-                    .flatten()
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect(),
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Time column '{}' must be integer type",
-                        request.time_col
-                    ))]));
-                }
-            },
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Time column '{}' not found",
-                    request.time_col
-                ))]));
-            }
-        };
-        times.sort();
+        // Units in level order (integer ids numerically, text in byte order), times sorted
+        let mut times: Vec<i64> = time_of_row.to_vec();
+        times.sort_unstable();
+        times.dedup();
 
         // Validate treated unit exists
-        if !units.contains(&request.treated_unit) {
+        let Some(treated) = units.levels.iter().position(|u| u == &request.treated_unit) else {
+            let shown: Vec<&str> = units.levels.iter().take(10).map(String::as_str).collect();
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Treated unit '{}' not found in data. Available units: {:?}",
+                "Treated unit '{}' not found in '{}'. Available units: {}",
                 request.treated_unit,
-                units.iter().take(10).collect::<Vec<_>>()
+                request.unit_col,
+                shown.join(", ")
             ))]));
-        }
+        };
 
         // Find treatment period index
         let treatment_idx = match times.iter().position(|&t| t == request.treatment_time) {
@@ -1654,98 +1628,58 @@ impl AnalyticsServer {
             }
         };
 
-        // Build treated series and donor matrix
+        // One pass over the rows fills the units x times grid.
+        let n_units = units.n_levels();
         let n_times = times.len();
-        let donor_units: Vec<String> = units
-            .iter()
-            .filter(|u| *u != &request.treated_unit)
-            .cloned()
-            .collect();
-        let n_donors = donor_units.len();
-
-        // Helper function to get value for unit at time
-        let get_value = |df: &p2a_core::polars::frame::DataFrame,
-                         outcome: &str,
-                         unit_col: &str,
-                         time_col: &str,
-                         unit: &str,
-                         time: i64|
-         -> Result<f64, String> {
-            let unit_col_data = df
-                .column(unit_col)
-                .map_err(|e: PolarsError| e.to_string())?;
-            let unit_str = unit_col_data
-                .str()
-                .map_err(|_| "Unit column not string".to_string())?;
-            let unit_mask = unit_str.equal(unit);
-
-            let time_col_data = df
-                .column(time_col)
-                .map_err(|e: PolarsError| e.to_string())?;
-            let time_i64 = time_col_data
-                .i64()
-                .map_err(|_| "Time column not int".to_string())?;
-            let time_mask = time_i64.equal(time);
-
-            let combined = &unit_mask & &time_mask;
-            let filtered = df
-                .filter(&combined)
-                .map_err(|e: PolarsError| e.to_string())?;
-            if filtered.height() == 0 {
-                return Err(format!("No data for unit '{}' at time {}", unit, time));
-            }
-            let outcome_col = filtered
-                .column(outcome)
-                .map_err(|e: PolarsError| e.to_string())?;
-            let val = outcome_col
-                .f64()
-                .map_err(|_| "Outcome not numeric".to_string())?
-                .get(0)
-                .ok_or_else(|| "Missing value".to_string())?;
-            Ok(val)
+        let grid_len = match p2a_core::resource::checked_len(&[n_units, n_times], "scpi panel") {
+            Ok(len) => len,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         };
-
-        // Extract outcome values for treated unit
-        let mut treated_values = Array1::zeros(n_times);
-        for (t_idx, &time) in times.iter().enumerate() {
-            match get_value(
-                df,
-                &request.outcome,
-                &request.unit_col,
-                &request.time_col,
-                &request.treated_unit,
-                time,
-            ) {
-                Ok(v) => treated_values[t_idx] = v,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error extracting treated unit data: {}",
-                        e
-                    ))]));
-                }
+        let mut grid: Vec<Option<f64>> =
+            match p2a_core::resource::try_vec(grid_len, None, "scpi panel") {
+                Ok(g) => g,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            };
+        for (i, (&code, &time)) in units.codes.iter().zip(time_of_row).enumerate() {
+            let u = code as usize;
+            let Ok(t) = times.binary_search(&time) else {
+                continue; // every time is in `times` by construction
+            };
+            let cell = &mut grid[u * n_times + t];
+            if cell.is_some() {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "scpi needs one row per (unit, time): unit {} appears twice at time {}",
+                    units.levels[u], time
+                ))]));
             }
+            *cell = Some(outcome[i]);
         }
+        if let Some(first) = grid.iter().position(Option::is_none) {
+            let k = grid.iter().filter(|c| c.is_none()).count();
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "scpi needs a balanced panel: unit {} has no row for time {} ({} cells missing)",
+                units.levels[first / n_times],
+                times[first % n_times],
+                k
+            ))]));
+        }
+        let value = |u: usize, t: usize| grid[u * n_times + t].unwrap_or(f64::NAN);
 
-        // Extract donor matrix
+        // Treated series and donor matrix; donors are the other units in level order
+        let donor_units: Vec<String> = units
+            .levels
+            .iter()
+            .enumerate()
+            .filter(|(u, _)| *u != treated)
+            .map(|(_, name)| name.clone())
+            .collect();
+        let donor_codes: Vec<usize> = (0..n_units).filter(|&u| u != treated).collect();
+        let n_donors = donor_codes.len();
+        let treated_values = Array1::from_iter((0..n_times).map(|t| value(treated, t)));
         let mut donor_matrix = Array2::zeros((n_times, n_donors));
-        for (d_idx, donor) in donor_units.iter().enumerate() {
-            for (t_idx, &time) in times.iter().enumerate() {
-                match get_value(
-                    df,
-                    &request.outcome,
-                    &request.unit_col,
-                    &request.time_col,
-                    donor,
-                    time,
-                ) {
-                    Ok(v) => donor_matrix[[t_idx, d_idx]] = v,
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Error extracting donor unit '{}' data: {}",
-                            donor, e
-                        ))]));
-                    }
-                }
+        for (d_idx, &u) in donor_codes.iter().enumerate() {
+            for t in 0..n_times {
+                donor_matrix[[t, d_idx]] = value(u, t);
             }
         }
 
@@ -2827,5 +2761,75 @@ mod tests {
             assert_eq!(r.is_error, Some(true), "{col}: {out}");
             assert!(out.contains(needle), "{col}: {out}");
         }
+    }
+
+    // =========================================================================
+    // scpi extraction (T2-WP11: TOOL-5 scpi site)
+    // =========================================================================
+
+    fn grunfeld() -> DataFrame {
+        p2a_core::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/grunfeld.csv",
+        ))
+        .unwrap()
+    }
+
+    fn run_scpi_on(df: DataFrame, extra: Value) -> CallToolResult {
+        let req: ScpiRequest = serde_json::from_value(merged(
+            json!({
+                "dataset": "g", "outcome": "inv", "unit_col": "firm", "time_col": "year",
+                "treated_unit": "1", "treatment_time": 1950
+            }),
+            extra,
+        ))
+        .unwrap();
+        let (rt, server) = server_with(vec![("g", df)]);
+        rt.block_on(server.scpi(Parameters(req)))
+            .expect("data problems are tool errors")
+    }
+
+    #[test]
+    fn test_mcp_scpi_accepts_integer_unit_ids() {
+        let df = grunfeld();
+        assert_eq!(df.column("firm").unwrap().dtype(), &DataType::Int64);
+        let r = run_scpi_on(df, json!({}));
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        for needle in [
+            "Pre-treatment periods: 15",
+            "Post-treatment periods: 5",
+            "Donor pool size: 9",
+            "Donor Unit Names",
+        ] {
+            assert!(out.contains(needle), "{needle}\n{out}");
+        }
+    }
+
+    #[test]
+    fn test_mcp_scpi_reports_unknown_units_and_missing_cells() {
+        let df = grunfeld();
+        let err = |df: DataFrame, extra: Value| {
+            let r = run_scpi_on(df, extra);
+            assert_eq!(r.is_error, Some(true), "{}", text(&r));
+            text(&r)
+        };
+        let out = err(df.clone(), json!({"treated_unit": "11"}));
+        assert!(
+            out.contains("Available units: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"),
+            "{out}"
+        );
+        let out = err(with_nulls(&df, "inv", &[0]), json!({}));
+        assert!(
+            out.contains("Column 'inv' contains 1 missing value(s)"),
+            "{out}"
+        );
+        // row 25 (0-based) is firm 2, year 1940
+        let keep: p2a_core::polars::prelude::BooleanChunked =
+            (0..df.height()).map(|i| i != 25).collect();
+        let out = err(df.filter(&keep).unwrap(), json!({}));
+        assert!(
+            out.contains("balanced panel") && out.contains("unit 2") && out.contains("1940"),
+            "{out}"
+        );
     }
 }
