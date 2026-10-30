@@ -346,21 +346,14 @@ impl AnalyticsServer {
         Parameters(request): Parameters<CleaningSessionApplyRequest>,
     ) -> Result<CallToolResult, McpError> {
         let mut sessions = self.cleaning_sessions.write().await;
-
-        // Copied first when a quota snapshot shares it, so that the snapshot
-        // keeps the state before this call.
-        let session = match sessions.get_mut(&request.session_id) {
-            Some(s) => Arc::make_mut(s),
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Session '{}' not found. Use 'list_cleaning_sessions' to see active sessions.",
-                    request.session_id
-                ))]));
-            }
+        let Some(shared) = sessions.get_mut(&request.session_id) else {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Session '{}' not found. Use 'list_cleaning_sessions' to see active sessions.",
+                request.session_id
+            ))]));
         };
 
         let operation_type = request.operation.to_lowercase();
-        let description = format!("{} operation", operation_type);
         let params = std::collections::HashMap::new();
 
         // Helper to convert Vec<String> to Vec<&str>
@@ -368,49 +361,50 @@ impl AnalyticsServer {
             v.as_ref()
                 .map(|cols| cols.iter().map(|s| s.as_str()).collect())
         }
+        let first_column = |operation: &str| {
+            request
+                .columns
+                .as_ref()
+                .and_then(|c| c.first())
+                .cloned()
+                .ok_or_else(|| {
+                    McpError::invalid_request(format!("{operation} requires a column"), None)
+                })
+        };
+        type Apply = Box<
+            dyn FnOnce(&p2a_core::data::Dataset) -> Result<p2a_core::data::Dataset, String> + Send,
+        >;
 
-        // Apply the operation based on type
-        let result = match operation_type.as_str() {
+        // The operation and its required parameters are resolved before the
+        // session is touched, so a request that is refused copies nothing.
+        let (description, apply): (String, Apply) = match operation_type.as_str() {
             "trim" => {
                 let cols = request.columns.clone();
-                let cols_ref = to_str_slice(&cols);
-                session.apply_operation(&operation_type, &description, params, move |ds| {
-                    trim(ds, cols_ref.as_deref()).map_err(|e| e.to_string())
-                })
+                (
+                    format!("{} operation", operation_type),
+                    Box::new(move |ds| {
+                        trim(ds, to_str_slice(&cols).as_deref()).map_err(|e| e.to_string())
+                    }),
+                )
             }
             "lowercase" | "to_lowercase" => {
-                let column = request
-                    .columns
-                    .as_ref()
-                    .and_then(|c| c.first())
-                    .ok_or_else(|| McpError::invalid_request("lowercase requires a column", None))?
-                    .clone();
-                session.apply_operation(
-                    &operation_type,
-                    &format!("lowercase {}", column),
-                    params,
-                    |ds| to_lowercase(ds, &column).map_err(|e| e.to_string()),
+                let column = first_column("lowercase")?;
+                (
+                    format!("lowercase {}", column),
+                    Box::new(move |ds| to_lowercase(ds, &column).map_err(|e| e.to_string())),
                 )
             }
             "uppercase" | "to_uppercase" => {
-                let column = request
-                    .columns
-                    .as_ref()
-                    .and_then(|c| c.first())
-                    .ok_or_else(|| McpError::invalid_request("uppercase requires a column", None))?
-                    .clone();
-                session.apply_operation(
-                    &operation_type,
-                    &format!("uppercase {}", column),
-                    params,
-                    |ds| to_uppercase(ds, &column).map_err(|e| e.to_string()),
+                let column = first_column("uppercase")?;
+                (
+                    format!("uppercase {}", column),
+                    Box::new(move |ds| to_uppercase(ds, &column).map_err(|e| e.to_string())),
                 )
             }
             "fill_na" | "fillna" => {
                 let strategy_str = request.strategy.as_deref().unwrap_or("constant");
                 let value = request.value.clone();
                 let cols = request.columns.clone();
-                let cols_ref = to_str_slice(&cols);
                 let strategy = match strategy_str {
                     "mean" => FillStrategy::Mean,
                     "median" => FillStrategy::Median,
@@ -420,47 +414,37 @@ impl AnalyticsServer {
                         FillStrategy::Constant(value.unwrap_or_else(|| "0".to_string()))
                     }
                 };
-                session.apply_operation(
-                    &operation_type,
-                    &format!("fill_na with {:?}", strategy),
-                    params,
-                    move |ds| {
-                        fill_na(ds, cols_ref.as_deref(), strategy.clone())
+                (
+                    format!("fill_na with {:?}", strategy),
+                    Box::new(move |ds| {
+                        fill_na(ds, to_str_slice(&cols).as_deref(), strategy)
                             .map_err(|e| e.to_string())
-                    },
+                    }),
                 )
             }
             "drop_na" | "dropna" => {
                 let how = request.how.as_deref().unwrap_or("any").to_string();
                 let cols = request.columns.clone();
-                let cols_ref = to_str_slice(&cols);
-                session.apply_operation(
-                    &operation_type,
-                    &format!("drop_na ({})", how),
-                    params,
-                    move |ds| drop_na(ds, cols_ref.as_deref(), &how).map_err(|e| e.to_string()),
+                (
+                    format!("drop_na ({})", how),
+                    Box::new(move |ds| {
+                        drop_na(ds, to_str_slice(&cols).as_deref(), &how).map_err(|e| e.to_string())
+                    }),
                 )
             }
             "deduplicate" | "dedup" => {
                 let keep = request.keep.as_deref().unwrap_or("first").to_string();
                 let cols = request.columns.clone();
-                let cols_ref = to_str_slice(&cols);
-                session.apply_operation(
-                    &operation_type,
-                    &format!("deduplicate (keep={})", keep),
-                    params,
-                    move |ds| {
-                        deduplicate(ds, cols_ref.as_deref(), &keep).map_err(|e| e.to_string())
-                    },
+                (
+                    format!("deduplicate (keep={})", keep),
+                    Box::new(move |ds| {
+                        deduplicate(ds, to_str_slice(&cols).as_deref(), &keep)
+                            .map_err(|e| e.to_string())
+                    }),
                 )
             }
             "replace" => {
-                let column = request
-                    .columns
-                    .as_ref()
-                    .and_then(|c| c.first())
-                    .ok_or_else(|| McpError::invalid_request("replace requires a column", None))?
-                    .clone();
+                let column = first_column("replace")?;
                 let old_value = request
                     .old_value
                     .clone()
@@ -469,20 +453,15 @@ impl AnalyticsServer {
                     .value
                     .clone()
                     .ok_or_else(|| McpError::invalid_request("replace requires value", None))?;
-                session.apply_operation(
-                    &operation_type,
-                    &format!("replace '{}' with '{}' in {}", old_value, new_value, column),
-                    params,
-                    |ds| replace(ds, &column, &old_value, &new_value).map_err(|e| e.to_string()),
+                (
+                    format!("replace '{}' with '{}' in {}", old_value, new_value, column),
+                    Box::new(move |ds| {
+                        replace(ds, &column, &old_value, &new_value).map_err(|e| e.to_string())
+                    }),
                 )
             }
             "filter" => {
-                let column = request
-                    .columns
-                    .as_ref()
-                    .and_then(|c| c.first())
-                    .ok_or_else(|| McpError::invalid_request("filter requires a column", None))?
-                    .clone();
+                let column = first_column("filter")?;
                 let operator = request
                     .operator
                     .clone()
@@ -490,11 +469,11 @@ impl AnalyticsServer {
                 let value = request.filter_value.clone().ok_or_else(|| {
                     McpError::invalid_request("filter requires filter_value", None)
                 })?;
-                session.apply_operation(
-                    &operation_type,
-                    &format!("filter {} {} {}", column, operator, value),
-                    params,
-                    |ds| filter(ds, &column, &operator, &value).map_err(|e| e.to_string()),
+                (
+                    format!("filter {} {} {}", column, operator, value),
+                    Box::new(move |ds| {
+                        filter(ds, &column, &operator, &value).map_err(|e| e.to_string())
+                    }),
                 )
             }
             _ => {
@@ -504,6 +483,11 @@ impl AnalyticsServer {
                 ))]));
             }
         };
+
+        // Copied only now, when a quota snapshot shares it, so that the
+        // snapshot keeps the state before this call.
+        let result =
+            Arc::make_mut(shared).apply_operation(&operation_type, &description, params, apply);
 
         match result {
             Ok(report) => Ok(CallToolResult::success(vec![Content::text(format!(
@@ -526,18 +510,23 @@ impl AnalyticsServer {
         Parameters(request): Parameters<CleaningRollbackRequest>,
     ) -> Result<CallToolResult, McpError> {
         let mut sessions = self.cleaning_sessions.write().await;
-
-        // Copied first when a quota snapshot shares it (see
-        // `cleaning_session_apply`).
-        let session = match sessions.get_mut(&request.session_id) {
-            Some(s) => Arc::make_mut(s),
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Session '{}' not found. Use 'list_cleaning_sessions' to see active sessions.",
-                    request.session_id
-                ))]));
-            }
+        let Some(shared) = sessions.get_mut(&request.session_id) else {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Session '{}' not found. Use 'list_cleaning_sessions' to see active sessions.",
+                request.session_id
+            ))]));
         };
+
+        // A rollback the session refuses is refused on the shared session,
+        // so it copies nothing; one that runs copies it first when a quota
+        // snapshot shares it (see `cleaning_session_apply`).
+        if let Some(e) = rollback_refusal(shared, request.checkpoint_index) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Rollback failed: {}",
+                e
+            ))]));
+        }
+        let session = Arc::make_mut(shared);
 
         let result = match request.checkpoint_index {
             Some(index) => session.rollback_to(index),
@@ -720,5 +709,131 @@ impl AnalyticsServer {
         }
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+}
+
+/// The error `CleaningSession::rollback_to` (`Some(index)`) or `rollback`
+/// (`None`) would return for this request, without changing the session:
+/// an index past the last checkpoint, or no index at the initial state.
+fn rollback_refusal(session: &CleaningSession, index: Option<usize>) -> Option<String> {
+    match index {
+        Some(index) if session.get_checkpoint_dataset(index).is_none() => Some(format!(
+            "Invalid checkpoint index {}. Valid range: 0-{}",
+            index,
+            session.list_checkpoints().len().saturating_sub(1)
+        )),
+        None if session.current_checkpoint == 0 => {
+            Some("Already at initial state, cannot rollback further".to_string())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(all(test, feature = "http"))]
+mod tests {
+    use std::sync::Arc;
+
+    use p2a_core::data::CleaningSession;
+    use serde_json::json;
+
+    use crate::server::AnalyticsServer;
+    use crate::session::Session;
+    use crate::session::test_fixtures::cleaning_fixture;
+
+    /// A session holding one cleaning session `c1` at its initial checkpoint.
+    async fn session_with_cleaning() -> Session {
+        let s = Session::new("cleaning".into(), None);
+        s.cleaning_sessions.write().await.insert(
+            "c1".into(),
+            Arc::new(CleaningSession::new(cleaning_fixture(), "cl")),
+        );
+        s
+    }
+
+    /// Whether the session still holds the snapshot's `c1`, not a copy.
+    async fn shares_c1(s: &Session, snapshot: &crate::session::SessionStateSnapshot) -> bool {
+        Arc::ptr_eq(
+            &s.cleaning_sessions.read().await["c1"],
+            &snapshot.cleaning_sessions["c1"],
+        )
+    }
+
+    /// The refusal text of a failed call, from its error or its content.
+    fn refusal(r: &crate::transport::http::ToolResult) -> String {
+        assert!(!r.success);
+        let content: Vec<&str> = r
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                crate::transport::http::ContentItem::Text { text } => Some(text.as_str()),
+                crate::transport::http::ContentItem::Image { .. } => None,
+            })
+            .collect();
+        r.error.clone().unwrap_or_else(|| content.join("\n"))
+    }
+
+    /// A refused rollback or apply leaves the cleaning session shared with a
+    /// quota snapshot: pre-fix the handler copied it (`Arc::make_mut`)
+    /// before it found that the request changes nothing.
+    #[tokio::test]
+    async fn refused_cleaning_requests_copy_nothing() {
+        let s = session_with_cleaning().await;
+        let snapshot = s.snapshot_state().await;
+        let server = AnalyticsServer::new();
+        let call = |tool: &'static str, args: serde_json::Value| {
+            let (server, s) = (&server, &s);
+            async move { server.call_tool_with_session(tool, args, s).await }
+        };
+
+        // No earlier checkpoint to roll back to, with and without an index.
+        let r = call("cleaning_rollback", json!({"session_id": "c1"}))
+            .await
+            .unwrap();
+        let expected = CleaningSession::new(cleaning_fixture(), "cl")
+            .rollback()
+            .unwrap_err();
+        assert_eq!(refusal(&r), format!("Rollback failed: {expected}"));
+        assert!(shares_c1(&s, &snapshot).await, "refused rollback");
+        let r = call(
+            "cleaning_rollback",
+            json!({"session_id": "c1", "checkpoint_index": 9}),
+        )
+        .await
+        .unwrap();
+        let expected = CleaningSession::new(cleaning_fixture(), "cl")
+            .rollback_to(9)
+            .unwrap_err();
+        assert_eq!(refusal(&r), format!("Rollback failed: {expected}"));
+        assert!(shares_c1(&s, &snapshot).await, "refused rollback_to");
+
+        // An unknown operation, and one without its required parameters.
+        let r = call(
+            "cleaning_session_apply",
+            json!({"session_id": "c1", "operation": "shuffle"}),
+        )
+        .await
+        .unwrap();
+        assert!(refusal(&r).contains("Unknown operation 'shuffle'"), "{r:?}");
+        assert!(shares_c1(&s, &snapshot).await, "unknown operation");
+        let missing = call(
+            "cleaning_session_apply",
+            json!({"session_id": "c1", "operation": "replace", "columns": ["v"], "value": "0"}),
+        )
+        .await;
+        assert!(
+            format!("{missing:?}").contains("replace requires old_value"),
+            "{missing:?}"
+        );
+        assert!(shares_c1(&s, &snapshot).await, "missing parameter");
+
+        // An operation that runs changes the session, which is then copied.
+        let r = call(
+            "cleaning_session_apply",
+            json!({"session_id": "c1", "operation": "drop_na"}),
+        )
+        .await
+        .unwrap();
+        assert!(r.success, "{r:?}");
+        assert!(!shares_c1(&s, &snapshot).await, "applied operation");
     }
 }
