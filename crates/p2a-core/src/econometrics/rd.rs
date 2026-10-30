@@ -23,7 +23,7 @@
 //! - Implementation adapted from R package `rdrobust` (Calonico, Cattaneo, Farrell, Titiunik).
 //!   Source: https://cran.r-project.org/package=rdrobust
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
@@ -816,7 +816,7 @@ fn compute_kernel_weights(x: &Array1<f64>, cutoff: f64, h: f64, kernel: KernelTy
 ///
 /// The `n x (p + 1)` matrix is allocated through `resource::try_zeros2`, so a
 /// size above the allocation ceiling is a `ResourceLimit` error.
-fn build_polynomial_matrix(x: &Array1<f64>, cutoff: f64, p: usize) -> EconResult<Array2<f64>> {
+fn build_polynomial_matrix(x: ArrayView1<f64>, cutoff: f64, p: usize) -> EconResult<Array2<f64>> {
     let n = x.len();
     // A saturated column count cannot be allocated, so try_zeros2 reports it.
     let mut matrix =
@@ -939,7 +939,7 @@ fn compute_mse_bandwidth(
     let pilot_order = 4.max(p + 2);
     let x_arr = Array1::from_vec(x.to_vec());
     let y_arr = y.clone();
-    let x_design = build_polynomial_matrix(&x_arr, cutoff, pilot_order)?;
+    let x_design = build_polynomial_matrix(x_arr.view(), cutoff, pilot_order)?;
 
     // Equal weights for pilot
     let pilot_weights = Array1::from_elem(n, 1.0 / n as f64);
@@ -969,7 +969,7 @@ fn compute_mse_bandwidth(
     let h_pilot = x_range / 2.0;
 
     let pilot_kernel_weights = compute_kernel_weights(&x_arr, cutoff, h_pilot, kernel);
-    let x_linear = build_polynomial_matrix(&x_arr, cutoff, 1)?;
+    let x_linear = build_polynomial_matrix(x_arr.view(), cutoff, 1)?;
 
     let sigma2_est = match weighted_least_squares(&x_linear, &y_arr, &pilot_kernel_weights) {
         Ok((_, resid)) => {
@@ -1058,13 +1058,22 @@ struct SideFit {
     rx: Array2<f64>,
     /// rdrobust's Q_q, m x (p + 1).
     qq: Array2<f64>,
-    /// Residuals for the conventional (order p) and the robust (order q) variance, m x k.
+    /// Residuals for the conventional (order p) variance, m x k.
     res_h: Array2<f64>,
-    res_b: Array2<f64>,
+    /// Residuals for the robust (order q) variance; `None` when they are `res_h` (the
+    /// nearest-neighbour residuals do not depend on the fit).
+    res_b: Option<Array2<f64>>,
     n_h: usize,
     n_b: usize,
     /// Ill-conditioning notes from the matrix inversions.
     warnings: Vec<String>,
+}
+
+impl SideFit {
+    /// The residuals of the robust variance (`res_b`, or `res_h` when they are the same).
+    fn robust_residuals(&self) -> &Array2<f64> {
+        self.res_b.as_ref().unwrap_or(&self.res_h)
+    }
 }
 
 /// Select and sort the rows of one side (`left`: x < c, else x >= c) with positive
@@ -1130,7 +1139,7 @@ fn select_side(
 /// (R' diag(w) R)^-1 through `safe_inverse`; a failure is `SingularMatrix` naming the
 /// side, an ill-conditioned matrix a warning.
 fn weighted_gram_inverse(
-    r: &Array2<f64>,
+    r: ArrayView2<f64>,
     w: &[f64],
     cols: usize,
     what: &str,
@@ -1169,7 +1178,7 @@ fn weighted_gram_inverse(
 /// sqrt(m / (m - dim)) with m the rows in the window, HC2/HC3 by the leverage
 /// h_ii = w_i R_i' invG R_i (floored at 1 - 1e-8, as rdrobust).
 fn hc_residuals(
-    r: &Array2<f64>,
+    r: ArrayView2<f64>,
     w: &[f64],
     inv_g: &Array2<f64>,
     beta: &Array2<f64>,
@@ -1185,7 +1194,17 @@ fn hc_residuals(
             VceType::Hc0 | VceType::Nn => 1.0,
             VceType::Hc1 => (m as f64 / m.saturating_sub(dim) as f64).sqrt(),
             VceType::Hc2 | VceType::Hc3 => {
-                let hii = w[i] * row.dot(&inv_g.dot(&row));
+                // R_i' invG R_i without a temporary (rdrobust's
+                // rowSums((R %*% invG) * (R * W)))
+                let mut quad = 0.0;
+                for j in 0..dim {
+                    let mut acc = 0.0;
+                    for l in 0..dim {
+                        acc += inv_g[[j, l]] * row[l];
+                    }
+                    quad += row[j] * acc;
+                }
+                let hii = w[i] * quad;
                 let one_minus = (1.0 - hii).max(1e-8);
                 if vce == VceType::Hc2 {
                     (1.0 / one_minus).sqrt()
@@ -1304,11 +1323,11 @@ fn fit_side(
     let (m, k) = side.d.dim();
     let mut warnings = Vec::new();
 
-    // R_q = [1, (x - c), ..., (x - c)^q]; R_p is its first p + 1 columns.
-    let rq = build_polynomial_matrix(&Array1::from_vec(side.x.clone()), cutoff, q)?;
-    let rp = rq.slice(ndarray::s![.., ..=p]).to_owned();
+    // R_q = [1, (x - c), ..., (x - c)^q]; R_p is its first p + 1 columns (a view).
+    let rq = build_polynomial_matrix(ArrayView1::from(side.x.as_slice()), cutoff, q)?;
+    let rp = rq.slice(ndarray::s![.., ..=p]);
     let inv_gp = weighted_gram_inverse(
-        &rp,
+        rp,
         &side.w_h,
         p + 1,
         &format!("order-{p} X'WX (bandwidth h)"),
@@ -1316,7 +1335,7 @@ fn fit_side(
         &mut warnings,
     )?;
     let inv_gq = weighted_gram_inverse(
-        &rq,
+        rq.view(),
         &side.w_b,
         q + 1,
         &format!("order-{q} X'WX (bias bandwidth b)"),
@@ -1363,13 +1382,17 @@ fn fit_side(
     let beta_bc = inv_gp.dot(&qq.t().dot(&side.d));
 
     let (res_h, res_b) = match vce {
-        VceType::Nn => {
-            let res = nn_residuals(&side.x, &side.d, nnmatch)?;
-            (res.clone(), res)
-        }
+        VceType::Nn => (nn_residuals(&side.x, &side.d, nnmatch)?, None),
         _ => (
-            hc_residuals(&rp, &side.w_h, &inv_gp, &beta_p, &side.d, vce)?,
-            hc_residuals(&rq, &side.w_b, &inv_gq, &beta_q, &side.d, vce)?,
+            hc_residuals(rp, &side.w_h, &inv_gp, &beta_p, &side.d, vce)?,
+            Some(hc_residuals(
+                rq.view(),
+                &side.w_b,
+                &inv_gq,
+                &beta_q,
+                &side.d,
+                vce,
+            )?),
         ),
     };
 
@@ -1428,8 +1451,8 @@ impl RdFit {
         let (l, r) = (&self.left, &self.right);
         let v_cl = intercept_variance(&l.rx, &l.res_h, &l.a, s)
             + intercept_variance(&r.rx, &r.res_h, &r.a, s);
-        let v_rb = intercept_variance(&l.qq, &l.res_b, &l.a, s)
-            + intercept_variance(&r.qq, &r.res_b, &r.a, s);
+        let v_rb = intercept_variance(&l.qq, l.robust_residuals(), &l.a, s)
+            + intercept_variance(&r.qq, r.robust_residuals(), &r.a, s);
         (v_cl.sqrt(), v_rb.sqrt())
     }
 }
@@ -1971,7 +1994,7 @@ mod tests {
         let x = Array1::from_vec(vec![0.0, 1.0, 2.0]);
         let cutoff = 1.0;
 
-        let mat = build_polynomial_matrix(&x, cutoff, 2).unwrap();
+        let mat = build_polynomial_matrix(x.view(), cutoff, 2).unwrap();
 
         // Row 0: x=0, (x-c) = -1
         // [1, -1, 1]
