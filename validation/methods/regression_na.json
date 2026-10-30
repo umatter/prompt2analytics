@@ -105,7 +105,8 @@
         "reg_smoothers_na"
       ],
       "tests": [
-        "p2a-core::regression::line::tests::test_validate_reg_smoothers_na_fixture"
+        "p2a-core::regression::line::tests::test_validate_reg_smoothers_na_fixture",
+        "p2a-core::regression::line::tests::test_validate_line_na"
       ],
       "quantities": [
         "complete pairs (56)",
@@ -118,6 +119,34 @@
           "finding": "REG-12",
           "quantity": "line coefficients (line_coef)",
           "note": "R 0.441594195008563728 / 0.053890384144849528; p2a's resistant line is a different variant (-0.514777229630535849 / 0.062911296831234101 on the same 56 pairs by an R transcription of line.rs), Tier 4"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "supsmu_missing",
+      "name": "Friedman's super smoother on data with missing values (non-finite observations deleted)",
+      "category": "regression",
+      "reference": "stats::supsmu (is.finite(x + y + wt))",
+      "doc": "validation/regression/supsmu.md",
+      "cases": [
+        "reg_smoothers_na"
+      ],
+      "tests": [
+        "p2a-core::regression::supsmu::tests::test_validate_supsmu_na"
+      ],
+      "quantities": [
+        "x grid after deletion (56 values, exact)",
+        "n",
+        "NA data = complete rows",
+        "missing counts"
+      ],
+      "tolerance": "exact",
+      "deviations": [
+        {
+          "finding": "REG-31",
+          "quantity": "smoothed values (supsmu_y)",
+          "note": "p2a's super smoother is not Friedman's algorithm (Tier 4); supsmu_y is recorded in the case, not compared"
         }
       ],
       "supersedes_legacy": []
