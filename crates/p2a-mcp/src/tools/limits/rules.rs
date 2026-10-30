@@ -546,6 +546,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("rd_fuzzy", "p", Max(ModelOrder)),
         p("rd_fuzzy", "cutoff", Exempt(CUTOFF)),
         p("rd_fuzzy", "h", Exempt(RD_BANDWIDTH)),
+        p("rd_fuzzy", "b", Exempt(RD_BANDWIDTH)),
         p("rd_fuzzy", "level", Exempt(LEVEL)),
         p("rd_multi", "p", Max(ModelOrder)),
         p(

@@ -59,6 +59,15 @@ use p2a_core::{
     run_twang, sargan_test, sbw, tmle, weightit,
 };
 
+/// The RD tools' `vce` (default nearest-neighbour), or the tool error naming the valid ones.
+fn parse_vce(vce: Option<&str>) -> Result<VceType, CallToolResult> {
+    match vce {
+        None => Ok(VceType::Nn),
+        Some(s) => VceType::parse(s)
+            .map_err(|e| CallToolResult::error(vec![Content::text(format!("Invalid vce: {e}"))])),
+    }
+}
+
 // Helper function for formatting diagnostic warnings
 fn format_diagnostic_warnings(report: &p2a_core::diagnostics::IdentificationReport) -> String {
     let mut output = String::new();
@@ -1852,12 +1861,18 @@ impl AnalyticsServer {
 
     /// Run Sharp Regression Discontinuity estimation.
     #[tool(
-        description = "Run Sharp Regression Discontinuity (RD) estimation. Implements local polynomial regression with robust bias-corrected inference following Calonico, Cattaneo & Titiunik (2014). Returns conventional, bias-corrected, and robust treatment effect estimates with confidence intervals."
+        description = "Run Sharp Regression Discontinuity (RD) estimation by local polynomial regression, with the bias-corrected robust inference of Calonico, Cattaneo & Titiunik (2014) as in R's rdrobust: conventional, bias-corrected and robust estimates, standard errors, p-values and confidence intervals. Bandwidths come from p2a's own MSE-type selector unless h (and b) are given; vce selects the variance estimator (nearest-neighbour by default, as rdrobust). Rows with missing values are dropped and reported."
     )]
     pub async fn rd_estimate(
         &self,
         Parameters(request): Parameters<RdEstimateRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // vce is checked before the dataset lookup, so a bad name never costs a data read
+        let vce = match parse_vce(request.vce.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -1886,6 +1901,7 @@ impl AnalyticsServer {
             b: request.b,
             kernel,
             bwselect,
+            vce,
             level: request.level.unwrap_or(0.95),
             ..Default::default()
         };
@@ -1969,12 +1985,18 @@ impl AnalyticsServer {
 
     /// Run Fuzzy Regression Discontinuity estimation.
     #[tool(
-        description = "Run Fuzzy Regression Discontinuity estimation. For cases where treatment probability (not assignment) jumps at the cutoff. Uses a Wald estimator (ratio of reduced-form to first-stage). Returns Local Average Treatment Effect (LATE)."
+        description = "Run Fuzzy Regression Discontinuity estimation, for designs where the treatment probability (not assignment) jumps at the cutoff. Fits the outcome and the treatment on one bandwidth and reports the Wald ratio (LATE) with its joint conventional standard error and the bias-corrected robust estimate and interval, as rdrobust(fuzzy = ), plus the first-stage jump and F statistic (warning below 10)."
     )]
     pub async fn rd_fuzzy(
         &self,
         Parameters(request): Parameters<FuzzyRdRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // vce is checked before the dataset lookup, so a bad name never costs a data read
+        let vce = match parse_vce(request.vce.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -2000,9 +2022,10 @@ impl AnalyticsServer {
             p: request.p.unwrap_or(1),
             q: None,
             h: request.h,
-            b: None,
+            b: request.b,
             kernel,
             bwselect,
+            vce,
             level: request.level.unwrap_or(0.95),
             ..Default::default()
         };
@@ -2034,12 +2057,18 @@ impl AnalyticsServer {
 
     /// Run Multi-Cutoff Regression Discontinuity estimation.
     #[tool(
-        description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020)."
+        description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020). Each cutoff-specific estimate is rdrobust's bias-corrected estimate with its robust standard error; vce selects the variance estimator."
     )]
     pub async fn rd_multi(
         &self,
         Parameters(request): Parameters<RdMultiRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // vce is checked before the dataset lookup, so a bad name never costs a data read
+        let vce = match parse_vce(request.vce.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -2089,7 +2118,7 @@ impl AnalyticsServer {
             pooled: request.pooled.unwrap_or(true),
             pooling_weights,
             bwselect: BandwidthMethod::MseRd,
-            vce: VceType::default(),
+            vce,
             level: request.level.unwrap_or(0.95),
             test_heterogeneity: request.test_heterogeneity.unwrap_or(true),
         };
@@ -2607,5 +2636,201 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(
             result.to_string(),
         )]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::common::test_support::{server_with, text};
+    use p2a_core::polars::prelude::{DataFrame, DataType, NamedFrom, Series};
+    use p2a_validation::Case;
+    use serde_json::{Value, json};
+
+    /// The case and a server holding its dataset as `rd`.
+    fn case_server(id: &str) -> (Case, tokio::runtime::Runtime, AnalyticsServer) {
+        let case = Case::load(id);
+        let df = p2a_core::data::DataLoader::load_csv(case.dataset_path()).unwrap();
+        let (rt, server) = server_with(vec![("rd", df)]);
+        (case, rt, server)
+    }
+
+    /// `rd_sim.csv` as data only (no R value is compared).
+    fn rd_frame() -> DataFrame {
+        p2a_core::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/generated/rd_sim.csv",
+        ))
+        .unwrap()
+    }
+
+    /// `col` cast to Float64 with the listed rows set to null.
+    fn with_nulls(df: &DataFrame, col: &str, rows: &[usize]) -> DataFrame {
+        let mut df = df.clone();
+        let cast = df.column(col).unwrap().cast(&DataType::Float64).unwrap();
+        let mut vals: Vec<Option<f64>> = cast.f64().unwrap().into_iter().collect();
+        for &r in rows {
+            vals[r] = None;
+        }
+        df.with_column(Series::new(col.into(), vals)).unwrap();
+        df
+    }
+
+    /// One row of the RD estimate table (core's `Display` format).
+    fn rd_row(label: &str, est: f64, se: f64, p: f64, ci: &[f64]) -> String {
+        format!(
+            "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.4}  [{:>8.4}, {:>8.4}]",
+            label,
+            est,
+            se,
+            est / se,
+            p,
+            ci[0],
+            ci[1]
+        )
+    }
+
+    /// The Conventional and Robust rows of an rdrobust run `<prefix>_*`.
+    fn rows(case: &Case, prefix: &str) -> [String; 2] {
+        let v = |k: &str| case.scalar(&format!("{prefix}_{k}"));
+        let ci = |k: &str| case.vector(&format!("{prefix}_{k}"));
+        [
+            rd_row(
+                "Conventional",
+                v("coef_conv"),
+                v("se_conv"),
+                v("p_conv"),
+                &ci("ci_conv"),
+            ),
+            rd_row(
+                "Robust",
+                v("coef_bc"),
+                v("se_robust"),
+                v("p_robust"),
+                &ci("ci_robust"),
+            ),
+        ]
+    }
+
+    /// `base` with the keys of `extra` added or replaced.
+    fn merged(base: Value, extra: Value) -> Value {
+        let mut v = base;
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    }
+
+    #[test]
+    fn test_validate_mcp_rd_estimate_vce() {
+        let (case, rt, server) = case_server("rd_sharp_fixed_bw");
+        let base = json!({"dataset": "rd", "outcome": "y", "running_var": "x", "cutoff": 0.0, "h": 0.3, "b": 0.3});
+        for (vce, prefix) in [
+            (None, "tri_nn_hb"),
+            (Some("nn"), "tri_nn_hb"),
+            (Some("hc1"), "tri_hc1_hb"),
+            (Some("HC3"), "tri_hc3_hb"),
+        ] {
+            let args = match vce {
+                Some(v) => merged(base.clone(), json!({ "vce": v })),
+                None => base.clone(),
+            };
+            let req: RdEstimateRequest = serde_json::from_value(args).unwrap();
+            let r = rt.block_on(server.rd_estimate(Parameters(req))).unwrap();
+            let out = text(&r);
+            assert_ne!(r.is_error, Some(true), "{out}");
+            for row in rows(&case, prefix) {
+                assert!(out.contains(&row), "{vce:?}: {row}\n{out}");
+            }
+        }
+        let req: RdEstimateRequest =
+            serde_json::from_value(merged(base, json!({"level": 0.9}))).unwrap();
+        let r = rt.block_on(server.rd_estimate(Parameters(req))).unwrap();
+        let out = text(&r);
+        let ci = case.vector("level90_ci_robust");
+        assert!(out.contains("[90% CI]"), "{out}");
+        assert!(
+            out.contains(&format!("[{:>8.4}, {:>8.4}]", ci[0], ci[1])),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_rd_estimate_rejects_unknown_vce() {
+        // vce is checked before the dataset lookup, so no dataset is loaded
+        let (rt, server) = server_with(vec![]);
+        let base = json!({"dataset": "none", "outcome": "y", "running_var": "x", "vce": "robust"});
+        let check = |r: CallToolResult| {
+            let out = text(&r);
+            assert_eq!(r.is_error, Some(true), "{out}");
+            assert!(out.contains("vce") && out.contains("hc1"), "{out}");
+        };
+        let req: RdEstimateRequest = serde_json::from_value(base.clone()).unwrap();
+        check(rt.block_on(server.rd_estimate(Parameters(req))).unwrap());
+        let req: FuzzyRdRequest =
+            serde_json::from_value(merged(base.clone(), json!({"treatment": "d"}))).unwrap();
+        check(rt.block_on(server.rd_fuzzy(Parameters(req))).unwrap());
+        let req: RdMultiRequest =
+            serde_json::from_value(merged(base, json!({"cutoffs": [0.0]}))).unwrap();
+        check(rt.block_on(server.rd_multi(Parameters(req))).unwrap());
+    }
+
+    #[test]
+    fn test_validate_mcp_rd_fuzzy_b() {
+        let (case, rt, server) = case_server("rd_fuzzy_fixed_bw");
+        let base = json!({"dataset": "rd", "outcome": "yf", "running_var": "x", "treatment": "d"});
+        for (extra, prefix) in [
+            (json!({"h": 0.3, "b": 0.5}), "fuzzy_nn_h03_b05"),
+            (json!({"h": 0.4, "vce": "hc1"}), "fuzzy_hc1"),
+        ] {
+            let req: FuzzyRdRequest = serde_json::from_value(merged(base.clone(), extra)).unwrap();
+            let r = rt.block_on(server.rd_fuzzy(Parameters(req))).unwrap();
+            let out = text(&r);
+            assert_ne!(r.is_error, Some(true), "{out}");
+            for row in rows(&case, prefix) {
+                assert!(out.contains(&row), "{prefix}: {row}\n{out}");
+            }
+            let f = (case.scalar(&format!("{prefix}_first_stage_conv"))
+                / case.scalar(&format!("{prefix}_first_stage_se_conv")))
+            .powi(2);
+            assert!(
+                out.contains(&format!("F = {f:.2}")),
+                "{prefix}: F = {f:.2}\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_mcp_rd_multi_vce() {
+        let (case, rt, server) = case_server("rd_sharp_fixed_bw");
+        let req: RdMultiRequest = serde_json::from_value(json!({
+            "dataset": "rd", "outcome": "y", "running_var": "x",
+            "cutoffs": [0.0], "bandwidth": 0.3, "vce": "hc1"
+        }))
+        .unwrap();
+        let r = rt.block_on(server.rd_multi(Parameters(req))).unwrap();
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        let cell = format!(
+            "{:>10.4} {:>10.4}",
+            case.scalar("tri_hc1_hb_coef_bc"),
+            case.scalar("tri_hc1_hb_se_robust")
+        );
+        assert!(out.contains(&cell), "{cell}\n{out}");
+    }
+
+    #[test]
+    fn test_mcp_rd_estimate_reports_dropped_rows() {
+        let (rt, server) = server_with(vec![("rd", with_nulls(&rd_frame(), "y", &[0]))]);
+        let req: RdEstimateRequest = serde_json::from_value(json!({
+            "dataset": "rd", "outcome": "y", "running_var": "x", "h": 0.3
+        }))
+        .unwrap();
+        let r = rt.block_on(server.rd_estimate(Parameters(req))).unwrap();
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        assert!(
+            out.contains("Missing values: 1 of 1000 rows dropped because of missing values (y: 1)"),
+            "{out}"
+        );
     }
 }

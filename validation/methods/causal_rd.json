@@ -15,7 +15,8 @@
         "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_fixed_bw",
         "p2a-core::econometrics::rd::tests::test_validate_rd_mass_points_nn",
         "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_display_table",
-        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_fixed_bw_missing_rows"
+        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_fixed_bw_missing_rows",
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_estimate_vce"
       ],
       "quantities": [
         "conventional and bias-corrected estimates",
@@ -52,7 +53,8 @@
       "tests": [
         "p2a-core::econometrics::rd::tests::test_validate_rd_fuzzy_fixed_bw",
         "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_int64_outcome",
-        "p2a-core::econometrics::rd::tests::test_validate_rd_fuzzy_weak_first_stage_warning"
+        "p2a-core::econometrics::rd::tests::test_validate_rd_fuzzy_weak_first_stage_warning",
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_fuzzy_b"
       ],
       "quantities": [
         "Wald ratio (conventional, bias-corrected)",
@@ -81,7 +83,8 @@
         "rd_sharp_fixed_bw"
       ],
       "tests": [
-        "p2a-core::econometrics::rdmulti::tests::test_validate_rd_multi_single_cutoff"
+        "p2a-core::econometrics::rdmulti::tests::test_validate_rd_multi_single_cutoff",
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_multi_vce"
       ],
       "quantities": [
         "per-cutoff effect, robust SE, CI, p (single cutoff)",

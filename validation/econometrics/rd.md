@@ -224,6 +224,24 @@ Tests (registered under `rd_fuzzy`):
 Not registered: `test_fuzzy_rd_one_bandwidth_for_both_stages` (no R value) checks that the
 selector runs once, on the outcome, and that both stages use its bandwidths.
 
+## MCP and CLI
+
+MCP tools (`crates/p2a-mcp/src/tools/handlers/causal.rs`): `rd_estimate`, `rd_fuzzy` and
+`rd_multi` take `vce` (`"nn"`, the default, or `"hc0"` to `"hc3"`, case-insensitive; any other
+value is a tool error listing them, checked before the dataset is read), and `rd_fuzzy` takes
+the bias bandwidth `b` (default `h`). The text they return is the core `Display` output above.
+
+- `test_validate_mcp_rd_estimate_vce` (registered under `rd_sharp`): the Conventional and
+  Robust rows of `tri_nn_hb` (no `vce`, and `"nn"`), `tri_hc1_hb` (`"hc1"`) and `tri_hc3_hb`
+  (`"HC3"`) are in the output, and `level = 0.9` prints `[90% CI]` with `level90_ci_robust`.
+- `test_validate_mcp_rd_fuzzy_b` (registered under `rd_fuzzy`): `h = 0.3, b = 0.5` prints the
+  `fuzzy_nn_h03_b05` rows and `F = 14.52`; `h = 0.4, vce = "hc1"` the `fuzzy_hc1` rows.
+- `test_validate_mcp_rd_multi_vce` (registered under `rd_multi`): one cutoff, bandwidth 0.3,
+  `vce = "hc1"` prints `tri_hc1_hb`'s bias-corrected estimate and robust SE.
+- Not registered: `test_mcp_rd_estimate_rejects_unknown_vce` (`vce = "robust"` is a tool error
+  for the three tools) and `test_mcp_rd_estimate_reports_dropped_rows` (a missing outcome is
+  dropped and the `Missing values:` line printed).
+
 ## Limits
 
 - Bandwidth selection is p2a's own MSE-type selector, not `rdbwselect` (CAUS-28, a registry
