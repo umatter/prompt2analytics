@@ -24,12 +24,13 @@
 use ndarray::{Array1, Array2};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, NaPolicy};
+use crate::data::columns::{ColumnRequest, NaPolicy, numeric_options};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::get_column_names;
 use crate::traits::estimator::SignificanceLevel;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -393,6 +394,17 @@ struct SynthData {
 /// - Abadie, Diamond, Hainmueller (2010), JASA 105(490), 493-505.
 /// - Equation numbers reference that paper.
 ///
+/// # Data requirements
+///
+/// One row per (unit, time): a duplicate (unit, time) row is an error, and so is a
+/// missing (null) unit or time label. The outcome must be present in every
+/// optimisation-window and post-treatment cell of the treated unit and the donors; a
+/// missing value there is named ("Outcome 'y' is missing (null or NaN) for unit 'B' at
+/// time 2."). Predictors are aggregated over the values present in their window. Integer
+/// outcomes and predictors are read as numbers; unit ids may be text, integers or floats
+/// (`treated_unit` is matched against their label, e.g. "3"), times integers,
+/// whole-number floats or dates. Donors are in sorted order (R `factor()` order).
+///
 /// # Example
 /// ```ignore
 /// let predictors = vec![
@@ -606,52 +618,21 @@ fn prepare_synth_data(
 ) -> EconResult<SynthData> {
     let df = dataset.df();
 
-    // Get unique units and times
-    let units: Vec<String> = df
-        .column(unit_col)
-        .map_err(|e| EconError::ColumnNotFound {
-            column: unit_col.to_string(),
-            available: get_column_names(dataset.df()),
-        })?
-        .str()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Unit column '{}' must be string type", unit_col),
-        })?
-        .into_iter()
-        .filter_map(|s: Option<&str>| s.map(|s| s.to_string()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    let times: Vec<i64> = df
-        .column(time_col)
-        .map_err(|e| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: get_column_names(dataset.df()),
-        })?
-        .i64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Time column '{}' must be integer type", time_col),
-        })?
-        .into_iter()
-        .flatten()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    let mut times = times;
-    times.sort();
+    // The (unit, time) index, read once: units in R factor() order, missing unit or
+    // time labels and duplicate cells refused.
+    let panel = read_synth_panel(df, unit_col, time_col)?;
+    let times = &panel.times;
 
     // Validate treated unit exists
-    if !units.contains(&treated_unit.to_string()) {
+    let Some(treated) = panel.units.iter().position(|u| u == treated_unit) else {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Treated unit '{}' not found in data. Available units: {:?}",
                 treated_unit,
-                units.iter().take(10).collect::<Vec<_>>()
+                panel.units.iter().take(10).collect::<Vec<_>>()
             ),
         });
-    }
+    };
 
     // Split into pre and post treatment periods
     let pre_times: Vec<i64> = times
@@ -675,8 +656,9 @@ fn prepare_synth_data(
         });
     }
 
-    // Get donor units (all except treated)
-    let donor_units: Vec<String> = units.into_iter().filter(|u| u != treated_unit).collect();
+    // Donor units: every unit but the treated one, in level order
+    let donors: Vec<usize> = (0..panel.units.len()).filter(|&u| u != treated).collect();
+    let donor_units: Vec<String> = donors.iter().map(|&u| panel.units[u].clone()).collect();
 
     // Determine optimization window
     let opt_times: Vec<i64> = match optimization_window {
@@ -694,6 +676,17 @@ fn prepare_synth_data(
         });
     }
 
+    // The outcome and each distinct predictor column, read once (strict numeric:
+    // integers and booleans accepted, null or NaN as a missing value, infinite values
+    // refused).
+    let mut values: HashMap<&str, Vec<Option<f64>>> = HashMap::new();
+    values.insert(outcome, numeric_options(df, outcome)?);
+    for spec in predictors {
+        if !values.contains_key(spec.column.as_str()) {
+            values.insert(spec.column.as_str(), numeric_options(df, &spec.column)?);
+        }
+    }
+
     // Build predictor matrices
     let k = predictors.len();
     let j = donor_units.len();
@@ -706,8 +699,8 @@ fn prepare_synth_data(
     )?;
     let mut predictor_names = Vec::with_capacity(k);
 
-    // Each get_outcome call filters the whole frame, so building these matrices
-    // is O(cells x n); the budget checks let a deadline stop it.
+    // Each cell is a lookup in the panel index, so building these matrices is
+    // O(cells); the budget checks let a deadline stop it.
     for (p_idx, pred_spec) in predictors.iter().enumerate() {
         crate::resource::checkpoint()?;
 
@@ -730,25 +723,25 @@ fn prepare_synth_data(
         );
         predictor_names.push(pred_name);
 
+        let column = &values[pred_spec.column.as_str()];
+
         // Get treated unit predictor value
         x1[p_idx] = aggregate_predictor(
-            df,
+            &panel,
+            column,
             &pred_spec.column,
-            unit_col,
-            time_col,
-            treated_unit,
+            treated,
             &pred_times,
             &pred_spec.aggregation,
         )?;
 
         // Get donor unit predictor values
-        for (d_idx, donor) in donor_units.iter().enumerate() {
+        for (d_idx, &donor) in donors.iter().enumerate() {
             crate::resource::checkpoint()?;
             x0[[p_idx, d_idx]] = aggregate_predictor(
-                df,
+                &panel,
+                column,
                 &pred_spec.column,
-                unit_col,
-                time_col,
                 donor,
                 &pred_times,
                 &pred_spec.aggregation,
@@ -773,25 +766,27 @@ fn prepare_synth_data(
         "synthetic-control outcome matrix (post-treatment periods x donors)",
     )?;
 
+    let y = &values[outcome];
+
     // Pre-treatment outcomes
     for (t_idx, &time) in opt_times.iter().enumerate() {
         crate::resource::checkpoint()?;
-        z1[t_idx] = get_outcome(df, outcome, unit_col, time_col, treated_unit, time)?;
+        z1[t_idx] = get_outcome(&panel, y, outcome, treated, time)?;
 
-        for (d_idx, donor) in donor_units.iter().enumerate() {
+        for (d_idx, &donor) in donors.iter().enumerate() {
             crate::resource::checkpoint()?;
-            z0[[t_idx, d_idx]] = get_outcome(df, outcome, unit_col, time_col, donor, time)?;
+            z0[[t_idx, d_idx]] = get_outcome(&panel, y, outcome, donor, time)?;
         }
     }
 
     // Post-treatment outcomes
     for (t_idx, &time) in post_times.iter().enumerate() {
         crate::resource::checkpoint()?;
-        y1_post[t_idx] = get_outcome(df, outcome, unit_col, time_col, treated_unit, time)?;
+        y1_post[t_idx] = get_outcome(&panel, y, outcome, treated, time)?;
 
-        for (d_idx, donor) in donor_units.iter().enumerate() {
+        for (d_idx, &donor) in donors.iter().enumerate() {
             crate::resource::checkpoint()?;
-            y0_post[[t_idx, d_idx]] = get_outcome(df, outcome, unit_col, time_col, donor, time)?;
+            y0_post[[t_idx, d_idx]] = get_outcome(&panel, y, outcome, donor, time)?;
         }
     }
 
@@ -809,109 +804,135 @@ fn prepare_synth_data(
     })
 }
 
-/// Aggregate predictor values over time for a specific unit.
-fn aggregate_predictor(
-    df: &DataFrame,
-    column: &str,
-    unit_col: &str,
-    time_col: &str,
-    unit: &str,
-    times: &[i64],
-    aggregation: &TimeAggregation,
-) -> EconResult<f64> {
-    let mut values = Vec::new();
+/// The (unit, time) index of a synthetic-control panel.
+struct SynthPanel {
+    /// Unit labels in R `factor()` order.
+    units: Vec<String>,
+    /// The distinct time periods, ascending.
+    times: Vec<i64>,
+    /// The frame row of each (unit level, time) cell.
+    cell: HashMap<(usize, i64), usize>,
+}
 
-    for &time in times {
-        if let Ok(val) = get_outcome(df, column, unit_col, time_col, unit, time) {
-            if val.is_finite() {
-                values.push(val);
+/// Index a synthetic-control panel in one pass over the rows: the unit as a factor, the
+/// time as a whole-number index (or date), a missing unit or time label refused with
+/// `NullValues`, and a duplicate (unit, time) row an `InvalidSpecification` naming the
+/// first repeated cell.
+fn read_synth_panel(df: &DataFrame, unit_col: &str, time_col: &str) -> EconResult<SynthPanel> {
+    let cols = ColumnRequest::new(df)
+        .factor(unit_col)
+        .time_index(time_col)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let unit = cols.factor(unit_col);
+    let time = cols.time_index(time_col);
+    let n = cols.n();
+
+    let what = "synthetic-control panel index";
+    let mut cell: HashMap<(usize, i64), usize> = HashMap::new();
+    cell.try_reserve(n).map_err(|_| {
+        crate::resource::reserve_failed(what, n, std::mem::size_of::<((usize, i64), usize)>())
+    })?;
+    let mut duplicates = 0usize;
+    let mut first_duplicate = None;
+    for (i, (&code, &t)) in unit.codes.iter().zip(time).enumerate() {
+        match cell.entry((code as usize, t)) {
+            Entry::Occupied(_) => {
+                duplicates += 1;
+                first_duplicate.get_or_insert(i);
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(cols.rows()[i]);
             }
         }
     }
+    if let Some(i) = first_duplicate {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "synthetic control needs one row per (unit, time): {duplicates} duplicate \
+                 row(s) (first: unit '{}', time {}). Remove the duplicates first.",
+                unit.label(i),
+                time[i]
+            ),
+        });
+    }
 
-    if values.is_empty() {
+    let mut times: Vec<i64> =
+        crate::resource::try_with_capacity(n, "synthetic-control time periods")?;
+    times.extend_from_slice(time);
+    times.sort_unstable();
+    times.dedup();
+
+    Ok(SynthPanel {
+        units: unit.levels.clone(),
+        times,
+        cell,
+    })
+}
+
+/// Aggregate a predictor over `times` for unit level `unit`. Absent cells and missing
+/// values are skipped (the aggregate is over the present values).
+fn aggregate_predictor(
+    panel: &SynthPanel,
+    values: &[Option<f64>],
+    column: &str,
+    unit: usize,
+    times: &[i64],
+    aggregation: &TimeAggregation,
+) -> EconResult<f64> {
+    let (mut count, mut sum, mut first, mut last) = (0usize, 0.0, f64::NAN, f64::NAN);
+    for &time in times {
+        if let Some(&row) = panel.cell.get(&(unit, time))
+            && let Some(v) = values[row]
+        {
+            if count == 0 {
+                first = v;
+            }
+            last = v;
+            sum += v;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "No valid values for predictor '{}' for unit '{}' in specified time window",
-                column, unit
+                column, panel.units[unit]
             ),
         });
     }
 
     let result = match aggregation {
-        TimeAggregation::Mean => values.iter().sum::<f64>() / values.len() as f64,
-        TimeAggregation::First => values[0],
-        TimeAggregation::Last => *values.last().unwrap(),
-        TimeAggregation::Sum => values.iter().sum(),
+        TimeAggregation::Mean => sum / count as f64,
+        TimeAggregation::First => first,
+        TimeAggregation::Last => last,
+        TimeAggregation::Sum => sum,
     };
 
     Ok(result)
 }
 
-/// Get outcome value for a specific unit at a specific time.
+/// The outcome of unit level `unit` at `time`: `values` holds one entry per frame row.
 fn get_outcome(
-    df: &DataFrame,
+    panel: &SynthPanel,
+    values: &[Option<f64>],
     outcome: &str,
-    unit_col: &str,
-    time_col: &str,
-    unit: &str,
+    unit: usize,
     time: i64,
 ) -> EconResult<f64> {
-    // Filter to the specific unit and time
-    let mask = df
-        .column(unit_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: unit_col.to_string(),
-            available: vec![],
-        })?
-        .str()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: "Unit column must be string".to_string(),
-        })?
-        .equal(unit);
-
-    let time_mask = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: vec![],
-        })?
-        .i64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: "Time column must be integer".to_string(),
-        })?
-        .equal(time);
-
-    let combined_mask = &mask & &time_mask;
-
-    let filtered = df
-        .filter(&combined_mask)
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Filter error: {:?}", e),
-        })?;
-
-    if filtered.height() == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: format!("No data for unit '{}' at time {}", unit, time),
-        });
-    }
-
-    let val = filtered
-        .column(outcome)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: vec![],
-        })?
-        .f64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Outcome '{}' must be numeric", outcome),
-        })?
-        .get(0)
+    let label = &panel.units[unit];
+    let row = *panel
+        .cell
+        .get(&(unit, time))
         .ok_or_else(|| EconError::InvalidSpecification {
-            message: "Missing outcome value".to_string(),
+            message: format!("No data for unit '{label}' at time {time}"),
         })?;
-
-    Ok(val)
+    values[row].ok_or_else(|| EconError::InvalidSpecification {
+        message: format!(
+            "Outcome '{outcome}' is missing (null or NaN) for unit '{label}' at time {time}."
+        ),
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1854,23 +1875,8 @@ fn run_placebo_inference(
     config: &SynthConfig,
     treated_rmspe_pre: f64,
 ) -> EconResult<PlaceboResults> {
-    // Get all units
-    let df = dataset.df();
-    let units: Vec<String> = df
-        .column(unit_col)
-        .map_err(|e| EconError::ColumnNotFound {
-            column: unit_col.to_string(),
-            available: get_column_names(dataset.df()),
-        })?
-        .str()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: "Unit column must be string".to_string(),
-        })?
-        .into_iter()
-        .filter_map(|s: Option<&str>| s.map(|s| s.to_string()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Get all units, in level order
+    let units = read_synth_panel(dataset.df(), unit_col, time_col)?.units;
 
     // Calculate RMSPE ratio for treated unit
     // We need the post-treatment RMSPE too
@@ -3671,24 +3677,26 @@ mod tests {
     #[test]
     fn test_synth_matrices_respect_allocation_ceiling() {
         let preds = vec![PredictorSpec::new("x1")];
-        // the 3 x 2 pre-period outcome matrix (48 bytes) is over a 16-byte ceiling
+        // the extractor's 18-row buffers are over a 16-byte ceiling before the 3 x 2
+        // outcome matrix
         let ds = create_test_panel();
         let r = crate::resource::with_alloc_ceiling(Some(16), || {
             run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
         });
         assert!(
-            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("outcome matrix")),
+            matches!(r, Err(EconError::ResourceLimit(_))),
             "ok={}",
             r.is_ok()
         );
-        // 20 donors: the outcome matrices (320 bytes) fit under 1000 bytes, the
-        // donor-by-donor QP matrices (20 x 20 each) do not
+        // 20 donors: the extractor's 63-row buffers (at most 1008 bytes: the time index
+        // and the column values as 16-byte options) and the outcome matrices (320 bytes)
+        // fit under 1100 bytes, the donor-by-donor QP matrices (20 x 20 each) do not
         let ds = wide_panel(20);
         let cfg = SynthConfig {
             treatment_time: 3,
             ..synth_cfg()
         };
-        let r = crate::resource::with_alloc_ceiling(Some(1000), || {
+        let r = crate::resource::with_alloc_ceiling(Some(1100), || {
             run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg.clone())
         });
         assert!(
@@ -3932,6 +3940,141 @@ mod tests {
                     diff
                 );
             }
+        }
+    }
+
+    // =========================================================================
+    // T2-WP13: the panel through the shared extractor (X-2, X-8)
+    // =========================================================================
+
+    /// The test_basic_synth configuration.
+    fn na_cfg() -> SynthConfig {
+        SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        }
+    }
+
+    fn na_synth(ds: &Dataset, unit_col: &str, cfg: SynthConfig) -> EconResult<SynthResult> {
+        let preds = [PredictorSpec::new("x1")];
+        run_synthetic_control(ds, "outcome", unit_col, "time", &preds, cfg)
+    }
+
+    fn weight_names(r: &SynthResult) -> Vec<&str> {
+        r.all_unit_weights.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    fn weight_bits(r: &SynthResult) -> Vec<u64> {
+        r.all_unit_weights
+            .iter()
+            .map(|(_, w)| w.to_bits())
+            .collect()
+    }
+
+    fn with_column(ds: &Dataset, column: Column) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(column).unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_na_synth_integer_outcome_and_unit_ids() {
+        let ds = create_test_panel();
+        let base = na_synth(&ds, "unit", na_cfg()).unwrap();
+        // donors in sorted order
+        assert_eq!(weight_names(&base), ["B", "C"]);
+        // an Int64 outcome is read as numbers
+        let outcome = ds
+            .df()
+            .column("outcome")
+            .unwrap()
+            .cast(&DataType::Int64)
+            .unwrap();
+        let int_outcome = na_synth(&with_column(&ds, outcome), "unit", na_cfg()).unwrap();
+        assert_eq!(weight_names(&int_outcome), weight_names(&base));
+        assert_eq!(weight_bits(&int_outcome), weight_bits(&base));
+        assert_eq!(
+            int_outcome.average_effect.to_bits(),
+            base.average_effect.to_bits()
+        );
+        // integer unit ids: A -> 1, B -> 2, C -> 3
+        let ids: Vec<i64> = (0..ds.nrows()).map(|r| 1 + (r / 6) as i64).collect();
+        let int_ids = with_column(&ds, Column::new("unit_id".into(), ids));
+        let r = na_synth(
+            &int_ids,
+            "unit_id",
+            SynthConfig {
+                treated_unit: "1".to_string(),
+                ..na_cfg()
+            },
+        )
+        .unwrap();
+        assert_eq!(weight_names(&r), ["2", "3"]);
+        assert_eq!(weight_bits(&r), weight_bits(&base));
+    }
+
+    #[test]
+    fn test_na_synth_duplicate_cell() {
+        // (B, 2) is row 7; its copy has another outcome
+        let ds = create_test_panel();
+        let mut extra = ds.df().slice(7, 1);
+        extra
+            .with_column(Column::new("outcome".into(), [99.0]))
+            .unwrap();
+        let mut df = ds.df().clone();
+        df.vstack_mut(&extra).unwrap();
+        match na_synth(&Dataset::new(df), "unit", na_cfg()) {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "synthetic control needs one row per (unit, time): 1 duplicate row(s) \
+                 (first: unit 'B', time 2). Remove the duplicates first."
+            ),
+            other => panic!("duplicate cell: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_na_synth_missing_outcome_cell() {
+        let ds = create_test_panel();
+        let outcome: Vec<Option<f64>> = (0..ds.nrows())
+            .map(|r| {
+                (r != 7).then(|| {
+                    ds.df()
+                        .column("outcome")
+                        .unwrap()
+                        .get(r)
+                        .unwrap()
+                        .try_extract::<f64>()
+                        .unwrap()
+                })
+            })
+            .collect();
+        let data = with_column(&ds, Column::new("outcome".into(), outcome));
+        match na_synth(&data, "unit", na_cfg()) {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "Outcome 'outcome' is missing (null or NaN) for unit 'B' at time 2."
+            ),
+            other => panic!("missing outcome cell: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_na_synth_null_unit_label() {
+        // (A, 6) is row 5
+        let ds = create_test_panel();
+        let units: Vec<Option<&str>> = (0..ds.nrows())
+            .map(|r| (r != 5).then_some(["A", "B", "C"][r / 6]))
+            .collect();
+        let data = with_column(&ds, Column::new("unit".into(), units));
+        match na_synth(&data, "unit", na_cfg()) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("unit", 1));
+            }
+            other => panic!("null unit label: {other:?}"),
         }
     }
 }
