@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "staggered_did_cs",
+      "name": "Callaway-Sant'Anna ATT(g,t): analytic influence-function SEs, simple/group/dynamic aggregation, pre-trend Wald",
+      "category": "econometrics",
+      "reference": "did 2.1 formulas (att_gt est_method 'reg' without covariates, base_period 'universal', bstrap = FALSE; aggte 'simple' | 'group' | 'dynamic'), re-implemented in validation/r/cases/causal_did.R; the did package is not installed on the reference machine",
+      "doc": "validation/econometrics/staggered_did.md",
+      "cases": ["did_cs_analytic"],
+      "tests": [
+        "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_string_unit_ids",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_notyet_comparison_sets",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_analytic_never",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_analytic_notyet",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_confidence_level_90",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_bootstrap_close_to_analytic",
+        "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_analytic",
+        "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_string_unit_ids"
+      ],
+      "quantities": [
+        "ATT(g,t), its SE and CI, n_treated/n_comparison per cell (never and not yet treated)",
+        "overall (simple) ATT, SE, CI, p",
+        "group ATT, SE, CI, p",
+        "event-study ATT, SE, CI, p",
+        "pre-trend Wald W, df, p",
+        "90% CI",
+        "bootstrap SE within 15% of the analytic SE (B = 999)",
+        "MCP text at print precision"
+      ],
+      "tolerance": "validation/README.md, n = 720 rows (90 units): ATT 1e-8, SEs, CI bounds and statistics 1e-6 relative; MCP text at print precision; bootstrap SEs (seed 42, B = 999) within 15% of the analytic SE: a Monte Carlo bound, not an R value",
+      "deviations": [
+        {"finding": "CAUS-84", "quantity": "aggte type 'group' overall (selective_att, selective_se)", "note": "recorded in the case, not reported by p2a: the headline overall ATT is the 'simple' aggregation (Tier 4)"}
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

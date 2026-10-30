@@ -219,6 +219,25 @@ trend_test <- lm(y ~ treat + as.factor(t) + treat:as.factor(t), data = pre_data)
 # Interaction terms should be insignificant
 ```
 
+## Missing values, column types and clusters
+
+`run_did` (MCP `diff_in_diff`, CLI `causal did`) reads the outcome, treatment, post indicator,
+controls and the cluster id through one `ColumnRequest`:
+
+- a row with a missing value (null or NaN) in any of them is dropped from all of them
+  (`NaPolicy::Omit`, as `lm`/`fixest` drop incomplete rows), and `DiDResult::missing` and the
+  last Display line report it ("Missing values: 2 of 200 rows dropped because of missing values
+  (y: 1, cl_int: 1)");
+- cluster ids are factors of any type (integers, fractional numbers, strings, categoricals,
+  dates): every distinct value is one cluster for the CR1 sandwich. Numeric ids were keyed by
+  `format!("{:.0}")` before, which merged fractional ids (0.0 .. 1.9 became 3 clusters);
+- a text outcome is `NonNumericColumn`, an absent column `ColumnNotFound`, and fewer complete
+  rows than regressors plus one is `InsufficientData`.
+
+Fixture tests, not R-pinned (`crates/p2a-core/src/econometrics/did.rs`):
+`test_na_did_cluster_ids_are_factors` (integer, string and fractional ids of 20 clusters give one
+result), `test_na_did_omits_missing_rows`, `test_na_did_errors_name_the_column`.
+
 ## Running the Tests
 
 ```bash

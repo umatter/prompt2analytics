@@ -65,8 +65,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Public Types
@@ -199,6 +199,10 @@ pub struct BaconDecompResult {
     /// Weighted average estimate from each comparison type.
     /// Useful for understanding where the estimate comes from.
     pub estimate_by_type: BaconEstimatesByType,
+
+    /// Rows dropped because of missing values (empty when none were).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Weighted average estimates broken down by comparison type.
@@ -317,6 +321,11 @@ impl fmt::Display for BaconDecompResult {
             )?;
         }
 
+        if let Some(note) = self.missing.note() {
+            writeln!(f)?;
+            writeln!(f, "Missing values: {note}")?;
+        }
+
         Ok(())
     }
 }
@@ -333,10 +342,16 @@ impl fmt::Display for BaconDecompResult {
 /// # Arguments
 ///
 /// * `dataset` - Panel dataset with repeated observations per unit
-/// * `outcome_col` - Name of the outcome variable column
-/// * `unit_col` - Name of the unit identifier column
-/// * `time_col` - Name of the time period column
+/// * `outcome_col` - Name of the outcome variable column (numeric)
+/// * `unit_col` - Name of the unit identifier column (any type: integers, fractional
+///   numbers, strings, categoricals, dates)
+/// * `time_col` - Name of the time period column (whole numbers or dates)
 /// * `treatment_col` - Name of the binary treatment indicator column (0/1)
+///
+/// A row with a missing value (null or NaN) in any of the four columns is dropped
+/// from all of them; `BaconDecompResult::missing` and the last Display line report
+/// what was dropped. A fractional time value or a text outcome is an error naming
+/// the column.
 ///
 /// # Returns
 ///
@@ -379,36 +394,33 @@ pub fn bacon_decomp(
     time_col: &str,
     treatment_col: &str,
 ) -> EconResult<BaconDecompResult> {
-    // Extract columns
-    let y = DesignMatrix::extract_column(dataset.df(), outcome_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    // One request over the four columns: rows with a missing value in any of them
+    // are dropped jointly (reported in `missing`).
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(outcome_col)
+        .factor(unit_col)
+        .time_index(time_col)
+        .numeric(treatment_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    // The cell sums below key rows by `unit[i] as i64` and `time[i] as i64`: unit
+    // codes (0..n_units) and whole-number time indices are exact as f64, so those
+    // keys are exact.
+    let y = cols.numeric_array(outcome_col);
+    let unit: Array1<f64> = cols
+        .factor(unit_col)
+        .codes
+        .iter()
+        .map(|&c| f64::from(c))
+        .collect();
+    let time: Array1<f64> = cols
+        .time_index(time_col)
+        .iter()
+        .map(|&t| t as f64)
+        .collect();
+    let treatment = cols.numeric_array(treatment_col);
 
-    let unit = DesignMatrix::extract_column(dataset.df(), unit_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: unit_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let time = DesignMatrix::extract_column(dataset.df(), time_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let n = y.len();
+    let n = cols.n();
 
     // Identify unique time periods
     let unique_times: BTreeSet<i64> = time.iter().map(|&t| t as i64).collect();
@@ -571,6 +583,7 @@ pub fn bacon_decomp(
         n_units,
         timing_groups,
         estimate_by_type,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -1644,5 +1657,168 @@ mod tests {
     fn test_bacon_stops_when_cancelled() {
         let r = cancelled(|| bacon_decomp(&bacon_panel(|_, _| false), "y", "unit", "time", "D"));
         assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    // =========================================================================
+    // T2-WP12: columns through the shared extractor (CAUS-58)
+    // =========================================================================
+
+    fn replace(ds: &Dataset, column: Column) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(column).unwrap();
+        Dataset::new(df)
+    }
+
+    /// The (unit, time) of each row of a `bacon_panel`.
+    fn unit_time(ds: &Dataset) -> Vec<(i64, i64)> {
+        let get = |c: &str| -> Vec<i64> {
+            ds.df()
+                .column(c)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .iter()
+                .map(|v| v.unwrap() as i64)
+                .collect()
+        };
+        get("unit").into_iter().zip(get("time")).collect()
+    }
+
+    fn assert_same_bacon(a: &BaconDecompResult, b: &BaconDecompResult) {
+        assert_eq!(a.components.len(), b.components.len());
+        for (x, y) in a.components.iter().zip(&b.components) {
+            assert_eq!(
+                (
+                    x.comparison_type,
+                    x.treated_group,
+                    x.control_group,
+                    x.n_treated,
+                    x.n_control,
+                    x.time_range
+                ),
+                (
+                    y.comparison_type,
+                    y.treated_group,
+                    y.control_group,
+                    y.n_treated,
+                    y.n_control,
+                    y.time_range
+                )
+            );
+            assert!((x.estimate - y.estimate).abs() <= 1e-12 * y.estimate.abs().max(1.0));
+            assert!((x.weight - y.weight).abs() <= 1e-12 * y.weight.abs().max(1.0));
+        }
+        assert!(
+            (a.overall_estimate - b.overall_estimate).abs()
+                <= 1e-12 * b.overall_estimate.abs().max(1.0)
+        );
+        assert_eq!(
+            (a.n_units, a.n_obs, a.n_never_treated, &a.timing_groups),
+            (b.n_units, b.n_obs, b.n_never_treated, &b.timing_groups)
+        );
+    }
+
+    #[test]
+    fn test_na_bacon_string_unit_ids() {
+        let ds = bacon_panel(|_, _| false);
+        // C order of the labels (unit_1 < unit_10 < unit_11 < unit_12 < unit_2) differs
+        // from the numeric order
+        let labels: Vec<String> = unit_time(&ds)
+            .iter()
+            .map(|(u, _)| format!("unit_{u}"))
+            .collect();
+        let s = replace(&ds, Column::new("unit".into(), labels));
+        let numeric = bacon_decomp(&ds, "y", "unit", "time", "D").unwrap();
+        let text = bacon_decomp(&s, "y", "unit", "time", "D").unwrap();
+        assert_same_bacon(&text, &numeric);
+        assert_eq!(text.n_units, 12);
+        assert_eq!(text.n_obs, 96);
+    }
+
+    #[test]
+    fn test_na_bacon_omits_missing_rows() {
+        let ds = bacon_panel(|_, _| false);
+        let ut = unit_time(&ds);
+        let null_at = |ds: &Dataset, col: &str, cell: (i64, i64)| {
+            let v: Vec<Option<f64>> = ds
+                .df()
+                .column(col)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .iter()
+                .zip(&ut)
+                .map(|(x, &c)| if c == cell { None } else { x })
+                .collect();
+            replace(ds, Column::new(col.into(), v))
+        };
+        // unit 10 is never treated, so a missing D leaves every first treatment period
+        let na = null_at(&null_at(&ds, "y", (2, 4)), "D", (10, 5));
+        let a = bacon_decomp(&na, "y", "unit", "time", "D").unwrap();
+        let b = bacon_decomp(
+            &bacon_panel(|u, t| (u, t) == (2, 4) || (u, t) == (10, 5)),
+            "y",
+            "unit",
+            "time",
+            "D",
+        )
+        .unwrap();
+        assert_same_bacon(&a, &b);
+        assert_eq!(a.n_obs, 94);
+        assert_eq!(a.missing.n_dropped, 2);
+        assert_eq!(
+            a.missing.by_column,
+            vec![("y".to_string(), 1), ("D".to_string(), 1)]
+        );
+        assert!(b.missing.is_empty());
+        let shown = format!("{a}");
+        assert!(
+            shown.trim_end().ends_with(
+                "Missing values: 2 of 96 rows dropped because of missing values (y: 1, D: 1)"
+            ),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn test_na_bacon_errors_name_the_column() {
+        let ds = bacon_panel(|_, _| false);
+        let text: Vec<String> = ds
+            .df()
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|v| format!("{}", v.unwrap()))
+            .collect();
+        match bacon_decomp(
+            &replace(&ds, Column::new("y".into(), text)),
+            "y",
+            "unit",
+            "time",
+            "D",
+        ) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "y"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        let mut time: Vec<f64> = unit_time(&ds).iter().map(|&(_, t)| t as f64).collect();
+        time[2] = 3.5;
+        match bacon_decomp(
+            &replace(&ds, Column::new("time".into(), time)),
+            "y",
+            "unit",
+            "time",
+            "D",
+        ) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("whole numbers"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        match bacon_decomp(&ds, "y", "no_such", "time", "D") {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "no_such"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
     }
 }

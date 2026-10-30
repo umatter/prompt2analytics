@@ -54,12 +54,11 @@ use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use std::collections::HashMap;
-
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 /// Result from a Difference-in-Differences estimation.
@@ -111,6 +110,9 @@ pub struct DiDResult {
     /// Number of clusters (if clustered SEs were used)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub n_clusters: Option<usize>,
+    /// Rows dropped because of missing values (empty when none were).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for DiDResult {
@@ -189,6 +191,10 @@ impl fmt::Display for DiDResult {
 
         writeln!(f, "{}", "-".repeat(75))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f)?;
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -203,7 +209,16 @@ impl fmt::Display for DiDResult {
 /// * `post_var` - Binary variable indicating post-treatment period (1 = post, 0 = pre)
 /// * `controls` - Optional control variables to include in the regression
 /// * `cluster_var` - Optional variable to cluster standard errors on (e.g., unit/entity ID).
-///   When provided, uses CR1 clustered SEs instead of HC1 robust SEs.
+///   When provided, uses CR1 clustered SEs instead of HC1 robust SEs. Cluster ids may be
+///   of any type (integers, fractional numbers, strings, categoricals, dates); every
+///   distinct value is its own cluster.
+///
+/// # Missing values
+/// The outcome, treatment, post indicator, controls and the cluster id are read through
+/// [`crate::data::columns::ColumnRequest`]: a row with a missing value (null or NaN) in any
+/// of them is dropped from all of them, and `DiDResult::missing` and the last Display line
+/// report what was dropped. Text in a numeric role is `NonNumericColumn`; fewer than k + 1
+/// complete rows (k regressors) is `InsufficientData`.
 ///
 /// # Model
 /// The model estimated is:
@@ -218,30 +233,28 @@ pub fn run_did(
     controls: Option<&[&str]>,
     cluster_var: Option<&str>,
 ) -> EconResult<DiDResult> {
-    // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), dep_var).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: dep_var.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let control_cols: &[&str] = controls.unwrap_or(&[]);
+    let k_base = 4; // intercept, treatment, post, interaction
+    let k = k_base + control_cols.len();
 
-    // Extract treatment and post indicators
-    let treatment = DesignMatrix::extract_column(dataset.df(), treatment_var).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_var.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let post = DesignMatrix::extract_column(dataset.df(), post_var).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: post_var.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let n = y.len();
+    // One request over every column the model uses: rows with a missing value in
+    // any of them are dropped jointly (reported in `missing`).
+    let mut request = ColumnRequest::new(dataset.df())
+        .numeric(dep_var)
+        .numeric(treatment_var)
+        .numeric(post_var)
+        .numerics(control_cols);
+    if let Some(c) = cluster_var {
+        request = request.factor(c);
+    }
+    let cols = request
+        .na(NaPolicy::Omit)
+        .min_rows(k + 1, "difference-in-differences")
+        .extract()?;
+    let y = cols.numeric_array(dep_var);
+    let treatment = cols.numeric_array(treatment_var);
+    let post = cols.numeric_array(post_var);
+    let n = cols.n();
 
     // Create interaction term: treatment × post
     let interaction: Array1<f64> = treatment
@@ -255,10 +268,6 @@ pub fn run_did(
         compute_group_means(&y, &treatment, &post);
 
     // Build design matrix: [intercept, treatment, post, interaction, controls...]
-    let k_base = 4; // intercept, treatment, post, interaction
-    let k_controls = controls.map(|c| c.len()).unwrap_or(0);
-    let k = k_base + k_controls;
-
     let mut x = Array2::zeros((n, k));
 
     // Intercept
@@ -279,21 +288,16 @@ pub fn run_did(
     ];
 
     // Add control variables
-    let control_names: Vec<String>;
-    if let Some(ctrl) = controls {
-        control_names = ctrl.iter().map(|s| s.to_string()).collect();
-        for (i, col_name) in ctrl.iter().enumerate() {
-            let col_data = DesignMatrix::extract_column(dataset.df(), col_name).map_err(|e| {
-                EconError::ColumnNotFound {
-                    column: col_name.to_string(),
-                    available: get_column_names(dataset.df()),
-                }
-            })?;
-            x.column_mut(k_base + i).assign(&col_data);
-            var_names.push(col_name.to_string());
+    let control_names: Vec<String> = control_cols.iter().map(|s| s.to_string()).collect();
+    for (i, col_name) in control_cols.iter().enumerate() {
+        for (cell, &v) in x
+            .column_mut(k_base + i)
+            .iter_mut()
+            .zip(cols.numeric(col_name))
+        {
+            *cell = v;
         }
-    } else {
-        control_names = vec![];
+        var_names.push(col_name.to_string());
     }
 
     // OLS estimation: β = (X'X)^{-1} X'y
@@ -320,19 +324,12 @@ pub fn run_did(
 
     // Variance-covariance estimation: clustered or HC1
     let (vcov, n_clust) = if let Some(cvar) = cluster_var {
-        // Clustered standard errors (CR1)
-        let cluster_col = DesignMatrix::extract_column(dataset.df(), cvar).map_err(|_| {
-            EconError::ColumnNotFound {
-                column: cvar.to_string(),
-                available: get_column_names(dataset.df()),
-            }
-        })?;
-
-        // Build cluster map: cluster_id -> [row indices]
-        let mut clusters: HashMap<String, Vec<usize>> = HashMap::new();
-        for i in 0..n {
-            let key = format!("{:.0}", cluster_col[i]);
-            clusters.entry(key).or_default().push(i);
+        // Clustered standard errors (CR1), one cluster per factor level
+        let factor = cols.factor(cvar);
+        let mut clusters: Vec<Vec<usize>> =
+            resource::try_vec(factor.n_levels(), Vec::new(), "DiD clusters")?;
+        for (i, &code) in factor.codes.iter().enumerate() {
+            clusters[code as usize].push(i);
         }
         let g = clusters.len();
 
@@ -345,7 +342,7 @@ pub fn run_did(
 
         // Compute meat: sum over clusters of (X_g' e_g)(X_g' e_g)'
         let mut meat = Array2::<f64>::zeros((k, k));
-        for indices in clusters.values() {
+        for indices in &clusters {
             let mut xe = vec![0.0; k];
             for &i in indices {
                 let e = residuals[i];
@@ -423,6 +420,7 @@ pub fn run_did(
         controls: control_names,
         cluster_var: cluster_var.map(|s| s.to_string()),
         n_clusters: n_clust,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -836,5 +834,155 @@ mod tests {
             "Null case: ATT = {:.3}, p-value = {:.3}",
             result.att, result.p_value
         );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // T2-WP12: columns through the shared extractor (CAUS-58)
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /// `create_validation_did_dataset()` with three codings of 20 clusters: row i is in
+    /// cluster i % 20, as an integer (`cl_int`), a string (`cl_str`, "c0".."c19") and a
+    /// fraction (`cl_frac`, 0.0..1.9).
+    fn did_with_clusters() -> Dataset {
+        let ds = create_validation_did_dataset();
+        let n = ds.nrows();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new(
+            "cl_int".into(),
+            (0..n).map(|i| (i % 20) as i64).collect::<Vec<_>>(),
+        ))
+        .unwrap();
+        df.with_column(Column::new(
+            "cl_str".into(),
+            (0..n).map(|i| format!("c{}", i % 20)).collect::<Vec<_>>(),
+        ))
+        .unwrap();
+        df.with_column(Column::new(
+            "cl_frac".into(),
+            (0..n).map(|i| (i % 20) as f64 / 10.0).collect::<Vec<_>>(),
+        ))
+        .unwrap();
+        Dataset::new(df)
+    }
+
+    fn same(a: f64, b: f64) -> bool {
+        a == b || (a - b).abs() <= 1e-12 * a.abs().max(b.abs())
+    }
+
+    fn assert_same_did(a: &DiDResult, b: &DiDResult) {
+        assert_eq!(a.n_obs, b.n_obs);
+        assert_eq!(a.n_clusters, b.n_clusters);
+        for (x, y) in [
+            (a.att, b.att),
+            (a.std_error, b.std_error),
+            (a.t_stat, b.t_stat),
+            (a.p_value, b.p_value),
+            (a.r_squared, b.r_squared),
+            (a.adj_r_squared, b.adj_r_squared),
+            (a.control_pre_mean, b.control_pre_mean),
+            (a.control_post_mean, b.control_post_mean),
+            (a.treated_pre_mean, b.treated_pre_mean),
+            (a.treated_post_mean, b.treated_post_mean),
+        ] {
+            assert!(same(x, y), "{x} vs {y}");
+        }
+        for (x, y) in a
+            .coefficients
+            .iter()
+            .chain(&a.std_errors)
+            .zip(b.coefficients.iter().chain(&b.std_errors))
+        {
+            assert!(same(*x, *y), "{x} vs {y}");
+        }
+    }
+
+    #[test]
+    fn test_na_did_cluster_ids_are_factors() {
+        let ds = did_with_clusters();
+        let int = run_did(&ds, "y", "treat", "post", None, Some("cl_int")).unwrap();
+        assert_eq!(int.n_clusters, Some(20));
+        for c in ["cl_str", "cl_frac"] {
+            let r = run_did(&ds, "y", "treat", "post", None, Some(c))
+                .unwrap_or_else(|e| panic!("{c}: {e}"));
+            assert_eq!(r.n_clusters, Some(20), "{c}");
+            assert_same_did(&int, &r);
+        }
+    }
+
+    #[test]
+    fn test_na_did_omits_missing_rows() {
+        let ds = did_with_clusters();
+        let null_at = |ds: &Dataset, col: &str, row: usize| {
+            let c = ds.df().column(col).unwrap();
+            let values = match c.dtype() {
+                DataType::Int64 => Column::new(
+                    col.into(),
+                    c.i64()
+                        .unwrap()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| if i == row { None } else { v })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => Column::new(
+                    col.into(),
+                    c.f64()
+                        .unwrap()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| if i == row { None } else { v })
+                        .collect::<Vec<_>>(),
+                ),
+            };
+            let mut df = ds.df().clone();
+            df.with_column(values).unwrap();
+            Dataset::new(df)
+        };
+        let na = null_at(&null_at(&ds, "y", 7), "cl_int", 150);
+        let keep =
+            BooleanChunked::from_iter_values("keep".into(), (0..200).map(|i| i != 7 && i != 150));
+        let kept = Dataset::new(ds.df().filter(&keep).unwrap());
+        let a = run_did(&na, "y", "treat", "post", None, Some("cl_int")).unwrap();
+        let b = run_did(&kept, "y", "treat", "post", None, Some("cl_int")).unwrap();
+        assert_same_did(&a, &b);
+        assert_eq!(a.n_obs, 198);
+        assert_eq!(a.missing.n_dropped, 2);
+        assert_eq!(
+            a.missing.by_column,
+            vec![("y".to_string(), 1), ("cl_int".to_string(), 1)]
+        );
+        assert!(b.missing.is_empty());
+        let shown = format!("{a}");
+        assert!(
+            shown.trim_end().ends_with(
+                "Missing values: 2 of 200 rows dropped because of missing values (y: 1, cl_int: 1)"
+            ),
+            "{shown}"
+        );
+        assert!(!format!("{b}").contains("Missing values"));
+    }
+
+    #[test]
+    fn test_na_did_errors_name_the_column() {
+        let ds = did_with_clusters();
+        let text: Vec<String> = ds
+            .df()
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|v| format!("{}", v.unwrap()))
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new("y".into(), text)).unwrap();
+        match run_did(&Dataset::new(df), "y", "treat", "post", None, None) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "y"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        match run_did(&ds, "nonexistent", "treat", "post", None, None) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "nonexistent"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
     }
 }

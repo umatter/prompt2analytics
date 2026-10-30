@@ -53,9 +53,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::t_test_p_value;
 
 /// Configuration for ETWFE estimation.
@@ -182,6 +183,9 @@ pub struct EtwfeResult {
     pub ref_time: i64,
     /// Reference cohort (if applicable)
     pub ref_cohort: Option<i64>,
+    /// Rows dropped because of missing values (empty when none were).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for EtwfeResult {
@@ -265,6 +269,10 @@ impl fmt::Display for EtwfeResult {
         }
 
         writeln!(f, "\nR-squared: {:.4}", self.r_squared)?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f)?;
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -275,13 +283,25 @@ impl fmt::Display for EtwfeResult {
 /// # Arguments
 ///
 /// * `dataset` - Panel dataset
-/// * `y_col` - Outcome variable column
-/// * `unit_col` - Unit/entity identifier column
-/// * `time_col` - Time period column
+/// * `y_col` - Outcome variable column (numeric)
+/// * `unit_col` - Unit/entity identifier column (any type: integers, fractional
+///   numbers, strings, categoricals, dates)
+/// * `time_col` - Time period column (whole numbers or dates)
 /// * `treat_col` - Treatment indicator column (1 if treated, 0 otherwise)
-/// * `first_treat_col` - First treatment period column (cohort identifier)
-/// * `x_cols` - Optional control variables
+/// * `first_treat_col` - First treatment period column (cohort identifier; whole
+///   numbers or dates, 0 for never-treated units)
+/// * `x_cols` - Optional control variables (numeric)
 /// * `config` - ETWFE configuration
+///
+/// # Missing values
+///
+/// A row with a missing value (null or NaN) in the outcome, unit, time, treatment,
+/// first treatment period or a control is dropped from every column, as fixest and
+/// etwfe drop incomplete rows; `EtwfeResult::missing` and the last Display line
+/// report what was dropped. Nothing is imputed: a missing `first_treat` does not make
+/// a unit never treated. A fractional or non-finite `first_treat` or time value is
+/// an error (an infinite `first_treat` one that says never-treated units are coded
+/// 0), and a text outcome is `NonNumericColumn`.
 ///
 /// # Returns
 ///
@@ -297,25 +317,33 @@ pub fn run_etwfe(
     config: Option<EtwfeConfig>,
 ) -> EconResult<EtwfeResult> {
     let config = config.unwrap_or_default();
-    let df = dataset.df();
-    let n = df.height();
+    let control_cols: &[&str] = x_cols.unwrap_or(&[]);
 
-    // Extract columns
-    let y = DesignMatrix::extract_column(df, y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: get_column_names(df),
-    })?;
-
-    let units: Vec<String> = extract_string_column(df, unit_col)?;
-    let times: Vec<i64> = extract_int_column(df, time_col)?;
-    let treat: Vec<f64> = extract_float_column(df, treat_col)?;
-    let first_treat: Vec<i64> = extract_int_column(df, first_treat_col)?;
+    // An infinite first_treat is refused with the never-treated code in the message.
+    crate::econometrics::staggered_did::refuse_infinite_first_treat(dataset, first_treat_col, "0")?;
+    // One request over every column the model uses: rows with a missing value in
+    // any of them are dropped jointly (reported in `missing`), never imputed.
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .factor(unit_col)
+        .time_index(time_col)
+        .numeric(treat_col)
+        .time_index(first_treat_col)
+        .numerics(control_cols)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let n = cols.n();
+    let y = cols.numeric_array(y_col);
+    let units: &[u32] = &cols.factor(unit_col).codes;
+    let times: &[i64] = cols.time_index(time_col);
+    let treat: &[f64] = cols.numeric(treat_col);
+    let first_treat: &[i64] = cols.time_index(first_treat_col);
 
     // Identify unique cohorts and time periods
     let unique_times: BTreeSet<i64> = times.iter().copied().collect();
     let unique_cohorts: BTreeSet<i64> = first_treat
         .iter()
-        .filter(|&&g| g > 0) // Exclude never-treated (coded as 0 or very large)
+        .filter(|&&g| g > 0) // never treated: 0
         .copied()
         .collect();
 
@@ -326,14 +354,6 @@ pub fn run_etwfe(
     let ref_time = config
         .tref
         .unwrap_or_else(|| *all_periods.first().unwrap_or(&0));
-
-    // Identify never-treated units
-    let _never_treated: BTreeSet<String> = units
-        .iter()
-        .zip(first_treat.iter())
-        .filter(|(_, g)| **g == 0 || **g == i64::MAX || !unique_cohorts.contains(*g))
-        .map(|(u, _)| u.clone())
-        .collect();
 
     // Build cohort-time interaction terms
     // For each (cohort g, time t) combination where t >= g, create an indicator
@@ -386,17 +406,14 @@ pub fn run_etwfe(
     }
 
     // Add control variables
-    if let Some(controls) = x_cols {
-        for (c_idx, &ctrl) in controls.iter().enumerate() {
-            let ctrl_vals = extract_float_column(df, ctrl)?;
-            for i in 0..n {
-                x_data[[i, n_gt + c_idx]] = ctrl_vals[i];
-            }
+    for (c_idx, &ctrl) in control_cols.iter().enumerate() {
+        for (i, &v) in cols.numeric(ctrl).iter().enumerate() {
+            x_data[[i, n_gt + c_idx]] = v;
         }
     }
 
     // Demean for unit and time fixed effects (within transformation)
-    let (y_demeaned, x_demeaned) = demean_panel(&y, &x_data, &units, &times)?;
+    let (y_demeaned, x_demeaned) = demean_panel(&y, &x_data, units, times)?;
 
     // Run OLS on demeaned data
     let xtx_mat = xtx(&x_demeaned.view());
@@ -423,7 +440,8 @@ pub fn run_etwfe(
     let vcov = &xtx_inv * sigma2;
 
     // R-squared
-    let y_mean = y_demeaned.mean().unwrap_or(0.0);
+    // n >= 1: the extraction keeps at least one row (ndarray's mean is sum / n)
+    let y_mean = y_demeaned.sum() / n as f64;
     let tss: f64 = y_demeaned.iter().map(|yi| (yi - y_mean).powi(2)).sum();
     let r_squared = if tss > 0.0 { 1.0 - ssr / tss } else { 0.0 };
 
@@ -434,7 +452,7 @@ pub fn run_etwfe(
         let se = vcov[[j, j]].max(0.0).sqrt();
         let t_stat = if se > 1e-10 { estimate / se } else { 0.0 };
         let p_value = t_test_p_value(t_stat, df_resid as f64);
-        let n_treated = cohort_time_counts.get(&(g, t)).copied().unwrap_or(0);
+        let n_treated = cohort_time_counts.get(&(g, t)).copied().unwrap_or_default();
 
         cohort_time_effects.push(CohortTimeEffect {
             cohort: g,
@@ -462,7 +480,7 @@ pub fn run_etwfe(
     let n_treated: usize = treat.iter().filter(|&&d| d > 0.5).count();
     let n_control = n - n_treated;
 
-    let controls_vec = x_cols.map_or(vec![], |c| c.iter().map(|s| s.to_string()).collect());
+    let controls_vec: Vec<String> = control_cols.iter().map(|s| s.to_string()).collect();
 
     Ok(EtwfeResult {
         model: format!(
@@ -488,32 +506,33 @@ pub fn run_etwfe(
         r_squared,
         ref_time,
         ref_cohort: None,
+        missing: cols.missing().clone(),
     })
 }
 
-/// Demean data by unit and time for two-way fixed effects.
+/// Demean data by unit and time for two-way fixed effects. `units` are factor
+/// codes (0..n_units), one per row.
 fn demean_panel(
     y: &Array1<f64>,
     x: &Array2<f64>,
-    units: &[String],
+    units: &[u32],
     times: &[i64],
 ) -> EconResult<(Array1<f64>, Array2<f64>)> {
     let n = y.len();
     let k = x.ncols();
+    let n_units = units.iter().max().map_or(0, |&u| u as usize + 1);
 
-    // Compute unit means
-    let mut unit_counts: HashMap<String, usize> = HashMap::new();
-    let mut unit_y_sums: HashMap<String, f64> = HashMap::new();
-    let mut unit_x_sums: HashMap<String, Vec<f64>> = HashMap::new();
+    // Compute unit means (sums in row order)
+    let mut unit_counts = resource::try_vec(n_units, 0usize, "ETWFE unit counts")?;
+    let mut unit_y_sums = resource::try_vec(n_units, 0.0f64, "ETWFE unit sums")?;
+    let mut unit_x_sums = resource::try_zeros2(n_units, k, "ETWFE unit sums")?;
 
     for i in 0..n {
-        let u = &units[i];
-        *unit_counts.entry(u.clone()).or_insert(0) += 1;
-        *unit_y_sums.entry(u.clone()).or_insert(0.0) += y[i];
-
-        let x_sum = unit_x_sums.entry(u.clone()).or_insert_with(|| vec![0.0; k]);
+        let u = units[i] as usize;
+        unit_counts[u] += 1;
+        unit_y_sums[u] += y[i];
         for j in 0..k {
-            x_sum[j] += x[[i, j]];
+            unit_x_sums[[u, j]] += x[[i, j]];
         }
     }
 
@@ -534,10 +553,11 @@ fn demean_panel(
     }
 
     // Grand means
-    let grand_y_mean = y.mean().unwrap_or(0.0);
+    // n >= 1 (ndarray's mean is sum / n)
+    let grand_y_mean = y.sum() / n as f64;
     let mut grand_x_mean = vec![0.0; k];
     for j in 0..k {
-        grand_x_mean[j] = x.column(j).mean().unwrap_or(0.0);
+        grand_x_mean[j] = x.column(j).sum() / n as f64;
     }
 
     // Apply two-way demeaning: x_it - x_i. - x_.t + x_..
@@ -545,7 +565,7 @@ fn demean_panel(
     let mut x_demeaned = Array2::zeros((n, k));
 
     for i in 0..n {
-        let u = &units[i];
+        let u = units[i] as usize;
         let t = times[i];
 
         let unit_n = unit_counts[u] as f64;
@@ -557,7 +577,7 @@ fn demean_panel(
         y_demeaned[i] = y[i] - unit_y_mean - time_y_mean + grand_y_mean;
 
         for j in 0..k {
-            let unit_x_mean = unit_x_sums[u][j] / unit_n;
+            let unit_x_mean = unit_x_sums[[u, j]] / unit_n;
             let time_x_mean = time_x_sums[&t][j] / time_n;
             x_demeaned[[i, j]] = x[[i, j]] - unit_x_mean - time_x_mean + grand_x_mean[j];
         }
@@ -671,111 +691,6 @@ fn compute_overall_att(effects: &[CohortTimeEffect]) -> (f64, f64, f64, f64) {
     } else {
         (att_simple, att_se, att_simple, att_se)
     }
-}
-
-// Helper functions for column extraction
-
-fn extract_string_column(df: &polars::frame::DataFrame, col: &str) -> EconResult<Vec<String>> {
-    let column = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Try string first
-    if let Ok(str_col) = column.str() {
-        return Ok(str_col
-            .into_iter()
-            .map(|opt| opt.unwrap_or("").to_string())
-            .collect());
-    }
-
-    // Try integer and convert to string
-    if let Ok(int_col) = column.i64() {
-        return Ok(int_col
-            .into_iter()
-            .map(|opt| opt.unwrap_or(0).to_string())
-            .collect());
-    }
-
-    Err(EconError::InvalidSpecification {
-        message: format!("Column '{}' must be string or integer type", col),
-    })
-}
-
-fn extract_int_column(df: &polars::frame::DataFrame, col: &str) -> EconResult<Vec<i64>> {
-    let column = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Try i64 first
-    if let Ok(int_col) = column.i64() {
-        return Ok(int_col.into_iter().map(|opt| opt.unwrap_or(0)).collect());
-    }
-
-    // Try i32
-    if let Ok(int_col) = column.i32() {
-        return Ok(int_col
-            .into_iter()
-            .map(|opt| opt.unwrap_or(0) as i64)
-            .collect());
-    }
-
-    // Try f64 and convert
-    if let Ok(float_col) = column.f64() {
-        return Ok(float_col
-            .into_iter()
-            .map(|opt| opt.unwrap_or(0.0) as i64)
-            .collect());
-    }
-
-    Err(EconError::InvalidSpecification {
-        message: format!("Column '{}' must be numeric type", col),
-    })
-}
-
-fn extract_float_column(df: &polars::frame::DataFrame, col: &str) -> EconResult<Vec<f64>> {
-    let column = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    if let Ok(float_col) = column.f64() {
-        return Ok(float_col
-            .into_iter()
-            .map(|opt| opt.unwrap_or(0.0))
-            .collect());
-    }
-
-    if let Ok(int_col) = column.i64() {
-        return Ok(int_col
-            .into_iter()
-            .map(|opt| opt.unwrap_or(0) as f64)
-            .collect());
-    }
-
-    if let Ok(int_col) = column.i32() {
-        return Ok(int_col
-            .into_iter()
-            .map(|opt| opt.unwrap_or(0) as f64)
-            .collect());
-    }
-
-    Err(EconError::InvalidSpecification {
-        message: format!("Column '{}' must be numeric type", col),
-    })
 }
 
 #[cfg(test)]
@@ -1246,6 +1161,177 @@ mod tests {
                 ct.time - ct.cohort,
                 "rel_time should equal time - cohort"
             );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // T2-WP12: columns through the shared extractor, no imputation (CAUS-63)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    fn etwfe(ds: &Dataset) -> EconResult<EtwfeResult> {
+        run_etwfe(ds, "y", "unit", "time", "treat", "first_treat", None, None)
+    }
+
+    fn i64_col(ds: &Dataset, col: &str) -> Vec<i64> {
+        ds.df()
+            .column(col)
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .map(|v| v.unwrap())
+            .collect()
+    }
+
+    /// `ds` with nulls in the Int64 column `col` on the rows where `null` is true.
+    fn null_i64(ds: &Dataset, col: &str, null: impl Fn(usize) -> bool) -> Dataset {
+        let v: Vec<Option<i64>> = i64_col(ds, col)
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| if null(i) { None } else { Some(x) })
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new(col.into(), v)).unwrap();
+        Dataset::new(df)
+    }
+
+    fn without_rows(ds: &Dataset, drop: impl Fn(usize) -> bool) -> Dataset {
+        let keep =
+            BooleanChunked::from_iter_values("keep".into(), (0..ds.nrows()).map(|i| !drop(i)));
+        Dataset::new(ds.df().filter(&keep).unwrap())
+    }
+
+    fn assert_same_etwfe(a: &EtwfeResult, b: &EtwfeResult) {
+        let close = |x: f64, y: f64| x == y || (x - y).abs() <= 1e-12 * x.abs().max(y.abs());
+        assert_eq!(a.n_obs, b.n_obs);
+        assert_eq!(a.n_periods, b.n_periods);
+        assert_eq!(a.cohort_time_effects.len(), b.cohort_time_effects.len());
+        for (x, y) in a.cohort_time_effects.iter().zip(&b.cohort_time_effects) {
+            assert_eq!(
+                (x.cohort, x.time, x.n_treated),
+                (y.cohort, y.time, y.n_treated)
+            );
+            assert!(
+                close(x.estimate, y.estimate),
+                "{} vs {}",
+                x.estimate,
+                y.estimate
+            );
+            assert!(
+                close(x.std_error, y.std_error),
+                "{} vs {}",
+                x.std_error,
+                y.std_error
+            );
+        }
+        for (x, y) in [
+            (a.att_simple, b.att_simple),
+            (a.att_se, b.att_se),
+            (a.att_weighted, b.att_weighted),
+            (a.att_weighted_se, b.att_weighted_se),
+        ] {
+            assert!(close(x, y), "{x} vs {y}");
+        }
+    }
+
+    #[test]
+    fn test_na_etwfe_null_first_treat_drops_rows() {
+        let (ds, _) = create_validation_etwfe_panel();
+        let units = i64_col(&ds, "unit");
+        let gone = |i: usize| units[i] == 1 || units[i] == 11;
+        let na = null_i64(&ds, "first_treat", gone);
+        let a = etwfe(&na).unwrap();
+        let b = etwfe(&without_rows(&ds, gone)).unwrap();
+        assert_same_etwfe(&a, &b);
+        assert_eq!(a.n_obs, 266);
+        assert_eq!(a.missing.by_column, vec![("first_treat".to_string(), 14)]);
+        assert!(b.missing.is_empty());
+        let shown = format!("{a}");
+        assert!(
+            shown.trim_end().ends_with(
+                "Missing values: 14 of 280 rows dropped because of missing values \
+                 (first_treat: 14)"
+            ),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn test_na_etwfe_null_ids_and_time_drop_rows() {
+        let (ds, _) = create_validation_etwfe_panel();
+        let (units, times) = (i64_col(&ds, "unit"), i64_col(&ds, "time"));
+        let row = |u: i64, t: i64| (0..units.len()).find(|&i| units[i] == u && times[i] == t);
+        let (r_time, r_unit) = (row(25, 4).unwrap(), row(30, 6).unwrap());
+        let na = null_i64(&null_i64(&ds, "time", |i| i == r_time), "unit", |i| {
+            i == r_unit
+        });
+        let a = etwfe(&na).unwrap();
+        let b = etwfe(&without_rows(&ds, |i| i == r_time || i == r_unit)).unwrap();
+        assert_same_etwfe(&a, &b);
+        assert_eq!(a.n_periods, 7);
+        assert_eq!(a.n_obs, 278);
+        assert_eq!(
+            a.missing.by_column,
+            vec![("unit".to_string(), 1), ("time".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn test_na_etwfe_errors_name_the_column() {
+        let (ds, _) = create_validation_etwfe_panel();
+        let text: Vec<String> = ds
+            .df()
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|v| format!("{}", v.unwrap()))
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new("y".into(), text)).unwrap();
+        match etwfe(&Dataset::new(df)) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "y"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        let mut time: Vec<f64> = i64_col(&ds, "time").iter().map(|&t| t as f64).collect();
+        time[5] = 2.5;
+        let mut df = ds.df().clone();
+        df.with_column(Column::new("time".into(), time)).unwrap();
+        match etwfe(&Dataset::new(df)) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("whole numbers"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        let df = ds.df().drop("treat").unwrap();
+        match etwfe(&Dataset::new(df)) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "treat"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
+        // never-treated units coded as -inf or inf: the error names the column and
+        // the code to use instead
+        let g = i64_col(&ds, "first_treat");
+        let first_never = g.iter().position(|&g| g == 0).unwrap();
+        for (code, shown) in [(f64::NEG_INFINITY, "-inf"), (f64::INFINITY, "inf")] {
+            let ft: Vec<f64> = g
+                .iter()
+                .map(|&g| if g == 0 { code } else { g as f64 })
+                .collect();
+            let mut df = ds.df().clone();
+            df.with_column(Column::new("first_treat".into(), ft))
+                .unwrap();
+            match etwfe(&Dataset::new(df)) {
+                Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                    message,
+                    format!(
+                        "Column 'first_treat' (the first treatment period) is {shown} in row \
+                         {first_never} (0-based); never-treated units must be coded 0, not \
+                         infinity."
+                    )
+                ),
+                other => panic!("expected InvalidSpecification, got {other:?}"),
+            }
         }
     }
 }
