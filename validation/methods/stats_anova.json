@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "anova_two_way",
+      "name": "Two-way ANOVA (Type I, II and III sums of squares)",
+      "category": "stats",
+      "reference": "stats::aov (Type I); car::Anova(type = 2); car::Anova(type = 3) with contr.sum",
+      "doc": "validation/stats/anova.md",
+      "cases": ["stat_anova_two_way_unbalanced"],
+      "tests": [
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type1",
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type2",
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type3",
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_empty_cell",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_anova_two_way_unbalanced"
+      ],
+      "quantities": [
+        "Type I SS, df, F, p (interaction and additive)",
+        "residual SS and df",
+        "Type II SS, F, p (interaction and additive; empty cell by model comparison)",
+        "Type III SS, F, p (sum contrasts; refusal with aliased coefficients)",
+        "interaction df from the rank (empty cells)",
+        "rows used and dropped"
+      ],
+      "tolerance": "validation/README.md, n = 10-13 (< 100): SS and F 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and counts exact; MCP text at its 4 printed decimals",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
