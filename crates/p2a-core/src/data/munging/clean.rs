@@ -391,6 +391,9 @@ pub fn deduplicate(dataset: &Dataset, subset: Option<&[&str]>, keep: &str) -> Mu
 
 /// Cast a column to a different data type.
 ///
+/// Values that cannot be converted become missing; [`cast_with`] reports
+/// them, or refuses the cast with `strict`.
+///
 /// # Arguments
 /// * `dataset` - Source dataset
 /// * `column` - Column to cast
@@ -401,21 +404,7 @@ pub fn deduplicate(dataset: &Dataset, subset: Option<&[&str]>, keep: &str) -> Mu
 /// let casted = cast(&dataset, "age", "float")?;
 /// ```
 pub fn cast(dataset: &Dataset, column: &str, dtype: &str) -> MungeResult<Dataset> {
-    let df = dataset.df();
-
-    if df.column(column).is_err() {
-        return Err(MungeError::ColumnNotFound(column.to_string()));
-    }
-
-    let target_dtype = parse_cast_dtype(dtype)?;
-    let col = df.column(column)?;
-    let casted = col.cast(&target_dtype)?;
-
-    let mut result_df = df.clone();
-    result_df = result_df.drop(column)?;
-    result_df = result_df.with_column(casted)?.clone();
-
-    Ok(Dataset::new(result_df))
+    cast_with(dataset, column, dtype, &CastOptions::default()).map(|(ds, _)| ds)
 }
 
 /// Cast multiple columns.
@@ -424,11 +413,297 @@ pub fn cast(dataset: &Dataset, column: &str, dtype: &str) -> MungeResult<Dataset
 /// * `dataset` - Source dataset
 /// * `casts` - Vec of (column, dtype) pairs
 pub fn cast_columns(dataset: &Dataset, casts: &[(&str, &str)]) -> MungeResult<Dataset> {
-    let mut result = dataset.clone();
-    for (column, dtype) in casts {
-        result = cast(&result, column, dtype)?;
+    cast_columns_with(dataset, casts, &CastOptions::default()).map(|(ds, _)| ds)
+}
+
+/// Options of [`cast_with`] and [`cast_columns_with`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastOptions {
+    /// Refuse the cast when any present value cannot be converted.
+    pub strict: bool,
+}
+
+/// What a cast lost: the present values that became missing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastReport {
+    /// The column cast.
+    pub column: String,
+    /// Target type as requested ("int", "float", ...).
+    pub dtype: String,
+    /// Present (non-missing) input values that became missing.
+    pub n_failed: usize,
+    /// Up to 3 distinct failed inputs, in row order, as text.
+    pub examples: Vec<String>,
+}
+
+impl CastReport {
+    /// `column 'v': 2 values could not be converted to int and are now missing
+    /// (first: '1,234', 'x')` ("1 value ... is now missing" in the singular);
+    /// `None` when nothing failed.
+    pub fn note(&self) -> Option<String> {
+        (self.n_failed > 0).then(|| {
+            let verb = if self.n_failed == 1 { "is" } else { "are" };
+            format!(
+                "column '{}': {} could not be converted to {} and {verb} now missing (first: {})",
+                self.column,
+                self.failed_values(),
+                self.dtype,
+                self.quoted_examples()
+            )
+        })
     }
-    Ok(result)
+
+    /// "1 value" / "2 values".
+    fn failed_values(&self) -> String {
+        match self.n_failed {
+            1 => "1 value".to_string(),
+            n => format!("{n} values"),
+        }
+    }
+
+    /// The examples, each in single quotes, comma-separated.
+    fn quoted_examples(&self) -> String {
+        let quoted: Vec<String> = self.examples.iter().map(|e| format!("'{e}'")).collect();
+        quoted.join(", ")
+    }
+
+    /// Remember a failed input (at most 3 distinct ones, in row order).
+    fn failed(&mut self, value: impl FnOnce() -> String) {
+        self.n_failed += 1;
+        if self.examples.len() < 3 {
+            let value = value();
+            if !self.examples.contains(&value) {
+                self.examples.push(value);
+            }
+        }
+    }
+}
+
+/// Cast `column` to `dtype` ([`parse_cast_dtype`]'s names) and report the
+/// present values that could not be converted and are now missing.
+///
+/// Text (and categorical labels) is converted with R's coercion rules:
+/// surrounding whitespace is trimmed; `""` and `"NA"` are missing (not
+/// failures, as R is silent about them); integer targets take a number and
+/// truncate it toward zero (`as.integer("3.7")` is 3) and refuse one outside
+/// the target's range; float targets parse a number (`inf` and `nan` too); the
+/// boolean target accepts `TRUE`, `true`, `T`, `True` and `FALSE`, `false`,
+/// `F`, `False`. Any other source is cast by polars (numbers truncate toward
+/// zero, a non-finite or out-of-range number becomes missing), and a present
+/// (neither null nor NaN) value that comes out missing is a failure.
+///
+/// # Errors
+///
+/// [`MungeError::ColumnNotFound`] for a missing column,
+/// [`MungeError::InvalidExpression`] for an unknown type name,
+/// [`MungeError::InvalidValue`] when `options.strict` and a value failed, and
+/// the error of a cancelled or over-limit computation.
+pub fn cast_with(
+    dataset: &Dataset,
+    column: &str,
+    dtype: &str,
+    options: &CastOptions,
+) -> MungeResult<(Dataset, CastReport)> {
+    let df = dataset.df();
+    let col = df
+        .column(column)
+        .map_err(|_| MungeError::ColumnNotFound(column.to_string()))?;
+    let target = parse_cast_dtype(dtype)?;
+    let mut report = CastReport {
+        column: column.to_string(),
+        dtype: dtype.to_string(),
+        ..CastReport::default()
+    };
+
+    let text_source = matches!(
+        col.dtype(),
+        DataType::String | DataType::Categorical(..) | DataType::Enum(..)
+    );
+    let casted = if text_source && target != DataType::String {
+        let labels = col.cast(&DataType::String)?;
+        cast_text(labels.str()?, &target, &mut report)?.with_name(col.name().clone())
+    } else {
+        let casted = col.cast(&target)?;
+        count_lost_values(col, &casted, &mut report)?;
+        casted
+    };
+
+    if options.strict && report.n_failed > 0 {
+        return Err(MungeError::InvalidValue {
+            column: column.to_string(),
+            value: report.examples.first().cloned().unwrap_or_default(),
+            reason: format!(
+                "{} could not be converted to {dtype} (first: {}); fix them or cast without \
+                 strict to set them missing",
+                report.failed_values(),
+                report.quoted_examples()
+            ),
+        });
+    }
+
+    let mut result_df = df.clone();
+    result_df = result_df.drop(column)?;
+    result_df = result_df.with_column(casted)?.clone();
+
+    Ok((Dataset::new(result_df), report))
+}
+
+/// [`cast_with`] for each (column, dtype) pair in order, with one report per
+/// pair.
+pub fn cast_columns_with(
+    dataset: &Dataset,
+    casts: &[(&str, &str)],
+    options: &CastOptions,
+) -> MungeResult<(Dataset, Vec<CastReport>)> {
+    let mut result = dataset.clone();
+    let mut reports = Vec::with_capacity(casts.len());
+    for (column, dtype) in casts {
+        let (next, report) = cast_with(&result, column, dtype, options)?;
+        result = next;
+        reports.push(report);
+    }
+    Ok((result, reports))
+}
+
+/// A cooperative-cancellation checkpoint of a cast, as a munging error.
+fn cast_checkpoint(row: usize) -> MungeResult<()> {
+    if row.is_multiple_of(CHECKPOINT_EVERY) {
+        crate::resource::checkpoint().map_err(|e| MungeError::FeatureError(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Text values converted to `target` (not String) by R's coercion rules (see
+/// [`cast_with`]); the failures go into `report`.
+fn cast_text(
+    text: &StringChunked,
+    target: &DataType,
+    report: &mut CastReport,
+) -> MungeResult<Column> {
+    let alloc = |e: crate::errors::EconError| MungeError::FeatureError(e.to_string());
+    /// The trimmed text, or None for a missing value (null, "" or "NA").
+    fn present(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|t| !t.is_empty() && *t != "NA")
+    }
+    let name = text.name().clone();
+    Ok(match target {
+        DataType::Int64 | DataType::Int32 => {
+            let int32 = *target == DataType::Int32;
+            // [lo, hi) of the target; both bounds are exact in f64.
+            let (lo, hi) = if int32 {
+                (f64::from(i32::MIN), f64::from(i32::MAX) + 1.0)
+            } else {
+                (i64::MIN as f64, -(i64::MIN as f64))
+            };
+            let mut values =
+                crate::resource::try_with_capacity::<Option<i64>>(text.len(), "cast values")
+                    .map_err(alloc)?;
+            for (row, v) in text.iter().enumerate() {
+                cast_checkpoint(row)?;
+                let value = present(v).and_then(|t| {
+                    // An integer literal exactly, else a number truncated toward zero.
+                    let exact = if int32 {
+                        t.parse::<i32>().ok().map(i64::from)
+                    } else {
+                        t.parse::<i64>().ok()
+                    };
+                    let parsed = exact.or_else(|| {
+                        t.parse::<f64>()
+                            .ok()
+                            .map(f64::trunc)
+                            .filter(|x| x.is_finite() && *x >= lo && *x < hi)
+                            .map(|x| x as i64)
+                    });
+                    if parsed.is_none() {
+                        report.failed(|| t.to_string());
+                    }
+                    parsed
+                });
+                values.push(value);
+            }
+            if *target == DataType::Int32 {
+                let ca: Int32Chunked = values
+                    .into_iter()
+                    .map(|v| v.and_then(|x| i32::try_from(x).ok()))
+                    .collect();
+                ca.with_name(name).into_column()
+            } else {
+                let ca: Int64Chunked = values.into_iter().collect();
+                ca.with_name(name).into_column()
+            }
+        }
+        DataType::Float64 | DataType::Float32 => {
+            let mut values =
+                crate::resource::try_with_capacity::<Option<f64>>(text.len(), "cast values")
+                    .map_err(alloc)?;
+            for (row, v) in text.iter().enumerate() {
+                cast_checkpoint(row)?;
+                let value = present(v).and_then(|t| {
+                    let parsed = t.parse::<f64>().ok();
+                    if parsed.is_none() {
+                        report.failed(|| t.to_string());
+                    }
+                    parsed
+                });
+                values.push(value);
+            }
+            let ca: Float64Chunked = values.into_iter().collect();
+            let col = ca.with_name(name).into_column();
+            if *target == DataType::Float32 {
+                col.cast(&DataType::Float32)?
+            } else {
+                col
+            }
+        }
+        DataType::Boolean => {
+            let mut values =
+                crate::resource::try_with_capacity::<Option<bool>>(text.len(), "cast values")
+                    .map_err(alloc)?;
+            for (row, v) in text.iter().enumerate() {
+                cast_checkpoint(row)?;
+                let value = present(v).and_then(|t| {
+                    let parsed = match t {
+                        "TRUE" | "true" | "T" | "True" => Some(true),
+                        "FALSE" | "false" | "F" | "False" => Some(false),
+                        _ => None,
+                    };
+                    if parsed.is_none() {
+                        report.failed(|| t.to_string());
+                    }
+                    parsed
+                });
+                values.push(value);
+            }
+            let ca: BooleanChunked = values.into_iter().collect();
+            ca.with_name(name).into_column()
+        }
+        other => text.clone().into_column().cast(other)?,
+    })
+}
+
+/// Count into `report` the present (neither null nor NaN) values of `source`
+/// that are missing in `casted`, its polars cast.
+fn count_lost_values(source: &Column, casted: &Column, report: &mut CastReport) -> MungeResult<()> {
+    if casted.null_count() == source.null_count() {
+        return Ok(());
+    }
+    let source = source.as_materialized_series();
+    let casted = casted.as_materialized_series();
+    let floats = source.dtype().is_float();
+    for row in 0..source.len() {
+        cast_checkpoint(row)?;
+        let before = source.get(row)?;
+        if before.is_null() || !casted.get(row)?.is_null() {
+            continue;
+        }
+        let text = match before.extract::<f64>() {
+            Some(x) if floats && x.is_nan() => continue, // NaN was missing already
+            Some(x) if floats => x.to_string(),
+            _ => before.to_string(),
+        };
+        report.failed(|| text);
+    }
+    Ok(())
 }
 
 /// The data type [`cast`] and [`cast_columns`] cast to for the type name
@@ -454,11 +729,13 @@ pub fn parse_cast_dtype(dtype: &str) -> MungeResult<DataType> {
     }
 }
 
-/// Clip numeric values to a range.
+/// Clip numeric values to a range (R's `pmin(pmax(x, min), max)`).
+///
+/// Nulls stay null and NaN stays NaN; the result is Float64.
 ///
 /// # Arguments
 /// * `dataset` - Source dataset
-/// * `column` - Column to clip
+/// * `column` - Numeric column to clip (text is refused, never cast to nulls)
 /// * `min` - Minimum value (None = no lower bound)
 /// * `max` - Maximum value (None = no upper bound)
 pub fn clip(
@@ -468,19 +745,16 @@ pub fn clip(
     max: Option<f64>,
 ) -> MungeResult<Dataset> {
     let df = dataset.df();
-
-    if df.column(column).is_err() {
-        return Err(MungeError::ColumnNotFound(column.to_string()));
-    }
-
-    let col = df.column(column)?;
-    let float_col = col.cast(&DataType::Float64)?;
-    let ca = float_col.f64()?;
+    let ca = super::numeric_f64(df, column, false)?;
 
     let clipped: Float64Chunked = ca
-        .into_iter()
+        .iter()
         .map(|opt| {
             opt.map(|v| {
+                // f64::max(NaN, min) is min: NaN must not become a bound.
+                if v.is_nan() {
+                    return v;
+                }
                 let mut val = v;
                 if let Some(min_val) = min {
                     val = val.max(min_val);
@@ -493,7 +767,7 @@ pub fn clip(
         })
         .collect();
 
-    let clipped_col = clipped.with_name(col.name().clone()).into_column();
+    let clipped_col = clipped.with_name(column.into()).into_column();
 
     let mut result_df = df.clone();
     result_df = result_df.drop(column)?;
@@ -1724,5 +1998,185 @@ mod tests {
             Err(MungeError::ColumnNotFound(_))
         ));
         assert!(fill_na(&ds, None, FillStrategy::Mean).is_ok());
+    }
+
+    #[test]
+    fn test_cast_text_to_number_follows_r_coercion() {
+        // DATA-37. R:
+        // v <- c("1", "1,234", "N/A", "3.7", "42", " 7", "$5", "", "-0.5e2")
+        // as.integer(v)   # 1 NA NA 3 42 7 NA NA -50 (warning; "" is NA silently)
+        // as.numeric(v)   # 1 NA NA 3.7 42 7 NA NA -50
+        let ds = Dataset::new(
+            df!("v" => ["1", "1,234", "N/A", "3.7", "42", " 7", "$5", "", "-0.5e2"]).unwrap(),
+        );
+        let ints = cast(&ds, "v", "int").unwrap();
+        assert_eq!(
+            ints.df()
+                .column("v")
+                .unwrap()
+                .i64()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![
+                Some(1),
+                None,
+                None,
+                Some(3),
+                Some(42),
+                Some(7),
+                None,
+                None,
+                Some(-50)
+            ]
+        );
+        assert_eq!(
+            f64s(&cast(&ds, "v", "float").unwrap(), "v"),
+            vec![
+                Some(1.0),
+                None,
+                None,
+                Some(3.7),
+                Some(42.0),
+                Some(7.0),
+                None,
+                None,
+                Some(-50.0)
+            ]
+        );
+        let (_, rep) = cast_with(&ds, "v", "int", &CastOptions::default()).unwrap();
+        assert_eq!(
+            (rep.n_failed, rep.examples.clone()),
+            (3, vec!["1,234".into(), "N/A".into(), "$5".into()])
+        );
+        assert_eq!((rep.column.as_str(), rep.dtype.as_str()), ("v", "int"));
+    }
+
+    #[test]
+    fn test_cast_reports_values_that_fail_to_convert() {
+        // R: as.integer(c("1,234", "7", "x")) is NA 7 NA, "NAs introduced by coercion".
+        let ds = Dataset::new(df!("v" => ["1,234", "7", "x"]).unwrap());
+        let (out, rep) = cast_with(&ds, "v", "int", &CastOptions::default()).unwrap();
+        assert_eq!(
+            out.df()
+                .column("v")
+                .unwrap()
+                .i64()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![None, Some(7), None]
+        );
+        assert_eq!(
+            rep.note().unwrap(),
+            "column 'v': 2 values could not be converted to int and are now missing \
+             (first: '1,234', 'x')"
+        );
+        let e = cast_with(&ds, "v", "int", &CastOptions { strict: true })
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("2 values could not be converted to int"), "{e}");
+        let one = Dataset::new(df!("v" => ["7", "x"]).unwrap());
+        let (_, rep) = cast_with(&one, "v", "int", &CastOptions::default()).unwrap();
+        assert_eq!(
+            rep.note().unwrap(),
+            "column 'v': 1 value could not be converted to int and is now missing (first: 'x')"
+        );
+        let (_, ok) = cast_with(
+            &Dataset::new(df!("v" => [Some("1"), Some(" 2 "), Some(""), None]).unwrap()),
+            "v",
+            "float",
+            &CastOptions::default(),
+        )
+        .unwrap();
+        assert!(ok.n_failed == 0 && ok.note().is_none(), "{ok:?}");
+    }
+
+    #[test]
+    fn test_cast_text_to_bool_and_float_to_int() {
+        // R: as.logical(c("TRUE", "true", "T", "True", "FALSE", "false", "F", "False", "yes", "1"))
+        // T T T T F F F F NA NA; as.integer(c(3.7, -3.7, NaN, Inf)) is 3 -3 NA NA (a warning
+        // for Inf only: NaN was already missing).
+        let b = Dataset::new(
+            df!("v" => ["TRUE", "true", "T", "True", "FALSE", "false", "F", "False", "yes", "1"])
+                .unwrap(),
+        );
+        let (out, rep) = cast_with(&b, "v", "bool", &CastOptions::default()).unwrap();
+        let (t, f) = (Some(true), Some(false));
+        assert_eq!(
+            out.df()
+                .column("v")
+                .unwrap()
+                .bool()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![t, t, t, t, f, f, f, f, None, None]
+        );
+        assert_eq!(rep.n_failed, 2);
+        let x = Dataset::new(df!("v" => [3.7, -3.7, f64::NAN, f64::INFINITY]).unwrap());
+        let (out, rep) = cast_with(&x, "v", "int", &CastOptions::default()).unwrap();
+        assert_eq!(
+            out.df()
+                .column("v")
+                .unwrap()
+                .i64()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![Some(3), Some(-3), None, None]
+        );
+        assert_eq!(
+            (rep.n_failed, rep.examples.clone()),
+            (1, vec!["inf".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_cast_columns_with_reports_each_column() {
+        let ds = Dataset::new(df!("a" => ["1", "x"], "b" => ["2.5", "3"]).unwrap());
+        let (out, reports) = cast_columns_with(
+            &ds,
+            &[("a", "int"), ("b", "float")],
+            &CastOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(f64s(&out, "b"), vec![Some(2.5), Some(3.0)]);
+        assert_eq!(
+            reports.iter().map(|r| r.n_failed).collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        assert!(matches!(
+            cast_with(&ds, "nope", "int", &CastOptions::default()),
+            Err(MungeError::ColumnNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_clip_keeps_nan_and_refuses_text() {
+        // R: pmin(pmax(c(NaN, -1, 5, NA, 2), 0), 3) is NaN 0 3 NA 2.
+        let ds = Dataset::new(
+            df!("v" => [Some(f64::NAN), Some(-1.0), Some(5.0), None, Some(2.0)]).unwrap(),
+        );
+        let got = f64s(&clip(&ds, "v", Some(0.0), Some(3.0)).unwrap(), "v");
+        assert!(got[0].unwrap().is_nan());
+        assert_eq!(&got[1..], &[Some(0.0), Some(3.0), None, Some(2.0)]);
+        let e = err_text(clip(
+            &Dataset::new(df!("v" => ["1", "5"]).unwrap()),
+            "v",
+            Some(0.0),
+            None,
+        ));
+        assert!(e.contains("'v'") && e.contains("numeric"), "{e}");
+        // Design 2.4: Int64 accepted.
+        let i = clip(
+            &Dataset::new(df!("v" => [1i64, 9]).unwrap()),
+            "v",
+            None,
+            Some(5.0),
+        )
+        .unwrap();
+        assert_eq!(f64s(&i, "v"), vec![Some(1.0), Some(5.0)]);
     }
 }

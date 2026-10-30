@@ -41,6 +41,8 @@
 //! | **Sort** | `arrange`, `order_by` | Row ordering |
 //! | **Distinct** | `distinct` | Remove duplicates |
 //! | **Missing** | `drop_na`, `fill_na`, `replace_na` | Handle missing values |
+//! | **Bin** | `bin`, `bin_with` | R `cut()` intervals; missing and out-of-range values are NA |
+//! | **Cast** | `cast`, `cast_with` | Type conversion that reports values that fail to convert |
 //!
 //! ## Data Quality ([`quality`])
 //!
