@@ -1,13 +1,43 @@
 //! Survival analysis commands
 
 use clap::Subcommand;
+use p2a_core::econometrics::{KmConfType, KmConfig, run_kaplan_meier_with};
 use p2a_core::{
     AftConfig, AftDistribution, CoxConfig, TiesMethod, log_rank_test, run_aft, run_competing_risks,
-    run_cox_ph, run_kaplan_meier,
+    run_cox_ph,
 };
 
-use crate::output::{OutputFormat, print_error};
+use crate::output::{OutputFormat, missing_json, print_error, print_missing_note};
 use crate::session::SessionManager;
+
+/// "95" for 0.95, "97.5" for 0.975.
+fn percent(conf_level: f64) -> String {
+    let pct = conf_level * 100.0;
+    if (pct - pct.round()).abs() < 1e-9 {
+        format!("{pct:.0}")
+    } else {
+        format!("{pct}")
+    }
+}
+
+/// `{:.4}`, or "NA" for NaN or `None` (R's NA).
+fn na4(v: Option<f64>) -> String {
+    match v {
+        Some(x) if !x.is_nan() => format!("{x:.4}"),
+        _ => "NA".to_string(),
+    }
+}
+
+/// Adds `"missing"` to a JSON object when rows were dropped.
+fn with_missing(
+    mut json: serde_json::Value,
+    missing: &p2a_core::data::columns::MissingSummary,
+) -> serde_json::Value {
+    if let Some(m) = missing_json(missing) {
+        json["missing"] = m;
+    }
+    json
+}
 
 #[derive(Subcommand)]
 pub enum SurvivalCommands {
@@ -19,6 +49,9 @@ EXAMPLES:
 
     # Stratified by treatment group
     p2a --session s.json survival km mydata -t time -e status -g treatment
+
+    # Log-log confidence intervals (R survfit conf.type log-log)
+    p2a --session s.json survival km mydata -t time -e status --conf-type log-log
 ")]
     Km {
         /// Dataset name
@@ -28,7 +61,8 @@ EXAMPLES:
         #[arg(short = 't', long)]
         time: String,
 
-        /// Event indicator column (1 = event, 0 = censored)
+        /// Status column, coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event) or
+        /// TRUE/FALSE
         #[arg(short = 'e', long)]
         event: String,
 
@@ -39,6 +73,10 @@ EXAMPLES:
         /// Confidence level (default 0.95)
         #[arg(long, default_value = "0.95")]
         conf: f64,
+
+        /// Confidence interval type, as R survfit's conf.type: log (default), log-log, plain
+        #[arg(long = "conf-type", default_value = "log")]
+        conf_type: String,
     },
 
     /// Log-rank test comparing survival curves between groups
@@ -54,7 +92,8 @@ EXAMPLES:
         #[arg(short = 't', long)]
         time: String,
 
-        /// Event indicator column
+        /// Status column, coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event) or
+        /// TRUE/FALSE
         #[arg(short = 'e', long)]
         event: String,
 
@@ -80,7 +119,8 @@ EXAMPLES:
         #[arg(short = 't', long)]
         time: String,
 
-        /// Event indicator column
+        /// Status column, coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event) or
+        /// TRUE/FALSE
         #[arg(short = 'e', long)]
         event: String,
 
@@ -114,7 +154,8 @@ EXAMPLES:
         #[arg(short = 't', long)]
         time: String,
 
-        /// Event indicator column
+        /// Status column, coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event) or
+        /// TRUE/FALSE
         #[arg(short = 'e', long)]
         event: String,
 
@@ -164,12 +205,14 @@ pub fn execute(
             event,
             group,
             conf,
+            conf_type,
         } => execute_km(
             dataset,
             time,
             event,
             group.as_deref(),
             *conf,
+            conf_type,
             format,
             session,
         ),
@@ -211,9 +254,17 @@ fn execute_km(
     event_col: &str,
     group_col: Option<&str>,
     conf_level: f64,
+    conf_type: &str,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
+    let conf_type = match conf_type.parse::<KmConfType>() {
+        Ok(t) => t,
+        Err(e) => {
+            print_error(&format!("Kaplan-Meier failed: {e}"), format);
+            return Ok(());
+        }
+    };
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -225,63 +276,96 @@ fn execute_km(
         }
     };
 
-    match dataset {
-        Some(ds) => {
-            match run_kaplan_meier(ds, time_col, event_col, group_col, conf_level) {
-                Ok(results) => {
-                    // Results is a Vec<KaplanMeierResult>, one per group
-                    for result in &results {
-                        match format {
-                            OutputFormat::Json => {
-                                let json = serde_json::json!({
-                                    "method": "Kaplan-Meier",
-                                    "group": result.group,
-                                    "n_obs": result.n_obs,
-                                    "total_events": result.total_events,
-                                    "total_censored": result.total_censored,
-                                    "median_survival": result.median_survival,
-                                    "times": result.times,
-                                    "survival": result.survival,
-                                    "std_errors": result.std_errors,
-                                });
-                                println!("{}", serde_json::to_string_pretty(&json)?);
-                            }
-                            _ => {
-                                println!("\nKaplan-Meier Survival Estimates");
-                                println!("{}", "=".repeat(50));
-                                if let Some(ref group) = result.group {
-                                    println!("Group: {}", group);
-                                }
-                                println!("Observations: {}", result.n_obs);
-                                println!("Events: {}", result.total_events);
-                                println!("Censored: {}", result.total_censored);
-                                if let Some(median) = result.median_survival {
-                                    println!("Median survival time: {:.4}", median);
-                                } else {
-                                    println!("Median survival time: not reached");
-                                }
-                                println!("\nSurvival table (first 10 time points):");
-                                println!("{:<12} {:<12} {:<12}", "Time", "Survival", "Std.Error");
-                                println!("{}", "-".repeat(36));
-                                let n = result.times.len().min(10);
-                                for i in 0..n {
-                                    println!(
-                                        "{:<12.4} {:<12.4} {:<12.4}",
-                                        result.times[i], result.survival[i], result.std_errors[i]
-                                    );
-                                }
-                            }
-                        }
-                    }
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let config = KmConfig {
+        conf_level,
+        conf_type,
+    };
+    let results = match run_kaplan_meier_with(ds, time_col, event_col, group_col, &config) {
+        Ok(results) => results,
+        Err(e) => {
+            print_error(&format!("Kaplan-Meier failed: {}", e), format);
+            return Ok(());
+        }
+    };
+
+    // One document or block per group (CLI-38: still one JSON document per group)
+    for result in &results {
+        match format {
+            OutputFormat::Json => {
+                let json = with_missing(
+                    serde_json::json!({
+                        "method": "Kaplan-Meier",
+                        "group": result.group,
+                        "n_obs": result.n_obs,
+                        "total_events": result.total_events,
+                        "total_censored": result.total_censored,
+                        "conf_level": result.conf_level,
+                        "conf_type": result.conf_type.to_string(),
+                        "median_survival": result.median_survival,
+                        "median_ci": [result.median_ci.0, result.median_ci.1],
+                        "times": result.times,
+                        "n_at_risk": result.n_at_risk,
+                        "n_events": result.n_events,
+                        "n_censored": result.n_censored,
+                        "survival": result.survival,
+                        "std_errors": result.std_errors,
+                        "ci_lower": result.ci_lower,
+                        "ci_upper": result.ci_upper,
+                    }),
+                    &result.missing,
+                );
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            }
+            _ => {
+                let pct = percent(result.conf_level);
+                println!("\nKaplan-Meier Survival Estimates");
+                println!("{}", "=".repeat(50));
+                if let Some(ref group) = result.group {
+                    println!("Group: {}", group);
                 }
-                Err(e) => {
-                    print_error(&format!("Kaplan-Meier failed: {}", e), format);
+                println!("Observations: {}", result.n_obs);
+                println!("Events: {}", result.total_events);
+                println!("Censored: {}", result.total_censored);
+                println!(
+                    "Confidence intervals: {pct}%, conf.type = {}",
+                    result.conf_type
+                );
+                let limits = format!(
+                    "({pct}% CI: {} - {})",
+                    na4(result.median_ci.0),
+                    na4(result.median_ci.1)
+                );
+                match result.median_survival {
+                    Some(median) => println!("Median survival time: {median:.4} {limits}"),
+                    None => println!("Median survival time: not reached {limits}"),
+                }
+                println!("\nSurvival table (first 10 time points):");
+                println!(
+                    "{:<12} {:<12} {:<12} {:<12} {:<12}",
+                    "Time", "Survival", "Std.Error", "Lower", "Upper"
+                );
+                println!("{}", "-".repeat(60));
+                let n = result.times.len().min(10);
+                for i in 0..n {
+                    println!(
+                        "{:<12.4} {:<12.4} {:<12} {:<12} {:<12}",
+                        result.times[i],
+                        result.survival[i],
+                        na4(Some(result.std_errors[i])),
+                        na4(Some(result.ci_lower[i])),
+                        na4(Some(result.ci_upper[i]))
+                    );
                 }
             }
         }
-        None => {
-            print_error(&format!("Dataset '{}' not found", dataset_name), format);
-        }
+    }
+    // The rows dropped from the whole call, once after the last group.
+    if let Some(first) = results.first() {
+        print_missing_note(&first.missing, format);
     }
     Ok(())
 }
@@ -309,15 +393,21 @@ fn execute_log_rank(
         Some(ds) => match log_rank_test(ds, time_col, event_col, group_col) {
             Ok(result) => match format {
                 OutputFormat::Json => {
-                    let json = serde_json::json!({
-                        "method": "Log-rank test",
-                        "chi_squared": result.chi_squared,
-                        "degrees_of_freedom": result.df,
-                        "p_value": result.p_value,
-                        "groups": result.groups,
-                        "n_per_group": result.n_per_group,
-                        "events_per_group": result.events_per_group,
-                    });
+                    let json = with_missing(
+                        serde_json::json!({
+                            "method": "Log-rank test",
+                            "chi_squared": result.chi_squared,
+                            "degrees_of_freedom": result.df,
+                            "p_value": result.p_value,
+                            "groups": result.groups,
+                            "n_per_group": result.n_per_group,
+                            "events_per_group": result.events_per_group,
+                            "expected_per_group": result.expected_per_group,
+                            "obs_minus_exp": result.obs_minus_exp,
+                            "variance": result.variance,
+                        }),
+                        &result.missing,
+                    );
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 }
                 _ => {
@@ -325,6 +415,33 @@ fn execute_log_rank(
                     println!("{}", "=".repeat(50));
                     println!("Chi-squared statistic: {:.4}", result.chi_squared);
                     println!("Degrees of freedom: {}", result.df);
+                    println!(
+                        "\n{:<15} {:>8} {:>8} {:>10}",
+                        "Group", "N", "Events", "Expected"
+                    );
+                    for (i, group) in result.groups.iter().enumerate() {
+                        println!(
+                            "{:<15} {:>8} {:>8} {:>10.2}",
+                            group,
+                            result.n_per_group[i],
+                            result.events_per_group[i],
+                            result.expected_per_group[i]
+                        );
+                    }
+                    let excluded: Vec<&str> = result
+                        .groups
+                        .iter()
+                        .zip(&result.expected_per_group)
+                        .filter(|(_, e)| **e <= 0.0)
+                        .map(|(g, _)| g.as_str())
+                        .collect();
+                    if !excluded.is_empty() {
+                        println!(
+                            "Groups with no expected events: {} (excluded from the test, as R survdiff)",
+                            excluded.join(", ")
+                        );
+                    }
+                    println!();
                     println!("p-value: {:.6}", result.p_value);
                     println!("Number of groups: {}", result.groups.len());
                     if result.p_value < 0.05 {
@@ -334,6 +451,7 @@ fn execute_log_rank(
                     } else {
                         println!("\nConclusion: No significant difference in survival curves");
                     }
+                    print_missing_note(&result.missing, format);
                 }
             },
             Err(e) => {
@@ -387,22 +505,31 @@ fn execute_cox(
             match run_cox_ph(ds, time_col, event_col, &cov_refs, Some(config)) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": "Cox Proportional Hazards",
-                            "variables": result.variables,
-                            "coefficients": result.coefficients,
-                            "std_errors": result.std_errors,
-                            "hazard_ratios": result.hazard_ratios,
-                            "z_stats": result.z_stats,
-                            "p_values": result.p_values,
-                            "log_likelihood": result.log_likelihood,
-                            "concordance": result.concordance,
-                        });
+                        let json = with_missing(
+                            serde_json::json!({
+                                "method": "Cox Proportional Hazards",
+                                "n_obs": result.n_obs,
+                                "n_events": result.n_events,
+                                "variables": result.variables,
+                                "coefficients": result.coefficients,
+                                "std_errors": result.std_errors,
+                                "hazard_ratios": result.hazard_ratios,
+                                "z_stats": result.z_stats,
+                                "p_values": result.p_values,
+                                "log_likelihood": result.log_likelihood,
+                                "concordance": result.concordance,
+                            }),
+                            &result.missing,
+                        );
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
                         println!("\nCox Proportional Hazards Model");
                         println!("{}", "=".repeat(60));
+                        println!(
+                            "Observations: {}, Events: {}",
+                            result.n_obs, result.n_events
+                        );
                         println!("Log-likelihood: {:.4}", result.log_likelihood);
                         println!("Concordance: {:.4}", result.concordance);
                         println!(
@@ -421,6 +548,7 @@ fn execute_cox(
                                 result.p_values[i]
                             );
                         }
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => {
@@ -475,20 +603,23 @@ fn execute_aft(
             match run_aft(ds, time_col, event_col, &cov_refs, Some(config)) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": "Accelerated Failure Time",
-                            "distribution": format!("{}", result.distribution),
-                            "n_obs": result.n_obs,
-                            "n_events": result.n_events,
-                            "variables": result.variables,
-                            "coefficients": result.coefficients,
-                            "std_errors": result.std_errors,
-                            "z_stats": result.z_stats,
-                            "p_values": result.p_values,
-                            "log_likelihood": result.log_likelihood,
-                            "aic": result.aic,
-                            "scale": result.scale,
-                        });
+                        let json = with_missing(
+                            serde_json::json!({
+                                "method": "Accelerated Failure Time",
+                                "distribution": format!("{}", result.distribution),
+                                "n_obs": result.n_obs,
+                                "n_events": result.n_events,
+                                "variables": result.variables,
+                                "coefficients": result.coefficients,
+                                "std_errors": result.std_errors,
+                                "z_stats": result.z_stats,
+                                "p_values": result.p_values,
+                                "log_likelihood": result.log_likelihood,
+                                "aic": result.aic,
+                                "scale": result.scale,
+                            }),
+                            &result.missing,
+                        );
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -516,6 +647,7 @@ fn execute_aft(
                                 result.p_values[i]
                             );
                         }
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => {
@@ -553,19 +685,22 @@ fn execute_competing_risks(
         Some(ds) => match run_competing_risks(ds, time_col, event_type_col, conf_level) {
             Ok(result) => match format {
                 OutputFormat::Json => {
-                    let json = serde_json::json!({
-                        "method": "Competing Risks Analysis",
-                        "n_obs": result.n_obs,
-                        "n_censored": result.n_censored,
-                        "event_types": result.event_types,
-                        "cumulative_incidence": result.cifs.iter().map(|ci| {
-                            serde_json::json!({
-                                "event_type": ci.event_type,
-                                "times": ci.times,
-                                "incidence": ci.incidence,
-                            })
-                        }).collect::<Vec<_>>(),
-                    });
+                    let json = with_missing(
+                        serde_json::json!({
+                            "method": "Competing Risks Analysis",
+                            "n_obs": result.n_obs,
+                            "n_censored": result.n_censored,
+                            "event_types": result.event_types,
+                            "cumulative_incidence": result.cifs.iter().map(|ci| {
+                                serde_json::json!({
+                                    "event_type": ci.event_type,
+                                    "times": ci.times,
+                                    "incidence": ci.incidence,
+                                })
+                            }).collect::<Vec<_>>(),
+                        }),
+                        &result.missing,
+                    );
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 }
                 _ => {
@@ -583,6 +718,7 @@ fn execute_competing_risks(
                             println!("{:<12.4} {:<12.4}", ci.times[i], ci.incidence[i]);
                         }
                     }
+                    print_missing_note(&result.missing, format);
                 }
             },
             Err(e) => {
