@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::get_column_names;
 use crate::traits::estimator::SignificanceLevel;
@@ -2208,6 +2209,18 @@ impl fmt::Display for GsynthResult {
 ///
 /// `GsynthResult` with estimated treatment effects and diagnostics.
 ///
+/// # Data requirements
+///
+/// One row per (unit, time) of a balanced panel, with no missing value (null or NaN) in
+/// the outcome, treatment, unit, time or covariate columns: a missing value is
+/// `EconError::NullValues` naming the column, and a duplicate (unit, time) row or a
+/// missing cell an `InvalidSpecification` naming the first one. Times are whole numbers
+/// or dates (a fractional time is refused, naming the row); units may be of any
+/// categorical dtype (text, integers, floats, booleans, dates) and are ordered as R's
+/// `factor()` sorts them, which fixes the order of `unit_effects` and of the
+/// cross-validation folds. Integer and boolean treatments are read as numbers. R's
+/// gsynth imputes missing cells by EM, which p2a does not implement.
+///
 /// # References
 ///
 /// - Xu, Y. (2017). "Generalized Synthetic Control Method: Causal Inference with
@@ -2223,59 +2236,22 @@ pub fn run_gsynth(
     x_cols: &[&str],
     config: GsynthConfig,
 ) -> EconResult<GsynthResult> {
-    let df = dataset.df();
+    // One balanced panel, units in R factor() order (T2 design 1.6: missing values,
+    // missing cells and duplicate cells are refused).
+    let GsynthPanel {
+        units: unique_units,
+        times: unique_times,
+        y: y_mat,
+        d: d_mat,
+        x: x_panels,
+    } = read_gsynth_panel(dataset.df(), y_col, d_col, unit_col, time_col, x_cols)?;
 
-    // Extract data
-    let units = extract_id_column(df, unit_col)?;
-    let times = extract_time_column(df, time_col)?;
-    let y = extract_numeric_column(df, y_col)?;
-    let d = extract_numeric_column(df, d_col)?;
-
-    // Build panel structure
-    let unique_units: Vec<String> = units
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    let mut unique_times: Vec<i64> = times
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    unique_times.sort();
-
-    let n_units = unique_units.len();
     let n_times = unique_times.len();
-
-    // Build index mappings
-    let unit_idx: std::collections::HashMap<&str, usize> = unique_units
-        .iter()
-        .enumerate()
-        .map(|(i, u)| (u.as_str(), i))
-        .collect();
     let time_idx: std::collections::HashMap<i64, usize> = unique_times
         .iter()
         .enumerate()
         .map(|(i, &t)| (t, i))
         .collect();
-
-    // Build Y and D matrices (units x times)
-    // n_units x n_times can be quadratic in the number of rows (a panel in
-    // which every row is its own unit and period), so these are fallible.
-    let mut y_mat =
-        crate::resource::try_zeros2(n_units, n_times, "gsynth outcome panel (units x periods)")?;
-    y_mat.fill(f64::NAN);
-    let mut d_mat =
-        crate::resource::try_zeros2(n_units, n_times, "gsynth treatment panel (units x periods)")?;
-
-    for (row_idx, (unit, time)) in units.iter().zip(times.iter()).enumerate() {
-        let ui = unit_idx[unit.as_str()];
-        let ti = time_idx[time];
-        y_mat[[ui, ti]] = y[row_idx];
-        d_mat[[ui, ti]] = d[row_idx];
-    }
 
     // Identify treated and control units
     let mut treated_units: Vec<usize> = Vec::new();
@@ -2368,25 +2344,12 @@ pub fn run_gsynth(
         config.cv_folds
     };
 
-    // Extract covariates if specified
+    // Covariate panels, read with the outcome
     let (x_mat, covariate_names) = if !x_cols.is_empty() {
-        let mut x_data: Vec<Array2<f64>> = Vec::new();
-        for col in x_cols {
-            let x_vec = extract_numeric_column(df, col)?;
-            let mut x_panel = crate::resource::try_zeros2(
-                n_units,
-                n_times,
-                "gsynth covariate panel (units x periods)",
-            )?;
-            x_panel.fill(f64::NAN);
-            for (row_idx, (unit, time)) in units.iter().zip(times.iter()).enumerate() {
-                let ui = unit_idx[unit.as_str()];
-                let ti = time_idx[time];
-                x_panel[[ui, ti]] = x_vec[row_idx];
-            }
-            x_data.push(x_panel);
-        }
-        (Some(x_data), x_cols.iter().map(|s| s.to_string()).collect())
+        (
+            Some(x_panels),
+            x_cols.iter().map(|s| s.to_string()).collect(),
+        )
     } else {
         (None, Vec::new())
     };
@@ -2576,76 +2539,141 @@ pub fn run_gsynth(
     })
 }
 
-/// Extract ID column as strings.
-fn extract_id_column(df: &DataFrame, col: &str) -> EconResult<Vec<String>> {
-    let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    if let Ok(ca) = series.str() {
-        Ok(ca.into_no_null_iter().map(|s| s.to_string()).collect())
-    } else if let Ok(ca) = series.i64() {
-        Ok(ca.into_no_null_iter().map(|v| v.to_string()).collect())
-    } else if let Ok(ca) = series.i32() {
-        Ok(ca.into_no_null_iter().map(|v| v.to_string()).collect())
-    } else {
-        Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be string or integer", col),
-        })
-    }
+/// A gsynth panel read through the shared extractor: balanced, one row per (unit, time).
+struct GsynthPanel {
+    /// Unit labels in R `factor()` order.
+    units: Vec<String>,
+    /// The distinct time periods, ascending.
+    times: Vec<i64>,
+    /// Outcome panel (units x periods).
+    y: Array2<f64>,
+    /// Treatment panel (units x periods).
+    d: Array2<f64>,
+    /// One panel (units x periods) per covariate, in `x_cols` order.
+    x: Vec<Array2<f64>>,
 }
 
-/// Extract time column as i64.
-fn extract_time_column(df: &DataFrame, col: &str) -> EconResult<Vec<i64>> {
-    let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
+/// Read a gsynth panel with one `ColumnRequest` (`NaPolicy::Fail`): a missing value in
+/// any column is `NullValues` naming it, a fractional or text time an
+/// `InvalidSpecification`. Duplicate (unit, time) rows and missing cells are refused
+/// before any units x periods buffer is allocated; every step is O(n log n).
+fn read_gsynth_panel(
+    df: &DataFrame,
+    y_col: &str,
+    d_col: &str,
+    unit_col: &str,
+    time_col: &str,
+    x_cols: &[&str],
+) -> EconResult<GsynthPanel> {
+    let cols = ColumnRequest::new(df)
+        .factor(unit_col)
+        .time_index(time_col)
+        .numeric(y_col)
+        .numeric(d_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let n = cols.n();
+    let unit = cols.factor(unit_col);
+    let time = cols.time_index(time_col);
+    let units = unit.levels.clone();
 
-    if let Ok(ca) = series.i64() {
-        Ok(ca.into_no_null_iter().collect())
-    } else if let Ok(ca) = series.i32() {
-        Ok(ca.into_no_null_iter().map(|v| v as i64).collect())
-    } else if let Ok(ca) = series.f64() {
-        Ok(ca.into_no_null_iter().map(|v| v as i64).collect())
-    } else {
-        Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be numeric", col),
-        })
+    let mut times: Vec<i64> = crate::resource::try_with_capacity(n, "gsynth time periods")?;
+    times.extend_from_slice(time);
+    times.sort_unstable();
+    times.dedup();
+
+    // The rows in (unit level, time) order; equal neighbours are duplicates.
+    let key = |r: usize| (unit.codes[r], time[r]);
+    let mut order: Vec<usize> = crate::resource::try_with_capacity(n, "gsynth panel order")?;
+    order.extend(0..n);
+    order.sort_unstable_by_key(|&r| key(r));
+    let mut duplicates = 0usize;
+    let mut first_duplicate = None;
+    for pair in order.windows(2) {
+        if key(pair[0]) == key(pair[1]) {
+            duplicates += 1;
+            first_duplicate.get_or_insert(pair[1]);
+        }
     }
-}
-
-/// Extract numeric column.
-fn extract_numeric_column(df: &DataFrame, col: &str) -> EconResult<Vec<f64>> {
-    let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    if let Ok(ca) = series.f64() {
-        Ok(ca.into_no_null_iter().collect())
-    } else if let Ok(ca) = series.i64() {
-        Ok(ca.into_no_null_iter().map(|v| v as f64).collect())
-    } else if let Ok(ca) = series.i32() {
-        Ok(ca.into_no_null_iter().map(|v| v as f64).collect())
-    } else {
-        Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be numeric", col),
-        })
+    if let Some(r) = first_duplicate {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "gsynth needs one row per (unit, time): {duplicates} duplicate row(s) \
+                 (first: unit '{}', time {}). Remove the duplicates first.",
+                unit.label(r),
+                time[r]
+            ),
+        });
     }
+
+    let n_units = units.len();
+    let n_times = times.len();
+    // Without duplicates every row is its own cell, so n <= units x periods.
+    let missing = (n_units as u128 * n_times as u128).saturating_sub(n as u128);
+    if missing > 0 {
+        // The first absent cell in (unit level, time) order. Every cell before it
+        // consumes one row of `order`, so the walk is O(n).
+        let mut next = order.iter().peekable();
+        let mut first = None;
+        'units: for u in 0..n_units {
+            crate::resource::checkpoint()?;
+            for &t in &times {
+                match next.peek() {
+                    Some(&&r) if unit.codes[r] as usize == u && time[r] == t => {
+                        next.next();
+                    }
+                    _ => {
+                        first = Some((u, t));
+                        break 'units;
+                    }
+                }
+            }
+        }
+        let (u, t) = first.ok_or_else(|| {
+            EconError::Internal("gsynth panel: no missing cell found".to_string())
+        })?;
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "gsynth needs a balanced panel: {missing} (unit, time) cell(s) are missing \
+                 (first: unit '{}', time {t}). p2a's gsynth has no estimator for \
+                 unbalanced panels (R's gsynth imputes missing cells); fill or drop them \
+                 first.",
+                units[u]
+            ),
+        });
+    }
+
+    // Balanced: order[u * n_times + j] is the row of (units[u], times[j]).
+    let panel = |values: &[f64], what: &str| -> EconResult<Array2<f64>> {
+        let mut m = crate::resource::try_zeros2(n_units, n_times, what)?;
+        for (cell, &r) in m.iter_mut().zip(&order) {
+            *cell = values[r];
+        }
+        Ok(m)
+    };
+    let y = panel(
+        cols.numeric(y_col),
+        "gsynth outcome panel (units x periods)",
+    )?;
+    let d = panel(
+        cols.numeric(d_col),
+        "gsynth treatment panel (units x periods)",
+    )?;
+    let mut x = Vec::with_capacity(x_cols.len());
+    for col in x_cols {
+        x.push(panel(
+            cols.numeric(col),
+            "gsynth covariate panel (units x periods)",
+        )?);
+    }
+    Ok(GsynthPanel {
+        units,
+        times,
+        y,
+        d,
+        x,
+    })
 }
 
 /// Select optimal number of factors via k-fold cross-validation.
@@ -4197,18 +4225,42 @@ mod gsynth_tests {
 
     #[test]
     fn test_gsynth_matrices_respect_allocation_ceiling() {
-        // the 5 x 10 units-by-periods panel (400 bytes) is over a 64-byte ceiling
+        // the extractor's 50-row buffers (400 bytes) are over a 64-byte ceiling; a
+        // balanced panel's units x periods buffers are no larger
         let ds = create_gsynth_dataset();
         let r = crate::resource::with_alloc_ceiling(Some(64), || {
             run_gsynth(&ds, "outcome", "treated", "unit", "time", &[], gs_cfg())
         });
         assert!(
-            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("units x periods")),
+            matches!(r, Err(EconError::ResourceLimit(_))),
             "ok={}",
             r.is_ok()
         );
-        // a long panel: 4 x 40 panels (1280 bytes) fit under 2000 bytes, the
-        // 30 x 30 pre-period factor covariance (7200 bytes) does not
+        // every row its own unit and period: refused as unbalanced before a 40 x 40
+        // units-by-periods panel (12800 bytes) is allocated
+        let n = 40usize;
+        let quad = Dataset::new(
+            df! {
+                "unit" => (0..n).map(|i| format!("u{i:02}")).collect::<Vec<_>>(),
+                "time" => (1..=n as i64).collect::<Vec<_>>(),
+                "outcome" => (0..n).map(|i| i as f64 + 0.5).collect::<Vec<_>>(),
+                "treated" => (0..n).map(|i| f64::from(u8::from(i == n - 1))).collect::<Vec<_>>(),
+            }
+            .unwrap(),
+        );
+        let r = crate::resource::with_alloc_ceiling(Some(4096), || {
+            run_gsynth(&quad, "outcome", "treated", "unit", "time", &[], gs_cfg())
+        });
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.starts_with(
+                "gsynth needs a balanced panel: 1560 (unit, time) cell(s) are missing \
+                 (first: unit 'u00', time 2)."
+            )),
+            "{r:?}"
+        );
+        // a long panel: the extractor's 160-row buffers (at most 2560 bytes, the time
+        // index as Option<i64>) and the 4 x 40 panels (1280 bytes) fit under 3000
+        // bytes, the 30 x 30 pre-period factor covariance (7200 bytes) does not
         let (mut u, mut t, mut y, mut d) = (vec![], vec![], vec![], vec![]);
         for unit in ["C1", "C2", "C3", "T1"] {
             for time in 1..=40i64 {
@@ -4226,7 +4278,7 @@ mod gsynth_tests {
         }
         let long =
             Dataset::new(df! { "unit" => u, "time" => t, "outcome" => y, "treated" => d }.unwrap());
-        let r = crate::resource::with_alloc_ceiling(Some(2000), || {
+        let r = crate::resource::with_alloc_ceiling(Some(3000), || {
             run_gsynth(&long, "outcome", "treated", "unit", "time", &[], gs_cfg())
         });
         assert!(
@@ -4235,5 +4287,171 @@ mod gsynth_tests {
             r.is_ok()
         );
         assert!(run_gsynth(&long, "outcome", "treated", "unit", "time", &[], gs_cfg()).is_ok());
+    }
+
+    // =========================================================================
+    // T2-WP13: missing values, balance, duplicates, time index (CAUS-42)
+    // =========================================================================
+
+    fn drop_row(ds: &Dataset, i: usize) -> Dataset {
+        let keep = BooleanChunked::from_iter_values("keep".into(), (0..ds.nrows()).map(|r| r != i));
+        Dataset::new(ds.df().filter(&keep).unwrap())
+    }
+
+    fn dup_row(ds: &Dataset, i: usize) -> Dataset {
+        let mut df = ds.df().clone();
+        df.vstack_mut(&ds.df().slice(i as i64, 1)).unwrap();
+        Dataset::new(df)
+    }
+
+    fn null_at(ds: &Dataset, col: &str, i: usize) -> Dataset {
+        let mut df = ds.df().clone();
+        let c = df.column(col).unwrap();
+        let replaced = if c.dtype() == &DataType::String {
+            let v: Vec<Option<String>> = c
+                .str()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(r, s)| if r == i { None } else { s.map(str::to_string) })
+                .collect();
+            Column::new(col.into(), v)
+        } else {
+            let v: Vec<Option<f64>> = c
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(r, x)| if r == i { None } else { x })
+                .collect();
+            Column::new(col.into(), v)
+        };
+        df.with_column(replaced).unwrap();
+        Dataset::new(df)
+    }
+
+    fn quarterly_time(ds: &Dataset) -> Dataset {
+        let mut df = ds.df().clone();
+        let t: Vec<Option<f64>> = df
+            .column("time")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|t| t.map(|t| 2000.0 + (t - 1.0) / 4.0))
+            .collect();
+        df.with_column(Column::new("time".into(), t)).unwrap();
+        Dataset::new(df)
+    }
+
+    fn with_dtype(ds: &Dataset, col: &str, dtype: DataType) -> Dataset {
+        let mut df = ds.df().clone();
+        let cast = df.column(col).unwrap().cast(&dtype).unwrap();
+        df.with_column(cast).unwrap();
+        Dataset::new(df)
+    }
+
+    fn gs(ds: &Dataset, config: GsynthConfig) -> EconResult<GsynthResult> {
+        run_gsynth(ds, "outcome", "treated", "unit", "time", &[], config)
+    }
+
+    #[test]
+    fn test_na_gsynth_missing_cell() {
+        // (C2, 5) is row 14
+        let err = gs(&drop_row(&create_gsynth_dataset(), 14), gs_cfg()).unwrap_err();
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.starts_with(
+                "gsynth needs a balanced panel: 1 (unit, time) cell(s) are missing \
+                 (first: unit 'C2', time 5)."
+            )),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_na_gsynth_duplicate_cell() {
+        let err = gs(&dup_row(&create_gsynth_dataset(), 14), gs_cfg()).unwrap_err();
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.starts_with(
+                "gsynth needs one row per (unit, time): 1 duplicate row(s) \
+                 (first: unit 'C2', time 5)."
+            )),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_na_gsynth_null_outcome() {
+        let ds = create_gsynth_dataset();
+        for col in ["outcome", "unit", "treated"] {
+            match gs(&null_at(&ds, col, 14), gs_cfg()) {
+                Err(EconError::NullValues { column, count }) => {
+                    assert_eq!((column.as_str(), count), (col, 1));
+                }
+                other => panic!("null {col}: expected NullValues, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_na_gsynth_fractional_time() {
+        match gs(&quarterly_time(&create_gsynth_dataset()), gs_cfg()) {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "Time column 'time' must hold whole numbers; row 1 (0-based) is 2000.25. \
+                 Round or recode it first."
+            ),
+            other => panic!("fractional time: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_na_gsynth_boolean_treatment() {
+        let ds = create_gsynth_dataset();
+        let key = |r: &GsynthResult| {
+            let mut k = vec![r.att.to_bits()];
+            k.extend(r.unit_effects.iter().map(|u| u.att.to_bits()));
+            k
+        };
+        let base = key(&gs(&ds, gs_cfg()).unwrap());
+        let boolean = gs(&with_dtype(&ds, "treated", DataType::Boolean), gs_cfg()).unwrap();
+        assert_eq!(key(&boolean), base, "Boolean treatment");
+        // regression guards: Int64 and whole-number Float64 times
+        for dtype in [DataType::Int64, DataType::Float64] {
+            let r = gs(&with_dtype(&ds, "time", dtype.clone()), gs_cfg()).unwrap();
+            assert_eq!(key(&r), base, "time as {dtype}");
+        }
+    }
+
+    #[test]
+    fn test_gsynth_unit_order_is_deterministic() {
+        let ds = create_gsynth_dataset();
+        let r = gs(&ds, gs_cfg()).unwrap();
+        let labels: Vec<&str> = r.unit_effects.iter().map(|u| u.unit.as_str()).collect();
+        assert_eq!(labels, ["T1", "T2"]);
+        // the CV folds follow the control-unit order
+        let cv = || GsynthConfig {
+            n_factors: 0,
+            cross_validate: true,
+            max_factors: 3,
+            cv_folds: 2,
+            min_pre_periods: 2,
+            ..Default::default()
+        };
+        let fingerprint = |r: &GsynthResult| {
+            let mut k = vec![r.n_factors as u64, r.cv_mspe.len() as u64, r.att.to_bits()];
+            for (factors, mspe) in &r.cv_mspe {
+                k.push(*factors as u64);
+                k.push(mspe.to_bits());
+            }
+            k
+        };
+        let a = gs(&ds, cv()).unwrap();
+        let b = gs(&ds, cv()).unwrap();
+        assert_eq!(fingerprint(&a), fingerprint(&b));
     }
 }
