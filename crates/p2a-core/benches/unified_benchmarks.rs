@@ -42,8 +42,8 @@ use p2a_core::econometrics::{
     run_panel_unit_root,
 };
 use p2a_core::econometrics::{
-    GsynthConfig, PanelGlsModel, PvcmType, SacConfig, run_arellano_bond, run_gsynth,
-    run_hausman_test, run_panel_gls, run_pmg, run_pvcm, run_sac_dataset,
+    GsynthConfig, PanelGlsModel, PvcmType, SacConfig, run_gsynth, run_hausman_test, run_panel_gls,
+    run_pmg, run_pvcm, run_sac_dataset,
 };
 use p2a_core::econometrics::{RdMultiConfig, run_rd_multi};
 use p2a_core::econometrics::{granger_test, run_var, run_vecm};
@@ -56,9 +56,9 @@ use p2a_core::ml::{cmdscale_from_data, kmedoids, linear_svm, silhouette, tsne};
 use p2a_core::regression::{
     BgTestType, BootstrapType, CorrelationStructure, CovarianceType, HacKernel, ModelFn, ModelType,
     NlsConfig, QuantRegConfig, ResetType, SmoothSplineConfig, StepConfig, StepDirection, bg_test,
-    evalue_rr_ci, gls, harvey_collier_test, jarque_bera_test, marginal_effects,
-    model_exponential_growth, quantreg, reset_test, run_diagnostics, run_nls, run_ols_clustered,
-    run_vcov_driscoll_kraay, smooth_spline, step, vcov_bootstrap, vcov_hac, wald_test,
+    evalue_rr_ci, gls, harvey_collier_test, jarque_bera_test, marginal_effects, quantreg,
+    reset_test, run_diagnostics, run_ols_clustered, run_vcov_driscoll_kraay, smooth_spline, step,
+    vcov_bootstrap, vcov_hac, wald_test,
 };
 use p2a_core::spatial::{MoranAlternative, localmoran, moran_test};
 use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
@@ -116,7 +116,6 @@ use p2a_core::stats::{
     run_two_way_anova,
     shapiro_wilk_test,
     spline,
-    tukey_hsd,
     var_test,
     wilcoxon_signed_rank,
 };
@@ -939,7 +938,7 @@ fn extract_col_strings(dataset: &Dataset, col: &str) -> Vec<String> {
 // ============================================
 
 /// Benchmarks whose call result is not captured as outputs.
-const NO_OUTPUT_CAPTURE: &[&str] = &["RandomForest", "SynthControl"];
+const NO_OUTPUT_CAPTURE: &[&str] = &["SynthControl"];
 
 /// A benchmark completed when its call returned a result: every other
 /// benchmark captures outputs from an `Ok` result.
@@ -1234,15 +1233,41 @@ fn main() {
 
     // Arellano-Bond GMM
     // Cap: no R benchmark at n=10000
+    // Difference GMM, two-step, one lag of y, with collapsed instruments lags 2..4
+    // (3 columns plus the 2 differenced x's: fewer instruments than entities at
+    // both sizes, so the two-step weight is invertible). R's pgmm runs the same
+    // specification with collapse = TRUE, lag(y, 2:4) and fsm = "I".
     for (n_ent, n_per) in sizes_for(&["Arellano_Bond"], [(10, 10), (50, 20)]) {
+        use p2a_core::econometrics::{GmmConfig, run_gmm};
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
+        let gmm_cfg = GmmConfig {
+            collapse: true,
+            max_lag: Some(4),
+            ..Default::default()
+        };
 
         let mut result = run_benchmark_tracked("Arellano_Bond", "pgmm", n, &slow_config, || {
-            run_arellano_bond(&dataset, "y", &["x1", "x2"], "entity", "time")
+            run_gmm(
+                &dataset,
+                "y",
+                &["x1", "x2"],
+                "entity",
+                "time",
+                1,
+                Some(gmm_cfg.clone()),
+            )
         });
-        if let Ok(ref ab) = run_arellano_bond(&dataset, "y", &["x1", "x2"], "entity", "time") {
+        if let Ok(ref ab) = run_gmm(
+            &dataset,
+            "y",
+            &["x1", "x2"],
+            "entity",
+            "time",
+            1,
+            Some(gmm_cfg.clone()),
+        ) {
             let mut outputs = BTreeMap::new();
             capture_vec(&mut outputs, "coefficients", &ab.coefficients);
             capture_vec(&mut outputs, "std_errors", &ab.std_errors);
@@ -1381,6 +1406,15 @@ fn main() {
                 capture_vec(&mut outputs, "ar_coef", &arima.ar_coeffs);
                 capture_vec(&mut outputs, "ma_coef", &arima.ma_coeffs);
                 capture(&mut outputs, "intercept", arima.intercept);
+                // R (forecast::Arima, CSS, include.drift) reports the same fit's
+                // constant as the mean of the differenced series: drift = c / (1 - sum(ar)),
+                // where c is the arima crate's CSS constant (arima.intercept).
+                // T2-WP16 replaces the crate's fit: run_arima then fits no drift for
+                // d = 1 and ArimaResult gets a `drift` field, so at that merge this call
+                // becomes run_arima_with(.., ArimaSpec { include_drift: true, .. }) and
+                // this capture reads arima.drift.
+                let ar_sum: f64 = arima.ar_coeffs.iter().sum();
+                capture(&mut outputs, "drift", arima.intercept / (1.0 - ar_sum));
                 capture(&mut outputs, "aic", arima.aic);
                 result.outputs = outputs;
             }
@@ -1432,12 +1466,10 @@ fn main() {
                 let mut outputs = BTreeMap::new();
                 capture(&mut outputs, "inertia", km.inertia);
                 capture(&mut outputs, "n_iterations", km.n_iterations as f64);
-                let sizes: Vec<serde_json::Value> = km
-                    .cluster_sizes
-                    .iter()
-                    .map(|&s| serde_json::Value::from(s as f64))
-                    .collect();
-                outputs.insert("cluster_sizes".to_string(), serde_json::Value::Array(sizes));
+                // Sorted, as R reports them: cluster labels are arbitrary
+                let mut sizes: Vec<f64> = km.cluster_sizes.iter().map(|&s| s as f64).collect();
+                sizes.sort_by(f64::total_cmp);
+                capture_vec(&mut outputs, "cluster_sizes", &sizes);
                 result.outputs = outputs;
             }
             result.dgp = "cluster".to_string();
@@ -1510,6 +1542,14 @@ fn main() {
         if let Ok(ref hc) = hierarchical(data.view(), Some(3), Linkage::Ward, None) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "n_clusters", hc.n_clusters as f64);
+            // Sorted sizes of the 3 clusters, as R's table(cutree(fit, k = 3))
+            let mut counts: BTreeMap<usize, f64> = BTreeMap::new();
+            for &label in &hc.labels {
+                *counts.entry(label).or_insert(0.0) += 1.0;
+            }
+            let mut sizes: Vec<f64> = counts.into_values().collect();
+            sizes.sort_by(f64::total_cmp);
+            capture_vec(&mut outputs, "cluster_sizes", &sizes);
             result.outputs = outputs;
         }
         result.dgp = "cluster".to_string();
@@ -1527,23 +1567,43 @@ fn main() {
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let target: Array1<f64> = data.column(0).to_owned();
         let features = data.slice(ndarray::s![.., 1..]);
-        let result = {
-            let mut r = run_benchmark_tracked("RandomForest", "100trees", n, &config, || {
-                random_forest(
-                    features.view(),
-                    target.view(),
-                    Some(100),
-                    Some(10),
-                    Some(5),
-                    None,
-                    Some(42),
-                    None,
-                )
-            });
-            r.dgp = "cluster".to_string();
-            r.seed = 42;
-            r
+        // R's randomForest(ntree = 100, mtry = 2, nodesize = 5) with no leaf cap:
+        // a node splits while it holds at least 6 rows (R: more than nodesize),
+        // depth up to 512 (never reached here), 2 candidate features per split.
+        // Trees grow on rayon's threads (R: one thread); n_threads records how many.
+        let rf_call = || {
+            random_forest(
+                features.view(),
+                target.view(),
+                Some(100),
+                Some(512),
+                Some(6),
+                Some("2"),
+                Some(42),
+                None,
+            )
         };
+        let mut result = run_benchmark_tracked("RandomForest", "100trees", n, &config, &rf_call);
+        if let Ok(ref rf) = rf_call() {
+            let mut outputs = BTreeMap::new();
+            if let Some(rsq) = rf.oob_score {
+                // OOB R^2 = 1 - SS_res / SS_tot over the rows some tree left out
+                // (every row, at 100 trees), so the OOB MSE is (1 - R^2) times the
+                // population variance: R's final fit$mse and fit$rsq
+                let mean = target.mean().unwrap_or(0.0);
+                let var_pop = target.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+                capture(&mut outputs, "mse", (1.0 - rsq) * var_pop);
+                capture(&mut outputs, "rsq", rsq);
+            }
+            capture(
+                &mut outputs,
+                "n_threads",
+                rayon::current_num_threads() as f64,
+            );
+            result.outputs = outputs;
+        }
+        result.dgp = "cluster".to_string();
+        result.seed = 42;
         print_result(&result);
         results.push(result);
     }
@@ -1562,6 +1622,14 @@ fn main() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "n_clusters", db.n_clusters as f64);
             capture(&mut outputs, "n_noise", db.n_noise as f64);
+            // Sorted sizes of the clusters (noise, label -1, excluded), as R reports them
+            let mut counts: BTreeMap<i32, f64> = BTreeMap::new();
+            for &label in db.labels.iter().filter(|&&l| l >= 0) {
+                *counts.entry(label).or_insert(0.0) += 1.0;
+            }
+            let mut sizes: Vec<f64> = counts.into_values().collect();
+            sizes.sort_by(f64::total_cmp);
+            capture_vec(&mut outputs, "cluster_sizes", &sizes);
             result.outputs = outputs;
         }
         result.dgp = "cluster".to_string();
@@ -1575,25 +1643,30 @@ fn main() {
     // ============================================
     // Cap: no R benchmark at n=10000
     for n in sizes_for(&["factanal"], [100, 1000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let p = 10;
+        // v1..v10 of factor_n<n>.csv, the rows R's factanal fits; the generator
+        // (same DGP, own draws) is only the fallback when the CSV is missing
+        let data = load_csv_array2(&data_dir, "factor", n).unwrap_or_else(|| {
+            let mut rng = ChaCha8Rng::seed_from_u64(42);
+            let p = 10;
+            let mut data = Array2::zeros((n, p));
+            for i in 0..n {
+                let f1: f64 = rng.gen_range(-2.0..2.0);
+                let f2: f64 = rng.gen_range(-2.0..2.0);
+                let f3: f64 = rng.gen_range(-2.0..2.0);
+                data[[i, 0]] = 0.8 * f1 + rng.gen_range(-0.3..0.3);
+                data[[i, 1]] = 0.7 * f1 + rng.gen_range(-0.4..0.4);
+                data[[i, 2]] = 0.75 * f1 + rng.gen_range(-0.35..0.35);
+                data[[i, 3]] = 0.8 * f2 + rng.gen_range(-0.3..0.3);
+                data[[i, 4]] = 0.7 * f2 + rng.gen_range(-0.4..0.4);
+                data[[i, 5]] = 0.75 * f2 + rng.gen_range(-0.35..0.35);
+                data[[i, 6]] = 0.8 * f3 + rng.gen_range(-0.3..0.3);
+                data[[i, 7]] = 0.7 * f3 + rng.gen_range(-0.4..0.4);
+                data[[i, 8]] = 0.75 * f3 + rng.gen_range(-0.35..0.35);
+                data[[i, 9]] = rng.gen_range(-1.0..1.0);
+            }
+            data
+        });
         let k = 3;
-        let mut data = Array2::zeros((n, p));
-        for i in 0..n {
-            let f1: f64 = rng.gen_range(-2.0..2.0);
-            let f2: f64 = rng.gen_range(-2.0..2.0);
-            let f3: f64 = rng.gen_range(-2.0..2.0);
-            data[[i, 0]] = 0.8 * f1 + rng.gen_range(-0.3..0.3);
-            data[[i, 1]] = 0.7 * f1 + rng.gen_range(-0.4..0.4);
-            data[[i, 2]] = 0.75 * f1 + rng.gen_range(-0.35..0.35);
-            data[[i, 3]] = 0.8 * f2 + rng.gen_range(-0.3..0.3);
-            data[[i, 4]] = 0.7 * f2 + rng.gen_range(-0.4..0.4);
-            data[[i, 5]] = 0.75 * f2 + rng.gen_range(-0.35..0.35);
-            data[[i, 6]] = 0.8 * f3 + rng.gen_range(-0.3..0.3);
-            data[[i, 7]] = 0.7 * f3 + rng.gen_range(-0.4..0.4);
-            data[[i, 8]] = 0.75 * f3 + rng.gen_range(-0.35..0.35);
-            data[[i, 9]] = rng.gen_range(-1.0..1.0);
-        }
         let mut result = run_benchmark_tracked("factanal", "varimax", n, &config, || {
             factanal(&data.view(), k, RotationMethod::Varimax, ScoresMethod::None)
         });
@@ -1605,6 +1678,7 @@ fn main() {
             let n_vars = fa.loadings.nrows();
             let n_factors = fa.loadings.ncols();
             let mut normalized = fa.loadings.clone();
+            let mut peak_rows = vec![0usize; n_factors];
             for j in 0..n_factors {
                 // Find the row with the largest absolute loading for this factor
                 let mut max_abs = 0.0f64;
@@ -1614,6 +1688,7 @@ fn main() {
                     if v.abs() > max_abs {
                         max_abs = v.abs();
                         max_val = v;
+                        peak_rows[j] = i;
                     }
                 }
                 // Flip sign if the dominant loading is negative
@@ -1623,10 +1698,21 @@ fn main() {
                     }
                 }
             }
-            let loadings: Vec<f64> = normalized.iter().cloned().collect();
+            // The varimax factors have nearly equal sums of squares, so their order
+            // is not stable across implementations: order them by the variable they
+            // load on most (stable sort; R's mlts_order_factors does the same), and
+            // list the loadings factor by factor, as R's as.numeric(matrix) does.
+            let mut factor_order: Vec<usize> = (0..n_factors).collect();
+            factor_order.sort_by_key(|&j| peak_rows[j]);
+            let loadings: Vec<f64> = factor_order
+                .iter()
+                .flat_map(|&j| normalized.column(j).to_vec())
+                .collect();
             capture_vec(&mut outputs, "loadings", &loadings);
             let uniq: Vec<f64> = fa.uniquenesses.iter().cloned().collect();
             capture_vec(&mut outputs, "uniquenesses", &uniq);
+            capture(&mut outputs, "chi_sq", fa.chi_squared);
+            capture(&mut outputs, "p_value", fa.p_value);
             result.outputs = outputs;
         }
         result.dgp = "factor".to_string();
@@ -1639,9 +1725,12 @@ fn main() {
     // Doubly Robust (AIPW)
     // ============================================
     // Cap: no R benchmark at n=10000
+    // Outcome y, treatment `treatment`, covariates x1 and x2 of treatment_n<n>.csv,
+    // as the R side (which fits the same AIPW by hand). Before, this read
+    // binary_n<n>.csv with the continuous x1 as the treatment.
     for n in sizes_for(&["Doubly_Robust"], [100, 1000]) {
-        let dataset =
-            load_csv_dataset(&data_dir, "binary", n).unwrap_or_else(|| generate_binary_data(n, 42));
+        let dataset = load_csv_dataset(&data_dir, "treatment", n)
+            .unwrap_or_else(|| generate_treatment_data(n, 42));
         let dr_config = DoublyRobustConfig {
             method: DRMethod::AIPW,
             estimand: Estimand::ATE,
@@ -1650,9 +1739,10 @@ fn main() {
             ..Default::default()
         };
         // Capture outputs before benchmark to avoid allocation-tracker interference
-        let dr_outputs = run_doubly_robust(&dataset, "y", "x1", &["x2"], dr_config.clone());
+        let dr_outputs =
+            run_doubly_robust(&dataset, "y", "treatment", &["x1", "x2"], dr_config.clone());
         let mut result = run_benchmark_tracked("Doubly_Robust", "AIPW", n, &config, || {
-            run_doubly_robust(&dataset, "y", "x1", &["x2"], dr_config.clone())
+            run_doubly_robust(&dataset, "y", "treatment", &["x1", "x2"], dr_config.clone())
         });
         if let Ok(ref dr) = dr_outputs {
             let mut outputs = BTreeMap::new();
@@ -1660,7 +1750,7 @@ fn main() {
             capture(&mut outputs, "se", dr.std_error);
             result.outputs = outputs;
         }
-        result.dgp = "binary".to_string();
+        result.dgp = "treatment".to_string();
         result.seed = 42;
         print_result(&result);
         results.push(result);
@@ -1908,6 +1998,10 @@ fn main() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "att", did.att);
             capture(&mut outputs, "se", did.std_error);
+            // [intercept, treatment, post, treatment x post, x1], HC1 SEs; R reports
+            // the same order and HC1 (coeftest with vcovHC type HC1)
+            capture_vec(&mut outputs, "coefficients", &did.coefficients);
+            capture_vec(&mut outputs, "std_errors", &did.std_errors);
             result.outputs = outputs;
         }
         result.dgp = "did".to_string();
@@ -1955,10 +2049,20 @@ fn main() {
     for n in sizes_for(&["RD"], [100, 1000]) {
         let dataset =
             load_csv_dataset(&data_dir, "rd", n).unwrap_or_else(|| generate_rd_data(n, 42));
+        // Fixed h = b = 0.3 and HC1 variance, as the R side's rdrobust call: p2a-core
+        // has no CCT mserd selector (its closed-form bandwidth is capped at
+        // range/4), and its "nn" variance is an approximation of rdrobust's.
+        let rd_h = 0.3;
+        let rd_config = RdConfig {
+            h: Some(rd_h),
+            b: Some(rd_h),
+            vce: p2a_core::VceType::Hc1,
+            ..RdConfig::default()
+        };
         let mut result = run_benchmark_tracked("RD", "sharp", n, &slow_config, || {
-            run_rd(&dataset, "y", "running", 0.0, RdConfig::default())
+            run_rd(&dataset, "y", "running", 0.0, rd_config.clone())
         });
-        if let Ok(ref rd) = run_rd(&dataset, "y", "running", 0.0, RdConfig::default()) {
+        if let Ok(ref rd) = run_rd(&dataset, "y", "running", 0.0, rd_config.clone()) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "tau_conventional", rd.tau_conventional);
             capture(&mut outputs, "se_conventional", rd.se_conventional);
@@ -2042,6 +2146,20 @@ fn main() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "att", etwfe.att_simple);
             capture(&mut outputs, "se", etwfe.att_se);
+            // One effect per treated (cohort, period) cell, cohort then period
+            // ascending; R's saturated feols reports the same cells in this order
+            let cell_estimates: Vec<f64> = etwfe
+                .cohort_time_effects
+                .iter()
+                .map(|e| e.estimate)
+                .collect();
+            let cell_ses: Vec<f64> = etwfe
+                .cohort_time_effects
+                .iter()
+                .map(|e| e.std_error)
+                .collect();
+            capture_vec(&mut outputs, "coefficients", &cell_estimates);
+            capture_vec(&mut outputs, "std_errors", &cell_ses);
             result.outputs = outputs;
         }
         result.dgp = "staggered".to_string();
@@ -2077,7 +2195,11 @@ fn main() {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset_with_ids(&data_dir, "staggered", n, &["unit"])
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
+        // One factor, no cross-validation, at least 2 pre-periods, the default
+        // tolerance 1e-5: R's gsynth(CV = FALSE, r = 1, min.T0 = 2, tol = 1e-5)
         let gsynth_config = GsynthConfig {
+            n_factors: 1,
+            cross_validate: false,
             bootstrap_se: false,
             min_pre_periods: 2,
             ..Default::default()
@@ -2120,13 +2242,21 @@ fn main() {
     for n in sizes_for(&["TMLE"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
+        // y is continuous: a linear Q and a linear fluctuation (the default
+        // QModel::Logistic fits a logistic Q to a y outside [0, 1] and returned
+        // ATEs of exactly -1 and 1). R: tmle with the same Qform/gform, gbound
+        // and fluctuation = "linear".
+        let tmle_config = TmleConfig {
+            q_model: p2a_core::QModel::Linear,
+            ..TmleConfig::default()
+        };
         let mut result = run_benchmark_tracked("TMLE", "ATE", n, &slow_config, || {
             tmle(
                 &dataset,
                 "y",
                 "treatment",
                 &["x1", "x2"],
-                TmleConfig::default(),
+                tmle_config.clone(),
             )
         });
         if let Ok(ref t) = tmle(
@@ -2134,7 +2264,7 @@ fn main() {
             "y",
             "treatment",
             &["x1", "x2"],
-            TmleConfig::default(),
+            tmle_config.clone(),
         ) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "ate", t.ate);
@@ -2152,13 +2282,20 @@ fn main() {
     for n in sizes_for(&["CTMLE"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
+        // y is continuous: a linear Q (the default logistic Q returned ATEs of
+        // exactly -1 and 1), as for TMLE and as R's ctmleDiscrete(family =
+        // "gaussian", fluctuation = "linear") call
+        let ctmle_config = CTmleConfig {
+            q_model: p2a_core::CTmleQModel::Linear,
+            ..CTmleConfig::default()
+        };
         let mut result = run_benchmark_tracked("CTMLE", "adaptive", n, &slow_config, || {
             ctmle(
                 &dataset,
                 "y",
                 "treatment",
                 &["x1", "x2"],
-                CTmleConfig::default(),
+                ctmle_config.clone(),
             )
         });
         if let Ok(ref c) = ctmle(
@@ -2166,7 +2303,7 @@ fn main() {
             "y",
             "treatment",
             &["x1", "x2"],
-            CTmleConfig::default(),
+            ctmle_config.clone(),
         ) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "ate", c.ate);
@@ -2253,6 +2390,8 @@ fn main() {
             };
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "ate", ate);
+            // Propensity-score coefficients [intercept, x1, x2], as R's fit$coefficients
+            capture_vec(&mut outputs, "coefficients", &cbps.coefficients);
             capture(
                 &mut outputs,
                 "converged",
@@ -2298,6 +2437,24 @@ fn main() {
             let mut outputs = BTreeMap::new();
             let n_matched = m.weights.iter().filter(|&&w| w > 0.0).count();
             capture(&mut outputs, "n_matched", n_matched as f64);
+            // Difference in weighted means on the matched sample, as the R side
+            // computes from matchit's weights (m.order = "data", the order used
+            // here): identical matched sets give identical values
+            let y = extract_col_vec(&dataset, "y");
+            let t = extract_col_vec(&dataset, "treatment");
+            let (mut s1, mut w1, mut s0, mut w0) = (0.0, 0.0, 0.0, 0.0);
+            for ((&wi, &yi), &ti) in m.weights.iter().zip(y.iter()).zip(t.iter()) {
+                if ti > 0.5 {
+                    s1 += wi * yi;
+                    w1 += wi;
+                } else {
+                    s0 += wi * yi;
+                    w0 += wi;
+                }
+            }
+            if w1 > 0.0 && w0 > 0.0 {
+                capture(&mut outputs, "att", s1 / w1 - s0 / w0);
+            }
             result.outputs = outputs;
         }
         result.dgp = "treatment".to_string();
@@ -2327,6 +2484,20 @@ fn main() {
         ) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "n_weights", wi.weights.len() as f64);
+            // R's summary(fit$weights): min, quartiles (quantile type 7), mean, max
+            let mut sorted = wi.weights.clone();
+            sorted.sort_by(f64::total_cmp);
+            if !sorted.is_empty() {
+                let q7 = |p: f64| {
+                    let h = (sorted.len() - 1) as f64 * p;
+                    let lo = h.floor() as usize;
+                    let hi = (lo + 1).min(sorted.len() - 1);
+                    sorted[lo] + (h - lo as f64) * (sorted[hi] - sorted[lo])
+                };
+                let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
+                let summary = [q7(0.0), q7(0.25), q7(0.5), mean, q7(0.75), q7(1.0)];
+                capture_vec(&mut outputs, "weights_summary", &summary);
+            }
             result.outputs = outputs;
         }
         result.dgp = "treatment".to_string();
@@ -2452,9 +2623,10 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Fisher"], [100, 1000, 10000]) {
-        let a = (n as f64 * 0.3) as f64;
-        let b = (n as f64 * 0.2) as f64;
-        let c = (n as f64 * 0.15) as f64;
+        // R's table: round(n * 0.3), round(n * 0.2), round(n * 0.15), the rest
+        let a = (n as f64 * 0.3).round();
+        let b = (n as f64 * 0.2).round();
+        let c = (n as f64 * 0.15).round();
         let d = n as f64 - a - b - c;
         let table = [[a, b], [c, d]];
 
@@ -2471,6 +2643,27 @@ fn main() {
         result.seed = 42;
         print_result(&result);
         results.push(result);
+
+        // R's "with_ci" (conf.int = TRUE, conf.level = 0.95), the entry the merge
+        // keeps for Fisher: the exact conditional CI of the odds ratio. R's estimate is
+        // the conditional MLE and Rust's the sample odds ratio, so they are captured
+        // under different keys and only the p-value and the CI are compared.
+        let mut result = run_benchmark_tracked("Fisher", "with_ci", n, &config, || {
+            fisher_exact_test(&table, FisherAlternative::TwoSided, Some(0.95))
+        });
+        if let Ok(ref res) = fisher_exact_test(&table, FisherAlternative::TwoSided, Some(0.95)) {
+            let mut outputs = BTreeMap::new();
+            capture(&mut outputs, "odds_ratio_sample", res.odds_ratio);
+            capture(&mut outputs, "p_value", res.p_value);
+            if let Some((lo, hi)) = res.odds_ratio_ci {
+                capture_vec(&mut outputs, "conf_int", &[lo, hi]);
+            }
+            result.outputs = outputs;
+        }
+        result.dgp = "fisher".to_string();
+        result.seed = 42;
+        print_result(&result);
+        results.push(result);
     }
 
     // ============================================
@@ -2481,12 +2674,20 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Isotonic_Regression"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
-        let y_iso: Vec<f64> = x
-            .iter()
-            .map(|&xi| xi * 2.0 + rng.gen_range(-0.5..0.5))
-            .collect();
+        // x = (0..n)/n, y = 2x + noise, as R wrote them
+        let (x, y_iso): (Vec<f64>, Vec<f64>) =
+            match load_csv_columns_array2(&data_dir, "isotonic_regression", n, &["x", "y"]) {
+                Some(a) => (a.column(0).to_vec(), a.column(1).to_vec()),
+                None => {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
+                    let y_iso: Vec<f64> = x
+                        .iter()
+                        .map(|&xi| xi * 2.0 + rng.gen_range(-0.5..0.5))
+                        .collect();
+                    (x, y_iso)
+                }
+            };
 
         let mut result = run_benchmark_tracked("Isotonic_Regression", "PAVA", n, &config, || {
             isoreg(&x, &y_iso)
@@ -2516,7 +2717,8 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Jarque_Bera"], [100, 1000, 10000]) {
-        let dataset = generate_regression_data(n, 5, 42);
+        let dataset = load_csv_dataset(&data_dir, "regression", n)
+            .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let x_cols = vec!["x1", "x2", "x3", "x4", "x5"];
         let ols_result = run_ols(&dataset, "y", &x_cols, true, CovarianceType::Standard).unwrap();
         let residuals: Vec<f64> = ols_result.residuals().to_vec();
@@ -2545,6 +2747,11 @@ fn main() {
 
     for n in sizes_for(&["KM", "CoxPH", "LogRank"], [100, 1000, 10000]) {
         let ds = load_csv_dataset(&data_dir, "survival", n);
+        // R: coxph(ties = "efron"); p2a's default is Breslow (equal without tied event times)
+        let cox_cfg = p2a_core::CoxConfig {
+            ties: p2a_core::TiesMethod::Efron,
+            ..Default::default()
+        };
 
         if let Some(ref dataset) = ds {
             if wants("KM") {
@@ -2571,9 +2778,21 @@ fn main() {
             if wants("CoxPH") {
                 // Cox PH
                 let mut result = run_benchmark_tracked("CoxPH", "efron", n, &config, || {
-                    run_cox_ph(dataset, "time", "event", &["x1", "x2"], None)
+                    run_cox_ph(
+                        dataset,
+                        "time",
+                        "event",
+                        &["x1", "x2"],
+                        Some(cox_cfg.clone()),
+                    )
                 });
-                if let Ok(ref cox) = run_cox_ph(dataset, "time", "event", &["x1", "x2"], None) {
+                if let Ok(ref cox) = run_cox_ph(
+                    dataset,
+                    "time",
+                    "event",
+                    &["x1", "x2"],
+                    Some(cox_cfg.clone()),
+                ) {
                     let mut outputs = BTreeMap::new();
                     capture_vec(&mut outputs, "coefficients", &cox.coefficients);
                     capture_vec(&mut outputs, "std_errors", &cox.std_errors);
@@ -2654,9 +2873,21 @@ fn main() {
 
             if wants("CoxPH") {
                 let mut result = run_benchmark_tracked("CoxPH", "efron", n, &config, || {
-                    run_cox_ph(&dataset, "time", "event", &["x1", "x2"], None)
+                    run_cox_ph(
+                        &dataset,
+                        "time",
+                        "event",
+                        &["x1", "x2"],
+                        Some(cox_cfg.clone()),
+                    )
                 });
-                if let Ok(ref cox) = run_cox_ph(&dataset, "time", "event", &["x1", "x2"], None) {
+                if let Ok(ref cox) = run_cox_ph(
+                    &dataset,
+                    "time",
+                    "event",
+                    &["x1", "x2"],
+                    Some(cox_cfg.clone()),
+                ) {
                     let mut outputs = BTreeMap::new();
                     capture_vec(&mut outputs, "coefficients", &cox.coefficients);
                     capture_vec(&mut outputs, "std_errors", &cox.std_errors);
@@ -2843,15 +3074,17 @@ fn main() {
         }
 
         // OLS_HAC (Newey-West)
+        // The fit is timed with the HAC variance, as R times lm() with NeweyWest()
+        // (and as the HC pairs time run_ols): Bartlett kernel, bandwidth
+        // floor(4 (n/100)^(2/9)), no prewhitening, no finite-sample adjustment.
         if wants("OLS_HAC") {
-            let ols_result =
-                run_ols(&dataset, "y", &x_cols, true, CovarianceType::Standard).unwrap();
-            let design = DesignMatrix::from_dataframe(dataset.df(), &x_cols, true).unwrap();
-            let x_mat = design.data.clone();
-            let mut result = run_benchmark_tracked("OLS_HAC", "Newey-West", n, &config, || {
-                vcov_hac(&ols_result, &x_mat, None, HacKernel::Bartlett, false)
-            });
-            if let Ok(ref hac) = vcov_hac(&ols_result, &x_mat, None, HacKernel::Bartlett, false) {
+            let fit_hac = || -> Option<p2a_core::regression::HacResult> {
+                let ols = run_ols(&dataset, "y", &x_cols, true, CovarianceType::Standard).ok()?;
+                let design = DesignMatrix::from_dataframe(dataset.df(), &x_cols, true).ok()?;
+                vcov_hac(&ols, &design.data, None, HacKernel::Bartlett, false).ok()
+            };
+            let mut result = run_benchmark_tracked("OLS_HAC", "Newey-West", n, &config, &fit_hac);
+            if let Some(ref hac) = fit_hac() {
                 let mut outputs = BTreeMap::new();
                 capture_vec(&mut outputs, "coefficients", &hac.coefficients);
                 capture_vec(&mut outputs, "std_errors", &hac.std_errors);
@@ -2924,7 +3157,8 @@ fn main() {
             });
             if let Ok(ref hc) = harvey_collier_test(&dataset, "y", &x_cols) {
                 let mut outputs = BTreeMap::new();
-                capture(&mut outputs, "statistic", hc.statistic);
+                // lmtest::harvtest reports |t|
+                capture(&mut outputs, "statistic", hc.statistic.abs());
                 capture(&mut outputs, "p_value", hc.p_value);
                 result.outputs = outputs;
             }
@@ -2959,8 +3193,16 @@ fn main() {
             if let Ok(ref diag) = run_diagnostics(&dataset, "y", &x_cols) {
                 if let Some(ref vifs) = diag.vif {
                     let mut outputs = BTreeMap::new();
-                    let vif_vals: Vec<f64> = vifs.iter().map(|v| v.vif).collect();
+                    // car::vif reports the 5 regressors; the intercept's entry is NaN
+                    let vif_vals: Vec<f64> = vifs
+                        .iter()
+                        .filter(|v| v.variable != "(Intercept)" && v.variable != "const")
+                        .map(|v| v.vif)
+                        .collect();
                     capture_vec(&mut outputs, "vif_values", &vif_vals);
+                    if let Some(cn) = diag.condition_number {
+                        capture(&mut outputs, "condition_number", cn);
+                    }
                     result.outputs = outputs;
                 }
             }
@@ -3082,6 +3324,9 @@ fn main() {
 
     // Quantile Regression (slower - use slow_config)
     // Cap: no R benchmark at n=10000
+    // R fits the same regression_n<n> rows and times its kernel SEs too, since
+    // quantreg always computes them; R's fit is the exact simplex (rq "br"),
+    // this one IRLS, so the coefficients agree only to the IRLS tolerance.
     for n in sizes_for(&["Quantile_Regression"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 3, 42));
@@ -3109,8 +3354,10 @@ fn main() {
 
     // Smooth Spline
     // Cap: no R benchmark at n=10000
+    // The loess_n<n> data R fits (y = x1 + noise), GCV (cv: true here is GCV,
+    // R's cv = FALSE), every unique x a knot (R: all.knots = TRUE)
     for n in sizes_for(&["Smooth_Spline"], [100, 1000]) {
-        let dataset = load_csv_dataset(&data_dir, "regression", n)
+        let dataset = load_csv_dataset(&data_dir, "loess", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
         let x1_col = dataset
             .df()
@@ -3129,10 +3376,15 @@ fn main() {
             .unwrap();
         let y_vec: Vec<f64> = y_col.into_iter().map(|v| v.unwrap_or(0.0)).collect();
 
+        let gcv_config = SmoothSplineConfig {
+            cv: true,
+            all_knots: true,
+            ..Default::default()
+        };
         let mut result = run_benchmark_tracked("Smooth_Spline", "GCV", n, &config, || {
-            smooth_spline(&x_vec, &y_vec, SmoothSplineConfig::default())
+            smooth_spline(&x_vec, &y_vec, gcv_config.clone())
         });
-        if let Ok(ref ss) = smooth_spline(&x_vec, &y_vec, SmoothSplineConfig::default()) {
+        if let Ok(ref ss) = smooth_spline(&x_vec, &y_vec, gcv_config.clone()) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "df", ss.df);
             capture(&mut outputs, "lambda", ss.lambda);
@@ -3211,13 +3463,23 @@ fn main() {
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
 
+        // stlrs defaults: seasonal 13 (degree 0), trend 21, low-pass 13, inner 2,
+        // outer 0, which R's stl(s.window = 13) reproduces. stlrs computes in f32.
         let stl_config = StlConfig::new(12);
         let mut result = run_benchmark_tracked("STL", "period=12", n, &config, || {
             stl(&y_vec, stl_config.clone())
         });
-        if let Ok(_) = stl(&y_vec, stl_config.clone()) {
+        if let Ok(ref stl_res) = stl(&y_vec, stl_config.clone()) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "n_components", 3.0);
+            capture_vec(&mut outputs, "seasonal_cycle", &stl_res.seasonal[..12]);
+            capture_vec(
+                &mut outputs,
+                "trend_ends",
+                &[stl_res.trend[0], stl_res.trend[stl_res.trend.len() - 1]],
+            );
+            let remainder_sumsq: f64 = stl_res.remainder.iter().map(|r| r * r).sum();
+            capture(&mut outputs, "remainder_sumsq", remainder_sumsq);
             result.outputs = outputs;
         }
         result.dgp = "timeseries".to_string();
@@ -3486,6 +3748,40 @@ fn main() {
     println!("\n--- Discrete Choice: Count Models ---");
     print_header();
 
+    // Fallback for `negbin_n<n>` (`zero_frac` 0) and `zinb_n<n>` (0.3) when R has not
+    // written them: NB2 counts with size 2 and mean exp(0.5 + 0.3 x1 + 0.2 x2), drawn as
+    // Poisson(lambda) with lambda ~ Gamma(shape 2, scale mean / 2), and a share
+    // `zero_frac` of structural zeros. Same model as R's, not the same draws.
+    fn discrete_generate_nb_data(n: usize, seed: u64, zero_frac: f64) -> Dataset {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let size = 2.0_f64;
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                if zero_frac > 0.0 && rng.gen_range(0.0_f64..1.0_f64) < zero_frac {
+                    return 0.0;
+                }
+                let mu = (0.5 + 0.3 * x1[i] + 0.2 * x2[i]).exp();
+                let lambda: f64 = rand_distr::Gamma::new(size, mu / size)
+                    .expect("gamma shape and scale are positive")
+                    .sample(&mut rng);
+                let u: f64 = rng.gen_range(0.0_f64..1.0_f64);
+                let mut k = 0.0;
+                let mut p = (-lambda).exp();
+                let mut cum = p;
+                while cum < u && k < 1000.0 {
+                    k += 1.0;
+                    p *= lambda / k;
+                    cum += p;
+                }
+                k
+            })
+            .collect();
+        let df = df! { "y" => y, "x1" => x1, "x2" => x2 }.expect("negative binomial data");
+        Dataset::new(df)
+    }
+
     for n in sizes_for(
         &["Poisson", "NegBin", "ZIP", "ZINB", "Hurdle"],
         [100, 1000, 10000],
@@ -3529,11 +3825,14 @@ fn main() {
         }
 
         if wants("NegBin") {
-            // Negative Binomial
+            // Negative Binomial, on R's overdispersed negbin_n<n> (count_n<n> is Poisson,
+            // so its theta MLE is at the boundary)
+            let negbin_dataset = load_csv_dataset(&data_dir, "negbin", n)
+                .unwrap_or_else(|| discrete_generate_nb_data(n, 42, 0.0));
             let mut result = run_benchmark_tracked("NegBin", "MLE", n, &slow_config, || {
-                run_negbin(&count_dataset, "y", &["x1", "x2"], None)
+                run_negbin(&negbin_dataset, "y", &["x1", "x2"], None)
             });
-            if let Ok(ref res) = run_negbin(&count_dataset, "y", &["x1", "x2"], None) {
+            if let Ok(ref res) = run_negbin(&negbin_dataset, "y", &["x1", "x2"], None) {
                 let mut outputs = BTreeMap::new();
                 capture_vec(&mut outputs, "coefficients", &res.coefficients);
                 capture_vec(&mut outputs, "std_errors", &res.std_errors);
@@ -3541,7 +3840,7 @@ fn main() {
                 capture(&mut outputs, "aic", res.aic);
                 result.outputs = outputs;
             }
-            result.dgp = "count".to_string();
+            result.dgp = "negbin".to_string();
             result.seed = 42;
             print_result(&result);
             results.push(result);
@@ -3555,6 +3854,8 @@ fn main() {
             if let Ok(ref res) = run_zip(&zeroinfl_dataset, "y", &["x1", "x2"], None) {
                 let mut outputs = BTreeMap::new();
                 capture_vec(&mut outputs, "count_coefficients", &res.count_coefficients);
+                capture_vec(&mut outputs, "count_std_errors", &res.count_std_errors);
+                capture_vec(&mut outputs, "zero_coefficients", &res.zero_coefficients);
                 capture(&mut outputs, "log_likelihood", res.log_likelihood);
                 capture(&mut outputs, "aic", res.aic);
                 result.outputs = outputs;
@@ -3566,20 +3867,25 @@ fn main() {
         }
 
         if wants("ZINB") {
-            // ZINB
+            // ZINB, on R's overdispersed zero-inflated zinb_n<n> (zeroinfl_n<n> is ZIP, so
+            // its theta MLE is at the boundary)
+            let zinb_dataset = load_csv_dataset(&data_dir, "zinb", n)
+                .unwrap_or_else(|| discrete_generate_nb_data(n, 42, 0.3));
             let mut result = run_benchmark_tracked("ZINB", "EM", n, &slow_config, || {
-                run_zinb(&zeroinfl_dataset, "y", &["x1", "x2"], None)
+                run_zinb(&zinb_dataset, "y", &["x1", "x2"], None)
             });
-            if let Ok(ref res) = run_zinb(&zeroinfl_dataset, "y", &["x1", "x2"], None) {
+            if let Ok(ref res) = run_zinb(&zinb_dataset, "y", &["x1", "x2"], None) {
                 let mut outputs = BTreeMap::new();
                 capture_vec(&mut outputs, "count_coefficients", &res.count_coefficients);
+                capture_vec(&mut outputs, "count_std_errors", &res.count_std_errors);
+                capture_vec(&mut outputs, "zero_coefficients", &res.zero_coefficients);
                 capture(&mut outputs, "log_likelihood", res.log_likelihood);
                 if let Some(theta) = res.theta {
                     capture(&mut outputs, "theta", theta);
                 }
                 result.outputs = outputs;
             }
-            result.dgp = "zeroinfl".to_string();
+            result.dgp = "zinb".to_string();
             result.seed = 42;
             print_result(&result);
             results.push(result);
@@ -3643,6 +3949,7 @@ fn main() {
                 capture_vec(&mut outputs, "coefficients", &res.coefficients);
                 capture_vec(&mut outputs, "thresholds", &res.thresholds);
                 capture(&mut outputs, "log_likelihood", res.log_likelihood);
+                capture_vec(&mut outputs, "std_errors", &res.std_errors);
                 result.outputs = outputs;
             }
             result.dgp = "ordered".to_string();
@@ -3661,6 +3968,8 @@ fn main() {
                 let mut outputs = BTreeMap::new();
                 let flat_coefs: Vec<f64> = res.coefficients.iter().flatten().copied().collect();
                 capture_vec(&mut outputs, "coefficients", &flat_coefs);
+                let flat_ses: Vec<f64> = res.std_errors.iter().flatten().copied().collect();
+                capture_vec(&mut outputs, "std_errors", &flat_ses);
                 capture(&mut outputs, "log_likelihood", res.log_likelihood);
                 capture(&mut outputs, "aic", res.aic);
                 result.outputs = outputs;
@@ -3868,15 +4177,9 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["ACF"], [100, 1000, 10000]) {
-        let ts_data = generate_time_series(n, 42);
-        let y_vec: Vec<f64> = ts_data
-            .df()
-            .column("y")
-            .unwrap()
-            .f64()
-            .unwrap()
-            .into_no_null_iter()
-            .collect();
+        let ts_data = load_csv_dataset(&data_dir, "timeseries", n)
+            .unwrap_or_else(|| generate_time_series(n, 42));
+        let y_vec: Vec<f64> = extract_col_vec(&ts_data, "y");
 
         let mut result = run_benchmark_tracked("ACF", "correlation", n, &config, || {
             acf(&y_vec, Some(20), AcfType::Correlation, true, false)
@@ -3903,15 +4206,10 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["PACF"], [100, 1000, 10000]) {
-        let ts_data = generate_time_series(n, 42);
-        let y_vec: Vec<f64> = ts_data
-            .df()
-            .column("y")
-            .unwrap()
-            .f64()
-            .unwrap()
-            .into_no_null_iter()
-            .collect();
+        // The series R's PACF section fits (timeseries_n<n>.csv)
+        let ts_data = load_csv_dataset(&data_dir, "timeseries", n)
+            .unwrap_or_else(|| generate_time_series(n, 42));
+        let y_vec = extract_col_vec(&ts_data, "y");
 
         let mut result = run_benchmark_tracked("PACF", "durbin_levinson", n, &config, || {
             pacf(&y_vec, Some(20))
@@ -3938,21 +4236,28 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["CCF"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let y1: Vec<f64> = (0..n)
-            .map(|t| {
-                let trend = 0.01 * t as f64;
-                let seasonal = (t as f64 * std::f64::consts::PI / 6.0).sin() * 2.0;
-                trend + seasonal + rng.gen_range(0.0..0.5)
-            })
-            .collect();
-        let y2: Vec<f64> = (0..n)
-            .map(|t| {
-                let trend = 0.02 * t as f64;
-                let seasonal = (t as f64 * std::f64::consts::PI / 4.0).cos() * 1.5;
-                trend + seasonal + rng.gen_range(0.0..0.5)
-            })
-            .collect();
+        let (y1, y2): (Vec<f64>, Vec<f64>) =
+            match load_csv_columns_array2(&data_dir, "bivariate_ts", n, &["y1", "y2"]) {
+                Some(a) => (a.column(0).to_vec(), a.column(1).to_vec()),
+                None => {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    let y1: Vec<f64> = (0..n)
+                        .map(|t| {
+                            let trend = 0.01 * t as f64;
+                            let seasonal = (t as f64 * std::f64::consts::PI / 6.0).sin() * 2.0;
+                            trend + seasonal + rng.gen_range(0.0..0.5)
+                        })
+                        .collect();
+                    let y2: Vec<f64> = (0..n)
+                        .map(|t| {
+                            let trend = 0.02 * t as f64;
+                            let seasonal = (t as f64 * std::f64::consts::PI / 4.0).cos() * 1.5;
+                            trend + seasonal + rng.gen_range(0.0..0.5)
+                        })
+                        .collect();
+                    (y1, y2)
+                }
+            };
 
         let mut result = run_benchmark_tracked("CCF", "cross_correlation", n, &config, || {
             ccf(&y1, &y2, Some(10), CcfType::Correlation)
@@ -3979,7 +4284,8 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Cancor"], [100, 1000, 10000]) {
-        let ds = generate_regression_data(n, 5, 42);
+        let ds = load_csv_dataset(&data_dir, "regression", n)
+            .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let df = ds.df();
         let mut x_mat = Array2::<f64>::zeros((n, 2));
         let mut y_mat = Array2::<f64>::zeros((n, 3));
@@ -4018,12 +4324,22 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Spline"], [100, 1000, 10000]) {
-        let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let y_sp: Vec<f64> = x
-            .iter()
-            .map(|&xi| (xi * std::f64::consts::PI * 2.0).sin() + rng.gen_range(-0.1..0.1))
-            .collect();
+        // The x, y R's Spline section interpolates (spline_n<n>.csv)
+        let (x, y_sp): (Vec<f64>, Vec<f64>) =
+            match load_csv_columns_array2(&data_dir, "spline", n, &["x", "y"]) {
+                Some(a) => (a.column(0).to_vec(), a.column(1).to_vec()),
+                None => {
+                    let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    let y_sp: Vec<f64> = x
+                        .iter()
+                        .map(|&xi| {
+                            (xi * std::f64::consts::PI * 2.0).sin() + rng.gen_range(-0.1..0.1)
+                        })
+                        .collect();
+                    (x, y_sp)
+                }
+            };
 
         let mut result = run_benchmark_tracked("Spline", "natural", n, &config, || {
             spline(&x, &y_sp, None, Some(n * 3), SplineMethod::Natural)
@@ -4050,8 +4366,13 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["t_test"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
+        // The sample R's t-test section writes (normal_n<n>.csv)
+        let data_vec: Vec<f64> = load_csv_array1(&data_dir, "normal", n, "x")
+            .map(|a| a.to_vec())
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect()
+            });
 
         let mut result = run_benchmark_tracked("t_test", "one_sample", n, &config, || {
             one_sample_t_test(&data_vec, 5.0, Alternative::TwoSided, 0.95)
@@ -4077,8 +4398,13 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Wilcoxon"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
+        // normal_n<n>.csv: R's Wilcoxon section draws these same values
+        let data_vec: Vec<f64> = load_csv_array1(&data_dir, "normal", n, "x")
+            .map(|a| a.to_vec())
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect()
+            });
 
         let mut result = run_benchmark_tracked("Wilcoxon", "signed_rank", n, &config, || {
             wilcoxon_signed_rank(
@@ -4115,8 +4441,13 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["KS_test"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
+        // R's KS section draws the values of normal_n<n>.csv (the t-test data)
+        let data_vec: Vec<f64> = load_csv_array1(&data_dir, "normal", n, "x")
+            .map(|a| a.to_vec())
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect()
+            });
 
         let mut result = run_benchmark_tracked("KS_test", "one_sample", n, &config, || {
             ks_test_one_sample(
@@ -4149,8 +4480,13 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Shapiro_Wilk"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
+        // normal_n<n>.csv: R's Shapiro-Wilk section draws these same values (n <= 1000)
+        let data_vec: Vec<f64> = load_csv_array1(&data_dir, "normal", n, "x")
+            .map(|a| a.to_vec())
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect()
+            });
 
         let mut result = run_benchmark_tracked("Shapiro_Wilk", "test", n, &config, || {
             shapiro_wilk_test(&data_vec)
@@ -4175,28 +4511,32 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["ANOVA"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let n_per_group = n / 3;
-        let mut y_vals: Vec<f64> = Vec::with_capacity(n);
-        let mut group_vals: Vec<String> = Vec::with_capacity(n);
-        for g in 0..3 {
-            let mean = 5.0 + g as f64;
-            let count = if g < 2 {
-                n_per_group
-            } else {
-                n - 2 * n_per_group
-            };
-            for _ in 0..count {
-                y_vals.push(mean + rng.gen_range(-1.0..1.0));
-                group_vals.push(format!("g{}", g));
-            }
-        }
-        let anova_df = DataFrame::new(vec![
-            Column::new("y".into(), &y_vals),
-            Column::new("group".into(), group_vals),
-        ])
-        .unwrap();
-        let anova_ds = Dataset::new(anova_df);
+        // y and the group labels "g0"/"g1"/"g2" as R wrote them
+        let anova_ds = load_csv_dataset_with_strings(&data_dir, "anova", n, &["group"])
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                let n_per_group = n / 3;
+                let mut y_vals: Vec<f64> = Vec::with_capacity(n);
+                let mut group_vals: Vec<String> = Vec::with_capacity(n);
+                for g in 0..3 {
+                    let mean = 5.0 + g as f64;
+                    let count = if g < 2 {
+                        n_per_group
+                    } else {
+                        n - 2 * n_per_group
+                    };
+                    for _ in 0..count {
+                        y_vals.push(mean + rng.gen_range(-1.0..1.0));
+                        group_vals.push(format!("g{}", g));
+                    }
+                }
+                let anova_df = DataFrame::new(vec![
+                    Column::new("y".into(), &y_vals),
+                    Column::new("group".into(), group_vals),
+                ])
+                .unwrap();
+                Dataset::new(anova_df)
+            });
 
         let mut result = run_benchmark_tracked("ANOVA", "one_way", n, &config, || {
             run_one_way_anova(&anova_ds, "y", "group")
@@ -4221,20 +4561,33 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Kruskal_Wallis"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let n_per_group = n / 3;
+        // R's Kruskal-Wallis section draws the values of anova_n<n>.csv; the groups
+        // in the order their labels first appear (g0, g1, g2)
         let mut groups: Vec<(String, Vec<f64>)> = Vec::new();
-        for g in 0..3 {
-            let mean = 5.0 + g as f64;
-            let count = if g < 2 {
-                n_per_group
-            } else {
-                n - 2 * n_per_group
-            };
-            let vals: Vec<f64> = (0..count)
-                .map(|_| mean + rng.gen_range(-1.0..1.0))
-                .collect();
-            groups.push((format!("g{}", g), vals));
+        if let Some(ds) = load_csv_dataset_with_strings(&data_dir, "anova", n, &["group"]) {
+            let y = extract_col_vec(&ds, "y");
+            let labels = extract_col_strings(&ds, "group");
+            for (label, v) in labels.into_iter().zip(y) {
+                match groups.iter().position(|(g, _)| *g == label) {
+                    Some(i) => groups[i].1.push(v),
+                    None => groups.push((label, vec![v])),
+                }
+            }
+        } else {
+            let mut rng = ChaCha8Rng::seed_from_u64(42);
+            let n_per_group = n / 3;
+            for g in 0..3 {
+                let mean = 5.0 + g as f64;
+                let count = if g < 2 {
+                    n_per_group
+                } else {
+                    n - 2 * n_per_group
+                };
+                let vals: Vec<f64> = (0..count)
+                    .map(|_| mean + rng.gen_range(-1.0..1.0))
+                    .collect();
+                groups.push((format!("g{}", g), vals));
+            }
         }
 
         let groups_ref = groups.clone();
@@ -4262,15 +4615,22 @@ fn main() {
 
     for n in sizes_for(&["Friedman"], [100, 1000, 10000]) {
         let k = 3; // number of treatments
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        // Friedman expects n blocks × k treatments (outer=blocks, inner=treatments)
-        let blocks: Vec<Vec<f64>> = (0..n)
-            .map(|_| {
-                (0..k)
-                    .map(|g| 5.0 + g as f64 + rng.gen_range(-1.0..1.0))
-                    .collect()
-            })
-            .collect();
+        // Friedman expects n blocks × k treatments (outer=blocks, inner=treatments):
+        // the rows of friedman_n<n>.csv (columns t0, t1, t2)
+        let blocks: Vec<Vec<f64>> =
+            match load_csv_columns_array2(&data_dir, "friedman", n, &["t0", "t1", "t2"]) {
+                Some(a) => a.outer_iter().map(|r| r.to_vec()).collect(),
+                None => {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    (0..n)
+                        .map(|_| {
+                            (0..k)
+                                .map(|g| 5.0 + g as f64 + rng.gen_range(-1.0..1.0))
+                                .collect()
+                        })
+                        .collect()
+                }
+            };
         let tnames: Vec<String> = (0..k).map(|g| format!("t{}", g)).collect();
 
         let blocks_ref = blocks.clone();
@@ -4298,10 +4658,15 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Chi_squared"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let observed: Vec<f64> = (0..5)
-            .map(|_| (n as f64 / 5.0) + rng.gen_range(-5.0..5.0))
-            .collect();
+        // the 5 cell counts R tests (column obs, 5 rows)
+        let observed: Vec<f64> = load_csv_array1(&data_dir, "chi_squared", n, "obs")
+            .map(|a| a.to_vec())
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                (0..5)
+                    .map(|_| (n as f64 / 5.0) + rng.gen_range(-5.0..5.0))
+                    .collect()
+            });
 
         let mut result = run_benchmark_tracked("Chi_squared", "gof", n, &config, || {
             chisq_test_gof(&observed, None, false)
@@ -4326,12 +4691,19 @@ fn main() {
     print_header();
 
     for n in sizes_for(&["Cor_Test"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let x_ct: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
-        let y_ct: Vec<f64> = x_ct
-            .iter()
-            .map(|&xi| 0.5 * xi + rng.gen_range(-0.5..0.5))
-            .collect();
+        let (x_ct, y_ct): (Vec<f64>, Vec<f64>) =
+            match load_csv_columns_array2(&data_dir, "cor", n, &["x", "y"]) {
+                Some(a) => (a.column(0).to_vec(), a.column(1).to_vec()),
+                None => {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    let x_ct: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
+                    let y_ct: Vec<f64> = x_ct
+                        .iter()
+                        .map(|&xi| 0.5 * xi + rng.gen_range(-0.5..0.5))
+                        .collect();
+                    (x_ct, y_ct)
+                }
+            };
 
         let mut result = run_benchmark_tracked("Cor_Test", "pearson", n, &config, || {
             cor_test(
@@ -4374,10 +4746,22 @@ fn main() {
         ],
         [100, 1000, 10000],
     ) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let g1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
-        let g2: Vec<f64> = (0..n).map(|_| rng.gen_range(-0.5..1.5)).collect();
-        let g3: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
+        // groups_n<n>.csv: the g1, g2, g3 every test of R's section uses (n rows)
+        let (g1, g2, g3): (Vec<f64>, Vec<f64>, Vec<f64>) =
+            match load_csv_columns_array2(&data_dir, "groups", n, &["g1", "g2", "g3"]) {
+                Some(a) => (
+                    a.column(0).to_vec(),
+                    a.column(1).to_vec(),
+                    a.column(2).to_vec(),
+                ),
+                None => {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    let g1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                    let g2: Vec<f64> = (0..n).map(|_| rng.gen_range(-0.5..1.5)).collect();
+                    let g3: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
+                    (g1, g2, g3)
+                }
+            };
 
         let groups: Vec<(String, Vec<f64>)> = vec![
             ("g1".to_string(), g1.clone()),
@@ -4423,14 +4807,19 @@ fn main() {
 
         // Mood
         if wants("Mood") {
-            let local_g1 = g1.clone();
-            let local_g2 = g2.clone();
+            // g1, g2 as R's variance section draws them (oneway_n<n>.csv)
+            let (local_g1, local_g2) =
+                match load_csv_columns_array2(&data_dir, "oneway", n, &["g1", "g2"]) {
+                    Some(a) => (a.column(0).to_vec(), a.column(1).to_vec()),
+                    None => (g1.clone(), g2.clone()),
+                };
             let mut result = run_benchmark_tracked("Mood", "test", n, &config, || {
                 mood_test(&local_g1, &local_g2, Alternative::TwoSided)
             });
-            if let Ok(ref mt) = mood_test(&g1, &g2, Alternative::TwoSided) {
+            if let Ok(ref mt) = mood_test(&local_g1, &local_g2, Alternative::TwoSided) {
                 let mut outputs = BTreeMap::new();
-                capture(&mut outputs, "statistic", mt.statistic);
+                // R's mood.test reports Z; mt.statistic is the raw T sum
+                capture(&mut outputs, "statistic", mt.z_score);
                 capture(&mut outputs, "p_value", mt.p_value);
                 result.outputs = outputs;
             }
@@ -4461,12 +4850,16 @@ fn main() {
 
         // Var_Test (F-test for equality of variances)
         if wants("Var_Test") {
-            let local_g1 = g1.clone();
-            let local_g2 = g2.clone();
+            // g1, g2 as R's variance section draws them (oneway_n<n>.csv)
+            let (local_g1, local_g2) =
+                match load_csv_columns_array2(&data_dir, "oneway", n, &["g1", "g2"]) {
+                    Some(a) => (a.column(0).to_vec(), a.column(1).to_vec()),
+                    None => (g1.clone(), g2.clone()),
+                };
             let mut result = run_benchmark_tracked("Var_Test", "F-test", n, &config, || {
                 var_test(&local_g1, &local_g2, 1.0, Alternative::TwoSided, 0.95)
             });
-            if let Ok(ref vt) = var_test(&g1, &g2, 1.0, Alternative::TwoSided, 0.95) {
+            if let Ok(ref vt) = var_test(&local_g1, &local_g2, 1.0, Alternative::TwoSided, 0.95) {
                 let mut outputs = BTreeMap::new();
                 capture(&mut outputs, "statistic", vt.f_statistic);
                 capture(&mut outputs, "p_value", vt.p_value);
@@ -4480,11 +4873,21 @@ fn main() {
 
         // Oneway (Welch ANOVA)
         if wants("Oneway") {
-            let local_groups = groups.clone();
+            // g1, g2, g3 as R's variance section draws them (oneway_n<n>.csv);
+            // R stacks them into y ~ group with levels g1, g2, g3
+            let local_groups: Vec<(String, Vec<f64>)> =
+                match load_csv_columns_array2(&data_dir, "oneway", n, &["g1", "g2", "g3"]) {
+                    Some(a) => ["g1", "g2", "g3"]
+                        .iter()
+                        .enumerate()
+                        .map(|(j, name)| (name.to_string(), a.column(j).to_vec()))
+                        .collect(),
+                    None => groups.clone(),
+                };
             let mut result = run_benchmark_tracked("Oneway", "Welch", n, &config, || {
                 oneway_test(&local_groups, false)
             });
-            if let Ok(ref ow) = oneway_test(&groups, false) {
+            if let Ok(ref ow) = oneway_test(&local_groups, false) {
                 let mut outputs = BTreeMap::new();
                 capture(&mut outputs, "statistic", ow.statistic);
                 capture(&mut outputs, "p_value", ow.p_value);
@@ -4507,10 +4910,10 @@ fn main() {
     for n in sizes_for(&["McNemar"], [100, 1000, 10000]) {
         // McNemar - 2x2 paired table
         {
-            let mut rng = ChaCha8Rng::seed_from_u64(42);
+            // Fixed off-diagonal offsets (+2, +3), the same constants R uses
             let a = (n as f64 * 0.4) as u64;
-            let b = (n as f64 * 0.15) as u64 + rng.gen_range(1..5);
-            let c = (n as f64 * 0.25) as u64 + rng.gen_range(1..5);
+            let b = (n as f64 * 0.15) as u64 + 2;
+            let c = (n as f64 * 0.25) as u64 + 3;
             let d = n as u64 - a - b - c;
             let table = [[a, b], [c, d]];
             let mut result = run_benchmark_tracked("McNemar", "test", n, &config, || {
@@ -4531,17 +4934,27 @@ fn main() {
 
     // Mantel-Haenszel
     for n in sizes_for(&["Mantel_Haenszel"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let tables: Vec<Table2x2> = (0..n / 25)
-            .map(|_| {
-                Table2x2::new(
-                    rng.gen_range(5.0..20.0),
-                    rng.gen_range(3.0..15.0),
-                    rng.gen_range(3.0..15.0),
-                    rng.gen_range(5.0..20.0),
-                )
-            })
-            .collect();
+        // n / 25 strata, one row each (a, b / c, d) as R wrote them
+        let tables: Vec<Table2x2> =
+            match load_csv_columns_array2(&data_dir, "mantel_haenszel", n, &["a", "b", "c", "d"]) {
+                Some(cells) => cells
+                    .outer_iter()
+                    .map(|r| Table2x2::new(r[0], r[1], r[2], r[3]))
+                    .collect(),
+                None => {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    (0..n / 25)
+                        .map(|_| {
+                            Table2x2::new(
+                                rng.gen_range(5.0..20.0),
+                                rng.gen_range(3.0..15.0),
+                                rng.gen_range(3.0..15.0),
+                                rng.gen_range(5.0..20.0),
+                            )
+                        })
+                        .collect()
+                }
+            };
         let local_tables = tables.clone();
         let mut result = run_benchmark_tracked("Mantel_Haenszel", "CMH", n, &config, || {
             mantelhaen_test(&local_tables, None, true, CmhAlternative::TwoSided)
@@ -4550,6 +4963,12 @@ fn main() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "statistic", mh.statistic);
             capture(&mut outputs, "p_value", mh.p_value);
+            capture(&mut outputs, "estimate", mh.common_odds_ratio);
+            capture_vec(
+                &mut outputs,
+                "conf_int",
+                &[mh.odds_ratio_ci.0, mh.odds_ratio_ci.1],
+            );
             result.outputs = outputs;
         }
         result.dgp = "stratified_2x2".to_string();
@@ -4568,24 +4987,41 @@ fn main() {
     for n in sizes_for(&["MANOVA"], [100, 1000, 10000]) {
         // MANOVA
         {
-            let mut rng = ChaCha8Rng::seed_from_u64(42);
-            let n_groups = 3;
-            let n_per = n / n_groups;
-            let mut y_data = Array2::zeros((n, 2));
-            let mut group_labels: Vec<String> = Vec::with_capacity(n);
-            for g in 0..n_groups {
-                for i in 0..n_per {
-                    let row = g * n_per + i;
-                    y_data[[row, 0]] = (g as f64) * 1.5 + rng.gen_range(-1.0..1.0);
-                    y_data[[row, 1]] = (g as f64) * 0.8 + rng.gen_range(-1.0..1.0);
-                    group_labels.push(format!("g{}", g));
-                }
-            }
-            for row in (n_groups * n_per)..n {
-                y_data[[row, 0]] = rng.gen_range(-1.0..1.0);
-                y_data[[row, 1]] = rng.gen_range(-1.0..1.0);
-                group_labels.push("g0".to_string());
-            }
+            // y1, y2 and the group labels as R wrote them (manova_n<n>.csv)
+            let (y_data, group_labels): (Array2<f64>, Vec<String>) =
+                match load_csv_dataset_with_strings(&data_dir, "manova", n, &["group"]) {
+                    Some(ds) => {
+                        let y1 = extract_col_vec(&ds, "y1");
+                        let y2 = extract_col_vec(&ds, "y2");
+                        let mut y_data = Array2::zeros((y1.len(), 2));
+                        for (i, (a, b)) in y1.iter().zip(y2.iter()).enumerate() {
+                            y_data[[i, 0]] = *a;
+                            y_data[[i, 1]] = *b;
+                        }
+                        (y_data, extract_col_strings(&ds, "group"))
+                    }
+                    None => {
+                        let mut rng = ChaCha8Rng::seed_from_u64(42);
+                        let n_groups = 3;
+                        let n_per = n / n_groups;
+                        let mut y_data = Array2::zeros((n, 2));
+                        let mut group_labels: Vec<String> = Vec::with_capacity(n);
+                        for g in 0..n_groups {
+                            for i in 0..n_per {
+                                let row = g * n_per + i;
+                                y_data[[row, 0]] = (g as f64) * 1.5 + rng.gen_range(-1.0..1.0);
+                                y_data[[row, 1]] = (g as f64) * 0.8 + rng.gen_range(-1.0..1.0);
+                                group_labels.push(format!("g{}", g));
+                            }
+                        }
+                        for row in (n_groups * n_per)..n {
+                            y_data[[row, 0]] = rng.gen_range(-1.0..1.0);
+                            y_data[[row, 1]] = rng.gen_range(-1.0..1.0);
+                            group_labels.push("g0".to_string());
+                        }
+                        (y_data, group_labels)
+                    }
+                };
             let local_y = y_data.clone();
             let local_g = group_labels.clone();
             let mut result = run_benchmark_tracked("MANOVA", "one-way", n, &config, || {
@@ -4606,16 +5042,23 @@ fn main() {
 
     // Median_Polish
     for n in sizes_for(&["Median_Polish"], [100, 1000, 10000]) {
-        let rows = (n as f64).sqrt() as usize;
-        let cols = rows;
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let matrix: Vec<Vec<f64>> = (0..rows)
-            .map(|r| {
-                (0..cols)
-                    .map(|c| (r as f64) * 0.5 + (c as f64) * 0.3 + rng.gen_range(-0.5..0.5))
+        // The floor(sqrt(n))^2 matrix R's "iterative" section polishes
+        // (median_polish_n<n>.csv: one row per matrix row, columns c1..c<cols>)
+        let matrix: Vec<Vec<f64>> = match load_csv_array2(&data_dir, "median_polish", n) {
+            Some(a) => a.outer_iter().map(|r| r.to_vec()).collect(),
+            None => {
+                let rows = (n as f64).sqrt() as usize;
+                let cols = rows;
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                (0..rows)
+                    .map(|r| {
+                        (0..cols)
+                            .map(|c| (r as f64) * 0.5 + (c as f64) * 0.3 + rng.gen_range(-0.5..0.5))
+                            .collect()
+                    })
                     .collect()
-            })
-            .collect();
+            }
+        };
         let local_mat = matrix.clone();
         let mut result = run_benchmark_tracked("Median_Polish", "iterative", n, &config, || {
             medpolish(&local_mat, None, None, false)
@@ -4659,7 +5102,10 @@ fn main() {
     // Prop_Trend
     for n in sizes_for(&["Prop_Trend"], [100, 1000, 10000]) {
         let k = 5;
-        let x_vals: Vec<usize> = (0..k).map(|i| (n / k) / 2 + i * 3).collect();
+        // Step 3 between groups, or less where 3 would put x above n (as in R):
+        // step 2 at n = 100 (step 3 gives 22 of 20, refused), 3 at n = 1000 and 10000
+        let step = 3usize.min(((n / k) - (n / k) / 2) / (k - 1));
+        let x_vals: Vec<usize> = (0..k).map(|i| (n / k) / 2 + i * step).collect();
         let n_vals: Vec<usize> = vec![n / k; k];
         let local_x = x_vals.clone();
         let local_n = n_vals.clone();
@@ -4703,12 +5149,14 @@ fn main() {
         let t_vals = vec![1.0];
         let local_x = x_vals.clone();
         let local_t = t_vals.clone();
+        // One-sided, as in R: the two-sided p-values are defined differently
+        // (R sums d(k) <= d(x), p2a-core doubles the smaller tail)
         let mut result = run_benchmark_tracked("Poisson_Test", "exact", n, &config, || {
             poisson_test(
                 &local_x,
                 &local_t,
                 n as f64,
-                PoissonAlternative::TwoSided,
+                PoissonAlternative::Greater,
                 0.95,
             )
         });
@@ -4716,7 +5164,7 @@ fn main() {
             &x_vals,
             &t_vals,
             n as f64,
-            PoissonAlternative::TwoSided,
+            PoissonAlternative::Greater,
             0.95,
         ) {
             let mut outputs = BTreeMap::new();
@@ -4773,23 +5221,32 @@ fn main() {
         &["Pairwise_t", "Pairwise_Wilcox", "Tukey"],
         [100, 1000, 10000],
     ) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let n_per = n / 3;
-        let mut values: Vec<f64> = Vec::with_capacity(n);
-        let mut group_labels: Vec<String> = Vec::with_capacity(n);
-        for g in 0..3 {
-            let offset = g as f64 * 0.5;
-            for _ in 0..n_per {
-                values.push(offset + rng.gen_range(-1.0..1.0));
-                group_labels.push(format!("g{}", g));
-            }
-        }
-        for _ in (3 * n_per)..n {
-            values.push(rng.gen_range(-1.0..1.0));
-            group_labels.push("g0".to_string());
-        }
+        // The values and labels R's multiple-comparisons section tests
+        // (pairwise_t_n<n>.csv: y, group "g0"/"g1"/"g2"), read by all three methods
+        let (values, group_labels): (Vec<f64>, Vec<String>) =
+            match load_csv_dataset_with_strings(&data_dir, "pairwise_t", n, &["group"]) {
+                Some(ds) => (extract_col_vec(&ds, "y"), extract_col_strings(&ds, "group")),
+                None => {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    let n_per = n / 3;
+                    let mut values: Vec<f64> = Vec::with_capacity(n);
+                    let mut group_labels: Vec<String> = Vec::with_capacity(n);
+                    for g in 0..3 {
+                        let offset = g as f64 * 0.5;
+                        for _ in 0..n_per {
+                            values.push(offset + rng.gen_range(-1.0..1.0));
+                            group_labels.push(format!("g{}", g));
+                        }
+                    }
+                    for _ in (3 * n_per)..n {
+                        values.push(rng.gen_range(-1.0..1.0));
+                        group_labels.push("g0".to_string());
+                    }
+                    (values, group_labels)
+                }
+            };
 
-        // Pairwise_t
+        // Pairwise_t (pool_sd = true: R's pairwise.t.test default, pool.sd = TRUE)
         if wants("Pairwise_t") {
             let local_v = values.clone();
             let local_g = group_labels.clone();
@@ -4797,7 +5254,7 @@ fn main() {
                 pairwise_t_test(
                     &local_v,
                     &local_g,
-                    false,
+                    true,
                     Alternative::TwoSided,
                     PValueAdjustMethod::Holm,
                 )
@@ -4805,7 +5262,7 @@ fn main() {
             if let Ok(ref pt) = pairwise_t_test(
                 &values,
                 &group_labels,
-                false,
+                true,
                 Alternative::TwoSided,
                 PValueAdjustMethod::Holm,
             ) {
@@ -4820,7 +5277,8 @@ fn main() {
             results.push(result);
         }
 
-        // Pairwise_Wilcox
+        // Pairwise_Wilcox (exact = Some(false), as R's exact = FALSE: normal
+        // approximation with continuity correction; None picks the same here)
         if wants("Pairwise_Wilcox") {
             let local_v = values.clone();
             let local_g = group_labels.clone();
@@ -4830,7 +5288,7 @@ fn main() {
                     &local_g,
                     Alternative::TwoSided,
                     PValueAdjustMethod::Holm,
-                    None,
+                    Some(false),
                 )
             });
             if let Ok(ref pw) = pairwise_wilcox_test(
@@ -4838,7 +5296,7 @@ fn main() {
                 &group_labels,
                 Alternative::TwoSided,
                 PValueAdjustMethod::Holm,
-                None,
+                Some(false),
             ) {
                 let mut outputs = BTreeMap::new();
                 let pvals: Vec<f64> = pw.p_values_adj.clone();
@@ -4859,37 +5317,42 @@ fn main() {
             ])
             .unwrap();
             let dataset = Dataset::new(df);
-            if let Ok(anova_res) = run_one_way_anova(&dataset, "y", "group") {
-                let local_anova = anova_res.clone();
-                let mut result = run_benchmark_tracked("Tukey", "HSD", n, &config, || {
-                    tukey_hsd(&local_anova, 0.95)
-                });
-                if let Ok(ref tk) = tukey_hsd(&anova_res, 0.95) {
-                    let mut outputs = BTreeMap::new();
-                    let pvals: Vec<f64> = tk.comparisons.iter().map(|c| c.p_adj).collect();
-                    capture_vec(&mut outputs, "p_values", &pvals);
-                    result.outputs = outputs;
-                }
-                result.dgp = "groups".to_string();
-                result.seed = 42;
-                print_result(&result);
-                results.push(result);
+            // Timed like R's TukeyHSD(aov(y ~ group)): the one-way ANOVA fit plus the HSD
+            let mut result = run_benchmark_tracked("Tukey", "HSD", n, &config, || {
+                p2a_core::stats::run_tukey_hsd(&dataset, "y", "group", 0.95)
+            });
+            if let Ok((_, ref tk)) = p2a_core::stats::run_tukey_hsd(&dataset, "y", "group", 0.95) {
+                let mut outputs = BTreeMap::new();
+                let pvals: Vec<f64> = tk.comparisons.iter().map(|c| c.p_adj).collect();
+                capture_vec(&mut outputs, "p_values", &pvals);
+                result.outputs = outputs;
             }
+            result.dgp = "groups".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
     }
 
     // Quade test
     for n in sizes_for(&["Quade"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
         let n_blocks = n;
         let n_treatments = 3;
-        let data: Vec<Vec<f64>> = (0..n_blocks)
-            .map(|_| {
-                (0..n_treatments)
-                    .map(|t| (t as f64) * 0.3 + rng.gen_range(-1.0..1.0))
-                    .collect()
-            })
-            .collect();
+        // The n blocks x 3 treatments R's Quade section tests (quade_n<n>.csv: t0, t1, t2)
+        let data: Vec<Vec<f64>> =
+            match load_csv_columns_array2(&data_dir, "quade", n, &["t0", "t1", "t2"]) {
+                Some(a) => a.outer_iter().map(|r| r.to_vec()).collect(),
+                None => {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    (0..n_blocks)
+                        .map(|_| {
+                            (0..n_treatments)
+                                .map(|t| (t as f64) * 0.3 + rng.gen_range(-1.0..1.0))
+                                .collect()
+                        })
+                        .collect()
+                }
+            };
         let treatment_names: Vec<String> = (0..n_treatments).map(|t| format!("t{}", t)).collect();
         let local_data = data.clone();
         let local_names = treatment_names.clone();
@@ -4910,8 +5373,13 @@ fn main() {
 
     // P_Adjust
     for n in sizes_for(&["P_Adjust"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let pvals: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0)).collect();
+        // The uniform p-values R's BH section adjusts (p_adjust_n<n>.csv)
+        let pvals: Vec<f64> = load_csv_array1(&data_dir, "p_adjust", n, "p")
+            .map(|a| a.to_vec())
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                (0..n).map(|_| rng.gen_range(0.0..1.0)).collect()
+            });
         let local_pv = pvals.clone();
         let mut result = run_benchmark_tracked("P_Adjust", "BH", n, &config, || {
             let _ = p_adjust(&local_pv, PValueAdjustMethod::BH);
@@ -4942,9 +5410,18 @@ fn main() {
         &["Robust_Stats", "Weighted", "Mahalanobis"],
         [100, 1000, 10000],
     ) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let data: Vec<f64> = (0..n).map(|_| rng.gen_range(-5.0..5.0)).collect();
-        let weights: Vec<f64> = (0..n).map(|_| rng.gen_range(0.1..2.0)).collect();
+        // The data and weights R's utility section uses (weighted_n<n>.csv: x, w);
+        // Robust_Stats reads x, Weighted x and w
+        let (data, weights): (Vec<f64>, Vec<f64>) =
+            match load_csv_columns_array2(&data_dir, "weighted", n, &["x", "w"]) {
+                Some(a) => (a.column(0).to_vec(), a.column(1).to_vec()),
+                None => {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    let data: Vec<f64> = (0..n).map(|_| rng.gen_range(-5.0..5.0)).collect();
+                    let weights: Vec<f64> = (0..n).map(|_| rng.gen_range(0.1..2.0)).collect();
+                    (data, weights)
+                }
+            };
 
         // Robust_Stats (fivenum + iqr)
         if wants("Robust_Stats") {
@@ -4998,14 +5475,21 @@ fn main() {
 
         // Mahalanobis
         if wants("Mahalanobis") {
-            let p = 3;
-            let mut rng2 = ChaCha8Rng::seed_from_u64(42);
-            let mut mdata = Array2::zeros((n, p));
-            for i in 0..n {
-                for j in 0..p {
-                    mdata[[i, j]] = rng2.gen_range(-2.0..2.0);
-                }
-            }
+            // The n x 3 U(-2, 2) matrix R's "distances" section uses
+            // (mahalanobis_n<n>.csv: m1, m2, m3)
+            let mdata: Array2<f64> =
+                load_csv_columns_array2(&data_dir, "mahalanobis", n, &["m1", "m2", "m3"])
+                    .unwrap_or_else(|| {
+                        let p = 3;
+                        let mut rng2 = ChaCha8Rng::seed_from_u64(42);
+                        let mut mdata = Array2::zeros((n, p));
+                        for i in 0..n {
+                            for j in 0..p {
+                                mdata[[i, j]] = rng2.gen_range(-2.0..2.0);
+                            }
+                        }
+                        mdata
+                    });
             let local_md = mdata.clone();
             let mut result = run_benchmark_tracked("Mahalanobis", "distances", n, &config, || {
                 mahalanobis(local_md.view(), None, None, false)
@@ -5026,8 +5510,13 @@ fn main() {
     // Loglin (3-way table)
     for n in sizes_for(&["Loglin"], [100, 1000, 10000]) {
         let dims = vec![2, 2, 2];
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let table: Vec<f64> = (0..8).map(|_| rng.gen_range(5.0..50.0)).collect();
+        // R's 8 cells in row-major order (loglin_n<n>.csv, column count; the same at every n)
+        let table: Vec<f64> = load_csv_array1(&data_dir, "loglin", n, "count")
+            .map(|a| a.to_vec())
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                (0..8).map(|_| rng.gen_range(5.0..50.0)).collect()
+            });
         let margins = vec![vec![0, 1], vec![1, 2]];
         let local_t = table.clone();
         let local_d = dims.clone();
@@ -5038,6 +5527,8 @@ fn main() {
         if let Ok(ref ll) = loglin(&table, &dims, &margins, None, None) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "deviance", ll.lrt);
+            capture(&mut outputs, "pearson", ll.pearson);
+            capture(&mut outputs, "df", ll.df as f64);
             result.outputs = outputs;
         }
         result.dgp = "contingency".to_string();
@@ -5101,6 +5592,7 @@ fn main() {
         if let Ok(ref aft) = run_aft(&dataset, "time", "event", &["x1", "x2"], Some(aft_config)) {
             let mut outputs = BTreeMap::new();
             capture_vec(&mut outputs, "coefficients", &aft.coefficients);
+            capture(&mut outputs, "scale", aft.scale);
             capture(&mut outputs, "log_likelihood", aft.log_likelihood);
             result.outputs = outputs;
         }
@@ -5164,27 +5656,52 @@ fn main() {
 
     // Cap: no R benchmark at n=10000
     for n in sizes_for(&["RD_Multi"], [100, 1000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
         let cutoffs = vec![0.0, 2.0];
-        let mut x_vals = Vec::with_capacity(n);
-        let mut y_vals = Vec::with_capacity(n);
-        let mut cutoff_assign = Vec::with_capacity(n);
-        let half = n / 2;
-        for i in 0..n {
-            let c_idx = if i < half { 0 } else { 1 };
-            let c = cutoffs[c_idx];
-            let x = c + rng.gen_range(-2.0..2.0);
-            let te = if x >= c { 1.5 + c_idx as f64 } else { 0.0 };
-            let y = 0.5 + 0.3 * x + te + rng.gen_range(-0.5..0.5);
-            x_vals.push(x);
-            y_vals.push(y);
-            cutoff_assign.push(c_idx);
-        }
-        let x_arr = Array1::from(x_vals);
-        let y_arr = Array1::from(y_vals);
-        let c_arr: Array1<usize> = Array1::from(cutoff_assign);
+        // The rows of R's "2-cutoff" section (rd_multi_n<n>.csv: y, x and the
+        // 0-based cutoff index c_idx); the same DGP from the internal PRNG if
+        // the CSV is missing
+        let from_csv = match (
+            load_csv_array1(&data_dir, "rd_multi", n, "y"),
+            load_csv_array1(&data_dir, "rd_multi", n, "x"),
+            load_csv_array1_i64(&data_dir, "rd_multi", n, "c_idx"),
+        ) {
+            (Some(y), Some(x), Some(c)) if c.iter().all(|&v| v >= 0) => {
+                Some((y, x, c.mapv(|v| v as usize)))
+            }
+            _ => None,
+        };
+        let (y_arr, x_arr, c_arr): (Array1<f64>, Array1<f64>, Array1<usize>) = from_csv
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                let mut x_vals = Vec::with_capacity(n);
+                let mut y_vals = Vec::with_capacity(n);
+                let mut cutoff_assign = Vec::with_capacity(n);
+                let half = n / 2;
+                for i in 0..n {
+                    let c_idx = if i < half { 0 } else { 1 };
+                    let c = cutoffs[c_idx];
+                    let x = c + rng.gen_range(-2.0..2.0);
+                    let te = if x >= c { 1.5 + c_idx as f64 } else { 0.0 };
+                    let y = 0.5 + 0.3 * x + te + rng.gen_range(-0.5..0.5);
+                    x_vals.push(x);
+                    y_vals.push(y);
+                    cutoff_assign.push(c_idx);
+                }
+                (
+                    Array1::from(y_vals),
+                    Array1::from(x_vals),
+                    Array1::from(cutoff_assign),
+                )
+            });
+        // As for RD: a fixed h = b = 1.0 and HC1 variance at both cutoffs (R:
+        // rdrobust(h = 1, b = 1, vce = "hc1") per cutoff), and no pooled estimate
+        // or heterogeneity test, which R does not compute
         let rd_config = RdMultiConfig {
             cutoffs: cutoffs.clone(),
+            bandwidth: p2a_core::RdMultiBandwidth::Global(1.0),
+            vce: p2a_core::VceType::Hc1,
+            pooled: false,
+            test_heterogeneity: false,
             ..Default::default()
         };
         let local_y = y_arr.clone();
@@ -5201,7 +5718,17 @@ fn main() {
         });
         if let Ok(ref rdm) = run_rd_multi(&y_arr.view(), &x_arr.view(), &c_arr.view(), rd_config) {
             let mut outputs = BTreeMap::new();
-            let coefs: Vec<f64> = rdm.cutoff_results.iter().map(|pc| pc.effect).collect();
+            // The conventional estimate per cutoff, rdrobust's coef[1] (`effect` is
+            // p2a-core's bias-corrected tau_robust)
+            let coefs: Vec<f64> = rdm
+                .cutoff_results
+                .iter()
+                .map(|pc| {
+                    pc.full_result
+                        .as_ref()
+                        .map_or(f64::NAN, |r| r.tau_conventional)
+                })
+                .collect();
             capture_vec(&mut outputs, "coefficients", &coefs);
             result.outputs = outputs;
         }
@@ -5218,26 +5745,14 @@ fn main() {
     // ============================================
 
     // OLS_Clustered
-    for n in sizes_for(&["OLS_Clustered"], [100, 500, 1000]) {
-        let entities = n / 10;
-        let nn = entities * 10;
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let normal = Normal::new(0.0, 1.0).unwrap();
-        let entity: Vec<f64> = (0..nn).map(|i| (i / 10) as f64).collect();
-        let time_col: Vec<f64> = (0..nn).map(|i| (i % 10) as f64).collect();
-        let x1: Vec<f64> = (0..nn).map(|_| normal.sample(&mut rng)).collect();
-        let x2: Vec<f64> = (0..nn).map(|_| normal.sample(&mut rng)).collect();
-        let y: Vec<f64> = (0..nn)
-            .map(|i| entity[i] * 0.1 + 0.5 * x1[i] + 0.3 * x2[i] + normal.sample(&mut rng) * 0.5)
-            .collect();
-        let df = df! {
-            "entity" => &entity, "time" => &time_col,
-            "y" => &y, "x1" => &x1, "x2" => &x2,
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
+    // R's rows: n/10 entities x 10 periods (generate_panel_data(n/10, 10)),
+    // saved as ols_clustered_n<n>.csv; vcovCL's HC1 type with the G/(G-1)
+    // cluster adjustment is the correction run_ols_clustered applies.
+    for n in sizes_for(&["OLS_Clustered"], [100, 1000, 10000]) {
+        let dataset = load_csv_dataset(&data_dir, "ols_clustered", n)
+            .unwrap_or_else(|| generate_panel_data(n / 10, 10, 42));
 
-        let mut result = run_benchmark_tracked("OLS_Clustered", "entity", nn, &config, || {
+        let mut result = run_benchmark_tracked("OLS_Clustered", "entity", n, &config, || {
             run_ols_clustered(&dataset, "y", &["x1", "x2"], "entity", None)
         });
         if let Ok(ref res) = run_ols_clustered(&dataset, "y", &["x1", "x2"], "entity", None) {
@@ -5295,75 +5810,74 @@ fn main() {
         results.push(result);
     }
 
-    // NLS (exponential growth model)
-    for n in sizes_for(&["NLS"], [100, 500, 1000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let normal = Normal::new(0.0, 0.1).unwrap();
-        let x_vals: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
-        // y = 2.0 * exp(0.3 * x) + noise
-        let y_vals: Vec<f64> = x_vals
-            .iter()
-            .map(|&xi| 2.0 * (0.3 * xi).exp() + normal.sample(&mut rng))
-            .collect();
-        let df = df! {
-            "y" => &y_vals,
-            "x" => &x_vals,
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
+    // NLS (exponential decay, the model R's nls fits)
+    // R's rows (nls_n<n>.csv): x = seq(0.1, 10, length.out = n) and
+    // y = 2 exp(-0.3 x) + N(0, 0.1). R's two-parameter model a * exp(-b x)
+    // (model_exponential_decay has a third parameter, a constant), from R's
+    // start (1, 0.1), by Gauss-Newton as nls's default algorithm.
+    fn panelreg_exp_decay(x: &Array1<f64>, theta: &Array1<f64>) -> f64 {
+        theta[0] * (-theta[1] * x[0]).exp()
+    }
+    for n in sizes_for(&["NLS"], [100, 1000, 10000]) {
+        use p2a_core::regression::{NlsAlgorithm, run_nls_with_config};
+        let dataset = load_csv_dataset(&data_dir, "nls", n).unwrap_or_else(|| {
+            let mut rng = ChaCha8Rng::seed_from_u64(42);
+            let normal = Normal::new(0.0, 0.1).unwrap();
+            let x_vals: Vec<f64> = (0..n)
+                .map(|i| 0.1 + 9.9 * i as f64 / (n - 1) as f64)
+                .collect();
+            let y_vals: Vec<f64> = x_vals
+                .iter()
+                .map(|&xi| 2.0 * (-0.3 * xi).exp() + normal.sample(&mut rng))
+                .collect();
+            Dataset::new(df! { "y" => &y_vals, "x" => &x_vals }.unwrap())
+        });
         let start = Array1::from_vec(vec![1.0, 0.1]);
+        let nls_config = NlsConfig {
+            algorithm: NlsAlgorithm::GaussNewton,
+            ..Default::default()
+        };
 
-        let mut result = run_benchmark_tracked("NLS", "exp_growth", n, &slow_config, || {
-            run_nls(
+        let mut result = run_benchmark_tracked("NLS", "exp_decay", n, &slow_config, || {
+            run_nls_with_config(
                 &dataset,
                 "y",
                 "x",
-                model_exponential_growth,
+                panelreg_exp_decay,
                 &start,
                 &["a", "b"],
+                nls_config.clone(),
             )
         });
-        if let Ok(ref res) = run_nls(
+        if let Ok(ref res) = run_nls_with_config(
             &dataset,
             "y",
             "x",
-            model_exponential_growth,
+            panelreg_exp_decay,
             &start,
             &["a", "b"],
+            nls_config.clone(),
         ) {
             let mut outputs = BTreeMap::new();
             capture_vec(&mut outputs, "coefficients", &res.coefficients);
-            capture(&mut outputs, "rss", res.rss);
+            capture(&mut outputs, "residual_sse", res.rss);
             result.outputs = outputs;
         }
-        result.dgp = "exponential".to_string();
+        result.dgp = "nls".to_string();
         result.seed = 42;
         print_result(&result);
         results.push(result);
     }
 
     // FEGLM_Gaussian (explicit Gaussian family with entity FE)
-    for n in sizes_for(&["FEGLM_Gaussian"], [100, 500, 1000]) {
-        let entities = n / 10;
-        let nn = entities * 10;
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let normal = Normal::new(0.0, 1.0).unwrap();
-        let entity: Vec<String> = (0..nn).map(|i| format!("e{}", i / 10)).collect();
-        let x1: Vec<f64> = (0..nn).map(|_| normal.sample(&mut rng)).collect();
-        let x2: Vec<f64> = (0..nn).map(|_| normal.sample(&mut rng)).collect();
-        let y: Vec<f64> = (0..nn)
-            .map(|i| {
-                (i / 10) as f64 * 0.1 + 0.5 * x1[i] + 0.3 * x2[i] + normal.sample(&mut rng) * 0.5
-            })
-            .collect();
-        let df = df! {
-            "entity" => &entity,
-            "y" => &y, "x1" => &x1, "x2" => &x2,
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
+    // R's rows (panel_n<n>.csv, the FixedEffects shapes). R reports iid SEs
+    // without fixest's (n-1)/(n-K) adjustment, the model-based SEs run_feglm reports.
+    for (n_ent, n_per) in sizes_for(&["FEGLM_Gaussian"], [(10, 10), (50, 20), (100, 100)]) {
+        let n = n_ent * n_per;
+        let dataset = load_csv_dataset_with_ids(&data_dir, "panel", n, &["entity"])
+            .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
 
-        let mut result = run_benchmark_tracked("FEGLM_Gaussian", "entity_FE", nn, &config, || {
+        let mut result = run_benchmark_tracked("FEGLM_Gaussian", "fixest", n, &config, || {
             run_feglm(
                 &dataset,
                 "y",
@@ -5394,99 +5908,106 @@ fn main() {
     }
 
     // E_Value (sensitivity analysis)
-    for n in sizes_for(&["E_Value"], [100, 500, 1000]) {
-        // E-value doesn't use data size directly; we benchmark repeated computation
-        // Simulate an observed risk ratio from a study of size n
-        let rr = 1.5 + (n as f64 * 0.001);
-        let ci_lo = rr * 0.8;
-        let ci_hi = rr * 1.25;
-        let mut result = run_benchmark_tracked("E_Value", "risk_ratio", n, &config, || {
-            evalue_rr_ci(rr, Some(ci_lo), Some(ci_hi))
-        });
-        if let Ok(ref ev) = evalue_rr_ci(rr, Some(ci_lo), Some(ci_hi)) {
+    // The R side's steps on the R side's rows (regression_n<n>.csv, the sizes R
+    // runs): OLS of y on x1..x5, RR = exp(|b_x1|) with the CI
+    // exp(|b_x1| -/+ 1.96 se), then the E-values. Before, the RR was a made-up
+    // 1.5 + n/1000 with a made-up CI, at sizes 100, 500, 1000.
+    for n in sizes_for(&["E_Value"], [100, 1000, 10000]) {
+        let dataset = load_csv_dataset(&data_dir, "regression", n)
+            .unwrap_or_else(|| generate_regression_data(n, 5, 42));
+        let x_cols = ["x1", "x2", "x3", "x4", "x5"];
+        let causal_evalue = || -> p2a_core::EconResult<_> {
+            let ols = run_ols(&dataset, "y", &x_cols, true, CovarianceType::Standard)?;
+            // coefficients()[1] and std_errors()[1]: x1 (index 0 is the intercept)
+            let b = ols.coefficients()[1].abs();
+            let se = ols.std_errors()[1];
+            evalue_rr_ci(
+                b.exp(),
+                Some((b - 1.96 * se).exp()),
+                Some((b + 1.96 * se).exp()),
+            )
+        };
+        let mut result =
+            run_benchmark_tracked("E_Value", "risk_ratio", n, &config, || causal_evalue());
+        if let Ok(ref ev) = causal_evalue() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "evalue_point", ev.evalue_point);
             capture(&mut outputs, "risk_ratio", ev.risk_ratio);
+            if let Some(ci) = ev.evalue_ci {
+                capture(&mut outputs, "evalue_ci", ci);
+            }
             result.outputs = outputs;
         }
-        result.dgp = "computed".to_string();
+        result.dgp = "regression".to_string();
         result.seed = 42;
         print_result(&result);
         results.push(result);
     }
 
     // Panel_Unit_Root (LLC test)
-    for n in sizes_for(&["Panel_Unit_Root"], [200, 500, 1000]) {
-        let entities = n / 20;
-        let periods = 20;
-        let nn = entities * periods;
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let normal = Normal::new(0.0, 1.0).unwrap();
-        let unit_col: Vec<f64> = (0..nn).map(|i| (i / periods) as f64).collect();
-        let time_col: Vec<f64> = (0..nn).map(|i| (i % periods) as f64).collect();
-        // Random walk with drift
-        let mut y_vals = Vec::with_capacity(nn);
-        for _u in 0..entities {
-            let mut prev = 0.0;
-            for _t in 0..periods {
-                prev = 0.9 * prev + normal.sample(&mut rng);
-                y_vals.push(prev);
-            }
-        }
-        let df = df! {
-            "unit" => &unit_col,
-            "time" => &time_col,
-            "y" => &y_vals,
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-        let pur_config = PanelUnitRootConfig::default();
+    // R's rows (panel_n<n>.csv, entity x time, the FixedEffects shapes) with R's
+    // lag order: a fixed floor(T^(1/3)) lags (2, 2, 4) in every unit's ADF
+    // regression, set explicitly (R: purtest(lags = floor(T^(1/3)))).
+    for (n_ent, n_per) in sizes_for(&["Panel_Unit_Root"], [(10, 10), (50, 20), (100, 100)]) {
+        let n = n_ent * n_per;
+        let dataset = load_csv_dataset_with_ids(&data_dir, "panel", n, &["entity", "time"])
+            .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
+        let pur_config = PanelUnitRootConfig {
+            lags: Some((n_per as f64).powf(1.0 / 3.0).floor() as usize),
+            ..Default::default()
+        };
 
-        let mut result = run_benchmark_tracked("Panel_Unit_Root", "LLC", nn, &config, || {
-            run_panel_unit_root(&dataset, "y", "unit", "time", pur_config.clone())
+        let mut result = run_benchmark_tracked("Panel_Unit_Root", "LLC", n, &config, || {
+            run_panel_unit_root(&dataset, "y", "entity", "time", pur_config.clone())
         });
-        if let Ok(ref res) = run_panel_unit_root(&dataset, "y", "unit", "time", pur_config.clone())
+        if let Ok(ref res) =
+            run_panel_unit_root(&dataset, "y", "entity", "time", pur_config.clone())
         {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "statistic", res.statistic);
             capture(&mut outputs, "p_value", res.p_value);
             result.outputs = outputs;
         }
-        result.dgp = "panel_ts".to_string();
+        result.dgp = "panel".to_string();
         result.seed = 42;
         print_result(&result);
         results.push(result);
     }
 
-    // ANOVA_TwoWay
-    for n in sizes_for(&["ANOVA_TwoWay"], [100, 500, 1000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let normal = Normal::new(0.0, 1.0).unwrap();
-        let factor_a: Vec<String> = (0..n).map(|i| format!("A{}", i % 3)).collect();
-        let factor_b: Vec<String> = (0..n).map(|i| format!("B{}", i % 2)).collect();
-        let y: Vec<f64> = (0..n)
-            .map(|i| {
-                let a_eff = (i % 3) as f64 * 0.5;
-                let b_eff = (i % 2) as f64 * 0.3;
-                a_eff + b_eff + normal.sample(&mut rng)
-            })
-            .collect();
-        let df = df! {
-            "y" => &y, "factorA" => &factor_a, "factorB" => &factor_b,
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
+    // ANOVA_TwoWay: R's sizes and data (anova_twoway_n<n>.csv: y, factor1 "A"/"B",
+    // factor2 "X"/"Y"/"Z"), R's variant name and output keys
+    for n in sizes_for(&["ANOVA_TwoWay"], [100, 1000, 10000]) {
+        let dataset =
+            load_csv_dataset_with_strings(&data_dir, "anova_twoway", n, &["factor1", "factor2"])
+                .unwrap_or_else(|| {
+                    let mut rng = ChaCha8Rng::seed_from_u64(42);
+                    let normal = Normal::new(0.0, 1.0).unwrap();
+                    let factor_a: Vec<String> = (0..n).map(|i| format!("A{}", i % 2)).collect();
+                    let factor_b: Vec<String> = (0..n).map(|i| format!("B{}", i % 3)).collect();
+                    let y: Vec<f64> = (0..n)
+                        .map(|i| {
+                            let a_eff = (i % 2) as f64 * 0.5;
+                            let b_eff = (i % 3) as f64 * 0.3;
+                            a_eff + b_eff + normal.sample(&mut rng)
+                        })
+                        .collect();
+                    let df = df! {
+                        "y" => &y, "factor1" => &factor_a, "factor2" => &factor_b,
+                    }
+                    .unwrap();
+                    Dataset::new(df)
+                });
 
-        let mut result =
-            run_benchmark_tracked("ANOVA_TwoWay", "with_interaction", n, &config, || {
-                run_two_way_anova(&dataset, "y", "factorA", "factorB", true)
-            });
-        if let Ok(ref res) = run_two_way_anova(&dataset, "y", "factorA", "factorB", true) {
+        let mut result = run_benchmark_tracked("ANOVA_TwoWay", "full", n, &config, || {
+            run_two_way_anova(&dataset, "y", "factor1", "factor2", true)
+        });
+        if let Ok(ref res) = run_two_way_anova(&dataset, "y", "factor1", "factor2", true) {
             let mut outputs = BTreeMap::new();
-            capture(&mut outputs, "f_a", res.f_a);
-            capture(&mut outputs, "p_a", res.p_a);
-            capture(&mut outputs, "f_b", res.f_b);
-            capture(&mut outputs, "p_b", res.p_b);
+            capture(&mut outputs, "f_statistic_1", res.f_a);
+            capture(&mut outputs, "f_statistic_2", res.f_b);
+            if let Some(f_ab) = res.f_ab {
+                capture(&mut outputs, "f_interaction", f_ab);
+            }
             result.outputs = outputs;
         }
         result.dgp = "factorial".to_string();
