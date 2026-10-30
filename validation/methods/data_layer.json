@@ -29,6 +29,27 @@
       "tolerance": "deterministic order statistics and moments: 1e-12 relative (tighter than validation/README.md); counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "data_bin",
+      "name": "Binning as base::cut: custom edges, right/left-closed, include.lowest, NA for missing and out-of-range values",
+      "category": "data",
+      "reference": "base::cut(breaks, right, include.lowest)",
+      "doc": "validation/data/data_layer.md",
+      "cases": [
+        "data_bin_cut"
+      ],
+      "tests": [
+        "p2a-core::data::munging::features::tests::test_validate_bin_cut_right_closed",
+        "p2a-core::data::munging::features::tests::test_validate_bin_cut_options"
+      ],
+      "quantities": [
+        "bin index per row (right-closed, include.lowest, left-closed)",
+        "NA count"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

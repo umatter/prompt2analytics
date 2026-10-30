@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "data_bin_cut",
+  "area": "data/munging",
+  "method": "Binning with custom edges, nulls and out-of-range values (base::cut)",
+  "reference": "base::cut(breaks = c(0, 1, 3, 5), right = TRUE | FALSE, include.lowest)",
+  "call": "cut(x, breaks = c(0, 1, 3, 5))",
+  "dataset": "validation/datasets/generated/bin_cut.csv",
+  "datasets": ["validation/datasets/generated/bin_cut.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "right_codes": [-1, -1, 0, 0, 1, 1, 2, 2, -1, -1, 1, -1],
+    "include_lowest_codes": [-1, 0, 0, 0, 1, 1, 2, 2, -1, -1, 1, -1],
+    "left_closed_codes": [-1, 0, 0, 1, 1, 2, 2, -1, -1, -1, 1, -1],
+    "n_na_right": 5
+  }
+}

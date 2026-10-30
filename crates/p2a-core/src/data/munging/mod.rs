@@ -43,6 +43,38 @@ mod transform;
 /// ([`crate::resource::checkpoint`]) in the munging loops.
 const CHECKPOINT_EVERY: usize = 65_536;
 
+/// The values of the numeric column `column`, `None` where a value is missing
+/// (null, or NaN in a float column; R's `is.na`), by the strict rule of
+/// [`crate::data::columns`]: integers, floats and decimals, booleans as 0/1
+/// when `allow_bool`; a text column is refused, never cast to nulls. A column
+/// whose cells are all null is accepted whatever its dtype (an all-empty CSV
+/// column is text). Infinite values are kept.
+fn numeric_cells(
+    df: &polars::prelude::DataFrame,
+    column: &str,
+    allow_bool: bool,
+) -> MungeResult<Vec<Option<f64>>> {
+    let col = crate::data::columns::column(df, column)
+        .map_err(|_| MungeError::ColumnNotFound(column.to_string()))?;
+    let ca = crate::data::columns::float64_strict(col, allow_bool).ok_or_else(|| {
+        MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "numeric (convert text with munge_cast first)".to_string(),
+            found: col.dtype().to_string(),
+        }
+    })?;
+    let stopped = |e: crate::errors::EconError| MungeError::FeatureError(e.to_string());
+    let mut cells =
+        crate::resource::try_with_capacity(ca.len(), "column values").map_err(stopped)?;
+    for (i, v) in ca.iter().enumerate() {
+        if i.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(stopped)?;
+        }
+        cells.push(v.filter(|x| !x.is_nan()));
+    }
+    Ok(cells)
+}
+
 // Re-export error types
 pub use error::{MungeError, MungeResult};
 
@@ -96,6 +128,6 @@ pub use reshape::{explode, melt, pivot, stack, transpose};
 
 // Re-export feature engineering operations
 pub use features::{
-    BinStrategy, bin, cumprod, cumsum, diff, lag, lead, normalize, one_hot_encode, pct_change,
-    rank, standardize,
+    BinOptions, BinOutcome, BinStrategy, bin, bin_with, cumprod, cumsum, diff, lag, lead,
+    normalize, one_hot_encode, pct_change, rank, standardize,
 };
