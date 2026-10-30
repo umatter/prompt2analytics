@@ -2142,6 +2142,10 @@ pub struct DriscollKraayResult {
     /// Warnings about the estimate
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Rows dropped because their time id was missing ([`run_vcov_driscoll_kraay`]);
+    /// absent from JSON when nothing was dropped.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for DriscollKraayResult {
@@ -2426,6 +2430,7 @@ pub fn vcov_driscoll_kraay(
         bandwidth: bw,
         kernel,
         warnings,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -2436,7 +2441,10 @@ pub fn vcov_driscoll_kraay(
 /// * `dataset` - The dataset
 /// * `y_col` - Name of the dependent variable column
 /// * `x_cols` - Names of independent variable columns
-/// * `time_col` - Name of the time period identifier column
+/// * `time_col` - Name of the time period identifier column: whole numbers (integers or
+///   integral floats) or dates. A fractional or text id is an `InvalidSpecification`; a row
+///   whose id is missing is dropped, the model is re-estimated on the other rows, and the
+///   drop is reported in `DriscollKraayResult::missing` and as the first warning.
 /// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than the number of
 ///   time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
 /// * `kernel` - Kernel type string ("bartlett", "parzen", "qs", etc.)
@@ -2461,55 +2469,43 @@ pub fn run_vcov_driscoll_kraay(
     bandwidth: Option<usize>,
     kernel: Option<&str>,
 ) -> EconResult<DriscollKraayResult> {
-    // Run OLS
-    let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
+    // Time ids: whole numbers (integers or integral floats) or dates. A fractional or
+    // text id is an error; a row whose id is missing is dropped.
+    let ids = ColumnRequest::new(dataset.df())
+        .time_index(time_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 2);
+    names.push(y_col);
+    names.extend_from_slice(x_cols);
+    names.push(time_col);
+    let sample = estimation_sample(dataset, &names, &ids)?;
+    let df = sample.df();
+
+    // Run OLS on the estimation sample
+    let ols_result = run_ols(&sample, y_col, x_cols, true, CovarianceType::Standard)?;
 
     // Build design matrix
-    let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
-    let x = dm.view().to_owned();
-
-    // Extract time IDs
-    let time_series = dataset
-        .df()
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: vec![],
-        })?;
-
-    let time_ids: Vec<i64> = if time_series.dtype().is_integer() {
-        time_series
-            .cast(&DataType::Int64)
-            .map_err(|_| EconError::NonNumericColumn {
-                column: time_col.to_string(),
-            })?
-            .i64()
-            .map_err(|_| EconError::NonNumericColumn {
-                column: time_col.to_string(),
-            })?
-            .into_no_null_iter()
-            .collect()
-    } else if time_series.dtype().is_float() {
-        time_series
-            .f64()
-            .map_err(|_| EconError::NonNumericColumn {
-                column: time_col.to_string(),
-            })?
-            .into_no_null_iter()
-            .map(|v| v as i64)
-            .collect()
-    } else {
-        return Err(EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        });
-    };
+    let dm = DesignMatrix::from_dataframe(df, x_cols, true)
+        .map_err(|e| econ_error_from_design(e, df))?;
 
     // Parse kernel
     let kernel_type = kernel
         .and_then(HacKernel::from_str)
         .unwrap_or(HacKernel::Bartlett);
 
-    vcov_driscoll_kraay(&ols_result, &x, &time_ids, bandwidth, kernel_type)
+    let mut result = vcov_driscoll_kraay(
+        &ols_result,
+        &dm.data,
+        ids.time_index(time_col),
+        bandwidth,
+        kernel_type,
+    )?;
+    if let Some(note) = ids.missing().note() {
+        result.missing = ids.missing().clone();
+        result.warnings.insert(0, note);
+    }
+    Ok(result)
 }
 
 /// Fixtures for the missing-value and column-type tests of the regression helpers
@@ -3962,5 +3958,78 @@ mod tests {
             }
             e => panic!("{e:?}"),
         }
+    }
+
+    /// REG-21 (Driscoll-Kraay): a missing time id drops its row and the model is
+    /// re-estimated; integral float ids equal the Int64 ids; fractional and text ids are
+    /// refused instead of truncated. The DK SEs are not R-pinned (REG-24): the test pins
+    /// the estimation sample against the same estimator on the complete rows.
+    #[test]
+    fn test_validate_na_driscoll_kraay_time_ids() {
+        use super::na_fixtures::{complete_rows, with_derived};
+        use crate::data::columns::MissingSummary;
+        let (_case, ds) = crate::test_support::load_case("reg_cluster_na");
+        let x = ["value", "capital"];
+        let r = run_vcov_driscoll_kraay(&ds, "inv", &x, "year_na", None, None).unwrap();
+        assert_eq!((r.n_obs, r.n_periods), (198, 20));
+        assert_eq!(
+            r.missing,
+            MissingSummary {
+                n_total: 200,
+                n_used: 198,
+                n_dropped: 2,
+                by_column: vec![("year_na".into(), 2)],
+            }
+        );
+        assert_eq!(
+            r.warnings[0],
+            "2 of 200 rows dropped because of missing values (year_na: 2)"
+        );
+        assert_eq!(
+            r.to_string()
+                .matches("rows dropped because of missing values")
+                .count(),
+            1
+        );
+        let complete = complete_rows(&ds, &["year_na"]);
+        let c = run_vcov_driscoll_kraay(&complete, "inv", &x, "year_na", None, None).unwrap();
+        assert_eq!(
+            (&r.coefficients, &r.std_errors, r.bandwidth),
+            (&c.coefficients, &c.std_errors, c.bandwidth)
+        );
+        assert!(c.missing.is_empty() && c.warnings.iter().all(|w| !w.contains("dropped")));
+        assert!(serde_json::to_value(&c).unwrap().get("missing").is_none());
+        // Integral floats are accepted and equal the Int64 ids.
+        let f = with_derived(&ds, "t_f", "year", |v| v);
+        assert_eq!(
+            run_vcov_driscoll_kraay(&f, "inv", &x, "t_f", None, None)
+                .unwrap()
+                .std_errors,
+            run_vcov_driscoll_kraay(&ds, "inv", &x, "year", None, None)
+                .unwrap()
+                .std_errors
+        );
+        // Fractional ids are refused, not truncated (1935.25 used to become period 1935).
+        let q = with_derived(&ds, "t_q", "year", |v| v + 0.25);
+        match run_vcov_driscoll_kraay(&q, "inv", &x, "t_q", None, None).unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("Time column 't_q' must hold whole numbers")
+                    && message.contains("1935.25"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+        // Text ids (design 2.4 (c)).
+        match run_vcov_driscoll_kraay(&ds, "inv", &x, "firm_label", None, None).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("Time column 'firm_label'"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
+        // An absent time column (design 2.4 (d)).
+        assert!(matches!(
+            run_vcov_driscoll_kraay(&ds, "inv", &x, "nope", None, None),
+            Err(EconError::ColumnNotFound { .. })
+        ));
     }
 }
