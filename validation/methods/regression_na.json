@@ -11,7 +11,8 @@
         "reg_cluster_na"
       ],
       "tests": [
-        "p2a-core::regression::ols::tests::test_validate_reg_cluster_na_fixture"
+        "p2a-core::regression::ols::tests::test_validate_reg_cluster_na_fixture",
+        "p2a-core::regression::ols::tests::test_validate_ols_cluster_na"
       ],
       "quantities": [
         "coefficients (one-, two-way)",
