@@ -59,7 +59,10 @@
         "p2a-core::econometrics::weightit::tests::test_validate_na_entropy_balance_columns",
         "p2a-core::econometrics::cbps::tests::test_validate_na_cbps_columns",
         "p2a-core::econometrics::twang::tests::test_validate_na_twang_columns",
-        "p2a-core::econometrics::sbw::tests::test_validate_na_sbw_columns"
+        "p2a-core::econometrics::sbw::tests::test_validate_na_sbw_columns",
+        "p2a-core::econometrics::tmle::tests::test_validate_na_tmle_columns",
+        "p2a-core::econometrics::ctmle::tests::test_validate_na_ctmle_columns",
+        "p2a-core::econometrics::stdreg::tests::test_validate_na_stdreg_columns"
       ],
       "quantities": ["NullValues column and count (missing_y, missing_d_na, missing_x1)"],
       "tolerance": "exact",
