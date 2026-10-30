@@ -93,6 +93,26 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/ordered_j16.csv` | 96 × 2 (y, x) | `disc_polr_j16` | `r/cases/discrete_newton.R` | seed 16, 16 categories |
 | `generated/ordered_j30.csv` | 180 × 2 (y, x) | `disc_polr_j30` | `r/cases/discrete_newton.R` | seed 30, 30 categories |
 | `generated/columns_conventions.csv` | 10 × 5 (id, y, n, s, flag) | `columns_conventions`; read by `cli_na_strings` | `r/cases/data_columns.R`; read by `r/cases/data_na_strings.R` | literal values (no RNG): empty fields for NA, integer `n`, logical `flag`, mixed-case text `s` |
+| `generated/quality_na.csv` | 40 × 3 (id, x, z) | `data_quality_profile_na` | `r/cases/data_quality.R` | seed 12; x = round(rnorm(40, 10, 3), 4) with NA in rows 3, 17, 29; z = round(runif(37, 0, 5), 4) then three NaN (written as empty fields) |
+| `generated/bin_cut.csv` | 12 × 2 (id, x) | `data_bin_cut` | `r/cases/data_quality.R` | literal values (no RNG): -5, 0, 0.5, 1, 2.5, 3, 4.9, 5, 7, NA, 2, NA |
+| `generated/fisher_tables.csv` | 11 × 5 (table, a, b, c, d) | `stat_fisher_tables` | `r/cases/stats_contingency.R` | literal values: eleven 2 × 2 count tables (N = 8 to 4000) |
+| `generated/fisher_rows_2000.csv` | 2000 × 2 (treat, outcome) | `stat_fisher_rows_2000`; read by the GOF and independence tests | `r/cases/stats_contingency.R` | seed 20261021; table [[520, 480], [480, 520]] |
+| `generated/contingency_na_codes.csv` | 12 × 4 (g, h, code, out) | `stat_contingency_na_codes` | `r/cases/stats_contingency.R` | literal values: 3 missing `h`, 1 missing integer `code` (levels 2, 10) |
+| `generated/chisq_gof.csv` | 52 × 2 (id, cat) | `stat_chisq_gof` | `r/cases/stats_contingency.R` | seed 7; cat = a ×5, b ×30, c ×15, 2 missing |
+| `generated/chisq_small_expected.csv` | 13 × 2 (x, y) | `stat_chisq_small_expected` | `r/cases/stats_contingency.R` | literal values; expected counts below 5 |
+| `generated/mantelhaen_na.csv` | 240 × 3 (treat, outcome, stratum) | `stat_mantelhaen_na` | `r/cases/stats_contingency.R` | seed 11; 3 missing strata |
+| `generated/shapiro_cases.csv` | 5000 × 18 (id and 17 sample columns n3_124 ... n5000_rnorm, each padded with NA to 5000 rows; n3_124, n3_123, n25_int read as Int64) | `stat_shapiro_wilk` | `r/cases/stats_onesample.R` | seed 42; `qnorm(ppoints(100))` for `n100_qnorm` |
+| `generated/two_sample_na.csv` | 22 × 8 (id, x, y, xi, yi, g, mi, mj; xi, yi, mi, mj Int64 with NA, g text with one NA) | `stat_two_sample_na` | `r/cases/stats_onesample.R` | fixed x, y; seed 3 (xi, yi), seed 17 (mi, mj) |
+| `generated/pairwise_mahalanobis_na.csv` | 30 × 5 (id, y, g, a, b; y Int64 with NA in rows 4 and 18, a NA in row 7) | `stat_pairwise_mahalanobis_na` | `r/cases/stats_onesample.R` | seed 9 |
+| `generated/rd_sim.csv` | 1000 × 6 (x, y, d, yf, xm, ym) | `rd_sharp_fixed_bw`, `rd_mass_points_nn`, `rd_fuzzy_fixed_bw` | `r/cases/causal_rd.R` | seed 42, cutoff 0, fuzzy take-up 0.2/0.8, x on a 0.01 grid in xm |
+| `generated/iv_weak_controls.csv` | 500 × 5 (y, x, w, z1, z2) | `iv_weak_controls` | `r/cases/econ_iv.R` | seed 20261021 |
+| `generated/iv_two_endog.csv` | 400 × 8 (y, x1, x2, w1, w2, z1, z2, z3) | `iv_two_endog` | `r/cases/econ_iv.R` | seed 77 |
+| `generated/iv_no_controls.csv` | 300 × 4 (y, x, z1, z2) | `iv_no_controls` | `r/cases/econ_iv.R` | seed 5 |
+| `generated/iv_na_rows.csv` | 300 × 8 (id, label, y, x, w, k, z1, z2); NA in y (2), x, w, k, z1, z2 (1 each); `k` integer, `label` text | `iv_na_rows` | `r/cases/econ_iv.R` | seed 4242 |
+| `generated/grunfeld_na.csv` | 200 × 7 (firm, firm_id, firm_name, year, inv, value, capital); NA in inv (2), value (1), firm_id and firm_name (2, same rows), year (2) | `panel_grunfeld_na` | `r/cases/econ_panel_na.R` | `grunfeld.csv` with missing cells and text/numeric firm ids |
+| `generated/arima_series.csv` | 300 × 10 (t, a, c, m, b, dr, ai, a_na, ai_na, lab) | `arima_css_forecast`, `arima_fixed_forecast`, `ts_granger_int` | `r/cases/forecasting_arima.R` | seed 20261021; a AR(1) around 100, c random walk, m ARMA(1,1) around 20, b AR(2), dr drift + MA(1) in differences; ai = round(10 a) (Int64); a_na, ai_na missing at rows 150-151; lab text |
+| `generated/causal_na.csv` | 400 × 8 (id, y, d, m, x1, x2, d_na, d_txt) | `causal_mediation_na` | `r/cases/causal_mediation_na.R` | seed 20261021; empty fields for NA (15 in y, 25 in m, 10 in x1, 6 in d_na); integer d, d_na and id; text d_txt |
+| `generated/cs_panel.csv` | 720 × 4 (unit, time, first_treat, y) | `did_cs_analytic` | `r/cases/causal_did.R` | seed 20261021, 90 units x 8 periods, cohorts 3/5/7/never, AR(1) errors |
 
 ## Adding a dataset
 

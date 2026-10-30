@@ -286,7 +286,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Econometrics
 | Method | File | Status |
 |--------|------|--------|
-| Fixed Effects | [panel_fe.md](econometrics/panel_fe.md) | R-pinned |
+| Fixed Effects | [panel_fe.md](econometrics/panel_fe.md) | R-pinned, known deviations (ECON-34) |
 | Random Effects | [panel_re.md](econometrics/panel_re.md) | R-pinned |
 | Hausman Test | [hausman.md](econometrics/hausman.md) | R-pinned |
 | HDFE | [hdfe.md](econometrics/hdfe.md) | R-pinned |
@@ -294,21 +294,22 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Panel GLS (pggls) | [pggls.md](econometrics/pggls.md) | not R-pinned |
 | FEGLM | [feglm.md](econometrics/feglm.md) | not R-pinned |
 | Multinomial and ordered logit/probit (Newton fit) | [discrete_newton.md](econometrics/discrete_newton.md) | R-pinned, known deviations (ECON-4, ECON-5) |
-| IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | not R-pinned |
+| IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | R-pinned |
 | Diff-in-Diff | [did.md](econometrics/did.md) | not R-pinned |
-| Regression Discontinuity (Sharp) | no validation document yet | not R-pinned |
-| Regression Discontinuity (Fuzzy) | no validation document yet | not R-pinned |
-| IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | not R-pinned |
+| Staggered DiD (Callaway-Sant'Anna) | [staggered_did.md](econometrics/staggered_did.md) | R-pinned, known deviations (CAUS-84) |
+| Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
+| Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
+| IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned |
 | Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | not R-pinned |
 | TMLE | [tmle.md](econometrics/tmle.md) | not R-pinned |
 | LTMLE (Longitudinal TMLE) | [ltmle.md](econometrics/ltmle.md) | not R-pinned |
 | CBPS | [cbps.md](econometrics/cbps.md) | not R-pinned |
 | SBW (Stable Balancing Weights) | [sbw.md](econometrics/sbw.md) | not R-pinned |
-| Mediation Analysis | [mediation.md](econometrics/mediation.md) | not R-pinned |
-| Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | not R-pinned |
+| Mediation Analysis | [mediation.md](econometrics/mediation.md) | R-pinned, known deviations (CAUS-26) |
+| Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned, known deviations (CAUS-23) |
 | Logit | [logit.md](econometrics/logit.md) | not R-pinned |
 | Probit | [probit.md](econometrics/probit.md) | not R-pinned |
-| Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | not R-pinned |
+| Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | R-pinned, known deviations (CAUS-77) |
 
 ### Survival Analysis
 | Method | File | Status |
@@ -327,11 +328,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | VECM | [vecm.md](econometrics/timeseries/vecm.md) | not R-pinned |
 | IRF | [irf.md](econometrics/timeseries/irf.md) | not R-pinned |
 | Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | not R-pinned |
+| Granger causality | [granger.md](econometrics/granger.md) | R-pinned |
 
 ### Forecasting
 | Method | File | Status |
 |--------|------|--------|
-| ARIMA | [arima.md](forecasting/arima.md) | not R-pinned |
+| ARIMA | [arima.md](forecasting/arima.md) | R-pinned |
 | MSTL | [mstl.md](forecasting/mstl.md) | not R-pinned |
 | Structural time series (StructTS) | [structts.md](forecasting/structts.md) | not R-pinned |
 | Changepoint | no validation document yet | not R-pinned |
@@ -361,6 +363,17 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Constrained Optimization | [constroptim.md](stats/constroptim.md) | not R-pinned |
 | SE for Contrasts | [secontrast.md](stats/secontrast.md) | not R-pinned |
 | Model Tables | [modeltables.md](stats/modeltables.md) | not R-pinned |
+| Fisher's Exact Test (2 × 2) | [fisher.md](stats/fisher.md) | R-pinned |
+| Chi-Squared Tests and Contingency Tables | [chisq.md](stats/chisq.md) | R-pinned |
+| Cochran-Mantel-Haenszel Test | [mantelhaen_test.md](stats/mantelhaen_test.md) | R-pinned |
+| Shapiro-Wilk normality test | [shapiro_wilk.md](stats/shapiro_wilk.md) | R-pinned |
+| t-tests (one-sample, Welch, pooled, paired) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
+| Kolmogorov-Smirnov test | [ks_test.md](stats/ks_test.md) | R-pinned, known deviations (STAT-27) |
+| Mood test of scale | [mood.md](stats/mood.md) | R-pinned, known deviations (STAT-29) |
+| Bartlett, Fligner-Killeen and F tests of variances | [bartlett.md](stats/bartlett.md) | R-pinned |
+| Pairwise t-tests | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
+| Correlation test (cor.test) | [new_methods.md](stats/new_methods.md) | R-pinned |
+| Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned |
 
 ### Spatial Econometrics
 | Method | File | Status |
@@ -389,6 +402,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 |--------|------|--------|
 | Column extraction conventions | [README.md](README.md) | R-pinned |
 | CLI `data load` missing-value markers (default `NA` and empty, `--na-strings`) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
+| Data quality profile (missing values as null or NaN, type-7 quartiles, IQR outliers) | [data_layer.md](data/data_layer.md) | R-pinned |
+| Binning as base::cut (custom edges, right/left-closed, include.lowest, NA for missing and out-of-range values) | [data_layer.md](data/data_layer.md) | R-pinned |
 
 ### Interfaces (CLI exhibits, MCP)
 | Method | File | Status |
