@@ -52,11 +52,11 @@ pub struct Cli {
     pub session: Option<PathBuf>,
 
     /// Suppress non-essential output
-    #[arg(short, long, global = true)]
+    #[arg(long, global = true)]
     pub quiet: bool,
 
-    /// Enable verbose output for debugging (-v for info, -vv for debug, -vvv for trace)
-    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    /// Enable verbose logging on stderr (--verbose for info, twice for debug, three times for trace)
+    #[arg(long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
     /// Maximum memory usage in MB (warns when exceeded, 0 = unlimited)
@@ -167,9 +167,9 @@ fn main() -> anyhow::Result<()> {
     // Initialize logger based on verbosity level
     let log_level = match cli.verbose {
         0 => log::LevelFilter::Warn,  // Default: only warnings and errors
-        1 => log::LevelFilter::Info,  // -v: info messages
-        2 => log::LevelFilter::Debug, // -vv: debug messages
-        _ => log::LevelFilter::Trace, // -vvv+: trace messages
+        1 => log::LevelFilter::Info,  // --verbose: info messages
+        2 => log::LevelFilter::Debug, // twice: debug messages
+        _ => log::LevelFilter::Trace, // three times or more: trace messages
     };
 
     env_logger::Builder::new()
@@ -354,6 +354,103 @@ fn run_smoke_test(format: &OutputFormat) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_definition_tests {
+    use super::{Cli, Commands};
+    use crate::commands::{
+        munge::MungeCommands, panel::PanelCommands, stats::StatsCommands,
+        timeseries::TimeseriesCommands,
+    };
+    use clap::{CommandFactory, Parser};
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("p2a").chain(args.iter().copied()))
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn cli_debug_asserts() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn subcommand_short_q_and_v_bind_to_the_subcommand() {
+        let cli = parse(&["ts", "arima", "d", "--col", "y", "-q", "2"]);
+        assert!(!cli.quiet);
+        assert!(matches!(
+            cli.command,
+            Commands::Timeseries(TimeseriesCommands::Arima { ma: 2, .. })
+        ));
+        assert!(matches!(
+            parse(&["ts", "varma", "d", "--cols", "a", "b", "-q", "2"]).command,
+            Commands::Timeseries(TimeseriesCommands::Varma { ma: 2, .. })
+        ));
+        assert!(matches!(
+            parse(&["ts", "garch", "d", "--col", "r", "-p", "1", "-q", "2"]).command,
+            Commands::Timeseries(TimeseriesCommands::Garch { garch: 2, .. })
+        ));
+        let cli = parse(&[
+            "panel",
+            "unit-root",
+            "d",
+            "-v",
+            "gdp",
+            "--unit",
+            "c",
+            "--time",
+            "t",
+        ]);
+        assert_eq!(cli.verbose, 0);
+        assert!(
+            matches!(cli.command, Commands::Panel(PanelCommands::UnitRoot { ref var, .. }) if var == "gdp")
+        );
+        assert!(matches!(
+            parse(&["stats", "friedman", "d", "-v", "score", "-g", "trt", "-b", "subj"]).command,
+            Commands::Stats(StatsCommands::Friedman { ref value, .. }) if value == "score"
+        ));
+        assert!(matches!(
+            parse(&["munge", "filter", "d", "-c", "age", "-o", "gt", "-v", "30"]).command,
+            Commands::Munge(MungeCommands::Filter { ref value, .. }) if value == "30"
+        ));
+        assert!(matches!(
+            parse(&["munge", "pivot", "d", "-i", "id", "-o", "var", "-v", "val"]).command,
+            Commands::Munge(MungeCommands::Pivot { ref values, .. }) if values == "val"
+        ));
+        assert!(matches!(
+            parse(&["munge", "melt", "d", "-i", "id", "-v", "jan", "feb"]).command,
+            Commands::Munge(MungeCommands::Melt { ref value_vars, .. }) if value_vars == &["jan", "feb"]
+        ));
+    }
+
+    #[test]
+    fn munge_mutate_name_has_its_own_short() {
+        assert!(matches!(
+            parse(&["munge", "mutate", "d", "-n", "total", "-e", "add:a:b", "-N", "out"]).command,
+            Commands::Munge(MungeCommands::Mutate { ref new_col, name: Some(ref n), .. })
+                if new_col == "total" && n == "out"
+        ));
+    }
+
+    #[test]
+    fn global_quiet_and_verbose_are_long_only() {
+        let cli = parse(&[
+            "ts",
+            "arima",
+            "d",
+            "--col",
+            "y",
+            "--quiet",
+            "--verbose",
+            "--verbose",
+        ]);
+        assert!(cli.quiet);
+        assert_eq!(cli.verbose, 2);
+        assert!(parse(&["--quiet", "data", "list"]).quiet);
+        assert!(Cli::try_parse_from(["p2a", "-q", "data", "list"]).is_err());
+        assert!(Cli::try_parse_from(["p2a", "-v", "data", "list"]).is_err());
+    }
 }
 
 #[cfg(test)]

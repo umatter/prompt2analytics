@@ -173,7 +173,7 @@ EXAMPLES:
         expr: String,
 
         /// Name for the resulting dataset
-        #[arg(short, long)]
+        #[arg(short = 'N', long)]
         name: Option<String>,
     },
 
