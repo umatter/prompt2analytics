@@ -84,6 +84,9 @@ EXAMPLES:
 
     # Export to Parquet
     p2a --session s.json data save mydata --output results.parquet
+
+    # File format given explicitly
+    p2a --session s.json data save mydata --output results.dat --file-format csv
 ")]
     Save {
         /// Dataset name
@@ -93,9 +96,9 @@ EXAMPLES:
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Output format (csv, parquet, json) - overrides file extension
-        #[arg(short, long)]
-        format: Option<String>,
+        /// File format (csv, parquet, json); overrides the file extension
+        #[arg(short = 'f', long)]
+        file_format: Option<String>,
     },
 }
 
@@ -121,8 +124,15 @@ pub fn execute(
         DataCommands::Save {
             dataset,
             output,
-            format: fmt,
-        } => execute_save(dataset, output, fmt.as_deref(), format, quiet, session),
+            file_format,
+        } => execute_save(
+            dataset,
+            output,
+            file_format.as_deref(),
+            format,
+            quiet,
+            session,
+        ),
     }
 }
 
@@ -543,7 +553,9 @@ fn execute_save(
         Some(other) => {
             progress.finish_and_clear();
             print_error(
-                &format!("Unsupported format '{}'. Use csv, parquet, or json.", other),
+                &format!(
+                    "Unsupported file format '{other}'. Use --file-format csv|parquet|json or a .csv, .parquet or .json extension."
+                ),
                 format,
             );
             return Ok(());
@@ -551,7 +563,7 @@ fn execute_save(
         None => {
             progress.finish_and_clear();
             print_error(
-                "Could not determine output format. Use --format or provide file extension (.csv, .parquet, .json).",
+                "Could not determine the file format. Use --file-format csv|parquet|json or a .csv, .parquet or .json extension.",
                 format,
             );
             return Ok(());

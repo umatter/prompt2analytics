@@ -451,6 +451,85 @@ mod cli_definition_tests {
         assert!(Cli::try_parse_from(["p2a", "-q", "data", "list"]).is_err());
         assert!(Cli::try_parse_from(["p2a", "-v", "data", "list"]).is_err());
     }
+
+    /// clap skips propagating a global whose id the subcommand already defines, so debug_assert
+    /// cannot see a shadowing id (CLI-2). Walk the unbuilt tree, which holds local args only.
+    #[test]
+    fn no_subcommand_arg_shadows_a_global() {
+        fn walk(
+            cmd: &clap::Command,
+            path: &str,
+            globals: &[clap::Arg],
+            bad: &mut Vec<String>,
+            seen: &mut usize,
+        ) {
+            for sc in cmd.get_subcommands() {
+                let p = format!("{path} {}", sc.get_name());
+                for a in sc.get_arguments() {
+                    *seen += 1;
+                    for g in globals {
+                        let same_long = a.get_long().is_some() && a.get_long() == g.get_long();
+                        let same_short = a.get_short().is_some() && a.get_short() == g.get_short();
+                        if a.get_id() == g.get_id() || same_long || same_short {
+                            bad.push(format!(
+                                "{p}: `{}` shadows the global `{}`",
+                                a.get_id(),
+                                g.get_id()
+                            ));
+                        }
+                    }
+                }
+                walk(sc, &p, globals, bad, seen);
+            }
+        }
+        let root = Cli::command();
+        let globals: Vec<clap::Arg> = root
+            .get_arguments()
+            .filter(|a| a.is_global_set())
+            .cloned()
+            .collect();
+        let (mut bad, mut seen) = (Vec::new(), 0usize);
+        walk(&root, "p2a", &globals, &mut bad, &mut seen);
+        // about 680 today
+        assert!(
+            seen > 300,
+            "walk saw only {seen} subcommand args; are subcommands deferred?"
+        );
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[test]
+    fn data_save_file_format_and_global_format() {
+        use crate::commands::data::DataCommands;
+        use crate::output::OutputFormat;
+        let cli = parse(&[
+            "data",
+            "save",
+            "d",
+            "-o",
+            "out.dat",
+            "--file-format",
+            "csv",
+            "-F",
+            "json",
+        ]);
+        assert!(matches!(cli.format, OutputFormat::Json));
+        assert!(
+            matches!(cli.command, Commands::Data(DataCommands::Save { ref file_format, .. }) if file_format.as_deref() == Some("csv"))
+        );
+        let cli = parse(&["data", "save", "d", "-o", "x.csv", "-f", "parquet"]);
+        assert!(matches!(cli.format, OutputFormat::Text));
+        assert!(
+            matches!(cli.command, Commands::Data(DataCommands::Save { ref file_format, .. }) if file_format.as_deref() == Some("parquet"))
+        );
+        assert!(matches!(
+            parse(&["data", "save", "d", "-o", "x.csv"]).command,
+            Commands::Data(DataCommands::Save {
+                file_format: None,
+                ..
+            })
+        ));
+    }
 }
 
 #[cfg(test)]

@@ -85,3 +85,67 @@ fn test_cli_short_flags_bind_to_subcommands_in_debug_build() {
     );
     assert_eq!(fit["model"], "ARIMA(1,0,2)"); // 2 is not the default (1), so -q bound to --ma
 }
+
+/// CLI-2: every `data save` panicked (exit 101, in release builds too) because the subcommand's
+/// `format` arg shared its id with the global --format.
+#[test]
+fn test_cli_data_save_file_format() {
+    let s = temp_session();
+    let g = repo_path("validation/datasets/grunfeld.csv");
+    s.load_as(&g, "grunfeld", &[]);
+    let p = |f: &str| s.dir().join(f);
+    s.ok(&[
+        "data",
+        "save",
+        "grunfeld",
+        "--output",
+        p("g.dat").to_str().unwrap(),
+        "--file-format",
+        "csv",
+    ]);
+    assert_same_csv(&p("g.dat"), &g);
+    s.ok(&[
+        "data",
+        "save",
+        "grunfeld",
+        "--output",
+        p("g.csv").to_str().unwrap(),
+    ]); // format from the extension
+    assert_same_csv(&p("g.csv"), &g);
+    // -F after the subcommand is the global output format (was "unexpected argument '-F'")
+    let out = s.run(&[
+        "data",
+        "save",
+        "grunfeld",
+        "--output",
+        p("g2.csv").to_str().unwrap(),
+        "-F",
+        "json",
+    ]);
+    assert_no_panic(&out, "data save -F json");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // R: nrow(read.csv("grunfeld.csv")) = 200, ncol = 5
+    assert_eq!(
+        (
+            j["format"].as_str(),
+            j["rows"].as_u64(),
+            j["columns"].as_u64()
+        ),
+        (Some("CSV"), Some(200), Some(5))
+    );
+    for bad in ["g.unknown", "g_no_extension"] {
+        let e = s.err(&[
+            "data",
+            "save",
+            "grunfeld",
+            "--output",
+            p(bad).to_str().unwrap(),
+        ]);
+        assert!(e.contains("--file-format"), "{bad}: {e}");
+    }
+}
