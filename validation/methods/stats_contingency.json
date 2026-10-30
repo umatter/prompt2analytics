@@ -75,6 +75,21 @@
       "tolerance": "validation/README.md statistic and p-value rows",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mantelhaen",
+      "name": "Cochran-Mantel-Haenszel test, 2 x 2 x K",
+      "category": "stats",
+      "reference": "stats::mantelhaen.test(table(x, y, stratum)) (NA strata dropped)",
+      "doc": "validation/stats/mantelhaen_test.md",
+      "cases": ["stat_mantelhaen_na"],
+      "tests": [
+        "p2a-core::stats::mantelhaen::tests::test_validate_mantelhaen_na"
+      ],
+      "quantities": ["X-squared with and without correction", "p", "common odds ratio", "95% CI", "rows used", "strata"],
+      "tolerance": "validation/README.md, n = 237: statistics 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

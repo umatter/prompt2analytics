@@ -31,7 +31,10 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/mantelhaen.test.html>
 
 use crate::data::Dataset;
+use crate::data::columns::MissingSummary;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
+use crate::stats::contingency::{level_list, stratified_tables};
 use crate::traits::chi_squared_p_value;
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +63,15 @@ pub struct MantelHaenszelResult {
     pub alternative: CmhAlternative,
     /// Per-stratum statistics
     pub stratum_stats: Vec<StratumStats>,
+    /// Row level labels, common to every stratum (empty for array input).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_levels: Vec<String>,
+    /// Column level labels, common to every stratum (empty for array input).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub col_levels: Vec<String>,
+    /// Rows dropped because of a missing value (dataset input).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Statistics for a single stratum (2×2 table).
@@ -109,8 +121,19 @@ impl std::fmt::Display for MantelHaenszelResult {
         )?;
         writeln!(f)?;
         writeln!(f, "Strata: {}, Total N: {}", self.n_strata, self.total_n)?;
+        if !self.row_levels.is_empty() || !self.col_levels.is_empty() {
+            writeln!(
+                f,
+                "Rows: {}; columns: {}",
+                self.row_levels.join(", "),
+                self.col_levels.join(", ")
+            )?;
+        }
         if self.continuity_correction {
             writeln!(f, "(Continuity correction applied)")?;
+        }
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
         }
         Ok(())
     }
@@ -350,6 +373,9 @@ pub fn mantelhaen_test(
         continuity_correction: correct && yates > 0.0,
         alternative,
         stratum_stats,
+        row_levels: Vec::new(),
+        col_levels: Vec::new(),
+        missing: MissingSummary::none(total_n as usize),
     })
 }
 
@@ -409,6 +435,13 @@ fn compute_or_confidence_interval(tables: &[Table2x2], or_mh: f64, conf_level: f
 
 /// Run CMH test on a Dataset with factor columns.
 ///
+/// Builds the 2 × 2 × K tables with [`stratified_tables`], as R's
+/// `mantelhaen.test(table(row, col, stratum))`: rows with a missing value (null, or NaN in
+/// a float column) in any of the three columns are dropped and reported in `missing`, and
+/// the row, column and stratum levels follow R `factor()` order (numbers numerically, text
+/// in C-locale order), so the first level of each is the first row or column of every
+/// stratum's table.
+///
 /// # Arguments
 ///
 /// * `dataset` - The dataset containing the data
@@ -417,6 +450,12 @@ fn compute_or_confidence_interval(tables: &[Table2x2], or_mh: f64, conf_level: f
 /// * `stratum_var` - Column name for the stratum/group variable
 /// * `correct` - Whether to apply continuity correction
 /// * `alternative` - Direction of alternative hypothesis
+///
+/// # Errors
+///
+/// [`stratified_tables`]' errors (`ColumnNotFound`, a column that cannot be categorical, no
+/// row left, `ResourceLimit`, `Cancelled`), and `InvalidSpecification` naming the levels
+/// when the row or column variable does not have exactly 2 levels.
 ///
 /// # Returns
 ///
@@ -429,131 +468,43 @@ pub fn run_mantelhaen_test(
     correct: bool,
     alternative: CmhAlternative,
 ) -> EconResult<MantelHaenszelResult> {
-    let df = dataset.df();
-
-    // Extract columns
-    let row_col = df.column(row_var).map_err(|_| EconError::ColumnNotFound {
-        column: row_var.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let col_col = df.column(col_var).map_err(|_| EconError::ColumnNotFound {
-        column: col_var.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let stratum_col = df
-        .column(stratum_var)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: stratum_var.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    // Build stratum -> (row_level, col_level) -> count mapping
-    use std::collections::{BTreeMap, BTreeSet};
-
-    let mut strata: BTreeMap<String, BTreeMap<(String, String), f64>> = BTreeMap::new();
-    let mut row_levels: BTreeSet<String> = BTreeSet::new();
-    let mut col_levels: BTreeSet<String> = BTreeSet::new();
-
-    let n = df.height();
-    for i in 0..n {
-        let stratum = format!(
-            "{}",
-            stratum_col
-                .get(i)
-                .map_err(|e| EconError::InvalidSpecification {
-                    message: format!("Error accessing stratum at row {}: {}", i, e),
-                })?
-        );
-
-        let row = format!(
-            "{}",
-            row_col
-                .get(i)
-                .map_err(|e| EconError::InvalidSpecification {
-                    message: format!("Error accessing row variable at row {}: {}", i, e),
-                })?
-        );
-
-        let col = format!(
-            "{}",
-            col_col
-                .get(i)
-                .map_err(|e| EconError::InvalidSpecification {
-                    message: format!("Error accessing column variable at row {}: {}", i, e),
-                })?
-        );
-
-        row_levels.insert(row.clone());
-        col_levels.insert(col.clone());
-
-        *strata
-            .entry(stratum)
-            .or_default()
-            .entry((row, col))
-            .or_insert(0.0) += 1.0;
-    }
-
-    // Verify we have 2×2 tables
-    let row_levels: Vec<_> = row_levels.into_iter().collect();
-    let col_levels: Vec<_> = col_levels.into_iter().collect();
-
-    if row_levels.len() != 2 {
+    let (strata, tables, missing) = stratified_tables(dataset.df(), row_var, col_var, stratum_var)?;
+    let Some(first) = tables.first() else {
+        return Err(EconError::InsufficientData {
+            required: 1,
+            provided: 0,
+            context: "Mantel-Haenszel test: no stratum is left after removing rows with \
+                      missing values"
+                .to_string(),
+        });
+    };
+    if first.n_rows() != 2 || first.n_cols() != 2 {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "Row variable '{}' must have exactly 2 levels, found {}",
-                row_var,
-                row_levels.len()
+                "Mantel-Haenszel test needs 2 x 2 x K tables, but after removing rows with \
+                 missing values '{row_var}' has {} level(s) [{}] and '{col_var}' has {} \
+                 level(s) [{}]",
+                first.n_rows(),
+                level_list(&first.row_levels),
+                first.n_cols(),
+                level_list(&first.col_levels)
             ),
         });
     }
-
-    if col_levels.len() != 2 {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Column variable '{}' must have exactly 2 levels, found {}",
-                col_var,
-                col_levels.len()
-            ),
-        });
+    let (row_levels, col_levels) = (first.row_levels.clone(), first.col_levels.clone());
+    let mut cells: Vec<Table2x2> = resource::try_with_capacity(tables.len(), "stratum tables")?;
+    for t in &tables {
+        // every stratum has the common 2 x 2 levels
+        let [[a, b], [c, d]] = t
+            .as_2x2()
+            .ok_or_else(|| EconError::Computation("a stratum's table is not 2 x 2".to_string()))?;
+        cells.push(Table2x2::new(a, b, c, d));
     }
-
-    // Build 2×2 tables for each stratum
-    let mut tables = Vec::with_capacity(strata.len());
-    let mut stratum_names = Vec::with_capacity(strata.len());
-
-    for (stratum_name, counts) in strata {
-        let a = *counts
-            .get(&(row_levels[0].clone(), col_levels[0].clone()))
-            .unwrap_or(&0.0);
-        let b = *counts
-            .get(&(row_levels[0].clone(), col_levels[1].clone()))
-            .unwrap_or(&0.0);
-        let c = *counts
-            .get(&(row_levels[1].clone(), col_levels[0].clone()))
-            .unwrap_or(&0.0);
-        let d = *counts
-            .get(&(row_levels[1].clone(), col_levels[1].clone()))
-            .unwrap_or(&0.0);
-
-        tables.push(Table2x2::new(a, b, c, d));
-        stratum_names.push(stratum_name);
-    }
-
-    mantelhaen_test(&tables, Some(&stratum_names), correct, alternative)
+    let mut result = mantelhaen_test(&cells, Some(&strata), correct, alternative)?;
+    result.row_levels = row_levels;
+    result.col_levels = col_levels;
+    result.missing = missing;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -765,5 +716,92 @@ mod tests {
         assert!(display.contains("Cochran-Mantel-Haenszel"));
         assert!(display.contains("CMH"));
         assert!(display.contains("p-value"));
+    }
+
+    #[test]
+    fn test_validate_mantelhaen_na() {
+        // R: mantelhaen.test(table(treat, outcome, stratum)) drops the 3 NA strata: X2
+        // 9.464008299682503, p 0.0020954268679205345; correct = FALSE 10.292389179376896,
+        // p 0.0013358001984906988; common OR 2.397932948724719, CI 1.4029852155370948,
+        // 4.098462594545848; 237 rows (case stat_mantelhaen_na). Fails before: AnyValue::Null
+        // formats as "null", a 4th stratum: n_strata 4, total_n 240. (Its 3 rows are all "no",
+        // so they add nothing to DELTA, the variance or the OR, and the statistic happens to
+        // match R.)
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_mantelhaen_na");
+        let r = run_mantelhaen_test(
+            &ds,
+            "treat",
+            "outcome",
+            "stratum",
+            true,
+            CmhAlternative::TwoSided,
+        )
+        .unwrap();
+        let u = run_mantelhaen_test(
+            &ds,
+            "treat",
+            "outcome",
+            "stratum",
+            false,
+            CmhAlternative::TwoSided,
+        )
+        .unwrap();
+        Check::new(&case)
+            .scalar("statistic", r.statistic, Tol::stat(237))
+            .scalar("p", r.p_value, Tol::p_value(237))
+            .scalar("statistic_nocorrect", u.statistic, Tol::stat(237))
+            .scalar("p_nocorrect", u.p_value, Tol::p_value(237))
+            .scalar("common_or", r.common_odds_ratio, Tol::stat(237))
+            .scalar("ci_lower", r.odds_ratio_ci.0, Tol::stat(237))
+            .scalar("ci_upper", r.odds_ratio_ci.1, Tol::stat(237))
+            .scalar("n_used", r.total_n as f64, Tol::exact())
+            .scalar("n_used", r.missing.n_used as f64, Tol::exact())
+            .finish();
+        assert_eq!(r.n_strata, 3);
+        assert_eq!(
+            r.stratum_stats
+                .iter()
+                .map(|s| s.stratum.as_str())
+                .collect::<Vec<_>>(),
+            ["s1", "s2", "s3"]
+        );
+        assert_eq!(
+            (r.row_levels.clone(), r.col_levels.clone()),
+            (
+                vec!["ctl".to_string(), "trt".into()],
+                vec!["no".to_string(), "yes".into()]
+            )
+        );
+        assert_eq!(r.missing.by_column, vec![("stratum".to_string(), 3)]);
+        assert!(
+            r.to_string()
+                .contains("Missing values: 3 of 240 rows dropped")
+        );
+    }
+
+    #[test]
+    fn test_run_mantelhaen_refuses_tables_that_are_not_2x2() {
+        // three treatment levels: the error names the levels after dropping missing rows
+        let df = df! {
+            "t" => ["a", "b", "c", "a", "b", "c"],
+            "y" => ["n", "y", "n", "y", "n", "y"],
+            "s" => ["1", "1", "1", "2", "2", "2"],
+        }
+        .unwrap();
+        let e = run_mantelhaen_test(
+            &Dataset::new(df),
+            "t",
+            "y",
+            "s",
+            true,
+            CmhAlternative::TwoSided,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("'t' has 3 level(s) [a, b, c]") && e.contains("2 x 2 x K"),
+            "{e}"
+        );
     }
 }
