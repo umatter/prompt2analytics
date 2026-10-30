@@ -13,17 +13,16 @@
 
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
-use super::utils::demean_by_entity;
+use super::utils::{demean_by_entity, entity_codes, time_codes};
 
 /// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
 /// SVD fallback). Check the working set against the allocation ceiling before building it.
@@ -108,6 +107,11 @@ pub struct PanelGlsResult {
     pub residuals: ndarray::Array1<f64>,
     #[serde(skip, default)]
     pub vcov: ndarray::Array2<f64>,
+
+    /// Rows dropped because of a missing value in y, a regressor, the entity or the time
+    /// (plm `na.omit`).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl crate::traits::estimator::LinearEstimator for PanelGlsResult {
@@ -179,11 +183,21 @@ impl fmt::Display for PanelGlsResult {
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
         writeln!(f, "Sigma: {:.6}  RSS: {:.4}", self.sigma, self.rss)?;
 
-        if !self.warnings.is_empty() {
+        // The missing-value note is printed once, as the last line
+        let note = self.missing.note();
+        let shown: Vec<&String> = self
+            .warnings
+            .iter()
+            .filter(|w| note.as_deref() != Some(w.as_str()))
+            .collect();
+        if !shown.is_empty() {
             writeln!(f, "\nWarnings:")?;
-            for warning in &self.warnings {
+            for warning in shown {
                 writeln!(f, "  - {}", warning)?;
             }
+        }
+        if let Some(note) = note {
+            writeln!(f, "Missing values: {note}")?;
         }
 
         Ok(())
@@ -217,6 +231,12 @@ impl fmt::Display for PanelGlsResult {
 /// `InvalidSpecification`: the unrestricted T x T error covariance is estimated
 /// from N residual vectors and has no inverse.
 ///
+/// # Missing values
+///
+/// Rows with a missing value (null or NaN) in `y`, a regressor, the entity or the time
+/// are dropped and reported in `missing` (plm `na.omit`). Integer outcomes and times of
+/// any integer width are accepted; a fractional time is `InvalidSpecification`.
+///
 /// # Reference
 ///
 /// Implementation adapted from R's plm package pggls() function.
@@ -233,83 +253,25 @@ pub fn run_panel_gls(
     let model = model.unwrap_or_default();
     let mut warnings = Vec::new();
 
-    // Extract data from dataset
-    let df = dataset.df();
-    let y_series = df
-        .column(y_col)
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Dependent variable '{}' not found", y_col),
-        })?;
-    let y: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Dependent variable '{}' must be numeric", y_col),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract entity and time identifiers
-    let entity_series = df
-        .column(entity_col)
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Entity column '{}' not found", entity_col),
-        })?;
-
-    let time_series = df
-        .column(time_col)
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Time column '{}' not found", time_col),
-        })?;
-
-    // Get unique entities
-    let entity_strings: Vec<String> = if let Ok(utf8) = entity_series.str() {
-        utf8.into_iter()
-            .map(|s| s.unwrap_or("").to_string())
-            .collect()
-    } else if let Ok(i64_col) = entity_series.i64() {
-        i64_col
-            .into_iter()
-            .map(|v| v.unwrap_or(0).to_string())
-            .collect()
-    } else {
-        return Err(EconError::InvalidSpecification {
-            message: "Entity column must be string or integer".to_string(),
-        });
-    };
-
-    let time_values: Vec<i64> = if let Ok(i64_col) = time_series.i64() {
-        i64_col.into_iter().map(|v| v.unwrap_or(0)).collect()
-    } else if let Ok(f64_col) = time_series.f64() {
-        f64_col
-            .into_iter()
-            .map(|v| v.unwrap_or(0.0) as i64)
-            .collect()
-    } else {
-        return Err(EconError::InvalidSpecification {
-            message: "Time column must be numeric".to_string(),
-        });
-    };
-
-    // Build entity mapping
-    let mut entity_map: HashMap<String, usize> = HashMap::new();
-    let mut entity_ids: Vec<usize> = Vec::with_capacity(y.len());
-    let mut entity_counter = 0;
-
-    for entity in &entity_strings {
-        let id = *entity_map.entry(entity.clone()).or_insert_with(|| {
-            let id = entity_counter;
-            entity_counter += 1;
-            id
-        });
-        entity_ids.push(id);
+    // y, X, the entity and the time on the rows complete in all of them (plm
+    // na.omit); integer outcomes and times of any integer width are numbers, a
+    // fractional time is an error
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
+        .factor(entity_col)
+        .time_index(time_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let missing = cols.missing().clone();
+    if let Some(note) = missing.note() {
+        warnings.push(note);
     }
-
-    let n_groups = entity_map.len();
-
-    // Get unique time periods
-    let mut unique_times: Vec<i64> = time_values.to_vec();
-    unique_times.sort_unstable();
-    unique_times.dedup();
+    let y: Vec<f64> = cols.numeric(y_col).to_vec();
+    let entity = cols.factor(entity_col);
+    let (entity_ids, n_groups) = entity_codes(entity);
+    let time_values: Vec<i64> = cols.time_index(time_col).to_vec();
+    let (row_time_idx, unique_times) = time_codes(&time_values);
     let n_periods = unique_times.len();
 
     let n = y.len();
@@ -327,12 +289,8 @@ pub fn run_panel_gls(
         });
     }
 
-    // Rows of each entity (in row order) and each row's time index, built once
-    let mut time_idx_map: HashMap<i64, usize> = HashMap::new();
-    for (idx, &t) in unique_times.iter().enumerate() {
-        time_idx_map.insert(t, idx);
-    }
-    let row_time_idx: Vec<usize> = time_values.iter().map(|t| time_idx_map[t]).collect();
+    // Rows of each entity (in row order), built once; each row's time index is
+    // `row_time_idx`
     let mut rows_by_entity: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
     for (i, &entity_id) in entity_ids.iter().enumerate() {
         rows_by_entity[entity_id].push(i);
@@ -340,7 +298,7 @@ pub fn run_panel_gls(
 
     // Build design matrix (includes intercept for non-FE models)
     let has_intercept = model != PanelGlsModel::FixedEffects;
-    let dm = DesignMatrix::from_dataframe(df, x_cols, has_intercept)?;
+    let dm = cols.matrix(x_cols, has_intercept);
     let x = &dm.data;
     let k = x.ncols();
 
@@ -386,22 +344,26 @@ pub fn run_panel_gls(
             // First-difference transformation
             warnings.push("First-difference GLS drops first observation per entity".to_string());
 
-            // Sort data by entity and time for differencing
+            // Sort data by entity and time for differencing. The order is by the
+            // entity label as a string, as before the shared extractor, so the
+            // first-difference residual alignment (ECON-33, Tier 4) and T0's
+            // pinned FD outputs are unchanged.
+            let entity_strings: Vec<&str> = (0..n).map(|i| entity.label(i)).collect();
             let mut sorted_indices: Vec<usize> = (0..n).collect();
-            sorted_indices.sort_by_key(|&i| (&entity_strings[i], time_values[i]));
+            sorted_indices.sort_by_key(|&i| (entity_strings[i], time_values[i]));
 
             // Compute first differences
             let mut y_diff = Vec::new();
             let mut x_diff = Vec::new();
 
-            let mut prev_entity = String::new();
+            let mut prev_entity: Option<&str> = None;
             let mut prev_y = 0.0;
             let mut prev_x = vec![0.0; k];
 
             for &idx in &sorted_indices {
-                let curr_entity = &entity_strings[idx];
+                let curr_entity = entity_strings[idx];
 
-                if *curr_entity == prev_entity {
+                if prev_entity == Some(curr_entity) {
                     // Same entity, compute difference
                     y_diff.push(y[idx] - prev_y);
                     let mut row = Vec::with_capacity(k);
@@ -411,7 +373,7 @@ pub fn run_panel_gls(
                     x_diff.push(row);
                 }
 
-                prev_entity = curr_entity.clone();
+                prev_entity = Some(curr_entity);
                 prev_y = y[idx];
                 prev_x = (0..k).map(|j| x[[idx, j]]).collect();
             }
@@ -606,14 +568,8 @@ pub fn run_panel_gls(
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 
-    // Build variable names
-    let variables: Vec<String> = if model != PanelGlsModel::FixedEffects {
-        std::iter::once("(Intercept)".to_string())
-            .chain(x_cols.iter().map(|s| s.to_string()))
-            .collect()
-    } else {
-        x_cols.iter().map(|s| s.to_string()).collect()
-    };
+    // Variable names ("(Intercept)" first for the models with an intercept)
+    let variables: Vec<String> = dm.column_names.clone();
 
     let coef_arr: Array1<f64> = beta.clone();
     let se_arr: Array1<f64> = Array1::from_vec(std_errors.clone());
@@ -642,6 +598,7 @@ pub fn run_panel_gls(
         se_arr,
         residuals,
         vcov,
+        missing,
     })
 }
 
@@ -949,5 +906,141 @@ mod tests {
                 0.6970403766260955,
             ],
         );
+    }
+
+    /// The rows of `df` whose `year` is missing or at most 1944 (N = T = 10 after
+    /// deletion, as T0's pinned test).
+    fn early(df: &polars::prelude::DataFrame) -> polars::prelude::DataFrame {
+        use polars::prelude::{BooleanChunked, NewChunkedArray};
+        let years = crate::data::columns::numeric_options(df, "year").unwrap();
+        let mask: Vec<bool> = years
+            .iter()
+            .map(|y| y.is_none_or(|y| y <= 1944.0))
+            .collect();
+        df.filter(&BooleanChunked::from_slice("keep".into(), &mask))
+            .unwrap()
+    }
+
+    /// Two fits agree to 1e-12 (coefficients, SEs, RSS and R-squared).
+    fn assert_same_gls(a: &PanelGlsResult, b: &PanelGlsResult) {
+        let tol = p2a_validation::Tol::new(1e-12, 1e-12);
+        assert_eq!(a.variables, b.variables);
+        let va = a
+            .coefficients
+            .iter()
+            .chain(&a.std_errors)
+            .chain([&a.rss, &a.r_squared]);
+        let vb = b
+            .coefficients
+            .iter()
+            .chain(&b.std_errors)
+            .chain([&b.rss, &b.r_squared]);
+        for (x, y) in va.zip(vb) {
+            assert!(tol.allows(*x, *y), "{x} vs {y}");
+        }
+    }
+
+    const MODELS: [PanelGlsModel; 3] = [
+        PanelGlsModel::FixedEffects,
+        PanelGlsModel::Pooling,
+        PanelGlsModel::FirstDifference,
+    ];
+
+    /// Panel GLS drops rows with a missing outcome or time (plm na.omit) and equals
+    /// the fit on the complete rows. Before, the null outcomes were read through
+    /// `into_no_null_iter` and the missing years became period 0.
+    #[test]
+    fn test_validate_na_panel_gls_omit_equals_complete_rows() {
+        let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        assert_eq!(
+            case.dataset,
+            "validation/datasets/generated/grunfeld_na.csv"
+        );
+        let df = early(ds.df());
+        assert_eq!(df.height(), 101);
+        let complete = Dataset::new(df.drop_nulls::<String>(None).unwrap());
+        let ds = Dataset::new(df);
+        let note = "4 of 101 rows dropped because of missing values (inv: 2, year: 2)";
+        for m in MODELS {
+            let fit = |d: &Dataset| {
+                run_panel_gls(
+                    d,
+                    "inv",
+                    &["value", "capital"],
+                    "firm_name",
+                    "year",
+                    Some(m),
+                )
+                .unwrap_or_else(|e| panic!("{m:?}: {e}"))
+            };
+            let r = fit(&ds);
+            assert_same_gls(&r, &fit(&complete));
+            assert_eq!((r.n_obs, r.n_groups, r.n_periods), (97, 10, 10), "{m:?}");
+            assert_eq!(r.missing.note().as_deref(), Some(note), "{m:?}");
+            assert!(r.warnings.iter().any(|w| w == note), "{m:?}");
+            let text = r.to_string();
+            assert!(
+                text.trim_end()
+                    .ends_with(&format!("Missing values: {note}")),
+                "{text}"
+            );
+        }
+    }
+
+    /// Integer outcomes and times of any integer width are read as numbers; a
+    /// fractional time is an error; the errors name the column.
+    #[test]
+    fn test_validate_na_panel_gls_integer_outcome_and_time() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use polars::prelude::{Column, DataType};
+        let (case, _) = crate::test_support::load_case("panel_grunfeld_na");
+        let path = p2a_validation::repo_path(&case.datasets[0]);
+        let g = crate::data::DataLoader::load_csv(&path).unwrap();
+        let mut df = early(&g);
+        assert_eq!(df.height(), 100);
+        let inv = numeric_column(&df, "inv", NaPolicy::Fail).unwrap().0;
+        let inv_int: Vec<i64> = inv.iter().map(|v| v.round() as i64).collect();
+        let inv_f: Vec<f64> = inv_int.iter().map(|&v| v as f64).collect();
+        df.with_column(Column::new("inv_int".into(), inv_int))
+            .unwrap();
+        df.with_column(Column::new("inv_f".into(), inv_f)).unwrap();
+        let ds = Dataset::new(df.clone());
+        let fit = |d: &Dataset, y: &str, m| {
+            run_panel_gls(d, y, &["value", "capital"], "firm", "year", Some(m))
+        };
+        for m in MODELS {
+            let a = fit(&ds, "inv_int", m).unwrap_or_else(|e| panic!("{m:?}: {e}"));
+            assert_same_gls(&a, &fit(&ds, "inv_f", m).unwrap());
+        }
+
+        let year32 = df.column("year").unwrap().cast(&DataType::Int32).unwrap();
+        let mut df32 = df.clone();
+        df32.with_column(year32).unwrap();
+        for m in MODELS {
+            let a =
+                fit(&Dataset::new(df32.clone()), "inv", m).unwrap_or_else(|e| panic!("{m:?}: {e}"));
+            assert_same_gls(&a, &fit(&ds, "inv", m).unwrap());
+        }
+
+        let mut years = numeric_column(&df, "year", NaPolicy::Fail).unwrap().0;
+        years[0] = 1935.25;
+        let mut frac = df.clone();
+        frac.with_column(Column::new("year".into(), years)).unwrap();
+        match fit(&Dataset::new(frac), "inv", PanelGlsModel::Pooling) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("whole numbers"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+
+        match fit(&ds, "nope", PanelGlsModel::Pooling) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "nope"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
+        let (_, na) = crate::test_support::load_case("panel_grunfeld_na");
+        match fit(&na, "firm_name", PanelGlsModel::Pooling) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "firm_name"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
     }
 }
