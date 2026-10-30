@@ -9,6 +9,17 @@
 //! Usage:
 //!   cargo bench -p p2a-core --bench unified_benchmarks
 //!   cargo bench -p p2a-core --bench unified_benchmarks -- --data-dir /path/to/data
+//!
+//! Options (all optional; without them the run is the paper's full benchmark):
+//!   --data-dir <dir>     CSVs written by unified_benchmark.R
+//!                        (default: performance/comparisons/data, relative to the cwd)
+//!   --results-dir <dir>  write rust_unified_<timestamp>.json there only (default: both
+//!                        <workspace>/performance/results and
+//!                        <workspace>/performance/comparisons/r_comparison/results)
+//!   --only <A,B,...>     benchmark only these methods (exact `method` names, comma-separated;
+//!                        repeatable); unselected sections load no data and time nothing
+//!   --quick              1 warmup and 3 measurement iterations at every size, for
+//!                        correctness checks whose timings are not used
 
 mod bench_utils;
 
@@ -16,7 +27,9 @@ use bench_utils::{
     BenchConfig, BenchmarkResult, TrackingAllocator, print_header, print_result,
     run_benchmark_tracked, save_results,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[global_allocator]
 static ALLOC: TrackingAllocator = TrackingAllocator;
@@ -184,28 +197,194 @@ use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Normal};
 
 // ============================================
+// Run options: --data-dir, --results-dir, --only, --quick
+// ============================================
+
+/// Command-line options of a run. Every flag is optional; with none, the run
+/// is the paper's full benchmark (all methods, full iteration counts, results
+/// in the workspace's two results directories).
+struct RunOptions {
+    data_dir: String,
+    results_dir: Option<PathBuf>,
+    only: Option<BTreeSet<String>>,
+    quick: bool,
+}
+
+/// Parse the options; the last occurrence of a valued flag wins, `--only`
+/// lists accumulate, and anything else (cargo passes `--bench`) is ignored.
+fn parse_run_options(args: &[String]) -> RunOptions {
+    let mut opts = RunOptions {
+        data_dir: "performance/comparisons/data".to_string(),
+        results_dir: None,
+        only: None,
+        quick: false,
+    };
+    let mut i = 1;
+    while i < args.len() {
+        let value = args.get(i + 1).cloned();
+        match (args[i].as_str(), value) {
+            ("--data-dir", Some(v)) => {
+                opts.data_dir = v;
+                i += 1;
+            }
+            ("--results-dir", Some(v)) => {
+                opts.results_dir = Some(PathBuf::from(v));
+                i += 1;
+            }
+            ("--only", Some(v)) => {
+                let set = opts.only.get_or_insert_with(BTreeSet::new);
+                set.extend(
+                    v.split(',')
+                        .map(|m| m.trim().to_string())
+                        .filter(|m| !m.is_empty()),
+                );
+                i += 1;
+            }
+            ("--quick", _) => opts.quick = true,
+            _ => {}
+        }
+        i += 1;
+    }
+    opts
+}
+
+/// The `--only` selection (`None`: every method), set once at the start of `main`.
+static ONLY: OnceLock<Option<BTreeSet<String>>> = OnceLock::new();
+/// Every method name the run asked `wants` about, to report `--only` names
+/// that match no benchmark (a typo would otherwise select nothing silently).
+static ASKED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Whether this run benchmarks `method` (always true without `--only`).
+/// Guard each method's block with it when one loop benchmarks several methods.
+fn wants(method: &str) -> bool {
+    if let Ok(mut asked) = ASKED.lock() {
+        asked.insert(method.to_string());
+    }
+    match ONLY.get() {
+        Some(Some(only)) => only.contains(method),
+        _ => true,
+    }
+}
+
+/// The sizes a benchmark loop iterates over: all of `sizes` when the run wants
+/// any of `methods` (the methods the loop body benchmarks), none otherwise, so
+/// an unselected loop loads no data and times nothing.
+///   `for n in sizes_for(&["OLS"], [100, 1000, 10000]) { ... }`
+fn sizes_for<T, const N: usize>(methods: &[&str], sizes: [T; N]) -> Vec<T> {
+    // Ask about every name (no short-circuit), so ASKED knows them all.
+    let wanted = methods.iter().filter(|m| wants(m)).count() > 0;
+    if wanted { sizes.into() } else { Vec::new() }
+}
+
+// ============================================
 // CSV Loading Helpers
 // ============================================
+//
+// Every loader reads `<data_dir>/<dgp>_n<n>.csv`, the file unified_benchmark.R
+// writes with save_dgp(df, "<dgp>_n<n>"), and returns None (with a warning)
+// when the file is missing or unreadable, so the caller can fall back to its
+// internal generator. Missing values become 0.0 in the f64 loaders.
+
+/// The CSV the R side writes for `dgp` at size `n`.
+fn csv_path(data_dir: &str, dgp: &str, n: usize) -> String {
+    format!("{}/{}_n{}.csv", data_dir, dgp, n)
+}
+
+/// Column names in the header line of a CSV (R's write.csv quotes them).
+fn csv_header(path: &str) -> Vec<String> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = std::io::BufReader::new(f).read_line(&mut line);
+    }
+    line.trim_end_matches(['\r', '\n'])
+        .split(',')
+        .map(|h| h.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+/// Read `<data_dir>/<dgp>_n<n>.csv` with polars' type inference, except that
+/// the columns named in `string_cols` are read as strings exactly as written
+/// (factor labels such as "1", "g0" or "A" stay labels).
+fn read_csv(data_dir: &str, dgp: &str, n: usize, string_cols: &[&str]) -> Option<DataFrame> {
+    let path = csv_path(data_dir, dgp, n);
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("WARNING: CSV not found: {}, using internal PRNG", path);
+        return None;
+    }
+    let mut options = CsvReadOptions::default();
+    if !string_cols.is_empty() {
+        let header = csv_header(&path);
+        let mut schema = Schema::with_capacity(string_cols.len());
+        for name in string_cols {
+            if header.iter().any(|h| h == name) {
+                schema.with_column((*name).into(), DataType::String);
+            } else {
+                eprintln!("WARNING: {} has no column {}", path, name);
+            }
+        }
+        options = options.with_schema_overwrite(Some(Arc::new(schema)));
+    }
+    match options
+        .try_into_reader_with_file_path(Some(path.clone().into()))
+        .and_then(|reader| reader.finish())
+    {
+        Ok(df) => Some(df),
+        Err(e) => {
+            eprintln!("WARNING: cannot read {}: {}, using internal PRNG", path, e);
+            None
+        }
+    }
+}
+
+/// One numeric column of a DataFrame as f64 (integer columns are cast; nulls
+/// become 0.0). None for a missing or non-numeric column.
+fn df_column_f64(df: &DataFrame, name: &str) -> Option<Vec<f64>> {
+    let col = df.column(name).ok()?;
+    if col.dtype() == &DataType::String {
+        return None;
+    }
+    let cast = col.strict_cast(&DataType::Float64).ok()?;
+    let ca = cast.as_materialized_series().f64().ok()?.clone();
+    Some(ca.into_iter().map(|v| v.unwrap_or(0.0)).collect())
+}
 
 /// Load a CSV file as a Dataset. Returns None if file doesn't exist.
 /// Casts all integer columns to Float64 so downstream .f64() calls work.
 fn load_csv_dataset(data_dir: &str, dgp: &str, n: usize) -> Option<Dataset> {
-    load_csv_dataset_with_ids(data_dir, dgp, n, &[])
+    load_csv_dataset_typed(data_dir, dgp, n, &[], &[])
 }
 
 /// As `load_csv_dataset`, but the integer columns named in `ids` keep their
 /// integer type: entity and unit identifiers must be integer or string.
 fn load_csv_dataset_with_ids(data_dir: &str, dgp: &str, n: usize, ids: &[&str]) -> Option<Dataset> {
-    let path = format!("{}/{}_n{}.csv", data_dir, dgp, n);
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("WARNING: CSV not found: {}, using internal PRNG", path);
-        return None;
-    }
-    let mut df = CsvReadOptions::default()
-        .try_into_reader_with_file_path(Some(path.into()))
-        .ok()?
-        .finish()
-        .ok()?;
+    load_csv_dataset_typed(data_dir, dgp, n, ids, &[])
+}
+
+/// As `load_csv_dataset`, but the columns named in `string_cols` are String
+/// columns holding the labels exactly as R wrote them (factor levels, group
+/// names, an ordered outcome "1"/"2"/"3"), whatever they look like.
+///   `load_csv_dataset_with_strings(&data_dir, "anova", n, &["group"])`
+fn load_csv_dataset_with_strings(
+    data_dir: &str,
+    dgp: &str,
+    n: usize,
+    string_cols: &[&str],
+) -> Option<Dataset> {
+    load_csv_dataset_typed(data_dir, dgp, n, &[], string_cols)
+}
+
+/// The general Dataset loader: `string_cols` are read as strings, the integer
+/// columns named in `ids` stay integer, and every other integer column is cast
+/// to Float64.
+fn load_csv_dataset_typed(
+    data_dir: &str,
+    dgp: &str,
+    n: usize,
+    ids: &[&str],
+    string_cols: &[&str],
+) -> Option<Dataset> {
+    let mut df = read_csv(data_dir, dgp, n, string_cols)?;
     // Cast integer columns to f64 for consistent downstream handling
     let int_cols: Vec<String> = df
         .get_columns()
@@ -229,47 +408,78 @@ fn load_csv_dataset_with_ids(data_dir: &str, dgp: &str, n: usize, ids: &[&str]) 
     Some(Dataset::new(df))
 }
 
-/// Load a CSV file as an Array2<f64> (for ML methods). Returns None if not found.
+/// Load a CSV file as an Array2<f64> of all its columns, in file order (for
+/// ML methods). Returns None if not found or if a column is not numeric.
 fn load_csv_array2(data_dir: &str, dgp: &str, n: usize) -> Option<Array2<f64>> {
-    let path = format!("{}/{}_n{}.csv", data_dir, dgp, n);
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("WARNING: CSV not found: {}, using internal PRNG", path);
-        return None;
+    let df = read_csv(data_dir, dgp, n, &[])?;
+    let names: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    df_columns_array2(&df, &names)
+}
+
+/// The columns named in `cols`, in that order, as an n x cols.len() Array2<f64>
+/// (integer columns are cast). None if the file or a column is missing.
+///   `load_csv_columns_array2(&data_dir, "regression", n, &["x1", "x2"])`
+///   rows as Vec<Vec<f64>>: `a.outer_iter().map(|r| r.to_vec()).collect()`
+fn load_csv_columns_array2(
+    data_dir: &str,
+    dgp: &str,
+    n: usize,
+    cols: &[&str],
+) -> Option<Array2<f64>> {
+    let df = read_csv(data_dir, dgp, n, &[])?;
+    let arr = df_columns_array2(&df, cols);
+    if arr.is_none() {
+        eprintln!(
+            "WARNING: {} lacks a numeric column among {:?}",
+            csv_path(data_dir, dgp, n),
+            cols
+        );
     }
-    let df = CsvReadOptions::default()
-        .try_into_reader_with_file_path(Some(path.into()))
-        .ok()?
-        .finish()
-        .ok()?;
-    let ncols = df.width();
-    let nrows = df.height();
-    let mut data = Array2::zeros((nrows, ncols));
-    for (j, col) in df.get_columns().iter().enumerate() {
-        let s = col.as_materialized_series();
-        let ca = s.f64().ok()?;
-        for (i, val) in ca.into_iter().enumerate() {
-            data[[i, j]] = val.unwrap_or(0.0);
+    arr
+}
+
+fn df_columns_array2(df: &DataFrame, cols: &[&str]) -> Option<Array2<f64>> {
+    let mut data = Array2::zeros((df.height(), cols.len()));
+    for (j, name) in cols.iter().enumerate() {
+        let values = df_column_f64(df, name)?;
+        for (i, v) in values.into_iter().enumerate() {
+            data[[i, j]] = v;
         }
     }
     Some(data)
 }
 
-/// Load a CSV file as an Array1<f64> from a single column. Returns None if not found.
+/// Load a CSV file as an Array1<f64> from a single column (integer columns
+/// are cast). Returns None if the file or the column is missing.
+///   `load_csv_array1(&data_dir, "normal", n, "x").map(|a| a.to_vec())`
 fn load_csv_array1(data_dir: &str, dgp: &str, n: usize, col_name: &str) -> Option<Array1<f64>> {
-    let path = format!("{}/{}_n{}.csv", data_dir, dgp, n);
-    if !std::path::Path::new(&path).exists() {
+    let df = read_csv(data_dir, dgp, n, &[])?;
+    df_column_f64(&df, col_name).map(Array1::from)
+}
+
+/// One integer column (group codes, cutoff indices, event types) as
+/// Array1<i64>. None if the file or the column is missing, or a value is
+/// missing or not a whole number.
+///   `load_csv_array1_i64(&data_dir, "rd_multi", n, "c_idx").map(|a| a.mapv(|v| v as usize))`
+fn load_csv_array1_i64(data_dir: &str, dgp: &str, n: usize, col_name: &str) -> Option<Array1<i64>> {
+    let df = read_csv(data_dir, dgp, n, &[])?;
+    let path = csv_path(data_dir, dgp, n);
+    let col = df.column(col_name).ok()?;
+    if col.null_count() > 0 || col.dtype() == &DataType::String {
+        eprintln!("WARNING: {} column {} is not all integers", path, col_name);
         return None;
     }
-    let df = CsvReadOptions::default()
-        .try_into_reader_with_file_path(Some(path.into()))
-        .ok()?
-        .finish()
-        .ok()?;
-    let col = df.column(col_name).ok()?;
-    let s = col.as_materialized_series();
-    let ca = s.f64().ok()?;
-    let arr: Array1<f64> = ca.into_iter().map(|v| v.unwrap_or(0.0)).collect();
-    Some(arr)
+    let values = df_column_f64(&df, col_name)?;
+    if values.iter().any(|v| v.fract() != 0.0) {
+        eprintln!("WARNING: {} column {} is not all integers", path, col_name);
+        return None;
+    }
+    Some(values.into_iter().map(|v| v as i64).collect())
 }
 
 // ============================================
@@ -706,6 +916,24 @@ fn extract_col_vec(dataset: &Dataset, col: &str) -> Vec<f64> {
         .collect()
 }
 
+/// Extract a column from a dataset as Vec<String> (labels for the functions
+/// that take `&[String]`; numbers are formatted, nulls become "").
+fn extract_col_strings(dataset: &Dataset, col: &str) -> Vec<String> {
+    let casted = dataset
+        .df()
+        .column(col)
+        .unwrap()
+        .cast(&DataType::String)
+        .unwrap();
+    casted
+        .as_materialized_series()
+        .str()
+        .unwrap()
+        .into_iter()
+        .map(|v| v.unwrap_or("").to_string())
+        .collect()
+}
+
 // ============================================
 // Main
 // ============================================
@@ -728,41 +956,59 @@ fn completed_results(results: &[BenchmarkResult]) -> Vec<BenchmarkResult> {
 }
 
 fn main() {
-    // Parse --data-dir from CLI args
     let args: Vec<String> = std::env::args().collect();
-    let data_dir = args
-        .windows(2)
-        .find(|w| w[0] == "--data-dir")
-        .map(|w| w[1].clone())
-        .unwrap_or_else(|| "performance/comparisons/data".to_string());
+    let opts = parse_run_options(&args);
+    let data_dir = opts.data_dir.clone();
+    let _ = ONLY.set(opts.only.clone());
 
-    let config = BenchConfig {
-        warmup_iterations: 10,
-        measurement_iterations: 100,
-        capture_raw_times: true,
-    };
-
-    let slow_config = BenchConfig {
-        warmup_iterations: 3,
-        measurement_iterations: 20,
-        capture_raw_times: true,
+    let (config, slow_config) = if opts.quick {
+        // Correctness checks: every size runs, few iterations, timings unused.
+        let quick = BenchConfig {
+            warmup_iterations: 1,
+            measurement_iterations: 3,
+            capture_raw_times: true,
+        };
+        (quick.clone(), quick)
+    } else {
+        (
+            BenchConfig {
+                warmup_iterations: 10,
+                measurement_iterations: 100,
+                capture_raw_times: true,
+            },
+            BenchConfig {
+                warmup_iterations: 3,
+                measurement_iterations: 20,
+                capture_raw_times: true,
+            },
+        )
     };
 
     let mut results: Vec<BenchmarkResult> = Vec::new();
 
-    // Set up incremental save paths so results are written after each section
+    // Set up incremental save paths so results are written after each section:
+    // --results-dir names the one directory; by default the file goes to both
+    // results directories of the workspace.
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_default();
-    let perf_results = workspace_root.join("performance/results");
-    let r_results = workspace_root.join("performance/comparisons/r_comparison/results");
-    let _ = std::fs::create_dir_all(&perf_results);
-    let _ = std::fs::create_dir_all(&r_results);
-    let incremental_path = perf_results.join(format!("rust_unified_{}.json", timestamp));
-    let incremental_r_path = r_results.join(format!("rust_unified_{}.json", timestamp));
+    let file_name = format!("rust_unified_{}.json", timestamp);
+    let result_dirs: Vec<PathBuf> = match &opts.results_dir {
+        Some(dir) => vec![dir.clone()],
+        None => {
+            let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            vec![
+                workspace_root.join("performance/results"),
+                workspace_root.join("performance/comparisons/r_comparison/results"),
+            ]
+        }
+    };
+    for dir in &result_dirs {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let result_paths: Vec<PathBuf> = result_dirs.iter().map(|d| d.join(&file_name)).collect();
 
     // Macro to save results incrementally after each section. Only completed
     // calls are saved: a call that returned an error leaves `outputs` empty,
@@ -770,17 +1016,32 @@ fn main() {
     macro_rules! save_incremental {
         ($results:expr) => {
             let completed = completed_results($results);
-            let _ = save_results(&completed, &incremental_path.to_string_lossy());
-            let _ = save_results(&completed, &incremental_r_path.to_string_lossy());
+            for path in &result_paths {
+                if let Err(e) = save_results(&completed, &path.to_string_lossy()) {
+                    eprintln!("WARNING: cannot write {}: {}", path.display(), e);
+                }
+            }
         };
     }
 
     println!("\n=== p2a Unified Benchmarks ===\n");
     println!("Data directory: {}", data_dir);
-    println!("Incremental results: {}", incremental_path.display());
+    println!("Incremental results: {}", result_paths[0].display());
+    if let Some(only) = &opts.only {
+        println!(
+            "Only: {}",
+            only.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
     println!(
-        "Configuration: {} warmup, {} measurement iterations\n",
-        config.warmup_iterations, config.measurement_iterations
+        "Configuration: {} warmup, {} measurement iterations{}\n",
+        config.warmup_iterations,
+        config.measurement_iterations,
+        if opts.quick {
+            " (--quick: slow benchmarks too)"
+        } else {
+            ""
+        }
     );
 
     // ============================================
@@ -789,7 +1050,7 @@ fn main() {
     println!("\n--- Regression ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["OLS"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let x_cols = vec!["x1", "x2", "x3", "x4", "x5"];
@@ -835,78 +1096,87 @@ fn main() {
     println!("\n--- Panel Data ---");
     print_header();
 
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
+    for (n_ent, n_per) in sizes_for(
+        &["FixedEffects", "RandomEffects", "HDFE"],
+        [(10, 10), (50, 20), (100, 100)],
+    ) {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
 
-        // Fixed Effects
-        let mut result = run_benchmark_tracked("FixedEffects", "within", n, &config, || {
-            run_fixed_effects(&dataset, "y", &["x1", "x2"], "entity")
-        });
-        if let Ok(ref fe) = run_fixed_effects(&dataset, "y", &["x1", "x2"], "entity") {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &fe.coefficients);
-            capture_vec(&mut outputs, "std_errors", &fe.std_errors);
-            capture(&mut outputs, "r_squared", fe.r_squared);
-            result.outputs = outputs;
+        if wants("FixedEffects") {
+            // Fixed Effects
+            let mut result = run_benchmark_tracked("FixedEffects", "within", n, &config, || {
+                run_fixed_effects(&dataset, "y", &["x1", "x2"], "entity")
+            });
+            if let Ok(ref fe) = run_fixed_effects(&dataset, "y", &["x1", "x2"], "entity") {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &fe.coefficients);
+                capture_vec(&mut outputs, "std_errors", &fe.std_errors);
+                capture(&mut outputs, "r_squared", fe.r_squared);
+                result.outputs = outputs;
+            }
+            result.dgp = "panel".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "panel".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // Random Effects
-        let mut result = run_benchmark_tracked("RandomEffects", "GLS", n, &config, || {
-            run_random_effects(&dataset, "y", &["x1", "x2"], "entity")
-        });
-        if let Ok(ref re) = run_random_effects(&dataset, "y", &["x1", "x2"], "entity") {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &re.coefficients);
-            capture_vec(&mut outputs, "std_errors", &re.std_errors);
-            capture(&mut outputs, "r_squared", re.r_squared);
-            result.outputs = outputs;
+        if wants("RandomEffects") {
+            // Random Effects
+            let mut result = run_benchmark_tracked("RandomEffects", "GLS", n, &config, || {
+                run_random_effects(&dataset, "y", &["x1", "x2"], "entity")
+            });
+            if let Ok(ref re) = run_random_effects(&dataset, "y", &["x1", "x2"], "entity") {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &re.coefficients);
+                capture_vec(&mut outputs, "std_errors", &re.std_errors);
+                capture(&mut outputs, "r_squared", re.r_squared);
+                result.outputs = outputs;
+            }
+            result.dgp = "panel".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "panel".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // HDFE
-        let mut result = run_benchmark_tracked("HDFE", "2-way", n, &config, || {
-            run_hdfe(
+        if wants("HDFE") {
+            // HDFE
+            let mut result = run_benchmark_tracked("HDFE", "2-way", n, &config, || {
+                run_hdfe(
+                    &dataset,
+                    "y",
+                    &["x1", "x2"],
+                    &["entity", "time"],
+                    None,
+                    CovarianceType::Standard,
+                )
+            });
+            if let Ok(ref hdfe) = run_hdfe(
                 &dataset,
                 "y",
                 &["x1", "x2"],
                 &["entity", "time"],
                 None,
                 CovarianceType::Standard,
-            )
-        });
-        if let Ok(ref hdfe) = run_hdfe(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            &["entity", "time"],
-            None,
-            CovarianceType::Standard,
-        ) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &hdfe.coefficients);
-            capture_vec(&mut outputs, "std_errors", &hdfe.std_errors);
-            capture(&mut outputs, "r_squared_within", hdfe.r_squared_within);
-            result.outputs = outputs;
+            ) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &hdfe.coefficients);
+                capture_vec(&mut outputs, "std_errors", &hdfe.std_errors);
+                capture(&mut outputs, "r_squared_within", hdfe.r_squared_within);
+                result.outputs = outputs;
+            }
+            result.dgp = "panel".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "panel".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
     }
 
     // Additional Panel Methods: Hausman, Panel_GLS, Arellano_Bond, PVCM, PMG
 
     // Hausman test
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
+    for (n_ent, n_per) in sizes_for(&["Hausman"], [(10, 10), (50, 20), (100, 100)]) {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -928,7 +1198,7 @@ fn main() {
 
     // Panel GLS
     // Cap: no R benchmark at n=10000
-    for (n_ent, n_per) in [(10, 10), (50, 20)] {
+    for (n_ent, n_per) in sizes_for(&["Panel_GLS"], [(10, 10), (50, 20)]) {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset_with_ids(&data_dir, "panel", n, &["entity"])
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -964,7 +1234,7 @@ fn main() {
 
     // Arellano-Bond GMM
     // Cap: no R benchmark at n=10000
-    for (n_ent, n_per) in [(10, 10), (50, 20)] {
+    for (n_ent, n_per) in sizes_for(&["Arellano_Bond"], [(10, 10), (50, 20)]) {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -986,7 +1256,7 @@ fn main() {
 
     // PVCM (requires string entity column)
     // Cap: no R benchmark at n=10000
-    for (n_ent, n_per) in [(10, 10), (50, 20)] {
+    for (n_ent, n_per) in sizes_for(&["PVCM"], [(10, 10), (50, 20)]) {
         let n = n_ent * n_per;
         let base_dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -1015,7 +1285,7 @@ fn main() {
 
     // PMG (requires string entity column)
     // Cap: no R benchmark at n=10000
-    for (n_ent, n_per) in [(10, 10), (50, 20)] {
+    for (n_ent, n_per) in sizes_for(&["PMG"], [(10, 10), (50, 20)]) {
         let n = n_ent * n_per;
         let base_dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -1049,41 +1319,45 @@ fn main() {
     println!("\n--- Discrete Choice ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Logit", "Probit"], [100, 1000, 10000]) {
         let dataset =
             load_csv_dataset(&data_dir, "binary", n).unwrap_or_else(|| generate_binary_data(n, 42));
 
-        // Logit
-        let mut result = run_benchmark_tracked("Logit", "MLE", n, &config, || {
-            run_logit(&dataset, "y", &["x1", "x2"])
-        });
-        if let Ok(ref logit) = run_logit(&dataset, "y", &["x1", "x2"]) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &logit.coefficients);
-            capture_vec(&mut outputs, "std_errors", &logit.std_errors);
-            capture(&mut outputs, "log_likelihood", logit.log_likelihood);
-            result.outputs = outputs;
+        if wants("Logit") {
+            // Logit
+            let mut result = run_benchmark_tracked("Logit", "MLE", n, &config, || {
+                run_logit(&dataset, "y", &["x1", "x2"])
+            });
+            if let Ok(ref logit) = run_logit(&dataset, "y", &["x1", "x2"]) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &logit.coefficients);
+                capture_vec(&mut outputs, "std_errors", &logit.std_errors);
+                capture(&mut outputs, "log_likelihood", logit.log_likelihood);
+                result.outputs = outputs;
+            }
+            result.dgp = "binary".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "binary".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // Probit
-        let mut result = run_benchmark_tracked("Probit", "MLE", n, &config, || {
-            run_probit(&dataset, "y", &["x1", "x2"])
-        });
-        if let Ok(ref probit) = run_probit(&dataset, "y", &["x1", "x2"]) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &probit.coefficients);
-            capture_vec(&mut outputs, "std_errors", &probit.std_errors);
-            capture(&mut outputs, "log_likelihood", probit.log_likelihood);
-            result.outputs = outputs;
+        if wants("Probit") {
+            // Probit
+            let mut result = run_benchmark_tracked("Probit", "MLE", n, &config, || {
+                run_probit(&dataset, "y", &["x1", "x2"])
+            });
+            if let Ok(ref probit) = run_probit(&dataset, "y", &["x1", "x2"]) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &probit.coefficients);
+                capture_vec(&mut outputs, "std_errors", &probit.std_errors);
+                capture(&mut outputs, "log_likelihood", probit.log_likelihood);
+                result.outputs = outputs;
+            }
+            result.dgp = "binary".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "binary".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
     }
 
     // ============================================
@@ -1093,45 +1367,49 @@ fn main() {
     println!("\n--- Time Series ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["ARIMA", "MSTL"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
 
-        // ARIMA
-        let mut result = run_benchmark_tracked("ARIMA", "(1,1,1)", n, &config, || {
-            run_arima(&dataset, "y", 1, 1, 1)
-        });
-        if let Ok(ref arima) = run_arima(&dataset, "y", 1, 1, 1) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "ar_coef", &arima.ar_coeffs);
-            capture_vec(&mut outputs, "ma_coef", &arima.ma_coeffs);
-            capture(&mut outputs, "intercept", arima.intercept);
-            capture(&mut outputs, "aic", arima.aic);
-            result.outputs = outputs;
+        if wants("ARIMA") {
+            // ARIMA
+            let mut result = run_benchmark_tracked("ARIMA", "(1,1,1)", n, &config, || {
+                run_arima(&dataset, "y", 1, 1, 1)
+            });
+            if let Ok(ref arima) = run_arima(&dataset, "y", 1, 1, 1) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "ar_coef", &arima.ar_coeffs);
+                capture_vec(&mut outputs, "ma_coef", &arima.ma_coeffs);
+                capture(&mut outputs, "intercept", arima.intercept);
+                capture(&mut outputs, "aic", arima.aic);
+                result.outputs = outputs;
+            }
+            result.dgp = "timeseries".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "timeseries".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // MSTL
-        let mut result = run_benchmark_tracked("MSTL", "period=12", n, &config, || {
-            run_mstl(&dataset, "y", &[12])
-        });
-        if let Ok(ref mstl) = run_mstl(&dataset, "y", &[12]) {
-            let mut outputs = BTreeMap::new();
-            // n_components = trend + seasonal(s) + remainder
-            capture(
-                &mut outputs,
-                "n_components",
-                (2 + mstl.seasonal.len()) as f64,
-            );
-            result.outputs = outputs;
+        if wants("MSTL") {
+            // MSTL
+            let mut result = run_benchmark_tracked("MSTL", "period=12", n, &config, || {
+                run_mstl(&dataset, "y", &[12])
+            });
+            if let Ok(ref mstl) = run_mstl(&dataset, "y", &[12]) {
+                let mut outputs = BTreeMap::new();
+                // n_components = trend + seasonal(s) + remainder
+                capture(
+                    &mut outputs,
+                    "n_components",
+                    (2 + mstl.seasonal.len()) as f64,
+                );
+                result.outputs = outputs;
+            }
+            result.dgp = "timeseries".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "timeseries".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
     }
 
     // ============================================
@@ -1141,47 +1419,51 @@ fn main() {
     println!("\n--- Machine Learning ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["K-Means", "PCA"], [100, 1000, 10000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
-        // K-Means
-        let mut result = run_benchmark_tracked("K-Means", "k=3", n, &config, || {
-            kmeans(data.view(), 3, Some(100), Some(1e-4), Some(5), Some(42))
-        });
-        if let Ok(ref km) = kmeans(data.view(), 3, Some(100), Some(1e-4), Some(5), Some(42)) {
-            let mut outputs = BTreeMap::new();
-            capture(&mut outputs, "inertia", km.inertia);
-            capture(&mut outputs, "n_iterations", km.n_iterations as f64);
-            let sizes: Vec<serde_json::Value> = km
-                .cluster_sizes
-                .iter()
-                .map(|&s| serde_json::Value::from(s as f64))
-                .collect();
-            outputs.insert("cluster_sizes".to_string(), serde_json::Value::Array(sizes));
-            result.outputs = outputs;
+        if wants("K-Means") {
+            // K-Means
+            let mut result = run_benchmark_tracked("K-Means", "k=3", n, &config, || {
+                kmeans(data.view(), 3, Some(100), Some(1e-4), Some(5), Some(42))
+            });
+            if let Ok(ref km) = kmeans(data.view(), 3, Some(100), Some(1e-4), Some(5), Some(42)) {
+                let mut outputs = BTreeMap::new();
+                capture(&mut outputs, "inertia", km.inertia);
+                capture(&mut outputs, "n_iterations", km.n_iterations as f64);
+                let sizes: Vec<serde_json::Value> = km
+                    .cluster_sizes
+                    .iter()
+                    .map(|&s| serde_json::Value::from(s as f64))
+                    .collect();
+                outputs.insert("cluster_sizes".to_string(), serde_json::Value::Array(sizes));
+                result.outputs = outputs;
+            }
+            result.dgp = "cluster".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "cluster".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // PCA
-        let mut result = run_benchmark_tracked("PCA", "k=3", n, &config, || {
-            pca(data.view(), Some(3), false)
-        });
-        if let Ok(ref pca_res) = pca(data.view(), Some(3), false) {
-            let mut outputs = BTreeMap::new();
-            let ev: Vec<f64> = pca_res.explained_variance.iter().cloned().collect();
-            capture_vec(&mut outputs, "eigenvalues", &ev);
-            let evr: Vec<f64> = pca_res.explained_variance_ratio.iter().cloned().collect();
-            capture_vec(&mut outputs, "variance_explained", &evr);
-            result.outputs = outputs;
+        if wants("PCA") {
+            // PCA
+            let mut result = run_benchmark_tracked("PCA", "k=3", n, &config, || {
+                pca(data.view(), Some(3), false)
+            });
+            if let Ok(ref pca_res) = pca(data.view(), Some(3), false) {
+                let mut outputs = BTreeMap::new();
+                let ev: Vec<f64> = pca_res.explained_variance.iter().cloned().collect();
+                capture_vec(&mut outputs, "eigenvalues", &ev);
+                let evr: Vec<f64> = pca_res.explained_variance_ratio.iter().cloned().collect();
+                capture_vec(&mut outputs, "variance_explained", &evr);
+                result.outputs = outputs;
+            }
+            result.dgp = "cluster".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "cluster".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
     }
 
     // ============================================
@@ -1191,7 +1473,7 @@ fn main() {
     println!("\n--- LOESS ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["LOESS"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "loess", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
         let mut result = run_benchmark_tracked("LOESS", "span=0.75", n, &config, || {
@@ -1219,7 +1501,7 @@ fn main() {
     // Hierarchical Clustering
     // ============================================
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["Hierarchical"], [100, 1000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let mut result = run_benchmark_tracked("Hierarchical", "Ward", n, &config, || {
@@ -1240,7 +1522,7 @@ fn main() {
     // Random Forest
     // ============================================
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["RandomForest"], [100, 1000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let target: Array1<f64> = data.column(0).to_owned();
@@ -1270,7 +1552,7 @@ fn main() {
     // DBSCAN
     // ============================================
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["DBSCAN"], [100, 1000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let mut result = run_benchmark_tracked("DBSCAN", "eps=1.5", n, &config, || {
@@ -1292,7 +1574,7 @@ fn main() {
     // Factor Analysis
     // ============================================
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["factanal"], [100, 1000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let p = 10;
         let k = 3;
@@ -1357,7 +1639,7 @@ fn main() {
     // Doubly Robust (AIPW)
     // ============================================
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["Doubly_Robust"], [100, 1000]) {
         let dataset =
             load_csv_dataset(&data_dir, "binary", n).unwrap_or_else(|| generate_binary_data(n, 42));
         let dr_config = DoublyRobustConfig {
@@ -1387,7 +1669,7 @@ fn main() {
     // ============================================
     // Changepoint
     // ============================================
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Changepoint"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let mut result = run_benchmark_tracked("Changepoint", "PELT", n, &config, || {
@@ -1410,7 +1692,7 @@ fn main() {
     // Synthetic Control
     // ============================================
     // Cap: no R benchmark at n=10000
-    for (n_units, n_periods) in [(10, 10), (50, 20)] {
+    for (n_units, n_periods) in sizes_for(&["SynthControl"], [(10, 10), (50, 20)]) {
         let n = n_units * n_periods;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let mut unit_ids: Vec<String> = Vec::new();
@@ -1468,7 +1750,10 @@ fn main() {
     println!("\n--- Spatial ---");
     print_header();
 
-    for n_side in [10, 20, 32] {
+    for n_side in sizes_for(
+        &["SAR", "SEM", "SAC", "Moran_Test", "Local_Moran"],
+        [10, 20, 32],
+    ) {
         let n = n_side * n_side;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let mut coords = Vec::with_capacity(n);
@@ -1499,86 +1784,94 @@ fn main() {
 
         // SAR
         let listw_clone = listw.clone();
-        let mut result = run_benchmark_tracked("SAR", "lagsarlm", n, &config, || {
-            let mut lw = listw_clone.clone();
-            run_sar_dataset(&dataset, "y", &["x"], &mut lw, sar_config.clone())
-        });
-        if let Ok(ref sar) = {
-            let mut lw = listw.clone();
-            run_sar_dataset(&dataset, "y", &["x"], &mut lw, sar_config.clone())
-        } {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &sar.coefficients);
-            capture_vec(&mut outputs, "std_errors", &sar.std_errors);
-            capture(&mut outputs, "rho", sar.rho);
-            result.outputs = outputs;
+        if wants("SAR") {
+            let mut result = run_benchmark_tracked("SAR", "lagsarlm", n, &config, || {
+                let mut lw = listw_clone.clone();
+                run_sar_dataset(&dataset, "y", &["x"], &mut lw, sar_config.clone())
+            });
+            if let Ok(ref sar) = {
+                let mut lw = listw.clone();
+                run_sar_dataset(&dataset, "y", &["x"], &mut lw, sar_config.clone())
+            } {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &sar.coefficients);
+                capture_vec(&mut outputs, "std_errors", &sar.std_errors);
+                capture(&mut outputs, "rho", sar.rho);
+                result.outputs = outputs;
+            }
+            result.dgp = "spatial".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "spatial".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
         // SEM
         let listw_clone = listw.clone();
-        let mut result = run_benchmark_tracked("SEM", "errorsarlm", n, &config, || {
-            let mut lw = listw_clone.clone();
-            run_sem_dataset(&dataset, "y", &["x"], &mut lw, sem_config.clone())
-        });
-        if let Ok(ref sem) = {
-            let mut lw = listw.clone();
-            run_sem_dataset(&dataset, "y", &["x"], &mut lw, sem_config.clone())
-        } {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &sem.coefficients);
-            capture_vec(&mut outputs, "std_errors", &sem.std_errors);
-            capture(&mut outputs, "lambda", sem.lambda);
-            result.outputs = outputs;
+        if wants("SEM") {
+            let mut result = run_benchmark_tracked("SEM", "errorsarlm", n, &config, || {
+                let mut lw = listw_clone.clone();
+                run_sem_dataset(&dataset, "y", &["x"], &mut lw, sem_config.clone())
+            });
+            if let Ok(ref sem) = {
+                let mut lw = listw.clone();
+                run_sem_dataset(&dataset, "y", &["x"], &mut lw, sem_config.clone())
+            } {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &sem.coefficients);
+                capture_vec(&mut outputs, "std_errors", &sem.std_errors);
+                capture(&mut outputs, "lambda", sem.lambda);
+                result.outputs = outputs;
+            }
+            result.dgp = "spatial".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "spatial".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
         // SAC (SARAR)
         let sac_config = SacConfig::default();
         let listw_clone = listw.clone();
-        let mut result = run_benchmark_tracked("SAC", "sacsarlm", n, &slow_config, || {
-            let mut lw = listw_clone.clone();
-            run_sac_dataset(&dataset, "y", &["x"], &mut lw, sac_config.clone())
-        });
-        if let Ok(ref sac) = {
-            let mut lw = listw.clone();
-            run_sac_dataset(&dataset, "y", &["x"], &mut lw, sac_config.clone())
-        } {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &sac.coefficients);
-            capture(&mut outputs, "rho", sac.rho);
-            capture(&mut outputs, "lambda", sac.lambda);
-            result.outputs = outputs;
+        if wants("SAC") {
+            let mut result = run_benchmark_tracked("SAC", "sacsarlm", n, &slow_config, || {
+                let mut lw = listw_clone.clone();
+                run_sac_dataset(&dataset, "y", &["x"], &mut lw, sac_config.clone())
+            });
+            if let Ok(ref sac) = {
+                let mut lw = listw.clone();
+                run_sac_dataset(&dataset, "y", &["x"], &mut lw, sac_config.clone())
+            } {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &sac.coefficients);
+                capture(&mut outputs, "rho", sac.rho);
+                capture(&mut outputs, "lambda", sac.lambda);
+                result.outputs = outputs;
+            }
+            result.dgp = "spatial".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "spatial".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
         // Moran's I test
         let y_arr = Array1::from(y_vals.clone());
-        let mut result = run_benchmark_tracked("Moran_Test", "moran.test", n, &config, || {
-            moran_test(&y_arr, &listw, MoranAlternative::Greater)
-        });
-        if let Ok(ref m) = moran_test(&y_arr, &listw, MoranAlternative::Greater) {
-            let mut outputs = BTreeMap::new();
-            capture(&mut outputs, "statistic", m.statistic);
-            capture(&mut outputs, "p_value", m.p_value);
-            result.outputs = outputs;
+        if wants("Moran_Test") {
+            let mut result = run_benchmark_tracked("Moran_Test", "moran.test", n, &config, || {
+                moran_test(&y_arr, &listw, MoranAlternative::Greater)
+            });
+            if let Ok(ref m) = moran_test(&y_arr, &listw, MoranAlternative::Greater) {
+                let mut outputs = BTreeMap::new();
+                capture(&mut outputs, "statistic", m.statistic);
+                capture(&mut outputs, "p_value", m.p_value);
+                result.outputs = outputs;
+            }
+            result.dgp = "spatial".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "spatial".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
         // Local Moran (LISA) - skip n_side=32 (too slow for permutations)
-        if n_side <= 20 {
+        if n_side <= 20 && wants("Local_Moran") {
             let mut result =
                 run_benchmark_tracked("Local_Moran", "localmoran", n, &slow_config, || {
                     localmoran(&y_arr, &listw, 0.05, 99)
@@ -1605,7 +1898,7 @@ fn main() {
 
     // DiD (canonical 2x2)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["DiD"], [100, 1000]) {
         let dataset =
             load_csv_dataset(&data_dir, "did", n).unwrap_or_else(|| generate_did_data(n, 42));
         let mut result = run_benchmark_tracked("DiD", "canonical", n, &slow_config, || {
@@ -1625,7 +1918,7 @@ fn main() {
 
     // IV/2SLS
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["IV_2SLS"], [100, 1000]) {
         let dataset =
             load_csv_dataset(&data_dir, "iv", n).unwrap_or_else(|| generate_iv_data(n, 42));
         let mut result = run_benchmark_tracked("IV_2SLS", "2sls", n, &slow_config, || {
@@ -1659,7 +1952,7 @@ fn main() {
 
     // RD (sharp)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["RD"], [100, 1000]) {
         let dataset =
             load_csv_dataset(&data_dir, "rd", n).unwrap_or_else(|| generate_rd_data(n, 42));
         let mut result = run_benchmark_tracked("RD", "sharp", n, &slow_config, || {
@@ -1682,7 +1975,7 @@ fn main() {
 
     // Staggered DiD (Callaway-Sant'Anna)
     // Cap: no R benchmark at n=10000
-    for (n_units, n_periods) in [(10, 10), (50, 20)] {
+    for (n_units, n_periods) in sizes_for(&["Staggered_DiD"], [(10, 10), (50, 20)]) {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset_with_ids(&data_dir, "staggered", n, &["unit"])
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1720,7 +2013,7 @@ fn main() {
 
     // ETWFE (Wooldridge)
     // Cap: no R benchmark at n=10000
-    for (n_units, n_periods) in [(10, 10), (50, 20)] {
+    for (n_units, n_periods) in sizes_for(&["ETWFE"], [(10, 10), (50, 20)]) {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset_with_ids(&data_dir, "staggered", n, &["unit"])
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1759,7 +2052,7 @@ fn main() {
 
     // Bacon decomposition
     // Cap: no R benchmark at n=10000
-    for (n_units, n_periods) in [(10, 10), (50, 20)] {
+    for (n_units, n_periods) in sizes_for(&["Bacon"], [(10, 10), (50, 20)]) {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset(&data_dir, "staggered", n)
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1780,7 +2073,7 @@ fn main() {
 
     // GSynth (Generalized Synthetic Control)
     // Cap: no R benchmark at n=10000
-    for (n_units, n_periods) in [(10, 10), (50, 20)] {
+    for (n_units, n_periods) in sizes_for(&["GSynth"], [(10, 10), (50, 20)]) {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset_with_ids(&data_dir, "staggered", n, &["unit"])
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1824,7 +2117,7 @@ fn main() {
 
     // TMLE
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["TMLE"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("TMLE", "ATE", n, &slow_config, || {
@@ -1856,7 +2149,7 @@ fn main() {
 
     // CTMLE
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["CTMLE"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("CTMLE", "adaptive", n, &slow_config, || {
@@ -1888,7 +2181,7 @@ fn main() {
 
     // IPW
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["IPW"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("IPW", "ATE", n, &slow_config, || {
@@ -1920,7 +2213,7 @@ fn main() {
 
     // CBPS
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["CBPS"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("CBPS", "exact", n, &slow_config, || {
@@ -1975,7 +2268,7 @@ fn main() {
 
     // Matching (nearest neighbor)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["Matching"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("Matching", "nearest", n, &slow_config, || {
@@ -2015,7 +2308,7 @@ fn main() {
 
     // WeightIt
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["WeightIt"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("WeightIt", "logistic", n, &slow_config, || {
@@ -2044,7 +2337,7 @@ fn main() {
 
     // DoubleML (PLR)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["DoubleML"], [100, 1000]) {
         let (y, d, x) = generate_doubleml_data(n, 42);
         let mut result = run_benchmark_tracked("DoubleML", "PLR", n, &slow_config, || {
             run_double_ml(&y.view(), &d.view(), &x.view(), DoubleMLConfig::default())
@@ -2065,7 +2358,7 @@ fn main() {
 
     // Mediation
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["Mediation"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "mediation", n)
             .unwrap_or_else(|| generate_mediation_data(n, 42));
         let med_config = MediationConfig {
@@ -2106,7 +2399,7 @@ fn main() {
 
     // LTMLE (2 time points)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["LTMLE"], [100, 1000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x1: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
         let x2: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
@@ -2158,7 +2451,7 @@ fn main() {
     println!("\n--- Fisher Exact Test ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Fisher"], [100, 1000, 10000]) {
         let a = (n as f64 * 0.3) as f64;
         let b = (n as f64 * 0.2) as f64;
         let c = (n as f64 * 0.15) as f64;
@@ -2187,7 +2480,7 @@ fn main() {
     println!("\n--- Isotonic Regression ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Isotonic_Regression"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
         let y_iso: Vec<f64> = x
@@ -2222,7 +2515,7 @@ fn main() {
     println!("\n--- Jarque-Bera ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Jarque_Bera"], [100, 1000, 10000]) {
         let dataset = generate_regression_data(n, 5, 42);
         let x_cols = vec!["x1", "x2", "x3", "x4", "x5"];
         let ols_result = run_ols(&dataset, "y", &x_cols, true, CovarianceType::Standard).unwrap();
@@ -2250,59 +2543,65 @@ fn main() {
     println!("\n--- Survival Analysis ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["KM", "CoxPH", "LogRank"], [100, 1000, 10000]) {
         let ds = load_csv_dataset(&data_dir, "survival", n);
 
         if let Some(ref dataset) = ds {
-            // Kaplan-Meier
-            let mut result = run_benchmark_tracked("KM", "unstratified", n, &config, || {
-                run_kaplan_meier(dataset, "time", "event", None, 0.95)
-            });
-            if let Ok(ref km_results) = run_kaplan_meier(dataset, "time", "event", None, 0.95) {
-                if let Some(km) = km_results.first() {
-                    let mut outputs = BTreeMap::new();
-                    capture(&mut outputs, "n_events", km.total_events as f64);
-                    if let Some(med) = km.median_survival {
-                        capture(&mut outputs, "median_survival", med);
+            if wants("KM") {
+                // Kaplan-Meier
+                let mut result = run_benchmark_tracked("KM", "unstratified", n, &config, || {
+                    run_kaplan_meier(dataset, "time", "event", None, 0.95)
+                });
+                if let Ok(ref km_results) = run_kaplan_meier(dataset, "time", "event", None, 0.95) {
+                    if let Some(km) = km_results.first() {
+                        let mut outputs = BTreeMap::new();
+                        capture(&mut outputs, "n_events", km.total_events as f64);
+                        if let Some(med) = km.median_survival {
+                            capture(&mut outputs, "median_survival", med);
+                        }
+                        result.outputs = outputs;
                     }
+                }
+                result.dgp = "survival".to_string();
+                result.seed = 42;
+                print_result(&result);
+                results.push(result);
+            }
+
+            if wants("CoxPH") {
+                // Cox PH
+                let mut result = run_benchmark_tracked("CoxPH", "efron", n, &config, || {
+                    run_cox_ph(dataset, "time", "event", &["x1", "x2"], None)
+                });
+                if let Ok(ref cox) = run_cox_ph(dataset, "time", "event", &["x1", "x2"], None) {
+                    let mut outputs = BTreeMap::new();
+                    capture_vec(&mut outputs, "coefficients", &cox.coefficients);
+                    capture_vec(&mut outputs, "std_errors", &cox.std_errors);
+                    capture(&mut outputs, "log_likelihood", cox.log_likelihood);
                     result.outputs = outputs;
                 }
+                result.dgp = "survival".to_string();
+                result.seed = 42;
+                print_result(&result);
+                results.push(result);
             }
-            result.dgp = "survival".to_string();
-            result.seed = 42;
-            print_result(&result);
-            results.push(result);
 
-            // Cox PH
-            let mut result = run_benchmark_tracked("CoxPH", "efron", n, &config, || {
-                run_cox_ph(dataset, "time", "event", &["x1", "x2"], None)
-            });
-            if let Ok(ref cox) = run_cox_ph(dataset, "time", "event", &["x1", "x2"], None) {
-                let mut outputs = BTreeMap::new();
-                capture_vec(&mut outputs, "coefficients", &cox.coefficients);
-                capture_vec(&mut outputs, "std_errors", &cox.std_errors);
-                capture(&mut outputs, "log_likelihood", cox.log_likelihood);
-                result.outputs = outputs;
+            if wants("LogRank") {
+                // Log-Rank test
+                let mut result = run_benchmark_tracked("LogRank", "test", n, &config, || {
+                    log_rank_test(dataset, "time", "event", "group")
+                });
+                if let Ok(ref lr) = log_rank_test(dataset, "time", "event", "group") {
+                    let mut outputs = BTreeMap::new();
+                    capture(&mut outputs, "chi_sq", lr.chi_squared);
+                    capture(&mut outputs, "p_value", lr.p_value);
+                    result.outputs = outputs;
+                }
+                result.dgp = "survival".to_string();
+                result.seed = 42;
+                print_result(&result);
+                results.push(result);
             }
-            result.dgp = "survival".to_string();
-            result.seed = 42;
-            print_result(&result);
-            results.push(result);
-
-            // Log-Rank test
-            let mut result = run_benchmark_tracked("LogRank", "test", n, &config, || {
-                log_rank_test(dataset, "time", "event", "group")
-            });
-            if let Ok(ref lr) = log_rank_test(dataset, "time", "event", "group") {
-                let mut outputs = BTreeMap::new();
-                capture(&mut outputs, "chi_sq", lr.chi_squared);
-                capture(&mut outputs, "p_value", lr.p_value);
-                result.outputs = outputs;
-            }
-            result.dgp = "survival".to_string();
-            result.seed = 42;
-            print_result(&result);
-            results.push(result);
         } else {
             // Fall back to generated data
             let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -2332,52 +2631,59 @@ fn main() {
             .unwrap();
             let dataset = Dataset::new(df);
 
-            let mut result = run_benchmark_tracked("KM", "unstratified", n, &config, || {
-                run_kaplan_meier(&dataset, "time", "event", None, 0.95)
-            });
-            if let Ok(ref km_results) = run_kaplan_meier(&dataset, "time", "event", None, 0.95) {
-                if let Some(km) = km_results.first() {
-                    let mut outputs = BTreeMap::new();
-                    capture(&mut outputs, "n_events", km.total_events as f64);
-                    if let Some(med) = km.median_survival {
-                        capture(&mut outputs, "median_survival", med);
+            if wants("KM") {
+                let mut result = run_benchmark_tracked("KM", "unstratified", n, &config, || {
+                    run_kaplan_meier(&dataset, "time", "event", None, 0.95)
+                });
+                if let Ok(ref km_results) = run_kaplan_meier(&dataset, "time", "event", None, 0.95)
+                {
+                    if let Some(km) = km_results.first() {
+                        let mut outputs = BTreeMap::new();
+                        capture(&mut outputs, "n_events", km.total_events as f64);
+                        if let Some(med) = km.median_survival {
+                            capture(&mut outputs, "median_survival", med);
+                        }
+                        result.outputs = outputs;
                     }
+                }
+                result.dgp = "survival".to_string();
+                result.seed = 42;
+                print_result(&result);
+                results.push(result);
+            }
+
+            if wants("CoxPH") {
+                let mut result = run_benchmark_tracked("CoxPH", "efron", n, &config, || {
+                    run_cox_ph(&dataset, "time", "event", &["x1", "x2"], None)
+                });
+                if let Ok(ref cox) = run_cox_ph(&dataset, "time", "event", &["x1", "x2"], None) {
+                    let mut outputs = BTreeMap::new();
+                    capture_vec(&mut outputs, "coefficients", &cox.coefficients);
+                    capture_vec(&mut outputs, "std_errors", &cox.std_errors);
+                    capture(&mut outputs, "log_likelihood", cox.log_likelihood);
                     result.outputs = outputs;
                 }
+                result.dgp = "survival".to_string();
+                result.seed = 42;
+                print_result(&result);
+                results.push(result);
             }
-            result.dgp = "survival".to_string();
-            result.seed = 42;
-            print_result(&result);
-            results.push(result);
 
-            let mut result = run_benchmark_tracked("CoxPH", "efron", n, &config, || {
-                run_cox_ph(&dataset, "time", "event", &["x1", "x2"], None)
-            });
-            if let Ok(ref cox) = run_cox_ph(&dataset, "time", "event", &["x1", "x2"], None) {
-                let mut outputs = BTreeMap::new();
-                capture_vec(&mut outputs, "coefficients", &cox.coefficients);
-                capture_vec(&mut outputs, "std_errors", &cox.std_errors);
-                capture(&mut outputs, "log_likelihood", cox.log_likelihood);
-                result.outputs = outputs;
+            if wants("LogRank") {
+                let mut result = run_benchmark_tracked("LogRank", "test", n, &config, || {
+                    log_rank_test(&dataset, "time", "event", "group")
+                });
+                if let Ok(ref lr) = log_rank_test(&dataset, "time", "event", "group") {
+                    let mut outputs = BTreeMap::new();
+                    capture(&mut outputs, "chi_sq", lr.chi_squared);
+                    capture(&mut outputs, "p_value", lr.p_value);
+                    result.outputs = outputs;
+                }
+                result.dgp = "survival".to_string();
+                result.seed = 42;
+                print_result(&result);
+                results.push(result);
             }
-            result.dgp = "survival".to_string();
-            result.seed = 42;
-            print_result(&result);
-            results.push(result);
-
-            let mut result = run_benchmark_tracked("LogRank", "test", n, &config, || {
-                log_rank_test(&dataset, "time", "event", "group")
-            });
-            if let Ok(ref lr) = log_rank_test(&dataset, "time", "event", "group") {
-                let mut outputs = BTreeMap::new();
-                capture(&mut outputs, "chi_sq", lr.chi_squared);
-                capture(&mut outputs, "p_value", lr.p_value);
-                result.outputs = outputs;
-            }
-            result.dgp = "survival".to_string();
-            result.seed = 42;
-            print_result(&result);
-            results.push(result);
         }
     }
 
@@ -2388,7 +2694,7 @@ fn main() {
     println!("\n--- Sensemakr ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Sensemakr"], [100, 1000, 10000]) {
         let ds = load_csv_dataset(&data_dir, "treatment", n);
 
         let dataset = ds.unwrap_or_else(|| {
@@ -2462,61 +2768,82 @@ fn main() {
     println!("\n--- Regression Diagnostics & Variants ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(
+        &[
+            "OLS_HC0",
+            "OLS_HC2",
+            "OLS_HC3",
+            "OLS_HAC",
+            "Breusch_Godfrey",
+            "Breusch_Pagan",
+            "Durbin_Watson",
+            "Harvey_Collier",
+            "RESET",
+            "VIF",
+            "Wald",
+        ],
+        [100, 1000, 10000],
+    ) {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3", "x4", "x5"];
 
-        // OLS_HC0
-        let mut result = run_benchmark_tracked("OLS_HC0", "robust", n, &config, || {
-            run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC0)
-        });
-        if let Ok(ref ols) = run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC0) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &ols.coefficients().to_vec());
-            capture_vec(&mut outputs, "std_errors", &ols.std_errors().to_vec());
-            capture(&mut outputs, "r_squared", ols.r_squared);
-            result.outputs = outputs;
+        if wants("OLS_HC0") {
+            // OLS_HC0
+            let mut result = run_benchmark_tracked("OLS_HC0", "robust", n, &config, || {
+                run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC0)
+            });
+            if let Ok(ref ols) = run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC0) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &ols.coefficients().to_vec());
+                capture_vec(&mut outputs, "std_errors", &ols.std_errors().to_vec());
+                capture(&mut outputs, "r_squared", ols.r_squared);
+                result.outputs = outputs;
+            }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // OLS_HC2
-        let mut result = run_benchmark_tracked("OLS_HC2", "robust", n, &config, || {
-            run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC2)
-        });
-        if let Ok(ref ols) = run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC2) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &ols.coefficients().to_vec());
-            capture_vec(&mut outputs, "std_errors", &ols.std_errors().to_vec());
-            capture(&mut outputs, "r_squared", ols.r_squared);
-            result.outputs = outputs;
+        if wants("OLS_HC2") {
+            // OLS_HC2
+            let mut result = run_benchmark_tracked("OLS_HC2", "robust", n, &config, || {
+                run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC2)
+            });
+            if let Ok(ref ols) = run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC2) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &ols.coefficients().to_vec());
+                capture_vec(&mut outputs, "std_errors", &ols.std_errors().to_vec());
+                capture(&mut outputs, "r_squared", ols.r_squared);
+                result.outputs = outputs;
+            }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // OLS_HC3
-        let mut result = run_benchmark_tracked("OLS_HC3", "robust", n, &config, || {
-            run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC3)
-        });
-        if let Ok(ref ols) = run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC3) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &ols.coefficients().to_vec());
-            capture_vec(&mut outputs, "std_errors", &ols.std_errors().to_vec());
-            capture(&mut outputs, "r_squared", ols.r_squared);
-            result.outputs = outputs;
+        if wants("OLS_HC3") {
+            // OLS_HC3
+            let mut result = run_benchmark_tracked("OLS_HC3", "robust", n, &config, || {
+                run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC3)
+            });
+            if let Ok(ref ols) = run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC3) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &ols.coefficients().to_vec());
+                capture_vec(&mut outputs, "std_errors", &ols.std_errors().to_vec());
+                capture(&mut outputs, "r_squared", ols.r_squared);
+                result.outputs = outputs;
+            }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
         // OLS_HAC (Newey-West)
-        {
+        if wants("OLS_HAC") {
             let ols_result =
                 run_ols(&dataset, "y", &x_cols, true, CovarianceType::Standard).unwrap();
             let design = DesignMatrix::from_dataframe(dataset.df(), &x_cols, true).unwrap();
@@ -2536,120 +2863,134 @@ fn main() {
             results.push(result);
         }
 
-        // Breusch_Godfrey
-        let mut result = run_benchmark_tracked("Breusch_Godfrey", "LM", n, &config, || {
-            bg_test(&dataset, "y", &x_cols, 1, BgTestType::default(), 0.0)
-        });
-        if let Ok(ref bg) = bg_test(&dataset, "y", &x_cols, 1, BgTestType::default(), 0.0) {
-            let mut outputs = BTreeMap::new();
-            capture(&mut outputs, "statistic", bg.statistic);
-            capture(&mut outputs, "p_value", bg.p_value);
-            result.outputs = outputs;
-        }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
-
-        // Breusch_Pagan
-        let mut result = run_benchmark_tracked("Breusch_Pagan", "test", n, &config, || {
-            run_diagnostics(&dataset, "y", &x_cols)
-        });
-        if let Ok(ref diag) = run_diagnostics(&dataset, "y", &x_cols) {
-            if let Some(ref bp) = diag.breusch_pagan {
+        if wants("Breusch_Godfrey") {
+            // Breusch_Godfrey
+            let mut result = run_benchmark_tracked("Breusch_Godfrey", "LM", n, &config, || {
+                bg_test(&dataset, "y", &x_cols, 1, BgTestType::default(), 0.0)
+            });
+            if let Ok(ref bg) = bg_test(&dataset, "y", &x_cols, 1, BgTestType::default(), 0.0) {
                 let mut outputs = BTreeMap::new();
-                capture(&mut outputs, "statistic", bp.statistic);
-                capture(&mut outputs, "p_value", bp.p_value);
+                capture(&mut outputs, "statistic", bg.statistic);
+                capture(&mut outputs, "p_value", bg.p_value);
                 result.outputs = outputs;
             }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // Durbin_Watson
-        let mut result = run_benchmark_tracked("Durbin_Watson", "test", n, &config, || {
-            run_diagnostics(&dataset, "y", &x_cols)
-        });
-        if let Ok(ref diag) = run_diagnostics(&dataset, "y", &x_cols) {
-            if let Some(ref dw) = diag.durbin_watson {
+        if wants("Breusch_Pagan") {
+            // Breusch_Pagan
+            let mut result = run_benchmark_tracked("Breusch_Pagan", "test", n, &config, || {
+                run_diagnostics(&dataset, "y", &x_cols)
+            });
+            if let Ok(ref diag) = run_diagnostics(&dataset, "y", &x_cols) {
+                if let Some(ref bp) = diag.breusch_pagan {
+                    let mut outputs = BTreeMap::new();
+                    capture(&mut outputs, "statistic", bp.statistic);
+                    capture(&mut outputs, "p_value", bp.p_value);
+                    result.outputs = outputs;
+                }
+            }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
+        }
+
+        if wants("Durbin_Watson") {
+            // Durbin_Watson
+            let mut result = run_benchmark_tracked("Durbin_Watson", "test", n, &config, || {
+                run_diagnostics(&dataset, "y", &x_cols)
+            });
+            if let Ok(ref diag) = run_diagnostics(&dataset, "y", &x_cols) {
+                if let Some(ref dw) = diag.durbin_watson {
+                    let mut outputs = BTreeMap::new();
+                    capture(&mut outputs, "statistic", dw.statistic);
+                    result.outputs = outputs;
+                }
+            }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
+        }
+
+        if wants("Harvey_Collier") {
+            // Harvey_Collier
+            let mut result = run_benchmark_tracked("Harvey_Collier", "test", n, &config, || {
+                harvey_collier_test(&dataset, "y", &x_cols)
+            });
+            if let Ok(ref hc) = harvey_collier_test(&dataset, "y", &x_cols) {
                 let mut outputs = BTreeMap::new();
-                capture(&mut outputs, "statistic", dw.statistic);
+                capture(&mut outputs, "statistic", hc.statistic);
+                capture(&mut outputs, "p_value", hc.p_value);
                 result.outputs = outputs;
             }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // Harvey_Collier
-        let mut result = run_benchmark_tracked("Harvey_Collier", "test", n, &config, || {
-            harvey_collier_test(&dataset, "y", &x_cols)
-        });
-        if let Ok(ref hc) = harvey_collier_test(&dataset, "y", &x_cols) {
-            let mut outputs = BTreeMap::new();
-            capture(&mut outputs, "statistic", hc.statistic);
-            capture(&mut outputs, "p_value", hc.p_value);
-            result.outputs = outputs;
-        }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
-
-        // RESET
-        let mut result = run_benchmark_tracked("RESET", "test", n, &config, || {
-            reset_test(&dataset, "y", &x_cols, &[2, 3], ResetType::default())
-        });
-        if let Ok(ref rst) = reset_test(&dataset, "y", &x_cols, &[2, 3], ResetType::default()) {
-            let mut outputs = BTreeMap::new();
-            capture(&mut outputs, "statistic", rst.statistic);
-            capture(&mut outputs, "p_value", rst.p_value);
-            result.outputs = outputs;
-        }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
-
-        // VIF
-        let mut result = run_benchmark_tracked("VIF", "diagnostics", n, &config, || {
-            run_diagnostics(&dataset, "y", &x_cols)
-        });
-        if let Ok(ref diag) = run_diagnostics(&dataset, "y", &x_cols) {
-            if let Some(ref vifs) = diag.vif {
+        if wants("RESET") {
+            // RESET
+            let mut result = run_benchmark_tracked("RESET", "test", n, &config, || {
+                reset_test(&dataset, "y", &x_cols, &[2, 3], ResetType::default())
+            });
+            if let Ok(ref rst) = reset_test(&dataset, "y", &x_cols, &[2, 3], ResetType::default()) {
                 let mut outputs = BTreeMap::new();
-                let vif_vals: Vec<f64> = vifs.iter().map(|v| v.vif).collect();
-                capture_vec(&mut outputs, "vif_values", &vif_vals);
+                capture(&mut outputs, "statistic", rst.statistic);
+                capture(&mut outputs, "p_value", rst.p_value);
                 result.outputs = outputs;
             }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // Wald test (drop x1 from full model)
-        let mut result = run_benchmark_tracked("Wald", "F-test", n, &config, || {
-            wald_test(&dataset, "y", &x_cols, &["x2", "x3", "x4", "x5"], true)
-        });
-        if let Ok(ref wt) = wald_test(&dataset, "y", &x_cols, &["x2", "x3", "x4", "x5"], true) {
-            let mut outputs = BTreeMap::new();
-            capture(&mut outputs, "statistic", wt.statistic);
-            capture(&mut outputs, "p_value", wt.p_value);
-            result.outputs = outputs;
+        if wants("VIF") {
+            // VIF
+            let mut result = run_benchmark_tracked("VIF", "diagnostics", n, &config, || {
+                run_diagnostics(&dataset, "y", &x_cols)
+            });
+            if let Ok(ref diag) = run_diagnostics(&dataset, "y", &x_cols) {
+                if let Some(ref vifs) = diag.vif {
+                    let mut outputs = BTreeMap::new();
+                    let vif_vals: Vec<f64> = vifs.iter().map(|v| v.vif).collect();
+                    capture_vec(&mut outputs, "vif_values", &vif_vals);
+                    result.outputs = outputs;
+                }
+            }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "regression".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
+
+        if wants("Wald") {
+            // Wald test (drop x1 from full model)
+            let mut result = run_benchmark_tracked("Wald", "F-test", n, &config, || {
+                wald_test(&dataset, "y", &x_cols, &["x2", "x3", "x4", "x5"], true)
+            });
+            if let Ok(ref wt) = wald_test(&dataset, "y", &x_cols, &["x2", "x3", "x4", "x5"], true) {
+                let mut outputs = BTreeMap::new();
+                capture(&mut outputs, "statistic", wt.statistic);
+                capture(&mut outputs, "p_value", wt.p_value);
+                result.outputs = outputs;
+            }
+            result.dgp = "regression".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
+        }
     }
 
     // OLS_Bootstrap (slower - use slow_config with smaller sample sizes)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["OLS_Bootstrap"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3", "x4", "x5"];
@@ -2700,7 +3041,7 @@ fn main() {
     // The Rust AR(1) fit itself is a Prais-Winsten transform, O(n p), with no n×n
     // matrix; review the cap together with the R side when the paper benchmarks
     // are regenerated.
-    for n in [100, 1000] {
+    for n in sizes_for(&["GLS"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
 
@@ -2741,7 +3082,7 @@ fn main() {
 
     // Quantile Regression (slower - use slow_config)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["Quantile_Regression"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 3, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3"];
@@ -2768,7 +3109,7 @@ fn main() {
 
     // Smooth Spline
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["Smooth_Spline"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
         let x1_col = dataset
@@ -2805,7 +3146,7 @@ fn main() {
 
     // Stepwise Selection (slower - use slow_config)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["Stepwise"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3", "x4", "x5"];
@@ -2837,7 +3178,7 @@ fn main() {
     print_header();
 
     // AR
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["AR"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2865,7 +3206,7 @@ fn main() {
     }
 
     // STL
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["STL"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2886,7 +3227,7 @@ fn main() {
     }
 
     // Decompose
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Decompose"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2910,7 +3251,7 @@ fn main() {
     }
 
     // Holt-Winters
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Holt_Winters"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2943,7 +3284,7 @@ fn main() {
 
     // GARCH
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["GARCH"], [100, 1000]) {
         let garch_y = load_csv_array1(&data_dir, "garch", n, "y")
             .map(|a| a.to_vec())
             .unwrap_or_else(|| generate_garch_data(n, 42));
@@ -2972,7 +3313,7 @@ fn main() {
 
     // Kalman (local level state-space model)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["Kalman"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -3005,7 +3346,7 @@ fn main() {
 
     // StructTS (local linear trend)
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["StructTS"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -3035,7 +3376,7 @@ fn main() {
 
     // VAR
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["VAR"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "bivariate", n)
             .unwrap_or_else(|| generate_bivariate_data(n, 42));
 
@@ -3056,7 +3397,7 @@ fn main() {
 
     // VECM
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["VECM"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "bivariate", n)
             .unwrap_or_else(|| generate_bivariate_data(n, 42));
 
@@ -3077,7 +3418,7 @@ fn main() {
 
     // Granger
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["Granger"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "bivariate", n)
             .unwrap_or_else(|| generate_bivariate_data(n, 42));
 
@@ -3097,7 +3438,7 @@ fn main() {
     }
 
     // Phillips-Perron
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Phillips_Perron"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -3118,7 +3459,7 @@ fn main() {
     }
 
     // Box-Ljung
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Box_Ljung"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -3145,125 +3486,138 @@ fn main() {
     println!("\n--- Discrete Choice: Count Models ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(
+        &["Poisson", "NegBin", "ZIP", "ZINB", "Hurdle"],
+        [100, 1000, 10000],
+    ) {
         let count_dataset =
             load_csv_dataset(&data_dir, "count", n).unwrap_or_else(|| generate_count_data(n, 42));
         let zeroinfl_dataset = load_csv_dataset(&data_dir, "zeroinfl", n)
             .unwrap_or_else(|| generate_zeroinfl_data(n, 42));
 
-        // Poisson (via FEGLM with a group FE)
-        let mut result = run_benchmark_tracked("Poisson", "GLM", n, &slow_config, || {
-            run_feglm(
+        if wants("Poisson") {
+            // Poisson (via FEGLM with a group FE)
+            let mut result = run_benchmark_tracked("Poisson", "GLM", n, &slow_config, || {
+                run_feglm(
+                    &count_dataset,
+                    "y",
+                    &["x1", "x2"],
+                    &["group"],
+                    GlmFamily::Poisson,
+                    None,
+                )
+            });
+            if let Ok(ref res) = run_feglm(
                 &count_dataset,
                 "y",
                 &["x1", "x2"],
                 &["group"],
                 GlmFamily::Poisson,
                 None,
-            )
-        });
-        if let Ok(ref res) = run_feglm(
-            &count_dataset,
-            "y",
-            &["x1", "x2"],
-            &["group"],
-            GlmFamily::Poisson,
-            None,
-        ) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &res.coefficients);
-            capture_vec(&mut outputs, "std_errors", &res.std_errors);
-            capture(&mut outputs, "log_likelihood", res.log_likelihood);
-            capture(&mut outputs, "aic", res.aic);
-            result.outputs = outputs;
-        }
-        result.dgp = "count".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
-
-        // Negative Binomial
-        let mut result = run_benchmark_tracked("NegBin", "MLE", n, &slow_config, || {
-            run_negbin(&count_dataset, "y", &["x1", "x2"], None)
-        });
-        if let Ok(ref res) = run_negbin(&count_dataset, "y", &["x1", "x2"], None) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &res.coefficients);
-            capture_vec(&mut outputs, "std_errors", &res.std_errors);
-            capture(&mut outputs, "theta", res.theta);
-            capture(&mut outputs, "aic", res.aic);
-            result.outputs = outputs;
-        }
-        result.dgp = "count".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
-
-        // ZIP
-        let mut result = run_benchmark_tracked("ZIP", "EM", n, &slow_config, || {
-            run_zip(&zeroinfl_dataset, "y", &["x1", "x2"], None)
-        });
-        if let Ok(ref res) = run_zip(&zeroinfl_dataset, "y", &["x1", "x2"], None) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "count_coefficients", &res.count_coefficients);
-            capture(&mut outputs, "log_likelihood", res.log_likelihood);
-            capture(&mut outputs, "aic", res.aic);
-            result.outputs = outputs;
-        }
-        result.dgp = "zeroinfl".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
-
-        // ZINB
-        let mut result = run_benchmark_tracked("ZINB", "EM", n, &slow_config, || {
-            run_zinb(&zeroinfl_dataset, "y", &["x1", "x2"], None)
-        });
-        if let Ok(ref res) = run_zinb(&zeroinfl_dataset, "y", &["x1", "x2"], None) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "count_coefficients", &res.count_coefficients);
-            capture(&mut outputs, "log_likelihood", res.log_likelihood);
-            if let Some(theta) = res.theta {
-                capture(&mut outputs, "theta", theta);
+            ) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &res.coefficients);
+                capture_vec(&mut outputs, "std_errors", &res.std_errors);
+                capture(&mut outputs, "log_likelihood", res.log_likelihood);
+                capture(&mut outputs, "aic", res.aic);
+                result.outputs = outputs;
             }
-            result.outputs = outputs;
+            result.dgp = "count".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "zeroinfl".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // Hurdle (Poisson)
-        let mut result = run_benchmark_tracked("Hurdle", "Poisson", n, &slow_config, || {
-            run_hurdle(
+        if wants("NegBin") {
+            // Negative Binomial
+            let mut result = run_benchmark_tracked("NegBin", "MLE", n, &slow_config, || {
+                run_negbin(&count_dataset, "y", &["x1", "x2"], None)
+            });
+            if let Ok(ref res) = run_negbin(&count_dataset, "y", &["x1", "x2"], None) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &res.coefficients);
+                capture_vec(&mut outputs, "std_errors", &res.std_errors);
+                capture(&mut outputs, "theta", res.theta);
+                capture(&mut outputs, "aic", res.aic);
+                result.outputs = outputs;
+            }
+            result.dgp = "count".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
+        }
+
+        if wants("ZIP") {
+            // ZIP
+            let mut result = run_benchmark_tracked("ZIP", "EM", n, &slow_config, || {
+                run_zip(&zeroinfl_dataset, "y", &["x1", "x2"], None)
+            });
+            if let Ok(ref res) = run_zip(&zeroinfl_dataset, "y", &["x1", "x2"], None) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "count_coefficients", &res.count_coefficients);
+                capture(&mut outputs, "log_likelihood", res.log_likelihood);
+                capture(&mut outputs, "aic", res.aic);
+                result.outputs = outputs;
+            }
+            result.dgp = "zeroinfl".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
+        }
+
+        if wants("ZINB") {
+            // ZINB
+            let mut result = run_benchmark_tracked("ZINB", "EM", n, &slow_config, || {
+                run_zinb(&zeroinfl_dataset, "y", &["x1", "x2"], None)
+            });
+            if let Ok(ref res) = run_zinb(&zeroinfl_dataset, "y", &["x1", "x2"], None) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "count_coefficients", &res.count_coefficients);
+                capture(&mut outputs, "log_likelihood", res.log_likelihood);
+                if let Some(theta) = res.theta {
+                    capture(&mut outputs, "theta", theta);
+                }
+                result.outputs = outputs;
+            }
+            result.dgp = "zeroinfl".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
+        }
+
+        if wants("Hurdle") {
+            // Hurdle (Poisson)
+            let mut result = run_benchmark_tracked("Hurdle", "Poisson", n, &slow_config, || {
+                run_hurdle(
+                    &zeroinfl_dataset,
+                    "y",
+                    &["x1", "x2"],
+                    None,
+                    HurdleType::Poisson,
+                )
+            });
+            if let Ok(ref res) = run_hurdle(
                 &zeroinfl_dataset,
                 "y",
                 &["x1", "x2"],
                 None,
                 HurdleType::Poisson,
-            )
-        });
-        if let Ok(ref res) = run_hurdle(
-            &zeroinfl_dataset,
-            "y",
-            &["x1", "x2"],
-            None,
-            HurdleType::Poisson,
-        ) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "count_coefficients", &res.count_coefficients);
-            capture_vec(
-                &mut outputs,
-                "binary_coefficients",
-                &res.binary_coefficients,
-            );
-            capture(&mut outputs, "log_likelihood", res.log_likelihood);
-            result.outputs = outputs;
+            ) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "count_coefficients", &res.count_coefficients);
+                capture_vec(
+                    &mut outputs,
+                    "binary_coefficients",
+                    &res.binary_coefficients,
+                );
+                capture(&mut outputs, "log_likelihood", res.log_likelihood);
+                result.outputs = outputs;
+            }
+            result.dgp = "zeroinfl".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "zeroinfl".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
     }
 
     // ============================================
@@ -3273,44 +3627,49 @@ fn main() {
     println!("\n--- Discrete Choice: Ordered & Multinomial ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Ordered_Logit", "Multinomial_Logit"], [100, 1000, 10000]) {
         let ordered_dataset = load_csv_dataset(&data_dir, "ordered", n)
             .unwrap_or_else(|| generate_ordered_data(n, 42));
         let multinom_dataset = load_csv_dataset(&data_dir, "multinomial", n)
             .unwrap_or_else(|| generate_multinomial_data(n, 42));
 
-        // Ordered Logit
-        let mut result = run_benchmark_tracked("Ordered_Logit", "MLE", n, &slow_config, || {
-            run_ordered_logit(&ordered_dataset, "y", &["x1", "x2"])
-        });
-        if let Ok(ref res) = run_ordered_logit(&ordered_dataset, "y", &["x1", "x2"]) {
-            let mut outputs = BTreeMap::new();
-            capture_vec(&mut outputs, "coefficients", &res.coefficients);
-            capture_vec(&mut outputs, "thresholds", &res.thresholds);
-            capture(&mut outputs, "log_likelihood", res.log_likelihood);
-            result.outputs = outputs;
+        if wants("Ordered_Logit") {
+            // Ordered Logit
+            let mut result = run_benchmark_tracked("Ordered_Logit", "MLE", n, &slow_config, || {
+                run_ordered_logit(&ordered_dataset, "y", &["x1", "x2"])
+            });
+            if let Ok(ref res) = run_ordered_logit(&ordered_dataset, "y", &["x1", "x2"]) {
+                let mut outputs = BTreeMap::new();
+                capture_vec(&mut outputs, "coefficients", &res.coefficients);
+                capture_vec(&mut outputs, "thresholds", &res.thresholds);
+                capture(&mut outputs, "log_likelihood", res.log_likelihood);
+                result.outputs = outputs;
+            }
+            result.dgp = "ordered".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "ordered".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
 
-        // Multinomial Logit
-        let mut result = run_benchmark_tracked("Multinomial_Logit", "MLE", n, &slow_config, || {
-            run_multinom(&multinom_dataset, "y", &["x1", "x2"], None)
-        });
-        if let Ok(ref res) = run_multinom(&multinom_dataset, "y", &["x1", "x2"], None) {
-            let mut outputs = BTreeMap::new();
-            let flat_coefs: Vec<f64> = res.coefficients.iter().flatten().copied().collect();
-            capture_vec(&mut outputs, "coefficients", &flat_coefs);
-            capture(&mut outputs, "log_likelihood", res.log_likelihood);
-            capture(&mut outputs, "aic", res.aic);
-            result.outputs = outputs;
+        if wants("Multinomial_Logit") {
+            // Multinomial Logit
+            let mut result =
+                run_benchmark_tracked("Multinomial_Logit", "MLE", n, &slow_config, || {
+                    run_multinom(&multinom_dataset, "y", &["x1", "x2"], None)
+                });
+            if let Ok(ref res) = run_multinom(&multinom_dataset, "y", &["x1", "x2"], None) {
+                let mut outputs = BTreeMap::new();
+                let flat_coefs: Vec<f64> = res.coefficients.iter().flatten().copied().collect();
+                capture_vec(&mut outputs, "coefficients", &flat_coefs);
+                capture(&mut outputs, "log_likelihood", res.log_likelihood);
+                capture(&mut outputs, "aic", res.aic);
+                result.outputs = outputs;
+            }
+            result.dgp = "multinomial".to_string();
+            result.seed = 42;
+            print_result(&result);
+            results.push(result);
         }
-        result.dgp = "multinomial".to_string();
-        result.seed = 42;
-        print_result(&result);
-        results.push(result);
     }
 
     // ============================================
@@ -3321,7 +3680,7 @@ fn main() {
     print_header();
 
     // Cap: PAM is O(n^2); n=10000 takes ~40 min with 100 iterations
-    for n in [100, 1000] {
+    for n in sizes_for(&["K_Medoids"], [100, 1000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -3351,7 +3710,7 @@ fn main() {
     println!("\n--- Linear SVM ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["SVM"], [100, 1000, 10000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         // Create binary labels: cluster 0 vs others
@@ -3407,7 +3766,7 @@ fn main() {
     print_header();
 
     // Cap: t-SNE is O(n^2) with 500 internal iterations; n=10000 takes hours
-    for n in [100, 1000] {
+    for n in sizes_for(&["tSNE"], [100, 1000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -3450,7 +3809,7 @@ fn main() {
     print_header();
 
     // Cap: Silhouette computes pairwise distances O(n^2); no R benchmark
-    for n in [100, 1000] {
+    for n in sizes_for(&["Silhouette"], [100, 1000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         // Run kmeans first to get labels
@@ -3481,7 +3840,7 @@ fn main() {
     print_header();
 
     // Cap: MDS is O(n^3) eigendecomposition; n=10000 takes hours, no R benchmark
-    for n in [100, 1000] {
+    for n in sizes_for(&["MDS"], [100, 1000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -3508,7 +3867,7 @@ fn main() {
     println!("\n--- ACF ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["ACF"], [100, 1000, 10000]) {
         let ts_data = generate_time_series(n, 42);
         let y_vec: Vec<f64> = ts_data
             .df()
@@ -3543,7 +3902,7 @@ fn main() {
     println!("\n--- PACF ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["PACF"], [100, 1000, 10000]) {
         let ts_data = generate_time_series(n, 42);
         let y_vec: Vec<f64> = ts_data
             .df()
@@ -3578,7 +3937,7 @@ fn main() {
     println!("\n--- CCF ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["CCF"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let y1: Vec<f64> = (0..n)
             .map(|t| {
@@ -3619,7 +3978,7 @@ fn main() {
     println!("\n--- Canonical Correlation ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Cancor"], [100, 1000, 10000]) {
         let ds = generate_regression_data(n, 5, 42);
         let df = ds.df();
         let mut x_mat = Array2::<f64>::zeros((n, 2));
@@ -3658,7 +4017,7 @@ fn main() {
     println!("\n--- Spline ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Spline"], [100, 1000, 10000]) {
         let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let y_sp: Vec<f64> = x
@@ -3690,7 +4049,7 @@ fn main() {
     println!("\n--- t-test ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["t_test"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
 
@@ -3717,7 +4076,7 @@ fn main() {
     println!("\n--- Wilcoxon ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Wilcoxon"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
 
@@ -3755,7 +4114,7 @@ fn main() {
     println!("\n--- KS Test ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["KS_test"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
 
@@ -3789,7 +4148,7 @@ fn main() {
     println!("\n--- Shapiro-Wilk ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Shapiro_Wilk"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
 
@@ -3815,7 +4174,7 @@ fn main() {
     println!("\n--- ANOVA ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["ANOVA"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let n_per_group = n / 3;
         let mut y_vals: Vec<f64> = Vec::with_capacity(n);
@@ -3861,7 +4220,7 @@ fn main() {
     println!("\n--- Kruskal-Wallis ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Kruskal_Wallis"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let n_per_group = n / 3;
         let mut groups: Vec<(String, Vec<f64>)> = Vec::new();
@@ -3901,7 +4260,7 @@ fn main() {
     println!("\n--- Friedman ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Friedman"], [100, 1000, 10000]) {
         let k = 3; // number of treatments
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         // Friedman expects n blocks × k treatments (outer=blocks, inner=treatments)
@@ -3938,7 +4297,7 @@ fn main() {
     println!("\n--- Chi-squared ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Chi_squared"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let observed: Vec<f64> = (0..5)
             .map(|_| (n as f64 / 5.0) + rng.gen_range(-5.0..5.0))
@@ -3966,7 +4325,7 @@ fn main() {
     println!("\n--- Cor Test ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Cor_Test"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x_ct: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
         let y_ct: Vec<f64> = x_ct
@@ -4009,7 +4368,12 @@ fn main() {
     println!("\n--- Variance/Scale Tests ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(
+        &[
+            "Bartlett", "Fligner", "Mood", "Ansari", "Var_Test", "Oneway",
+        ],
+        [100, 1000, 10000],
+    ) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let g1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
         let g2: Vec<f64> = (0..n).map(|_| rng.gen_range(-0.5..1.5)).collect();
@@ -4022,7 +4386,7 @@ fn main() {
         ];
 
         // Bartlett
-        {
+        if wants("Bartlett") {
             let local_groups = groups.clone();
             let mut result = run_benchmark_tracked("Bartlett", "test", n, &config, || {
                 bartlett_test(&local_groups)
@@ -4040,7 +4404,7 @@ fn main() {
         }
 
         // Fligner
-        {
+        if wants("Fligner") {
             let local_groups = groups.clone();
             let mut result = run_benchmark_tracked("Fligner", "test", n, &config, || {
                 fligner_test(&local_groups)
@@ -4058,7 +4422,7 @@ fn main() {
         }
 
         // Mood
-        {
+        if wants("Mood") {
             let local_g1 = g1.clone();
             let local_g2 = g2.clone();
             let mut result = run_benchmark_tracked("Mood", "test", n, &config, || {
@@ -4077,7 +4441,7 @@ fn main() {
         }
 
         // Ansari
-        {
+        if wants("Ansari") {
             let local_g1 = g1.clone();
             let local_g2 = g2.clone();
             let mut result = run_benchmark_tracked("Ansari", "test", n, &config, || {
@@ -4096,7 +4460,7 @@ fn main() {
         }
 
         // Var_Test (F-test for equality of variances)
-        {
+        if wants("Var_Test") {
             let local_g1 = g1.clone();
             let local_g2 = g2.clone();
             let mut result = run_benchmark_tracked("Var_Test", "F-test", n, &config, || {
@@ -4115,7 +4479,7 @@ fn main() {
         }
 
         // Oneway (Welch ANOVA)
-        {
+        if wants("Oneway") {
             let local_groups = groups.clone();
             let mut result = run_benchmark_tracked("Oneway", "Welch", n, &config, || {
                 oneway_test(&local_groups, false)
@@ -4140,7 +4504,7 @@ fn main() {
     println!("\n--- Categorical Tests ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["McNemar"], [100, 1000, 10000]) {
         // McNemar - 2x2 paired table
         {
             let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -4166,7 +4530,7 @@ fn main() {
     }
 
     // Mantel-Haenszel
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Mantel_Haenszel"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let tables: Vec<Table2x2> = (0..n / 25)
             .map(|_| {
@@ -4201,7 +4565,7 @@ fn main() {
     println!("\n--- Multivariate Tests ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["MANOVA"], [100, 1000, 10000]) {
         // MANOVA
         {
             let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -4241,7 +4605,7 @@ fn main() {
     }
 
     // Median_Polish
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Median_Polish"], [100, 1000, 10000]) {
         let rows = (n as f64).sqrt() as usize;
         let cols = rows;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -4274,7 +4638,7 @@ fn main() {
     println!("\n--- Proportion/Count Tests ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Prop_Test"], [100, 1000, 10000]) {
         let x = (n as f64 * 0.55) as u64;
         let nn = n as u64;
         let mut result = run_benchmark_tracked("Prop_Test", "one-sample", n, &config, || {
@@ -4293,7 +4657,7 @@ fn main() {
     }
 
     // Prop_Trend
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Prop_Trend"], [100, 1000, 10000]) {
         let k = 5;
         let x_vals: Vec<usize> = (0..k).map(|i| (n / k) / 2 + i * 3).collect();
         let n_vals: Vec<usize> = vec![n / k; k];
@@ -4315,7 +4679,7 @@ fn main() {
     }
 
     // Binom_Test
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Binom_Test"], [100, 1000, 10000]) {
         let x = (n as f64 * 0.55) as u64;
         let nn = n as u64;
         let mut result = run_benchmark_tracked("Binom_Test", "exact", n, &config, || {
@@ -4334,7 +4698,7 @@ fn main() {
     }
 
     // Poisson_Test
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Poisson_Test"], [100, 1000, 10000]) {
         let x_vals = vec![n as u64];
         let t_vals = vec![1.0];
         let local_x = x_vals.clone();
@@ -4367,7 +4731,7 @@ fn main() {
     }
 
     // Power_Analysis
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Power_Analysis"], [100, 1000, 10000]) {
         let mut result = run_benchmark_tracked("Power_Analysis", "t-test", n, &config, || {
             power_t_test(
                 Some(n as f64),
@@ -4405,7 +4769,10 @@ fn main() {
     println!("\n--- Multiple Comparisons ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(
+        &["Pairwise_t", "Pairwise_Wilcox", "Tukey"],
+        [100, 1000, 10000],
+    ) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let n_per = n / 3;
         let mut values: Vec<f64> = Vec::with_capacity(n);
@@ -4423,7 +4790,7 @@ fn main() {
         }
 
         // Pairwise_t
-        {
+        if wants("Pairwise_t") {
             let local_v = values.clone();
             let local_g = group_labels.clone();
             let mut result = run_benchmark_tracked("Pairwise_t", "Holm", n, &config, || {
@@ -4454,7 +4821,7 @@ fn main() {
         }
 
         // Pairwise_Wilcox
-        {
+        if wants("Pairwise_Wilcox") {
             let local_v = values.clone();
             let local_g = group_labels.clone();
             let mut result = run_benchmark_tracked("Pairwise_Wilcox", "Holm", n, &config, || {
@@ -4485,7 +4852,7 @@ fn main() {
         }
 
         // Tukey HSD
-        {
+        if wants("Tukey") {
             let df = DataFrame::new(vec![
                 Column::new("y".into(), &values),
                 Column::new("group".into(), group_labels.clone()),
@@ -4512,7 +4879,7 @@ fn main() {
     }
 
     // Quade test
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Quade"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let n_blocks = n;
         let n_treatments = 3;
@@ -4542,7 +4909,7 @@ fn main() {
     }
 
     // P_Adjust
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["P_Adjust"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let pvals: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0)).collect();
         let local_pv = pvals.clone();
@@ -4571,13 +4938,16 @@ fn main() {
     println!("\n--- Utility Stats ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(
+        &["Robust_Stats", "Weighted", "Mahalanobis"],
+        [100, 1000, 10000],
+    ) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data: Vec<f64> = (0..n).map(|_| rng.gen_range(-5.0..5.0)).collect();
         let weights: Vec<f64> = (0..n).map(|_| rng.gen_range(0.1..2.0)).collect();
 
         // Robust_Stats (fivenum + iqr)
-        {
+        if wants("Robust_Stats") {
             let local_d = data.clone();
             let mut result =
                 run_benchmark_tracked("Robust_Stats", "fivenum+iqr", n, &config, || {
@@ -4609,7 +4979,7 @@ fn main() {
         }
 
         // Weighted_Mean
-        {
+        if wants("Weighted") {
             let local_d = data.clone();
             let local_w = weights.clone();
             let mut result = run_benchmark_tracked("Weighted", "mean", n, &config, || {
@@ -4627,7 +4997,7 @@ fn main() {
         }
 
         // Mahalanobis
-        {
+        if wants("Mahalanobis") {
             let p = 3;
             let mut rng2 = ChaCha8Rng::seed_from_u64(42);
             let mut mdata = Array2::zeros((n, p));
@@ -4654,7 +5024,7 @@ fn main() {
     }
 
     // Loglin (3-way table)
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Loglin"], [100, 1000, 10000]) {
         let dims = vec![2, 2, 2];
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let table: Vec<f64> = (0..8).map(|_| rng.gen_range(5.0..50.0)).collect();
@@ -4683,7 +5053,7 @@ fn main() {
     println!("\n--- Survival: AFT ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["AFT"], [100, 1000, 10000]) {
         let ds = load_csv_dataset(&data_dir, "survival", n);
 
         let dataset = ds.unwrap_or_else(|| {
@@ -4747,7 +5117,7 @@ fn main() {
     println!("\n--- Survival: Competing Risks ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    for n in sizes_for(&["Competing_Risks"], [100, 1000, 10000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let time_vals: Vec<f64> = (0..n).map(|_| rng.gen_range(0.1..20.0)).collect();
         let event_type_vals: Vec<f64> = (0..n)
@@ -4793,7 +5163,7 @@ fn main() {
     print_header();
 
     // Cap: no R benchmark at n=10000
-    for n in [100, 1000] {
+    for n in sizes_for(&["RD_Multi"], [100, 1000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let cutoffs = vec![0.0, 2.0];
         let mut x_vals = Vec::with_capacity(n);
@@ -4848,7 +5218,7 @@ fn main() {
     // ============================================
 
     // OLS_Clustered
-    for &n in &[100, 500, 1000] {
+    for n in sizes_for(&["OLS_Clustered"], [100, 500, 1000]) {
         let entities = n / 10;
         let nn = entities * 10;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -4888,7 +5258,7 @@ fn main() {
     }
 
     // OLS_Driscoll_Kraay
-    for &n in &[100, 500, 1000] {
+    for n in sizes_for(&["OLS_Driscoll_Kraay"], [100, 500, 1000]) {
         let entities = n / 10;
         let nn = entities * 10;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -4926,7 +5296,7 @@ fn main() {
     }
 
     // NLS (exponential growth model)
-    for &n in &[100, 500, 1000] {
+    for n in sizes_for(&["NLS"], [100, 500, 1000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let normal = Normal::new(0.0, 0.1).unwrap();
         let x_vals: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
@@ -4973,7 +5343,7 @@ fn main() {
     }
 
     // FEGLM_Gaussian (explicit Gaussian family with entity FE)
-    for &n in &[100, 500, 1000] {
+    for n in sizes_for(&["FEGLM_Gaussian"], [100, 500, 1000]) {
         let entities = n / 10;
         let nn = entities * 10;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -5024,7 +5394,7 @@ fn main() {
     }
 
     // E_Value (sensitivity analysis)
-    for &n in &[100, 500, 1000] {
+    for n in sizes_for(&["E_Value"], [100, 500, 1000]) {
         // E-value doesn't use data size directly; we benchmark repeated computation
         // Simulate an observed risk ratio from a study of size n
         let rr = 1.5 + (n as f64 * 0.001);
@@ -5046,7 +5416,7 @@ fn main() {
     }
 
     // Panel_Unit_Root (LLC test)
-    for &n in &[200, 500, 1000] {
+    for n in sizes_for(&["Panel_Unit_Root"], [200, 500, 1000]) {
         let entities = n / 20;
         let periods = 20;
         let nn = entities * periods;
@@ -5089,7 +5459,7 @@ fn main() {
     }
 
     // ANOVA_TwoWay
-    for &n in &[100, 500, 1000] {
+    for n in sizes_for(&["ANOVA_TwoWay"], [100, 500, 1000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let normal = Normal::new(0.0, 1.0).unwrap();
         let factor_a: Vec<String> = (0..n).map(|i| format!("A{}", i % 3)).collect();
@@ -5126,7 +5496,7 @@ fn main() {
     }
 
     // Marginal_Effects (logit AME)
-    for &n in &[100, 500, 1000] {
+    for n in sizes_for(&["Marginal_Effects"], [100, 500, 1000]) {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let normal = Normal::new(0.0, 1.0).unwrap();
         let x1: Vec<f64> = (0..n).map(|_| normal.sample(&mut rng)).collect();
@@ -5178,8 +5548,24 @@ fn main() {
             println!("  {} {} n={}", r.method, r.variant, r.n);
         }
     }
-    println!("\nFinal results saved to: {}", incremental_path.display());
-    println!("Also saved to: {}", incremental_r_path.display());
+    println!("\nFinal results saved to: {}", result_paths[0].display());
+    for path in &result_paths[1..] {
+        println!("Also saved to: {}", path.display());
+    }
+    if let Some(only) = &opts.only {
+        let asked = ASKED.lock().map(|a| a.clone()).unwrap_or_default();
+        let unknown: Vec<&str> = only
+            .iter()
+            .filter(|m| !asked.contains(*m))
+            .map(|m| m.as_str())
+            .collect();
+        if !unknown.is_empty() {
+            println!(
+                "\nWARNING: --only names no benchmark of this harness: {}",
+                unknown.join(", ")
+            );
+        }
+    }
 
     // Print summary
     println!("\n=== Summary ===");
