@@ -4,6 +4,7 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ndarray::Array2;
+use p2a_core::econometrics::{OrderedConfig, run_ordered_model_with};
 use p2a_core::linalg::design::DesignMatrix;
 use p2a_core::{
     Alternative,
@@ -76,7 +77,6 @@ use p2a_core::{
     run_multinom,
     run_negbin,
     run_ols,
-    run_ordered_logit,
     run_panel_gls,
     run_zinb,
     run_zip,
@@ -977,11 +977,16 @@ fn multinom_benchmark(c: &mut Criterion) {
 fn ordered_logit_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("polr");
 
+    // The outcome is text: its order is given (ECON-19).
+    let cfg = OrderedConfig {
+        levels: Some(vec!["Low".into(), "Med".into(), "High".into()]),
+        ..OrderedConfig::default()
+    };
     for &n in &[100, 500, 1000, 5000] {
         let dataset = create_ordered_dataset(n, 505);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| run_ordered_logit(&dataset, "y", &["x"]))
+            b.iter(|| run_ordered_model_with(&dataset, "y", &["x"], &cfg))
         });
     }
     group.finish();

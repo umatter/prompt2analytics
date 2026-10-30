@@ -1,0 +1,117 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "discrete_ordered_logit",
+      "name": "Ordered logit (proportional odds), MASS::polr parameterisation",
+      "category": "econometrics",
+      "reference": "MASS::polr(method = 'logistic', control = list(reltol = 1e-15)) polished to the exact MLE; observed-information SEs (analytic Hessian = numDeriv::hessian)",
+      "doc": "validation/econometrics/ordered.md",
+      "cases": ["disc_ordered"],
+      "tests": [
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_disc_ordered",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_text_outcome_with_levels",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_integer_levels_in_numeric_order",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_enum_outcome_uses_declared_order",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_missing_rows_dropped",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_ordered_model_disc_ordered"
+      ],
+      "quantities": ["coefficients", "cut points", "SE (coefficients, cut points)", "z", "p", "log-likelihood", "null log-likelihood", "McFadden pseudo-R2", "AIC", "BIC", "category order and counts", "rows used / dropped (na.omit)"],
+      "tolerance": "MLE (validation/README.md, iterative): coefficients and cut points 1e-6, SEs and z 1e-5 relative; p 2e-3 relative (z^2 times the z tolerance); log-likelihood, AIC, BIC, pseudo-R2 1e-6 (n = 400); counts exact; MCP text at print precision (4 decimals)",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/ordered_logit_test.csv", "validation/expected/ordered_logit_multi_test.csv"]
+    },
+    {
+      "id": "discrete_ordered_probit",
+      "name": "Ordered probit, MASS::polr parameterisation",
+      "category": "econometrics",
+      "reference": "MASS::polr(method = 'probit', control = list(reltol = 1e-15)) polished to the exact MLE; observed-information SEs",
+      "doc": "validation/econometrics/ordered.md",
+      "cases": ["disc_ordered"],
+      "tests": [
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_probit_disc_ordered",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_ordered_model_disc_ordered"
+      ],
+      "quantities": ["coefficients", "cut points", "SE (coefficients, cut points)", "z", "p", "log-likelihood", "null log-likelihood", "McFadden pseudo-R2", "AIC", "BIC", "category counts"],
+      "tolerance": "as discrete_ordered_logit",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/ordered_probit_test.csv"]
+    },
+    {
+      "id": "discrete_negbin",
+      "name": "Negative binomial regression (NB2, log link), MASS::glm.nb",
+      "category": "econometrics",
+      "reference": "MASS::glm.nb(control = glm.control(epsilon = 1e-14)) polished to the joint (beta, theta) MLE; beta SEs (X'WX)^-1 as summary.negbin; SE(theta) = 1/sqrt(theta.ml information) at the optimum; base R trigamma",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": ["disc_negbin"],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_theta_disc_negbin",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_init_theta_is_a_starting_value",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_missing_rows_dropped",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_trigamma_disc_negbin",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_intercept_only_disc_negbin",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_negbin_disc_negbin"
+      ],
+      "quantities": ["coefficients", "SE", "z", "p", "theta", "SE(theta)", "log-likelihood", "AIC", "BIC", "mean and variance of y", "rows used / dropped (na.omit)", "trigamma", "intercept-only model (glm.nb(y ~ 1))", "init_theta range [1e-8, 1e6]"],
+      "tolerance": "MLE: coefficients and theta 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 400); mean/variance of y 1e-8; glm.nb's own SE.theta 1e-4 (evaluated one theta.ml step before its theta); trigamma 1e-12 relative",
+      "deviations": [
+        {"finding": "ECON-64", "quantity": "null log-likelihood and McFadden pseudo-R2", "note": "not pinned: the null log-likelihood omits the lnGamma terms and reuses the full model's theta (Tier 4)"}
+      ],
+      "supersedes_legacy": ["validation/expected/negbin_test.csv"]
+    },
+    {
+      "id": "discrete_zip",
+      "name": "Zero-inflated Poisson (logit zero part), pscl::zeroinfl",
+      "category": "econometrics",
+      "reference": "pscl::zeroinfl(dist = 'poisson', EM = TRUE, reltol = 1e-15) polished with pscl's analytic gradient; SEs from numDeriv::hessian",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": ["disc_zeroinfl"],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_disc_zeroinfl",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_zero_part_regressors",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_missing_rows_dropped",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_intercept_only_zero_part",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl"
+      ],
+      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "log-likelihood", "AIC", "BIC", "zero count", "rows used / dropped (na.omit)", "intercept-only zero part (y ~ x1 + x2 | 1)", "converged and the fit unchanged when x1 is multiplied by 1e4, 1e6, 1e10 or 1e12 (x1 coefficients and SEs divided by the scale)"],
+      "tolerance": "MLE: coefficients 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 500); counts exact; fits with x1 scaled by 1e4, 1e6, 1e10 or 1e12 equal the unscaled fit to 1e-7 relative",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/zip_test.csv"]
+    },
+    {
+      "id": "discrete_zinb",
+      "name": "Zero-inflated negative binomial (logit zero part), pscl::zeroinfl",
+      "category": "econometrics",
+      "reference": "pscl::zeroinfl(dist = 'negbin', EM = TRUE, reltol = 1e-15) polished with pscl's analytic gradient; SEs (incl. log theta) from numDeriv::hessian",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": ["disc_zeroinfl"],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zinb_disc_zeroinfl",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl"
+      ],
+      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "theta", "SE(log theta)", "SE(theta)", "log-likelihood", "AIC", "BIC", "zero count", "converged and the fit unchanged when x1 is multiplied by 1e4, 1e6, 1e10 or 1e12"],
+      "tolerance": "as discrete_zip; theta 1e-6, SE(log theta) and SE(theta) 1e-5 relative",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/zinb_test.csv"]
+    },
+    {
+      "id": "discrete_hurdle_rows",
+      "name": "Hurdle models: rows used after listwise deletion (pscl::hurdle na.omit)",
+      "category": "econometrics",
+      "reference": "pscl::hurdle(y ~ x1 + x2) on data with missing values: number of observations used",
+      "doc": "validation/econometrics/hurdle.md",
+      "cases": ["disc_zeroinfl"],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_missing_rows_dropped"
+      ],
+      "quantities": ["rows used / dropped (na.omit)"],
+      "tolerance": "exact",
+      "deviations": [
+        {"finding": "ECON-16", "quantity": "count-part SEs, NB hurdle theta (all hurdle estimates)", "note": "not pinned to pscl::hurdle: the truncated-count information and the NB theta are Tier 4"}
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

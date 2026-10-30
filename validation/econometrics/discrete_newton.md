@@ -147,40 +147,38 @@ every fit; every category has 6 rows):
 The case files also carry every threshold (`logit_zeta`, `probit_zeta`, named
 `c001|c002`, ...) with its SE, and polr's own null fits.
 
-What is pinned for both links: n and the category counts (exact), the null log-likelihood
-(`Tol::stat(n)`: 1e-5 relative for n = 30 and 96, 1e-6 for n = 180), finite coefficients,
-thresholds and log-likelihood, a log-likelihood not above polr's maximum, and `converged`
-only above the null model.
+What is pinned for both links: the coefficient and every cut point (`Tol::iterative(1e-6)`),
+their standard errors (`Tol::iterative(1e-5)`), the log-likelihood and the null
+log-likelihood (`Tol::stat(n)`: 1e-5 relative for n = 30 and 96, 1e-6 for n = 180), n and
+the category counts (exact), and `converged = true` with no warning. The case values are
+polr's own optimum (BFGS at `reltol = 1e-14`), not re-solved. Against the Newton-polished
+MLE (each fit polished with `.polish` and `.polr_grad` of `validation/r/cases/discrete.R`
+until max |grad| < 1e-9, SEs from its `.polr_hess`; R 4.3.3, MASS 7.3.60.0.1) they are
+within 8.6e-9 relative for the coefficients (j30, probit), 1.2e-7 for the cut points,
+1.8e-6 for the standard errors and 1.3e-15 for the log-likelihood, over both links and the
+three cases. That is well inside those tolerances, so no polished values are added to this
+case file. The fits are `run_ordered_model_with` with `levels` set to polr's level order (the
+sorted labels `c001`, `c002`, ...), since a text outcome needs its order (ECON-19).
 
-**Deviations** (owned by T2-WP10): ECON-4, the beta score has the wrong sign and the
-outer-product Hessian divides by `p_i` twice, so the fit never reaches polr's MLE; ECON-5,
-the standard errors are a 0.1 placeholder. After this package the fits are finite and
-`converged = false` after 100 iterations (j16: log-likelihood -376.4779 logit, -356.0706
-probit; j30: -808.2087, -753.3586); before it, j16 and j30 were all NaN with a
-log-likelihood of -3315.7225 and -6216.9798 and `Converged: true` after 1 to 3
-iterations. The polr values are polr's own optimum (BFGS at `reltol = 1e-14`), not
-re-solved, so T2-WP10 either pins them at `Tol::iterative` with the measured need or adds
-tight values to its own case file.
+The ordered estimator is Newton-Raphson on the analytic score and observed Hessian (T2-WP10,
+ECON-4 and ECON-5; `validation/econometrics/ordered.md`), with step halving that keeps the
+cut points increasing and Levenberg damping where the information is not positive
+definite; standard errors come from the inverse observed information. Newton's method is
+affine-invariant, and so is its convergence test (the Newton decrement, not the largest
+score component): with x multiplied by 1e4, 1e6 or 1e12 the fit converges and is the
+unscaled one with the coefficient divided by the scale, the cut points and the
+log-likelihood equal to 1e-9 relative, and each scaled fit also matches polr's cut points
+and log-likelihood. (An
+earlier step inverted the negative definite Hessian through `safe_inverse`, which returns
+the pseudoinverse whenever `cond > 1e10`; `disc_polr_j5` with x multiplied by 1e4 then
+returned its starting point after one iteration.)
 
-The ordered Newton step, like the multinomial one, solves the information matrix: the
-negated outer-product Hessian plus the 1e-6 ridge, which is positive definite and so takes
-the Cholesky path at any conditioning. The step used to invert the negative definite
-Hessian, which always fails Cholesky; `safe_inverse` then returns the pseudoinverse
-whenever `cond > 1e10`, which means ill-conditioning, not singularity, and a regressor in
-the thousands is enough for it. Under the pseudoinverse-step rule below, `disc_polr_j5`
-with x multiplied by 1e4 then returned its starting point after one iteration
-(coefficient 0, the null log-likelihood). On the information matrix the fit with x
-multiplied by 1e4 or 1e6 is the unscaled one with the coefficient divided by the scale,
-to 1.1e-10 relative (logit) and 7.9e-11 (probit); the difference comes from the ridge,
-which is not scale-free. The j16 and j30 log-likelihoods above are unchanged to the digits
-shown.
-
-The ordered loop has the same contract as the multinomial one: a non-finite score or
-step, or a step from the pseudoinverse, ends the iteration unapplied and not converged.
-On the information matrix a pseudoinverse step occurs only when Cholesky fails in floating
-point despite the ridge and the condition number exceeds 1e10. The 100-category fit of one
-row each (no MLE) stops on such a step, at iteration 18; with pseudoinverse steps applied
-it runs all 100 iterations.
+The ordered loop keeps the contract of the multinomial one: `converged == true` implies
+finite estimates and log-likelihood; a non-finite step ends the iteration unapplied and
+not converged, with a warning. The 100-category fit of one row each converges to polr's
+MLE (coefficient 0.27537780315599802, log-likelihood -437.01698120738473, polr polished to
+max |grad| 8.8e-13; the data have an MLE). Before T2-WP10 the wrong score sign kept the fit
+away from it, and it stopped on a pseudoinverse step at iteration 18.
 
 ## Known differences
 
@@ -190,8 +188,6 @@ it runs all 100 iterations.
 - Rows with a null outcome (ECON-12, T2-WP18).
 - `p2a discrete mlogit` prints no convergence flag (CLI-17, T2-WP18).
 - p-values below about 1e-16 print as 0 (X-17, Tier 3).
-- The ordered category order comes from sorting the labels as strings (ECON-19,
-  T2-WP10); these cases avoid it with `c001`-style labels.
 
 ## Tests
 
@@ -204,7 +200,7 @@ R-pinned (load a case):
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5`
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j16`
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j30`
-- `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5_regressor_scale` (on `disc_polr_j5`'s dataset with x multiplied by 1e4 or 1e6: n, the category counts and the null log-likelihood against the case, and the fit unchanged apart from the coefficient divided by the scale)
+- `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5_regressor_scale` (on `disc_polr_j5`'s dataset with x multiplied by 1e4, 1e6 or 1e12: converged at the unscaled fit's iteration; the cut points, the log-likelihood, n, the category counts and the null log-likelihood against the case; and the fit unchanged apart from the coefficient divided by the scale)
 
 Helpers, the category cap and the separated fits:
 
@@ -213,7 +209,7 @@ Helpers, the category cap and the separated fits:
 - `econometrics::discrete::multinomial_logit::tests::test_multinom_accepts_100_categories`
 - `econometrics::discrete::multinomial_logit::tests::test_multinom_one_row_per_category_does_not_converge`
 - `econometrics::discrete::ordered_models::tests::test_ordered_max_abs_step_rejects_non_finite`
-- `econometrics::discrete::ordered_models::tests::test_ordered_accepts_100_categories`
+- `econometrics::discrete::ordered_models::tests::test_ordered_accepts_100_categories` (the cap admits 100 categories; the one-row-per-category fit converges to polr's coefficient and log-likelihood, inline values)
 
 Linear algebra (`linalg::matrix_ops::tests::`; R `solve()` values for `-tridiag(-1, 3, -1)`
 and `I - 0.5 W` on a 5 x 5 rook grid):

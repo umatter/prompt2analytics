@@ -42,6 +42,7 @@ mod conditional_logit;
 mod count_models;
 mod mixed_logit;
 mod multinomial_logit;
+mod newton;
 mod ordered_models;
 mod types;
 
@@ -154,35 +155,6 @@ mod tests {
         assert_eq!(result.n_obs, 12);
         assert_eq!(result.categories.len(), 3);
         assert_eq!(result.coefficients.len(), 2);
-    }
-
-    fn create_ordered_dataset() -> Dataset {
-        let df = df! {
-            "y" => ["Low", "Low", "Low", "Medium", "Medium", "Medium", "High", "High", "High", "High"],
-            "x" => [1.0, 2.0, 1.5, 4.0, 5.0, 4.5, 7.0, 8.0, 9.0, 8.5]
-        }
-        .unwrap();
-        Dataset::new(df)
-    }
-
-    #[test]
-    fn test_ordered_logit_basic() {
-        let dataset = create_ordered_dataset();
-        let result = run_ordered_logit(&dataset, "y", &["x"]).unwrap();
-
-        assert_eq!(result.n_obs, 10);
-        assert_eq!(result.categories.len(), 3);
-        assert_eq!(result.thresholds.len(), 2);
-        assert!(result.coefficients[0] > 0.0);
-    }
-
-    #[test]
-    fn test_ordered_probit_basic() {
-        let dataset = create_ordered_dataset();
-        let result = run_ordered_probit(&dataset, "y", &["x"]).unwrap();
-
-        assert_eq!(result.model_type, OrderedModelType::Probit);
-        assert!(result.coefficients[0] > 0.0);
     }
 
     fn create_count_dataset() -> Dataset {

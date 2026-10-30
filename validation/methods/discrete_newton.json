@@ -21,7 +21,7 @@
     },
     {
       "id": "ordered_newton_many_categories",
-      "name": "Ordered logit and probit (run_ordered_logit, run_ordered_probit) with 5, 16 and 30 categories: finite estimates, honest convergence flag, category counts and null log-likelihood",
+      "name": "Ordered logit and probit with 5, 16 and 30 categories (run_ordered_model_with): polr's coefficients, cut points, standard errors and log-likelihood, category counts and null log-likelihood",
       "category": "econometrics",
       "reference": "MASS::polr(method = 'logistic' | 'probit', Hess = TRUE, control = list(reltol = 1e-14)); null log-likelihood sum_j n_j log(n_j / n)",
       "doc": "validation/econometrics/discrete_newton.md",
@@ -32,12 +32,9 @@
         "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j30",
         "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j5_regressor_scale"
       ],
-      "quantities": ["n", "category counts", "null log-likelihood", "finite coefficients, thresholds and log-likelihood", "log-likelihood not above polr's maximum", "converged only above the null model", "fit unchanged when x is multiplied by 1e4 or 1e6 (coefficient divided by the scale)"],
-      "tolerance": "counts exact; null log-likelihood 1e-5 (n = 30, 96) and 1e-6 (n = 180) relative",
-      "deviations": [
-        {"finding": "ECON-4", "quantity": "coefficients, thresholds and log-likelihood (logit and probit)", "note": "the beta score has the wrong sign and the outer-product Hessian divides by p_i twice, so the fit never reaches polr's MLE (converged = false after 100 iterations); T2-WP10 pins logit_*/probit_* of these cases"},
-        {"finding": "ECON-5", "quantity": "standard errors", "note": "hard-coded 0.1; T2-WP10 computes them from the observed information"}
-      ],
+      "quantities": ["coefficients", "cut points", "SE (coefficient, cut points)", "log-likelihood", "n", "category counts", "null log-likelihood", "converged", "converged and the fit unchanged when x is multiplied by 1e4, 1e6 or 1e12 (coefficient divided by the scale)"],
+      "tolerance": "the cases hold polr's own BFGS optimum, within 8.6e-9 (coefficients), 1.2e-7 (cut points) and 1.8e-6 (SEs) relative of the MLE (polr's fit polished with .polish and .polr_grad of validation/r/cases/discrete.R, see the doc): coefficients and cut points Tol::iterative(1e-6), SEs Tol::iterative(1e-5), log-likelihood and null log-likelihood Tol::stat(n) (1e-5 for n = 30 and 96, 1e-6 for n = 180); counts exact",
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]
