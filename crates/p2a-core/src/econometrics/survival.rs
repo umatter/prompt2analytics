@@ -102,6 +102,83 @@ impl fmt::Display for AftDistribution {
 // Kaplan-Meier Estimator
 // =============================================================================
 
+/// Confidence-interval transformation of a Kaplan-Meier curve (R `survfit`'s
+/// `conf.type`). Used by [`run_kaplan_meier_with`], implemented by T2-WP09.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum KmConfType {
+    /// Interval on log S(t), R's default `"log"`.
+    #[default]
+    Log,
+    /// Interval on log(-log S(t)), R `"log-log"`.
+    LogLog,
+    /// Interval on S(t) itself, R `"plain"`.
+    Plain,
+}
+
+impl std::str::FromStr for KmConfType {
+    type Err = EconError;
+
+    /// `"log"`, `"log-log"` (or `"loglog"`) and `"plain"`, ignoring case and surrounding
+    /// whitespace.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "log" => Ok(KmConfType::Log),
+            "log-log" | "loglog" => Ok(KmConfType::LogLog),
+            "plain" => Ok(KmConfType::Plain),
+            _ => Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Unknown conf_type '{s}'; use \"log\" (default, as R survfit), \"log-log\" \
+                     or \"plain\""
+                ),
+            }),
+        }
+    }
+}
+
+impl fmt::Display for KmConfType {
+    /// R's `conf.type` names: "log", "log-log", "plain".
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            KmConfType::Log => "log",
+            KmConfType::LogLog => "log-log",
+            KmConfType::Plain => "plain",
+        })
+    }
+}
+
+/// Options of [`run_kaplan_meier_with`] (implemented by T2-WP09).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct KmConfig {
+    /// Confidence level of the pointwise intervals (default 0.95).
+    pub conf_level: f64,
+    /// Interval transformation (default [`KmConfType::Log`], as R `survfit`).
+    pub conf_type: KmConfType,
+}
+
+impl Default for KmConfig {
+    fn default() -> Self {
+        KmConfig {
+            conf_level: 0.95,
+            conf_type: KmConfType::Log,
+        }
+    }
+}
+
+/// Kaplan-Meier estimation with the options of [`KmConfig`].
+///
+/// Implemented by T2-WP09; until then returns `EconError::NotImplemented`.
+pub fn run_kaplan_meier_with(
+    dataset: &Dataset,
+    time_col: &str,
+    event_col: &str,
+    group_col: Option<&str>,
+    config: &KmConfig,
+) -> EconResult<Vec<KaplanMeierResult>> {
+    Err(EconError::NotImplemented(
+        "T2-WP09: run_kaplan_meier_with".to_string(),
+    ))
+}
+
 /// Result from Kaplan-Meier survival estimation.
 ///
 /// The Kaplan-Meier estimator is a non-parametric statistic for estimating
@@ -3041,6 +3118,36 @@ mod tests {
             final_cif_sum <= 1.0 + 0.01,
             "Sum of CIFs at final time should be <= 1, got {}",
             final_cif_sum
+        );
+    }
+
+    #[test]
+    fn test_km_conf_type_parse_and_defaults() {
+        for (text, want) in [
+            ("log", KmConfType::Log),
+            (" Log ", KmConfType::Log),
+            ("log-log", KmConfType::LogLog),
+            ("loglog", KmConfType::LogLog),
+            ("plain", KmConfType::Plain),
+        ] {
+            assert_eq!(text.parse::<KmConfType>().unwrap(), want, "{text:?}");
+        }
+        match "arcsin".parse::<KmConfType>() {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("\"log-log\""), "{message}");
+                assert!(message.contains("'arcsin'"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        assert_eq!(KmConfType::LogLog.to_string(), "log-log");
+        assert_eq!(KmConfType::Log.to_string(), "log");
+        assert_eq!(KmConfType::Plain.to_string(), "plain");
+        assert_eq!(
+            KmConfig::default(),
+            KmConfig {
+                conf_level: 0.95,
+                conf_type: KmConfType::Log
+            }
         );
     }
 }

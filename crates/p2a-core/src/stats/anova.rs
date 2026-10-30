@@ -616,6 +616,54 @@ impl std::fmt::Display for TwoWayAnovaResult {
     }
 }
 
+/// Sums of squares for a two-way ANOVA (R `anova(lm)` sequential Type I, or
+/// `car::Anova` Type II / III).
+///
+/// Used by [`run_two_way_anova_with`], implemented by T2-WP07.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SsType {
+    /// Sequential sums of squares (R `aov`, `anova(lm)`). Default.
+    #[default]
+    I,
+    /// Each main effect adjusted for the other (R `car::Anova(type = 2)`).
+    II,
+    /// Each term adjusted for all others, sum-to-zero contrasts (R `car::Anova(type = 3)`).
+    III,
+}
+
+/// Options of [`run_two_way_anova_with`] (implemented by T2-WP07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TwoWayAnovaConfig {
+    /// Include the A x B interaction (default true).
+    pub interaction: bool,
+    /// Sums of squares (default [`SsType::I`]).
+    pub ss_type: SsType,
+}
+
+impl Default for TwoWayAnovaConfig {
+    fn default() -> Self {
+        TwoWayAnovaConfig {
+            interaction: true,
+            ss_type: SsType::I,
+        }
+    }
+}
+
+/// Two-way ANOVA with the options of [`TwoWayAnovaConfig`].
+///
+/// Implemented by T2-WP07; until then returns `EconError::NotImplemented`.
+pub fn run_two_way_anova_with(
+    dataset: &Dataset,
+    response: &str,
+    factor_a: &str,
+    factor_b: &str,
+    config: &TwoWayAnovaConfig,
+) -> EconResult<TwoWayAnovaResult> {
+    Err(EconError::NotImplemented(
+        "T2-WP07: run_two_way_anova_with".to_string(),
+    ))
+}
+
 /// Perform two-way ANOVA on a dataset.
 ///
 /// Tests the effects of two categorical factors on a response variable,

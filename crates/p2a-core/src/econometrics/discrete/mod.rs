@@ -55,7 +55,10 @@ pub use binary_choice::{run_logit, run_probit};
 pub use multinomial_logit::{MultinomResult, run_multinom};
 
 // Re-exports for ordered models
-pub use ordered_models::{OrderedModelType, OrderedResult, run_ordered_logit, run_ordered_probit};
+pub use ordered_models::{
+    OrderedConfig, OrderedModelType, OrderedResult, run_ordered_logit, run_ordered_model_with,
+    run_ordered_probit,
+};
 
 // Re-exports for count models
 pub use count_models::{

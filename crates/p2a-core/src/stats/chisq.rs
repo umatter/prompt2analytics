@@ -538,6 +538,34 @@ fn independence_from_flat(
     })
 }
 
+/// Expected frequencies of a goodness-of-fit test ([`run_chisq_gof_with`], implemented by
+/// T2-WP05).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub enum GofExpected {
+    /// Every observed category equally likely. Default.
+    #[default]
+    Uniform,
+    /// probabilities in sorted level order (the order `ChiSquaredResult::row_labels` reports)
+    Probs(Vec<f64>),
+    /// category -> probability; categories never observed are counted as 0
+    Named(Vec<(String, f64)>),
+}
+
+/// Chi-squared goodness-of-fit test on a dataset column against `expected`; `rescale`
+/// divides the probabilities by their sum (R `chisq.test(rescale.p = TRUE)`).
+///
+/// Implemented by T2-WP05; until then returns `EconError::NotImplemented`.
+pub fn run_chisq_gof_with(
+    dataset: &Dataset,
+    column: &str,
+    expected: &GofExpected,
+    rescale: bool,
+) -> EconResult<ChiSquaredResult> {
+    Err(EconError::NotImplemented(
+        "T2-WP05: run_chisq_gof_with".to_string(),
+    ))
+}
+
 /// Run chi-squared goodness-of-fit test on a dataset column.
 ///
 /// Counts occurrences of each unique value and tests against expected probabilities.
