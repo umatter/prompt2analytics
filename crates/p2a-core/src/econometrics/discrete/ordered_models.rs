@@ -610,7 +610,7 @@ fn ordered_loglik(
         let upper = (c + 1 < n_cat).then(|| zeta[c] - eta);
         let lower = (c > 0).then(|| zeta[c - 1] - eta);
         let p = interval_probability(lower, upper, link);
-        if !(p > 0.0) {
+        if p.is_nan() || p <= 0.0 {
             return Ok(f64::NEG_INFINITY);
         }
         ll += p.ln();
@@ -1465,7 +1465,7 @@ mod tests {
             r.iterations,
             r.warnings
         );
-        let coef = 0.27537780315599802;
+        let coef = 0.275_377_803_155_998;
         assert!(
             (r.coefficients[0] - coef).abs() <= 1e-6 * coef,
             "coefficient {} vs polr {coef}",

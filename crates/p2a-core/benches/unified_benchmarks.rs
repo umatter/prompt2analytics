@@ -2159,9 +2159,9 @@ fn main() {
     print_header();
 
     for n in [100, 1000, 10000] {
-        let a = (n as f64 * 0.3) as f64;
-        let b = (n as f64 * 0.2) as f64;
-        let c = (n as f64 * 0.15) as f64;
+        let a = n as f64 * 0.3;
+        let b = n as f64 * 0.2;
+        let c = n as f64 * 0.15;
         let d = n as f64 - a - b - c;
         let table = [[a, b], [c, d]];
 
@@ -2874,7 +2874,7 @@ fn main() {
         let mut result = run_benchmark_tracked("STL", "period=12", n, &config, || {
             stl(&y_vec, stl_config.clone())
         });
-        if let Ok(_) = stl(&y_vec, stl_config.clone()) {
+        if stl(&y_vec, stl_config.clone()).is_ok() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "n_components", 3.0);
             result.outputs = outputs;
@@ -2898,7 +2898,7 @@ fn main() {
         let mut result = run_benchmark_tracked("Decompose", "additive", n, &config, || {
             decompose(&y_vec, 12, dec_config.clone())
         });
-        if let Ok(_) = decompose(&y_vec, 12, dec_config.clone()) {
+        if decompose(&y_vec, 12, dec_config.clone()).is_ok() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "n_components", 3.0);
             result.outputs = outputs;
