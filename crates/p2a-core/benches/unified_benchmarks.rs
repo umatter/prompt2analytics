@@ -1395,18 +1395,23 @@ fn main() {
             });
             if let Ok(ref arima) = run_arima_with(&dataset, "y", &arima_spec) {
                 let mut outputs = BTreeMap::new();
-                capture_vec(&mut outputs, "ar_coef", &arima.ar_coeffs);
-                capture_vec(&mut outputs, "ma_coef", &arima.ma_coeffs);
-                // R's "intercept" key is the constant of the differenced equation,
-                // drift x (1 - sum(ar)), which is ArimaResult::constant for d = 1 with
-                // drift (R has no intercept coefficient for d = 1).
-                if let Some(constant) = arima.constant {
-                    capture(&mut outputs, "intercept", constant);
+                // Rust-only key. An unconverged CSS fit (TS-35) is not R's optimum: it
+                // gets no key R has, so the pair is not exhibit-eligible.
+                capture(&mut outputs, "converged", arima.converged);
+                if arima.converged {
+                    capture_vec(&mut outputs, "ar_coef", &arima.ar_coeffs);
+                    capture_vec(&mut outputs, "ma_coef", &arima.ma_coeffs);
+                    // R's "intercept" key is the constant of the differenced equation,
+                    // drift x (1 - sum(ar)), which is ArimaResult::constant for d = 1
+                    // with drift (R has no intercept coefficient for d = 1).
+                    if let Some(constant) = arima.constant {
+                        capture(&mut outputs, "intercept", constant);
+                    }
+                    if let Some(drift) = arima.drift {
+                        capture(&mut outputs, "drift", drift);
+                    }
+                    capture(&mut outputs, "aic", arima.aic);
                 }
-                if let Some(drift) = arima.drift {
-                    capture(&mut outputs, "drift", drift);
-                }
-                capture(&mut outputs, "aic", arima.aic);
                 result.outputs = outputs;
             }
             result.dgp = "timeseries".to_string();
@@ -2880,7 +2885,9 @@ fn main() {
         });
         if let Ok(ref res) = fisher_exact_test(&table, FisherAlternative::TwoSided, None) {
             let mut outputs = BTreeMap::new();
-            capture(&mut outputs, "statistic", res.odds_ratio);
+            // R's estimate, the conditional MLE; the sample odds ratio is Rust's extra key
+            capture(&mut outputs, "statistic", res.conditional_mle);
+            capture(&mut outputs, "odds_ratio_sample", res.odds_ratio);
             capture(&mut outputs, "p_value", res.p_value);
             result.outputs = outputs;
         }
@@ -2890,14 +2897,15 @@ fn main() {
         results.push(result);
 
         // R's "with_ci" (conf.int = TRUE, conf.level = 0.95), the entry the merge
-        // keeps for Fisher: the exact conditional CI of the odds ratio. R's estimate is
-        // the conditional MLE and Rust's the sample odds ratio, so they are captured
-        // under different keys and only the p-value and the CI are compared.
+        // keeps for Fisher: the exact conditional CI of the odds ratio. Both sides report
+        // the conditional MLE of the odds ratio as `statistic` (R's estimate), so it is
+        // compared with the p-value and the CI; the sample odds ratio is an extra key.
         let mut result = run_benchmark_tracked("Fisher", "with_ci", n, &config, || {
             fisher_exact_test(&table, FisherAlternative::TwoSided, Some(0.95))
         });
         if let Ok(ref res) = fisher_exact_test(&table, FisherAlternative::TwoSided, Some(0.95)) {
             let mut outputs = BTreeMap::new();
+            capture(&mut outputs, "statistic", res.conditional_mle);
             capture(&mut outputs, "odds_ratio_sample", res.odds_ratio);
             capture(&mut outputs, "p_value", res.p_value);
             if let Some((lo, hi)) = res.odds_ratio_ci {
