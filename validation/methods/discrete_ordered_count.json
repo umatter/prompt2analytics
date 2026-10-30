@@ -57,6 +57,57 @@
         {"finding": "ECON-64", "quantity": "null log-likelihood and McFadden pseudo-R2", "note": "not pinned: the null log-likelihood omits the lnGamma terms and reuses the full model's theta (Tier 4)"}
       ],
       "supersedes_legacy": ["validation/expected/negbin_test.csv"]
+    },
+    {
+      "id": "discrete_zip",
+      "name": "Zero-inflated Poisson (logit zero part), pscl::zeroinfl",
+      "category": "econometrics",
+      "reference": "pscl::zeroinfl(dist = 'poisson', EM = TRUE, reltol = 1e-15) polished with pscl's analytic gradient; SEs from numDeriv::hessian",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": ["disc_zeroinfl"],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_disc_zeroinfl",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_zero_part_regressors",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_missing_rows_dropped",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl"
+      ],
+      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "log-likelihood", "AIC", "BIC", "zero count", "rows used / dropped (na.omit)"],
+      "tolerance": "MLE: coefficients 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 500); counts exact",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/zip_test.csv"]
+    },
+    {
+      "id": "discrete_zinb",
+      "name": "Zero-inflated negative binomial (logit zero part), pscl::zeroinfl",
+      "category": "econometrics",
+      "reference": "pscl::zeroinfl(dist = 'negbin', EM = TRUE, reltol = 1e-15) polished with pscl's analytic gradient; SEs (incl. log theta) from numDeriv::hessian",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": ["disc_zeroinfl"],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zinb_disc_zeroinfl",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl"
+      ],
+      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "theta", "SE(log theta)", "SE(theta)", "log-likelihood", "AIC", "BIC", "zero count"],
+      "tolerance": "as discrete_zip; theta 1e-6, SE(log theta) and SE(theta) 1e-5 relative",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/zinb_test.csv"]
+    },
+    {
+      "id": "discrete_hurdle_rows",
+      "name": "Hurdle models: rows used after listwise deletion (pscl::hurdle na.omit)",
+      "category": "econometrics",
+      "reference": "pscl::hurdle(y ~ x1 + x2) on data with missing values: number of observations used",
+      "doc": "validation/econometrics/hurdle.md",
+      "cases": ["disc_zeroinfl"],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_missing_rows_dropped"
+      ],
+      "quantities": ["rows used / dropped (na.omit)"],
+      "tolerance": "exact",
+      "deviations": [
+        {"finding": "ECON-16", "quantity": "count-part SEs, NB hurdle theta (all hurdle estimates)", "note": "not pinned to pscl::hurdle: the truncated-count information and the NB theta are Tier 4"}
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

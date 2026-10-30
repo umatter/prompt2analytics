@@ -181,3 +181,83 @@ case("disc_negbin", "econometrics/discrete", "Negative binomial (MASS::glm.nb): 
        reference = "MASS::glm.nb(control = glm.control(epsilon = 1e-14)), polished by Newton steps on the joint (beta, theta) score; beta SEs (X'WX)^-1 with W = mu theta/(theta + mu) (summary.negbin); SE.theta = 1/sqrt(theta.ml information) at the optimum",
        call = "glm.nb(y ~ x1 + x2, data = d)", packages = "MASS")
 })
+
+# ---- zero-inflated Poisson and negative binomial ---------------------------------------------
+.zi_ll <- function(par, X, Z, y, dist) {
+  kx <- ncol(X); kz <- ncol(Z)
+  b <- par[1:kx]; g <- par[(kx + 1):(kx + kz)]
+  mu <- exp(drop(X %*% b)); p0 <- plogis(drop(Z %*% g))
+  if (dist == "poisson") dens <- dpois(y, mu) else dens <- dnbinom(y, size = exp(par[kx + kz + 1]), mu = mu)
+  sum(log(ifelse(y == 0, p0 + (1 - p0) * dens, (1 - p0) * dens)))
+}
+# pscl's analytic gradient (gradPoisson / gradNegBin, logit link, no weights or offsets)
+.zi_grad <- function(par, X, Z, y, dist) {
+  kx <- ncol(X); kz <- ncol(Z); Y1 <- y > 0
+  mu <- exp(drop(X %*% par[1:kx])); etaz <- drop(Z %*% par[(kx + 1):(kx + kz)]); muz <- plogis(etaz); me <- dlogis(etaz)
+  if (dist == "poisson") {
+    cl0 <- -mu; dens0 <- muz * (1 - Y1) + exp(log(1 - muz) + cl0)
+    wc <- ifelse(Y1, y - mu, -exp(-log(dens0) + log(1 - muz) + cl0 + log(mu)))
+  } else {
+    th <- exp(par[kx + kz + 1]); cl0 <- dnbinom(0, size = th, mu = mu, log = TRUE)
+    dens0 <- muz * (1 - Y1) + exp(log(1 - muz) + cl0)
+    wc <- ifelse(Y1, y - mu * (y + th) / (mu + th), -exp(-log(dens0) + log(1 - muz) + cl0 + log(th) - log(mu + th) + log(mu)))
+    wt <- th * ifelse(Y1, digamma(y + th) - digamma(th) + log(th) - log(mu + th) + 1 - (y + th) / (mu + th),
+                      exp(-log(dens0) + log(1 - muz) + cl0) * (log(th) - log(mu + th) + 1 - th / (mu + th)))
+  }
+  wz <- ifelse(Y1, -1 / (1 - muz) * me, (me - exp(cl0) * me) / dens0)
+  c(colSums(wc * X), colSums(wz * Z), if (dist == "negbin") sum(wt))
+}
+.zi_values <- function(d, yname, xnames, znames, dist) {
+  frm <- as.formula(paste(yname, "~", paste(xnames, collapse = " + "), "|", paste(znames, collapse = " + ")))
+  m <- zeroinfl(frm, data = d, dist = dist, control = zeroinfl.control(EM = TRUE, reltol = 1e-15, maxit = 100000))
+  dd <- d[complete.cases(d[, unique(c(yname, xnames, znames))]), ]
+  X <- cbind(1, as.matrix(dd[, xnames, drop = FALSE])); Z <- cbind(1, as.matrix(dd[, znames, drop = FALSE])); y <- dd[[yname]]
+  kx <- ncol(X); kz <- ncol(Z)
+  par0 <- c(m$coefficients$count, m$coefficients$zero, if (dist == "negbin") log(m$theta))
+  par <- .polish(par0, function(p) .zi_grad(p, X, Z, y, dist))
+  H <- numDeriv::hessian(function(p) .zi_ll(p, X, Z, y, dist), par)
+  se <- sqrt(diag(solve(-H)))
+  ic <- 1:kx; iz <- (kx + 1):(kx + kz)
+  ll <- .zi_ll(par, X, Z, y, dist); npar <- length(par); n <- length(y)
+  zc <- .z_p(par[ic], se[ic]); zz <- .z_p(par[iz], se[iz])
+  out <- list(count = named(setNames(par[ic], names(m$coefficients$count))), zero = named(setNames(par[iz], names(m$coefficients$zero))),
+              se_count = vec(se[ic]), se_zero = vec(se[iz]), z_count = vec(zc$z), p_count = vec(zc$p),
+              z_zero = vec(zz$z), p_zero = vec(zz$p),
+              count_pkg = named(m$coefficients$count), zero_pkg = named(m$coefficients$zero),
+              se_count_pkg = vec(sqrt(diag(vcov(m)))[ic]), se_zero_pkg = vec(sqrt(diag(vcov(m)))[iz]),
+              loglik = ll, loglik_pkg = as.numeric(logLik(m)), aic = -2 * ll + 2 * npar, bic = -2 * ll + log(n) * npar,
+              n = n, n_zeros = sum(y == 0),
+              max_abs_grad = max(abs(.zi_grad(par, X, Z, y, dist))), max_abs_grad_pkg = max(abs(.zi_grad(par0, X, Z, y, dist))))
+  if (dist == "negbin") {
+    lt <- par[npar]
+    out$theta <- exp(lt); out$log_theta <- lt; out$se_log_theta <- se[npar]; out$se_theta <- exp(lt) * se[npar]
+    out$theta_pkg <- m$theta; out$se_log_theta_pkg <- m$SE.logtheta
+  }
+  out
+}
+case("disc_zeroinfl", "econometrics/discrete", "Zero-inflated Poisson and NB (pscl::zeroinfl), count and zero parts", function(ctx) {
+  set.seed(808)
+  n <- 500
+  x1 <- rnorm(n); x2 <- rnorm(n)
+  p0 <- plogis(-0.4 + 0.6 * x1 + 0.2 * x2)
+  mu <- exp(0.6 + 0.25 * x1 - 0.3 * x2)
+  ypois <- ifelse(runif(n) < p0, 0L, rpois(n, mu))
+  ynb <- ifelse(runif(n) < p0, 0L, rnbinom(n, size = 2, mu = mu))
+  y_na <- ypois; y_na[c(7, 88, 410)] <- NA
+  x2r <- round(x2, 8); x2_na <- x2r; x2_na[c(50, 51)] <- NA
+  d <- ctx$gen_dataset("zeroinfl", data.frame(y = ypois, y_nb = ynb, x1 = round(x1, 8), x2 = x2r, y_na = y_na, x2_na = x2_na))
+  stopifnot(is.integer(d$y), is.integer(d$y_nb), sum(!complete.cases(d$y_na, d$x1, d$x2_na)) == 5)
+  zp <- .zi_values(d, "y", c("x1", "x2"), c("x1", "x2"), "poisson"); names(zp) <- paste0("zip_", names(zp))
+  zn <- .zi_values(d, "y_nb", c("x1", "x2"), c("x1", "x2"), "negbin"); names(zn) <- paste0("zinb_", names(zn))
+  z1 <- .zi_values(d, "y", c("x1", "x2"), "x1", "poisson")          # zero part with its own regressors
+  na <- .zi_values(d, "y_na", c("x1", "x2_na"), c("x1", "x2_na"), "poisson")
+  # pscl::hurdle drops the same rows (na.omit); its estimates are not pinned here (ECON-16, Tier 4)
+  hna <- hurdle(y_na ~ x1 + x2_na, data = d)
+  list(values = c(zp, zn, list(zip_z1_count = z1$count, zip_z1_zero = z1$zero, zip_z1_se_zero = z1$se_zero, zip_z1_loglik = z1$loglik,
+                               zip_na_count = na$count, zip_na_zero = na$zero, zip_na_se_count = na$se_count, zip_na_loglik = na$loglik,
+                               zip_na_n_used = na$n, zip_na_n_dropped = nrow(d) - na$n,
+                               zip_na_missing_y = sum(is.na(d$y_na)), zip_na_missing_x2 = sum(is.na(d$x2_na)),
+                               hurdle_na_n_used = hna$n)),
+       reference = "pscl::zeroinfl(y ~ x1 + x2 | x1 + x2, dist = 'poisson' | 'negbin', EM = TRUE, reltol = 1e-15), polished by Newton steps on pscl's analytic gradient; SEs from numDeriv::hessian",
+       call = "zeroinfl(y ~ x1 + x2 | x1 + x2, data = d, dist = ...)", packages = c("pscl", "numDeriv"))
+})

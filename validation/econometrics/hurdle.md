@@ -109,6 +109,26 @@ model_nb$theta  # Dispersion parameter
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-81):
 - `econometrics::discrete::count_models::tests::test_validate_hurdle_poisson_structure` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): n, model type, no theta, the zero and positive counts, and finite log-likelihoods; no `pscl::hurdle` value is compared.
 
+## Missing values
+
+`run_hurdle` reads the outcome, the count regressors `x` and the binary-part regressors
+`z` in one request; a row with a missing value in any of them is dropped from both parts
+(listwise deletion, as `pscl::hurdle`'s default `na.action = na.omit`) and reported in
+`HurdleResult::missing` (JSON key `missing`, omitted when nothing was dropped) and on the
+last line of the text output. A text outcome or regressor is `NonNumericColumn`; before
+T2-WP10 a missing count was read as 0 and a missing regressor was a design error.
+
+R reference: case `disc_zeroinfl` (`validation/r/cases/discrete.R`, dataset
+`validation/datasets/generated/zeroinfl.csv`): `pscl::hurdle(y_na ~ x1 + x2_na)` uses 495
+of the 500 rows (`hurdle_na_n_used`; `y_na` has 3 and `x2_na` 2 missing cells).
+
+**Rust test** (R-pinned for the rows used):
+- `econometrics::discrete::count_models::tests::test_validate_hurdle_missing_rows_dropped`
+  (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): `n_obs` equals R's
+  `hurdle_na_n_used` (exact), 5 rows are dropped, and both parts' coefficients equal those
+  of the same fit on the complete rows. The estimates themselves are not compared with
+  `pscl::hurdle` (ECON-16, Tier 4).
+
 ## Numerical Precision Summary
 
 - **Coefficients**: Match R within ±0.3 (stochastic data generation)
@@ -159,6 +179,13 @@ The Rust implementation:
 5. For NegBin: estimates theta using profile likelihood
 6. Computes combined log-likelihood: LL = LL_binary + LL_count
 7. Returns coefficients, standard errors, z-statistics, p-values for both parts
+
+## Status
+
+R-pinned for the rows used, known deviations (ECON-16): registry
+`validation/methods/discrete_ordered_count.json`, id `discrete_hurdle_rows`. The hurdle
+estimates, standard errors and theta are not R-pinned (ECON-16, Tier 4: the
+truncated-count information and the NB hurdle theta).
 
 ## References
 

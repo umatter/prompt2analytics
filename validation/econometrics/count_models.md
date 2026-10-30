@@ -1,9 +1,9 @@
 # Validation: Count Models (MASS::glm.nb, pscl::zeroinfl)
 
 Registry: [`validation/methods/discrete_ordered_count.json`](../methods/discrete_ordered_count.json)
-(method `discrete_negbin`). R case: `disc_negbin` in
-[`validation/r/cases/discrete.R`](../r/cases/discrete.R). The hurdle models are in
-[hurdle.md](hurdle.md).
+(methods `discrete_negbin`, `discrete_zip`, `discrete_zinb`). R cases: `disc_negbin` and
+`disc_zeroinfl` in [`validation/r/cases/discrete.R`](../r/cases/discrete.R). The hurdle
+models are in [hurdle.md](hurdle.md).
 
 ## Method Overview
 
@@ -46,6 +46,43 @@ Poisson one) gives `converged = false`, `theta_std_error = NaN` and a warning th
 data show no overdispersion. R's glm.nb stops there with "iteration limit reached" (on the
 12-row unit-test fixture: theta 106936.84).
 
+### Zero-inflated Poisson and NB
+
+`run_zip(dataset, y, x, z)` and `run_zinb(...)` fit `pscl::zeroinfl(y ~ x | z, dist =
+"poisson" | "negbin")` with a logit zero part (`z` defaults to `x`, pscl's default):
+
+    P(y = 0) = pi + (1 - pi) f(0),   P(y = k) = (1 - pi) f(k) for k > 0,
+    logit(pi) = z'gamma,   log(mu) = x'beta,   f Poisson(mu) or NB2(mu, theta)
+
+Algorithm (pscl's `EM = TRUE` start, then a full maximisation):
+
+- Start: `gamma` from a logistic IRLS of `1[y = 0]` on `Z`, `beta` from a Poisson IRLS of
+  `y` on `X` (glm.fit's guards: the logit mean within `[eps, 1 - eps]`, `d mu / d eta >=
+  eps`, `eta <= 700`; a singular or non-finite update keeps the previous coefficients).
+- ZIP EM to convergence (relative log-likelihood change below 1e-8, at most 500 rounds):
+  the E-step `w_i = pi_i / (pi_i + (1 - pi_i) e^-mu_i)` for zeros, the M-steps a logistic
+  IRLS with response `w` and a Poisson IRLS with weights `1 - w`; a round that would lower
+  the log-likelihood is not taken. ZINB starts from the ZIP EM values and `ln theta = 0`
+  (pscl's start when `EM = FALSE`; the optimum is the same).
+- Joint maximisation of the log-likelihood in `(beta, gamma[, ln theta])`, computed in log
+  space, by damped Newton steps with pscl's analytic gradient (`gradPoisson`,
+  `gradNegBin`) and a central-difference Hessian of that gradient (step
+  `1e-5 max(1, |par_k|)`, symmetrised); Levenberg damping and step halving as for the
+  ordered models; `ln theta <= ln 1e8`; at most 200 iterations. Converged: `max |grad| <
+  1e-8 (1 + |ll|)`, relative log-likelihood change below 1e-12 and every Newton-step
+  component below `1e-10 (1 + |par_k|)`. A non-finite gradient or Hessian, a failed line
+  search or the iteration limit end the fit with `converged = false` and a warning.
+- Standard errors from the inverse of the negated Hessian at the estimate (NaN with a
+  warning if it is not positive definite); for ZINB `log_theta_std_error` = SE(ln theta)
+  (pscl's `SE.logtheta`) and `theta_std_error = theta SE(ln theta)` (delta method). z and
+  p as for NB; AIC and BIC count `kx + kz (+ 1)` parameters.
+- Fitted zero-inflation probabilities with `min(pi, 1 - pi) < 10 eps` give the warning
+  "fitted zero-inflation probabilities numerically 0 or 1 occurred" (glm.fit's test; pscl's
+  EM suppresses it and reports such fits as converged). A ZINB theta above 1e6 is flagged as
+  for NB.
+- An outcome without a zero count is refused (`InvalidSpecification`, as pscl's "minimum
+  count is not zero"). Zeros are the values below 0.5 (ECON-58).
+
 ### Missing values
 
 The outcome and the regressors are read together; rows with a missing value in any of
@@ -60,6 +97,8 @@ was dropped) and on the last line of the text output. A text column is
 |---|---|---|
 | MASS | 7.3.60.0.1 (R 4.3.3) | `glm.nb(control = glm.control(epsilon = 1e-14, maxit = 200))`, `theta.ml` |
 | base R | 4.3.3 | `trigamma` |
+| pscl | 1.5.9 | `zeroinfl(dist = "poisson" \| "negbin", control = zeroinfl.control(EM = TRUE, reltol = 1e-15, maxit = 100000))` |
+| numDeriv | 2016.8.1.1 | `hessian`, `jacobian` (polishing and SEs) |
 
 ## R reference
 
@@ -99,6 +138,41 @@ se_theta <- 1 / sqrt(.nb_info(th, mu, y))                                  # the
 | `na_loglik`, `na_n_used`, `na_n_dropped` | -557.9807627670712, 395, 5 (`y_na` 3, `x1_na` 2) |
 | `trigamma` at `trigamma_x` = 0.1, 0.5, 1, 1.6025851429909947, 3.7, 6, 10, 25.5, 1000 | 101.43329915079275, 4.934802200544679, 1.6449340668482264, 0.8566167623849812, 0.31003785767003833, 0.18132295573711527, 0.10516633568168572, 0.03999466964956293, 0.0010005001666666335 |
 
+Case `disc_zeroinfl` (dataset `validation/datasets/generated/zeroinfl.csv`, 500 rows, seed
+808): `y` zero-inflated Poisson and `y_nb` zero-inflated NB (size 2) with
+`logit(pi) = -0.4 + 0.6 x1 + 0.2 x2`, `mu = exp(0.6 + 0.25 x1 - 0.3 x2)` (Int64), and `y_na`,
+`x2_na` with 3 and 2 missing cells (5 incomplete rows). zeroinfl's BFGS stops at
+`max |grad|` 7.5e-6 (ZIP) and 7.1e-6 (ZINB); its ZINB theta is 5.3e-7 relative from the MLE.
+The case polishes pscl's fit with pscl's analytic gradient to `max |grad|` 9.8e-14 (ZIP)
+and 8.1e-12 (ZINB) and takes the SEs from `numDeriv::hessian` there; pscl's values are kept
+as `*_pkg`. `Rscript validation/r/run.R --write disc_zeroinfl` writes it.
+
+| key | ZIP (`y`) | ZINB (`y_nb`) |
+|---|---|---|
+| `*_count` (Intercept), x1, x2 | 0.6259760625813262, 0.18647905374652335, -0.2665448461538206 | 0.41210175578854347, 0.2928331023453584, -0.34469422957446477 |
+| `*_zero` | -0.35893642636304074, 0.4216190725590943, 0.1843533718931378 | -1.3270691586609378, 0.7774559970541303, 0.4259557829270744 |
+| `*_se_count` | 0.05501336912265871, 0.05319705963870614, 0.06063009261132024 | 0.1260329943978712, 0.0819981352226419, 0.08343840402822274 |
+| `*_se_zero` | 0.12617385646381543, 0.1352377225436285, 0.1351834256116356 | 0.5841342107431455, 0.3373393530304863, 0.2582986823793917 |
+| `*_z_count` | 11.378617099157111, 3.505439116616914, -4.396246726234656 | 3.269792626584648, 3.5712166081613437, -4.131122036536955 |
+| `*_p_count` | 5.344041039890042e-30, 0.0004558547486653013, 1.101387377357464e-05 | 0.0010762635342585198, 0.0003553268754454276, 3.609968617545867e-05 |
+| `*_z_zero` | -2.844776536302334, 3.117614409863176, 1.3637276245888388 | -2.2718565943477573, 2.3046703269863373, 1.6490822911029268 |
+| `*_p_zero` | 0.004444258969631584, 0.0018232116615723565, 0.17265330637629114 | 0.023095173294476534, 0.021185043961690894, 0.09913077708359233 |
+| `*_loglik`, `*_aic`, `*_bic` | -688.7967373111242, 1389.5934746222483, 1414.8811232127814 | -712.3927772952783, 1438.7855545905566, 1468.287811279512 |
+| `*_n`, `*_n_zeros` | 500, 259 | 500, 273 |
+| `zinb_theta`, `zinb_log_theta` | | 1.1216047965897817, 0.11476051384912063 |
+| `zinb_se_log_theta`, `zinb_se_theta` | | 0.3065579537099327, 0.3438368713138088 |
+| `*_count_pkg` (pscl) | 0.6259760539704734, 0.18647906400263853, -0.26654483687991976 | 0.4121018888512731, 0.29283313687668966, -0.3446941769846983 |
+| `zinb_theta_pkg`, `zinb_se_log_theta_pkg` | | 1.1216053960325127, 0.30655779164663227 |
+
+Zero part on `x1` only (`zip_z1_*`): count 0.6072009458052031, 0.18265730366648034,
+-0.30273324594357554; zero -0.3891251937775814, 0.43784369115847704; `zip_z1_se_zero`
+0.12886042812630255, 0.13807038647154984; `zip_z1_loglik` -689.7078650175997. Missing
+values (`y_na ~ x1 + x2_na | x1 + x2_na`, 495 rows): count 0.631486489779986,
+0.19001742937939975, -0.2619236371428857; zero -0.3678354788343926, 0.43133493971040254,
+0.19474884922867577; `zip_na_se_count` 0.054914842224500375, 0.05315774411900642,
+0.060678332311512276; `zip_na_loglik` -684.0056763199633; 5 rows dropped (`y_na` 3,
+`x2_na` 2). `hurdle_na_n_used` 495 (pscl::hurdle on the same data; [hurdle.md](hurdle.md)).
+
 ## Rust tests
 
 R-pinned (`crates/p2a-core/src/econometrics/discrete/count_models.rs` unless noted):
@@ -110,6 +184,11 @@ R-pinned (`crates/p2a-core/src/econometrics/discrete/count_models.rs` unless not
 | `econometrics::discrete::count_models::tests::test_validate_negbin_missing_rows_dropped` | `y_na ~ x1_na + x2`: `na_*` estimates, 395 rows used, 5 dropped by column |
 | `econometrics::discrete::count_models::tests::test_validate_negbin_trigamma_disc_negbin` | `trigamma` against R's at `trigamma_x` |
 | `p2a-mcp` `tier2::wp10_ordered_count::test_validate_mcp_negbin_disc_negbin` (`crates/p2a-mcp/tests/tier2/wp10_ordered_count.rs`) | the MCP `negbin` text: coefficients, SE, z, p, theta with SE, log-likelihood at print precision; `Converged: true` |
+| `econometrics::discrete::count_models::tests::test_validate_zip_disc_zeroinfl` | every `zip_*` key above (count, zero, SEs, z, p, log-likelihood, AIC, BIC, n, zeros; `*_pkg` cross-checks); converged, no warning; no theta |
+| `econometrics::discrete::count_models::tests::test_validate_zinb_disc_zeroinfl` | every `zinb_*` key, with theta, SE(log theta) and SE(theta) |
+| `econometrics::discrete::count_models::tests::test_validate_zip_zero_part_regressors` | `zip_z1_*` (zero part on `x1`) |
+| `econometrics::discrete::count_models::tests::test_validate_zip_missing_rows_dropped` | `zip_na_*`: estimates, 495 rows used, 5 dropped by column |
+| `p2a-mcp` `tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl` | the MCP `zeroinfl` text for both distributions: both coefficient tables, log-likelihood, and the ZINB theta line, at print precision |
 
 Not R-pinned:
 
@@ -120,6 +199,19 @@ Not R-pinned:
   a cancelled budget stops the fit.
 - `p2a-mcp` `tier2::wp10_ordered_count::test_mcp_negbin_reports_dropped_rows_and_rejects_bad_init_theta`:
   the MCP text reports the dropped rows; a negative `init_theta` is a tool error.
+- `econometrics::discrete::count_models::tests::test_zip_separated_zero_part_is_flagged`:
+  the 12-row fixture with a separated zero part (pscl: zero coefficients 94.70464,
+  -25.39549, logLik -8.370407) reaches at least pscl's log-likelihood and warns that
+  fitted probabilities were numerically 0 or 1.
+- `econometrics::discrete::count_models::tests::test_zeroinfl_gradient_matches_central_differences`:
+  the analytic gradient equals central differences of the log-likelihood, both
+  distributions.
+- `econometrics::discrete::count_models::tests::test_zeroinfl_rejects_outcome_without_zeros`,
+  `econometrics::discrete::count_models::tests::test_na_count_models_float_outcome_equals_int64`,
+  `econometrics::discrete::count_models::tests::test_na_count_models_text_outcome_is_non_numeric`,
+  `econometrics::discrete::count_models::tests::test_zeroinfl_stops_when_cancelled`:
+  the zero-count refusal, Int64 = Float64 outcomes, `NonNumericColumn` for a text outcome
+  (NB, ZIP, hurdle), cancellation.
 
 ## Tolerance
 
@@ -127,13 +219,19 @@ Not R-pinned:
 theta `Tol::iterative(1e-6)`, SEs, `SE(theta)` and z `Tol::iterative(1e-5)`, p
 `Tol::iterative(2e-3)`, log-likelihood, AIC, BIC `Tol::stat(400)` (1e-6), mean and variance
 of y `Tol::coef(400)` (1e-8), counts exact; glm.nb's `SE.theta` `Tol::iterative(1e-4)`;
-trigamma `Tol::new(1e-12, 0)`; MCP text `Tol::printed(4)`. Measured: the Rust fit agrees
-with the polished values to about 1e-14 relative (coefficients, theta, SEs).
+trigamma `Tol::new(1e-12, 0)`; MCP text `Tol::printed(4)`. Zero-inflated: coefficients
+and theta `Tol::iterative(1e-6)`, SEs (incl. SE(log theta), SE(theta)) and z
+`Tol::iterative(1e-5)`, p `Tol::iterative(2e-3)` (z^2 is at most 130 here),
+log-likelihood, AIC, BIC `Tol::stat(500)` (1e-6), counts exact, pscl's own optimum
+`Tol::iterative(1e-4)`. Measured: the NB fit agrees with the polished values to about
+1e-14 relative (coefficients, theta, SEs); ZIP to 1e-14 (coefficients) and 1e-11 (SEs);
+ZINB to 1e-10 (coefficients, theta) and 1e-9 (SEs, the central-difference Hessian).
 
 ## Status
 
 R-pinned, known deviations (ECON-64): registry
-`validation/methods/discrete_ordered_count.json`, id `discrete_negbin`.
+`validation/methods/discrete_ordered_count.json`, ids `discrete_negbin` (deviation
+ECON-64), `discrete_zip` and `discrete_zinb`.
 
 ## Known Differences
 
@@ -143,7 +241,13 @@ R-pinned, known deviations (ECON-64): registry
   is checked at 1e-4.
 - No overdispersion: theta stops at a value above 1e6 (bounded by 1e8) with
   `converged = false`, where glm.nb stops at the iteration limit.
-- `validation/expected/negbin_test.csv` is a legacy file that no test reads.
+- ZIP/ZINB: pscl's BFGS stops about 1e-7 relative from the MLE (`*_pkg`, checked at
+  1e-4); p2a warns about fitted zero-inflation probabilities numerically 0 or 1, which
+  pscl's EM suppresses, and refuses an outcome without zeros as pscl does.
+- Open items: ECON-58 (Tier 4) keeps negative and non-integer counts and the `y < 0.5`
+  zero rule; TOOL-30 (Tier 4) the MCP description of the `z` argument.
+- `validation/expected/negbin_test.csv`, `zip_test.csv` and `zinb_test.csv` are legacy
+  files that no test reads.
 
 ## References
 
@@ -151,3 +255,7 @@ R-pinned, known deviations (ECON-64): registry
   section 7.4. Springer.
 - Cameron, A. C., & Trivedi, P. K. (2013). *Regression Analysis of Count Data* (2nd ed.).
   Cambridge University Press.
+- Lambert, D. (1992). Zero-inflated Poisson regression, with an application to defects in
+  manufacturing. *Technometrics*, 34(1), 1-14.
+- Zeileis, A., Kleiber, C., & Jackman, S. (2008). Regression models for count data in R.
+  *Journal of Statistical Software*, 27(8), 1-25.

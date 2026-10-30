@@ -149,3 +149,50 @@ async fn test_mcp_negbin_reports_dropped_rows_and_rejects_bad_init_theta() {
     assert!(!r.success, "{t}");
     assert!(t.contains("init_theta"), "{t}");
 }
+
+/// `zeroinfl` prints pscl's fit for both distributions (before: SE 0.1 after two EM
+/// passes reported as converged, and a clamped moment theta for ZINB).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_validate_mcp_zeroinfl_disc_zeroinfl() {
+    let case = Case::load("disc_zeroinfl");
+    let (session, server) = session_with("disc_zeroinfl");
+    let names = ["(Intercept)", "x1", "x2"];
+    let tol = Tol::printed(4);
+    for (y, dist, p) in [("y", "poisson", "zip_"), ("y_nb", "negbin", "zinb_")] {
+        let r = call(
+            &server,
+            &session,
+            "zeroinfl",
+            json!({"dataset": "zeroinfl", "y": y, "x": ["x1", "x2"], "z": ["x1", "x2"], "dist": dist}),
+        )
+        .await;
+        let t = text(&r);
+        assert!(r.success, "{t}");
+        assert!(t.contains("Converged: true"), "{t}");
+        let (count, zero) = t
+            .split_once("Zero-Inflation Model")
+            .unwrap_or_else(|| panic!("no zero-inflation table in:\n{t}"));
+        let k = |s: &str| format!("{p}{s}");
+        let mut check = Check::new(&case);
+        check
+            .named(&k("count"), &names, &column(count, &names, 0), tol)
+            .vector(&k("se_count"), &column(count, &names, 1), tol)
+            .vector(&k("z_count"), &column(count, &names, 2), tol)
+            .vector(&k("p_count"), &column(count, &names, 3), tol)
+            .named(&k("zero"), &names, &column(zero, &names, 0), tol)
+            .vector(&k("se_zero"), &column(zero, &names, 1), tol)
+            .vector(&k("z_zero"), &column(zero, &names, 2), tol)
+            .vector(&k("p_zero"), &column(zero, &names, 3), tol)
+            .scalar(&k("loglik"), labelled(&t, "Log-Likelihood:").unwrap(), tol);
+        if dist == "negbin" {
+            let theta = numbers(line(&t, "Theta:"));
+            assert_eq!(theta.len(), 4, "{t}");
+            check
+                .scalar("zinb_theta", theta[0], tol)
+                .scalar("zinb_se_theta", theta[1], tol)
+                .scalar("zinb_log_theta", theta[2], tol)
+                .scalar("zinb_se_log_theta", theta[3], tol);
+        }
+        check.finish();
+    }
+}
