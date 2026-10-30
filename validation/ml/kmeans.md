@@ -61,6 +61,24 @@ table(result$cluster, iris$Species)
 
 Centroids should match within 1e-4 (given same initialization).
 
+## Missing and non-finite values
+
+- **Core.** `kmeans` refuses NaN and ±Inf before it initialises and names the first bad
+  cell in row-major order: "k-means: x must contain only finite values (row 4, column 0 is
+  NaN); remove or impute missing values first". It used to report "K-means failed to
+  converge" (every inertia was NaN). R stops as well: `kmeans(m, 2)` on a matrix with an
+  `NA` gives "NA/NaN/Inf in foreign function call (arg 1)" (R 4.3.3).
+- **MCP and CLI.** `ml_kmeans` and `p2a ml kmeans` read their columns through the shared
+  extractor with the Fail policy: a missing value (null or NaN) is an error naming the
+  column ("Column 'x1_na' contains 1 missing value(s) (null or NaN) ..."; the MCP text adds
+  that `munge_drop_na` or `munge_fill_na` can remove or impute the rows), a text column is
+  refused by name, and integer and boolean columns are numeric.
+- **Tests.** `test_na_kmeans_refuses_non_finite_input` (`crates/p2a-core/src/ml/clustering.rs`),
+  `test_na_mcp_ml_matrix_tools_name_the_column` and
+  `test_mcp_ml_matrix_tools_int64_equals_float64` (`crates/p2a-mcp/src/tools/handlers/ml.rs`),
+  `test_cli_ml_integer_columns_accepted` (`crates/p2a-cli/tests/tier2/wp17_ml.rs`). They
+  compare p2a with p2a and pin no R number.
+
 ## Running the Tests
 
 ```bash
