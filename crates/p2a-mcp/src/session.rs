@@ -284,7 +284,7 @@ impl Session {
     /// profiler's names to the restored datasets, as every charge refresh
     /// does ([`refresh_data_bytes`](Self::refresh_data_bytes)). A tracked
     /// name whose dataset the undone call replaced (its columns are not the
-    /// snapshot's, [`same_dataset`]) is tracked again with the snapshot's
+    /// snapshot's, `same_dataset`) is tracked again with the snapshot's
     /// dataset when its entry holds another estimate, so a load that
     /// replaced a dataset and was undone leaves the original's estimate. A
     /// call that replaced no dataset adds no history row here.
