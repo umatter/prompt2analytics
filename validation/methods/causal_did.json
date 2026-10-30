@@ -14,7 +14,9 @@
         "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_analytic_never",
         "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_analytic_notyet",
         "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_confidence_level_90",
-        "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_bootstrap_close_to_analytic"
+        "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_bootstrap_close_to_analytic",
+        "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_analytic",
+        "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_string_unit_ids"
       ],
       "quantities": ["ATT(g,t)", "n_treated/n_comparison per cell (not yet treated)", "overall (simple), group and event-study ATT"],
       "tolerance": "validation/README.md, n = 720 rows (90 units): ATT 1e-8, SEs, CI bounds and statistics 1e-6 relative; MCP text at print precision",
