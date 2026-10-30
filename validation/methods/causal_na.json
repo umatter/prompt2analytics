@@ -9,7 +9,12 @@
       "doc": "validation/econometrics/mediation.md",
       "cases": ["causal_mediation_na"],
       "tests": [
-        "p2a-core::econometrics::treatment::tests::test_validate_causal_na_fixture"
+        "p2a-core::econometrics::treatment::tests::test_validate_causal_na_fixture",
+        "p2a-core::econometrics::mediation::tests::test_validate_mediation_na_omit_causal_na",
+        "p2a-core::econometrics::mediation::tests::test_validate_mediation_total_effect_causal_na",
+        "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_int64_treatment",
+        "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_reports_missing",
+        "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_errors_name_the_column"
       ],
       "quantities": ["complete rows and missing counts", "rows kept after trimming", "total effect (trim 0 and 0.05)"],
       "tolerance": "counts exact; total effect Tol::iterative(1e-8) (logit Newton-Raphson to |step| < 1e-8); MCP text Tol::printed(4)",
