@@ -4,6 +4,8 @@
 //! using Pearson's product moment correlation coefficient, Kendall's tau, or
 //! Spearman's rho.
 
+use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::stats::Alternative;
@@ -53,6 +55,10 @@ pub struct CorTestResult {
     pub method: CorrelationMethod,
     /// Method description string
     pub method_name: String,
+    /// Rows dropped because of a missing value in either column (`run_cor_test_dataset`;
+    /// nothing for slices).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Perform a correlation test between two samples.
@@ -236,6 +242,7 @@ fn pearson_test(
         alternative,
         method: CorrelationMethod::Pearson,
         method_name: "Pearson's product-moment correlation".to_string(),
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -310,6 +317,7 @@ fn spearman_test(
         alternative,
         method: CorrelationMethod::Spearman,
         method_name: "Spearman's rank correlation rho".to_string(),
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -364,6 +372,7 @@ fn kendall_test(
         alternative,
         method: CorrelationMethod::Kendall,
         method_name: "Kendall's rank correlation tau".to_string(),
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -571,6 +580,37 @@ pub fn run_cor_test(
     cor_test(x, y, method, alternative, conf_level)
 }
 
+/// Run `cor.test` on two dataset columns.
+///
+/// Rows with a missing value (null or NaN) in either column are dropped, as R's `cor.test`
+/// does (`complete.cases(x, y)`), and reported in `missing`. Integer, decimal and boolean
+/// columns are accepted; a text column is refused (`EconError::NonNumericColumn`), as are
+/// infinite values (`EconError::NonFiniteValues`). `method`, `alternative` and `conf_level`
+/// are as in [`run_cor_test`]. The MCP and CLI correlation tools call this (T2-WP20,
+/// T2-WP21).
+pub fn run_cor_test_dataset(
+    dataset: &Dataset,
+    x_col: &str,
+    y_col: &str,
+    method: &str,
+    alternative: &str,
+    conf_level: f64,
+) -> EconResult<CorTestResult> {
+    let cols = ColumnRequest::new(dataset.df())
+        .numerics(&[x_col, y_col])
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let mut result = run_cor_test(
+        cols.numeric(x_col),
+        cols.numeric(y_col),
+        method,
+        alternative,
+        conf_level,
+    )?;
+    result.missing = cols.missing().clone();
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,6 +692,7 @@ mod tests {
             alternative,
             method: CorrelationMethod::Kendall,
             method_name: "Kendall's rank correlation tau".to_string(),
+            missing: MissingSummary::none(n),
         })
     }
 
@@ -1120,5 +1161,69 @@ mod tests {
             (result.estimate - 1.0).abs() < 1e-10,
             "Perfect Kendall tau expected"
         );
+    }
+
+    // ========================================================================
+    // Dataset columns with missing values (case stat_two_sample_na,
+    // validation/r/cases/stats_onesample.R)
+    // ========================================================================
+
+    /// cor.test(x, y) keeps complete pairs only (complete.cases(x, y)).
+    #[test]
+    fn test_validate_cor_test_two_sample_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_cor_test_dataset(&ds, "x", "y", "pearson", "two.sided", 0.95).unwrap();
+        Check::new(&case)
+            .scalar("cor_r", r.estimate, Tol::coef(6))
+            .scalar("cor_t", r.statistic, Tol::stat(6))
+            .scalar("cor_df", r.df.unwrap(), Tol::exact())
+            .scalar("cor_p", r.p_value, Tol::p_value(6))
+            .vector(
+                "cor_ci",
+                &[r.conf_low.unwrap(), r.conf_high.unwrap()],
+                Tol::stat(6),
+            )
+            .scalar("n_pairs", r.n as f64, Tol::exact())
+            .finish();
+        assert_eq!(
+            r.missing.by_column,
+            vec![("x".to_string(), 15), ("y".to_string(), 15)]
+        );
+        assert_eq!(r.missing.n_dropped, 16);
+    }
+
+    #[test]
+    fn test_validate_na_cor_test_columns() {
+        use crate::data::Dataset;
+        use polars::prelude::*;
+        let (_case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let mut df = ds.df().clone();
+        for c in ["xi", "yi"] {
+            let col = df
+                .column(c)
+                .unwrap()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .with_name(format!("{c}_f").into());
+            df.with_column(col).unwrap();
+        }
+        let ds2 = Dataset::new(df);
+        let a = run_cor_test_dataset(&ds2, "xi", "yi", "pearson", "two.sided", 0.95).unwrap();
+        let b = run_cor_test_dataset(&ds2, "xi_f", "yi_f", "pearson", "two.sided", 0.95).unwrap();
+        assert_eq!(a.n, 18);
+        assert_eq!(a.estimate, b.estimate);
+        assert!(matches!(
+            run_cor_test_dataset(&ds, "x", "g", "pearson", "two.sided", 0.95),
+            Err(EconError::NonNumericColumn { column }) if column == "g"
+        ));
+        assert!(matches!(
+            run_cor_test_dataset(&ds, "x", "nope", "pearson", "two.sided", 0.95),
+            Err(EconError::ColumnNotFound { .. })
+        ));
+        assert!(matches!(
+            run_cor_test_dataset(&ds, "x", "y", "pearsn", "two.sided", 0.95),
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 }
