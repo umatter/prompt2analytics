@@ -1417,6 +1417,35 @@ mod tests {
         serde_json::from_str(&t).unwrap_or_else(|e| panic!("not JSON ({e}): {t}"))
     }
 
+    /// Every number of field `key` in the JSON text `json`: the value of each
+    /// `"key": <number>` and the elements of each `"key": [<numbers>]`, read with
+    /// `str::parse::<f64>`, which rounds correctly. This workspace builds serde_json
+    /// without its `float_roundtrip` feature, and its default (best-effort) float parsing
+    /// can read a shortest round-trip double 1 ulp off, so exact comparisons read the text.
+    fn json_numbers(json: &str, key: &str) -> Vec<f64> {
+        let pattern = format!("\"{key}\":");
+        let mut numbers = Vec::new();
+        let mut rest = json;
+        while let Some(at) = rest.find(&pattern) {
+            rest = rest[at + pattern.len()..].trim_start();
+            let (body, tail) = match rest.strip_prefix('[') {
+                Some(array) => array.split_once(']').expect("an array closed by ]"),
+                None => rest.split_at(rest.find([',', '}', '\n']).unwrap_or(rest.len())),
+            };
+            numbers.extend(
+                body.split(',')
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(|t| {
+                        t.parse::<f64>()
+                            .unwrap_or_else(|e| panic!("`{t}` in field {key}: {e}"))
+                    }),
+            );
+            rest = tail;
+        }
+        numbers
+    }
+
     /// `missing` of reg_smoothers_na: 4 of 60 rows dropped, 2 missing x and 2 missing y.
     fn smoothers_missing() -> Value {
         json!({"n_total": 60, "n_used": 56, "n_dropped": 4, "by_column": {"x": 2, "y": 2}})
@@ -1672,11 +1701,9 @@ mod tests {
             .finish();
         let (xc, yc) = complete_pairs(&case);
         let fit = p2a_core::regression::line::line(&xc, &yc, None).unwrap();
-        assert_eq!(
-            j["coefficients"]["intercept"].as_f64().unwrap(),
-            fit.intercept
-        );
-        assert_eq!(j["coefficients"]["slope"].as_f64().unwrap(), fit.slope);
+        let raw = text(&r);
+        assert_eq!(json_numbers(&raw, "intercept"), [fit.intercept]);
+        assert_eq!(json_numbers(&raw, "slope"), [fit.slope]);
         assert_eq!(j["missing"], smoothers_missing());
     }
 }

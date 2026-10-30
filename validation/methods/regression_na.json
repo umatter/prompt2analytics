@@ -135,7 +135,7 @@
         "NA data = complete rows",
         "missing counts"
       ],
-      "tolerance": "exact",
+      "tolerance": "exact (the CLI text's x grid: its 4 printed decimals)",
       "deviations": [
         {
           "finding": "REG-31",

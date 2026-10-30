@@ -18,6 +18,44 @@ fn smoothers_missing() -> Value {
 
 const SMOOTHERS_NOTE: &str = "Note: 4 of 60 rows dropped because of missing values (x: 2, y: 2)";
 
+/// Every number of field `key` in the JSON text `json`: the value of each
+/// `"key": <number>` and the elements of each `"key": [<numbers>]`, read with
+/// `str::parse::<f64>`, which rounds correctly. This workspace builds serde_json without
+/// its `float_roundtrip` feature, and its default (best-effort) float parsing can read a
+/// shortest round-trip double 1 ulp off, so the exact comparisons read the text.
+fn json_numbers(json: &str, key: &str) -> Vec<f64> {
+    let pattern = format!("\"{key}\":");
+    let mut numbers = Vec::new();
+    let mut rest = json;
+    while let Some(at) = rest.find(&pattern) {
+        rest = rest[at + pattern.len()..].trim_start();
+        let (body, tail) = match rest.strip_prefix('[') {
+            Some(array) => array.split_once(']').expect("an array closed by ]"),
+            None => rest.split_at(rest.find([',', '}', '\n']).unwrap_or(rest.len())),
+        };
+        numbers.extend(
+            body.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(|t| {
+                    t.parse::<f64>()
+                        .unwrap_or_else(|e| panic!("`{t}` in field {key}: {e}"))
+                }),
+        );
+        rest = tail;
+    }
+    numbers
+}
+
+/// `-F json` and `args`: the raw stdout (for [`json_numbers`]) and its parsed value.
+fn json_and_text(s: &TempSession, args: &[&str]) -> (String, Value) {
+    let mut all = vec!["-F", "json"];
+    all.extend_from_slice(args);
+    let text = s.ok(&all);
+    let value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"));
+    (text, value)
+}
+
 /// REG-21: rows with a missing cluster id are dropped and the model re-estimated;
 /// the text shows the drop as a warning, `-F json` as a `missing` object.
 #[test]
@@ -87,14 +125,14 @@ fn test_validate_cli_reg_line_na() {
     assert!(text.contains("Observations: 56\n"), "{text}");
     assert!(text.trim_end().ends_with(SMOOTHERS_NOTE), "{text}");
 
-    let j = s.json(&args);
+    let (raw, j) = json_and_text(&s, &args);
     Check::new(&case)
         .scalar("n_complete", j["n"].as_f64().unwrap(), Tol::exact())
         .finish();
     let (xc, yc) = complete_pairs(&case);
     let fit = p2a_core::regression::line::line(&xc, &yc, Some(1)).unwrap();
-    assert_eq!(j["intercept"].as_f64().unwrap(), fit.intercept);
-    assert_eq!(j["slope"].as_f64().unwrap(), fit.slope);
+    assert_eq!(json_numbers(&raw, "intercept"), [fit.intercept]);
+    assert_eq!(json_numbers(&raw, "slope"), [fit.slope]);
     assert_eq!(j["missing"], smoothers_missing());
 }
 
@@ -128,24 +166,12 @@ fn test_validate_cli_reg_supsmu_na() {
         assert!(y.is_finite(), "y[{i}] = {y}");
     }
 
-    let j = s.json(&args);
+    let (raw, j) = json_and_text(&s, &args);
     assert_eq!(j["n"], 56);
     let (xc, yc) = complete_pairs(&case);
     let fit = p2a_core::regression::supsmu::supsmu(&xc, &yc, None, None, false, 0.0).unwrap();
-    let fitted: Vec<f64> = j["fitted_sample"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_f64().unwrap())
-        .collect();
-    // Same doubles in (the x grid above is R's, and reg line's residuals match the
-    // in-process fit exactly), but the p2a binary and this test binary round the
-    // smoother's boundary fits differently in the last bits (1-2 ulp observed), so this
-    // cross-process comparison allows 1e-12 relative; it is not an R pin (REG-31).
-    assert_eq!(fitted.len(), 10);
-    for (a, e) in fitted.iter().zip(&fit.y[..10]) {
-        assert!(Tol::new(1e-12, 0.0).allows(*a, *e), "{a} vs {e}");
-    }
+    // The smooth on the complete pairs, exactly (not an R pin, REG-31).
+    assert_eq!(json_numbers(&raw, "fitted_sample"), &fit.y[..10]);
     assert_eq!(j["missing"], smoothers_missing());
 }
 
@@ -156,25 +182,14 @@ fn test_validate_cli_reg_integer_columns() {
     let case = Case::load("ols_mtcars");
     let s = temp_session();
     let name = s.load(&case);
-    let q = s.json(&["reg", "quantreg", &name, "-y", "hp", "-x", "wt"]);
+    let (raw, q) = json_and_text(&s, &["reg", "quantreg", &name, "-y", "hp", "-x", "wt"]);
     assert_eq!(q["n_obs"], 32);
     let df = p2a_core::DataLoader::load_csv(case.dataset_path()).unwrap();
     let ds = p2a_core::Dataset::new(df.clone());
     let fit = p2a_core::run_quantreg(&ds, "hp", &["wt"], 0.5).unwrap();
-    let estimates: Vec<f64> = q["coefficients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["estimate"].as_f64().unwrap())
-        .collect();
+    // The in-process fit on the same doubles, exactly (not an R pin).
     let expected: Vec<f64> = fit.coefficients.iter().map(|c| c.estimate).collect();
-    // The p2a process and this test process can differ in the last bits of the IRLS
-    // fit (2 ulp on the intercept were observed), so this cross-process comparison
-    // allows 1e-12 relative; it is not an R pin.
-    assert_eq!(estimates.len(), expected.len());
-    for (a, e) in estimates.iter().zip(&expected) {
-        assert!(Tol::new(1e-12, 0.0).allows(*a, *e), "{a} vs {e}");
-    }
+    assert_eq!(json_numbers(&raw, "estimate"), expected);
     let loess = s.json(&["reg", "loess", &name, "-y", "mpg", "-x", "hp"]);
     assert_eq!(loess["n_obs"], 32);
     let spline = s.json(&[

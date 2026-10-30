@@ -105,7 +105,8 @@ missing y; R's unique sorted x after the deletion is `supsmu_x` (56 values, 0.01
 0.6713, ...; the complete x have no ties), and its smooth on the NA data equals the smooth
 on the complete pairs.
 
-Tests (registry entry `supsmu_missing` in `validation/methods/regression_na.json`), exact:
+Tests (registry entry `supsmu_missing` in `validation/methods/regression_na.json`); every
+comparison is exact except the CLI text's grid, which is printed with 4 decimals:
 
 - `test_validate_supsmu_na`: the x grid equals R's `supsmu_x` exactly; `n` is
   `n_complete`; every smoothed value is finite and equals the smooth on the complete rows;
@@ -113,8 +114,10 @@ Tests (registry entry `supsmu_missing` in `validation/methods/regression_na.json
 - `test_validate_mcp_regression_supsmu_na`: the first 20 grid points equal R's, the
   smoothed values are numbers, a missing weight drops its row, a text weights column is an
   error;
-- `test_validate_cli_reg_supsmu_na`: the printed grid (4 decimals) is R's; `-F json`
-  equals the smooth on the complete pairs.
+- `test_validate_cli_reg_supsmu_na`: the printed grid equals R's to its 4 decimals; the
+  `-F json` `fitted_sample` equals the smooth on the complete pairs exactly (the numbers
+  are read from the output text with `str::parse`, since serde_json's default float
+  parsing can be 1 ulp off).
 
 ### Known difference (REG-31)
 
