@@ -13,7 +13,9 @@
       "tests": [
         "p2a-core::regression::ols::tests::test_validate_reg_cluster_na_fixture",
         "p2a-core::regression::ols::tests::test_validate_ols_cluster_na",
-        "p2a-core::regression::ols::tests::test_validate_na_driscoll_kraay_time_ids"
+        "p2a-core::regression::ols::tests::test_validate_na_driscoll_kraay_time_ids",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_clustered_na",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_driscoll_kraay_missing_time"
       ],
       "quantities": [
         "coefficients (one-, two-way)",
@@ -44,7 +46,8 @@
         "ols_mtcars"
       ],
       "tests": [
-        "p2a-core::regression::ols::tests::test_validate_na_vcov_bootstrap_integer_outcome"
+        "p2a-core::regression::ols::tests::test_validate_na_vcov_bootstrap_integer_outcome",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_bootstrap_cov_integer_outcome"
       ],
       "quantities": [
         "Int64 outcome = Float64 outcome (same seed)",
@@ -68,7 +71,10 @@
         "p2a-core::regression::loess::tests::test_validate_na_loess_columns",
         "p2a-core::regression::quantreg::tests::test_validate_na_quantreg_columns",
         "p2a-core::regression::smooth_spline::tests::test_validate_na_smooth_spline_columns",
-        "p2a-core::regression::glmnet::tests::test_validate_na_glmnet_columns"
+        "p2a-core::regression::glmnet::tests::test_validate_na_glmnet_columns",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_loess_missing_and_integer",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_gls_missing_y_is_error",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_smooth_spline_missing_is_error"
       ],
       "quantities": [
         "Int64 = Float64",
@@ -106,7 +112,8 @@
       ],
       "tests": [
         "p2a-core::regression::line::tests::test_validate_reg_smoothers_na_fixture",
-        "p2a-core::regression::line::tests::test_validate_line_na"
+        "p2a-core::regression::line::tests::test_validate_line_na",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_line_na"
       ],
       "quantities": [
         "complete pairs (56)",
@@ -130,10 +137,12 @@
       "reference": "stats::supsmu (is.finite(x + y + wt))",
       "doc": "validation/regression/supsmu.md",
       "cases": [
-        "reg_smoothers_na"
+        "reg_smoothers_na",
+        "ols_mtcars"
       ],
       "tests": [
-        "p2a-core::regression::supsmu::tests::test_validate_supsmu_na"
+        "p2a-core::regression::supsmu::tests::test_validate_supsmu_na",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_supsmu_na"
       ],
       "quantities": [
         "x grid after deletion (56 values, exact)",
