@@ -279,7 +279,6 @@ pub fn wilcoxon_rank_sum(
     alternative: Alternative,
     config: &WilcoxonConfig,
 ) -> EconResult<WilcoxonResult> {
-    let n_input = x.len() + y.len();
     // Filter out non-finite values
     let x: Vec<f64> = x.iter().copied().filter(|v| v.is_finite()).collect();
     let y: Vec<f64> = y.iter().copied().filter(|v| v.is_finite()).collect();
@@ -374,7 +373,7 @@ pub fn wilcoxon_rank_sum(
         n_2: Some(n2),
         n_ties,
         warning,
-        missing: MissingSummary::none(n_input),
+        missing: MissingSummary::none(n1 + n2),
     })
 }
 
@@ -539,11 +538,12 @@ pub fn wilcoxon_signed_rank(
         },
         conf_int_lower,
         conf_int_upper,
-        n: x.len(),
-        n_2: y.map(|v| v.len()),
+        // The finite observations (pairs) used, zero differences included.
+        n: differences.len(),
+        n_2: y.map(|_| differences.len()),
         n_ties,
         warning,
-        missing: MissingSummary::none(x.len()),
+        missing: MissingSummary::none(differences.len()),
     })
 }
 
@@ -1585,6 +1585,33 @@ mod tests {
         // Should only use finite values: x = [1, 3, 5], y = [2, 4, 6]
         assert_eq!(result.n, 3);
         assert_eq!(result.n_2, Some(3)); // y has 3 finite values: 2, 4, 6
+    }
+
+    /// The array-level functions drop non-finite values silently; their summary counts the
+    /// values they used, so it agrees with `n` (and `n_2`). Fails before: the summary
+    /// counted the input, and the signed-rank `n` did too.
+    #[test]
+    fn test_array_level_summary_counts_the_values_used() {
+        let x = [1.3, f64::NAN, 3.1, f64::INFINITY, 5.2, 0.4];
+        let y = [2.2, 4.1, f64::NEG_INFINITY, 6.3, 0.9, 2.8];
+        let (tt, config) = (Alternative::TwoSided, WilcoxonConfig::default());
+
+        let rs = wilcoxon_rank_sum(&x, &y, 0.0, tt, &config).unwrap();
+        assert_eq!((rs.n, rs.n_2), (4, Some(5)));
+        assert_eq!(
+            (rs.missing.n_total, rs.missing.n_used, rs.missing.n_dropped),
+            (9, 9, 0)
+        );
+
+        let one = wilcoxon_signed_rank(&x, None, 1.0, tt, &config).unwrap();
+        assert_eq!(one.n, 4);
+        assert_eq!((one.missing.n_total, one.missing.n_used), (4, 4));
+
+        // Finite pairs: rows 1, 5 and 6 (x is NaN in row 2 and Inf in row 4, y -Inf in 3).
+        let paired = wilcoxon_signed_rank(&x, Some(&y), 0.0, tt, &config).unwrap();
+        assert_eq!((paired.n, paired.n_2), (3, Some(3)));
+        assert_eq!((paired.missing.n_total, paired.missing.n_used), (3, 3));
+        assert!(paired.missing.is_empty());
     }
 
     #[test]
