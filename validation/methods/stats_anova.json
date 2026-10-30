@@ -194,6 +194,30 @@
       "tolerance": "validation/README.md, n = 24 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df, block counts and labels exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "manova",
+      "name": "One-way MANOVA (Pillai, Wilks, Hotelling-Lawley, Roy)",
+      "category": "stats",
+      "reference": "stats::manova; summary.manova",
+      "doc": "validation/stats/manova.md",
+      "cases": [
+        "stat_manova_na"
+      ],
+      "tests": [
+        "p2a-core::stats::manova::tests::test_validate_manova_na",
+        "p2a-core::stats::manova::tests::test_validate_na_manova_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_anova_manova_na"
+      ],
+      "quantities": [
+        "Pillai, Wilks, Hotelling-Lawley and Roy statistics",
+        "approximate F, df1, df2, p",
+        "rows used and dropped (joint deletion)",
+        "group labels and sizes"
+      ],
+      "tolerance": "validation/README.md, n = 33 (< 100): statistics, F and Wilks' (Rao) df2 1e-5 relative, p 1e-5 relative + 1e-12 absolute, other df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

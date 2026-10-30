@@ -170,3 +170,26 @@ case("stat_friedman_quade", "stats/rank", "Friedman and Quade tests: complete de
        reference = "stats::friedman.test, stats::quade.test (incomplete blocks from NA responses dropped; replicated cells and NA labels are errors)",
        call = "friedman.test(y, treat, block); quade.test(y, treat, block)", packages = character(0))
 })
+
+# One-way MANOVA with two missing cells: manova (lm) drops incomplete rows (STAT-11).
+case("stat_manova_na", "stats/anova", "One-way MANOVA with incomplete rows", function(ctx) {
+  set.seed(31)
+  g <- rep(c("g1", "g2", "g3"), each = 12)
+  y1 <- round(rnorm(36, rep(c(5, 6, 7), each = 12), 1), 3)
+  y2 <- round(0.5 * y1 + rnorm(36, rep(c(2, 2.5, 2), each = 12), 0.8), 3)
+  y1[c(3, 20)] <- NA; y2[30] <- NA
+  d <- ctx$gen_dataset("manova_na", data.frame(id = 1:36, y1 = y1, y2 = y2, g = g))
+  m <- manova(cbind(y1, y2) ~ g, data = d)
+  out <- list()
+  for (t in c("Pillai", "Wilks", "Hotelling-Lawley", "Roy")) {
+    s <- summary(m, test = t)$stats
+    key <- tolower(gsub("-", "_", t))
+    out[[paste0(key, "_stat")]] <- s[1, 2]; out[[paste0(key, "_approx_f")]] <- s[1, 3]
+    out[[paste0(key, "_df1")]] <- s[1, 4]; out[[paste0(key, "_df2")]] <- s[1, 5]; out[[paste0(key, "_p")]] <- s[1, 6]
+  }
+  out$n_used <- nrow(m$residuals)
+  # T2-WP07 addition: the group sizes of the complete rows (labels without quotes)
+  out$group_n <- named(c(table(d$g[complete.cases(d$y1, d$y2, d$g)])))
+  list(values = out, reference = "stats::manova; summary.manova(test = Pillai | Wilks | Hotelling-Lawley | Roy)",
+       call = "manova(cbind(y1, y2) ~ g)", packages = character(0))
+})

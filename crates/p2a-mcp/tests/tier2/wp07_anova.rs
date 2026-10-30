@@ -251,3 +251,38 @@ async fn test_validate_mcp_hypothesis_quade_na() {
         .scalar("na_quade_complete_p", num(&na["p_value"]), Tol::p_value(24))
         .finish();
 }
+
+#[tokio::test]
+async fn test_validate_mcp_anova_manova_na() {
+    let case = Case::load("stat_manova_na");
+    let (session, server) = session_with("stat_manova_na");
+    let v = json_of(
+        &call(
+            &server,
+            &session,
+            "anova_manova",
+            json!({"dataset": "manova_na", "response_vars": ["y1", "y2"], "factor": "g"}),
+        )
+        .await,
+    );
+    let (s, p, x) = (Tol::stat(33), Tol::p_value(33), Tol::exact());
+    let mut check = Check::new(&case);
+    for key in ["pillai", "wilks"] {
+        let t = &v["tests"][key];
+        check
+            .scalar(&format!("{key}_stat"), num(&t["statistic"]), s)
+            .scalar(&format!("{key}_approx_f"), num(&t["f_value"]), s)
+            .scalar(&format!("{key}_df1"), num(&t["df1"]), x)
+            .scalar(&format!("{key}_df2"), num(&t["df2"]), s)
+            .scalar(&format!("{key}_p"), num(&t["p_value"]), p);
+    }
+    check.scalar("n_used", num(&v["n_obs"]), x).finish();
+    let mut groups: Vec<&str> = v["group_sizes"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    groups.sort();
+    assert_eq!(groups, ["g1", "g2", "g3"]);
+}
