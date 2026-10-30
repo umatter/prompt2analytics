@@ -32,12 +32,25 @@ on the earlier columns is below 1e-7 of its length is aliased), so empty cells r
 interaction df: a 3 x 2 layout with one empty cell has interaction df 1 and residual df
 `n - rank`. When empty cells leave the interaction no df, `aov` prints no `a:b` row; p2a sets
 `ss_ab`, `df_ab`, `ms_ab`, `f_ab`, `p_ab` and `sig_ab` to `None` (while `with_interaction` stays
-`true`) and its Display prints the row as "not estimable".
+`true`) and its Display prints the row as "not estimable". A main effect aliased with the other
+factor (B given A in a disconnected layout, A given B when A is nested in B) has df 0 and NaN
+for MS, F and p; `aov` drops that row too, and the Display prints it as "not estimable (aliased
+with the other factor)".
 
 The fit runs on the cell means weighted by the square roots of the cell sizes, which has the
 same normal equations as the regression on the rows: O(n) to build the cells, then Gram-Schmidt
-with re-orthogonalisation over the design columns (one cancellation point per column). The
-result carries `ss_type` and, when rows were dropped, `missing`.
+with re-orthogonalisation over the treatment-coded columns of A and B (one cancellation point
+per column). The interaction needs no columns of its own: A + B + A:B spans the indicator of
+every non-empty cell, so the model with the interaction is saturated (rank = number of
+non-empty cells c, residual = within-cell SS), and A:B given A and B is the additive model's
+residual between the cells, on `c - rank(A + B)` df. With the interaction, a Type III main
+effect is the Wald test of equal unweighted marginal means, `sum_l (m_l - m_w)^2 / s_l` over
+the marginal means `m_l` (variance `s_l` sigma^2, `m_w` their `1 / s_l`-weighted mean), which is
+what the sum-to-zero coefficients test. The cost is O(n + c (La + Lb) r) for La and Lb levels
+and the additive model's rank r. `stats::anova::tests::test_two_way_anova_shortcuts_match_explicit_interaction_columns`
+checks both identities at 1e-10 relative against the fit on explicit interaction columns (cell
+indicators, or the products of the sum codes for Type III). The result carries `ss_type` and,
+when rows were dropped, `missing`.
 
 ## Reference Implementations
 

@@ -1,7 +1,7 @@
 //! Analysis of Variance (ANOVA) for comparing group means.
 //!
-//! Provides one-way and two-way ANOVA implementations following the standard
-//! sum of squares decomposition approach.
+//! One-way ANOVA by the sum-of-squares decomposition; two-way ANOVA by least
+//! squares with Type I, II and III sums of squares ([`run_two_way_anova_with`]).
 //!
 //! # References
 //!
@@ -12,7 +12,7 @@
 //!
 //! # Mathematical Background
 //!
-//! ANOVA partitions total variation into components:
+//! One-way ANOVA partitions total variation into components:
 //!
 //! **Total Sum of Squares (SST):**
 //! ```text
@@ -428,13 +428,14 @@ pub struct TwoWayAnovaResult {
     // ═══════════════════════════════════════════════════════════════════════
     // Sum of Squares
     // ═══════════════════════════════════════════════════════════════════════
-    /// Sum of Squares for Factor A
+    /// Sum of Squares for Factor A (of the [`SsType`] in `ss_type`)
     pub ss_a: f64,
-    /// Sum of Squares for Factor B
+    /// Sum of Squares for Factor B (of the [`SsType`] in `ss_type`)
     pub ss_b: f64,
-    /// Sum of Squares for A×B Interaction (if included)
+    /// Sum of Squares for the A×B interaction; `None` when the model has no interaction
+    /// term or when empty cells leave it no df (aov omits the row)
     pub ss_ab: Option<f64>,
-    /// Sum of Squares Error (Within)
+    /// Residual sum of squares of the fitted model
     pub ss_error: f64,
     /// Total Sum of Squares
     pub ss_total: f64,
@@ -442,13 +443,18 @@ pub struct TwoWayAnovaResult {
     // ═══════════════════════════════════════════════════════════════════════
     // Degrees of Freedom
     // ═══════════════════════════════════════════════════════════════════════
-    /// DF for Factor A (levels_a - 1)
+    /// DF for factor A: the rank the term adds in the fitted sequence (levels - 1 unless
+    /// aliased). 0 means the term is aliased with the other factor; `ms_a`, `f_a` and
+    /// `p_a` are then NaN.
     pub df_a: usize,
-    /// DF for Factor B (levels_b - 1)
+    /// DF for factor B: the rank the term adds in the fitted sequence (levels - 1 unless
+    /// aliased). 0 means the term is aliased with the other factor; `ms_b`, `f_b` and
+    /// `p_b` are then NaN.
     pub df_b: usize,
-    /// DF for Interaction (df_a * df_b)
+    /// DF for the interaction: n_cells - rank(A + B); `None` without an interaction term
+    /// or when empty cells leave it no df (aov omits the row)
     pub df_ab: Option<usize>,
-    /// DF for Error
+    /// Residual DF: n - rank of the fitted model
     pub df_error: usize,
     /// Total DF
     pub df_total: usize,
@@ -456,24 +462,37 @@ pub struct TwoWayAnovaResult {
     // ═══════════════════════════════════════════════════════════════════════
     // Mean Squares
     // ═══════════════════════════════════════════════════════════════════════
+    /// Mean square of factor A (`ss_a / df_a`)
     pub ms_a: f64,
+    /// Mean square of factor B (`ss_b / df_b`)
     pub ms_b: f64,
+    /// Mean square of the interaction; `None` under the same condition as `df_ab`
     pub ms_ab: Option<f64>,
+    /// Residual mean square (`ss_error / df_error`)
     pub ms_error: f64,
 
     // ═══════════════════════════════════════════════════════════════════════
     // F-Statistics and P-Values
     // ═══════════════════════════════════════════════════════════════════════
+    /// F statistic of factor A
     pub f_a: f64,
+    /// P-value of factor A
     pub p_a: f64,
+    /// Significance of factor A
     pub sig_a: SignificanceLevel,
 
+    /// F statistic of factor B
     pub f_b: f64,
+    /// P-value of factor B
     pub p_b: f64,
+    /// Significance of factor B
     pub sig_b: SignificanceLevel,
 
+    /// F statistic of the interaction; `None` under the same condition as `df_ab`
     pub f_ab: Option<f64>,
+    /// P-value of the interaction; `None` under the same condition as `df_ab`
     pub p_ab: Option<f64>,
+    /// Significance of the interaction; `None` under the same condition as `df_ab`
     pub sig_ab: Option<SignificanceLevel>,
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -541,29 +560,47 @@ impl std::fmt::Display for TwoWayAnovaResult {
             "───────────────────────────────────────────────────────────────────"
         )?;
 
-        writeln!(
-            f,
-            "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.4} {}",
-            self.factor_a,
-            self.ss_a,
-            self.df_a,
-            self.ms_a,
-            self.f_a,
-            self.p_a,
-            self.sig_a.stars()
-        )?;
-
-        writeln!(
-            f,
-            "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.4} {}",
-            self.factor_b,
-            self.ss_b,
-            self.df_b,
-            self.ms_b,
-            self.f_b,
-            self.p_b,
-            self.sig_b.stars()
-        )?;
+        // A main effect aliased with the other factor (df 0) has no row in aov either.
+        let main_rows = [
+            (
+                &self.factor_a,
+                self.ss_a,
+                self.df_a,
+                self.ms_a,
+                self.f_a,
+                self.p_a,
+                self.sig_a,
+            ),
+            (
+                &self.factor_b,
+                self.ss_b,
+                self.df_b,
+                self.ms_b,
+                self.f_b,
+                self.p_b,
+                self.sig_b,
+            ),
+        ];
+        for (name, ss, df, ms, f_stat, p, sig) in main_rows {
+            if df == 0 {
+                writeln!(
+                    f,
+                    "{name:>15} not estimable (aliased with the other factor)"
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.4} {}",
+                    name,
+                    ss,
+                    df,
+                    ms,
+                    f_stat,
+                    p,
+                    sig.stars()
+                )?;
+            }
+        }
 
         let label = format!("{}:{}", self.factor_a, self.factor_b);
         if let Some(df_ab) = self.df_ab {
@@ -621,7 +658,7 @@ impl std::fmt::Display for TwoWayAnovaResult {
 /// Sums of squares for a two-way ANOVA (R `anova(lm)` sequential Type I, or
 /// `car::Anova` Type II / III).
 ///
-/// Used by [`run_two_way_anova_with`], implemented by T2-WP07.
+/// Selects the table [`run_two_way_anova_with`] reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SsType {
     /// Sequential sums of squares (R `aov`, `anova(lm)`). Default.
@@ -676,7 +713,7 @@ impl std::str::FromStr for SsType {
     }
 }
 
-/// Options of [`run_two_way_anova_with`] (implemented by T2-WP07).
+/// Options of [`run_two_way_anova_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TwoWayAnovaConfig {
     /// Include the A x B interaction (default true).
@@ -697,28 +734,37 @@ impl Default for TwoWayAnovaConfig {
 /// Two-way ANOVA with the options of [`TwoWayAnovaConfig`]: R `aov` (Type I) or
 /// `car::Anova(type = 2 | 3)` for any layout, balanced or not, with or without empty cells.
 ///
-/// The model is fitted by least squares on dummy-coded designs: treatment contrasts for
-/// Types I and II, sum-to-zero contrasts (`contr.sum`) for Type III. Each term's sum of
-/// squares is the reduction in the residual sum of squares when it enters a sequence of
-/// nested models, and its df is the rank it adds (R's `lm` aliasing rule: a design column
-/// whose residual on the earlier columns is below 1e-7 of its length is aliased):
+/// Each term's sum of squares is the reduction in the residual sum of squares when it
+/// enters a sequence of nested least-squares models, and its df is the rank it adds (R's
+/// `lm` aliasing rule: a design column whose residual on the earlier columns is below 1e-7
+/// of its length is aliased):
 ///
 /// - **Type I** (sequential, `aov`): A, then B given A, then A:B given both.
 /// - **Type II** (`car::Anova(type = 2)`): A given B, B given A, A:B given both. With empty
 ///   cells the terms are still compared as nested models, as car does after its note that
 ///   the model has aliased coefficients.
-/// - **Type III** (`car::Anova(type = 3)`, sum contrasts): every term given all others. It is
-///   refused with [`EconError::InvalidSpecification`] when the model has aliased
-///   coefficients (empty cells), as car refuses it.
+/// - **Type III** (`car::Anova(type = 3)`, sum-to-zero contrasts): every term given all
+///   others. It is refused with [`EconError::InvalidSpecification`] when the model has
+///   aliased coefficients (empty cells, or an additive model whose factors are aliased), as
+///   car refuses it.
+///
+/// The main effects are fitted on R's treatment-coded dummies. The interaction needs no
+/// design columns: A + B + A:B spans the indicator of every non-empty cell, so the model
+/// with the interaction is saturated (its fit is the cell means and its rank the number of
+/// non-empty cells), and A:B given A and B is the residual the additive model leaves
+/// between the cells. With the interaction, a Type III main effect is the Wald test of
+/// equal unweighted marginal means, which is what its sum-to-zero coefficients test.
 ///
 /// Empty cells reduce the interaction df (a 3 x 2 layout with one empty cell has 1); when
-/// they leave the interaction no df, its fields are `None`, as `aov` drops that row. The
-/// residual df is `n - rank`. Rows with a missing response or factor level are dropped
-/// (`aov`'s `na.omit`) and reported in `missing`; integer responses are accepted.
+/// they leave the interaction no df, its fields are `None`, as `aov` drops that row. A main
+/// effect aliased with the other factor (a disconnected layout, or one factor nested in the
+/// other) has df 0. The residual df is `n - rank`. Rows with a missing response or factor
+/// level are dropped (`aov`'s `na.omit`) and reported in `missing`; integer responses are
+/// accepted.
 ///
 /// The fit works on the cell means weighted by the square roots of the cell sizes, so it
-/// costs O(n) for the cells plus O(p c r) for c non-empty cells, p design columns and rank
-/// r; each design column is a cancellation point.
+/// costs O(n + c (La + Lb) r) for c non-empty cells, La and Lb levels and the additive
+/// model's rank r; each design column is a cancellation point.
 pub fn run_two_way_anova_with(
     dataset: &Dataset,
     response: &str,
@@ -753,75 +799,11 @@ pub fn run_two_way_anova_with(
     let n = y.len();
     let cells = CellLayout::new(y, fa, fb)?;
     let interaction = config.interaction;
+    let fit = two_way_terms(&cells, interaction, config.ss_type)?;
+    let (term_a, term_b) = (fit.a, fit.b);
 
-    let main = |first: Term, second: Term| -> Vec<Term> {
-        let mut t = vec![Term::Intercept, first, second];
-        if interaction {
-            t.push(Term::Ab);
-        }
-        t
-    };
-    // (SS, df) of A, B and A:B, and the full model's fit.
-    let (term_a, term_b, term_ab, full) = match config.ss_type {
-        SsType::I => {
-            let full = fit_sequence(&cells, &main(Term::A, Term::B), Coding::Treatment)?;
-            (
-                full.terms[1],
-                full.terms[2],
-                full.terms.get(3).copied(),
-                full,
-            )
-        }
-        SsType::II => {
-            let full = fit_sequence(&cells, &main(Term::A, Term::B), Coding::Treatment)?;
-            let ba = fit_sequence(
-                &cells,
-                &[Term::Intercept, Term::B, Term::A],
-                Coding::Treatment,
-            )?;
-            (ba.terms[2], full.terms[2], full.terms.get(3).copied(), full)
-        }
-        SsType::III => {
-            let full_cells = levels_a.checked_mul(levels_b);
-            let empty = full_cells.map_or(usize::MAX, |c| c.saturating_sub(cells.n_cells()));
-            let refuse = || EconError::InvalidSpecification {
-                message: format!(
-                    "Type III sums of squares are not defined: the model has aliased \
-                     coefficients ({empty} empty cell(s) in {levels_a} x {levels_b}), as \
-                     car::Anova; use Type I or Type II"
-                ),
-            };
-            if interaction && empty > 0 {
-                return Err(refuse());
-            }
-            let full = fit_sequence(&cells, &main(Term::A, Term::B), Coding::Sum)?;
-            if full.rank < full.n_cols {
-                return Err(refuse());
-            }
-            let last = |others: &[Term], term: Term| -> EconResult<TermFit> {
-                let mut t = vec![Term::Intercept];
-                t.extend_from_slice(others);
-                t.push(term);
-                Ok(*fit_sequence(&cells, &t, Coding::Sum)?
-                    .terms
-                    .last()
-                    .unwrap_or(&TermFit::default()))
-            };
-            let with_ab = |t: Term| -> Vec<Term> {
-                if interaction {
-                    vec![t, Term::Ab]
-                } else {
-                    vec![t]
-                }
-            };
-            let a = last(&with_ab(Term::B), Term::A)?;
-            let b = last(&with_ab(Term::A), Term::B)?;
-            (a, b, full.terms.get(3).copied(), full)
-        }
-    };
-
-    let df_error = n.saturating_sub(full.rank);
-    let ss_error = full.rss;
+    let df_error = n.saturating_sub(fit.rank);
+    let ss_error = fit.rss;
     let ms_error = mean_square(ss_error, df_error);
     let f_of = |ms: f64| {
         if df_error > 0 && ms_error > 0.0 {
@@ -839,7 +821,7 @@ pub fn run_two_way_anova_with(
     let (ms_a, f_a, p_a) = stats(term_a);
     let (ms_b, f_b, p_b) = stats(term_b);
     // An interaction that empty cells leave without df has no row (aov omits it).
-    let term_ab = term_ab.filter(|t| t.df > 0);
+    let term_ab = fit.ab.filter(|t| t.df > 0);
     let ab = term_ab.map(stats);
 
     let grand_mean = y.iter().sum::<f64>() / n as f64;
@@ -1021,102 +1003,44 @@ impl CellLayout {
     }
 }
 
-/// A term of the two-way model.
+/// A main-effect term of the two-way model (the interaction needs no design columns).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Term {
     Intercept,
     A,
     B,
-    Ab,
 }
 
-/// Contrasts of the factor columns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Coding {
-    /// R's default `contr.treatment`: the first level is the baseline.
-    Treatment,
-    /// `contr.sum`: the last level is minus the sum of the others.
-    Sum,
-}
-
-/// One design column, as a function of a cell's levels.
+/// One design column, as a function of a cell's levels (R's default `contr.treatment`: the
+/// first level is the baseline).
 #[derive(Debug, Clone, Copy)]
 enum Column {
     One,
-    /// Indicator of level `j` of A (treatment coding).
+    /// Indicator of level `j` of A.
     A(u32),
-    /// Indicator of level `j` of B (treatment coding).
+    /// Indicator of level `j` of B.
     B(u32),
-    /// Indicator of one cell (treatment-coded interaction; the column of an empty cell is
-    /// zero, hence aliased, and never built).
-    Cell(u32, u32),
-    /// Sum code `j` of A.
-    SumA(u32),
-    /// Sum code `j` of B.
-    SumB(u32),
-    /// Product of sum code `i` of A and sum code `j` of B.
-    SumAb(u32, u32),
-}
-
-/// `contr.sum` code `j` of `level` among `levels` levels.
-fn sum_code(level: u32, j: u32, levels: usize) -> f64 {
-    if level == j {
-        1.0
-    } else if level as usize + 1 == levels {
-        -1.0
-    } else {
-        0.0
-    }
 }
 
 impl Column {
-    fn value(self, a: u32, b: u32, la: usize, lb: usize) -> f64 {
+    fn value(self, a: u32, b: u32) -> f64 {
         let ind = |t: bool| if t { 1.0 } else { 0.0 };
         match self {
             Column::One => 1.0,
             Column::A(j) => ind(a == j),
             Column::B(j) => ind(b == j),
-            Column::Cell(i, j) => ind(a == i && b == j),
-            Column::SumA(j) => sum_code(a, j, la),
-            Column::SumB(j) => sum_code(b, j, lb),
-            Column::SumAb(i, j) => sum_code(a, i, la) * sum_code(b, j, lb),
         }
     }
 }
 
 /// The design columns of `term`.
-fn term_columns(cells: &CellLayout, term: Term, coding: Coding) -> EconResult<Vec<Column>> {
+fn term_columns(cells: &CellLayout, term: Term) -> Vec<Column> {
     let (la, lb) = (cells.levels_a as u32, cells.levels_b as u32);
-    let cols = match (term, coding) {
-        (Term::Intercept, _) => vec![Column::One],
-        (Term::A, Coding::Treatment) => (1..la).map(Column::A).collect(),
-        (Term::B, Coding::Treatment) => (1..lb).map(Column::B).collect(),
-        (Term::A, Coding::Sum) => (0..la - 1).map(Column::SumA).collect(),
-        (Term::B, Coding::Sum) => (0..lb - 1).map(Column::SumB).collect(),
-        (Term::Ab, Coding::Treatment) => cells
-            .a
-            .iter()
-            .zip(&cells.b)
-            .filter(|&(&i, &j)| i >= 1 && j >= 1)
-            .map(|(&i, &j)| Column::Cell(i, j))
-            .collect(),
-        (Term::Ab, Coding::Sum) => {
-            // Only built for a complete layout (Type III refuses empty cells first), so
-            // (la - 1)(lb - 1) < la * lb = number of cells.
-            let len = resource::checked_len(
-                &[cells.levels_a - 1, cells.levels_b - 1],
-                "two-way ANOVA interaction columns",
-            )?;
-            let mut v = resource::try_with_capacity(len, "two-way ANOVA interaction columns")?;
-            for j in 0..lb - 1 {
-                for i in 0..la - 1 {
-                    v.push(Column::SumAb(i, j));
-                }
-            }
-            v
-        }
-    };
-    Ok(cols)
+    match term {
+        Term::Intercept => vec![Column::One],
+        Term::A => (1..la).map(Column::A).collect(),
+        Term::B => (1..lb).map(Column::B).collect(),
+    }
 }
 
 /// Sum of squares and df a term adds to a sequence of nested models.
@@ -1134,29 +1058,158 @@ struct SequenceFit {
     rank: usize,
     /// Number of design columns.
     n_cols: usize,
-    /// Residual sum of squares of the full sequence (within-cell SS included).
+    /// Residual sum of squares of the weighted cell means: what the fit leaves between the
+    /// cells (the within-cell SS is not included).
+    cell_rss: f64,
+}
+
+/// SS and df of A, B and A:B, and the rank and residual SS of the fitted model.
+#[derive(Debug, Clone, Copy)]
+struct TwoWayTerms {
+    a: TermFit,
+    b: TermFit,
+    /// `None` without an interaction term; df 0 when empty cells leave it none.
+    ab: Option<TermFit>,
+    rank: usize,
     rss: f64,
+}
+
+/// The terms of the table `ss_type` selects (see [`run_two_way_anova_with`]).
+///
+/// Only the additive model is fitted, as (1, A, B) and, for A adjusted for B, (1, B, A).
+/// With the interaction the model is saturated: rank = number of non-empty cells c,
+/// residual = within-cell SS, and A:B adds the additive fit's between-cell residual on
+/// `c - rank(1, A, B)` df.
+fn two_way_terms(
+    cells: &CellLayout,
+    interaction: bool,
+    ss_type: SsType,
+) -> EconResult<TwoWayTerms> {
+    let (levels_a, levels_b, c) = (cells.levels_a, cells.levels_b, cells.n_cells());
+    let a_then_b = fit_sequence(cells, &[Term::Intercept, Term::A, Term::B])?;
+    let b_then_a = || fit_sequence(cells, &[Term::Intercept, Term::B, Term::A]);
+    let empty = levels_a
+        .checked_mul(levels_b)
+        .map_or(usize::MAX, |k| k.saturating_sub(c));
+    let refuse = || EconError::InvalidSpecification {
+        message: format!(
+            "Type III sums of squares are not defined: the model has aliased \
+             coefficients ({empty} empty cell(s) in {levels_a} x {levels_b}), as \
+             car::Anova; use Type I or Type II"
+        ),
+    };
+    let (a, b) = match ss_type {
+        SsType::I => (a_then_b.terms[1], a_then_b.terms[2]),
+        SsType::II => (b_then_a()?.terms[2], a_then_b.terms[2]),
+        SsType::III if interaction => {
+            // Only a complete layout has no aliased coefficients with the interaction.
+            if empty > 0 {
+                return Err(refuse());
+            }
+            (
+                marginal_means_ss(&cells.a, levels_a, levels_b, cells)?,
+                marginal_means_ss(&cells.b, levels_b, levels_a, cells)?,
+            )
+        }
+        SsType::III => {
+            // Additive: each main effect last is the Type II comparison; the contrasts do
+            // not change the column space of (1, A, B).
+            if a_then_b.rank < a_then_b.n_cols {
+                return Err(refuse());
+            }
+            (b_then_a()?.terms[2], a_then_b.terms[2])
+        }
+    };
+    let fit = if interaction {
+        TwoWayTerms {
+            a,
+            b,
+            ab: Some(TermFit {
+                ss: a_then_b.cell_rss,
+                df: c.saturating_sub(a_then_b.rank),
+            }),
+            rank: c,
+            rss: cells.ss_within,
+        }
+    } else {
+        TwoWayTerms {
+            a,
+            b,
+            ab: None,
+            rank: a_then_b.rank,
+            rss: cells.ss_within + a_then_b.cell_rss,
+        }
+    };
+    Ok(fit)
+}
+
+/// Type III SS of a main effect (level `codes` per cell, `levels` levels, `other` levels of
+/// the other factor) in the model with the interaction on a complete layout.
+///
+/// It is the Wald form `(L mu)' (L D^-1 L')^-1 (L mu)` for equal unweighted marginal means,
+/// with `mu` the cell means, `D = diag(n_c)` and `L` the contrasts of the marginal means
+/// `m_l = sum_k mu_lk / other`: the hypothesis the factor's sum-to-zero coefficients test.
+/// The `m_l` are independent with variances `s_l sigma^2`,
+/// `s_l = sum_k 1 / (other^2 n_lk)`, so the form equals `sum_l (m_l - m_w)^2 / s_l` with `m_w`
+/// the `1 / s_l`-weighted mean of the `m_l`: O(c + levels) for c cells.
+fn marginal_means_ss(
+    codes: &[u32],
+    levels: usize,
+    other: usize,
+    cells: &CellLayout,
+) -> EconResult<TermFit> {
+    let mut mean_sum: Vec<f64> = resource::try_vec(levels, 0.0, "two-way ANOVA marginal means")?;
+    let mut inv_n_sum: Vec<f64> = resource::try_vec(levels, 0.0, "two-way ANOVA marginal means")?;
+    for ((&l, &m), &k) in codes.iter().zip(&cells.mean).zip(&cells.n) {
+        mean_sum[l as usize] += m;
+        inv_n_sum[l as usize] += 1.0 / k as f64;
+    }
+    let other = other as f64;
+    // (m_l, 1 / s_l) per level.
+    let marginal = |l: usize| (mean_sum[l] / other, other * other / inv_n_sum[l]);
+    let (mut sum_w, mut sum_wm) = (0.0, 0.0);
+    for l in 0..levels {
+        let (m, w) = marginal(l);
+        sum_w += w;
+        sum_wm += w * m;
+    }
+    let m_w = sum_wm / sum_w;
+    let ss = (0..levels)
+        .map(|l| {
+            let (m, w) = marginal(l);
+            w * (m - m_w).powi(2)
+        })
+        .sum();
+    Ok(TermFit { ss, df: levels - 1 })
 }
 
 fn dot(x: &[f64], y: &[f64]) -> f64 {
     x.iter().zip(y).map(|(a, b)| a * b).sum()
 }
 
-/// Fit the terms in order on the weighted cell means: Gram-Schmidt with
-/// re-orthogonalisation (two projection passes) over the design columns, R's aliasing
-/// rule, and each term's SS as the squared projections of the response on its new
-/// orthonormal directions. The weighted cell regression has the same normal equations as
-/// the regression on the rows, so its SS and rank are those of `lm` on the data.
-fn fit_sequence(cells: &CellLayout, terms: &[Term], coding: Coding) -> EconResult<SequenceFit> {
+/// Fit the main-effect terms in order (treatment coding).
+fn fit_sequence(cells: &CellLayout, terms: &[Term]) -> EconResult<SequenceFit> {
+    let columns: Vec<Vec<Column>> = terms.iter().map(|&t| term_columns(cells, t)).collect();
+    fit_columns(cells, &columns, Column::value)
+}
+
+/// Fit the design columns of each term in order on the weighted cell means: Gram-Schmidt
+/// with re-orthogonalisation (two projection passes), R's aliasing rule, and each term's SS
+/// as the squared projections of the response on its new orthonormal directions. The
+/// weighted cell regression has the same normal equations as the regression on the rows,
+/// so its SS and rank are those of `lm` on the data. `value(column, a, b)` is a column's
+/// entry for the cell with levels `a` and `b`.
+fn fit_columns<C: Copy>(
+    cells: &CellLayout,
+    columns: &[Vec<C>],
+    value: impl Fn(C, u32, u32) -> f64,
+) -> EconResult<SequenceFit> {
     let c = cells.n_cells();
-    let mut columns = Vec::with_capacity(terms.len());
     let mut n_cols = 0usize;
-    for &term in terms {
-        let cols = term_columns(cells, term, coding)?;
+    for cols in columns {
         n_cols = n_cols
             .checked_add(cols.len())
             .ok_or_else(|| EconError::ResourceLimit("two-way ANOVA design".to_string()))?;
-        columns.push(cols);
     }
     let max_rank = n_cols.min(c);
     let q_len = resource::checked_len(&[c, max_rank], "two-way ANOVA design")?;
@@ -1170,8 +1223,8 @@ fn fit_sequence(cells: &CellLayout, terms: &[Term], coding: Coding) -> EconResul
         .map(|(m, w)| m * w)
         .collect();
     let mut rank = 0usize;
-    let mut fits = Vec::with_capacity(terms.len());
-    for cols in &columns {
+    let mut fits = Vec::with_capacity(columns.len());
+    for cols in columns {
         let mut fit = TermFit::default();
         for &col in cols {
             resource::checkpoint()?;
@@ -1179,8 +1232,7 @@ fn fit_sequence(cells: &CellLayout, terms: &[Term], coding: Coding) -> EconResul
                 continue; // the cell space is spanned: every further column is aliased
             }
             for (k, xk) in x.iter_mut().enumerate() {
-                *xk =
-                    cells.w[k] * col.value(cells.a[k], cells.b[k], cells.levels_a, cells.levels_b);
+                *xk = cells.w[k] * value(col, cells.a[k], cells.b[k]);
             }
             let norm_x = dot(&x, &x).sqrt();
             if norm_x == 0.0 {
@@ -1216,7 +1268,7 @@ fn fit_sequence(cells: &CellLayout, terms: &[Term], coding: Coding) -> EconResul
         terms: fits,
         rank,
         n_cols,
-        rss: cells.ss_within + dot(&e, &e),
+        cell_rss: dot(&e, &e),
     })
 }
 
@@ -1875,6 +1927,298 @@ mod tests {
         }
         assert_eq!(SsType::III.to_string(), "III");
         assert_eq!(SsType::I.to_string(), "I");
+    }
+
+    // ========================================================================
+    // Reference: the fit on explicit interaction columns
+    // ========================================================================
+    //
+    // The interaction used to be fitted on design columns: one indicator per non-empty cell
+    // (treatment coding, Types I and II), or the (La - 1)(Lb - 1) products of the sum codes
+    // (Type III, every term sum-coded). That fit is kept here, on the same Gram-Schmidt
+    // core, as the reference for the saturated-model and marginal-means shortcuts.
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RefTerm {
+        Intercept,
+        A,
+        B,
+        Ab,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RefCoding {
+        Treatment,
+        Sum,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum RefColumn {
+        One,
+        A(u32),
+        B(u32),
+        Cell(u32, u32),
+        SumA(u32),
+        SumB(u32),
+        SumAb(u32, u32),
+    }
+
+    /// `contr.sum` code `j` of `level` among `levels` levels.
+    fn sum_code(level: u32, j: u32, levels: usize) -> f64 {
+        if level == j {
+            1.0
+        } else if level as usize + 1 == levels {
+            -1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn ref_columns(cells: &CellLayout, term: RefTerm, coding: RefCoding) -> Vec<RefColumn> {
+        let (la, lb) = (cells.levels_a as u32, cells.levels_b as u32);
+        match (term, coding) {
+            (RefTerm::Intercept, _) => vec![RefColumn::One],
+            (RefTerm::A, RefCoding::Treatment) => (1..la).map(RefColumn::A).collect(),
+            (RefTerm::B, RefCoding::Treatment) => (1..lb).map(RefColumn::B).collect(),
+            (RefTerm::A, RefCoding::Sum) => (0..la - 1).map(RefColumn::SumA).collect(),
+            (RefTerm::B, RefCoding::Sum) => (0..lb - 1).map(RefColumn::SumB).collect(),
+            // Empty cells have zero columns (aliased), so they are not built.
+            (RefTerm::Ab, RefCoding::Treatment) => cells
+                .a
+                .iter()
+                .zip(&cells.b)
+                .filter(|&(&i, &j)| i >= 1 && j >= 1)
+                .map(|(&i, &j)| RefColumn::Cell(i, j))
+                .collect(),
+            (RefTerm::Ab, RefCoding::Sum) => (0..lb - 1)
+                .flat_map(|j| (0..la - 1).map(move |i| RefColumn::SumAb(i, j)))
+                .collect(),
+        }
+    }
+
+    fn ref_fit(cells: &CellLayout, terms: &[RefTerm], coding: RefCoding) -> SequenceFit {
+        let columns: Vec<Vec<RefColumn>> = terms
+            .iter()
+            .map(|&t| ref_columns(cells, t, coding))
+            .collect();
+        let (la, lb) = (cells.levels_a, cells.levels_b);
+        let ind = |t: bool| if t { 1.0 } else { 0.0 };
+        fit_columns(cells, &columns, |col, a, b| match col {
+            RefColumn::One => 1.0,
+            RefColumn::A(j) => ind(a == j),
+            RefColumn::B(j) => ind(b == j),
+            RefColumn::Cell(i, j) => ind(a == i && b == j),
+            RefColumn::SumA(j) => sum_code(a, j, la),
+            RefColumn::SumB(j) => sum_code(b, j, lb),
+            RefColumn::SumAb(i, j) => sum_code(a, i, la) * sum_code(b, j, lb),
+        })
+        .unwrap()
+    }
+
+    /// The terms as the explicit-column fit gives them; `None` where Type III is refused.
+    fn reference_terms(
+        cells: &CellLayout,
+        interaction: bool,
+        ss_type: SsType,
+    ) -> Option<TwoWayTerms> {
+        use RefCoding::{Sum, Treatment};
+        use RefTerm::{A, Ab, B, Intercept};
+        let main = |first: RefTerm, second: RefTerm| {
+            let mut t = vec![Intercept, first, second];
+            if interaction {
+                t.push(Ab);
+            }
+            t
+        };
+        let (a, b, full) = match ss_type {
+            SsType::I => {
+                let full = ref_fit(cells, &main(A, B), Treatment);
+                (full.terms[1], full.terms[2], full)
+            }
+            SsType::II => {
+                let full = ref_fit(cells, &main(A, B), Treatment);
+                let ba = ref_fit(cells, &[Intercept, B, A], Treatment);
+                (ba.terms[2], full.terms[2], full)
+            }
+            SsType::III => {
+                let empty = cells.levels_a * cells.levels_b - cells.n_cells();
+                if interaction && empty > 0 {
+                    return None;
+                }
+                let full = ref_fit(cells, &main(A, B), Sum);
+                if full.rank < full.n_cols {
+                    return None;
+                }
+                let last = |others: &[RefTerm], term: RefTerm| {
+                    let mut t = vec![Intercept];
+                    t.extend_from_slice(others);
+                    t.push(term);
+                    *ref_fit(cells, &t, Sum).terms.last().unwrap()
+                };
+                let with_ab = |t: RefTerm| if interaction { vec![t, Ab] } else { vec![t] };
+                (last(&with_ab(B), A), last(&with_ab(A), B), full)
+            }
+        };
+        Some(TwoWayTerms {
+            a,
+            b,
+            ab: full.terms.get(3).copied(),
+            rank: full.rank,
+            rss: cells.ss_within + full.cell_rss,
+        })
+    }
+
+    fn layout(ds: &Dataset) -> CellLayout {
+        let cols = ColumnRequest::new(ds.df())
+            .numeric("y")
+            .factor("a")
+            .factor("b")
+            .na(NaPolicy::Omit)
+            .extract()
+            .unwrap();
+        CellLayout::new(cols.numeric("y"), cols.factor("a"), cols.factor("b")).unwrap()
+    }
+
+    /// A noisy `la` x `lb` layout with `count(a, b)` rows in cell (a, b) (none when 0).
+    fn noisy_layout(la: i64, lb: i64, count: impl Fn(i64, i64) -> usize) -> Dataset {
+        let (mut a, mut b, mut y) = (Vec::new(), Vec::new(), Vec::new());
+        let mut i = 0.0f64;
+        for ai in 0..la {
+            for bi in 0..lb {
+                for _ in 0..count(ai, bi) {
+                    a.push(format!("a{ai:02}"));
+                    b.push(format!("b{bi:02}"));
+                    let (x, z) = (ai as f64, bi as f64);
+                    y.push(2.0 + 0.4 * x - 0.3 * z + 0.2 * x * z + (1.7 * i + 0.3).sin());
+                    i += 1.0;
+                }
+            }
+        }
+        Dataset::new(df! { "y" => y, "a" => a, "b" => b }.unwrap())
+    }
+
+    /// The shortcuts against the explicit-column fit, at 1e-10 relative: SS of terms with
+    /// df (an SS without df is the rounding of zero, held to 1e-10 of the total), df, rank
+    /// and residual SS, for Types I, II and III, with and without the interaction.
+    #[test]
+    fn test_two_way_anova_shortcuts_match_explicit_interaction_columns() {
+        let layouts = [
+            // Complete and unbalanced (1 to 4 rows per cell).
+            (
+                "complete 3 x 4",
+                noisy_layout(3, 4, |a, b| 1 + ((3 * a + 2 * b) % 4) as usize),
+            ),
+            // Two empty cells, still connected.
+            (
+                "empty cells 4 x 3",
+                noisy_layout(4, 3, |a, b| match (a, b) {
+                    (0, 2) | (3, 0) => 0,
+                    _ => 1 + ((a + 2 * b) % 3) as usize,
+                }),
+            ),
+            // B nested in A: A given B has no df.
+            (
+                "nested 2 x 4",
+                noisy_layout(2, 4, |a, b| usize::from(b / 2 == a) * 3),
+            ),
+            // Two diagonal cells: B given A has no df.
+            (
+                "diagonal 2 x 2",
+                noisy_layout(2, 2, |a, b| usize::from(a == b) * 3),
+            ),
+        ];
+        let mut compared_type3_interaction = 0;
+        for (name, ds) in &layouts {
+            let cells = layout(ds);
+            let total = run_two_way_anova(ds, "y", "a", "b", true).unwrap().ss_total;
+            for interaction in [true, false] {
+                for ss_type in [SsType::I, SsType::II, SsType::III] {
+                    let what = format!("{name}, interaction {interaction}, Type {ss_type}");
+                    let got = two_way_terms(&cells, interaction, ss_type);
+                    let want = reference_terms(&cells, interaction, ss_type);
+                    let (got, want) = match (got, want) {
+                        (Ok(g), Some(w)) => (g, w),
+                        (Err(EconError::InvalidSpecification { .. }), None) => continue,
+                        (g, w) => panic!("{what}: {g:?} vs reference {w:?}"),
+                    };
+                    let close = |x: f64, y: f64, df: usize, term: &str| {
+                        let ok = if df == 0 {
+                            x.abs() <= 1e-10 * total && y.abs() <= 1e-10 * total
+                        } else {
+                            (x - y).abs() <= 1e-10 * x.abs().max(y.abs())
+                        };
+                        assert!(ok, "{what}: {term} {x} vs reference {y}");
+                    };
+                    assert_eq!(got.a.df, want.a.df, "{what}: df(A)");
+                    assert_eq!(got.b.df, want.b.df, "{what}: df(B)");
+                    close(got.a.ss, want.a.ss, got.a.df, "SS(A)");
+                    close(got.b.ss, want.b.ss, got.b.df, "SS(B)");
+                    assert_eq!(
+                        got.ab.map(|t| t.df),
+                        want.ab.map(|t| t.df),
+                        "{what}: df(A:B)"
+                    );
+                    if let (Some(g), Some(w)) = (got.ab, want.ab) {
+                        close(g.ss, w.ss, g.df, "SS(A:B)");
+                    }
+                    assert_eq!(got.rank, want.rank, "{what}: rank");
+                    close(got.rss, want.rss, 1, "RSS");
+                    if interaction && ss_type == SsType::III {
+                        compared_type3_interaction += 1;
+                    }
+                }
+            }
+        }
+        // Type III with the interaction exists only on the complete layout.
+        assert_eq!(compared_type3_interaction, 1);
+    }
+
+    /// A main effect aliased with the other factor has df 0 and no numbers; the table says
+    /// it is not estimable, as aov drops the row. Two cells, (a1, b1) and (a2, b2): B given A
+    /// is aliased (Type I), and so is A given B (Type II). Fails before: the row was printed
+    /// with df 0 and NaN.
+    #[test]
+    fn test_two_way_anova_aliased_main_effect_not_estimable() {
+        let ds = Dataset::new(
+            df! {
+                "y" => [1.2, 0.8, 1.1, 3.1, 2.7, 3.4],
+                "a" => ["a1", "a1", "a1", "a2", "a2", "a2"],
+                "b" => ["b1", "b1", "b1", "b2", "b2", "b2"],
+            }
+            .unwrap(),
+        );
+        let not_estimable = |r: &TwoWayAnovaResult, name: &str| {
+            let line = format!("{name} not estimable (aliased with the other factor)");
+            r.to_string().lines().any(|l| l.trim_start() == line)
+        };
+        let t1 = run_two_way_anova(&ds, "y", "a", "b", true).unwrap();
+        assert_eq!((t1.df_a, t1.df_b, t1.df_ab, t1.df_error), (1, 0, None, 4));
+        assert!(t1.ms_b.is_nan() && t1.f_b.is_nan() && t1.p_b.is_nan());
+        assert!(not_estimable(&t1, "b"), "{t1}");
+        assert!(!not_estimable(&t1, "a"), "{t1}");
+        assert!(t1.to_string().contains("a:b not estimable"), "{t1}");
+        let t2 = two_way_with(&ds, "y", "a", "b", false, SsType::II).unwrap();
+        assert_eq!((t2.df_a, t2.df_b), (0, 0));
+        assert!(not_estimable(&t2, "a") && not_estimable(&t2, "b"), "{t2}");
+    }
+
+    /// The model with the interaction is fitted without one design column per cell, so its
+    /// largest buffer holds c x (La + Lb - 1) values, not c x c. Fails before: with the
+    /// interaction columns the c x c buffer exceeded this ceiling and the call was refused.
+    #[test]
+    fn test_two_way_anova_interaction_needs_no_cell_columns() {
+        let ds = noisy_layout(40, 40, |_, _| 2);
+        resource::with_alloc_ceiling(Some(4 << 20), || {
+            for ss_type in [SsType::I, SsType::II, SsType::III] {
+                let r = two_way_with(&ds, "y", "a", "b", true, ss_type).unwrap();
+                assert_eq!(
+                    (r.df_a, r.df_b, r.df_ab, r.df_error),
+                    (39, 39, Some(39 * 39), 1600),
+                    "Type {ss_type}"
+                );
+                assert!(r.f_ab.unwrap().is_finite(), "Type {ss_type}");
+            }
+        });
     }
 
     // ========================================================================
