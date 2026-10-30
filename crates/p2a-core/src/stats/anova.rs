@@ -1195,8 +1195,8 @@ fn fit_sequence(cells: &CellLayout, terms: &[Term], coding: Coding) -> EconResul
                 }
             }
             let norm_r = dot(&x, &x).sqrt();
-            if !(norm_r >= ALIAS_TOL * norm_x) {
-                continue; // aliased (or NaN)
+            if norm_r.is_nan() || norm_r < ALIAS_TOL * norm_x {
+                continue; // aliased (or not a number)
             }
             for xk in x.iter_mut() {
                 *xk /= norm_r;
