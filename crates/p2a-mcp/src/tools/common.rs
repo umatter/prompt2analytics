@@ -557,6 +557,12 @@ mod tests {
         append_missing_note(&mut text, &none);
         assert_eq!(text, "t");
         assert_eq!(missing_json(&none), None);
-        assert_eq!(case.scalar("missing_y"), 2.0);
+        // The per-column counts in the note and the JSON are the case's.
+        let by = &cols.missing().by_column;
+        assert_eq!((by[0].0.as_str(), by[1].0.as_str()), ("y", "n"));
+        p2a_validation::Check::new(&case)
+            .scalar("missing_y", by[0].1 as f64, p2a_validation::Tol::exact())
+            .scalar("missing_n", by[1].1 as f64, p2a_validation::Tol::exact())
+            .finish();
     }
 }
