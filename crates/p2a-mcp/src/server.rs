@@ -2294,8 +2294,9 @@ mod tests {
 
 /// Spatial weights and cleaning sessions live in the `Session` (MCP-4): a
 /// session-scoped server is built per HTTP call, so state kept anywhere else
-/// was gone by the next call. The Moran figures are R's (see
-/// `session::test_fixtures`); they show that the stored k = 4 and k = 5
+/// was gone by the next call. The Moran figures were computed in R 4.3.3
+/// from spdep's formulas written out (see `session::test_fixtures`); they
+/// are not an R-pinned case. They show that the stored k = 4 and k = 5
 /// weights are the ones a later call uses.
 #[cfg(all(test, feature = "http"))]
 mod session_state_tests {
@@ -2339,13 +2340,15 @@ mod session_state_tests {
         json!({"dataset": "sp", "variable": "v", "weights": name})
     }
 
-    // R's Moran figures (`session::test_fixtures`), each the f64 nearest
-    // R's 17-digit output, written in its shortest form.
-    /// k = 4: I (R 0.68715919057620856), variance (R 0.0095894910636934762), z.
+    // Moran figures computed in R 4.3.3 from spdep's formulas written out
+    // (see `session::test_fixtures`); not an R-pinned case. Each is the f64
+    // nearest the script's 17-digit output, written in its shortest form.
+    /// k = 4: I (script 0.68715919057620856), variance (script
+    /// 0.0095894910636934762), z.
     const MORAN_K4: (f64, f64, f64) =
         (0.6871591905762086, 0.009589491063693476, 7.2789719093779635);
-    /// k = 5: I (R 0.65697404814893101), variance (R 0.0074262267610125639),
-    /// z (R 7.9212144518526779).
+    /// k = 5: I (script 0.65697404814893101), variance (script
+    /// 0.0074262267610125639), z (script 7.9212144518526779).
     const MORAN_K5: (f64, f64, f64) = (0.656974048148931, 0.007426226761012564, 7.921214451852678);
     /// E[I] = -1 / (n - 1), n = 40.
     const MORAN_EXPECTED: f64 = -0.02564102564102564;

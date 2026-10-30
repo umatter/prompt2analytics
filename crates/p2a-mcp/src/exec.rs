@@ -2556,9 +2556,11 @@ mod session_state_quota_tests {
         // Pre-fix: base (the weights were never counted).
         assert_eq!(s.data_bytes(), base + 6_722);
         match run(&g, &s, "spatial_neighbors", nb(20, "w20")).await {
-            Err(ToolCallError::QuotaExceeded(m)) => assert!(
-                m.contains("per session") && m.contains("spatial weights") && m.contains("undone"),
-                "{m}"
+            Err(ToolCallError::QuotaExceeded(msg)) => assert!(
+                msg.contains("per session")
+                    && msg.contains("spatial weights")
+                    && msg.contains("undone"),
+                "{msg}"
             ),
             other => panic!("expected QuotaExceeded, got {other:?}"),
         }
@@ -2594,8 +2596,8 @@ mod session_state_quota_tests {
         )
         .await
         {
-            Err(ToolCallError::QuotaExceeded(m)) => {
-                assert!(m.contains("cleaning") && m.contains("undone"), "{m}")
+            Err(ToolCallError::QuotaExceeded(msg)) => {
+                assert!(msg.contains("cleaning") && msg.contains("undone"), "{msg}")
             }
             other => panic!("expected QuotaExceeded, got {other:?}"),
         }
@@ -2644,7 +2646,7 @@ mod session_state_quota_tests {
         );
         let apply = serde_json::json!({"session_id": id, "operation": "drop_na"});
         match run(&full, &s, "cleaning_session_apply", apply).await {
-            Err(ToolCallError::QuotaExceeded(m)) => assert!(m.contains("undone"), "{m}"),
+            Err(ToolCallError::QuotaExceeded(msg)) => assert!(msg.contains("undone"), "{msg}"),
             other => panic!("expected QuotaExceeded, got {other:?}"),
         }
         assert_eq!(s.data_bytes(), held);
@@ -2678,8 +2680,8 @@ mod session_state_quota_tests {
         assert!(stored.success, "{}", text(&stored));
         assert_eq!(m.total_data_bytes().await, ba + bb + 6_722);
         match run(&g, &b, "spatial_neighbors", nb(20, "w20")).await {
-            Err(ToolCallError::QuotaExceeded(m)) => {
-                assert!(m.contains("server") && m.contains("undone"), "{m}")
+            Err(ToolCallError::QuotaExceeded(msg)) => {
+                assert!(msg.contains("server") && msg.contains("undone"), "{msg}")
             }
             other => panic!("expected QuotaExceeded, got {other:?}"),
         }

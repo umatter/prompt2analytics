@@ -1571,11 +1571,13 @@ impl InMemorySessionStore {
 
 // Fixtures of the session-state tests (T2-WP02, MCP-4): spatial weights and
 // cleaning sessions kept in a `Session` between tool calls. The values the
-// tests pin come from R 4.3.3. spdep is not installed, so its knearneigh
-// (ties broken by the lower index, as p2a does), nb2listw(style = "W") and
-// moran.test(randomisation = TRUE) are written out from their definitions;
-// the fixture is the same doubles in R and Rust (exact integer arithmetic,
-// then one division and one multiplication in the same order):
+// tests pin were computed in R 4.3.3. spdep is not installed, so its
+// knearneigh (ties broken by the lower index, as p2a does),
+// nb2listw(style = "W") and moran.test(randomisation = TRUE) are written
+// out from their definitions; the values are therefore not an R-pinned
+// case (no validation case or registry entry). The fixture is the same
+// doubles in R and Rust (exact integer arithmetic, then one division and
+// one multiplication in the same order):
 //
 //   n <- 40L; i <- seq_len(n); m <- 2147483647
 //   st <- numeric(80); cur <- 20261021
