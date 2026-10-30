@@ -80,3 +80,19 @@ async fn test_validate_mcp_munge_bin_cut() {
             .finish();
     }
 }
+
+#[tokio::test]
+async fn test_mcp_munge_fill_na_all_missing_is_an_error() {
+    // DATA-35. R: mean(c(NA_real_, NA_real_, NA_real_), na.rm = TRUE) is NaN, not 0.
+    let e = Dataset::new(df!("id" => [1i64, 2, 3], "z" => [None::<f64>, None, None]).unwrap());
+    let (session, server) = common::session_with_datasets(vec![("e", e)]);
+    let r = common::call(
+        &server,
+        &session,
+        "munge_fill_na",
+        json!({"dataset": "e", "columns": ["z"], "strategy": "mean"}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(!r.success && t.contains("no observed values"), "{t}");
+}

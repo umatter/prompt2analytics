@@ -1,6 +1,14 @@
 //! T2-WP04: munge bin, cast, mutate and fill-na, and interactive charts with a missing group,
 //! through the p2a CLI.
 use crate::common::*;
+use std::path::PathBuf;
+
+/// Writes `body` to `<dir>/<name>` and returns the path.
+fn write(s: &TempSession, name: &str, body: &str) -> PathBuf {
+    let p = s.dir().join(name);
+    std::fs::write(&p, body).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    p
+}
 
 /// The `Counts:` line `munge bin` prints for the R bin codes `codes` (0-based bin, -1 = NA)
 /// of `k` bins, `n_missing` of the NA rows being missing values.
@@ -45,4 +53,23 @@ fn test_validate_cli_munge_bin_cut() {
         counts_line(&case.vector("include_lowest_codes"), 3, 2),
         "Counts: bin_0: 3, bin_1: 3, bin_2: 2; NA: 4 (2 missing, 2 outside the edges)"
     );
+}
+
+#[test]
+fn test_cli_munge_fill_na_all_missing_is_an_error() {
+    // DATA-35. An all-empty CSV column has no observed value, so its mean is undefined
+    // (R: mean(c(NA, NA, NA), na.rm = TRUE) is NaN); it was filled with 0.
+    let s = temp_session();
+    let e = write(&s, "e.csv", "id,z\n1,\n2,\n3,\n");
+    s.load_as(&e, "e", &[]);
+    let stderr = s.err(&[
+        "munge",
+        "fill-na",
+        "e",
+        "--method",
+        "mean",
+        "--columns",
+        "z",
+    ]);
+    assert!(stderr.contains("no observed values"), "{stderr}");
 }

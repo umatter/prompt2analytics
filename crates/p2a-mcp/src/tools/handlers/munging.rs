@@ -1249,9 +1249,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-    /// Fill null values using a strategy.
+    /// Fill missing values using a strategy.
     #[tool(
-        description = "Fill null values using a strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value."
+        description = "Fill missing values (null, and NaN in float columns) using a strategy: 'mean', 'median', 'forward', 'backward', 'zero', or a constant value. Mean and median use the observed values; a column with no observed value is an error."
     )]
     pub async fn munge_fill_na(
         &self,

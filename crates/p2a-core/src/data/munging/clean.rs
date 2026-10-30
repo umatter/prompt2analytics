@@ -7,15 +7,16 @@ use serde::{Deserialize, Serialize};
 use super::CHECKPOINT_EVERY;
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
+use crate::data::columns::is_numeric_dtype;
 
 /// Strategy for handling missing values when filling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FillStrategy {
     /// Fill with a constant value (parsed based on column type)
     Constant(String),
-    /// Fill with column mean (numeric only)
+    /// Fill with the mean of the observed values (numeric only)
     Mean,
-    /// Fill with column median (numeric only)
+    /// Fill with the median of the observed values (numeric only)
     Median,
     /// Forward fill (use previous non-null value)
     Forward,
@@ -93,12 +94,27 @@ pub fn drop_na(dataset: &Dataset, columns: Option<&[&str]>, how: &str) -> MungeR
     Ok(Dataset::new(filtered))
 }
 
-/// Fill null values in specified columns.
+/// Fill missing values in specified columns.
+///
+/// A value is missing when it is null or, in a float column, NaN (R's `is.na`;
+/// `tidyr::replace_na` fills NaN too), so every strategy fills NaN cells.
+/// Mean and median are those of the observed values; integer columns become
+/// Float64 for them.
 ///
 /// # Arguments
 /// * `dataset` - Source dataset
-/// * `columns` - Columns to fill (None = all columns)
-/// * `strategy` - How to fill null values
+/// * `columns` - Columns to fill (None = all columns; then mean and median skip
+///   the non-numeric columns)
+/// * `strategy` - How to fill missing values
+///
+/// # Errors
+///
+/// [`MungeError::ColumnNotFound`] for a named column that does not exist;
+/// [`MungeError::TypeMismatch`] for mean or median of a named non-numeric
+/// column; [`MungeError::InvalidValue`] for mean or median of a numeric (or
+/// named, all-null) column without an observed value, whose mean or median is
+/// undefined; [`MungeError::InvalidValue`] for a constant that does not parse
+/// for the column's type.
 ///
 /// # Example
 /// ```ignore
@@ -131,25 +147,22 @@ pub fn fill_na(
             .collect(),
     };
 
+    let named = columns.is_some();
     let mut result_df = df.clone();
 
     for col_name in &cols_to_fill {
-        let col = result_df.column(col_name)?;
-        let dtype = col.dtype();
+        let source = result_df.column(col_name)?;
+        let dtype = source.dtype().clone();
+        let col = &nan_to_null(source)?;
 
         let filled_col = match &strategy {
             FillStrategy::Constant(value) => fill_with_constant(col, value)?,
-            FillStrategy::Mean => {
-                if !dtype.is_primitive_numeric() {
-                    continue; // Skip non-numeric columns for mean
+            FillStrategy::Mean | FillStrategy::Median => {
+                if !named && !is_numeric_dtype(&dtype, false) {
+                    continue; // Skip non-numeric columns nobody named
                 }
-                fill_with_mean(col)?
-            }
-            FillStrategy::Median => {
-                if !dtype.is_primitive_numeric() {
-                    continue;
-                }
-                fill_with_median(col)?
+                let median = matches!(strategy, FillStrategy::Median);
+                fill_with_statistic(&result_df, col_name, col, median)?
             }
             FillStrategy::Forward => fill_forward(col)?,
             FillStrategy::Backward => fill_backward(col)?,
@@ -191,6 +204,7 @@ fn fill_with_constant(col: &Column, value: &str) -> MungeResult<Column> {
                 value: value.to_string(),
                 reason: "Cannot parse as float".to_string(),
             })?;
+            // na-ok: dtype matched by the arm; fill_na mapped NaN to null
             let ca = col.f64()?.fill_null_with_values(val)?;
             Ok(ca.into_column())
         }
@@ -200,6 +214,7 @@ fn fill_with_constant(col: &Column, value: &str) -> MungeResult<Column> {
                 value: value.to_string(),
                 reason: "Cannot parse as float".to_string(),
             })?;
+            // na-ok: dtype matched by the arm; fill_na mapped NaN to null
             let ca = col.f32()?.fill_null_with_values(val)?;
             Ok(ca.into_column())
         }
@@ -230,24 +245,59 @@ fn fill_with_constant(col: &Column, value: &str) -> MungeResult<Column> {
     }
 }
 
-fn fill_with_mean(col: &Column) -> MungeResult<Column> {
+/// `col` with its NaN cells made null (float columns; others unchanged), so
+/// that the fills treat NaN as the missing value it is.
+fn nan_to_null(col: &Column) -> MungeResult<Column> {
     let name = col.name().clone();
-    let float_col = col.cast(&DataType::Float64)?;
-    let ca = float_col.f64()?;
-
-    let mean_val = ca.mean().unwrap_or(0.0);
-    let filled = ca.fill_null_with_values(mean_val)?;
-    Ok(filled.with_name(name).into_column())
+    Ok(match col.dtype() {
+        DataType::Float64 => {
+            // na-ok: NaN -> null conversion (the arm matched the dtype)
+            let ca = col.f64()?;
+            ca.apply(|v| v.filter(|x| !x.is_nan()))
+                .with_name(name)
+                .into_column()
+        }
+        DataType::Float32 => {
+            // na-ok: NaN -> null conversion (the arm matched the dtype)
+            let ca = col.f32()?;
+            ca.apply(|v| v.filter(|x| !x.is_nan()))
+                .with_name(name)
+                .into_column()
+        }
+        _ => col.clone(),
+    })
 }
 
-fn fill_with_median(col: &Column) -> MungeResult<Column> {
-    let name = col.name().clone();
+/// The column `name` of `df` (`col`, its NaN cells made null) with its missing
+/// cells filled by the mean (`median` false) or the median of its observed
+/// values, as Float64. A column without an observed value is an error: its
+/// mean and median are undefined (R: `mean(c(NA, NA), na.rm = TRUE)` is NaN).
+fn fill_with_statistic(
+    df: &DataFrame,
+    name: &str,
+    col: &Column,
+    median: bool,
+) -> MungeResult<Column> {
+    let which = if median { "median" } else { "mean" };
+    let cells = super::numeric_cells(df, name, false)?;
+    let observed: Float64Chunked = cells.into_iter().flatten().map(Some).collect();
+    let value = if median {
+        observed.median()
+    } else {
+        observed.mean()
+    }
+    .ok_or_else(|| MungeError::InvalidValue {
+        column: name.to_string(),
+        value: which.to_string(),
+        reason: format!(
+            "the column has no observed values (all null or NaN), so its {which} is \
+             undefined; drop the column or fill it with a constant"
+        ),
+    })?;
     let float_col = col.cast(&DataType::Float64)?;
-    let ca = float_col.f64()?;
-
-    let median_val = ca.median().unwrap_or(0.0);
-    let filled = ca.fill_null_with_values(median_val)?;
-    Ok(filled.with_name(name).into_column())
+    // na-ok: cast to Float64 above; the fill below replaces the missing cells
+    let filled = float_col.f64()?.fill_null_with_values(value)?;
+    Ok(filled.with_name(col.name().clone()).into_column())
 }
 
 fn fill_forward(col: &Column) -> MungeResult<Column> {
@@ -274,10 +324,12 @@ fn fill_with_zero(col: &Column) -> MungeResult<Column> {
             Ok(ca.into_column())
         }
         DataType::Float64 => {
+            // na-ok: dtype matched by the arm; fill_na mapped NaN to null
             let ca = col.f64()?.fill_null_with_values(0.0)?;
             Ok(ca.into_column())
         }
         DataType::Float32 => {
+            // na-ok: dtype matched by the arm; fill_na mapped NaN to null
             let ca = col.f32()?.fill_null_with_values(0.0)?;
             Ok(ca.into_column())
         }
@@ -519,6 +571,7 @@ pub fn replace(
                 value: new_value.to_string(),
                 reason: "Cannot parse as float".to_string(),
             })?;
+            // na-ok: dtype matched by the arm; values are compared, nulls stay null
             let ca = col.f64()?;
             let replaced: Float64Chunked = ca
                 .into_iter()
@@ -1588,5 +1641,88 @@ mod tests {
             .into_no_null_iter()
             .collect();
         assert_eq!(names, vec!["alice", "bob", "charlie"]);
+    }
+
+    /// A numeric column as `Option<f64>` (cast to Float64 first).
+    fn f64s(ds: &Dataset, c: &str) -> Vec<Option<f64>> {
+        ds.df()
+            .column(c)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn test_fill_na_mean_of_all_missing_column_is_an_error() {
+        // DATA-35. R: mean(c(NA_real_, NA_real_), na.rm = TRUE) is NaN and the median NA:
+        // there is no value to fill with, and 0 is not one.
+        let ds = Dataset::new(df!("id" => [1, 2, 3], "z" => [None::<f64>, None, None]).unwrap());
+        for s in [FillStrategy::Mean, FillStrategy::Median] {
+            let e = err_text(fill_na(&ds, Some(&["z"]), s));
+            assert!(e.contains("'z'") && e.contains("no observed values"), "{e}");
+        }
+        // Also when no column is named.
+        let ints = Dataset::new(df!("k" => [None::<i64>, None]).unwrap());
+        assert!(fill_na(&ints, None, FillStrategy::Mean).is_err());
+        // An all-empty CSV column is text: named, it has no observed values either.
+        let text = Dataset::new(df!("t" => [None::<&str>, None]).unwrap());
+        let e = err_text(fill_na(&text, Some(&["t"]), FillStrategy::Mean));
+        assert!(e.contains("no observed values"), "{e}");
+    }
+
+    #[test]
+    fn test_fill_na_uses_present_values_and_fills_nan() {
+        // R: x <- c(1, NA, NaN, 4, 10); mean(x, na.rm = TRUE) = 5, median 4; is.na(NaN) is
+        // TRUE, so tidyr::replace_na fills the NaN as well.
+        let ds = Dataset::new(
+            df!("x" => [Some(1.0), None, Some(f64::NAN), Some(4.0), Some(10.0)]).unwrap(),
+        );
+        let run = |s| f64s(&fill_na(&ds, Some(&["x"]), s).unwrap(), "x");
+        assert_eq!(
+            run(FillStrategy::Mean),
+            vec![Some(1.0), Some(5.0), Some(5.0), Some(4.0), Some(10.0)]
+        );
+        assert_eq!(
+            run(FillStrategy::Median),
+            vec![Some(1.0), Some(4.0), Some(4.0), Some(4.0), Some(10.0)]
+        );
+        assert_eq!(
+            run(FillStrategy::Zero),
+            vec![Some(1.0), Some(0.0), Some(0.0), Some(4.0), Some(10.0)]
+        );
+        assert_eq!(
+            run(FillStrategy::Forward),
+            vec![Some(1.0), Some(1.0), Some(1.0), Some(4.0), Some(10.0)]
+        );
+        assert_eq!(
+            run(FillStrategy::Constant("-1".into())),
+            vec![Some(1.0), Some(-1.0), Some(-1.0), Some(4.0), Some(10.0)]
+        );
+    }
+
+    #[test]
+    fn test_na_fill_mean_fixtures() {
+        // Design 2.4: Int64 like Float64 (R: mean(c(1, 4)) = 2.5); a named text column is an
+        // error for mean; an absent column is named; with no column named, text columns are
+        // skipped as before.
+        let i = fill_na(
+            &Dataset::new(df!("v" => [Some(1i64), None, Some(4)]).unwrap()),
+            Some(&["v"]),
+            FillStrategy::Mean,
+        )
+        .unwrap();
+        assert_eq!(f64s(&i, "v"), vec![Some(1.0), Some(2.5), Some(4.0)]);
+        let ds = test_dataset_with_nulls();
+        let e = err_text(fill_na(&ds, Some(&["name"]), FillStrategy::Mean));
+        assert!(e.contains("'name'") && e.contains("numeric"), "{e}");
+        assert!(matches!(
+            fill_na(&ds, Some(&["nope"]), FillStrategy::Mean),
+            Err(MungeError::ColumnNotFound(_))
+        ));
+        assert!(fill_na(&ds, None, FillStrategy::Mean).is_ok());
     }
 }
