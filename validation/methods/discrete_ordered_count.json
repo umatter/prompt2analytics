@@ -9,14 +9,33 @@
       "doc": "validation/econometrics/ordered.md",
       "cases": ["disc_ordered"],
       "tests": [
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_disc_ordered",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_text_outcome_with_levels",
         "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_integer_levels_in_numeric_order",
         "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_enum_outcome_uses_declared_order",
-        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_missing_rows_dropped"
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_missing_rows_dropped",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_ordered_model_disc_ordered"
       ],
-      "quantities": ["category order and counts", "rows used / dropped (na.omit)"],
-      "tolerance": "counts exact",
+      "quantities": ["coefficients", "cut points", "SE (coefficients, cut points)", "z", "p", "log-likelihood", "null log-likelihood", "McFadden pseudo-R2", "AIC", "BIC", "category order and counts", "rows used / dropped (na.omit)"],
+      "tolerance": "MLE (validation/README.md, iterative): coefficients and cut points 1e-6, SEs and z 1e-5 relative; p 2e-3 relative (z^2 times the z tolerance); log-likelihood, AIC, BIC, pseudo-R2 1e-6 (n = 400); counts exact; MCP text at print precision (4 decimals)",
       "deviations": [],
-      "supersedes_legacy": []
+      "supersedes_legacy": ["validation/expected/ordered_logit_test.csv", "validation/expected/ordered_logit_multi_test.csv"]
+    },
+    {
+      "id": "discrete_ordered_probit",
+      "name": "Ordered probit, MASS::polr parameterisation",
+      "category": "econometrics",
+      "reference": "MASS::polr(method = 'probit', control = list(reltol = 1e-15)) polished to the exact MLE; observed-information SEs",
+      "doc": "validation/econometrics/ordered.md",
+      "cases": ["disc_ordered"],
+      "tests": [
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_probit_disc_ordered",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_ordered_model_disc_ordered"
+      ],
+      "quantities": ["coefficients", "cut points", "SE (coefficients, cut points)", "z", "p", "log-likelihood", "null log-likelihood", "McFadden pseudo-R2", "AIC", "BIC", "category counts"],
+      "tolerance": "as discrete_ordered_logit",
+      "deviations": [],
+      "supersedes_legacy": ["validation/expected/ordered_probit_test.csv"]
     }
   ]
 }

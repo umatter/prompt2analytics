@@ -2,11 +2,13 @@
 //!
 //! # Mathematical Background
 //!
-//! For ordered outcomes y in {1, 2, ..., J}, the model is:
+//! For ordered outcomes y in {1, 2, ..., J}, the model is (polr's parameterisation):
 //!
-//! P(y <= j | X) = F(alpha_j - X'beta)
+//! P(y <= j | X) = F(zeta_j - X'beta),   zeta_1 < ... < zeta_{J-1}
 //!
-//! where F is the logistic CDF for logit, or normal CDF for probit.
+//! where F is the logistic CDF for logit, or normal CDF for probit. The fit is the
+//! maximum-likelihood estimate by Newton-Raphson on the analytic score and observed
+//! Hessian; standard errors come from the inverse observed information.
 //!
 //! # References
 //!
@@ -14,18 +16,18 @@
 //!
 //! R equivalent: `MASS::polr()`
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{Continuous, ContinuousCDF, Normal};
 use std::collections::HashSet;
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{self, ColumnRequest, Columns, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::matrix_ops::cholesky_inverse;
 use crate::resource;
-use crate::traits::estimator::{logistic_cdf, logistic_pdf, normal_cdf, normal_pdf};
 
 /// Most outcome categories an ordered logit/probit accepts.
 ///
@@ -35,10 +37,16 @@ use crate::traits::estimator::{logistic_cdf, logistic_pdf, normal_cdf, normal_pd
 /// passed as the outcome would otherwise create one category per observation.
 const MAX_OUTCOME_CATEGORIES: usize = 100;
 
-/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity or solution,
-/// residual product, SVD fallback). Check the working set against the allocation ceiling
-/// before building it.
+/// The m x m matrices a fit holds at once: the Hessian, its damped copy, and inside
+/// `cholesky_inverse` the faer copy, the factor, the identity and the solution (the
+/// covariance). Check the working set against the allocation ceiling before building it.
 const DENSE_INVERSE_COPIES: usize = 6;
+
+/// Step halvings before the line search gives up.
+const MAX_HALVINGS: usize = 30;
+
+/// Levenberg damping attempts when the observed information is not positive definite.
+const MAX_DAMPING: usize = 20;
 
 fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
     let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
@@ -75,12 +83,12 @@ impl fmt::Display for OrderedModelType {
     }
 }
 
-/// Options of [`run_ordered_model_with`] (implemented by T2-WP10).
+/// Options of [`run_ordered_model_with`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderedConfig {
     /// Link function (default logit).
     pub link: OrderedModelType,
-    /// ordinal order of a text outcome (required for String outcomes)
+    /// Category order, lowest first (required for a text or categorical outcome).
     pub levels: Option<Vec<String>>,
     /// Maximum Newton iterations (default 100).
     pub max_iter: usize,
@@ -217,25 +225,24 @@ impl fmt::Display for OrderedResult {
 
 /// Run ordered logit regression (proportional odds model).
 ///
-/// R equivalent: `MASS::polr()`. The estimates are not yet polr's: the beta score
-/// has the wrong sign and the Hessian is an outer-product approximation, so the fit
-/// does not reach the MLE (ECON-4, T2-WP10), and the standard errors are a 0.1
-/// placeholder (ECON-5).
+/// R equivalent: `MASS::polr()`: `P(y <= j) = F(zeta_j - x'beta)` with the logistic
+/// `F`. The estimates, standard errors and log-likelihood are polr's maximum
+/// likelihood fit (`validation/econometrics/ordered.md`).
 ///
 /// # Convergence
 ///
-/// Newton steps on the information matrix (the negated Hessian approximation plus
-/// a 1e-6 ridge, positive definite), at most 100. The inverse takes the Cholesky
-/// path at any conditioning, so ill-conditioning that comes from the scale of a
-/// regressor (values in the thousands, say) neither stops nor truncates the
-/// iteration. `converged == true` implies that every coefficient, every threshold
-/// and the log-likelihood are finite, and that the last step came from a regular
-/// (not pseudo-) inverse with largest absolute (clamped) change below `1e-8`. A
-/// non-finite score or step ends the iteration with `converged = false`, and that
-/// step is not applied. So does a step from the pseudoinverse, which
-/// `safe_inverse` returns only when Cholesky fails in floating point (the ridge
-/// lost to rounding) and the condition number exceeds `1e10`. Non-convergence is
-/// reported in the result, never as an error.
+/// Newton-Raphson on the analytic score and observed Hessian, at most 100 iterations,
+/// from the null-model MLE (beta = 0, cut points at `F^-1` of the cumulative category
+/// shares). A step is halved until the cut points stay increasing and the
+/// log-likelihood does not fall; where the observed information is not positive
+/// definite the step is damped (Levenberg). The fit has converged when the largest
+/// score is below `1e-8 (1 + |ll|)`, the relative change of the log-likelihood below
+/// `1e-10` and every component of the Newton step below `1e-10 (1 + |theta_k|)`.
+/// `converged == true` implies finite estimates and log-likelihood. A non-finite
+/// step, a failed line search and the iteration limit end the fit with
+/// `converged = false` and a message in `warnings`, never with an error. Standard
+/// errors are the square roots of the diagonal of the inverse observed information;
+/// they are NaN, with a warning, when the information is not positive definite.
 ///
 /// # Errors
 ///
@@ -257,13 +264,9 @@ pub fn run_ordered_logit(
 
 /// Run ordered probit regression.
 ///
-/// R equivalent: `MASS::polr(method = "probit")`. The estimates are not yet
-/// polr's (ECON-4, ECON-5; T2-WP10). Iteration and convergence are as for
-/// [`run_ordered_logit`]: Newton steps on the positive definite information
-/// matrix (Cholesky at any conditioning); `converged == true` implies finite
-/// estimates and log-likelihood and a last step from a regular inverse; a
-/// non-finite step, or a pseudoinverse step (Cholesky failed in floating point
-/// and cond > 1e10), ends the iteration, not converged and not applied.
+/// R equivalent: `MASS::polr(method = "probit")`: the model of [`run_ordered_logit`]
+/// with the standard normal `F`. Estimation, convergence and standard errors are as
+/// for [`run_ordered_logit`].
 ///
 /// # Errors
 ///
@@ -354,236 +357,158 @@ pub fn run_ordered_model_with(
         });
     }
 
-    let y_idx: Vec<usize> = factor.codes.iter().map(|&c| c as usize).collect();
-
     // Design matrix (no intercept: it is absorbed into the thresholds)
     let dm = cols.matrix(x_cols, false);
     let x = dm.view();
     let k = x.ncols();
 
     let var_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
+    let codes = factor.codes.as_slice();
 
-    // Number of thresholds = J - 1
+    // Parameters: theta = (beta_1..beta_k, zeta_1..zeta_{J-1})
     let n_thresholds = j - 1;
     let n_params = k + n_thresholds;
-
-    // Initialize: thresholds evenly spaced, beta = 0
-    let mut theta = vec![0.0; n_params];
-
-    // Initialize thresholds based on marginal proportions
-    let mut cum_prop = 0.0;
-    for t in 0..n_thresholds {
-        cum_prop += category_counts[t] as f64 / n as f64;
-        let init_thresh = match model_type {
-            OrderedModelType::Logit => (cum_prop / (1.0 - cum_prop.min(0.999))).ln(),
-            OrderedModelType::Probit => {
-                // Approximate inverse normal
-                let p = cum_prop.max(0.001).min(0.999);
-                let t_approx = ((2.0 * p - 1.0).abs()).sqrt();
-                (2.0 * p - 1.0).signum() * t_approx * 1.5
-            }
-        };
-        theta[k + t] = init_thresh;
-    }
-
-    // CDF function
-    let cdf_fn: fn(f64) -> f64 = match model_type {
-        OrderedModelType::Logit => logistic_cdf,
-        OrderedModelType::Probit => normal_cdf,
-    };
-
-    let pdf_fn: fn(f64) -> f64 = match model_type {
-        OrderedModelType::Logit => logistic_pdf,
-        OrderedModelType::Probit => normal_pdf,
-    };
-
-    // Newton-Raphson iteration
-    let max_iter = 100;
-    let tol = 1e-8;
-    let mut converged = false;
-    let mut iterations = 0;
     let hessian_what = match model_type {
         OrderedModelType::Logit => "ordered logit Hessian",
         OrderedModelType::Probit => "ordered probit Hessian",
     };
     ensure_dense_inverse_fits(n_params, hessian_what)?;
-    // Positions and values of the non-zero score entries of one observation:
-    // the k slopes and at most two thresholds.
-    let mut score_idx: Vec<usize> = Vec::with_capacity(k + 2);
-    let mut score_val: Vec<f64> = Vec::with_capacity(k + 2);
+    let mut hess = resource::try_zeros2(n_params, n_params, hessian_what)?;
+    let mut work = resource::try_zeros2(n_params, n_params, hessian_what)?;
+    let mut grad = resource::try_vec(n_params, 0.0, "ordered model score")?;
+    let mut trial_grad = resource::try_vec(n_params, 0.0, "ordered model score")?;
 
-    for iter in 0..max_iter {
+    // Start at the null-model MLE: beta = 0, zeta_j = F^-1(P_j) with P_j the
+    // cumulative category shares, so the first log-likelihood is the null one.
+    let mut theta = resource::try_vec(n_params, 0.0, "ordered model parameters")?;
+    let mut cumulative = 0usize;
+    for t in 0..n_thresholds {
+        cumulative += category_counts[t];
+        theta[k + t] = link_quantile(cumulative as f64 / n as f64, model_type);
+    }
+    let mut trial = theta.clone();
+
+    let mut ll = ordered_loglik(&x, codes, j, &theta, model_type, &mut grad, Some(&mut hess))?;
+    let mut ll_prev = f64::NAN;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut converged = false;
+    let mut stopped = false;
+    let mut iterations = 0;
+    for iter in 1..=config.max_iter {
         resource::checkpoint()?;
-        iterations = iter + 1;
-
-        // Extract current parameters
-        let beta: Vec<f64> = theta[..k].to_vec();
-        let alpha: Vec<f64> = theta[k..].to_vec();
-
-        // Compute gradient and Hessian
-        let mut gradient = vec![0.0; n_params];
-        let mut hess = resource::try_zeros2(n_params, n_params, hessian_what)?;
-
-        for i in 0..n {
-            if i % 256 == 0 {
-                resource::checkpoint()?;
-            }
-            let yi = y_idx[i];
-
-            // Compute X'beta
-            let mut xb = 0.0;
-            for kk in 0..k {
-                xb += x[[i, kk]] * beta[kk];
-            }
-
-            // P(Y <= j) = F(alpha_j - X'beta)
-            let p_low = if yi == 0 {
-                0.0
-            } else {
-                cdf_fn(alpha[yi - 1] - xb)
-            };
-            let p_high = if yi == j - 1 {
-                1.0
-            } else {
-                cdf_fn(alpha[yi] - xb)
-            };
-            let p_i = (p_high - p_low).max(1e-15);
-
-            let f_low = if yi == 0 {
-                0.0
-            } else {
-                pdf_fn(alpha[yi - 1] - xb)
-            };
-            let f_high = if yi == j - 1 {
-                0.0
-            } else {
-                pdf_fn(alpha[yi] - xb)
-            };
-
-            // Gradient w.r.t. beta
-            let grad_beta = (f_high - f_low) / p_i;
-            for kk in 0..k {
-                gradient[kk] += x[[i, kk]] * grad_beta;
-            }
-
-            // Gradient w.r.t. thresholds
-            if yi > 0 {
-                gradient[k + yi - 1] -= f_low / p_i;
-            }
-            if yi < j - 1 {
-                gradient[k + yi] += f_high / p_i;
-            }
-
-            // Hessian (approximate using outer product), over the non-zero
-            // score entries only
-            score_idx.clear();
-            score_val.clear();
-            for kk in 0..k {
-                score_idx.push(kk);
-                score_val.push(x[[i, kk]] * grad_beta);
-            }
-            if yi > 0 {
-                score_idx.push(k + yi - 1);
-                score_val.push(-f_low / p_i);
-            }
-            if yi < j - 1 {
-                score_idx.push(k + yi);
-                score_val.push(f_high / p_i);
-            }
-            subtract_scaled_outer(&mut hess, &score_idx, &score_val, p_i);
-        }
-
-        // A non-finite score ends the iteration, not converged.
-        if !gradient.iter().all(|g| g.is_finite()) {
+        iterations = iter;
+        if !(ll.is_finite()
+            && grad.iter().all(|g| g.is_finite())
+            && hess.iter().all(|h| h.is_finite()))
+        {
+            warnings.push(format!(
+                "the log-likelihood, score or Hessian is not finite at iteration {iter}; \
+                 estimation stopped"
+            ));
+            stopped = true;
             break;
         }
-
-        // Information matrix: the negated Hessian (approximation) plus a 1e-6 ridge.
-        // It is positive definite, so safe_inverse takes its Cholesky path at any
-        // conditioning. (The negative definite Hessian itself always fails
-        // Cholesky, and for cond > 1e10, as with a regressor in the thousands,
-        // safe_inverse answers it with the pseudoinverse.)
-        let mut info = hess;
-        info.mapv_inplace(|v| -v);
-        for i in 0..n_params {
-            info[[i, i]] += 1e-6;
-        }
-
-        let (info_inv, singular) = match safe_inverse(&info.view()) {
-            Ok(inv) => inv,
-            Err(_) => {
-                // Fall back to gradient descent step
-                let step_size = 0.1;
-                for i in 0..n_params {
-                    theta[i] += step_size * gradient[i];
-                }
-                continue;
-            }
-        };
-        drop(info);
-
-        // Newton step: theta += I^-1 g (the same iterate as theta -= H^-1 g)
-        let grad_arr = Array1::from_vec(gradient);
-        let step = info_inv.dot(&grad_arr);
-        drop(info_inv);
-
-        // A non-finite step ends the iteration unapplied and not converged; so does
-        // one from the pseudoinverse, which safe_inverse returns only when Cholesky
-        // fails in floating point despite the ridge and cond exceeds 1e10.
-        let Some(max_step) = max_abs_step(&step) else {
+        let Some(delta) = newton_step(&hess, &grad, &mut work) else {
+            warnings.push(format!(
+                "the observed information is not positive definite at iteration {iter}, \
+                 even with damping; estimation stopped"
+            ));
+            stopped = true;
             break;
         };
-        if singular.is_some() {
+        // A non-finite step is not applied (RF-31: it never counts as converged).
+        if max_abs_step(&delta).is_none() {
+            warnings.push(format!(
+                "the Newton step is not finite at iteration {iter}; estimation stopped"
+            ));
+            stopped = true;
             break;
         }
-
-        // Update with step size control: each component clamped to [-2, 2]
-        for i in 0..n_params {
-            theta[i] += step[i].clamp(-2.0, 2.0);
-        }
-        // The largest clamped change, max_i |clamp(step_i)| = min(max_i |step_i|, 2)
-        let max_change = max_step.min(2.0);
-
-        // Ensure thresholds are ordered
-        for t in 1..n_thresholds {
-            if theta[k + t] <= theta[k + t - 1] {
-                theta[k + t] = theta[k + t - 1] + 0.1;
-            }
-        }
-
-        if max_change < tol {
+        let max_score = grad.iter().fold(0.0f64, |m, g| m.max(g.abs()));
+        let rel_step = delta
+            .iter()
+            .zip(&theta)
+            .fold(0.0f64, |m, (d, t)| m.max(d.abs() / (1.0 + t.abs())));
+        if iter > 1
+            && max_score < 1e-8 * (1.0 + ll.abs())
+            && (ll - ll_prev).abs() < config.tol * (ll_prev.abs() + config.tol)
+            && rel_step <= 1e-10
+        {
             converged = true;
             break;
         }
-    }
 
-    // Final parameters
+        // Step halving: the cut points must stay increasing and the log-likelihood
+        // must not fall.
+        let mut accepted = false;
+        let mut s = 1.0;
+        for _ in 0..=MAX_HALVINGS {
+            for ((t, th), d) in trial.iter_mut().zip(&theta).zip(&delta) {
+                *t = th + s * d;
+            }
+            if trial[k..].windows(2).all(|w| w[0] < w[1]) {
+                let ll_trial =
+                    ordered_loglik(&x, codes, j, &trial, model_type, &mut trial_grad, None)?;
+                if ll_trial.is_finite() && ll_trial >= ll - 1e-12 * ll.abs() {
+                    accepted = true;
+                    break;
+                }
+            }
+            s *= 0.5;
+        }
+        if !accepted {
+            warnings.push(format!(
+                "the line search could not increase the log-likelihood at iteration {iter}; \
+                 estimation stopped"
+            ));
+            stopped = true;
+            break;
+        }
+        std::mem::swap(&mut theta, &mut trial);
+        ll_prev = ll;
+        ll = ordered_loglik(&x, codes, j, &theta, model_type, &mut grad, Some(&mut hess))?;
+    }
+    if !converged && !stopped {
+        let max_score = grad.iter().fold(0.0f64, |m, g| m.max(g.abs()));
+        warnings.push(format!(
+            "Newton-Raphson did not converge in {} iterations (max |score| = {max_score:.3e}); \
+             the estimates may be unreliable (separation, or a category with very few \
+             observations)",
+            config.max_iter
+        ));
+    }
+    let log_likelihood = ll;
+    let converged = converged && log_likelihood.is_finite() && theta.iter().all(|t| t.is_finite());
+
+    // Standard errors from the inverse observed information at the final estimate.
+    hess.mapv_inplace(|h| -h);
+    let covariance = if hess.iter().all(|h| h.is_finite()) {
+        cholesky_inverse(&hess.view()).ok()
+    } else {
+        None
+    };
+    let se_all: Vec<f64> = match &covariance {
+        Some(v) => (0..n_params).map(|i| v[[i, i]].sqrt()).collect(),
+        None => {
+            warnings.push(
+                "the observed information is not positive definite; standard errors are \
+                 not available"
+                    .to_string(),
+            );
+            vec![f64::NAN; n_params]
+        }
+    };
+    drop(covariance);
+
     let beta: Vec<f64> = theta[..k].to_vec();
     let alpha: Vec<f64> = theta[k..].to_vec();
-
-    // Compute log-likelihood
-    let mut log_likelihood = 0.0;
-    for i in 0..n {
-        let yi = y_idx[i];
-        let mut xb = 0.0;
-        for kk in 0..k {
-            xb += x[[i, kk]] * beta[kk];
-        }
-
-        let p_low = if yi == 0 {
-            0.0
-        } else {
-            cdf_fn(alpha[yi - 1] - xb)
-        };
-        let p_high = if yi == j - 1 {
-            1.0
-        } else {
-            cdf_fn(alpha[yi] - xb)
-        };
-        let p_i = (p_high - p_low).max(1e-15);
-        log_likelihood += p_i.ln();
-    }
-    let converged = converged && log_likelihood.is_finite() && theta.iter().all(|t| t.is_finite());
+    let std_errors: Vec<f64> = se_all[..k].to_vec();
+    let threshold_std_errors: Vec<f64> = se_all[k..].to_vec();
+    let z_stats: Vec<f64> = beta.iter().zip(&std_errors).map(|(b, se)| b / se).collect();
+    let p_values: Vec<f64> = z_stats
+        .iter()
+        .map(|z| 2.0 * Normal::standard().sf(z.abs()))
+        .collect();
 
     // Null model: thresholds only
     let log_likelihood_null: f64 = category_counts
@@ -594,20 +519,6 @@ pub fn run_ordered_model_with(
     let pseudo_r_squared = 1.0 - (log_likelihood / log_likelihood_null);
     let aic = -2.0 * log_likelihood + 2.0 * n_params as f64;
     let bic = -2.0 * log_likelihood + (n_params as f64) * (n as f64).ln();
-
-    // Standard errors (simplified - using observed information)
-    let std_errors: Vec<f64> = beta.iter().map(|_| 0.1).collect(); // Placeholder
-    let z_stats: Vec<f64> = beta
-        .iter()
-        .zip(&std_errors)
-        .map(|(b, se)| if *se > 1e-15 { b / se } else { 0.0 })
-        .collect();
-    let p_values: Vec<f64> = z_stats
-        .iter()
-        .map(|z| 2.0 * (1.0 - normal_cdf(z.abs())))
-        .collect();
-
-    let threshold_std_errors: Vec<f64> = alpha.iter().map(|_| 0.1).collect(); // Placeholder
 
     Ok(OrderedResult {
         model_type,
@@ -630,8 +541,192 @@ pub fn run_ordered_model_with(
         n_obs: n,
         category_counts,
         missing: cols.missing().clone(),
-        warnings: Vec::new(),
+        warnings,
     })
+}
+
+/// The Newton step `(-H + lambda I)^-1 g`: `lambda = 0` first; when that matrix is not
+/// positive definite, `lambda = 1e-8 max(1, max diag(-H))`, ten times larger on each of
+/// up to [`MAX_DAMPING`] attempts (Levenberg). `None` if every attempt fails. `work`
+/// holds the damped copy.
+fn newton_step(hess: &Array2<f64>, grad: &[f64], work: &mut Array2<f64>) -> Option<Array1<f64>> {
+    let m = grad.len();
+    let max_diag = (0..m).fold(1.0f64, |acc, i| acc.max(-hess[[i, i]]));
+    let mut lambda = 0.0;
+    for attempt in 0..=MAX_DAMPING {
+        work.zip_mut_with(hess, |w, h| *w = -h);
+        for i in 0..m {
+            work[[i, i]] += lambda;
+        }
+        if let Ok(inv) = cholesky_inverse(&work.view()) {
+            return Some(inv.dot(&ArrayView1::from(grad)));
+        }
+        lambda = if attempt == 0 {
+            1e-8 * max_diag
+        } else {
+            lambda * 10.0
+        };
+    }
+    None
+}
+
+/// Log-likelihood of the ordered model at `theta = (beta, zeta)`, with its score in
+/// `grad` and, when `hess` is given, its observed Hessian (polr's model,
+/// `P(y <= j) = F(zeta_j - x'beta)`). `NEG_INFINITY` when some observation has
+/// probability 0 (then `grad` and `hess` are incomplete).
+///
+/// Per observation in category `c` (0-based) with `u = zeta_c - eta` (`+inf` for the
+/// last category) and `l = zeta_{c-1} - eta` (`-inf` for the first),
+/// `p = F(u) - F(l)` and, with `f`, `f'` zero at infinite bounds,
+/// `dp = (x (f(l) - f(u)), -f(l) at zeta_{c-1}, f(u) at zeta_c)` and
+/// `d2p = (x x' (f'(u) - f'(l)); -x f'(u) at (beta, zeta_c); x f'(l) at
+/// (beta, zeta_{c-1}); f'(u) at (zeta_c, zeta_c); -f'(l) at (zeta_{c-1}, zeta_{c-1}))`:
+/// `ll += ln p`, `grad += dp / p`, `hess += d2p / p - dp dp' / p^2`, accumulated over
+/// the slopes and the (at most two) cut points of the observation only.
+fn ordered_loglik(
+    x: &ArrayView2<f64>,
+    codes: &[u32],
+    n_cat: usize,
+    theta: &[f64],
+    link: OrderedModelType,
+    grad: &mut [f64],
+    mut hess: Option<&mut Array2<f64>>,
+) -> EconResult<f64> {
+    let k = x.ncols();
+    let (beta, zeta) = theta.split_at(k);
+    grad.fill(0.0);
+    if let Some(h) = hess.as_deref_mut() {
+        h.fill(0.0);
+    }
+    let mut idx: Vec<usize> = Vec::with_capacity(k + 2);
+    let mut dp: Vec<f64> = Vec::with_capacity(k + 2);
+    let mut ll = 0.0;
+    for (i, (row, &code)) in x.outer_iter().zip(codes).enumerate() {
+        if i % 256 == 0 {
+            resource::checkpoint()?;
+        }
+        let c = code as usize;
+        let eta: f64 = row.iter().zip(beta).map(|(a, b)| a * b).sum();
+        let upper = (c + 1 < n_cat).then(|| zeta[c] - eta);
+        let lower = (c > 0).then(|| zeta[c - 1] - eta);
+        let p = interval_probability(lower, upper, link);
+        if !(p > 0.0) {
+            return Ok(f64::NEG_INFINITY);
+        }
+        ll += p.ln();
+        let (fu, fpu) = upper.map_or((0.0, 0.0), |u| link_density(u, link));
+        let (fl, fpl) = lower.map_or((0.0, 0.0), |l| link_density(l, link));
+
+        idx.clear();
+        dp.clear();
+        for (a, &xa) in row.iter().enumerate() {
+            idx.push(a);
+            dp.push(xa * (fl - fu));
+        }
+        if c > 0 {
+            idx.push(k + c - 1);
+            dp.push(-fl);
+        }
+        if c + 1 < n_cat {
+            idx.push(k + c);
+            dp.push(fu);
+        }
+        for (&a, &d) in idx.iter().zip(&dp) {
+            grad[a] += d / p;
+        }
+
+        if let Some(h) = hess.as_deref_mut() {
+            let slope = (fpu - fpl) / p;
+            for (a, &xa) in row.iter().enumerate() {
+                for (b, &xb) in row.iter().enumerate() {
+                    h[[a, b]] += xa * xb * slope;
+                }
+            }
+            if c + 1 < n_cat {
+                let jc = k + c;
+                for (a, &xa) in row.iter().enumerate() {
+                    let v = -xa * fpu / p;
+                    h[[a, jc]] += v;
+                    h[[jc, a]] += v;
+                }
+                h[[jc, jc]] += fpu / p;
+            }
+            if c > 0 {
+                let jl = k + c - 1;
+                for (a, &xa) in row.iter().enumerate() {
+                    let v = xa * fpl / p;
+                    h[[a, jl]] += v;
+                    h[[jl, a]] += v;
+                }
+                h[[jl, jl]] -= fpl / p;
+            }
+            let p2 = p * p;
+            for (&a, &da) in idx.iter().zip(&dp) {
+                for (&b, &db) in idx.iter().zip(&dp) {
+                    h[[a, b]] -= da * db / p2;
+                }
+            }
+        }
+    }
+    Ok(ll)
+}
+
+/// `F(u) - F(l)` for `l < u` (`None` = infinite bound), as `S(l) - S(u)` with the upper
+/// tail `S = 1 - F` when `l > 0`, so that neither difference loses its digits.
+fn interval_probability(lower: Option<f64>, upper: Option<f64>, link: OrderedModelType) -> f64 {
+    match (lower, upper) {
+        (None, Some(u)) => link_cdf(u, link),
+        (Some(l), None) => link_sf(l, link),
+        (Some(l), Some(u)) if l > 0.0 => link_sf(l, link) - link_sf(u, link),
+        (Some(l), Some(u)) => link_cdf(u, link) - link_cdf(l, link),
+        (None, None) => 1.0,
+    }
+}
+
+/// `F(u)`.
+fn link_cdf(u: f64, link: OrderedModelType) -> f64 {
+    match link {
+        OrderedModelType::Logit => {
+            if u >= 0.0 {
+                1.0 / (1.0 + (-u).exp())
+            } else {
+                let e = u.exp();
+                e / (1.0 + e)
+            }
+        }
+        OrderedModelType::Probit => Normal::standard().cdf(u),
+    }
+}
+
+/// `1 - F(u)`, computed in the upper tail.
+fn link_sf(u: f64, link: OrderedModelType) -> f64 {
+    match link {
+        OrderedModelType::Logit => link_cdf(-u, link),
+        OrderedModelType::Probit => Normal::standard().sf(u),
+    }
+}
+
+/// The density `f(u)` and its derivative `f'(u)` at a finite `u`.
+fn link_density(u: f64, link: OrderedModelType) -> (f64, f64) {
+    match link {
+        OrderedModelType::Logit => {
+            let e = (-u.abs()).exp();
+            let f = e / ((1.0 + e) * (1.0 + e));
+            (f, f * (1.0 - 2.0 * link_cdf(u, link)))
+        }
+        OrderedModelType::Probit => {
+            let f = Normal::standard().pdf(u);
+            (f, -u * f)
+        }
+    }
+}
+
+/// `F^-1(p)` for `0 < p < 1`.
+fn link_quantile(p: f64, link: OrderedModelType) -> f64 {
+    match link {
+        OrderedModelType::Logit => (p / (1.0 - p)).ln(),
+        OrderedModelType::Probit => Normal::standard().inverse_cdf(p),
+    }
 }
 
 /// `levels` must be non-empty and name each label once.
@@ -717,22 +812,10 @@ fn short_label(label: &str) -> String {
     }
 }
 
-/// Subtract `g g' / p_i` from `hess` for a score `g` that is zero except at the
-/// positions `idx`, where it takes the values `val`.
-///
-/// Only the non-zero pairs are visited. The terms the dense double loop would
-/// add for the other pairs are exact zeros, so the result is bit-identical.
-fn subtract_scaled_outer(hess: &mut Array2<f64>, idx: &[usize], val: &[f64], p_i: f64) {
-    for (&a, &g_a) in idx.iter().zip(val) {
-        for (&b, &g_b) in idx.iter().zip(val) {
-            hess[[a, b]] -= g_a * g_b / p_i;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linalg::design::DesignMatrix;
     use crate::resource::{self, Budget, CancelToken};
     use crate::test_support::load_case;
     use ndarray::array;
@@ -758,8 +841,75 @@ mod tests {
         }
     }
 
+    fn zeta_names(r: &OrderedResult) -> Vec<String> {
+        r.categories
+            .windows(2)
+            .map(|w| format!("{}|{}", w[0], w[1]))
+            .collect()
+    }
+
     fn counts(r: &OrderedResult) -> Vec<f64> {
         r.category_counts.iter().map(|&c| c as f64).collect()
+    }
+
+    /// Every quantity of one polr fit; `p` is "logit_" or "probit_".
+    fn check_polr(case: &Case, p: &str, r: &OrderedResult) {
+        let n = r.n_obs;
+        assert!(
+            r.converged,
+            "{p}: not converged after {} iterations: {:?}",
+            r.iterations, r.warnings
+        );
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        let zn = zeta_names(r);
+        let k = |s: &str| format!("{p}{s}");
+        Check::new(case)
+            .named(
+                &k("coef"),
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(&k("zeta"), &zn, &r.thresholds, Tol::iterative(1e-6))
+            .named(
+                &k("se_coef"),
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .named(
+                &k("se_zeta"),
+                &zn,
+                &r.threshold_std_errors,
+                Tol::iterative(1e-5),
+            )
+            .named(&k("z"), &r.variables, &r.z_stats, Tol::iterative(1e-5))
+            // p of an iterative estimate: d ln p / d ln z ~ z^2 (<= 46 here) times the z
+            // tolerance
+            .named(&k("p"), &r.variables, &r.p_values, Tol::iterative(2e-3))
+            .scalar(&k("loglik"), r.log_likelihood, Tol::stat(n))
+            .scalar(&k("loglik_null"), r.log_likelihood_null, Tol::stat(n))
+            .scalar(&k("pseudo_r2"), r.pseudo_r_squared, Tol::stat(n))
+            .scalar(&k("aic"), r.aic, Tol::stat(n))
+            .scalar(&k("bic"), r.bic, Tol::stat(n))
+            .vector(&k("counts"), &counts(r), Tol::exact())
+            .scalar(&k("n"), n as f64, Tol::exact())
+            // polr's own BFGS optimum (reltol 1e-15, max |grad| ~ 2e-6): a looser
+            // cross-check (design 2.3)
+            .named(
+                &k("coef_pkg"),
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-4),
+            )
+            .named(&k("zeta_pkg"), &zn, &r.thresholds, Tol::iterative(1e-4))
+            .named(
+                &k("se_coef_pkg"),
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-4),
+            )
+            .finish();
     }
 
     fn with_column(ds: &Dataset, col: Column) -> Dataset {
@@ -788,39 +938,47 @@ mod tests {
 
     /// RF-31: with 16 or more categories the Newton step went through faer 0.22's
     /// full-pivot LU, which returned NaN, and the NaN fit was reported as converged.
-    /// The estimates are not polr's until ECON-4 is fixed (T2-WP10; deviation in
-    /// validation/methods/discrete_newton.json), so this pins n, the category counts
-    /// and the null log-likelihood, and requires finite estimates and an honest
-    /// convergence flag.
+    /// The fit is now polr's maximum-likelihood fit, so this pins the coefficient, the cut
+    /// points, their standard errors and the log-likelihood of both links, besides n,
+    /// the category counts and the null log-likelihood. The case values are polr's
+    /// optimum (BFGS, reltol = 1e-14): coefficients within 1.6e-9, cut points within
+    /// 1.2e-7, SEs within 1.8e-6 relative of the polished MLE (T2-WP10 Appendix B.5),
+    /// inside the tolerances below.
     fn pin_ordered(case: &Case, ds: &Dataset) {
-        for (link, r) in [
-            ("logit", fit_j(case, ds, OrderedModelType::Logit)),
-            ("probit", fit_j(case, ds, OrderedModelType::Probit)),
+        for (link, model) in [
+            ("logit", OrderedModelType::Logit),
+            ("probit", OrderedModelType::Probit),
         ] {
+            let r = fit_j(case, ds, model);
             let n = r.n_obs;
-            let finite = r
-                .coefficients
-                .iter()
-                .chain(&r.thresholds)
-                .all(|v| v.is_finite())
-                && r.log_likelihood.is_finite();
-            assert!(finite, "{link}: non-finite estimates\n{r}");
-            // The MLE maximises the likelihood: no finite iterate can lie above polr's.
-            let ll_max = case.scalar(&format!("{link}_loglik"));
             assert!(
-                r.log_likelihood <= ll_max + 1e-8 * ll_max.abs(),
-                "{link}: {} > polr {ll_max}",
-                r.log_likelihood
+                r.converged && r.warnings.is_empty(),
+                "{link}: {:?}\n{r}",
+                r.warnings
             );
-            assert!(
-                !r.converged || r.log_likelihood >= r.log_likelihood_null,
-                "{link}: converged below the null model\n{r}"
-            );
-            // deviation ECON-4: coefficients, thresholds and log-likelihood vs
-            // <link>_coef/_zeta/_loglik (T2-WP10)
-            // deviation ECON-5: standard errors are the 0.1 placeholder (T2-WP10)
-            assert_eq!(r.thresholds.len(), r.categories.len() - 1);
+            let zn = zeta_names(&r);
+            let k = |s: &str| format!("{link}_{s}");
             Check::new(case)
+                .named(
+                    &k("coef"),
+                    &r.variables,
+                    &r.coefficients,
+                    Tol::iterative(1e-6),
+                )
+                .named(&k("zeta"), &zn, &r.thresholds, Tol::iterative(1e-6))
+                .named(
+                    &k("se_coef"),
+                    &r.variables,
+                    &r.std_errors,
+                    Tol::iterative(1e-5),
+                )
+                .named(
+                    &k("se_zeta"),
+                    &zn,
+                    &r.threshold_std_errors,
+                    Tol::iterative(1e-5),
+                )
+                .scalar(&k("loglik"), r.log_likelihood, Tol::stat(n))
                 .scalar("n", n as f64, Tol::exact())
                 .named("counts", &r.categories, &counts(&r), Tol::exact())
                 .scalar("null_loglik", r.log_likelihood_null, Tol::stat(n))
@@ -856,17 +1014,15 @@ mod tests {
         Dataset::new(df! { "y" => y, "x" => x }.unwrap())
     }
 
-    /// The fit must not depend on the scale of a regressor. The step used to invert
-    /// the negative definite Hessian, which always takes safe_inverse's fallback,
-    /// and that answers cond > 1e10 with the pseudoinverse. With the rule that a
-    /// pseudoinverse step ends the fit, disc_polr_j5 with x times 1e4 returned its
-    /// starting point after one iteration (coefficient 0, thresholds at their start
-    /// values, the null log-likelihood). On the information matrix (Cholesky) the
-    /// scaled fit is the unscaled one with the coefficient divided by the scale, to
-    /// 1.1e-10 relative (logit) and 7.9e-11 (probit) measured at both scales: the
-    /// 1e-6 ridge is not scale-free. The fits are the non-converged iterates of
-    /// ECON-4. Each scaled fit is also checked against polr's case: n, the category
-    /// counts and the null log-likelihood do not depend on the scale of x.
+    /// The fit must not depend on the scale of a regressor. An earlier step inverted
+    /// the negative definite Hessian through the general inverse, whose fallback
+    /// answered cond > 1e10 with the pseudoinverse: disc_polr_j5 with x times 1e4
+    /// returned its starting point. Newton's method is affine-invariant, so the iterates
+    /// on the scaled data are the unscaled ones up to rounding: the coefficient divided
+    /// by the scale, the cut points and the log-likelihood equal, to 1e-9 relative.
+    /// Each scaled fit is also checked against polr's case: the cut points and the
+    /// log-likelihood, n, the category counts and the null log-likelihood do not depend
+    /// on the scale of x.
     #[test]
     fn test_validate_ordered_j5_regressor_scale() {
         let (case, ds) = crate::test_support::load_case("disc_polr_j5");
@@ -878,10 +1034,26 @@ mod tests {
             let base = fit_j(&case, &ds, model);
             for scale in [1e4, 1e6] {
                 let r = fit_j(&case, &with_x_scaled(&ds, scale), model);
+                assert!(
+                    r.converged,
+                    "{link}, x * {scale:e}: not converged: {:?}",
+                    r.warnings
+                );
                 Check::new(&case)
                     .scalar("n", r.n_obs as f64, Tol::exact())
                     .named("counts", &r.categories, &counts(&r), Tol::exact())
                     .scalar("null_loglik", r.log_likelihood_null, Tol::stat(r.n_obs))
+                    .named(
+                        &format!("{link}_zeta"),
+                        &zeta_names(&r),
+                        &r.thresholds,
+                        Tol::iterative(1e-6),
+                    )
+                    .scalar(
+                        &format!("{link}_loglik"),
+                        r.log_likelihood,
+                        Tol::stat(r.n_obs),
+                    )
                     .finish();
                 let want = base.coefficients[0] / scale;
                 assert!(
@@ -918,6 +1090,118 @@ mod tests {
         pin_ordered(&case, &ds);
     }
 
+    // ---- polr's fit: estimates, standard errors and statistics -----------------------
+
+    #[test]
+    fn test_validate_ordered_logit_disc_ordered() {
+        let (case, ds) = load_case("disc_ordered");
+        let r = run_ordered_logit(&ds, "y", &["x1", "x2"]).unwrap();
+        assert_eq!(r.categories, ["1", "2", "3"]);
+        check_polr(&case, "logit_", &r);
+    }
+
+    #[test]
+    fn test_validate_ordered_probit_disc_ordered() {
+        let (case, ds) = load_case("disc_ordered");
+        let r = run_ordered_probit(&ds, "y", &["x1", "x2"]).unwrap();
+        assert_eq!(r.categories, ["1", "2", "3"]);
+        check_polr(&case, "probit_", &r);
+    }
+
+    /// The text labels in their ordinal order give the integer fit; in R's alphabetical
+    /// order (high < low < mid) they give R's fit of that (different) model.
+    #[test]
+    fn test_validate_ordered_logit_text_outcome_with_levels() {
+        let (case, ds) = load_case("disc_ordered");
+        let fit = |levels: &[&str]| {
+            run_ordered_model_with(
+                &ds,
+                "y_label",
+                &["x1", "x2"],
+                &cfg(OrderedModelType::Logit, Some(levels)),
+            )
+            .unwrap()
+        };
+        let r = fit(&["low", "mid", "high"]);
+        assert!(r.converged, "{:?}", r.warnings);
+        Check::new(&case)
+            .named(
+                "logit_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            // the labels differ (low|mid vs 1|2): compare in order
+            .vector("logit_zeta", &r.thresholds, Tol::iterative(1e-6))
+            .named(
+                "logit_se_coef",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar("logit_loglik", r.log_likelihood, Tol::stat(r.n_obs))
+            .finish();
+        let a = fit(&["high", "low", "mid"]);
+        assert!(a.converged, "{:?}", a.warnings);
+        Check::new(&case)
+            .named(
+                "alpha_labels_coef",
+                &a.variables,
+                &a.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "alpha_labels_zeta",
+                &zeta_names(&a),
+                &a.thresholds,
+                Tol::iterative(1e-6),
+            )
+            .scalar("alpha_labels_loglik", a.log_likelihood, Tol::stat(a.n_obs))
+            .finish();
+    }
+
+    /// The private score and Hessian are the derivatives of the log-likelihood (central
+    /// differences, step 1e-6), for both links, away from the optimum.
+    #[test]
+    fn test_ordered_analytic_derivatives_match_central_differences() {
+        let ds = ordered_data();
+        let df = ds.df();
+        let cols = ColumnRequest::new(df).factor("y").extract().unwrap();
+        let codes = cols.factor("y").codes.clone();
+        let dm = DesignMatrix::from_dataframe(df, &["x1", "x2"], false).unwrap();
+        let x = dm.view();
+        let theta = [0.3, -0.2, -0.5, 0.9];
+        let m = theta.len();
+        let h = 1e-6;
+        for link in [OrderedModelType::Logit, OrderedModelType::Probit] {
+            let mut g = vec![0.0; m];
+            let mut hess = Array2::zeros((m, m));
+            ordered_loglik(&x, &codes, 3, &theta, link, &mut g, Some(&mut hess)).unwrap();
+            for kk in 0..m {
+                let (mut up, mut dn) = (theta, theta);
+                up[kk] += h;
+                dn[kk] -= h;
+                let (mut g_up, mut g_dn) = (vec![0.0; m], vec![0.0; m]);
+                let ll_up = ordered_loglik(&x, &codes, 3, &up, link, &mut g_up, None).unwrap();
+                let ll_dn = ordered_loglik(&x, &codes, 3, &dn, link, &mut g_dn, None).unwrap();
+                let fd = (ll_up - ll_dn) / (2.0 * h);
+                assert!(
+                    (fd - g[kk]).abs() <= 1e-6 * (1.0 + g[kk].abs()),
+                    "{link:?}: score[{kk}] {} vs central difference {fd}",
+                    g[kk]
+                );
+                for a in 0..m {
+                    let fd = (g_up[a] - g_dn[a]) / (2.0 * h);
+                    assert!(
+                        (fd - hess[[a, kk]]).abs() <= 1e-5 * (1.0 + hess[[a, kk]].abs()),
+                        "{link:?}: Hessian[{a}, {kk}] {} vs central difference {fd}",
+                        hess[[a, kk]]
+                    );
+                }
+            }
+        }
+    }
+
     // ---- category order, levels and missing values (ECON-19, ECON-12) ----------------
 
     /// 13 integer levels -2..10 are ordered by value (R factor()), not as strings
@@ -932,8 +1216,29 @@ mod tests {
             .map(|&v| format!("{}", v as i64))
             .collect();
         assert_eq!(r.categories, want);
+        assert!(r.converged, "{:?}", r.warnings);
+        let n = r.n_obs;
         Check::new(&case)
             .vector("wide_counts", &counts(&r), Tol::exact())
+            .named(
+                "wide_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "wide_zeta",
+                &zeta_names(&r),
+                &r.thresholds,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "wide_se_coef",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar("wide_loglik", r.log_likelihood, Tol::stat(n))
             .finish();
     }
 
@@ -955,6 +1260,15 @@ mod tests {
         assert_eq!(r.categories, ["low", "mid", "high"]);
         Check::new(&case)
             .vector("logit_counts", &counts(&r), Tol::exact())
+            .named(
+                "logit_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            // the labels differ (low|mid vs 1|2): compare in order
+            .vector("logit_zeta", &r.thresholds, Tol::iterative(1e-6))
+            .scalar("logit_loglik", r.log_likelihood, Tol::stat(r.n_obs))
             .finish();
     }
 
@@ -988,6 +1302,25 @@ mod tests {
                 r.missing.by_column[1].1 as f64,
                 Tol::exact(),
             )
+            .named(
+                "na_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "na_zeta",
+                &zeta_names(&r),
+                &r.thresholds,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "na_se_coef",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar("na_loglik", r.log_likelihood, Tol::stat(r.n_obs))
             .finish();
     }
 
@@ -1102,13 +1435,14 @@ mod tests {
         }
     }
 
-    /// 100 categories of one row each. Before Tier 1 the fit was finite, but every
-    /// Newton step used a wrong full-pivot LU inverse (RF-31). It must stay finite
-    /// and end before the iteration limit, not converged: here the information
-    /// matrix fails Cholesky in floating point despite its ridge, safe_inverse
-    /// answers with the pseudoinverse, and that step ends the fit (measured: step
-    /// 18). With pseudoinverse steps applied the fit runs all 100 iterations, not
-    /// converged (measured), so the iteration count is what this test can see.
+    /// 100 categories of one row each (T0's cap fixture) have an MLE: the old loop (wrong
+    /// score sign) stopped on a pseudoinverse step at iteration 18 instead. R (T2-WP10 Appendix
+    /// B.5): `i <- 0:99; x <- ((i * 7) %% 13) + 0.1 * i; yv <- i + 0.5;
+    /// MASS::polr(factor(yv) ~ x, method = "logistic", control = list(reltol = 1e-15,
+    /// maxit = 100000))` (convergence 0), polished by Newton steps on the analytic score
+    /// to max |grad| 8.8e-13: coefficient 0.27537780315599802, log-likelihood
+    /// -437.01698120738473. A cap fixture, not a validation dataset: the values stay
+    /// inline.
     #[test]
     fn test_ordered_accepts_100_categories() {
         let r = run_ordered_logit(&continuous_y_dataset(100), "y", &["x"]).unwrap();
@@ -1125,13 +1459,23 @@ mod tests {
             r.iterations
         );
         assert!(
-            !r.converged && r.iterations < 100,
-            "expected a stop on a pseudoinverse step: converged {} after {} iterations \
-             (LL {}, null {})",
+            r.converged && r.iterations < 100,
+            "converged {} after {} iterations: {:?}",
             r.converged,
             r.iterations,
-            r.log_likelihood,
-            r.log_likelihood_null
+            r.warnings
+        );
+        let coef = 0.27537780315599802;
+        assert!(
+            (r.coefficients[0] - coef).abs() <= 1e-6 * coef,
+            "coefficient {} vs polr {coef}",
+            r.coefficients[0]
+        );
+        let ll = -437.01698120738473_f64;
+        assert!(
+            (r.log_likelihood - ll).abs() <= 1e-9 * ll.abs(),
+            "log-likelihood {} vs polr {ll}",
+            r.log_likelihood
         );
     }
 
@@ -1166,28 +1510,5 @@ mod tests {
             EconError::ResourceLimit(m) => assert!(m.contains("Hessian"), "{m}"),
             other => panic!("expected ResourceLimit, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_sparse_outer_product_matches_dense_loop() {
-        let n_params = 9;
-        let idx = [0usize, 1, 2, 5, 6];
-        let val = [0.31, -1.7, 2.25, -0.42, 0.9];
-        let p_i = 0.37;
-        let mut base = Array2::<f64>::from_shape_fn((n_params, n_params), |(a, b)| {
-            0.01 * (a * 3 + b) as f64 - 0.2
-        });
-        let mut dense = base.clone();
-        let mut g = vec![0.0; n_params];
-        for (&i, &v) in idx.iter().zip(&val) {
-            g[i] = v;
-        }
-        for a in 0..n_params {
-            for b in 0..n_params {
-                dense[[a, b]] -= g[a] * g[b] / p_i;
-            }
-        }
-        subtract_scaled_outer(&mut base, &idx, &val, p_i);
-        assert_eq!(base, dense); // bitwise: skipped entries would only subtract +-0.0
     }
 }
