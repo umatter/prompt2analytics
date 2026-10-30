@@ -2158,13 +2158,14 @@ mod tests {
         server.hypothesis_chisq_gof(Parameters(req)).await.unwrap()
     }
 
-    /// The tight re-solve of fisher.test's equations (plan T2-WP05 decision 2).
+    /// The tight re-solve of fisher.test's equations (validation/stats/fisher.md, "Tight
+    /// limits, not R's printed ones, are the reference").
     const TIGHT: Tol = Tol::new(1e-9, 1e-12);
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_validate_mcp_hypothesis_fisher_exact_rows_2000() {
-        // STAT-10: before, run_fisher_test's lazy group_by panicked here ("Cannot start a
-        // runtime from within a runtime"); without the panic it returned p = 0 (STAT-2).
+        // STAT-10: the Fisher table no longer goes through polars' lazy engine, so the tool
+        // answers inside the server's async runtime; STAT-2: p is R's value, not 0.
         // R: fisher.test(table(treat, outcome)).
         let (case, server, name) = case_server("stat_fisher_rows_2000").await;
         let req: FisherExactRequest = serde_json::from_value(serde_json::json!(

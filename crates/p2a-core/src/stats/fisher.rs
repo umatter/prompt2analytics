@@ -840,7 +840,8 @@ mod tests {
     use crate::data::columns::{ColumnRequest, NaPolicy};
     use p2a_validation::{Case, Check, Tol};
 
-    /// Tight re-solve of fisher.test's equations (uniroot tol 1e-15), plan T2-WP05 decision 2.
+    /// Tight re-solve of fisher.test's equations (uniroot tol 1e-15; validation/stats/fisher.md,
+    /// "Tight limits, not R's printed ones, are the reference").
     const TIGHT: Tol = Tol::new(1e-9, 1e-12);
     /// fisher.test's own limits and estimate (uniroot tol eps^0.25): up to 0.69% off on the
     /// case tables.
@@ -1010,8 +1011,8 @@ mod tests {
     fn test_fisher_extreme_table_matches_tight_r() {
         // [[50,1],[1,50]]: R 4.3.3 fisher.test prints CI (127.00893441058923, 4503599627370496)
         // and estimate 1530.9010005032094 because uniroot's tol (eps^0.25) is absolute on the
-        // 1/t scale; the same equations re-solved with uniroot(tol = 1e-15) (plan T2-WP05
-        // Appendix C, extreme_digits.R) give the values below. p-values are R's own:
+        // 1/t scale; the same equations re-solved with uniroot(tol = 1e-15) give the values
+        // below (validation/stats/fisher.md, "Tight limits"). p-values are R's own:
         // two.sided 1.3022734448002492e-26, greater 6.5113672240012631e-27, less 1.
         let t = [[50.0, 1.0], [1.0, 50.0]];
         let rel = |a: f64, e: f64| ((a - e) / e).abs() < 1e-9;
@@ -1416,9 +1417,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_validate_run_fisher_test_inside_tokio_runtime() {
-        // STAT-10: the lazy group_by in run_fisher_test went to polars' streaming engine,
-        // whose block_on panicked with "Cannot start a runtime from within a runtime" inside
-        // this runtime.
+        // STAT-10: run_fisher_test builds its table without polars' lazy engine, so it runs
+        // inside an async runtime.
         let (_case, ds) = crate::test_support::load_case("stat_fisher_rows_2000");
         let r = run_fisher_test(
             &ds,

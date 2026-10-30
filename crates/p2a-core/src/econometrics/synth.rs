@@ -3688,9 +3688,8 @@ mod tests {
             "ok={}",
             r.is_ok()
         );
-        // 20 donors: the extractor's 63-row buffers (at most 1008 bytes: the time index
-        // and the column values as 16-byte options) and the outcome matrices (320 bytes)
-        // fit under 1100 bytes, the donor-by-donor QP matrices (20 x 20 each) do not
+        // 20 donors: the extractor's row buffers and the outcome matrices fit under this
+        // ceiling, the donor-by-donor QP matrices do not
         let ds = wide_panel(20);
         let cfg = SynthConfig {
             treatment_time: 3,
@@ -4379,8 +4378,7 @@ mod gsynth_tests {
             "ok={}",
             r.is_ok()
         );
-        // every row its own unit and period: refused as unbalanced before a 40 x 40
-        // units-by-periods panel (12800 bytes) is allocated
+        // an unbalanced panel is refused before any per-cell buffer is allocated
         let n = 40usize;
         let quad = Dataset::new(
             df! {
@@ -4401,9 +4399,8 @@ mod gsynth_tests {
             )),
             "{r:?}"
         );
-        // a long panel: the extractor's 160-row buffers (at most 2560 bytes, the time
-        // index as Option<i64>) and the 4 x 40 panels (1280 bytes) fit under 3000
-        // bytes, the 30 x 30 pre-period factor covariance (7200 bytes) does not
+        // a long panel: the extractor's row buffers and the units-by-periods panels fit
+        // under this ceiling, the pre-period factor covariance does not
         let (mut u, mut t, mut y, mut d) = (vec![], vec![], vec![], vec![]);
         for unit in ["C1", "C2", "C3", "T1"] {
             for time in 1..=40i64 {

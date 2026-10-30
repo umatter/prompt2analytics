@@ -214,12 +214,10 @@ order (before T2-WP11 it was hash order and changed from run to run). Times are 
 distinct values. With fewer rows than units x times cells the panel cannot be balanced, and the
 tool error names the counts and the first empty cell (`scpi needs a balanced panel: 10 units x
 20 times = 200 cells, but the data has 199 rows (unit 2 has no row for time 1940; cells
-without a row: 1)`), found from the sorted cells of the rows, so the grid is never larger than the data.
-Otherwise the outcome grid is filled in one pass: a second row for a (unit, time) cell
-(`unit 1 appears twice at time 1935`) and a missing outcome are tool errors naming the unit and
-time or the column. Before,
-the handler refused integer unit columns ("must be string type") and looked every cell up with
-a full-table filter (finding TOOL-5, scpi site).
+without a row: 1)`), found from the sorted cells of the rows. Otherwise the outcome grid is
+filled in one pass: a second row for a (unit, time) cell (`unit 1 appears twice at time 1935`)
+and a missing outcome are tool errors naming the unit and time or the column. Before, the
+handler refused integer unit columns ("must be string type"; finding TOOL-5, scpi site).
 
 Tests (`crates/p2a-mcp/src/tools/handlers/causal.rs`, on `validation/datasets/grunfeld.csv`;
 not registered, no R value): `test_mcp_scpi_accepts_integer_unit_ids` and
