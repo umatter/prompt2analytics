@@ -3032,6 +3032,13 @@ mod tests {
                 // step test is relative and tighter, which can cost an iteration.
                 if s > 1.0 {
                     assert_eq!(r.iterations, base.iterations, "{p} x1 * {s:e}");
+                } else {
+                    assert!(
+                        r.iterations <= base.iterations + 1,
+                        "{p} x1 * {s:e}: {} iterations, unscaled {}",
+                        r.iterations,
+                        base.iterations
+                    );
                 }
                 assert!(r.warnings.is_empty(), "{p} x1 * {s:e}: {:?}", r.warnings);
                 // x1 is the second column of both parts

@@ -184,7 +184,8 @@ mod tests {
         assert!(step.lambda > 3e5 && step.lambda < 1e7, "{}", step.lambda);
         assert!(step.delta.iter().all(|d| d.abs() < 1e-10), "{}", step.delta);
         assert!(!step.converged(&grad, &par, ll, ll, 1e-12));
-        // the same step, undamped: the three unit-free tests decide, and they pass
+        // the same step, undamped: the decrement, log-likelihood and step tests
+        // decide, and they pass
         let undamped = NewtonStep {
             lambda: 0.0,
             ..step.clone()

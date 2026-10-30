@@ -171,7 +171,7 @@ iteration and is the unscaled one with the coefficient divided by the scale, the
 points and the log-likelihood equal to 1e-9 relative, and each scaled fit also matches
 polr's cut points and log-likelihood. The third test, on each Newton-step component, is
 relative only above 1 in absolute value, so with x divided by 1e6 the larger coefficient
-can cost an iteration; that fit converges to the same values too. (An
+can cost an iteration (the test allows one); that fit converges to the same values too. (An
 earlier step inverted the negative definite Hessian through `safe_inverse`, which returns
 the pseudoinverse whenever `cond > 1e10`; `disc_polr_j5` with x multiplied by 1e4 then
 returned its starting point after one iteration.)

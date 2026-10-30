@@ -1021,9 +1021,17 @@ mod tests {
                     r.warnings
                 );
                 // the iterates are the unscaled ones; scaled up, so is the stopping
-                // iteration
+                // iteration. Scaled down, the coefficient grows, where the step test is
+                // relative and tighter, which can cost an iteration.
                 if scale > 1.0 {
                     assert_eq!(r.iterations, base.iterations, "{link}, x * {scale:e}");
+                } else {
+                    assert!(
+                        r.iterations <= base.iterations + 1,
+                        "{link}, x * {scale:e}: {} iterations, unscaled {}",
+                        r.iterations,
+                        base.iterations
+                    );
                 }
                 Check::new(&case)
                     .scalar("n", r.n_obs as f64, Tol::exact())
