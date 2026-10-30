@@ -199,6 +199,59 @@ freedom exact.
   tolerance; both are replaced by the case-pinned tests above. Coefficients, classical
   standard errors, within R-squared and F were already equal to plm.
 
+## Missing values and identifier types
+
+- One NA-aware request reads y, the regressors and the entity id; the rows with a
+  missing value (null or NaN) in any of them are dropped jointly, as plm and fixest do
+  (`na.omit`). The count is in `missing`, the first warning (FE/RE) and the last line of
+  the output: "Missing values: 5 of 200 rows dropped because of missing values (inv: 2,
+  value: 1, firm_id: 2)".
+- A missing id drops its row. Before Tier 2 a missing numeric id became 0 and merged
+  into the real level 0, and a missing text id became a pseudo-level "" (ECON-37); a
+  missing outcome was reported as "Column 'inv' not found".
+- Ids may be text or numeric (any integer width, floats, booleans, dates). Levels follow R
+  `factor()` order: numbers numerically, text in byte (C locale) order. On Grunfeld and the
+  T1 cases this equals the order of first appearance, so their numbers do not change.
+- An infinite value is refused (`NonFiniteValues`), a text column in a numeric role is
+  `NonNumericColumn`, an unknown column `ColumnNotFound`.
+- An empty regressor list is refused (`InvalidSpecification`, "At least one regressor is
+  required").
+
+Case `panel_grunfeld_na` (`validation/r/cases/econ_panel_na.R`, R 4.3.3, plm 2.6.7,
+fixest 0.14.2): Grunfeld with `inv` missing in rows 5 and 50, `value` in row 120, the firm
+id missing in rows 77 and 133 (both as the text id `firm_name`, "F01".."F10", and as the
+numeric id `firm_id`, 0..9, so that a real id 0 exists) and `year` missing in rows 31 and
+150 (`validation/datasets/generated/grunfeld_na.csv`). FE, RE and the mean-group estimator
+take no time column and use the 195 rows complete in (inv, value, capital, id); the two-way
+HDFE uses the 193 rows complete in every column.
+
+| Quantity | R |
+|---|---|
+| FE coef value, capital | 0.11208925635974927, 0.30295345813460367 |
+| FE SE value, capital | 0.011852746814109964, 0.017413938988850859 |
+| n used, entities | 195, 10 |
+| mean group (`plm::pmg(model = "mg")`) coef (Intercept), value, capital | -20.012397699749485, 0.089450800955623466, 0.20409095049720219 |
+
+The mean-group standard errors (`mg_se`) are not compared: p2a reports the cross-entity
+standard deviation of the per-entity coefficients, not its standard error (registry
+deviation ECON-34, Tier 4).
+
+Tests (registered as `panel_missing_values` in `validation/methods/econ_iv_panel_na.json`):
+`econometrics::panel::linear_models::tests::test_validate_panel_fe_re_grunfeld_na` (FE and
+RE with both id columns, the counts and the note),
+`econometrics::panel::linear_models::tests::test_validate_panel_fe_missing_ids_not_merged`
+(y and x complete, two missing ids: the ids are not merged),
+`econometrics::panel::linear_models::tests::test_validate_na_fe_re_errors_and_integer_regressor`,
+`econometrics::panel::heterogeneous::tests::test_validate_pmg_grunfeld_na` (mean group),
+`econometrics::panel::heterogeneous::tests::test_validate_na_pvcm_numeric_and_string_ids_agree`,
+the id and time extractors in `econometrics::panel::utils::tests`
+(`test_validate_na_extract_time_ids_integer_widths_and_fractions`,
+`test_validate_na_extract_entity_ids_factor_order_and_nulls`,
+`test_validate_na_entity_and_time_codes`), and through the MCP tools
+`tier2::wp08_iv_panel::test_validate_mcp_panel_fixed_effects_grunfeld_na` and
+`tier2::wp08_iv_panel::test_validate_mcp_panel_pmg_grunfeld_na`. A NaN cell is dropped
+like a null one (`econometrics::panel::linear_models::tests::test_fixed_effects_non_finite_data`).
+
 ## Known differences
 
 - A regressor that is constant within every entity, or one that is exactly collinear with

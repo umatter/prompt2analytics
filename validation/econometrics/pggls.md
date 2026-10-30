@@ -98,6 +98,21 @@ pggls(inv ~ value + capital, data = d, model = "within")   # also "pooling", "fd
   factor sqrt(RSS/df) = sqrt(498646.34/97).
 - **R-squared**: computed differently depending on model; not compared.
 
+## Missing values
+
+`run_panel_gls` reads y, the regressors, the entity and the time with one NA-aware request
+and drops the rows with a missing value (null or NaN) in any of them, as pggls does
+(`na.omit`); the count is in `PanelGlsResult.missing`, its first warning and the last line
+of the output. Outcomes and times may be integers of any width (Int32 from parquet or a
+cast, Int64, unsigned) or whole-number floats, and the entity text or numeric; a fractional
+time is refused (`InvalidSpecification`, "must hold whole numbers") instead of being
+truncated, and a missing id or time drops its row instead of becoming "" or period 0.
+Tests: `econometrics::panel::gls_models::tests::test_validate_na_panel_gls_omit_equals_complete_rows`
+(on `panel_grunfeld_na` up to 1944, 4 of 101 rows dropped, all three models equal to the fit
+on the complete rows) and
+`econometrics::panel::gls_models::tests::test_validate_na_panel_gls_integer_outcome_and_time`.
+Numbers are not pinned to R here: ECON-33 (GLS), Tier 4.
+
 ## Known Differences
 
 1. **T > N is refused**, where pggls uses a generalised inverse (ECON-32, done in T0-WP14).

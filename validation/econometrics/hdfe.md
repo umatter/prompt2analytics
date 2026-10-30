@@ -92,6 +92,49 @@ for the small simulated example (x1 0.99766, SE 0.02834) that R does not give: f
 that data gives x1 0.9802154032 (SE 0.01506135460) and x2 0.4826382350 (SE 0.02363228724)
 with 13 residual df. Both are removed.
 
+## Missing values and identifier types
+
+- One NA-aware request reads y, the regressors and the entity id and every fixed-effect column (the year included); the rows with a
+  missing value (null or NaN) in any of them are dropped jointly, as plm and fixest do
+  (`na.omit`). The count is in `missing`, the first warning (FE/RE) and the last line of
+  the output: "Missing values: 5 of 200 rows dropped because of missing values (inv: 2,
+  value: 1, firm_id: 2)".
+- A missing id drops its row. Before Tier 2 a missing numeric id became 0 and merged
+  into the real level 0, and a missing text id became a pseudo-level "" (ECON-37); a
+  missing outcome was reported as "Column 'inv' not found".
+- Ids may be text or numeric (any integer width, floats, booleans, dates). Levels follow R
+  `factor()` order: numbers numerically, text in byte (C locale) order. On Grunfeld and the
+  T1 cases this equals the order of first appearance, so their numbers do not change.
+- An infinite value is refused (`NonFiniteValues`), a text column in a numeric role is
+  `NonNumericColumn`, an unknown column `ColumnNotFound`.
+
+Case `panel_grunfeld_na` (`validation/r/cases/econ_panel_na.R`, R 4.3.3, plm 2.6.7,
+fixest 0.14.2): Grunfeld with `inv` missing in rows 5 and 50, `value` in row 120, the firm
+id missing in rows 77 and 133 (both as the text id `firm_name`, "F01".."F10", and as the
+numeric id `firm_id`, 0..9, so that a real id 0 exists) and `year` missing in rows 31 and
+150 (`validation/datasets/generated/grunfeld_na.csv`). FE, RE and the mean-group estimator
+take no time column and use the 195 rows complete in (inv, value, capital, id); the two-way
+HDFE uses the 193 rows complete in every column.
+
+| Quantity | R (`feols(inv ~ value + capital \| firm_name + year, vcov = "iid")`) |
+|---|---|
+| coef value, capital | 0.11723697793697486, 0.35306812464135312 |
+| iid SE value, capital | 0.01373577849772019, 0.02300641102878161 |
+| n used, rows removed | 193, 7 |
+| levels firm, year | 10, 20 |
+
+The same model with `firm_id` gives the same partition. On this unbalanced panel the MAP
+iterates; an R replica of `demean_map` converges in 7-8 sweeps at the default tolerance to
+within 3e-15 of fixest, so the deterministic tolerance applies.
+
+Tests (registered as `panel_missing_values` in `validation/methods/econ_iv_panel_na.json`):
+`econometrics::hdfe::tests::test_validate_hdfe_grunfeld_na` (both id columns, the counts,
+the note, and the ECON-37 variant with y and x complete),
+`econometrics::feglm::tests::test_validate_na_feglm_omit_and_missing_fe_ids`, and through
+the MCP tool `tier2::wp08_iv_panel::test_validate_mcp_panel_hdfe_grunfeld_na`. A NaN cell
+in y is dropped like a null one, an infinite value refused
+(`econometrics::hdfe::tests::test_hdfe_non_finite_data`).
+
 ## Known differences
 
 - The adjusted within R-squared follows plm (0.6704668484), not fixest's `war2`
