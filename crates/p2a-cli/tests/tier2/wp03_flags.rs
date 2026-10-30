@@ -312,6 +312,29 @@ fn r_class_code(dtype: &str) -> f64 {
 /// and the markers persist: every call below is a new process that reloads the session's datasets.
 /// The case `cli_na_strings` reads the same "NA"- and "."-coded copies of the case file in R.
 #[test]
+fn test_cli_na_strings_refused_for_any_non_csv_file() {
+    // The --na-strings guard covers every extension but csv, also one the loader does not
+    // read, so the refusal names the flag rather than the format.
+    let s = temp_session();
+    let txt = s.dir().join("t.txt");
+    std::fs::write(&txt, "x\n1\n.\n").unwrap();
+    let e = s.err(&[
+        "data",
+        "load",
+        txt.to_str().unwrap(),
+        "--name",
+        "t",
+        "--na-strings",
+        ".",
+    ]);
+    assert!(e.contains("--na-strings") && e.contains("CSV"), "{e}");
+    assert!(e.contains("'txt'"), "{e}");
+    // without the flag the format itself is refused
+    let e = s.err(&["data", "load", txt.to_str().unwrap(), "--name", "t"]);
+    assert!(e.contains("Unsupported file format: txt"), "{e}");
+}
+
+#[test]
 fn test_validate_cli_data_load_na_strings() {
     let case = Case::load("columns_conventions");
     let read = Case::load("cli_na_strings");

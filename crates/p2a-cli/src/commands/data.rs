@@ -195,6 +195,24 @@ fn execute_load(
         quiet,
     );
 
+    // --na-strings is a CSV option: refused for every other extension
+    if na_strings.is_some() && extension != "csv" {
+        progress.finish_and_clear();
+        let file = if extension.is_empty() {
+            "a file without an extension".to_string()
+        } else {
+            format!("a '{extension}' file")
+        };
+        print_error(
+            &format!(
+                "--na-strings applies to CSV files only, not to {file}; \
+                 parquet, Excel, Stata and SAS files store missing values natively"
+            ),
+            format,
+        );
+        return Ok(());
+    }
+
     // Load the dataset
     let df = match extension.as_str() {
         "csv" => match na_strings {
@@ -204,16 +222,6 @@ fn execute_load(
             }
             None => DataLoader::load_csv(path)?,
         },
-        "parquet" | "xlsx" | "xls" | "xlsb" | "dta" | "sas7bdat" if na_strings.is_some() => {
-            progress.finish_and_clear();
-            print_error(
-                &format!(
-                    "--na-strings applies to CSV files only; '{extension}' files store missing values natively"
-                ),
-                format,
-            );
-            return Ok(());
-        }
         "parquet" => DataLoader::load_parquet(path)?,
         "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(path, None)?,
         "dta" => DataLoader::load_stata(path)?,
