@@ -23,7 +23,10 @@
         "p2a-core::diagnostics::iv::tests::test_validate_iv_diagnostics_two_endog",
         "p2a-core::econometrics::iv::tests::test_validate_iv_na_rows",
         "p2a-core::econometrics::iv::tests::test_validate_na_iv_errors_name_the_column",
-        "p2a-core::econometrics::general_gmm::tests::test_validate_na_gmm_iv_omit_equals_complete_rows"
+        "p2a-core::econometrics::general_gmm::tests::test_validate_na_gmm_iv_omit_equals_complete_rows",
+        "p2a-mcp::tier2::wp08_iv_panel::test_validate_mcp_iv_2sls_weak_controls",
+        "p2a-mcp::tier2::wp08_iv_panel::test_validate_mcp_iv_first_stage_weak_controls",
+        "p2a-mcp::tier2::wp08_iv_panel::test_validate_mcp_iv_sargan_na_rows"
       ],
       "quantities": [
         "coefficients",
@@ -65,7 +68,10 @@
         "p2a-core::econometrics::panel::gls_models::tests::test_validate_na_panel_gls_omit_equals_complete_rows",
         "p2a-core::econometrics::panel::gls_models::tests::test_validate_na_panel_gls_integer_outcome_and_time",
         "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pmg_grunfeld_na",
-        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_na_pvcm_numeric_and_string_ids_agree"
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_na_pvcm_numeric_and_string_ids_agree",
+        "p2a-mcp::tier2::wp08_iv_panel::test_validate_mcp_panel_fixed_effects_grunfeld_na",
+        "p2a-mcp::tier2::wp08_iv_panel::test_validate_mcp_panel_hdfe_grunfeld_na",
+        "p2a-mcp::tier2::wp08_iv_panel::test_validate_mcp_panel_pmg_grunfeld_na"
       ],
       "quantities": [
         "FE coefficients and SEs",
