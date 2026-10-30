@@ -3,10 +3,11 @@
 use clap::{Subcommand, ValueEnum};
 use p2a_core::Dataset;
 use p2a_core::data::munging::{
-    AggFn, AggSpec, ArithOp, BinOptions, BinStrategy, FillStrategy, MungeError, MutateExpr,
-    bin_with, concat, deduplicate, diff, drop_columns, drop_na, fill_na, filter, full_join,
-    group_by, inner_join, lag, lead, left_join, melt, mutate, normalize, one_hot_encode,
-    pct_change, pivot, rename, right_join, sample, select, sort, standardize, value_counts,
+    AggFn, AggSpec, ArithOp, BinOptions, BinStrategy, CastOptions, FillStrategy, MungeError,
+    MutateExpr, bin_with, cast_with, concat, deduplicate, diff, drop_columns, drop_na, fill_na,
+    filter, full_join, group_by, inner_join, lag, lead, left_join, melt, mutate, normalize,
+    one_hot_encode, pct_change, pivot, rename, right_join, sample, select, sort, standardize,
+    value_counts,
 };
 
 use crate::output::{OutputFormat, print_error, print_message};
@@ -606,6 +607,37 @@ EXAMPLES:
         name: Option<String>,
     },
 
+    /// Convert a column to another type (reports values that fail to convert)
+    #[command(after_help = "\
+Text is trimmed and parsed as R's as.numeric/as.integer/as.logical do ('3.7' to
+int is 3); a value that cannot be converted becomes missing and a warning says
+how many (--strict refuses the cast instead).
+
+EXAMPLES:
+    p2a --session s.json munge cast mydata --column price --dtype float
+    p2a --session s.json munge cast mydata --column n --dtype int --strict
+")]
+    Cast {
+        /// Dataset name
+        dataset: String,
+
+        /// Column to cast
+        #[arg(short, long)]
+        column: String,
+
+        /// Target type: int, float, string or bool
+        #[arg(long)]
+        dtype: String,
+
+        /// Refuse the cast when any value cannot be converted
+        #[arg(long)]
+        strict: bool,
+
+        /// Name for the resulting dataset
+        #[arg(short = 'o', long)]
+        name: Option<String>,
+    },
+
     /// One-hot encode a categorical column
     #[command(after_help = "\
 EXAMPLES:
@@ -864,6 +896,21 @@ pub fn execute(
                 right: !*left_closed,
                 include_lowest: *include_lowest,
             },
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::Cast {
+            dataset,
+            column,
+            dtype,
+            strict,
+            name,
+        } => execute_cast(
+            dataset,
+            column,
+            dtype,
+            CastOptions { strict: *strict },
             name.as_deref(),
             format,
             session,
@@ -1626,6 +1673,32 @@ fn execute_bin(
         }
         Err(e) => {
             print_error(&format!("Bin failed: {}", e), format);
+            Ok(())
+        }
+    }
+}
+
+fn execute_cast(
+    dataset: &str,
+    column: &str,
+    dtype: &str,
+    options: CastOptions,
+    output_name: Option<&str>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let ds = get_dataset_clone!(dataset, session, format);
+
+    match cast_with(&ds, column, dtype, &options) {
+        Ok((result, report)) => {
+            store_result(result, output_name, dataset, "cast", session, format)?;
+            if let Some(note) = report.note() {
+                print_message(&format!("Warning: {note}"), format);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            print_error(&format!("Cast failed: {}", e), format);
             Ok(())
         }
     }

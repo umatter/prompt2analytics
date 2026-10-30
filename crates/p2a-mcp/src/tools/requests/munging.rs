@@ -804,7 +804,7 @@ pub struct CastColumnRequest {
 
     /// Target data type for single column
     #[schemars(
-        description = "Target data type: 'int' (i64), 'float' (f64), 'string' (Utf8), 'bool' (Boolean)."
+        description = "Target data type: 'int' (i64), 'float' (f64), 'string' (Utf8), 'bool' (Boolean). Text is trimmed and parsed as R's as.numeric/as.integer/as.logical ('3.7' to int is 3)."
     )]
     pub dtype: Option<String>,
 
@@ -813,6 +813,12 @@ pub struct CastColumnRequest {
         description = "Batch mode: list of [column, dtype] pairs, e.g. [[\"col1\", \"float\"], [\"col2\", \"int\"]]. Use this to cast multiple columns at once."
     )]
     pub casts: Option<Vec<Vec<String>>>,
+
+    /// Refuse the cast when a value cannot be converted
+    #[schemars(
+        description = "If true, refuse the cast when any value cannot be converted; default false: such values become missing and the result says how many."
+    )]
+    pub strict: Option<bool>,
 
     /// Optional name for the resulting dataset
     #[schemars(

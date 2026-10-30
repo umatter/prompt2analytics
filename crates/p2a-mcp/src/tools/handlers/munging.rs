@@ -24,6 +24,7 @@ use p2a_core::{
             ArithOp,
             BinOptions,
             BinStrategy,
+            CastOptions,
             FillStrategy,
             JoinType,
             MungeError,
@@ -2724,7 +2725,7 @@ impl AnalyticsServer {
 
     /// Create a new column by computation.
     #[tool(
-        description = "Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values."
+        description = "Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values. Operands must be numeric or boolean columns; convert text columns with munge_cast first."
     )]
     pub async fn munge_mutate(
         &self,
@@ -2837,13 +2838,13 @@ impl AnalyticsServer {
 
     /// Cast column(s) to a different data type.
     #[tool(
-        description = "Cast column(s) to a different data type (int, float, string, bool). Use after cleaning sentinel values to convert string columns to numeric for analysis."
+        description = "Cast column(s) to int, float, string or bool. Text is parsed as R's as.numeric/as.integer/as.logical do (trimmed; '3.7' to int is 3); text that cannot be parsed becomes missing and the reply says how many values (strict = true refuses instead). Use after cleaning sentinel values."
     )]
     pub async fn munge_cast(
         &self,
         Parameters(request): Parameters<CastColumnRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::data::munging::{cast, cast_columns};
+        use p2a_core::data::munging::{cast_columns_with, cast_with};
 
         // An owned copy: the read lock is released before the result is
         // bounded and built.
@@ -2922,25 +2923,22 @@ impl AnalyticsServer {
             }
         }
 
-        let result = if cast_refs.len() == 1 {
-            match cast(&dataset, cast_refs[0].0, cast_refs[0].1) {
-                Ok(ds) => ds,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cast failed: {}",
-                        e
-                    ))]));
-                }
-            }
+        let options = CastOptions {
+            strict: request.strict.unwrap_or(false),
+        };
+        let cast_result = if cast_refs.len() == 1 {
+            cast_with(&dataset, cast_refs[0].0, cast_refs[0].1, &options)
+                .map(|(ds, report)| (ds, vec![report]))
         } else {
-            match cast_columns(&dataset, &cast_refs) {
-                Ok(ds) => ds,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cast failed: {}",
-                        e
-                    ))]));
-                }
+            cast_columns_with(&dataset, &cast_refs, &options)
+        };
+        let (result, reports) = match cast_result {
+            Ok(done) => done,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cast failed: {}",
+                    e
+                ))]));
             }
         };
 
@@ -2952,11 +2950,16 @@ impl AnalyticsServer {
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        let mut text = format!(
             "Cast columns [{}], saved as '{}'",
             cast_desc.join(", "),
             result_name
-        ))]))
+        );
+        for note in reports.iter().filter_map(|r| r.note()) {
+            text.push_str(&format!("\nWarning: {note}"));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
 
@@ -3862,6 +3865,7 @@ mod tests {
             column: Some("b".into()),
             dtype: Some(dtype.into()),
             casts: None,
+            strict: None,
             result_name: Some(result.into()),
         };
         // 40,000 booleans (5 kB) as strings: 720 kB of views.

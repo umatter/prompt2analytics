@@ -96,3 +96,48 @@ async fn test_mcp_munge_fill_na_all_missing_is_an_error() {
     let t = text(&r);
     assert!(!r.success && t.contains("no observed values"), "{t}");
 }
+
+#[tokio::test]
+async fn test_mcp_munge_cast_reports_failed_values() {
+    // DATA-37. R: as.integer(c("1,234", "7", "x")) is NA 7 NA with a coercion warning.
+    let c = Dataset::new(df!("v" => ["1,234", "7", "x"]).unwrap());
+    let (session, server) = common::session_with_datasets(vec![("c", c)]);
+    let args = |strict: bool| {
+        json!({"dataset": "c", "column": "v", "dtype": "int", "strict": strict,
+               "result_name": "c2"})
+    };
+    let r = common::call(&server, &session, "munge_cast", args(false)).await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    assert!(
+        t.contains(
+            "Warning: column 'v': 2 values could not be converted to int and are now missing \
+             (first: '1,234', 'x')"
+        ),
+        "{t}"
+    );
+    let r = common::call(&server, &session, "munge_cast", args(true)).await;
+    let t = text(&r);
+    assert!(
+        !r.success && t.contains("2 values could not be converted to int"),
+        "{t}"
+    );
+}
+
+#[tokio::test]
+async fn test_mcp_munge_mutate_refuses_text() {
+    // DATA-37. R: c("$5", "10", "2,000") * c(6, 3, 1.5) is an error
+    // ("non-numeric argument to binary operator").
+    let m = Dataset::new(df!("p" => ["$5", "10", "2,000"], "q" => [6.0, 3.0, 1.5]).unwrap());
+    let (session, server) = common::session_with_datasets(vec![("m", m)]);
+    let r = common::call(
+        &server,
+        &session,
+        "munge_mutate",
+        json!({"dataset": "m", "new_column": "pq", "expr_type": "arithmetic",
+               "left": "p", "operator": "*", "right": "q"}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(!r.success && t.contains("numeric"), "{t}");
+}

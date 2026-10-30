@@ -73,3 +73,44 @@ fn test_cli_munge_fill_na_all_missing_is_an_error() {
     ]);
     assert!(stderr.contains("no observed values"), "{stderr}");
 }
+
+#[test]
+fn test_cli_munge_cast_reports_failed_values() {
+    // DATA-37. R: as.integer(c("1,234", "7", "x")) is NA 7 NA with a coercion warning.
+    let s = temp_session();
+    let c = write(&s, "c.csv", "v\n\"1,234\"\n7\nx\n");
+    s.load_as(&c, "c", &[]);
+    let stdout = s.ok(&["munge", "cast", "c", "--column", "v", "--dtype", "int"]);
+    assert!(
+        stdout.contains(
+            "Warning: column 'v': 2 values could not be converted to int and are now missing \
+             (first: '1,234', 'x')"
+        ),
+        "{stdout}"
+    );
+    let stderr = s.err(&[
+        "munge", "cast", "c", "--column", "v", "--dtype", "int", "--strict",
+    ]);
+    assert!(
+        stderr.contains("2 values could not be converted"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn test_cli_munge_mutate_refuses_text() {
+    // DATA-37. R: c("$5", "10", "2,000") * c(6, 3, 1.5) is an error.
+    let s = temp_session();
+    let m = write(&s, "m.csv", "p,q\n$5,6\n10,3\n\"2,000\",1.5\n");
+    s.load_as(&m, "m", &[]);
+    let stderr = s.err(&[
+        "munge",
+        "mutate",
+        "m",
+        "--new-col",
+        "pq",
+        "--expr",
+        "mul:p:q",
+    ]);
+    assert!(stderr.contains("numeric"), "{stderr}");
+}
