@@ -200,6 +200,14 @@ impl Session {
     /// Put `snapshot` back as the session's state, write-locking each map in
     /// turn in the order [`snapshot_state`](Self::snapshot_state) reads
     /// them, then recompute the cached charge (its shared labels included).
+    ///
+    /// The memory profiler is not part of a snapshot. `load_dataset` tracks
+    /// a dataset before inserting it, so a load the quota refuses would
+    /// leave its entry for the life of the session, counted by no quota.
+    /// The restore therefore untracks every entry whose name the restored
+    /// datasets lack, which keeps the profiler's names a subset of the
+    /// dataset names the charge counts. (An entry the undone call
+    /// re-tracked for a dataset it replaced keeps that call's estimate.)
     pub async fn restore_state(&self, snapshot: SessionStateSnapshot) {
         let SessionStateSnapshot {
             datasets,
@@ -209,6 +217,24 @@ impl Session {
         *self.datasets.write().await = datasets;
         *self.cleaning_sessions.write().await = cleaning_sessions;
         *self.spatial_weights.write().await = spatial_weights;
+        // The names under the datasets' read lock, which is dropped before
+        // the profiler's lock is taken (`server_stats` holds the datasets
+        // and then reads the profiler).
+        let held: HashSet<String> = self.datasets.read().await.keys().cloned().collect();
+        let mut profiler = self.memory_profiler.write().await;
+        if profiler.dataset_count() > 0 {
+            let gone: Vec<String> = profiler
+                .stats()
+                .datasets
+                .into_iter()
+                .map(|tracked| tracked.name)
+                .filter(|name| !held.contains(name))
+                .collect();
+            for name in &gone {
+                profiler.untrack_dataset(name);
+            }
+        }
+        drop(profiler);
         self.refresh_data_bytes().await;
     }
 }
@@ -225,6 +251,10 @@ impl Session {
 /// tool that then changes a session copies that one session
 /// (`Arc::make_mut`), its checkpoints' quality profiles and audit trail
 /// included, while the snapshot holds the original.
+///
+/// The memory profiler behind `server_stats`' history is not part of a
+/// snapshot; [`Session::restore_state`] untracks its entries for datasets
+/// the restored state does not hold.
 #[derive(Clone)]
 pub struct SessionStateSnapshot {
     pub datasets: HashMap<String, Dataset>,
@@ -2619,6 +2649,32 @@ mod tests {
         assert_eq!(s.cleaning_sessions.read().await["c1"].audit_trail.len(), 1);
         s.restore_state(snap).await;
         assert_eq!(s.cleaning_sessions.read().await["c1"].audit_trail.len(), 0);
+    }
+
+    /// The memory profiler is not snapshotted, but a restore leaves it no
+    /// entry for a dataset the session does not hold: `load_dataset` tracks
+    /// its dataset before inserting it, so a load the quota refuses would
+    /// otherwise leave its entry for the life of the session.
+    #[tokio::test]
+    async fn restore_state_untracks_profiler_entries_the_snapshot_lacks() {
+        let s = test_fixtures::session_with("sp", test_fixtures::spatial_fixture()).await;
+        let sp = s.datasets.read().await["sp"].clone();
+        s.memory_profiler.write().await.track_dataset("sp", &sp);
+        let snap = s.snapshot_state().await;
+        let count = s.memory_profiler.read().await.dataset_count();
+        assert_eq!(count, 1);
+        // What a refused load leaves behind before its rollback.
+        let ghost = test_fixtures::cleaning_fixture();
+        s.memory_profiler
+            .write()
+            .await
+            .track_dataset("ghost", &ghost);
+        s.datasets.write().await.insert("ghost".into(), ghost);
+        s.restore_state(snap).await;
+        let profiler = s.memory_profiler.read().await;
+        assert_eq!(profiler.dataset_memory("ghost"), None);
+        assert_eq!(profiler.dataset_count(), count);
+        assert!(profiler.dataset_memory("sp").is_some());
     }
 
     #[tokio::test]
