@@ -80,3 +80,31 @@ case("stat_anova_two_way_unbalanced", "stats/anova", "Two-way ANOVA, unbalanced 
        reference = "stats::aov (sequential Type I SS); car::Anova(type = 2); car::Anova(type = 3, contr.sum)",
        call = "aov(y ~ fa * fb); aov(y ~ fa + fb); aov(y3 ~ fa3 * fb3); car::Anova(lm(...), type = 2 | 3)", packages = "car")
 })
+
+# One-way ANOVA, Kruskal-Wallis and Welch's oneway.test with missing responses and labels
+# (STAT-11, STAT-25); string labels must be printed without quotes.
+case("stat_oneway_na_labels", "stats/anova", "One-way ANOVA, Kruskal-Wallis and oneway.test with NA responses and NA group labels", function(ctx) {
+  y <- c(1, 2, NA, 4, 5, 6, 7, NA)
+  g <- c("a", "a", "a", "b", "b", NA, "c", "c")
+  v9 <- c(1:8, 9.5); g9 <- c("a", "a", "a", "b", "b", "b", NA, NA, NA)
+  d <- ctx$gen_dataset("oneway_na_labels", data.frame(
+    id = 1:9, y = c(y, NA), g = c(g, NA), v9 = v9, g9 = g9))
+  a <- summary(aov(y ~ g, data = d))[[1]]
+  kw <- kruskal.test(v9 ~ g9, data = d)
+  ow <- oneway.test(v9 ~ g9, data = d)
+  owe <- oneway.test(v9 ~ g9, data = d, var.equal = TRUE)
+  cc <- complete.cases(d$y, d$g); cc9 <- complete.cases(d$v9, d$g9)
+  stopifnot(is.integer(d$y), is.double(d$v9))                # y is read as Int64 by polars
+  list(values = list(
+    aov_f = a[1, "F value"], aov_p = a[1, "Pr(>F)"], aov_df_between = a[1, "Df"], aov_df_within = a[2, "Df"],
+    aov_ss_between = a[1, "Sum Sq"], aov_ss_within = a[2, "Sum Sq"], aov_n_used = 5,
+    kw_chisq = unname(kw$statistic), kw_df = unname(kw$parameter), kw_p = kw$p.value,
+    welch_f = unname(ow$statistic), welch_df1 = unname(ow$parameter[1]), welch_df2 = unname(ow$parameter[2]), welch_p = ow$p.value,
+    classic_f = unname(owe$statistic), classic_p = owe$p.value,
+    # T2-WP07 additions: group labels, sizes and means of the rows each test keeps
+    classic_df1 = unname(owe$parameter[1]), classic_df2 = unname(owe$parameter[2]),
+    aov_group_n = named(c(table(d$g[cc]))), aov_group_means = named(tapply(d$y[cc], d$g[cc], mean)),
+    aov_grand_mean = mean(d$y[cc]), kw_group_n = named(c(table(d$g9[cc9])))),
+    reference = "stats::aov, kruskal.test, oneway.test (rows with NA response or label dropped)",
+    call = "aov(y ~ g); kruskal.test(v9 ~ g9); oneway.test(v9 ~ g9)", packages = character(0))
+})

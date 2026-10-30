@@ -7,7 +7,9 @@
       "category": "stats",
       "reference": "stats::aov (Type I); car::Anova(type = 2); car::Anova(type = 3) with contr.sum",
       "doc": "validation/stats/anova.md",
-      "cases": ["stat_anova_two_way_unbalanced"],
+      "cases": [
+        "stat_anova_two_way_unbalanced"
+      ],
       "tests": [
         "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type1",
         "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type2",
@@ -24,6 +26,82 @@
         "rows used and dropped"
       ],
       "tolerance": "validation/README.md, n = 10-13 (< 100): SS and F 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and counts exact; MCP text at its 4 printed decimals",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "anova_one_way",
+      "name": "One-way ANOVA",
+      "category": "stats",
+      "reference": "stats::aov",
+      "doc": "validation/stats/anova.md",
+      "cases": [
+        "stat_oneway_na_labels"
+      ],
+      "tests": [
+        "p2a-core::stats::anova::tests::test_validate_oneway_na_labels_aov",
+        "p2a-core::stats::anova::tests::test_validate_na_one_way_anova_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_anova_one_way_na_labels"
+      ],
+      "quantities": [
+        "F, p",
+        "df between and within",
+        "SS between and within",
+        "grand mean",
+        "group labels, sizes and means",
+        "rows used and dropped"
+      ],
+      "tolerance": "validation/README.md, n = 5 (< 100): SS, F, grand and group means 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df, counts and labels exact; MCP text at its 4 printed decimals",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "kruskal_wallis",
+      "name": "Kruskal-Wallis rank-sum test",
+      "category": "stats",
+      "reference": "stats::kruskal.test",
+      "doc": "validation/stats/kruskal.md",
+      "cases": [
+        "stat_oneway_na_labels"
+      ],
+      "tests": [
+        "p2a-core::stats::kruskal::tests::test_validate_oneway_na_labels_kruskal",
+        "p2a-core::stats::kruskal::tests::test_validate_na_kruskal_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_kruskal_wallis_na_labels"
+      ],
+      "quantities": [
+        "chi-squared statistic",
+        "df",
+        "p",
+        "group labels and sizes",
+        "rows used and dropped"
+      ],
+      "tolerance": "validation/README.md, n = 6 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df, group sizes and labels exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "oneway_test",
+      "name": "Welch and classical one-way test (oneway.test)",
+      "category": "stats",
+      "reference": "stats::oneway.test",
+      "doc": "validation/stats/oneway.md",
+      "cases": [
+        "stat_oneway_na_labels"
+      ],
+      "tests": [
+        "p2a-core::stats::oneway::tests::test_validate_oneway_na_labels_welch",
+        "p2a-core::stats::oneway::tests::test_validate_na_oneway_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_oneway_na_labels"
+      ],
+      "quantities": [
+        "F (Welch and classical)",
+        "df1, df2 (Welch df real-valued)",
+        "p",
+        "group labels",
+        "rows used and dropped"
+      ],
+      "tolerance": "validation/README.md, n = 6 (< 100): F 1e-5 relative, Welch df 1e-5 relative (real-valued), classical df exact, p 1e-5 relative + 1e-12 absolute",
       "deviations": [],
       "supersedes_legacy": []
     }

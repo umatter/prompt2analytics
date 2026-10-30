@@ -113,6 +113,42 @@ kruskal.test(list(t1, t2, t3))
 | n_groups | 3 | 3 | PASS |
 | n_total | 9 | 9 | PASS |
 
+## Missing values, labels and the R case
+
+`run_kruskal_test(dataset, value, group)` reads the value and the group in one request through
+the shared extractor (`p2a_core::data::columns`):
+
+- **NA policy:** a row whose value or group label is missing is dropped (joint `na.omit`, as
+  `kruskal.test(value ~ group)`), and the drop is reported in `missing`. A missing label is
+  never a level of its own (before T2-WP07 it became a group named `null`).
+- **Labels and order:** groups follow R `factor()` order: text by byte order, numeric labels by
+  value (an Int64 group column with labels 2 and 10 gives the groups "2", "10"). Text labels
+  are printed as stored, without quotes (STAT-25).
+- **Dtypes:** integer values are accepted; a text value column is `NonNumericColumn`, an absent
+  column `ColumnNotFound`.
+
+**R case** `stat_oneway_na_labels` (`validation/r/cases/stats_anova.R`, dataset
+`validation/datasets/generated/oneway_na_labels.csv`, 9 rows; `g9` is missing in 3 of them):
+
+```r
+kruskal.test(v9 ~ g9, data = d)   # 6 rows used: groups a (1, 2, 3) and b (4, 5, 6)
+```
+
+| Quantity | R value |
+|---|---|
+| Kruskal-Wallis chi-squared | 3.8571428571428577 |
+| df | 1 |
+| p-value | 0.04953461343562679 |
+| group sizes | a 3, b 3 |
+
+**Rust tests:**
+- `stats::kruskal::tests::test_validate_oneway_na_labels_kruskal` (statistic `Tol::stat(6)`,
+  df exact, p `Tol::p_value(6)`, group labels and sizes exact)
+- `stats::kruskal::tests::test_validate_na_kruskal_dtypes_and_errors` (Int64 labels in numeric
+  order, the text and absent-column errors)
+- MCP: `test_validate_mcp_hypothesis_kruskal_wallis_na_labels`
+  (`crates/p2a-mcp/tests/tier2/wp07_anova.rs`)
+
 ## Numerical Precision Summary
 
 - H statistics match R within 0.01

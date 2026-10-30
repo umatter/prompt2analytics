@@ -55,3 +55,101 @@ async fn test_validate_mcp_anova_two_way_unbalanced() {
     assert!(t.contains("Missing values: 1 of 13 rows dropped"), "{t}");
     assert!(t.contains("Levels: 2 × 2"), "{t}");
 }
+
+/// The JSON object a tool returned as its only text item.
+fn json_of(r: &p2a_mcp::transport::http::ToolResult) -> serde_json::Value {
+    let t = text(r);
+    assert!(r.success, "tool error: {t}");
+    serde_json::from_str(&t).unwrap_or_else(|e| panic!("{e}: {t}"))
+}
+
+fn num(v: &serde_json::Value) -> f64 {
+    v.as_f64().unwrap_or_else(|| panic!("not a number: {v}"))
+}
+
+#[tokio::test]
+async fn test_validate_mcp_anova_one_way_na_labels() {
+    let case = Case::load("stat_oneway_na_labels");
+    let (session, server) = session_with("stat_oneway_na_labels");
+    let r = call(
+        &server,
+        &session,
+        "anova_one_way",
+        json!({"dataset": "oneway_na_labels", "response": "y", "factor": "g"}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    let (p4, x) = (Tol::printed(4), Tol::exact());
+    let between = row(&t, "Between");
+    let within = row(&t, "Within");
+    let labels = ["a", "b", "c"];
+    let sizes: Vec<f64> = labels.iter().map(|g| row(&t, g)[0]).collect();
+    Check::new(&case)
+        .scalar("aov_ss_between", between[0], p4)
+        .scalar("aov_df_between", between[1], x)
+        .scalar("aov_f", between[3], p4)
+        .scalar("aov_p", between[4], p4)
+        .scalar("aov_ss_within", within[0], p4)
+        .scalar("aov_df_within", within[1], x)
+        .named("aov_group_n", &labels, &sizes, x)
+        .finish();
+    assert!(
+        !t.lines().any(|l| {
+            let l = l.trim_start();
+            l.starts_with("Null") || l.starts_with("null") || l.starts_with('"')
+        }),
+        "{t}"
+    );
+    assert!(t.contains("N = 5  |  Groups = 3"), "{t}");
+    assert!(t.contains("Missing values: 4 of 9 rows dropped"), "{t}");
+}
+
+#[tokio::test]
+async fn test_validate_mcp_hypothesis_kruskal_wallis_na_labels() {
+    let case = Case::load("stat_oneway_na_labels");
+    let (session, server) = session_with("stat_oneway_na_labels");
+    let v = json_of(
+        &call(
+            &server,
+            &session,
+            "hypothesis_kruskal_wallis",
+            json!({"dataset": "oneway_na_labels", "value": "v9", "group": "g9"}),
+        )
+        .await,
+    );
+    let groups = v["group_statistics"].as_array().unwrap();
+    let names: Vec<&str> = groups
+        .iter()
+        .map(|g| g["group"].as_str().unwrap())
+        .collect();
+    let sizes: Vec<f64> = groups.iter().map(|g| num(&g["n"])).collect();
+    Check::new(&case)
+        .scalar("kw_chisq", num(&v["statistic"]), Tol::stat(6))
+        .scalar("kw_df", num(&v["df"]), Tol::exact())
+        .scalar("kw_p", num(&v["p_value"]), Tol::p_value(6))
+        .named("kw_group_n", &names, &sizes, Tol::exact())
+        .finish();
+    assert_eq!(names, ["a", "b"]);
+}
+
+#[tokio::test]
+async fn test_validate_mcp_hypothesis_oneway_na_labels() {
+    let case = Case::load("stat_oneway_na_labels");
+    let (session, server) = session_with("stat_oneway_na_labels");
+    let v = json_of(
+        &call(
+            &server,
+            &session,
+            "hypothesis_oneway",
+            json!({"dataset": "oneway_na_labels", "value": "v9", "group": "g9"}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .scalar("welch_f", num(&v["statistic"]), Tol::stat(6))
+        .scalar("welch_df1", num(&v["df_numerator"]), Tol::stat(6))
+        .scalar("welch_df2", num(&v["df_denominator"]), Tol::stat(6))
+        .scalar("welch_p", num(&v["p_value"]), Tol::p_value(6))
+        .finish();
+}

@@ -2,6 +2,12 @@
 
 ## Method Overview
 
+`run_one_way_anova(dataset, response, factor)` is `aov(response ~ factor)`: between- and
+within-group sums of squares, F on (k - 1, n - k) df, eta-squared and omega-squared, and the
+group sizes, means and standard deviations in R `factor()` order (numeric labels numerically:
+2 before 10; text labels as stored, without quotes). Tukey's HSD (`run_tukey_hsd`) and the
+one-way model tables build on it.
+
 `run_two_way_anova_with(dataset, response, factor_a, factor_b, &TwoWayAnovaConfig { interaction,
 ss_type })` fits the two-way model by least squares on a dummy-coded design and reports the
 sums of squares of R's three conventions:
@@ -46,7 +52,40 @@ Rows with a missing response or a missing factor level are dropped, as `aov`'s `
 reported: `missing.n_dropped`, `missing.by_column` and a last Display line `Missing values: 1 of 13
 rows dropped because of missing values (y: 1, fa: 1)`. A missing label is never a level of its
 own. Integer responses are accepted. Factor levels follow R `factor()` (numeric labels in
-numeric order).
+numeric order). This holds for the one-way and the two-way ANOVA alike.
+
+## R case: `stat_oneway_na_labels` (one-way)
+
+`validation/r/cases/stats_anova.R`, case `stat_oneway_na_labels`, dataset
+`validation/datasets/generated/oneway_na_labels.csv` (9 rows). `y` is an Int64 column missing in
+3 rows and `g` is missing in 2, so 5 rows are used (4 dropped). The same case pins Kruskal-Wallis
+and `oneway.test` on `v9 ~ g9` (`kruskal.md`, `oneway.md`).
+
+```r
+summary(aov(y ~ g, data = d))
+```
+
+| Quantity | R value |
+|---|---|
+| F / p | 21.79999999999999 / 0.043859649122807036 |
+| df between / within | 2 / 2 |
+| SS between / within | 21.800000000000004 / 1.0000000000000007 |
+| rows used, grand mean | 5, 3.8 |
+| group sizes | a 2, b 2, c 1 |
+| group means | a 1.5, b 4.5, c 7 |
+
+Before T2-WP07 the Int64 response was refused as non-numeric, and with a Float64 response a
+missing value was read as 0 and a missing label became a group named `Null`.
+
+**Rust tests** (`crates/p2a-core/src/stats/anova.rs`):
+- `stats::anova::tests::test_validate_oneway_na_labels_aov` (F, p, df, SS, rows used, grand
+  mean, group sizes and means; labels exactly `a`, `b`, `c`; 4 rows dropped)
+- `stats::anova::tests::test_validate_na_one_way_anova_dtypes_and_errors` (Int64 and Float64
+  responses give identical results; a text response is `NonNumericColumn`, an absent factor
+  `ColumnNotFound`)
+
+**MCP test:** `test_validate_mcp_anova_one_way_na_labels` (`anova_one_way` text at its 4 printed
+decimals; group rows `a`, `b`, `c`, no `Null` group, the missing-value line).
 
 ## R case: `stat_anova_two_way_unbalanced`
 
@@ -101,7 +140,7 @@ Full precision is in `validation/expected/stat_anova_two_way_unbalanced.json`
 
 ## Tolerances
 
-`validation/README.md`, n = 10 to 13 (< 100): sums of squares and F 1e-5 relative, p-values
+`validation/README.md`, n = 5 to 13 (< 100): sums of squares and F 1e-5 relative, p-values
 1e-5 relative plus 1e-12 absolute, df and counts exact; MCP text at its 4 printed decimals. The
 algorithm reproduces R to about 1e-14 relative on every value above.
 

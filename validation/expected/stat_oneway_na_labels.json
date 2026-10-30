@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "stat_oneway_na_labels",
+  "area": "stats/anova",
+  "method": "One-way ANOVA, Kruskal-Wallis and oneway.test with NA responses and NA group labels",
+  "reference": "stats::aov, kruskal.test, oneway.test (rows with NA response or label dropped)",
+  "call": "aov(y ~ g); kruskal.test(v9 ~ g9); oneway.test(v9 ~ g9)",
+  "dataset": "validation/datasets/generated/oneway_na_labels.csv",
+  "datasets": ["validation/datasets/generated/oneway_na_labels.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "aov_f": 21.79999999999999,
+    "aov_p": 0.043859649122807036,
+    "aov_df_between": 2,
+    "aov_df_within": 2,
+    "aov_ss_between": 21.800000000000004,
+    "aov_ss_within": 1.0000000000000007,
+    "aov_n_used": 5,
+    "kw_chisq": 3.8571428571428577,
+    "kw_df": 1,
+    "kw_p": 0.04953461343562679,
+    "welch_f": 13.5,
+    "welch_df1": 1,
+    "welch_df2": 4,
+    "welch_p": 0.021311641128756727,
+    "classic_f": 13.5,
+    "classic_p": 0.021311641128756727,
+    "classic_df1": 1,
+    "classic_df2": 4,
+    "aov_group_n": {
+      "names": ["a", "b", "c"],
+      "values": [2, 2, 1]
+    },
+    "aov_group_means": {
+      "names": ["a", "b", "c"],
+      "values": [1.5, 4.5, 7]
+    },
+    "aov_grand_mean": 3.7999999999999998,
+    "kw_group_n": {
+      "names": ["a", "b"],
+      "values": [3, 3]
+    }
+  }
+}

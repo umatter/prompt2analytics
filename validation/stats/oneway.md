@@ -80,6 +80,44 @@ oneway.test(value ~ group, data = df, var.equal = TRUE)
 | df_denom | 11 | 11 | exact | PASS |
 | p-value | 2.134e-06 | 2.134e-06 | 0.000001 | PASS |
 
+## Missing values, labels and the R case
+
+`run_oneway_test(dataset, value, group, var_equal)` reads the value and the group in one
+request through the shared extractor (`p2a_core::data::columns`):
+
+- **NA policy:** a row whose value or group label is missing is dropped (joint `na.omit`, as
+  `oneway.test(value ~ group)`), and the drop is reported in `missing`. A missing label is never
+  a level of its own (before T2-WP07 it became a group named `null`).
+- **Labels and order:** groups follow R `factor()` order: text by byte order, numeric labels by
+  value (an Int64 group column with labels 2 and 10 gives the groups "2", "10"). Text labels
+  are printed as stored, without quotes (STAT-25).
+- **Dtypes:** integer values are accepted; a text value column is `NonNumericColumn`, an absent
+  column `ColumnNotFound`.
+
+**R case** `stat_oneway_na_labels` (`validation/r/cases/stats_anova.R`, dataset
+`validation/datasets/generated/oneway_na_labels.csv`, 9 rows; `g9` is missing in 3 of them):
+
+```r
+oneway.test(v9 ~ g9, data = d)                     # Welch
+oneway.test(v9 ~ g9, data = d, var.equal = TRUE)   # classical F
+```
+
+| Quantity | Welch | classical |
+|---|---|---|
+| F | 13.5 | 13.5 |
+| df1 / df2 | 1 / 4 | 1 / 4 |
+| p-value | 0.021311641128756727 | 0.021311641128756727 |
+
+(Both groups have variance 1 and 3 rows, so the two tests coincide here.)
+
+**Rust tests:**
+- `stats::oneway::tests::test_validate_oneway_na_labels_welch` (F and p at `Tol::stat(6)` /
+  `Tol::p_value(6)`, Welch df at `Tol::stat(6)` since Satterthwaite's df is real-valued,
+  classical df exact; group labels and rows dropped)
+- `stats::oneway::tests::test_validate_na_oneway_dtypes_and_errors` (Int64 labels in numeric
+  order, the text and absent-column errors)
+- MCP: `test_validate_mcp_hypothesis_oneway_na_labels` (`crates/p2a-mcp/tests/tier2/wp07_anova.rs`)
+
 ## Numerical Precision Summary
 
 - F statistics match R within 0.01

@@ -43,7 +43,7 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
-use crate::traits::{SignificanceLevel, f_test_p_value};
+use crate::traits::SignificanceLevel;
 
 /// Statistics for a single group in ANOVA.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +222,9 @@ impl std::fmt::Display for AnovaResult {
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -236,10 +239,30 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+/// The values of each factor level, in level order (R `factor()` order), labelled by the
+/// level's label. Every level of an extracted factor is observed, so no group is empty.
+pub(crate) fn values_by_level(values: &[f64], factor: &Factor) -> Vec<(String, Vec<f64>)> {
+    let counts = factor.counts();
+    let mut groups: Vec<(String, Vec<f64>)> = factor
+        .levels
+        .iter()
+        .zip(&counts)
+        .map(|(label, &n)| (label.clone(), Vec::with_capacity(n)))
+        .collect();
+    for (&v, &code) in values.iter().zip(&factor.codes) {
+        groups[code as usize].1.push(v);
+    }
+    groups
+}
+
 /// Perform one-way ANOVA on a dataset.
 ///
 /// Tests whether the means of the response variable differ significantly
 /// across levels of the factor variable.
+///
+/// Rows with a missing response or factor level are dropped, as `aov`'s `na.omit`, and
+/// reported in `missing`; a missing label is never a group of its own. Integer responses
+/// are accepted. Groups are listed in R `factor()` order (numeric labels numerically).
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -263,59 +286,14 @@ pub fn run_one_way_anova(
     response: &str,
     factor: &str,
 ) -> EconResult<AnovaResult> {
-    let df = dataset.df();
-
-    // Validate columns exist
-    let response_col = df.column(response).map_err(|_| EconError::ColumnNotFound {
-        column: response.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let factor_col = df.column(factor).map_err(|_| EconError::ColumnNotFound {
-        column: factor.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Extract response values as f64
-    let y_values: Vec<f64> = response_col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: response.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    if y_values.is_empty() {
-        return Err(EconError::EmptyDataset);
-    }
-
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(response)
+        .factor(factor)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let groups = values_by_level(cols.numeric(response), cols.factor(factor));
+    let y_values = cols.numeric(response);
     let n_total = y_values.len();
-
-    // Group data by factor
-    let mut groups: HashMap<String, Vec<f64>> = HashMap::new();
-
-    for i in 0..factor_col.len() {
-        let group_key = format!(
-            "{:?}",
-            factor_col.get(i).map_err(|e| {
-                EconError::Internal(format!("Failed to get factor value: {}", e))
-            })?
-        );
-
-        // Get corresponding y value
-        if let Some(&y_val) = y_values.get(i) {
-            groups.entry(group_key).or_default().push(y_val);
-        }
-    }
-
     let n_groups = groups.len();
 
     if n_groups < 2 {
@@ -355,19 +333,8 @@ pub fn run_one_way_anova(
         let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-        // Clean up the group name (remove quotes from AnyValue format)
-        let clean_name = group_name
-            .trim_matches('"')
-            .trim_start_matches("String(\"")
-            .trim_end_matches("\")")
-            .trim_start_matches("Int64(")
-            .trim_start_matches("Int32(")
-            .trim_start_matches("Float64(")
-            .trim_end_matches(')')
-            .to_string();
-
         group_stats.push(GroupStats {
-            group: clean_name,
+            group: group_name.clone(),
             n: n_i,
             mean: group_mean,
             std_dev,
@@ -375,9 +342,6 @@ pub fn run_one_way_anova(
             max,
         });
     }
-
-    // Sort groups by name for consistent output
-    group_stats.sort_by(|a, b| a.group.cmp(&b.group));
 
     // Compute total sum of squares
     let ss_total = ss_between + ss_within;
@@ -402,7 +366,7 @@ pub fn run_one_way_anova(
         f64::NAN
     };
 
-    let p_value = f_test_p_value(f_statistic, df_between as f64, df_within as f64);
+    let p_value = f_upper_tail(f_statistic, df_between as f64, df_within as f64);
 
     // Effect sizes
     // η² (eta-squared) = SSB / SST - proportion of variance explained
@@ -442,7 +406,7 @@ pub fn run_one_way_anova(
         n_obs: n_total,
         grand_mean,
         groups: group_stats,
-        missing: MissingSummary::none(n_total),
+        missing: cols.missing().clone(),
     })
 }
 
@@ -1911,5 +1875,69 @@ mod tests {
         }
         assert_eq!(SsType::III.to_string(), "III");
         assert_eq!(SsType::I.to_string(), "I");
+    }
+
+    // ========================================================================
+    // R-pinned one-way ANOVA with missing responses and labels (T2-WP07)
+    // ========================================================================
+    //
+    // Case stat_oneway_na_labels: y (Int64) is missing in 3 of 9 rows and g in 2, so aov
+    // uses 5 rows; groups a, b, c in R factor() order, labels without quotes.
+
+    #[test]
+    fn test_validate_oneway_na_labels_aov() {
+        let (case, ds) = load_case("stat_oneway_na_labels");
+        let r = run_one_way_anova(&ds, "y", "g").unwrap();
+        let names: Vec<&str> = r.groups.iter().map(|g| g.group.as_str()).collect();
+        let sizes: Vec<f64> = r.groups.iter().map(|g| g.n as f64).collect();
+        let means: Vec<f64> = r.groups.iter().map(|g| g.mean).collect();
+        let (s, p, x) = (Tol::stat(5), Tol::p_value(5), Tol::exact());
+        Check::new(&case)
+            .scalar("aov_f", r.f_statistic, s)
+            .scalar("aov_p", r.p_value, p)
+            .scalar("aov_df_between", r.df_between as f64, x)
+            .scalar("aov_df_within", r.df_within as f64, x)
+            .scalar("aov_ss_between", r.ss_between, s)
+            .scalar("aov_ss_within", r.ss_within, s)
+            .scalar("aov_n_used", r.n_obs as f64, x)
+            .scalar("aov_grand_mean", r.grand_mean, s)
+            .named("aov_group_n", &names, &sizes, x)
+            .named("aov_group_means", &names, &means, s)
+            .finish();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(r.missing.n_dropped, 4);
+        assert_eq!(
+            r.missing.by_column,
+            vec![("y".to_string(), 3), ("g".to_string(), 2)]
+        );
+        assert!(
+            r.to_string()
+                .contains("Missing values: 4 of 9 rows dropped because of missing values"),
+            "{r}"
+        );
+    }
+
+    /// Design 2.4 fixture: an Int64 response equals its Float64 cast; a text response and an
+    /// absent factor are refused with the variant that names the problem.
+    #[test]
+    fn test_validate_na_one_way_anova_dtypes_and_errors() {
+        let (_case, ds) = load_case("stat_oneway_na_labels");
+        assert_eq!(ds.df().column("y").unwrap().dtype(), &DataType::Int64);
+        let int = run_one_way_anova(&ds, "y", "g").unwrap();
+        let mut df = ds.df().clone();
+        let y = df.column("y").unwrap().cast(&DataType::Float64).unwrap();
+        df.with_column(y).unwrap();
+        let float = run_one_way_anova(&Dataset::new(df), "y", "g").unwrap();
+        assert_eq!(int.f_statistic, float.f_statistic);
+        assert_eq!(int.ss_between, float.ss_between);
+        assert_eq!(int.ss_within, float.ss_within);
+        assert!(matches!(
+            run_one_way_anova(&ds, "g", "id"),
+            Err(EconError::NonNumericColumn { ref column }) if column == "g"
+        ));
+        assert!(matches!(
+            run_one_way_anova(&ds, "y", "nope"),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
     }
 }
