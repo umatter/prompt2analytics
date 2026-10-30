@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "contingency_table",
+      "name": "Contingency tables from factor columns (missing rows dropped, R factor() level order)",
+      "category": "stats",
+      "reference": "base::table (NA excluded); base::factor (numeric levels numerically, LC_COLLATE = C)",
+      "doc": "validation/stats/chisq.md",
+      "cases": ["stat_contingency_na_codes", "stat_chisq_gof", "stat_mantelhaen_na", "stat_fisher_rows_2000"],
+      "tests": [
+        "p2a-core::stats::contingency::tests::test_validate_contingency_table_na_codes",
+        "p2a-core::stats::contingency::tests::test_validate_na_contingency_int64_equals_float64",
+        "p2a-core::stats::contingency::tests::test_validate_na_contingency_rejects_datetime_and_absent_columns",
+        "p2a-core::stats::contingency::tests::test_validate_level_counts_extra_levels",
+        "p2a-core::stats::contingency::tests::test_validate_stratified_tables_mantelhaen_na",
+        "p2a-core::stats::contingency::tests::test_validate_contingency_table_inside_tokio_runtime"
+      ],
+      "quantities": ["cell counts", "level order", "rows dropped per column", "strata"],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
