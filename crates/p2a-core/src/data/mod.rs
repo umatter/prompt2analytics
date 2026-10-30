@@ -134,16 +134,16 @@
 //! use polars::prelude::*;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // NB: use a null, not f64::NAN, to represent a missing number. polars counts
-//! // NaN as a present value, so a NaN never raises a missing-data issue here.
+//! // A missing number may be a null or a NaN: both count as missing (R's `is.na`).
 //! let df = df! {
-//!     "x" => [Some(1.0), Some(2.0), None, Some(4.0)],
+//!     "x" => [Some(1.0), Some(f64::NAN), None, Some(4.0)],
 //!     "y" => [Some("a"), Some("b"), None, Some("d")]
 //! }?;
-//! let dataset = Dataset::new(df);
-//! let profile = generate_quality_profile(&dataset);
+//! let profile = generate_quality_profile(&Dataset::new(df));
+//! let x = profile.columns.iter().find(|c| c.name == "x").unwrap();
+//! assert_eq!((x.null_count, x.nan_count), (2, 1));
 //! let suggestions = generate_suggestions(&profile);
-//! assert!(!suggestions.suggestions.is_empty()); // both columns are 25% null
+//! assert!(!suggestions.suggestions.is_empty()); // x is 50% missing, y 25%
 //! for s in suggestions.suggestions {
 //!     println!("{:?}: {}", s.priority, s.description);
 //! }

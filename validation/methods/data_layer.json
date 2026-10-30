@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "data_quality_profile",
+      "name": "Data quality profile: missing values (null or NaN), quartiles, IQR outliers",
+      "category": "data",
+      "reference": "stats::quantile(type = 7, na.rm = TRUE); mean; sd; IQR outlier rule (1.5 x IQR)",
+      "doc": "validation/data/data_layer.md",
+      "cases": [
+        "data_quality_profile_na"
+      ],
+      "tests": [
+        "p2a-core::data::quality::tests::test_validate_quality_profile_na",
+        "p2a-core::data::quality::tests::test_validate_quality_profile_nan_cells"
+      ],
+      "quantities": [
+        "q1",
+        "median",
+        "q3",
+        "mean",
+        "sd",
+        "min",
+        "max",
+        "missing count (null + NaN)",
+        "IQR outlier count",
+        "completeness"
+      ],
+      "tolerance": "deterministic order statistics and moments: 1e-12 relative (tighter than validation/README.md); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
