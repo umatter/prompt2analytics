@@ -106,7 +106,17 @@ pub fn format_suggestions(target: &str, available: &[String]) -> Option<String> 
 }
 
 /// Format the ColumnNotFound error message with typo suggestions.
+///
+/// A column that is among `available` exists: some call sites still map every
+/// `DesignError` (a missing, infinite or text cell) to `ColumnNotFound`, so the
+/// message says the column could not be read instead of claiming it is absent.
 fn format_column_not_found_error(column: &str, available: &[String]) -> String {
+    if available.iter().any(|name| name == column) {
+        return format!(
+            "Column '{column}' exists but could not be read as numbers (it has missing, \
+             infinite or non-numeric values)."
+        );
+    }
     let base = format!("Column '{}' not found in dataset.", column);
 
     if let Some(suggestion) = format_suggestions(column, available) {
@@ -513,6 +523,21 @@ mod tests {
         assert!(msg.contains("xyz"));
         assert!(!msg.contains("Did you mean"));
         assert!(msg.contains("Available columns"));
+    }
+
+    #[test]
+    fn test_column_not_found_for_an_existing_column_says_unreadable() {
+        // Call sites that still map every design error to ColumnNotFound (a NaN, Inf or
+        // text cell in an existing column) must not claim the column is missing.
+        let err = EconError::ColumnNotFound {
+            column: "y".to_string(),
+            available: vec!["t".to_string(), "y".to_string(), "x".to_string()],
+        };
+        assert_eq!(
+            err.to_string(),
+            "Column 'y' exists but could not be read as numbers (it has missing, infinite \
+             or non-numeric values)."
+        );
     }
 
     #[test]
