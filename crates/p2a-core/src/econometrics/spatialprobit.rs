@@ -30,6 +30,15 @@
 //! where lambda is the spatial error parameter. This model accounts for spatial
 //! correlation in the error term.
 //!
+//! # Data requirements
+//!
+//! Row i of the dataset is unit i of the weights: one row per unit of W, and no row can be
+//! dropped. Missing values (null or NaN) in y or X are refused with
+//! `EconError::NullValues` naming the column (spatialprobit, like spatialreg, has no
+//! `na.omit` route); remove the incomplete rows and rebuild W first. Integer and Boolean
+//! columns are accepted. The outcome is 0/1: an Int64, Float64 or Boolean column with both
+//! values present.
+//!
 //! # Estimation Method
 //!
 //! Uses a Bayesian Markov Chain Monte Carlo (MCMC) approach with data augmentation,
@@ -336,37 +345,9 @@ fn run_spatial_probit_internal(
     // Refuse impossible draw counts before any work.
     total_mcmc_draws(&config)?;
 
-    let df = dataset.df();
-    let n = df.height();
-    let k = x_cols.len() + 1; // +1 for intercept
-
-    // Validate dimensions
-    if n != listw.n() {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Dataset has {} observations but weights matrix has {} observations",
-                n,
-                listw.n()
-            ),
-        });
-    }
-
-    // Extract y (binary outcome)
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let y: Array1<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
+    // y (0/1, integer or Boolean) and [1, X]; one row per unit of W, no missing values
+    let (y, x) = super::spatial::spatial_model_data(dataset, y_col, x_cols, listw)?;
+    let n = y.len();
 
     // Validate y is binary
     let n_positive = y.iter().filter(|&&v| v >= 0.5).count();
@@ -377,28 +358,6 @@ fn run_spatial_probit_internal(
                 y_col, n_positive, n
             ),
         });
-    }
-
-    // Build design matrix with intercept
-    let mut x = Array2::zeros((n, k));
-    for i in 0..n {
-        x[[i, 0]] = 1.0; // Intercept
-    }
-    for (j, &col_name) in x_cols.iter().enumerate() {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-        let col_f64 = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-        for (i, val) in col_f64.into_no_null_iter().enumerate() {
-            x[[i, j + 1]] = val;
-        }
     }
 
     // Get valid range for spatial parameter
@@ -1636,5 +1595,75 @@ mod tests {
         assert!((inverse_normal_cdf(0.5) - 0.0).abs() < 1e-6);
         assert!(inverse_normal_cdf(0.975) > 1.9 && inverse_normal_cdf(0.975) < 2.0);
         assert!(inverse_normal_cdf(0.025) < -1.9 && inverse_normal_cdf(0.025) > -2.0);
+    }
+
+    fn short_chain() -> SpatialProbitConfig {
+        SpatialProbitConfig {
+            n_draws: 100,
+            burn_in: 50,
+            compute_impacts: false,
+            seed: Some(42),
+            ..Default::default()
+        }
+    }
+
+    /// The outcome of the binary fixture as stored (Float64 0/1).
+    fn outcome(ds: &Dataset) -> Vec<f64> {
+        ds.df()
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect()
+    }
+
+    #[test]
+    fn test_na_spatial_probit_int64_and_boolean_outcome() {
+        let (ds, w) = create_test_spatial_binary_data();
+        let y = outcome(&ds);
+        let x = ds.df().column("x").unwrap().clone();
+        let y_i64: Vec<i64> = y.iter().map(|&v| v as i64).collect();
+        let y_bool: Vec<bool> = y.iter().map(|&v| v > 0.5).collect();
+        let as_i64 = DataFrame::new(vec![Column::new("y".into(), y_i64), x.clone()]).unwrap();
+        let as_bool = DataFrame::new(vec![Column::new("y".into(), y_bool), x]).unwrap();
+        for run in [run_sar_probit, run_sem_probit] {
+            let f = run(&ds, "y", &["x"], &mut w.clone(), short_chain());
+            assert!(f.is_ok(), "{f:?}");
+            for df in [&as_i64, &as_bool] {
+                let r = run(
+                    &Dataset::new(df.clone()),
+                    "y",
+                    &["x"],
+                    &mut w.clone(),
+                    short_chain(),
+                );
+                assert_eq!(format!("{r:?}"), format!("{f:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_na_spatial_probit_missing_outcome() {
+        let (ds, w) = create_test_spatial_binary_data();
+        let y: Vec<Option<f64>> = outcome(&ds)
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| (i != 4).then_some(v))
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new("y".into(), y)).unwrap();
+        let e = run_sar_probit(
+            &Dataset::new(df),
+            "y",
+            &["x"],
+            &mut w.clone(),
+            short_chain(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, EconError::NullValues { ref column, count: 1 } if column == "y"),
+            "{e:?}"
+        );
     }
 }

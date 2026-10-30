@@ -55,6 +55,13 @@
 //! Alternatively, HAC standard errors (Kelejian & Prucha, 2007) can be
 //! computed for robustness to both heteroscedasticity and spatial correlation.
 //!
+//! # Data requirements
+//!
+//! Row i of the dataset is unit i of the weights: one row per unit of W, and no row can be
+//! dropped. Missing values (null or NaN) in y or X are refused with
+//! `EconError::NullValues` naming the column (spdep/spatialreg `na.fail`); remove the
+//! incomplete rows and rebuild W first. Integer and Boolean (0/1) columns are accepted.
+//!
 //! # References
 //!
 //! - Kelejian, H.H. & Prucha, I.R. (1998). "A Generalized Spatial Two-Stage
@@ -388,19 +395,9 @@ pub fn run_sphet(
 ) -> EconResult<SphetResult> {
     validate_config(&config)?;
 
-    let df = dataset.df();
-    let n = df.height();
-    let k = x_cols.len() + 1; // +1 for intercept
-
-    if n != listw.n() {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Dataset has {} observations but weights matrix has {} observations",
-                n,
-                listw.n()
-            ),
-        });
-    }
+    let (y, x) = super::spatial::spatial_model_data(dataset, y_col, x_cols, listw)?;
+    let n = y.len();
+    let k = x.ncols(); // intercept + regressors
 
     if n < k + 5 {
         return Err(EconError::InsufficientData {
@@ -408,45 +405,6 @@ pub fn run_sphet(
             provided: n,
             context: "Spatial GMM requires sufficient degrees of freedom".to_string(),
         });
-    }
-
-    // Extract y
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let y: Array1<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Build design matrix with intercept
-    let mut x = Array2::zeros((n, k));
-    for i in 0..n {
-        x[[i, 0]] = 1.0; // Intercept
-    }
-    for (j, &col_name) in x_cols.iter().enumerate() {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-        let col_f64 = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-        for (i, val) in col_f64.into_no_null_iter().enumerate() {
-            x[[i, j + 1]] = val;
-        }
     }
 
     // Build coefficient names
@@ -1550,5 +1508,70 @@ mod tests {
         // With rho=2, g1=0.1, g2=0.5, g3=0.01: sigma2 = 0.1 - 2*0.5 + 0.04 = -0.86 < 0
         let obj_bad = gm_objective(2.0, 0.1, 0.5, 0.01, 0.1, 0.3, 0.1, 0.1);
         assert!(obj_bad.is_infinite());
+    }
+
+    /// The integer 5 x 5 grid of `spatial.rs`'s `int_grid` (that helper is private to its
+    /// module): W = 4 nearest neighbours, row-standardised; x1 = 6 i, x2 = 5 ((7 i) mod 13),
+    /// y = round(30 (1.5 + 0.8 i/5 - 0.3 ((7 i) mod 13)/6 + 0.2 (row + col))). Returns the
+    /// Int64 columns, a Float64 copy and W.
+    fn int_grid() -> (DataFrame, DataFrame, SpatialWeights) {
+        let coords: Vec<(f64, f64)> = (0..5)
+            .flat_map(|i| (0..5).map(move |j| (i as f64, j as f64)))
+            .collect();
+        let w =
+            SpatialWeights::from_neighbors(&Neighbors::from_knn(&coords, 4), WeightStyle::RowStd);
+        let x1: Vec<i64> = (0..25).map(|i| 6 * i).collect();
+        let x2: Vec<i64> = (0..25).map(|i| 5 * ((7 * i) % 13)).collect();
+        let y: Vec<i64> = (0..25i64)
+            .map(|i| {
+                let (row, col) = (i / 5, i % 5);
+                let v = 1.5 + 0.8 * i as f64 / 5.0 - 0.3 * ((7 * i) % 13) as f64 / 6.0
+                    + 0.2 * (row + col) as f64;
+                (30.0 * v).round() as i64
+            })
+            .collect();
+        let f = |v: &[i64]| v.iter().map(|&a| a as f64).collect::<Vec<f64>>();
+        let int = df! { "y" => &y, "x1" => &x1, "x2" => &x2 }.unwrap();
+        let flt = df! { "y" => f(&y), "x1" => f(&x1), "x2" => f(&x2) }.unwrap();
+        (int, flt, w)
+    }
+
+    #[test]
+    fn test_na_sphet_int64_equals_float64_and_refuses_missing() {
+        let (int, flt, w) = int_grid();
+        let y_null: Vec<Option<f64>> = flt
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| if i == 7 { None } else { v })
+            .collect();
+        let mut with_null = flt.clone();
+        with_null
+            .with_column(Column::new("y".into(), y_null))
+            .unwrap();
+        let run = |df: &DataFrame, model: SphetModel| {
+            let config = SphetConfig {
+                model,
+                ..Default::default()
+            };
+            run_sphet(&Dataset::new(df.clone()), "y", &["x1", "x2"], &w, config)
+        };
+        for model in [
+            SphetModel::SpatialLag,
+            SphetModel::SpatialError,
+            SphetModel::SARAR,
+        ] {
+            let (a, b) = (run(&int, model), run(&flt, model));
+            assert!(b.is_ok(), "{model:?}: {b:?}");
+            assert_eq!(format!("{a:?}"), format!("{b:?}"), "{model:?}");
+            let e = run(&with_null, model).unwrap_err();
+            assert!(
+                matches!(e, EconError::NullValues { ref column, count: 1 } if column == "y"),
+                "{model:?}: {e:?}"
+            );
+        }
     }
 }

@@ -19,6 +19,15 @@
 //!
 //! where λ is the spatial error parameter.
 //!
+//! # Data requirements
+//!
+//! Row i of the dataset is unit i of the weights, so the dataset has exactly one row per
+//! unit of W and no row can be dropped. Missing values (null or NaN) in the outcome or a
+//! regressor are refused with `EconError::NullValues` naming the column (spatialreg's
+//! `na.action = na.fail`); remove the incomplete rows and rebuild W first. Integer and
+//! Boolean (0/1) columns are accepted, text is `NonNumericColumn` and `±Inf` is
+//! `NonFiniteValues`. The same rules hold for `sphet` and `spatialprobit`.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -42,9 +51,47 @@ use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, pseudoinverse, xtx, xty};
 use crate::spatial::SpatialWeights;
+
+/// Outcome `y` and design `[1, X]` (intercept first) of a spatial cross-section model (SAR,
+/// SEM, SAC, sphet, spatial probit).
+///
+/// Row i of the dataset is unit i of `listw`, so no row can be dropped. Every column is read
+/// through `ColumnRequest` with `NaPolicy::Fail` (spatialreg/spdep: `na.action = na.fail`):
+/// - a missing value (null or NaN) is `EconError::NullValues` for the first such column,
+///   `y_col` first;
+/// - Integer and Boolean (0/1) columns are accepted;
+/// - text is `NonNumericColumn`, and `±Inf` is `NonFiniteValues`.
+///
+/// `n != listw.n()` is `InvalidSpecification` ("Dataset has {n} observations but weights
+/// matrix has {m} observations"); that check runs first.
+pub(crate) fn spatial_model_data(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    listw: &SpatialWeights,
+) -> EconResult<(Array1<f64>, Array2<f64>)> {
+    let df = dataset.df();
+    let n = df.height();
+    if n != listw.n() {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Dataset has {} observations but weights matrix has {} observations",
+                n,
+                listw.n()
+            ),
+        });
+    }
+    let cols = ColumnRequest::new(df)
+        .numeric(y_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    Ok((cols.numeric_array(y_col), cols.matrix(x_cols, true).data))
+}
 
 /// Refuses an optimiser tolerance that is not finite and positive, and `max_iter == 0`.
 /// Shared by the cross-section estimators here and the spatial panel ones in `splm`.
@@ -249,66 +296,9 @@ pub fn run_sar(
     config: SarConfig,
 ) -> EconResult<SarResult> {
     validate_optimizer(config.tol, config.max_iter)?;
-    let df = dataset.df();
-    let n = df.height();
-    let k = x_cols.len() + 1; // +1 for intercept
-
-    if n != listw.n() {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Dataset has {} observations but weights matrix has {} observations",
-                n,
-                listw.n()
-            ),
-        });
-    }
-
-    // Extract y
-    let y_series = df.column(y_col).map_err(|_e| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let y: Array1<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Build design matrix with intercept
-    let mut x_data = Vec::with_capacity(n * k);
-    for _ in 0..n {
-        x_data.push(1.0); // Intercept
-    }
-    for &col_name in x_cols {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-        let col_f64 = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-        for val in col_f64.into_no_null_iter() {
-            x_data.push(val);
-        }
-    }
-
-    let mut x = Array2::zeros((n, k));
-    for i in 0..n {
-        x[[i, 0]] = 1.0; // Intercept
-        for (j, &_col_name) in x_cols.iter().enumerate() {
-            x[[i, j + 1]] = x_data[n * (j + 1) + i];
-        }
-    }
+    let (y, x) = spatial_model_data(dataset, y_col, x_cols, listw)?;
+    let n = y.len();
+    let k = x.ncols(); // intercept + regressors
 
     // Add spatially lagged X for Spatial Durbin Model
     let x_final = if config.durbin {
@@ -475,58 +465,9 @@ pub fn run_sem(
     config: SemConfig,
 ) -> EconResult<SemResult> {
     validate_optimizer(config.tol, config.max_iter)?;
-    let df = dataset.df();
-    let n = df.height();
-    let k = x_cols.len() + 1; // +1 for intercept
-
-    if n != listw.n() {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Dataset has {} observations but weights matrix has {} observations",
-                n,
-                listw.n()
-            ),
-        });
-    }
-
-    // Extract y
-    let y_series = df.column(y_col).map_err(|_e| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let y: Array1<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Build design matrix with intercept
-    let mut x = Array2::zeros((n, k));
-    for i in 0..n {
-        x[[i, 0]] = 1.0; // Intercept
-    }
-    for (j, &col_name) in x_cols.iter().enumerate() {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-        let col_f64 = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-        for (i, val) in col_f64.into_no_null_iter().enumerate() {
-            x[[i, j + 1]] = val;
-        }
-    }
+    let (y, x) = spatial_model_data(dataset, y_col, x_cols, listw)?;
+    let n = y.len();
+    let k = x.ncols(); // intercept + regressors
 
     // Get valid range for λ
     let (lambda_min, lambda_max) = listw.try_rho_range()?;
@@ -757,58 +698,9 @@ pub fn run_sac(
     config: SacConfig,
 ) -> EconResult<SacResult> {
     validate_optimizer(config.tol, config.max_iter)?;
-    let df = dataset.df();
-    let n = df.height();
-    let k = x_cols.len() + 1; // +1 for intercept
-
-    if n != listw.n() {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Dataset has {} observations but weights matrix has {} observations",
-                n,
-                listw.n()
-            ),
-        });
-    }
-
-    // Extract y
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let y: Array1<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Build design matrix with intercept
-    let mut x = Array2::zeros((n, k));
-    for i in 0..n {
-        x[[i, 0]] = 1.0; // Intercept
-    }
-    for (j, &col_name) in x_cols.iter().enumerate() {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-        let col_f64 = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-        for (i, val) in col_f64.into_no_null_iter().enumerate() {
-            x[[i, j + 1]] = val;
-        }
-    }
+    let (y, x) = spatial_model_data(dataset, y_col, x_cols, listw)?;
+    let n = y.len();
+    let k = x.ncols(); // intercept + regressors
 
     // Pre-compute eigenvalues
     let eigenvalues = listw.try_eigenvalues()?.clone();
@@ -2652,5 +2544,174 @@ mod tests {
             run_sac(&d, "y", &["x"], &mut w, SacConfig::default())
         });
         assert!(matches!(r, Err(EconError::Cancelled(_))), "sac");
+    }
+
+    /// 5 x 5 grid, W = 4 nearest neighbours (row-standardised), integer-valued data:
+    /// x1 = 6 i, x2 = 5 ((7 i) mod 13),
+    /// y = round(30 (1.5 + 0.8 i/5 - 0.3 ((7 i) mod 13)/6 + 0.2 (row + col)))
+    /// (`create_validation_spatial_data` scaled by 30 and rounded, so the fit stays well
+    /// conditioned). Returns the Int64 columns, a Float64 copy and W.
+    fn int_grid() -> (DataFrame, DataFrame, SpatialWeights) {
+        let coords: Vec<(f64, f64)> = (0..5)
+            .flat_map(|i| (0..5).map(move |j| (i as f64, j as f64)))
+            .collect();
+        let w =
+            SpatialWeights::from_neighbors(&Neighbors::from_knn(&coords, 4), WeightStyle::RowStd);
+        let x1: Vec<i64> = (0..25).map(|i| 6 * i).collect();
+        let x2: Vec<i64> = (0..25).map(|i| 5 * ((7 * i) % 13)).collect();
+        let y: Vec<i64> = (0..25i64)
+            .map(|i| {
+                let (row, col) = (i / 5, i % 5);
+                let v = 1.5 + 0.8 * i as f64 / 5.0 - 0.3 * ((7 * i) % 13) as f64 / 6.0
+                    + 0.2 * (row + col) as f64;
+                (30.0 * v).round() as i64
+            })
+            .collect();
+        let f = |v: &[i64]| v.iter().map(|&a| a as f64).collect::<Vec<f64>>();
+        let int = df! { "y" => &y, "x1" => &x1, "x2" => &x2 }.unwrap();
+        let flt = df! { "y" => f(&y), "x1" => f(&x1), "x2" => f(&x2) }.unwrap();
+        (int, flt, w)
+    }
+
+    fn sar(df: &DataFrame, w: &SpatialWeights, durbin: bool) -> EconResult<SarResult> {
+        let config = SarConfig {
+            durbin,
+            ..Default::default()
+        };
+        run_sar(
+            &Dataset::new(df.clone()),
+            "y",
+            &["x1", "x2"],
+            &mut w.clone(),
+            config,
+        )
+    }
+
+    fn sem(df: &DataFrame, w: &SpatialWeights) -> EconResult<SemResult> {
+        let ds = Dataset::new(df.clone());
+        run_sem(
+            &ds,
+            "y",
+            &["x1", "x2"],
+            &mut w.clone(),
+            SemConfig::default(),
+        )
+    }
+
+    fn sac(df: &DataFrame, w: &SpatialWeights) -> EconResult<SacResult> {
+        let ds = Dataset::new(df.clone());
+        run_sac(
+            &ds,
+            "y",
+            &["x1", "x2"],
+            &mut w.clone(),
+            SacConfig::default(),
+        )
+    }
+
+    /// A Float64 copy of column `name` of `df`, every value as stored.
+    fn f64_values(df: &DataFrame, name: &str) -> Vec<f64> {
+        df.column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect()
+    }
+
+    #[test]
+    fn test_na_spatial_models_int64_equals_float64() {
+        let (int, flt, w) = int_grid();
+        assert_eq!(int.column("y").unwrap().dtype(), &DataType::Int64);
+        for durbin in [false, true] {
+            let (a, b) = (sar(&int, &w, durbin), sar(&flt, &w, durbin));
+            assert!(b.is_ok(), "{b:?}");
+            assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        }
+        let (a, b) = (sem(&int, &w), sem(&flt, &w));
+        assert!(b.is_ok(), "{b:?}");
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        let (a, b) = (sac(&int, &w), sac(&flt, &w));
+        assert!(b.is_ok(), "{b:?}");
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        // a Boolean regressor is 0/1
+        let flag: Vec<bool> = (0..25).map(|i| i % 3 == 0).collect();
+        let mut bdf = flt.clone();
+        bdf.with_column(Column::new("x2".into(), flag.clone()))
+            .unwrap();
+        let mut fdf = flt.clone();
+        let flag01: Vec<f64> = flag.iter().map(|&b| f64::from(u8::from(b))).collect();
+        fdf.with_column(Column::new("x2".into(), flag01)).unwrap();
+        let (a, b) = (sar(&bdf, &w, false), sar(&fdf, &w, false));
+        assert!(b.is_ok(), "{b:?}");
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    }
+
+    #[test]
+    fn test_na_spatial_models_missing_values_refused() {
+        let (_, flt, w) = int_grid();
+        let y_null: Vec<Option<f64>> = f64_values(&flt, "y")
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| (i != 7).then_some(v))
+            .collect();
+        let mut d = flt.clone();
+        d.with_column(Column::new("y".into(), y_null)).unwrap();
+        for e in [
+            sar(&d, &w, false).unwrap_err(),
+            sem(&d, &w).unwrap_err(),
+            sac(&d, &w).unwrap_err(),
+        ] {
+            assert!(
+                matches!(e, EconError::NullValues { ref column, count: 1 } if column == "y"),
+                "{e:?}"
+            );
+        }
+        // NaN is missing too (a Rust-built fixture; R has no NaN in a CSV)
+        let mut x1 = f64_values(&flt, "x1");
+        x1[3] = f64::NAN;
+        let mut d = flt.clone();
+        d.with_column(Column::new("x1".into(), x1)).unwrap();
+        let e = sar(&d, &w, false).unwrap_err();
+        assert!(
+            matches!(e, EconError::NullValues { ref column, count: 1 } if column == "x1"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_na_spatial_models_dtype_errors() {
+        let (_, flt, w) = int_grid();
+        let mut d = flt.clone();
+        let text: Vec<String> = (0..25).map(|i| format!("v{i}")).collect();
+        d.with_column(Column::new("x1".into(), text)).unwrap();
+        let e = sar(&d, &w, false).unwrap_err();
+        assert!(
+            matches!(e, EconError::NonNumericColumn { ref column } if column == "x1"),
+            "{e:?}"
+        );
+        let mut x2 = f64_values(&flt, "x2");
+        x2[0] = f64::INFINITY;
+        let mut d = flt.clone();
+        d.with_column(Column::new("x2".into(), x2)).unwrap();
+        let e = sem(&d, &w).unwrap_err();
+        assert!(
+            matches!(e, EconError::NonFiniteValues { ref column, count: 1 } if column == "x2"),
+            "{e:?}"
+        );
+        let r = run_sar(
+            &Dataset::new(flt.clone()),
+            "y",
+            &["nope"],
+            &mut w.clone(),
+            SarConfig::default(),
+        );
+        assert!(matches!(r, Err(EconError::ColumnNotFound { .. })), "{r:?}");
+        // W of the wrong size (a guard: refused before the change too)
+        let three = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
+        let small =
+            SpatialWeights::from_neighbors(&Neighbors::from_knn(&three, 1), WeightStyle::RowStd);
+        let e = sar(&flt, &small, false).unwrap_err();
+        assert!(matches!(e, EconError::InvalidSpecification { .. }), "{e:?}");
     }
 }
