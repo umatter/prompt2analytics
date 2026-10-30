@@ -22,6 +22,13 @@
 //! starting where R starts (AR and MA coefficients 0, μ and δ by least squares). R's default
 //! method, CSS-ML, is not implemented.
 //!
+//! # Forecasts
+//!
+//! As `stats::predict.Arima` does for a CSS fit: the state-space form of
+//! `stats::makeARIMA`, a Kalman filter over the mean- and drift-adjusted series, and
+//! `KalmanForecast`. Standard errors use forecast::Arima's σ² = SSR / (n - d - k); the 80%
+//! and 95% limits are those of `forecast::forecast`.
+//!
 //! # References
 //!
 //! - Box, G.E.P., Jenkins, G.M., Reinsel, G.C., & Ljung, G.M. (2015). *Time Series
@@ -43,20 +50,15 @@
 use std::fmt;
 
 use anyhow::Result;
-use ndarray::{Array1, Array2};
-use rand::SeedableRng;
-use rand::rngs::StdRng;
+use ndarray::{Array1, Array2, s};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
 use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::solve;
-use crate::resource::{checked_len, checkpoint, try_vec, try_zeros1, try_zeros2};
-
-fn size_overflow(what: &str) -> EconError {
-    EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
-}
+use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_zeros1, try_zeros2};
 
 /// Outer iterations of the Levenberg-Marquardt loop.
 const MAX_ITERATIONS: usize = 200;
@@ -69,8 +71,12 @@ const LAMBDA_START: f64 = 1e-3;
 const LAMBDA_MAX: f64 = 1e16;
 /// Keeps the damping positive after many accepted steps.
 const LAMBDA_MIN: f64 = 1e-20;
+/// `stats::makeARIMA`'s prior variance of the differencing states.
+const KAPPA: f64 = 1e6;
 /// Rows between budget checks in a pass over the series.
 const ROW_STRIDE: usize = 4096;
+/// Kalman filter steps between budget checks.
+const FILTER_STRIDE: usize = 1024;
 /// A matrix power below this (largest absolute entry) has decayed.
 const DECAYED: f64 = 1e-12;
 /// Squarings before a matrix that has not decayed counts as not stable.
@@ -80,6 +86,8 @@ const MAX_SQUARINGS: usize = 64;
 /// circle.
 const MA_NOT_INVERTIBLE: &str = "MA part of model is not invertible";
 const AR_NOT_STATIONARY: &str = "AR part is not stationary";
+const DIFFUSE_ARMA_PRIOR: &str = "AR part is not stationary: the Kalman filter starts the ARMA \
+     state from a diffuse prior (variance 1e6) instead of the stationary covariance";
 
 /// ARIMA(p, d, q) with forecast::Arima's mean and drift options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,17 +295,84 @@ impl fmt::Display for ArimaResult {
     }
 }
 
-/// Result from ARIMA forecasting.
+/// Result of an ARIMA forecast.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArimaForecastResult {
     /// Column being forecasted
     pub column: String,
     /// Number of forecast steps
     pub horizon: usize,
-    /// Forecasted values
+    /// Point forecasts, h = 1..horizon
     pub forecast: Vec<f64>,
-    /// Standard errors of forecast (if available)
+    /// Standard errors of the forecasts (stats::predict.Arima); always `Some` from
+    /// [`forecast_arima_with`], an `Option` for compatibility with stored results.
     pub std_errors: Option<Vec<f64>>,
+    /// Coverage of the prediction intervals in percent: [80.0, 95.0].
+    #[serde(default)]
+    pub levels: Vec<f64>,
+    /// `lower[i][h]`: lower limit for `levels[i]` (forecast::forecast's `lower`).
+    #[serde(default)]
+    pub lower: Vec<Vec<f64>>,
+    /// `upper[i][h]`: upper limit for `levels[i]` (forecast::forecast's `upper`).
+    #[serde(default)]
+    pub upper: Vec<Vec<f64>>,
+    /// The fit's warnings plus those of the forecaster.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The fit the forecasts come from (always `Some` from [`forecast_arima_with`]).
+    #[serde(default)]
+    pub fit: Option<ArimaResult>,
+}
+
+impl fmt::Display for ArimaForecastResult {
+    /// The forecast table. Warnings the fit reported are left to the fit's own `Display`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = self
+            .fit
+            .as_ref()
+            .map_or_else(|| "ARIMA".to_string(), |fit| fit.spec().label());
+        write!(
+            f,
+            "Forecasts from {label} for '{}' (80% and 95% prediction intervals, as R forecast())",
+            self.column
+        )?;
+        let width = format!("  t+{}: ", self.forecast.len()).len();
+        write!(
+            f,
+            "\n{:width$}{:>11} {:>11} {:>11} {:>11} {:>11} {:>11}",
+            "", "Forecast", "Std.Err", "Lo 80", "Hi 80", "Lo 95", "Hi 95"
+        )?;
+        let at = |rows: &Vec<Vec<f64>>, i: usize, h: usize| {
+            rows.get(i)
+                .and_then(|r| r.get(h))
+                .copied()
+                .unwrap_or(f64::NAN)
+        };
+        for (h, mean) in self.forecast.iter().enumerate() {
+            let se = self
+                .std_errors
+                .as_ref()
+                .and_then(|s| s.get(h))
+                .copied()
+                .unwrap_or(f64::NAN);
+            let step = format!("  t+{}: ", h + 1);
+            write!(
+                f,
+                "\n{step:width$}{mean:>11.4} {se:>11.4} {:>11.4} {:>11.4} {:>11.4} {:>11.4}",
+                at(&self.lower, 0, h),
+                at(&self.upper, 0, h),
+                at(&self.lower, 1, h),
+                at(&self.upper, 1, h)
+            )?;
+        }
+        let fit_warnings = self.fit.as_ref().map(|fit| fit.warnings.as_slice());
+        for w in &self.warnings {
+            if !fit_warnings.is_some_and(|fw| fw.contains(w)) {
+                write!(f, "\nWarning: {w}")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Fit an ARIMA(p, d, q) model by conditional sum of squares, as
@@ -353,7 +428,90 @@ pub fn run_arima(
     Ok(run_arima_with(dataset, column, &ArimaSpec::new(p, d, q))?)
 }
 
-/// Forecast future values using a fitted ARIMA model.
+/// Forecast `horizon` steps ahead with an ARIMA model fitted by conditional sum of squares,
+/// with standard errors and 80% / 95% prediction intervals, as
+/// `forecast::forecast(forecast::Arima(x, order, method = "CSS"), h, level = c(80, 95))`.
+///
+/// The forecasts come from the state-space form of `stats::makeARIMA` and a Kalman filter
+/// over the series minus its mean (and drift), as `stats::predict.Arima` computes them for
+/// a CSS fit. The standard errors use forecast::Arima's sigma2 = SSR / (n - d - k).
+///
+/// # Errors
+/// Those of [`run_arima_with`]; a horizon of 0 is `InvalidSpecification`, and a horizon
+/// whose output vectors cannot be allocated is [`EconError::ResourceLimit`] (checked before
+/// the fit). The filter checks the budget every 1024 steps and once per forecast step.
+///
+/// # Example
+/// ```
+/// use p2a_core::data::Dataset;
+/// use p2a_core::forecasting::{ArimaSpec, forecast_arima_with};
+/// use polars::prelude::*;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // An AR(1) series around 10 with deterministic noise.
+/// let mut y = vec![10.0];
+/// for t in 1..60 {
+///     let noise = ((t * 37 % 17) as f64 - 8.0) / 8.0;
+///     y.push(10.0 + 0.6 * (y[t - 1] - 10.0) + noise);
+/// }
+/// let ds = Dataset::new(df! { "y" => &y }?);
+/// let fc = forecast_arima_with(&ds, "y", &ArimaSpec::new(1, 0, 0), 4)?;
+/// assert_eq!(fc.forecast.len(), 4);
+/// assert!(fc.lower[1][0] < fc.forecast[0]); // the 95% lower limit
+/// # Ok(())
+/// # }
+/// ```
+pub fn forecast_arima_with(
+    dataset: &Dataset,
+    column: &str,
+    spec: &ArimaSpec,
+    horizon: usize,
+) -> EconResult<ArimaForecastResult> {
+    const WHAT: &str = "the ARIMA forecast (horizon x 6 output vectors)";
+    let cells = checked_len(&[horizon, 6], WHAT)?;
+    check_alloc::<f64>(cells, WHAT)?;
+    if horizon == 0 {
+        return Err(invalid("horizon must be at least 1".to_string()));
+    }
+    let (x, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
+    let fit = fit_css(&x, spec, column)?;
+    let pred = arima_predict(&x, spec, &fit.coefficients, fit.sigma2, horizon)?;
+
+    let normal = Normal::new(0.0, 1.0).map_err(|e| EconError::Internal(e.to_string()))?;
+    let levels = vec![80.0, 95.0];
+    let mut lower = Vec::with_capacity(levels.len());
+    let mut upper = Vec::with_capacity(levels.len());
+    for level in &levels {
+        let z = normal.inverse_cdf(0.5 * (1.0 + level / 100.0));
+        let mut lo = try_vec(horizon, 0.0, WHAT)?;
+        let mut hi = try_vec(horizon, 0.0, WHAT)?;
+        for h in 0..horizon {
+            lo[h] = pred.mean[h] - z * pred.se[h];
+            hi[h] = pred.mean[h] + z * pred.se[h];
+        }
+        lower.push(lo);
+        upper.push(hi);
+    }
+    let mut warnings = fit.warnings.clone();
+    for w in pred.warnings {
+        if !warnings.contains(&w) {
+            warnings.push(w);
+        }
+    }
+    Ok(ArimaForecastResult {
+        column: column.to_string(),
+        horizon,
+        forecast: pred.mean,
+        std_errors: Some(pred.se),
+        levels,
+        lower,
+        upper,
+        warnings,
+        fit: Some(fit),
+    })
+}
+
+/// Forecast future values with an ARIMA model with R's defaults ([`ArimaSpec::new`]); see
+/// [`forecast_arima_with`].
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the time series
@@ -364,10 +522,11 @@ pub fn run_arima(
 /// * `horizon` - Number of steps to forecast
 ///
 /// # Returns
-/// `ArimaForecastResult` containing forecasted values, or the [`EconError`] of
-/// [`run_arima_with`] inside the `anyhow::Error`, including [`EconError::Cancelled`] (the
-/// fit checks the budget before it starts and on every iteration) and
-/// [`EconError::NullValues`] for a column with missing values.
+/// `ArimaForecastResult` with forecasts, standard errors and 80/95% limits, or the
+/// [`EconError`] of [`forecast_arima_with`] inside the `anyhow::Error`, including
+/// [`EconError::Cancelled`] (the fit checks the budget before it starts and on every
+/// iteration, the forecast every 1024 filter steps) and [`EconError::NullValues`] for a
+/// column with missing values.
 pub fn forecast_arima(
     dataset: &Dataset,
     column: &str,
@@ -376,51 +535,12 @@ pub fn forecast_arima(
     q: usize,
     horizon: usize,
 ) -> Result<ArimaForecastResult> {
-    use arima::sim;
-
-    // First fit the model
-    let model = run_arima(dataset, column, p, d, q)?;
-
-    // The series the fit read (`run_arima` refused missing values)
-    let (values, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
-
-    // Prepare AR and MA coefficients as Option slices
-    let ar_opt = if model.ar_coeffs.is_empty() {
-        None
-    } else {
-        Some(model.ar_coeffs.as_slice())
-    };
-    let ma_opt = if model.ma_coeffs.is_empty() {
-        None
-    } else {
-        Some(model.ma_coeffs.as_slice())
-    };
-
-    // The arima crate grows its buffer with push (one doubling reallocation) and clones it once.
-    // Refuse sizes it could never allocate before it starts; TS-1 (tier 2) replaces this forecaster.
-    const WHAT: &str = "the ARIMA forecast buffer (series length + horizon)";
-    let total = values
-        .len()
-        .checked_add(horizon)
-        .ok_or_else(|| size_overflow(WHAT))?;
-    crate::resource::check_alloc::<f64>(total.saturating_mul(2), WHAT)?;
-    drop(crate::resource::try_with_capacity::<f64>(total, WHAT)?);
-
-    // Create a zero-noise function for deterministic forecast
-    let noise_fn = |_idx: usize, _rng: &mut StdRng| 0.0;
-    let mut rng = StdRng::seed_from_u64(42);
-
-    // Forecast using arima_forecast
-    // The function handles differencing internally via the d parameter
-    let forecast = sim::arima_forecast(&values, horizon, ar_opt, ma_opt, d, &noise_fn, &mut rng)
-        .map_err(|e| anyhow::anyhow!("Forecasting failed: {:?}", e))?;
-
-    Ok(ArimaForecastResult {
-        column: column.to_string(),
+    Ok(forecast_arima_with(
+        dataset,
+        column,
+        &ArimaSpec::new(p, d, q),
         horizon,
-        forecast,
-        std_errors: None,
-    })
+    )?)
 }
 
 fn invalid(message: String) -> EconError {
@@ -900,6 +1020,260 @@ fn polynomial_stable(c: &[f64]) -> EconResult<bool> {
     decays(&companion(c)?)
 }
 
+/// Stationary covariance of x_t = A x_{t-1} + R e_t (doubling: X <- X + A X A',
+/// A <- A A from X = V = R R', until A has decayed); `None` when A is not stable.
+fn stationary_covariance(a: &Array2<f64>, v: &Array2<f64>) -> EconResult<Option<Array2<f64>>> {
+    let mut x = v.clone();
+    let mut power = a.clone();
+    for _ in 0..MAX_SQUARINGS {
+        if max_abs(&power) <= DECAYED {
+            return Ok(Some(x));
+        }
+        checkpoint()?;
+        x = &x + &power.dot(&x).dot(&power.t());
+        power = power.dot(&power);
+        if !all_finite(&x) || !all_finite(&power) {
+            return Ok(None);
+        }
+    }
+    Ok((max_abs(&power) <= DECAYED).then_some(x))
+}
+
+/// The ARIMA state space of `stats::makeARIMA`: r = max(p, q + 1) ARMA states followed by
+/// d differencing states.
+struct StateSpace<'a> {
+    phi: &'a [f64],
+    /// (1 - B)^d = 1 - delta_1 B - ... - delta_d B^d
+    delta: Vec<f64>,
+    /// (1, theta_1, ..., theta_q, 0, ...), length r
+    r_vec: Vec<f64>,
+    r: usize,
+    rd: usize,
+}
+
+impl StateSpace<'_> {
+    /// out = T v.
+    fn apply_t(&self, v: &[f64], out: &mut [f64]) {
+        let (r, p) = (self.r, self.phi.len());
+        for i in 0..r {
+            let mut t = if i + 1 < r { v[i + 1] } else { 0.0 };
+            if i < p {
+                t += self.phi[i] * v[0];
+            }
+            out[i] = t;
+        }
+        let d = self.delta.len();
+        if d > 0 {
+            let mut t = v[0];
+            for (k, &dk) in self.delta.iter().enumerate() {
+                t += dk * v[r + k];
+            }
+            out[r] = t;
+            for i in 1..d {
+                out[r + i] = v[r + i - 1];
+            }
+        }
+    }
+
+    /// Z'v, Z = (1, 0, ..., 0, delta_1, ..., delta_d).
+    fn z_dot(&self, v: &[f64]) -> f64 {
+        let mut t = v[0];
+        for (k, &dk) in self.delta.iter().enumerate() {
+            t += dk * v[self.r + k];
+        }
+        t
+    }
+
+    /// m = P Z.
+    fn p_z(&self, pm: &Array2<f64>, m: &mut [f64]) {
+        for (i, mi) in m.iter_mut().enumerate() {
+            let mut t = pm[[i, 0]];
+            for (k, &dk) in self.delta.iter().enumerate() {
+                t += dk * pm[[i, self.r + k]];
+            }
+            *mi = t;
+        }
+    }
+
+    /// a <- T a; P <- T P T' + V, with the companion structure (O(rd^2)).
+    fn time_update(&self, a: &mut [f64], pm: &mut Array2<f64>, buf: &mut UpdateBuffers) {
+        let rd = self.rd;
+        self.apply_t(a, &mut buf.out);
+        a.copy_from_slice(&buf.out);
+        for j in 0..rd {
+            for i in 0..rd {
+                buf.col[i] = pm[[i, j]];
+            }
+            self.apply_t(&buf.col, &mut buf.out);
+            for i in 0..rd {
+                buf.tp[[i, j]] = buf.out[i];
+            }
+        }
+        for i in 0..rd {
+            for j in 0..rd {
+                buf.col[j] = buf.tp[[i, j]];
+            }
+            self.apply_t(&buf.col, &mut buf.out);
+            for j in 0..rd {
+                pm[[i, j]] = buf.out[j];
+            }
+        }
+        let nz = self
+            .r_vec
+            .iter()
+            .rposition(|&v| v != 0.0)
+            .map_or(0, |i| i + 1);
+        for i in 0..nz {
+            for j in 0..nz {
+                pm[[i, j]] += self.r_vec[i] * self.r_vec[j];
+            }
+        }
+    }
+}
+
+/// Scratch space of [`StateSpace::time_update`].
+struct UpdateBuffers {
+    tp: Array2<f64>,
+    col: Vec<f64>,
+    out: Vec<f64>,
+}
+
+/// stats::predict.Arima's output for given coefficients.
+struct ArimaPrediction {
+    mean: Vec<f64>,
+    se: Vec<f64>,
+    warnings: Vec<String>,
+}
+
+/// The coefficients of (1 - B)^d as R's `Delta`: (1 - B)^d = 1 - delta_1 B - ... -
+/// delta_d B^d.
+fn differencing_weights(d: usize) -> EconResult<Vec<f64>> {
+    let mut poly = try_vec(d + 1, 0.0, "the differencing polynomial")?;
+    poly[0] = 1.0;
+    for len in 1..=d {
+        for i in (1..=len).rev() {
+            poly[i] -= poly[i - 1];
+        }
+    }
+    Ok(poly[1..].iter().map(|c| -c).collect())
+}
+
+/// predict.Arima for given coefficients (R order) and sigma2: `stats::makeARIMA`, the
+/// Kalman filter of `ARIMA_Like` over x - mean - drift t, then `KalmanForecast`.
+fn arima_predict(
+    x: &[f64],
+    spec: &ArimaSpec,
+    coefficients: &[f64],
+    sigma2: f64,
+    horizon: usize,
+) -> EconResult<ArimaPrediction> {
+    const WHAT: &str = "the ARIMA state space";
+    let n = x.len();
+    let model = Model::new(spec, n)?;
+    model.check_coefficients(coefficients)?;
+    let (phi, theta, beta) = model.split(coefficients);
+    let (mean, drift) = model.mean_drift(beta);
+    let r = model.p.max(model.q + 1);
+    let d = model.d;
+    let rd = r + d;
+    let mut warnings = Vec::new();
+
+    let mut r_vec = try_vec(r, 0.0, WHAT)?;
+    r_vec[0] = 1.0;
+    r_vec[1..=model.q].copy_from_slice(theta);
+
+    // P0: the stationary covariance of the ARMA states; kappa for the differencing states.
+    let mut pm = try_zeros2(rd, rd, WHAT)?;
+    let mut t_r = try_zeros2(r, r, WHAT)?;
+    for (i, &phi_i) in phi.iter().enumerate() {
+        t_r[[i, 0]] = phi_i;
+    }
+    for i in 0..r - 1 {
+        t_r[[i, i + 1]] = 1.0;
+    }
+    let mut v_r = try_zeros2(r, r, WHAT)?;
+    for i in 0..r {
+        for j in 0..r {
+            v_r[[i, j]] = r_vec[i] * r_vec[j];
+        }
+    }
+    match stationary_covariance(&t_r, &v_r)? {
+        Some(q0) => pm.slice_mut(s![0..r, 0..r]).assign(&q0),
+        None => {
+            // CSS does not constrain the AR part. R's Gardner Q0 is undefined here.
+            for i in 0..r {
+                pm[[i, i]] = KAPPA;
+            }
+            warnings.push(DIFFUSE_ARMA_PRIOR.to_string());
+        }
+    }
+    drop(t_r);
+    drop(v_r);
+    for i in 0..d {
+        pm[[r + i, r + i]] = KAPPA;
+    }
+
+    let ss = StateSpace {
+        phi,
+        delta: differencing_weights(d)?,
+        r_vec,
+        r,
+        rd,
+    };
+    let mut buf = UpdateBuffers {
+        tp: try_zeros2(rd, rd, WHAT)?,
+        col: try_vec(rd, 0.0, WHAT)?,
+        out: try_vec(rd, 0.0, WHAT)?,
+    };
+    let mut a = try_vec(rd, 0.0, WHAT)?;
+    let mut m = try_vec(rd, 0.0, WHAT)?;
+    for (t, &xt) in x.iter().enumerate() {
+        if t % FILTER_STRIDE == FILTER_STRIDE - 1 {
+            checkpoint()?;
+        }
+        let zt = xt - mean - drift * (t + 1) as f64;
+        if t > 0 {
+            ss.time_update(&mut a, &mut pm, &mut buf);
+        }
+        ss.p_z(&pm, &mut m);
+        let f = ss.z_dot(&m);
+        if !(f > 0.0 && f.is_finite()) {
+            return Err(EconError::Computation(format!(
+                "ARIMA Kalman filter: innovation variance {f} at t = {}",
+                t + 1
+            )));
+        }
+        let v = zt - ss.z_dot(&a);
+        for (ai, &mi) in a.iter_mut().zip(m.iter()) {
+            *ai += mi * v / f;
+        }
+        for i in 0..rd {
+            for j in 0..rd {
+                pm[[i, j]] -= m[i] * m[j] / f;
+            }
+        }
+    }
+
+    let mut forecast = try_vec(horizon, 0.0, "the ARIMA forecasts")?;
+    let mut se = try_vec(horizon, 0.0, "the ARIMA forecasts")?;
+    for h in 0..horizon {
+        checkpoint()?;
+        ss.time_update(&mut a, &mut pm, &mut buf);
+        ss.p_z(&pm, &mut m);
+        forecast[h] = ss.z_dot(&a) + mean + drift * (n + h + 1) as f64;
+        se[h] = (sigma2 * ss.z_dot(&m)).sqrt();
+    }
+    let neg_theta: Vec<f64> = theta.iter().map(|t| -t).collect();
+    if !polynomial_stable(&neg_theta)? {
+        warnings.push(MA_NOT_INVERTIBLE.to_string());
+    }
+    Ok(ArimaPrediction {
+        mean: forecast,
+        se,
+        warnings,
+    })
+}
+
 /// The CSS fit of `x` (see the module docs).
 fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult> {
     let n = x.len();
@@ -1074,46 +1448,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_arima_forecast_decays_toward_mean() {
-        // For ARIMA(1,0,0) with |phi| < 1, forecasts should decay toward
-        // the unconditional mean (approximately the sample mean of the differenced series).
-        let y = generate_ar1_data(300, 0.6, 77);
-
-        let df = df! {
-            "y" => &y,
-        }
-        .unwrap();
-        let dataset = crate::data::Dataset::new(df);
-
-        let result = forecast_arima(&dataset, "y", 1, 0, 0, 20).unwrap();
-
-        assert_eq!(result.forecast.len(), 20);
-
-        // All forecast values should be finite
-        for (i, &f) in result.forecast.iter().enumerate() {
-            assert!(
-                f.is_finite(),
-                "Forecast at step {} should be finite, got {}",
-                i,
-                f
-            );
-        }
-
-        // For a stationary AR(1), successive forecasts should move closer to 0
-        // (the unconditional mean for zero-mean AR).
-        // Check that the absolute value of forecasts is not diverging.
-        let last_abs = result.forecast.last().unwrap().abs();
-        let first_abs = result.forecast.first().unwrap().abs();
-        // Last forecast should be closer to zero or at least not much larger than first
-        assert!(
-            last_abs <= first_abs + 2.0,
-            "Forecast should not diverge: first_abs={:.4}, last_abs={:.4}",
-            first_abs,
-            last_abs
-        );
-    }
-
-    #[test]
     fn test_validate_arima_011_ma_coefficient() {
         // Fit ARIMA(0,1,1) to a random walk with MA noise.
         // Generate: y_t = y_{t-1} + e_t + theta * e_{t-1}
@@ -1171,8 +1505,8 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("ARIMA forecast"), "{err}");
-        // The buffer length overflows. Never call the pre-fix forecaster with this: the arima
-        // crate grows its buffer one push at a time until memory runs out.
+        // The output size overflows: refused before the fit (the arima crate's forecaster,
+        // replaced by the state-space one, grew its buffer one push at a time).
         assert!(forecast_arima(&dataset, "y", 1, 0, 0, usize::MAX).is_err());
         assert_eq!(
             forecast_arima(&dataset, "y", 1, 0, 0, 12)
@@ -1204,6 +1538,9 @@ mod tests {
         assert!(is_cancelled(&err), "{err}");
         let err =
             cancelled(|| run_arima_with(&dataset, "y", &ArimaSpec::new(1, 0, 1))).unwrap_err();
+        assert!(matches!(err, EconError::Cancelled(_)), "{err}");
+        let err = cancelled(|| forecast_arima_with(&dataset, "y", &ArimaSpec::new(1, 0, 1), 5))
+            .unwrap_err();
         assert!(matches!(err, EconError::Cancelled(_)), "{err}");
         // A budget that is still live leaves the fit alone.
         let live = crate::resource::Budget::new(
@@ -1422,6 +1759,87 @@ mod tests {
             ..ArimaSpec::new(0, 1, 1)
         };
         assert_eq!(drift.label(), "ARIMA(0,1,1) with drift");
+    }
+
+    /// TS-1 on the old API. R: forecast::forecast(Arima(x, order, method = "CSS"), h = 5) at
+    /// the exact optimum.
+    #[test]
+    fn test_validate_arima_forecast_default_spec() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("arima_css_forecast");
+        let n = 300;
+        let mut check = Check::new(&case);
+        for (key, column, (p, d, q)) in [
+            ("a_100", "a", (1, 0, 0)),
+            ("c_011", "c", (0, 1, 1)),
+            ("dr_121", "dr", (1, 2, 1)),
+        ] {
+            let fc = forecast_arima(&ds, column, p, d, q, 5).unwrap();
+            check
+                .vector(&format!("{key}_mean_tight"), &fc.forecast, Tol::stat(n))
+                .vector(
+                    &format!("{key}_se_tight"),
+                    &fc.std_errors.clone().unwrap_or_default(),
+                    Tol::stat(n),
+                );
+        }
+        check.finish();
+    }
+
+    /// The forecaster alone: stats::predict.Arima for fixed coefficients (stats::arima's
+    /// sigma2 = SSR / (n - d - p)).
+    #[test]
+    fn test_validate_arima_fixed_forecast() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("arima_fixed_forecast");
+        let mut check = Check::new(&case);
+        for (key, column, spec) in [
+            ("a_100", "a", ArimaSpec::new(1, 0, 0)),
+            ("m_101", "m", ArimaSpec::new(1, 0, 1)),
+            ("c_011", "c", ArimaSpec::new(0, 1, 1)),
+            ("b_200", "b", ArimaSpec::new(2, 0, 0)),
+            ("m40_101", "m", ArimaSpec::new(1, 0, 1)),
+        ] {
+            let n = case.scalar(&format!("{key}_n")) as usize;
+            let (x, _) = numeric_column(ds.df(), column, NaPolicy::Fail).unwrap();
+            let coefs = case.vector(&format!("{key}_fixed"));
+            let sigma2 = case.scalar(&format!("{key}_sigma2"));
+            let (resid, _) = css_residuals(&x[..n], &spec, &coefs).unwrap();
+            let pred = arima_predict(&x[..n], &spec, &coefs, sigma2, 8).unwrap();
+            check
+                .vector(&format!("{key}_pred"), &pred.mean, Tol::coef(n))
+                .vector(&format!("{key}_se"), &pred.se, Tol::se(n))
+                .vector(&format!("{key}_resid_tail"), &resid[n - 3..], Tol::coef(n));
+        }
+        check.finish();
+    }
+
+    /// R: forecast::forecast(h = 5, level = c(80, 95)) at the exact CSS optimum; 13 fits.
+    #[test]
+    fn test_validate_arima_css_forecast() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("arima_css_forecast");
+        let n = 300;
+        let mut check = Check::new(&case);
+        for (key, column, spec) in css_fits() {
+            let fc = forecast_arima_with(&ds, column, &spec, 5).unwrap();
+            assert_eq!(fc.levels, vec![80.0, 95.0]);
+            assert!(fc.fit.as_ref().unwrap().converged, "{key}");
+            check
+                .vector(&format!("{key}_mean_tight"), &fc.forecast, Tol::stat(n))
+                .vector(
+                    &format!("{key}_se_tight"),
+                    fc.std_errors.as_ref().unwrap(),
+                    Tol::stat(n),
+                )
+                .vector(&format!("{key}_lower80_tight"), &fc.lower[0], Tol::stat(n))
+                .vector(&format!("{key}_upper80_tight"), &fc.upper[0], Tol::stat(n))
+                .vector(&format!("{key}_lower95_tight"), &fc.lower[1], Tol::stat(n))
+                .vector(&format!("{key}_upper95_tight"), &fc.upper[1], Tol::stat(n))
+                // forecast::Arima's own optimum: its means sit up to 3.0e-6 away (dr_121)
+                .vector(&format!("{key}_mean"), &fc.forecast, Tol::iterative(1e-5));
+        }
+        check.finish();
     }
 
     #[test]

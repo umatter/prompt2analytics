@@ -7,7 +7,7 @@
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **ARIMA** | [`run_arima`] | Auto-regressive integrated moving average |
+//! | **ARIMA** | [`run_arima`], [`run_arima_with`], [`forecast_arima`], [`forecast_arima_with`], [`ArimaSpec`] | ARIMA(p,d,q) by conditional sum of squares (mean and drift as R), forecasts with 80/95% intervals |
 //! | **AR** | [`ar`], [`run_ar`] | Autoregressive models (Yule-Walker, OLS, Burg) |
 //! | **ARIMA Simulation** | [`arima_sim`] | Simulate ARIMA processes |
 //! | **ARMA ACF** | [`arma_acf`] | Theoretical ACF of ARMA models |
@@ -71,18 +71,28 @@
 //! ## Example
 //!
 //! ```ignore
-//! use p2a_core::forecasting::{run_arima, forecast_arima, run_holt_winters, SeasonalType};
+//! use p2a_core::forecasting::{
+//!     ArimaSpec, forecast_arima, forecast_arima_with, run_arima, run_arima_with,
+//!     run_holt_winters, SeasonalType,
+//! };
 //! use p2a_core::data::Dataset;
 //!
 //! // Assuming dataset is loaded with a "sales" time series column
 //!
-//! // Fit ARIMA(1,1,1) to sales column
+//! // Fit ARIMA(1,1,1) to sales column (R's defaults: no mean or drift for d = 1)
 //! let arima = run_arima(&dataset, "sales", 1, 1, 1)?;
-//! println!("AIC: {:.2}", arima.aic);
+//! println!("AIC (CSS likelihood): {:.2}", arima.aic);
 //!
-//! // Forecast 12 periods ahead
+//! // The same order with a drift, as forecast::Arima(include.drift = TRUE)
+//! let spec = ArimaSpec { include_drift: true, ..ArimaSpec::new(1, 1, 1) };
+//! let with_drift = run_arima_with(&dataset, "sales", &spec)?;
+//! println!("drift: {:?}", with_drift.drift);
+//!
+//! // Forecast 12 periods ahead, with standard errors and 80/95% limits
 //! let forecast = forecast_arima(&dataset, "sales", 1, 1, 1, 12)?;
-//! println!("Forecast: {:?}", forecast.point_forecast);
+//! println!("Forecast: {:?}", forecast.forecast);
+//! let forecast = forecast_arima_with(&dataset, "sales", &spec, 12)?;
+//! println!("95% lower limits: {:?}", forecast.lower[1]);
 //!
 //! // Holt-Winters seasonal model (period=12 for monthly data)
 //! let hw = run_holt_winters(&dataset, "sales", 12, SeasonalType::Additive, None, None, None)?;
@@ -93,7 +103,8 @@
 //!
 //! | R Function | p2a-core Function |
 //! |------------|-------------------|
-//! | `arima()` | [`run_arima`] |
+//! | `arima(method = "CSS")`, `forecast::Arima()` | [`run_arima`], [`run_arima_with`] |
+//! | `forecast::forecast()` of an `Arima` fit | [`forecast_arima`], [`forecast_arima_with`] |
 //! | `ar()` | [`ar`], [`run_ar`] |
 //! | `HoltWinters()` | [`holt_winters`], [`run_holt_winters`] |
 //! | `stl()` | [`stl`], [`run_stl`] |
@@ -118,7 +129,8 @@ pub mod tsutils;
 
 pub use ar::{ArConfig, ArMethod, ArResult, ar, run_ar, run_ar_with_order};
 pub use arima_model::{
-    ArimaForecastResult, ArimaResult, ArimaSpec, forecast_arima, run_arima, run_arima_with,
+    ArimaForecastResult, ArimaResult, ArimaSpec, forecast_arima, forecast_arima_with, run_arima,
+    run_arima_with,
 };
 pub use causal_impact::{
     CausalImpactConfig, CausalImpactModel, CausalImpactResult, CausalImpactSeries,
