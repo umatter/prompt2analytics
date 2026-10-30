@@ -3304,8 +3304,8 @@ mod tests {
     }
 
     /// With B = 999 the replicate SEs of the overall and group aggregates are within
-    /// 15% of did's analytic SEs (R emulation of the same replicate scheme: ratios
-    /// 1.011 for the overall SE with B = 20000; [0.950, 1.076] over 200 seeds, B = 999).
+    /// 15% of did's analytic SEs (seed 42: ratios 1.019 overall; 1.063, 0.959 and
+    /// 1.022 for the groups).
     #[test]
     fn test_validate_staggered_did_bootstrap_close_to_analytic() {
         let (case, ds) = crate::test_support::load_case("did_cs_analytic");

@@ -18,7 +18,16 @@
         "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_analytic",
         "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_string_unit_ids"
       ],
-      "quantities": ["ATT(g,t)", "n_treated/n_comparison per cell (not yet treated)", "overall (simple), group and event-study ATT"],
+      "quantities": [
+        "ATT(g,t), its SE and CI, n_treated/n_comparison per cell (never and not yet treated)",
+        "overall (simple) ATT, SE, CI, p",
+        "group ATT, SE, CI, p",
+        "event-study ATT, SE, CI, p",
+        "pre-trend Wald W, df, p",
+        "90% CI",
+        "bootstrap SE within 15% of the analytic SE (B = 999)",
+        "MCP text at print precision"
+      ],
       "tolerance": "validation/README.md, n = 720 rows (90 units): ATT 1e-8, SEs, CI bounds and statistics 1e-6 relative; MCP text at print precision",
       "deviations": [
         {"finding": "CAUS-84", "quantity": "aggte type 'group' overall (selective_att, selective_se)", "note": "recorded in the case, not reported by p2a: the headline overall ATT is the 'simple' aggregation (Tier 4)"}

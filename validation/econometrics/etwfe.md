@@ -71,6 +71,25 @@ emfx(mod)
 | Overall ATT | 0.5 | Weighted average |
 | Event-study coefficients | directional | Pre-treatment near 0, post positive |
 
+## Missing values and column types
+
+`run_etwfe` (MCP `etwfe`) reads the outcome, unit, time, treatment, first treatment period and
+controls through one `ColumnRequest`:
+
+- a row with a missing value (null or NaN) in any of them is dropped from all of them, as
+  fixest and etwfe drop incomplete rows, and `EtwfeResult::missing` and the last Display line
+  report it. Nothing is imputed any more: a missing `first_treat` was read as 0 (never treated,
+  so a treated unit became a control), a missing time as a period 0, a missing unit id as one
+  pooled unit "0" (or ""), a missing treatment or control as 0.0;
+- unit ids may be integers, fractional numbers, strings, categoricals or dates; time and
+  `first_treat` hold whole numbers or dates (a fractional or infinite value is an error);
+  never-treated units are coded 0;
+- a text outcome is `NonNumericColumn`, an absent column `ColumnNotFound`.
+
+Fixture tests, not R-pinned (`crates/p2a-core/src/econometrics/etwfe.rs`):
+`test_na_etwfe_null_first_treat_drops_rows`, `test_na_etwfe_null_ids_and_time_drop_rows`,
+`test_na_etwfe_errors_name_the_column`.
+
 ## Running the Tests
 
 ```bash

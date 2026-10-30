@@ -10,7 +10,7 @@ The Goodman-Bacon (2021) decomposition breaks down a two-way fixed effects (TWFE
 
 ## Implementation Details
 
-**File**: `/home/umatter/tools/p2a-stats/crates/p2a-core/src/econometrics/bacon.rs`
+**File**: `crates/p2a-core/src/econometrics/bacon.rs`
 
 **Function**: `bacon_decomp(dataset, outcome_col, unit_col, time_col, treatment_col)`
 
@@ -143,6 +143,25 @@ Goodman-Bacon, A. (2021). "Difference-in-Differences with Variation in Treatment
 
 - R: `bacondecomp` package (Flack & Sant'Anna) - https://cran.r-project.org/package=bacondecomp
 - Stata: `bacondecomp` (Goodman-Bacon, Goldring, & Nichols) - https://github.com/tgoldring/bacondecomp
+
+## Missing values and column types
+
+`bacon_decomp` (MCP `bacon_decomp`) reads the outcome, unit, time and treatment columns through
+one `ColumnRequest` (in that order):
+
+- a row with a missing value (null or NaN) in any of them is dropped from all of them, and
+  `BaconDecompResult::missing` and the last Display line report it;
+- unit ids may be integers, fractional numbers, strings, categoricals or dates; the time column
+  holds whole numbers or dates (a fractional time is an error naming the row, where it was
+  truncated before);
+- a text outcome is `NonNumericColumn`, an absent column `ColumnNotFound`.
+
+The 2x2 components are unchanged for numeric ids. Fixture tests, not R-pinned
+(`crates/p2a-core/src/econometrics/bacon.rs`): `test_na_bacon_string_unit_ids`,
+`test_na_bacon_omits_missing_rows`, `test_na_bacon_errors_name_the_column`. The 2x2 estimates
+of `test_bacon_components_match_bacondecomp` and `test_bacon_unbalanced_components_pinned` are
+compared with R (bacondecomp 0.1.1 and the 2x2 definition), the weights are not (CAUS-10); no
+registry entry exists, so the method is not R-pinned.
 
 ## Validation Status
 
