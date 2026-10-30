@@ -3744,4 +3744,32 @@ mod tests {
             other => panic!("expected NonNumericColumn for x2, got {other:?}"),
         }
     }
+
+    /// The reg_cluster_na case as polars reads it: the dtypes and missing cells the
+    /// missing-id tests rely on (3 empty firm labels, 2 empty years), and R's row counts.
+    #[test]
+    fn test_validate_reg_cluster_na_fixture() {
+        let (case, ds) = crate::test_support::load_case("reg_cluster_na");
+        let df = ds.df();
+        assert_eq!(df.height(), 200);
+        for (c, t) in [
+            ("firm", DataType::Int64),
+            ("year", DataType::Int64),
+            ("year_na", DataType::Int64),
+            ("firm_label", DataType::String),
+            ("inv", DataType::Float64),
+        ] {
+            assert_eq!(df.column(c).unwrap().dtype(), &t, "{c}");
+        }
+        let fl = df.column("firm_label").unwrap().is_not_null();
+        let yn = df.column("year_na").unwrap().is_not_null();
+        let (n_fl, n_yn) = (fl.sum().unwrap() as usize, yn.sum().unwrap() as usize);
+        assert_eq!((200 - n_fl, 200 - n_yn), (3, 2));
+        let both = (&fl & &yn).sum().unwrap() as usize;
+        Check::new(&case)
+            .scalar("n_used", n_fl as f64, Tol::exact())
+            .scalar("n_dropped", (200 - n_fl) as f64, Tol::exact())
+            .scalar("n_used_twoway", both as f64, Tol::exact())
+            .finish();
+    }
 }

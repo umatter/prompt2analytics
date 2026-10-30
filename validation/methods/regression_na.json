@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ols_clustered_missing_ids",
+      "name": "OLS with CR1 clustered SEs when cluster ids are missing (rows dropped, re-estimated); Driscoll-Kraay time ids",
+      "category": "regression",
+      "reference": "stats::lm + sandwich::vcovCL(type = 'HC1') on the rows with an id; fixest::feols(cluster = ) drops them likewise",
+      "doc": "validation/regression/ols_clustered.md",
+      "cases": [
+        "reg_cluster_na"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_reg_cluster_na_fixture"
+      ],
+      "quantities": [
+        "coefficients (one-, two-way)",
+        "SE CR1 one-way (= fixest)",
+        "SE CR1 two-way",
+        "rows used/dropped",
+        "cluster counts",
+        "DK estimation sample (property)",
+        "fractional time ids refused"
+      ],
+      "tolerance": "validation/README.md, n = 195-197: coefficients 1e-8, SE 1e-6 relative; counts exact; MCP text 4 decimals, CLI text 6",
+      "deviations": [
+        {
+          "finding": "REG-24",
+          "quantity": "Driscoll-Kraay SEs",
+          "note": "not R-pinned: the DK meat is scaled differently from sandwich::vcovPL (Tier 4); the tests pin the estimation sample only"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "line_missing",
+      "name": "Tukey's resistant line on data with missing values (incomplete pairs deleted)",
+      "category": "regression",
+      "reference": "stats::line (complete.cases)",
+      "doc": "validation/regression/line.md",
+      "cases": [
+        "reg_smoothers_na"
+      ],
+      "tests": [
+        "p2a-core::regression::line::tests::test_validate_reg_smoothers_na_fixture"
+      ],
+      "quantities": [
+        "complete pairs (56)",
+        "NA data = complete pairs",
+        "missing counts"
+      ],
+      "tolerance": "exact",
+      "deviations": [
+        {
+          "finding": "REG-12",
+          "quantity": "line coefficients (line_coef)",
+          "note": "R 0.441594195008563728 / 0.053890384144849528; p2a's resistant line is a different variant (-0.514777229630535849 / 0.062911296831234101 on the same 56 pairs by an R transcription of line.rs), Tier 4"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

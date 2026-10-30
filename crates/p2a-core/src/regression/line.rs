@@ -514,4 +514,40 @@ mod tests {
             result.intercept
         );
     }
+
+    /// The reg_smoothers_na case as polars reads it: `id` Int64, `x` and `y` Float64
+    /// with 2 empty cells each, R's count of complete pairs, and no ties among the
+    /// complete x (so supsmu's unique grid is the complete x).
+    #[test]
+    fn test_validate_reg_smoothers_na_fixture() {
+        use p2a_validation::{Check, Tol};
+        use polars::prelude::DataType;
+        let (case, ds) = crate::test_support::load_case("reg_smoothers_na");
+        let df = ds.df();
+        assert_eq!(df.height(), 60);
+        assert_eq!(df.column("id").unwrap().dtype(), &DataType::Int64);
+        for c in ["x", "y"] {
+            let col = df.column(c).unwrap();
+            assert_eq!(col.dtype(), &DataType::Float64, "{c}");
+            assert_eq!(col.null_count(), 2, "{c}");
+        }
+        let ok = &df.column("x").unwrap().is_not_null() & &df.column("y").unwrap().is_not_null();
+        let n_complete = ok.sum().unwrap() as usize;
+        Check::new(&case)
+            .scalar("n_complete", n_complete as f64, Tol::exact())
+            .finish();
+        let x = crate::data::columns::numeric_options(df, "x").unwrap();
+        let y = crate::data::columns::numeric_options(df, "y").unwrap();
+        let mut xc: Vec<f64> = x
+            .iter()
+            .zip(&y)
+            .filter_map(|(a, b)| a.zip(*b).map(|(a, _)| a))
+            .collect();
+        assert_eq!(xc.len(), n_complete);
+        xc.sort_by(f64::total_cmp);
+        assert!(
+            xc.windows(2).all(|w| w[0] != w[1]),
+            "tied complete x values"
+        );
+    }
 }

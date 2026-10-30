@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "reg_cluster_na",
+  "area": "regression",
+  "method": "OLS with clustered SEs when some cluster ids are missing (rows dropped, model re-estimated)",
+  "reference": "stats::lm + sandwich::vcovCL(type = 'HC1') on rows with a cluster id (fixest::feols(cluster = ) drops them likewise)",
+  "call": "lm(inv ~ value + capital, data = d[!is.na(d$firm_label), ]); vcovCL(m, cluster = ~firm_label, type = 'HC1')",
+  "dataset": "validation/datasets/generated/grunfeld_cluster_na.csv",
+  "datasets": ["validation/datasets/grunfeld.csv", "validation/datasets/generated/grunfeld_cluster_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3",
+    "fixest": "0.14.2"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-42.611251576789968, 0.12051018457056514, 0.21788811575756084]
+    },
+    "se_cluster_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [19.961266464445341, 0.01656539894414541, 0.081875443483358568]
+    },
+    "se_cluster_fixest": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [19.961266464445341, 0.016565398944145479, 0.081875443483358665]
+    },
+    "n_used": 197,
+    "n_dropped": 3,
+    "coef_twoway": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-42.967792614985377, 0.12028550976765875, 0.21901079994995851]
+    },
+    "se_cluster_twoway_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [19.270675339796629, 0.018119455024332931, 0.078221819577902488]
+    },
+    "n_used_twoway": 195
+  }
+}
