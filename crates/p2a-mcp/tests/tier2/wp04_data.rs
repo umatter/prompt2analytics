@@ -141,3 +141,30 @@ async fn test_mcp_munge_mutate_refuses_text() {
     let t = text(&r);
     assert!(!r.success && t.contains("numeric"), "{t}");
 }
+
+#[tokio::test]
+async fn test_mcp_viz_interactive_with_missing_group() {
+    // DATA-27: a null group label panicked inside plotlars; it is the group "NA" now.
+    let g = Dataset::new(
+        df!(
+            "x" => [1.0, 2.0, 3.0, 4.0],
+            "y" => [2.1, 3.9, 6.2, 7.8],
+            "g" => [Some("a"), None, Some("b"), Some("a")]
+        )
+        .unwrap(),
+    );
+    let (session, server) = common::session_with_datasets(vec![("g", g)]);
+    for (tool, args) in [
+        (
+            "viz_scatter_interactive",
+            json!({"dataset": "g", "x_column": "x", "y_column": "y", "group_column": "g"}),
+        ),
+        (
+            "viz_histogram_interactive",
+            json!({"dataset": "g", "column": "x", "group_column": "g"}),
+        ),
+    ] {
+        let r = common::call(&server, &session, tool, args).await;
+        assert!(r.success, "{tool}: {}", text(&r));
+    }
+}

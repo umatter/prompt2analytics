@@ -114,3 +114,47 @@ fn test_cli_munge_mutate_refuses_text() {
     ]);
     assert!(stderr.contains("numeric"), "{stderr}");
 }
+
+#[test]
+fn test_cli_viz_interactive_with_missing_group() {
+    // DATA-27: a missing group label aborted the CLI (exit 101); it is the group "NA" now.
+    let s = temp_session();
+    let n = write(&s, "n.csv", "x,y,g\n1,2.1,a\n2,3.9,\n3,6.2,b\n4,7.8,a\n");
+    s.load_as(&n, "n", &[]);
+    for (args, file) in [
+        (
+            vec![
+                "viz",
+                "scatter-interactive",
+                "n",
+                "-x",
+                "x",
+                "-y",
+                "y",
+                "-g",
+                "g",
+                "-f",
+                "s.html",
+            ],
+            "s.html",
+        ),
+        (
+            vec![
+                "viz",
+                "histogram-interactive",
+                "n",
+                "--col",
+                "x",
+                "-g",
+                "g",
+                "-f",
+                "h.html",
+            ],
+            "h.html",
+        ),
+    ] {
+        s.ok(&args);
+        let html = std::fs::read_to_string(s.dir().join(file)).unwrap();
+        assert!(html.contains("\"NA\""), "{file} has no group \"NA\"");
+    }
+}
