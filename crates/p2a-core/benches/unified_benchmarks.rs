@@ -937,8 +937,9 @@ fn extract_col_strings(dataset: &Dataset, col: &str) -> Vec<String> {
 // Main
 // ============================================
 
-/// Benchmarks whose call result is not captured as outputs.
-const NO_OUTPUT_CAPTURE: &[&str] = &["SynthControl"];
+/// Benchmarks whose call result is not captured as outputs. Empty since
+/// SynthControl captures loss, solution_w and average_effect.
+const NO_OUTPUT_CAPTURE: &[&str] = &[];
 
 /// A benchmark completed when its call returned a result: every other
 /// benchmark captures outputs from an `Ok` result.
@@ -1781,54 +1782,96 @@ fn main() {
     // ============================================
     // Synthetic Control
     // ============================================
-    // Cap: no R benchmark at n=10000
-    for (n_units, n_periods) in sizes_for(&["SynthControl"], [(10, 10), (50, 20)]) {
+    // R's sizes: 10 and 100 units x 10 periods (n = 100, 1000). R's rows come from
+    // synthcontrol_n<n>.csv: unit stays a String ("unit_<i>") and time an integer,
+    // as run_synthetic_control requires. No R benchmark at n=10000.
+    for (n_units, n_periods) in sizes_for(&["SynthControl"], [(10, 10), (100, 10)]) {
         let n = n_units * n_periods;
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let mut unit_ids: Vec<String> = Vec::new();
-        let mut time_ids: Vec<i64> = Vec::new();
-        let mut outcome: Vec<f64> = Vec::new();
-        let mut pred1: Vec<f64> = Vec::new();
-        let mut pred2: Vec<f64> = Vec::new();
-        for u in 0..n_units {
-            for t in 0..n_periods {
-                unit_ids.push(format!("unit_{}", u));
-                time_ids.push(t as i64);
-                let base = (u as f64) * 0.5 + (t as f64) * 0.1;
-                let treatment_effect = if u == 0 && t >= 7 { 2.0 } else { 0.0 };
-                outcome.push(base + treatment_effect + rng.gen_range(-0.3..0.3));
-                pred1.push(rng.gen_range(0.0..1.0));
-                pred2.push(rng.gen_range(0.0..1.0));
-            }
-        }
-        let df = df! {
-            "unit" => &unit_ids, "time" => &time_ids, "outcome" => &outcome,
-            "pred1" => &pred1, "pred2" => &pred2,
-        }
-        .expect("synth data");
-        let dataset = Dataset::new(df);
-        let predictors = vec![PredictorSpec::new("pred1"), PredictorSpec::new("pred2")];
+        let dataset = load_csv_dataset_typed(&data_dir, "synthcontrol", n, &["time"], &["unit"])
+            .unwrap_or_else(|| {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                let mut unit_ids: Vec<String> = Vec::new();
+                let mut time_ids: Vec<i64> = Vec::new();
+                let mut outcome: Vec<f64> = Vec::new();
+                let mut pred1: Vec<f64> = Vec::new();
+                let mut pred2: Vec<f64> = Vec::new();
+                for u in 0..n_units {
+                    for t in 0..n_periods {
+                        unit_ids.push(format!("unit_{}", u));
+                        time_ids.push(t as i64);
+                        let base = (u as f64) * 0.5 + (t as f64) * 0.1;
+                        let treatment_effect = if u == 0 && t >= 7 { 2.0 } else { 0.0 };
+                        outcome.push(base + treatment_effect + rng.gen_range(-0.3..0.3));
+                        pred1.push(rng.gen_range(0.0..1.0));
+                        pred2.push(rng.gen_range(0.0..1.0));
+                    }
+                }
+                let df = df! {
+                    "unit" => &unit_ids, "time" => &time_ids, "outcome" => &outcome,
+                    "pred1" => &pred1, "pred2" => &pred2,
+                }
+                .expect("synth data");
+                Dataset::new(df)
+            });
+        // R's dataprep predictors: the pre-treatment (0..6) means of pred1 and
+        // pred2 and, as special.predictors, of the outcome. Without the outcome
+        // mean the weights are not identified (the treated unit's two predictor
+        // means lie inside the donors' hull).
+        let predictors = vec![
+            PredictorSpec::new("pred1"),
+            PredictorSpec::new("pred2"),
+            PredictorSpec::new("outcome"),
+        ];
         let config_synth = SynthConfig {
             treatment_time: 7,
             treated_unit: "unit_0".to_string(),
             run_placebos: false,
             ..Default::default()
         };
-        let result = {
-            let mut r = run_benchmark_tracked("SynthControl", "Nelder-Mead", n, &config, || {
-                run_synthetic_control(
-                    &dataset,
-                    "outcome",
-                    "unit",
-                    "time",
-                    &predictors,
-                    config_synth.clone(),
-                )
-            });
-            r.dgp = "synth".to_string();
-            r.seed = 42;
-            r
-        };
+        let mut result = run_benchmark_tracked("SynthControl", "Nelder-Mead", n, &config, || {
+            run_synthetic_control(
+                &dataset,
+                "outcome",
+                "unit",
+                "time",
+                &predictors,
+                config_synth.clone(),
+            )
+        });
+        if let Ok(ref sc) = run_synthetic_control(
+            &dataset,
+            "outcome",
+            "unit",
+            "time",
+            &predictors,
+            config_synth.clone(),
+        ) {
+            let mut outputs = BTreeMap::new();
+            // R's loss.v: the pre-period (0..6) MSPE of the reported weights
+            capture(&mut outputs, "loss", sc.pre_treatment_mspe);
+            // Donor weights by unit index (unit_1, unit_2, ...): p2a-core lists
+            // donors in HashSet order, R in its factor's alphabetical order, and R
+            // reorders by index too
+            let mut by_index: Vec<(i64, f64)> = sc
+                .all_unit_weights
+                .iter()
+                .map(|(unit, w)| {
+                    let idx = unit
+                        .trim_start_matches("unit_")
+                        .parse::<i64>()
+                        .unwrap_or(i64::MAX);
+                    (idx, *w)
+                })
+                .collect();
+            by_index.sort_by_key(|&(idx, _)| idx);
+            let weights: Vec<f64> = by_index.iter().map(|&(_, w)| w).collect();
+            capture_vec(&mut outputs, "solution_w", &weights);
+            // Mean post-period (7..9) gap, R's mean(Y1plot - Y0plot %*% w) there
+            capture(&mut outputs, "average_effect", sc.average_effect);
+            result.outputs = outputs;
+        }
+        result.dgp = "synth".to_string();
+        result.seed = 42;
         print_result(&result);
         results.push(result);
     }
@@ -2077,13 +2120,23 @@ fn main() {
         results.push(result);
     }
 
-    // Staggered DiD (Callaway-Sant'Anna)
-    // Cap: no R benchmark at n=10000
-    for (n_units, n_periods) in sizes_for(&["Staggered_DiD"], [(10, 10), (50, 20)]) {
+    // Staggered DiD (Callaway-Sant'Anna), at R's three sizes
+    // R's att_gt options: never-treated comparison units, no covariates
+    // (OutcomeRegression = est_method "reg"), the base period g - 1 for every
+    // cell (base_period "universal"), analytic SEs (bootstrap 0 = R's bstrap
+    // FALSE; the default 999 replicates with a random seed are neither R's work
+    // nor reproducible) and every cell, however small (min_obs_per_cell 1: the
+    // default 10 drops every cell here, the cohorts have 1 to 4 units, and R
+    // keeps them). R refuses n = 100 (3 never-treated units, did's minimum is 5).
+    for (n_units, n_periods) in sizes_for(&["Staggered_DiD"], [(10, 10), (50, 20), (100, 100)]) {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset_with_ids(&data_dir, "staggered", n, &["unit"])
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
-        let sdid_config = StaggeredDidConfig::default();
+        let sdid_config = StaggeredDidConfig {
+            bootstrap: 0,
+            min_obs_per_cell: 1,
+            ..StaggeredDidConfig::default()
+        };
         let mut result = run_benchmark_tracked("Staggered_DiD", "CS", n, &slow_config, || {
             run_staggered_did(
                 &dataset,
@@ -2107,6 +2160,16 @@ fn main() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "overall_att", sdid.overall_att.att);
             capture(&mut outputs, "overall_se", sdid.overall_att.std_error);
+            // Every ATT(g,t) cell, cohort then period ascending: att_gt's order
+            let cell_att: Vec<f64> = sdid.group_time_atts.iter().map(|c| c.att).collect();
+            let cell_se: Vec<f64> = sdid.group_time_atts.iter().map(|c| c.std_error).collect();
+            capture_vec(&mut outputs, "att", &cell_att);
+            capture_vec(&mut outputs, "se", &cell_se);
+            // aggte(type = "dynamic") by e ascending, aggte(type = "group") by cohort
+            let es_att: Vec<f64> = sdid.event_study.iter().map(|e| e.att).collect();
+            let group_att: Vec<f64> = sdid.group_effects.iter().map(|e| e.att).collect();
+            capture_vec(&mut outputs, "event_study_att", &es_att);
+            capture_vec(&mut outputs, "group_att", &group_att);
             result.outputs = outputs;
         }
         result.dgp = "staggered".to_string();
@@ -2278,7 +2341,7 @@ fn main() {
     }
 
     // CTMLE
-    // Cap: no R benchmark at n=10000
+    // Cap: R also runs n=10000; Rust stops at 1000 (unchanged)
     for n in sizes_for(&["CTMLE"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
@@ -2308,6 +2371,18 @@ fn main() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "ate", c.ate);
             capture(&mut outputs, "se", c.se);
+            // Which covariates the selected g holds (x1, x2), as R reports it
+            // from ctmleDiscrete's best candidate: the two searches differ
+            // (CAUS-57), and the pair is like-for-like only where both end
+            // with the same g model.
+            let in_g = |name: &str| {
+                if c.selected_covariate_names.iter().any(|s| s == name) {
+                    1.0
+                } else {
+                    0.0
+                }
+            };
+            capture_vec(&mut outputs, "g_selected", &[in_g("x1"), in_g("x2")]);
             result.outputs = outputs;
         }
         result.dgp = "treatment".to_string();
@@ -2507,15 +2582,69 @@ fn main() {
     }
 
     // DoubleML (PLR)
-    // Cap: no R benchmark at n=10000
+    // Cap: R also runs n=10000; Rust stops at 1000 (unchanged)
+    //
+    // R's rows (doubleml_n<n>.csv) and R's folds: R puts row r (0-based) in
+    // fold r % 5. p2a-core cannot take folds; it draws them from its seed as
+    // create_fold_assignments does (doubleml.rs:985-1002): StdRng from the
+    // seed, shuffle 0..n, the row at shuffled position i in fold i % k. This
+    // computes that assignment for the seed passed and returns the row order
+    // that puts in each of p2a-core's folds exactly the rows R puts in it
+    // (row order changes nothing else in PLR: OLS fits and the pooled DML2 sums).
+    fn dml_row_order_for_r_folds(n: usize, k: usize, seed: u64) -> Vec<usize> {
+        use rand::seq::SliceRandom;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut shuffled: Vec<usize> = (0..n).collect();
+        shuffled.shuffle(&mut rng);
+        let mut p2a_fold = vec![0usize; n];
+        for (i, &idx) in shuffled.iter().enumerate() {
+            p2a_fold[idx] = i % k;
+        }
+        // Both assignments give fold f the same count (#{i < n : i % k == f}).
+        // Position pos (in p2a-core's fold f) gets R's next row of fold f.
+        let mut next_r_row: Vec<usize> = (0..k).collect();
+        p2a_fold
+            .iter()
+            .map(|&f| {
+                let r = next_r_row[f];
+                next_r_row[f] += k;
+                r
+            })
+            .collect()
+    }
     for n in sizes_for(&["DoubleML"], [100, 1000]) {
-        let (y, d, x) = generate_doubleml_data(n, 42);
+        let dml_x_cols = ["x1", "x2", "x3", "x4", "x5"];
+        let (y0, d0, x0) = match load_csv_dataset(&data_dir, "doubleml", n) {
+            Some(ds) => {
+                let mut x: Array2<f64> = Array2::zeros((n, dml_x_cols.len()));
+                for (j, col) in dml_x_cols.iter().enumerate() {
+                    for (i, v) in extract_col_vec(&ds, col).into_iter().enumerate() {
+                        x[[i, j]] = v;
+                    }
+                }
+                (
+                    Array1::from(extract_col_vec(&ds, "y")),
+                    Array1::from(extract_col_vec(&ds, "d")),
+                    x,
+                )
+            }
+            None => generate_doubleml_data(n, 42),
+        };
+        // MLMethod::OLS for both nuisances (R: regr.lm for l and m), 5 folds,
+        // a fixed seed (the default None drew new folds from entropy each call)
+        let dml_seed = 42;
+        let dml_config = DoubleMLConfig {
+            seed: Some(dml_seed),
+            ..DoubleMLConfig::default()
+        };
+        let order = dml_row_order_for_r_folds(n, dml_config.n_folds, dml_seed);
+        let y: Array1<f64> = order.iter().map(|&r| y0[r]).collect();
+        let d: Array1<f64> = order.iter().map(|&r| d0[r]).collect();
+        let x: Array2<f64> = x0.select(ndarray::Axis(0), &order);
         let mut result = run_benchmark_tracked("DoubleML", "PLR", n, &slow_config, || {
-            run_double_ml(&y.view(), &d.view(), &x.view(), DoubleMLConfig::default())
+            run_double_ml(&y.view(), &d.view(), &x.view(), dml_config.clone())
         });
-        if let Ok(ref dml) =
-            run_double_ml(&y.view(), &d.view(), &x.view(), DoubleMLConfig::default())
-        {
+        if let Ok(ref dml) = run_double_ml(&y.view(), &d.view(), &x.view(), dml_config.clone()) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "theta", dml.theta);
             capture(&mut outputs, "se", dml.se);
@@ -2569,44 +2698,96 @@ fn main() {
     }
 
     // LTMLE (2 time points)
-    // Cap: no R benchmark at n=10000
+    // Cap: R also runs n=10000; Rust stops at 1000 (unchanged)
     for n in sizes_for(&["LTMLE"], [100, 1000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let x1: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
-        let x2: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
-        let a1: Array1<f64> = (0..n)
-            .map(|i| {
-                let p = 1.0 / (1.0 + (-0.3 * x1[[i, 0]]).exp());
-                if rng.gen_range(0.0..1.0) < p {
-                    1.0
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let a2: Array1<f64> = (0..n)
-            .map(|i| {
-                let p = 1.0 / (1.0 + (-0.3 * x2[[i, 0]] - 0.2 * a1[i]).exp());
-                if rng.gen_range(0.0..1.0) < p {
-                    1.0
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let y1: Array1<f64> = Array1::zeros(n);
-        let y2: Array1<f64> = (0..n)
-            .map(|i| 1.0 + 0.5 * a1[i] + 0.3 * a2[i] + 0.2 * x1[[i, 0]] + rng.gen_range(-0.5..0.5))
-            .collect();
-        let ltmle_data =
-            LtmleData::new(vec![y1, y2], vec![a1, a2], vec![x1, x2]).expect("ltmle data");
-        let mut result = run_benchmark_tracked("LTMLE", "2-period", n, &slow_config, || {
-            run_ltmle(&ltmle_data, LtmleConfig::default())
-        });
-        if let Ok(ref lt) = run_ltmle(&ltmle_data, LtmleConfig::default()) {
+        // R's rows (ltmle_n<n>.csv): L1 = (L1_1, L1_2), A1, L2 = (L2_1, L2_2), A2, Y
+        let (l1, l2, a1, a2, y) = match load_csv_dataset(&data_dir, "ltmle", n) {
+            Some(ds) => {
+                let col = |c: &str| Array1::from(extract_col_vec(&ds, c));
+                let pair = |a: &str, b: &str| {
+                    let mut m: Array2<f64> = Array2::zeros((n, 2));
+                    m.column_mut(0).assign(&col(a));
+                    m.column_mut(1).assign(&col(b));
+                    m
+                };
+                (
+                    pair("L1_1", "L1_2"),
+                    pair("L2_1", "L2_2"),
+                    col("A1"),
+                    col("A2"),
+                    col("Y"),
+                )
+            }
+            None => {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                let x1: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
+                let x2: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
+                let a1: Array1<f64> = (0..n)
+                    .map(|i| {
+                        let p = 1.0 / (1.0 + (-0.3 * x1[[i, 0]]).exp());
+                        if rng.gen_range(0.0..1.0) < p {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let a2: Array1<f64> = (0..n)
+                    .map(|i| {
+                        let p = 1.0 / (1.0 + (-0.3 * x2[[i, 0]] - 0.2 * a1[i]).exp());
+                        if rng.gen_range(0.0..1.0) < p {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let y2: Array1<f64> = (0..n)
+                    .map(|i| {
+                        1.0 + 0.5 * a1[i]
+                            + 0.3 * a2[i]
+                            + 0.2 * x1[[i, 0]]
+                            + rng.gen_range(-0.5..0.5)
+                    })
+                    .collect();
+                (x1, x2, a1, a2, y2)
+            }
+        };
+        // ltmle's default formulas condition on the full history: g_2 and Q_2
+        // on L1, A1 and L2. p2a-core uses covariates[t] alone (CAUS-18), so the
+        // history goes into the time-2 covariates: (L2_1, L2_2, L1_1, L1_2, A1).
+        let mut l2_hist: Array2<f64> = Array2::zeros((n, 5));
+        l2_hist.column_mut(0).assign(&l2.column(0));
+        l2_hist.column_mut(1).assign(&l2.column(1));
+        l2_hist.column_mut(2).assign(&l1.column(0));
+        l2_hist.column_mut(3).assign(&l1.column(1));
+        l2_hist.column_mut(4).assign(&a1);
+        // ltmle fits Q by logistic regression on Y mapped to [0, 1] by its
+        // range and reports the estimates back on Y's scale; the default
+        // LtmleQModel::Logistic on the raw Y (outside [0, 1]) diverged and
+        // returned ATE = SE = 0. The default gbounds (0.01, 0.99) are R's. The
+        // mapping is inside the timed call, as it is inside ltmle().
+        let ltmle_fit = || {
+            let lo = y.iter().copied().fold(f64::INFINITY, f64::min);
+            let range = y.iter().copied().fold(f64::NEG_INFINITY, f64::max) - lo;
+            LtmleData::new(
+                vec![Array1::zeros(n), y.mapv(|v| (v - lo) / range)],
+                vec![a1.clone(), a2.clone()],
+                vec![l1.clone(), l2_hist.clone()],
+            )
+            .and_then(|data| run_ltmle(&data, LtmleConfig::default()))
+            .map(|lt| (lt, lo, range))
+        };
+        let mut result = run_benchmark_tracked("LTMLE", "2-period", n, &slow_config, &ltmle_fit);
+        if let Ok((lt, lo, range)) = ltmle_fit() {
+            // On Y's scale, as ltmle reports them. They differ from R's: the
+            // targeting omits the regime indicator (CAUS-17) and the influence
+            // curve its residual terms (CAUS-19).
             let mut outputs = BTreeMap::new();
-            capture(&mut outputs, "ate", lt.ate);
-            capture(&mut outputs, "se", lt.se);
+            capture(&mut outputs, "ate", lt.ate * range);
+            capture(&mut outputs, "se", lt.se * range);
+            capture(&mut outputs, "psi_treated", lo + range * lt.psi_treated);
+            capture(&mut outputs, "psi_control", lo + range * lt.psi_control);
             result.outputs = outputs;
         }
         result.dgp = "ltmle".to_string();
@@ -3543,9 +3724,15 @@ fn main() {
         results.push(result);
     }
 
-    // GARCH
-    // Cap: no R benchmark at n=10000
-    for n in sizes_for(&["GARCH"], [100, 1000]) {
+    // GARCH: Gaussian GARCH(1,1) with a constant mean on R's garch_n rows, at
+    // R's sizes. Reported as fGarch::garchFit reports it: mu, (omega, alpha1,
+    // beta1), the standard errors of (mu, omega, alpha1, beta1) and the
+    // log-likelihood. The variance recursion starts at the unconditional
+    // variance here and at fGarch's "mci" value in R (fGarch refuses "uev"),
+    // which moves the MLE by up to 20% at n=100 and under 0.4% from n=1000.
+    // Library: the estimator diverges (TS-11), the SEs use the Hessian
+    // diagonal (TS-12).
+    for n in sizes_for(&["GARCH"], [100, 1000, 10000]) {
         let garch_y = load_csv_array1(&data_dir, "garch", n, "y")
             .map(|a| a.to_vec())
             .unwrap_or_else(|| generate_garch_data(n, 42));
@@ -3560,10 +3747,14 @@ fn main() {
         });
         if let Ok(ref garch_res) = garch(&garch_y, Some(garch_config.clone())) {
             let mut outputs = BTreeMap::new();
+            capture(&mut outputs, "mu", garch_res.mu);
             let mut coeffs = vec![garch_res.omega];
             coeffs.extend_from_slice(&garch_res.alpha);
             coeffs.extend_from_slice(&garch_res.beta);
             capture_vec(&mut outputs, "coefficients", &coeffs);
+            // (mu, omega, alpha1, beta1): include_mean puts mu first
+            capture_vec(&mut outputs, "std_errors", &garch_res.std_errors);
+            capture(&mut outputs, "log_likelihood", garch_res.log_likelihood);
             result.outputs = outputs;
         }
         result.dgp = "garch".to_string();
@@ -4073,7 +4264,12 @@ fn main() {
     println!("\n--- t-SNE ---");
     print_header();
 
-    // Cap: t-SNE is O(n^2) with 500 internal iterations; n=10000 takes hours
+    // Cap: t-SNE is O(n^2) with 500 internal iterations; n=10000 takes hours.
+    // R runs Rtsne with tsne()'s algorithm (exact, PCA x 1e-4 start,
+    // exaggeration 4 for 100 iterations, momentum switch at 250, eta 4 x 200
+    // for its gradient without the factor 4). The final KL divergence is
+    // chaotic in the start and the summation order, so it agrees to about
+    // 1-3% (n=100) and 0.5-1% (n=1000) only; the other keys are exact.
     for n in sizes_for(&["tSNE"], [100, 1000]) {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
@@ -4101,6 +4297,7 @@ fn main() {
             capture(&mut outputs, "n_components", res.n_components as f64);
             capture(&mut outputs, "kl_divergence", res.kl_divergence);
             capture(&mut outputs, "n_iterations", res.n_iterations as f64);
+            capture(&mut outputs, "perplexity", res.perplexity);
             result.outputs = outputs;
         }
         result.dgp = "cluster".to_string();
@@ -5594,27 +5791,36 @@ fn main() {
     println!("\n--- Survival: Competing Risks ---");
     print_header();
 
+    // R's rows (competing_risks_n<n>.csv: time, event_type 0/1/2). Reported as
+    // cmprsk::cuminc + timepoints report them: the CIF of each cause and its
+    // standard error times sqrt(n) at t = 2, 5, 10, 15 (the step function's
+    // value at the last time <= t), and the event counts per cause. The CIFs
+    // agree exactly; the standard errors come from a simplified variance
+    // (library ECON-78).
+    let cr_eval_times = [2.0_f64, 5.0, 10.0, 15.0];
     for n in sizes_for(&["Competing_Risks"], [100, 1000, 10000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let time_vals: Vec<f64> = (0..n).map(|_| rng.gen_range(0.1..20.0)).collect();
-        let event_type_vals: Vec<f64> = (0..n)
-            .map(|_| {
-                let u: f64 = rng.gen_range(0.0..1.0);
-                if u < 0.3 {
-                    0.0
-                } else if u < 0.65 {
-                    1.0
-                } else {
-                    2.0
-                }
-            })
-            .collect();
-        let df = DataFrame::new(vec![
-            Column::new("time".into(), &time_vals),
-            Column::new("event_type".into(), &event_type_vals),
-        ])
-        .unwrap();
-        let dataset = Dataset::new(df);
+        let dataset = load_csv_dataset(&data_dir, "competing_risks", n).unwrap_or_else(|| {
+            let mut rng = ChaCha8Rng::seed_from_u64(42);
+            let time_vals: Vec<f64> = (0..n).map(|_| rng.gen_range(0.1..20.0)).collect();
+            let event_type_vals: Vec<f64> = (0..n)
+                .map(|_| {
+                    let u: f64 = rng.gen_range(0.0..1.0);
+                    if u < 0.3 {
+                        0.0
+                    } else if u < 0.65 {
+                        1.0
+                    } else {
+                        2.0
+                    }
+                })
+                .collect();
+            let df = DataFrame::new(vec![
+                Column::new("time".into(), &time_vals),
+                Column::new("event_type".into(), &event_type_vals),
+            ])
+            .unwrap();
+            Dataset::new(df)
+        });
 
         let mut result =
             run_benchmark_tracked("Competing_Risks", "Aalen-Johansen", n, &config, || {
@@ -5624,6 +5830,38 @@ fn main() {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "n_obs", cr.n_obs as f64);
             capture(&mut outputs, "n_event_types", cr.event_types.len() as f64);
+            let n_events: Vec<f64> = cr
+                .event_types
+                .iter()
+                .map(|e| *cr.n_events_by_type.get(e).unwrap_or(&0) as f64)
+                .collect();
+            capture_vec(&mut outputs, "n_events", &n_events);
+            for cif in &cr.cifs {
+                let at_times = |vals: &[f64]| -> Vec<f64> {
+                    cr_eval_times
+                        .iter()
+                        .map(|&tau| {
+                            let k = cif.times.partition_point(|&t| t <= tau);
+                            if k == 0 { 0.0 } else { vals[k - 1] }
+                        })
+                        .collect()
+                };
+                capture_vec(
+                    &mut outputs,
+                    &format!("cif_cause{}", cif.event_type),
+                    &at_times(&cif.incidence),
+                );
+                let sqrt_n = (cr.n_obs as f64).sqrt();
+                let se_sqrtn: Vec<f64> = at_times(&cif.std_errors)
+                    .iter()
+                    .map(|se| se * sqrt_n)
+                    .collect();
+                capture_vec(
+                    &mut outputs,
+                    &format!("se_sqrtn_cause{}", cif.event_type),
+                    &se_sqrtn,
+                );
+            }
             result.outputs = outputs;
         }
         result.dgp = "competing_risks".to_string();
@@ -6001,28 +6239,12 @@ fn main() {
         results.push(result);
     }
 
-    // Marginal_Effects (logit AME)
-    for n in sizes_for(&["Marginal_Effects"], [100, 500, 1000]) {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let normal = Normal::new(0.0, 1.0).unwrap();
-        let x1: Vec<f64> = (0..n).map(|_| normal.sample(&mut rng)).collect();
-        let x2: Vec<f64> = (0..n).map(|_| normal.sample(&mut rng)).collect();
-        let y: Vec<f64> = (0..n)
-            .map(|i| {
-                let logit = -1.0 + 0.5 * x1[i] + 0.3 * x2[i];
-                let prob = 1.0 / (1.0 + (-logit).exp());
-                if rng.gen_range(0.0..1.0) < prob {
-                    1.0
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let df = df! {
-            "y" => &y, "x1" => &x1, "x2" => &x2,
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
+    // Marginal_Effects (logit AME): R's rows (binary_n<n>.csv, as Logit reads)
+    // at R's sizes; R's margins() fits the same glm and reports the AMEs with
+    // delta-method SEs, as marginal_effects does
+    for n in sizes_for(&["Marginal_Effects"], [100, 1000, 10000]) {
+        let dataset =
+            load_csv_dataset(&data_dir, "binary", n).unwrap_or_else(|| generate_binary_data(n, 42));
 
         let mut result =
             run_benchmark_tracked("Marginal_Effects", "logit_AME", n, &slow_config, || {
@@ -6030,8 +6252,14 @@ fn main() {
             });
         if let Ok(ref res) = marginal_effects(&dataset, "y", &["x1", "x2"], ModelType::Logit) {
             let mut outputs = BTreeMap::new();
-            let ames: Vec<f64> = res.average_marginal.iter().map(|m| m.estimate).collect();
-            capture_vec(&mut outputs, "ame", &ames);
+            // By name, under R's keys: average_marginal also holds the intercept
+            for m in &res.average_marginal {
+                if m.variable == "(Intercept)" {
+                    continue;
+                }
+                capture(&mut outputs, &format!("ame_{}", m.variable), m.estimate);
+                capture(&mut outputs, &format!("se_{}", m.variable), m.std_error);
+            }
             result.outputs = outputs;
         }
         result.dgp = "binary".to_string();
