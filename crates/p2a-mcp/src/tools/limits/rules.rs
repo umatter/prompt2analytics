@@ -339,6 +339,14 @@ pub static PARAM_RULES: &[ParamRule] = {
             ),
         ),
         p("hypothesis_chisq_gof", "probs[]", Exempt(ARRAY_VALUE)),
+        p(
+            "hypothesis_chisq_gof",
+            "expected",
+            Exempt(
+                "probability per category; the request body limit bounds the map, and the core \
+                 matches its keys by hash in O(k)",
+            ),
+        ),
         p("hypothesis_ks_test", "a", Exempt(DISTRIBUTION)),
         p("hypothesis_ks_test", "b", Exempt(DISTRIBUTION)),
         p("hypothesis_ks_test", "mean", Exempt(DISTRIBUTION)),

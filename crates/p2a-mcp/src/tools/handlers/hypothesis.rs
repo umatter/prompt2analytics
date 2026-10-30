@@ -12,15 +12,15 @@
 //! - And more
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::check_named_budget;
+use crate::tools::common::{check_named_budget, missing_json};
 use crate::tools::limits::echo;
 use crate::tools::requests::hypothesis::*;
 use p2a_core::stats::{
-    Alternative, CmhAlternative, PValueAdjustMethod, PoissonAlternative, mcnemar_test, mood_test,
-    one_sample_t_test, paired_t_test, poisson_test, run_bartlett_test, run_chisq_gof,
-    run_chisq_independence, run_friedman_test, run_kruskal_test, run_mantelhaen_test,
-    run_oneway_test, run_pairwise_t_test, run_pairwise_wilcox_test, run_quade_test,
-    two_sample_t_test,
+    Alternative, CmhAlternative, GofExpected, PValueAdjustMethod, PoissonAlternative, mcnemar_test,
+    mood_test, one_sample_t_test, paired_t_test, poisson_test, run_bartlett_test,
+    run_chisq_gof_with, run_chisq_independence, run_friedman_test, run_kruskal_test,
+    run_mantelhaen_test, run_oneway_test, run_pairwise_t_test, run_pairwise_wilcox_test,
+    run_quade_test, two_sample_t_test,
 };
 use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
@@ -94,7 +94,7 @@ impl AnalyticsServer {
 
     /// Run chi-squared goodness-of-fit test.
     #[tool(
-        description = "Run Pearson's chi-squared goodness-of-fit test to check if observed category frequencies match expected probabilities. Tests H₀: observed frequencies follow the expected distribution. Returns chi-squared statistic, p-value, degrees of freedom, and residuals. Use for categorical data to test if a distribution is uniform or matches specific probabilities."
+        description = "Run Pearson's chi-squared goodness-of-fit test (R chisq.test(table(x), p = ...)) to check if observed category frequencies match expected probabilities. Tests H₀: observed frequencies follow the expected distribution. Each distinct non-missing value of the column is a category; rows with a missing value are dropped and reported under missing. Give the expected probabilities either as probs, one per category in the order of the sorted category labels (numbers numerically, text in C-locale order; the result's categories lists that order), or as expected, a category -> probability map in which categories that never occur in the data count as 0 (e.g. all six faces of a die); omit both for the uniform distribution. Returns chi-squared statistic, p-value, degrees of freedom, the categories with observed and expected counts and Pearson residuals, and R's warning when an expected count is below 5."
     )]
     pub async fn hypothesis_chisq_gof(
         &self,
@@ -104,24 +104,54 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let probs: Option<Vec<f64>> = request.probs;
-        let probs_ref: Option<&[f64]> = probs.as_deref();
+        let expected = match (request.probs, request.expected) {
+            (Some(_), Some(_)) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Chi-squared goodness-of-fit test refused: give either probs (in the sorted \
+                     category order) or expected (a category -> probability map), not both",
+                )]));
+            }
+            (Some(probs), None) => GofExpected::Probs(probs),
+            (None, Some(map)) => GofExpected::Named(map.into_iter().collect()),
+            (None, None) => GofExpected::Uniform,
+        };
 
-        match run_chisq_gof(dataset, &request.column, probs_ref) {
+        match run_chisq_gof_with(dataset, &request.column, &expected, false) {
             Ok(result) => {
-                let json_output = serde_json::json!({
-                    "test": result.test_name,
-                    "statistic": result.statistic,
-                    "df": result.df,
-                    "p_value": result.p_value,
-                    "significance": result.significance.to_string(),
-                    "observed": result.observed,
-                    "expected": result.expected,
-                    "residuals": result.residuals,
-                    "n_categories": result.observed.len(),
-                });
+                let categories = result.row_labels.clone().unwrap_or_default();
+                let k = result.observed.len();
+                let label_bytes = label_budget_bytes(&categories);
+                let mut out = serde_json::Map::new();
+                out.insert("test".into(), serde_json::json!(result.test_name));
+                out.insert("statistic".into(), json_number(result.statistic));
+                out.insert("df".into(), serde_json::json!(result.df));
+                out.insert("p_value".into(), json_number(result.p_value));
+                out.insert(
+                    "significance".into(),
+                    serde_json::json!(result.significance.to_string()),
+                );
+                out.insert("n_categories".into(), serde_json::json!(k));
+                out.insert("n".into(), json_number(result.observed.iter().sum::<f64>()));
+                if fits_response_budget((k as u64).saturating_mul(3), label_bytes) {
+                    out.insert("categories".into(), serde_json::json!(categories));
+                    out.insert("observed".into(), serde_json::json!(result.observed));
+                    out.insert("expected".into(), serde_json::json!(result.expected));
+                    out.insert("residuals".into(), serde_json::json!(result.residuals));
+                } else {
+                    out.insert(
+                        "per_category_arrays".into(),
+                        serde_json::json!(format!(
+                            "omitted: {k} categories are too many to return; the statistic, df \
+                             and p-value are complete"
+                        )),
+                    );
+                }
+                out.insert("warnings".into(), serde_json::json!(result.warnings));
+                if let Some(missing) = missing_json(&result.missing) {
+                    out.insert("missing".into(), missing);
+                }
                 Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json_output).unwrap(),
+                    serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap(),
                 )]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -133,7 +163,7 @@ impl AnalyticsServer {
 
     /// Run chi-squared test of independence.
     #[tool(
-        description = "Run Pearson's chi-squared test of independence to check if two categorical variables are independent. Creates a contingency table from two columns and tests H₀: row and column variables are independent. For 2×2 tables, Yates' continuity correction is applied by default. Returns chi-squared statistic, p-value, degrees of freedom, expected values, and residuals."
+        description = "Run Pearson's chi-squared test of independence (R chisq.test(table(x, y))) to check if two categorical variables are independent. Creates a contingency table from two columns and tests H₀: row and column variables are independent. Rows with a missing value in either column are dropped (R table()) and reported under missing; the levels are sorted (numbers numerically, text in C-locale order) and returned as row_levels and col_levels. For 2×2 tables, Yates' continuity correction is applied by default. Returns chi-squared statistic, p-value, degrees of freedom, observed and expected counts and residuals in row_levels x col_levels order, and R's warning 'Chi-squared approximation may be incorrect' when an expected count is below 5."
     )]
     pub async fn hypothesis_chisq_independence(
         &self,
@@ -146,8 +176,9 @@ impl AnalyticsServer {
         let correct = request.correct.unwrap_or(true);
 
         // Size the table before any work, when a budget depends on its size: both counts include
-        // null as a level, as the core's `unique()` does. A missing column is left to the core
-        // to report; a count that fails is a refusal, since the budget could not be checked.
+        // null as a level, an upper bound on the table the core builds after dropping missing
+        // values. A missing column is left to the core to report; a count that fails is a
+        // refusal, since the budget could not be checked.
         let limits = crate::tools::limits::current();
         let mut cells: Option<usize> = None;
         if limits.table_cells.is_some() || limits.response_bytes.is_some() {
@@ -189,17 +220,20 @@ impl AnalyticsServer {
 
         match run_chisq_independence(dataset, &request.row_var, &request.col_var, correct) {
             Ok(result) => {
-                // The four per-cell arrays take about 4 x 32 bytes of JSON per cell; leave them
-                // out when they could not fit the response budget.
+                // The four per-cell arrays take about 4 x 32 bytes of JSON per cell, and the
+                // level labels their own length; leave them out together when they could not
+                // fit the response budget.
                 let n_cells = cells.unwrap_or(result.observed.len());
-                let fits = limits
-                    .response_bytes
-                    .is_none_or(|cap| (n_cells as u64).saturating_mul(128) <= cap);
+                let row_levels = result.row_labels.clone().unwrap_or_default();
+                let col_levels = result.col_labels.clone().unwrap_or_default();
+                let label_bytes =
+                    label_budget_bytes(&row_levels).saturating_add(label_budget_bytes(&col_levels));
+                let fits = fits_response_budget((n_cells as u64).saturating_mul(4), label_bytes);
                 let mut out = serde_json::Map::new();
                 out.insert("test".into(), serde_json::json!(result.test_name));
-                out.insert("statistic".into(), serde_json::json!(result.statistic));
+                out.insert("statistic".into(), json_number(result.statistic));
                 out.insert("df".into(), serde_json::json!(result.df));
-                out.insert("p_value".into(), serde_json::json!(result.p_value));
+                out.insert("p_value".into(), json_number(result.p_value));
                 out.insert(
                     "significance".into(),
                     serde_json::json!(result.significance.to_string()),
@@ -207,6 +241,8 @@ impl AnalyticsServer {
                 out.insert("n_rows".into(), serde_json::json!(result.n_rows));
                 out.insert("n_cols".into(), serde_json::json!(result.n_cols));
                 if fits {
+                    out.insert("row_levels".into(), serde_json::json!(row_levels));
+                    out.insert("col_levels".into(), serde_json::json!(col_levels));
                     out.insert("observed".into(), serde_json::json!(result.observed));
                     out.insert("expected".into(), serde_json::json!(result.expected));
                     out.insert("residuals".into(), serde_json::json!(result.residuals));
@@ -227,6 +263,10 @@ impl AnalyticsServer {
                     "yates_correction".into(),
                     serde_json::json!(result.yates_correction),
                 );
+                out.insert("warnings".into(), serde_json::json!(result.warnings));
+                if let Some(missing) = missing_json(&result.missing) {
+                    out.insert("missing".into(), missing);
+                }
                 let json_output = serde_json::Value::Object(out);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -340,7 +380,7 @@ impl AnalyticsServer {
 
     /// Fisher's exact test for 2×2 contingency tables.
     #[tool(
-        description = "Run Fisher's exact test for a 2×2 contingency table. Tests independence between two binary categorical variables using exact probability calculations (hypergeometric distribution). More accurate than chi-squared test for small samples. Returns p-value, odds ratio, and optionally a confidence interval. Use when expected cell counts are small (<5) or when exact p-values are needed."
+        description = "Run Fisher's exact test for a 2×2 contingency table built from two columns, as R fisher.test. Tests independence between two binary categorical variables using exact probability calculations (hypergeometric distribution). More accurate than chi-squared test for small samples. Rows with a missing value in either column are dropped (R table()); the levels are sorted (numbers numerically, text in C-locale order) and returned as row_levels and col_levels. Returns the p-value, the conditional MLE odds ratio and (with conf_level) the exact conditional CI as R fisher.test (one-sided for 'less'/'greater'), the sample odds ratio and the level labels; infinite values are the string \"Inf\". Use when expected cell counts are small (<5) or when exact p-values are needed."
     )]
     pub async fn hypothesis_fisher_exact(
         &self,
@@ -374,28 +414,36 @@ impl AnalyticsServer {
             Ok(result) => {
                 let mut json_output = serde_json::json!({
                     "test": result.test_name,
-                    "p_value": result.p_value,
+                    "p_value": json_number(result.p_value),
                     "significance": result.significance.to_string(),
                     "alternative": result.alternative.to_string(),
-                    "odds_ratio": result.odds_ratio,
+                    "odds_ratio": json_number(result.odds_ratio),
+                    "sample_odds_ratio": json_number(result.odds_ratio),
+                    "conditional_mle": json_number(result.conditional_mle),
                     "table": {
-                        "a": result.table[0],
-                        "b": result.table[1],
-                        "c": result.table[2],
-                        "d": result.table[3],
+                        "a": json_number(result.table[0]),
+                        "b": json_number(result.table[1]),
+                        "c": json_number(result.table[2]),
+                        "d": json_number(result.table[3]),
                     },
-                    "row_totals": result.row_totals,
-                    "col_totals": result.col_totals,
-                    "n": result.n,
-                    "prob_observed": result.prob_observed,
+                    "row_levels": result.row_levels,
+                    "col_levels": result.col_levels,
+                    "row_totals": result.row_totals.map(json_number),
+                    "col_totals": result.col_totals.map(json_number),
+                    "n": json_number(result.n),
+                    "prob_observed": json_number(result.prob_observed),
                 });
 
                 if let (Some((lo, hi)), Some(level)) = (result.odds_ratio_ci, result.conf_level) {
                     json_output["odds_ratio_ci"] = serde_json::json!({
-                        "lower": lo,
-                        "upper": hi,
-                        "conf_level": level,
+                        "lower": json_number(lo),
+                        "upper": json_number(hi),
+                        "conf_level": json_number(level),
+                        "method": "exact conditional (as R fisher.test)",
                     });
+                }
+                if let Some(missing) = missing_json(&result.missing) {
+                    json_output["missing"] = missing;
                 }
 
                 Ok(CallToolResult::success(vec![Content::text(
@@ -683,7 +731,7 @@ impl AnalyticsServer {
 
     /// Run Cochran-Mantel-Haenszel test for stratified 2×2 tables.
     #[tool(
-        description = "Run Cochran-Mantel-Haenszel test for conditional independence in stratified 2×2 tables. Tests whether two binary variables are associated while controlling for a third (stratum) variable. Returns CMH chi-squared statistic, p-value, common odds ratio estimate with confidence interval, and per-stratum statistics."
+        description = "Run Cochran-Mantel-Haenszel test for conditional independence in stratified 2×2 tables (R mantelhaen.test(table(x, y, stratum))). Tests whether two binary variables are associated while controlling for a third (stratum) variable. Rows with a missing value in any of the three columns are dropped (R table()) and reported under missing; levels are sorted (numbers numerically, text in C-locale order) and returned as row_levels and col_levels. Returns CMH chi-squared statistic, p-value, common odds ratio estimate with confidence interval, and per-stratum statistics."
     )]
     pub async fn hypothesis_mantelhaen(
         &self,
@@ -744,7 +792,7 @@ impl AnalyticsServer {
             CmhAlternative::Less => "true common odds ratio is less than 1",
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": result.test_name,
             "statistic": result.statistic,
             "statistic_name": "Mantel-Haenszel X-squared",
@@ -772,8 +820,13 @@ impl AnalyticsServer {
             "references": {
                 "method": "Cochran (1954), Biometrics 10(4):417-451; Mantel & Haenszel (1959), JNCI 22(4):719-748",
                 "variance": "Robins et al. (1986) for odds ratio CI"
-            }
+            },
+            "row_levels": result.row_levels,
+            "col_levels": result.col_levels,
         });
+        if let Some(missing) = missing_json(&result.missing) {
+            output["missing"] = missing;
+        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1740,8 +1793,9 @@ fn check_pairwise_groups(
     })
 }
 
-/// The distinct values of column `name` (null counted as one, as the core's `unique()` does) for
-/// a size budget: `Ok(None)` when the column is missing, which the core reports itself.
+/// The distinct values of column `name` for a size budget, null counted as one: an upper bound
+/// on the levels the core keeps after dropping missing values. `Ok(None)` when the column is
+/// missing, which the core reports itself.
 fn budget_level_count(
     df: &p2a_core::polars::prelude::DataFrame,
     name: &str,
@@ -1765,6 +1819,36 @@ fn level_count_or_refusal(
             echo(name)
         )
     })
+}
+
+/// A number for a JSON result: finite values as numbers, others as the strings `"Inf"`,
+/// `"-Inf"` or `"NaN"` (JSON has no infinity, and `null` would hide which it is).
+fn json_number(v: f64) -> serde_json::Value {
+    if v.is_finite() {
+        serde_json::json!(v)
+    } else if v == f64::INFINITY {
+        serde_json::json!("Inf")
+    } else if v == f64::NEG_INFINITY {
+        serde_json::json!("-Inf")
+    } else {
+        serde_json::json!("NaN")
+    }
+}
+
+/// Whether `numbers` JSON numbers (about 32 bytes each) and labels taking `label_bytes` fit
+/// this server's `response_bytes` budget (always, when it is off).
+fn fits_response_budget(numbers: u64, label_bytes: u64) -> bool {
+    crate::tools::limits::current()
+        .response_bytes
+        .is_none_or(|cap| numbers.saturating_mul(32).saturating_add(label_bytes) <= cap)
+}
+
+/// The JSON bytes a list of labels takes for [`fits_response_budget`]: each label's length
+/// plus 8 for its quotes, comma and indentation.
+fn label_budget_bytes(labels: &[String]) -> u64 {
+    labels
+        .iter()
+        .fold(0u64, |acc, l| acc.saturating_add(l.len() as u64 + 8))
 }
 
 /// The k x k lower-triangular matrix of adjusted p-values (row i, column j < i), with its size
@@ -1792,6 +1876,7 @@ mod tests {
     use crate::tools::common::test_support::{hosted_with, server_with, text};
     use crate::tools::limits::{self, Limits};
     use p2a_core::polars::prelude::*;
+    use p2a_validation::{Case, Check, Tol};
 
     /// `r{i}`, `c{i}`: an n x n table
     fn pair_ids(n: usize) -> DataFrame {
@@ -2028,5 +2113,315 @@ mod tests {
                 vec![Some(20.0), Some(21.0), None],
             ]
         );
+    }
+
+    async fn case_server(id: &str) -> (Case, AnalyticsServer, String) {
+        let case = Case::load(id);
+        let df = p2a_core::data::DataLoader::load_csv(case.dataset_path()).unwrap();
+        let name = std::path::Path::new(&case.dataset)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let server = AnalyticsServer::new();
+        server
+            .datasets
+            .write()
+            .await
+            .insert(name.clone(), p2a_core::data::Dataset::new(df));
+        (case, server, name)
+    }
+
+    fn json_of(r: &CallToolResult) -> serde_json::Value {
+        assert_ne!(r.is_error, Some(true), "{}", text(r));
+        serde_json::from_str(&text(r)).unwrap()
+    }
+
+    async fn gof(server: &AnalyticsServer, args: serde_json::Value) -> CallToolResult {
+        let req: ChiSquaredGofRequest = serde_json::from_value(args).unwrap();
+        server.hypothesis_chisq_gof(Parameters(req)).await.unwrap()
+    }
+
+    /// The tight re-solve of fisher.test's equations (plan T2-WP05 decision 2).
+    const TIGHT: Tol = Tol::new(1e-9, 1e-12);
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_fisher_exact_rows_2000() {
+        // STAT-10: before, run_fisher_test's lazy group_by panicked here ("Cannot start a
+        // runtime from within a runtime"); without the panic it returned p = 0 (STAT-2).
+        // R: fisher.test(table(treat, outcome)).
+        let (case, server, name) = case_server("stat_fisher_rows_2000").await;
+        let req: FisherExactRequest = serde_json::from_value(serde_json::json!(
+            {"dataset": name, "row_var": "treat", "col_var": "outcome", "conf_level": 0.95}))
+        .unwrap();
+        let v = json_of(
+            &server
+                .hypothesis_fisher_exact(Parameters(req))
+                .await
+                .unwrap(),
+        );
+        Check::new(&case)
+            .scalar(
+                "p_two_sided",
+                v["p_value"].as_f64().unwrap(),
+                Tol::p_value(2000),
+            )
+            .scalar(
+                "estimate_cond_mle_tight",
+                v["conditional_mle"].as_f64().unwrap(),
+                TIGHT,
+            )
+            .scalar(
+                "ci_lower_two_sided_tight",
+                v["odds_ratio_ci"]["lower"].as_f64().unwrap(),
+                TIGHT,
+            )
+            .scalar(
+                "ci_upper_two_sided_tight",
+                v["odds_ratio_ci"]["upper"].as_f64().unwrap(),
+                TIGHT,
+            )
+            .scalar(
+                "sample_odds_ratio",
+                v["sample_odds_ratio"].as_f64().unwrap(),
+                Tol::new(1e-15, 0.0),
+            )
+            .scalar(
+                "sample_odds_ratio",
+                v["odds_ratio"].as_f64().unwrap(),
+                Tol::new(1e-15, 0.0),
+            )
+            .scalar("n", v["n"].as_f64().unwrap(), Tol::exact())
+            .finish();
+        assert_eq!(v["row_levels"], serde_json::json!(["control", "treated"]));
+        assert_eq!(v["col_levels"], serde_json::json!(["no", "yes"]));
+        assert_eq!(
+            v["table"],
+            serde_json::json!({"a": 520.0, "b": 480.0, "c": 480.0, "d": 520.0})
+        );
+        assert_eq!(
+            v["odds_ratio_ci"]["method"],
+            "exact conditional (as R fisher.test)"
+        );
+        assert!(v.get("missing").is_none());
+        // greater: the upper limit is +inf, shown as "Inf" (JSON has no infinity)
+        let req: FisherExactRequest = serde_json::from_value(serde_json::json!(
+            {"dataset": name, "row_var": "treat", "col_var": "outcome", "conf_level": 0.95,
+             "alternative": "greater"}))
+        .unwrap();
+        let g = json_of(
+            &server
+                .hypothesis_fisher_exact(Parameters(req))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(g["odds_ratio_ci"]["upper"], "Inf");
+        Check::new(&case)
+            .scalar(
+                "p_greater",
+                g["p_value"].as_f64().unwrap(),
+                Tol::p_value(2000),
+            )
+            .scalar(
+                "ci_lower_greater_tight",
+                g["odds_ratio_ci"]["lower"].as_f64().unwrap(),
+                TIGHT,
+            )
+            .finish();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_chisq_independence_rows_2000() {
+        // R: chisq.test(table(treat, outcome)) with Yates: 3.042, p 0.08113589702211416 (no
+        // panic since T0-WP19).
+        let (case, server, name) = case_server("stat_fisher_rows_2000").await;
+        let req: ChiSquaredIndependenceRequest = serde_json::from_value(serde_json::json!(
+            {"dataset": name, "row_var": "treat", "col_var": "outcome"}))
+        .unwrap();
+        let v = json_of(
+            &server
+                .hypothesis_chisq_independence(Parameters(req))
+                .await
+                .unwrap(),
+        );
+        Check::new(&case)
+            .scalar(
+                "chisq_yates",
+                v["statistic"].as_f64().unwrap(),
+                Tol::stat(2000),
+            )
+            .scalar(
+                "chisq_yates_p",
+                v["p_value"].as_f64().unwrap(),
+                Tol::p_value(2000),
+            )
+            .finish();
+        assert_eq!(v["row_levels"], serde_json::json!(["control", "treated"]));
+        assert_eq!(v["col_levels"], serde_json::json!(["no", "yes"]));
+        assert_eq!(v["warnings"], serde_json::json!([]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_chisq_independence_small_expected() {
+        // TOOL-33: R warns "Chi-squared approximation may be incorrect"; the JSON had neither
+        // warning nor labels.
+        let (case, server, name) = case_server("stat_chisq_small_expected").await;
+        let req: ChiSquaredIndependenceRequest = serde_json::from_value(serde_json::json!(
+            {"dataset": name, "row_var": "x", "col_var": "y"}))
+        .unwrap();
+        let v = json_of(
+            &server
+                .hypothesis_chisq_independence(Parameters(req))
+                .await
+                .unwrap(),
+        );
+        let f = |k: &str| {
+            v[k].as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        Check::new(&case)
+            .scalar("chisq", v["statistic"].as_f64().unwrap(), Tol::stat(13))
+            .scalar("p", v["p_value"].as_f64().unwrap(), Tol::p_value(13))
+            .vector("observed", &f("observed"), Tol::exact())
+            .vector("expected", &f("expected"), Tol::stat(13))
+            .vector("residuals", &f("residuals"), Tol::stat(13))
+            .vector("stdres", &f("std_residuals"), Tol::stat(13))
+            .finish();
+        assert_eq!(v["row_levels"], serde_json::json!(["p", "q", "r"]));
+        assert_eq!(v["col_levels"], serde_json::json!(["s", "t"]));
+        assert!(
+            v["warnings"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("Chi-squared approximation may be incorrect")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_chisq_gof_expected() {
+        // STAT-3/STAT-45: R chisq.test(table(cat), p = c(a = .1, b = .6, c = .3)) -> X2 0, p 1;
+        // the named form with an unobserved "d" -> 6, df 3, p 0.11161022509471258; the 2 NA
+        // cells are reported. Fails before: `expected` was ignored (uniform, with the null as
+        // a 4th category: 36.769, df 3).
+        let (case, server, name) = case_server("stat_chisq_gof").await;
+        let v = json_of(
+            &gof(
+                &server,
+                serde_json::json!({"dataset": name, "column": "cat",
+                                   "expected": {"a": 0.1, "b": 0.6, "c": 0.3}}),
+            )
+            .await,
+        );
+        let w = json_of(
+            &gof(
+                &server,
+                serde_json::json!({"dataset": name, "column": "cat",
+                                   "expected": {"a": 0.1, "b": 0.5, "c": 0.3, "d": 0.1}}),
+            )
+            .await,
+        );
+        let p = json_of(
+            &gof(
+                &server,
+                serde_json::json!({"dataset": name, "column": "cat", "probs": [0.2, 0.5, 0.3]}),
+            )
+            .await,
+        );
+        Check::new(&case)
+            .scalar("p1_chisq", v["statistic"].as_f64().unwrap(), Tol::stat(50))
+            .scalar("p1_p", v["p_value"].as_f64().unwrap(), Tol::p_value(50))
+            .scalar(
+                "named4_chisq",
+                w["statistic"].as_f64().unwrap(),
+                Tol::stat(50),
+            )
+            .scalar("named4_df", w["df"].as_f64().unwrap(), Tol::exact())
+            .scalar("named4_p", w["p_value"].as_f64().unwrap(), Tol::p_value(50))
+            .scalar("p2_chisq", p["statistic"].as_f64().unwrap(), Tol::stat(50))
+            .scalar("n_used", v["n"].as_f64().unwrap(), Tol::exact())
+            .finish();
+        assert_eq!(v["categories"], serde_json::json!(["a", "b", "c"]));
+        assert_eq!(w["categories"], serde_json::json!(["a", "b", "c", "d"]));
+        assert_eq!(v["observed"], serde_json::json!([5.0, 30.0, 15.0]));
+        assert_eq!(v["missing"]["n_dropped"], 2);
+        // both forms at once is a tool error, not a guess
+        let both = gof(
+            &server,
+            serde_json::json!({"dataset": name, "column": "cat", "probs": [0.1, 0.6, 0.3],
+                               "expected": {"a": 0.1, "b": 0.6, "c": 0.3}}),
+        )
+        .await;
+        assert_eq!(both.is_error, Some(true));
+        assert!(text(&both).contains("either"), "{}", text(&both));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_mantelhaen_na() {
+        // R: mantelhaen.test(table(treat, outcome, stratum)), NA strata dropped (237 rows).
+        let (case, server, name) = case_server("stat_mantelhaen_na").await;
+        let req: MantelhaenTestRequest = serde_json::from_value(serde_json::json!(
+            {"dataset": name, "row_var": "treat", "col_var": "outcome", "stratum_var": "stratum"}))
+        .unwrap();
+        let v = json_of(&server.hypothesis_mantelhaen(Parameters(req)).await.unwrap());
+        Check::new(&case)
+            .scalar(
+                "statistic",
+                v["statistic"].as_f64().unwrap(),
+                Tol::stat(237),
+            )
+            .scalar("p", v["p_value"].as_f64().unwrap(), Tol::p_value(237))
+            .scalar(
+                "common_or",
+                v["common_odds_ratio"].as_f64().unwrap(),
+                Tol::stat(237),
+            )
+            .scalar("n_used", v["total_n"].as_f64().unwrap(), Tol::exact())
+            .finish();
+        assert_eq!(v["n_strata"], 3);
+        assert_eq!(v["row_levels"], serde_json::json!(["ctl", "trt"]));
+        assert_eq!(v["missing"]["by_column"]["stratum"], 3);
+    }
+
+    #[test]
+    fn test_mcp_hypothesis_chisq_gof_omits_arrays_above_response_budget() {
+        // decision 8: 200,000 categories x (3 numbers + a label) exceed the hosted 16 MiB
+        // response budget; the statistic is still returned (before: the full arrays, which
+        // the governor would replace by an error).
+        let ids: Vec<String> = (0..200_000).map(|i| format!("c{i}")).collect();
+        let (rt, server) = server_with(vec![("d", df!("id" => ids).unwrap())]);
+        let req: ChiSquaredGofRequest =
+            serde_json::from_value(serde_json::json!({"dataset": "d", "column": "id"})).unwrap();
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_chisq_gof(Parameters(req)))
+        })
+        .unwrap();
+        let t = text(&r);
+        assert!(
+            t.contains("\"statistic\"")
+                && t.contains("per_category_arrays")
+                && !t.contains("\"categories\""),
+            "{}",
+            t.chars().take(400).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn test_mcp_json_number_spells_non_finite_values() {
+        assert_eq!(json_number(1.5), serde_json::json!(1.5));
+        assert_eq!(json_number(f64::INFINITY), "Inf");
+        assert_eq!(json_number(f64::NEG_INFINITY), "-Inf");
+        assert_eq!(json_number(f64::NAN), "NaN");
+        assert!(limits::with_limits(Limits::off(), || fits_response_budget(
+            u64::MAX,
+            1
+        )));
+        let small = hosted_with(&["response_bytes=100"]);
+        assert!(limits::with_limits(small.clone(), || fits_response_budget(
+            3, 4
+        )));
+        assert!(!limits::with_limits(small, || fits_response_budget(3, 5)));
     }
 }
