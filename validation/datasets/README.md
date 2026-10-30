@@ -118,6 +118,15 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/ordered.csv` | 400 × 7 (y, y_label, x1, x2, y_wide, y_na, x1_na) | `disc_ordered` | `r/cases/discrete.R` | seed 2026, 3 ordered categories, 13-level y_wide, 7 incomplete rows |
 | `generated/negbin.csv` | 400 × 5 (y, x1, x2, y_na, x1_na) | `disc_negbin` | `r/cases/discrete.R` | seed 404, NB2 with size 1.8, 5 incomplete rows |
 | `generated/zeroinfl.csv` | 500 × 6 (y, y_nb, x1, x2, y_na, x2_na) | `disc_zeroinfl` | `r/cases/discrete.R` | seed 808, zero-inflated Poisson and NB, 5 incomplete rows |
+| `generated/anova_two_way_unbalanced.csv` | 13 × 6 (y, fa, fb, y3, fa3, fb3) | `stat_anova_two_way_unbalanced` | `r/cases/stats_anova.R` | seed 101; 2 x 2 cells of 2/4/4/2 rows plus one row with y and fa missing; 3 x 2 layout y3 ~ fa3 * fb3 with the (C, L) cell empty |
+| `generated/oneway_na_labels.csv` | 9 × 5 (id, y, g, v9, g9) | `stat_oneway_na_labels` | `r/cases/stats_anova.R` | fixed values; y Int64 missing in 3 rows, g in 2, g9 in 3 |
+| `generated/wilcoxon_na.csv` | 10 × 3 (id, x, y) | `stat_wilcoxon_na` | `r/cases/stats_anova.R` | seed 17; x missing in row 3, y in row 8; no ties |
+| `generated/friedman_quade.csv` | 24 × 4 (y, y_na, treat, block) | `stat_friedman_quade` | `r/cases/stats_anova.R` | seed 23; 8 blocks × 3 treatments, Int64 y, y_na missing in row 5 (block S2) |
+| `generated/manova_na.csv` | 36 × 4 (id, y1, y2, g) | `stat_manova_na` | `r/cases/stats_anova.R` | seed 31; 3 groups of 12; y1 missing in rows 3 and 20, y2 in row 30 |
+| `generated/lung.csv` | 228 × 8 (inst, time, status, age, sex, ph.ecog, ph.karno, wt.loss) | `surv_km_lung`, `surv_km_lung_by_sex`, `surv_logrank_lung` | `r/cases/survival.R` | `survival::lung`: integer days, status 1 = censored, 2 = dead; empty cells inst 1, ph.ecog 1, ph.karno 1, wt.loss 14 |
+| `generated/logrank_small.csv` | 12 × 3 (time, event, group) | `surv_logrank_small` | `r/cases/survival.R` | fixed values: the 12-row data of the former log-rank test |
+| `generated/km_small.csv` | 10 × 2 (time, event) | `surv_km_small` | `r/cases/survival.R` | fixed values: the 10-row data of the former KM test |
+| `generated/km_median_rules.csv` | 16 × 6 (time, event, group, time_early, event_early, group_no_mid) | `surv_km_median_rules` | `r/cases/survival.R` | fixed values; group_no_mid has 7 empty cells |
 
 ## Adding a dataset
 

@@ -100,12 +100,13 @@ looks like a validation failure but is not one.
 
 - **Harness** (`validation/r/harness.R` and `validation/r/cases/*.R`; the case files record
   the versions they were written with): jsonlite, plm, fixest, sandwich, lmtest, car, tseries,
-  quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv, pscl.
+  quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv, pscl,
+  survival.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
                      "quantreg", "nlme", "aod", "strucchange", "nnet", "MASS", "AER",
-                     "rdrobust", "forecast", "numDeriv", "pscl"))
+                     "rdrobust", "forecast", "numDeriv", "pscl", "survival"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -318,11 +319,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Survival Analysis
 | Method | File | Status |
 |--------|------|--------|
-| Kaplan-Meier | [survival.md](econometrics/survival.md) | not R-pinned |
-| Log-Rank Test | [survival.md](econometrics/survival.md) | not R-pinned |
-| Cox PH | [survival.md](econometrics/survival.md) | not R-pinned |
-| AFT Models | [survival.md](econometrics/survival.md) | not R-pinned |
-| Competing Risks | [survival.md](econometrics/survival.md) | not R-pinned |
+| Kaplan-Meier | [survival.md](econometrics/survival.md) | R-pinned |
+| Log-Rank Test | [survival.md](econometrics/survival.md) | R-pinned |
+| Survival columns (Int64, na.omit, Surv() status coding) | [survival.md](econometrics/survival.md) | R-pinned |
+| Cox PH | [survival_models.md](econometrics/survival_models.md) | not R-pinned |
+| AFT Models | [survival_models.md](econometrics/survival_models.md) | not R-pinned |
+| Competing Risks | [survival_models.md](econometrics/survival_models.md) | not R-pinned |
 
 ### Time Series
 | Method | File | Status |
@@ -366,7 +368,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Log-Linear Models | [loglin.md](stats/loglin.md) | not R-pinned |
 | Constrained Optimization | [constroptim.md](stats/constroptim.md) | not R-pinned |
 | SE for Contrasts | [secontrast.md](stats/secontrast.md) | not R-pinned |
-| Model Tables | [modeltables.md](stats/modeltables.md) | not R-pinned |
+| Model Tables | [modeltables.md](stats/modeltables.md) | R-pinned, known deviations (STAT-75) |
 | Fisher's Exact Test (2 × 2) | [fisher.md](stats/fisher.md) | R-pinned |
 | Chi-Squared Tests and Contingency Tables | [chisq.md](stats/chisq.md) | R-pinned |
 | Cochran-Mantel-Haenszel Test | [mantelhaen_test.md](stats/mantelhaen_test.md) | R-pinned |
@@ -378,6 +380,14 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Pairwise t-tests | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
 | Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned |
 | Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned |
+| One-way ANOVA | [anova.md](stats/anova.md) | R-pinned |
+| Two-way ANOVA (Type I, II and III sums of squares) | [anova.md](stats/anova.md) | R-pinned |
+| Kruskal-Wallis rank-sum test | [kruskal.md](stats/kruskal.md) | R-pinned |
+| Welch and classical one-way test (oneway.test) | [oneway.md](stats/oneway.md) | R-pinned |
+| Wilcoxon signed-rank and rank-sum tests | [wilcoxon.md](stats/wilcoxon.md) | R-pinned, known deviations (STAT-72) |
+| Friedman rank-sum test | [friedman.md](stats/friedman.md) | R-pinned |
+| Quade test | [quade_test.md](stats/quade_test.md) | R-pinned |
+| One-way MANOVA (Pillai, Wilks, Hotelling-Lawley, Roy) | [manova.md](stats/manova.md) | R-pinned |
 
 ### Spatial Econometrics
 | Method | File | Status |
