@@ -140,8 +140,9 @@ case("disc_ordered", "econometrics/discrete", "Ordered logit and probit (MASS::p
     sum(digamma(th + y) - digamma(th) + log(th) + 1 - log(th + mu) - (y + th) / (mu + th)))
 }
 .nb_ll <- function(th, mu, y) sum(lgamma(th + y) - lgamma(th) - lgamma(y + 1) + th * log(th) + y * log(mu + (y == 0)) - (th + y) * log(th + mu))
+.rhs <- function(names) if (length(names)) paste(names, collapse = " + ") else "1"   # "1": intercept only
 .nb_values <- function(d, yname, xnames, init_theta = NULL) {
-  frm <- as.formula(paste(yname, "~", paste(xnames, collapse = " + ")))
+  frm <- as.formula(paste(yname, "~", .rhs(xnames)))
   m <- if (is.null(init_theta)) glm.nb(frm, data = d, control = glm.control(epsilon = 1e-14, maxit = 200))
        else glm.nb(frm, data = d, init.theta = init_theta, control = glm.control(epsilon = 1e-14, maxit = 200))
   dd <- d[complete.cases(d[, c(yname, xnames)]), ]
@@ -171,13 +172,16 @@ case("disc_negbin", "econometrics/discrete", "Negative binomial (MASS::glm.nb): 
   i50 <- .nb_values(d, "y", c("x1", "x2"), init_theta = 50)
   stopifnot(abs(i50$theta - v$theta) < 1e-10 * v$theta)
   na <- .nb_values(d, "y_na", c("x1_na", "x2"))
-  # R's trigamma at the points the NB theta information needs (incl. the polished theta); T2-WP10 plan sync
+  i0 <- .nb_values(d, "y", character(0))                             # intercept only: glm.nb(y ~ 1)
+  # R's trigamma at the points the NB theta information needs (incl. the polished theta)
   tg_x <- c(0.1, 0.5, 1, v$theta, 3.7, 6, 10, 25.5, 1000)
   list(values = c(v, list(trigamma_x = vec(tg_x), trigamma = vec(trigamma(tg_x)),
                           theta_init50_pkg = i50$theta_pkg,
                           na_coef = na$coef, na_se = na$se, na_theta = na$theta, na_se_theta = na$se_theta,
                           na_loglik = na$loglik, na_n_used = na$n, na_n_dropped = nrow(d) - na$n,
-                          na_missing_y = sum(is.na(d$y_na)), na_missing_x1 = sum(is.na(d$x1_na)))),
+                          na_missing_y = sum(is.na(d$y_na)), na_missing_x1 = sum(is.na(d$x1_na)),
+                          int_coef = i0$coef, int_se = i0$se, int_theta = i0$theta, int_se_theta = i0$se_theta,
+                          int_loglik = i0$loglik)),
        reference = "MASS::glm.nb(control = glm.control(epsilon = 1e-14)), polished by Newton steps on the joint (beta, theta) score; beta SEs (X'WX)^-1 with W = mu theta/(theta + mu) (summary.negbin); SE.theta = 1/sqrt(theta.ml information) at the optimum",
        call = "glm.nb(y ~ x1 + x2, data = d)", packages = "MASS")
 })
@@ -208,7 +212,7 @@ case("disc_negbin", "econometrics/discrete", "Negative binomial (MASS::glm.nb): 
   c(colSums(wc * X), colSums(wz * Z), if (dist == "negbin") sum(wt))
 }
 .zi_values <- function(d, yname, xnames, znames, dist) {
-  frm <- as.formula(paste(yname, "~", paste(xnames, collapse = " + "), "|", paste(znames, collapse = " + ")))
+  frm <- as.formula(paste(yname, "~", .rhs(xnames), "|", .rhs(znames)))
   m <- zeroinfl(frm, data = d, dist = dist, control = zeroinfl.control(EM = TRUE, reltol = 1e-15, maxit = 100000))
   dd <- d[complete.cases(d[, unique(c(yname, xnames, znames))]), ]
   X <- cbind(1, as.matrix(dd[, xnames, drop = FALSE])); Z <- cbind(1, as.matrix(dd[, znames, drop = FALSE])); y <- dd[[yname]]
@@ -251,13 +255,16 @@ case("disc_zeroinfl", "econometrics/discrete", "Zero-inflated Poisson and NB (ps
   zn <- .zi_values(d, "y_nb", c("x1", "x2"), c("x1", "x2"), "negbin"); names(zn) <- paste0("zinb_", names(zn))
   z1 <- .zi_values(d, "y", c("x1", "x2"), "x1", "poisson")          # zero part with its own regressors
   na <- .zi_values(d, "y_na", c("x1", "x2_na"), c("x1", "x2_na"), "poisson")
+  z0 <- .zi_values(d, "y", c("x1", "x2"), character(0), "poisson")  # zero part intercept only: y ~ x1 + x2 | 1
   # pscl::hurdle drops the same rows (na.omit); its estimates are not pinned here (ECON-16, Tier 4)
   hna <- hurdle(y_na ~ x1 + x2_na, data = d)
   list(values = c(zp, zn, list(zip_z1_count = z1$count, zip_z1_zero = z1$zero, zip_z1_se_zero = z1$se_zero, zip_z1_loglik = z1$loglik,
                                zip_na_count = na$count, zip_na_zero = na$zero, zip_na_se_count = na$se_count, zip_na_loglik = na$loglik,
                                zip_na_n_used = na$n, zip_na_n_dropped = nrow(d) - na$n,
                                zip_na_missing_y = sum(is.na(d$y_na)), zip_na_missing_x2 = sum(is.na(d$x2_na)),
-                               hurdle_na_n_used = hna$n)),
+                               hurdle_na_n_used = hna$n,
+                               zip_z0_count = z0$count, zip_z0_zero = z0$zero, zip_z0_se_count = z0$se_count,
+                               zip_z0_se_zero = z0$se_zero, zip_z0_loglik = z0$loglik)),
        reference = "pscl::zeroinfl(y ~ x1 + x2 | x1 + x2, dist = 'poisson' | 'negbin', EM = TRUE, reltol = 1e-15), polished by Newton steps on pscl's analytic gradient; SEs from numDeriv::hessian",
        call = "zeroinfl(y ~ x1 + x2 | x1 + x2, data = d, dist = ...)", packages = c("pscl", "numDeriv"))
 })

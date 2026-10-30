@@ -49,9 +49,10 @@
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_init_theta_is_a_starting_value",
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_missing_rows_dropped",
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_trigamma_disc_negbin",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_intercept_only_disc_negbin",
         "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_negbin_disc_negbin"
       ],
-      "quantities": ["coefficients", "SE", "z", "p", "theta", "SE(theta)", "log-likelihood", "AIC", "BIC", "mean and variance of y", "rows used / dropped (na.omit)", "trigamma"],
+      "quantities": ["coefficients", "SE", "z", "p", "theta", "SE(theta)", "log-likelihood", "AIC", "BIC", "mean and variance of y", "rows used / dropped (na.omit)", "trigamma", "intercept-only model (glm.nb(y ~ 1))", "init_theta range [1e-8, 1e6]"],
       "tolerance": "MLE: coefficients and theta 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 400); mean/variance of y 1e-8; glm.nb's own SE.theta 1e-4 (evaluated one theta.ml step before its theta); trigamma 1e-12 relative",
       "deviations": [
         {"finding": "ECON-64", "quantity": "null log-likelihood and McFadden pseudo-R2", "note": "not pinned: the null log-likelihood omits the lnGamma terms and reuses the full model's theta (Tier 4)"}
@@ -69,10 +70,12 @@
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_disc_zeroinfl",
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_zero_part_regressors",
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_missing_rows_dropped",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zip_intercept_only_zero_part",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl",
         "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl"
       ],
-      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "log-likelihood", "AIC", "BIC", "zero count", "rows used / dropped (na.omit)"],
-      "tolerance": "MLE: coefficients 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 500); counts exact",
+      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "log-likelihood", "AIC", "BIC", "zero count", "rows used / dropped (na.omit)", "intercept-only zero part (y ~ x1 + x2 | 1)", "fit unchanged when x1 is multiplied by 1e4 or 1e6 (x1 coefficients and SEs divided by the scale)"],
+      "tolerance": "MLE: coefficients 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 500); counts exact; fits with x1 scaled by 1e4 or 1e6 equal the unscaled fit to 1e-7 relative",
       "deviations": [],
       "supersedes_legacy": ["validation/expected/zip_test.csv"]
     },
@@ -85,9 +88,10 @@
       "cases": ["disc_zeroinfl"],
       "tests": [
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_zinb_disc_zeroinfl",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl",
         "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl"
       ],
-      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "theta", "SE(log theta)", "SE(theta)", "log-likelihood", "AIC", "BIC", "zero count"],
+      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "theta", "SE(log theta)", "SE(theta)", "log-likelihood", "AIC", "BIC", "zero count", "fit unchanged when x1 is multiplied by 1e4 or 1e6"],
       "tolerance": "as discrete_zip; theta 1e-6, SE(log theta) and SE(theta) 1e-5 relative",
       "deviations": [],
       "supersedes_legacy": ["validation/expected/zinb_test.csv"]

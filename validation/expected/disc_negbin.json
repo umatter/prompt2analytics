@@ -65,6 +65,17 @@
     "na_n_used": 395,
     "na_n_dropped": 5,
     "na_missing_y": 3,
-    "na_missing_x1": 2
+    "na_missing_x1": 2,
+    "int_coef": {
+      "names": ["(Intercept)"],
+      "values": [0.12883287184296743]
+    },
+    "int_se": {
+      "names": ["(Intercept)"],
+      "values": [0.067352401417311913]
+    },
+    "int_theta": 1.0690413506823526,
+    "int_se_theta": 0.1786307915194861,
+    "int_loglik": -590.7891356865365
   }
 }

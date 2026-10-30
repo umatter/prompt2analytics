@@ -13,24 +13,37 @@ models are in [hurdle.md](hurdle.md).
 
     y ~ NB(mu, theta),   log(mu) = x'beta,   Var(y) = mu + mu^2 / theta
 
-`init_theta` is the starting value of theta (glm.nb's `init.theta`); it must be positive
-and finite (`InvalidSpecification` naming `init_theta` otherwise).
+`init_theta` is the starting value of theta (glm.nb's `init.theta`); it must lie in
+`[1e-8, 1e6]` (`InvalidSpecification` naming `init_theta` and both bounds otherwise).
+Below the range the theta score and information cannot be evaluated (trigamma(theta) =
+1/theta^2 overflows below 1e-154, so theta could not move); above it the theta score is
+at rounding level (near 1e8), so the alternation stopped at its start with the
+no-overdispersion warning, also for overdispersed data.
 
 Algorithm (glm.nb's alternation):
 
 - Start: the coefficients of a Poisson fit (glm's IRLS from `mu = y + 0.1`), or of the NB
   fit at `init_theta` when given; theta from `init_theta` or MASS's moment start
-  `n / sum((y / mu - 1)^2)`.
+  `n / sum((y / mu - 1)^2)`, moved into `[1e-8, 1e6]`.
 - Coefficients: Fisher scoring (IRLS) at fixed theta, weights `W = mu theta / (theta + mu)`,
-  working response `z = eta + (y - mu) / mu`, until `max |delta beta| < 1e-12 (1 + max
-  |beta|)`. A design whose `X'WX` is not positive definite is `SingularMatrix`. If the
-  final IRLS does not converge in 100 iterations (fitted means near 0, as for an all-zero
-  outcome), the fit reports `converged = false` with a warning.
+  working response `z = eta + (y - mu) / mu`, at most 100 iterations, until
+  `max |delta beta| < 1e-12 (1 + max |beta|)` or the log-likelihood changes by at most
+  `1e-12 (|ll| + 0.1)` (glm.fit's relative test, on the log-likelihood). The second test
+  is the one an ill-conditioned `X'WX` passes (polynomial terms, nearly collinear
+  regressors): there the solve moves the coefficients by rounding noise in the directions
+  the data determine poorly, which does not change the likelihood. A design whose `X'WX`
+  is not positive definite is `SingularMatrix`.
+- No finite MLE: fitted means below `10 eps` after the final IRLS (glm.fit's "fitted rates
+  numerically 0" test; an all-zero outcome, or zero counts a regressor separates) give
+  `converged = false` and a warning that says so. A final IRLS that settles on neither
+  test also gives `converged = false`, with its own warning.
 - theta: Newton steps on `ln theta` at fixed `mu` with MASS `theta.ml`'s score
   `s = sum(digamma(theta + y) - digamma(theta) + ln theta + 1 - ln(theta + mu) - (y + theta) / (mu + theta))`
   and information
   `I = sum(-trigamma(theta + y) + trigamma(theta) - 1/theta + 2/(mu + theta) - (y + theta)/(mu + theta)^2)`
-  (MASS's signs), clamped to +-2 and halved while the profile log-likelihood falls.
+  (MASS's signs), clamped to +-2 and halved while the profile log-likelihood falls. A
+  theta at which the score, the information or the log-likelihood is not finite ends the
+  alternation with `converged = false` and a warning that names theta.
 - The two alternate (at most 100 rounds) until theta changes by less than 1e-10 relative
   and the log-likelihood by less than 1e-12 relative; then one more IRLS at the final
   theta.
@@ -68,12 +81,17 @@ Algorithm (pscl's `EM = TRUE` start, then a full maximisation):
   (pscl's start when `EM = FALSE`; the optimum is the same).
 - Joint maximisation of the log-likelihood in `(beta, gamma[, ln theta])`, computed in log
   space, by damped Newton steps with pscl's analytic gradient (`gradPoisson`,
-  `gradNegBin`) and a central-difference Hessian of that gradient (step
-  `1e-5 max(1, |par_k|)`, symmetrised); Levenberg damping and step halving as for the
-  ordered models; `ln theta <= ln 1e8`; at most 200 iterations. Converged: `max |grad| <
-  1e-8 (1 + |ll|)`, relative log-likelihood change below 1e-12 and every Newton-step
-  component below `1e-10 (1 + |par_k|)`. A non-finite gradient or Hessian, a failed line
-  search or the iteration limit end the fit with `converged = false` and a warning.
+  `gradNegBin`) and the analytic Hessian (formulas in the doc comment of `zi_loglik`,
+  checked against central differences of the gradient); Levenberg damping and step
+  halving as for the ordered models; `ln theta <= ln 1e8`; at most 200 iterations.
+  Converged: `max |grad| < 1e-8 (1 + |ll|)`, log-likelihood change below
+  `1e-12 (|ll| + 1e-12)` and every Newton-step component below `1e-10 (1 + |par_k|)`. A
+  non-finite gradient or Hessian, a failed line search or the iteration limit end the fit
+  with `converged = false` and a warning. Newton's method with the exact Hessian is
+  affine-invariant: with a regressor multiplied by 1e4 or 1e6 its coefficients and SEs are
+  the unscaled ones divided by the scale, and z and the log-likelihood are unchanged.
+  (The central-difference Hessian this replaced used a step relative to the parameter
+  value, so its SEs moved with the units of a regressor: z by 10% at a scale of 1e5.)
 - Standard errors from the inverse of the negated Hessian at the estimate (NaN with a
   warning if it is not positive definite); for ZINB `log_theta_std_error` = SE(ln theta)
   (pscl's `SE.logtheta`) and `theta_std_error = theta SE(ln theta)` (delta method). z and
@@ -81,7 +99,10 @@ Algorithm (pscl's `EM = TRUE` start, then a full maximisation):
 - Fitted zero-inflation probabilities with `min(pi, 1 - pi) < 10 eps` give the warning
   "fitted zero-inflation probabilities numerically 0 or 1 occurred" (glm.fit's test; pscl's
   EM suppresses it and reports such fits as converged). A ZINB theta above 1e6 is flagged as
-  for NB.
+  for NB, with a warning that names the zero-inflated Poisson model (pscl::zeroinfl with
+  `dist = "poisson"`). Its ln theta direction of the Hessian is then singular, so the count
+  and zero-part SEs come from their own block, the Poisson-limit information, and the theta
+  SEs are NaN.
 - An outcome without a zero count is refused (`InvalidSpecification`, as pscl's "minimum
   count is not zero"). Zeros are the values below 0.5 (ECON-58).
 
@@ -138,6 +159,8 @@ se_theta <- 1 / sqrt(.nb_info(th, mu, y))                                  # the
 | `na_se` | 0.12176776202503943, 0.06857685945875105, 0.2182275750886312 |
 | `na_theta`, `na_se_theta` | 1.5624842841513744, 0.3171253193416621 |
 | `na_loglik`, `na_n_used`, `na_n_dropped` | -557.9807627670712, 395, 5 (`y_na` 3, `x1_na` 2) |
+| `int_coef`, `int_se` (`glm.nb(y ~ 1)`) | (Intercept) 0.12883287184296743, 0.067352401417311913 |
+| `int_theta`, `int_se_theta`, `int_loglik` | 1.0690413506823526, 0.1786307915194861, -590.7891356865365 |
 | `trigamma` at `trigamma_x` = 0.1, 0.5, 1, 1.6025851429909947, 3.7, 6, 10, 25.5, 1000 | 101.43329915079275, 4.934802200544679, 1.6449340668482264, 0.8566167623849812, 0.31003785767003833, 0.18132295573711527, 0.10516633568168572, 0.03999466964956293, 0.0010005001666666335 |
 
 Case `disc_zeroinfl` (dataset `validation/datasets/generated/zeroinfl.csv`, 500 rows, seed
@@ -174,6 +197,10 @@ values (`y_na ~ x1 + x2_na | x1 + x2_na`, 495 rows): count 0.631486489779986,
 0.19474884922867577; `zip_na_se_count` 0.054914842224500375, 0.05315774411900642,
 0.060678332311512276; `zip_na_loglik` -684.0056763199633; 5 rows dropped (`y_na` 3,
 `x2_na` 2). `hurdle_na_n_used` 495 (pscl::hurdle on the same data; [hurdle.md](hurdle.md)).
+Zero part on its intercept alone (`zip_z0_*`, `y ~ x1 + x2 | 1`): count
+0.60724894342877345, 0.11776749247011398, -0.31583962342782135; zero -0.35958412819172109;
+`zip_z0_se_count` 0.055207787807567452, 0.050945419658198668, 0.054371358544598181;
+`zip_z0_se_zero` 0.12295792255917738; `zip_z0_loglik` -695.3298205798277.
 
 ## Rust tests
 
@@ -182,14 +209,17 @@ R-pinned (`crates/p2a-core/src/econometrics/discrete/count_models.rs` unless not
 | Test | Quantities |
 |---|---|
 | `econometrics::discrete::count_models::tests::test_validate_negbin_theta_disc_negbin` | `coef`, `se`, `z`, `p`, `theta`, `se_theta`, `loglik`, `aic`, `bic`, `y_mean`, `y_var`, `n`; cross-checks `coef_pkg`, `theta_pkg`, `se_theta_pkg`; converged, no warning |
-| `econometrics::discrete::count_models::tests::test_validate_negbin_init_theta_is_a_starting_value` | `init_theta` 50 and 0.2 reach `theta` and `coef`; 0, -1, NaN and inf are refused |
+| `econometrics::discrete::count_models::tests::test_validate_negbin_init_theta_is_a_starting_value` | `init_theta` 50, 0.2 and the range ends 1e-8 and 1e6 reach `theta` and `coef` (converged, no warning); 0, -1, NaN, inf, 1e-300, 1e-9, 2e6 and 1e300 are refused with a message naming `init_theta` and both bounds |
 | `econometrics::discrete::count_models::tests::test_validate_negbin_missing_rows_dropped` | `y_na ~ x1_na + x2`: `na_*` estimates, 395 rows used, 5 dropped by column |
 | `econometrics::discrete::count_models::tests::test_validate_negbin_trigamma_disc_negbin` | `trigamma` against R's at `trigamma_x` |
+| `econometrics::discrete::count_models::tests::test_validate_negbin_intercept_only_disc_negbin` | `int_*` (`glm.nb(y ~ 1)`): coefficient, SE, theta, SE(theta), log-likelihood; converged, no warning |
 | `p2a-mcp` `tier2::wp10_ordered_count::test_validate_mcp_negbin_disc_negbin` (`crates/p2a-mcp/tests/tier2/wp10_ordered_count.rs`) | the MCP `negbin` text: coefficients, SE, z, p, theta with SE, log-likelihood at print precision; `Converged: true` |
 | `econometrics::discrete::count_models::tests::test_validate_zip_disc_zeroinfl` | every `zip_*` key above (count, zero, SEs, z, p, log-likelihood, AIC, BIC, n, zeros; `*_pkg` cross-checks); converged, no warning; no theta |
 | `econometrics::discrete::count_models::tests::test_validate_zinb_disc_zeroinfl` | every `zinb_*` key, with theta, SE(log theta) and SE(theta) |
 | `econometrics::discrete::count_models::tests::test_validate_zip_zero_part_regressors` | `zip_z1_*` (zero part on `x1`) |
 | `econometrics::discrete::count_models::tests::test_validate_zip_missing_rows_dropped` | `zip_na_*`: estimates, 495 rows used, 5 dropped by column |
+| `econometrics::discrete::count_models::tests::test_validate_zip_intercept_only_zero_part` | `zip_z0_*` (`y ~ x1 + x2 \| 1`): count and zero coefficients, SEs, log-likelihood |
+| `econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl` | ZIP and ZINB with x1 multiplied by 1e4 and 1e6: converged, no warning; x1 coefficients and SEs times the scale, all other coefficients, SEs, z, SE(log theta) and the log-likelihood equal the unscaled fit to 1e-7 relative, and pscl's `zip_*` / `zinb_*` values |
 | `p2a-mcp` `tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl` | the MCP `zeroinfl` text for both distributions: both coefficient tables, log-likelihood, and the ZINB theta line, at print precision |
 
 Not R-pinned:
@@ -198,18 +228,30 @@ Not R-pinned:
   the underdispersed 12-row fixture gives theta above 1e6, `converged = false`,
   `SE(theta) = NaN` and the overdispersion warning.
 - `econometrics::discrete::count_models::tests::test_negbin_all_zero_outcome_is_not_converged`:
-  an all-zero outcome (no MLE) gives `converged = false` and the IRLS warning.
+  an all-zero outcome (no MLE), with 30 and with 5 rows, gives `converged = false` and the
+  "fitted means numerically 0" warning.
+- `econometrics::discrete::count_models::tests::test_negbin_ill_conditioned_designs_converge`:
+  seeded NB counts on two ill-conditioned designs, `y ~ x + x^2 + x^3` with
+  `x ~ U(10, 20)` and `y ~ x1 + x2` with `x2 = x1 + 1e-4 noise`, converge without a
+  warning, with finite SEs (glm.nb on the cubic sample agrees to 2e-10).
 - `econometrics::discrete::count_models::tests::test_negbin_stops_when_cancelled`:
   a cancelled budget stops the fit.
 - `p2a-mcp` `tier2::wp10_ordered_count::test_mcp_negbin_reports_dropped_rows_and_rejects_bad_init_theta`:
   the MCP text reports the dropped rows; a negative `init_theta` is a tool error.
+- `econometrics::discrete::count_models::tests::test_zinb_without_overdispersion_is_flagged`:
+  ZINB on underdispersed positive counts (the case's `y` with its positive values replaced
+  by the rounded count mean): theta above 1e6, `converged = false`, NaN theta SEs, the
+  warning naming pscl::zeroinfl's Poisson model; the count and zero parts, their SEs and
+  the log-likelihood equal the ZIP fit on the same data to 1e-5 relative.
+- `econometrics::discrete::count_models::tests::test_theta_newton_reports_a_theta_it_cannot_update`:
+  at theta = 1e-300 (trigamma overflows) the theta step reports that it could not move.
 - `econometrics::discrete::count_models::tests::test_zip_separated_zero_part_is_flagged`:
   the 12-row fixture with a separated zero part (pscl: zero coefficients 94.70464,
   -25.39549, logLik -8.370407) reaches at least pscl's log-likelihood and warns that
   fitted probabilities were numerically 0 or 1.
-- `econometrics::discrete::count_models::tests::test_zeroinfl_gradient_matches_central_differences`:
-  the analytic gradient equals central differences of the log-likelihood, both
-  distributions.
+- `econometrics::discrete::count_models::tests::test_zeroinfl_analytic_derivatives_match_central_differences`:
+  the analytic gradient and Hessian equal central differences of the log-likelihood and
+  the gradient, both distributions, with the zero part on all and on fewer regressors.
 - `econometrics::discrete::count_models::tests::test_zeroinfl_rejects_outcome_without_zeros`,
   `econometrics::discrete::count_models::tests::test_na_count_models_float_outcome_equals_int64`,
   `econometrics::discrete::count_models::tests::test_na_count_models_text_outcome_is_non_numeric`,
@@ -228,8 +270,10 @@ and theta `Tol::iterative(1e-6)`, SEs (incl. SE(log theta), SE(theta)) and z
 `Tol::iterative(1e-5)`, p `Tol::iterative(2e-3)` (z^2 is at most 130 here),
 log-likelihood, AIC, BIC `Tol::stat(500)` (1e-6), counts exact, pscl's own optimum
 `Tol::iterative(1e-4)`. Measured: the NB fit agrees with the polished values to about
-1e-14 relative (coefficients, theta, SEs); ZIP to 1e-14 (coefficients) and 1e-11 (SEs);
-ZINB to 1e-10 (coefficients, theta) and 1e-9 (SEs, the central-difference Hessian).
+1e-14 relative (coefficients, theta, SEs); ZIP to 1e-14 (coefficients) and 3e-11 (SEs);
+ZINB to 2e-10 (coefficients) and 1.3e-9 (SEs; the R side takes them from
+`numDeriv::hessian`, p2a from the analytic Hessian). The regressor-scale test holds the
+scaled fits to the unscaled one at 1e-7 relative.
 
 ## Status
 

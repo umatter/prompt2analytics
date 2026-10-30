@@ -107,6 +107,17 @@
     "zip_na_n_dropped": 5,
     "zip_na_missing_y": 3,
     "zip_na_missing_x2": 2,
-    "hurdle_na_n_used": 495
+    "hurdle_na_n_used": 495,
+    "zip_z0_count": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.60724894342877345, 0.11776749247011398, -0.31583962342782135]
+    },
+    "zip_z0_zero": {
+      "names": ["(Intercept)"],
+      "values": [-0.35958412819172109]
+    },
+    "zip_z0_se_count": [0.055207787807567452, 0.050945419658198668, 0.054371358544598181],
+    "zip_z0_se_zero": [0.12295792255917738],
+    "zip_z0_loglik": -695.3298205798277
   }
 }
