@@ -246,6 +246,7 @@ mod tests {
             b_left: 0.75,
             b_right: 0.75,
             bwselect: BandwidthMethod::MseTwo,
+            bandwidth_given: false,
             p: 1,
             q: 2,
             kernel: KernelType::Triangular,

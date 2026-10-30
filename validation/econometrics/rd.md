@@ -66,6 +66,8 @@ p-values are `2 Φ(-|est / se|)` (upper tail); a zero SE gives p = 0 for a nonze
 as R's `2 * pnorm(-Inf)`, and p = 1 for a zero one, and the printed z is `est / se` (`inf`).
 `bias = tau_cl - tau_bc`. `n_eff_left/right` are `N_h`, `n_b_left/right` are `N_b`, and
 `coef_left/right` are `beta_p` on each side. `significance` follows the robust p-value.
+`bandwidth_given` is true when `h` was given, and the printed `Bandwidth Method:` line then
+reads `Manual (h given by the caller)` (rdrobust's "Manual") instead of the selector's name.
 
 The cost per side is O(m log m) for the sort, O(m (q + 1)²) for the fits and O(m + B · nnmatch)
 for the nearest-neighbour residuals (B distinct values of x).
@@ -134,6 +136,8 @@ on continuous, tied, signed-zero and tiny inputs, and
 right-side bandwidth checks. `test_rd_zero_se_gives_p_zero_for_a_nonzero_jump` fits a column
 that is 0 left and 1 right of the cutoff (nearest-neighbour residuals and SEs 0, every p-value
 0, `inf` printed as z, and the same for the first stage of a fuzzy fit).
+`test_rd_display_names_a_given_bandwidth` checks the `Bandwidth Method:` line and
+`bandwidth_given` with and without `h`.
 
 Tolerances (`validation/README.md`, n = 1000): coefficients 1e-8 relative, SEs, statistics
 and CI bounds 1e-6 relative, p-values 1e-6 relative plus 1e-12 absolute, counts exact. The
@@ -229,7 +233,9 @@ selector runs once, on the outcome, and that both stages use its bandwidths, on 
 (n = 2000, x uniform on [-1, 1], take-up 0.2 / 0.8, `y = 0.5 + 10 x² + d + N(0, 0.3²)`) where
 the selector run on each column alone picks h = 0.4241 for the outcome and 0.4996 (the cap, a
 quarter of the range) for the treatment; the test first asserts that the two differ, so two
-separate selector runs fail it.
+separate selector runs fail it. `test_fuzzy_rd_degenerate_first_stage_names_the_jump`: a
+treatment without a jump (|tau_T| < 1e-10) is an `InvalidSpecification` that names the jump,
+the bound and the column.
 
 ## MCP and CLI
 

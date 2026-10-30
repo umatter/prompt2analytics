@@ -383,8 +383,11 @@ pub struct RdResult {
     pub b_left: f64,
     /// Bias bandwidth (right).
     pub b_right: f64,
-    /// Bandwidth selection method.
+    /// Bandwidth selection method (not run when `bandwidth_given`).
     pub bwselect: BandwidthMethod,
+    /// The caller gave h (rdrobust's "Manual" bandwidth), so no selector ran.
+    #[serde(default)]
+    pub bandwidth_given: bool,
 
     // Specification
     /// Polynomial order for estimation.
@@ -415,8 +418,8 @@ pub struct RdResult {
 }
 
 /// The warnings (without the missing-value note, printed last on its own line) and the
-/// `Missing values:` line of a result.
-fn write_warnings_and_missing(
+/// `Missing values:` line of a result (also `RdMultiResult`'s).
+pub(crate) fn write_warnings_and_missing(
     f: &mut fmt::Formatter<'_>,
     warnings: &[String],
     missing: &MissingSummary,
@@ -530,7 +533,11 @@ impl fmt::Display for RdResult {
             "Bandwidth (b): {:.4} (left), {:.4} (right)",
             self.b_left, self.b_right
         )?;
-        writeln!(f, "Bandwidth Method: {}", self.bwselect)?;
+        if self.bandwidth_given {
+            writeln!(f, "Bandwidth Method: Manual (h given by the caller)")?;
+        } else {
+            writeln!(f, "Bandwidth Method: {}", self.bwselect)?;
+        }
         writeln!(f)?;
 
         writeln!(
@@ -1651,6 +1658,7 @@ fn rd_result_from(
         b_left: fit.b.0,
         b_right: fit.b.1,
         bwselect: config.bwselect,
+        bandwidth_given: config.h.is_some(),
         p: fit.p,
         q: fit.q,
         kernel: config.kernel,
@@ -1826,8 +1834,11 @@ pub fn run_fuzzy_rd(
     let (tau_t, tau_t_bc) = fit.jumps(1);
     if tau_t.abs() < 1e-10 {
         return Err(EconError::InvalidSpecification {
-            message: "First stage is too weak: treatment probability does not jump at cutoff"
-                .to_string(),
+            message: format!(
+                "First stage is degenerate: the conventional treatment jump at the cutoff is \
+                 {tau_t:e}, and |jump| must be at least 1e-10 for the Wald ratio; check the \
+                 treatment column '{treatment}' and the bandwidth"
+            ),
         });
     }
     let mut outcome_rd = rd_result_from(&fit, 0, outcome, running_var, cutoff, &config);
@@ -3105,6 +3116,65 @@ mod tests {
 
         // a zero estimate with a zero SE is not significant
         assert_eq!(two_sided_p(&Normal::standard(), 0.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn test_fuzzy_rd_degenerate_first_stage_names_the_jump() {
+        let mut df = create_sharp_rd_dataset().df().clone();
+        df.with_column(Series::new("t".into(), vec![0.5; 100]))
+            .unwrap();
+        let ds = Dataset::new(df);
+        let cfg = RdConfig {
+            h: Some(1.0),
+            ..Default::default()
+        };
+        match run_fuzzy_rd(&ds, "outcome", "running", "t", 0.0, cfg) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.starts_with("First stage is degenerate")
+                        && message.contains("at least 1e-10")
+                        && message.contains("'t'"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rd_display_names_a_given_bandwidth() {
+        let ds = create_sharp_rd_dataset();
+        let given = run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                h: Some(1.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(given.bandwidth_given);
+        assert!(
+            given
+                .to_string()
+                .contains("Bandwidth Method: Manual (h given by the caller)"),
+            "{given}"
+        );
+        let selected = run_rd(&ds, "outcome", "running", 0.0, RdConfig::default()).unwrap();
+        assert!(!selected.bandwidth_given);
+        assert!(
+            selected
+                .to_string()
+                .contains("Bandwidth Method: MSE-optimal (common)"),
+            "{selected}"
+        );
+        // a result serialised before the field existed reads as selected
+        let mut json = serde_json::to_value(&given).unwrap();
+        json.as_object_mut().unwrap().remove("bandwidth_given");
+        let old: RdResult = serde_json::from_value(json).unwrap();
+        assert!(!old.bandwidth_given);
     }
 
     #[test]

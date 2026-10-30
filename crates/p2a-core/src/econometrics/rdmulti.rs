@@ -26,6 +26,7 @@ use crate::traits::estimator::SignificanceLevel;
 
 use super::rd::{
     BandwidthMethod, KernelType, RdConfig, RdResult, VceType, run_rd, validate_rd_config,
+    write_warnings_and_missing,
 };
 
 /// Bandwidth selection strategy for multiple cutoffs.
@@ -356,25 +357,7 @@ impl fmt::Display for RdMultiResult {
             "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '\u{2020}' 0.1"
         )?;
 
-        let note = self.missing.note();
-        let shown: Vec<&String> = self
-            .warnings
-            .iter()
-            .filter(|w| Some(w.as_str()) != note.as_deref())
-            .collect();
-        if !shown.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in shown {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-        if let Some(note) = note {
-            writeln!(f)?;
-            writeln!(f, "Missing values: {note}")?;
-        }
-
-        Ok(())
+        write_warnings_and_missing(f, &self.warnings, &self.missing)
     }
 }
 
