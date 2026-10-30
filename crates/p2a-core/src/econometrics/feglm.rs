@@ -54,14 +54,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::data::columns::econ_error_from_design;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf, normal_pdf};
 
-use super::hdfe::{FactorInfo, reject_non_finite};
+use super::hdfe::{FactorInfo, factor_info};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GLM Family
@@ -465,6 +464,11 @@ pub struct FeglmResult {
     #[serde(skip)]
     #[allow(dead_code)]
     pub(crate) vcov: Array2<f64>,
+
+    /// Rows dropped because of a missing value in y, a regressor or a fixed-effect id
+    /// (fixest drops them too).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for FeglmResult {
@@ -528,6 +532,9 @@ impl fmt::Display for FeglmResult {
 
         writeln!(f, "{}", "-".repeat(70))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -694,103 +701,6 @@ fn weighted_demean_matrix_map(
     Ok((x_demeaned, max_iterations, max_change, all_converged))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Factor Extraction (reused from hdfe.rs but needs pub visibility)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-use polars::prelude::*;
-use std::collections::HashMap;
-
-/// Extract factor information from a dataset column.
-fn extract_factor_info(dataset: &Dataset, col: &str) -> EconResult<FactorInfo> {
-    let df = dataset.df();
-    let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let mut id_map: HashMap<String, usize> = HashMap::new();
-    let mut next_id = 0usize;
-
-    let ids: Vec<usize> = if let Ok(int_col) = series.i64() {
-        int_col
-            .into_iter()
-            .map(|v| {
-                let key = v.unwrap_or(0).to_string();
-                *id_map.entry(key).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                })
-            })
-            .collect()
-    } else if let Ok(str_col) = series.str() {
-        str_col
-            .into_iter()
-            .map(|v| {
-                let key = v.unwrap_or("").to_string();
-                *id_map.entry(key).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                })
-            })
-            .collect()
-    } else {
-        // Try to cast to string
-        let casted = series.cast(&DataType::String).map_err(|e| {
-            EconError::Internal(format!(
-                "Cannot convert column '{}' to factor IDs: {}",
-                col, e
-            ))
-        })?;
-        let str_col = casted.str().map_err(|e| {
-            EconError::Internal(format!("Cannot read column '{}' as string: {}", col, e))
-        })?;
-        str_col
-            .into_iter()
-            .map(|v| {
-                let key = v.unwrap_or("").to_string();
-                *id_map.entry(key).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                })
-            })
-            .collect()
-    };
-
-    let n_levels = id_map.len();
-
-    if n_levels < 2 {
-        return Err(EconError::InsufficientData {
-            required: 2,
-            provided: n_levels,
-            context: format!(
-                "Fixed effect column '{}' has only {} unique level(s)",
-                col, n_levels
-            ),
-        });
-    }
-
-    // Pre-compute group counts
-    let mut counts = vec![0usize; n_levels];
-    for &id in &ids {
-        counts[id] += 1;
-    }
-
-    Ok(FactorInfo {
-        name: col.to_string(),
-        n_levels,
-        ids,
-        counts,
-    })
-}
-
 /// Check the IRLS and MAP controls: a tolerance of zero or less can never be
 /// met, zero iterations cannot fit anything, and the weight floor must be a
 /// usable number.
@@ -862,6 +772,12 @@ fn compute_absorbed_df(factors: &[FactorInfo]) -> usize {
 /// A `FeglmResult` containing coefficient estimates, standard errors,
 /// and diagnostic information.
 ///
+/// # Missing values
+///
+/// Rows with a missing value (null or NaN) in `y`, a regressor or a fixed-effect
+/// column are dropped and reported in `missing` (fixest drops them too); an infinite
+/// value is refused (`NonFiniteValues`) before the family's checks.
+///
 /// # Example
 ///
 /// ```ignore
@@ -903,10 +819,16 @@ pub fn run_feglm(
 
     validate_config(&config)?;
 
-    // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-    reject_non_finite(y.iter(), &format!("Dependent variable '{}'", y_col))?;
+    // y, X and every fixed-effect column on the rows complete in all of them
+    // (fixest drops incomplete rows too); an infinite value is refused here,
+    // before the family's checks
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
+        .factors(fe_cols)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y = cols.numeric_array(y_col);
 
     // Validate y for binomial families
     let n_positive = y.iter().filter(|&&v| v >= 0.5).count();
@@ -939,21 +861,17 @@ pub fn run_feglm(
         GlmFamily::Gaussian => {}
     }
 
-    // Build design matrix WITHOUT intercept (FE absorbs the constant)
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
+    // Design matrix WITHOUT intercept (FE absorbs the constant)
+    let design = cols.matrix(x_cols, false);
     let x = design.data;
     let var_names = design.column_names;
-    for (j, name) in var_names.iter().enumerate() {
-        reject_non_finite(x.column(j).iter(), &format!("Regressor '{}'", name))?;
-    }
     let n = y.len();
     let k = x.ncols();
 
-    // Extract factor information for each FE dimension
+    // Factor information for each FE dimension (levels in R factor order)
     let factors: Vec<FactorInfo> = fe_cols
         .iter()
-        .map(|col| extract_factor_info(dataset, col))
+        .map(|col| factor_info(col, cols.factor(col)))
         .collect::<EconResult<Vec<_>>>()?;
 
     // Compute absorbed degrees of freedom
@@ -1329,6 +1247,7 @@ pub fn run_feglm(
         df_absorbed,
         beta,
         vcov,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -1833,71 +1752,145 @@ mod tests {
         );
     }
 
-    /// The column and count of a `NullValues` or `NonFiniteValues` error.
-    fn named_refusal(res: EconResult<FeglmResult>) -> (&'static str, String, usize) {
+    /// The column and count of a `NonFiniteValues` error.
+    fn non_finite(res: EconResult<FeglmResult>) -> (String, usize) {
         match res {
-            Err(EconError::NullValues { column, count }) => ("NullValues", column, count),
-            Err(EconError::NonFiniteValues { column, count }) => ("NonFiniteValues", column, count),
-            Err(e) => panic!("expected NullValues or NonFiniteValues, got: {e}"),
-            Ok(_) => panic!("expected NullValues or NonFiniteValues, got Ok"),
+            Err(EconError::NonFiniteValues { column, count }) => (column, count),
+            Err(e) => panic!("expected NonFiniteValues, got: {e}"),
+            Ok(_) => panic!("expected NonFiniteValues, got Ok"),
         }
     }
 
-    /// A NaN or Inf in y or a regressor is refused by the shared extraction rule
-    /// (DesignMatrix: NaN is missing, Inf is refused), naming the column.
+    /// Coefficients, SEs and log-likelihoods of two fits agree to 1e-12.
+    fn assert_same_fit(a: &FeglmResult, b: &FeglmResult) {
+        let tol = p2a_validation::Tol::new(1e-12, 1e-12);
+        assert_eq!(a.variables, b.variables);
+        for (x, y) in a
+            .coefficients
+            .iter()
+            .chain(&a.std_errors)
+            .chain([&a.log_likelihood])
+            .zip(
+                b.coefficients
+                    .iter()
+                    .chain(&b.std_errors)
+                    .chain([&b.log_likelihood]),
+            )
+        {
+            assert!(tol.allows(*x, *y), "{x} vs {y}");
+        }
+    }
+
+    /// The 40-row id / x / y frame of `ppml_panel`, without row `drop` when given.
+    fn frame(x: &[f64], y: &[f64], drop: Option<usize>) -> Dataset {
+        let keep = |i: &usize| Some(*i) != drop;
+        let id: Vec<i64> = (0..40).filter(keep).map(|i| (i / 8) as i64).collect();
+        let x: Vec<f64> = (0..40).filter(keep).map(|i| x[i]).collect();
+        let y: Vec<f64> = (0..40).filter(keep).map(|i| y[i]).collect();
+        Dataset::new(df! { "id" => id, "x" => x, "y" => y }.unwrap())
+    }
+
+    /// A NaN in y or a regressor is a missing cell (design 1.1, fixest drops it): the
+    /// fit equals the fit without that row and reports it. An infinite value is
+    /// refused by name, before the family's checks.
     #[test]
-    fn test_feglm_rejects_non_finite_outcome() {
-        let ds = ppml_panel(|i| {
-            if i == 5 {
-                f64::NAN
-            } else {
-                3.0 + (i % 4) as f64
-            }
-        });
+    fn test_feglm_non_finite_outcome() {
+        let x: Vec<f64> = (0..40).map(|i| ((i * 7) % 11) as f64 / 10.0).collect();
+        let y: Vec<f64> = (0..40).map(|i| 3.0 + (i % 4) as f64).collect();
+        let fit = |ds: &Dataset, family| run_feglm(ds, "y", &["x"], &["id"], family, None);
+
+        let mut y_nan = y.clone();
+        y_nan[5] = f64::NAN;
+        let r = fit(&frame(&x, &y_nan, None), GlmFamily::Poisson).unwrap();
+        assert_same_fit(
+            &r,
+            &fit(&frame(&x, &y, Some(5)), GlmFamily::Poisson).unwrap(),
+        );
+        assert_eq!(r.missing.n_dropped, 1);
+        assert_eq!(r.missing.by_column, [("y".to_string(), 1)]);
+
+        let mut y_inf = y.clone();
+        y_inf[5] = f64::INFINITY;
         assert_eq!(
-            named_refusal(run_feglm(
-                &ds,
-                "y",
-                &["x"],
-                &["id"],
-                GlmFamily::Poisson,
-                None
-            )),
-            ("NullValues", "y".to_string(), 1)
+            non_finite(fit(&frame(&x, &y_inf, None), GlmFamily::Logit)),
+            ("y".to_string(), 1)
         );
-        let ds = ppml_panel(|i| {
-            if i == 5 {
-                f64::INFINITY
-            } else {
-                3.0 + (i % 4) as f64
-            }
-        });
+
+        let mut x_nan = x.clone();
+        x_nan[7] = f64::NAN;
+        let r = fit(&frame(&x_nan, &y, None), GlmFamily::Poisson).unwrap();
+        assert_same_fit(
+            &r,
+            &fit(&frame(&x, &y, Some(7)), GlmFamily::Poisson).unwrap(),
+        );
+        assert_eq!(r.missing.by_column, [("x".to_string(), 1)]);
+
+        let mut x_inf = x.clone();
+        x_inf[7] = f64::INFINITY;
         assert_eq!(
-            named_refusal(run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Logit, None)),
-            ("NonFiniteValues", "y".to_string(), 1)
+            non_finite(fit(&frame(&x_inf, &y, None), GlmFamily::Poisson)),
+            ("x".to_string(), 1)
         );
-        // a non-finite regressor is refused too
-        let mut x: Vec<f64> = (0..40).map(|i| ((i * 7) % 11) as f64 / 10.0).collect();
-        x[7] = f64::NAN;
-        let ds = Dataset::new(
-            df! {
-                "id" => (0..40).map(|i| (i / 8) as i64).collect::<Vec<i64>>(),
-                "x" => x,
-                "y" => (0..40).map(|i| 3.0 + (i % 4) as f64).collect::<Vec<f64>>(),
-            }
-            .unwrap(),
-        );
+    }
+
+    /// FEGLM drops rows with a missing outcome, regressor or fixed-effect id, as fixest
+    /// does: the fit on Grunfeld with missing cells equals the fit on its 193 complete
+    /// rows. ECON-37: missing ids used to become level 0 (or "") and merge into a real
+    /// level. Not pinned to fixest: FEGLM's numbers carry ECON-20/66/67/85 (Tier 4).
+    #[test]
+    fn test_validate_na_feglm_omit_and_missing_fe_ids() {
+        let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
         assert_eq!(
-            named_refusal(run_feglm(
-                &ds,
-                "y",
-                &["x"],
-                &["id"],
-                GlmFamily::Poisson,
-                None
-            )),
-            ("NullValues", "x".to_string(), 1)
+            case.dataset,
+            "validation/datasets/generated/grunfeld_na.csv"
         );
+        let cc = Dataset::new(ds.df().drop_nulls::<String>(None).unwrap());
+        assert_eq!(cc.df().height(), 193);
+        let subset = [
+            "inv".to_string(),
+            "value".to_string(),
+            "capital".to_string(),
+        ];
+        let xy = Dataset::new(ds.df().drop_nulls(Some(&subset)).unwrap());
+        let fit = |d: &Dataset, fe: &[&str]| {
+            run_feglm(
+                d,
+                "inv",
+                &["value", "capital"],
+                fe,
+                GlmFamily::Gaussian,
+                None,
+            )
+        };
+        let reference = fit(&cc, &["firm_id", "year"]).unwrap();
+        assert!(reference.missing.is_empty());
+        let r = fit(&ds, &["firm_id", "year"]).unwrap();
+        assert_same_fit(&r, &reference);
+        assert_eq!((r.n_obs, r.missing.n_dropped), (193, 7));
+        let by: Vec<(String, usize)> = [("inv", 2), ("value", 1), ("firm_id", 2), ("year", 2)]
+            .iter()
+            .map(|(c, k)| (c.to_string(), *k))
+            .collect();
+        assert_eq!(r.missing.by_column, by);
+        assert_same_fit(&fit(&xy, &["firm_id", "year"]).unwrap(), &reference);
+        assert_same_fit(&fit(&ds, &["firm_name", "year"]).unwrap(), &reference);
+        match run_feglm(
+            &ds,
+            "firm_name",
+            &["value"],
+            &["firm_id"],
+            GlmFamily::Gaussian,
+            None,
+        ) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "firm_name"),
+            Err(e) => panic!("expected NonNumericColumn, got {e}"),
+            Ok(_) => panic!("expected NonNumericColumn, got Ok"),
+        }
+        match fit(&ds, &["nope"]) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "nope"),
+            Err(e) => panic!("expected ColumnNotFound, got {e}"),
+            Ok(_) => panic!("expected ColumnNotFound, got Ok"),
+        }
     }
 
     /// The closed form is O(1): y = 1e12 used to loop 10^12 times. The 1e-14 x scale

@@ -428,6 +428,19 @@ tolerance.
 |----------|---|-----------|
 | Poisson LL / null LL (Case D, fixest convention) | 40 | 1e-12 × scale pointwise; 1e-10 relative (null) |
 
+## Missing values
+
+`run_feglm` reads y, the regressors and every fixed-effect column with one NA-aware request
+and drops the rows with a missing value (null or NaN) in any of them, as fixest does; the
+count is in `FeglmResult.missing` and the last line of the output. Integer columns of any
+width are numbers, fixed-effect ids may be text or numeric (levels in R factor order), and a
+missing id drops its row instead of becoming level 0 or "". An infinite value is refused
+(`NonFiniteValues`) before the family's checks. Tests:
+`econometrics::feglm::tests::test_validate_na_feglm_omit_and_missing_fe_ids` (on
+`panel_grunfeld_na`: the fit equals the fit on its 193 complete rows, with the text or the
+numeric firm id) and `econometrics::feglm::tests::test_feglm_non_finite_outcome`. Numbers are
+not pinned to R here: ECON-20, ECON-66, ECON-67, ECON-85 (FEGLM), Tier 4.
+
 ## Known Differences
 
 1. **Acceleration**: p2a uses optional Gearhart-Koshy acceleration in MAP; alpaca may use different acceleration.

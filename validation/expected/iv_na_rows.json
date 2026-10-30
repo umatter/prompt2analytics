@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "id": "iv_na_rows",
+  "area": "econometrics/iv",
+  "method": "2SLS and first-stage diagnostics on data with missing cells, an integer control and a text column (ivreg na.omit)",
+  "reference": "AER::ivreg (na.action = na.omit); summary.ivreg(diagnostics = TRUE), vcov. = sandwich::vcovHC(type = 'HC1'); first-stage partial F by anova(lm(x ~ w + k), lm(x ~ w + k + z1 + z2)) on the complete rows of the first-stage columns",
+  "call": "ivreg(y ~ x + w + k | w + k + z1 + z2)",
+  "dataset": "validation/datasets/generated/iv_na_rows.csv",
+  "datasets": ["validation/datasets/generated/iv_na_rows.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "AER": "1.2.17",
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x", "w", "k"],
+      "values": [1.0554082366227837, 0.54877689731239732, 0.35628326343265526, -0.3410347236015594]
+    },
+    "se": {
+      "names": ["(Intercept)", "x", "w", "k"],
+      "values": [0.17163940376487344, 0.071434817505935458, 0.07925639250311578, 0.047390729798043416]
+    },
+    "se_hc1": {
+      "names": ["(Intercept)", "x", "w", "k"],
+      "values": [0.15904354059293663, 0.073322644355988092, 0.073621644706330924, 0.047104803764284893]
+    },
+    "se_hc0": {
+      "names": ["(Intercept)", "x", "w", "k"],
+      "values": [0.15795790646613017, 0.072822142640018642, 0.073119102008482872, 0.046783265509336654]
+    },
+    "weak_f": [84.915225706067275],
+    "weak_df1": [2],
+    "weak_df2": [289],
+    "weak_p": [9.7946873967282209e-30],
+    "weak_f_hc1": [88.013921635429739],
+    "weak_p_hc1": [1.4093829753259807e-30],
+    "wu_hausman": 34.845550942609428,
+    "wu_hausman_p": 9.9887845302206153e-09,
+    "sargan": 0.11130482093750826,
+    "sargan_p": 0.73866347796076148,
+    "overall_first_stage_f": [47.255459234914504],
+    "n_obs": 294,
+    "n_dropped": 6,
+    "missing_y": 2,
+    "missing_x": 1,
+    "missing_w": 1,
+    "missing_k": 1,
+    "missing_z1": 1,
+    "missing_z2": 1,
+    "fsd_n_obs": 296,
+    "fsd_partial_f": 83.119221603270859,
+    "fsd_partial_p": 2.7903687835782346e-29,
+    "fsd_partial_df1": 2,
+    "fsd_partial_df2": 291,
+    "fsd_partial_r2": 0.36357057390174263,
+    "fsd_r2": 0.3893239601294386,
+    "fsd_adj_r2": 0.38092978776008379,
+    "fsd_instr_coef": {
+      "names": ["z1", "z2"],
+      "values": [0.85866461821734863, -0.56794075661760568]
+    },
+    "fsd_instr_se": {
+      "names": ["z1", "z2"],
+      "values": [0.082136420765497709, 0.077311447792562257]
+    }
+  }
+}

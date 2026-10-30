@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "id": "panel_grunfeld_na",
+  "area": "econometrics/panel",
+  "method": "FE, RE, two-way HDFE and mean group on Grunfeld with missing cells and missing string/numeric firm ids",
+  "reference": "plm::plm(model = 'within' | 'random') and plm::pmg(model = 'mg') on the complete rows of (inv, value, capital, firm id); fixest::feols(| firm_name + year) on the complete rows of all columns (both drop rows with NA in y, x or the index)",
+  "call": "plm(inv ~ value + capital, data = pdata.frame(ce, index = 'firm_name'), model = 'within' | 'random'); feols(inv ~ value + capital | firm_name + year, d, vcov = 'iid'); pmg(inv ~ value + capital, pdata.frame(ce, index = 'firm_id'), model = 'mg')",
+  "dataset": "validation/datasets/generated/grunfeld_na.csv",
+  "datasets": ["validation/datasets/grunfeld.csv", "validation/datasets/generated/grunfeld_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7",
+    "fixest": "0.14.2"
+  },
+  "values": {
+    "fe_coef": {
+      "names": ["value", "capital"],
+      "values": [0.11208925635974927, 0.30295345813460367]
+    },
+    "fe_se": {
+      "names": ["value", "capital"],
+      "values": [0.011852746814109964, 0.017413938988850859]
+    },
+    "fe_nobs": 195,
+    "re_coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-57.314592463981789, 0.11174085623662816, 0.30103103318348384]
+    },
+    "re_se": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [28.900193452681595, 0.010492765131194839, 0.017240854457136419]
+    },
+    "re_nobs": 195,
+    "n_complete_fe": 195,
+    "n_groups": 10,
+    "hdfe_coef": {
+      "names": ["value", "capital"],
+      "values": [0.11723697793697486, 0.35306812464135312]
+    },
+    "hdfe_se_iid": {
+      "names": ["value", "capital"],
+      "values": [0.01373577849772019, 0.02300641102878161]
+    },
+    "hdfe_nobs": 193,
+    "hdfe_n_removed": 7,
+    "n_complete": 193,
+    "n_years": 20,
+    "mg_coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-20.012397699749485, 0.089450800955623466, 0.20409095049720219]
+    },
+    "mg_se": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [15.352864158121326, 0.017779373456998308, 0.04865161569039466]
+    },
+    "missing_inv": 2,
+    "missing_value": 1,
+    "missing_firm_name": 2,
+    "missing_year": 2
+  }
+}

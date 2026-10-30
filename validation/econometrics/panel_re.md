@@ -270,7 +270,7 @@ untransformed data, which p2a reported as `r_squared` before Tier 1.
   `econometrics::panel::linear_models::tests::test_random_effects_needs_within_degrees_of_freedom`,
   `econometrics::panel::linear_models::tests::test_random_effects_needs_more_entities_than_coefficients`,
   `econometrics::panel::linear_models::tests::test_random_effects_stops_when_cancelled`,
-  `econometrics::panel::linear_models::tests::test_random_effects_refuses_non_finite_data`,
+  `econometrics::panel::linear_models::tests::test_random_effects_non_finite_data`,
   `econometrics::panel::tests::test_collinear_regressors_are_refused`,
   `econometrics::panel::tests::test_time_invariant_regressor_fe_refuses_re_warns`.
 - `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_panel_random_effects` checks
@@ -301,6 +301,45 @@ freedom exact.
 - Non-finite data and exactly collinear regressors are refused. A NaN in `y` gave NaN
   coefficients with SE 0, p 1 and a spurious between-rank warning; collinear regressors
   gave a wrong identified combination.
+
+## Missing values and identifier types
+
+- One NA-aware request reads y, the regressors and the entity id; the rows with a
+  missing value (null or NaN) in any of them are dropped jointly, as plm and fixest do
+  (`na.omit`). The count is in `missing`, the first warning (FE/RE) and the last line of
+  the output: "Missing values: 5 of 200 rows dropped because of missing values (inv: 2,
+  value: 1, firm_id: 2)".
+- A missing id drops its row. Before Tier 2 a missing numeric id became 0 and merged
+  into the real level 0, and a missing text id became a pseudo-level "" (ECON-37); a
+  missing outcome was reported as "Column 'inv' not found".
+- Ids may be text or numeric (any integer width, floats, booleans, dates). Levels follow R
+  `factor()` order: numbers numerically, text in byte (C locale) order. On Grunfeld and the
+  T1 cases this equals the order of first appearance, so their numbers do not change.
+- An infinite value is refused (`NonFiniteValues`), a text column in a numeric role is
+  `NonNumericColumn`, an unknown column `ColumnNotFound`.
+- An empty regressor list is refused (`InvalidSpecification`, "At least one regressor is
+  required").
+
+Case `panel_grunfeld_na` (`validation/r/cases/econ_panel_na.R`, R 4.3.3, plm 2.6.7,
+fixest 0.14.2): Grunfeld with `inv` missing in rows 5 and 50, `value` in row 120, the firm
+id missing in rows 77 and 133 (both as the text id `firm_name`, "F01".."F10", and as the
+numeric id `firm_id`, 0..9, so that a real id 0 exists) and `year` missing in rows 31 and
+150 (`validation/datasets/generated/grunfeld_na.csv`). FE, RE and the mean-group estimator
+take no time column and use the 195 rows complete in (inv, value, capital, id); the two-way
+HDFE uses the 193 rows complete in every column.
+
+| Quantity | R |
+|---|---|
+| RE coef (Intercept), value, capital | -57.314592463981789, 0.11174085623662816, 0.30103103318348384 |
+| RE SE (classical) | 28.900193452681595, 0.010492765131194839, 0.017240854457136419 |
+| n used, entities | 195, 10 |
+
+Tests (registered as `panel_missing_values` in `validation/methods/econ_iv_panel_na.json`):
+`econometrics::panel::linear_models::tests::test_validate_panel_fe_re_grunfeld_na`,
+`econometrics::panel::linear_models::tests::test_validate_panel_fe_missing_ids_not_merged`
+and `econometrics::panel::linear_models::tests::test_validate_na_fe_re_errors_and_integer_regressor`;
+a NaN cell is dropped like a null one
+(`econometrics::panel::linear_models::tests::test_random_effects_non_finite_data`).
 
 ## Known differences
 

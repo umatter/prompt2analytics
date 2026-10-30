@@ -39,8 +39,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
 use crate::regression::HacKernel;
 use crate::resource;
@@ -182,6 +182,10 @@ pub struct GeneralGmmResult {
     pub iterations: usize,
     /// Estimation method used
     pub method: GmmMethod,
+    /// Rows dropped because of missing values (`run_gmm_iv`; the array-level
+    /// estimators drop nothing).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for GeneralGmmResult {
@@ -250,6 +254,9 @@ impl fmt::Display for GeneralGmmResult {
                 self.iterations
             )?;
         }
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -295,6 +302,10 @@ pub fn run_general_gmm(
 /// * `x_cols` - Regressors (endogenous and exogenous)
 /// * `z_cols` - Instruments (should include exogenous regressors)
 /// * `config` - Configuration options
+///
+/// Rows with a missing value (null or NaN) in `y`, a regressor or an instrument are
+/// dropped from every column and reported in `missing`; an infinite value is refused
+/// (`NonFiniteValues`), a text column is `NonNumericColumn`.
 pub fn run_gmm_iv(
     dataset: &Dataset,
     y_col: &str,
@@ -304,29 +315,25 @@ pub fn run_gmm_iv(
 ) -> EconResult<GeneralGmmResult> {
     let config = config.unwrap_or_default();
 
-    // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    // y, X and Z on the rows complete in all of them (incomplete rows are dropped
+    // and reported)
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
+        .numerics(z_cols)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y = cols.numeric_array(y_col);
 
-    // Extract X with intercept
-    let x_dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
-    let x = x_dm.data;
+    // X and Z with intercept
+    let x_dm = cols.matrix(x_cols, true);
+    let z = cols.matrix(z_cols, true).data;
 
-    // Extract Z with intercept
-    let z_dm = DesignMatrix::from_dataframe(dataset.df(), z_cols, true)?;
-    let z = z_dm.data;
-
-    let moments = MomentCondition::LinearIV { y, x, z };
+    let moments = MomentCondition::LinearIV { y, x: x_dm.data, z };
     let mut result = run_general_gmm(moments, config)?;
 
-    // Update names
-    result.names = std::iter::once("(Intercept)".to_string())
-        .chain(x_cols.iter().map(|s| s.to_string()))
-        .collect();
+    result.names = x_dm.column_names;
+    result.missing = cols.missing().clone();
 
     Ok(result)
 }
@@ -523,6 +530,7 @@ fn estimate_two_step_iv(
         converged: true,
         iterations: 2,
         method: GmmMethod::TwoStep,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -644,6 +652,7 @@ fn estimate_iterative_iv(
         converged,
         iterations,
         method: GmmMethod::Iterative,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -832,6 +841,7 @@ fn estimate_normal_distribution(
         converged: true,
         iterations: 1,
         method: GmmMethod::TwoStep,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -1090,6 +1100,53 @@ mod tests {
                 (Err(_), Err(_)) => {}
                 (a, b) => panic!("bandwidth {bw}: {a:?} vs {b:?}"),
             }
+        }
+    }
+
+    /// GMM-IV drops rows with a missing outcome, regressor or instrument and equals the
+    /// fit on the complete rows; the errors name the column. Not pinned to R: the GMM
+    /// variance is ECON-21 (Tier 4).
+    #[test]
+    fn test_validate_na_gmm_iv_omit_equals_complete_rows() {
+        let (case, ds) = crate::test_support::load_case("iv_na_rows");
+        assert_eq!(case.dataset, "validation/datasets/generated/iv_na_rows.csv");
+        let x = ["x", "w", "k"];
+        let z = ["z1", "z2", "w", "k"];
+        let r = run_gmm_iv(&ds, "y", &x, &z, None).unwrap();
+        let complete = Dataset::new(ds.df().drop_nulls::<String>(None).unwrap());
+        let c = run_gmm_iv(&complete, "y", &x, &z, None).unwrap();
+        let tol = p2a_validation::Tol::new(1e-12, 1e-12);
+        let va = r
+            .coefficients
+            .iter()
+            .chain(&r.std_errors)
+            .chain([&r.j_stat]);
+        let vb = c
+            .coefficients
+            .iter()
+            .chain(&c.std_errors)
+            .chain([&c.j_stat]);
+        for (a, b) in va.zip(vb) {
+            assert!(tol.allows(*a, *b), "{a} vs {b}");
+        }
+        assert_eq!(r.names, c.names);
+        assert_eq!(r.n_obs, 294);
+        assert!(c.missing.is_empty());
+        let note = "6 of 300 rows dropped because of missing values (y: 2, x: 1, w: 1, k: 1, z1: 1, z2: 1)";
+        assert_eq!(r.missing.note().as_deref(), Some(note));
+        let text = r.to_string();
+        assert!(
+            text.trim_end()
+                .ends_with(&format!("Missing values: {note}")),
+            "{text}"
+        );
+        match run_gmm_iv(&ds, "label", &x, &z, None) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "label"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        match run_gmm_iv(&ds, "y", &x, &["nope", "w"], None) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "nope"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
         }
     }
 }

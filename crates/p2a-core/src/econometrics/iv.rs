@@ -22,8 +22,11 @@
 //!
 //! ## Weak Instruments
 //!
-//! The first-stage F-statistic tests instrument strength. Stock & Yogo (2005)
-//! suggest F > 10 as a rule of thumb for a single endogenous regressor.
+//! The first-stage F is the partial F of the excluded instruments (restricted fit
+//! on the included exogenous regressors), AER's "Weak instruments" statistic; with
+//! robust = true it is the HC1 Wald F of the excluded-instrument coefficients.
+//! F > 10 is the rule of thumb for instrument strength. Stock & Yogo (2005)
+//! critical values are not computed.
 //!
 //! # References
 //!
@@ -50,17 +53,23 @@
 //!
 //! R equivalent: `AER::ivreg()`, `ivreg::ivreg()`
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, FisherSnedecor};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::traits::estimator::{
-    SignificanceLevel, chi_squared_p_value, f_test_p_value, t_test_p_value,
-};
+use crate::resource;
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, t_test_p_value};
+
+/// `first_stage_f_type` of a classical fit.
+const PARTIAL_F: &str = "partial F of the excluded instruments";
+/// `first_stage_f_type` of a robust (HC1) fit.
+const HC1_WALD_F: &str = "HC1 Wald F of the excluded instruments";
 
 /// Result from an IV/2SLS estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,12 +100,65 @@ pub struct IVResult {
     pub n_obs: usize,
     /// Degrees of freedom
     pub df: usize,
-    /// First-stage F-statistics for each endogenous variable
+    /// First-stage F of each endogenous variable, in `endogenous_vars` order: the
+    /// partial F of the excluded instruments (`robust = false`), comparing
+    /// `x_j ~ [1, X_exog]` with `x_j ~ [1, X_exog, Z]` (AER's "Weak instruments"
+    /// statistic), or the HC1 Wald F of the excluded-instrument coefficients
+    /// (`robust = true`). See `first_stage_f_type`.
     pub first_stage_f_stats: Vec<f64>,
-    /// Whether instruments are strong (F > 10 for each endogenous)
+    /// Whether instruments are strong (first-stage F >= 10 for each endogenous variable;
+    /// a NaN F is not strong)
     pub strong_instruments: bool,
     /// Estimation warnings
     pub warnings: Vec<String>,
+    /// Degrees of freedom (L, n - k_z) of each first-stage F: L excluded instruments,
+    /// k_z = columns of [1, X_exog, Z].
+    #[serde(default)]
+    pub first_stage_df: Vec<(usize, usize)>,
+    /// Upper-tail p-value of each first-stage F from F(L, n - k_z) (statrs `sf`).
+    #[serde(default)]
+    pub first_stage_p_values: Vec<f64>,
+    /// 1 - RSS(x_j ~ 1, X_exog, Z) / RSS(x_j ~ 1, X_exog), per endogenous variable
+    /// (classical in both modes).
+    #[serde(default)]
+    pub first_stage_partial_r2: Vec<f64>,
+    /// "partial F of the excluded instruments" (robust = false) | "HC1 Wald F of the
+    /// excluded instruments" (robust = true).
+    #[serde(default)]
+    pub first_stage_f_type: String,
+    /// Rows dropped because of missing values (R ivreg na.omit).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
+}
+
+/// Writes the `Warnings:` block (without the warning that repeats the missing-value
+/// note, printed as the last line instead) when something is left.
+fn write_warnings(
+    f: &mut fmt::Formatter<'_>,
+    warnings: &[String],
+    missing: &MissingSummary,
+) -> fmt::Result {
+    let note = missing.note();
+    let shown: Vec<&String> = warnings
+        .iter()
+        .filter(|w| note.as_deref() != Some(w.as_str()))
+        .collect();
+    if !shown.is_empty() {
+        writeln!(f)?;
+        writeln!(f, "Warnings:")?;
+        for w in shown {
+            writeln!(f, "  - {}", w)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes `Missing values: <note>` as the last line when rows were dropped.
+fn write_missing(f: &mut fmt::Formatter<'_>, missing: &MissingSummary) -> fmt::Result {
+    match missing.note() {
+        Some(note) => writeln!(f, "Missing values: {note}"),
+        None => Ok(()),
+    }
 }
 
 impl fmt::Display for IVResult {
@@ -109,12 +171,38 @@ impl fmt::Display for IVResult {
         writeln!(f, "No. Observations: {}", self.n_obs)?;
         writeln!(f, "R-squared: {:.4}", self.r_squared)?;
         if !self.first_stage_f_stats.is_empty() {
-            writeln!(
-                f,
-                "First-stage F: {:.4}",
-                self.first_stage_f_stats.iter().sum::<f64>()
-                    / self.first_stage_f_stats.len() as f64
-            )?;
+            let f_type = if self.first_stage_f_type.is_empty() {
+                "F"
+            } else {
+                self.first_stage_f_type.as_str()
+            };
+            writeln!(f, "First stage ({f_type}):")?;
+            for (j, &fj) in self.first_stage_f_stats.iter().enumerate() {
+                let name = self
+                    .endogenous_vars
+                    .get(j)
+                    .map_or("endogenous", String::as_str);
+                match self.first_stage_df.get(j) {
+                    Some(&(df1, df2)) => {
+                        let p = self
+                            .first_stage_p_values
+                            .get(j)
+                            .copied()
+                            .unwrap_or(f64::NAN);
+                        let r2 = self
+                            .first_stage_partial_r2
+                            .get(j)
+                            .copied()
+                            .unwrap_or(f64::NAN);
+                        writeln!(
+                            f,
+                            "  {name}: F = {fj:.4} on ({df1}, {df2}) DF, p = {p:.4}, \
+                             partial R-squared = {r2:.4}"
+                        )?;
+                    }
+                    None => writeln!(f, "  {name}: F = {fj:.4}")?,
+                }
+            }
         }
         writeln!(f)?;
         writeln!(
@@ -140,16 +228,127 @@ impl fmt::Display for IVResult {
         writeln!(f, "{}", "-".repeat(70))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
 
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
+        write_warnings(f, &self.warnings, &self.missing)?;
+        write_missing(f, &self.missing)
+    }
+}
+
+/// Upper-tail probability of `f` under F(`df1`, `df2`) (statrs `sf`): NaN when a df is 0
+/// or `f` is NaN, 0 when `f` is infinite.
+fn f_upper_tail(f: f64, df1: usize, df2: usize) -> f64 {
+    if df1 == 0 || df2 == 0 || f.is_nan() {
+        return f64::NAN;
+    }
+    if f.is_infinite() {
+        return 0.0;
+    }
+    match FisherSnedecor::new(df1 as f64, df2 as f64) {
+        Ok(d) => d.sf(f.max(0.0)),
+        Err(_) => f64::NAN,
+    }
+}
+
+/// OLS of `v` on the columns of `z`, given `(z'z)^-1`: the coefficients, the explicit
+/// residuals and their sum of squares.
+fn ols_fit(
+    z: &ArrayView2<f64>,
+    ztz_inv: &Array2<f64>,
+    v: &ArrayView1<f64>,
+) -> (Array1<f64>, Array1<f64>, f64) {
+    let beta = ztz_inv.dot(&z.t().dot(v));
+    let resid = v - &z.dot(&beta);
+    let rss = resid.dot(&resid);
+    (beta, resid, rss)
+}
+
+/// The classical partial F of `l` excluded columns: `((rss0 - rss1)/l) / (rss1/df2)`,
+/// with `rss0` the restricted and `rss1` the full residual sum of squares. NaN when
+/// `df2 == 0`; +inf for a perfect full fit.
+fn partial_f(rss0: f64, rss1: f64, l: usize, df2: usize) -> f64 {
+    if df2 == 0 || l == 0 {
+        f64::NAN
+    } else if rss1 > 0.0 {
+        ((rss0 - rss1).max(0.0) / l as f64) / (rss1 / df2 as f64)
+    } else {
+        f64::INFINITY
+    }
+}
+
+/// The HC1 Wald F of the coefficients `beta[k_exog..]` of the OLS fit of a column on
+/// `z` (`(z'z)^-1` given, residuals `resid`): `b' V_bb^-1 b / L`, with
+/// `V = (z'z)^-1 [sum_i e_i^2 z_i z_i'] (z'z)^-1 n / (n - k_z)` (sandwich `vcovHC(type =
+/// "HC1")`). `None` when `V_bb` is singular (including a pseudoinverse fallback).
+fn hc1_wald_f(
+    z: &ArrayView2<f64>,
+    ztz_inv: &Array2<f64>,
+    resid: &Array1<f64>,
+    beta: &Array1<f64>,
+    k_exog: usize,
+) -> Option<f64> {
+    let (n, kz) = z.dim();
+    let l = kz.saturating_sub(k_exog);
+    let df2 = n.saturating_sub(kz);
+    if l == 0 || df2 == 0 {
+        return Some(f64::NAN);
+    }
+    let mut meat = Array2::<f64>::zeros((kz, kz));
+    for (row, &e) in z.rows().into_iter().zip(resid.iter()) {
+        let e2 = e * e;
+        for a in 0..kz {
+            let za = e2 * row[a];
+            for b in a..kz {
+                meat[[a, b]] += za * row[b];
             }
         }
-
-        Ok(())
     }
+    for a in 0..kz {
+        for b in 0..a {
+            meat[[a, b]] = meat[[b, a]];
+        }
+    }
+    let v = ztz_inv.dot(&meat).dot(ztz_inv) * (n as f64 / df2 as f64);
+    let v_bb = v.slice(s![k_exog.., k_exog..]);
+    let b = beta.slice(s![k_exog..]);
+    match safe_inverse(&v_bb) {
+        Ok((inv, None)) => Some(b.dot(&inv.dot(&b)) / l as f64),
+        _ => None,
+    }
+}
+
+/// The model's columns on the rows complete in y, X_exog, X_endog and Z (R ivreg
+/// `na.omit`).
+struct IvData {
+    y: Array1<f64>,
+    /// "(Intercept)" and the included exogenous regressors.
+    exog: DesignMatrix,
+    endog: DesignMatrix,
+    instr: DesignMatrix,
+    missing: MissingSummary,
+}
+
+/// One NA-aware request over every model column, in the order y, X_exog, X_endog, Z;
+/// incomplete rows are dropped jointly.
+fn iv_data(
+    dataset: &Dataset,
+    y_col: &str,
+    x_exog: &[&str],
+    x_endog: &[&str],
+    instruments: &[&str],
+) -> EconResult<IvData> {
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_exog)
+        .numerics(x_endog)
+        .numerics(instruments)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    Ok(IvData {
+        y: cols.numeric_array(y_col),
+        exog: cols.matrix(x_exog, true),
+        endog: cols.matrix(x_endog, false),
+        instr: cols.matrix(instruments, false),
+        missing: cols.missing().clone(),
+    })
 }
 
 /// Run Two-Stage Least Squares (2SLS) / Instrumental Variables estimation.
@@ -176,6 +375,25 @@ impl fmt::Display for IVResult {
 ///   X'P_Z y = (Z'X)' (Z'Z)^{-1} (Z'y)
 ///
 /// This reduces memory from O(n·k) to O(k²) for the second stage.
+///
+/// # First stage
+///
+/// For each endogenous `x_j` the first-stage F is the partial F of the L excluded
+/// instruments, comparing `x_j ~ [1, X_exog]` with `x_j ~ [1, X_exog, Z]` on
+/// `(L, n - k_z)` degrees of freedom (AER's "Weak instruments" statistic,
+/// `summary(ivreg, diagnostics = TRUE)`); with `robust = true` it is the HC1 Wald F
+/// of the excluded-instrument coefficients, as AER with
+/// `vcov. = sandwich::vcovHC(type = "HC1")`. `first_stage_p_values` are upper-tail
+/// F probabilities and `first_stage_partial_r2` the classical partial R². A
+/// first-stage F below 10 (or not computed) adds a weak-instrument warning and makes
+/// `strong_instruments` false. Stock & Yogo (2005) critical values are not computed.
+///
+/// # Missing values
+///
+/// Rows with a missing value (null or NaN) in y, a regressor or an instrument are
+/// dropped from every column (R ivreg `na.omit`), counted in `missing` and noted in
+/// `warnings`; an infinite value is refused (`NonFiniteValues`), a text column is
+/// `NonNumericColumn`.
 pub fn run_iv2sls(
     dataset: &Dataset,
     y_col: &str,
@@ -186,6 +404,12 @@ pub fn run_iv2sls(
 ) -> EconResult<IVResult> {
     let mut warnings = Vec::new();
 
+    if x_endog.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: "At least one endogenous variable is required".to_string(),
+        });
+    }
+
     // Check identification
     if instruments.len() < x_endog.len() {
         return Err(EconError::UnderIdentified {
@@ -194,29 +418,22 @@ pub fn run_iv2sls(
         });
     }
 
-    // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|_e| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
+    // y, [1, X_exog], X_endog and Z on the complete rows
+    let IvData {
+        y,
+        exog: design_exog,
+        endog: design_endog,
+        instr: design_instruments,
+        missing,
+    } = iv_data(dataset, y_col, x_exog, x_endog, instruments)?;
+    if let Some(note) = missing.note() {
+        warnings.push(note);
+    }
     let n = y.len();
-
-    // Build matrices
-    // X_exog: exogenous variables (with intercept)
-    let design_exog = DesignMatrix::from_dataframe(dataset.df(), x_exog, true)?;
     let x_exog_mat = design_exog.data;
     let exog_names = design_exog.column_names;
-
-    // X_endog: endogenous variables
-    let design_endog = DesignMatrix::from_dataframe(dataset.df(), x_endog, false)?;
     let x_endog_mat = design_endog.data;
     let endog_names = design_endog.column_names;
-
-    // Z: instruments only
-    let design_instruments = DesignMatrix::from_dataframe(dataset.df(), instruments, false)?;
     let z_mat = design_instruments.data;
 
     // Full instrument matrix: [X_exog, Z] (all exogenous + excluded instruments)
@@ -246,10 +463,24 @@ pub fn run_iv2sls(
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // First Stage: Compute F-statistics for instrument strength
-    // X_endog_hat_j = Z * (Z'Z)^{-1} * Z' * x_j
+    // First stage: the F of the excluded instruments for each x_j, comparing
+    // the restricted fit x_j ~ [1, X_exog] with x_j ~ [1, X_exog, Z] (AER's
+    // weak-instrument statistic), classical or HC1 Wald.
     // ═══════════════════════════════════════════════════════════════════
+    let (ztz0_inv, _) = safe_inverse(&ztz.slice(s![..k_exog, ..k_exog])).map_err(|e| {
+        EconError::SingularMatrix {
+            context: "[1, X_exog]'[1, X_exog] in the first-stage restricted fit".to_string(),
+            suggestion: format!("Check for collinearity among the exogenous regressors: {e:?}"),
+        }
+    })?;
+    let z0 = z_full.slice(s![.., ..k_exog]);
+    let fs_df2 = n.saturating_sub(k_full_z);
+    let f_type = if robust { HC1_WALD_F } else { PARTIAL_F };
+
     let mut first_stage_f_stats = Vec::with_capacity(k_endog);
+    let mut first_stage_df = Vec::with_capacity(k_endog);
+    let mut first_stage_p_values = Vec::with_capacity(k_endog);
+    let mut first_stage_partial_r2 = Vec::with_capacity(k_endog);
 
     // Store first-stage betas only if needed for robust SEs
     let mut first_stage_betas: Vec<Array1<f64>> = if robust {
@@ -259,37 +490,48 @@ pub fn run_iv2sls(
     };
 
     for j in 0..k_endog {
+        resource::checkpoint()?;
         let x_j = x_endog_mat.column(j);
 
-        // First stage: beta_j = (Z'Z)^{-1} Z'x_j
-        let ztx_j = z_full.t().dot(&x_j);
-        let beta_first = ztz_inv.dot(&ztx_j);
-
-        // First-stage F-statistic via projection:
-        // SSR = x_j'(I - P_Z)x_j = x_j'x_j - ztx_j' * (Z'Z)^{-1} * ztx_j
-        let x_j_sq = x_j.dot(&x_j);
-        let ssr = x_j_sq - ztx_j.dot(&beta_first);
-        let x_j_mean = x_j.mean().unwrap_or(0.0);
-        let sst = x_j_sq - n as f64 * x_j_mean * x_j_mean;
-
-        let df_reg = k_full_z.saturating_sub(1);
-        let df_res = n.saturating_sub(k_full_z);
-
-        let f_stat = if df_reg > 0 && df_res > 0 && ssr > 0.0 {
-            ((sst - ssr) / df_reg as f64) / (ssr / df_res as f64)
+        // Full first stage x_j ~ [1, X_exog, Z] and restricted x_j ~ [1, X_exog],
+        // from explicit residuals
+        let (beta_first, resid_first, rss1) = ols_fit(&z_full.view(), &ztz_inv, &x_j);
+        let (_, _, rss0) = ols_fit(&z0, &ztz0_inv, &x_j);
+        let partial_r2 = if rss0 > 0.0 {
+            1.0 - rss1 / rss0
         } else {
-            0.0
+            f64::NAN
+        };
+
+        let f_stat = if robust {
+            match hc1_wald_f(&z_full.view(), &ztz_inv, &resid_first, &beta_first, k_exog) {
+                Some(f) => f,
+                None => {
+                    warnings.push(format!(
+                        "HC1 first-stage Wald F for '{}' not computed: singular covariance of \
+                         the instrument coefficients",
+                        x_endog[j]
+                    ));
+                    f64::NAN
+                }
+            }
+        } else {
+            partial_f(rss0, rss1, k_instr, fs_df2)
         };
 
         first_stage_f_stats.push(f_stat);
+        first_stage_df.push((k_instr, fs_df2));
+        first_stage_p_values.push(f_upper_tail(f_stat, k_instr, fs_df2));
+        first_stage_partial_r2.push(partial_r2);
         if robust {
             first_stage_betas.push(beta_first);
         }
 
-        if f_stat < 10.0 {
+        if f_stat.is_nan() || f_stat < 10.0 {
             warnings.push(format!(
-                "Weak instrument warning: First-stage F = {:.2} for '{}' (< 10)",
-                f_stat, x_endog[j]
+                "Weak instruments for '{}': first-stage {f_type} = {f_stat:.2} on \
+                 ({k_instr}, {fs_df2}) DF, below 10",
+                x_endog[j]
             ));
         }
     }
@@ -457,6 +699,11 @@ pub fn run_iv2sls(
         first_stage_f_stats,
         strong_instruments,
         warnings,
+        first_stage_df,
+        first_stage_p_values,
+        first_stage_partial_r2,
+        first_stage_f_type: f_type.to_string(),
+        missing,
     })
 }
 
@@ -467,13 +714,15 @@ pub struct FirstStageDiagnostics {
     pub endogenous_var: String,
     /// Instruments used
     pub instruments: Vec<String>,
-    /// First-stage F-statistic (instrument strength test)
+    /// Partial F of the excluded instruments given the controls: the restricted fit
+    /// `endog ~ [1, controls]` against `endog ~ [1, instruments, controls]` (AER's
+    /// weak-instrument statistic; the overall F when there are no controls)
     pub f_statistic: f64,
-    /// p-value for F-statistic
+    /// Upper-tail p-value of `f_statistic` on `f_df` degrees of freedom
     pub f_pvalue: f64,
-    /// First-stage R-squared
+    /// R-squared of the full first stage
     pub r_squared: f64,
-    /// Adjusted R-squared
+    /// Adjusted R-squared of the full first stage
     pub adj_r_squared: f64,
     /// Number of observations
     pub n_obs: usize,
@@ -483,6 +732,18 @@ pub struct FirstStageDiagnostics {
     pub instrument_coeffs: Vec<(String, f64, f64, f64, f64)>,
     /// Significance levels for each instrument
     pub significance: Vec<SignificanceLevel>,
+    /// Degrees of freedom `(L, n - k)` of `f_statistic`, `k = 1 + L + n_controls`.
+    #[serde(default)]
+    pub f_df: (usize, usize),
+    /// `1 - RSS(full) / RSS(restricted)`.
+    #[serde(default)]
+    pub partial_r_squared: f64,
+    /// Control variables (included exogenous regressors) of the first stage.
+    #[serde(default)]
+    pub controls: Vec<String>,
+    /// Rows dropped because of missing values in the first-stage columns.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for FirstStageDiagnostics {
@@ -491,14 +752,26 @@ impl fmt::Display for FirstStageDiagnostics {
         writeln!(f, "===========================================")?;
         writeln!(f, "Endogenous Variable: {}", self.endogenous_var)?;
         writeln!(f, "Instruments: {}", self.instruments.join(", "))?;
+        if !self.controls.is_empty() {
+            writeln!(f, "Controls: {}", self.controls.join(", "))?;
+        }
         writeln!(f, "No. Observations: {}", self.n_obs)?;
         writeln!(f)?;
 
-        writeln!(f, "Instrument Strength Test:")?;
-        writeln!(f, "  F-statistic: {:.4}", self.f_statistic)?;
+        writeln!(f, "Instrument Strength ({PARTIAL_F}):")?;
+        writeln!(
+            f,
+            "  F-statistic: {:.4} on ({}, {}) DF",
+            self.f_statistic, self.f_df.0, self.f_df.1
+        )?;
         writeln!(f, "  Prob (F): {:.4}", self.f_pvalue)?;
-        writeln!(f, "  R-squared: {:.4}", self.r_squared)?;
-        writeln!(f, "  Adj. R-squared: {:.4}", self.adj_r_squared)?;
+        writeln!(f, "  Partial R-squared: {:.4}", self.partial_r_squared)?;
+        writeln!(f, "  R-squared (first stage): {:.4}", self.r_squared)?;
+        writeln!(
+            f,
+            "  Adj. R-squared (first stage): {:.4}",
+            self.adj_r_squared
+        )?;
         writeln!(f)?;
 
         // Stock-Yogo critical values interpretation
@@ -543,14 +816,19 @@ impl fmt::Display for FirstStageDiagnostics {
             "      Rule of thumb: F > 10 suggests instruments are not weak"
         )?;
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
 /// Run first-stage diagnostics for IV/2SLS.
 ///
-/// Tests instrument strength by regressing the endogenous variable on instruments.
-/// Key output is the F-statistic: F > 10 suggests instruments are not weak.
+/// Tests instrument strength by regressing the endogenous variable on the instruments
+/// and the controls. The F-statistic is the partial F of the excluded instruments
+/// given the controls (the restricted fit `endog ~ [1, controls]` against
+/// `endog ~ [1, instruments, controls]`, R `anova(lm(x ~ w), lm(x ~ w + z))`), AER's
+/// "Weak instruments" statistic, on `(L, n - k)` degrees of freedom; without controls
+/// it is the overall F of the first stage. F > 10 suggests instruments are not weak;
+/// Stock & Yogo (2005) critical values are not computed.
 ///
 /// # Arguments
 /// * `dataset` - The dataset
@@ -563,23 +841,23 @@ pub fn run_first_stage_diagnostics(
     instruments: &[&str],
     controls: Option<&[&str]>,
 ) -> EconResult<FirstStageDiagnostics> {
-    // Extract endogenous variable
-    let y = DesignMatrix::extract_column(dataset.df(), endog_var).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: endog_var.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let controls: Vec<&str> = controls.unwrap_or(&[]).to_vec();
 
+    // The endogenous variable, instruments and controls on their complete rows
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(endog_var)
+        .numerics(instruments)
+        .numerics(&controls)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y = cols.numeric_array(endog_var);
     let n = y.len();
 
-    // Build the full regressor set: intercept + instruments + controls
+    // The full regressor set: intercept + instruments + controls
     let mut all_vars: Vec<&str> = instruments.to_vec();
-    if let Some(ctrl) = controls {
-        all_vars.extend(ctrl);
-    }
+    all_vars.extend(&controls);
 
-    let design = DesignMatrix::from_dataframe(dataset.df(), &all_vars, true)?;
+    let design = cols.matrix(&all_vars, true);
     let x = design.data;
     let var_names = design.column_names;
     let k = x.ncols();
@@ -614,14 +892,24 @@ pub fn run_first_stage_diagnostics(
     // Adjusted R-squared
     let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df as f64);
 
-    // F-statistic
-    let df_reg = k.saturating_sub(1);
-    let f_statistic = if df_reg > 0 && df > 0 && ssr > 0.0 {
-        ((sst - ssr) / df_reg as f64) / (ssr / df as f64)
+    // Partial F of the instruments given the controls: the restricted fit
+    // endog ~ [1, controls] against the full first stage (AER's weak-instrument F)
+    let restricted = cols.matrix(&controls, true);
+    let (restricted_inv, _) = safe_inverse(&xtx(&restricted.data.view()).view()).map_err(|e| {
+        EconError::SingularMatrix {
+            context: "[1, controls]'[1, controls] in the first-stage restricted fit".to_string(),
+            suggestion: format!("Check for collinearity among the controls: {e:?}"),
+        }
+    })?;
+    let (_, _, rss0) = ols_fit(&restricted.data.view(), &restricted_inv, &y.view());
+    let l = instruments.len();
+    let f_statistic = partial_f(rss0, ssr, l, df);
+    let f_pvalue = f_upper_tail(f_statistic, l, df);
+    let partial_r_squared = if rss0 > 0.0 {
+        1.0 - ssr / rss0
     } else {
-        0.0
+        f64::NAN
     };
-    let f_pvalue = f_test_p_value(f_statistic, df_reg as f64, df as f64);
 
     // Standard errors
     let vcov = &xtx_inv * sigma2;
@@ -663,6 +951,10 @@ pub fn run_first_stage_diagnostics(
         strong_instruments: f_statistic > 10.0,
         instrument_coeffs,
         significance,
+        f_df: (l, df),
+        partial_r_squared,
+        controls: controls.iter().map(|s| s.to_string()).collect(),
+        missing: cols.missing().clone(),
     })
 }
 
@@ -702,6 +994,9 @@ pub struct SarganTestResult {
     pub null_hypothesis: String,
     /// Interpretation based on p-value
     pub interpretation: String,
+    /// Rows dropped because of missing values (the rows of `run_iv2sls`).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for SarganTestResult {
@@ -723,7 +1018,7 @@ impl fmt::Display for SarganTestResult {
         writeln!(f, "  Overidentifying restrictions: {}", self.df)?;
         writeln!(f)?;
         writeln!(f, "Interpretation: {}", self.interpretation)?;
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -736,6 +1031,9 @@ impl fmt::Display for SarganTestResult {
 ///
 /// - The model must be **over-identified**: number of instruments > number of endogenous variables
 /// - For just-identified models (instruments == endogenous), the test is not defined
+///
+/// The test uses the rows [`run_iv2sls`] uses: rows with a missing value in any model
+/// column are dropped (R ivreg `na.omit`) and reported in `missing`.
 ///
 /// # Test Statistic
 ///
@@ -803,6 +1101,7 @@ pub fn sargan_test(
             overidentified: false,
             null_hypothesis: "Instruments are valid (uncorrelated with error term)".to_string(),
             interpretation: "Model is exactly identified (instruments = endogenous). Sargan test not applicable.".to_string(),
+            missing: MissingSummary::default(),
         });
     }
 
@@ -810,19 +1109,18 @@ pub fn sargan_test(
     let iv_result = run_iv2sls(dataset, y_col, x_exog, x_endog, instruments, false)?;
     let n = iv_result.n_obs;
 
-    // Re-extract data to compute residuals and run auxiliary regression
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    // Re-extract the same complete rows to compute residuals and run the auxiliary
+    // regression
+    let IvData {
+        y,
+        exog: design_exog,
+        endog: design_endog,
+        instr: design_z,
+        missing,
+    } = iv_data(dataset, y_col, x_exog, x_endog, instruments)?;
 
     // Build the full X matrix (exogenous + endogenous)
-    let design_exog = DesignMatrix::from_dataframe(dataset.df(), x_exog, true)?;
     let x_exog_mat = design_exog.data;
-
-    let design_endog = DesignMatrix::from_dataframe(dataset.df(), x_endog, false)?;
     let x_endog_mat = design_endog.data;
 
     let k_exog = x_exog_mat.ncols();
@@ -843,7 +1141,6 @@ pub fn sargan_test(
     let residuals = &y - &y_hat;
 
     // Build the full instrument matrix Z = [exogenous, excluded_instruments]
-    let design_z = DesignMatrix::from_dataframe(dataset.df(), instruments, false)?;
     let z_excl = design_z.data;
 
     let k_z = k_exog + z_excl.ncols(); // exogenous (with intercept) + excluded instruments
@@ -905,6 +1202,7 @@ pub fn sargan_test(
         overidentified: true,
         null_hypothesis: "Instruments are valid (uncorrelated with error term)".to_string(),
         interpretation,
+        missing,
     })
 }
 
@@ -1144,288 +1442,336 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    // VALIDATION TESTS - Comparing against R's AER::ivreg()
+    // R-pinned tests: AER::ivreg on the cases of validation/r/cases/econ_iv.R
+    // (registered as `iv_2sls` in validation/methods/econ_iv_panel_na.json)
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Create dataset for IV validation with known DGP
-    /// y = 0.5 + 1.0*x_endog + error
-    /// x_endog is endogenous (correlated with error)
-    /// z is a valid instrument
-    fn create_validation_iv_dataset() -> Dataset {
-        // Generate IV data with:
-        // - z: instrument (exogenous)
-        // - u: common factor creating endogeneity
-        // - x_endog: endogenous regressor (2*z + u + noise)
-        // - y: outcome (0.5 + 1.0*x_endog + 0.5*u + noise)
+    use p2a_validation::{Check, Tol};
 
-        // Deterministic pseudo-random for reproducibility
-        let n = 100;
-        let z: Vec<f64> = (0..n).map(|i| (i as f64 * 0.7).sin() * 2.0).collect();
-        let u: Vec<f64> = (0..n).map(|i| (i as f64 * 1.3).cos()).collect();
-
-        let x_endog: Vec<f64> = z
+    /// The first-stage df of each endogenous variable as two vectors (df1, df2).
+    fn fs_df(r: &IVResult) -> (Vec<f64>, Vec<f64>) {
+        r.first_stage_df
             .iter()
-            .zip(u.iter())
-            .enumerate()
-            .map(|(i, (&zi, &ui))| {
-                let noise = (i as f64 * 0.9).sin() * 0.3;
-                2.0 * zi + ui + noise
-            })
-            .collect();
+            .map(|&(a, b)| (a as f64, b as f64))
+            .unzip()
+    }
 
-        let y: Vec<f64> = x_endog
-            .iter()
-            .zip(u.iter())
-            .enumerate()
-            .map(|(i, (&xi, &ui))| {
-                let noise = (i as f64 * 1.1).cos() * 0.3;
-                0.5 + 1.0 * xi + 0.5 * ui + noise
-            })
-            .collect();
+    /// Names, coefficients and SEs of the instrument rows of a first-stage fit.
+    fn instr_rows(d: &FirstStageDiagnostics) -> (Vec<String>, Vec<f64>, Vec<f64>) {
+        let names = d.instrument_coeffs.iter().map(|c| c.0.clone()).collect();
+        let coefs = d.instrument_coeffs.iter().map(|c| c.1).collect();
+        let ses = d.instrument_coeffs.iter().map(|c| c.2).collect();
+        (names, coefs, ses)
+    }
 
-        let df = df! {
-            "y" => y,
-            "x_endog" => x_endog,
-            "z" => z
+    /// A control that predicts the endogenous regressor and weak excluded instruments:
+    /// the overall first-stage F (300.8, what p2a reported before) certified them as
+    /// strong; AER's weak-instrument (partial) F is 0.2267.
+    #[test]
+    fn test_validate_iv_weak_controls() {
+        let (case, ds) = crate::test_support::load_case("iv_weak_controls");
+        let r = run_iv2sls(&ds, "y", &["w"], &["x"], &["z1", "z2"], false).unwrap();
+        let h = run_iv2sls(&ds, "y", &["w"], &["x"], &["z1", "z2"], true).unwrap();
+        let s = sargan_test(&ds, "y", &["w"], &["x"], &["z1", "z2"]).unwrap();
+        let n = r.n_obs;
+        let (df1, df2) = fs_df(&r);
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se", &r.variables, &r.std_errors, Tol::se(n))
+            .named("se_hc1", &h.variables, &h.std_errors, Tol::se(n))
+            .vector("weak_f", &r.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p", &r.first_stage_p_values, Tol::p_value(n))
+            .vector("weak_df1", &df1, Tol::exact())
+            .vector("weak_df2", &df2, Tol::exact())
+            .vector("weak_f_hc1", &h.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p_hc1", &h.first_stage_p_values, Tol::p_value(n))
+            .scalar("fs_partial_r2", r.first_stage_partial_r2[0], Tol::stat(n))
+            .scalar("sargan", s.j_statistic, Tol::stat(n))
+            .scalar("sargan_p", s.p_value, Tol::p_value(n))
+            .scalar("n_obs", n as f64, Tol::exact())
+            .finish();
+        // Not compared: se_hc0 (run_iv2sls offers classical and HC1 only), wu_hausman (not
+        // computed), overall_first_stage_f (the pre-fix value, kept in the case for the record).
+        assert_eq!(h.coefficients, r.coefficients);
+        assert_eq!(h.first_stage_partial_r2, r.first_stage_partial_r2);
+        assert!(!r.strong_instruments && !h.strong_instruments);
+        assert_eq!(
+            r.first_stage_f_type,
+            "partial F of the excluded instruments"
+        );
+        assert_eq!(
+            h.first_stage_f_type,
+            "HC1 Wald F of the excluded instruments"
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("Weak instruments for 'x': first-stage partial F")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.missing.is_empty());
+    }
+
+    /// Two endogenous regressors: one partial F per variable, in `x_endog` order.
+    #[test]
+    fn test_validate_iv_two_endog() {
+        let (case, ds) = crate::test_support::load_case("iv_two_endog");
+        let (exog, endog, instr) = (&["w1", "w2"], &["x1", "x2"], &["z1", "z2", "z3"]);
+        let r = run_iv2sls(&ds, "y", exog, endog, instr, false).unwrap();
+        let h = run_iv2sls(&ds, "y", exog, endog, instr, true).unwrap();
+        let s = sargan_test(&ds, "y", exog, endog, instr).unwrap();
+        let n = r.n_obs;
+        let (df1, df2) = fs_df(&r);
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se", &r.variables, &r.std_errors, Tol::se(n))
+            .named("se_hc1", &h.variables, &h.std_errors, Tol::se(n))
+            .vector("weak_f", &r.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p", &r.first_stage_p_values, Tol::p_value(n))
+            .vector("weak_df1", &df1, Tol::exact())
+            .vector("weak_df2", &df2, Tol::exact())
+            .vector("weak_f_hc1", &h.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p_hc1", &h.first_stage_p_values, Tol::p_value(n))
+            .scalar("sargan", s.j_statistic, Tol::stat(n))
+            .scalar("sargan_p", s.p_value, Tol::p_value(n))
+            .scalar("n_obs", n as f64, Tol::exact())
+            .finish();
+        assert!(r.strong_instruments && h.strong_instruments);
+        assert!(
+            !r.warnings.iter().any(|w| w.starts_with("Weak instruments")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// No controls: the partial F equals the overall F (already right before the fix);
+    /// the robust run now reports the HC1 Wald F instead of the classical F.
+    #[test]
+    fn test_validate_iv_no_controls() {
+        let (case, ds) = crate::test_support::load_case("iv_no_controls");
+        let r = run_iv2sls(&ds, "y", &[], &["x"], &["z1", "z2"], false).unwrap();
+        let h = run_iv2sls(&ds, "y", &[], &["x"], &["z1", "z2"], true).unwrap();
+        let s = sargan_test(&ds, "y", &[], &["x"], &["z1", "z2"]).unwrap();
+        let n = r.n_obs;
+        let (df1, df2) = fs_df(&r);
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se", &r.variables, &r.std_errors, Tol::se(n))
+            .named("se_hc1", &h.variables, &h.std_errors, Tol::se(n))
+            .vector("weak_f", &r.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p", &r.first_stage_p_values, Tol::p_value(n))
+            .vector("weak_df1", &df1, Tol::exact())
+            .vector("weak_df2", &df2, Tol::exact())
+            .vector("weak_f_hc1", &h.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p_hc1", &h.first_stage_p_values, Tol::p_value(n))
+            .scalar("sargan", s.j_statistic, Tol::stat(n))
+            .scalar("sargan_p", s.p_value, Tol::p_value(n))
+            .scalar("n_obs", n as f64, Tol::exact())
+            .finish();
+        assert!(!r.strong_instruments && !h.strong_instruments);
+        assert!(
+            h.warnings
+                .iter()
+                .any(|w| w.starts_with("Weak instruments for 'x': first-stage HC1 Wald F")),
+            "{:?}",
+            h.warnings
+        );
+    }
+
+    /// `run_first_stage_diagnostics` with controls: the partial F of the instruments
+    /// given the controls, `anova(lm(x ~ w), lm(x ~ w + z1 + z2))`; without controls on
+    /// `iv_no_controls` it equals AER's weak-instrument F.
+    #[test]
+    fn test_validate_first_stage_diagnostics_weak_controls() {
+        let (case, ds) = crate::test_support::load_case("iv_weak_controls");
+        let d = run_first_stage_diagnostics(&ds, "x", &["z1", "z2"], Some(&["w"])).unwrap();
+        let n = d.n_obs;
+        let (names, coefs, ses) = instr_rows(&d);
+        Check::new(&case)
+            .scalar("fs_partial_f", d.f_statistic, Tol::stat(n))
+            .scalar("fs_partial_p", d.f_pvalue, Tol::p_value(n))
+            .scalar("fs_partial_df1", d.f_df.0 as f64, Tol::exact())
+            .scalar("fs_partial_df2", d.f_df.1 as f64, Tol::exact())
+            .scalar("fs_partial_r2", d.partial_r_squared, Tol::stat(n))
+            .scalar("fs_r2", d.r_squared, Tol::stat(n))
+            .scalar("fs_adj_r2", d.adj_r_squared, Tol::stat(n))
+            .named("fs_instr_coef", &names, &coefs, Tol::coef(n))
+            .named("fs_instr_se", &names, &ses, Tol::se(n))
+            .finish();
+        assert!(!d.strong_instruments);
+        assert_eq!(d.controls, ["w"]);
+
+        let (case, ds) = crate::test_support::load_case("iv_no_controls");
+        let d = run_first_stage_diagnostics(&ds, "x", &["z1", "z2"], None).unwrap();
+        let n = d.n_obs;
+        Check::new(&case)
+            .vector("weak_f", &[d.f_statistic], Tol::stat(n))
+            .vector("weak_p", &[d.f_pvalue], Tol::p_value(n))
+            .vector("weak_df1", &[d.f_df.0 as f64], Tol::exact())
+            .vector("weak_df2", &[d.f_df.1 as f64], Tol::exact())
+            .finish();
+        assert!(d.controls.is_empty());
+    }
+
+    /// The first-stage block of both Displays names the statistic and its df.
+    #[test]
+    fn test_validate_iv_display_first_stage() {
+        let (case, ds) = crate::test_support::load_case("iv_weak_controls");
+        let r = run_iv2sls(&ds, "y", &["w"], &["x"], &["z1", "z2"], false).unwrap();
+        Check::new(&case)
+            .vector("weak_f", &r.first_stage_f_stats, Tol::printed(4))
+            .finish();
+        let text = r.to_string();
+        assert!(
+            text.contains("First stage (partial F of the excluded instruments):"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  x: F = 0.2267 on (2, 496) DF, p = 0.7972, partial R-squared = 0.0009"),
+            "{text}"
+        );
+        assert!(!text.contains("First-stage F:"), "{text}");
+        let d = run_first_stage_diagnostics(&ds, "x", &["z1", "z2"], Some(&["w"])).unwrap();
+        let text = d.to_string();
+        assert!(text.contains("Controls: w"), "{text}");
+        assert!(
+            text.contains("Instrument Strength (partial F of the excluded instruments):"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  F-statistic: 0.2267 on (2, 496) DF"),
+            "{text}"
+        );
+        assert!(text.contains("WEAK (F < 5)"), "{text}");
+    }
+
+    /// Missing cells in six columns, an Int64 control: ivreg drops the 6 incomplete rows
+    /// (na.omit); the first-stage diagnostics use the complete rows of their own columns.
+    #[test]
+    fn test_validate_iv_na_rows() {
+        let (case, ds) = crate::test_support::load_case("iv_na_rows");
+        assert_eq!(
+            ds.df().column("k").unwrap().dtype(),
+            &polars::prelude::DataType::Int64
+        ); // design 2.2
+        let (exog, endog, instr) = (&["w", "k"], &["x"], &["z1", "z2"]);
+        let r = run_iv2sls(&ds, "y", exog, endog, instr, false).unwrap();
+        let h = run_iv2sls(&ds, "y", exog, endog, instr, true).unwrap();
+        let s = sargan_test(&ds, "y", exog, endog, instr).unwrap();
+        let d = run_first_stage_diagnostics(&ds, "x", instr, Some(exog)).unwrap();
+        let by = |m: &MissingSummary, c: &str| {
+            m.by_column
+                .iter()
+                .find(|(k, _)| k == c)
+                .map_or(0, |(_, v)| *v) as f64
+        };
+        let n = r.n_obs;
+        let (df1, df2) = fs_df(&r);
+        let (names, coefs, ses) = instr_rows(&d);
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se", &r.variables, &r.std_errors, Tol::se(n))
+            .named("se_hc1", &h.variables, &h.std_errors, Tol::se(n))
+            .vector("weak_f", &r.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p", &r.first_stage_p_values, Tol::p_value(n))
+            .vector("weak_f_hc1", &h.first_stage_f_stats, Tol::stat(n))
+            .vector("weak_p_hc1", &h.first_stage_p_values, Tol::p_value(n))
+            .vector("weak_df1", &df1, Tol::exact())
+            .vector("weak_df2", &df2, Tol::exact())
+            .scalar("sargan", s.j_statistic, Tol::stat(n))
+            .scalar("sargan_p", s.p_value, Tol::p_value(n))
+            .scalar("n_obs", n as f64, Tol::exact())
+            .scalar("n_dropped", r.missing.n_dropped as f64, Tol::exact())
+            .scalar("missing_y", by(&r.missing, "y"), Tol::exact())
+            .scalar("missing_x", by(&r.missing, "x"), Tol::exact())
+            .scalar("missing_w", by(&r.missing, "w"), Tol::exact())
+            .scalar("missing_k", by(&r.missing, "k"), Tol::exact())
+            .scalar("missing_z1", by(&r.missing, "z1"), Tol::exact())
+            .scalar("missing_z2", by(&r.missing, "z2"), Tol::exact())
+            .scalar("fsd_n_obs", d.n_obs as f64, Tol::exact())
+            .scalar("fsd_partial_f", d.f_statistic, Tol::stat(d.n_obs))
+            .scalar("fsd_partial_p", d.f_pvalue, Tol::p_value(d.n_obs))
+            .scalar("fsd_partial_df1", d.f_df.0 as f64, Tol::exact())
+            .scalar("fsd_partial_df2", d.f_df.1 as f64, Tol::exact())
+            .scalar("fsd_partial_r2", d.partial_r_squared, Tol::stat(d.n_obs))
+            .scalar("fsd_r2", d.r_squared, Tol::stat(d.n_obs))
+            .scalar("fsd_adj_r2", d.adj_r_squared, Tol::stat(d.n_obs))
+            .named("fsd_instr_coef", &names, &coefs, Tol::coef(d.n_obs))
+            .named("fsd_instr_se", &names, &ses, Tol::se(d.n_obs))
+            .finish();
+        let note = "6 of 300 rows dropped because of missing values (y: 2, w: 1, k: 1, x: 1, z1: 1, z2: 1)";
+        assert_eq!(r.missing.note().as_deref(), Some(note));
+        assert!(r.warnings.iter().any(|w| w == note), "{:?}", r.warnings);
+        assert_eq!(s.missing, r.missing);
+        assert_eq!(
+            d.missing.note().as_deref(),
+            Some(
+                "4 of 300 rows dropped because of missing values (x: 1, z1: 1, z2: 1, w: 1, k: 1)"
+            )
+        );
+        let text = r.to_string();
+        assert_eq!(text.matches(note).count(), 1, "{text}"); // printed once
+        assert!(
+            text.trim_end()
+                .ends_with(&format!("Missing values: {note}")),
+            "{text}"
+        );
+        assert!(r.strong_instruments);
+        for t in [s.to_string(), d.to_string()] {
+            assert!(
+                t.trim_end()
+                    .lines()
+                    .last()
+                    .is_some_and(|l| l.starts_with("Missing values: ")),
+                "{t}"
+            );
         }
-        .unwrap();
-        Dataset::new(df)
     }
 
-    /// Validation test: Basic 2SLS (just-identified)
-    /// Compared against R's AER::ivreg(y ~ x | z)
+    /// A text column is non-numeric and an unknown column is not found, whichever role
+    /// they take; an Int64 control gives the fit of the same values in Float64.
     #[test]
-    fn test_validate_iv2sls_basic() {
-        let dataset = create_validation_iv_dataset();
+    fn test_validate_na_iv_errors_name_the_column() {
+        let (case, ds) = crate::test_support::load_case("iv_na_rows");
+        assert_eq!(case.dataset, "validation/datasets/generated/iv_na_rows.csv");
+        let non_numeric = |e: &EconError| matches!(e, EconError::NonNumericColumn { column } if column == "label");
+        let e = run_iv2sls(&ds, "label", &["w"], &["x"], &["z1", "z2"], false).unwrap_err();
+        assert!(non_numeric(&e), "{e:?}");
+        let e = run_iv2sls(&ds, "y", &["w"], &["label"], &["z1", "z2"], false).unwrap_err();
+        assert!(non_numeric(&e), "{e:?}");
+        let e = run_iv2sls(&ds, "y", &["w"], &["x"], &["nope", "z2"], false).unwrap_err();
+        assert!(
+            matches!(&e, EconError::ColumnNotFound { column, .. } if column == "nope"),
+            "{e:?}"
+        );
+        let e = run_first_stage_diagnostics(&ds, "label", &["z1"], None).unwrap_err();
+        assert!(non_numeric(&e), "{e:?}");
+        let e = sargan_test(&ds, "label", &[], &["x"], &["z1", "z2"]).unwrap_err();
+        assert!(non_numeric(&e), "{e:?}");
+        let e = run_iv2sls(&ds, "y", &["w"], &[], &["z1", "z2"], false).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("endogenous")),
+            "{e:?}"
+        );
 
-        let result = run_iv2sls(
-            &dataset,
-            "y",
-            &[],          // no exogenous regressors
-            &["x_endog"], // endogenous
-            &["z"],       // instrument
-            false,        // not robust
-        )
-        .unwrap();
-
-        // Structure checks
-        assert_eq!(result.n_obs, 100);
-        assert!(!result.coefficients.is_empty());
-
-        // Find coefficient on x_endog
-        let x_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "x_endog")
+        // the Int64 control `k` as Float64 (nulls kept) gives the same fit
+        let k_f = crate::data::columns::numeric_options(ds.df(), "k").unwrap();
+        let mut df = ds.df().clone();
+        df.with_column(polars::prelude::Column::new("k".into(), k_f))
             .unwrap();
-
-        // True coefficient is 1.0; IV should recover something close
-        // (exact recovery depends on instrument strength and sample size)
-        assert!(
-            (result.coefficients[x_idx] - 1.0).abs() < 0.5,
-            "IV coefficient on x_endog should be close to 1.0, got {}",
-            result.coefficients[x_idx]
-        );
-
-        // Standard error should be positive
-        assert!(result.std_errors[x_idx] > 0.0, "IV SE should be positive");
-
-        // First stage F-stat should indicate strong instrument
-        assert!(
-            !result.first_stage_f_stats.is_empty(),
-            "First stage F-stats should be computed"
-        );
-    }
-
-    /// Validation test: Over-identified 2SLS (more instruments than endogenous)
-    /// Compared against R's AER::ivreg(y ~ x | z1 + z2)
-    #[test]
-    fn test_validate_iv2sls_overidentified() {
-        // Create dataset with 2 instruments for 1 endogenous variable
-        let n = 150;
-        let z1: Vec<f64> = (0..n).map(|i| (i as f64 * 0.5).sin() * 2.0).collect();
-        let z2: Vec<f64> = (0..n).map(|i| (i as f64 * 0.8).cos() * 1.5).collect();
-        let u: Vec<f64> = (0..n).map(|i| (i as f64 * 1.1).sin() * 0.8).collect();
-
-        let x_endog: Vec<f64> = z1
+        let ds_f = Dataset::new(df);
+        let fit =
+            |d: &Dataset| run_iv2sls(d, "y", &["w", "k"], &["x"], &["z1", "z2"], true).unwrap();
+        let (a, b) = (fit(&ds), fit(&ds_f));
+        let tol = Tol::new(1e-12, 1e-12);
+        for (x, y) in a
+            .coefficients
             .iter()
-            .zip(z2.iter())
-            .zip(u.iter())
-            .enumerate()
-            .map(|(i, ((&z1i, &z2i), &ui))| {
-                let noise = (i as f64 * 0.7).cos() * 0.2;
-                1.5 * z1i + 1.0 * z2i + ui + noise
-            })
-            .collect();
-
-        let y: Vec<f64> = x_endog
-            .iter()
-            .zip(u.iter())
-            .enumerate()
-            .map(|(i, (&xi, &ui))| {
-                let noise = (i as f64 * 1.3).sin() * 0.25;
-                1.0 + 0.8 * xi + 0.4 * ui + noise
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x_endog" => x_endog,
-            "z1" => z1,
-            "z2" => z2
+            .chain(&a.std_errors)
+            .zip(b.coefficients.iter().chain(&b.std_errors))
+        {
+            assert!(tol.allows(*x, *y), "Int64 {x} vs Float64 {y}");
         }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_iv2sls(
-            &dataset,
-            "y",
-            &[],           // no exogenous
-            &["x_endog"],  // 1 endogenous
-            &["z1", "z2"], // 2 instruments (over-identified)
-            false,
-        )
-        .unwrap();
-
-        // Structure
-        assert_eq!(result.n_obs, n);
-        assert_eq!(result.instruments.len(), 2);
-        assert_eq!(result.endogenous_vars.len(), 1);
-
-        // Coefficient should be close to true value (0.8)
-        let x_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "x_endog")
-            .unwrap();
-
-        assert!(
-            (result.coefficients[x_idx] - 0.8).abs() < 0.4,
-            "IV coefficient should be close to 0.8, got {}",
-            result.coefficients[x_idx]
-        );
-
-        // With 2 instruments for 1 endogenous, Sargan test is applicable
-        let sargan = sargan_test(&dataset, "y", &[], &["x_endog"], &["z1", "z2"]).unwrap();
-
-        assert!(sargan.overidentified);
-        assert_eq!(sargan.df, 1); // 2 instruments - 1 endogenous = 1
-        assert!(sargan.j_statistic >= 0.0);
-        assert!(sargan.p_value >= 0.0 && sargan.p_value <= 1.0);
-    }
-
-    /// Validation test: First-stage diagnostics
-    /// Check instrument strength via F-statistic
-    #[test]
-    fn test_validate_first_stage_diagnostics() {
-        let dataset = create_validation_iv_dataset();
-
-        let result = run_first_stage_diagnostics(&dataset, "x_endog", &["z"], None).unwrap();
-
-        // Structure checks
-        assert_eq!(result.endogenous_var, "x_endog");
-        assert_eq!(result.instruments.len(), 1);
-        assert_eq!(result.n_obs, 100);
-
-        // F-statistic should be positive
-        assert!(
-            result.f_statistic >= 0.0,
-            "First-stage F-stat should be non-negative, got {}",
-            result.f_statistic
-        );
-
-        // R-squared should be in [0, 1]
-        assert!(
-            result.r_squared >= 0.0 && result.r_squared <= 1.0,
-            "First-stage R² should be in [0, 1], got {}",
-            result.r_squared
-        );
-
-        // With our strong instrument, F should be > 10 (Stock-Yogo threshold)
-        // Note: depends on DGP; may not always hold
-        println!(
-            "First-stage F-statistic: {:.2} (>10 indicates strong instrument)",
-            result.f_statistic
-        );
-
-        // Instrument coefficients should be reported
-        assert!(!result.instrument_coeffs.is_empty());
-    }
-
-    /// Validation test: IV with exogenous control variables
-    #[test]
-    fn test_validate_iv2sls_with_controls() {
-        // Create data with an exogenous control variable
-        let n = 120;
-        let z: Vec<f64> = (0..n).map(|i| (i as f64 * 0.6).sin() * 2.0).collect();
-        let w: Vec<f64> = (0..n).map(|i| (i as f64 * 0.4).cos() * 1.5).collect(); // Exogenous control
-        let u: Vec<f64> = (0..n).map(|i| (i as f64 * 1.0).sin() * 0.7).collect();
-
-        let x_endog: Vec<f64> = z
-            .iter()
-            .zip(w.iter())
-            .zip(u.iter())
-            .enumerate()
-            .map(|(i, ((&zi, &wi), &ui))| {
-                let noise = (i as f64 * 0.8).cos() * 0.2;
-                1.5 * zi + 0.5 * wi + ui + noise
-            })
-            .collect();
-
-        let y: Vec<f64> = x_endog
-            .iter()
-            .zip(w.iter())
-            .zip(u.iter())
-            .enumerate()
-            .map(|(i, ((&xi, &wi), &ui))| {
-                let noise = (i as f64 * 1.2).sin() * 0.2;
-                0.5 + 0.8 * xi + 0.6 * wi + 0.3 * ui + noise
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x_endog" => x_endog,
-            "w" => w,
-            "z" => z
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_iv2sls(
-            &dataset,
-            "y",
-            &["w"],       // exogenous control
-            &["x_endog"], // endogenous
-            &["z"],       // instrument
-            false,
-        )
-        .unwrap();
-
-        // Should have coefficients for both x_endog and w
-        assert!(result.variables.contains(&"x_endog".to_string()));
-        assert!(result.variables.contains(&"w".to_string()));
-
-        // Find indices
-        let x_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "x_endog")
-            .unwrap();
-        let w_idx = result.variables.iter().position(|v| v == "w").unwrap();
-
-        // Both coefficients should be close to true values
-        // True: x_endog = 0.8, w = 0.6
-        assert!(
-            (result.coefficients[x_idx] - 0.8).abs() < 0.5,
-            "Coefficient on x_endog should be close to 0.8, got {}",
-            result.coefficients[x_idx]
-        );
-
-        assert!(
-            (result.coefficients[w_idx] - 0.6).abs() < 0.5,
-            "Coefficient on w should be close to 0.6, got {}",
-            result.coefficients[w_idx]
-        );
     }
 }

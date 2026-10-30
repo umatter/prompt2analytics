@@ -32,15 +32,12 @@
 //! ```
 
 use ndarray::{Array1, Array2};
-use polars::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::data::columns::econ_error_from_design;
+use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::regression::CovarianceType;
 use crate::resource;
@@ -98,95 +95,25 @@ pub struct FactorInfo {
     pub counts: Vec<usize>,
 }
 
-/// Extract factor information from a dataset column.
-///
-/// Maps unique values in the column to integer IDs (0 to n_levels-1).
-fn extract_factor_info(dataset: &Dataset, col: &str) -> EconResult<FactorInfo> {
-    let df = dataset.df();
-    let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let mut id_map: HashMap<String, usize> = HashMap::new();
-    let mut next_id = 0usize;
-
-    let ids: Vec<usize> = if let Ok(int_col) = series.i64() {
-        int_col
-            .into_iter()
-            .map(|v| {
-                let key = v.unwrap_or(0).to_string();
-                *id_map.entry(key).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                })
-            })
-            .collect()
-    } else if let Ok(str_col) = series.str() {
-        str_col
-            .into_iter()
-            .map(|v| {
-                let key = v.unwrap_or("").to_string();
-                *id_map.entry(key).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                })
-            })
-            .collect()
-    } else {
-        // Try to cast to string
-        let casted = series.cast(&DataType::String).map_err(|e| {
-            EconError::Internal(format!(
-                "Cannot convert column '{}' to factor IDs: {}",
-                col, e
-            ))
-        })?;
-        let str_col = casted.str().map_err(|e| {
-            EconError::Internal(format!("Cannot read column '{}' as string: {}", col, e))
-        })?;
-        str_col
-            .into_iter()
-            .map(|v| {
-                let key = v.unwrap_or("").to_string();
-                *id_map.entry(key).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                })
-            })
-            .collect()
-    };
-
-    let n_levels = id_map.len();
-
+/// `FactorInfo` of an absorbed fixed effect from its extracted factor (codes in R
+/// `factor()` order of the ids); fewer than 2 levels is `InsufficientData`.
+pub(crate) fn factor_info(name: &str, factor: &Factor) -> EconResult<FactorInfo> {
+    let n_levels = factor.n_levels();
     if n_levels < 2 {
         return Err(EconError::InsufficientData {
             required: 2,
             provided: n_levels,
             context: format!(
                 "Fixed effect column '{}' has only {} unique level(s)",
-                col, n_levels
+                name, n_levels
             ),
         });
     }
-
-    // Pre-compute group counts
-    let mut counts = vec![0usize; n_levels];
-    for &id in &ids {
-        counts[id] += 1;
-    }
-
     Ok(FactorInfo {
-        name: col.to_string(),
+        name: name.to_string(),
         n_levels,
-        ids,
-        counts,
+        ids: factor.codes.iter().map(|&c| c as usize).collect(),
+        counts: factor.counts(),
     })
 }
 
@@ -396,28 +323,6 @@ fn validate_config(config: &HdfeConfig) -> EconResult<()> {
     Ok(())
 }
 
-/// Refuse a column with NaN or infinite values, naming it and the count.
-///
-/// Shared with `feglm`, which validates its columns the same way.
-pub(super) fn reject_non_finite<'a>(
-    values: impl Iterator<Item = &'a f64>,
-    what: &str,
-) -> EconResult<()> {
-    let bad = values.filter(|v| !v.is_finite()).count();
-    if bad == 0 {
-        return Ok(());
-    }
-    Err(EconError::InvalidSpecification {
-        message: format!(
-            "{} contains {} non-finite value{} (NaN or infinite); remove or impute {} first",
-            what,
-            bad,
-            if bad == 1 { "" } else { "s" },
-            if bad == 1 { "it" } else { "them" }
-        ),
-    })
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Degrees of Freedom
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -603,6 +508,11 @@ pub struct HdfeResult {
     #[serde(skip)]
     #[allow(dead_code)]
     pub(crate) xtx_inv: Array2<f64>,
+
+    /// Rows dropped because of a missing value in y, a regressor or a fixed-effect id
+    /// (fixest drops them too).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for HdfeResult {
@@ -662,6 +572,9 @@ impl fmt::Display for HdfeResult {
 
         writeln!(f, "{}", "-".repeat(70))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -689,6 +602,12 @@ impl fmt::Display for HdfeResult {
 ///
 /// An `HdfeResult` containing coefficient estimates, standard errors,
 /// and diagnostic information.
+///
+/// # Missing values
+///
+/// Rows with a missing value (null or NaN) in `y`, a regressor or a fixed-effect
+/// column are dropped and reported in `missing` (fixest drops them too); an infinite
+/// value is refused (`NonFiniteValues`). Fixed-effect levels follow R factor order.
 ///
 /// # Example
 ///
@@ -731,26 +650,27 @@ pub fn run_hdfe(
         });
     }
 
-    // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-    reject_non_finite(y.iter(), &format!("Dependent variable '{}'", y_col))?;
+    // y, X and every fixed-effect column on the rows complete in all of them
+    // (fixest drops incomplete rows too)
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
+        .factors(fe_cols)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y = cols.numeric_array(y_col);
 
-    // Build design matrix WITHOUT intercept (FE absorbs the constant)
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
+    // Design matrix WITHOUT intercept (FE absorbs the constant)
+    let design = cols.matrix(x_cols, false);
     let x = design.data;
     let var_names = design.column_names;
-    for (j, name) in var_names.iter().enumerate() {
-        reject_non_finite(x.column(j).iter(), &format!("Regressor '{}'", name))?;
-    }
     let n = y.len();
     let k = x.ncols();
 
-    // Extract factor information for each FE dimension
+    // Factor information for each FE dimension (levels in R factor order)
     let factors: Vec<FactorInfo> = fe_cols
         .iter()
-        .map(|col| extract_factor_info(dataset, col))
+        .map(|col| factor_info(col, cols.factor(col)))
         .collect::<EconResult<Vec<_>>>()?;
 
     // Compute absorbed degrees of freedom
@@ -911,6 +831,7 @@ pub fn run_hdfe(
         resid: residuals,
         vcov,
         xtx_inv,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -1070,11 +991,16 @@ mod tests {
     #[test]
     fn test_extract_factor_info() {
         let dataset = create_balanced_panel();
-        let factor = extract_factor_info(&dataset, "firm").unwrap();
+        let cols = crate::data::columns::ColumnRequest::new(dataset.df())
+            .factor("firm")
+            .extract()
+            .unwrap();
+        let factor = factor_info("firm", cols.factor("firm")).unwrap();
 
         assert_eq!(factor.name, "firm");
         assert_eq!(factor.n_levels, 3);
         assert_eq!(factor.ids.len(), 12);
+        assert_eq!(factor.counts, [4, 4, 4]);
 
         // Check that each firm maps to a unique ID
         let unique_ids: std::collections::HashSet<_> = factor.ids.iter().collect();
@@ -1917,47 +1843,136 @@ mod tests {
         );
     }
 
-    /// A NaN in y is refused by the shared extraction rule (DesignMatrix: NaN is
-    /// a missing value), naming the column.
-    #[test]
-    fn test_hdfe_rejects_non_finite_data() {
-        // create_balanced_panel's columns with y[0] = NaN
-        let ds_nan = Dataset::new(
+    /// `create_balanced_panel`'s columns with `y[0] = y0`, keeping row 0 or not.
+    fn balanced_panel_with_y0(y0: f64, keep_row0: bool) -> Dataset {
+        let firm = ["A", "A", "A", "A", "B", "B", "B", "B", "C", "C", "C", "C"];
+        let year = [
+            2020i64, 2021, 2022, 2023, 2020, 2021, 2022, 2023, 2020, 2021, 2022, 2023,
+        ];
+        let x = [1.0, 3.0, 2.0, 5.0, 2.0, 1.0, 4.0, 3.0, 3.0, 4.0, 1.0, 2.0];
+        let y = [
+            y0,
+            2.0 * 3.0 + 0.0 + 1.0 + 0.2,
+            2.0 * 2.0 + 0.0 + 2.0 + 0.1,
+            2.0 * 5.0 + 0.0 + 3.0 + 0.0,
+            2.0 * 2.0 + 5.0 + 0.0 + 0.0,
+            2.0 * 1.0 + 5.0 + 1.0 + 0.1,
+            2.0 * 4.0 + 5.0 + 2.0 - 0.1,
+            2.0 * 3.0 + 5.0 + 3.0 + 0.2,
+            2.0 * 3.0 + 10.0 + 0.0 + 0.2,
+            2.0 * 4.0 + 10.0 + 1.0 - 0.1,
+            2.0 * 1.0 + 10.0 + 2.0 + 0.0,
+            2.0 * 2.0 + 10.0 + 3.0 - 0.2,
+        ];
+        let from = usize::from(!keep_row0);
+        Dataset::new(
             df! {
-                "firm" => ["A", "A", "A", "A", "B", "B", "B", "B", "C", "C", "C", "C"],
-                "year" => [2020i64, 2021, 2022, 2023, 2020, 2021, 2022, 2023, 2020, 2021, 2022, 2023],
-                "x" => [1.0, 3.0, 2.0, 5.0, 2.0, 1.0, 4.0, 3.0, 3.0, 4.0, 1.0, 2.0],
-                "y" => [
-                    f64::NAN,
-                    2.0 * 3.0 + 0.0 + 1.0 + 0.2,
-                    2.0 * 2.0 + 0.0 + 2.0 + 0.1,
-                    2.0 * 5.0 + 0.0 + 3.0 + 0.0,
-                    2.0 * 2.0 + 5.0 + 0.0 + 0.0,
-                    2.0 * 1.0 + 5.0 + 1.0 + 0.1,
-                    2.0 * 4.0 + 5.0 + 2.0 - 0.1,
-                    2.0 * 3.0 + 5.0 + 3.0 + 0.2,
-                    2.0 * 3.0 + 10.0 + 0.0 + 0.2,
-                    2.0 * 4.0 + 10.0 + 1.0 - 0.1,
-                    2.0 * 1.0 + 10.0 + 2.0 + 0.0,
-                    2.0 * 2.0 + 10.0 + 3.0 - 0.2
-                ],
+                "firm" => &firm[from..],
+                "year" => &year[from..],
+                "x" => &x[from..],
+                "y" => &y[from..],
             }
             .unwrap(),
-        );
-        match run_hdfe(
-            &ds_nan,
-            "y",
-            &["x"],
-            &["firm", "year"],
-            None,
-            CovarianceType::HC1,
-        ) {
-            Err(EconError::NullValues { column, count }) => {
-                assert_eq!(column, "y");
-                assert_eq!(count, 1);
-            }
-            other => panic!("expected NullValues for y, got {other:?}"),
+        )
+    }
+
+    /// A NaN in y is a missing cell (design 1.1, fixest drops it): the fit equals the
+    /// fit without that row and reports it; an infinite value is refused by name.
+    #[test]
+    fn test_hdfe_non_finite_data() {
+        let fit = |ds: &Dataset| {
+            run_hdfe(
+                ds,
+                "y",
+                &["x"],
+                &["firm", "year"],
+                None,
+                CovarianceType::HC1,
+            )
+        };
+        let r = fit(&balanced_panel_with_y0(f64::NAN, true)).unwrap();
+        let reference = fit(&balanced_panel_with_y0(0.0, false)).unwrap();
+        let tol = p2a_validation::Tol::new(1e-12, 1e-12);
+        for (a, b) in r
+            .coefficients
+            .iter()
+            .chain(&r.std_errors)
+            .zip(reference.coefficients.iter().chain(&reference.std_errors))
+        {
+            assert!(tol.allows(*a, *b), "{a} vs {b}");
         }
+        assert_eq!(r.missing.n_dropped, 1);
+        assert_eq!(r.n_obs, 11);
+        match fit(&balanced_panel_with_y0(f64::INFINITY, true)) {
+            Err(EconError::NonFiniteValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("y", 1))
+            }
+            other => panic!("expected NonFiniteValues for y, got {other:?}"),
+        }
+    }
+
+    /// Two-way HDFE on Grunfeld with missing cells, missing ids and missing years,
+    /// pinned to `fixest::feols(| firm_name + year, vcov = "iid")` on the 193 complete
+    /// rows; the numeric and the text firm id give the same partition. ECON-37: with y
+    /// and x complete, missing ids and years used to become level 0 (merged into firm 0
+    /// and a real year); they now drop their rows.
+    #[test]
+    fn test_validate_hdfe_grunfeld_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        let subset = [
+            "inv".to_string(),
+            "value".to_string(),
+            "capital".to_string(),
+        ];
+        let xy = Dataset::new(ds.df().drop_nulls(Some(&subset)).unwrap());
+        let check = |r: &HdfeResult| {
+            let n = r.n_obs;
+            Check::new(&case)
+                .named("hdfe_coef", &r.variables, &r.coefficients, Tol::coef(n))
+                .named("hdfe_se_iid", &r.variables, &r.std_errors, Tol::se(n))
+                .scalar("hdfe_nobs", n as f64, Tol::exact())
+                .scalar("n_groups", r.fe_counts[0] as f64, Tol::exact())
+                .scalar("n_years", r.fe_counts[1] as f64, Tol::exact())
+                .finish();
+        };
+        for fe in [["firm_name", "year"], ["firm_id", "year"]] {
+            let r = run_hdfe(
+                &ds,
+                "inv",
+                &["value", "capital"],
+                &fe,
+                None,
+                CovarianceType::Standard,
+            )
+            .unwrap();
+            check(&r);
+            Check::new(&case)
+                .scalar("hdfe_n_removed", r.missing.n_dropped as f64, Tol::exact())
+                .finish();
+            let note = format!(
+                "7 of 200 rows dropped because of missing values (inv: 2, value: 1, {}: 2, year: 2)",
+                fe[0]
+            );
+            assert_eq!(r.missing.note().unwrap(), note);
+            let text = r.to_string();
+            assert!(
+                text.trim_end()
+                    .ends_with(&format!("Missing values: {note}")),
+                "{text}"
+            );
+        }
+        let r = run_hdfe(
+            &xy,
+            "inv",
+            &["value", "capital"],
+            &["firm_id", "year"],
+            None,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        check(&r);
+        assert_eq!(r.missing.n_dropped, 4);
     }
 
     #[test]
