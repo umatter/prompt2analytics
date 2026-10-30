@@ -455,6 +455,10 @@ pub struct QueryResult {
     pub rows: usize,
     /// Column names
     pub columns: Vec<String>,
+    /// Per-column notes on how values were typed (text kept so that no value
+    /// is lost, integers approximated as floats). Nothing is ever lost
+    /// silently: a column that cannot be loaded is an error instead.
+    pub warnings: Vec<String>,
 }
 
 impl std::fmt::Display for QueryResult {
@@ -463,6 +467,9 @@ impl std::fmt::Display for QueryResult {
         writeln!(f, "============")?;
         writeln!(f, "Rows returned: {}", self.rows)?;
         writeln!(f, "Columns: {}", self.columns.join(", "))?;
+        for w in &self.warnings {
+            writeln!(f, "Warning: {w}")?;
+        }
         writeln!(f)?;
         writeln!(f, "Preview (first 5 rows):")?;
         write!(f, "{}", self.dataframe.head(Some(5)))
@@ -533,10 +540,12 @@ impl<V> RowCollector<V> {
 
 /// Assemble the collected columns into a [`QueryOutcome`], converting each
 /// column by consuming it (peak memory: the values plus one converted column).
+/// The converters' warnings go into [`QueryResult::warnings`]; the first
+/// converter error is returned.
 fn finish_outcome<V>(
     collector: RowCollector<V>,
     column_names: Vec<String>,
-    to_series: impl Fn(&str, Vec<V>) -> Series,
+    to_series: impl Fn(&str, Vec<V>, &mut Vec<String>) -> Result<Series, DatabaseError>,
 ) -> Result<QueryOutcome, DatabaseError> {
     let RowCollector {
         columns,
@@ -544,17 +553,18 @@ fn finish_outcome<V>(
         truncated,
         ..
     } = collector;
-    let columns_vec: Vec<Column> = column_names
-        .iter()
-        .zip(columns)
-        .map(|(name, values)| to_series(name, values).into())
-        .collect();
+    let mut warnings = Vec::new();
+    let mut columns_vec: Vec<Column> = Vec::with_capacity(column_names.len());
+    for (name, values) in column_names.iter().zip(columns) {
+        columns_vec.push(to_series(name, values, &mut warnings)?.into());
+    }
     let dataframe = DataFrame::new(columns_vec)?;
     Ok(QueryOutcome {
         result: QueryResult {
             dataframe,
             rows,
             columns: column_names,
+            warnings,
         },
         truncated,
         rows_returned: rows,
@@ -569,6 +579,10 @@ fn finish_outcome<V>(
 const WATCH_POLL: Duration = Duration::from_millis(20);
 /// Rows between two budget checks in the row loops.
 const CHECK_EVERY_ROWS: usize = 1024;
+/// Values between two budget checks in the column conversions.
+const CHECK_EVERY_VALUES: usize = 65_536;
+/// 2^53: integers up to this magnitude are exact in an f64.
+const EXACT_F64_INT: u64 = 1 << 53;
 /// SQLite virtual-machine instructions between two progress-handler calls.
 const SQLITE_PROGRESS_OPS: i32 = 1000;
 const MIB: usize = 1024 * 1024;
@@ -584,6 +598,13 @@ fn budget_message(err: EconError) -> String {
 /// [`resource::checkpoint`] as a [`DatabaseError::Interrupted`].
 fn checkpoint() -> Result<(), DatabaseError> {
     resource::checkpoint().map_err(|e| DatabaseError::Interrupted(budget_message(e)))
+}
+
+/// An empty buffer for the `len` values of one result column, allocated
+/// fallibly (over the allocation ceiling: [`DatabaseError::Interrupted`]).
+fn column_buffer<T>(len: usize) -> Result<Vec<T>, DatabaseError> {
+    resource::try_with_capacity(len, "query result column")
+        .map_err(|e| DatabaseError::Interrupted(budget_message(e)))
 }
 
 /// The RSS guard of a query: `(RSS at the start, allowed growth)` in bytes,
@@ -947,58 +968,122 @@ fn sqlite_value_bytes(value: &rusqlite::types::Value) -> u64 {
     }
 }
 
-/// One SQLite result column as a Series, typed by its first non-null value.
-fn sqlite_column_to_series(name: &str, values: Vec<rusqlite::types::Value>) -> Series {
-    use rusqlite::types::{Type, Value};
-    let col_type = values
-        .iter()
-        .find_map(|v| match v {
-            Value::Null => None,
-            v => Some(v.data_type()),
-        })
-        .unwrap_or(Type::Text);
-
-    match col_type {
-        Type::Integer => {
-            let values: Vec<Option<i64>> = values
-                .into_iter()
-                .map(|v| match v {
-                    Value::Integer(i) => Some(i),
-                    _ => None,
-                })
-                .collect();
-            Series::new(name.into(), values)
+/// One SQLite result column as a Series, typed from all its values.
+///
+/// SQLite types values, not columns: a `DECIMAL` column stores 10.00 as an
+/// INTEGER and 12.50 as a REAL. So INTEGER values alone give Int64; INTEGER
+/// and REAL values give Float64 (with a warning when an integer beyond 2^53
+/// is approximated); any TEXT gives String, numbers written as text, with a
+/// warning when numbers were mixed in; BLOB values alone give Binary; all
+/// NULL gives a String column of nulls. No value but a NULL becomes null.
+///
+/// # Errors
+///
+/// [`DatabaseError::UnsupportedType`] for BLOB values mixed with others, and
+/// the errors of a cancelled or over-limit computation.
+fn sqlite_column_to_series(
+    name: &str,
+    values: Vec<rusqlite::types::Value>,
+    warnings: &mut Vec<String>,
+) -> Result<Series, DatabaseError> {
+    use rusqlite::types::Value;
+    let (mut n_int, mut n_real, mut n_text, mut n_blob, mut n_big) = (0usize, 0, 0, 0, 0);
+    let mut first_text: Option<usize> = None;
+    for (i, v) in values.iter().enumerate() {
+        if i.is_multiple_of(CHECK_EVERY_VALUES) {
+            checkpoint()?;
         }
-        Type::Real => {
-            let values: Vec<Option<f64>> = values
-                .into_iter()
-                .map(|v| match v {
-                    Value::Real(f) => Some(f),
-                    Value::Integer(i) => Some(i as f64),
-                    _ => None,
-                })
-                .collect();
-            Series::new(name.into(), values)
-        }
-        Type::Text | Type::Blob => {
-            let values: Vec<Option<String>> = values
-                .into_iter()
-                .map(|v| match v {
-                    Value::Text(s) => Some(s),
-                    Value::Blob(b) => Some(String::from_utf8_lossy(&b).into_owned()),
-                    Value::Null => None,
-                    Value::Integer(i) => Some(i.to_string()),
-                    Value::Real(f) => Some(f.to_string()),
-                })
-                .collect();
-            Series::new(name.into(), values)
-        }
-        Type::Null => {
-            // All nulls - default to string
-            let values: Vec<Option<String>> = vec![None; values.len()];
-            Series::new(name.into(), values)
+        match v {
+            Value::Null => {}
+            Value::Integer(x) => {
+                n_int += 1;
+                if x.unsigned_abs() > EXACT_F64_INT {
+                    n_big += 1;
+                }
+            }
+            Value::Real(_) => n_real += 1,
+            Value::Text(_) => {
+                n_text += 1;
+                first_text.get_or_insert(i);
+            }
+            Value::Blob(_) => n_blob += 1,
         }
     }
+    let n_numbers = n_int + n_real;
+    let n = values.len();
+
+    if n_blob > 0 {
+        if n_numbers + n_text > 0 {
+            return Err(DatabaseError::UnsupportedType(format!(
+                "column '{name}' mixes BLOB values with INTEGER, REAL or TEXT values; select it \
+                 with CAST({name} AS TEXT) or split it"
+            )));
+        }
+        let mut out: Vec<Option<Vec<u8>>> = column_buffer(n)?;
+        out.extend(values.into_iter().map(|v| match v {
+            Value::Blob(b) => Some(b),
+            _ => None,
+        }));
+        let ca: BinaryChunked = out.into_iter().collect();
+        return Ok(ca.with_name(name.into()).into_series());
+    }
+
+    if n_text > 0 {
+        if n_numbers > 0 {
+            let example = first_text
+                .and_then(|i| match &values[i] {
+                    Value::Text(t) => Some(t.chars().take(40).collect::<String>()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            warnings.push(format!(
+                "column '{name}' mixes numbers and text ({n_text} TEXT value(s), first \
+                 '{example}'); loaded as text so no value is lost. Convert it in SQL (CAST, \
+                 NULLIF) or with munge_cast"
+            ));
+        }
+        let mut out: Vec<Option<String>> = column_buffer(n)?;
+        for (i, v) in values.into_iter().enumerate() {
+            if i.is_multiple_of(CHECK_EVERY_VALUES) {
+                checkpoint()?;
+            }
+            out.push(match v {
+                Value::Text(s) => Some(s),
+                Value::Integer(x) => Some(x.to_string()),
+                Value::Real(x) => Some(x.to_string()),
+                Value::Null | Value::Blob(_) => None,
+            });
+        }
+        return Ok(Series::new(name.into(), out));
+    }
+
+    if n_real > 0 {
+        if n_big > 0 {
+            warnings.push(format!(
+                "column '{name}' mixes INTEGER and REAL values and {n_big} integer(s) exceed \
+                 ±2^53; they are approximated as Float64"
+            ));
+        }
+        let mut out: Vec<Option<f64>> = column_buffer(n)?;
+        out.extend(values.into_iter().map(|v| match v {
+            Value::Real(x) => Some(x),
+            Value::Integer(x) => Some(x as f64),
+            _ => None,
+        }));
+        return Ok(Series::new(name.into(), out));
+    }
+
+    if n_int > 0 {
+        let mut out: Vec<Option<i64>> = column_buffer(n)?;
+        out.extend(values.into_iter().map(|v| match v {
+            Value::Integer(x) => Some(x),
+            _ => None,
+        }));
+        return Ok(Series::new(name.into(), out));
+    }
+
+    // All nulls - default to string
+    Ok(Series::full_null(name.into(), n, &DataType::String))
 }
 
 /// List all tables in a SQLite database.
@@ -1351,7 +1436,10 @@ fn run_duckdb_query(
     drop(stmt);
     drop(watch);
 
-    finish_outcome(collector, column_names, duckdb_column_to_series)
+    // Task 9 maps the DuckDB values by type; this converter never warns.
+    finish_outcome(collector, column_names, |name, values, _warnings| {
+        Ok(duckdb_column_to_series(name, values))
+    })
 }
 
 /// One DuckDB value read *without owning* the container types the converter
@@ -2462,5 +2550,117 @@ mod tests {
         assert!(!outcome.truncated);
         assert_eq!(outcome.result.rows, 2);
         assert_eq!(outcome.result.columns.len(), 3);
+    }
+
+    // ------------------------------------------------------------------
+    // Result typing (DATA-7, DATA-8)
+    // ------------------------------------------------------------------
+
+    /// A Float64 column as options (`f64()`: any other dtype fails the test).
+    fn f64s(df: &DataFrame, c: &str) -> Vec<Option<f64>> {
+        df.column(c)
+            .unwrap()
+            .as_materialized_series()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    /// A String column as options.
+    fn strs<'a>(df: &'a DataFrame, c: &str) -> Vec<Option<&'a str>> {
+        df.column(c)
+            .unwrap()
+            .as_materialized_series()
+            .str()
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    /// `sales` and `b` as sqlite3 3.45.1 stores them: price is INTEGER, REAL, INTEGER,
+    /// REAL (DECIMAL affinity stores 10.00 and 7.0 as integers); qty is three integers
+    /// and a text; note mixes integers, text and a real; `b` holds blobs, text and nulls.
+    fn sales_db(dir: &Path) -> PathBuf {
+        let db = dir.join("sales.sqlite");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE sales(id integer, price DECIMAL(10,2), qty integer, note); \
+                 INSERT INTO sales VALUES (1, 10.00, 3, 5), (2, 12.50, 4, 'x'), \
+                                          (3, 7.0, 2, 2.5), (4, 8.25, 'n/a', 7); \
+                 CREATE TABLE b(k integer, blob_col blob, mixed); \
+                 INSERT INTO b VALUES (1, x'0102', x'ff'), (2, NULL, 'text'), (3, x'', NULL);",
+            )
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn test_sqlite_integer_and_real_column_is_float_with_every_value() {
+        // DATA-7: price came back Int64 [10, null, 7, null].
+        let dir = tempfile::tempdir().unwrap();
+        let r = query_sqlite(sales_db(dir.path()), "SELECT id, price FROM sales").unwrap();
+        assert_eq!(r.dataframe.column("id").unwrap().dtype(), &DataType::Int64);
+        assert_eq!(
+            f64s(&r.dataframe, "price"),
+            vec![Some(10.0), Some(12.5), Some(7.0), Some(8.25)]
+        );
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn test_sqlite_numbers_mixed_with_text_load_as_text_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = query_sqlite(sales_db(dir.path()), "SELECT qty, note FROM sales").unwrap();
+        assert_eq!(
+            strs(&r.dataframe, "qty"),
+            vec![Some("3"), Some("4"), Some("2"), Some("n/a")]
+        );
+        assert_eq!(
+            strs(&r.dataframe, "note"),
+            vec![Some("5"), Some("x"), Some("2.5"), Some("7")]
+        );
+        assert_eq!(r.warnings.len(), 2, "{:?}", r.warnings);
+        assert!(
+            r.warnings[0].contains("column 'qty' mixes numbers and text")
+                && r.warnings[0].contains("loaded as text"),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("Warning: column 'note'"), "{r}");
+    }
+
+    #[test]
+    fn test_sqlite_blobs_and_large_integers() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sales_db(dir.path());
+        let r = query_sqlite(&db, "SELECT blob_col FROM b").unwrap();
+        let s = r
+            .dataframe
+            .column("blob_col")
+            .unwrap()
+            .as_materialized_series();
+        assert_eq!(s.dtype(), &DataType::Binary);
+        assert_eq!(
+            s.binary().unwrap().into_iter().collect::<Vec<_>>(),
+            vec![Some(&[1u8, 2][..]), None, Some(&[][..])]
+        );
+        let e = query_sqlite(&db, "SELECT mixed FROM b")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("column 'mixed'") && e.contains("BLOB"), "{e}");
+        let r = query_sqlite(&db, "SELECT 9007199254740993 AS v UNION ALL SELECT 0.5").unwrap();
+        assert_eq!(
+            f64s(&r.dataframe, "v"),
+            vec![Some(9007199254740992.0), Some(0.5)]
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("column 'v'") && w.contains("2^53")),
+            "{:?}",
+            r.warnings
+        );
     }
 }
