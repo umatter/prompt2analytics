@@ -104,15 +104,25 @@ Algorithm (pscl's `EM = TRUE` start, then a full maximisation):
   halving as for the ordered models; `ln theta <= ln 1e8`; at most 200 iterations.
   Converged: the Newton decrement `g'(-H)^-1 g` (from the step just computed) at most
   `1e-12 (1 + |ll|)`, log-likelihood change below `1e-12 (|ll| + 1e-12)` and every
-  Newton-step component at most `1e-10 (1 + |par_k|)`. A non-finite gradient or Hessian,
-  a failed line search or the iteration limit end the fit with `converged = false` and a
-  warning (which reports `max |grad|`). Newton's method with the exact Hessian is
-  affine-invariant, and so is the decrement: with a regressor multiplied by 1e4, 1e6, 1e10
-  or 1e12 the fit converges, its coefficients and SEs are the unscaled ones divided by the
+  Newton-step component at most `1e-10 (1 + |par_k|)`; when the step had to be damped,
+  also every gradient component below `1e-8 (1 + |ll|)`. A non-finite gradient or
+  Hessian, a failed line search or the iteration limit end the fit with
+  `converged = false` and a warning (which reports `max |grad|`). Newton's method with the
+  exact Hessian is affine-invariant, and so are the decrement and the log-likelihood
+  change: with a regressor multiplied by 1e4, 1e6, 1e10 or 1e12 the fit converges at the
+  unscaled fit's iteration, its coefficients and SEs are the unscaled ones divided by the
   scale, and z and the log-likelihood are unchanged. (The earlier test
-  `max |grad| < 1e-8 (1 + |ll|)` did not have this property: the gradient component of a
-  regressor scales with its units, so ZIP with x1 times 1e10 reached the unscaled
-  estimates but was reported as not converged after 200 iterations.)
+  `max |grad| < 1e-8 (1 + |ll|)` alone did not have this property: the gradient component
+  of a regressor scales with its units, so ZIP with x1 times 1e10 reached the unscaled
+  estimates but was reported as not converged after 200 iterations.) The step test is
+  relative only for parameters above 1 in absolute value (absolute below), so a change of
+  units that makes a coefficient large tightens it and can cost an iteration: with x1
+  divided by 1e6 (coefficients near 1e5) the fit converges to the same estimates,
+  possibly an iteration later. A damped step `(-H + lambda I)^-1 g` shrinks with
+  `lambda`, and so do its decrement and its components, so away from the optimum tiny
+  damped steps could pass the three tests; the gradient test, which does depend on
+  units, guards that case. At a regular optimum `-H` is positive definite and the step
+  is not damped.
   (The central-difference Hessian this replaced used a step relative to the parameter
   value, so its SEs moved with the units of a regressor: z by 10% at a scale of 1e5.)
 - Standard errors from the inverse of the negated Hessian at the estimate (NaN with a
@@ -245,7 +255,7 @@ R-pinned (`crates/p2a-core/src/econometrics/discrete/count_models.rs` unless not
 | `econometrics::discrete::count_models::tests::test_validate_zip_zero_part_regressors` | `zip_z1_*` (zero part on `x1`) |
 | `econometrics::discrete::count_models::tests::test_validate_zip_missing_rows_dropped` | `zip_na_*`: estimates, 495 rows used, 5 dropped by column |
 | `econometrics::discrete::count_models::tests::test_validate_zip_intercept_only_zero_part` | `zip_z0_*` (`y ~ x1 + x2 \| 1`): count and zero coefficients, SEs, log-likelihood |
-| `econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl` | ZIP and ZINB with x1 multiplied by 1e4, 1e6, 1e10 and 1e12: converged at the unscaled fit's iteration, no warning; x1 coefficients and SEs times the scale, all other coefficients, SEs, z, SE(log theta) and the log-likelihood equal the unscaled fit to 1e-7 relative, and pscl's `zip_*` / `zinb_*` values |
+| `econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl` | ZIP and ZINB with x1 multiplied by 1e-6, 1e4, 1e6, 1e10 and 1e12: converged, scaled up at the unscaled fit's iteration, no warning; x1 coefficients and SEs times the scale, all other coefficients, SEs, z, SE(log theta) and the log-likelihood equal the unscaled fit to 1e-7 relative, and pscl's `zip_*` / `zinb_*` values |
 | `p2a-mcp` `tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl` | the MCP `zeroinfl` text for both distributions: both coefficient tables, log-likelihood, and the ZINB theta line, at print precision |
 
 Not R-pinned:

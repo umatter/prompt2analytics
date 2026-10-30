@@ -225,14 +225,17 @@ impl fmt::Display for OrderedResult {
 /// definite the step is damped (Levenberg). The fit has converged when the Newton
 /// decrement `g'(-H)^-1 g` is at most `1e-12 (1 + |ll|)`, the relative change of the
 /// log-likelihood below `1e-10` and every component of the Newton step at most
-/// `1e-10 (1 + |theta_k|)`. Unlike the largest score component, none of these depends
-/// on the units of a regressor, so neither the estimates (Newton's method is
-/// affine-invariant) nor the convergence flag do. `converged == true` implies finite
-/// estimates and log-likelihood. A non-finite
-/// step, a failed line search and the iteration limit end the fit with
-/// `converged = false` and a message in `warnings`, never with an error. Standard
-/// errors are the square roots of the diagonal of the inverse observed information;
-/// they are NaN, with a warning, when the information is not positive definite.
+/// `1e-10 (1 + |theta_k|)`; after a damped step, which can be short far from the
+/// optimum, also every score component below `1e-8 (1 + |ll|)`. The decrement and the
+/// log-likelihood change do not depend on the units of a regressor, and neither do the
+/// estimates (Newton's method is affine-invariant). The step test is relative only for
+/// parameters above 1 in absolute value, so a change of units that makes a coefficient
+/// large tightens it and can cost an iteration. `converged == true` implies finite
+/// estimates and log-likelihood. A non-finite step, a failed line search and the
+/// iteration limit end the fit with `converged = false` and a message in `warnings`,
+/// never with an error. Standard errors are the square roots of the diagonal of the
+/// inverse observed information; they are NaN, with a warning, when the information is
+/// not positive definite.
 ///
 /// # Errors
 ///
@@ -405,7 +408,7 @@ pub fn run_ordered_model_with(
             stopped = true;
             break;
         }
-        let Some(delta) = newton_step(&hess, &grad, &mut work) else {
+        let Some(step) = newton_step(&hess, &grad, &mut work) else {
             warnings.push(format!(
                 "the observed information is not positive definite at iteration {iter}, \
                  even with damping; estimation stopped"
@@ -413,27 +416,18 @@ pub fn run_ordered_model_with(
             stopped = true;
             break;
         };
+        let delta = &step.delta;
         // A non-finite step is not applied (RF-31: it never counts as converged).
-        if max_abs_step(&delta).is_none() {
+        if max_abs_step(delta).is_none() {
             warnings.push(format!(
                 "the Newton step is not finite at iteration {iter}; estimation stopped"
             ));
             stopped = true;
             break;
         }
-        // The Newton decrement g'(-H)^-1 g (twice the gain the step predicts) does not
-        // depend on the units of a regressor; max |g| does (x times s: its score
-        // component times s).
-        let decrement: f64 = grad.iter().zip(&delta).map(|(g, d)| g * d).sum();
-        let rel_step = delta
-            .iter()
-            .zip(&theta)
-            .fold(0.0f64, |m, (d, t)| m.max(d.abs() / (1.0 + t.abs())));
-        if iter > 1
-            && decrement <= 1e-12 * (1.0 + ll.abs())
-            && (ll - ll_prev).abs() < config.tol * (ll_prev.abs() + config.tol)
-            && rel_step <= 1e-10
-        {
+        // the Newton decrement, the log-likelihood change and the step (and after
+        // damping the score; NewtonStep::converged)
+        if iter > 1 && step.converged(&grad, &theta, ll, ll_prev, config.tol) {
             converged = true;
             break;
         }
@@ -443,7 +437,7 @@ pub fn run_ordered_model_with(
         let mut accepted = false;
         let mut s = 1.0;
         for _ in 0..=MAX_HALVINGS {
-            for ((t, th), d) in trial.iter_mut().zip(&theta).zip(&delta) {
+            for ((t, th), d) in trial.iter_mut().zip(&theta).zip(delta) {
                 *t = th + s * d;
             }
             if trial[k..].windows(2).all(|w| w[0] < w[1]) {
@@ -1002,9 +996,11 @@ mod tests {
     /// returned its starting point. Newton's method is affine-invariant, so the iterates
     /// on the scaled data are the unscaled ones up to rounding: the coefficient divided
     /// by the scale, the cut points and the log-likelihood equal, to 1e-9 relative. So
-    /// is the convergence test (the Newton decrement), and the scaled fit stops at the
-    /// same iteration; a test on max |score| (the slope's component times the scale)
-    /// ran to the iteration limit at 1e12.
+    /// are the Newton decrement and the log-likelihood change of the convergence test,
+    /// and scaled up the fit stops at the same iteration; a test on max |score| (the
+    /// slope's component times the scale) ran to the iteration limit at 1e12. Scaled
+    /// down (x / 1e6), the coefficient grows, and the step test, relative above 1, is
+    /// tighter: the fit converges, possibly an iteration later.
     /// Each scaled fit is also checked against polr's case: the cut points and the
     /// log-likelihood, n, the category counts and the null log-likelihood do not depend
     /// on the scale of x.
@@ -1017,15 +1013,18 @@ mod tests {
             ("probit", OrderedModelType::Probit),
         ] {
             let base = fit_j(&case, &ds, model);
-            for scale in [1e4, 1e6, 1e12] {
+            for scale in [1e-6, 1e4, 1e6, 1e12] {
                 let r = fit_j(&case, &with_x_scaled(&ds, scale), model);
                 assert!(
                     r.converged,
                     "{link}, x * {scale:e}: not converged: {:?}",
                     r.warnings
                 );
-                // the iterates are the unscaled ones, and so is the stopping iteration
-                assert_eq!(r.iterations, base.iterations, "{link}, x * {scale:e}");
+                // the iterates are the unscaled ones; scaled up, so is the stopping
+                // iteration
+                if scale > 1.0 {
+                    assert_eq!(r.iterations, base.iterations, "{link}, x * {scale:e}");
+                }
                 Check::new(&case)
                     .scalar("n", r.n_obs as f64, Tol::exact())
                     .named("counts", &r.categories, &counts(&r), Tol::exact())

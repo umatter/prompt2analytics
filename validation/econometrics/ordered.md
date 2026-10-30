@@ -42,13 +42,21 @@ case asserts that this analytic Hessian equals `numDeriv::hessian` of the log-li
   increasing and the log-likelihood does not fall.
 - Converged: the Newton decrement `g'(-H)^-1 g` (from the step just computed) at most
   `1e-12 (1 + |ll|)`, relative change of the log-likelihood below `tol`, and every
-  Newton-step component at most `1e-10 (1 + |theta_k|)`. None of the three depends on the
-  units of a regressor, so neither does the flag: with x multiplied by `s` the score
-  component of its slope is multiplied by `s`, and a test on `max |score|` (the earlier
-  `max |score| < 1e-8 (1 + |ll|)`) failed at `s = 1e12` on a fit whose iterates were the
-  unscaled ones. A non-finite step or score, a failed line search or the iteration limit
-  end the fit with `converged = false` and a message in `warnings` (never an error); that
-  message still reports `max |score|`.
+  Newton-step component at most `1e-10 (1 + |theta_k|)`; when the step had to be damped,
+  also every score component below `1e-8 (1 + |ll|)`. The decrement and the
+  log-likelihood change do not depend on the units of a regressor: with x multiplied by
+  `s` the score component of its slope is multiplied by `s`, and a test on `max |score|`
+  alone (the earlier `max |score| < 1e-8 (1 + |ll|)`) failed at `s = 1e12` on a fit whose
+  iterates were the unscaled ones. The step test is relative only for parameters above 1
+  in absolute value (absolute below), so a change of units that makes a coefficient large
+  tightens it and can cost an iteration (x divided by 1e6: converged, possibly an
+  iteration later). A damped step `(-H + lambda I)^-1 g` shrinks with `lambda`, and so do
+  its decrement and its components, so away from the optimum tiny damped steps could pass
+  the three tests; the score test, which does depend on units, guards that case. At a
+  regular optimum `-H` is positive definite and the step is not damped. A non-finite step
+  or score, a failed line search or the iteration limit end the fit with
+  `converged = false` and a message in `warnings` (never an error); that message still
+  reports `max |score|`.
 - Standard errors: square roots of the diagonal of the inverse observed information at the
   estimate (NaN with a warning if it is not positive definite); `z = b / SE`,
   `p = 2 P(Z > |z|)` from the upper tail.

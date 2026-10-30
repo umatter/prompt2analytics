@@ -879,10 +879,13 @@ impl fmt::Display for ZeroInflResult {
 /// with pscl's analytic gradient and the analytic Hessian. The fit has converged when
 /// the Newton decrement `g'(-H)^-1 g` is at most `1e-12 (1 + |ll|)`, the
 /// log-likelihood changes by less than `1e-12 (|ll| + 1e-12)` and every component of
-/// the Newton step is at most `1e-10 (1 + |par_k|)`; unlike the largest gradient
-/// component, none of these depends on the units of a regressor. Standard errors come
-/// from the inverse Hessian at the estimate; like the estimates and the convergence
-/// flag, they do not depend on the units of a regressor.
+/// the Newton step is at most `1e-10 (1 + |par_k|)`; after a damped step, which can be
+/// short far from the optimum, also every gradient component below `1e-8 (1 + |ll|)`.
+/// The decrement and the log-likelihood change do not depend on the units of a regressor;
+/// the step test is relative only for parameters above 1 in absolute value, so a change
+/// of units that makes a coefficient large tightens it and can cost an iteration.
+/// Standard errors come from the inverse Hessian at the estimate; like the estimates,
+/// they do not depend on the units of a regressor.
 ///
 /// Rows with a missing outcome or regressor (count or zero part) are dropped (R
 /// `na.omit`) and reported in `missing`. Non-convergence and a Hessian that is not
@@ -1454,7 +1457,7 @@ fn run_zeroinfl(
             stopped = true;
             break;
         }
-        let Some(delta) = newton_step(&hess, &grad, &mut work) else {
+        let Some(step) = newton_step(&hess, &grad, &mut work) else {
             warnings.push(format!(
                 "the Hessian is not negative definite at iteration {iter}, even with \
                  damping; estimation stopped"
@@ -1462,6 +1465,7 @@ fn run_zeroinfl(
             stopped = true;
             break;
         };
+        let delta = &step.delta;
         if delta.iter().any(|d| !d.is_finite()) {
             warnings.push(format!(
                 "the Newton step is not finite at iteration {iter}; estimation stopped"
@@ -1469,19 +1473,9 @@ fn run_zeroinfl(
             stopped = true;
             break;
         }
-        // The Newton decrement g'(-H)^-1 g (twice the gain the step predicts) does not
-        // depend on the units of a regressor; max |g| does (x times s: its score
-        // component times s).
-        let decrement: f64 = grad.iter().zip(&delta).map(|(g, d)| g * d).sum();
-        let rel_step = delta
-            .iter()
-            .zip(&par)
-            .fold(0.0f64, |m, (d, p)| m.max(d.abs() / (1.0 + p.abs())));
-        if iter > 1
-            && decrement <= 1e-12 * (1.0 + ll.abs())
-            && (ll - ll_prev).abs() < 1e-12 * (ll_prev.abs() + 1e-12)
-            && rel_step <= 1e-10
-        {
+        // the Newton decrement, the log-likelihood change and the step (and after
+        // damping the gradient; NewtonStep::converged)
+        if iter > 1 && step.converged(&grad, &par, ll, ll_prev, 1e-12) {
             converged = true;
             break;
         }
@@ -1489,7 +1483,7 @@ fn run_zeroinfl(
         let mut accepted = false;
         let mut s = 1.0;
         for _ in 0..=MAX_HALVINGS {
-            for ((t, p), d) in trial.iter_mut().zip(&par).zip(&delta) {
+            for ((t, p), d) in trial.iter_mut().zip(&par).zip(delta) {
                 *t = p + s * d;
             }
             if negbin {
@@ -3009,12 +3003,13 @@ mod tests {
     /// The fit must not depend on the units of a regressor (income, population): with
     /// x1 multiplied by `s` (count and zero part), the x1 coefficients and SEs are the
     /// unscaled ones divided by `s`, everything else, z and the log-likelihood
-    /// included, is unchanged, and the fit converges at the same iteration. A Hessian by
-    /// central differences with a step relative to the parameter value did not have this
-    /// property (its z values moved by 10% at s = 1e5), nor did a convergence test on
-    /// max |gradient| (the x1 component is multiplied by `s`: ZIP at s = 1e10 ran to the
-    /// iteration limit). Each scaled fit is also checked against pscl's case, x1
-    /// rescaled.
+    /// included, is unchanged, and the fit converges, for `s > 1` at the same
+    /// iteration (for `s = 1e-6` possibly one later: see the comment in the loop). A
+    /// Hessian by central differences with a step relative to the parameter value did
+    /// not have this property (its z values moved by 10% at s = 1e5), nor did a
+    /// convergence test on max |gradient| (the x1 component is multiplied by `s`: ZIP
+    /// at s = 1e10 ran to the iteration limit). Each scaled fit is also checked against
+    /// pscl's case, x1 rescaled.
     #[test]
     fn test_validate_zeroinfl_regressor_scale_disc_zeroinfl() {
         let (case, ds) = load_case("disc_zeroinfl");
@@ -3027,13 +3022,17 @@ mod tests {
                 run_zeroinfl(ds, y, &["x1", "x2"], Some(&["x1", "x2"]), dist).unwrap()
             };
             let base = fit(&ds);
-            for s in [1e4, 1e6, 1e10, 1e12] {
+            for s in [1e-6, 1e4, 1e6, 1e10, 1e12] {
                 let x1 =
                     (ds.column("x1").unwrap().as_materialized_series() * s).with_name("x1".into());
                 let r = fit(&with_column(&ds, x1.into_column()));
                 assert!(r.converged, "{p} x1 * {s:e}: {:?}", r.warnings);
-                // the iterates are the unscaled ones, and so is the stopping iteration
-                assert_eq!(r.iterations, base.iterations, "{p} x1 * {s:e}");
+                // the iterates are the unscaled ones; scaled up, so is the stopping
+                // iteration. Scaled down, the x1 coefficients grow to about 1e5, where the
+                // step test is relative and tighter, which can cost an iteration.
+                if s > 1.0 {
+                    assert_eq!(r.iterations, base.iterations, "{p} x1 * {s:e}");
+                }
                 assert!(r.warnings.is_empty(), "{p} x1 * {s:e}: {:?}", r.warnings);
                 // x1 is the second column of both parts
                 let unscale = |v: &[f64]| -> Vec<f64> {

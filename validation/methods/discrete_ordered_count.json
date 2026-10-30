@@ -74,8 +74,8 @@
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl",
         "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl"
       ],
-      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "log-likelihood", "AIC", "BIC", "zero count", "rows used / dropped (na.omit)", "intercept-only zero part (y ~ x1 + x2 | 1)", "converged and the fit unchanged when x1 is multiplied by 1e4, 1e6, 1e10 or 1e12 (x1 coefficients and SEs divided by the scale)"],
-      "tolerance": "MLE: coefficients 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 500); counts exact; fits with x1 scaled by 1e4, 1e6, 1e10 or 1e12 equal the unscaled fit to 1e-7 relative",
+      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "log-likelihood", "AIC", "BIC", "zero count", "rows used / dropped (na.omit)", "intercept-only zero part (y ~ x1 + x2 | 1)", "converged and the fit unchanged when x1 is multiplied by 1e-6, 1e4, 1e6, 1e10 or 1e12 (x1 coefficients and SEs divided by the scale)"],
+      "tolerance": "MLE: coefficients 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 500); counts exact; fits with x1 scaled by 1e-6, 1e4, 1e6, 1e10 or 1e12 equal the unscaled fit to 1e-7 relative",
       "deviations": [],
       "supersedes_legacy": ["validation/expected/zip_test.csv"]
     },
@@ -91,7 +91,7 @@
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl",
         "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl"
       ],
-      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "theta", "SE(log theta)", "SE(theta)", "log-likelihood", "AIC", "BIC", "zero count", "converged and the fit unchanged when x1 is multiplied by 1e4, 1e6, 1e10 or 1e12"],
+      "quantities": ["count coefficients", "zero coefficients", "SE (both parts)", "z", "p", "theta", "SE(log theta)", "SE(theta)", "log-likelihood", "AIC", "BIC", "zero count", "converged and the fit unchanged when x1 is multiplied by 1e-6, 1e4, 1e6, 1e10 or 1e12"],
       "tolerance": "as discrete_zip; theta 1e-6, SE(log theta) and SE(theta) 1e-5 relative",
       "deviations": [],
       "supersedes_legacy": ["validation/expected/zinb_test.csv"]
