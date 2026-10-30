@@ -218,6 +218,35 @@
       "tolerance": "validation/README.md, n = 33 (< 100): statistics, F and Wilks' (Rao) df2 1e-5 relative, p 1e-5 relative + 1e-12 absolute, other df and counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "model_tables",
+      "name": "Model tables (means and effects)",
+      "category": "stats",
+      "reference": "stats::model.tables (residual df of aov)",
+      "doc": "validation/stats/modeltables.md",
+      "cases": [
+        "stat_anova_two_way_unbalanced",
+        "stat_oneway_na_labels"
+      ],
+      "tests": [
+        "p2a-core::stats::modeltables::tests::test_validate_model_tables_two_way_empty_cell",
+        "p2a-core::stats::modeltables::tests::test_validate_model_tables_one_way_na_labels"
+      ],
+      "quantities": [
+        "residual df and MSE (aov)",
+        "group means and sizes",
+        "grand mean"
+      ],
+      "tolerance": "validation/README.md, n = 5-13 (< 100): means and SS 1e-5 relative, df and sizes exact",
+      "deviations": [
+        {
+          "finding": "STAT-75",
+          "quantity": "standard errors",
+          "note": "p2a's model-tables SEs are SEs of individual means, R's model.tables SEs are for differences of means (and R refuses unbalanced designs); not compared until STAT-75 (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

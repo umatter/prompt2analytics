@@ -95,6 +95,28 @@ print(mt)
 **Rust tests** (not R-pinned: no `model.tables` value is compared, and p2a's SE definition differs from R's; the R-pinned case comes with STAT-75):
 - `stats::modeltables::tests::test_model_tables_two_way_effects` (`crates/p2a-core/src/stats/modeltables.rs`): hand-computed main effects (±3.0, ±1.5) within 1e-10 and that an interaction table is returned.
 
+### R-pinned values (T2-WP07)
+
+Two tests pin model tables to the R cases of `validation/r/cases/stats_anova.R`:
+
+- `stats::modeltables::tests::test_validate_model_tables_two_way_empty_cell` (case
+  `stat_anova_two_way_unbalanced`, the 3 x 2 layout `y3 ~ fa3 * fb3` with the (C, L) cell
+  empty): `df_mse` is 8, the residual df of `aov(y3 ~ fa3 * fb3)` (`empty_resid_df`), and
+  `mse * df_mse` is its residual SS 5.166173166666655 (`empty_resid_ss`, `Tol::stat(13)`).
+- `stats::modeltables::tests::test_validate_model_tables_one_way_na_labels` (case
+  `stat_oneway_na_labels`, the one-way ANOVA on the 5 of 9 rows without a missing value): group
+  means a 1.5, b 4.5, c 7 (`aov_group_means`), sizes 2, 2, 1, grand mean 3.8, and `mse * df_mse`
+  equal to `aov`'s within SS 1.0000000000000007 on 2 df.
+
+**Residual df rule:** `model_tables_two_way` takes the residual df as n minus the number of
+non-empty cells, the residual df of `aov(y ~ a * b)` (and of p2a's two-way ANOVA). Before T2-WP07
+it was `n - a * b`, one too few per empty cell (7 instead of 8 here), so its MSE disagreed with
+the two-way ANOVA. Empty cells keep a mean of 0 in the tables (STAT-83, Tier 3).
+
+The standard errors are not compared (registry deviation STAT-75, `// deviation STAT-75` in
+both tests): p2a reports the SE of each mean, sqrt(MSE / n), while R's `model.tables(se = TRUE)`
+reports SEs for differences of means and refuses unbalanced designs.
+
 ## Numerical Precision Summary
 
 | Design | Mean Tolerance | SE Tolerance |
