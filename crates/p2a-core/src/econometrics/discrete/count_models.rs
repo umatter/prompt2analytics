@@ -424,11 +424,15 @@ fn theta_information(theta: f64, mu: &[f64], y: &[f64]) -> f64 {
 /// The ML theta at fixed `mu`: Newton steps on `phi = ln theta` with MASS theta.ml's
 /// score `s` and information `I` (`delta = s / (theta I - s)` where the profile is
 /// concave in `phi`, else `sign(s)`), clamped to +-2 and halved while the profile
-/// log-likelihood falls by more than its rounding (`1e-12 |ll|`). Stops when
-/// `|delta| < 1e-12`, after 100 steps, when no halving helps, or at [`THETA_MAX`].
-/// The flag is `false` when the score, the information or the log-likelihood is not
-/// finite at a theta the steps reach, so that theta could not be updated from there
-/// (the returned theta is that one).
+/// log-likelihood falls by more than its rounding (`1e-12 |ll|`). Stops after the step
+/// whose Newton decrement `theta s delta` (the score in `phi` times the step: twice the
+/// gain the step promises, whatever the scale of theta) is at most `1e-12 (1 + |ll|)`,
+/// after 100 steps, when no halving helps, or at [`THETA_MAX`]. The score is a sum over
+/// the rows, so at the optimum it is rounding noise: on near-Poisson data, where
+/// SE(theta) is of the order of theta, that noise keeps `|delta|` near 1e-9, so a test
+/// on `|delta|` alone need not pass. The flag is `false` when the score, the information
+/// or the log-likelihood is not finite at a theta the steps reach, so that theta could
+/// not be updated from there (the returned theta is that one).
 fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
     let mut theta = theta.min(THETA_MAX);
     let mut ll = nb_loglik(theta, mu, y);
@@ -446,9 +450,9 @@ fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
             s.signum()
         };
         delta = delta.clamp(-2.0, 2.0);
-        if delta.abs() < 1e-12 {
-            break;
-        }
+        // the last step: a Newton step whose decrement is at rounding level (taken,
+        // since Newton's error after it is far smaller still)
+        let last = curvature > 0.0 && theta * s * delta <= 1e-12 * (1.0 + ll.abs());
         let mut accepted = false;
         for _ in 0..30 {
             let candidate = (theta.ln() + delta).exp().min(THETA_MAX);
@@ -463,7 +467,7 @@ fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
             }
             delta *= 0.5;
         }
-        if !accepted || theta >= THETA_MAX {
+        if !accepted || last || theta >= THETA_MAX {
             break;
         }
     }
@@ -474,13 +478,17 @@ fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
 ///
 /// R equivalent: `MASS::glm.nb()`. The coefficients come from Fisher scoring (IRLS)
 /// at fixed theta, theta from Newton steps on MASS `theta.ml`'s score and information
-/// at fixed fitted means, alternating until theta changes by less than 1e-10 relative
-/// and the log-likelihood by less than 1e-12 relative (at most 100 rounds), as glm.nb
-/// does. `initial_theta` is the starting value of theta (glm.nb's `init.theta`), in
-/// `[1e-8, 1e6]`; without it the start is a Poisson fit and MASS's moment estimate
-/// `n / sum((y/mu - 1)^2)`, moved into that range. Standard errors of the coefficients
-/// are `(X'WX)^-1` with `W = mu theta/(theta + mu)` (summary.negbin),
-/// `SE(theta) = 1/sqrt(information)` at the optimum (MASS `SE.theta`).
+/// at fixed fitted means, alternating (at most 100 rounds) until the log-likelihood
+/// changes by less than 1e-12 relative and theta by less than 1e-10 relative or less
+/// than 1e-6 of its standard error. (glm.nb alternates the same two steps but stops on
+/// `|dLm| / sqrt(2 max(1, df.residual)) + |dtheta| <= 1e-8`, its control `epsilon`,
+/// with `theta.ml` restarted from the moment estimate in each round and stopped once
+/// its step is below `eps^0.25`.) `initial_theta` is the starting value of theta
+/// (glm.nb's `init.theta`), in `[1e-8, 1e6]`; without it the start is a Poisson fit and
+/// MASS's moment estimate `n / sum((y/mu - 1)^2)`, moved into that range. Standard
+/// errors of the coefficients are `(X'WX)^-1` with `W = mu theta/(theta + mu)`
+/// (summary.negbin), `SE(theta) = 1/sqrt(information)` at the optimum (MASS
+/// `SE.theta`).
 ///
 /// Rows with a missing outcome or regressor are dropped (R `na.omit`) and reported in
 /// `missing`. Data without overdispersion drive theta towards its bound 1e8; a final
@@ -583,11 +591,18 @@ pub fn run_negbin(
             break;
         }
         let ll_new = nb_loglik(theta_new, &work.mu, y);
-        let theta_change = (theta_new - theta).abs() / theta;
+        // theta has settled when it changed by less than 1e-10 relative or by less than
+        // 1e-6 of its standard error (MASS SE.theta at these means): at the optimum the
+        // theta score is rounding noise, which on near-Poisson data moves theta by
+        // about 1e-9 relative (1e-8 standard errors) from round to round
+        let theta_change = (theta_new - theta).abs();
+        let info = theta_information(theta_new, &work.mu, y);
+        let theta_settled =
+            theta_change < 1e-10 * theta || (info > 0.0 && theta_change * info.sqrt() < 1e-6);
         let ll_change = (ll_new - ll).abs();
         theta = theta_new;
         ll = ll_new;
-        if theta_change < 1e-10 && ll_change < 1e-12 * ll.abs() {
+        if theta_settled && ll_change < 1e-12 * ll.abs() {
             converged = true;
             break;
         }
@@ -2695,6 +2710,69 @@ mod tests {
             updated && theta.is_finite() && theta > 0.0,
             "{theta} {updated}"
         );
+    }
+
+    /// Seeded NB counts of size 300 on `n` rows: `y ~ x + x2 + x3`, regressors N(0, 1),
+    /// `mu = exp(0.3 + 0.2 x)`. Near-Poisson: theta is weakly identified (its SE is of
+    /// the order of theta).
+    fn near_poisson_counts(seed: u64, n: usize) -> Dataset {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use rand_distr::{Distribution, Gamma, Normal as NormalDist, Poisson};
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let normal = NormalDist::new(0.0, 1.0).unwrap();
+        let (mut y, mut x, mut x2, mut x3) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..n {
+            let (a, b, c): (f64, f64, f64) = (
+                normal.sample(&mut rng),
+                normal.sample(&mut rng),
+                normal.sample(&mut rng),
+            );
+            let mu = (0.3 + 0.2 * a).exp();
+            let lambda = Gamma::new(300.0, mu / 300.0).unwrap().sample(&mut rng);
+            let count: f64 = Poisson::new(lambda).unwrap().sample(&mut rng);
+            y.push(count);
+            x.push(a);
+            x2.push(b);
+            x3.push(c);
+        }
+        Dataset::new(df! { "y" => y, "x" => x, "x2" => x2, "x3" => x3 }.unwrap())
+    }
+
+    /// Near-Poisson counts on 20000 rows (`near_poisson_counts`, seed 8; theta about 150,
+    /// SE(theta) about 160). At the optimum the theta score is rounding noise, which the
+    /// theta steps' old stop, `|delta| < 1e-12`, did not reach: theta moved by about 1e-9
+    /// relative from round to round, and the round test (1e-10 relative) passed only by
+    /// chance, here after 75 rounds (on 1e5 rows not in 100). The decrement stop and the
+    /// change in standard errors settle it in a few rounds. R (MASS 7.3.60.0.1) on this sample written to CSV: glm.nb's fit is at
+    /// the joint MLE (max |grad| 1.1e-10 there) but warns "alternation limit reached",
+    /// since its own test, `|dtheta| <= 1e-8` absolute, is below theta's rounding noise
+    /// too. The values are that MLE (Newton on the joint score from glm.nb's fit).
+    #[test]
+    fn test_negbin_near_poisson_alternation_converges() {
+        let ds = near_poisson_counts(8, 20_000);
+        let r = run_negbin(&ds, "y", &["x", "x2", "x3"], None).unwrap();
+        assert!(r.converged, "{r}");
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(r.iterations <= 10, "{} rounds: {r}", r.iterations);
+        let theta = 149.63812578340671;
+        let se_theta = 161.13931481604541;
+        let coef = [
+            0.29211443006113891,
+            0.20206724123943764,
+            0.0015081929875445312,
+            0.0059562768475432707,
+        ];
+        let close = |a: f64, b: f64, tol: f64| (a - b).abs() <= tol * b.abs();
+        assert!(close(r.theta, theta, 1e-6), "theta {} vs {theta}", r.theta);
+        assert!(
+            close(r.theta_std_error, se_theta, 1e-5),
+            "SE(theta) {} vs {se_theta}",
+            r.theta_std_error
+        );
+        for (i, (a, b)) in r.coefficients.iter().zip(&coef).enumerate() {
+            assert!(close(*a, *b, 1e-6), "coefficient {i}: {a} vs {b}");
+        }
     }
 
     #[test]

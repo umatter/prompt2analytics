@@ -59,12 +59,27 @@ Algorithm (glm.nb's alternation):
   `s = sum(digamma(theta + y) - digamma(theta) + ln theta + 1 - ln(theta + mu) - (y + theta) / (mu + theta))`
   and information
   `I = sum(-trigamma(theta + y) + trigamma(theta) - 1/theta + 2/(mu + theta) - (y + theta)/(mu + theta)^2)`
-  (MASS's signs), clamped to +-2 and halved while the profile log-likelihood falls. A
+  (MASS's signs), clamped to +-2 and halved while the profile log-likelihood falls, at
+  most 100 steps. They stop after the step whose Newton decrement `theta s delta` (the
+  score in `ln theta` times the step, twice the gain the step promises) is at most
+  `1e-12 (1 + |ll|)`. The score is a sum over the rows, so at the optimum it is rounding
+  noise; on near-Poisson data (SE(theta) of the order of theta) that noise keeps the step
+  near 1e-9, so a stop on `|delta| < 1e-12` alone, the earlier test, was not reached. A
   theta at which the score, the information or the log-likelihood is not finite ends the
   alternation with `converged = false` and a warning that names theta.
-- The two alternate (at most 100 rounds) until theta changes by less than 1e-10 relative
-  and the log-likelihood by less than 1e-12 relative; then one more IRLS at the final
-  theta.
+- The two alternate (at most 100 rounds) until the log-likelihood changes by less than
+  1e-12 relative and theta by less than 1e-10 relative or by less than 1e-6 of its
+  standard error (`1/sqrt(I)` at the round's means); then one more IRLS at the final
+  theta. The rounding noise of the score moves theta by about 1e-9 relative (1e-8
+  standard errors) from round to round on near-Poisson data, so the relative test alone
+  passed only by chance: after 4 to 75 rounds on eleven overdispersed 20000-row samples
+  of the test's generator, and not in 100 rounds on 1e5 rows, where glm.nb converges.
+  glm.nb's own test differs:
+  `|dLm| / sqrt(2 max(1, df.residual)) + |dtheta| <= 1e-8` (its control `epsilon`), with
+  `theta.ml` restarted from the moment estimate in each round and stopped once its step
+  is below `eps^0.25`, so its theta is a function of the means. Its absolute `|dtheta|`
+  can also stay above 1e-8: on the near-Poisson test sample below (theta about 150)
+  glm.nb's fit is at the MLE but warns "alternation limit reached".
 - Standard errors: `(X'WX)^-1` at the estimate (summary.negbin's expected information);
   `SE(theta) = 1 / sqrt(I)` at the optimum (MASS `SE.theta`). `z = b / SE`,
   `p = 2 P(Z > |z|)` from the upper tail. AIC and BIC count `k + 1` parameters.
@@ -283,6 +298,12 @@ Not R-pinned:
   seeded NB counts on two ill-conditioned designs, `y ~ x + x^2 + x^3` with
   `x ~ U(10, 20)` and `y ~ x1 + x2` with `x2 = x1 + 1e-4 noise`, converge without a
   warning, with finite SEs (glm.nb on the cubic sample agrees to 2e-10).
+- `econometrics::discrete::count_models::tests::test_negbin_near_poisson_alternation_converges`:
+  seeded NB counts of size 300 on 20000 rows (`y ~ x + x2 + x3`, theta about 150,
+  SE(theta) about 160), which took 75 rounds before the decrement stop: converged in at
+  most 10 rounds, no warning, theta and the coefficients at the joint MLE to 1e-6
+  relative and SE(theta) to 1e-5 (R: glm.nb's fit on the sample written to CSV, at the
+  MLE, Newton on the joint score from there; glm.nb warns "alternation limit reached").
 - `econometrics::discrete::count_models::tests::test_negbin_stops_when_cancelled`:
   a cancelled budget stops the fit.
 - `p2a-mcp` `tier2::wp10_ordered_count::test_mcp_negbin_reports_dropped_rows_and_rejects_bad_init_theta`:
