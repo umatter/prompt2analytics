@@ -13,7 +13,7 @@
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{check_named_budget, missing_json};
-use crate::tools::limits::echo;
+use crate::tools::limits::{Family, echo};
 use crate::tools::requests::hypothesis::*;
 use p2a_core::stats::{
     Alternative, CmhAlternative, GofExpected, PValueAdjustMethod, PoissonAlternative, mcnemar_test,
@@ -112,7 +112,23 @@ impl AnalyticsServer {
                 )]));
             }
             (Some(probs), None) => GofExpected::Probs(probs),
-            (None, Some(map)) => GofExpected::Named(map.into_iter().collect()),
+            (None, Some(map)) => {
+                // The core copies each key several times, so the map is held to the length
+                // budget of an array (probs has an array rule; a map is checked here).
+                if let Err(msg) = check_named_budget(
+                    "hypothesis_chisq_gof",
+                    "array_length",
+                    map.len() as u64,
+                    crate::tools::limits::current().cap(Family::ArrayLength),
+                ) {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Chi-squared goodness-of-fit test refused: expected has {} categories. \
+                         {msg}",
+                        map.len()
+                    ))]));
+                }
+                GofExpected::Named(map.into_iter().collect())
+            }
             (None, None) => GofExpected::Uniform,
         };
 
@@ -2405,6 +2421,39 @@ mod tests {
                 && !t.contains("\"categories\""),
             "{}",
             t.chars().take(400).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn test_mcp_hypothesis_chisq_gof_holds_expected_to_the_array_length_budget() {
+        // review: the expected map had no length bound but the request body; it now has the
+        // array_length budget that bounds probs.
+        let mut cat: Vec<&str> = Vec::new();
+        for (lvl, k) in [("a", 7), ("b", 12), ("c", 9)] {
+            cat.extend(std::iter::repeat_n(lvl, k));
+        }
+        let (rt, server) = server_with(vec![("d", df!("cat" => cat).unwrap())]);
+        let call = |l: Limits| {
+            let req: ChiSquaredGofRequest = serde_json::from_value(serde_json::json!(
+                {"dataset": "d", "column": "cat", "expected": {"a": 0.2, "b": 0.5, "c": 0.3}}))
+            .unwrap();
+            limits::with_limits(l, || {
+                rt.block_on(server.hypothesis_chisq_gof(Parameters(req)))
+            })
+            .unwrap()
+        };
+        let r = call(hosted_with(&["array_length=2"]));
+        assert_eq!(r.is_error, Some(true), "{}", text(&r));
+        assert!(
+            text(&r).contains("array_length") && text(&r).contains("3 categories"),
+            "{}",
+            text(&r)
+        );
+        let ok = call(hosted_with(&["array_length=3"]));
+        assert_ne!(ok.is_error, Some(true), "{}", text(&ok));
+        assert_eq!(
+            json_of(&ok)["categories"],
+            serde_json::json!(["a", "b", "c"])
         );
     }
 

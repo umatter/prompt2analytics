@@ -343,8 +343,9 @@ pub static PARAM_RULES: &[ParamRule] = {
             "hypothesis_chisq_gof",
             "expected",
             Exempt(
-                "probability per category; the request body limit bounds the map, and the core \
-                 matches its keys by hash in O(k)",
+                "probability per category, a map no array rule reaches: the handler refuses \
+                 more entries than the array_length budget, and the core matches the e keys \
+                 to the k levels by hash in O(k + e)",
             ),
         ),
         p("hypothesis_ks_test", "a", Exempt(DISTRIBUTION)),

@@ -48,7 +48,9 @@ categorical variable to given probabilities, and independence of two categorical
   the map that never occur in the data count 0 (a die face never rolled); an observed category
   without a probability is an error, where R's `factor(x, levels = ...)` would silently turn
   its rows into NA. Keys match the categories by label, or by value on a numeric column
-  ("2.0" names the level "2"), through a hash of the canonical key, so the map costs O(k).
+  ("2.0" names the level "2"), through a hash of the canonical key, so a map of `e` entries
+  over `k` observed categories costs O(k + e). The MCP tool refuses a map with more entries
+  than its `array_length` budget (the limit `probs` has as an array).
   The categories are reported as the observed levels in factor order, then the declared
   categories that never occur, in the order given (MCP: key order). This is R's
   `table(factor(x, levels = ...))` when the declared order is the observed order followed by
