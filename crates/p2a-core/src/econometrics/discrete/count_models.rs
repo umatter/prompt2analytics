@@ -293,15 +293,15 @@ fn irls_loglik(theta: f64, mu: &[f64], y: &[f64]) -> f64 {
 /// log-likelihood). The second test is the one an ill-conditioned X'WX (polynomial
 /// terms, nearly collinear regressors) passes: there the solve moves the coefficients
 /// by rounding noise in the directions the data determine poorly, which does not
-/// change the likelihood. The flag says whether either test passed. `work.eta` and
-/// `work.mu` hold the fitted values on return.
+/// change the likelihood. [`IrlsStop`] says whether either test passed and holds the
+/// last step. `work.eta` and `work.mu` hold the fitted values on return.
 fn irls_beta(
     x: &ArrayView2<f64>,
     y: &[f64],
     beta: Option<&Array1<f64>>,
     theta: f64,
     work: &mut NbWork,
-) -> EconResult<(Array1<f64>, bool)> {
+) -> EconResult<(Array1<f64>, IrlsStop)> {
     let mut beta = match beta {
         Some(b) => {
             linear_predictor(x, b, &mut work.eta, &mut work.mu);
@@ -319,7 +319,10 @@ fn irls_beta(
         Some(_) => irls_loglik(theta, &work.mu, y),
         None => f64::NAN,
     };
-    let mut converged = false;
+    let mut stop = IrlsStop {
+        converged: false,
+        last_step: None,
+    };
     for _ in 0..100 {
         resource::checkpoint()?;
         for i in 0..y.len() {
@@ -334,11 +337,9 @@ fn irls_beta(
             return Err(nb_singular());
         }
         let scale = 1.0 + new_beta.iter().fold(0.0f64, |m, b| m.max(b.abs()));
-        let change = beta.as_ref().map_or(f64::INFINITY, |old| {
-            new_beta
-                .iter()
-                .zip(old)
-                .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()))
+        stop.last_step = beta.as_ref().map(|old| &new_beta - old);
+        let change = stop.last_step.as_ref().map_or(f64::INFINITY, |step| {
+            step.iter().fold(0.0f64, |m, d| m.max(d.abs()))
         });
         linear_predictor(x, &new_beta, &mut work.eta, &mut work.mu);
         beta = Some(new_beta);
@@ -346,11 +347,36 @@ fn irls_beta(
         let ll_change = (ll_new - ll).abs();
         ll = ll_new;
         if change < 1e-12 * scale || ll_change <= 1e-12 * (ll_new.abs() + 0.1) {
-            converged = true;
+            stop.converged = true;
             break;
         }
     }
-    Ok((beta.unwrap_or_else(|| Array1::zeros(x.ncols())), converged))
+    Ok((beta.unwrap_or_else(|| Array1::zeros(x.ncols())), stop))
+}
+
+/// How [`irls_beta`] ended.
+#[derive(Debug, Clone)]
+struct IrlsStop {
+    /// One of the two stopping tests passed.
+    converged: bool,
+    /// The coefficient change of the last step; `None` when that step was the first
+    /// one from glm's start (no coefficients before it).
+    last_step: Option<Array1<f64>>,
+}
+
+/// Smallest drop of a linear predictor in the last IRLS step that counts as a fitted
+/// mean still being driven to 0 (by more than 1%; [`run_negbin`]'s no-MLE test).
+const ETA_FALLING: f64 = 0.01;
+
+impl IrlsStop {
+    /// Whether the last step lowered the linear predictor `x_i' beta` of row `xi` by
+    /// more than [`ETA_FALLING`]; `true` when there was no step from earlier
+    /// coefficients.
+    fn lowered(&self, xi: ndarray::ArrayView1<f64>) -> bool {
+        self.last_step
+            .as_ref()
+            .is_none_or(|step| xi.dot(step) < -ETA_FALLING)
+    }
 }
 
 /// `ln Gamma(theta + y) - ln Gamma(theta)`.
@@ -459,9 +485,15 @@ fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
 /// Rows with a missing outcome or regressor are dropped (R `na.omit`) and reported in
 /// `missing`. Data without overdispersion drive theta towards its bound 1e8; a final
 /// theta above 1e6 gives `converged = false`, `theta_std_error = NaN` and a warning.
-/// Fitted means numerically 0 (below `10 eps`, glm.fit's test: an outcome without a
-/// finite MLE, such as all zeros), a theta that cannot be updated and a coefficient
-/// IRLS that does not settle also give `converged = false` and a warning.
+/// Fitted means numerically 0 (below `10 eps`, glm.fit's test) that the last step of
+/// the final IRLS still lowered by more than 1% (the row's linear predictor by more
+/// than 0.01; without a finite MLE each step lowers it by about 1) mean an outcome
+/// without a finite MLE, such as all zeros or zero counts a regressor separates:
+/// `converged = false` and a warning. At a converged fit (a zero count at an extreme
+/// regressor value, which adds nothing to the likelihood) they are a note in
+/// `warnings` that counts the rows, and `converged` is unchanged. A theta that cannot
+/// be updated and a coefficient IRLS that does not settle also give
+/// `converged = false` and a warning.
 ///
 /// # Errors
 ///
@@ -566,24 +598,41 @@ pub fn run_negbin(
         warnings.push("the beta/theta alternation did not converge in 100 rounds".to_string());
     }
     // The coefficients at the final theta.
-    let (beta, irls_converged) = irls_beta(&x, y, Some(&beta), theta, &mut work)?;
-    // glm.fit's test for an outcome without a finite MLE (all counts 0, or zero counts a
-    // regressor separates): fitted means numerically 0.
-    let means_zero = work.mu.iter().any(|&m| m < 10.0 * f64::EPSILON);
-    if means_zero {
-        warnings.push(
-            "fitted means numerically 0 occurred (glm.fit: 'fitted rates numerically 0'): \
-             the coefficient IRLS drives them to 0 because the outcome has no finite \
-             maximum-likelihood estimate (all counts 0, or zero counts that a regressor \
-             separates); the estimates are not reliable"
-                .to_string(),
-        );
-    } else if !irls_converged {
+    let (beta, irls) = irls_beta(&x, y, Some(&beta), theta, &mut work)?;
+    // glm.fit's test: fitted means numerically 0. They mean an outcome without a finite
+    // MLE (all counts 0, or zero counts that a regressor separates) only while the IRLS
+    // still drives them to 0: the working response of such a row is eta - 1, so each
+    // step lowers its linear predictor by about 1. A converged fit moves it by rounding
+    // and theta's last change (a zero count at an extreme regressor value, which adds
+    // nothing to the likelihood); its tiny means are a note.
+    let tiny = 10.0 * f64::EPSILON;
+    let n_tiny = work.mu.iter().filter(|&&m| m < tiny).count();
+    let rows = if n_tiny == 1 { "row" } else { "rows" };
+    let no_mle = n_tiny > 0
+        && work
+            .mu
+            .iter()
+            .zip(x.outer_iter())
+            .any(|(&m, xi)| m < tiny && irls.lowered(xi));
+    if no_mle {
+        warnings.push(format!(
+            "fitted means numerically 0 occurred for {n_tiny} {rows} (glm.fit: 'fitted \
+             rates numerically 0') and the coefficient IRLS was still driving them to 0: \
+             the outcome has no finite maximum-likelihood estimate (all counts 0, or zero \
+             counts that a regressor separates); the estimates are not reliable"
+        ));
+    } else if !irls.converged {
         warnings.push(
             "the IRLS for the coefficients did not settle in 100 iterations at the final \
              theta: neither the coefficients nor the log-likelihood stopped changing"
                 .to_string(),
         );
+    } else if n_tiny > 0 {
+        warnings.push(format!(
+            "fitted means numerically 0 occurred for {n_tiny} {rows} (glm.fit: 'fitted \
+             rates numerically 0') at converged coefficients; check those rows for extreme \
+             regressor values"
+        ));
     }
     let log_likelihood = nb_loglik(theta, &work.mu, y);
 
@@ -619,11 +668,8 @@ pub fn run_negbin(
     let aic = -2.0 * log_likelihood + 2.0 * n_params as f64;
     let bic = -2.0 * log_likelihood + (n_params as f64) * (n as f64).ln();
 
-    let mut converged = converged
-        && irls_converged
-        && !means_zero
-        && log_likelihood.is_finite()
-        && theta.is_finite();
+    let mut converged =
+        converged && irls.converged && !no_mle && log_likelihood.is_finite() && theta.is_finite();
     let theta_std_error = if theta > THETA_POISSON {
         converged = false;
         warnings.push(no_overdispersion_warning(
@@ -824,15 +870,20 @@ impl fmt::Display for ZeroInflResult {
 /// R equivalent: `pscl::zeroinfl(y ~ x | z, dist = "poisson")`, logit zero part;
 /// `z_cols` defaults to `x_cols` (pscl's default). The ZIP EM runs to convergence for
 /// starting values; then the joint log-likelihood is maximised by damped Newton steps
-/// with pscl's analytic gradient and the analytic Hessian, converging on the gradient,
-/// the log-likelihood and the Newton step. Standard errors come from the inverse
-/// Hessian at the estimate; like the estimates, they do not depend on the units of a
-/// regressor.
+/// with pscl's analytic gradient and the analytic Hessian. The fit has converged when
+/// the Newton decrement `g'(-H)^-1 g` is at most `1e-12 (1 + |ll|)`, the
+/// log-likelihood changes by less than `1e-12 (|ll| + 1e-12)` and every component of
+/// the Newton step is at most `1e-10 (1 + |par_k|)`; unlike the largest gradient
+/// component, none of these depends on the units of a regressor. Standard errors come
+/// from the inverse Hessian at the estimate; like the estimates and the convergence
+/// flag, they do not depend on the units of a regressor.
 ///
 /// Rows with a missing outcome or regressor (count or zero part) are dropped (R
-/// `na.omit`) and reported in `missing`. Non-convergence, a Hessian that is not
-/// negative definite and fitted zero-inflation probabilities numerically 0 or 1
-/// (quasi-separation) are reported in `warnings`, never as an error.
+/// `na.omit`) and reported in `missing`. Non-convergence and a Hessian that is not
+/// negative definite are reported in `warnings`, never as an error, and so are
+/// fitted zero-inflation probabilities numerically 0 or 1 (glm.fit's diagnostic, with
+/// the number of rows: quasi-separation in the zero part, or rows with extreme
+/// regressor values), which leave `converged` unchanged.
 ///
 /// # Errors
 ///
@@ -1412,13 +1463,16 @@ fn run_zeroinfl(
             stopped = true;
             break;
         }
-        let max_grad = grad.iter().fold(0.0f64, |m, g| m.max(g.abs()));
+        // The Newton decrement g'(-H)^-1 g (twice the gain the step predicts) does not
+        // depend on the units of a regressor; max |g| does (x times s: its score
+        // component times s).
+        let decrement: f64 = grad.iter().zip(&delta).map(|(g, d)| g * d).sum();
         let rel_step = delta
             .iter()
             .zip(&par)
             .fold(0.0f64, |m, (d, p)| m.max(d.abs() / (1.0 + p.abs())));
         if iter > 1
-            && max_grad < 1e-8 * (1.0 + ll.abs())
+            && decrement <= 1e-12 * (1.0 + ll.abs())
             && (ll - ll_prev).abs() < 1e-12 * (ll_prev.abs() + 1e-12)
             && rel_step <= 1e-10
         {
@@ -1465,42 +1519,49 @@ fn run_zeroinfl(
     let mut converged =
         converged && log_likelihood.is_finite() && par.iter().all(|p| p.is_finite());
 
-    // glm.fit's test for fitted probabilities numerically 0 or 1 (pscl's EM suppresses it).
+    // glm.fit's diagnostic for fitted probabilities numerically 0 or 1 (pscl's EM
+    // suppresses it). One row with an extreme zero-part regressor value is enough, so it
+    // is a note to check the rows, not a verdict on the fit.
     let tiny = 10.0 * f64::EPSILON;
-    let separated = x_zero.outer_iter().any(|zr| {
-        let pi = logistic_cdf(
-            zr.iter()
-                .zip(&par[k_count..k_count + k_zero])
-                .map(|(a, b)| a * b)
-                .sum(),
-        );
-        pi.min(1.0 - pi) < tiny
-    });
-    if separated {
-        warnings.push(
-            "fitted zero-inflation probabilities numerically 0 or 1 occurred (quasi-separation \
-             in the zero part); its estimates and standard errors are not reliable"
-                .to_string(),
-        );
+    let n_extreme = x_zero
+        .outer_iter()
+        .filter(|zr| {
+            let pi = logistic_cdf(
+                zr.iter()
+                    .zip(&par[k_count..k_count + k_zero])
+                    .map(|(a, b)| a * b)
+                    .sum(),
+            );
+            pi.min(1.0 - pi) < tiny
+        })
+        .count();
+    if n_extreme > 0 {
+        let rows = if n_extreme == 1 { "row" } else { "rows" };
+        warnings.push(format!(
+            "fitted zero-inflation probabilities numerically 0 or 1 occurred for {n_extreme} \
+             {rows} (possible quasi-separation in the zero part, or rows with extreme \
+             regressor values); check those rows"
+        ));
     }
 
     // Standard errors from the inverse Hessian at the final estimate (`hess` is at
     // `par`). With theta at the Poisson limit (ZINB) the ln theta direction of -H is
     // singular; the count and zero parts then take their SEs from their own block,
-    // the Poisson-limit information, and the theta SEs are NaN.
+    // the Poisson-limit information, and the theta SEs are NaN. -H is negated in place
+    // and passed as a view, so the working set stays at DENSE_INVERSE_COPIES.
     let theta_at_limit = negbin && par[n_params - 1].exp() > THETA_POISSON;
     let m_se = if theta_at_limit {
         n_params - 1
     } else {
         n_params
     };
-    let information = hess.slice(ndarray::s![..m_se, ..m_se]).mapv(|h| -h);
+    hess.mapv_inplace(|h| -h);
+    let information = hess.slice(ndarray::s![..m_se, ..m_se]);
     let covariance = if information.iter().all(|h| h.is_finite()) {
-        cholesky_inverse(&information.view()).ok()
+        cholesky_inverse(&information).ok()
     } else {
         None
     };
-    drop(information);
     let mut se_all: Vec<f64> = match &covariance {
         Some(v) => (0..m_se).map(|i| v[[i, i]].sqrt()).collect(),
         None => {
@@ -2349,6 +2410,94 @@ mod tests {
         }
     }
 
+    /// Zero counts that a regressor separates (every row with d = 1 has y = 0) have no
+    /// finite MLE either: the coefficient of d runs to -inf, each IRLS step lowering the
+    /// linear predictor of those rows by about 1. The fit must not be reported as
+    /// converged, although theta (from the d = 0 rows) settles.
+    #[test]
+    fn test_negbin_separating_regressor_is_not_converged() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use rand_distr::{Distribution, Gamma, Poisson};
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let (mut y, mut d, mut x) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..90 {
+            let di = f64::from(u8::from(i % 3 == 0));
+            let xi = (i as f64 * 0.37).sin();
+            let lambda = Gamma::new(2.0, (0.5 + 0.3 * xi).exp() / 2.0)
+                .unwrap()
+                .sample(&mut rng);
+            let count: f64 = Poisson::new(lambda.max(1e-300)).unwrap().sample(&mut rng);
+            y.push(if di == 1.0 { 0.0 } else { count });
+            d.push(di);
+            x.push(xi);
+        }
+        let ds = Dataset::new(df! { "y" => y, "d" => d, "x" => x }.unwrap());
+        let r = run_negbin(&ds, "y", &["d", "x"], None).unwrap();
+        assert!(!r.converged, "{r}");
+        assert!(r.coefficients[1] < -10.0, "{r}");
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("numerically 0") && w.contains("maximum-likelihood")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// One zero count at an extreme regressor value has a fitted mean far below 10 eps
+    /// (x1 = -80: eta about -38) but contributes nothing to the likelihood, so the fit is
+    /// the one without that row and converges. R (MASS 7.3.60.0.1): glm.nb on
+    /// negbin.csv plus the row (y = 0, x1 = -80, x2 = 0.1) converges to theta 1.602585,
+    /// with glm.fit's "fitted rates numerically 0" warning from its Poisson start. The
+    /// tiny mean is a note, not a missing MLE: the coefficients have stopped moving.
+    #[test]
+    fn test_negbin_high_leverage_zero_row_converges() {
+        let ds = negbin_data();
+        let col = |name: &str| -> Vec<f64> {
+            ds.column(name)
+                .unwrap()
+                .as_materialized_series()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_no_null_iter()
+                .collect()
+        };
+        let (mut y, mut x1, mut x2) = (col("y"), col("x1"), col("x2"));
+        y.push(0.0);
+        x1.push(-80.0);
+        x2.push(0.1);
+        let lev = Dataset::new(df! { "y" => y, "x1" => x1, "x2" => x2 }.unwrap());
+        let base = run_negbin(&ds, "y", &["x1", "x2"], None).unwrap();
+        let r = run_negbin(&lev, "y", &["x1", "x2"], None).unwrap();
+        assert_eq!(r.n_obs, 401);
+        assert!(r.converged, "{r}");
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("maximum-likelihood")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("numerically 0") && w.contains("1 row")),
+            "{:?}",
+            r.warnings
+        );
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-6 * b.abs();
+        for (i, (a, b)) in r.coefficients.iter().zip(&base.coefficients).enumerate() {
+            assert!(close(*a, *b), "coefficient {i}: {a} vs {b}");
+        }
+        assert!(
+            close(r.theta, base.theta),
+            "theta {} vs {}",
+            r.theta,
+            base.theta
+        );
+    }
+
     // ---- negative binomial against MASS::glm.nb (disc_negbin) -----------------------
 
     #[test]
@@ -2569,6 +2718,51 @@ mod tests {
         assert!(r.log_likelihood >= -8.370407, "{r}");
     }
 
+    /// One zero count at an extreme regressor value (x1 = -90: logit(pi) about -71)
+    /// has a fitted zero-inflation probability far below 10 eps, but the fit is regular:
+    /// the warning is glm.fit's diagnostic with the row count, the fit converges and
+    /// equals the one without that row.
+    #[test]
+    fn test_zinb_extreme_row_is_a_note() {
+        let ds = zi_data();
+        let col = |name: &str| -> Vec<f64> {
+            ds.column(name)
+                .unwrap()
+                .as_materialized_series()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_no_null_iter()
+                .collect()
+        };
+        let (mut y, mut x1, mut x2) = (col("y_nb"), col("x1"), col("x2"));
+        y.push(0.0);
+        x1.push(-90.0);
+        x2.push(0.0);
+        let ext = Dataset::new(df! { "y_nb" => y, "x1" => x1, "x2" => x2 }.unwrap());
+        let base = run_zinb(&ds, "y_nb", &["x1", "x2"], None).unwrap();
+        let r = run_zinb(&ext, "y_nb", &["x1", "x2"], None).unwrap();
+        assert!(r.converged, "{r}");
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        let w = &r.warnings[0];
+        assert!(
+            w.contains("numerically 0 or 1 occurred for 1 row")
+                && w.contains("possible quasi-separation")
+                && !w.contains("not reliable"),
+            "{w}"
+        );
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-6 * b.abs();
+        for (what, a, b) in [
+            ("count", &r.count_coefficients, &base.count_coefficients),
+            ("zero", &r.zero_coefficients, &base.zero_coefficients),
+        ] {
+            for (i, (u, v)) in a.iter().zip(b.iter()).enumerate() {
+                assert!(close(*u, *v), "{what}[{i}]: {u} vs {v}");
+            }
+        }
+    }
+
     // ---- zero-inflated Poisson and NB against pscl::zeroinfl (disc_zeroinfl) --------
 
     #[test]
@@ -2768,9 +2962,12 @@ mod tests {
     /// The fit must not depend on the units of a regressor (income, population): with
     /// x1 multiplied by `s` (count and zero part), the x1 coefficients and SEs are the
     /// unscaled ones divided by `s`, everything else, z and the log-likelihood
-    /// included, is unchanged. A Hessian by central differences with a step relative to
-    /// the parameter value did not have this property (its z values moved by 10% at
-    /// s = 1e5). Each scaled fit is also checked against pscl's case, x1 rescaled.
+    /// included, is unchanged, and the fit converges at the same iteration. A Hessian by
+    /// central differences with a step relative to the parameter value did not have this
+    /// property (its z values moved by 10% at s = 1e5), nor did a convergence test on
+    /// max |gradient| (the x1 component is multiplied by `s`: ZIP at s = 1e10 ran to the
+    /// iteration limit). Each scaled fit is also checked against pscl's case, x1
+    /// rescaled.
     #[test]
     fn test_validate_zeroinfl_regressor_scale_disc_zeroinfl() {
         let (case, ds) = load_case("disc_zeroinfl");
@@ -2783,11 +2980,13 @@ mod tests {
                 run_zeroinfl(ds, y, &["x1", "x2"], Some(&["x1", "x2"]), dist).unwrap()
             };
             let base = fit(&ds);
-            for s in [1e4, 1e6] {
+            for s in [1e4, 1e6, 1e10, 1e12] {
                 let x1 =
                     (ds.column("x1").unwrap().as_materialized_series() * s).with_name("x1".into());
                 let r = fit(&with_column(&ds, x1.into_column()));
                 assert!(r.converged, "{p} x1 * {s:e}: {:?}", r.warnings);
+                // the iterates are the unscaled ones, and so is the stopping iteration
+                assert_eq!(r.iterations, base.iterations, "{p} x1 * {s:e}");
                 assert!(r.warnings.is_empty(), "{p} x1 * {s:e}: {:?}", r.warnings);
                 // x1 is the second column of both parts
                 let unscale = |v: &[f64]| -> Vec<f64> {
@@ -2952,6 +3151,88 @@ mod tests {
             match e {
                 Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "y_label"),
                 other => panic!("expected NonNumericColumn, got {other:?}"),
+            }
+        }
+    }
+
+    /// Column errors name the column, for the outcome, the count regressors and the
+    /// zero-part (hurdle: binary-part) regressors of every count model: an absent column
+    /// is ColumnNotFound, a text regressor with a numeric outcome NonNumericColumn.
+    #[test]
+    fn test_na_count_models_column_errors() {
+        let (nb, zi, text) = (negbin_data(), zi_data(), ordered_text_data());
+        let poisson = HurdleType::Poisson;
+        let not_found = [
+            (
+                "negbin y",
+                run_negbin(&nb, "nope", &["x1"], None).map(|_| ()),
+            ),
+            (
+                "negbin x",
+                run_negbin(&nb, "y", &["nope"], None).map(|_| ()),
+            ),
+            ("zip y", run_zip(&zi, "nope", &["x1"], None).map(|_| ())),
+            ("zip x", run_zip(&zi, "y", &["nope"], None).map(|_| ())),
+            (
+                "zip z",
+                run_zip(&zi, "y", &["x1"], Some(&["nope"])).map(|_| ()),
+            ),
+            ("zinb x", run_zinb(&zi, "y_nb", &["nope"], None).map(|_| ())),
+            (
+                "zinb z",
+                run_zinb(&zi, "y_nb", &["x1"], Some(&["nope"])).map(|_| ()),
+            ),
+            (
+                "hurdle y",
+                run_hurdle(&zi, "nope", &["x1"], None, poisson).map(|_| ()),
+            ),
+            (
+                "hurdle x",
+                run_hurdle(&zi, "y", &["nope"], None, poisson).map(|_| ()),
+            ),
+            (
+                "hurdle z",
+                run_hurdle(&zi, "y", &["x1"], Some(&["nope"]), poisson).map(|_| ()),
+            ),
+        ];
+        for (what, r) in not_found {
+            match r {
+                Err(EconError::ColumnNotFound { column, .. }) => {
+                    assert_eq!(column, "nope", "{what}")
+                }
+                other => panic!("{what}: expected ColumnNotFound, got {other:?}"),
+            }
+        }
+        // `y` of disc_ordered is numeric (1, 2, 3), `y_label` its text labels
+        let non_numeric = [
+            (
+                "negbin x",
+                run_negbin(&text, "y", &["y_label"], None).map(|_| ()),
+            ),
+            ("zip x", run_zip(&text, "y", &["y_label"], None).map(|_| ())),
+            (
+                "zip z",
+                run_zip(&text, "y", &["x1"], Some(&["y_label"])).map(|_| ()),
+            ),
+            (
+                "zinb x",
+                run_zinb(&text, "y", &["y_label"], None).map(|_| ()),
+            ),
+            (
+                "hurdle x",
+                run_hurdle(&text, "y", &["y_label"], None, poisson).map(|_| ()),
+            ),
+            (
+                "hurdle z",
+                run_hurdle(&text, "y", &["x1"], Some(&["y_label"]), poisson).map(|_| ()),
+            ),
+        ];
+        for (what, r) in non_numeric {
+            match r {
+                Err(EconError::NonNumericColumn { column }) => {
+                    assert_eq!(column, "y_label", "{what}")
+                }
+                other => panic!("{what}: expected NonNumericColumn, got {other:?}"),
             }
         }
     }

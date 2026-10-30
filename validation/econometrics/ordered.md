@@ -40,10 +40,15 @@ case asserts that this analytic Hessian equals `numDeriv::hessian` of the log-li
   attempt, at most 20).
 - Line search: the step is halved (at most 30 times) until the cut points are strictly
   increasing and the log-likelihood does not fall.
-- Converged: `max |score| < 1e-8 (1 + |ll|)`, relative change of the log-likelihood below
-  `tol`, and every Newton-step component below `1e-10 (1 + |theta_k|)`. A non-finite step
-  or score, a failed line search or the iteration limit end the fit with
-  `converged = false` and a message in `warnings` (never an error).
+- Converged: the Newton decrement `g'(-H)^-1 g` (from the step just computed) at most
+  `1e-12 (1 + |ll|)`, relative change of the log-likelihood below `tol`, and every
+  Newton-step component at most `1e-10 (1 + |theta_k|)`. None of the three depends on the
+  units of a regressor, so neither does the flag: with x multiplied by `s` the score
+  component of its slope is multiplied by `s`, and a test on `max |score|` (the earlier
+  `max |score| < 1e-8 (1 + |ll|)`) failed at `s = 1e12` on a fit whose iterates were the
+  unscaled ones. A non-finite step or score, a failed line search or the iteration limit
+  end the fit with `converged = false` and a message in `warnings` (never an error); that
+  message still reports `max |score|`.
 - Standard errors: square roots of the diagonal of the inverse observed information at the
   estimate (NaN with a warning if it is not positive definite); `z = b / SE`,
   `p = 2 P(Z > |z|)` from the upper tail.

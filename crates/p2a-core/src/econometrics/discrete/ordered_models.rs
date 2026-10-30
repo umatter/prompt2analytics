@@ -222,10 +222,13 @@ impl fmt::Display for OrderedResult {
 /// from the null-model MLE (beta = 0, cut points at `F^-1` of the cumulative category
 /// shares). A step is halved until the cut points stay increasing and the
 /// log-likelihood does not fall; where the observed information is not positive
-/// definite the step is damped (Levenberg). The fit has converged when the largest
-/// score is below `1e-8 (1 + |ll|)`, the relative change of the log-likelihood below
-/// `1e-10` and every component of the Newton step below `1e-10 (1 + |theta_k|)`.
-/// `converged == true` implies finite estimates and log-likelihood. A non-finite
+/// definite the step is damped (Levenberg). The fit has converged when the Newton
+/// decrement `g'(-H)^-1 g` is at most `1e-12 (1 + |ll|)`, the relative change of the
+/// log-likelihood below `1e-10` and every component of the Newton step at most
+/// `1e-10 (1 + |theta_k|)`. Unlike the largest score component, none of these depends
+/// on the units of a regressor, so neither the estimates (Newton's method is
+/// affine-invariant) nor the convergence flag do. `converged == true` implies finite
+/// estimates and log-likelihood. A non-finite
 /// step, a failed line search and the iteration limit end the fit with
 /// `converged = false` and a message in `warnings`, never with an error. Standard
 /// errors are the square roots of the diagonal of the inverse observed information;
@@ -418,13 +421,16 @@ pub fn run_ordered_model_with(
             stopped = true;
             break;
         }
-        let max_score = grad.iter().fold(0.0f64, |m, g| m.max(g.abs()));
+        // The Newton decrement g'(-H)^-1 g (twice the gain the step predicts) does not
+        // depend on the units of a regressor; max |g| does (x times s: its score
+        // component times s).
+        let decrement: f64 = grad.iter().zip(&delta).map(|(g, d)| g * d).sum();
         let rel_step = delta
             .iter()
             .zip(&theta)
             .fold(0.0f64, |m, (d, t)| m.max(d.abs() / (1.0 + t.abs())));
         if iter > 1
-            && max_score < 1e-8 * (1.0 + ll.abs())
+            && decrement <= 1e-12 * (1.0 + ll.abs())
             && (ll - ll_prev).abs() < config.tol * (ll_prev.abs() + config.tol)
             && rel_step <= 1e-10
         {
@@ -799,8 +805,7 @@ mod tests {
     use p2a_validation::{Case, Check, Tol};
     use polars::prelude::*;
 
-    /// Case data for tests that are not R-pinned (not registered; see the plan's
-    /// test-placement rule).
+    /// Case data for tests that are not R-pinned (these tests are not registered).
     fn ordered_data() -> Dataset {
         load_case("disc_ordered").1
     }
@@ -872,7 +877,7 @@ mod tests {
             .vector(&k("counts"), &counts(r), Tol::exact())
             .scalar(&k("n"), n as f64, Tol::exact())
             // polr's own BFGS optimum (reltol 1e-15, max |grad| ~ 2e-6): a looser
-            // cross-check (design 2.3)
+            // cross-check
             .named(
                 &k("coef_pkg"),
                 &r.variables,
@@ -996,7 +1001,10 @@ mod tests {
     /// answered cond > 1e10 with the pseudoinverse: disc_polr_j5 with x times 1e4
     /// returned its starting point. Newton's method is affine-invariant, so the iterates
     /// on the scaled data are the unscaled ones up to rounding: the coefficient divided
-    /// by the scale, the cut points and the log-likelihood equal, to 1e-9 relative.
+    /// by the scale, the cut points and the log-likelihood equal, to 1e-9 relative. So
+    /// is the convergence test (the Newton decrement), and the scaled fit stops at the
+    /// same iteration; a test on max |score| (the slope's component times the scale)
+    /// ran to the iteration limit at 1e12.
     /// Each scaled fit is also checked against polr's case: the cut points and the
     /// log-likelihood, n, the category counts and the null log-likelihood do not depend
     /// on the scale of x.
@@ -1009,13 +1017,15 @@ mod tests {
             ("probit", OrderedModelType::Probit),
         ] {
             let base = fit_j(&case, &ds, model);
-            for scale in [1e4, 1e6] {
+            for scale in [1e4, 1e6, 1e12] {
                 let r = fit_j(&case, &with_x_scaled(&ds, scale), model);
                 assert!(
                     r.converged,
                     "{link}, x * {scale:e}: not converged: {:?}",
                     r.warnings
                 );
+                // the iterates are the unscaled ones, and so is the stopping iteration
+                assert_eq!(r.iterations, base.iterations, "{link}, x * {scale:e}");
                 Check::new(&case)
                     .scalar("n", r.n_obs as f64, Tol::exact())
                     .named("counts", &r.categories, &counts(&r), Tol::exact())

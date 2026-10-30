@@ -164,9 +164,11 @@ The ordered estimator is Newton-Raphson on the analytic score and observed Hessi
 ECON-4 and ECON-5; `validation/econometrics/ordered.md`), with step halving that keeps the
 cut points increasing and Levenberg damping where the information is not positive
 definite; standard errors come from the inverse observed information. Newton's method is
-affine-invariant: with x multiplied by 1e4 or 1e6 the fit is the unscaled one with the
-coefficient divided by the scale, the cut points and the log-likelihood equal to 1e-9
-relative, and each scaled fit also matches polr's cut points and log-likelihood. (An
+affine-invariant, and so is its convergence test (the Newton decrement, not the largest
+score component): with x multiplied by 1e4, 1e6 or 1e12 the fit converges and is the
+unscaled one with the coefficient divided by the scale, the cut points and the
+log-likelihood equal to 1e-9 relative, and each scaled fit also matches polr's cut points
+and log-likelihood. (An
 earlier step inverted the negative definite Hessian through `safe_inverse`, which returns
 the pseudoinverse whenever `cond > 1e10`; `disc_polr_j5` with x multiplied by 1e4 then
 returned its starting point after one iteration.)
@@ -198,7 +200,7 @@ R-pinned (load a case):
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5`
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j16`
 - `econometrics::discrete::ordered_models::tests::test_validate_ordered_j30`
-- `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5_regressor_scale` (on `disc_polr_j5`'s dataset with x multiplied by 1e4 or 1e6: converged; the cut points, the log-likelihood, n, the category counts and the null log-likelihood against the case; and the fit unchanged apart from the coefficient divided by the scale)
+- `econometrics::discrete::ordered_models::tests::test_validate_ordered_j5_regressor_scale` (on `disc_polr_j5`'s dataset with x multiplied by 1e4, 1e6 or 1e12: converged at the unscaled fit's iteration; the cut points, the log-likelihood, n, the category counts and the null log-likelihood against the case; and the fit unchanged apart from the coefficient divided by the scale)
 
 Helpers, the category cap and the separated fits:
 

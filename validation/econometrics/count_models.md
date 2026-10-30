@@ -34,9 +34,22 @@ Algorithm (glm.nb's alternation):
   the data determine poorly, which does not change the likelihood. A design whose `X'WX`
   is not positive definite is `SingularMatrix`.
 - No finite MLE: fitted means below `10 eps` after the final IRLS (glm.fit's "fitted rates
-  numerically 0" test; an all-zero outcome, or zero counts a regressor separates) give
-  `converged = false` and a warning that says so. A final IRLS that settles on neither
-  test also gives `converged = false`, with its own warning.
+  numerically 0" test) mean an outcome without a finite MLE (an all-zero outcome, or zero
+  counts a regressor separates) only while the IRLS still drives them to 0. The working
+  response of such a row is `eta - 1`, so each step lowers its linear predictor by about
+  1 (measured: 1.0 on the all-zero and the separated fixtures). When the last step of the
+  final IRLS lowered the linear predictor of a row with a tiny mean by more than 0.01 (the
+  mean by more than 1%), the fit gives `converged = false` and a warning that says so.
+  Otherwise the fit has converged and the tiny means are a note in `warnings` that counts
+  the rows ("fitted means numerically 0 occurred for k rows ... at converged
+  coefficients"), with `converged` unchanged: one zero count at an extreme regressor
+  value adds nothing to the likelihood (`disc_negbin` plus the row `y = 0, x1 = -80,
+  x2 = 0.1`: the last step moves that row's linear predictor by 5e-11, and the fit is the
+  400-row one; R's glm.nb converges there with theta 1.602585 and glm.fit's warning from
+  its Poisson start). A test on the coefficient change alone cannot tell the two apart:
+  theta's last change moves the coefficients of a regular fit by more than
+  `1e-12 (1 + max |beta|)` too. A final IRLS that settles on neither test also gives
+  `converged = false`, with its own warning.
 - theta: Newton steps on `ln theta` at fixed `mu` with MASS `theta.ml`'s score
   `s = sum(digamma(theta + y) - digamma(theta) + ln theta + 1 - ln(theta + mu) - (y + theta) / (mu + theta))`
   and information
@@ -84,12 +97,17 @@ Algorithm (pscl's `EM = TRUE` start, then a full maximisation):
   `gradNegBin`) and the analytic Hessian (formulas in the doc comment of `zi_loglik`,
   checked against central differences of the gradient); Levenberg damping and step
   halving as for the ordered models; `ln theta <= ln 1e8`; at most 200 iterations.
-  Converged: `max |grad| < 1e-8 (1 + |ll|)`, log-likelihood change below
-  `1e-12 (|ll| + 1e-12)` and every Newton-step component below `1e-10 (1 + |par_k|)`. A
-  non-finite gradient or Hessian, a failed line search or the iteration limit end the fit
-  with `converged = false` and a warning. Newton's method with the exact Hessian is
-  affine-invariant: with a regressor multiplied by 1e4 or 1e6 its coefficients and SEs are
-  the unscaled ones divided by the scale, and z and the log-likelihood are unchanged.
+  Converged: the Newton decrement `g'(-H)^-1 g` (from the step just computed) at most
+  `1e-12 (1 + |ll|)`, log-likelihood change below `1e-12 (|ll| + 1e-12)` and every
+  Newton-step component at most `1e-10 (1 + |par_k|)`. A non-finite gradient or Hessian,
+  a failed line search or the iteration limit end the fit with `converged = false` and a
+  warning (which reports `max |grad|`). Newton's method with the exact Hessian is
+  affine-invariant, and so is the decrement: with a regressor multiplied by 1e4, 1e6, 1e10
+  or 1e12 the fit converges, its coefficients and SEs are the unscaled ones divided by the
+  scale, and z and the log-likelihood are unchanged. (The earlier test
+  `max |grad| < 1e-8 (1 + |ll|)` did not have this property: the gradient component of a
+  regressor scales with its units, so ZIP with x1 times 1e10 reached the unscaled
+  estimates but was reported as not converged after 200 iterations.)
   (The central-difference Hessian this replaced used a step relative to the parameter
   value, so its SEs moved with the units of a regressor: z by 10% at a scale of 1e5.)
 - Standard errors from the inverse of the negated Hessian at the estimate (NaN with a
@@ -97,8 +115,11 @@ Algorithm (pscl's `EM = TRUE` start, then a full maximisation):
   (pscl's `SE.logtheta`) and `theta_std_error = theta SE(ln theta)` (delta method). z and
   p as for NB; AIC and BIC count `kx + kz (+ 1)` parameters.
 - Fitted zero-inflation probabilities with `min(pi, 1 - pi) < 10 eps` give the warning
-  "fitted zero-inflation probabilities numerically 0 or 1 occurred" (glm.fit's test; pscl's
-  EM suppresses it and reports such fits as converged). A ZINB theta above 1e6 is flagged as
+  "fitted zero-inflation probabilities numerically 0 or 1 occurred for k rows (possible
+  quasi-separation in the zero part, or rows with extreme regressor values); check those
+  rows" (glm.fit's diagnostic; pscl's EM suppresses it and reports such fits as
+  converged). It leaves `converged` unchanged: one row with an extreme regressor value is
+  enough to trigger it on a regular fit. A ZINB theta above 1e6 is flagged as
   for NB, with a warning that names the zero-inflated Poisson model (pscl::zeroinfl with
   `dist = "poisson"`). Its ln theta direction of the Hessian is then singular, so the count
   and zero-part SEs come from their own block, the Poisson-limit information, and the theta
@@ -219,7 +240,7 @@ R-pinned (`crates/p2a-core/src/econometrics/discrete/count_models.rs` unless not
 | `econometrics::discrete::count_models::tests::test_validate_zip_zero_part_regressors` | `zip_z1_*` (zero part on `x1`) |
 | `econometrics::discrete::count_models::tests::test_validate_zip_missing_rows_dropped` | `zip_na_*`: estimates, 495 rows used, 5 dropped by column |
 | `econometrics::discrete::count_models::tests::test_validate_zip_intercept_only_zero_part` | `zip_z0_*` (`y ~ x1 + x2 \| 1`): count and zero coefficients, SEs, log-likelihood |
-| `econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl` | ZIP and ZINB with x1 multiplied by 1e4 and 1e6: converged, no warning; x1 coefficients and SEs times the scale, all other coefficients, SEs, z, SE(log theta) and the log-likelihood equal the unscaled fit to 1e-7 relative, and pscl's `zip_*` / `zinb_*` values |
+| `econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl` | ZIP and ZINB with x1 multiplied by 1e4, 1e6, 1e10 and 1e12: converged at the unscaled fit's iteration, no warning; x1 coefficients and SEs times the scale, all other coefficients, SEs, z, SE(log theta) and the log-likelihood equal the unscaled fit to 1e-7 relative, and pscl's `zip_*` / `zinb_*` values |
 | `p2a-mcp` `tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl` | the MCP `zeroinfl` text for both distributions: both coefficient tables, log-likelihood, and the ZINB theta line, at print precision |
 
 Not R-pinned:
@@ -230,6 +251,13 @@ Not R-pinned:
 - `econometrics::discrete::count_models::tests::test_negbin_all_zero_outcome_is_not_converged`:
   an all-zero outcome (no MLE), with 30 and with 5 rows, gives `converged = false` and the
   "fitted means numerically 0" warning.
+- `econometrics::discrete::count_models::tests::test_negbin_separating_regressor_is_not_converged`:
+  seeded NB counts with a dummy whose rows all have y = 0 (no MLE): `converged = false`,
+  the dummy's coefficient below -10 and the no-MLE warning.
+- `econometrics::discrete::count_models::tests::test_negbin_high_leverage_zero_row_converges`:
+  `disc_negbin`'s data plus the row `y = 0, x1 = -80, x2 = 0.1` (fitted mean far below
+  10 eps): converged, no no-MLE warning, a note counting 1 row, and the coefficients and
+  theta of the 400-row fit to 1e-6 relative (R's glm.nb: converged, theta 1.602585).
 - `econometrics::discrete::count_models::tests::test_negbin_ill_conditioned_designs_converge`:
   seeded NB counts on two ill-conditioned designs, `y ~ x + x^2 + x^3` with
   `x ~ U(10, 20)` and `y ~ x1 + x2` with `x2 = x1 + 1e-4 noise`, converge without a
@@ -249,15 +277,22 @@ Not R-pinned:
   the 12-row fixture with a separated zero part (pscl: zero coefficients 94.70464,
   -25.39549, logLik -8.370407) reaches at least pscl's log-likelihood and warns that
   fitted probabilities were numerically 0 or 1.
+- `econometrics::discrete::count_models::tests::test_zinb_extreme_row_is_a_note`: ZINB on
+  `disc_zeroinfl`'s `y_nb` plus the row `y_nb = 0, x1 = -90, x2 = 0`: converged, the one
+  warning is glm.fit's diagnostic counting 1 row, and the estimates are those without the
+  row to 1e-6 relative.
 - `econometrics::discrete::count_models::tests::test_zeroinfl_analytic_derivatives_match_central_differences`:
   the analytic gradient and Hessian equal central differences of the log-likelihood and
   the gradient, both distributions, with the zero part on all and on fewer regressors.
 - `econometrics::discrete::count_models::tests::test_zeroinfl_rejects_outcome_without_zeros`,
   `econometrics::discrete::count_models::tests::test_na_count_models_float_outcome_equals_int64`,
   `econometrics::discrete::count_models::tests::test_na_count_models_text_outcome_is_non_numeric`,
+  `econometrics::discrete::count_models::tests::test_na_count_models_column_errors`,
   `econometrics::discrete::count_models::tests::test_zeroinfl_stops_when_cancelled`:
   the zero-count refusal, Int64 = Float64 outcomes, `NonNumericColumn` for a text outcome
-  (NB, ZIP, hurdle), cancellation.
+  (NB, ZIP, hurdle), `ColumnNotFound` for an absent outcome, count regressor or zero-part
+  regressor and `NonNumericColumn` for a text regressor in either part (NB, ZIP, ZINB,
+  hurdle), cancellation.
 
 ## Tolerance
 
