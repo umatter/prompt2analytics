@@ -49,14 +49,16 @@
 //!
 //! Applied when expected counts are small to improve approximation to chi-squared distribution.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 use crate::data::Dataset;
-use crate::data::columns::MissingSummary;
+use crate::data::columns::{self, MissingSummary, is_numeric_dtype};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
-use crate::stats::contingency::contingency_table;
+use crate::stats::contingency::{CategoryIndex, contingency_table, level_counts, level_list};
 use crate::traits::SignificanceLevel;
 
 /// R's warning when an expected count is below 5.
@@ -315,18 +317,27 @@ pub fn chisq_test_gof(
                 ),
             });
         }
-        if p.iter().any(|&x| x < 0.0) {
+        if p.iter().any(|&x| !(x >= 0.0 && x.is_finite())) {
             return Err(EconError::InvalidSpecification {
-                message: "Probabilities must be non-negative".to_string(),
+                message: "Probabilities must be non-negative and finite".to_string(),
             });
         }
         let sum: f64 = p.iter().sum();
         if rescale_p {
+            if !(sum > 0.0) {
+                return Err(EconError::InvalidSpecification {
+                    message: "Probabilities to rescale must have a positive sum".to_string(),
+                });
+            }
             p.iter().map(|&x| x / sum).collect()
         } else {
-            if (sum - 1.0).abs() > 1e-6 {
+            // R's rule: |sum(p) - 1| <= sqrt(.Machine$double.eps)
+            if (sum - 1.0).abs() > f64::EPSILON.sqrt() {
                 return Err(EconError::InvalidSpecification {
-                    message: "Probabilities must sum to 1 (or use rescale_p=true)".to_string(),
+                    message: format!(
+                        "Probabilities must sum to 1 (they sum to {sum}); use rescale_p = true \
+                         to rescale them"
+                    ),
                 });
             }
             p.to_vec()
@@ -619,8 +630,7 @@ fn independence_from_flat(
     })
 }
 
-/// Expected frequencies of a goodness-of-fit test ([`run_chisq_gof_with`], implemented by
-/// T2-WP05).
+/// Expected frequencies of a goodness-of-fit test ([`run_chisq_gof_with`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum GofExpected {
     /// Every observed category equally likely. Default.
@@ -635,27 +645,148 @@ pub enum GofExpected {
 /// Chi-squared goodness-of-fit test on a dataset column against `expected`; `rescale`
 /// divides the probabilities by their sum (R `chisq.test(rescale.p = TRUE)`).
 ///
-/// Implemented by T2-WP05; until then returns `EconError::NotImplemented`.
+/// The categories are the column's distinct non-missing values in R `factor()` order
+/// (numbers numerically, text in C-locale order), as [`level_counts`] counts them; rows with
+/// a missing value are dropped and reported in `missing`. `row_labels` lists the categories.
+///
+/// - [`GofExpected::Uniform`]: every observed category equally likely.
+/// - [`GofExpected::Probs`]: one probability per category in that order.
+/// - [`GofExpected::Named`]: a probability per category name; categories that never occur
+///   count 0 and are reported after the observed ones, in the order given. Every observed
+///   category must be named; on a numeric column a name matches by value ("2.0" is "2").
+///
+/// # Errors
+///
+/// [`level_counts`]' errors (`ColumnNotFound`, a column that cannot be categorical, no row
+/// left), `InvalidSpecification` for a probs list of the wrong length (listing the
+/// categories), an empty map, a category named twice, an observed category without a
+/// probability, and probabilities that are negative, not finite or (without `rescale`) do
+/// not sum to 1 within `sqrt(f64::EPSILON)`; [`chisq_test_gof`]'s errors.
 pub fn run_chisq_gof_with(
     dataset: &Dataset,
     column: &str,
     expected: &GofExpected,
     rescale: bool,
 ) -> EconResult<ChiSquaredResult> {
-    Err(EconError::NotImplemented(
-        "T2-WP05: run_chisq_gof_with".to_string(),
-    ))
+    let df = dataset.df();
+    let (labels, counts, missing, probs) = match expected {
+        GofExpected::Uniform => {
+            let (labels, counts, missing) = level_counts(df, column, &[])?;
+            (labels, counts, missing, None)
+        }
+        GofExpected::Probs(p) => {
+            let (labels, counts, missing) = level_counts(df, column, &[])?;
+            if p.len() != labels.len() {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "probs has {} value(s) but column '{column}' has {} categories after \
+                         removing missing values, in this order: [{}]. Give one probability \
+                         per category in that order, or name them (expected)",
+                        p.len(),
+                        labels.len(),
+                        level_list(&labels)
+                    ),
+                });
+            }
+            (labels, counts, missing, Some(p.clone()))
+        }
+        GofExpected::Named(pairs) => {
+            let (labels, counts, missing, probs) = named_probabilities(df, column, pairs)?;
+            (labels, counts, missing, Some(probs))
+        }
+    };
+    let mut result = chisq_test_gof(&counts, probs.as_deref(), rescale)?;
+    result.row_labels = Some(labels);
+    result.missing = missing;
+    Ok(result)
+}
+
+/// The categories, counts and missing-value summary of `column` with the probabilities of
+/// `pairs` aligned to the categories. Every key is matched by a hash of its canonical form
+/// (see `contingency::same_category`), so `e` pairs on `k` categories cost O(k + e).
+fn named_probabilities(
+    df: &polars::prelude::DataFrame,
+    column: &str,
+    pairs: &[(String, f64)],
+) -> EconResult<(Vec<String>, Vec<f64>, MissingSummary, Vec<f64>)> {
+    if pairs.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "expected names no category of column '{column}'; give a probability per \
+                 category"
+            ),
+        });
+    }
+    resource::check_alloc::<(&str, ())>(
+        resource::checked_len(&[pairs.len(), 2], "category names")?,
+        "category names",
+    )?;
+    let mut seen: HashSet<&str> = HashSet::new();
+    seen.try_reserve(pairs.len())
+        .map_err(|_| EconError::ResourceLimit("category names could not be allocated".into()))?;
+    let mut keys: Vec<String> = resource::try_with_capacity(pairs.len(), "category names")?;
+    for (i, (key, _)) in pairs.iter().enumerate() {
+        if i % 65_536 == 0 {
+            resource::checkpoint()?;
+        }
+        if !seen.insert(key.as_str()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!("category '{key}' is given twice"),
+            });
+        }
+        keys.push(key.clone());
+    }
+    let (labels, counts, missing) = level_counts(df, column, &keys)?;
+    let numeric = is_numeric_dtype(columns::column(df, column)?.dtype(), false);
+    let index = CategoryIndex::new(&labels, numeric)?;
+    let mut probs: Vec<Option<f64>> = resource::try_vec(labels.len(), None, "probabilities")?;
+    for (i, (key, p)) in pairs.iter().enumerate() {
+        if i % 65_536 == 0 {
+            resource::checkpoint()?;
+        }
+        // level_counts appended every key that matches no observed level, so each key
+        // names a label
+        let Some(at) = index.find(key) else {
+            return Err(EconError::Computation(format!(
+                "category '{key}' matches no category of column '{column}'"
+            )));
+        };
+        if probs[at].is_some() {
+            return Err(EconError::InvalidSpecification {
+                message: format!("category '{}' is given twice", labels[at]),
+            });
+        }
+        probs[at] = Some(*p);
+    }
+    let mut aligned: Vec<f64> = resource::try_with_capacity(labels.len(), "probabilities")?;
+    for (i, p) in probs.iter().enumerate() {
+        match p {
+            Some(p) => aligned.push(*p),
+            None => {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "category '{}' occurs {} time(s) in column '{column}' but has no \
+                         expected probability; list every observed category",
+                        labels[i], counts[i]
+                    ),
+                });
+            }
+        }
+    }
+    Ok((labels, counts, missing, aligned))
 }
 
 /// Run chi-squared goodness-of-fit test on a dataset column.
 ///
-/// Counts occurrences of each unique value and tests against expected probabilities.
+/// Counts the column's categories (missing values dropped, R `factor()` order; see
+/// [`run_chisq_gof_with`]) and tests them against `probs`, one probability per category
+/// in that order, or the uniform distribution.
 ///
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
 /// * `column` - Column name containing categorical values
-/// * `probs` - Optional expected probabilities (uniform if None)
+/// * `probs` - Optional expected probabilities in category order (uniform if None)
 ///
 /// # Example
 ///
@@ -668,62 +799,8 @@ pub fn run_chisq_gof(
     column: &str,
     probs: Option<&[f64]>,
 ) -> EconResult<ChiSquaredResult> {
-    use polars::prelude::*;
-
-    let df = dataset.df();
-
-    // Validate column exists
-    if df.column(column).is_err() {
-        return Err(EconError::ColumnNotFound {
-            column: column.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        });
-    }
-
-    // Use lazy frame for value_counts (via Expr, not Series method)
-    let lazy = df.clone().lazy();
-
-    let result = lazy
-        .select([col(column).value_counts(true, true, "count", false)])
-        .collect()
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Failed to get value counts: {}", e),
-        })?;
-
-    // The result is a struct column, we need to unnest it
-    let unnested = result
-        .unnest([column], None)
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Failed to unnest value counts: {}", e),
-        })?;
-
-    // Extract counts as f64 vector
-    let count_col = unnested
-        .column("count")
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Failed to get count column: {}", e),
-        })?;
-
-    let count_f64 =
-        count_col
-            .cast(&DataType::Float64)
-            .map_err(|e| EconError::InvalidSpecification {
-                message: format!("Failed to cast count column to f64: {}", e),
-            })?;
-
-    let observed: Vec<f64> = count_f64
-        .f64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: "Failed to convert count column to f64".to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    chisq_test_gof(&observed, probs, false)
+    let expected = probs.map_or(GofExpected::Uniform, |p| GofExpected::Probs(p.to_vec()));
+    run_chisq_gof_with(dataset, column, &expected, false)
 }
 
 /// Run chi-squared test of independence on two dataset columns.
@@ -1265,5 +1342,183 @@ mod tests {
         // Single row
         let result = chisq_test_independence(&[vec![10.0, 20.0]], false);
         assert!(result.is_err());
+    }
+
+    fn named(v: &[(&str, f64)]) -> GofExpected {
+        GofExpected::Named(v.iter().map(|(k, p)| (k.to_string(), *p)).collect())
+    }
+
+    #[test]
+    fn test_validate_chisq_gof() {
+        // R (case stat_chisq_gof, cat = a x5, b x30, c x15 plus 2 NA): chisq.test(table(cat))
+        // 19.000000000000004, df 2, p 7.485182988770046e-05; p = c(.1, .6, .3) in level order
+        // -> 0, p 1, expected [5, 30, 15]; p = c(.2, .5, .3) -> 3.5, p 0.17377394345044514;
+        // named map with an unobserved "d" (.1, .5, .3, .1) -> 6, df 3, p 0.11161022509471258.
+        // Fails before: value_counts counts the null (uniform: 36.769, df 3) and orders by
+        // frequency (probs: "length (3) must match observed length (4)", or 139.17 on
+        // complete rows; STAT-3).
+        let (case, ds) = crate::test_support::load_case("stat_chisq_gof");
+        let uni = run_chisq_gof(&ds, "cat", None).unwrap();
+        let p1 = run_chisq_gof(&ds, "cat", Some(&[0.1, 0.6, 0.3][..])).unwrap();
+        let p2 = run_chisq_gof_with(&ds, "cat", &GofExpected::Probs(vec![0.2, 0.5, 0.3]), false)
+            .unwrap();
+        let n1 = run_chisq_gof_with(
+            &ds,
+            "cat",
+            &named(&[("c", 0.3), ("a", 0.1), ("b", 0.6)]),
+            false,
+        )
+        .unwrap();
+        let n4 = run_chisq_gof_with(
+            &ds,
+            "cat",
+            &named(&[("a", 0.1), ("b", 0.5), ("c", 0.3), ("d", 0.1)]),
+            false,
+        )
+        .unwrap();
+        let r4 = run_chisq_gof_with(
+            &ds,
+            "cat",
+            &named(&[("a", 1.0), ("b", 5.0), ("c", 3.0), ("d", 1.0)]),
+            true,
+        )
+        .unwrap();
+        let die = chisq_test_gof(&case.vector("die_observed"), None, false).unwrap();
+        Check::new(&case)
+            .scalar("uniform_chisq", uni.statistic, Tol::stat(50))
+            .scalar("uniform_df", uni.df as f64, Tol::exact())
+            .scalar("uniform_p", uni.p_value, Tol::p_value(50))
+            .vector("observed", &uni.observed, Tol::exact())
+            .scalar("n_used", uni.missing.n_used as f64, Tol::exact())
+            .scalar("p1_chisq", p1.statistic, Tol::stat(50))
+            .scalar("p1_p", p1.p_value, Tol::p_value(50))
+            .vector("p1_expected", &p1.expected, Tol::stat(50))
+            .scalar("p1_chisq", n1.statistic, Tol::stat(50))
+            .vector("p1_expected", &n1.expected, Tol::stat(50))
+            .scalar("p2_chisq", p2.statistic, Tol::stat(50))
+            .scalar("p2_p", p2.p_value, Tol::p_value(50))
+            .vector("p2_expected", &p2.expected, Tol::stat(50))
+            .vector("p2_residuals", &p2.residuals, Tol::stat(50))
+            .scalar("named4_chisq", n4.statistic, Tol::stat(50))
+            .scalar("named4_df", n4.df as f64, Tol::exact())
+            .scalar("named4_p", n4.p_value, Tol::p_value(50))
+            .vector("named4_observed", &n4.observed, Tol::exact())
+            .vector("named4_expected", &n4.expected, Tol::stat(50))
+            .vector("named4_residuals", &n4.residuals, Tol::stat(50))
+            .scalar("named4_chisq", r4.statistic, Tol::stat(50))
+            .scalar("named4_p", r4.p_value, Tol::p_value(50))
+            .scalar("die_chisq", die.statistic, Tol::stat(50))
+            .scalar("die_df", die.df as f64, Tol::exact())
+            .scalar("die_p", die.p_value, Tol::p_value(50))
+            .finish();
+        assert_eq!(uni.row_labels.clone().unwrap(), ["a", "b", "c"]);
+        assert_eq!(n1.row_labels.clone().unwrap(), ["a", "b", "c"]);
+        assert_eq!(n4.row_labels.clone().unwrap(), ["a", "b", "c", "d"]);
+        assert_eq!(uni.missing.by_column, vec![("cat".to_string(), 2)]);
+        assert!(uni.warnings.is_empty() && n4.warnings.is_empty()); // R warns for neither
+    }
+
+    #[test]
+    fn test_validate_chisq_gof_na_codes() {
+        // R: chisq.test(table(h)) after dropping 3 NA: observed [4, 5], 0.1111111111111111,
+        // df 1, p 0.7388826803635273 (with R's warning). Fails before: the null is a third
+        // category, 0.5, df 2.
+        let (case, ds) = crate::test_support::load_case("stat_contingency_na_codes");
+        let r = run_chisq_gof(&ds, "h", None).unwrap();
+        Check::new(&case)
+            .scalar("h_gof_chisq", r.statistic, Tol::stat(9))
+            .scalar("h_gof_df", r.df as f64, Tol::exact())
+            .scalar("h_gof_p", r.p_value, Tol::p_value(9))
+            .vector("h_gof_observed", &r.observed, Tol::exact())
+            .finish();
+        assert_eq!(r.row_labels.unwrap(), ["u", "v"]);
+        assert!(r.warnings.iter().any(|w| w.starts_with(R_WARNING)));
+    }
+
+    #[test]
+    fn test_validate_chisq_gof_errors() {
+        // The order is part of the message, so a caller can fix probs (STAT-3, TOOL-33); R's
+        // sum rule is sqrt(eps).
+        let (_case, ds) = crate::test_support::load_case("stat_chisq_gof");
+        let e = run_chisq_gof(&ds, "cat", Some(&[0.25, 0.25, 0.25, 0.25][..]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("[a, b, c]") && e.contains("4"), "{e}");
+        let e = run_chisq_gof_with(&ds, "cat", &named(&[("a", 0.5), ("c", 0.5)]), false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("'b'") && e.contains("30"), "{e}"); // observed category without p
+        assert!(
+            run_chisq_gof_with(
+                &ds,
+                "cat",
+                &named(&[("a", 0.1), ("b", 0.6), ("c", 0.3 + 2e-8)]),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            run_chisq_gof_with(
+                &ds,
+                "cat",
+                &named(&[("a", 0.1), ("b", 0.6), ("c", 0.3), ("a", 0.0)]),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            run_chisq_gof_with(
+                &ds,
+                "cat",
+                &named(&[("a", -0.1), ("b", 0.8), ("c", 0.3)]),
+                false
+            )
+            .is_err()
+        );
+        assert!(run_chisq_gof_with(&ds, "cat", &GofExpected::Named(vec![]), false).is_err());
+        assert!(matches!(
+            run_chisq_gof(&ds, "nope", None),
+            Err(EconError::ColumnNotFound { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_run_chisq_gof_inside_tokio_runtime() {
+        // STAT-10 (third lazy site): run_chisq_gof called value_counts through the lazy engine.
+        // 1000 control and 1000 treated rows: uniform X2 = 0, df 1, p 1 (case
+        // stat_fisher_rows_2000's table).
+        let (_case, ds) = crate::test_support::load_case("stat_fisher_rows_2000");
+        let r = run_chisq_gof(&ds, "treat", None).unwrap();
+        assert_eq!((r.statistic, r.df, r.p_value), (0.0, 1, 1.0));
+        assert_eq!(r.row_labels.unwrap(), ["control", "treated"]);
+    }
+
+    #[test]
+    fn test_chisq_gof_named_matches_numeric_categories_by_value() {
+        // A numeric column: "2.0" names the level "2", a key given twice by value is refused,
+        // and an unobserved face counts 0 (R: chisq.test(table(factor(code, levels = c(2, 10,
+        // 33))), p = c(.5, .4, .1))).
+        let (_case, ds) = crate::test_support::load_case("stat_contingency_na_codes");
+        let r = run_chisq_gof_with(
+            &ds,
+            "code",
+            &named(&[("2.0", 0.5), ("10", 0.4), ("33", 0.1)]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(r.row_labels.clone().unwrap(), ["2", "10", "33"]);
+        assert_eq!(r.observed, [6.0, 5.0, 0.0]);
+        for (e, want) in r.expected.iter().zip([5.5, 4.4, 1.1]) {
+            assert!((e - want).abs() < 1e-12, "{:?}", r.expected);
+        }
+        let e = run_chisq_gof_with(
+            &ds,
+            "code",
+            &named(&[("2", 0.5), ("2.0", 0.1), ("10", 0.4)]),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("'2'") && e.contains("twice"), "{e}");
     }
 }

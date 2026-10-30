@@ -42,6 +42,24 @@
       "supersedes_legacy": []
     },
     {
+      "id": "chisq_gof",
+      "name": "Chi-squared goodness of fit (sorted, named and rescaled probabilities)",
+      "category": "stats",
+      "reference": "stats::chisq.test(table(x), p =, rescale.p =)",
+      "doc": "validation/stats/chisq.md",
+      "cases": ["stat_chisq_gof", "stat_contingency_na_codes", "stat_fisher_rows_2000"],
+      "tests": [
+        "p2a-core::stats::chisq::tests::test_validate_chisq_gof",
+        "p2a-core::stats::chisq::tests::test_validate_chisq_gof_na_codes",
+        "p2a-core::stats::chisq::tests::test_validate_chisq_gof_errors",
+        "p2a-core::stats::chisq::tests::test_validate_run_chisq_gof_inside_tokio_runtime"
+      ],
+      "quantities": ["X-squared", "df", "p", "observed", "expected", "Pearson residuals", "category order", "small-expected warning"],
+      "tolerance": "validation/README.md statistic and p-value rows (n = 9 to 60: 1e-5 relative)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "chisq_independence",
       "name": "Chi-squared test of independence (Yates for 2 x 2)",
       "category": "stats",
