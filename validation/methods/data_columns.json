@@ -16,7 +16,12 @@
         "p2a-core::data::columns::tests::test_validate_columns_errors_name_the_column",
         "p2a-core::data::columns::tests::test_validate_columns_matrix_and_summary",
         "p2a-core::data::columns::tests::test_validate_columns_level_order",
-        "p2a-core::data::columns::tests::test_validate_columns_duplicate_names"
+        "p2a-core::data::columns::tests::test_validate_columns_duplicate_names",
+        "p2a-mcp::tools::common::tests::test_validate_mcp_legacy_helpers_refuse_text",
+        "p2a-mcp::tools::common::tests::test_validate_mcp_numeric_column_omit_and_fail",
+        "p2a-mcp::tools::common::tests::test_validate_mcp_numeric_columns_int64_and_text",
+        "p2a-mcp::tools::common::tests::test_validate_mcp_numeric_matrix_dims_repeats_and_ceiling",
+        "p2a-mcp::tools::common::tests::test_validate_mcp_missing_note_and_json"
       ],
       "quantities": ["complete-case rows", "rows dropped per column", "factor level order (numeric; C-locale text)", "factor codes (all rows and kept rows)", "logical as 0/1", "mean on complete rows"],
       "tolerance": "exact for rows, counts and codes; 1e-14 relative for the mean of 6 values",
