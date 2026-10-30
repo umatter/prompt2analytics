@@ -40,7 +40,8 @@ With `m = a + c`, `n = b + d`, `k = a + b` and `x = a`, the top-left cell ranges
 `lo = max(0, k - n) ..= hi = min(k, m)`. For an odds ratio `psi` its distribution is
 `P(X = s) ∝ C(m, s) C(n, k - s) psi^s` (R's `dnhyper`), computed in log space
 (`ln C` from `statrs::function::factorial::ln_binomial`, shifted by the maximum before
-`exp`), so no table is too large for the p-value.
+`exp`), so no table overflows (for the precision of very large tables, see "Known
+differences").
 
 - Two-sided p: the sum of `P(X = s)` over the support points with
   `P(X = s) <= P(X = x) (1 + 1e-7)` (R's `relErr`), at most 1.
@@ -166,6 +167,13 @@ R's printed "odds ratio 1530.9" is the imprecise `uniroot` solution of the condi
 3. The levels are those of the kept rows (see "Data, missing values and level order").
 4. `odds_ratio` is still the sample odds ratio; the conditional MLE, which R reports as the
    estimate, is `conditional_mle`.
+5. Very large tables lose precision. The log weights are differences of `ln_binomial` values
+   (`statrs`' `ln_gamma`), which cancel, so their relative error is of order
+   `N ln N × 1e-16` for `N = a + b + c + d`: about 3e-9 at `N = 1e6`, 5e-6 at `N = 1e9` and a
+   few percent at `N = 1e12`. R's `dhyper` computes the weights with `dbinom_raw` (`stirlerr`
+   and `bd0`) and stays accurate there. No pinned case is affected (`N <= 4000`);
+   `test_fisher_one_sided_p_does_not_walk_below_the_support` is the `N = 1e12` example, and
+   needs an absolute tolerance of 0.05 on its one-sided p-value.
 
 ## Performance
 
