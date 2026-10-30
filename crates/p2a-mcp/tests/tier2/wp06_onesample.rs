@@ -138,3 +138,50 @@ async fn test_validate_mcp_hypothesis_pairwise_t_test() {
         )
         .finish();
 }
+
+#[tokio::test]
+async fn test_validate_mcp_multivariate_mahalanobis() {
+    let case = Case::load("stat_pairwise_mahalanobis_na");
+    let (session, server) = session_with("stat_pairwise_mahalanobis_na");
+    let v = json_of(
+        &call(
+            &server,
+            &session,
+            "multivariate_mahalanobis",
+            json!({"dataset": "pairwise_mahalanobis_na", "columns": ["a", "b"]}),
+        )
+        .await,
+    );
+    let parsed = |s: &Value| -> f64 {
+        let text = s.as_str().unwrap_or_else(|| panic!("not a string: {s}"));
+        text.parse()
+            .unwrap_or_else(|e| panic!("{text:?} is not a number: {e}"))
+    };
+    let center: Vec<f64> = v["center"].as_array().unwrap().iter().map(f).collect();
+    let first: Vec<f64> = v["first_10_distances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| parsed(&d["distance_squared"]))
+        .collect();
+    let r_dist = case.vector("mahalanobis_complete");
+    let r_mean = r_dist.iter().sum::<f64>() / r_dist.len() as f64;
+    let mut check = Check::new(&case);
+    check
+        .scalar("n_complete", f(&v["n_obs"]), Tol::exact())
+        .named("mahalanobis_center", &["a", "b"], &center, Tol::coef(29));
+    assert_eq!(first.len(), 10);
+    for (i, d) in first.iter().enumerate() {
+        assert!(
+            Tol::printed(4).allows(*d, r_dist[i]),
+            "first_10_distances[{i}]: {d} vs R {}",
+            r_dist[i]
+        );
+    }
+    let mean = parsed(&v["summary"]["mean_distance"]);
+    assert!(
+        Tol::printed(4).allows(mean, r_mean),
+        "mean_distance {mean} vs R {r_mean}"
+    );
+    check.finish();
+}
