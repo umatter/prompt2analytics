@@ -79,6 +79,45 @@ cat("lm():   slope =", coef(fit_lm)[2], "\n")
 # line() slope will be closer to 2.0
 ```
 
+## Missing and Non-finite Values (REG-13)
+
+`line()` deletes the pairs with a missing (NaN) or infinite x or y before the fit and
+reports them in `LineResult::missing` (`by_column` names `x` and `y`); `x`, `y`, `fitted`
+and `residuals` hold the kept pairs in input order. With fewer than 3 complete pairs it is
+an error. Sorting and medians use `f64::total_cmp`. Before, a NaN made the sort comparator
+inconsistent, which can panic since Rust 1.81, or gave meaningless coefficients. MCP
+`regression_line` and `p2a reg line` read x and y with the
+incomplete pairs dropped and report them (`missing` in JSON, a `Note:` line in the CLI
+text); the dataset paths refuse `±Inf` (`NonFiniteValues`) before `line()` is reached.
+
+R: case `reg_smoothers_na` of `validation/r/cases/regression_na.R`
+([source](../r/cases/regression_na.R)), 60 points (`set.seed(8)`) in
+`validation/datasets/generated/smoothers_na.csv` with x missing in rows 5 and 33 and y in
+rows 12 and 48. R's `line(x, y)` uses the 56 complete pairs (`n_complete`), and its
+coefficients on the NA data equal those on the complete pairs.
+
+Tests (registry entry `line_missing` in `validation/methods/regression_na.json`), exact:
+
+- `test_validate_reg_smoothers_na_fixture`: the dtypes and missing cells polars reads, 56
+  complete pairs, no tied x among them;
+- `test_validate_line_na`: `n` is R's `n_complete`; the fit on the NA data equals the fit
+  on the complete pairs; an infinite x is deleted too; too few complete pairs is an error;
+- `test_validate_mcp_regression_line_na`, `test_validate_cli_reg_line_na`: the same
+  through MCP and the CLI.
+
+### Known difference (REG-12)
+
+p2a's resistant line is a different variant of Tukey's line (the iteration count is off by
+one and the intercept comes from the middle group). On the 56 complete pairs R gives
+intercept 0.441594195008563728 and slope 0.053890384144849528; p2a gives
+-0.514777229630535849 and 0.062911296831234101 (equal to an R transcription of `line.rs`).
+The coefficients are a registry deviation until REG-12 (Tier 4) ports `tukeyline`.
+
+### Known difference: infinite values
+
+R's `line()` keeps `±Inf` (it deletes only `NA` pairs, `complete.cases`); p2a's array API
+deletes them, and the dataset paths refuse them.
+
 ## Numerical Precision Summary
 
 | Sample Size | Coefficient Tolerance |
