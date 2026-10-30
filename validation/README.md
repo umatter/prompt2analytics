@@ -100,12 +100,12 @@ looks like a validation failure but is not one.
 
 - **Harness** (`validation/r/harness.R` and `validation/r/cases/*.R`; the case files record
   the versions they were written with): jsonlite, plm, fixest, sandwich, lmtest, car, tseries,
-  quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv.
+  quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv, pscl.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
                      "quantreg", "nlme", "aod", "strucchange", "nnet", "MASS", "AER",
-                     "rdrobust", "forecast", "numDeriv"))
+                     "rdrobust", "forecast", "numDeriv", "pscl"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -277,10 +277,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Clustered SEs | [ols_clustered.md](regression/ols_clustered.md) | R-pinned |
 | HAC, Driscoll-Kraay, quantile regression, AR(1) GLS, RESET, Wald (legacy DGPs) | [regression_legacy_cases.md](regression/regression_legacy_cases.md) | R-pinned, known deviations (REG-22, REG-24, REG-26, REG-35, REG-37, REG-43, REG-50, REG-52, REG-61, REG-64, REG-9) |
 | Bootstrap covariance (vcovBS) | [vcovBS.md](regression/vcovBS.md) | not R-pinned |
-| LOESS | [loess.md](regression/loess.md) | not R-pinned |
+| LOESS | [loess.md](regression/loess.md) | R-pinned, known deviations (REG-14, REG-26) |
 | Nonlinear least squares | [nls.md](regression/nls.md) | not R-pinned |
-| Tukey's Resistant Line | [line.md](regression/line.md) | not R-pinned |
-| Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | not R-pinned |
+| Tukey's Resistant Line | [line.md](regression/line.md) | R-pinned, known deviations (REG-12) |
+| Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | R-pinned, known deviations (REG-31) |
 | Sensitivity Analysis (sensemakr) | [sensemakr.md](regression/sensemakr.md) | not R-pinned |
 | E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | not R-pinned |
 
@@ -294,7 +294,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Arellano-Bond / System GMM | [gmm.md](econometrics/gmm.md) | not R-pinned |
 | Panel GLS (pggls) | [pggls.md](econometrics/pggls.md) | not R-pinned |
 | FEGLM | [feglm.md](econometrics/feglm.md) | not R-pinned |
-| Multinomial and ordered logit/probit (Newton fit) | [discrete_newton.md](econometrics/discrete_newton.md) | R-pinned, known deviations (ECON-4, ECON-5) |
+| Multinomial and ordered logit/probit (Newton fit) | [discrete_newton.md](econometrics/discrete_newton.md) | R-pinned |
+| Ordered logit and probit (MASS::polr) | [ordered.md](econometrics/ordered.md) | R-pinned |
+| Negative binomial, zero-inflated Poisson and NB (MASS::glm.nb, pscl::zeroinfl) | [count_models.md](econometrics/count_models.md) | R-pinned, known deviations (ECON-64) |
+| Hurdle models (rows used) | [hurdle.md](econometrics/hurdle.md) | R-pinned, known deviations (ECON-16) |
 | IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | R-pinned |
 | Diff-in-Diff | [did.md](econometrics/did.md) | not R-pinned |
 | Staggered DiD (Callaway-Sant'Anna) | [staggered_did.md](econometrics/staggered_did.md) | R-pinned, known deviations (CAUS-84) |

@@ -8,7 +8,7 @@ datasets that R reference cases write (`validation/r/cases/*.R`).
 
 | File | Rows × columns | Used by | Source |
 |---|---|---|---|
-| `grunfeld.csv` | 200 × 5 (firm, year, inv, value, capital) | `ols_grunfeld`, `ols_diagnostics_grunfeld`, `panel_*_grunfeld`, `panel_hdfe_grunfeld`, `harness_selftest`, the CLI exhibit tests and the paper's CLI captures | `plm::Grunfeld` |
+| `grunfeld.csv` | 200 × 5 (firm, year, inv, value, capital) | `ols_grunfeld`, `ols_diagnostics_grunfeld`, `panel_*_grunfeld`, `panel_hdfe_grunfeld`, `reg_cluster_na`, `harness_selftest`, the CLI exhibit tests and the paper's CLI captures | `plm::Grunfeld` |
 | `employee_training.csv` | 1200 × 9 (employee_id, time, post_training, training_group, department, tenure, years_since_hire, performance, bonus) | the paper's chat transcripts (`paper/transcripts/section4_3_*.txt` in the paper repo); no validation case reads it | synthetic DiD panel, added in commit 4dd2c53; its generator is not in this repository |
 | `gdp_quarterly.csv` | 280 × 4 (date, year, quarter, gdp_growth) | the paper's time-series chat example (`paper/transcripts/section4_4_*.txt` in the paper repo); no validation case reads it | synthetic (see below) |
 
@@ -113,6 +113,11 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/arima_series.csv` | 300 × 10 (t, a, c, m, b, dr, ai, a_na, ai_na, lab) | `arima_css_forecast`, `arima_fixed_forecast`, `ts_granger_int` | `r/cases/forecasting_arima.R` | seed 20261021; a AR(1) around 100, c random walk, m ARMA(1,1) around 20, b AR(2), dr drift + MA(1) in differences; ai = round(10 a) (Int64); a_na, ai_na missing at rows 150-151; lab text |
 | `generated/causal_na.csv` | 400 × 8 (id, y, d, m, x1, x2, d_na, d_txt) | `causal_mediation_na` | `r/cases/causal_mediation_na.R` | seed 20261021; empty fields for NA (15 in y, 25 in m, 10 in x1, 6 in d_na); integer d, d_na and id; text d_txt |
 | `generated/cs_panel.csv` | 720 × 4 (unit, time, first_treat, y) | `did_cs_analytic` | `r/cases/causal_did.R` | seed 20261021, 90 units x 8 periods, cohorts 3/5/7/never, AR(1) errors |
+| `generated/grunfeld_cluster_na.csv` | 200 × 7 (firm, year, firm_label, year_na, inv, value, capital) | `reg_cluster_na` | `r/cases/regression_na.R` | `grunfeld.csv` with `firm_label` (`firm_01` ... `firm_10`) missing in rows 3, 44, 101 and `year_na` (the year) missing in rows 10, 190 |
+| `generated/smoothers_na.csv` | 60 × 3 (id, x, y) | `reg_smoothers_na` | `r/cases/regression_na.R` | seed 8; x ~ U(0, 10), y = sin(x) + 0.1 x + N(0, 0.3²), rounded to 4 decimals; x missing in rows 5, 33 and y in rows 12, 48 |
+| `generated/ordered.csv` | 400 × 7 (y, y_label, x1, x2, y_wide, y_na, x1_na) | `disc_ordered` | `r/cases/discrete.R` | seed 2026, 3 ordered categories, 13-level y_wide, 7 incomplete rows |
+| `generated/negbin.csv` | 400 × 5 (y, x1, x2, y_na, x1_na) | `disc_negbin` | `r/cases/discrete.R` | seed 404, NB2 with size 1.8, 5 incomplete rows |
+| `generated/zeroinfl.csv` | 500 × 6 (y, y_nb, x1, x2, y_na, x2_na) | `disc_zeroinfl` | `r/cases/discrete.R` | seed 808, zero-inflated Poisson and NB, 5 incomplete rows |
 
 ## Adding a dataset
 
