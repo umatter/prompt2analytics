@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "stat_chisq_small_expected",
+  "area": "stats/contingency",
+  "method": "Chi-squared independence with expected counts below 5",
+  "reference": "stats::chisq.test (warning when any expected count < 5)",
+  "call": "chisq.test(table(x, y))",
+  "dataset": "validation/datasets/generated/chisq_small_expected.csv",
+  "datasets": ["validation/datasets/generated/chisq_small_expected.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "chisq": 1.9345238095238098,
+    "df": 2,
+    "p": 0.38012242588687084,
+    "min_expected": 1.3846153846153846,
+    "warned": 1,
+    "observed": [4, 2, 1, 3, 1, 2],
+    "expected": [2.7692307692307692, 3.2307692307692308, 1.8461538461538463, 2.1538461538461537, 1.3846153846153846, 1.6153846153846154],
+    "residuals": [0.73960026163363879, -0.68473678801746063, -0.62275236877952778, 0.5765566601970552, -0.32686022523030667, 0.30261376633440118],
+    "stdres": [1.3735433430339008, -1.3735433430339008, -1.0199725071510093, 1.0199725071510093, -0.50787450018336999, 0.50787450018336999]
+  }
+}
