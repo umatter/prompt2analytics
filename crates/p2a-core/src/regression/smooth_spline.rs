@@ -11,6 +11,7 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/smooth.spline.html>
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use serde::{Deserialize, Serialize};
@@ -232,53 +233,27 @@ pub fn smooth_spline_predict(result: &SmoothSplineResult, xnew: &[f64]) -> EconR
 }
 
 /// Convenience function to run smooth.spline on a Dataset.
+///
+/// A missing x or y is an `EconError::NullValues` naming the column, as R's
+/// `smooth.spline` refuses missing values; integer columns are numbers.
 pub fn run_smooth_spline(
     dataset: &Dataset,
     x_col: &str,
     y_col: &str,
     df: Option<f64>,
 ) -> EconResult<SmoothSplineResult> {
-    let df_data = dataset.df();
-    let available: Vec<String> = df_data
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    let x_series = df_data
-        .column(x_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: x_col.to_string(),
-            available: available.clone(),
-        })?;
-    let y_series = df_data
-        .column(y_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: available.clone(),
-        })?;
-
-    let x: Vec<f64> = x_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: x_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-    let y: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
+    // R's smooth.spline refuses missing or infinite values: so does this.
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(x_col)
+        .numeric(y_col)
+        .na(NaPolicy::Fail)
+        .extract()?;
     let config = match df {
         Some(d) => SmoothSplineConfig::with_df(d),
         None => SmoothSplineConfig::with_cv(true),
     };
 
-    smooth_spline(&x, &y, config)
+    smooth_spline(cols.numeric(x_col), cols.numeric(y_col), config)
 }
 
 // ========== Internal helper functions ==========
@@ -1122,5 +1097,37 @@ mod tests {
                 -1.4014086129325052,
             ],
         );
+    }
+
+    /// REG-25: run_smooth_spline refuses missing values as R's smooth.spline does
+    /// ("missing or infinite values in inputs are not allowed") and accepts Int64.
+    #[test]
+    fn test_validate_na_smooth_spline_columns() {
+        use crate::regression::ols::na_fixtures::as_float;
+        let (_c, mt) = crate::test_support::load_case("ols_mtcars");
+        // x = hp is Int64, with ties
+        let a = run_smooth_spline(&mt, "hp", "mpg", Some(4.0)).unwrap();
+        let b = run_smooth_spline(&as_float(&mt, "hp"), "hp", "mpg", Some(4.0)).unwrap();
+        assert_eq!(
+            (a.n_obs, &a.x, &a.y, a.df, a.lambda),
+            (32, &b.x, &b.y, b.df, b.lambda)
+        );
+        let (_c, sm) = crate::test_support::load_case("reg_smoothers_na");
+        for (x, y, column) in [("x", "y", "x"), ("id", "y", "y")] {
+            match run_smooth_spline(&sm, x, y, None) {
+                Err(EconError::NullValues { column: c, count }) => {
+                    assert_eq!((c.as_str(), count), (column, 2))
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(matches!(
+            run_smooth_spline(&mt, "model", "mpg", None),
+            Err(EconError::NonNumericColumn { .. })
+        ));
+        assert!(matches!(
+            run_smooth_spline(&mt, "nope", "mpg", None),
+            Err(EconError::ColumnNotFound { .. })
+        ));
     }
 }

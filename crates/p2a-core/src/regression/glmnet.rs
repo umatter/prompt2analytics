@@ -46,6 +46,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, econ_error_from_design, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::DesignMatrix;
 use crate::resource;
@@ -602,24 +603,14 @@ pub fn glmnet(
     })
 }
 
-/// Extract a numeric column from a DataFrame as Array1<f64>
+/// A numeric column as `Array1<f64>`; a missing value is an error, as in R's glmnet.
 fn extract_column(df: &DataFrame, col_name: &str) -> EconResult<Array1<f64>> {
-    let series = df
-        .column(col_name)
-        .map_err(|_| EconError::Computation(format!("Column '{}' not found", col_name)))?;
-
-    let values: Vec<f64> = series
-        .cast(&DataType::Float64)
-        .map_err(|_| EconError::Computation(format!("Column '{}' is not numeric", col_name)))?
-        .f64()
-        .map_err(|_| EconError::Computation(format!("Could not convert '{}' to f64", col_name)))?
-        .into_no_null_iter()
-        .collect();
-
+    let (values, _) = numeric_column(df, col_name, NaPolicy::Fail)?;
     Ok(Array1::from_vec(values))
 }
 
-/// Fit glmnet model from Dataset
+/// Fit glmnet model from Dataset. A missing value in y or X is an `EconError::NullValues`
+/// naming the column (R's glmnet stops); integer columns are numbers.
 pub fn run_glmnet(
     dataset: &Dataset,
     y_col: &str,
@@ -627,9 +618,11 @@ pub fn run_glmnet(
     config: &GlmnetConfig,
 ) -> EconResult<GlmnetResult> {
     // Build design matrix (without intercept - handled internally)
-    let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
+    let df = dataset.df();
+    let dm = DesignMatrix::from_dataframe(df, x_cols, false)
+        .map_err(|e| econ_error_from_design(e, df))?;
     let x = dm.data.view();
-    let y = extract_column(dataset.df(), y_col)?;
+    let y = extract_column(df, y_col)?;
 
     let mut result = glmnet(x, y.view(), config)?;
 
@@ -777,7 +770,7 @@ pub fn cv_glmnet(
     })
 }
 
-/// Run cross-validated glmnet from Dataset
+/// Run cross-validated glmnet from Dataset (missing values refused as in [`run_glmnet`]).
 pub fn run_cv_glmnet(
     dataset: &Dataset,
     y_col: &str,
@@ -786,9 +779,11 @@ pub fn run_cv_glmnet(
     nfolds: usize,
     seed: Option<u64>,
 ) -> EconResult<GlmnetCvResult> {
-    let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
+    let df = dataset.df();
+    let dm = DesignMatrix::from_dataframe(df, x_cols, false)
+        .map_err(|e| econ_error_from_design(e, df))?;
     let x = dm.data.view();
-    let y = extract_column(dataset.df(), y_col)?;
+    let y = extract_column(df, y_col)?;
 
     let mut result = cv_glmnet(x, y.view(), config, nfolds, seed)?;
 
@@ -1274,6 +1269,45 @@ mod tests {
                 0.11309988200086778,
                 39.7064688694004,
             ],
+        );
+    }
+
+    /// REG-25: the glmnet wrappers refuse a missing y as R's glmnet does (it stops), and
+    /// a text y is not numeric (it used to become zeros); an Int64 y is a number.
+    #[test]
+    fn test_validate_na_glmnet_columns() {
+        use crate::regression::ols::na_fixtures::as_float;
+        let cfg = GlmnetConfig::default();
+        let (_c, sm) = crate::test_support::load_case("reg_smoothers_na");
+        let null_y = |r: EconResult<()>| match r {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("y", 2))
+            }
+            other => panic!("{other:?}"),
+        };
+        null_y(run_glmnet(&sm, "y", &["id"], &cfg).map(|_| ()));
+        null_y(run_cv_glmnet(&sm, "y", &["id"], &cfg, 5, Some(1)).map(|_| ()));
+        null_y(run_ridge(&sm, "y", &["id"], None).map(|_| ()));
+        null_y(run_lasso(&sm, "y", &["id"], None).map(|_| ()));
+        let (_c, mt) = crate::test_support::load_case("ols_mtcars");
+        match run_glmnet(&mt, "model", &["wt", "disp"], &cfg) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "model"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            run_glmnet(&mt, "nope", &["wt", "disp"], &cfg),
+            Err(EconError::ColumnNotFound { .. })
+        ));
+        assert!(matches!(
+            run_glmnet(&mt, "hp", &["wt", "nope"], &cfg),
+            Err(EconError::ColumnNotFound { .. })
+        ));
+        let a = run_glmnet(&mt, "hp", &["wt", "disp"], &cfg).unwrap();
+        let b = run_glmnet(&as_float(&mt, "hp"), "hp", &["wt", "disp"], &cfg).unwrap();
+        let (fa, fb) = (a.fits.last().unwrap(), b.fits.last().unwrap());
+        assert_eq!(
+            (&a.lambda, fa.intercept, &fa.coefficients),
+            (&b.lambda, fb.intercept, &fb.coefficients)
         );
     }
 }

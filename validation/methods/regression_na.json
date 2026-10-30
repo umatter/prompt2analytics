@@ -55,6 +55,47 @@
       "supersedes_legacy": []
     },
     {
+      "id": "regression_wrappers_columns",
+      "name": "Integer columns and missing values in run_loess, quantreg, run_smooth_spline, glmnet and the MCP GLS y",
+      "category": "regression",
+      "reference": "loess and quantreg::rq (na.action = na.omit); smooth.spline, glmnet and nlme::gls stop on NA",
+      "doc": "validation/regression/loess.md",
+      "cases": [
+        "ols_mtcars",
+        "reg_smoothers_na"
+      ],
+      "tests": [
+        "p2a-core::regression::loess::tests::test_validate_na_loess_columns",
+        "p2a-core::regression::quantreg::tests::test_validate_na_quantreg_columns",
+        "p2a-core::regression::smooth_spline::tests::test_validate_na_smooth_spline_columns",
+        "p2a-core::regression::glmnet::tests::test_validate_na_glmnet_columns"
+      ],
+      "quantities": [
+        "Int64 = Float64",
+        "Omit = the same function on the complete rows (56 of 60) with the reported counts",
+        "Fail = NullValues naming the column"
+      ],
+      "tolerance": "exact",
+      "deviations": [
+        {
+          "finding": "REG-14",
+          "quantity": "loess fitted values",
+          "note": "not R-pinned (REG-14, REG-45: neighbourhood and span differ from R, Tier 4)"
+        },
+        {
+          "finding": "REG-26",
+          "quantity": "quantreg SEs",
+          "note": "not R-pinned (Tier 4)"
+        },
+        {
+          "finding": "REG-29",
+          "quantity": "smooth.spline fit",
+          "note": "not R-pinned (REG-29, REG-30, Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
       "id": "line_missing",
       "name": "Tukey's resistant line on data with missing values (incomplete pairs deleted)",
       "category": "regression",
