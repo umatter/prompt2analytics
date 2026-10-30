@@ -2755,13 +2755,13 @@ mod tests {
         assert!(r.converged, "{r}");
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         assert!(r.iterations <= 10, "{} rounds: {r}", r.iterations);
-        let theta = 149.63812578340671;
-        let se_theta = 161.13931481604541;
+        let theta = 149.6381257834067;
+        let se_theta = 161.1393148160454;
         let coef = [
-            0.29211443006113891,
+            0.2921144300611389,
             0.20206724123943764,
             0.0015081929875445312,
-            0.0059562768475432707,
+            0.005956276847543271,
         ];
         let close = |a: f64, b: f64, tol: f64| (a - b).abs() <= tol * b.abs();
         assert!(close(r.theta, theta, 1e-6), "theta {} vs {theta}", r.theta);
