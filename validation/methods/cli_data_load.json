@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "cli_data_load_na_strings",
+      "name": "p2a data load: missing-value strings (default NA and empty; --na-strings)",
+      "category": "data",
+      "reference": "utils::read.csv(na.strings = c('NA', '')) on the columns_conventions case file; its 'NA'- and '.'-coded copies read with read.csv() and read.csv(na.strings = '.'), and the '.'-coded copy with read.csv(), in the case cli_na_strings (R 4.3.3)",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": ["columns_conventions", "cli_na_strings"],
+      "tests": ["p2a-cli::tier2::wp03_flags::test_validate_cli_data_load_na_strings"],
+      "quantities": ["missing cells per column", "complete rows", "rows dropped", "column classes (integer, numeric, character, logical)", "identical() to the case file"],
+      "tolerance": "exact (positions, counts, class codes, identical as 0/1)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

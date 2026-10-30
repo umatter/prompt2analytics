@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "id": "cli_na_strings",
+  "area": "data/na_strings",
+  "method": "read.csv na.strings on NA- and .-coded copies of a CSV",
+  "reference": "utils::read.csv (default na.strings = \"NA\"; na.strings = \".\") on NA- and .-coded copies of the case file; identical() to read.csv(case file, na.strings = c(\"NA\", \"\"))",
+  "call": "read.csv(na_file); read.csv(dot_file, na.strings = \".\"); read.csv(dot_file)",
+  "dataset": "validation/datasets/generated/columns_conventions.csv",
+  "datasets": ["validation/datasets/generated/columns_conventions.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "canon_class": {
+      "names": ["id", "y", "n", "s", "flag"],
+      "values": [0, 1, 0, 2, 3]
+    },
+    "na_class": {
+      "names": ["id", "y", "n", "s", "flag"],
+      "values": [0, 1, 0, 2, 3]
+    },
+    "dot_class": {
+      "names": ["id", "y", "n", "s", "flag"],
+      "values": [0, 1, 0, 2, 3]
+    },
+    "raw_class": {
+      "names": ["id", "y", "n", "s", "flag"],
+      "values": [0, 2, 2, 2, 2]
+    },
+    "canon_missing": {
+      "names": ["id", "y", "n", "s", "flag"],
+      "values": [0, 2, 1, 1, 1]
+    },
+    "na_missing": {
+      "names": ["id", "y", "n", "s", "flag"],
+      "values": [0, 2, 1, 1, 1]
+    },
+    "dot_missing": {
+      "names": ["id", "y", "n", "s", "flag"],
+      "values": [0, 2, 1, 1, 1]
+    },
+    "raw_missing": {
+      "names": ["id", "y", "n", "s", "flag"],
+      "values": [0, 0, 0, 0, 0]
+    },
+    "na_identical": 1,
+    "dot_identical": 1
+  }
+}

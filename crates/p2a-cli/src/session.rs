@@ -22,6 +22,11 @@ pub struct DatasetMeta {
     pub columns: Vec<String>,
     /// When the dataset was loaded
     pub loaded_at: DateTime<Utc>,
+    /// Strings read as missing values when the CSV file was loaded (`data load
+    /// --na-strings`), used again on every reload; `None` means the loader's default
+    /// (`NA` and the empty field). Absent in older session files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub na_strings: Option<Vec<String>>,
 }
 
 /// A recorded command execution
@@ -125,10 +130,17 @@ impl Default for Session {
     }
 }
 
-/// Reload a dataset from its source file
+/// Reload a dataset from its source file, with the missing-value strings it was
+/// loaded with
 fn reload_dataset(meta: &DatasetMeta) -> anyhow::Result<Dataset> {
     let df = match meta.format.as_str() {
-        "csv" => DataLoader::load_csv(&meta.source_path)?,
+        "csv" => match &meta.na_strings {
+            Some(na) => {
+                let na: Vec<&str> = na.iter().map(String::as_str).collect();
+                DataLoader::load_csv_with_na(&meta.source_path, &na)?
+            }
+            None => DataLoader::load_csv(&meta.source_path)?,
+        },
         "parquet" => DataLoader::load_parquet(&meta.source_path)?,
         "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(&meta.source_path, None)?,
         "dta" => DataLoader::load_stata(&meta.source_path)?,
@@ -259,13 +271,16 @@ impl SessionManager {
         self.command_start = None;
     }
 
-    /// Register a loaded dataset
+    /// Register a loaded dataset; `na_strings` is the `--na-strings` list of a CSV
+    /// load (`None`: the loader's default), stored so that reloads read the file
+    /// the same way
     pub fn register_dataset(
         &mut self,
         name: &str,
         source_path: PathBuf,
         format: &str,
         dataset: &Dataset,
+        na_strings: Option<Vec<String>>,
     ) {
         let df = dataset.df();
         let meta = DatasetMeta {
@@ -279,6 +294,7 @@ impl SessionManager {
                 .map(|s| s.to_string())
                 .collect(),
             loaded_at: Utc::now(),
+            na_strings,
         };
         self.session.register_dataset(meta);
     }
@@ -341,5 +357,28 @@ impl DatasetStore {
 impl Default for DatasetStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod dataset_meta_tests {
+    use super::DatasetMeta;
+
+    #[test]
+    fn na_strings_round_trip_and_old_sessions_parse() {
+        let old = r#"{"name":"d","source_path":"d.csv","format":"csv","nrows":3,"columns":["x"],"loaded_at":"2026-01-01T00:00:00Z"}"#;
+        let meta: DatasetMeta = serde_json::from_str(old).unwrap();
+        assert_eq!(meta.na_strings, None);
+        assert!(!serde_json::to_string(&meta).unwrap().contains("na_strings"));
+        let with = DatasetMeta {
+            na_strings: Some(vec![".".into(), "NA".into()]),
+            ..meta
+        };
+        let back: DatasetMeta =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(
+            back.na_strings,
+            Some(vec![".".to_string(), "NA".to_string()])
+        );
     }
 }

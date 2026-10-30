@@ -12,19 +12,26 @@ cargo build --release -p p2a-cli
 ## Global Options
 
 ```
--o, --output <FORMAT>    Output format: text (default), json, table
+-F, --format <FORMAT>    Output format: text (default), json, table
 --session <FILE>         Record commands to session file for reproducibility
+--quiet                  Suppress non-essential output (progress spinners)
+--verbose                Log to stderr: info; repeat for debug (twice) and trace (three times)
+--max-memory <MB>        Memory limit in MB (0 = unlimited, the default); parsed, not yet enforced
 -h, --help               Print help
 -V, --version            Print version
 ```
+
+Global options can come before or after the subcommand; `-q` and `-v` are not global: inside
+subcommands they are the subcommand's own options (`ts arima -q` is the MA order,
+`panel unit-root -v` the variable).
 
 ## Commands
 
 ### Data Commands
 
 ```bash
-# Load a dataset
-p2a data load <PATH> [--name NAME] [--format FORMAT]
+# Load a dataset (CSV, Parquet, Excel, Stata, SAS; the format comes from the extension)
+p2a data load <PATH> [--name NAME] [--na-strings LIST]
 
 # List loaded datasets
 p2a data list
@@ -34,13 +41,31 @@ p2a data describe <DATASET>
 
 # Preview first N rows
 p2a data head <DATASET> [-n ROWS]
+
+# Save a dataset (the format comes from the extension unless --file-format is given;
+# both are case-insensitive)
+p2a data save <DATASET> --output <FILE> [--file-format csv|parquet|json]
 ```
+
+**Missing values in CSV files.** `data load` reads the field `NA` and the empty field as missing,
+as R's `read.csv(na.strings = c("NA", ""))` does. `--na-strings` replaces that list with its own,
+comma-separated (`--na-strings .` for a Stata or SAS export, `--na-strings NA,,.` for all three);
+an empty unquoted field is missing in every case. Write a marker that starts with `-` in the `=`
+form, `--na-strings=-99`. The list is stored in the session file, so later commands of the same
+session reload the file with the same markers. Other formats store missing values themselves:
+`--na-strings` on a Parquet, Excel, Stata or SAS file is an error.
 
 **Examples:**
 ```bash
 p2a --session analysis.json data load /data/panel.csv --name firms
 p2a --session analysis.json data describe firms
 p2a --session analysis.json data head firms -n 20
+
+# A CSV export that writes missing values as "."
+p2a --session analysis.json data load stata_export.csv --name survey --na-strings .
+
+# Save under a name without a known extension
+p2a --session analysis.json data save firms --output firms.dat --file-format csv
 ```
 
 ### Regression Commands
@@ -397,8 +422,16 @@ finite (an aliased regressor's `NaN`) are `null`.
 | `panel hdfe` | as `panel fe`, plus `fe_dimensions` (objects with `levels`, `name`, one per `--fe` column); `n_groups` is the number of levels of the first `--fe` column; `se_type` is `"HC1"` |
 | `panel hausman` | `chi2_statistic`, `df`, `p_value`, `recommendation`, `test`, `vcov_method`, `warnings` (always, possibly `[]`) |
 
-### Table (`--output table`)
-ASCII table format using tabled.
+### Table (`-F table`)
+Currently the text layout; a separate table rendering is not implemented yet.
+
+### Missing values in results
+A method that drops rows with missing values in the columns it uses reports them. Text and table
+output end with one line, `Note: 3 of 120 rows dropped because of missing values (y: 2, x1: 1)`
+(rows dropped, rows in the dataset, and the missing cells per column; a row missing in two columns
+counts in both). JSON output has the key `missing` instead,
+`{"n_total": 120, "n_used": 117, "n_dropped": 3, "by_column": {"y": 2, "x1": 1}}`. Neither appears
+when no row was dropped.
 
 ## Session Recording
 
@@ -419,6 +452,12 @@ p2a script export my_analysis.json -o my_analysis.sh
 
 The generated script can be shared and re-executed for reproducible results.
 
+What is recorded: each command from its subcommand on, as typed, without the global options
+before the subcommand and without `--session` (wherever it appears before a `--`). The exported
+script supplies its own session file, `p2a --session "$SESSION_FILE" <command>`. Global options
+typed after the subcommand (`-F json`, `--quiet`) are recorded and replayed. The commands
+`script`, `chat` and `smoke-test` are not recorded.
+
 ## Error Handling
 
 Errors are displayed with context:
@@ -428,7 +467,7 @@ Error: Column 'unknown' not found in dataset
 Error: Regression failed: Matrix is singular
 ```
 
-With `--output json`, errors are returned as JSON:
+With `-F json`, errors are written to stderr as JSON:
 ```json
 {"error": "Dataset 'missing' not found"}
 ```

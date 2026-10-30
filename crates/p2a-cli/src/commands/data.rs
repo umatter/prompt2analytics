@@ -20,6 +20,9 @@ EXAMPLES:
 
     # Load with custom name
     p2a --session s.json data load data/monthly.csv --name monthly_sales
+
+    # A CSV export that writes missing values as '.' (Stata, SAS)
+    p2a --session s.json data load stata_export.csv --name s --na-strings .
 ")]
     Load {
         /// Path to the data file (CSV, Parquet, Excel, Stata, SAS)
@@ -28,6 +31,13 @@ EXAMPLES:
         /// Name to assign to the dataset
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Strings read as missing values in a CSV file, comma-separated (e.g. "NA,,." = NA,
+        /// the empty field and "."). Replaces the default list, NA and the empty field (R
+        /// read.csv); an empty unquoted field is missing in every case. Use --na-strings=-99
+        /// for a marker that starts with '-'.
+        #[arg(long = "na-strings", value_delimiter = ',', value_name = "LIST")]
+        na_strings: Option<Vec<String>>,
     },
 
     /// List all loaded datasets
@@ -84,6 +94,9 @@ EXAMPLES:
 
     # Export to Parquet
     p2a --session s.json data save mydata --output results.parquet
+
+    # File format given explicitly
+    p2a --session s.json data save mydata --output results.dat --file-format csv
 ")]
     Save {
         /// Dataset name
@@ -93,9 +106,9 @@ EXAMPLES:
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Output format (csv, parquet, json) - overrides file extension
-        #[arg(short, long)]
-        format: Option<String>,
+        /// File format (csv, parquet, json; any case); overrides the file extension
+        #[arg(short = 'f', long, value_parser = ["csv", "parquet", "json"], ignore_case = true)]
+        file_format: Option<String>,
     },
 }
 
@@ -106,9 +119,18 @@ pub fn execute(
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {
-        DataCommands::Load { path, name } => {
-            execute_load(path, name.as_deref(), format, quiet, session)
-        }
+        DataCommands::Load {
+            path,
+            name,
+            na_strings,
+        } => execute_load(
+            path,
+            name.as_deref(),
+            na_strings.as_deref(),
+            format,
+            quiet,
+            session,
+        ),
         DataCommands::List => execute_list(format, session),
         DataCommands::Describe { dataset } => execute_describe(dataset, format, session),
         DataCommands::Head { dataset, n } => execute_head(dataset, *n, format, session),
@@ -121,14 +143,22 @@ pub fn execute(
         DataCommands::Save {
             dataset,
             output,
-            format: fmt,
-        } => execute_save(dataset, output, fmt.as_deref(), format, quiet, session),
+            file_format,
+        } => execute_save(
+            dataset,
+            output,
+            file_format.as_deref(),
+            format,
+            quiet,
+            session,
+        ),
     }
 }
 
 fn execute_load(
     path: &PathBuf,
     name: Option<&str>,
+    na_strings: Option<&[String]>,
     format: &OutputFormat,
     quiet: bool,
     session: Option<&mut SessionManager>,
@@ -167,7 +197,23 @@ fn execute_load(
 
     // Load the dataset
     let df = match extension.as_str() {
-        "csv" => DataLoader::load_csv(path)?,
+        "csv" => match na_strings {
+            Some(na) => {
+                let na: Vec<&str> = na.iter().map(String::as_str).collect();
+                DataLoader::load_csv_with_na(path, &na)?
+            }
+            None => DataLoader::load_csv(path)?,
+        },
+        "parquet" | "xlsx" | "xls" | "xlsb" | "dta" | "sas7bdat" if na_strings.is_some() => {
+            progress.finish_and_clear();
+            print_error(
+                &format!(
+                    "--na-strings applies to CSV files only; '{extension}' files store missing values natively"
+                ),
+                format,
+            );
+            return Ok(());
+        }
         "parquet" => DataLoader::load_parquet(path)?,
         "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(path, None)?,
         "dta" => DataLoader::load_stata(path)?,
@@ -201,7 +247,13 @@ fn execute_load(
 
     // Register with session if available
     if let Some(mgr) = session {
-        mgr.register_dataset(&dataset_name, path.clone(), &extension, &dataset);
+        mgr.register_dataset(
+            &dataset_name,
+            path.clone(),
+            &extension,
+            &dataset,
+            na_strings.map(<[String]>::to_vec),
+        );
         mgr.store_dataset(dataset_name.clone(), dataset);
     }
 
@@ -517,8 +569,10 @@ fn execute_save(
         }
     };
 
-    // Determine format from option or extension
-    let output_format = fmt.or_else(|| output.extension().and_then(|ext| ext.to_str()));
+    // Determine format from option or extension, in any case (as `execute_load` reads extensions)
+    let output_format = fmt
+        .or_else(|| output.extension().and_then(|ext| ext.to_str()))
+        .map(str::to_ascii_lowercase);
 
     // Show progress spinner for file saving
     let progress = Progress::spinner(
@@ -529,7 +583,7 @@ fn execute_save(
         quiet,
     );
 
-    let result: Result<&str, String> = match output_format {
+    let result: Result<&str, String> = match output_format.as_deref() {
         Some("csv") => ds.to_csv(output).map(|_| "CSV").map_err(|e| e.to_string()),
         Some("parquet") => ds
             .to_parquet(output)
@@ -543,7 +597,9 @@ fn execute_save(
         Some(other) => {
             progress.finish_and_clear();
             print_error(
-                &format!("Unsupported format '{}'. Use csv, parquet, or json.", other),
+                &format!(
+                    "Unsupported file format '{other}'. Use --file-format csv|parquet|json or a .csv, .parquet or .json extension."
+                ),
                 format,
             );
             return Ok(());
@@ -551,7 +607,7 @@ fn execute_save(
         None => {
             progress.finish_and_clear();
             print_error(
-                "Could not determine output format. Use --format or provide file extension (.csv, .parquet, .json).",
+                "Could not determine the file format. Use --file-format csv|parquet|json or a .csv, .parquet or .json extension.",
                 format,
             );
             return Ok(());
