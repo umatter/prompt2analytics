@@ -5,6 +5,7 @@ use augurs_core::Fit;
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, numeric_column};
 
 /// Result from MSTL decomposition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,20 +33,14 @@ pub struct MstlResult {
 ///
 /// # Returns
 /// `MstlResult` containing the decomposition components.
+///
+/// Integer and Boolean columns are accepted; a missing value (empty cell, NA or NaN) is an
+/// error naming the column.
 pub fn run_mstl(dataset: &Dataset, column: &str, periods: &[usize]) -> Result<MstlResult> {
     use augurs_mstl::{MSTLModel, NaiveTrend};
 
-    // Extract time series data
-    let df = dataset.df();
-    let col = df
-        .column(column)
-        .map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
-
-    let values: Vec<f64> = col
-        .f64()
-        .map_err(|e| anyhow!("Column must be numeric: {}", e))?
-        .into_no_null_iter()
-        .collect();
+    // Extract time series data (an EconError inside the anyhow error)
+    let (values, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     if values.is_empty() {
         return Err(anyhow!("Empty time series"));
@@ -109,6 +104,22 @@ pub fn run_mstl(dataset: &Dataset, column: &str, periods: &[usize]) -> Result<Ms
 mod tests {
     use super::*;
     use polars::prelude::*;
+
+    /// X-2: an Int64 column decomposes as its Float64 copy; missing values, text and
+    /// absent columns are refused by name (EconError inside the anyhow error).
+    #[test]
+    fn test_na_mstl_int64_and_missing() {
+        use crate::forecasting::test_fixtures::*;
+        let ds = with_float_copy(&arima_series(), "ai");
+        let run = |col: &str| run_mstl(&ds, col, &[12]);
+        let int = run("ai").unwrap();
+        let flt = run("ai_f64").unwrap();
+        assert_same(&int.trend, &flt.trend);
+        assert_null_values(econ(&run("a_na").unwrap_err()), "a_na", 2);
+        assert_null_values(econ(&run("ai_na").unwrap_err()), "ai_na", 2);
+        assert_non_numeric(econ(&run("lab").unwrap_err()), "lab");
+        assert_not_found(econ(&run("nope").unwrap_err()), "nope");
+    }
 
     #[test]
     fn test_validate_mstl_two_seasonal_components() {

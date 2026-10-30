@@ -19,6 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, try_with_capacity};
 
@@ -383,6 +384,9 @@ pub fn holt_winters_forecast(result: &HoltWintersResult, h: usize) -> EconResult
 ///
 /// # Returns
 /// As [`holt_winters`], including [`EconError::Cancelled`] on a stopped budget.
+///
+/// Integer and Boolean columns are accepted; a missing value (empty cell, NA or NaN) is an
+/// error naming the column.
 pub fn run_holt_winters(
     dataset: &Dataset,
     column: &str,
@@ -392,25 +396,7 @@ pub fn run_holt_winters(
     beta: Option<f64>,
     gamma: Option<f64>,
 ) -> EconResult<HoltWintersResult> {
-    // Extract data
-    let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
-        column: column.to_string(),
-        available: available_cols.clone(),
-    })?;
-
-    let y: Vec<f64> = col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: column.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
+    let (y, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     // Determine if trend/seasonal should be used
     let use_trend = beta.map(|b| b > 0.0).unwrap_or(true);
@@ -1088,6 +1074,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X-2: an Int64 column fits as its Float64 copy; missing values, text and absent
+    /// columns are refused by name (they were read as 0 or refused as non-numeric).
+    #[test]
+    fn test_na_holt_winters_int64_and_missing() {
+        use crate::forecasting::test_fixtures::*;
+        let ds = with_float_copy(&arima_series(), "ai");
+        let run =
+            |col: &str| run_holt_winters(&ds, col, 12, SeasonalType::Additive, None, None, None);
+        let int = run("ai").unwrap();
+        let flt = run("ai_f64").unwrap();
+        assert_same(&int.fitted, &flt.fitted);
+        assert_eq!(int.sse.to_bits(), flt.sse.to_bits());
+        assert_null_values(&run("a_na").unwrap_err(), "a_na", 2);
+        assert_null_values(&run("ai_na").unwrap_err(), "ai_na", 2);
+        assert_non_numeric(&run("lab").unwrap_err(), "lab");
+        assert_not_found(&run("nope").unwrap_err(), "nope");
+    }
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol

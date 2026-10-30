@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::forecasting::kalman::{
     StateSpaceModel, admit_filter_history_and_forecast, kalman_filter, kalman_forecast,
@@ -245,74 +246,37 @@ pub struct CausalImpactResult {
 /// let result = causal_impact(&dataset, "y", "time", config)?;
 /// println!("Cumulative effect: {:.2}", result.summary.cumulative_effect);
 /// ```
+///
+/// Integer and Boolean columns are accepted; a missing value (empty cell, NA or NaN) is an
+/// error naming the column. The time column must hold whole numbers or dates.
 pub fn causal_impact(
     dataset: &Dataset,
     response_col: &str,
     time_col: &str,
     config: CausalImpactConfig,
 ) -> EconResult<CausalImpactResult> {
-    let df = dataset.df();
-    let available: Vec<String> = df
-        .get_column_names()
+    // One request: a whole-number time index (a fractional time is an error, not
+    // truncated), the response and the controls, all without missing values.
+    let control_names: Vec<&str> = config
+        .control_series
         .iter()
-        .map(|s| s.to_string())
+        .flatten()
+        .map(String::as_str)
         .collect();
-
-    // Extract time column
-    let time_series = df.column(time_col).map_err(|_| EconError::ColumnNotFound {
-        column: time_col.to_string(),
-        available: available.clone(),
-    })?;
-
-    let time: Vec<i64> = time_series
-        .cast(&polars::prelude::DataType::Int64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?
-        .i64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract response column
-    let response_series = df
-        .column(response_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: response_col.to_string(),
-            available: available.clone(),
-        })?;
-
-    let y: Vec<f64> = response_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: response_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract control series if specified
-    let controls = if let Some(ref control_cols) = config.control_series {
-        let mut control_data = Vec::new();
-        for col in control_cols {
-            let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-                column: col.to_string(),
-                available: available.clone(),
-            })?;
-            let values: Vec<f64> = series
-                .f64()
-                .map_err(|_| EconError::NonNumericColumn {
-                    column: col.to_string(),
-                })?
-                .into_no_null_iter()
-                .collect();
-            control_data.push(values);
-        }
-        Some(control_data)
-    } else {
-        None
-    };
+    let cols = ColumnRequest::new(dataset.df())
+        .time_index(time_col)
+        .numeric(response_col)
+        .numerics(&control_names)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let time: Vec<i64> = cols.time_index(time_col).to_vec();
+    let y: Vec<f64> = cols.numeric(response_col).to_vec();
+    let controls = config.control_series.as_ref().map(|names| {
+        names
+            .iter()
+            .map(|name| cols.numeric(name).to_vec())
+            .collect::<Vec<Vec<f64>>>()
+    });
 
     // Find indices for pre and post periods based on time values
     let pre_start_idx = time
@@ -399,6 +363,9 @@ pub fn causal_impact(
 /// * `pre_period` - (start, end) of pre-intervention period
 /// * `post_period` - (start, end) of post-intervention period
 /// * `control_cols` - Optional control series column names
+///
+/// Integer and Boolean columns are accepted; a missing value (empty cell, NA or NaN) is an
+/// error naming the column.
 pub fn run_causal_impact(
     dataset: &Dataset,
     response_col: &str,
@@ -1294,6 +1261,32 @@ fn nested_vec_to_array2(v: &[Vec<f64>]) -> Array2<f64> {
 mod tests {
     use super::*;
     use polars::prelude::*;
+
+    /// X-2: an Int64 response fits as its Float64 copy; missing values in the response,
+    /// the time index or a control, text and absent columns are refused by name, and a
+    /// fractional time index is an error (a non-strict cast used to truncate it).
+    #[test]
+    fn test_na_causal_impact_int64_and_missing() {
+        use crate::forecasting::test_fixtures::*;
+        let ds = with_float_copy(&arima_series(), "ai");
+        let run = |col: &str| run_causal_impact(&ds, col, "t", (1, 200), (201, 300), None);
+        let int = run("ai").unwrap();
+        let flt = run("ai_f64").unwrap();
+        assert_same(
+            &[int.summary.average_effect, int.summary.cumulative_effect],
+            &[flt.summary.average_effect, flt.summary.cumulative_effect],
+        );
+        assert_null_values(&run("a_na").unwrap_err(), "a_na", 2);
+        assert_null_values(&run("ai_na").unwrap_err(), "ai_na", 2);
+        assert_non_numeric(&run("lab").unwrap_err(), "lab");
+        assert_not_found(&run("nope").unwrap_err(), "nope");
+        let time = |t: &str| run_causal_impact(&ds, "a", t, (1, 200), (201, 300), None);
+        assert_null_values(&time("ai_na").unwrap_err(), "ai_na", 2);
+        let fractional = time("a").unwrap_err().to_string();
+        assert!(fractional.contains("whole numbers"), "{fractional}");
+        let control = run_causal_impact(&ds, "a", "t", (1, 200), (201, 300), Some(&["a_na"]));
+        assert_null_values(&control.unwrap_err(), "a_na", 2);
+    }
 
     fn generate_causal_impact_data(
         n_pre: usize,
