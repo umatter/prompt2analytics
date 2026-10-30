@@ -22,6 +22,26 @@
         {"finding": "CAUS-26", "quantity": "direct and indirect effects", "note": "NDE weight and labelling are Tier 4; not pinned"}
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "medflex_na",
+      "name": "Natural effect models (medflex): complete cases and the lm component models",
+      "category": "econometrics",
+      "reference": "stats::complete.cases; stats::lm (the component models; medflex 0.6-11's NDE/NIE are not compared, CAUS-23)",
+      "doc": "validation/econometrics/medflex.md",
+      "cases": ["causal_mediation_na"],
+      "tests": [
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_causal_na",
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_interaction_causal_na",
+        "p2a-core::econometrics::medflex::tests::test_validate_na_medflex_reports_missing",
+        "p2a-core::econometrics::medflex::tests::test_validate_na_medflex_errors_name_the_column"
+      ],
+      "quantities": ["complete rows and missing counts", "group counts", "E[M|A=0], E[M|A=1]", "mediator model: coefficient and SE of d, R2", "outcome model with and without d:m: coefficients and SEs of d, m, d:m, R2"],
+      "tolerance": "validation/README.md, n = 350: coefficients 1e-8, SE and R2 1e-6 relative; MCP text Tol::printed(4)",
+      "deviations": [
+        {"finding": "CAUS-23", "quantity": "NDE and NIE with interaction", "note": "NDE uses the raw control mean of M; Tier 4; not pinned"}
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
