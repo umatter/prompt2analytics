@@ -69,8 +69,6 @@ shapiro.test(x)
 | p-value | >0.05 | 0.1836 | - | ✅ |
 | n | 20 | 20 | Exact | ✅ |
 
-**Rust Test:** `crates/p2a-core/src/stats/shapiro.rs::tests::test_validate_shapiro_normal_against_r`
-
 ### Test 2: Small Sample (n=5)
 
 **R Code:**
@@ -86,8 +84,6 @@ shapiro.test(x)
 |-----------|------------|---|-----------|--------|
 | W | >0.90 | 0.9856 | 0.1 | ✅ |
 | n | 5 | 5 | Exact | ✅ |
-
-**Rust Test:** `crates/p2a-core/src/stats/shapiro.rs::tests::test_validate_shapiro_small_sample_against_r`
 
 ### Test 3: Exponential (Non-Normal) Data
 
@@ -106,8 +102,6 @@ shapiro.test(x)
 | W | <0.90 | ~0.75 | 0.2 | ✅ |
 | n | 15 | 15 | Exact | ✅ |
 
-**Rust Test:** `crates/p2a-core/src/stats/shapiro.rs::tests::test_validate_shapiro_exponential_against_r`
-
 ### Test 4: Minimum Sample Size (n=3)
 
 **R Code:**
@@ -123,8 +117,6 @@ shapiro.test(x)
 |-----------|------------|---|-----------|--------|
 | W | ≥0.75 | 1.0 | - | ✅ |
 | n | 3 | 3 | Exact | ✅ |
-
-**Rust Test:** `crates/p2a-core/src/stats/shapiro.rs::tests::test_validate_shapiro_n3_against_r`
 
 ## Numerical Precision Summary
 
