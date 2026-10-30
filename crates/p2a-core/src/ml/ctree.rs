@@ -1031,7 +1031,9 @@ fn find_terminal_node<'a>(node: &'a CtreeNode, x: &ArrayView1<f64>) -> &'a Ctree
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
-/// * `y_col` - Target column name
+/// * `y_col` - Numeric target column. Integer and boolean (0/1) columns are accepted;
+///   a missing value (null or NaN) in the target or a feature is an error naming the
+///   column (`EconError::NullValues`)
 /// * `x_cols` - Feature column names
 /// * `config` - Tree configuration
 ///
@@ -1044,35 +1046,9 @@ pub fn run_ctree(
     x_cols: &[&str],
     config: &CtreeConfig,
 ) -> EconResult<CtreeResult> {
-    use crate::linalg::design::DesignMatrix;
-
-    // Build design matrix
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
-    let x = design.data;
-    let feature_names = design.column_names;
-
-    // Get y column
-    let col_names: Vec<String> = dataset
-        .df()
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let y_series = dataset
-        .df()
-        .column(y_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: col_names,
-        })?;
-
-    let y: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::Computation(format!("Column '{}' is not numeric", y_col)))?
-        .into_no_null_iter()
-        .collect();
-
-    let y_arr = Array1::from_vec(y);
+    let (x, y_arr, _missing) =
+        super::extract::extract_xy(dataset, y_col, x_cols, crate::data::columns::NaPolicy::Fail)?;
+    let feature_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
     let mut result = ctree(x.view(), y_arr.view(), config)?;
     result.feature_names = Some(feature_names);

@@ -1348,7 +1348,9 @@ pub fn c50_predict_proba(result: &C50Result, x: ArrayView2<f64>) -> EconResult<V
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
-/// * `y_col` - Target column name (non-negative integer class codes)
+/// * `y_col` - Target column of non-negative integer class codes (integer, decimal or
+///   boolean); a missing value (null or NaN) in the target or a feature is an error
+///   naming the column (`EconError::NullValues`)
 /// * `x_cols` - Feature column names
 /// * `config` - C5.0 configuration
 ///
@@ -1361,35 +1363,9 @@ pub fn run_c50(
     x_cols: &[&str],
     config: &C50Config,
 ) -> EconResult<C50Result> {
-    use crate::linalg::design::DesignMatrix;
-
-    // Build design matrix
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
-    let x = design.data;
-    let feature_names = design.column_names;
-
-    // Get y column
-    let col_names: Vec<String> = dataset
-        .df()
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let y_series = dataset
-        .df()
-        .column(y_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: col_names,
-        })?;
-
-    let y: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::Computation(format!("Column '{}' is not numeric", y_col)))?
-        .into_no_null_iter()
-        .collect();
-
-    let y_arr = Array1::from_vec(y);
+    let (x, y_arr, _missing) =
+        super::extract::extract_xy(dataset, y_col, x_cols, crate::data::columns::NaPolicy::Fail)?;
+    let feature_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
     let mut result = c50(x.view(), y_arr.view(), config)?;
     result.feature_names = Some(feature_names);

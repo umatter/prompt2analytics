@@ -108,6 +108,17 @@
 //! | **MBoost** | [`mboost`] | Model-based gradient boosting framework |
 //! | **BART** | [`bart`] | Bayesian additive regression trees |
 //!
+//! ## Missing values and column types
+//!
+//! The dataset entry points (`run_gbm`, `run_xgboost`, `run_lightgbm`, `run_adaboost`,
+//! `run_mboost`, `run_cart`, `run_c50`, `run_ctree`, `run_cubist`, `run_quantile_rf`) read
+//! their columns through [`crate::data::columns`] with [`extract_xy`]: integer, boolean
+//! (0/1) and decimal columns are numeric, text is refused, and a missing value (null or
+//! NaN) in the target or a feature is an error naming the column. R's randomForest, gbm,
+//! kmeans and prcomp refuse NA too, and p2a's trees have no surrogate splits. The array
+//! functions ([`kmeans`], [`hierarchical`], [`pca`], [`tsne`], [`cmdscale`], [`dbscan`],
+//! [`linear_svm`], [`ppr`], [`random_forest`]) refuse non-finite input.
+//!
 //! ## Large-N Performance
 //!
 //! HDBSCAN and OPTICS automatically select optimal algorithms for large datasets:
@@ -433,6 +444,7 @@ pub use evaluation::{
     gbm_partial_dependence, gbm_variable_importance, rf_variable_importance, roc_auc,
 };
 pub use evaluation_fast::{FastRocAucResult, fast_roc_auc, fast_roc_auc_parallel};
+pub use extract::extract_xy;
 pub use gbm::{GbmConfig, GbmFamily, GbmResult, gbm, gbm_predict, run_gbm, run_gbm_default};
 pub use kdtree::{KdNode, KdTree, UnionFind, build_connected_mst, euclidean_distance, kruskal_mst};
 pub use mboost::{
