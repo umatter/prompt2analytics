@@ -149,6 +149,62 @@ Despite being slower, the Rust implementation:
 *R version: 4.x with stats package*
 *Rust: release build with -O3 optimizations*
 
+## Column Types and Missing Values (run_loess and the quantreg, smooth.spline and glmnet wrappers)
+
+The dataset wrappers read their columns through `p2a_core::data::columns`: integer and
+boolean columns are numbers, a text column is `NonNumericColumn`, an absent one
+`ColumnNotFound`, and missing values (null or NaN) follow the R function's default.
+
+| Function | Missing x or y | R behaviour followed |
+|---|---|---|
+| `run_loess` | row dropped; `LoessResult::missing`, x then y, and a last `Missing values:` line | R's `loess(y ~ x)` uses `na.omit` (incomplete rows dropped) |
+| `quantreg` / `run_quantreg` | row dropped; `QuantRegResult::missing`, y then the regressors, and a `Missing values:` line | `quantreg::rq` (`na.omit`) |
+| `run_smooth_spline` | `NullValues` naming the first column (x, then y) | `smooth.spline`: "missing or infinite values in inputs are not allowed" |
+| `run_glmnet`, `run_cv_glmnet`, `run_ridge`, `run_lasso` | `NullValues` naming the column | `glmnet`: "missing value where TRUE/FALSE needed" |
+| MCP `regression_gls` (y) | `NullValues` naming y | `nlme::gls` (`na.fail`) |
+
+Before this, the four core wrappers read with `.f64()` without a cast (glmnet with a
+non-strict cast), so an Int64 column was rejected as non-numeric, a null entered the fit as
+0, and a text y became zeros in glmnet. `p2a reg quantreg` and `reg loess` print
+`Note: <k> of <n> rows dropped ...` and add a `missing` object to `-F json`.
+
+R: case `reg_smoothers_na` of `validation/r/cases/regression_na.R`
+([source](../r/cases/regression_na.R)), 60 rows in
+`validation/datasets/generated/smoothers_na.csv` with 2 missing x and 2 missing y; R's
+count of complete rows is `n_complete` = 56.
+
+Registered tests (registry entry `regression_wrappers_columns` in
+`validation/methods/regression_na.json`): the row deletion of `run_loess` and `quantreg`
+is R-pinned, since the number of rows each fit uses is compared with R's `n_complete`
+exactly:
+
+- `test_validate_na_loess_columns`, `test_validate_na_quantreg_columns`: `n_complete`; the
+  fit on the data with missing cells equals the fit on the 56 complete rows, with the
+  reported counts; besides, Int64 equals the same values as Float64 exactly (mtcars
+  `hp`), text and absent columns are refused, and with no complete row the error is
+  `InsufficientData` naming the method;
+- `test_validate_mcp_regression_loess_missing_and_integer`: `n_complete` through MCP
+  `regression_loess`, the `missing` object, and an Int64 x;
+- `test_validate_cli_reg_loess_quantreg_missing_note`: `n_complete` through `p2a reg
+  loess` and `reg quantreg` with `-F json`, the `Note:` line and the `missing` object.
+
+Property tests, not registered as R-pinned (no value is compared with R; they load
+`validation/datasets/generated/mtcars.csv`, whose `hp` is Int64, and `smoothers_na.csv`
+without a case):
+
+- `test_na_smooth_spline_columns`, `test_na_glmnet_columns`: Int64 equals Float64; a
+  missing x or y is `NullValues` naming the column;
+- `test_mcp_regression_gls_missing_y_is_error`,
+  `test_mcp_regression_smooth_spline_missing_is_error`: the MCP GLS y and the smoothing
+  spline refuse missing values;
+- `test_cli_reg_integer_columns`, `test_cli_reg_smooth_spline_missing_is_error`: Int64
+  columns in `reg quantreg`, `loess`, `smooth-spline`, `line` and `supsmu`, and `reg
+  smooth-spline` refusing missing values.
+
+The fits themselves are not R-pinned here: the loess neighbourhood and span (REG-14,
+REG-45) and the quantreg SEs (REG-26) differ from R (Tier 4, registry deviations), and so
+does the smooth.spline fit (REG-29, REG-30, Tier 4), which no registered test covers.
+
 ## References
 
 - Cleveland, W. S. (1979). "Robust locally weighted regression and smoothing scatterplots." *Journal of the American Statistical Association*, 74(368), 829-836.

@@ -86,6 +86,52 @@ fit_bass5 <- supsmu(x, y, bass = 5)
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-31 for the estimator and REG-44 for the tests):
 - `regression::supsmu::tests::test_supsmu_bass_parameter` (`crates/p2a-core/src/regression/supsmu.rs`): the bass value is stored (0 and 10). No smoothed value is compared.
 
+## Missing and Non-finite Values (REG-13)
+
+`supsmu()` deletes the observations with a missing (NaN) or infinite x, y or weight before
+smoothing, as R's `supsmu` does (`is.finite(x + y + wt)`, with the warning "observations
+with NAs, NaNs and/or Infs deleted"), and reports them in `SupsmuResult::missing`
+(`by_column` names `x`, `y` and `wt`). With fewer than 4 complete observations it is an
+error. Sorting uses `f64::total_cmp`. Before, a NaN never left the running sums, so one
+missing y made the whole smooth NaN. MCP `regression_supsmu` reads x, y and the weights
+column jointly with the incomplete rows dropped (a missing weight drops its row instead of
+becoming 1.0, and a text weights column is an error instead of being ignored); `p2a reg
+supsmu` does the same for x and y. Both report the drop (`missing` in JSON, a `Note:` line
+in the CLI text). With fewer than 4 complete rows they fail before `supsmu()` is reached,
+with `InsufficientData` naming the method and the columns and counting the dataset's rows
+("SuperSmoother of 'y' on 'x': 2 of 6 rows have no missing value").
+
+R: case `reg_smoothers_na` of `validation/r/cases/regression_na.R`
+([source](../r/cases/regression_na.R)): `supsmu(x, y)` on 60 points with 2 missing x and 2
+missing y; R's unique sorted x after the deletion is `supsmu_x` (56 values, 0.013, 0.2166,
+0.6713, ...; the complete x have no ties), and its smooth on the NA data equals the smooth
+on the complete pairs.
+
+Tests (registry entry `supsmu_missing` in `validation/methods/regression_na.json`); every
+comparison is exact except the CLI text's grid, which is printed with 4 decimals:
+
+- `test_validate_supsmu_na`: the x grid equals R's `supsmu_x` exactly; `n` is
+  `n_complete`; every smoothed value is finite and equals the smooth on the complete rows;
+  a NaN weight and an infinite x are deleted jointly;
+- `test_validate_mcp_regression_supsmu_na`: the first 20 grid points equal R's, the
+  smoothed values are numbers, a missing weight drops its row, a text weights column is an
+  error;
+- `test_validate_cli_reg_supsmu_na`: the printed grid equals R's to its 4 decimals; the
+  `-F json` `fitted_sample` equals the smooth on the complete pairs exactly (the numbers
+  are read from the output text with `str::parse`, since serde_json's default float
+  parsing can be 1 ulp off).
+
+Property tests, not registered (no R value):
+`test_mcp_regression_line_supsmu_too_few_complete_rows` and
+`test_cli_reg_line_supsmu_too_few_complete_rows` check the too-few-rows error of supsmu and
+line through MCP and the CLI.
+
+### Known difference (REG-31)
+
+p2a's super smoother is not Friedman's algorithm (Tier 4): on this case its smoothed values
+differ from R's `supsmu_y` by up to 0.673 (absolute). `supsmu_y` is recorded in the case and
+not compared (registry deviation).
+
 ## Numerical Precision Summary
 
 | Sample Size | Smoothed Value Tolerance |

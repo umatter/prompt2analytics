@@ -1,1 +1,303 @@
 //! T2-WP15: regression helpers through the p2a CLI.
+use crate::common::*;
+use p2a_core::data::columns::numeric_options;
+use serde_json::{Value, json};
+
+/// The complete (x, y) pairs of a case dataset, in row order.
+fn complete_pairs(case: &Case) -> (Vec<f64>, Vec<f64>) {
+    let df = p2a_core::DataLoader::load_csv(case.dataset_path()).unwrap();
+    let x = numeric_options(&df, "x").unwrap();
+    let y = numeric_options(&df, "y").unwrap();
+    x.iter().zip(&y).filter_map(|(a, b)| a.zip(*b)).unzip()
+}
+
+/// The `missing` object of reg_smoothers_na (2 missing x, 2 missing y).
+fn smoothers_missing() -> Value {
+    json!({"n_total": 60, "n_used": 56, "n_dropped": 4, "by_column": {"x": 2, "y": 2}})
+}
+
+const SMOOTHERS_NOTE: &str = "Note: 4 of 60 rows dropped because of missing values (x: 2, y: 2)";
+
+/// Every number of field `key` in the JSON text `json`: the value of each
+/// `"key": <number>` and the elements of each `"key": [<numbers>]`, read with
+/// `str::parse::<f64>`, which rounds correctly. This workspace builds serde_json without
+/// its `float_roundtrip` feature, and its default (best-effort) float parsing can read a
+/// shortest round-trip double 1 ulp off, so the exact comparisons read the text.
+fn json_numbers(json: &str, key: &str) -> Vec<f64> {
+    let pattern = format!("\"{key}\":");
+    let mut numbers = Vec::new();
+    let mut rest = json;
+    while let Some(at) = rest.find(&pattern) {
+        rest = rest[at + pattern.len()..].trim_start();
+        let (body, tail) = match rest.strip_prefix('[') {
+            Some(array) => array.split_once(']').expect("an array closed by ]"),
+            None => rest.split_at(rest.find([',', '}', '\n']).unwrap_or(rest.len())),
+        };
+        numbers.extend(
+            body.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(|t| {
+                    t.parse::<f64>()
+                        .unwrap_or_else(|e| panic!("`{t}` in field {key}: {e}"))
+                }),
+        );
+        rest = tail;
+    }
+    numbers
+}
+
+/// `-F json` and `args`: the raw stdout (for [`json_numbers`]) and its parsed value.
+fn json_and_text(s: &TempSession, args: &[&str]) -> (String, Value) {
+    let mut all = vec!["-F", "json"];
+    all.extend_from_slice(args);
+    let text = s.ok(&all);
+    let value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"));
+    (text, value)
+}
+
+/// REG-21: rows with a missing cluster id are dropped and the model re-estimated;
+/// the text shows the drop as a warning, `-F json` as a `missing` object.
+#[test]
+fn test_validate_cli_reg_clustered_na() {
+    let case = Case::load("reg_cluster_na");
+    let s = temp_session();
+    let name = s.load(&case);
+    let args = [
+        "reg",
+        "clustered",
+        &name,
+        "-y",
+        "inv",
+        "-x",
+        "value",
+        "capital",
+        "--cluster",
+        "firm_label",
+    ];
+    let text = s.ok(&args);
+    assert!(text.contains("Observations: 197\n"), "{text}");
+    assert!(
+        text.contains("  - 3 of 200 rows dropped because of missing values (firm_label: 3)\n"),
+        "{text}"
+    );
+    assert!(!text.contains("Note:"), "the drop is printed once\n{text}");
+    let (names, values): (Vec<String>, Vec<Vec<f64>>) =
+        p2a_validation::text::coefficient_rows(&text)
+            .into_iter()
+            .unzip();
+    let coef: Vec<f64> = values.iter().map(|v| v[0]).collect();
+    let se: Vec<f64> = values.iter().map(|v| v[1]).collect();
+    Check::new(&case)
+        .named("coef", &names, &coef, Tol::printed(6))
+        .named("se_cluster_hc1", &names, &se, Tol::printed(6))
+        .finish();
+
+    let j = s.json(&args);
+    let rows = j["coefficients"].as_array().unwrap();
+    let names: Vec<&str> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+    let pick = |key: &str| -> Vec<f64> { rows.iter().map(|r| r[key].as_f64().unwrap()).collect() };
+    Check::new(&case)
+        .named("coef", &names, &pick("coefficient"), Tol::coef(197))
+        .named("se_cluster_hc1", &names, &pick("std_error"), Tol::se(197))
+        .scalar(
+            "n_used",
+            j["n_observations"].as_f64().unwrap(),
+            Tol::exact(),
+        )
+        .finish();
+    assert_eq!(j["n_clusters"], 10);
+    assert_eq!(
+        j["missing"],
+        json!({"n_total": 200, "n_used": 197, "n_dropped": 3, "by_column": {"firm_label": 3}})
+    );
+}
+
+/// REG-13: `reg line` drops the incomplete pairs (R's line uses complete pairs) and
+/// prints the note; the fit equals `line` on the complete pairs.
+#[test]
+fn test_validate_cli_reg_line_na() {
+    let case = Case::load("reg_smoothers_na");
+    let s = temp_session();
+    let name = s.load(&case);
+    let args = ["reg", "line", &name, "-y", "y", "-x", "x"];
+    let text = s.ok(&args);
+    assert!(text.contains("Observations: 56\n"), "{text}");
+    assert!(text.trim_end().ends_with(SMOOTHERS_NOTE), "{text}");
+
+    let (raw, j) = json_and_text(&s, &args);
+    Check::new(&case)
+        .scalar("n_complete", j["n"].as_f64().unwrap(), Tol::exact())
+        .finish();
+    let (xc, yc) = complete_pairs(&case);
+    let fit = p2a_core::regression::line::line(&xc, &yc, Some(1)).unwrap();
+    assert_eq!(json_numbers(&raw, "intercept"), [fit.intercept]);
+    assert_eq!(json_numbers(&raw, "slope"), [fit.slope]);
+    assert_eq!(j["missing"], smoothers_missing());
+}
+
+/// REG-13: `reg supsmu` drops the incomplete pairs; its x grid is R's grid after the
+/// deletion, and the smooth equals `supsmu` on the complete pairs.
+#[test]
+fn test_validate_cli_reg_supsmu_na() {
+    let case = Case::load("reg_smoothers_na");
+    let s = temp_session();
+    let name = s.load(&case);
+    let args = ["reg", "supsmu", &name, "-y", "y", "-x", "x"];
+    let text = s.ok(&args);
+    assert!(text.contains("Observations: 56\n"), "{text}");
+    assert!(text.trim_end().ends_with(SMOOTHERS_NOTE), "{text}");
+    let points: Vec<(f64, f64)> = text
+        .lines()
+        .filter_map(|l| {
+            let rest = l.trim_start().split_once(": x=")?.1;
+            let (x, y) = rest.split_once(", y=")?;
+            Some((x.parse().unwrap(), y.parse().unwrap()))
+        })
+        .collect();
+    assert_eq!(points.len(), 10, "{text}");
+    let r_x = case.vector("supsmu_x");
+    for (i, (x, y)) in points.iter().enumerate() {
+        assert!(
+            Tol::printed(4).allows(*x, r_x[i]),
+            "x[{i}] {x} vs R {}",
+            r_x[i]
+        );
+        assert!(y.is_finite(), "y[{i}] = {y}");
+    }
+
+    let (raw, j) = json_and_text(&s, &args);
+    assert_eq!(j["n"], 56);
+    let (xc, yc) = complete_pairs(&case);
+    let fit = p2a_core::regression::supsmu::supsmu(&xc, &yc, None, None, false, 0.0).unwrap();
+    // The smooth on the complete pairs, exactly (not an R pin, REG-31).
+    assert_eq!(json_numbers(&raw, "fitted_sample"), &fit.y[..10]);
+    assert_eq!(j["missing"], smoothers_missing());
+}
+
+/// REG-25 and REG-13: Int64 columns (mtcars hp) are numbers in reg quantreg, loess,
+/// smooth-spline, line and supsmu; nothing is dropped, so no output has `missing`. A
+/// property test (no value is compared with R), so it loads the dataset without a case.
+#[test]
+fn test_cli_reg_integer_columns() {
+    let path = repo_path("validation/datasets/generated/mtcars.csv");
+    let s = temp_session();
+    let name = "mtcars";
+    s.load_as(&path, name, &[]);
+    let (raw, q) = json_and_text(&s, &["reg", "quantreg", name, "-y", "hp", "-x", "wt"]);
+    assert_eq!(q["n_obs"], 32);
+    let df = p2a_core::DataLoader::load_csv(&path).unwrap();
+    let ds = p2a_core::Dataset::new(df.clone());
+    let fit = p2a_core::run_quantreg(&ds, "hp", &["wt"], 0.5).unwrap();
+    // The in-process fit on the same doubles, exactly (not an R pin).
+    let expected: Vec<f64> = fit.coefficients.iter().map(|c| c.estimate).collect();
+    assert_eq!(json_numbers(&raw, "estimate"), expected);
+    let loess = s.json(&["reg", "loess", name, "-y", "mpg", "-x", "hp"]);
+    assert_eq!(loess["n_obs"], 32);
+    let spline = s.json(&[
+        "reg",
+        "smooth-spline",
+        name,
+        "-y",
+        "mpg",
+        "-x",
+        "hp",
+        "--df",
+        "4",
+    ]);
+    assert_eq!(spline["n_obs"], 32);
+    let line = s.json(&["reg", "line", name, "-y", "mpg", "-x", "hp"]);
+    assert_eq!(line["n"], 32);
+    // supsmu's n counts the distinct x values (hp has ties).
+    let supsmu = s.json(&["reg", "supsmu", name, "-y", "mpg", "-x", "hp"]);
+    let column = |c: &str| -> Vec<f64> {
+        numeric_options(&df, c)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.unwrap())
+            .collect()
+    };
+    let smooth =
+        p2a_core::regression::supsmu::supsmu(&column("hp"), &column("mpg"), None, None, false, 0.0)
+            .unwrap();
+    assert_eq!(supsmu["n"].as_u64().unwrap() as usize, smooth.n);
+    for (what, v) in [
+        ("quantreg", &q),
+        ("loess", &loess),
+        ("smooth-spline", &spline),
+        ("line", &line),
+        ("supsmu", &supsmu),
+    ] {
+        assert!(v.get("missing").is_none(), "{what}: {v}");
+    }
+}
+
+/// REG-25: smooth.spline refuses missing values, as R does; the error names the column.
+/// A property test (no value is compared with R), so it loads the dataset without a case.
+#[test]
+fn test_cli_reg_smooth_spline_missing_is_error() {
+    let s = temp_session();
+    s.load_as(
+        &repo_path("validation/datasets/generated/smoothers_na.csv"),
+        "smoothers_na",
+        &[],
+    );
+    let err = s.err(&["reg", "smooth-spline", "smoothers_na", "-y", "y", "-x", "x"]);
+    assert!(
+        err.contains("Column 'x' contains 2 missing value(s)"),
+        "{err}"
+    );
+}
+
+/// REG-25: reg loess and reg quantreg drop the incomplete rows (R's na.omit), print the
+/// note as their last text line and add `missing` to `-F json`.
+#[test]
+fn test_validate_cli_reg_loess_quantreg_missing_note() {
+    let case = Case::load("reg_smoothers_na");
+    let s = temp_session();
+    let name = s.load(&case);
+    for (args, note) in [
+        (
+            ["reg", "loess", &name, "-y", "y", "-x", "x"],
+            SMOOTHERS_NOTE,
+        ),
+        (
+            ["reg", "quantreg", &name, "-y", "y", "-x", "x"],
+            "Note: 4 of 60 rows dropped because of missing values (y: 2, x: 2)",
+        ),
+    ] {
+        let text = s.ok(&args);
+        assert!(text.contains("Observations: 56\n"), "{text}");
+        assert!(text.trim_end().ends_with(note), "{text}");
+        let j = s.json(&args);
+        Check::new(&case)
+            .scalar("n_complete", j["n_obs"].as_f64().unwrap(), Tol::exact())
+            .finish();
+        assert_eq!(j["missing"], smoothers_missing(), "{j}");
+    }
+}
+
+/// REG-13: with too few complete rows, `reg line` and `reg supsmu` fail with the
+/// extractor's error, which names the method and the columns and counts the rows of the
+/// dataset (not only the complete ones the core function would see).
+#[test]
+fn test_cli_reg_line_supsmu_too_few_complete_rows() {
+    let s = temp_session();
+    // 2 of 6 rows have both x and y.
+    let path = s.dir().join("two_complete.csv");
+    std::fs::write(&path, "x,y\n1.2,2.3\n2.1,\n,3.9\n4.3,5.2\n,\n6.1,\n").unwrap();
+    s.load_as(&path, "two_complete", &[]);
+    for (command, needed, method) in [
+        ("line", 3, "Tukey's resistant line"),
+        ("supsmu", 4, "SuperSmoother"),
+    ] {
+        let err = s.err(&["reg", command, "two_complete", "-y", "y", "-x", "x"]);
+        assert!(
+            err.contains(&format!("need at least {needed} observations, got 2"))
+                && err.contains(&format!(
+                    "{method} of 'y' on 'x': 2 of 6 rows have no missing value"
+                )),
+            "{err}"
+        );
+    }
+}

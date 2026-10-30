@@ -51,9 +51,15 @@
 //!   829-836. https://doi.org/10.1080/01621459.1979.10481038
 //!   Related LOWESS method for comparison.
 //!
+//! Observations with a missing (NaN) or infinite x, y or weight are deleted first (R's
+//! `supsmu()` deletes them too, `is.finite(x + y + wt)`) and reported in
+//! [`SupsmuResult::missing`].
+//!
 //! R equivalent: `stats::supsmu()`
 
 use serde::{Deserialize, Serialize};
+
+use crate::data::columns::MissingSummary;
 
 /// Result of SuperSmoother fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +74,10 @@ pub struct SupsmuResult {
     pub periodic: bool,
     /// Number of unique points
     pub n: usize,
+    /// Observations dropped because x, y or the weight was missing or infinite
+    /// (`by_column` names `x`, `y` and `wt`); absent from JSON when nothing was dropped.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Configuration for SuperSmoother.
@@ -105,6 +115,9 @@ impl Default for SupsmuConfig {
 /// * `periodic` - Treat x as periodic on [0, 1]
 /// * `bass` - Smoothness control (0-10, higher = smoother)
 ///
+/// Observations with a NaN or infinite x, y or weight are deleted first; at least 4
+/// must remain.
+///
 /// # Returns
 /// A `SupsmuResult` containing the smoothed values
 ///
@@ -128,26 +141,50 @@ pub fn supsmu(
         return Err("x and y must have the same length".to_string());
     }
 
-    let n = x.len();
+    let n_total = x.len();
+    if let Some(w) = wt
+        && w.len() != n_total
+    {
+        return Err("Weights must have same length as data".to_string());
+    }
+
+    // Delete the observations with a missing or infinite x, y or weight
+    let finite_w = |i: usize| wt.is_none_or(|w| w[i].is_finite());
+    let keep: Vec<usize> = (0..n_total)
+        .filter(|&i| x[i].is_finite() && y[i].is_finite() && finite_w(i))
+        .collect();
+    let n = keep.len();
+    let bad = |v: &[f64]| v.iter().filter(|a| !a.is_finite()).count();
+    let mut by_column = Vec::new();
+    for (name, k) in [("x", bad(x)), ("y", bad(y)), ("wt", wt.map_or(0, bad))] {
+        if k > 0 {
+            by_column.push((name.to_string(), k));
+        }
+    }
+    let missing = MissingSummary {
+        n_total,
+        n_used: n,
+        n_dropped: n_total - n,
+        by_column,
+    };
     if n < 4 {
-        return Err("Need at least 4 observations for supsmu".to_string());
+        return Err(format!(
+            "Need at least 4 complete (x, y, wt) observations for supsmu; {n} of {n_total} \
+             are complete"
+        ));
     }
 
     let bass = bass.clamp(0.0, 10.0);
 
-    // Create weights if not provided
+    let x: Vec<f64> = keep.iter().map(|&i| x[i]).collect();
+    let y: Vec<f64> = keep.iter().map(|&i| y[i]).collect();
     let weights: Vec<f64> = match wt {
-        Some(w) => {
-            if w.len() != n {
-                return Err("Weights must have same length as data".to_string());
-            }
-            w.to_vec()
-        }
+        Some(w) => keep.iter().map(|&i| w[i]).collect(),
         None => vec![1.0; n],
     };
 
     // Sort data by x and remove duplicates (averaging y values)
-    let (sorted_x, sorted_y, sorted_w) = sort_and_dedupe(x, y, &weights);
+    let (sorted_x, sorted_y, sorted_w) = sort_and_dedupe(&x, &y, &weights);
     let m = sorted_x.len();
 
     if m < 4 {
@@ -171,6 +208,7 @@ pub fn supsmu(
         bass,
         periodic,
         n: m,
+        missing,
     })
 }
 
@@ -179,7 +217,7 @@ pub fn supsmu(
 fn sort_and_dedupe(x: &[f64], y: &[f64], w: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let n = x.len();
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_unstable_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_unstable_by(|&a, &b| x[a].total_cmp(&x[b]));
 
     let mut result_x = Vec::with_capacity(n);
     let mut result_y = Vec::with_capacity(n);
@@ -777,6 +815,77 @@ mod tests {
         assert!(
             increases > 40,
             "For linear data, most smoothed values should be increasing"
+        );
+    }
+
+    /// REG-13: observations with a missing (NaN) or infinite x, y or weight are deleted
+    /// first, as R's supsmu does (`is.finite(x + y + wt)`); the smooth on the NA data
+    /// equals the smooth on the complete rows, and its x grid is R's.
+    #[test]
+    fn test_validate_supsmu_na() {
+        use crate::data::columns::MissingSummary;
+        use crate::regression::ols::na_fixtures::nan_vec;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("reg_smoothers_na");
+        let (x, y) = (nan_vec(&ds, "x"), nan_vec(&ds, "y"));
+        let finite_rows = |cols: &[&[f64]]| -> Vec<usize> {
+            (0..x.len())
+                .filter(|&i| cols.iter().all(|c| c[i].is_finite()))
+                .collect()
+        };
+        let keep = finite_rows(&[&x, &y]);
+        let xc: Vec<f64> = keep.iter().map(|&i| x[i]).collect();
+        let yc: Vec<f64> = keep.iter().map(|&i| y[i]).collect();
+        let r = supsmu(&x, &y, None, None, false, 0.0).unwrap();
+        let c = supsmu(&xc, &yc, None, None, false, 0.0).unwrap();
+        assert_eq!(r.n, 56);
+        assert!(r.y.iter().all(|v| v.is_finite()));
+        assert_eq!(
+            r.missing,
+            MissingSummary {
+                n_total: 60,
+                n_used: 56,
+                n_dropped: 4,
+                by_column: vec![("x".into(), 2), ("y".into(), 2)],
+            }
+        );
+        assert_eq!((&r.x, &r.y), (&c.x, &c.y));
+        assert!(c.missing.is_empty());
+        // R's unique sorted x after deleting the incomplete pairs: exact, both sides read
+        // the same doubles.
+        // deviation REG-31: supsmu_y is not compared (p2a's smoother is not Friedman's).
+        Check::new(&case)
+            .vector("supsmu_x", &r.x, Tol::exact())
+            .scalar("n_complete", r.n as f64, Tol::exact())
+            .finish();
+        // Weights are deleted jointly: one NaN weight and one +Inf x on top of the NAs.
+        let mut wt = vec![1.0; 60];
+        wt[1] = f64::NAN;
+        let mut xi = x.clone();
+        xi[0] = f64::INFINITY;
+        let rw = supsmu(&xi, &y, Some(&wt), None, false, 0.0).unwrap();
+        assert_eq!(
+            rw.missing.by_column,
+            vec![("x".into(), 3), ("y".into(), 2), ("wt".into(), 1)]
+        );
+        assert_eq!((rw.missing.n_used, rw.missing.n_dropped), (54, 6));
+        let keep = finite_rows(&[&xi, &y, &wt]);
+        let x54: Vec<f64> = keep.iter().map(|&i| xi[i]).collect();
+        let y54: Vec<f64> = keep.iter().map(|&i| y[i]).collect();
+        let cw = supsmu(&x54, &y54, Some(&vec![1.0; 54]), None, false, 0.0).unwrap();
+        assert_eq!((&rw.x, &rw.y), (&cw.x, &cw.y));
+        let e = supsmu(
+            &[1.0, 2.0, f64::NAN, 4.0],
+            &[1.0; 4],
+            None,
+            None,
+            false,
+            0.0,
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("at least 4 complete") && e.contains("3 of 4"),
+            "{e}"
         );
     }
 }

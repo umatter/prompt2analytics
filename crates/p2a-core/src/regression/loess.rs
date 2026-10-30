@@ -45,6 +45,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::matrix_inverse;
 
@@ -125,6 +126,10 @@ pub struct LoessResult {
     pub r_squared: f64,
     /// Number of robust iterations performed
     pub robust_iterations: usize,
+    /// Rows dropped because x or y was missing ([`run_loess`]); absent from JSON when
+    /// nothing was dropped.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for LoessResult {
@@ -147,6 +152,9 @@ impl fmt::Display for LoessResult {
         writeln!(f, "Residual Standard Error: {:.6}", self.residual_se)?;
         writeln!(f, "Residual Sum of Squares: {:.6}", self.rss)?;
         writeln!(f, "R-squared: {:.6}", self.r_squared)?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
         Ok(())
     }
 }
@@ -799,6 +807,7 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
         residual_se,
         r_squared,
         robust_iterations: iterations,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -834,6 +843,10 @@ pub fn loess_predict(model: &LoessModel, new_x: &[f64]) -> EconResult<Vec<f64>> 
 /// * `degree` - Polynomial degree (default: 2)
 /// * `robust` - Use robust fitting (default: false)
 ///
+/// Rows with a missing x or y are dropped first, as R's `loess` does (`na.omit`), and
+/// reported in `LoessResult::missing` (no complete row is `InsufficientData`); integer
+/// columns are numbers.
+///
 /// # Returns
 /// `LoessResult` containing fitted values, residuals, and model diagnostics.
 pub fn run_loess(
@@ -844,42 +857,12 @@ pub fn run_loess(
     degree: usize,
     robust: bool,
 ) -> EconResult<LoessResult> {
-    let df = dataset.df();
-
-    // Extract columns
-    let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
-        column: x_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Convert to f64 vectors
-    let x: Vec<f64> = x_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: x_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    let y: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(x_col)
+        .numeric(y_col)
+        .na(NaPolicy::Omit)
+        .min_rows(1, &format!("LOESS of '{y_col}' on '{x_col}'"))
+        .extract()?;
 
     let config = LoessConfig {
         span,
@@ -888,7 +871,9 @@ pub fn run_loess(
         ..Default::default()
     };
 
-    loess(&x, &y, config)
+    let mut result = loess(cols.numeric(x_col), cols.numeric(y_col), config)?;
+    result.missing = cols.missing().clone();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1236,5 +1221,58 @@ mod tests {
                 diff
             );
         }
+    }
+
+    /// REG-25: run_loess reads x and y with R's na.omit (loess drops incomplete rows) and
+    /// accepts Int64 columns. R-pinned: the number of rows used is R's `n_complete`; the
+    /// fit itself is not (REG-14), so it is compared with the fit on the complete rows.
+    #[test]
+    fn test_validate_na_loess_columns() {
+        use crate::regression::ols::na_fixtures::{as_float, complete_rows, mtcars};
+        use p2a_validation::{Check, Tol};
+        let mt = mtcars();
+        // x = hp is Int64
+        let a = run_loess(&mt, "mpg", "hp", 0.75, 2, false).unwrap();
+        let b = run_loess(&as_float(&mt, "hp"), "mpg", "hp", 0.75, 2, false).unwrap();
+        assert_eq!((a.n_obs, &a.fitted, a.rss), (32, &b.fitted, b.rss));
+        let (case, sm) = crate::test_support::load_case("reg_smoothers_na");
+        let r = run_loess(&sm, "y", "x", 0.75, 2, false).unwrap();
+        Check::new(&case)
+            .scalar("n_complete", r.n_obs as f64, Tol::exact())
+            .finish();
+        let c = run_loess(&complete_rows(&sm, &["x", "y"]), "y", "x", 0.75, 2, false).unwrap();
+        assert_eq!(
+            (r.n_obs, &r.fitted, &r.residuals),
+            (56, &c.fitted, &c.residuals)
+        );
+        assert_eq!(
+            r.missing,
+            MissingSummary {
+                n_total: 60,
+                n_used: 56,
+                n_dropped: 4,
+                by_column: vec![("x".into(), 2), ("y".into(), 2)],
+            }
+        );
+        assert!(r.to_string().ends_with(
+            "Missing values: 4 of 60 rows dropped because of missing values (x: 2, y: 2)\n"
+        ));
+        assert!(c.missing.is_empty() && !c.to_string().contains("Missing values"));
+        assert!(serde_json::to_value(&c).unwrap().get("missing").is_none());
+        assert!(matches!(
+            run_loess(&mt, "mpg", "model", 0.75, 2, false),
+            Err(EconError::NonNumericColumn { .. })
+        ));
+        assert!(matches!(
+            run_loess(&mt, "mpg", "nope", 0.75, 2, false),
+            Err(EconError::ColumnNotFound { .. })
+        ));
+        // No complete row: the error names the method and the columns.
+        use crate::regression::ols::na_fixtures::{insufficient_context, with_all_null};
+        let none = with_all_null(&sm, "no_x", polars::prelude::DataType::Float64);
+        assert_eq!(
+            insufficient_context(run_loess(&none, "y", "no_x", 0.75, 2, false)),
+            "LOESS of 'y' on 'no_x': 0 of 60 rows have no missing value"
+        );
     }
 }

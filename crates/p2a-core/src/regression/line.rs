@@ -43,9 +43,14 @@
 //! - Mosteller, F., & Tukey, J.W. (1977). *Data Analysis and Regression*.
 //!   Addison-Wesley. ISBN: 978-0201048544.
 //!
+//! Pairs with a missing (NaN) or infinite x or y are deleted first (R's `line()` uses the
+//! complete pairs too) and reported in [`LineResult::missing`].
+//!
 //! R equivalent: `stats::line()`
 
 use serde::{Deserialize, Serialize};
+
+use crate::data::columns::MissingSummary;
 
 /// Result of Tukey's resistant line fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,18 +59,22 @@ pub struct LineResult {
     pub intercept: f64,
     /// Slope coefficient
     pub slope: f64,
-    /// Fitted values
+    /// Fitted values of the pairs used, in input order
     pub fitted: Vec<f64>,
-    /// Residuals (y - fitted)
+    /// Residuals (y - fitted) of the pairs used, in input order
     pub residuals: Vec<f64>,
-    /// Number of observations
+    /// Number of pairs used (pairs with a missing or infinite value are dropped)
     pub n: usize,
     /// Number of polishing iterations performed
     pub iter: usize,
-    /// The x values used
+    /// The x values used (the kept pairs, in input order)
     pub x: Vec<f64>,
-    /// The y values used
+    /// The y values used (the kept pairs, in input order)
     pub y: Vec<f64>,
+    /// Pairs dropped because x or y was missing or infinite (`by_column` names `x`
+    /// and `y`); absent from JSON when nothing was dropped.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl LineResult {
@@ -95,6 +104,9 @@ impl LineResult {
 /// * `y` - Response values (must have same length as x)
 /// * `iter` - Number of polishing iterations (default 1)
 ///
+/// Pairs with a NaN or infinite x or y are deleted before the fit; at least 3 pairs
+/// must remain.
+///
 /// # Returns
 /// A `LineResult` containing the fitted line parameters
 ///
@@ -112,16 +124,40 @@ pub fn line(x: &[f64], y: &[f64], iter: Option<usize>) -> Result<LineResult, Str
         return Err("x and y must have the same length".to_string());
     }
 
+    // Delete the pairs with a missing or infinite value
+    let n_total = x.len();
+    let bad_x = x.iter().filter(|v| !v.is_finite()).count();
+    let bad_y = y.iter().filter(|v| !v.is_finite()).count();
+    let (x, y): (Vec<f64>, Vec<f64>) = x
+        .iter()
+        .zip(y)
+        .filter(|(a, b)| a.is_finite() && b.is_finite())
+        .map(|(a, b)| (*a, *b))
+        .unzip();
+    let (x, y) = (x.as_slice(), y.as_slice());
     let n = x.len();
+    let missing = MissingSummary {
+        n_total,
+        n_used: n,
+        n_dropped: n_total - n,
+        by_column: [("x", bad_x), ("y", bad_y)]
+            .into_iter()
+            .filter(|(_, k)| *k > 0)
+            .map(|(name, k)| (name.to_string(), k))
+            .collect(),
+    };
     if n < 3 {
-        return Err("Need at least 3 observations for line fitting".to_string());
+        return Err(format!(
+            "Need at least 3 complete (x, y) pairs for line fitting; {n} of {n_total} pairs \
+             are complete (pairs with a missing or infinite value are dropped)"
+        ));
     }
 
     let iter_count = iter.unwrap_or(1).max(1);
 
     // Sort data by x values
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
 
     let sorted_x: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
     let sorted_y: Vec<f64> = indices.iter().map(|&i| y[i]).collect();
@@ -251,6 +287,7 @@ pub fn line(x: &[f64], y: &[f64], iter: Option<usize>) -> Result<LineResult, Str
         iter: iter_count,
         x: x.to_vec(),
         y: y.to_vec(),
+        missing,
     })
 }
 
@@ -261,7 +298,7 @@ fn median(data: &[f64]) -> f64 {
     }
 
     let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
 
     let n = sorted.len();
     if n % 2 == 0 {
@@ -512,6 +549,100 @@ mod tests {
             (result.intercept - 2.0).abs() < 0.5,
             "Clean data intercept should be close to 2.0, got {}",
             result.intercept
+        );
+    }
+
+    /// The reg_smoothers_na case as polars reads it: `id` Int64, `x` and `y` Float64
+    /// with 2 empty cells each, R's count of complete pairs, and no ties among the
+    /// complete x (so supsmu's unique grid is the complete x).
+    #[test]
+    fn test_validate_reg_smoothers_na_fixture() {
+        use p2a_validation::{Check, Tol};
+        use polars::prelude::DataType;
+        let (case, ds) = crate::test_support::load_case("reg_smoothers_na");
+        let df = ds.df();
+        assert_eq!(df.height(), 60);
+        assert_eq!(df.column("id").unwrap().dtype(), &DataType::Int64);
+        for c in ["x", "y"] {
+            let col = df.column(c).unwrap();
+            assert_eq!(col.dtype(), &DataType::Float64, "{c}");
+            assert_eq!(col.null_count(), 2, "{c}");
+        }
+        let ok = &df.column("x").unwrap().is_not_null() & &df.column("y").unwrap().is_not_null();
+        let n_complete = ok.sum().unwrap() as usize;
+        Check::new(&case)
+            .scalar("n_complete", n_complete as f64, Tol::exact())
+            .finish();
+        let x = crate::data::columns::numeric_options(df, "x").unwrap();
+        let y = crate::data::columns::numeric_options(df, "y").unwrap();
+        let mut xc: Vec<f64> = x
+            .iter()
+            .zip(&y)
+            .filter_map(|(a, b)| a.zip(*b).map(|(a, _)| a))
+            .collect();
+        assert_eq!(xc.len(), n_complete);
+        xc.sort_by(f64::total_cmp);
+        assert!(
+            xc.windows(2).all(|w| w[0] != w[1]),
+            "tied complete x values"
+        );
+    }
+
+    /// REG-13: pairs with a missing (NaN) or infinite x or y are deleted before the fit,
+    /// as R's line uses the complete pairs; the fit on the NA data equals the fit on
+    /// the complete pairs, and the sort cannot see a NaN.
+    #[test]
+    fn test_validate_line_na() {
+        use crate::data::columns::MissingSummary;
+        use crate::regression::ols::na_fixtures::nan_vec;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("reg_smoothers_na");
+        let (x, y) = (nan_vec(&ds, "x"), nan_vec(&ds, "y"));
+        let (xc, yc): (Vec<f64>, Vec<f64>) = x
+            .iter()
+            .zip(&y)
+            .filter(|(a, b)| a.is_finite() && b.is_finite())
+            .map(|(a, b)| (*a, *b))
+            .unzip();
+        let r = line(&x, &y, Some(1)).unwrap();
+        let c = line(&xc, &yc, Some(1)).unwrap();
+        assert_eq!(
+            r.missing,
+            MissingSummary {
+                n_total: 60,
+                n_used: 56,
+                n_dropped: 4,
+                by_column: vec![("x".into(), 2), ("y".into(), 2)],
+            }
+        );
+        assert!(r.intercept.is_finite() && r.slope.is_finite());
+        assert_eq!(
+            (r.intercept, r.slope, &r.x, &r.y, &r.fitted, &r.residuals),
+            (c.intercept, c.slope, &xc, &yc, &c.fitted, &c.residuals)
+        );
+        assert!(c.missing.is_empty());
+        assert!(serde_json::to_value(&c).unwrap().get("missing").is_none());
+        // deviation REG-12: R's line_coef (0.441594195008563728, 0.053890384144849528) is
+        // not compared; p2a's resistant line is another variant (Tier 4), so only R's NA
+        // handling is pinned: the number of complete pairs, and NA data = complete pairs.
+        Check::new(&case)
+            .scalar("n_complete", r.n as f64, Tol::exact())
+            .finish();
+        // +Inf in a complete row is deleted too (the array API; datasets refuse Inf
+        // earlier). Row 0 of the case is complete, so xc[1..] drops exactly that row.
+        let mut xi = x.clone();
+        xi[0] = f64::INFINITY;
+        let ri = line(&xi, &y, Some(1)).unwrap();
+        assert_eq!(
+            (ri.n, ri.missing.by_column.clone()),
+            (55, vec![("x".into(), 3), ("y".into(), 2)])
+        );
+        let d = line(&xc[1..], &yc[1..], Some(1)).unwrap();
+        assert_eq!((ri.intercept, ri.slope), (d.intercept, d.slope));
+        let e = line(&[1.0, f64::NAN, 3.0], &[1.0, 2.0, 3.0], None).unwrap_err();
+        assert!(
+            e.contains("at least 3 complete") && e.contains("2 of 3"),
+            "{e}"
         );
     }
 }

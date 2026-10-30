@@ -46,6 +46,24 @@ Property tests (`crates/p2a-core/src/regression/ols.rs`):
   `test_bootstrap_stops_when_cancelled` (Tier 0, `c3e808e`): the `n_boot >= 10` bound, the
   replicate-storage ceiling and cancellation
 
+## Integer Outcomes (REG-23)
+
+`run_vcov_bootstrap` reads y and X as `run_ols` does (`DesignMatrix`, integer and boolean
+columns are numbers; `run_ols` refuses missing values first). It used to re-read y with
+`.f64()` without a cast, so an Int64 outcome failed as "non-numeric" although `run_ols`
+accepted it. Two property tests on `validation/datasets/generated/mtcars.csv` (`hp` is
+Int64), not registered as R-pinned (no registry entry):
+
+- `test_na_vcov_bootstrap_integer_outcome` (`crates/p2a-core/src/regression/ols.rs`): the
+  pairs bootstrap on Int64 `hp` equals the bootstrap on the same values as Float64 with the
+  same seed (SEs and coefficients exactly), the coefficients equal `run_ols`, and a text
+  outcome is `NonNumericColumn`;
+- `test_mcp_regression_bootstrap_cov_integer_outcome`
+  (`crates/p2a-mcp/src/tools/handlers/regression.rs`): MCP `regression_bootstrap_cov` on
+  Int64 `hp` succeeds.
+
+No bootstrap value is compared with R (the RNGs differ, see above).
+
 ## Known Differences
 
 1. **Random number generation**: Rust uses ChaCha8Rng, R uses Mersenne Twister. Results with same seed will differ.

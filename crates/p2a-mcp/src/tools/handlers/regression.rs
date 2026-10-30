@@ -25,7 +25,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::extract_column_f64;
+use crate::tools::common::{NaPolicy, missing_json, numeric_column, numeric_columns};
 use crate::tools::requests::regression::{
     BgTestRequest, BootstrapCovRequest, CvGlmnetRequest, DiagnosticsRequest, DriscollKraayRequest,
     GlmnetRequest, GlsRequest, HacRequest, HarveyCollierRequest, LassoRequest, LineRequest,
@@ -34,6 +34,7 @@ use crate::tools::requests::regression::{
 };
 
 use p2a_core::data::Dataset;
+use p2a_core::data::columns::ColumnRequest;
 use p2a_core::regression::OlsResult;
 use p2a_core::regression::{
     BgTestType, CorrelationStructure, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType,
@@ -340,7 +341,7 @@ impl AnalyticsServer {
 
     /// Driscoll-Kraay panel-robust standard errors.
     #[tool(
-        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values."
+        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output)."
     )]
     pub async fn regression_driscoll_kraay(
         &self,
@@ -430,7 +431,7 @@ impl AnalyticsServer {
 
     /// Run OLS with clustered standard errors.
     #[tool(
-        description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors."
+        description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors. Rows with a missing cluster id are dropped and the model is re-estimated on the remaining rows (as fixest); the output reports how many."
     )]
     pub async fn regression_clustered(
         &self,
@@ -636,7 +637,7 @@ impl AnalyticsServer {
         };
 
         // Build JSON output for LLM
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "LOESS",
             "span": result.span,
             "degree": result.degree,
@@ -650,6 +651,9 @@ impl AnalyticsServer {
             "fitted_values": result.fitted,
             "residuals": result.residuals,
         });
+        if let Some(m) = missing_json(&result.missing) {
+            output["missing"] = m;
+        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string()),
@@ -664,98 +668,37 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SupsmuRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        // Extract x column
-        let x_col = match df.column(&request.x) {
+        // x, y and the weights with R's deletion of incomplete observations; too few
+        // complete rows is reported against the dataset's row count
+        let mut names = vec![request.x.as_str(), request.y.as_str()];
+        if let Some(w) = request.weights.as_deref() {
+            names.push(w);
+        }
+        let cols = match ColumnRequest::new(dataset.df())
+            .numerics(&names)
+            .na(NaPolicy::Omit)
+            .min_rows(
+                4,
+                &format!("SuperSmoother of '{}' on '{}'", request.y, request.x),
+            )
+            .extract()
+        {
             Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "X column '{}' not found: {}",
-                    request.x, e
+                    "SuperSmoother failed: {e}"
                 ))]));
             }
-        };
-
-        let x_values: Vec<f64> = match x_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "X column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot convert X to numeric: {}",
-                    e
-                ))]));
-            }
-        };
-
-        // Extract y column
-        let y_col = match df.column(&request.y) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Y column '{}' not found: {}",
-                    request.y, e
-                ))]));
-            }
-        };
-
-        let y_values: Vec<f64> = match y_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Y column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot convert Y to numeric: {}",
-                    e
-                ))]));
-            }
-        };
-
-        // Extract optional weights
-        let weights: Option<Vec<f64>> = if let Some(ref wt_col) = request.weights {
-            let w_col = match df.column(wt_col) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Weight column '{}' not found: {}",
-                        wt_col, e
-                    ))]));
-                }
-            };
-            match w_col.cast(&DataType::Float64) {
-                Ok(c) => match c.f64() {
-                    Ok(f) => Some(f.into_iter().map(|v| v.unwrap_or(1.0)).collect()),
-                    Err(_) => None,
-                },
-                Err(_) => None,
-            }
-        } else {
-            None
         };
 
         let result = match supsmu(
-            &x_values,
-            &y_values,
-            weights.as_deref(),
+            cols.numeric(&request.x),
+            cols.numeric(&request.y),
+            request.weights.as_deref().map(|w| cols.numeric(w)),
             request.span,
             request.periodic.unwrap_or(false),
             request.bass.unwrap_or(0.0),
@@ -770,7 +713,7 @@ impl AnalyticsServer {
         };
 
         // Format output
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "n_unique_points": result.n,
             "bass": result.bass,
             "periodic": result.periodic,
@@ -778,6 +721,9 @@ impl AnalyticsServer {
             "y_smoothed_sample": &result.y[..result.n.min(20)],
             "note": if result.n > 20 { Some(format!("Showing first 20 of {} points", result.n)) } else { None::<String> }
         });
+        if let Some(m) = missing_json(cols.missing()) {
+            output["missing"] = m;
+        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -792,73 +738,38 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<LineRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        // Extract x column
-        let x_col = match df.column(&request.x) {
+        // x and y with R's deletion of incomplete pairs; too few complete pairs is
+        // reported against the dataset's row count
+        let cols = match ColumnRequest::new(dataset.df())
+            .numeric(&request.x)
+            .numeric(&request.y)
+            .na(NaPolicy::Omit)
+            .min_rows(
+                3,
+                &format!(
+                    "Tukey's resistant line of '{}' on '{}'",
+                    request.y, request.x
+                ),
+            )
+            .extract()
+        {
             Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "X column '{}' not found: {}",
-                    request.x, e
+                    "Tukey's line failed: {e}"
                 ))]));
             }
         };
 
-        let x_values: Vec<f64> = match x_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "X column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot convert X to numeric: {}",
-                    e
-                ))]));
-            }
-        };
-
-        // Extract y column
-        let y_col = match df.column(&request.y) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Y column '{}' not found: {}",
-                    request.y, e
-                ))]));
-            }
-        };
-
-        let y_values: Vec<f64> = match y_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Y column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot convert Y to numeric: {}",
-                    e
-                ))]));
-            }
-        };
-
-        let result = match run_line(&x_values, &y_values, request.iter) {
+        let result = match run_line(
+            cols.numeric(&request.x),
+            cols.numeric(&request.y),
+            request.iter,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -869,7 +780,7 @@ impl AnalyticsServer {
         };
 
         // Format output
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "n_observations": result.n,
             "iterations": result.iter,
             "coefficients": {
@@ -880,6 +791,9 @@ impl AnalyticsServer {
             "residuals_sample": &result.residuals[..result.n.min(20)],
             "note": if result.n > 20 { Some(format!("Showing first 20 of {} values", result.n)) } else { None::<String> }
         });
+        if let Some(m) = missing_json(cols.missing()) {
+            output["missing"] = m;
+        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -970,10 +884,14 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract y column
-        let y = match extract_column_f64(dataset, &request.y) {
-            Ok(v) => Array1::from_vec(v),
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        // Extract y column (a missing value is an error, as nlme::gls's na.fail)
+        let y = match numeric_column(dataset, &request.y, NaPolicy::Fail) {
+            Ok((v, _)) => Array1::from_vec(v),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "GLS regression failed: {e}"
+                ))]));
+            }
         };
 
         // Build design matrix
@@ -1096,14 +1014,18 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let x = match extract_column_f64(dataset, &request.x) {
-            Ok(v) => v,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
-
-        let y = match extract_column_f64(dataset, &request.y) {
-            Ok(v) => v,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        // x and y; a missing value is an error, as R's smooth.spline refuses them
+        let cols = match numeric_columns(
+            dataset,
+            &[request.x.as_str(), request.y.as_str()],
+            NaPolicy::Fail,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Smooth spline failed: {e}"
+                ))]));
+            }
         };
 
         let config = SmoothSplineConfig {
@@ -1112,7 +1034,7 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match smooth_spline(&x, &y, config) {
+        match smooth_spline(cols.numeric(&request.x), cols.numeric(&request.y), config) {
             Ok(result) => {
                 // Get predictions at xout if specified, otherwise at data points
                 let (pred_x, pred_y) = if let Some(ref xout) = request.xout {
@@ -1486,6 +1408,394 @@ mod tests {
         assert!(
             !required.contains(&"cov_type") && !required.contains(&"intercept"),
             "{required:?}"
+        );
+    }
+
+    /// One server holding the dataset of each case, named by its file stem
+    /// (`grunfeld_cluster_na`, `smoothers_na`).
+    fn cases_server(ids: &[&str]) -> (tokio::runtime::Runtime, AnalyticsServer) {
+        let frames: Vec<(String, p2a_core::polars::prelude::DataFrame)> = ids
+            .iter()
+            .map(|id| {
+                let path = Case::load(id).dataset_path();
+                let stem = path.file_stem().unwrap().to_str().unwrap().to_string();
+                (stem, DataLoader::load_csv(&path).unwrap())
+            })
+            .collect();
+        server_with(
+            frames
+                .iter()
+                .map(|(name, df)| (name.as_str(), df.clone()))
+                .collect(),
+        )
+    }
+
+    /// The CSV at `rel` under the repository root, loaded as `p2a data load` loads it
+    /// but without an R case: for property tests and for datasets no R value is read
+    /// from.
+    fn repo_csv(rel: &str) -> p2a_core::polars::prelude::DataFrame {
+        let path = p2a_validation::repo_path(rel);
+        DataLoader::load_csv(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// `validation/datasets/generated/mtcars.csv` (`hp` is Int64, `model` is text).
+    fn mtcars_csv() -> p2a_core::polars::prelude::DataFrame {
+        repo_csv("validation/datasets/generated/mtcars.csv")
+    }
+
+    /// The tool's text output as JSON.
+    fn json_of(r: &CallToolResult) -> Value {
+        let t = text(r);
+        serde_json::from_str(&t).unwrap_or_else(|e| panic!("not JSON ({e}): {t}"))
+    }
+
+    /// Every number of field `key` in the JSON text `json`: the value of each
+    /// `"key": <number>` and the elements of each `"key": [<numbers>]`, read with
+    /// `str::parse::<f64>`, which rounds correctly. This workspace builds serde_json
+    /// without its `float_roundtrip` feature, and its default (best-effort) float parsing
+    /// can read a shortest round-trip double 1 ulp off, so exact comparisons read the text.
+    fn json_numbers(json: &str, key: &str) -> Vec<f64> {
+        let pattern = format!("\"{key}\":");
+        let mut numbers = Vec::new();
+        let mut rest = json;
+        while let Some(at) = rest.find(&pattern) {
+            rest = rest[at + pattern.len()..].trim_start();
+            let (body, tail) = match rest.strip_prefix('[') {
+                Some(array) => array.split_once(']').expect("an array closed by ]"),
+                None => rest.split_at(rest.find([',', '}', '\n']).unwrap_or(rest.len())),
+            };
+            numbers.extend(
+                body.split(',')
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(|t| {
+                        t.parse::<f64>()
+                            .unwrap_or_else(|e| panic!("`{t}` in field {key}: {e}"))
+                    }),
+            );
+            rest = tail;
+        }
+        numbers
+    }
+
+    /// `missing` of reg_smoothers_na: 4 of 60 rows dropped, 2 missing x and 2 missing y.
+    fn smoothers_missing() -> Value {
+        json!({"n_total": 60, "n_used": 56, "n_dropped": 4, "by_column": {"x": 2, "y": 2}})
+    }
+
+    /// The complete (x, y) pairs of a case dataset, in row order.
+    fn complete_pairs(case: &Case) -> (Vec<f64>, Vec<f64>) {
+        let df = DataLoader::load_csv(case.dataset_path()).unwrap();
+        let x = p2a_core::data::columns::numeric_options(&df, "x").unwrap();
+        let y = p2a_core::data::columns::numeric_options(&df, "y").unwrap();
+        x.iter().zip(&y).filter_map(|(a, b)| a.zip(*b)).unzip()
+    }
+
+    /// REG-21 through the tool: a missing cluster id drops its row (one- and two-way),
+    /// the model is re-estimated, and the text reports the drop.
+    #[test]
+    fn test_validate_mcp_regression_clustered_na() {
+        let case = Case::load("reg_cluster_na");
+        let (rt, server) = cases_server(&["reg_cluster_na"]);
+        let call = |extra: Value| -> String {
+            let mut v = json!({"dataset": "grunfeld_cluster_na", "y": "inv",
+                               "x": ["value", "capital"], "cluster1": "firm_label"});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            let req: OlsClusteredRequest = serde_json::from_value(v).unwrap();
+            let r = rt
+                .block_on(server.regression_clustered(Parameters(req)))
+                .unwrap();
+            assert_ne!(r.is_error, Some(true), "{}", text(&r));
+            text(&r)
+        };
+        let split = |t: &str| -> (Vec<String>, Vec<f64>, Vec<f64>) {
+            let rows = rows(t);
+            (
+                rows.iter().map(|(n, _)| n.clone()).collect(),
+                rows.iter().map(|(_, v)| v[0]).collect(),
+                rows.iter().map(|(_, v)| v[1]).collect(),
+            )
+        };
+        let t = call(json!({}));
+        assert!(
+            t.contains("Observations: 197\n") && t.contains("Clusters: 10\n"),
+            "{t}"
+        );
+        assert!(
+            t.contains("  - 3 of 200 rows dropped because of missing values (firm_label: 3)\n"),
+            "{t}"
+        );
+        let (names, coef, se) = split(&t);
+        Check::new(&case)
+            .named("coef", &names, &coef, Tol::printed(4))
+            .named("se_cluster_hc1", &names, &se, Tol::printed(4))
+            .finish();
+        let t = call(json!({"cluster2": "year_na"}));
+        assert!(
+            t.contains("Observations: 195\n") && t.contains("Clusters: 10 x 20\n"),
+            "{t}"
+        );
+        assert!(
+            t.contains(
+                "  - 5 of 200 rows dropped because of missing values (firm_label: 3, year_na: 2)\n"
+            ),
+            "{t}"
+        );
+        let (names, coef, se) = split(&t);
+        Check::new(&case)
+            .named("coef_twoway", &names, &coef, Tol::printed(4))
+            .named("se_cluster_twoway_hc1", &names, &se, Tol::printed(4))
+            .finish();
+    }
+
+    /// REG-21 (Driscoll-Kraay): a missing time id drops its row; a fractional time id
+    /// is a tool error instead of being truncated to a period. A property test (the DK
+    /// SEs are not R-pinned, REG-24), so it loads the dataset without a case.
+    #[test]
+    fn test_mcp_regression_driscoll_kraay_missing_time() {
+        use p2a_core::data::columns::{NaPolicy, numeric_column};
+        use p2a_core::polars::prelude::{NamedFrom, Series};
+        let df = repo_csv("validation/datasets/generated/grunfeld_cluster_na.csv");
+        let (year, _) = numeric_column(&df, "year", NaPolicy::Fail).unwrap();
+        let mut quarterly = df.clone();
+        let t_q: Vec<f64> = year.iter().map(|y| y + 0.25).collect();
+        quarterly
+            .with_column(Series::new("t_q".into(), t_q))
+            .unwrap();
+        let (rt, server) = server_with(vec![("grunfeld_cluster_na", df), ("quarterly", quarterly)]);
+        let call = |dataset: &str, time_col: &str| -> CallToolResult {
+            let req: DriscollKraayRequest = serde_json::from_value(json!({
+                "dataset": dataset, "y": "inv", "x": ["value", "capital"], "time_col": time_col
+            }))
+            .unwrap();
+            rt.block_on(server.regression_driscoll_kraay(Parameters(req)))
+                .unwrap()
+        };
+        let r = call("grunfeld_cluster_na", "year_na");
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(t.contains("N = 198 observations, T = 20 periods"), "{t}");
+        assert!(
+            t.contains("2 of 200 rows dropped because of missing values (year_na: 2)"),
+            "{t}"
+        );
+        let r = call("quarterly", "t_q");
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains("Time column 't_q' must hold whole numbers") && t.contains("1935.25"),
+            "{t}"
+        );
+    }
+
+    /// REG-23 through the tool: an Int64 outcome (mtcars hp) is a number. A property
+    /// test (no value is compared with R), so it loads the dataset without a case.
+    #[test]
+    fn test_mcp_regression_bootstrap_cov_integer_outcome() {
+        let (rt, server) = server_with(vec![("mtcars", mtcars_csv())]);
+        let req: BootstrapCovRequest = serde_json::from_value(json!({
+            "dataset": "mtcars", "y": "hp", "x": ["wt"], "n_boot": 200, "seed": 42
+        }))
+        .unwrap();
+        let r = rt
+            .block_on(server.regression_bootstrap_cov(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(t.contains("Bootstrap Covariance Estimation"), "{t}");
+    }
+
+    /// REG-25 through the tool: loess drops incomplete rows (R's na.omit; the number of
+    /// rows used is R's `n_complete`) and reports them, and an Int64 x is a number.
+    #[test]
+    fn test_validate_mcp_regression_loess_missing_and_integer() {
+        let case = Case::load("reg_smoothers_na");
+        let (rt, server) = server_with(vec![
+            (
+                "smoothers_na",
+                DataLoader::load_csv(case.dataset_path()).unwrap(),
+            ),
+            ("mtcars", mtcars_csv()),
+        ]);
+        let call = |v: Value| -> CallToolResult {
+            let req: LoessRequest = serde_json::from_value(v).unwrap();
+            rt.block_on(server.regression_loess(Parameters(req)))
+                .unwrap()
+        };
+        let r = call(json!({"dataset": "smoothers_na", "y": "y", "x": "x"}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let j = json_of(&r);
+        Check::new(&case)
+            .scalar("n_complete", j["n_obs"].as_f64().unwrap(), Tol::exact())
+            .finish();
+        assert_eq!(j["n_obs"], 56);
+        assert_eq!(j["fitted_values"].as_array().unwrap().len(), 56);
+        assert_eq!(j["missing"], smoothers_missing());
+        let r = call(json!({"dataset": "mtcars", "y": "mpg", "x": "hp"}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let j = json_of(&r);
+        assert_eq!(j["n_obs"], 32);
+        assert!(j.get("missing").is_none(), "{j}");
+    }
+
+    /// TOOL-3: the GLS y refuses missing values (nlme::gls stops) instead of a fit
+    /// with null coefficients. A property test (no value is compared with R), so it
+    /// loads the dataset without a case.
+    #[test]
+    fn test_mcp_regression_gls_missing_y_is_error() {
+        let (rt, server) = server_with(vec![(
+            "smoothers_na",
+            repo_csv("validation/datasets/generated/smoothers_na.csv"),
+        )]);
+        let req: GlsRequest = serde_json::from_value(json!({
+            "dataset": "smoothers_na", "y": "y", "x": ["id"], "correlation": "identity"
+        }))
+        .unwrap();
+        let r = rt.block_on(server.regression_gls(Parameters(req))).unwrap();
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(t.contains("Column 'y' contains 2 missing value(s)"), "{t}");
+    }
+
+    /// REG-25 through the tool: the smoothing spline refuses missing values (as R's
+    /// smooth.spline) and accepts an Int64 x. A property test (no value is compared with
+    /// R), so it loads the datasets without a case.
+    #[test]
+    fn test_mcp_regression_smooth_spline_missing_is_error() {
+        let (rt, server) = server_with(vec![
+            (
+                "smoothers_na",
+                repo_csv("validation/datasets/generated/smoothers_na.csv"),
+            ),
+            ("mtcars", mtcars_csv()),
+        ]);
+        let call = |v: Value| -> CallToolResult {
+            let req: SmoothSplineRequest = serde_json::from_value(v).unwrap();
+            rt.block_on(server.regression_smooth_spline(Parameters(req)))
+                .unwrap()
+        };
+        let r = call(json!({"dataset": "smoothers_na", "x": "x", "y": "y"}));
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(t.contains("Column 'x' contains 2 missing value(s)"), "{t}");
+        let r = call(json!({"dataset": "mtcars", "x": "hp", "y": "mpg", "df": 4.0}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert_eq!(json_of(&r)["n_obs"], 32);
+    }
+
+    /// REG-13 through the tool: supsmu drops incomplete (x, y, weights) rows; its x grid
+    /// is R's grid after the deletion and every smoothed value is a number.
+    #[test]
+    fn test_validate_mcp_regression_supsmu_na() {
+        let case = Case::load("reg_smoothers_na");
+        let (rt, server) = server_with(vec![
+            (
+                "smoothers_na",
+                DataLoader::load_csv(case.dataset_path()).unwrap(),
+            ),
+            ("mtcars", mtcars_csv()),
+        ]);
+        let call = |v: Value| -> CallToolResult {
+            let req: SupsmuRequest = serde_json::from_value(v).unwrap();
+            rt.block_on(server.regression_supsmu(Parameters(req)))
+                .unwrap()
+        };
+        let r = call(json!({"dataset": "smoothers_na", "x": "x", "y": "y"}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let j = json_of(&r);
+        assert_eq!(j["n_unique_points"], 56);
+        let x: Vec<f64> = j["x_sample"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        assert_eq!(x, case.vector("supsmu_x")[..20].to_vec());
+        let y = j["y_smoothed_sample"].as_array().unwrap();
+        assert_eq!(y.len(), 20);
+        assert!(
+            y.iter().all(|v| v.as_f64().is_some_and(f64::is_finite)),
+            "{j}"
+        );
+        assert_eq!(j["missing"], smoothers_missing());
+        // Weights are read with x and y: a missing weight drops its row (it used to
+        // become 1.0); here the weight column is x, so the same rows go.
+        let r = call(json!({"dataset": "smoothers_na", "x": "x", "y": "y", "weights": "x"}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert_eq!(json_of(&r)["missing"], smoothers_missing());
+        // A text weights column is an error (it used to be ignored silently).
+        let r = call(json!({"dataset": "mtcars", "x": "wt", "y": "mpg", "weights": "model"}));
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(t.contains("'model'"), "{t}");
+    }
+
+    /// REG-13 through the tool: line uses the complete pairs (R's line), so the fit
+    /// equals line() on them, and the drop is reported.
+    #[test]
+    fn test_validate_mcp_regression_line_na() {
+        let case = Case::load("reg_smoothers_na");
+        let (rt, server) = cases_server(&["reg_smoothers_na"]);
+        let req: LineRequest =
+            serde_json::from_value(json!({"dataset": "smoothers_na", "x": "x", "y": "y"})).unwrap();
+        let r = rt
+            .block_on(server.regression_line(Parameters(req)))
+            .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let j = json_of(&r);
+        Check::new(&case)
+            .scalar(
+                "n_complete",
+                j["n_observations"].as_f64().unwrap(),
+                Tol::exact(),
+            )
+            .finish();
+        let (xc, yc) = complete_pairs(&case);
+        let fit = p2a_core::regression::line::line(&xc, &yc, None).unwrap();
+        let raw = text(&r);
+        assert_eq!(json_numbers(&raw, "intercept"), [fit.intercept]);
+        assert_eq!(json_numbers(&raw, "slope"), [fit.slope]);
+        assert_eq!(j["missing"], smoothers_missing());
+    }
+
+    /// REG-13 through the tools: with too few complete rows, line and supsmu fail with
+    /// the extractor's error, which names the method and the columns and counts the
+    /// rows of the dataset (not only the complete ones the core function would see).
+    #[test]
+    fn test_mcp_regression_line_supsmu_too_few_complete_rows() {
+        // 2 of 6 rows have both x and y.
+        let df = p2a_core::polars::prelude::df!(
+            "x" => [Some(1.2), Some(2.1), None, Some(4.3), None, Some(6.1)],
+            "y" => [Some(2.3), None, Some(3.9), Some(5.2), None, None]
+        )
+        .unwrap();
+        let (rt, server) = server_with(vec![("two_complete", df)]);
+        let args = json!({"dataset": "two_complete", "x": "x", "y": "y"});
+        let req: LineRequest = serde_json::from_value(args.clone()).unwrap();
+        let r = rt
+            .block_on(server.regression_line(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains("need at least 3 observations, got 2")
+                && t.contains(
+                    "Tukey's resistant line of 'y' on 'x': 2 of 6 rows have no missing value"
+                ),
+            "{t}"
+        );
+        let req: SupsmuRequest = serde_json::from_value(args).unwrap();
+        let r = rt
+            .block_on(server.regression_supsmu(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains("need at least 4 observations, got 2")
+                && t.contains("SuperSmoother of 'y' on 'x': 2 of 6 rows have no missing value"),
+            "{t}"
         );
     }
 }

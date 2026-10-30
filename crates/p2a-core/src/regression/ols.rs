@@ -58,10 +58,13 @@ use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use crate::data::Dataset;
-use crate::data::columns::econ_error_from_design;
+use crate::data::columns::{
+    ColumnRequest, Columns, Factor, MissingSummary, NaPolicy, econ_error_from_design,
+};
 use crate::errors::{EconError, EconResult, EstimationWarning};
 use crate::linalg::{CONDITION_THRESHOLD, DesignMatrix, matmul, safe_inverse, xtx, xty};
 use crate::resource;
@@ -219,6 +222,11 @@ pub struct OlsResult {
     // ═══════════════════════════════════════════════════════════════════════
     /// Any warnings generated during estimation
     pub warnings: Vec<String>,
+    /// Rows dropped because an identifier (a cluster id) was missing. Empty for
+    /// `run_ols` and `run_ols_raw`, which refuse missing values; absent from JSON when
+    /// nothing was dropped.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Internal caches (not serialized)
@@ -581,6 +589,7 @@ pub fn run_ols_raw(
         bic,
         cov_type,
         warnings,
+        missing: MissingSummary::none(n),
         beta,
         se,
         resid: residuals,
@@ -752,6 +761,7 @@ pub fn run_ols(
         bic,
         cov_type,
         warnings,
+        missing: MissingSummary::none(n),
         beta,
         se,
         resid: residuals,
@@ -989,6 +999,14 @@ impl std::fmt::Display for OlsClusteredResult {
 
 /// Run OLS regression with clustered standard errors.
 ///
+/// Cluster ids are read as factors (strings, integers, floats, booleans or dates). A row
+/// whose id is missing, in either dimension of a two-way clustering, is dropped and the
+/// model is re-estimated on the remaining rows, as `fixest::feols(cluster = )` does
+/// (`sandwich::vcovCL` refuses missing clusters). The drop is reported in
+/// `OlsResult::missing` and as the first warning; when no row has an id the error is
+/// `InsufficientData` naming the id column(s). A missing value of `y_col` or of an
+/// `x_cols` column in a kept row is an error, as in [`run_ols`].
+///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
 /// * `y_col` - Name of the dependent variable column
@@ -1005,19 +1023,37 @@ pub fn run_ols_clustered(
     cluster1: &str,
     cluster2: Option<&str>,
 ) -> EconResult<OlsClusteredResult> {
-    let df = dataset.df();
+    // Cluster ids, with the rows whose id is missing left out.
+    let mut request = ColumnRequest::new(dataset.df()).factor(cluster1);
+    let context = match cluster2 {
+        Some(c2) => {
+            request = request.factor(c2);
+            format!("clustered OLS (rows with ids in '{cluster1}' and '{c2}')")
+        }
+        None => format!("clustered OLS (rows with an id in '{cluster1}')"),
+    };
+    let ids = request.na(NaPolicy::Omit).min_rows(1, &context).extract()?;
+
+    let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 3);
+    names.push(y_col);
+    names.extend_from_slice(x_cols);
+    names.push(cluster1);
+    names.extend(cluster2);
+    let sample = estimation_sample(dataset, &names, &ids)?;
+    let df = sample.df();
 
     // First run standard OLS to get coefficients and residuals
-    let mut base_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
+    let mut base_result = run_ols(&sample, y_col, x_cols, true, CovarianceType::Standard)?;
 
     // Build design matrix again (we need it for clustered SEs)
     let design = DesignMatrix::from_dataframe(df, x_cols, true)
-        .map_err(|e| EconError::Internal(e.to_string()))?;
+        .map_err(|e| econ_error_from_design(e, df))?;
     let x = &design.data;
 
-    // Extract cluster IDs
-    let clusters1 = extract_cluster_ids(df, cluster1)?;
-    let n_clusters_1 = clusters1.values().count();
+    // Row indices (into the sample) of each cluster
+    let factor1 = ids.factor(cluster1);
+    let clusters1 = cluster_groups(factor1)?;
+    let n_clusters_1 = clusters1.len();
 
     if n_clusters_1 < 2 {
         return Err(EconError::InsufficientData {
@@ -1048,8 +1084,9 @@ pub fn run_ols_clustered(
 
     let (vcov, n_clusters_2, cluster_type) = if let Some(c2) = cluster2 {
         // Two-way clustering
-        let clusters2 = extract_cluster_ids(df, c2)?;
-        let n_c2 = clusters2.values().count();
+        let factor2 = ids.factor(c2);
+        let clusters2 = cluster_groups(factor2)?;
+        let n_c2 = clusters2.len();
 
         if n_c2 < 2 {
             return Err(EconError::InsufficientData {
@@ -1059,12 +1096,14 @@ pub fn run_ols_clustered(
             });
         }
 
+        let intersection = intersection_groups(factor1, factor2)?;
         let vcov = compute_twoway_clustered_vcov(
             &x.view(),
             &base_result.resid,
             &base_result.xtx_inv,
             &clusters1,
             &clusters2,
+            &intersection,
         )?;
 
         (
@@ -1115,6 +1154,10 @@ pub fn run_ols_clustered(
     base_result.coefficients = coefficients;
     base_result.se = se;
     base_result.vcov = vcov;
+    if let Some(note) = ids.missing().note() {
+        base_result.missing = ids.missing().clone();
+        base_result.warnings.insert(0, note);
+    }
 
     Ok(OlsClusteredResult {
         ols: base_result,
@@ -1126,26 +1169,63 @@ pub fn run_ols_clustered(
     })
 }
 
-/// Extract cluster IDs from a column.
-/// Returns a mapping from cluster identifier to vector of row indices.
-fn extract_cluster_ids(df: &DataFrame, col: &str) -> EconResult<HashMap<String, Vec<usize>>> {
-    let column = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let mut clusters: HashMap<String, Vec<usize>> = HashMap::new();
-
-    for i in 0..column.len() {
-        let key = format!("{:?}", column.get(i).unwrap());
-        clusters.entry(key).or_default().push(i);
+/// The rows of `dataset` that `ids` kept, restricted to the columns `names` (each must
+/// exist; duplicates are taken once). Without a dropped row this is `dataset` itself, so
+/// the estimates on complete ids are computed exactly as before.
+fn estimation_sample<'a>(
+    dataset: &'a Dataset,
+    names: &[&str],
+    ids: &Columns,
+) -> EconResult<Cow<'a, Dataset>> {
+    if ids.missing().is_empty() {
+        return Ok(Cow::Borrowed(dataset));
     }
+    let df = dataset.df();
+    let mut seen: HashSet<&str> = HashSet::with_capacity(names.len());
+    let mut columns: Vec<&str> = Vec::with_capacity(names.len());
+    for &name in names {
+        crate::data::columns::column(df, name)?;
+        if seen.insert(name) {
+            columns.push(name);
+        }
+    }
+    let mut idx: Vec<IdxSize> = resource::try_with_capacity(ids.n(), "estimation sample")?;
+    for &row in ids.rows() {
+        // A polars frame's height fits its index type.
+        idx.push(IdxSize::try_from(row).map_err(|_| {
+            EconError::Internal(format!("row {row} exceeds the polars row index type"))
+        })?);
+    }
+    let sample = df
+        .select(columns)
+        .and_then(|selected| selected.take(&IdxCa::new("rows".into(), idx)))
+        .map_err(|e| EconError::Internal(e.to_string()))?;
+    Ok(Cow::Owned(Dataset::new(sample)))
+}
 
-    Ok(clusters)
+/// Row indices of each level of `f` (indices into the rows `f` was extracted from).
+fn cluster_groups(f: &Factor) -> EconResult<Vec<Vec<usize>>> {
+    let mut groups: Vec<Vec<usize>> =
+        resource::try_vec(f.n_levels(), Vec::new(), "cluster groups")?;
+    for (i, &code) in f.codes.iter().enumerate() {
+        groups[code as usize].push(i);
+    }
+    Ok(groups)
+}
+
+/// Row indices of each observed (level of `a`, level of `b`) pair: the intersection
+/// clusters of a two-way clustering, keyed by factor codes.
+fn intersection_groups(a: &Factor, b: &Factor) -> EconResult<Vec<Vec<usize>>> {
+    let mut index: HashMap<(u32, u32), usize> = HashMap::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, (&ca, &cb)) in a.codes.iter().zip(&b.codes).enumerate() {
+        let g = *index.entry((ca, cb)).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[g].push(i);
+    }
+    Ok(groups)
 }
 
 /// Compute one-way clustered variance-covariance matrix.
@@ -1158,7 +1238,7 @@ fn compute_clustered_vcov(
     x: &ndarray::ArrayView2<f64>,
     residuals: &Array1<f64>,
     xtx_inv: &Array2<f64>,
-    clusters: &HashMap<String, Vec<usize>>,
+    clusters: &[Vec<usize>],
 ) -> EconResult<Array2<f64>> {
     let n = x.nrows();
     let k = x.ncols();
@@ -1170,7 +1250,7 @@ fn compute_clustered_vcov(
     // Compute meat: sum over clusters of (X_g' e_g)(X_g' e_g)'
     let meat: Array2<f64> = clusters
         .par_iter()
-        .map(|(_, indices)| {
+        .map(|indices| {
             // Compute X_g' e_g for this cluster
             let mut xe = vec![0.0; k];
             for &i in indices {
@@ -1211,8 +1291,9 @@ fn compute_twoway_clustered_vcov(
     x: &ndarray::ArrayView2<f64>,
     residuals: &Array1<f64>,
     xtx_inv: &Array2<f64>,
-    clusters1: &HashMap<String, Vec<usize>>,
-    clusters2: &HashMap<String, Vec<usize>>,
+    clusters1: &[Vec<usize>],
+    clusters2: &[Vec<usize>],
+    intersection: &[Vec<usize>],
 ) -> EconResult<Array2<f64>> {
     // Compute V_1 (clustered on dimension 1)
     let v1 = compute_clustered_vcov(x, residuals, xtx_inv, clusters1)?;
@@ -1220,39 +1301,11 @@ fn compute_twoway_clustered_vcov(
     // Compute V_2 (clustered on dimension 2)
     let v2 = compute_clustered_vcov(x, residuals, xtx_inv, clusters2)?;
 
-    // Compute intersection clusters
-    let intersection = compute_intersection_clusters(clusters1, clusters2);
-    let v12 = compute_clustered_vcov(x, residuals, xtx_inv, &intersection)?;
+    // Compute V_12 (clustered on the intersection)
+    let v12 = compute_clustered_vcov(x, residuals, xtx_inv, intersection)?;
 
     // V = V_1 + V_2 - V_12
     Ok(&v1 + &v2 - &v12)
-}
-
-/// Compute intersection of two clustering dimensions.
-fn compute_intersection_clusters(
-    clusters1: &HashMap<String, Vec<usize>>,
-    clusters2: &HashMap<String, Vec<usize>>,
-) -> HashMap<String, Vec<usize>> {
-    let n = clusters1.values().map(|v| v.len()).sum::<usize>();
-
-    // Create reverse lookup for cluster2
-    let mut idx_to_c2: Vec<String> = vec![String::new(); n];
-    for (key, indices) in clusters2 {
-        for &i in indices {
-            idx_to_c2[i] = key.clone();
-        }
-    }
-
-    // Create intersection clusters
-    let mut intersection: HashMap<String, Vec<usize>> = HashMap::new();
-    for (c1_key, indices) in clusters1 {
-        for &i in indices {
-            let key = format!("{}-{}", c1_key, idx_to_c2[i]);
-            intersection.entry(key).or_default().push(i);
-        }
-    }
-
-    intersection
 }
 
 // ============================================================================
@@ -2030,25 +2083,13 @@ pub fn run_vcov_bootstrap(
     // First run OLS
     let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
 
-    // Build design matrix
-    let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
-    let x = dm.view().to_owned();
-
-    // Extract y
-    let y_series = dataset
-        .df()
-        .column(y_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: vec![],
-        })?;
-    let y: Array1<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
+    // X and y as run_ols reads them (integer and boolean columns are numbers; run_ols
+    // has already refused missing values)
+    let df = dataset.df();
+    let dm = DesignMatrix::from_dataframe(df, x_cols, true)
+        .map_err(|e| econ_error_from_design(e, df))?;
+    let x = dm.data;
+    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
 
     // Parse bootstrap type
     let boot_type = bootstrap_type
@@ -2094,6 +2135,10 @@ pub struct DriscollKraayResult {
     /// Warnings about the estimate
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Rows dropped because their time id was missing ([`run_vcov_driscoll_kraay`]);
+    /// absent from JSON when nothing was dropped.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for DriscollKraayResult {
@@ -2378,6 +2423,7 @@ pub fn vcov_driscoll_kraay(
         bandwidth: bw,
         kernel,
         warnings,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -2388,7 +2434,11 @@ pub fn vcov_driscoll_kraay(
 /// * `dataset` - The dataset
 /// * `y_col` - Name of the dependent variable column
 /// * `x_cols` - Names of independent variable columns
-/// * `time_col` - Name of the time period identifier column
+/// * `time_col` - Name of the time period identifier column: whole numbers (integers or
+///   integral floats) or dates. A fractional or text id is an `InvalidSpecification`; a row
+///   whose id is missing is dropped, the model is re-estimated on the other rows, and the
+///   drop is reported in `DriscollKraayResult::missing` and as the first warning (no row
+///   with an id is `InsufficientData` naming the column).
 /// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than the number of
 ///   time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
 /// * `kernel` - Kernel type string ("bartlett", "parzen", "qs", etc.)
@@ -2413,55 +2463,143 @@ pub fn run_vcov_driscoll_kraay(
     bandwidth: Option<usize>,
     kernel: Option<&str>,
 ) -> EconResult<DriscollKraayResult> {
-    // Run OLS
-    let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
+    // Time ids: whole numbers (integers or integral floats) or dates. A fractional or
+    // text id is an error; a row whose id is missing is dropped.
+    let ids = ColumnRequest::new(dataset.df())
+        .time_index(time_col)
+        .na(NaPolicy::Omit)
+        .min_rows(
+            1,
+            &format!("Driscoll-Kraay (rows with a time id in '{time_col}')"),
+        )
+        .extract()?;
+    let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 2);
+    names.push(y_col);
+    names.extend_from_slice(x_cols);
+    names.push(time_col);
+    let sample = estimation_sample(dataset, &names, &ids)?;
+    let df = sample.df();
+
+    // Run OLS on the estimation sample
+    let ols_result = run_ols(&sample, y_col, x_cols, true, CovarianceType::Standard)?;
 
     // Build design matrix
-    let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
-    let x = dm.view().to_owned();
-
-    // Extract time IDs
-    let time_series = dataset
-        .df()
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: vec![],
-        })?;
-
-    let time_ids: Vec<i64> = if time_series.dtype().is_integer() {
-        time_series
-            .cast(&DataType::Int64)
-            .map_err(|_| EconError::NonNumericColumn {
-                column: time_col.to_string(),
-            })?
-            .i64()
-            .map_err(|_| EconError::NonNumericColumn {
-                column: time_col.to_string(),
-            })?
-            .into_no_null_iter()
-            .collect()
-    } else if time_series.dtype().is_float() {
-        time_series
-            .f64()
-            .map_err(|_| EconError::NonNumericColumn {
-                column: time_col.to_string(),
-            })?
-            .into_no_null_iter()
-            .map(|v| v as i64)
-            .collect()
-    } else {
-        return Err(EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        });
-    };
+    let dm = DesignMatrix::from_dataframe(df, x_cols, true)
+        .map_err(|e| econ_error_from_design(e, df))?;
 
     // Parse kernel
     let kernel_type = kernel
         .and_then(HacKernel::from_str)
         .unwrap_or(HacKernel::Bartlett);
 
-    vcov_driscoll_kraay(&ols_result, &x, &time_ids, bandwidth, kernel_type)
+    let mut result = vcov_driscoll_kraay(
+        &ols_result,
+        &dm.data,
+        ids.time_index(time_col),
+        bandwidth,
+        kernel_type,
+    )?;
+    if let Some(note) = ids.missing().note() {
+        result.missing = ids.missing().clone();
+        result.warnings.insert(0, note);
+    }
+    Ok(result)
+}
+
+/// Fixtures for the missing-value and column-type tests of the regression helpers
+/// (T2-WP15), built from the R case datasets. `complete_rows` filters with polars
+/// directly, independently of `data::columns`, so a test compares the extractor's
+/// estimation sample against a sample built another way.
+#[cfg(test)]
+pub(crate) mod na_fixtures {
+    use crate::data::Dataset;
+    use crate::data::columns::{NaPolicy, numeric_column, numeric_options};
+    use polars::prelude::*;
+
+    /// The CSV at `rel` under the repository root (`validation/datasets/...`), loaded as
+    /// `p2a data load` loads it, for the property tests that compare no R value and so
+    /// load no R case.
+    pub(crate) fn repo_dataset(rel: &str) -> Dataset {
+        let path = p2a_validation::repo_path(rel);
+        match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        }
+    }
+
+    /// `validation/datasets/generated/mtcars.csv` (`hp` is Int64, `model` is text).
+    pub(crate) fn mtcars() -> Dataset {
+        repo_dataset("validation/datasets/generated/mtcars.csv")
+    }
+
+    /// `validation/datasets/generated/smoothers_na.csv`: 60 rows, 2 missing x, 2 missing y.
+    pub(crate) fn smoothers_na() -> Dataset {
+        repo_dataset("validation/datasets/generated/smoothers_na.csv")
+    }
+
+    /// `ds` with column `name` cast to Float64 (the same values).
+    pub(crate) fn as_float(ds: &Dataset, name: &str) -> Dataset {
+        let mut df = ds.df().clone();
+        let cast = df.column(name).unwrap().cast(&DataType::Float64).unwrap();
+        df.with_column(cast).unwrap();
+        Dataset::new(df)
+    }
+
+    /// The rows of `ds` where every column in `names` is not null.
+    pub(crate) fn complete_rows(ds: &Dataset, names: &[&str]) -> Dataset {
+        let df = ds.df();
+        let mut mask = df.column(names[0]).unwrap().is_not_null();
+        for name in &names[1..] {
+            mask = &mask & &df.column(name).unwrap().is_not_null();
+        }
+        Dataset::new(df.filter(&mask).unwrap())
+    }
+
+    /// Column `name` as f64 with missing cells as NaN (the array APIs' input).
+    pub(crate) fn nan_vec(ds: &Dataset, name: &str) -> Vec<f64> {
+        numeric_options(ds.df(), name)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.unwrap_or(f64::NAN))
+            .collect()
+    }
+
+    /// `ds` plus a column `name` of type `dtype` whose every cell is missing.
+    pub(crate) fn with_all_null(ds: &Dataset, name: &str, dtype: DataType) -> Dataset {
+        let mut df = ds.df().clone();
+        let n = df.height();
+        df.with_column(Series::full_null(name.into(), n, &dtype))
+            .unwrap();
+        Dataset::new(df)
+    }
+
+    /// The context of an `InsufficientData` error (panics on any other result).
+    pub(crate) fn insufficient_context<T: std::fmt::Debug>(
+        r: crate::errors::EconResult<T>,
+    ) -> String {
+        match r {
+            Err(crate::errors::EconError::InsufficientData {
+                required: 1,
+                provided: 0,
+                context,
+            }) => context,
+            other => panic!("expected InsufficientData (1 required, 0 provided), got {other:?}"),
+        }
+    }
+
+    /// `ds` plus a Float64 column `name` holding `f(source)` row by row.
+    pub(crate) fn with_derived(
+        ds: &Dataset,
+        name: &str,
+        source: &str,
+        f: impl Fn(f64) -> f64,
+    ) -> Dataset {
+        let (values, _) = numeric_column(ds.df(), source, NaPolicy::Fail).unwrap();
+        let derived: Vec<f64> = values.into_iter().map(f).collect();
+        let mut df = ds.df().clone();
+        df.with_column(Series::new(name.into(), derived)).unwrap();
+        Dataset::new(df)
+    }
 }
 
 #[cfg(test)]
@@ -3743,5 +3881,265 @@ mod tests {
             Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "x2"),
             other => panic!("expected NonNumericColumn for x2, got {other:?}"),
         }
+    }
+
+    /// The reg_cluster_na case as polars reads it: the dtypes and missing cells the
+    /// missing-id tests rely on (3 empty firm labels, 2 empty years), and R's row counts.
+    #[test]
+    fn test_validate_reg_cluster_na_fixture() {
+        let (case, ds) = crate::test_support::load_case("reg_cluster_na");
+        let df = ds.df();
+        assert_eq!(df.height(), 200);
+        for (c, t) in [
+            ("firm", DataType::Int64),
+            ("year", DataType::Int64),
+            ("year_na", DataType::Int64),
+            ("firm_label", DataType::String),
+            ("inv", DataType::Float64),
+        ] {
+            assert_eq!(df.column(c).unwrap().dtype(), &t, "{c}");
+        }
+        let fl = df.column("firm_label").unwrap().is_not_null();
+        let yn = df.column("year_na").unwrap().is_not_null();
+        let (n_fl, n_yn) = (fl.sum().unwrap() as usize, yn.sum().unwrap() as usize);
+        assert_eq!((200 - n_fl, 200 - n_yn), (3, 2));
+        let both = (&fl & &yn).sum().unwrap() as usize;
+        Check::new(&case)
+            .scalar("n_used", n_fl as f64, Tol::exact())
+            .scalar("n_dropped", (200 - n_fl) as f64, Tol::exact())
+            .scalar("n_used_twoway", both as f64, Tol::exact())
+            .finish();
+    }
+
+    /// REG-21: rows with a missing cluster id are dropped and the model is re-estimated
+    /// on the rest, one- and two-way; the CR1 SEs then equal lm + vcovCL(type = "HC1")
+    /// on those rows (and fixest's one-way SEs).
+    #[test]
+    fn test_validate_ols_cluster_na() {
+        use crate::data::columns::MissingSummary;
+        let (case, ds) = crate::test_support::load_case("reg_cluster_na");
+        let x = ["value", "capital"];
+        let one = run_ols_clustered(&ds, "inv", &x, "firm_label", None).unwrap();
+        let two = run_ols_clustered(&ds, "inv", &x, "firm_label", Some("year_na")).unwrap();
+        assert_eq!((one.n_clusters_1, one.n_clusters_2), (10, None));
+        assert_eq!((two.n_clusters_1, two.n_clusters_2), (10, Some(20)));
+        assert_eq!(
+            one.ols.missing,
+            MissingSummary {
+                n_total: 200,
+                n_used: 197,
+                n_dropped: 3,
+                by_column: vec![("firm_label".into(), 3)],
+            }
+        );
+        assert_eq!(
+            two.ols.missing,
+            MissingSummary {
+                n_total: 200,
+                n_used: 195,
+                n_dropped: 5,
+                by_column: vec![("firm_label".into(), 3), ("year_na".into(), 2)],
+            }
+        );
+        assert_eq!(
+            one.ols.warnings[0],
+            "3 of 200 rows dropped because of missing values (firm_label: 3)"
+        );
+        assert_eq!(
+            two.ols.warnings[0],
+            "5 of 200 rows dropped because of missing values (firm_label: 3, year_na: 2)"
+        );
+        let cols = |r: &OlsClusteredResult| -> (Vec<String>, Vec<f64>, Vec<f64>) {
+            (
+                r.ols.coefficients.iter().map(|c| c.name.clone()).collect(),
+                r.ols.coefficients.iter().map(|c| c.estimate).collect(),
+                r.ols.coefficients.iter().map(|c| c.std_error).collect(),
+            )
+        };
+        let (n1, b1, s1) = cols(&one);
+        let (n2, b2, s2) = cols(&two);
+        Check::new(&case)
+            .named("coef", &n1, &b1, Tol::coef(197))
+            .named("se_cluster_hc1", &n1, &s1, Tol::se(197))
+            .named("se_cluster_fixest", &n1, &s1, Tol::se(197))
+            .scalar("n_used", one.ols.n_obs as f64, Tol::exact())
+            .scalar("n_dropped", one.ols.missing.n_dropped as f64, Tol::exact())
+            .named("coef_twoway", &n2, &b2, Tol::coef(195))
+            .named("se_cluster_twoway_hc1", &n2, &s2, Tol::se(195))
+            .scalar("n_used_twoway", two.ols.n_obs as f64, Tol::exact())
+            .finish();
+        // The note is printed once, in the Warnings block.
+        let text = one.to_string();
+        assert_eq!(
+            text.matches("rows dropped because of missing values")
+                .count(),
+            1
+        );
+        assert!(text.contains("Observations: 197\n"), "{text}");
+        // No missing id: every row is used and nothing is reported (the Tier 1 path).
+        let full = run_ols_clustered(&ds, "inv", &x, "firm", None).unwrap();
+        assert_eq!((full.ols.n_obs, full.n_clusters_1), (200, 10));
+        assert!(full.ols.missing.is_empty() && !full.to_string().contains("dropped"));
+        assert!(
+            serde_json::to_value(&full)
+                .unwrap()
+                .get("missing")
+                .is_none()
+        );
+        // ... and the JSON of a fit that dropped rows has the object.
+        assert_eq!(
+            serde_json::to_value(&one).unwrap()["missing"],
+            serde_json::json!({"n_total": 200, "n_used": 197, "n_dropped": 3,
+                               "by_column": {"firm_label": 3}})
+        );
+        // An absent id column (design 2.4 (d)).
+        match run_ols_clustered(&ds, "inv", &x, "nope", None).unwrap_err() {
+            EconError::ColumnNotFound { column, available } => {
+                assert_eq!(column, "nope");
+                assert_eq!(available.len(), 7);
+            }
+            e => panic!("{e:?}"),
+        }
+        // No row has an id: the error names the method and the id column(s).
+        use super::na_fixtures::{insufficient_context, with_all_null};
+        let none = with_all_null(&ds, "no_id", DataType::String);
+        assert_eq!(
+            insufficient_context(run_ols_clustered(&none, "inv", &x, "no_id", None)),
+            "clustered OLS (rows with an id in 'no_id'): 0 of 200 rows have no missing value"
+        );
+        assert_eq!(
+            insufficient_context(run_ols_clustered(&none, "inv", &x, "firm", Some("no_id"))),
+            "clustered OLS (rows with ids in 'firm' and 'no_id'): \
+             0 of 200 rows have no missing value"
+        );
+    }
+
+    /// REG-21 (Driscoll-Kraay): a missing time id drops its row and the model is
+    /// re-estimated; integral float ids equal the Int64 ids; fractional and text ids are
+    /// refused instead of truncated. A property test: the DK SEs are not R-pinned
+    /// (REG-24), so it compares no R value and loads the dataset without a case; it pins
+    /// the estimation sample against the same estimator on the complete rows.
+    #[test]
+    fn test_na_driscoll_kraay_time_ids() {
+        use super::na_fixtures::{complete_rows, repo_dataset, with_derived};
+        use crate::data::columns::MissingSummary;
+        let ds = repo_dataset("validation/datasets/generated/grunfeld_cluster_na.csv");
+        let x = ["value", "capital"];
+        let r = run_vcov_driscoll_kraay(&ds, "inv", &x, "year_na", None, None).unwrap();
+        assert_eq!((r.n_obs, r.n_periods), (198, 20));
+        assert_eq!(
+            r.missing,
+            MissingSummary {
+                n_total: 200,
+                n_used: 198,
+                n_dropped: 2,
+                by_column: vec![("year_na".into(), 2)],
+            }
+        );
+        assert_eq!(
+            r.warnings[0],
+            "2 of 200 rows dropped because of missing values (year_na: 2)"
+        );
+        assert_eq!(
+            r.to_string()
+                .matches("rows dropped because of missing values")
+                .count(),
+            1
+        );
+        let complete = complete_rows(&ds, &["year_na"]);
+        let c = run_vcov_driscoll_kraay(&complete, "inv", &x, "year_na", None, None).unwrap();
+        assert_eq!(
+            (&r.coefficients, &r.std_errors, r.bandwidth),
+            (&c.coefficients, &c.std_errors, c.bandwidth)
+        );
+        assert!(c.missing.is_empty() && c.warnings.iter().all(|w| !w.contains("dropped")));
+        assert!(serde_json::to_value(&c).unwrap().get("missing").is_none());
+        // Integral floats are accepted and equal the Int64 ids.
+        let f = with_derived(&ds, "t_f", "year", |v| v);
+        assert_eq!(
+            run_vcov_driscoll_kraay(&f, "inv", &x, "t_f", None, None)
+                .unwrap()
+                .std_errors,
+            run_vcov_driscoll_kraay(&ds, "inv", &x, "year", None, None)
+                .unwrap()
+                .std_errors
+        );
+        // Fractional ids are refused, not truncated (1935.25 used to become period 1935).
+        let q = with_derived(&ds, "t_q", "year", |v| v + 0.25);
+        match run_vcov_driscoll_kraay(&q, "inv", &x, "t_q", None, None).unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("Time column 't_q' must hold whole numbers")
+                    && message.contains("1935.25"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+        // Text ids (design 2.4 (c)).
+        match run_vcov_driscoll_kraay(&ds, "inv", &x, "firm_label", None, None).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("Time column 'firm_label'"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
+        // An absent time column (design 2.4 (d)).
+        assert!(matches!(
+            run_vcov_driscoll_kraay(&ds, "inv", &x, "nope", None, None),
+            Err(EconError::ColumnNotFound { .. })
+        ));
+        // No row has a time id: the error names the method and the time column.
+        use super::na_fixtures::{insufficient_context, with_all_null};
+        let none = with_all_null(&ds, "no_t", DataType::Int64);
+        assert_eq!(
+            insufficient_context(run_vcov_driscoll_kraay(
+                &none, "inv", &x, "no_t", None, None
+            )),
+            "Driscoll-Kraay (rows with a time id in 'no_t'): 0 of 200 rows have no missing value"
+        );
+    }
+
+    /// REG-23: the bootstrap reads y as `run_ols` does, so an Int64 outcome (mtcars hp)
+    /// gives exactly the bootstrap of the same values as Float64 (same seed). A property
+    /// test: no value is compared with R (the RNGs differ), so it loads the dataset
+    /// without a case and is not registered as R-pinned.
+    #[test]
+    fn test_na_vcov_bootstrap_integer_outcome() {
+        use super::na_fixtures::as_float;
+        let ds = Dataset::new(
+            crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+                "validation/datasets/generated/mtcars.csv",
+            ))
+            .unwrap(),
+        );
+        assert_eq!(ds.df().column("hp").unwrap().dtype(), &DataType::Int64);
+        let a = run_vcov_bootstrap(&ds, "hp", &["wt"], Some(200), Some("pairs"), Some(42)).unwrap();
+        let b = run_vcov_bootstrap(
+            &as_float(&ds, "hp"),
+            "hp",
+            &["wt"],
+            Some(200),
+            Some("pairs"),
+            Some(42),
+        )
+        .unwrap();
+        assert_eq!(
+            (a.n_obs, &a.std_errors, &a.coefficients),
+            (32, &b.std_errors, &b.coefficients)
+        );
+        let ols = run_ols(&ds, "hp", &["wt"], true, CovarianceType::Standard).unwrap();
+        assert_eq!(
+            a.coefficients,
+            ols.coefficients
+                .iter()
+                .map(|c| c.estimate)
+                .collect::<Vec<_>>()
+        );
+        match run_vcov_bootstrap(&ds, "model", &["wt"], Some(200), None, Some(1)).unwrap_err() {
+            EconError::NonNumericColumn { column } => assert_eq!(column, "model"),
+            e => panic!("{e:?}"),
+        }
+        assert!(matches!(
+            run_vcov_bootstrap(&ds, "nope", &["wt"], Some(200), None, Some(1)),
+            Err(EconError::ColumnNotFound { .. })
+        ));
     }
 }

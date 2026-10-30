@@ -1,0 +1,125 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ols_clustered_missing_ids",
+      "name": "OLS with CR1 clustered SEs when cluster ids are missing (rows dropped, re-estimated)",
+      "category": "regression",
+      "reference": "stats::lm + sandwich::vcovCL(type = 'HC1') on the rows with an id; fixest::feols(cluster = ) drops them likewise",
+      "doc": "validation/regression/ols_clustered.md",
+      "cases": [
+        "reg_cluster_na"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_reg_cluster_na_fixture",
+        "p2a-core::regression::ols::tests::test_validate_ols_cluster_na",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_clustered_na",
+        "p2a-cli::tier2::wp15_regression::test_validate_cli_reg_clustered_na"
+      ],
+      "quantities": [
+        "coefficients (one-, two-way)",
+        "SE CR1 one-way (= fixest)",
+        "SE CR1 two-way",
+        "rows used/dropped",
+        "cluster counts"
+      ],
+      "tolerance": "validation/README.md, n = 195-197: coefficients 1e-8, SE 1e-6 relative; counts exact; MCP text 4 decimals, CLI text 6",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "regression_wrappers_columns",
+      "name": "Missing values in run_loess and quantreg (incomplete rows dropped, R's na.omit)",
+      "category": "regression",
+      "reference": "stats::loess and quantreg::rq (na.action = na.omit)",
+      "doc": "validation/regression/loess.md",
+      "cases": [
+        "reg_smoothers_na"
+      ],
+      "tests": [
+        "p2a-core::regression::loess::tests::test_validate_na_loess_columns",
+        "p2a-core::regression::quantreg::tests::test_validate_na_quantreg_columns",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_loess_missing_and_integer",
+        "p2a-cli::tier2::wp15_regression::test_validate_cli_reg_loess_quantreg_missing_note"
+      ],
+      "quantities": [
+        "rows used = R's n_complete (56 of 60)",
+        "Omit = the same function on the complete rows, with the reported counts"
+      ],
+      "tolerance": "exact",
+      "deviations": [
+        {
+          "finding": "REG-14",
+          "quantity": "loess fitted values",
+          "note": "not R-pinned (REG-14, REG-45: neighbourhood and span differ from R, Tier 4)"
+        },
+        {
+          "finding": "REG-26",
+          "quantity": "quantreg SEs",
+          "note": "not R-pinned (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "line_missing",
+      "name": "Tukey's resistant line on data with missing values (incomplete pairs deleted)",
+      "category": "regression",
+      "reference": "stats::line (complete.cases)",
+      "doc": "validation/regression/line.md",
+      "cases": [
+        "reg_smoothers_na"
+      ],
+      "tests": [
+        "p2a-core::regression::line::tests::test_validate_reg_smoothers_na_fixture",
+        "p2a-core::regression::line::tests::test_validate_line_na",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_line_na",
+        "p2a-cli::tier2::wp15_regression::test_validate_cli_reg_line_na"
+      ],
+      "quantities": [
+        "complete pairs (56)",
+        "NA data = complete pairs",
+        "missing counts"
+      ],
+      "tolerance": "exact",
+      "deviations": [
+        {
+          "finding": "REG-12",
+          "quantity": "line coefficients (line_coef)",
+          "note": "R 0.441594195008563728 / 0.053890384144849528; p2a's resistant line is a different variant (-0.514777229630535849 / 0.062911296831234101 on the same 56 pairs by an R transcription of line.rs), Tier 4"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "supsmu_missing",
+      "name": "Friedman's super smoother on data with missing values (non-finite observations deleted)",
+      "category": "regression",
+      "reference": "stats::supsmu (is.finite(x + y + wt))",
+      "doc": "validation/regression/supsmu.md",
+      "cases": [
+        "reg_smoothers_na"
+      ],
+      "tests": [
+        "p2a-core::regression::supsmu::tests::test_validate_supsmu_na",
+        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_supsmu_na",
+        "p2a-cli::tier2::wp15_regression::test_validate_cli_reg_supsmu_na"
+      ],
+      "quantities": [
+        "x grid after deletion (56 values, exact)",
+        "n",
+        "NA data = complete rows",
+        "missing counts"
+      ],
+      "tolerance": "exact (the CLI text's x grid: its 4 printed decimals)",
+      "deviations": [
+        {
+          "finding": "REG-31",
+          "quantity": "smoothed values (supsmu_y)",
+          "note": "p2a's super smoother is not Friedman's algorithm (Tier 4); supsmu_y is recorded in the case, not compared"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

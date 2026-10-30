@@ -37,12 +37,12 @@
 //! R equivalent: `quantreg::rq()`
 
 use ndarray::{Array1, Array2};
-use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::{DesignMatrix, safe_inverse, xtx};
+use crate::linalg::{safe_inverse, xtx};
 use crate::traits::t_test_p_value;
 
 /// Result from quantile regression.
@@ -66,6 +66,10 @@ pub struct QuantRegResult {
     pub algorithm: QuantRegAlgorithm,
     /// Variable names
     pub variable_names: Vec<String>,
+    /// Rows dropped because y or a regressor was missing; absent from JSON when
+    /// nothing was dropped.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
     /// Residuals
     #[serde(skip)]
     pub(crate) residuals: Array1<f64>,
@@ -159,6 +163,9 @@ impl std::fmt::Display for QuantRegResult {
                 coef.name, coef.estimate, coef.std_error, coef.t_value, coef.p_value
             )?;
         }
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
         Ok(())
     }
 }
@@ -198,6 +205,9 @@ impl Default for QuantRegConfig {
 }
 
 /// Run quantile regression.
+///
+/// Rows with a missing y or regressor are dropped first, as `quantreg::rq` does
+/// (`na.omit`), and reported in `QuantRegResult::missing`; integer columns are numbers.
 ///
 /// # Arguments
 ///
@@ -242,31 +252,22 @@ pub fn quantreg(
         );
     }
 
-    // Extract data
-    let df = dataset.df();
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
+    // y and X with R's na.omit: a row with a missing value in any of them is dropped
+    if x_cols.is_empty() && !config.intercept {
+        return Err(EconError::InvalidSpecification {
+            message: "No independent variables specified".to_string(),
+        });
+    }
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .min_rows(1, &format!("quantile regression of '{y_col}'"))
+        .extract()?;
+    let y_arr = cols.numeric_array(y_col);
 
-    let y: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Column '{}' must be numeric", y_col),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    let n = y.len();
-    let y_arr = Array1::from_vec(y);
-
-    // Build design matrix
-    let dm = DesignMatrix::from_dataframe(df, x_cols, config.intercept)?;
-    let x = dm.view().to_owned();
+    let n = y_arr.len();
+    let x = cols.matrix(x_cols, config.intercept).data;
     let k = x.ncols();
 
     if n <= k {
@@ -340,6 +341,7 @@ pub fn quantreg(
         iterations,
         algorithm: config.algorithm,
         variable_names: var_names,
+        missing: cols.missing().clone(),
         residuals,
         fitted,
     })
@@ -512,7 +514,7 @@ fn bandwidth_nrd(x: &Array1<f64>) -> f64 {
 
     // IQR estimate
     let mut sorted: Vec<f64> = x.iter().copied().collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
     let q1 = sorted[(n as usize * 25) / 100];
     let q3 = sorted[(n as usize * 75) / 100];
     let iqr = q3 - q1;
@@ -573,6 +575,7 @@ pub fn quantreg_multi(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polars::prelude::*;
 
     fn create_test_dataset() -> Dataset {
         // y = 1 + 2*x + noise (with heteroskedastic errors)
@@ -784,6 +787,67 @@ mod tests {
             (result.coefficients[0].estimate - 1.0).abs() < 2.0,
             "Median regression intercept should be close to 1: got {}",
             result.coefficients[0].estimate
+        );
+    }
+
+    /// REG-25: quantreg reads y and X with R's na.omit (quantreg::rq drops incomplete
+    /// rows), reports the drop, and accepts an Int64 outcome (TOOL-5's quantreg site).
+    /// R-pinned: the number of rows used is R's `n_complete`; the SEs are not (REG-26),
+    /// so the fit is compared with the fit on the complete rows.
+    #[test]
+    fn test_validate_na_quantreg_columns() {
+        use crate::regression::ols::na_fixtures::{as_float, complete_rows, mtcars};
+        use p2a_validation::{Check, Tol};
+        let mt = mtcars();
+        let a = run_quantreg(&mt, "hp", &["wt"], 0.5).unwrap();
+        let b = run_quantreg(&as_float(&mt, "hp"), "hp", &["wt"], 0.5).unwrap();
+        let pick = |r: &QuantRegResult| -> (Vec<f64>, Vec<f64>) {
+            (
+                r.coefficients.iter().map(|c| c.estimate).collect(),
+                r.coefficients.iter().map(|c| c.std_error).collect(),
+            )
+        };
+        assert_eq!(
+            (a.n_obs, pick(&a), a.objective),
+            (32, pick(&b), b.objective)
+        );
+        let (case, sm) = crate::test_support::load_case("reg_smoothers_na");
+        let r = run_quantreg(&sm, "y", &["x"], 0.5).unwrap();
+        Check::new(&case)
+            .scalar("n_complete", r.n_obs as f64, Tol::exact())
+            .finish();
+        let c = run_quantreg(&complete_rows(&sm, &["y", "x"]), "y", &["x"], 0.5).unwrap();
+        assert_eq!(
+            (r.n_obs, pick(&r), r.objective),
+            (56, pick(&c), c.objective)
+        );
+        assert_eq!(
+            r.missing,
+            MissingSummary {
+                n_total: 60,
+                n_used: 56,
+                n_dropped: 4,
+                by_column: vec![("y".into(), 2), ("x".into(), 2)],
+            }
+        );
+        assert!(r.to_string().ends_with(
+            "Missing values: 4 of 60 rows dropped because of missing values (y: 2, x: 2)\n"
+        ));
+        assert!(c.missing.is_empty() && !c.to_string().contains("Missing values"));
+        match run_quantreg(&mt, "model", &["wt"], 0.5) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "model"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            run_quantreg(&mt, "hp", &["nope"], 0.5),
+            Err(EconError::ColumnNotFound { .. })
+        ));
+        // No complete row: the error names the method and the outcome.
+        use crate::regression::ols::na_fixtures::{insufficient_context, with_all_null};
+        let none = with_all_null(&sm, "no_x", polars::prelude::DataType::Float64);
+        assert_eq!(
+            insufficient_context(run_quantreg(&none, "y", &["no_x"], 0.5)),
+            "quantile regression of 'y': 0 of 60 rows have no missing value"
         );
     }
 }
