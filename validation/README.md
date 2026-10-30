@@ -388,6 +388,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Method | File | Status |
 |--------|------|--------|
 | Column extraction conventions | [README.md](README.md) | R-pinned |
+| CLI `data load` missing-value markers (default `NA` and empty, `--na-strings`) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 
 ### Interfaces (CLI exhibits, MCP)
 | Method | File | Status |

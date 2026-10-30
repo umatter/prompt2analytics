@@ -92,7 +92,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/ordered_j5.csv` | 30 × 2 (y, x) | `disc_polr_j5` | `r/cases/discrete_newton.R` | seed 5, 5 categories |
 | `generated/ordered_j16.csv` | 96 × 2 (y, x) | `disc_polr_j16` | `r/cases/discrete_newton.R` | seed 16, 16 categories |
 | `generated/ordered_j30.csv` | 180 × 2 (y, x) | `disc_polr_j30` | `r/cases/discrete_newton.R` | seed 30, 30 categories |
-| `generated/columns_conventions.csv` | 10 × 5 (id, y, n, s, flag) | `columns_conventions` | `r/cases/data_columns.R` | literal values (no RNG): empty fields for NA, integer `n`, logical `flag`, mixed-case text `s` |
+| `generated/columns_conventions.csv` | 10 × 5 (id, y, n, s, flag) | `columns_conventions`; read by `cli_na_strings` | `r/cases/data_columns.R`; read by `r/cases/data_na_strings.R` | literal values (no RNG): empty fields for NA, integer `n`, logical `flag`, mixed-case text `s` |
 
 ## Adding a dataset
 
