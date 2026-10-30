@@ -100,11 +100,12 @@ looks like a validation failure but is not one.
 
 - **Harness** (`validation/r/harness.R` and `validation/r/cases/*.R`; the case files record
   the versions they were written with): jsonlite, plm, fixest, sandwich, lmtest, car, tseries,
-  quantreg, nlme, aod, strucchange, nnet, MASS.
+  quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
-                     "quantreg", "nlme", "aod", "strucchange", "nnet", "MASS"))
+                     "quantreg", "nlme", "aod", "strucchange", "nnet", "MASS", "AER",
+                     "rdrobust", "forecast", "numDeriv"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
