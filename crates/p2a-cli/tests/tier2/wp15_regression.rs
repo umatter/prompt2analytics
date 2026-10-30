@@ -276,3 +276,28 @@ fn test_validate_cli_reg_loess_quantreg_missing_note() {
         assert_eq!(j["missing"], smoothers_missing(), "{j}");
     }
 }
+
+/// REG-13: with too few complete rows, `reg line` and `reg supsmu` fail with the
+/// extractor's error, which names the method and the columns and counts the rows of the
+/// dataset (not only the complete ones the core function would see).
+#[test]
+fn test_cli_reg_line_supsmu_too_few_complete_rows() {
+    let s = temp_session();
+    // 2 of 6 rows have both x and y.
+    let path = s.dir().join("two_complete.csv");
+    std::fs::write(&path, "x,y\n1.2,2.3\n2.1,\n,3.9\n4.3,5.2\n,\n6.1,\n").unwrap();
+    s.load_as(&path, "two_complete", &[]);
+    for (command, needed, method) in [
+        ("line", 3, "Tukey's resistant line"),
+        ("supsmu", 4, "SuperSmoother"),
+    ] {
+        let err = s.err(&["reg", command, "two_complete", "-y", "y", "-x", "x"]);
+        assert!(
+            err.contains(&format!("need at least {needed} observations, got 2"))
+                && err.contains(&format!(
+                    "{method} of 'y' on 'x': 2 of 6 rows have no missing value"
+                )),
+            "{err}"
+        );
+    }
+}

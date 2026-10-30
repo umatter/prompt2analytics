@@ -34,6 +34,7 @@ use crate::tools::requests::regression::{
 };
 
 use p2a_core::data::Dataset;
+use p2a_core::data::columns::ColumnRequest;
 use p2a_core::regression::OlsResult;
 use p2a_core::regression::{
     BgTestType, CorrelationStructure, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType,
@@ -671,12 +672,21 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // x, y and the weights with R's deletion of incomplete observations
+        // x, y and the weights with R's deletion of incomplete observations; too few
+        // complete rows is reported against the dataset's row count
         let mut names = vec![request.x.as_str(), request.y.as_str()];
         if let Some(w) = request.weights.as_deref() {
             names.push(w);
         }
-        let cols = match numeric_columns(dataset, &names, NaPolicy::Omit) {
+        let cols = match ColumnRequest::new(dataset.df())
+            .numerics(&names)
+            .na(NaPolicy::Omit)
+            .min_rows(
+                4,
+                &format!("SuperSmoother of '{}' on '{}'", request.y, request.x),
+            )
+            .extract()
+        {
             Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -732,12 +742,21 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // x and y with R's deletion of incomplete pairs
-        let cols = match numeric_columns(
-            dataset,
-            &[request.x.as_str(), request.y.as_str()],
-            NaPolicy::Omit,
-        ) {
+        // x and y with R's deletion of incomplete pairs; too few complete pairs is
+        // reported against the dataset's row count
+        let cols = match ColumnRequest::new(dataset.df())
+            .numeric(&request.x)
+            .numeric(&request.y)
+            .na(NaPolicy::Omit)
+            .min_rows(
+                3,
+                &format!(
+                    "Tukey's resistant line of '{}' on '{}'",
+                    request.y, request.x
+                ),
+            )
+            .extract()
+        {
             Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1739,5 +1758,44 @@ mod tests {
         assert_eq!(json_numbers(&raw, "intercept"), [fit.intercept]);
         assert_eq!(json_numbers(&raw, "slope"), [fit.slope]);
         assert_eq!(j["missing"], smoothers_missing());
+    }
+
+    /// REG-13 through the tools: with too few complete rows, line and supsmu fail with
+    /// the extractor's error, which names the method and the columns and counts the
+    /// rows of the dataset (not only the complete ones the core function would see).
+    #[test]
+    fn test_mcp_regression_line_supsmu_too_few_complete_rows() {
+        // 2 of 6 rows have both x and y.
+        let df = p2a_core::polars::prelude::df!(
+            "x" => [Some(1.2), Some(2.1), None, Some(4.3), None, Some(6.1)],
+            "y" => [Some(2.3), None, Some(3.9), Some(5.2), None, None]
+        )
+        .unwrap();
+        let (rt, server) = server_with(vec![("two_complete", df)]);
+        let args = json!({"dataset": "two_complete", "x": "x", "y": "y"});
+        let req: LineRequest = serde_json::from_value(args.clone()).unwrap();
+        let r = rt
+            .block_on(server.regression_line(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains("need at least 3 observations, got 2")
+                && t.contains(
+                    "Tukey's resistant line of 'y' on 'x': 2 of 6 rows have no missing value"
+                ),
+            "{t}"
+        );
+        let req: SupsmuRequest = serde_json::from_value(args).unwrap();
+        let r = rt
+            .block_on(server.regression_supsmu(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains("need at least 4 observations, got 2")
+                && t.contains("SuperSmoother of 'y' on 'x': 2 of 6 rows have no missing value"),
+            "{t}"
+        );
     }
 }

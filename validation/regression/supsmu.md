@@ -97,7 +97,9 @@ missing y made the whole smooth NaN. MCP `regression_supsmu` reads x, y and the 
 column jointly with the incomplete rows dropped (a missing weight drops its row instead of
 becoming 1.0, and a text weights column is an error instead of being ignored); `p2a reg
 supsmu` does the same for x and y. Both report the drop (`missing` in JSON, a `Note:` line
-in the CLI text).
+in the CLI text). With fewer than 4 complete rows they fail before `supsmu()` is reached,
+with `InsufficientData` naming the method and the columns and counting the dataset's rows
+("SuperSmoother of 'y' on 'x': 2 of 6 rows have no missing value").
 
 R: case `reg_smoothers_na` of `validation/r/cases/regression_na.R`
 ([source](../r/cases/regression_na.R)): `supsmu(x, y)` on 60 points with 2 missing x and 2
@@ -118,6 +120,11 @@ comparison is exact except the CLI text's grid, which is printed with 4 decimals
   `-F json` `fitted_sample` equals the smooth on the complete pairs exactly (the numbers
   are read from the output text with `str::parse`, since serde_json's default float
   parsing can be 1 ulp off).
+
+Property tests, not registered (no R value):
+`test_mcp_regression_line_supsmu_too_few_complete_rows` and
+`test_cli_reg_line_supsmu_too_few_complete_rows` check the too-few-rows error of supsmu and
+line through MCP and the CLI.
 
 ### Known difference (REG-31)
 

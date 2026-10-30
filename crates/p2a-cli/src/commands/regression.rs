@@ -1403,11 +1403,13 @@ fn execute_supsmu(
 
     match dataset {
         Some(ds) => {
-            // x and y with R's deletion of incomplete pairs
+            // x and y with R's deletion of incomplete pairs; too few complete pairs is
+            // reported against the dataset's row count
             let cols = match ColumnRequest::new(ds.df())
                 .numeric(indep_var)
                 .numeric(dep_var)
                 .na(NaPolicy::Omit)
+                .min_rows(4, &format!("SuperSmoother of '{dep_var}' on '{indep_var}'"))
                 .extract()
             {
                 Ok(c) => c,
@@ -1480,11 +1482,16 @@ fn execute_line(
 
     match dataset {
         Some(ds) => {
-            // x and y with R's deletion of incomplete pairs
+            // x and y with R's deletion of incomplete pairs; too few complete pairs is
+            // reported against the dataset's row count
             let cols = match ColumnRequest::new(ds.df())
                 .numeric(indep_var)
                 .numeric(dep_var)
                 .na(NaPolicy::Omit)
+                .min_rows(
+                    3,
+                    &format!("Tukey's resistant line of '{dep_var}' on '{indep_var}'"),
+                )
                 .extract()
             {
                 Ok(c) => c,
