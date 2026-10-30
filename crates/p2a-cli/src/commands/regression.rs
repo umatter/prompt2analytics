@@ -14,11 +14,13 @@ use p2a_core::{
 use p2a_core::{run_gls, run_line, run_smooth_spline, run_step, run_supsmu, run_vcov_hac};
 
 use crate::output::{
-    CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, print_error,
-    se_label, validate_column_exists, validate_columns_exist, validate_sample_size,
+    CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, missing_json,
+    print_error, print_missing_note, se_label, validate_column_exists, validate_columns_exist,
+    validate_sample_size,
 };
 use crate::progress::Progress;
 use crate::session::SessionManager;
+use p2a_core::data::columns::{ColumnRequest, NaPolicy};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum RobustSE {
@@ -667,6 +669,10 @@ fn execute_clustered(
                     if let Some(g2) = result.n_clusters_2 {
                         extra_json.insert("n_clusters_2".to_string(), g2.into());
                     }
+                    // The text output shows the drop as the first warning.
+                    if let Some(m) = missing_json(&result.ols.missing) {
+                        extra_json.insert("missing".to_string(), m);
+                    }
                     let method = format!("Clustered OLS (cluster: {})", cluster);
                     let report = RegressionReport {
                         method: &method,
@@ -846,7 +852,7 @@ fn execute_quantreg(
             match run_quantreg(ds, dep_var, &x_cols, tau) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Quantile Regression",
                             "tau": result.tau,
                             "coefficients": result.coefficients.iter().map(|c| {
@@ -862,6 +868,9 @@ fn execute_quantreg(
                             }).collect::<Vec<_>>(),
                             "n_obs": result.n_obs,
                         });
+                        if let Some(m) = missing_json(&result.missing) {
+                            json["missing"] = m;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -893,6 +902,7 @@ fn execute_quantreg(
 
                         println!("\n---");
                         println!("Observations: {}", result.n_obs);
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Quantile regression failed: {}", e), format),
@@ -924,7 +934,7 @@ fn execute_loess(
         Some(ds) => match run_loess(ds, dep_var, indep_var, span, degree, false) {
             Ok(result) => match format {
                 OutputFormat::Json => {
-                    let json = serde_json::json!({
+                    let mut json = serde_json::json!({
                         "method": "LOESS",
                         "span": result.span,
                         "degree": result.degree,
@@ -934,6 +944,9 @@ fn execute_loess(
                         "fitted_values_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
                         "residuals_sample": result.residuals.iter().take(10).collect::<Vec<_>>(),
                     });
+                    if let Some(m) = missing_json(&result.missing) {
+                        json["missing"] = m;
+                    }
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 }
                 _ => {
@@ -948,6 +961,7 @@ fn execute_loess(
                     for (i, fitted) in result.fitted.iter().take(10).enumerate() {
                         println!("  {}: {:.6}", i + 1, fitted);
                     }
+                    print_missing_note(&result.missing, format);
                 }
             },
             Err(e) => print_error(&format!("LOESS failed: {}", e), format),
@@ -1389,39 +1403,40 @@ fn execute_supsmu(
 
     match dataset {
         Some(ds) => {
-            // Extract x and y columns
-            let df = ds.df();
-            let x: Vec<f64> = match df.column(indep_var) {
-                Ok(s) => s
-                    .f64()
-                    .map(|ca| ca.into_no_null_iter().collect())
-                    .unwrap_or_default(),
-                Err(_) => {
-                    print_error(&format!("Column '{}' not found", indep_var), format);
-                    return Ok(());
-                }
-            };
-            let y: Vec<f64> = match df.column(dep_var) {
-                Ok(s) => s
-                    .f64()
-                    .map(|ca| ca.into_no_null_iter().collect())
-                    .unwrap_or_default(),
-                Err(_) => {
-                    print_error(&format!("Column '{}' not found", dep_var), format);
+            // x and y with R's deletion of incomplete pairs
+            let cols = match ColumnRequest::new(ds.df())
+                .numeric(indep_var)
+                .numeric(dep_var)
+                .na(NaPolicy::Omit)
+                .extract()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    print_error(&format!("SuperSmoother failed: {e}"), format);
                     return Ok(());
                 }
             };
 
-            match run_supsmu(&x, &y, None, span, false, bass) {
+            match run_supsmu(
+                cols.numeric(indep_var),
+                cols.numeric(dep_var),
+                None,
+                span,
+                false,
+                bass,
+            ) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "SuperSmoother",
                             "bass": result.bass,
                             "periodic": result.periodic,
                             "n": result.n,
                             "fitted_sample": result.y.iter().take(10).collect::<Vec<_>>(),
                         });
+                        if let Some(m) = missing_json(cols.missing()) {
+                            json["missing"] = m;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1436,6 +1451,7 @@ fn execute_supsmu(
                         {
                             println!("  {}: x={:.4}, y={:.6}", i + 1, x_val, y_val);
                         }
+                        print_missing_note(cols.missing(), format);
                     }
                 },
                 Err(e) => print_error(&format!("SuperSmoother failed: {}", e), format),
@@ -1464,33 +1480,24 @@ fn execute_line(
 
     match dataset {
         Some(ds) => {
-            // Extract x and y columns
-            let df = ds.df();
-            let x: Vec<f64> = match df.column(indep_var) {
-                Ok(s) => s
-                    .f64()
-                    .map(|ca| ca.into_no_null_iter().collect())
-                    .unwrap_or_default(),
-                Err(_) => {
-                    print_error(&format!("Column '{}' not found", indep_var), format);
-                    return Ok(());
-                }
-            };
-            let y: Vec<f64> = match df.column(dep_var) {
-                Ok(s) => s
-                    .f64()
-                    .map(|ca| ca.into_no_null_iter().collect())
-                    .unwrap_or_default(),
-                Err(_) => {
-                    print_error(&format!("Column '{}' not found", dep_var), format);
+            // x and y with R's deletion of incomplete pairs
+            let cols = match ColumnRequest::new(ds.df())
+                .numeric(indep_var)
+                .numeric(dep_var)
+                .na(NaPolicy::Omit)
+                .extract()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    print_error(&format!("Resistant line failed: {e}"), format);
                     return Ok(());
                 }
             };
 
-            match run_line(&x, &y, Some(iter)) {
+            match run_line(cols.numeric(indep_var), cols.numeric(dep_var), Some(iter)) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Tukey's Resistant Line",
                             "intercept": result.intercept,
                             "slope": result.slope,
@@ -1498,6 +1505,9 @@ fn execute_line(
                             "iterations": result.iter,
                             "residuals_sample": result.residuals.iter().take(10).collect::<Vec<_>>(),
                         });
+                        if let Some(m) = missing_json(cols.missing()) {
+                            json["missing"] = m;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1512,6 +1522,7 @@ fn execute_line(
                         for (i, resid) in result.residuals.iter().take(10).enumerate() {
                             println!("  {}: {:.6}", i + 1, resid);
                         }
+                        print_missing_note(cols.missing(), format);
                     }
                 },
                 Err(e) => print_error(&format!("Resistant line failed: {}", e), format),
