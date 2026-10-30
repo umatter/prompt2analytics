@@ -108,8 +108,9 @@ fn k_help_names_the_range_and_what_n_is() {
     }
 }
 
-/// A coordinate that is not finite is refused, as in MCP; before, the legacy
-/// constructor fell back to an all-pairs search over the NaN distances.
+/// A coordinate that is NaN is a missing value and is refused, as in MCP;
+/// before, the legacy constructor fell back to an all-pairs search over the
+/// NaN distances.
 #[test]
 fn a_non_finite_coordinate_is_refused_with_exit_1() {
     let tmp = tempfile::tempdir().unwrap();
@@ -123,6 +124,6 @@ fn a_non_finite_coordinate_is_refused_with_exit_1() {
         .code(1)
         .stderr(predicate::str::contains("Failed to build spatial weights"))
         .stderr(predicate::str::contains(
-            "coordinates of observation 5 are not finite",
+            "Column 'cx' contains 1 missing value(s)",
         ));
 }

@@ -16,6 +16,18 @@ The `spatialprobit` module implements Bayesian spatial probit models for binary 
    - y = 1 if y* > 0, else y = 0
    - Accounts for spatial correlation in errors (nuisance dependence)
 
+### Data requirements
+
+- One dataset row per unit of W: row i of the data is unit i of the weights, so no row can
+  be dropped.
+- Missing values (null or NaN) in y or X are refused with `NullValues` naming the column,
+  as in spdep/spatialreg (`na.fail`); remove the incomplete rows and rebuild W first.
+- Integer and Boolean (0/1) columns are accepted. The outcome is 0/1 and may be an Int64,
+  Float64 or Boolean column with both values present. (A non-binary outcome is still read
+  as y >= 0.5; SPAT-6, Tier 3.)
+- Tests (T2-WP14): `test_na_spatial_probit_int64_and_boolean_outcome` and
+  `test_na_spatial_probit_missing_outcome` (`econometrics::spatialprobit::tests`).
+
 ## Estimation Method
 
 Uses Bayesian MCMC with data augmentation following LeSage & Pace (2009):
@@ -213,6 +225,8 @@ The result includes:
 | test_credible_intervals | PASS | 95% CI contains posterior mean |
 | test_truncated_normal_sampling | PASS | Samples correctly constrained |
 | test_inverse_normal_cdf | PASS | Quantile function accurate |
+| test_na_spatial_probit_int64_and_boolean_outcome | PASS | Int64 and Boolean outcomes give the Float64 result (same seed) |
+| test_na_spatial_probit_missing_outcome | PASS | A null outcome is `NullValues` naming `y` |
 
 ## MCP Tool Integration
 

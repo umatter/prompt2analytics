@@ -34,17 +34,21 @@
 //!   https://www.jstatsoft.org/v47/i01/
 //!
 //! R equivalent: `splm::spml()`, `splm::spgm()`, `splm::spreml()`
+//!
+//! The panel layout the estimators require (balanced, W rows in sorted entity-id order,
+//! rows in any order, no missing values) is described under "Panel layout" on [`run_spml`].
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, s};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
-use std::collections::HashMap;
 use std::fmt;
 
 use super::spatial::validate_optimizer;
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, xtx, xty};
+use crate::resource::{try_with_capacity, try_zeros1, try_zeros2};
 use crate::spatial::SpatialWeights;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
 
@@ -574,6 +578,21 @@ impl fmt::Display for SpgmResult {
 /// * `listw` - Spatial weights matrix
 /// * `config` - Model configuration
 ///
+/// # Panel layout
+///
+/// - The panel must be balanced: every entity is observed exactly once in every period.
+///   A duplicated (entity, time) pair or a missing cell is `InvalidSpecification` naming
+///   the first one (`splm::spml` refuses unbalanced panels too).
+/// - W is N x N, and row i of W belongs to the i-th entity in sorted id order: numbers
+///   ascending, text in byte order (R `factor()` under `LC_COLLATE=C`, splm's
+///   convention; an R session in a UTF-8 locale sorts text case-insensitively). When the
+///   weights' neighbours carry region ids, they must equal the sorted entity labels.
+/// - Rows may come in any order; the estimates do not depend on it, and `residuals` and
+///   `fitted` are returned in the dataset's row order.
+/// - Missing values (null or NaN) in y, X, the entity or the time column are refused
+///   (`NullValues`); integer and Boolean columns are accepted; time holds whole numbers
+///   or dates.
+///
 /// # Returns
 ///
 /// `SpmlResult` with estimates, standard errors, and diagnostics.
@@ -594,67 +613,35 @@ pub fn run_spml(
     config: SpmlConfig,
 ) -> EconResult<SpmlResult> {
     validate_optimizer(config.tol, config.max_iter)?;
-    let df = dataset.df();
-    let _n_total = df.height();
 
-    // Extract and organize panel structure
-    let (y, x, entity_ids, time_ids, n_entities, n_time) =
-        extract_panel_data(dataset, y_col, x_cols, entity_col, time_col)?;
-
-    let _k = x.ncols();
-
-    // Validate spatial weights dimension
-    if listw.n() != n_entities {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Spatial weights matrix has {} units but panel has {} entities. \
-                 Weights should be N x N where N is the number of cross-sectional units.",
-                listw.n(),
-                n_entities
-            ),
-        });
-    }
+    // Balanced panel in canonical layout (period blocks of entities in W row order)
+    let panel = extract_panel_data(dataset, y_col, x_cols, entity_col, time_col)?;
+    check_panel_weights(listw, &panel)?;
 
     // Build variable names
     let mut coef_names = vec!["(Intercept)".to_string()];
     coef_names.extend(x_cols.iter().map(|s| s.to_string()));
 
+    let (y, x, entity_ids) = (&panel.y, &panel.x, &panel.entity_ids);
+    let (n_entities, n_time) = (panel.n_entities, panel.n_time);
+
     // Dispatch based on model type and spatial specification
-    match config.model {
+    let mut result = match config.model {
         SpatialPanelModel::Within => run_spml_within(
-            &y,
-            &x,
-            &entity_ids,
-            &time_ids,
-            n_entities,
-            n_time,
-            listw,
-            &config,
-            coef_names,
+            y, x, entity_ids, n_entities, n_time, listw, &config, coef_names,
         ),
         SpatialPanelModel::Random => run_spml_random(
-            &y,
-            &x,
-            &entity_ids,
-            &time_ids,
-            n_entities,
-            n_time,
-            listw,
-            &config,
-            coef_names,
+            y, x, entity_ids, n_entities, n_time, listw, &config, coef_names,
         ),
         SpatialPanelModel::Pooling => run_spml_pooling(
-            &y,
-            &x,
-            &entity_ids,
-            &time_ids,
-            n_entities,
-            n_time,
-            listw,
-            &config,
-            coef_names,
+            y, x, entity_ids, n_entities, n_time, listw, &config, coef_names,
         ),
-    }
+    }?;
+
+    // Back to the dataset's row order
+    result.residuals = to_row_order(&result.residuals, &panel.rows);
+    result.fitted = to_row_order(&result.fitted, &panel.rows);
+    Ok(result)
 }
 
 /// Run spatial panel GMM estimation (equivalent to R's splm::spgm).
@@ -671,6 +658,13 @@ pub fn run_spml(
 /// * `time_col` - Name of the time identifier column
 /// * `listw` - Spatial weights matrix
 /// * `config` - GMM configuration
+///
+/// # Panel layout
+///
+/// As for [`run_spml`]: a balanced panel with unique (entity, time) pairs, rows in any
+/// order, W row i = the i-th entity in sorted id order (numbers ascending, text in byte
+/// order; region ids, when present, must match), and no missing values in y, X, the
+/// entity or the time column.
 ///
 /// # Returns
 ///
@@ -690,60 +684,27 @@ pub fn run_spgm(
     config: SpgmConfig,
 ) -> EconResult<SpgmResult> {
     validate_optimizer(config.tol, config.max_iter)?;
-    let (y, x, entity_ids, time_ids, n_entities, n_time) =
-        extract_panel_data(dataset, y_col, x_cols, entity_col, time_col)?;
-
-    let _k = x.ncols();
-
-    if listw.n() != n_entities {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Spatial weights matrix has {} units but panel has {} entities",
-                listw.n(),
-                n_entities
-            ),
-        });
-    }
+    let panel = extract_panel_data(dataset, y_col, x_cols, entity_col, time_col)?;
+    check_panel_weights(listw, &panel)?;
 
     let mut coef_names = vec!["(Intercept)".to_string()];
     coef_names.extend(x_cols.iter().map(|s| s.to_string()));
 
+    let (y, x, entity_ids) = (&panel.y, &panel.x, &panel.entity_ids);
+    let (n_entities, n_time) = (panel.n_entities, panel.n_time);
+
     // Dispatch based on method
     match config.method {
         SpgmMethod::W2sls => run_spgm_within(
-            &y,
-            &x,
-            &entity_ids,
-            &time_ids,
-            n_entities,
-            n_time,
-            listw,
-            &config,
-            coef_names,
+            y, x, entity_ids, n_entities, n_time, listw, &config, coef_names,
         ),
         SpgmMethod::G2sls => run_spgm_gls(
-            &y,
-            &x,
-            &entity_ids,
-            &time_ids,
-            n_entities,
-            n_time,
-            listw,
-            &config,
-            coef_names,
+            y, x, entity_ids, n_entities, n_time, listw, &config, coef_names,
         ),
         _ => {
             // Default to within for other methods (simplified)
             run_spgm_within(
-                &y,
-                &x,
-                &entity_ids,
-                &time_ids,
-                n_entities,
-                n_time,
-                listw,
-                &config,
-                coef_names,
+                y, x, entity_ids, n_entities, n_time, listw, &config, coef_names,
             )
         }
     }
@@ -753,148 +714,189 @@ pub fn run_spgm(
 // Internal Helper Functions
 // ============================================================================
 
-/// Extract and organize panel data from dataset.
+/// A balanced spatial panel in canonical layout: time-major (period 0's N rows, then period
+/// 1's, ...), with entities in sorted-id order inside each period, so period t is rows
+/// `t*N .. (t+1)*N` and row i of a cross-section is entity i, matching W row i.
+#[derive(Debug)]
+struct SpatialPanelData {
+    /// Outcome, canonical order.
+    y: Array1<f64>,
+    /// `[1, X]`, canonical order.
+    x: Array2<f64>,
+    /// Entity code (= W row) of each canonical row.
+    entity_ids: Vec<usize>,
+    n_entities: usize,
+    n_time: usize,
+    /// Entity labels in sorted order (numbers numerically, text in byte order).
+    entity_labels: Vec<String>,
+    /// Dataset row of each canonical row (a permutation of `0..n`).
+    rows: Vec<usize>,
+}
+
+/// Read a spatial panel (y, `[1, X]`, entity, time) and put it in canonical layout.
+///
+/// Every column goes through one `ColumnRequest` with `NaPolicy::Fail`: a missing value in
+/// y, X, the entity or the time column is `NullValues`; entities are a factor in R
+/// `factor()` order; times are a whole-number index. Duplicated (entity, time) pairs and
+/// an unbalanced panel are `InvalidSpecification` naming the first offending cell.
 fn extract_panel_data(
     dataset: &Dataset,
     y_col: &str,
     x_cols: &[&str],
     entity_col: &str,
     time_col: &str,
-) -> EconResult<(
-    Array1<f64>,
-    Array2<f64>,
-    Vec<usize>,
-    Vec<usize>,
-    usize,
-    usize,
-)> {
+) -> EconResult<SpatialPanelData> {
     let df = dataset.df();
-    let n = df.height();
+    let cols = ColumnRequest::new(df)
+        .numeric(y_col)
+        .numerics(x_cols)
+        .factor(entity_col)
+        .time_index(time_col)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let n = cols.n();
+    let entity = cols.factor(entity_col);
+    let n_entities = entity.n_levels();
+    let time_values = cols.time_index(time_col);
 
-    // Extract y
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let y: Array1<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract X with intercept
-    let k = x_cols.len() + 1;
-    let mut x = Array2::zeros((n, k));
-    for i in 0..n {
-        x[[i, 0]] = 1.0; // Intercept
+    // Sorted unique periods; a row's time code is its period's position.
+    let mut times: Vec<i64> = try_with_capacity(n, "spatial panel periods")?;
+    times.extend_from_slice(time_values);
+    times.sort_unstable();
+    times.dedup();
+    let n_time = times.len();
+    let mut time_code: Vec<usize> = try_with_capacity(n, "spatial panel time codes")?;
+    for &t in time_values {
+        let code = times
+            .binary_search(&t)
+            .map_err(|_| EconError::InvalidSpecification {
+                message: format!("time value {t} of column '{time_col}' could not be indexed"),
+            })?;
+        time_code.push(code);
     }
-    for (j, &col_name) in x_cols.iter().enumerate() {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-        let col_f64 = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-        for (i, val) in col_f64.into_no_null_iter().enumerate() {
-            x[[i, j + 1]] = val;
+    let key = |r: usize| (time_code[r], entity.codes[r] as usize);
+
+    // Rows in canonical order: by (time, entity).
+    let mut perm: Vec<usize> = try_with_capacity(n, "spatial panel row order")?;
+    perm.extend(0..n);
+    perm.sort_unstable_by_key(|&r| key(r));
+
+    let cell = |(t, e): (usize, usize)| format!("entity '{}', time {}", entity.levels[e], times[t]);
+
+    // Each (entity, time) pair at most once.
+    let mut duplicates = 0usize;
+    let mut first_duplicate = None;
+    for pair in perm.windows(2) {
+        if key(pair[0]) == key(pair[1]) {
+            duplicates += 1;
+            first_duplicate.get_or_insert(key(pair[1]));
         }
     }
-
-    // Extract entity IDs
-    let entity_series = df
-        .column(entity_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: entity_col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    let mut entity_map: HashMap<String, usize> = HashMap::new();
-    let mut next_entity_id = 0usize;
-
-    let entity_strings: Vec<String> = if let Ok(str_col) = entity_series.str() {
-        str_col
-            .into_iter()
-            .map(|s| s.unwrap_or("").to_string())
-            .collect()
-    } else if let Ok(i64_col) = entity_series.i64() {
-        i64_col
-            .into_iter()
-            .map(|v| v.unwrap_or(0).to_string())
-            .collect()
-    } else {
-        return Err(EconError::NonNumericColumn {
-            column: entity_col.to_string(),
+    if let Some(first) = first_duplicate {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Spatial panel has {duplicates} duplicated (entity, time) pair(s) (first: {}); \
+                 each entity may appear once per period.",
+                cell(first)
+            ),
         });
-    };
+    }
 
-    let entity_ids: Vec<usize> = entity_strings
-        .iter()
-        .map(|s| {
-            *entity_map.entry(s.clone()).or_insert_with(|| {
-                let id = next_entity_id;
-                next_entity_id += 1;
-                id
-            })
-        })
-        .collect();
+    // Every entity in every period. Without duplicates n < N*T here, so the first canonical
+    // position whose row is not the expected (period, entity) cell, or position n when all
+    // n rows match, is the first missing cell.
+    let cells = n_entities as u128 * n_time as u128;
+    if n as u128 != cells {
+        let first_missing = (0..n)
+            .find(|&p| key(perm[p]) != (p / n_entities, p % n_entities))
+            .unwrap_or(n);
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Spatial panel models need a balanced panel: {} of {cells} (entity, time) cells \
+                 are missing (first: {}). splm::spml refuses unbalanced panels too; keep the \
+                 entities observed in every period (or the periods observed for every entity) \
+                 and build W for exactly those entities.",
+                cells - n as u128,
+                cell((first_missing / n_entities, first_missing % n_entities))
+            ),
+        });
+    }
 
-    let n_entities = entity_map.len();
+    // Canonical arrays.
+    let k = x_cols.len() + 1;
+    let y_values = cols.numeric(y_col);
+    let mut y = try_zeros1(n, "spatial panel outcome")?;
+    let mut x = try_zeros2(n, k, "spatial panel design")?;
+    x.column_mut(0).fill(1.0);
+    for (p, &r) in perm.iter().enumerate() {
+        y[p] = y_values[r];
+    }
+    for (j, &name) in x_cols.iter().enumerate() {
+        let values = cols.numeric(name);
+        for (p, &r) in perm.iter().enumerate() {
+            x[[p, j + 1]] = values[r];
+        }
+    }
+    let mut entity_ids: Vec<usize> = try_with_capacity(n, "spatial panel entity codes")?;
+    entity_ids.extend(perm.iter().map(|&r| entity.codes[r] as usize));
+    let mut rows: Vec<usize> = try_with_capacity(n, "spatial panel rows")?;
+    rows.extend(perm.iter().map(|&r| cols.rows()[r]));
 
-    // Extract time IDs
-    let time_series = df.column(time_col).map_err(|_| EconError::ColumnNotFound {
-        column: time_col.to_string(),
-        available: df
-            .get_column_names()
+    Ok(SpatialPanelData {
+        y,
+        x,
+        entity_ids,
+        n_entities,
+        n_time,
+        entity_labels: entity.levels.clone(),
+        rows,
+    })
+}
+
+/// W must be N x N, and when its neighbours carry region ids they must equal the panel's
+/// sorted entity labels, in order.
+fn check_panel_weights(listw: &SpatialWeights, panel: &SpatialPanelData) -> EconResult<()> {
+    let labels = &panel.entity_labels;
+    if listw.n() != panel.n_entities {
+        let mut shown: Vec<&str> = labels.iter().take(3).map(String::as_str).collect();
+        if labels.len() > 3 {
+            shown.push("...");
+        }
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Spatial weights matrix has {} units but the panel has {} entities. W must be \
+                 N x N, and row i of W belongs to the i-th entity in sorted id order ({}; \
+                 numbers ascending, text in byte order).",
+                listw.n(),
+                panel.n_entities,
+                shown.join(", ")
+            ),
+        });
+    }
+    if let Some(ids) = listw.neighbors().region_ids()
+        && let Some((r, (id, label))) = ids
             .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let mut time_map: HashMap<i64, usize> = HashMap::new();
-    let mut next_time_id = 0usize;
-
-    let time_values: Vec<i64> = if let Ok(i64_col) = time_series.i64() {
-        i64_col.into_iter().map(|v| v.unwrap_or(0)).collect()
-    } else if let Ok(f64_col) = time_series.f64() {
-        f64_col
-            .into_iter()
-            .map(|v| v.unwrap_or(0.0) as i64)
-            .collect()
-    } else {
-        return Err(EconError::NonNumericColumn {
-            column: time_col.to_string(),
+            .zip(labels)
+            .enumerate()
+            .find(|(_, (id, label))| id != label)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Spatial weights row {r} has region id '{id}' but entity {r} of the panel in \
+                 sorted id order is '{label}'; W rows must follow the sorted entity ids."
+            ),
         });
-    };
+    }
+    Ok(())
+}
 
-    let time_ids: Vec<usize> = time_values
-        .iter()
-        .map(|&t| {
-            *time_map.entry(t).or_insert_with(|| {
-                let id = next_time_id;
-                next_time_id += 1;
-                id
-            })
-        })
-        .collect();
-
-    let n_time = time_map.len();
-
-    Ok((y, x, entity_ids, time_ids, n_entities, n_time))
+/// `out[rows[p]] = v[p]`: canonical order back to dataset row order.
+fn to_row_order(v: &Array1<f64>, rows: &[usize]) -> Array1<f64> {
+    let mut out = Array1::zeros(v.len());
+    for (&r, &value) in rows.iter().zip(v.iter()) {
+        out[r] = value;
+    }
+    out
 }
 
 /// Demean by entity (within transformation).
@@ -958,46 +960,40 @@ fn compute_entity_means(data: &Array1<f64>, entity_ids: &[usize], n_entities: us
         .collect()
 }
 
-/// Expand spatial lag to panel dimension.
-///
-/// For panel data, we apply the spatial weights to each cross-section at time t.
-/// W operates on N observations, but we have N*T total observations.
+/// W applied to each period block of a canonical-layout vector (`SpatialPanelData`):
+/// block t is entries `t*N .. (t+1)*N`, entity i at offset i.
 fn spatial_lag_panel(
     y: &Array1<f64>,
-    entity_ids: &[usize],
-    time_ids: &[usize],
     n_entities: usize,
     n_time: usize,
     listw: &SpatialWeights,
 ) -> Array1<f64> {
-    let n_total = y.len();
-    let mut wy = Array1::zeros(n_total);
-
-    // For each time period, apply spatial weights to cross-section
+    debug_assert_eq!(y.len(), n_entities * n_time);
+    let mut wy = Array1::zeros(y.len());
     for t in 0..n_time {
-        // Extract values for this time period
-        let mut y_t = Array1::zeros(n_entities);
-        let mut obs_indices = vec![None; n_entities];
-
-        for (i, (&eid, &tid)) in entity_ids.iter().zip(time_ids.iter()).enumerate() {
-            if tid == t {
-                y_t[eid] = y[i];
-                obs_indices[eid] = Some(i);
-            }
-        }
-
-        // Apply spatial lag
-        let wy_t = listw.lag(&y_t);
-
-        // Map back to panel structure
-        for (eid, opt_idx) in obs_indices.iter().enumerate() {
-            if let Some(idx) = opt_idx {
-                wy[*idx] = wy_t[eid];
-            }
-        }
+        let block = s![t * n_entities..(t + 1) * n_entities];
+        let wy_t = listw.lag(&y.slice(block).to_owned());
+        wy.slice_mut(block).assign(&wy_t);
     }
-
     wy
+}
+
+/// Column-wise `x_j - lambda * spatial_lag_panel(x_j)` (the SEM transform of the
+/// regressors), on the canonical layout.
+fn transform_panel_x(
+    x: &Array2<f64>,
+    lambda: f64,
+    n_entities: usize,
+    n_time: usize,
+    listw: &SpatialWeights,
+) -> Array2<f64> {
+    let mut out = x.clone();
+    for j in 0..x.ncols() {
+        let col = x.column(j).to_owned();
+        let wx = spatial_lag_panel(&col, n_entities, n_time, listw);
+        out.column_mut(j).assign(&(&col - lambda * &wx));
+    }
+    out
 }
 
 // ============================================================================
@@ -1008,7 +1004,6 @@ fn run_spml_within(
     y: &Array1<f64>,
     x: &Array2<f64>,
     entity_ids: &[usize],
-    time_ids: &[usize],
     n_entities: usize,
     n_time: usize,
     listw: &mut SpatialWeights,
@@ -1031,7 +1026,7 @@ fn run_spml_within(
     // Handle spatial lag if specified
     let (beta, rho_opt, sigma2, ll) = if config.lag {
         // Spatial lag panel model: y = rho*W*y + X*beta + alpha + epsilon
-        let wy = spatial_lag_panel(y, entity_ids, time_ids, n_entities, n_time, listw);
+        let wy = spatial_lag_panel(y, n_entities, n_time, listw);
         let wy_within = demean_by_entity(&wy, entity_ids, n_entities);
 
         // Optimize over rho using concentrated likelihood
@@ -1067,9 +1062,7 @@ fn run_spml_within(
         (beta, Some(rho_opt), sigma2, ll_opt)
     } else if config.spatial_error != SpatialErrorType::None {
         // Spatial error panel model
-        run_spml_within_sem(
-            &y_within, &x_fe, entity_ids, time_ids, n_entities, n_time, listw, config,
-        )?
+        run_spml_within_sem(&y_within, &x_fe, n_entities, n_time, listw, config)?
     } else {
         // Standard fixed effects (no spatial)
         let xtx_mat = xtx(&x_fe.view());
@@ -1175,8 +1168,6 @@ fn run_spml_within(
 fn run_spml_within_sem(
     y_within: &Array1<f64>,
     x_fe: &Array2<f64>,
-    entity_ids: &[usize],
-    time_ids: &[usize],
     n_entities: usize,
     n_time: usize,
     listw: &mut SpatialWeights,
@@ -1199,47 +1190,9 @@ fn run_spml_within_sem(
 
     // Negative concentrated log-likelihood
     let neg_ll = |lambda: f64| -> f64 {
-        // Transform y and X for each time period
-        let mut y_star = Array1::zeros(n);
-        let mut x_star = Array2::zeros((n, k));
-
-        for t in 0..n_time {
-            let mut y_t = Array1::zeros(n_entities);
-            let mut x_t = Array2::zeros((n_entities, k));
-            let mut obs_map = vec![None; n_entities];
-
-            for (i, (&eid, &tid)) in entity_ids.iter().zip(time_ids.iter()).enumerate() {
-                if tid == t {
-                    y_t[eid] = y_within[i];
-                    for j in 0..k {
-                        x_t[[eid, j]] = x_fe[[i, j]];
-                    }
-                    obs_map[eid] = Some(i);
-                }
-            }
-
-            // (I - lambda*W) transformation
-            let wy_t = listw.lag(&y_t);
-            let y_t_star = &y_t - lambda * &wy_t;
-
-            let mut wx_t = Array2::zeros((n_entities, k));
-            for j in 0..k {
-                let x_col = x_t.column(j).to_owned();
-                let wx_col = listw.lag(&x_col);
-                wx_t.column_mut(j).assign(&wx_col);
-            }
-            let x_t_star = &x_t - lambda * &wx_t;
-
-            // Map back
-            for (eid, opt_idx) in obs_map.iter().enumerate() {
-                if let Some(idx) = opt_idx {
-                    y_star[*idx] = y_t_star[eid];
-                    for j in 0..k {
-                        x_star[[*idx, j]] = x_t_star[[eid, j]];
-                    }
-                }
-            }
-        }
+        // (I - lambda*W) transformation of each period's cross-section
+        let y_star = y_within - lambda * &spatial_lag_panel(y_within, n_entities, n_time, listw);
+        let x_star = transform_panel_x(x_fe, lambda, n_entities, n_time, listw);
 
         // OLS on transformed data
         let xtx_mat = xtx(&x_star.view());
@@ -1291,44 +1244,8 @@ fn run_spml_within_sem(
     let ll_opt = -neg_ll(lambda_opt);
 
     // Compute beta at optimal lambda (recompute transformed data)
-    let mut y_star = Array1::zeros(n);
-    let mut x_star = Array2::zeros((n, k));
-
-    for t in 0..n_time {
-        let mut y_t = Array1::zeros(n_entities);
-        let mut x_t = Array2::zeros((n_entities, k));
-        let mut obs_map = vec![None; n_entities];
-
-        for (i, (&eid, &tid)) in entity_ids.iter().zip(time_ids.iter()).enumerate() {
-            if tid == t {
-                y_t[eid] = y_within[i];
-                for j in 0..k {
-                    x_t[[eid, j]] = x_fe[[i, j]];
-                }
-                obs_map[eid] = Some(i);
-            }
-        }
-
-        let wy_t = listw.lag(&y_t);
-        let y_t_star = &y_t - lambda_opt * &wy_t;
-
-        let mut wx_t = Array2::zeros((n_entities, k));
-        for j in 0..k {
-            let x_col = x_t.column(j).to_owned();
-            let wx_col = listw.lag(&x_col);
-            wx_t.column_mut(j).assign(&wx_col);
-        }
-        let x_t_star = &x_t - lambda_opt * &wx_t;
-
-        for (eid, opt_idx) in obs_map.iter().enumerate() {
-            if let Some(idx) = opt_idx {
-                y_star[*idx] = y_t_star[eid];
-                for j in 0..k {
-                    x_star[[*idx, j]] = x_t_star[[eid, j]];
-                }
-            }
-        }
-    }
+    let y_star = y_within - lambda_opt * &spatial_lag_panel(y_within, n_entities, n_time, listw);
+    let x_star = transform_panel_x(x_fe, lambda_opt, n_entities, n_time, listw);
 
     let xtx_mat = xtx(&x_star.view());
     let xtx_inv = matrix_inverse(&xtx_mat.view())?;
@@ -1423,7 +1340,6 @@ fn run_spml_random(
     y: &Array1<f64>,
     x: &Array2<f64>,
     entity_ids: &[usize],
-    time_ids: &[usize],
     n_entities: usize,
     n_time: usize,
     listw: &mut SpatialWeights,
@@ -1485,7 +1401,7 @@ fn run_spml_random(
 
     // Handle spatial lag if specified
     let (beta, rho_opt, sigma2, ll) = if config.lag {
-        let wy = spatial_lag_panel(y, entity_ids, time_ids, n_entities, n_time, listw);
+        let wy = spatial_lag_panel(y, n_entities, n_time, listw);
         let wy_means = compute_entity_means(&wy, entity_ids, n_entities);
         let mut wy_quasi = Array1::zeros(n);
         for i in 0..n {
@@ -1615,7 +1531,6 @@ fn run_spml_pooling(
     y: &Array1<f64>,
     x: &Array2<f64>,
     entity_ids: &[usize],
-    time_ids: &[usize],
     n_entities: usize,
     n_time: usize,
     listw: &mut SpatialWeights,
@@ -1626,7 +1541,7 @@ fn run_spml_pooling(
     let k = x.ncols();
 
     let (beta, rho_opt, sigma2, ll) = if config.lag {
-        let wy = spatial_lag_panel(y, entity_ids, time_ids, n_entities, n_time, listw);
+        let wy = spatial_lag_panel(y, n_entities, n_time, listw);
 
         let (rho_min, rho_max) = listw.try_rho_range()?;
         let (rho_opt, ll_opt) = optimize_rho_panel(
@@ -1749,7 +1664,6 @@ fn run_spgm_within(
     y: &Array1<f64>,
     x: &Array2<f64>,
     entity_ids: &[usize],
-    time_ids: &[usize],
     n_entities: usize,
     n_time: usize,
     listw: &mut SpatialWeights,
@@ -1771,14 +1685,14 @@ fn run_spgm_within(
     // Build instruments
     let (z, rho_opt, lambda_opt) = if config.lag {
         // For spatial lag: use WX as instruments
-        let wy = spatial_lag_panel(y, entity_ids, time_ids, n_entities, n_time, listw);
+        let wy = spatial_lag_panel(y, n_entities, n_time, listw);
         let wy_within = demean_by_entity(&wy, entity_ids, n_entities);
 
         // W*X as additional instruments
         let mut wx_within = Array2::zeros((n, k_fe));
         for j in 0..k_fe {
             let x_col = x_fe.column(j).to_owned();
-            let wx = spatial_lag_panel(&x_col, entity_ids, time_ids, n_entities, n_time, listw);
+            let wx = spatial_lag_panel(&x_col, n_entities, n_time, listw);
             let wx_within_col = demean_by_entity(&wx, entity_ids, n_entities);
             wx_within.column_mut(j).assign(&wx_within_col);
         }
@@ -1826,7 +1740,7 @@ fn run_spgm_within(
     let xtx_inv = matrix_inverse(&xtx_mat.view())?;
     let xty_vec = xty(&x_fe.view(), &y_within);
     let beta = if let Some(rho) = rho_opt {
-        let wy = spatial_lag_panel(y, entity_ids, time_ids, n_entities, n_time, listw);
+        let wy = spatial_lag_panel(y, n_entities, n_time, listw);
         let wy_within = demean_by_entity(&wy, entity_ids, n_entities);
         let y_tilde = &y_within - rho * &wy_within;
         let xty_tilde = xty(&x_fe.view(), &y_tilde);
@@ -1836,7 +1750,7 @@ fn run_spgm_within(
     };
 
     let residuals = if let Some(rho) = rho_opt {
-        let wy = spatial_lag_panel(y, entity_ids, time_ids, n_entities, n_time, listw);
+        let wy = spatial_lag_panel(y, n_entities, n_time, listw);
         let wy_within = demean_by_entity(&wy, entity_ids, n_entities);
         &y_within - rho * &wy_within - &x_fe.dot(&beta)
     } else {
@@ -1908,7 +1822,6 @@ fn run_spgm_gls(
     y: &Array1<f64>,
     x: &Array2<f64>,
     entity_ids: &[usize],
-    _time_ids: &[usize],
     n_entities: usize,
     n_time: usize,
     _listw: &mut SpatialWeights,
@@ -2027,6 +1940,7 @@ fn run_spgm_gls(
 mod tests {
     use super::*;
     use crate::spatial::{Neighbors, WeightStyle};
+    use p2a_validation::Tol;
     use polars::prelude::*;
 
     fn create_spatial_panel_data() -> (Dataset, SpatialWeights) {
@@ -2334,5 +2248,397 @@ mod tests {
             run_spml(&d, "y", &["x1", "x2"], "entity", "time", &mut w, c)
         });
         assert!(matches!(r, Err(EconError::Cancelled(_))), "{r:?}");
+    }
+
+    // ------------------------------------------------------------------------
+    // Panel layout (T2-WP14): balanced panels, sorted-id W rows, any row order.
+    // R: spml_entity_order.R (base R; splm is not installed), reproduced in
+    // validation/econometrics/splm.md.
+    // ------------------------------------------------------------------------
+
+    /// Dataset A of the R script and its W (entities in id order): entity k = 1..=12 on a
+    /// 3 x 4 integer grid at ((k-1) mod 4, (k-1) div 4), rook W (`from_distance(0, 1)`),
+    /// row-standardised; Int64 time 2001..=2005 (t = 1..=5);
+    /// x = sin(0.7 k + 1.3 t) + 0.1 k, alpha = 0.5 cos(1.1 k), e = 0.3 sin(2.3 k t + 0.4),
+    /// y_t solves (I - 0.5 W) y_t = 1.5 x_t + alpha + e_t by the Neumann iteration
+    /// v <- b + 0.5 W v from v = b, 200 times (0.5^200 is below rounding; R uses solve()).
+    /// Rows are entity-major, as R's `A`.
+    fn grid_panel() -> (DataFrame, SpatialWeights) {
+        let coords: Vec<(f64, f64)> = (0..12).map(|i| ((i % 4) as f64, (i / 4) as f64)).collect();
+        let w = SpatialWeights::from_neighbors(
+            &Neighbors::from_distance(&coords, 0.0, 1.0),
+            WeightStyle::RowStd,
+        );
+        let (n, tt) = (12usize, 5usize);
+        let x = |k: f64, t: f64| (0.7 * k + 1.3 * t).sin() + 0.1 * k;
+        let mut y = Array2::<f64>::zeros((n, tt));
+        for t in 1..=tt {
+            let b = Array1::from_iter((1..=n).map(|k| {
+                let (k, t) = (k as f64, t as f64);
+                1.5 * x(k, t) + 0.5 * (1.1 * k).cos() + 0.3 * (2.3 * k * t + 0.4).sin()
+            }));
+            let mut v = b.clone();
+            for _ in 0..200 {
+                v = &b + 0.5 * &w.lag(&v);
+            }
+            y.column_mut(t - 1).assign(&v);
+        }
+        let (mut entity, mut time, mut yv, mut xv) = (vec![], vec![], vec![], vec![]);
+        for k in 1..=n {
+            for t in 1..=tt {
+                entity.push(k as i64);
+                time.push(2000 + t as i64);
+                yv.push(y[[k - 1, t - 1]]);
+                xv.push(x(k as f64, t as f64));
+            }
+        }
+        let df = df! { "entity" => entity, "time" => time, "y" => yv, "x" => xv }.unwrap();
+        (df, w)
+    }
+
+    /// Row i of the result = row (7 i + 3) mod 60 of `df`.
+    fn shuffled(df: &DataFrame) -> DataFrame {
+        let idx: Vec<IdxSize> = (0..60).map(|i| ((7 * i + 3) % 60) as IdxSize).collect();
+        df.take(&IdxCa::from_vec("idx".into(), idx)).unwrap()
+    }
+
+    const C_LABELS: [&str; 12] = [
+        "u1", "u10", "u11", "u12", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9",
+    ];
+
+    /// Entity k (Int64) -> `C_LABELS[k - 1]` (String), so the k-th entity in sorted id
+    /// order is still entity k (R: `labs[Bd$entity]`).
+    fn with_labels(df: &DataFrame) -> DataFrame {
+        let labels: Vec<&str> = df
+            .column("entity")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_no_null_iter()
+            .map(|k| C_LABELS[(k - 1) as usize])
+            .collect();
+        let mut out = df.clone();
+        out.with_column(Column::new("entity".into(), labels))
+            .unwrap();
+        out
+    }
+
+    fn lag_cfg() -> SpmlConfig {
+        SpmlConfig {
+            lag: true,
+            ..Default::default()
+        }
+    }
+
+    fn spml(df: &DataFrame, w: &SpatialWeights, cfg: SpmlConfig) -> EconResult<SpmlResult> {
+        let ds = Dataset::new(df.clone());
+        run_spml(&ds, "y", &["x"], "entity", "time", &mut w.clone(), cfg)
+    }
+
+    fn spgm(df: &DataFrame, w: &SpatialWeights, cfg: SpgmConfig) -> EconResult<SpgmResult> {
+        let ds = Dataset::new(df.clone());
+        run_spgm(&ds, "y", &["x"], "entity", "time", &mut w.clone(), cfg)
+    }
+
+    /// Column `name` of `df` as stored (Float64).
+    fn f64_values(df: &DataFrame, name: &str) -> Vec<f64> {
+        df.column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect()
+    }
+
+    /// R: spml_entity_order.R (plan T2-WP14, Appendix A.2; the script is reproduced in
+    /// validation/econometrics/splm.md). Base-R re-implementation of the spml within-lag
+    /// concentrated likelihood, not splm itself (not installed), so this test is not
+    /// R-pinned in the registry's sense.
+    #[test]
+    fn test_spml_entity_order_r_cross_check() {
+        let (a, w) = grid_panel();
+        // The fixture reproduces R's first row of A.
+        let (y0, x0) = (f64_values(&a, "y")[0], f64_values(&a, "x")[0]);
+        assert!((y0 - 2.313_251_294_567_377).abs() < 1e-13, "{y0:.17}");
+        assert!((x0 - 1.009_297_426_825_681_8).abs() < 1e-15, "{x0:.17}");
+        for df in [a.clone(), shuffled(&a), with_labels(&shuffled(&a))] {
+            let r = spml(&df, &w, lag_cfg()).unwrap();
+            // the golden section stops at |b - a| < tol = 1e-8: iterative tolerance
+            let rho = r.rho.unwrap();
+            assert!(
+                Tol::iterative(1e-6).allows(rho, 0.415_229_776_053_281_8),
+                "rho {rho}"
+            );
+            let beta = r.coefficients[0];
+            assert!(
+                Tol::iterative(1e-6).allows(beta, 1.453_594_665_020_881_5),
+                "{beta}"
+            );
+            let ll = r.log_likelihood;
+            assert!(
+                Tol::iterative(1e-9).allows(ll, 13.520_649_774_963_92),
+                "{ll}"
+            );
+            let sigma2 = r.variance.sigma_epsilon.powi(2);
+            assert!(
+                Tol::iterative(1e-6).allows(sigma2, 0.044_630_452_161_004_024),
+                "{sigma2}"
+            );
+            assert_eq!((r.n_obs, r.n_entities, r.n_time, r.df), (60, 12, 5, 46));
+        }
+    }
+
+    #[test]
+    fn test_spml_spgm_row_order_invariant() {
+        let (a, w) = grid_panel();
+        let b = shuffled(&a);
+        let perm: Vec<usize> = (0..60).map(|i| (7 * i + 3) % 60).collect();
+        for cfg in [
+            lag_cfg(),
+            SpmlConfig {
+                spatial_error: SpatialErrorType::Baltagi,
+                ..Default::default()
+            },
+            SpmlConfig {
+                model: SpatialPanelModel::Random,
+                lag: true,
+                ..Default::default()
+            },
+            SpmlConfig {
+                model: SpatialPanelModel::Pooling,
+                lag: true,
+                ..Default::default()
+            },
+        ] {
+            let (ra, rb) = (
+                spml(&a, &w, cfg.clone()).unwrap(),
+                spml(&b, &w, cfg).unwrap(),
+            );
+            assert_eq!(ra.coefficients, rb.coefficients);
+            assert_eq!(ra.std_errors, rb.std_errors);
+            assert_eq!(
+                (ra.rho, ra.lambda, ra.log_likelihood),
+                (rb.rho, rb.lambda, rb.log_likelihood)
+            );
+            // residuals and fitted values come back in each dataset's row order
+            for i in 0..60 {
+                assert_eq!(rb.residuals[i], ra.residuals[perm[i]], "residual {i}");
+                assert_eq!(rb.fitted[i], ra.fitted[perm[i]], "fitted {i}");
+            }
+        }
+        for cfg in [
+            SpgmConfig {
+                lag: true,
+                spatial_error: false,
+                ..Default::default()
+            },
+            SpgmConfig::default(),
+            SpgmConfig {
+                method: SpgmMethod::G2sls,
+                ..Default::default()
+            },
+        ] {
+            let (ra, rb) = (
+                spgm(&a, &w, cfg.clone()).unwrap(),
+                spgm(&b, &w, cfg).unwrap(),
+            );
+            assert_eq!(
+                (ra.coefficients, ra.std_errors, ra.rho, ra.lambda, ra.sigma2),
+                (rb.coefficients, rb.std_errors, rb.rho, rb.lambda, rb.sigma2)
+            );
+        }
+    }
+
+    #[test]
+    fn test_spatial_lag_panel_follows_sorted_entity_ids() {
+        let df = df! {
+            "entity" => ["b", "a", "c", "a", "b", "c"],
+            "time" => [1i64, 1, 1, 2, 2, 2],
+            "y" => [10.0, 1.0, 100.0, 2.0, 20.0, 200.0],
+        }
+        .unwrap();
+        let panel = extract_panel_data(&Dataset::new(df), "y", &[], "entity", "time").unwrap();
+        assert_eq!(panel.entity_labels, ["a", "b", "c"]);
+        let w = SpatialWeights::from_neighbors(
+            &Neighbors::from_indices(vec![vec![1], vec![0, 2], vec![1]]),
+            WeightStyle::Binary,
+        );
+        let wy = to_row_order(&spatial_lag_panel(&panel.y, 3, 2, &w), &panel.rows);
+        // R (spml_entity_order.R, 3-entity example): 101 10 10 20 202 20
+        assert_eq!(wy.to_vec(), vec![101.0, 10.0, 10.0, 20.0, 202.0, 20.0]);
+    }
+
+    #[test]
+    fn test_spml_unbalanced_and_duplicated_panels_refused() {
+        let (a, w) = grid_panel();
+        let keep: Vec<bool> = (0..60).map(|r| r != 13).collect(); // entity 3, time 2004
+        let unb = a
+            .filter(&BooleanChunked::from_slice("m".into(), &keep))
+            .unwrap();
+        let dup = a.vstack(&a.slice(0, 1)).unwrap(); // entity 1, time 2001 twice
+        for (df, parts) in [
+            (&unb, ["balanced panel", "1 of 60", "entity '3', time 2004"]),
+            (
+                &dup,
+                ["1 duplicated", "(entity, time)", "entity '1', time 2001"],
+            ),
+        ] {
+            let e1 = spml(df, &w, lag_cfg()).unwrap_err();
+            let e2 = spgm(df, &w, SpgmConfig::default()).unwrap_err();
+            for e in [e1, e2] {
+                let m = e.to_string();
+                assert!(
+                    matches!(e, EconError::InvalidSpecification { .. })
+                        && parts.iter().all(|p| m.contains(p)),
+                    "{m}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_na_spml_missing_and_invalid_ids() {
+        let (a, w) = grid_panel();
+        let null_at_5 = |name: &str| {
+            let col = a.column(name).unwrap();
+            let mut out = a.clone();
+            let replaced = match col.dtype() {
+                DataType::Int64 => {
+                    let v: Vec<Option<i64>> = col
+                        .i64()
+                        .unwrap()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| if i == 5 { None } else { v })
+                        .collect();
+                    Column::new(name.into(), v)
+                }
+                _ => {
+                    let v: Vec<Option<f64>> = col
+                        .f64()
+                        .unwrap()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| if i == 5 { None } else { v })
+                        .collect();
+                    Column::new(name.into(), v)
+                }
+            };
+            out.with_column(replaced).unwrap();
+            out
+        };
+        for name in ["y", "entity", "time"] {
+            let e = spml(&null_at_5(name), &w, lag_cfg()).unwrap_err();
+            assert!(
+                matches!(e, EconError::NullValues { ref column, count: 1 } if column == name),
+                "{name}: {e:?}"
+            );
+            let e = spgm(&null_at_5(name), &w, SpgmConfig::default()).unwrap_err();
+            assert!(
+                matches!(e, EconError::NullValues { ref column, count: 1 } if column == name),
+                "{name}: {e:?}"
+            );
+        }
+        // a fractional time
+        let mut times: Vec<f64> = a
+            .column("time")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_no_null_iter()
+            .map(|t| t as f64)
+            .collect();
+        times[4] = 2001.5;
+        let mut d = a.clone();
+        d.with_column(Column::new("time".into(), times)).unwrap();
+        let e = spml(&d, &w, lag_cfg()).unwrap_err();
+        let m = e.to_string();
+        assert!(
+            matches!(e, EconError::InvalidSpecification { .. })
+                && m.contains("Time column 'time' must hold whole numbers"),
+            "{m}"
+        );
+        // a text outcome
+        let mut d = a.clone();
+        let text: Vec<String> = (0..60).map(|i| format!("v{i}")).collect();
+        d.with_column(Column::new("y".into(), text)).unwrap();
+        let e = spml(&d, &w, lag_cfg()).unwrap_err();
+        assert!(
+            matches!(e, EconError::NonNumericColumn { ref column } if column == "y"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_na_spml_int64_equals_float64() {
+        let (a, w) = grid_panel();
+        let scaled = |name: &str| -> Vec<i64> {
+            f64_values(&a, name)
+                .iter()
+                .map(|v| (10.0 * v).round() as i64)
+                .collect()
+        };
+        let (y_i, x_i) = (scaled("y"), scaled("x"));
+        let as_f64 = |v: &[i64]| v.iter().map(|&a| a as f64).collect::<Vec<f64>>();
+        let mut int = a.clone();
+        int.with_column(Column::new("y".into(), y_i.clone()))
+            .unwrap();
+        int.with_column(Column::new("x".into(), x_i.clone()))
+            .unwrap();
+        let mut flt = a.clone();
+        flt.with_column(Column::new("y".into(), as_f64(&y_i)))
+            .unwrap();
+        flt.with_column(Column::new("x".into(), as_f64(&x_i)))
+            .unwrap();
+        assert_eq!(int.column("y").unwrap().dtype(), &DataType::Int64);
+        let (ri, rf) = (spml(&int, &w, lag_cfg()), spml(&flt, &w, lag_cfg()));
+        assert!(rf.is_ok(), "{rf:?}");
+        assert_eq!(format!("{ri:?}"), format!("{rf:?}"));
+        let (gi, gf) = (
+            spgm(&int, &w, SpgmConfig::default()),
+            spgm(&flt, &w, SpgmConfig::default()),
+        );
+        assert!(gf.is_ok(), "{gf:?}");
+        assert_eq!(format!("{gi:?}"), format!("{gf:?}"));
+    }
+
+    #[test]
+    fn test_spml_weights_must_follow_sorted_entities() {
+        let (a, w) = grid_panel();
+        let c = with_labels(&shuffled(&a));
+        let coords: Vec<(f64, f64)> = (0..12).map(|k| ((k % 4) as f64, (k / 4) as f64)).collect();
+        // an 11 x 11 W for 12 entities
+        let w11 = SpatialWeights::from_neighbors(
+            &Neighbors::from_distance(&coords[..11], 0.0, 1.0),
+            WeightStyle::RowStd,
+        );
+        let m = spml(&c, &w11, lag_cfg()).unwrap_err().to_string();
+        assert!(
+            m.contains("12 entities")
+                && m.contains("sorted id order")
+                && m.contains("u1, u10, u11, ..."),
+            "{m}"
+        );
+        let m = spgm(&c, &w11, SpgmConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(m.contains("sorted id order"), "{m}");
+        // region ids equal to the sorted labels: accepted, the same result as without ids
+        let mut nb = Neighbors::from_distance(&coords, 0.0, 1.0);
+        nb.set_region_ids(C_LABELS.iter().map(|s| s.to_string()).collect());
+        let w_ids = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        assert_eq!(
+            format!("{:?}", spml(&c, &w_ids, lag_cfg()).unwrap().coefficients),
+            format!("{:?}", spml(&c, &w, lag_cfg()).unwrap().coefficients)
+        );
+        // region ids in another order: refused
+        let mut nb = Neighbors::from_distance(&coords, 0.0, 1.0);
+        nb.set_region_ids(C_LABELS.iter().rev().map(|s| s.to_string()).collect());
+        let reversed = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        let m = spml(&c, &reversed, lag_cfg()).unwrap_err().to_string();
+        assert!(
+            m.contains("row 0 has region id 'u9'") && m.contains("'u1'"),
+            "{m}"
+        );
     }
 }

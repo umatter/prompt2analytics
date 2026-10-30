@@ -10,6 +10,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::{self, NaPolicy, error_text};
 use crate::tools::requests::spatial::*;
 
 use p2a_core::{
@@ -51,11 +52,31 @@ use p2a_core::{
     spatial_lm_tests,
 };
 
+/// How to proceed after a missing value in a spatial test or model (appended by
+/// [`with_hint`]).
+const MISSING_HINT_MODELS: &str = "Spatial models use one row per unit of the weights, so \
+    incomplete rows cannot be dropped silently: remove them (munge_drop_na), then rebuild the \
+    weights with spatial_neighbors on the cleaned dataset.";
+
+/// How to proceed after a missing coordinate (appended by [`with_hint`]).
+const MISSING_HINT_NEIGHBORS: &str = "Row i of the weights is row i of the dataset, so a row \
+    cannot be skipped: remove the rows with missing coordinates (munge_drop_na) and rebuild \
+    the dataset's weights with spatial_neighbors.";
+
+/// `message`, followed by `hint` on its own line when the message reports a missing value.
+fn with_hint(message: String, hint: &str) -> String {
+    if message.contains("missing value") {
+        format!("{message}\n{hint}")
+    } else {
+        message
+    }
+}
+
 #[tool_router(router = spatial_router, vis = "pub")]
 impl AnalyticsServer {
     /// Create spatial neighbors and weights from coordinates.
     #[tool(
-        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw()."
+        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(). Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort)."
     )]
     pub async fn spatial_neighbors(
         &self,
@@ -67,48 +88,27 @@ impl AnalyticsServer {
             crate::get_dataset!(datasets, &request.dataset).clone()
         };
 
-        let df = dataset.df();
-
-        // Extract coordinates
-        let x_series = match df.column(&request.x_coord) {
-            Ok(s) => s,
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Coordinate column '{}' not found in dataset.",
-                    request.x_coord
-                ))]));
+        // Coordinates: integer or float, no missing value (row i is unit i of the weights)
+        let cols = match common::numeric_columns(
+            &dataset,
+            &[&request.x_coord, &request.y_coord],
+            NaPolicy::Fail,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return error_text(with_hint(
+                    format!("Could not read the coordinates: {e}"),
+                    MISSING_HINT_NEIGHBORS,
+                ));
             }
         };
-        let y_series = match df.column(&request.y_coord) {
-            Ok(s) => s,
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Coordinate column '{}' not found in dataset.",
-                    request.y_coord
-                ))]));
-            }
-        };
-
-        let x_vals: Vec<f64> = match x_series.f64() {
-            Ok(ca) => ca.into_no_null_iter().collect(),
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' must be numeric.",
-                    request.x_coord
-                ))]));
-            }
-        };
-        let y_vals: Vec<f64> = match y_series.f64() {
-            Ok(ca) => ca.into_no_null_iter().collect(),
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' must be numeric.",
-                    request.y_coord
-                ))]));
-            }
-        };
-
-        let coords: Vec<(f64, f64)> = x_vals.into_iter().zip(y_vals.into_iter()).collect();
+        let coords: Vec<(f64, f64)> = cols
+            .numeric(&request.x_coord)
+            .iter()
+            .copied()
+            .zip(cols.numeric(&request.y_coord).iter().copied())
+            .collect();
+        drop(cols);
         let n = coords.len();
 
         // The link budget (none without a resource profile).
@@ -239,7 +239,7 @@ impl AnalyticsServer {
 
     /// Run Moran's I test for spatial autocorrelation.
     #[tool(
-        description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test()."
+        description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
     )]
     pub async fn moran_test(
         &self,
@@ -260,24 +260,14 @@ impl AnalyticsServer {
             }
         };
 
-        // Extract variable
-        let df = dataset.df();
-        let var_series = match df.column(&request.variable) {
-            Ok(s) => s,
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Variable '{}' not found in dataset.",
-                    request.variable
-                ))]));
-            }
-        };
-        let x_vec: Vec<f64> = match var_series.f64() {
-            Ok(ca) => ca.into_no_null_iter().collect(),
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Variable '{}' must be numeric.",
-                    request.variable
-                ))]));
+        // The variable: integer, float or boolean, no missing value
+        let x_vec = match common::numeric_column(&dataset, &request.variable, NaPolicy::Fail) {
+            Ok((values, _)) => values,
+            Err(e) => {
+                return error_text(with_hint(
+                    format!("Could not read the variable: {e}"),
+                    MISSING_HINT_MODELS,
+                ));
             }
         };
         let x = ndarray::Array1::from_vec(x_vec);
@@ -315,10 +305,10 @@ impl AnalyticsServer {
                 );
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Moran's I test failed: {}",
-                e
-            ))])),
+            Err(e) => error_text(with_hint(
+                format!("Moran's I test failed: {e}"),
+                MISSING_HINT_MODELS,
+            )),
         }
     }
 
@@ -357,45 +347,18 @@ impl AnalyticsServer {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "OLS estimation failed: {}",
-                    e
-                ))]));
+                return error_text(with_hint(
+                    format!("OLS estimation failed: {e}"),
+                    MISSING_HINT_MODELS,
+                ));
             }
         };
 
-        // Build design matrix with intercept
-        let df = dataset.df();
-        let n = df.height();
-        let k = request.x.len() + 1; // +1 for intercept
-
-        let mut x_mat = ndarray::Array2::<f64>::zeros((n, k));
-        for i in 0..n {
-            x_mat[[i, 0]] = 1.0; // Intercept
-        }
-        for (j, col_name) in request.x.iter().enumerate() {
-            let col = match df.column(col_name) {
-                Ok(c) => c,
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' not found.",
-                        col_name
-                    ))]));
-                }
-            };
-            let col_f64 = match col.f64() {
-                Ok(c) => c,
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' must be numeric.",
-                        col_name
-                    ))]));
-                }
-            };
-            for (i, val) in col_f64.into_no_null_iter().enumerate() {
-                x_mat[[i, j + 1]] = val;
-            }
-        }
+        // Design matrix [1, X] (the regressors OLS used; no missing value)
+        let x_mat = match common::numeric_columns(&dataset, &x_refs, NaPolicy::Fail) {
+            Ok(cols) => cols.matrix(&x_refs, true).data,
+            Err(e) => return error_text(with_hint(e, MISSING_HINT_MODELS)),
+        };
 
         let tests = spatial_lm_tests(ols_result.residuals(), &x_mat, &mut listw);
         self.keep_weights_cache(&request.weights, listw).await;
@@ -440,16 +403,16 @@ impl AnalyticsServer {
                 );
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Spatial LM tests failed: {}",
-                e
-            ))])),
+            Err(e) => error_text(with_hint(
+                format!("Spatial LM tests failed: {e}"),
+                MISSING_HINT_MODELS,
+            )),
         }
     }
 
     /// Run Spatial Autoregressive Lag (SAR) model.
     #[tool(
-        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm()."
+        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
     )]
     pub async fn sar_model(
         &self,
@@ -553,16 +516,16 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "SAR model estimation failed: {}",
-                e
-            ))])),
+            Err(e) => error_text(with_hint(
+                format!("SAR model estimation failed: {e}"),
+                MISSING_HINT_MODELS,
+            )),
         }
     }
 
     /// Run Spatial Error Model (SEM).
     #[tool(
-        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm()."
+        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
     )]
     pub async fn sem_model(
         &self,
@@ -641,16 +604,16 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "SEM model estimation failed: {}",
-                e
-            ))])),
+            Err(e) => error_text(with_hint(
+                format!("SEM model estimation failed: {e}"),
+                MISSING_HINT_MODELS,
+            )),
         }
     }
 
     /// Run Spatial GMM with heteroscedasticity robustness (sphet).
     #[tool(
-        description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet()."
+        description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
     )]
     pub async fn sphet_model(
         &self,
@@ -789,16 +752,16 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Spatial GMM estimation failed: {}",
-                e
-            ))])),
+            Err(e) => error_text(with_hint(
+                format!("Spatial GMM estimation failed: {e}"),
+                MISSING_HINT_MODELS,
+            )),
         }
     }
 
     /// Run SAR Probit model (spatial lag probit for binary outcomes).
     #[tool(
-        description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means, credible intervals, and spatial impacts (direct, indirect, total effects). Equivalent to R's spatialprobit::sarprobit()."
+        description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means, credible intervals, and spatial impacts (direct, indirect, total effects). Equivalent to R's spatialprobit::sarprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
     )]
     pub async fn sar_probit_model(
         &self,
@@ -918,16 +881,16 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "SAR Probit estimation failed: {}",
-                e
-            ))])),
+            Err(e) => error_text(with_hint(
+                format!("SAR Probit estimation failed: {e}"),
+                MISSING_HINT_MODELS,
+            )),
         }
     }
 
     /// Run SEM Probit model (spatial error probit for binary outcomes).
     #[tool(
-        description = "Run Spatial Error (SEM) Probit model for binary dependent variables: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0). Estimates spatial error parameter lambda via Bayesian MCMC. Use when binary outcomes have spatially correlated unobserved factors (nuisance spatial dependence). Equivalent to R's spatialprobit::semprobit()."
+        description = "Run Spatial Error (SEM) Probit model for binary dependent variables: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0). Estimates spatial error parameter lambda via Bayesian MCMC. Use when binary outcomes have spatially correlated unobserved factors (nuisance spatial dependence). Equivalent to R's spatialprobit::semprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
     )]
     pub async fn sem_probit_model(
         &self,
@@ -1025,16 +988,16 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "SEM Probit estimation failed: {}",
-                e
-            ))])),
+            Err(e) => error_text(with_hint(
+                format!("SEM Probit estimation failed: {e}"),
+                MISSING_HINT_MODELS,
+            )),
         }
     }
 
     /// Run Spatial Panel ML model (spml).
     #[tool(
-        description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS."
+        description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
     )]
     pub async fn spatial_panel_ml(
         &self,
@@ -1173,16 +1136,16 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Spatial panel ML estimation failed: {}",
-                e
-            ))])),
+            Err(e) => error_text(with_hint(
+                format!("Spatial panel ML estimation failed: {e}"),
+                MISSING_HINT_MODELS,
+            )),
         }
     }
 
     /// Run Spatial Panel GMM model (spgm).
     #[tool(
-        description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007)."
+        description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007). The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
     )]
     pub async fn spatial_panel_gmm(
         &self,
@@ -1303,10 +1266,10 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Spatial panel GMM estimation failed: {}",
-                e
-            ))])),
+            Err(e) => error_text(with_hint(
+                format!("Spatial panel GMM estimation failed: {e}"),
+                MISSING_HINT_MODELS,
+            )),
         }
     }
 }
@@ -1338,7 +1301,9 @@ impl AnalyticsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::common::test_support::server_with;
     use crate::tools::limits::{self, Limits};
+    use p2a_validation::{Tol, text::labelled};
     use polars::prelude::*;
 
     /// A current-thread runtime: `limits::with_limits` is thread-local.
@@ -1703,5 +1668,352 @@ mod tests {
             })))
             .unwrap();
         assert!(text(&missing).contains("Spatial weights 'nope' not found"));
+    }
+
+    // ------------------------------------------------------------------------
+    // T2-WP14: integer columns, refused missing values, sorted-id panel W rows.
+    // ------------------------------------------------------------------------
+
+    fn req<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// The 25 integer points of moran_int_points.R (plan T2-WP14, Appendix A.3), i = 0..24:
+    /// gx = (40 i^2 + 3 i) mod 101, gy = (2 i^2 + 7 i + 5) mod 97,
+    /// v = (gx + gy) div 10 + (3 i) mod 7, b = (v >= 13) as 0/1. No kNN ties for k = 4.
+    /// `float`: Float64 copies (the same values), else Int64.
+    fn points_df(float: bool) -> DataFrame {
+        let gx: Vec<i64> = (0..25i64).map(|i| (40 * i * i + 3 * i) % 101).collect();
+        let gy: Vec<i64> = (0..25i64).map(|i| (2 * i * i + 7 * i + 5) % 97).collect();
+        let v: Vec<i64> = (0..25usize)
+            .map(|i| (gx[i] + gy[i]) / 10 + (3 * i as i64) % 7)
+            .collect();
+        let b: Vec<i64> = v.iter().map(|&v| i64::from(v >= 13)).collect();
+        if float {
+            let f = |c: &[i64]| c.iter().map(|&a| a as f64).collect::<Vec<f64>>();
+            df! { "gx" => f(&gx), "gy" => f(&gy), "v" => f(&v), "b" => f(&b) }.unwrap()
+        } else {
+            df! { "gx" => gx, "gy" => gy, "v" => v, "b" => b }.unwrap()
+        }
+    }
+
+    fn knn4(dataset: &str, weights: &str) -> SpatialNeighborsRequest {
+        req(serde_json::json!({
+            "dataset": dataset, "x_coord": "gx", "y_coord": "gy",
+            "method": "knn", "k": 4, "weights_name": weights,
+        }))
+    }
+
+    const C_LABELS: [&str; 12] = [
+        "u1", "u10", "u11", "u12", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9",
+    ];
+
+    /// Dataset C of spml_entity_order.R (plan T2-WP14, Appendix A.2; the same formulas as
+    /// the p2a-core splm fixture, whose test helpers are not visible here): entity k on a
+    /// 3 x 4 grid at ((k-1) mod 4, (k-1) div 4) with label `C_LABELS[k-1]`, Int64 time
+    /// 2001..=2005, x = sin(0.7 k + 1.3 t) + 0.1 k and y_t = (I - 0.5 W)^-1
+    /// (1.5 x_t + 0.5 cos(1.1 k) + 0.3 sin(2.3 k t + 0.4)) for the row-standardised rook W;
+    /// row i is row (7 i + 3) mod 60 of the entity-major dataset A. Also the 12-row
+    /// coordinate dataset (label, Int64 gx, gy) in sorted label order.
+    fn panel_dfs() -> (DataFrame, DataFrame) {
+        let gx: Vec<i64> = (0..12).map(|i| i % 4).collect();
+        let gy: Vec<i64> = (0..12).map(|i| i / 4).collect();
+        let coords: Vec<(f64, f64)> = gx
+            .iter()
+            .zip(&gy)
+            .map(|(&a, &b)| (a as f64, b as f64))
+            .collect();
+        let w = SpatialWeights::from_neighbors(
+            &Neighbors::from_distance(&coords, 0.0, 1.0),
+            WeightStyle::RowStd,
+        );
+        let x = |k: f64, t: f64| (0.7 * k + 1.3 * t).sin() + 0.1 * k;
+        let mut y = vec![[0.0; 5]; 12];
+        for t in 1..=5usize {
+            let b = ndarray::Array1::from_iter((1..=12usize).map(|k| {
+                let (k, t) = (k as f64, t as f64);
+                1.5 * x(k, t) + 0.5 * (1.1 * k).cos() + 0.3 * (2.3 * k * t + 0.4).sin()
+            }));
+            let mut v = b.clone();
+            for _ in 0..200 {
+                v = &b + 0.5 * &w.lag(&v);
+            }
+            for k in 0..12 {
+                y[k][t - 1] = v[k];
+            }
+        }
+        let (mut entity, mut time, mut yv, mut xv) = (vec![], vec![], vec![], vec![]);
+        for i in 0..60usize {
+            let a = (7 * i + 3) % 60; // row of A: entity a / 5 + 1, period a % 5 + 1
+            let (k, t) = (a / 5 + 1, a % 5 + 1);
+            entity.push(C_LABELS[k - 1]);
+            time.push(2000 + t as i64);
+            yv.push(y[k - 1][t - 1]);
+            xv.push(x(k as f64, t as f64));
+        }
+        let panel = df! { "entity" => entity, "time" => time, "y" => yv, "x" => xv }.unwrap();
+        let coords = df! { "entity" => C_LABELS.to_vec(), "gx" => gx, "gy" => gy }.unwrap();
+        (panel, coords)
+    }
+
+    /// R: moran_int_points.R (plan T2-WP14, Appendix A.3; base R, spdep is not installed).
+    #[test]
+    fn test_mcp_spatial_neighbors_and_moran_int64_match_r() {
+        let (rt, s) = server_with(vec![("pts", points_df(false)), ("ptsf", points_df(true))]);
+        for (ds, w) in [("pts", "w"), ("ptsf", "wf")] {
+            let r = call(&s, Limits::off(), knn4(ds, w));
+            let t = text(&r);
+            assert_ne!(r.is_error, Some(true), "{t}");
+            assert!(
+                t.contains("Observations: 25") && t.contains("Average neighbors: 4.00"),
+                "{t}"
+            );
+        }
+        {
+            let map = rt.block_on(s.spatial_weights.read());
+            assert_eq!(
+                serde_json::to_value(&map["w"]).unwrap(),
+                serde_json::to_value(&map["wf"]).unwrap()
+            );
+            // R: neighbours of point 0 (0-based) are 14 11 1 9
+            let mut nb0 = map["w"].neighbors().get_neighbors(0).to_vec();
+            nb0.sort_unstable();
+            assert_eq!(nb0, [1, 9, 11, 14]);
+        }
+        let r = rt
+            .block_on(s.moran_test(Parameters(req(serde_json::json!({
+                "dataset": "pts", "variable": "v", "weights": "w"
+            })))))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        for (label, r_value, decimals) in [
+            ("Moran I statistic:", 0.388_188_976_377_952_8, 6),
+            ("Expected I:", -0.041_666_666_666_666_664, 6),
+            ("Variance:", 0.012_700_853_696_201_244, 6),
+            ("Z-score:", 3.814_223_835_409_538, 4),
+            ("P-value:", 6.830_580_379_368_958e-5, 6),
+        ] {
+            let v = labelled(&t, label).unwrap_or_else(|| panic!("{label} missing in {t}"));
+            assert!(
+                Tol::printed(decimals).allows(v, r_value),
+                "{label} {v} vs R {r_value}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_na_mcp_spatial_neighbors_missing_coordinate() {
+        let mut with_null = points_df(false);
+        let gx: Vec<Option<i64>> = (0..25i64)
+            .map(|i| (i != 9).then_some((40 * i * i + 3 * i) % 101))
+            .collect();
+        with_null.with_column(Column::new("gx".into(), gx)).unwrap();
+        let mut with_nan = points_df(true);
+        let gx: Vec<f64> = (0..25i64)
+            .map(|i| {
+                if i == 9 {
+                    f64::NAN
+                } else {
+                    ((40 * i * i + 3 * i) % 101) as f64
+                }
+            })
+            .collect();
+        with_nan.with_column(Column::new("gx".into(), gx)).unwrap();
+        let (rt, s) = server_with(vec![("null", with_null), ("nan", with_nan)]);
+        for ds in ["null", "nan"] {
+            let r = call(&s, Limits::off(), knn4(ds, "w"));
+            let t = text(&r);
+            assert_eq!(r.is_error, Some(true), "{ds}: {t}");
+            assert!(
+                t.contains("Column 'gx' contains 1 missing value(s)")
+                    && t.contains("munge_drop_na"),
+                "{ds}: {t}"
+            );
+        }
+        assert!(rt.block_on(s.spatial_weights.read()).is_empty());
+    }
+
+    #[test]
+    fn test_na_mcp_moran_and_models_missing_values() {
+        let mut na = points_df(false);
+        let v: Vec<Option<i64>> = na
+            .column("v")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| if i == 2 { None } else { v })
+            .collect();
+        na.with_column(Column::new("v".into(), v)).unwrap();
+        let (rt, s) = server_with(vec![("pts", points_df(false)), ("na", na)]);
+        let r = call(&s, Limits::off(), knn4("pts", "w"));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let model = || serde_json::json!({"dataset": "na", "y": "v", "x": ["gx"], "weights": "w"});
+        let results = [
+            rt.block_on(s.moran_test(Parameters(req(serde_json::json!({
+                "dataset": "na", "variable": "v", "weights": "w"
+            }))))),
+            rt.block_on(s.sar_model(Parameters(req(model())))),
+            rt.block_on(s.sem_model(Parameters(req(model())))),
+        ];
+        for (i, r) in results.into_iter().enumerate() {
+            let r = r.unwrap();
+            let t = text(&r);
+            assert_eq!(r.is_error, Some(true), "tool {i}: {t}");
+            assert!(
+                t.contains("Column 'v' contains 1 missing value(s)")
+                    && t.contains("spatial_neighbors"),
+                "tool {i}: {t}"
+            );
+        }
+    }
+
+    /// The texts of every cross-section tool on `dataset`, with weights "w".
+    fn cross_section_texts(
+        rt: &tokio::runtime::Runtime,
+        s: &AnalyticsServer,
+        dataset: &str,
+    ) -> Vec<(Option<bool>, String)> {
+        let model =
+            || serde_json::json!({"dataset": dataset, "y": "v", "x": ["gx"], "weights": "w"});
+        let probit = || {
+            serde_json::json!({
+                "dataset": dataset, "y": "b", "x": ["gx"], "weights": "w",
+                "n_draws": 100, "burn_in": 50, "seed": 7,
+            })
+        };
+        let sphet = serde_json::json!({
+            "dataset": dataset, "y": "v", "x": ["gx"], "weights": "w", "model": "lag"
+        });
+        let moran = serde_json::json!({"dataset": dataset, "variable": "v", "weights": "w"});
+        [
+            rt.block_on(s.moran_test(Parameters(req(moran)))),
+            rt.block_on(s.spatial_lm_tests_tool(Parameters(req(model())))),
+            rt.block_on(s.sar_model(Parameters(req(model())))),
+            rt.block_on(s.sem_model(Parameters(req(model())))),
+            rt.block_on(s.sphet_model(Parameters(req(sphet)))),
+            rt.block_on(s.sar_probit_model(Parameters(req(probit())))),
+            rt.block_on(s.sem_probit_model(Parameters(req(probit())))),
+        ]
+        .into_iter()
+        .map(|r| {
+            let r = r.unwrap();
+            (r.is_error, text(&r))
+        })
+        .collect()
+    }
+
+    #[test]
+    fn test_mcp_spatial_models_int64_equal_float64() {
+        let mut with_bool = points_df(false);
+        let b: Vec<bool> = with_bool
+            .column("b")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_no_null_iter()
+            .map(|b| b == 1)
+            .collect();
+        with_bool.with_column(Column::new("b".into(), b)).unwrap();
+        let (rt, s) = server_with(vec![
+            ("pts", points_df(false)),
+            ("ptsf", points_df(true)),
+            ("ptsb", with_bool),
+        ]);
+        let r = call(&s, Limits::off(), knn4("pts", "w"));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let int = cross_section_texts(&rt, &s, "pts");
+        let flt = cross_section_texts(&rt, &s, "ptsf");
+        let boolean = cross_section_texts(&rt, &s, "ptsb");
+        for (i, ((a, b), c)) in int.iter().zip(&flt).zip(&boolean).enumerate() {
+            assert_ne!(b.0, Some(true), "tool {i}: {}", b.1);
+            assert_eq!(a, b, "tool {i}");
+            // a Boolean outcome is 0/1 (the probits are tools 5 and 6)
+            if i >= 5 {
+                assert_eq!(c, b, "tool {i}");
+            }
+        }
+    }
+
+    /// R: spml_entity_order.R (plan T2-WP14, Appendix A.2): within spatial-lag fit with W
+    /// rows in sorted label order.
+    #[test]
+    fn test_mcp_spatial_panel_ml_sorted_ids_match_r() {
+        let (panel, coords) = panel_dfs();
+        let (rt, s) = server_with(vec![("panel", panel), ("coords", coords)]);
+        let r = call(
+            &s,
+            Limits::off(),
+            req(serde_json::json!({
+                "dataset": "coords", "x_coord": "gx", "y_coord": "gy",
+                "method": "distance", "d_min": 0.0, "d_max": 1.0, "weights_name": "rook",
+            })),
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let r = rt
+            .block_on(s.spatial_panel_ml(Parameters(req(serde_json::json!({
+                "dataset": "panel", "y": "y", "x": ["x"], "entity_col": "entity",
+                "time_col": "time", "weights": "rook", "lag": true,
+            })))))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains("Observations: 60  Entities: 12  Time periods: 5"),
+            "{t}"
+        );
+        let rho = labelled(&t, "Estimate:").unwrap();
+        assert!(
+            Tol::printed(6).allows(rho, 0.415_229_776_053_281_8),
+            "rho {rho} (first-appearance W rows give 0.178685)"
+        );
+    }
+
+    #[test]
+    fn test_mcp_spatial_panel_unbalanced_duplicated_and_w_size_refused() {
+        let (panel, coords) = panel_dfs();
+        let minus = panel.slice(1, 59);
+        let plus = panel.vstack(&panel.slice(0, 1)).unwrap();
+        let coords11 = coords.slice(0, 11);
+        let (rt, s) = server_with(vec![
+            ("panel", panel),
+            ("minus", minus),
+            ("plus", plus),
+            ("coords", coords),
+            ("coords11", coords11),
+        ]);
+        for (ds, w) in [("coords", "rook"), ("coords11", "rook11")] {
+            let r = call(
+                &s,
+                Limits::off(),
+                req(serde_json::json!({
+                    "dataset": ds, "x_coord": "gx", "y_coord": "gy",
+                    "method": "distance", "d_min": 0.0, "d_max": 1.0, "weights_name": w,
+                })),
+            );
+            assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        }
+        for (ds, w, part) in [
+            ("minus", "rook", "balanced panel"),
+            ("plus", "rook", "duplicated"),
+            ("panel", "rook11", "sorted id order"),
+        ] {
+            let args = serde_json::json!({
+                "dataset": ds, "y": "y", "x": ["x"], "entity_col": "entity",
+                "time_col": "time", "weights": w,
+            });
+            let results = [
+                rt.block_on(s.spatial_panel_ml(Parameters(req(args.clone())))),
+                rt.block_on(s.spatial_panel_gmm(Parameters(req(args)))),
+            ];
+            for r in results {
+                let r = r.unwrap();
+                let t = text(&r);
+                assert_eq!(r.is_error, Some(true), "{ds}: {t}");
+                assert!(t.contains(part), "{ds}: {t}");
+            }
+        }
     }
 }

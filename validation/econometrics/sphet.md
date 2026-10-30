@@ -24,6 +24,19 @@ The Kelejian-Prucha GMM approach uses a multi-step procedure:
 - **HAC**: Heteroscedasticity and Autocorrelation Consistent (Kelejian-Prucha 2007)
 - **Standard**: Homoscedastic assumption
 
+### Data requirements
+
+- One dataset row per unit of W: row i of the data is unit i of the weights, so no row can
+  be dropped.
+- Missing values (null or NaN) in y or X are refused with `NullValues` naming the column,
+  as spdep/spatialreg do (`na.action = na.fail`); remove the incomplete rows and rebuild W
+  first. `±Inf` is refused as well.
+- Integer and Boolean (0/1) columns are accepted and give the same estimates as their
+  Float64 copies.
+- Tests (T2-WP14): `test_na_sphet_int64_equals_float64_and_refuses_missing`
+  (`econometrics::sphet::tests`; Int64 and Float64 give identical results for the lag,
+  error and SARAR models, and a null y is `NullValues`).
+
 ## Reference Implementation
 
 **R Package**: `sphet` (Piras, 2010)

@@ -18,6 +18,8 @@ use p2a_core::{
     run_sem,
 };
 
+use p2a_core::data::columns::{ColumnRequest, NaPolicy, numeric_column};
+
 use crate::output::{OutputFormat, print_error};
 use crate::session::SessionManager;
 
@@ -291,32 +293,20 @@ fn build_spatial_weights(
     k: usize,
     style: WeightStyle,
 ) -> anyhow::Result<SpatialWeights> {
-    let df = dataset.df();
-
-    // Extract coordinates
-    let x_col = df
-        .column(coord_x)
-        .map_err(|_| anyhow::anyhow!("Column '{}' not found", coord_x))?;
-    let y_col = df
-        .column(coord_y)
-        .map_err(|_| anyhow::anyhow!("Column '{}' not found", coord_y))?;
-
-    let x_vals: Vec<f64> = x_col
-        .f64()
-        .map_err(|_| anyhow::anyhow!("Column '{}' must be numeric", coord_x))?
-        .into_no_null_iter()
+    // Coordinates: integer or float columns with no missing value (row i of the
+    // weights is row i of the dataset, so no row can be skipped). A NaN is a missing
+    // value; an infinite coordinate is NonFiniteValues.
+    let cols = ColumnRequest::new(dataset.df())
+        .numerics(&[coord_x, coord_y])
+        .na(NaPolicy::Fail)
+        .extract()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let coords: Vec<(f64, f64)> = cols
+        .numeric(coord_x)
+        .iter()
+        .copied()
+        .zip(cols.numeric(coord_y).iter().copied())
         .collect();
-    let y_vals: Vec<f64> = y_col
-        .f64()
-        .map_err(|_| anyhow::anyhow!("Column '{}' must be numeric", coord_y))?
-        .into_no_null_iter()
-        .collect();
-
-    if x_vals.len() != y_vals.len() {
-        return Err(anyhow::anyhow!("Coordinate columns have different lengths"));
-    }
-
-    let coords: Vec<(f64, f64)> = x_vals.into_iter().zip(y_vals).collect();
 
     // Build neighbors and weights. Like the MCP `spatial_neighbors` tool, refuse
     // a k outside 1..=n-1 and coordinates that are not finite instead of
@@ -753,16 +743,14 @@ fn execute_moran(
                 }
             };
 
-            // Extract the variable as an array
-            let df = ds.df();
-            let y_col = df
-                .column(variable)
-                .map_err(|_| anyhow::anyhow!("Column '{}' not found", variable))?;
-            let y_vals: Vec<f64> = y_col
-                .f64()
-                .map_err(|_| anyhow::anyhow!("Column '{}' must be numeric", variable))?
-                .into_no_null_iter()
-                .collect();
+            // The variable: integer, float or boolean, no missing value
+            let y_vals = match numeric_column(ds.df(), variable, NaPolicy::Fail) {
+                Ok((values, _)) => values,
+                Err(e) => {
+                    print_error(&e.to_string(), format);
+                    return Ok(());
+                }
+            };
             let y = ndarray::Array1::from_vec(y_vals);
 
             let alt = match alternative.to_lowercase().as_str() {
