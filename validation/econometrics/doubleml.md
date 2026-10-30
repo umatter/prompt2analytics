@@ -141,3 +141,22 @@ print(f"95% CI: [{dml_plr.confint().iloc[0, 0]:.4f}, {dml_plr.confint().iloc[0, 
 - [x] MCP tool
 - [ ] Ridge/Lasso nuisance models (future)
 - [ ] Comparison with Python DoubleML on same data
+
+## MCP extraction (T2-WP11)
+
+The MCP tool `treatment_double_ml` reads the outcome, the treatment and the covariates in one
+request to the shared extractor (`p2a_core::data::columns`, through
+`crate::tools::common::numeric_columns`) with the `Fail` policy, because DoubleML refuses
+missing data. A missing (null or NaN) value in any of them is a tool error naming the column
+(`Column 'x' contains 1 missing value(s) ...`); an absent column or a text column is a tool
+error naming it as well, never a protocol error. Integer and boolean columns are numeric, so an
+Int64 0/1 treatment is accepted. Before T2-WP11 the handler dropped nulls from y and d per
+column but read missing covariates as 0, and then reshaped the covariates with the shortened
+row count, so one missing outcome shifted every covariate column; an integer treatment was
+refused with a protocol error (findings TOOL-5, TOOL-6).
+
+Tests (`crates/p2a-mcp/src/tools/handlers/causal.rs`, on `validation/datasets/generated/rd_sim.csv`;
+not registered, no R value): `test_mcp_treatment_double_ml_accepts_int64_treatment` (the Int64
+treatment gives the same output as the same values in Float64) and
+`test_mcp_treatment_double_ml_refuses_missing_values` (a missing covariate, a missing outcome and
+treatment, an absent covariate).

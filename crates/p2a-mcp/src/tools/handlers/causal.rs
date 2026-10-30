@@ -632,7 +632,7 @@ impl AnalyticsServer {
 
     /// Run Double/Debiased Machine Learning (DoubleML) estimation.
     #[tool(
-        description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information."
+        description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information. Columns must not contain missing values; integer and boolean columns are accepted."
     )]
     pub async fn treatment_double_ml(
         &self,
@@ -644,49 +644,9 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract data columns
-        let df = dataset.df();
-
-        // Extract outcome (Y)
-        let y_col = df.column(&request.outcome).map_err(|_| {
-            McpError::invalid_request(
-                format!("Outcome column '{}' not found", request.outcome),
-                None,
-            )
-        })?;
-        let y_vec: Vec<f64> = y_col
-            .f64()
-            .map_err(|_| {
-                McpError::invalid_request(
-                    format!("Outcome column '{}' must be numeric", request.outcome),
-                    None,
-                )
-            })?
-            .iter()
-            .flatten()
-            .collect();
-
-        // Extract treatment (D)
-        let d_col = df.column(&request.treatment).map_err(|_| {
-            McpError::invalid_request(
-                format!("Treatment column '{}' not found", request.treatment),
-                None,
-            )
-        })?;
-        let d_vec: Vec<f64> = d_col
-            .f64()
-            .map_err(|_| {
-                McpError::invalid_request(
-                    format!("Treatment column '{}' must be numeric", request.treatment),
-                    None,
-                )
-            })?
-            .iter()
-            .flatten()
-            .collect();
-
-        // Extract covariates (X)
-        let n = y_vec.len();
+        // y, d and X are read jointly; DoubleML refuses missing data, so a missing value
+        // in any of them is a tool error naming the column (NaPolicy::Fail).
+        let n = dataset.df().height();
         let p = request.covariates.len();
         if n.checked_mul(p)
             .is_none_or(|total| total > MAX_MATRIX_ELEMENTS)
@@ -696,45 +656,28 @@ impl AnalyticsServer {
                 n, p, MAX_MATRIX_ELEMENTS
             ))]));
         }
-        let mut x_data = Vec::with_capacity(n * p);
-
-        for col_name in &request.covariates {
-            let col = df.column(col_name).map_err(|_| {
-                McpError::invalid_request(
-                    format!("Covariate column '{}' not found", col_name),
-                    None,
-                )
-            })?;
-            let col_f64 = col.f64().map_err(|_| {
-                McpError::invalid_request(
-                    format!("Covariate column '{}' must be numeric", col_name),
-                    None,
-                )
-            })?;
-            for v in col_f64.iter() {
-                x_data.push(v.unwrap_or(0.0));
+        let mut names: Vec<&str> = vec![request.outcome.as_str(), request.treatment.as_str()];
+        names.extend(request.covariates.iter().map(String::as_str));
+        let cols = match crate::tools::common::numeric_columns(
+            dataset,
+            &names,
+            crate::tools::common::NaPolicy::Fail,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Double ML: {e}"
+                ))]));
             }
-        }
-
-        // Convert to ndarray
-        use ndarray::{Array1, Array2};
-        let y = Array1::from(y_vec);
-        let d = Array1::from(d_vec);
-
-        // Reshape X: we collected column-wise, need to transpose
-        let x_col_major = Array2::from_shape_vec((n, p), {
-            // Reorganize from column-major to row-major
-            let mut row_major = vec![0.0; n * p];
-            for j in 0..p {
-                for i in 0..n {
-                    row_major[i * p + j] = x_data[j * n + i];
-                }
-            }
-            row_major
-        })
-        .map_err(|e| {
-            McpError::internal_error(format!("Failed to create covariate matrix: {}", e), None)
-        })?;
+        };
+        let y = cols.numeric_array(&request.outcome);
+        let d = cols.numeric_array(&request.treatment);
+        let cov_names: Vec<&str> = request.covariates.iter().map(String::as_str).collect();
+        let x = if cov_names.is_empty() {
+            ndarray::Array2::zeros((cols.n(), 0))
+        } else {
+            cols.matrix(&cov_names, false).data
+        };
 
         // Parse model type
         let model_type = match request.model_type.as_deref() {
@@ -761,7 +704,7 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        let result = match run_double_ml(&y.view(), &d.view(), &x_col_major.view(), config) {
+        let result = match run_double_ml(&y.view(), &d.view(), &x.view(), config) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2832,5 +2775,66 @@ mod tests {
             out.contains("Missing values: 1 of 1000 rows dropped because of missing values (y: 1)"),
             "{out}"
         );
+    }
+
+    // =========================================================================
+    // treatment_double_ml extraction (T2-WP11: TOOL-5 DML site, TOOL-6)
+    // =========================================================================
+
+    /// `col` cast to Float64 (same values).
+    fn as_f64(df: &DataFrame, col: &str) -> DataFrame {
+        with_nulls(df, col, &[])
+    }
+
+    fn dml_request() -> DoubleMLRequest {
+        serde_json::from_value(json!({
+            "dataset": "rd", "outcome": "yf", "treatment": "d",
+            "covariates": ["x", "ym"], "seed": 11
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_mcp_treatment_double_ml_accepts_int64_treatment() {
+        let df = rd_frame();
+        assert_eq!(df.column("d").unwrap().dtype(), &DataType::Int64);
+        let run = |df: DataFrame| {
+            let (rt, server) = server_with(vec![("rd", df)]);
+            rt.block_on(server.treatment_double_ml(Parameters(dml_request())))
+                .expect("data problems are tool errors")
+        };
+        let int = run(df.clone());
+        assert_ne!(int.is_error, Some(true), "{}", text(&int));
+        let float = run(as_f64(&df, "d"));
+        assert_eq!(text(&int), text(&float));
+    }
+
+    #[test]
+    fn test_mcp_treatment_double_ml_refuses_missing_values() {
+        let df = rd_frame();
+        let run = |df: DataFrame, req: DoubleMLRequest| {
+            let (rt, server) = server_with(vec![("rd", df)]);
+            let r = rt
+                .block_on(server.treatment_double_ml(Parameters(req)))
+                .expect("data problems are tool errors");
+            assert_eq!(r.is_error, Some(true), "{}", text(&r));
+            text(&r)
+        };
+        let out = run(with_nulls(&df, "x", &[5]), dml_request());
+        assert!(
+            out.contains("Column 'x' contains 1 missing value(s)"),
+            "{out}"
+        );
+        let out = run(
+            with_nulls(&with_nulls(&df, "yf", &[7]), "d", &[7]),
+            dml_request(),
+        );
+        assert!(out.contains("Column 'yf'"), "{out}");
+        let req: DoubleMLRequest = serde_json::from_value(json!({
+            "dataset": "rd", "outcome": "yf", "treatment": "d", "covariates": ["x", "nope"]
+        }))
+        .unwrap();
+        let out = run(df, req);
+        assert!(out.contains("nope"), "{out}");
     }
 }
