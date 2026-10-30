@@ -3,7 +3,7 @@
   "methods": [
     {
       "id": "ols_clustered_missing_ids",
-      "name": "OLS with CR1 clustered SEs when cluster ids are missing (rows dropped, re-estimated); Driscoll-Kraay time ids",
+      "name": "OLS with CR1 clustered SEs when cluster ids are missing (rows dropped, re-estimated)",
       "category": "regression",
       "reference": "stats::lm + sandwich::vcovCL(type = 'HC1') on the rows with an id; fixest::feols(cluster = ) drops them likewise",
       "doc": "validation/regression/ols_clustered.md",
@@ -13,9 +13,7 @@
       "tests": [
         "p2a-core::regression::ols::tests::test_validate_reg_cluster_na_fixture",
         "p2a-core::regression::ols::tests::test_validate_ols_cluster_na",
-        "p2a-core::regression::ols::tests::test_validate_na_driscoll_kraay_time_ids",
         "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_clustered_na",
-        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_driscoll_kraay_missing_time",
         "p2a-cli::tier2::wp15_regression::test_validate_cli_reg_clustered_na"
       ],
       "quantities": [
@@ -23,46 +21,30 @@
         "SE CR1 one-way (= fixest)",
         "SE CR1 two-way",
         "rows used/dropped",
-        "cluster counts",
-        "DK estimation sample (property)",
-        "fractional time ids refused"
+        "cluster counts"
       ],
       "tolerance": "validation/README.md, n = 195-197: coefficients 1e-8, SE 1e-6 relative; counts exact; MCP text 4 decimals, CLI text 6",
-      "deviations": [
-        {
-          "finding": "REG-24",
-          "quantity": "Driscoll-Kraay SEs",
-          "note": "not R-pinned: the DK meat is scaled differently from sandwich::vcovPL (Tier 4); the tests pin the estimation sample only"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
       "id": "regression_wrappers_columns",
-      "name": "Integer columns and missing values in run_loess, quantreg, run_smooth_spline, glmnet and the MCP GLS y",
+      "name": "Missing values in run_loess and quantreg (incomplete rows dropped, R's na.omit)",
       "category": "regression",
-      "reference": "loess and quantreg::rq (na.action = na.omit); smooth.spline, glmnet and nlme::gls stop on NA",
+      "reference": "stats::loess and quantreg::rq (na.action = na.omit)",
       "doc": "validation/regression/loess.md",
       "cases": [
-        "ols_mtcars",
         "reg_smoothers_na"
       ],
       "tests": [
         "p2a-core::regression::loess::tests::test_validate_na_loess_columns",
         "p2a-core::regression::quantreg::tests::test_validate_na_quantreg_columns",
-        "p2a-core::regression::smooth_spline::tests::test_validate_na_smooth_spline_columns",
-        "p2a-core::regression::glmnet::tests::test_validate_na_glmnet_columns",
         "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_loess_missing_and_integer",
-        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_gls_missing_y_is_error",
-        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_smooth_spline_missing_is_error",
-        "p2a-cli::tier2::wp15_regression::test_validate_cli_reg_integer_columns",
-        "p2a-cli::tier2::wp15_regression::test_validate_cli_reg_smooth_spline_missing_is_error",
         "p2a-cli::tier2::wp15_regression::test_validate_cli_reg_loess_quantreg_missing_note"
       ],
       "quantities": [
-        "Int64 = Float64",
-        "Omit = the same function on the complete rows (56 of 60) with the reported counts",
-        "Fail = NullValues naming the column"
+        "rows used = R's n_complete (56 of 60)",
+        "Omit = the same function on the complete rows, with the reported counts"
       ],
       "tolerance": "exact",
       "deviations": [
@@ -75,11 +57,6 @@
           "finding": "REG-26",
           "quantity": "quantreg SEs",
           "note": "not R-pinned (Tier 4)"
-        },
-        {
-          "finding": "REG-29",
-          "quantity": "smooth.spline fit",
-          "note": "not R-pinned (REG-29, REG-30, Tier 4)"
         }
       ],
       "supersedes_legacy": []
@@ -121,8 +98,7 @@
       "reference": "stats::supsmu (is.finite(x + y + wt))",
       "doc": "validation/regression/supsmu.md",
       "cases": [
-        "reg_smoothers_na",
-        "ols_mtcars"
+        "reg_smoothers_na"
       ],
       "tests": [
         "p2a-core::regression::supsmu::tests::test_validate_supsmu_na",

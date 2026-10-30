@@ -1100,11 +1100,13 @@ mod tests {
     }
 
     /// REG-25: run_smooth_spline refuses missing values as R's smooth.spline does
-    /// ("missing or infinite values in inputs are not allowed") and accepts Int64.
+    /// ("missing or infinite values in inputs are not allowed") and accepts Int64. A
+    /// property test: no value is compared with R (the fit is not R-pinned, REG-29), so
+    /// it loads the datasets without a case.
     #[test]
-    fn test_validate_na_smooth_spline_columns() {
-        use crate::regression::ols::na_fixtures::as_float;
-        let (_c, mt) = crate::test_support::load_case("ols_mtcars");
+    fn test_na_smooth_spline_columns() {
+        use crate::regression::ols::na_fixtures::{as_float, mtcars, smoothers_na};
+        let mt = mtcars();
         // x = hp is Int64, with ties
         let a = run_smooth_spline(&mt, "hp", "mpg", Some(4.0)).unwrap();
         let b = run_smooth_spline(&as_float(&mt, "hp"), "hp", "mpg", Some(4.0)).unwrap();
@@ -1112,7 +1114,7 @@ mod tests {
             (a.n_obs, &a.x, &a.y, a.df, a.lambda),
             (32, &b.x, &b.y, b.df, b.lambda)
         );
-        let (_c, sm) = crate::test_support::load_case("reg_smoothers_na");
+        let sm = smoothers_na();
         for (x, y, column) in [("x", "y", "x"), ("id", "y", "y")] {
             match run_smooth_spline(&sm, x, y, None) {
                 Err(EconError::NullValues { column: c, count }) => {

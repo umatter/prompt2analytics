@@ -168,27 +168,42 @@ non-strict cast), so an Int64 column was rejected as non-numeric, a null entered
 0, and a text y became zeros in glmnet. `p2a reg quantreg` and `reg loess` print
 `Note: <k> of <n> rows dropped ...` and add a `missing` object to `-F json`.
 
-Tests (registry entry `regression_wrappers_columns` in
-`validation/methods/regression_na.json`; cases `ols_mtcars`, whose `hp` is Int64, and
-`reg_smoothers_na`, 60 rows with 2 missing x and 2 missing y):
+R: case `reg_smoothers_na` of `validation/r/cases/regression_na.R`
+([source](../r/cases/regression_na.R)), 60 rows in
+`validation/datasets/generated/smoothers_na.csv` with 2 missing x and 2 missing y; R's
+count of complete rows is `n_complete` = 56.
 
-- `test_validate_na_loess_columns`, `test_validate_na_quantreg_columns`: Int64 equals the
-  same values as Float64 exactly; the fit on the data with missing cells equals the fit on
-  the 56 complete rows, with the reported counts; text and absent columns refused; with
-  no complete row the error is `InsufficientData` naming the method;
-- `test_validate_na_smooth_spline_columns`, `test_validate_na_glmnet_columns`: Int64 equals
-  Float64; a missing x or y is `NullValues` naming the column;
-- MCP: `test_validate_mcp_regression_loess_missing_and_integer`,
-  `test_validate_mcp_regression_gls_missing_y_is_error`,
-  `test_validate_mcp_regression_smooth_spline_missing_is_error`;
-- CLI: `test_validate_cli_reg_integer_columns`,
-  `test_validate_cli_reg_smooth_spline_missing_is_error`,
-  `test_validate_cli_reg_loess_quantreg_missing_note` (the `Note:` line and `missing`
-  object of `reg loess` and `reg quantreg`).
+Registered tests (registry entry `regression_wrappers_columns` in
+`validation/methods/regression_na.json`): the row deletion of `run_loess` and `quantreg`
+is R-pinned, since the number of rows each fit uses is compared with R's `n_complete`
+exactly:
 
-None of these fits is R-pinned here: the loess neighbourhood and span (REG-14, REG-45), the
-quantreg SEs (REG-26) and the smooth.spline fit (REG-29, REG-30) differ from R (Tier 4,
-registry deviations). The tests pin the column handling only.
+- `test_validate_na_loess_columns`, `test_validate_na_quantreg_columns`: `n_complete`; the
+  fit on the data with missing cells equals the fit on the 56 complete rows, with the
+  reported counts; besides, Int64 equals the same values as Float64 exactly (mtcars
+  `hp`), text and absent columns are refused, and with no complete row the error is
+  `InsufficientData` naming the method;
+- `test_validate_mcp_regression_loess_missing_and_integer`: `n_complete` through MCP
+  `regression_loess`, the `missing` object, and an Int64 x;
+- `test_validate_cli_reg_loess_quantreg_missing_note`: `n_complete` through `p2a reg
+  loess` and `reg quantreg` with `-F json`, the `Note:` line and the `missing` object.
+
+Property tests, not registered as R-pinned (no value is compared with R; they load
+`validation/datasets/generated/mtcars.csv`, whose `hp` is Int64, and `smoothers_na.csv`
+without a case):
+
+- `test_na_smooth_spline_columns`, `test_na_glmnet_columns`: Int64 equals Float64; a
+  missing x or y is `NullValues` naming the column;
+- `test_mcp_regression_gls_missing_y_is_error`,
+  `test_mcp_regression_smooth_spline_missing_is_error`: the MCP GLS y and the smoothing
+  spline refuse missing values;
+- `test_cli_reg_integer_columns`, `test_cli_reg_smooth_spline_missing_is_error`: Int64
+  columns in `reg quantreg`, `loess`, `smooth-spline`, `line` and `supsmu`, and `reg
+  smooth-spline` refusing missing values.
+
+The fits themselves are not R-pinned here: the loess neighbourhood and span (REG-14,
+REG-45) and the quantreg SEs (REG-26) differ from R (Tier 4, registry deviations), and so
+does the smooth.spline fit (REG-29, REG-30, Tier 4), which no registered test covers.
 
 ## References
 

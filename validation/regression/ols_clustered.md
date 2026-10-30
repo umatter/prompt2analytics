@@ -117,15 +117,19 @@ row and value (1935.25 was truncated to period 1935 before); a text column is re
 row whose time id is missing is dropped, the model is re-estimated, and the drop is
 reported in `DriscollKraayResult::missing` and as the first warning. On `reg_cluster_na`
 with `time_col = year_na`: 198 rows in 20 periods (before: 200 rows and a bogus 21st
-period). The Driscoll-Kraay SEs are not R-pinned (REG-24, a registry deviation: the DK meat
-is scaled differently from `sandwich::vcovPL`); the tests pin the estimation sample:
+period). The Driscoll-Kraay SEs are not R-pinned (REG-24, Tier 4: the DK meat is scaled
+differently from `sandwich::vcovPL`), so two property tests, not registered as R-pinned,
+pin the estimation sample on `validation/datasets/generated/grunfeld_cluster_na.csv`
+(loaded without a case):
 
-- `test_validate_na_driscoll_kraay_time_ids`: the result on the data with missing years
-  equals the estimator on the complete rows (coefficients, SEs, bandwidth); integral float
-  ids give the Int64 result; fractional and text ids are refused; with no time id in any
-  row the error is `InsufficientData` naming the method and the time column;
-- `test_validate_mcp_regression_driscoll_kraay_missing_time`: the same through MCP
-  `regression_driscoll_kraay`.
+- `test_na_driscoll_kraay_time_ids` (`crates/p2a-core/src/regression/ols.rs`): the result
+  on the data with missing years equals the estimator on the complete rows (coefficients,
+  SEs, bandwidth); integral float ids give the Int64 result; fractional and text ids are
+  refused; with no time id in any row the error is `InsufficientData` naming the method
+  and the time column;
+- `test_mcp_regression_driscoll_kraay_missing_time`
+  (`crates/p2a-mcp/src/tools/handlers/regression.rs`): the dropped rows and the refused
+  fractional ids through MCP `regression_driscoll_kraay`.
 
 ## Known Differences
 

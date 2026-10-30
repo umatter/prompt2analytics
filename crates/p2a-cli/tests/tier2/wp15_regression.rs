@@ -176,26 +176,28 @@ fn test_validate_cli_reg_supsmu_na() {
 }
 
 /// REG-25 and REG-13: Int64 columns (mtcars hp) are numbers in reg quantreg, loess,
-/// smooth-spline, line and supsmu; nothing is dropped, so no output has `missing`.
+/// smooth-spline, line and supsmu; nothing is dropped, so no output has `missing`. A
+/// property test (no value is compared with R), so it loads the dataset without a case.
 #[test]
-fn test_validate_cli_reg_integer_columns() {
-    let case = Case::load("ols_mtcars");
+fn test_cli_reg_integer_columns() {
+    let path = repo_path("validation/datasets/generated/mtcars.csv");
     let s = temp_session();
-    let name = s.load(&case);
-    let (raw, q) = json_and_text(&s, &["reg", "quantreg", &name, "-y", "hp", "-x", "wt"]);
+    let name = "mtcars";
+    s.load_as(&path, name, &[]);
+    let (raw, q) = json_and_text(&s, &["reg", "quantreg", name, "-y", "hp", "-x", "wt"]);
     assert_eq!(q["n_obs"], 32);
-    let df = p2a_core::DataLoader::load_csv(case.dataset_path()).unwrap();
+    let df = p2a_core::DataLoader::load_csv(&path).unwrap();
     let ds = p2a_core::Dataset::new(df.clone());
     let fit = p2a_core::run_quantreg(&ds, "hp", &["wt"], 0.5).unwrap();
     // The in-process fit on the same doubles, exactly (not an R pin).
     let expected: Vec<f64> = fit.coefficients.iter().map(|c| c.estimate).collect();
     assert_eq!(json_numbers(&raw, "estimate"), expected);
-    let loess = s.json(&["reg", "loess", &name, "-y", "mpg", "-x", "hp"]);
+    let loess = s.json(&["reg", "loess", name, "-y", "mpg", "-x", "hp"]);
     assert_eq!(loess["n_obs"], 32);
     let spline = s.json(&[
         "reg",
         "smooth-spline",
-        &name,
+        name,
         "-y",
         "mpg",
         "-x",
@@ -204,10 +206,10 @@ fn test_validate_cli_reg_integer_columns() {
         "4",
     ]);
     assert_eq!(spline["n_obs"], 32);
-    let line = s.json(&["reg", "line", &name, "-y", "mpg", "-x", "hp"]);
+    let line = s.json(&["reg", "line", name, "-y", "mpg", "-x", "hp"]);
     assert_eq!(line["n"], 32);
     // supsmu's n counts the distinct x values (hp has ties).
-    let supsmu = s.json(&["reg", "supsmu", &name, "-y", "mpg", "-x", "hp"]);
+    let supsmu = s.json(&["reg", "supsmu", name, "-y", "mpg", "-x", "hp"]);
     let column = |c: &str| -> Vec<f64> {
         numeric_options(&df, c)
             .unwrap()
@@ -231,12 +233,16 @@ fn test_validate_cli_reg_integer_columns() {
 }
 
 /// REG-25: smooth.spline refuses missing values, as R does; the error names the column.
+/// A property test (no value is compared with R), so it loads the dataset without a case.
 #[test]
-fn test_validate_cli_reg_smooth_spline_missing_is_error() {
-    let case = Case::load("reg_smoothers_na");
+fn test_cli_reg_smooth_spline_missing_is_error() {
     let s = temp_session();
-    let name = s.load(&case);
-    let err = s.err(&["reg", "smooth-spline", &name, "-y", "y", "-x", "x"]);
+    s.load_as(
+        &repo_path("validation/datasets/generated/smoothers_na.csv"),
+        "smoothers_na",
+        &[],
+    );
+    let err = s.err(&["reg", "smooth-spline", "smoothers_na", "-y", "y", "-x", "x"]);
     assert!(
         err.contains("Column 'x' contains 2 missing value(s)"),
         "{err}"

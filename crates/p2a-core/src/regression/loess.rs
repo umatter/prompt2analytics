@@ -1224,17 +1224,22 @@ mod tests {
     }
 
     /// REG-25: run_loess reads x and y with R's na.omit (loess drops incomplete rows) and
-    /// accepts Int64 columns.
+    /// accepts Int64 columns. R-pinned: the number of rows used is R's `n_complete`; the
+    /// fit itself is not (REG-14), so it is compared with the fit on the complete rows.
     #[test]
     fn test_validate_na_loess_columns() {
-        use crate::regression::ols::na_fixtures::{as_float, complete_rows};
-        let (_c, mt) = crate::test_support::load_case("ols_mtcars");
+        use crate::regression::ols::na_fixtures::{as_float, complete_rows, mtcars};
+        use p2a_validation::{Check, Tol};
+        let mt = mtcars();
         // x = hp is Int64
         let a = run_loess(&mt, "mpg", "hp", 0.75, 2, false).unwrap();
         let b = run_loess(&as_float(&mt, "hp"), "mpg", "hp", 0.75, 2, false).unwrap();
         assert_eq!((a.n_obs, &a.fitted, a.rss), (32, &b.fitted, b.rss));
-        let (_c, sm) = crate::test_support::load_case("reg_smoothers_na");
+        let (case, sm) = crate::test_support::load_case("reg_smoothers_na");
         let r = run_loess(&sm, "y", "x", 0.75, 2, false).unwrap();
+        Check::new(&case)
+            .scalar("n_complete", r.n_obs as f64, Tol::exact())
+            .finish();
         let c = run_loess(&complete_rows(&sm, &["x", "y"]), "y", "x", 0.75, 2, false).unwrap();
         assert_eq!(
             (r.n_obs, &r.fitted, &r.residuals),

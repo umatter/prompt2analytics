@@ -1273,12 +1273,14 @@ mod tests {
     }
 
     /// REG-25: the glmnet wrappers refuse a missing y as R's glmnet does (it stops), and
-    /// a text y is not numeric (it used to become zeros); an Int64 y is a number.
+    /// a text y is not numeric (it used to become zeros); an Int64 y is a number. A
+    /// property test: no value is compared with R, so it loads the datasets without a
+    /// case.
     #[test]
-    fn test_validate_na_glmnet_columns() {
-        use crate::regression::ols::na_fixtures::as_float;
+    fn test_na_glmnet_columns() {
+        use crate::regression::ols::na_fixtures::{as_float, mtcars, smoothers_na};
         let cfg = GlmnetConfig::default();
-        let (_c, sm) = crate::test_support::load_case("reg_smoothers_na");
+        let sm = smoothers_na();
         let null_y = |r: EconResult<()>| match r {
             Err(EconError::NullValues { column, count }) => {
                 assert_eq!((column.as_str(), count), ("y", 2))
@@ -1289,7 +1291,7 @@ mod tests {
         null_y(run_cv_glmnet(&sm, "y", &["id"], &cfg, 5, Some(1)).map(|_| ()));
         null_y(run_ridge(&sm, "y", &["id"], None).map(|_| ()));
         null_y(run_lasso(&sm, "y", &["id"], None).map(|_| ()));
-        let (_c, mt) = crate::test_support::load_case("ols_mtcars");
+        let mt = mtcars();
         match run_glmnet(&mt, "model", &["wt", "disp"], &cfg) {
             Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "model"),
             other => panic!("{other:?}"),

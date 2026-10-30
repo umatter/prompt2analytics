@@ -792,10 +792,13 @@ mod tests {
 
     /// REG-25: quantreg reads y and X with R's na.omit (quantreg::rq drops incomplete
     /// rows), reports the drop, and accepts an Int64 outcome (TOOL-5's quantreg site).
+    /// R-pinned: the number of rows used is R's `n_complete`; the SEs are not (REG-26),
+    /// so the fit is compared with the fit on the complete rows.
     #[test]
     fn test_validate_na_quantreg_columns() {
-        use crate::regression::ols::na_fixtures::{as_float, complete_rows};
-        let (_c, mt) = crate::test_support::load_case("ols_mtcars");
+        use crate::regression::ols::na_fixtures::{as_float, complete_rows, mtcars};
+        use p2a_validation::{Check, Tol};
+        let mt = mtcars();
         let a = run_quantreg(&mt, "hp", &["wt"], 0.5).unwrap();
         let b = run_quantreg(&as_float(&mt, "hp"), "hp", &["wt"], 0.5).unwrap();
         let pick = |r: &QuantRegResult| -> (Vec<f64>, Vec<f64>) {
@@ -808,8 +811,11 @@ mod tests {
             (a.n_obs, pick(&a), a.objective),
             (32, pick(&b), b.objective)
         );
-        let (_c, sm) = crate::test_support::load_case("reg_smoothers_na");
+        let (case, sm) = crate::test_support::load_case("reg_smoothers_na");
         let r = run_quantreg(&sm, "y", &["x"], 0.5).unwrap();
+        Check::new(&case)
+            .scalar("n_complete", r.n_obs as f64, Tol::exact())
+            .finish();
         let c = run_quantreg(&complete_rows(&sm, &["y", "x"]), "y", &["x"], 0.5).unwrap();
         assert_eq!(
             (r.n_obs, pick(&r), r.objective),

@@ -2516,6 +2516,27 @@ pub(crate) mod na_fixtures {
     use crate::data::columns::{NaPolicy, numeric_column, numeric_options};
     use polars::prelude::*;
 
+    /// The CSV at `rel` under the repository root (`validation/datasets/...`), loaded as
+    /// `p2a data load` loads it, for the property tests that compare no R value and so
+    /// load no R case.
+    pub(crate) fn repo_dataset(rel: &str) -> Dataset {
+        let path = p2a_validation::repo_path(rel);
+        match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        }
+    }
+
+    /// `validation/datasets/generated/mtcars.csv` (`hp` is Int64, `model` is text).
+    pub(crate) fn mtcars() -> Dataset {
+        repo_dataset("validation/datasets/generated/mtcars.csv")
+    }
+
+    /// `validation/datasets/generated/smoothers_na.csv`: 60 rows, 2 missing x, 2 missing y.
+    pub(crate) fn smoothers_na() -> Dataset {
+        repo_dataset("validation/datasets/generated/smoothers_na.csv")
+    }
+
     /// `ds` with column `name` cast to Float64 (the same values).
     pub(crate) fn as_float(ds: &Dataset, name: &str) -> Dataset {
         let mut df = ds.df().clone();
@@ -3995,13 +4016,14 @@ mod tests {
 
     /// REG-21 (Driscoll-Kraay): a missing time id drops its row and the model is
     /// re-estimated; integral float ids equal the Int64 ids; fractional and text ids are
-    /// refused instead of truncated. The DK SEs are not R-pinned (REG-24): the test pins
+    /// refused instead of truncated. A property test: the DK SEs are not R-pinned
+    /// (REG-24), so it compares no R value and loads the dataset without a case; it pins
     /// the estimation sample against the same estimator on the complete rows.
     #[test]
-    fn test_validate_na_driscoll_kraay_time_ids() {
-        use super::na_fixtures::{complete_rows, with_derived};
+    fn test_na_driscoll_kraay_time_ids() {
+        use super::na_fixtures::{complete_rows, repo_dataset, with_derived};
         use crate::data::columns::MissingSummary;
-        let (_case, ds) = crate::test_support::load_case("reg_cluster_na");
+        let ds = repo_dataset("validation/datasets/generated/grunfeld_cluster_na.csv");
         let x = ["value", "capital"];
         let r = run_vcov_driscoll_kraay(&ds, "inv", &x, "year_na", None, None).unwrap();
         assert_eq!((r.n_obs, r.n_periods), (198, 20));

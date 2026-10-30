@@ -1393,7 +1393,7 @@ mod tests {
     }
 
     /// One server holding the dataset of each case, named by its file stem
-    /// (`grunfeld_cluster_na`, `smoothers_na`, `mtcars`).
+    /// (`grunfeld_cluster_na`, `smoothers_na`).
     fn cases_server(ids: &[&str]) -> (tokio::runtime::Runtime, AnalyticsServer) {
         let frames: Vec<(String, p2a_core::polars::prelude::DataFrame)> = ids
             .iter()
@@ -1409,6 +1409,19 @@ mod tests {
                 .map(|(name, df)| (name.as_str(), df.clone()))
                 .collect(),
         )
+    }
+
+    /// The CSV at `rel` under the repository root, loaded as `p2a data load` loads it
+    /// but without an R case: for property tests and for datasets no R value is read
+    /// from.
+    fn repo_csv(rel: &str) -> p2a_core::polars::prelude::DataFrame {
+        let path = p2a_validation::repo_path(rel);
+        DataLoader::load_csv(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// `validation/datasets/generated/mtcars.csv` (`hp` is Int64, `model` is text).
+    fn mtcars_csv() -> p2a_core::polars::prelude::DataFrame {
+        repo_csv("validation/datasets/generated/mtcars.csv")
     }
 
     /// The tool's text output as JSON.
@@ -1519,13 +1532,13 @@ mod tests {
     }
 
     /// REG-21 (Driscoll-Kraay): a missing time id drops its row; a fractional time id
-    /// is a tool error instead of being truncated to a period.
+    /// is a tool error instead of being truncated to a period. A property test (the DK
+    /// SEs are not R-pinned, REG-24), so it loads the dataset without a case.
     #[test]
-    fn test_validate_mcp_regression_driscoll_kraay_missing_time() {
+    fn test_mcp_regression_driscoll_kraay_missing_time() {
         use p2a_core::data::columns::{NaPolicy, numeric_column};
         use p2a_core::polars::prelude::{NamedFrom, Series};
-        let case = Case::load("reg_cluster_na");
-        let df = DataLoader::load_csv(case.dataset_path()).unwrap();
+        let df = repo_csv("validation/datasets/generated/grunfeld_cluster_na.csv");
         let (year, _) = numeric_column(&df, "year", NaPolicy::Fail).unwrap();
         let mut quarterly = df.clone();
         let t_q: Vec<f64> = year.iter().map(|y| y + 0.25).collect();
@@ -1562,13 +1575,7 @@ mod tests {
     /// test (no value is compared with R), so it loads the dataset without a case.
     #[test]
     fn test_mcp_regression_bootstrap_cov_integer_outcome() {
-        let (rt, server) = server_with(vec![(
-            "mtcars",
-            DataLoader::load_csv(p2a_validation::repo_path(
-                "validation/datasets/generated/mtcars.csv",
-            ))
-            .unwrap(),
-        )]);
+        let (rt, server) = server_with(vec![("mtcars", mtcars_csv())]);
         let req: BootstrapCovRequest = serde_json::from_value(json!({
             "dataset": "mtcars", "y": "hp", "x": ["wt"], "n_boot": 200, "seed": 42
         }))
@@ -1581,11 +1588,18 @@ mod tests {
         assert!(t.contains("Bootstrap Covariance Estimation"), "{t}");
     }
 
-    /// REG-25 through the tool: loess drops incomplete rows and reports them, and an
-    /// Int64 x is a number.
+    /// REG-25 through the tool: loess drops incomplete rows (R's na.omit; the number of
+    /// rows used is R's `n_complete`) and reports them, and an Int64 x is a number.
     #[test]
     fn test_validate_mcp_regression_loess_missing_and_integer() {
-        let (rt, server) = cases_server(&["reg_smoothers_na", "ols_mtcars"]);
+        let case = Case::load("reg_smoothers_na");
+        let (rt, server) = server_with(vec![
+            (
+                "smoothers_na",
+                DataLoader::load_csv(case.dataset_path()).unwrap(),
+            ),
+            ("mtcars", mtcars_csv()),
+        ]);
         let call = |v: Value| -> CallToolResult {
             let req: LoessRequest = serde_json::from_value(v).unwrap();
             rt.block_on(server.regression_loess(Parameters(req)))
@@ -1594,6 +1608,9 @@ mod tests {
         let r = call(json!({"dataset": "smoothers_na", "y": "y", "x": "x"}));
         assert_ne!(r.is_error, Some(true), "{}", text(&r));
         let j = json_of(&r);
+        Check::new(&case)
+            .scalar("n_complete", j["n_obs"].as_f64().unwrap(), Tol::exact())
+            .finish();
         assert_eq!(j["n_obs"], 56);
         assert_eq!(j["fitted_values"].as_array().unwrap().len(), 56);
         assert_eq!(j["missing"], smoothers_missing());
@@ -1605,10 +1622,14 @@ mod tests {
     }
 
     /// TOOL-3: the GLS y refuses missing values (nlme::gls stops) instead of a fit
-    /// with null coefficients.
+    /// with null coefficients. A property test (no value is compared with R), so it
+    /// loads the dataset without a case.
     #[test]
-    fn test_validate_mcp_regression_gls_missing_y_is_error() {
-        let (rt, server) = cases_server(&["reg_smoothers_na"]);
+    fn test_mcp_regression_gls_missing_y_is_error() {
+        let (rt, server) = server_with(vec![(
+            "smoothers_na",
+            repo_csv("validation/datasets/generated/smoothers_na.csv"),
+        )]);
         let req: GlsRequest = serde_json::from_value(json!({
             "dataset": "smoothers_na", "y": "y", "x": ["id"], "correlation": "identity"
         }))
@@ -1620,10 +1641,17 @@ mod tests {
     }
 
     /// REG-25 through the tool: the smoothing spline refuses missing values (as R's
-    /// smooth.spline) and accepts an Int64 x.
+    /// smooth.spline) and accepts an Int64 x. A property test (no value is compared with
+    /// R), so it loads the datasets without a case.
     #[test]
-    fn test_validate_mcp_regression_smooth_spline_missing_is_error() {
-        let (rt, server) = cases_server(&["reg_smoothers_na", "ols_mtcars"]);
+    fn test_mcp_regression_smooth_spline_missing_is_error() {
+        let (rt, server) = server_with(vec![
+            (
+                "smoothers_na",
+                repo_csv("validation/datasets/generated/smoothers_na.csv"),
+            ),
+            ("mtcars", mtcars_csv()),
+        ]);
         let call = |v: Value| -> CallToolResult {
             let req: SmoothSplineRequest = serde_json::from_value(v).unwrap();
             rt.block_on(server.regression_smooth_spline(Parameters(req)))
@@ -1643,7 +1671,13 @@ mod tests {
     #[test]
     fn test_validate_mcp_regression_supsmu_na() {
         let case = Case::load("reg_smoothers_na");
-        let (rt, server) = cases_server(&["reg_smoothers_na", "ols_mtcars"]);
+        let (rt, server) = server_with(vec![
+            (
+                "smoothers_na",
+                DataLoader::load_csv(case.dataset_path()).unwrap(),
+            ),
+            ("mtcars", mtcars_csv()),
+        ]);
         let call = |v: Value| -> CallToolResult {
             let req: SupsmuRequest = serde_json::from_value(v).unwrap();
             rt.block_on(server.regression_supsmu(Parameters(req)))
