@@ -190,6 +190,12 @@ use rand_distr::{Distribution, Normal};
 /// Load a CSV file as a Dataset. Returns None if file doesn't exist.
 /// Casts all integer columns to Float64 so downstream .f64() calls work.
 fn load_csv_dataset(data_dir: &str, dgp: &str, n: usize) -> Option<Dataset> {
+    load_csv_dataset_with_ids(data_dir, dgp, n, &[])
+}
+
+/// As `load_csv_dataset`, but the integer columns named in `ids` keep their
+/// integer type: entity and unit identifiers must be integer or string.
+fn load_csv_dataset_with_ids(data_dir: &str, dgp: &str, n: usize, ids: &[&str]) -> Option<Dataset> {
     let path = format!("{}/{}_n{}.csv", data_dir, dgp, n);
     if !std::path::Path::new(&path).exists() {
         eprintln!("WARNING: CSV not found: {}, using internal PRNG", path);
@@ -208,7 +214,7 @@ fn load_csv_dataset(data_dir: &str, dgp: &str, n: usize) -> Option<Dataset> {
             matches!(
                 c.dtype(),
                 DataType::Int32 | DataType::Int64 | DataType::UInt32 | DataType::UInt64
-            )
+            ) && !ids.contains(&c.name().as_str())
         })
         .map(|c| c.name().to_string())
         .collect();
@@ -704,6 +710,23 @@ fn extract_col_vec(dataset: &Dataset, col: &str) -> Vec<f64> {
 // Main
 // ============================================
 
+/// Benchmarks whose call result is not captured as outputs.
+const NO_OUTPUT_CAPTURE: &[&str] = &["RandomForest", "SynthControl"];
+
+/// A benchmark completed when its call returned a result: every other
+/// benchmark captures outputs from an `Ok` result.
+fn is_completed(r: &BenchmarkResult) -> bool {
+    !r.outputs.is_empty() || NO_OUTPUT_CAPTURE.contains(&r.method.as_str())
+}
+
+fn completed_results(results: &[BenchmarkResult]) -> Vec<BenchmarkResult> {
+    results
+        .iter()
+        .filter(|r| is_completed(r))
+        .cloned()
+        .collect()
+}
+
 fn main() {
     // Parse --data-dir from CLI args
     let args: Vec<String> = std::env::args().collect();
@@ -741,11 +764,14 @@ fn main() {
     let incremental_path = perf_results.join(format!("rust_unified_{}.json", timestamp));
     let incremental_r_path = r_results.join(format!("rust_unified_{}.json", timestamp));
 
-    // Macro to save results incrementally after each section
+    // Macro to save results incrementally after each section. Only completed
+    // calls are saved: a call that returned an error leaves `outputs` empty,
+    // and its time is that of the refusal, not of a fit.
     macro_rules! save_incremental {
         ($results:expr) => {
-            let _ = save_results($results, &incremental_path.to_string_lossy());
-            let _ = save_results($results, &incremental_r_path.to_string_lossy());
+            let completed = completed_results($results);
+            let _ = save_results(&completed, &incremental_path.to_string_lossy());
+            let _ = save_results(&completed, &incremental_r_path.to_string_lossy());
         };
     }
 
@@ -904,7 +930,7 @@ fn main() {
     // Cap: no R benchmark at n=10000
     for (n_ent, n_per) in [(10, 10), (50, 20)] {
         let n = n_ent * n_per;
-        let dataset = load_csv_dataset(&data_dir, "panel", n)
+        let dataset = load_csv_dataset_with_ids(&data_dir, "panel", n, &["entity"])
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
 
         let mut result = run_benchmark_tracked("Panel_GLS", "pggls", n, &config, || {
@@ -1658,7 +1684,7 @@ fn main() {
     // Cap: no R benchmark at n=10000
     for (n_units, n_periods) in [(10, 10), (50, 20)] {
         let n = n_units * n_periods;
-        let dataset = load_csv_dataset(&data_dir, "staggered", n)
+        let dataset = load_csv_dataset_with_ids(&data_dir, "staggered", n, &["unit"])
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
         let sdid_config = StaggeredDidConfig::default();
         let mut result = run_benchmark_tracked("Staggered_DiD", "CS", n, &slow_config, || {
@@ -1696,7 +1722,7 @@ fn main() {
     // Cap: no R benchmark at n=10000
     for (n_units, n_periods) in [(10, 10), (50, 20)] {
         let n = n_units * n_periods;
-        let dataset = load_csv_dataset(&data_dir, "staggered", n)
+        let dataset = load_csv_dataset_with_ids(&data_dir, "staggered", n, &["unit"])
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
         let mut result = run_benchmark_tracked("ETWFE", "Wooldridge", n, &slow_config, || {
             run_etwfe(
@@ -1756,7 +1782,7 @@ fn main() {
     // Cap: no R benchmark at n=10000
     for (n_units, n_periods) in [(10, 10), (50, 20)] {
         let n = n_units * n_periods;
-        let dataset = load_csv_dataset(&data_dir, "staggered", n)
+        let dataset = load_csv_dataset_with_ids(&data_dir, "staggered", n, &["unit"])
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
         let gsynth_config = GsynthConfig {
             bootstrap_se: false,
@@ -5142,12 +5168,22 @@ fn main() {
     // Final Save (incremental saves already wrote partial results throughout)
     // ============================================
     save_incremental!(&results);
+    let failed: Vec<&BenchmarkResult> = results.iter().filter(|r| !is_completed(r)).collect();
+    if !failed.is_empty() {
+        println!(
+            "\nNot saved, the call returned no result ({}):",
+            failed.len()
+        );
+        for r in &failed {
+            println!("  {} {} n={}", r.method, r.variant, r.n);
+        }
+    }
     println!("\nFinal results saved to: {}", incremental_path.display());
     println!("Also saved to: {}", incremental_r_path.display());
 
     // Print summary
     println!("\n=== Summary ===");
-    println!("Total benchmarks: {}", results.len());
+    println!("Total benchmarks: {}", results.len() - failed.len());
     let with_outputs = results.iter().filter(|r| !r.outputs.is_empty()).count();
     println!("Benchmarks with captured outputs: {}", with_outputs);
 
