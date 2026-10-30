@@ -2,7 +2,9 @@
 //!
 //! Provides Fisher's exact test for 2×2 contingency tables, which tests for
 //! independence between two categorical variables using exact probability
-//! calculations based on the hypergeometric distribution.
+//! calculations based on the hypergeometric distribution. The p-values, the
+//! conditional maximum-likelihood estimate of the odds ratio and its exact
+//! confidence interval are those of R's `stats::fisher.test` (2 x 2 case).
 //!
 //! # References
 //!
@@ -30,31 +32,42 @@
 //!    Total     | a + c | b + d |   n
 //! ```
 //!
-//! Given fixed marginals, the probability of observing exactly `a` in the
-//! top-left cell follows the hypergeometric distribution:
+//! Given fixed marginals (m = a + c, n = b + d, k = a + b), the top-left cell X
+//! ranges over `lo = max(0, k - n) ..= hi = min(k, m)` and, for a true odds ratio
+//! psi, follows the noncentral hypergeometric distribution
 //!
 //! ```text
-//! P(X = a) = C(a+b, a) × C(c+d, c) / C(n, a+c)
-//!          = (a+b)! × (c+d)! × (a+c)! × (b+d)! / (a! × b! × c! × d! × n!)
+//! P(X = s) ∝ C(m, s) × C(n, k - s) × psi^s
 //! ```
 //!
-//! ## Odds Ratio
-//!
-//! The sample odds ratio is: `OR = (a × d) / (b × c)`
-//!
-//! Under the null hypothesis of independence, the true odds ratio is 1.
+//! which is the central hypergeometric distribution at psi = 1. The weights are
+//! computed in log space, so the test works for any table size.
 //!
 //! ## P-Value Calculation
 //!
-//! - **Two-sided**: Sum probabilities of all tables with probability ≤ observed
+//! - **Two-sided**: the probability of the tables whose probability is at most
+//!   `1 + 1e-7` times that of the observed table (R's `relErr`)
 //! - **Greater**: P(X ≥ a) - tests for positive association
 //! - **Less**: P(X ≤ a) - tests for negative association
+//!
+//! ## Odds Ratio
+//!
+//! `conditional_mle` is the conditional maximum-likelihood estimate (R's
+//! `estimate`): the psi at which the mean of X equals a. `odds_ratio` is the
+//! sample odds ratio `(a × d) / (b × c)`. The confidence interval inverts the
+//! one-sided tests, as R does: two-sided `(L(alpha/2), U(alpha/2))`, `less`
+//! `(0, U(alpha))`, `greater` `(L(alpha), Inf)`. The estimating equations are
+//! solved by Brent's method (R's `zeroin`) with the same brackets and the same
+//! `1/t` substitution as R, to full precision (R's `uniroot` stops at an absolute
+//! tolerance of about 1e-4 on the `1/t` scale).
 
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{Discrete, DiscreteCDF, Hypergeometric};
+use statrs::function::factorial::ln_binomial;
 
 use crate::data::Dataset;
+use crate::data::columns::MissingSummary;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use crate::traits::SignificanceLevel;
 
 /// Alternative hypothesis for Fisher's exact test.
@@ -77,6 +90,10 @@ impl std::fmt::Display for FisherAlternative {
             FisherAlternative::Less => write!(f, "less"),
         }
     }
+}
+
+fn nan_f64() -> f64 {
+    f64::NAN
 }
 
 /// Result of Fisher's exact test.
@@ -103,10 +120,15 @@ pub struct FisherExactResult {
     // ═══════════════════════════════════════════════════════════════════════
     /// Sample odds ratio: (a × d) / (b × c)
     pub odds_ratio: f64,
-    /// Confidence interval for odds ratio (if computed)
+    /// Exact conditional confidence interval for the odds ratio, as R's `fisher.test`
+    /// computes it for `alternative` (if a confidence level was given)
     pub odds_ratio_ci: Option<(f64, f64)>,
     /// Confidence level used for CI
     pub conf_level: Option<f64>,
+    /// Conditional maximum-likelihood estimate of the odds ratio (R fisher.test's
+    /// `estimate`); 0 or +inf at the support edges.
+    #[serde(default = "nan_f64")]
+    pub conditional_mle: f64,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Table Data
@@ -119,6 +141,15 @@ pub struct FisherExactResult {
     pub col_totals: [f64; 2],
     /// Grand total
     pub n: f64,
+    /// Row level labels in table order (empty for array input).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_levels: Vec<String>,
+    /// Column level labels in table order (empty for array input).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub col_levels: Vec<String>,
+    /// Rows dropped because of a missing value (dataset input).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Probability Under Null
@@ -127,61 +158,120 @@ pub struct FisherExactResult {
     pub prob_observed: f64,
 }
 
+/// A number as the Display shows it: `Inf`, `-Inf` and `NaN` as R prints them.
+fn show(v: f64, decimals: usize) -> String {
+    if v == f64::INFINITY {
+        "Inf".to_string()
+    } else if v == f64::NEG_INFINITY {
+        "-Inf".to_string()
+    } else if v.is_nan() {
+        "NaN".to_string()
+    } else {
+        format!("{v:.decimals$}")
+    }
+}
+
+/// A p-value as the Display shows it: six decimals, or four significant digits below 1e-4.
+fn show_p(p: f64) -> String {
+    if p.is_finite() && p > 0.0 && p < 1e-4 {
+        format!("{p:.4e}")
+    } else {
+        show(p, 6)
+    }
+}
+
 impl std::fmt::Display for FisherExactResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "{}", self.test_name)?;
         writeln!(f, "{}", "=".repeat(self.test_name.len()))?;
         writeln!(f)?;
 
-        // Table display
+        // Table display, with the level labels when the table came from data
+        let labels = |levels: &[String], default: [&str; 2]| -> [String; 2] {
+            match levels {
+                [first, second] => [first.clone(), second.clone()],
+                _ => default.map(str::to_string),
+            }
+        };
+        let rows = labels(&self.row_levels, ["Row1", "Row2"]);
+        let cols = labels(&self.col_levels, ["Col1", "Col2"]);
+        let rw = rows
+            .iter()
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(5);
+        let cw = cols
+            .iter()
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(6);
         writeln!(f, "Observed:")?;
-        writeln!(f, "         Col1    Col2    Total")?;
         writeln!(
             f,
-            "  Row1 {:>6.0}  {:>6.0}  {:>6.0}",
-            self.table[0], self.table[1], self.row_totals[0]
+            "  {:<rw$}  {:>cw$}  {:>cw$}  {:>cw$}",
+            "", cols[0], cols[1], "Total"
         )?;
+        for (i, row) in rows.iter().enumerate() {
+            writeln!(
+                f,
+                "  {:<rw$}  {:>cw$.0}  {:>cw$.0}  {:>cw$.0}",
+                row,
+                self.table[2 * i],
+                self.table[2 * i + 1],
+                self.row_totals[i]
+            )?;
+        }
         writeln!(
             f,
-            "  Row2 {:>6.0}  {:>6.0}  {:>6.0}",
-            self.table[2], self.table[3], self.row_totals[1]
-        )?;
-        writeln!(
-            f,
-            "  Total {:>5.0}  {:>6.0}  {:>6.0}",
-            self.col_totals[0], self.col_totals[1], self.n
+            "  {:<rw$}  {:>cw$.0}  {:>cw$.0}  {:>cw$.0}",
+            "Total", self.col_totals[0], self.col_totals[1], self.n
         )?;
         writeln!(f)?;
 
         // P-value
         writeln!(
             f,
-            "p-value = {:.6} {}",
-            self.p_value,
+            "p-value = {} {}",
+            show_p(self.p_value),
             self.significance.stars()
         )?;
-        writeln!(
-            f,
-            "alternative hypothesis: true odds ratio is not equal to 1"
-        )?;
+        let direction = match self.alternative {
+            FisherAlternative::TwoSided => "not equal to 1",
+            FisherAlternative::Greater => "greater than 1",
+            FisherAlternative::Less => "less than 1",
+        };
+        writeln!(f, "alternative hypothesis: true odds ratio is {direction}")?;
         writeln!(f)?;
 
-        // Odds ratio
-        if self.odds_ratio.is_finite() {
-            writeln!(f, "sample odds ratio: {:.6}", self.odds_ratio)?;
-            if let (Some((lo, hi)), Some(level)) = (self.odds_ratio_ci, self.conf_level) {
-                writeln!(
-                    f,
-                    "{:.0}% confidence interval: ({:.4}, {:.4})",
-                    level * 100.0,
-                    lo,
-                    hi
-                )?;
-            }
-        } else {
-            writeln!(f, "sample odds ratio: Inf (zero cell present)")?;
+        // Odds ratios
+        writeln!(
+            f,
+            "conditional MLE odds ratio: {}",
+            show(self.conditional_mle, 6)
+        )?;
+        if let (Some((lo, hi)), Some(level)) = (self.odds_ratio_ci, self.conf_level) {
+            // the level in percent without binary noise (0.9 is 90, not 90.00000000000001)
+            let percent = (level * 1e8).round() / 1e6;
+            writeln!(
+                f,
+                "{percent}% confidence interval (exact conditional): ({}, {})",
+                show(lo, 4),
+                show(hi, 4)
+            )?;
         }
+        let sample = if self.odds_ratio.is_nan() {
+            "undefined (a d = b c = 0)".to_string()
+        } else {
+            show(self.odds_ratio, 6)
+        };
+        writeln!(f, "sample odds ratio: {sample}")?;
 
+        if let Some(note) = self.missing.note() {
+            writeln!(f)?;
+            writeln!(f, "Missing values: {note}")?;
+        }
         Ok(())
     }
 }
@@ -189,32 +279,34 @@ impl std::fmt::Display for FisherExactResult {
 /// Fisher's exact test for a 2×2 contingency table.
 ///
 /// Tests the null hypothesis that the odds ratio equals 1 (independence)
-/// using exact probability calculations based on the hypergeometric distribution.
+/// using exact probability calculations based on the hypergeometric distribution,
+/// as R's `fisher.test` does for a 2 x 2 table: the same p-values, conditional MLE
+/// (`conditional_mle`) and exact conditional confidence interval for `alternative`.
 ///
 /// # Arguments
 ///
-/// * `table` - A 2×2 contingency table as `[[a, b], [c, d]]`
+/// * `table` - A 2×2 contingency table as `[[a, b], [c, d]]` of whole-number counts
 /// * `alternative` - Alternative hypothesis: TwoSided, Greater, or Less
 /// * `conf_level` - Confidence level for odds ratio CI (e.g., 0.95)
 ///
 /// # Returns
 ///
-/// `FisherExactResult` containing p-value, odds ratio, and optionally CI.
+/// `FisherExactResult` containing p-value, odds ratios, and optionally the CI.
+///
+/// # Errors
+///
+/// - [`EconError::InvalidSpecification`] for a negative cell, a cell that is not a finite
+///   whole number up to 2^53, or a confidence level outside (0, 1).
+/// - [`EconError::InsufficientData`] for an empty table.
+/// - [`EconError::ResourceLimit`] when the support of the table cannot be allocated.
+/// - [`EconError::Cancelled`] when the thread's budget is cancelled.
 ///
 /// # Mathematical Details
 ///
-/// The test uses the hypergeometric distribution to compute exact p-values.
-/// For a table:
+/// The probability of observing exactly `a` in the top-left cell (given fixed marginals)
+/// is:
 /// ```text
-///     | a | b | a+b
-///     | c | d | c+d
-///     a+c b+d   n
-/// ```
-///
-/// The probability of observing exactly `a` in the top-left cell (given
-/// fixed marginals) is:
-/// ```text
-/// P(X = a) = C(a+b, a) × C(c+d, c) / C(n, a+c)
+/// P(X = a) = C(a+c, a) × C(b+d, b) / C(n, a+b)
 /// ```
 ///
 /// # Example
@@ -225,6 +317,9 @@ impl std::fmt::Display for FisherExactResult {
 /// // Classic tea-tasting lady example
 /// let table = [[3.0, 1.0], [1.0, 3.0]];
 /// let result = fisher_exact_test(&table, FisherAlternative::TwoSided, Some(0.95)).unwrap();
+/// // R: p-value = 0.4857, odds ratio 6.408309, CI 0.2117329 621.9337 (tighter: 626.2435)
+/// assert!((result.p_value - 0.4857142857142858).abs() < 1e-12);
+/// assert!((result.conditional_mle - 6.408319658199671).abs() < 1e-8);
 /// println!("{}", result);
 /// ```
 pub fn fisher_exact_test(
@@ -232,17 +327,36 @@ pub fn fisher_exact_test(
     alternative: FisherAlternative,
     conf_level: Option<f64>,
 ) -> EconResult<FisherExactResult> {
+    // Validate inputs: finite whole numbers, so that the support is well defined (a
+    // fractional count used to be truncated, and Inf saturated to u64::MAX)
+    for (i, row) in table.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            if v < 0.0 {
+                return Err(EconError::InvalidSpecification {
+                    message: "All table entries must be non-negative".to_string(),
+                });
+            }
+            if !v.is_finite() || v.fract() != 0.0 || v > MAX_COUNT {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "Fisher's exact test needs whole-number counts; cell [{i}][{j}] is {v}"
+                    ),
+                });
+            }
+        }
+    }
+    if let Some(level) = conf_level
+        && !(level > 0.0 && level < 1.0)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!("Confidence level must be between 0 and 1, got {level}"),
+        });
+    }
+
     let a = table[0][0];
     let b = table[0][1];
     let c = table[1][0];
     let d = table[1][1];
-
-    // Validate inputs
-    if a < 0.0 || b < 0.0 || c < 0.0 || d < 0.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "All table entries must be non-negative".to_string(),
-        });
-    }
 
     // Calculate marginals
     let row1 = a + b;
@@ -268,54 +382,34 @@ pub fn fisher_exact_test(
         f64::NAN
     };
 
-    // Set up hypergeometric distribution
-    // Hypergeometric(N = n, K = col1, n_draws = row1)
-    // X ~ number of successes (col1 items) in row1 draws from population of n
-    let n_u64 = n as u64;
-    let col1_u64 = col1 as u64;
-    let row1_u64 = row1 as u64;
+    // Whole numbers up to 2^53 convert exactly
+    let support = FisherSupport::new(a as u64, b as u64, c as u64, d as u64)?;
 
-    let hyper = Hypergeometric::new(n_u64, col1_u64, row1_u64).map_err(|e| {
-        EconError::InvalidSpecification {
-            message: format!("Failed to create hypergeometric distribution: {}", e),
-        }
-    })?;
-
-    let a_u64 = a as u64;
-
-    // Probability of observed table
-    let prob_observed = hyper.pmf(a_u64);
-
-    // Calculate p-value based on alternative hypothesis
+    // The one-sided p-values are R's pnhyper(x, 1): the tail of the normalised weights. A
+    // ratio of two sums with common rounding keeps P(X <= x) = 1 - 6.5e-27 at 1, where
+    // statrs' Hypergeometric::cdf, which sums the central probabilities one by one from 0,
+    // gives 0.99999999999995 (and loops over every value below the support).
     let p_value = match alternative {
-        FisherAlternative::Greater => {
-            // P(X >= a) = sf(a - 1) or 1 - cdf(a - 1)
-            if a_u64 == 0 { 1.0 } else { hyper.sf(a_u64 - 1) }
-        }
-        FisherAlternative::Less => {
-            // P(X <= a) = cdf(a)
-            hyper.cdf(a_u64)
-        }
-        FisherAlternative::TwoSided => {
-            // Sum probabilities of all tables as extreme or more extreme
-            // (tables with probability <= prob_observed)
-            compute_two_sided_pvalue(&hyper, a_u64, prob_observed, row1_u64, col1_u64, n_u64)
-        }
+        FisherAlternative::Greater => support.tail(1.0, true)?,
+        FisherAlternative::Less => support.tail(1.0, false)?,
+        FisherAlternative::TwoSided => support.two_sided_p()?,
     };
 
-    // Compute confidence interval for odds ratio if requested
-    let odds_ratio_ci = if let Some(level) = conf_level {
-        if level <= 0.0 || level >= 1.0 {
-            return Err(EconError::InvalidSpecification {
-                message: "Confidence level must be between 0 and 1".to_string(),
-            });
+    let conditional_mle = support.conditional_mle()?;
+
+    let odds_ratio_ci = match conf_level {
+        None => None,
+        Some(level) => {
+            let alpha = 1.0 - level;
+            Some(match alternative {
+                FisherAlternative::TwoSided => (
+                    support.ncp_lower(alpha / 2.0)?,
+                    support.ncp_upper(alpha / 2.0)?,
+                ),
+                FisherAlternative::Less => (0.0, support.ncp_upper(alpha)?),
+                FisherAlternative::Greater => (support.ncp_lower(alpha)?, f64::INFINITY),
+            })
         }
-        // Use the Cornfield method for exact CI
-        Some(compute_odds_ratio_ci(
-            a_u64, b as u64, c as u64, d as u64, level,
-        ))
-    } else {
-        None
     };
 
     let test_name = format!(
@@ -331,398 +425,336 @@ pub fn fisher_exact_test(
         odds_ratio,
         odds_ratio_ci,
         conf_level,
+        conditional_mle,
         table: [a, b, c, d],
         row_totals: [row1, row2],
         col_totals: [col1, col2],
         n,
-        prob_observed,
+        row_levels: Vec::new(),
+        col_levels: Vec::new(),
+        missing: MissingSummary::none(n as usize),
+        prob_observed: support.prob_observed(),
     })
 }
 
-/// Compute two-sided p-value for Fisher's exact test.
-///
-/// Computes all hypergeometric PMF values once into a Vec, then sums those
-/// with probability <= observed probability. Includes early termination
-/// when remaining probability mass is negligible (< 1e-15).
-fn compute_two_sided_pvalue(
-    hyper: &Hypergeometric,
-    _observed: u64,
-    prob_observed: f64,
-    row1: u64,
-    col1: u64,
-    n: u64,
-) -> f64 {
-    // The support of X is [max(0, row1 + col1 - n), min(row1, col1)]
-    let x_min = (row1 + col1).saturating_sub(n);
-    let x_max = row1.min(col1);
-    let support_size = (x_max - x_min + 1) as usize;
+/// R's `relErr` in `fisher.test`: a table counts as at most as likely as the observed one
+/// when its probability is at most `1 + 1e-7` times the observed probability.
+const REL_ERR: f64 = 1.0 + 1e-7;
 
-    // Optimization 1: Compute all PMF values once into a Vec
-    let mut pmf_values: Vec<f64> = Vec::with_capacity(support_size);
-    for x in x_min..=x_max {
-        pmf_values.push(hyper.pmf(x));
-    }
+/// The largest count accepted: whole numbers up to 2^53 are exact in an f64.
+const MAX_COUNT: f64 = 9_007_199_254_740_992.0;
 
-    // Optimization 2: Sort indices by descending PMF to enable early termination.
-    // We accumulate p-value by summing qualifying PMFs, and track remaining mass.
-    let threshold = prob_observed + 1e-10;
-    let mut p_value = 0.0;
-    let mut remaining_mass = 1.0;
+/// Iterations of Brent's root finder (R's `uniroot` default is 1000).
+const ZEROIN_MAXIT: usize = 2000;
 
-    // Iterate through PMF values. We process from largest to smallest so that
-    // once the remaining mass is negligible, we can stop early.
-    // Since most distributions are unimodal, a simpler approach works well:
-    // just scan all values and sum those that qualify, with early termination
-    // when the cumulative remaining mass drops below the threshold.
-    for &prob_x in &pmf_values {
-        if prob_x <= threshold {
-            p_value += prob_x;
-        }
-        remaining_mass -= prob_x;
-        // Early termination: if all remaining mass is negligible, stop
-        if remaining_mass < 1e-15 {
-            break;
-        }
-    }
+/// Passes over the support call [`resource::checkpoint`] this often.
+const CHECK_EVERY: usize = 65_536;
 
-    // Clamp to [0, 1] to handle numerical issues
-    p_value.min(1.0).max(0.0)
+/// The support of the top-left cell of a 2 x 2 table given its margins (R `fisher.test`'s
+/// `lo:hi`), with the log of each point's unnormalised hypergeometric probability.
+struct FisherSupport {
+    /// The observed top-left count.
+    x: u64,
+    /// Smallest and largest top-left count the margins allow.
+    lo: u64,
+    hi: u64,
+    /// `ln C(m, s) + ln C(n, k - s)` for `s` in `lo..=hi` (R's `dhyper(.., log = TRUE)` up to
+    /// the constant `-ln C(m + n, k)`, which normalises away).
+    logdc: Vec<f64>,
+    /// `ln C(m + n, k)`, the normalising constant of the central distribution.
+    ln_denom: f64,
 }
 
-/// Pre-computed log-binomial coefficients for the non-central hypergeometric
-/// distribution used in CI computation. Avoids recomputing ln_gamma calls
-/// across binary search iterations.
-struct PrecomputedLogBinom {
-    /// log(C(col1, x)) for x in x_min..=x_max
-    ln_choose_col1: Vec<f64>,
-    /// log(C(col2, row1 - x)) for x in x_min..=x_max
-    ln_choose_col2: Vec<f64>,
-    /// Validity flags: true if the table entry is valid for this x
-    valid: Vec<bool>,
-    /// Minimum x in support
-    x_min: u64,
-    /// Maximum x in support
-    x_max: u64,
+impl FisherSupport {
+    fn new(a: u64, b: u64, c: u64, d: u64) -> EconResult<Self> {
+        let (m, n, k) = (a + c, b + d, a + b);
+        let lo = k.saturating_sub(n);
+        let hi = k.min(m);
+        let len = usize::try_from(hi - lo)
+            .ok()
+            .and_then(|l| l.checked_add(1))
+            .ok_or_else(|| {
+                EconError::ResourceLimit(
+                    "Fisher's exact test: the support of the table is too large".to_string(),
+                )
+            })?;
+        let mut logdc: Vec<f64> = resource::try_with_capacity(len, "Fisher's exact test support")?;
+        for (i, s) in (lo..=hi).enumerate() {
+            if i % CHECK_EVERY == 0 {
+                resource::checkpoint()?;
+            }
+            logdc.push(ln_binomial(m, s) + ln_binomial(n, k - s));
+        }
+        Ok(FisherSupport {
+            x: a,
+            lo,
+            hi,
+            logdc,
+            ln_denom: ln_binomial(m + n, k),
+        })
+    }
+
+    /// Index of the observed count in the support.
+    fn obs(&self) -> usize {
+        // x is in lo..=hi, whose length fits a usize (checked in `new`)
+        (self.x - self.lo) as usize
+    }
+
+    /// The support point of index `i`.
+    fn point(&self, i: usize) -> f64 {
+        (self.lo + i as u64) as f64
+    }
+
+    /// `max_i (logdc[i] + ln_psi * s_i)`, the shift that keeps every weight at most 1.
+    fn max_log(&self, ln_psi: f64) -> EconResult<f64> {
+        let mut max = f64::NEG_INFINITY;
+        for (i, &l) in self.logdc.iter().enumerate() {
+            if i % CHECK_EVERY == 0 {
+                resource::checkpoint()?;
+            }
+            max = max.max(l + ln_psi * self.point(i));
+        }
+        Ok(max)
+    }
+
+    /// R's `mnhyper(psi)`: the mean of the noncentral hypergeometric distribution.
+    fn mean(&self, psi: f64) -> EconResult<f64> {
+        if psi == 0.0 {
+            return Ok(self.lo as f64);
+        }
+        if psi == f64::INFINITY {
+            return Ok(self.hi as f64);
+        }
+        let ln_psi = psi.ln();
+        let max = self.max_log(ln_psi)?;
+        let (mut num, mut den) = (0.0, 0.0);
+        for (i, &l) in self.logdc.iter().enumerate() {
+            if i % CHECK_EVERY == 0 {
+                resource::checkpoint()?;
+            }
+            let s = self.point(i);
+            let w = (l + ln_psi * s - max).exp();
+            num += s * w;
+            den += w;
+        }
+        Ok(num / den)
+    }
+
+    /// R's `pnhyper(x, psi, upper.tail)`: `P(X >= x)` when `upper`, else `P(X <= x)`, under
+    /// odds ratio `psi`.
+    fn tail(&self, psi: f64, upper: bool) -> EconResult<f64> {
+        let x = self.x;
+        let indicator = |b: bool| if b { 1.0 } else { 0.0 };
+        if psi == 0.0 {
+            return Ok(indicator(if upper { x <= self.lo } else { x >= self.lo }));
+        }
+        if psi == f64::INFINITY {
+            return Ok(indicator(if upper { x <= self.hi } else { x >= self.hi }));
+        }
+        let ln_psi = psi.ln();
+        let max = self.max_log(ln_psi)?;
+        let obs = self.obs();
+        let (mut selected, mut total) = (0.0, 0.0);
+        for (i, &l) in self.logdc.iter().enumerate() {
+            if i % CHECK_EVERY == 0 {
+                resource::checkpoint()?;
+            }
+            let w = (l + ln_psi * self.point(i) - max).exp();
+            total += w;
+            if (upper && i >= obs) || (!upper && i <= obs) {
+                selected += w;
+            }
+        }
+        Ok(selected / total)
+    }
+
+    /// The two-sided p-value of R's `fisher.test`: the probability of the tables at most
+    /// `REL_ERR` times as likely as the observed one, all in log space (STAT-2, STAT-5).
+    fn two_sided_p(&self) -> EconResult<f64> {
+        let max = self.max_log(0.0)?;
+        let threshold = (self.logdc[self.obs()] - max).exp() * REL_ERR;
+        let (mut selected, mut total) = (0.0, 0.0);
+        for (i, &l) in self.logdc.iter().enumerate() {
+            if i % CHECK_EVERY == 0 {
+                resource::checkpoint()?;
+            }
+            let w = (l - max).exp();
+            total += w;
+            if w <= threshold {
+                selected += w;
+            }
+        }
+        Ok((selected / total).min(1.0))
+    }
+
+    /// The probability of the observed table under independence,
+    /// `exp(ln C(m, x) + ln C(n, k - x) - ln C(m + n, k))` (statrs' `Hypergeometric::ln_pmf`).
+    fn prob_observed(&self) -> f64 {
+        (self.logdc[self.obs()] - self.ln_denom).exp()
+    }
+
+    /// R's `mle(x)`: the conditional maximum-likelihood estimate of the odds ratio.
+    fn conditional_mle(&self) -> EconResult<f64> {
+        if self.x == self.lo {
+            return Ok(0.0);
+        }
+        if self.x == self.hi {
+            return Ok(f64::INFINITY);
+        }
+        let x = self.x as f64;
+        let mu = self.mean(1.0)?;
+        if mu > x {
+            root_in_unit(&mut |t| Ok(self.mean(t)? - x))
+        } else if mu < x {
+            inverse_root(&mut |t| Ok(self.mean(1.0 / t)? - x))
+        } else {
+            Ok(1.0)
+        }
+    }
+
+    /// R's `ncp.U(x, alpha)`: the upper confidence limit of the odds ratio.
+    fn ncp_upper(&self, alpha: f64) -> EconResult<f64> {
+        if self.x == self.hi {
+            return Ok(f64::INFINITY);
+        }
+        let p = self.tail(1.0, false)?;
+        if p < alpha {
+            root_in_unit(&mut |t| Ok(self.tail(t, false)? - alpha))
+        } else if p > alpha {
+            inverse_root(&mut |t| Ok(self.tail(1.0 / t, false)? - alpha))
+        } else {
+            Ok(1.0)
+        }
+    }
+
+    /// R's `ncp.L(x, alpha)`: the lower confidence limit of the odds ratio.
+    fn ncp_lower(&self, alpha: f64) -> EconResult<f64> {
+        if self.x == self.lo {
+            return Ok(0.0);
+        }
+        let p = self.tail(1.0, true)?;
+        if p > alpha {
+            root_in_unit(&mut |t| Ok(self.tail(t, true)? - alpha))
+        } else if p < alpha {
+            inverse_root(&mut |t| Ok(self.tail(1.0 / t, true)? - alpha))
+        } else {
+            Ok(1.0)
+        }
+    }
 }
 
-impl PrecomputedLogBinom {
-    /// Pre-compute all log-binomial coefficients for the support range.
-    fn new(row1: u64, col1: u64, n: u64) -> Self {
-        let x_min = (row1 + col1).saturating_sub(n);
-        let x_max = row1.min(col1);
-        let col2 = n - col1;
-        let support_size = (x_max - x_min + 1) as usize;
+/// R's `uniroot(f, c(0, 1))$root`, solved to full precision. `f(0)` and `f(1)` have opposite
+/// signs wherever this is called; if they do not, the error says so instead of guessing.
+fn root_in_unit(f: &mut impl FnMut(f64) -> EconResult<f64>) -> EconResult<f64> {
+    bracketed_root(f, 0.0, 1.0)?.ok_or_else(|| {
+        EconError::Computation(
+            "Fisher's exact test: the estimating equation has no sign change on (0, 1)".to_string(),
+        )
+    })
+}
 
-        let mut ln_choose_col1 = Vec::with_capacity(support_size);
-        let mut ln_choose_col2 = Vec::with_capacity(support_size);
-        let mut valid = Vec::with_capacity(support_size);
+/// R's `1 / uniroot(function(t) h(1 / t), c(.Machine$double.eps, 1))$root` for
+/// `f(t) = h(1 / t)`. When the root lies below `eps` (an odds ratio above 4.5e15, where R's
+/// uniroot stops with an error), the bracket is widened to (`f64::MIN_POSITIVE`, 1); when it
+/// lies below that too, the odds ratio is +inf.
+fn inverse_root(f: &mut impl FnMut(f64) -> EconResult<f64>) -> EconResult<f64> {
+    for lower in [f64::EPSILON, f64::MIN_POSITIVE] {
+        if let Some(t) = bracketed_root(f, lower, 1.0)? {
+            return Ok(1.0 / t);
+        }
+    }
+    Ok(f64::INFINITY)
+}
 
-        for x in x_min..=x_max {
-            // Check validity: need x <= col1, row1 >= x, row1 - x <= col2
-            if x > col1 || row1 < x || row1 - x > col2 {
-                ln_choose_col1.push(0.0);
-                ln_choose_col2.push(0.0);
-                valid.push(false);
+/// The root of `f` on `(ax, bx)`, or `None` when `f(ax)` and `f(bx)` have one sign (or one
+/// of them is NaN), as R's `uniroot` checks before calling `zeroin`.
+fn bracketed_root(
+    f: &mut impl FnMut(f64) -> EconResult<f64>,
+    ax: f64,
+    bx: f64,
+) -> EconResult<Option<f64>> {
+    let fa = f(ax)?;
+    let fb = f(bx)?;
+    if fa == 0.0 {
+        return Ok(Some(ax));
+    }
+    if fb == 0.0 {
+        return Ok(Some(bx));
+    }
+    if fa.is_nan() || fb.is_nan() || (fa > 0.0) == (fb > 0.0) {
+        return Ok(None);
+    }
+    zeroin(f, ax, bx, fa, fb).map(Some)
+}
+
+/// Brent's method exactly as R's `R_zeroin2` (src/library/stats/src/zeroin.c) with `tol = 0`,
+/// so the step tolerance is `2 eps |b|` (relative), and at most [`ZEROIN_MAXIT`] iterations
+/// (on the last one it returns the current approximation, where R's uniroot warns).
+fn zeroin(
+    f: &mut impl FnMut(f64) -> EconResult<f64>,
+    ax: f64,
+    bx: f64,
+    fa: f64,
+    fb: f64,
+) -> EconResult<f64> {
+    let (mut a, mut b, mut fa, mut fb) = (ax, bx, fa, fb);
+    let (mut c, mut fc) = (a, fa);
+    for _ in 0..ZEROIN_MAXIT {
+        resource::checkpoint()?;
+        let prev_step = b - a;
+        if fc.abs() < fb.abs() {
+            // swap so that b is the best approximation
+            a = b;
+            b = c;
+            c = a;
+            fa = fb;
+            fb = fc;
+            fc = fa;
+        }
+        let tol_act = 2.0 * f64::EPSILON * b.abs();
+        let mut new_step = (c - b) / 2.0;
+        if new_step.abs() <= tol_act || fb == 0.0 {
+            return Ok(b);
+        }
+        // interpolation when the previous step was large enough and in the right direction
+        if prev_step.abs() >= tol_act && fa.abs() > fb.abs() {
+            let cb = c - b;
+            let (mut p, mut q) = if a == c {
+                // linear interpolation
+                let t1 = fb / fa;
+                (cb * t1, 1.0 - t1)
             } else {
-                ln_choose_col1.push(log_binomial(col1, x));
-                ln_choose_col2.push(log_binomial(col2, row1 - x));
-                valid.push(true);
+                // inverse quadratic interpolation
+                let qa = fa / fc;
+                let t1 = fb / fc;
+                let t2 = fb / fa;
+                (
+                    t2 * (cb * qa * (qa - t1) - (b - a) * (t1 - 1.0)),
+                    (qa - 1.0) * (t1 - 1.0) * (t2 - 1.0),
+                )
+            };
+            if p > 0.0 {
+                q = -q;
+            } else {
+                p = -p;
+            }
+            if p < 0.75 * cb * q - (tol_act * q).abs() / 2.0 && p < (prev_step * q / 2.0).abs() {
+                new_step = p / q;
             }
         }
-
-        Self {
-            ln_choose_col1,
-            ln_choose_col2,
-            valid,
-            x_min,
-            x_max,
+        if new_step.abs() < tol_act {
+            new_step = if new_step > 0.0 { tol_act } else { -tol_act };
+        }
+        a = b;
+        fa = fb;
+        b += new_step;
+        fb = f(b)?;
+        if (fb > 0.0 && fc > 0.0) || (fb < 0.0 && fc < 0.0) {
+            c = a;
+            fc = fa;
         }
     }
-}
-
-/// Compute exact confidence interval for odds ratio using iterative search.
-///
-/// Uses the Cornfield method: find odds ratios where Fisher's test
-/// would give p-value = alpha/2 for one-sided alternatives.
-///
-/// Pre-computes log-binomial coefficients once and reuses them across
-/// all binary search iterations for efficiency.
-fn compute_odds_ratio_ci(a: u64, b: u64, c: u64, d: u64, conf_level: f64) -> (f64, f64) {
-    let alpha = 1.0 - conf_level;
-
-    // Handle edge cases
-    if b == 0 || c == 0 {
-        // Odds ratio is infinite - lower bound only
-        let lower = if a == 0 || d == 0 { 0.0 } else { 0.0 };
-        return (lower, f64::INFINITY);
-    }
-    if a == 0 || d == 0 {
-        // Odds ratio is 0 - upper bound only
-        let n = a + b + c + d;
-        let row1 = a + b;
-        let col1 = a + c;
-        let precomp = PrecomputedLogBinom::new(row1, col1, n);
-        return (
-            0.0,
-            compute_ci_upper_fast(a, b, c, d, alpha / 2.0, &precomp),
-        );
-    }
-
-    let n = a + b + c + d;
-    let row1 = a + b;
-    let col1 = a + c;
-
-    // Pre-compute log-binomial coefficients once for both lower and upper bounds
-    let precomp = PrecomputedLogBinom::new(row1, col1, n);
-
-    // Binary search for lower bound
-    let lower = compute_ci_lower_fast(a, b, c, d, alpha / 2.0, &precomp);
-
-    // Binary search for upper bound
-    let upper = compute_ci_upper_fast(a, b, c, d, alpha / 2.0, &precomp);
-
-    (lower, upper)
-}
-
-/// Find lower CI bound using binary search with pre-computed log-binomial coefficients.
-fn compute_ci_lower_fast(
-    a: u64,
-    b: u64,
-    c: u64,
-    d: u64,
-    alpha: f64,
-    precomp: &PrecomputedLogBinom,
-) -> f64 {
-    let n = a + b + c + d;
-    let row1 = a + b;
-    let col1 = a + c;
-
-    // Lower bound search between 0 and sample OR
-    let sample_or = (a as f64 * d as f64) / (b as f64 * c as f64);
-    let mut lo = 0.0;
-    let mut hi = sample_or.max(0.001);
-
-    // Expand upper search bound if needed
-    while compute_fisher_pvalue_given_or_fast(
-        a,
-        row1,
-        col1,
-        n,
-        hi,
-        FisherAlternative::Less,
-        precomp,
-    ) < alpha
-    {
-        hi *= 2.0;
-        if hi > 1e6 {
-            return 0.0;
-        }
-    }
-
-    // Binary search
-    for _ in 0..100 {
-        let mid = (lo + hi) / 2.0;
-        let p = compute_fisher_pvalue_given_or_fast(
-            a,
-            row1,
-            col1,
-            n,
-            mid,
-            FisherAlternative::Less,
-            precomp,
-        );
-
-        if p < alpha {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-
-        if (hi - lo) < 1e-8 * lo.max(1e-10) {
-            break;
-        }
-    }
-
-    lo
-}
-
-/// Find upper CI bound using binary search with pre-computed log-binomial coefficients.
-fn compute_ci_upper_fast(
-    a: u64,
-    b: u64,
-    c: u64,
-    d: u64,
-    alpha: f64,
-    precomp: &PrecomputedLogBinom,
-) -> f64 {
-    let n = a + b + c + d;
-    let row1 = a + b;
-    let col1 = a + c;
-
-    // Upper bound search starting from sample OR
-    let sample_or = if b * c > 0 {
-        (a as f64 * d as f64) / (b as f64 * c as f64)
-    } else {
-        1.0
-    };
-    let mut lo = sample_or.max(0.001);
-    let mut hi = (sample_or * 10.0).max(10.0);
-
-    // Expand upper search bound if needed
-    while compute_fisher_pvalue_given_or_fast(
-        a,
-        row1,
-        col1,
-        n,
-        hi,
-        FisherAlternative::Greater,
-        precomp,
-    ) < alpha
-    {
-        hi *= 2.0;
-        if hi > 1e10 {
-            return f64::INFINITY;
-        }
-    }
-
-    // Binary search
-    for _ in 0..100 {
-        let mid = (lo + hi) / 2.0;
-        let p = compute_fisher_pvalue_given_or_fast(
-            a,
-            row1,
-            col1,
-            n,
-            mid,
-            FisherAlternative::Greater,
-            precomp,
-        );
-
-        if p < alpha {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-
-        if (hi - lo) < 1e-8 * hi.max(1e-10) {
-            break;
-        }
-    }
-
-    hi
-}
-
-/// Compute Fisher's p-value under a specific null odds ratio, using pre-computed
-/// log-binomial coefficients for efficiency.
-///
-/// This is the hot path for CI computation. By accepting pre-computed log-binomial
-/// coefficients, we avoid redundant ln_gamma calls across binary search iterations.
-/// Only the `x * ln(or)` term changes between iterations.
-fn compute_fisher_pvalue_given_or_fast(
-    observed: u64,
-    row1: u64,
-    col1: u64,
-    _n: u64,
-    or: f64,
-    alternative: FisherAlternative,
-    precomp: &PrecomputedLogBinom,
-) -> f64 {
-    let x_min = precomp.x_min;
-    let x_max = precomp.x_max;
-    let support_size = (x_max - x_min + 1) as usize;
-
-    // Compute log-probabilities using pre-computed binomial coefficients
-    // Only the OR^x term varies across binary search iterations
-    let ln_or = or.ln();
-
-    // First pass: compute log-probs and find maximum for numerical stability
-    let mut log_probs: Vec<f64> = Vec::with_capacity(support_size);
-    let mut max_log = f64::NEG_INFINITY;
-
-    for (i, x) in (x_min..=x_max).enumerate() {
-        if !precomp.valid[i] {
-            log_probs.push(f64::NEG_INFINITY);
-            continue;
-        }
-        // log P(X=x|OR) = log(C(col1, x)) + log(C(col2, row1-x)) + x*log(OR)
-        let log_p = precomp.ln_choose_col1[i] + precomp.ln_choose_col2[i] + (x as f64) * ln_or;
-        if log_p > max_log {
-            max_log = log_p;
-        }
-        log_probs.push(log_p);
-    }
-
-    if max_log.is_infinite() && max_log < 0.0 {
-        return 1.0; // All probabilities are 0
-    }
-
-    // Second pass: convert to normalized probabilities in a single allocation
-    let mut probs: Vec<f64> = Vec::with_capacity(support_size);
-    let mut total = 0.0;
-    for &log_p in &log_probs {
-        let p = (log_p - max_log).exp();
-        total += p;
-        probs.push(p);
-    }
-
-    if total == 0.0 {
-        return 1.0;
-    }
-
-    let inv_total = 1.0 / total;
-    for p in &mut probs {
-        *p *= inv_total;
-    }
-
-    // Compute p-value
-    let obs_idx = (observed - x_min) as usize;
-    match alternative {
-        FisherAlternative::Less => {
-            let mut sum = 0.0;
-            for i in 0..=obs_idx {
-                sum += probs[i];
-            }
-            sum
-        }
-        FisherAlternative::Greater => {
-            let mut sum = 0.0;
-            for i in obs_idx..probs.len() {
-                sum += probs[i];
-            }
-            sum
-        }
-        FisherAlternative::TwoSided => {
-            // Sum probs of all values as extreme
-            let obs_prob = probs[obs_idx];
-            let threshold = obs_prob + 1e-10;
-            let mut sum = 0.0;
-            for &p in &probs {
-                if p <= threshold {
-                    sum += p;
-                }
-            }
-            sum
-        }
-    }
-}
-
-/// Compute log of binomial coefficient C(n, k) = n! / (k! (n-k)!)
-fn log_binomial(n: u64, k: u64) -> f64 {
-    if k > n {
-        return f64::NEG_INFINITY;
-    }
-    if k == 0 || k == n {
-        return 0.0;
-    }
-
-    // Use log-gamma: log(C(n,k)) = log(n!) - log(k!) - log((n-k)!)
-    use statrs::function::gamma::ln_gamma;
-
-    let n_f = (n + 1) as f64;
-    let k_f = (k + 1) as f64;
-    let nk_f = (n - k + 1) as f64;
-
-    ln_gamma(n_f) - ln_gamma(k_f) - ln_gamma(nk_f)
+    Ok(b)
 }
 
 /// Fisher's exact test from integer table.
@@ -879,6 +911,259 @@ pub fn run_fisher_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{ColumnRequest, NaPolicy};
+    use p2a_validation::{Case, Check, Tol};
+
+    /// Tight re-solve of fisher.test's equations (uniroot tol 1e-15), plan T2-WP05 decision 2.
+    const TIGHT: Tol = Tol::new(1e-9, 1e-12);
+    /// fisher.test's own limits and estimate (uniroot tol eps^0.25): up to 0.69% off on the
+    /// case tables.
+    const PRINTED: Tol = Tol::new(1e-2, 0.0);
+
+    type Table = [[f64; 2]; 2];
+
+    fn case_tables(case_id: &str) -> (Case, Vec<(String, Table)>) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let cols = ColumnRequest::new(ds.df())
+            .factor("table")
+            .numerics(&["a", "b", "c", "d"])
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        let t = (0..cols.n())
+            .map(|i| {
+                (
+                    cols.factor("table").label(i).to_string(),
+                    [
+                        [cols.numeric("a")[i], cols.numeric("b")[i]],
+                        [cols.numeric("c")[i], cols.numeric("d")[i]],
+                    ],
+                )
+            })
+            .collect();
+        (case, t)
+    }
+
+    #[test]
+    fn test_validate_fisher_tables() {
+        // R: fisher.test(matrix(c(a, b, c, d), 2, byrow = TRUE), alternative = ...) on 11
+        // tables (case stat_fisher_tables). Fails before: two-sided p = 0 for N >= 1030
+        // (STAT-2), 1.2e-10 for tiny_p (STAT-5, R 4.906449339029371e-38), CI (0, 10 x OR)
+        // (STAT-24, tea R 0.21173559544657847, 626.2435305888135).
+        let (case, tables) = case_tables("stat_fisher_tables");
+        assert_eq!(tables.len(), 11);
+        let mut check = Check::new(&case);
+        for (id, t) in &tables {
+            let k = |s: &str| format!("{id}_{s}");
+            let n = case.scalar(&k("n")) as usize;
+            let two = fisher_exact_test(t, FisherAlternative::TwoSided, Some(0.95)).unwrap();
+            let less = fisher_exact_test(t, FisherAlternative::Less, Some(0.95)).unwrap();
+            let greater = fisher_exact_test(t, FisherAlternative::Greater, Some(0.95)).unwrap();
+            let (l2, u2) = two.odds_ratio_ci.unwrap();
+            let (ll, ul) = less.odds_ratio_ci.unwrap();
+            let (lg, ug) = greater.odds_ratio_ci.unwrap();
+            check
+                .scalar(&k("p_two_sided"), two.p_value, Tol::p_value(n))
+                .scalar(&k("p_less"), less.p_value, Tol::p_value(n))
+                .scalar(&k("p_greater"), greater.p_value, Tol::p_value(n))
+                .scalar(&k("estimate_cond_mle_tight"), two.conditional_mle, TIGHT)
+                .scalar(&k("estimate_cond_mle"), two.conditional_mle, PRINTED)
+                .scalar(&k("ci_lower_two_sided_tight"), l2, TIGHT)
+                .scalar(&k("ci_upper_two_sided_tight"), u2, TIGHT)
+                .scalar(&k("ci_lower_two_sided"), l2, PRINTED)
+                .scalar(&k("ci_upper_two_sided"), u2, PRINTED)
+                .scalar(&k("ci_lower_less"), ll, Tol::exact())
+                .scalar(&k("ci_upper_less_tight"), ul, TIGHT)
+                .scalar(&k("ci_upper_less"), ul, PRINTED)
+                .scalar(&k("ci_lower_greater_tight"), lg, TIGHT)
+                .scalar(&k("ci_lower_greater"), lg, PRINTED)
+                .scalar(
+                    &k("sample_odds_ratio"),
+                    two.odds_ratio,
+                    Tol::new(1e-15, 0.0),
+                )
+                .scalar(&k("n"), two.n, Tol::exact());
+            // R reports Inf as the upper limit of "greater"; the harness stores it as null
+            assert!(case.scalar(&k("ci_upper_greater")).is_nan(), "{id}");
+            assert_eq!(ug, f64::INFINITY, "{id}: greater upper limit");
+            assert_eq!(
+                two.conditional_mle.to_bits(),
+                less.conditional_mle.to_bits(),
+                "{id}: MLE does not depend on the alternative"
+            );
+            assert_eq!(
+                two.conditional_mle.to_bits(),
+                greater.conditional_mle.to_bits(),
+                "{id}"
+            );
+        }
+        // The p-values below 1e-12 compare equal under Tol::p_value's absolute floor; pin them
+        // relatively so the STAT-5 floor (1.2e-10 against R's 4.9e-38) cannot hide.
+        for (id, tag, alt) in [
+            ("tiny_p", "two_sided", FisherAlternative::TwoSided),
+            ("tiny_p", "greater", FisherAlternative::Greater),
+            ("n2000_sig", "two_sided", FisherAlternative::TwoSided),
+            ("n2000_sig", "greater", FisherAlternative::Greater),
+        ] {
+            let t = tables.iter().find(|(i, _)| i == id).unwrap().1;
+            check.scalar(
+                &format!("{id}_p_{tag}"),
+                fisher_exact_test(&t, alt, None).unwrap().p_value,
+                Tol::new(1e-9, 0.0),
+            );
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_fisher_tables_row_swap() {
+        // Swapping the rows maps psi -> 1/psi: p two-sided unchanged, less <-> greater,
+        // (L, U) -> (1/U, 1/L), MLE -> 1/MLE. zero_cell [[0,5],[3,2]] swapped is [[3,2],[0,5]],
+        // x = hi: MLE and the upper limit are +inf (R: estimate Inf, CI 0.49337123440314978,
+        // Inf), the edge no table of the case reaches directly.
+        let inv = |v: f64| {
+            if v == 0.0 {
+                f64::INFINITY
+            } else if v.is_infinite() {
+                0.0
+            } else {
+                1.0 / v
+            }
+        };
+        let (case, tables) = case_tables("stat_fisher_tables");
+        let mut check = Check::new(&case);
+        for (id, t) in &tables {
+            let k = |s: &str| format!("{id}_{s}");
+            let n = case.scalar(&k("n")) as usize;
+            let s = [t[1], t[0]];
+            let two = fisher_exact_test(&s, FisherAlternative::TwoSided, Some(0.95)).unwrap();
+            let less = fisher_exact_test(&s, FisherAlternative::Less, Some(0.95)).unwrap();
+            let greater = fisher_exact_test(&s, FisherAlternative::Greater, Some(0.95)).unwrap();
+            let (l2, u2) = two.odds_ratio_ci.unwrap();
+            check
+                .scalar(&k("p_two_sided"), two.p_value, Tol::p_value(n))
+                .scalar(&k("p_less"), greater.p_value, Tol::p_value(n))
+                .scalar(&k("p_greater"), less.p_value, Tol::p_value(n))
+                .scalar(
+                    &k("estimate_cond_mle_tight"),
+                    inv(two.conditional_mle),
+                    TIGHT,
+                )
+                .scalar(&k("ci_lower_two_sided_tight"), inv(u2), TIGHT)
+                .scalar(&k("ci_upper_two_sided_tight"), inv(l2), TIGHT)
+                .scalar(
+                    &k("ci_upper_less_tight"),
+                    inv(greater.odds_ratio_ci.unwrap().0),
+                    TIGHT,
+                )
+                .scalar(
+                    &k("ci_lower_greater_tight"),
+                    inv(less.odds_ratio_ci.unwrap().1),
+                    TIGHT,
+                )
+                .scalar(
+                    &k("sample_odds_ratio"),
+                    inv(two.odds_ratio),
+                    Tol::new(1e-14, 0.0),
+                );
+        }
+        check.finish();
+        let z = fisher_exact_test(
+            &[[3.0, 2.0], [0.0, 5.0]],
+            FisherAlternative::TwoSided,
+            Some(0.95),
+        )
+        .unwrap();
+        assert_eq!(
+            (z.conditional_mle, z.odds_ratio_ci.unwrap().1),
+            (f64::INFINITY, f64::INFINITY)
+        );
+    }
+
+    #[test]
+    fn test_fisher_extreme_table_matches_tight_r() {
+        // [[50,1],[1,50]]: R 4.3.3 fisher.test prints CI (127.00893441058923, 4503599627370496)
+        // and estimate 1530.9010005032094 because uniroot's tol (eps^0.25) is absolute on the
+        // 1/t scale; the same equations re-solved with uniroot(tol = 1e-15) (plan T2-WP05
+        // Appendix C, extreme_digits.R) give the values below. p-values are R's own:
+        // two.sided 1.3022734448002492e-26, greater 6.5113672240012631e-27, less 1.
+        let t = [[50.0, 1.0], [1.0, 50.0]];
+        let rel = |a: f64, e: f64| ((a - e) / e).abs() < 1e-9;
+        let two = fisher_exact_test(&t, FisherAlternative::TwoSided, Some(0.95)).unwrap();
+        let less = fisher_exact_test(&t, FisherAlternative::Less, Some(0.95)).unwrap();
+        let greater = fisher_exact_test(&t, FisherAlternative::Greater, Some(0.95)).unwrap();
+        assert!(rel(two.p_value, 1.3022734448002492e-26), "{}", two.p_value);
+        assert!(
+            rel(greater.p_value, 6.5113672240012631e-27),
+            "{}",
+            greater.p_value
+        );
+        assert_eq!(less.p_value, 1.0);
+        assert!(
+            rel(two.conditional_mle, 1512.5074333693019),
+            "{}",
+            two.conditional_mle
+        );
+        let (l, u) = two.odds_ratio_ci.unwrap();
+        assert!(
+            rel(l, 126.58051644404978) && rel(u, 102061.81206230588),
+            "({l}, {u})"
+        );
+        assert!(rel(less.odds_ratio_ci.unwrap().1, 50039.549513258804));
+        assert!(rel(greater.odds_ratio_ci.unwrap().0, 162.65609650777515));
+    }
+
+    #[test]
+    fn test_fisher_rejects_invalid_counts() {
+        // decision 4: NaN, Inf, fractional and > 2^53 cells are refused, naming the cell; no
+        // panic, no 2^63-point loop.
+        for bad in [f64::NAN, f64::INFINITY, 2.5, 1e16] {
+            let e = fisher_exact_test(
+                &[[bad, 1.0], [1.0, 1.0]],
+                FisherAlternative::TwoSided,
+                Some(0.95),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(e, EconError::InvalidSpecification { .. })
+                    && e.to_string().contains("[0][0]"),
+                "{bad}: {e}"
+            );
+        }
+        assert!(
+            fisher_exact_test(
+                &[[1.0, 1.0], [1.0, 1.0]],
+                FisherAlternative::TwoSided,
+                Some(f64::NAN)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_fisher_one_sided_p_does_not_walk_below_the_support() {
+        // x = lo = 1e12 - 1 with a two-point support: statrs' cdf(x), which the old code
+        // called, adds 1e12 zero terms below the support first and never returns. R:
+        // phyper(1e12 - 1, 1e12, 2, 1e12 + 1) = 1e12 / (1e12 + 2). The tolerance is loose because statrs' ln_gamma, which the
+        // log binomials use, has an absolute error of about 1e-2 at 1e12.
+        let t = [[1e12 - 1.0, 2.0], [1.0, 0.0]];
+        let less = fisher_exact_test(&t, FisherAlternative::Less, None).unwrap();
+        assert!((less.p_value - 1.0).abs() < 0.05, "{}", less.p_value);
+        let greater = fisher_exact_test(&t, FisherAlternative::Greater, None).unwrap();
+        assert_eq!(greater.p_value, 1.0);
+        assert_eq!(less.conditional_mle, 0.0);
+    }
+
+    #[test]
+    fn test_fisher_honours_cancellation() {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        let r = with_budget(Budget::new(None, token), || {
+            fisher_exact_test(&[[3.0, 1.0], [1.0, 3.0]], FisherAlternative::TwoSided, None)
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{r:?}");
+    }
 
     #[test]
     fn test_basic_fisher_exact() {

@@ -20,6 +20,22 @@
       "tolerance": "exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "fisher_exact",
+      "name": "Fisher's exact test, 2 x 2 (p-values, conditional MLE, exact CI)",
+      "category": "stats",
+      "reference": "stats::fisher.test (2 x 2: dnhyper, relErr 1 + 1e-7, mle, ncp.U, ncp.L); limits re-solved with uniroot(tol = 1e-15)",
+      "doc": "validation/stats/fisher.md",
+      "cases": ["stat_fisher_tables", "stat_fisher_rows_2000", "stat_contingency_na_codes", "stat_chisq_small_expected"],
+      "tests": [
+        "p2a-core::stats::fisher::tests::test_validate_fisher_tables",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_tables_row_swap"
+      ],
+      "quantities": ["p two-sided/less/greater", "conditional MLE", "CI two-sided/less/greater", "sample odds ratio", "table orientation"],
+      "tolerance": "p: validation/README.md p-value row (relative 1e-9 for p < 1e-12); MLE and limits 1e-9 relative to the tight re-solve; R's printed limits 1e-2 (uniroot tol eps^0.25)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
