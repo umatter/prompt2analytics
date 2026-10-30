@@ -22,12 +22,14 @@ use p2a_core::{
             AggFn,
             AggSpec,
             ArithOp,
+            BinOptions,
             BinStrategy,
+            CastOptions,
             FillStrategy,
             JoinType,
             MungeError,
             MutateExpr,
-            bin,
+            bin_with,
             concat,
             deduplicate,
             diff,
@@ -1248,9 +1250,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-    /// Fill null values using a strategy.
+    /// Fill missing values using a strategy.
     #[tool(
-        description = "Fill null values using a strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value."
+        description = "Fill missing values (null, and NaN in float columns) using a strategy: 'mean', 'median', 'forward', 'backward', 'zero', or a constant value. Mean and median use the observed values; a column with no observed value is an error."
     )]
     pub async fn munge_fill_na(
         &self,
@@ -2294,9 +2296,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-    /// Bin a continuous variable into discrete categories.
+    /// Bin a numeric column into intervals, as R's cut().
     #[tool(
-        description = "Bin a continuous variable into discrete categories. Strategies: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom' (specify break points)."
+        description = "Bin a numeric column into intervals as R's cut(): missing values and values outside the edges get NA (null), intervals are (a, b] unless right = false, include_lowest closes the outer edge. Strategies: 'uniform' (equal width; the range is widened by 0.1% as cut(x, n)), 'quantile' (type-7 quantile edges, open outer bins), 'custom' (strictly increasing break points). The reply lists the edges, the rows per bin and the NA rows."
     )]
     pub async fn munge_bin(
         &self,
@@ -2393,8 +2395,18 @@ impl AnalyticsServer {
             }
         }
 
-        let result = match bin(&dataset, &request.column, strategy, labels.as_deref()) {
-            Ok(ds) => ds,
+        let options = BinOptions {
+            right: request.right.unwrap_or(true),
+            include_lowest: request.include_lowest.unwrap_or(false),
+        };
+        let outcome = match bin_with(
+            &dataset,
+            &request.column,
+            strategy,
+            labels.as_deref(),
+            &options,
+        ) {
+            Ok(outcome) => outcome,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Bin failed: {}",
@@ -2402,14 +2414,20 @@ impl AnalyticsServer {
                 ))]));
             }
         };
+        let text = format!(
+            "Binned '{}' with the {} strategy into {} bins, saved as '{}' (new column '{}').\n{}",
+            request.column,
+            request.strategy,
+            outcome.counts.len(),
+            result_name,
+            outcome.column,
+            outcome.summary()
+        );
 
         let mut datasets = self.datasets.write().await;
-        datasets.insert(result_name.clone(), result);
+        datasets.insert(result_name.clone(), outcome.dataset);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Binned '{}' using {} strategy, saved as '{}'",
-            request.column, request.strategy, result_name
-        ))]))
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// One-hot encode a categorical column.
@@ -2707,7 +2725,7 @@ impl AnalyticsServer {
 
     /// Create a new column by computation.
     #[tool(
-        description = "Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values."
+        description = "Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values. Operands must be numeric or boolean columns; convert text columns with munge_cast first."
     )]
     pub async fn munge_mutate(
         &self,
@@ -2820,13 +2838,13 @@ impl AnalyticsServer {
 
     /// Cast column(s) to a different data type.
     #[tool(
-        description = "Cast column(s) to a different data type (int, float, string, bool). Use after cleaning sentinel values to convert string columns to numeric for analysis."
+        description = "Cast column(s) to int, float, string or bool. Text is parsed as R's as.numeric/as.integer/as.logical do (trimmed; '3.7' to int is 3); text that cannot be parsed becomes missing and the reply says how many values (strict = true refuses instead). Use after cleaning sentinel values."
     )]
     pub async fn munge_cast(
         &self,
         Parameters(request): Parameters<CastColumnRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::data::munging::{cast, cast_columns};
+        use p2a_core::data::munging::{cast_columns_with, cast_with};
 
         // An owned copy: the read lock is released before the result is
         // bounded and built.
@@ -2905,25 +2923,22 @@ impl AnalyticsServer {
             }
         }
 
-        let result = if cast_refs.len() == 1 {
-            match cast(&dataset, cast_refs[0].0, cast_refs[0].1) {
-                Ok(ds) => ds,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cast failed: {}",
-                        e
-                    ))]));
-                }
-            }
+        let options = CastOptions {
+            strict: request.strict.unwrap_or(false),
+        };
+        let cast_result = if cast_refs.len() == 1 {
+            cast_with(&dataset, cast_refs[0].0, cast_refs[0].1, &options)
+                .map(|(ds, report)| (ds, vec![report]))
         } else {
-            match cast_columns(&dataset, &cast_refs) {
-                Ok(ds) => ds,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cast failed: {}",
-                        e
-                    ))]));
-                }
+            cast_columns_with(&dataset, &cast_refs, &options)
+        };
+        let (result, reports) = match cast_result {
+            Ok(done) => done,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cast failed: {}",
+                    e
+                ))]));
             }
         };
 
@@ -2935,11 +2950,16 @@ impl AnalyticsServer {
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        let mut text = format!(
             "Cast columns [{}], saved as '{}'",
             cast_desc.join(", "),
             result_name
-        ))]))
+        );
+        for note in reports.iter().filter_map(|r| r.note()) {
+            text.push_str(&format!("\nWarning: {note}"));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
 
@@ -2995,6 +3015,7 @@ mod tests {
     use crate::config::SessionConfig;
     use crate::session::{DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager};
     use crate::tools::limits::{self, Limits};
+    use p2a_core::data::munging::bin;
     use p2a_core::data::munging::{JoinShape, JoinType, MungeResult, cast_columns, concat};
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
@@ -3048,6 +3069,8 @@ mod tests {
             strategy: "uniform".into(),
             bins,
             labels: None,
+            right: None,
+            include_lowest: None,
             result_name: Some("b".into()),
         };
         let r = run(
@@ -3643,6 +3666,8 @@ mod tests {
                 strategy: strategy.into(),
                 bins,
                 labels,
+                right: None,
+                include_lowest: None,
                 result_name: Some(result.into()),
             }
         };
@@ -3840,6 +3865,7 @@ mod tests {
             column: Some("b".into()),
             dtype: Some(dtype.into()),
             casts: None,
+            strict: None,
             result_name: Some(result.into()),
         };
         // 40,000 booleans (5 kB) as strings: 720 kB of views.
@@ -4125,6 +4151,8 @@ mod tests {
             strategy: strategy.into(),
             bins,
             labels,
+            right: None,
+            include_lowest: None,
             result_name: Some("b".into()),
         };
         let auto = refused_before_building(

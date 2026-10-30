@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "data_quality_profile_na",
+  "area": "data/quality",
+  "method": "Quality-profile statistics on a column with nulls and NaN (quantile type 7 on present values)",
+  "reference": "stats::quantile(type = 7, na.rm = TRUE); sd; IQR outlier rule 1.5 * IQR",
+  "call": "quantile(x, c(.25, .5, .75), na.rm = TRUE)",
+  "dataset": "validation/datasets/generated/quality_na.csv",
+  "datasets": ["validation/datasets/generated/quality_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "x_q1": 7.8895999999999997,
+    "x_median": 9.1830999999999996,
+    "x_q3": 11.0215,
+    "x_mean": 9.5906459459459459,
+    "x_sd": 2.667907832573702,
+    "x_min": 4.0071000000000003,
+    "x_max": 16.216100000000001,
+    "x_n_missing": 3,
+    "x_n_outliers_iqr": 2,
+    "z_n_missing": 3,
+    "z_median": 2.2757000000000001,
+    "completeness": 0.92500000000000004
+  }
+}

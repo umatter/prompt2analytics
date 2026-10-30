@@ -317,7 +317,7 @@ where
                 id: next_id(),
                 title: format!("Handle missing values in '{}'", column),
                 description: format!(
-                    "Column '{}' has {:.1}% null values ({} rows). {}",
+                    "Column '{}' has {:.1}% missing values (null or NaN) ({} rows). {}",
                     column,
                     pct * 100.0,
                     null_count,
@@ -573,7 +573,7 @@ where
                 reasoning: "Mixed types cause issues with calculations and comparisons. Standardize to a single type.".to_string(),
                 considerations: vec![
                     "Determine the intended type for this column".to_string(),
-                    "Values that can't convert will become null".to_string(),
+                    "Values that cannot be converted become missing; munge_cast reports how many (strict = true refuses instead)".to_string(),
                 ],
             })
         }
@@ -1004,5 +1004,42 @@ mod tests {
         for s in email_suggestions {
             assert!(s.columns.as_ref().unwrap().contains(&"email".to_string()));
         }
+    }
+
+    #[test]
+    fn test_fill_suggestion_uses_the_median_of_present_values() {
+        // DATA-16 repro. R: median(c(1, 2, 3, 4, 5, 6)) = 3.5 (the old profile proposed 2).
+        let ds = Dataset::new(
+            df!("x" => [Some(1.0), Some(2.0), None, None, None, Some(3.0), Some(4.0),
+                        Some(5.0), None, Some(6.0)])
+            .unwrap(),
+        );
+        let report = generate_suggestions(&generate_quality_profile(&ds));
+        let s = report
+            .suggestions
+            .iter()
+            .find(|s| s.operation == "fill_na")
+            .unwrap();
+        assert_eq!(s.parameters.strategy.as_deref(), Some("median"));
+        assert_eq!(s.parameters.value.as_deref(), Some("3.5000"));
+        assert!(
+            s.description.contains("missing values (null or NaN)"),
+            "{}",
+            s.description
+        );
+    }
+
+    #[test]
+    fn test_nan_cells_get_a_missing_value_suggestion() {
+        // WT-9. R: y <- c(1, NaN, NaN, 4, NaN); mean(is.na(y)) = 0.6; median(y, na.rm = TRUE) = 2.5
+        let ds = Dataset::new(df!("y" => [1.0, f64::NAN, f64::NAN, 4.0, f64::NAN]).unwrap());
+        let report = generate_suggestions(&generate_quality_profile(&ds));
+        let s = report
+            .suggestions
+            .iter()
+            .find(|s| s.operation == "fill_na")
+            .expect("fill_na suggestion");
+        assert_eq!(s.parameters.value.as_deref(), Some("2.5000"));
+        assert_eq!(s.estimated_impact.rows_affected, 3);
     }
 }

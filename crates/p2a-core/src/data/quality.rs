@@ -1,18 +1,23 @@
 //! Data quality profiling for LLM-assisted data cleaning.
 //!
 //! This module provides comprehensive data quality analysis including:
-//! - Column-level statistics (nulls, uniques, types)
+//! - Column-level statistics (missing values, uniques, types)
 //! - Numeric column analysis (outliers, bounds, distribution)
 //! - String column analysis (patterns, whitespace, encoding)
 //! - Automated issue detection
+//!
+//! A cell is missing when it is null or, in a float column, NaN (R's `is.na`).
+//! Numeric statistics are computed over the present values, the quartiles with
+//! polars' linear quantile (R's `quantile(type = 7, na.rm = TRUE)`).
 
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::Dataset;
+use super::columns::{float64_strict, is_numeric_dtype};
 
-/// Threshold for flagging high null rate (default: 5%)
+/// Threshold for flagging a high missing-value rate (default: 5%)
 const HIGH_NULL_THRESHOLD: f64 = 0.05;
 
 /// Threshold for flagging potential duplicates (based on unique ratio)
@@ -30,7 +35,7 @@ pub struct DataQualityProfile {
     pub row_count: usize,
     /// Number of completely duplicate rows
     pub duplicate_rows: usize,
-    /// Overall completeness score (% non-null cells)
+    /// Share of cells that are not missing (null or NaN), 0.0 to 1.0
     pub completeness_score: f64,
     /// Dataset-level issues detected
     pub dataset_issues: Vec<DataIssue>,
@@ -43,15 +48,19 @@ pub struct ColumnProfile {
     pub name: String,
     /// Data type as string
     pub dtype: String,
-    /// Number of null/missing values
+    /// Missing cells: polars nulls plus NaN in float columns (R `is.na`).
     pub null_count: usize,
-    /// Percentage of null values (0.0 to 1.0)
+    /// How many of `null_count` are NaN (0 for non-float columns).
+    #[serde(default)]
+    pub nan_count: usize,
+    /// `null_count / row_count` (0.0 to 1.0)
     pub null_pct: f64,
     /// Number of unique values
     pub unique_count: usize,
     /// Percentage of unique values (0.0 to 1.0)
     pub unique_pct: f64,
-    /// Statistics for numeric columns
+    /// Statistics of the present values of a numeric column (integers, unsigned
+    /// integers, floats, decimals); `None` when the column has no present value
     pub numeric_stats: Option<NumericStats>,
     /// Statistics for string columns
     pub string_stats: Option<StringStats>,
@@ -59,7 +68,7 @@ pub struct ColumnProfile {
     pub issues: Vec<DataIssue>,
 }
 
-/// Statistics for numeric columns.
+/// Statistics of the present (neither null nor NaN) values of a numeric column.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NumericStats {
     /// Minimum value
@@ -68,13 +77,13 @@ pub struct NumericStats {
     pub max: f64,
     /// Mean value
     pub mean: f64,
-    /// Median value
+    /// Median value (R `quantile(type = 7)` at 0.5)
     pub median: f64,
-    /// Standard deviation
+    /// Sample standard deviation (ddof 1; 0 for a single value)
     pub std: f64,
-    /// 25th percentile (Q1)
+    /// 25th percentile (Q1, R `quantile(type = 7)`)
     pub q1: f64,
-    /// 75th percentile (Q3)
+    /// 75th percentile (Q3, R `quantile(type = 7)`)
     pub q3: f64,
     /// Number of outliers (outside 1.5*IQR)
     pub outlier_count: usize,
@@ -110,7 +119,7 @@ pub struct StringStats {
 /// Types of data quality issues that can be detected.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DataIssue {
-    /// Column has high percentage of null values
+    /// Column has a high share of missing values (null or NaN)
     HighNullRate { column: String, pct: f64 },
     /// Dataset has duplicate rows
     DuplicateRows { count: usize },
@@ -154,7 +163,11 @@ impl DataIssue {
     pub fn description(&self) -> String {
         match self {
             DataIssue::HighNullRate { column, pct } => {
-                format!("Column '{}' has {:.1}% null values", column, pct * 100.0)
+                format!(
+                    "Column '{}' has {:.1}% missing values (null or NaN)",
+                    column,
+                    pct * 100.0
+                )
             }
             DataIssue::DuplicateRows { count } => {
                 format!("Dataset has {} duplicate rows", count)
@@ -275,8 +288,7 @@ pub fn generate_quality_profile(dataset: &Dataset) -> DataQualityProfile {
     let mut total_null_count = 0usize;
     let total_cells = row_count * col_names.len();
 
-    for col_name in &col_names {
-        let col = df.column(col_name).unwrap();
+    for col in df.get_columns() {
         let profile = profile_column(col, row_count);
         total_null_count += profile.null_count;
         columns.push(profile);
@@ -310,7 +322,13 @@ pub fn generate_quality_profile(dataset: &Dataset) -> DataQualityProfile {
 fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
     let name = col.name().to_string();
     let dtype = format!("{:?}", col.dtype());
-    let null_count = col.null_count();
+    // Numeric columns through the shared strict rule: their present values, and
+    // the NaN cells that count as missing next to the nulls.
+    let numeric = is_numeric_dtype(col.dtype(), false)
+        .then(|| present_values(col))
+        .flatten();
+    let nan_count = numeric.as_ref().map_or(0, |(_, nan)| *nan);
+    let null_count = col.null_count() + nan_count;
     let null_pct = if row_count > 0 {
         null_count as f64 / row_count as f64
     } else {
@@ -327,7 +345,7 @@ fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
 
     let mut issues = Vec::new();
 
-    // Check for high null rate
+    // Check for a high missing-value rate
     if null_pct > HIGH_NULL_THRESHOLD {
         issues.push(DataIssue::HighNullRate {
             column: name.clone(),
@@ -363,13 +381,10 @@ fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
 
     // Type-specific statistics
     let (numeric_stats, string_stats) = match col.dtype() {
-        DataType::Float64
-        | DataType::Float32
-        | DataType::Int64
-        | DataType::Int32
-        | DataType::Int16
-        | DataType::Int8 => {
-            let stats = compute_numeric_stats(col, &name);
+        dt if is_numeric_dtype(dt, false) => {
+            let stats = numeric
+                .as_ref()
+                .and_then(|(present, _)| compute_numeric_stats(present));
             if let Some(ref s) = stats {
                 if s.outlier_count > 0 {
                     issues.push(DataIssue::OutlierValues {
@@ -414,6 +429,7 @@ fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
         name,
         dtype,
         null_count,
+        nan_count,
         null_pct,
         unique_count,
         unique_pct,
@@ -423,31 +439,44 @@ fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
     }
 }
 
-/// Compute statistics for a numeric column.
-fn compute_numeric_stats(col: &Column, _name: &str) -> Option<NumericStats> {
-    let float_col = col.cast(&DataType::Float64).ok()?;
-    let ca = float_col.f64().ok()?;
+/// The present (neither null nor NaN) values of a numeric column and its
+/// number of NaN cells; `None` when the column cannot be read as numbers or its
+/// values cannot be allocated (the profile then has no numeric statistics).
+fn present_values(col: &Column) -> Option<(Vec<f64>, usize)> {
+    let ca = float64_strict(col, false)?;
+    let mut present =
+        crate::resource::try_with_capacity(ca.len() - ca.null_count(), "profile values").ok()?;
+    let mut nan = 0usize;
+    for v in ca.iter().flatten() {
+        if v.is_nan() {
+            nan += 1;
+        } else {
+            present.push(v);
+        }
+    }
+    Some((present, nan))
+}
 
-    // Basic statistics
+/// Statistics of the present values of a numeric column (`None` when there
+/// are none): min, max, mean, the sample standard deviation and the quartiles
+/// by polars' linear quantile, which is R's `quantile(type = 7)`; outlier, zero
+/// and negative counts over the same values.
+fn compute_numeric_stats(present: &[f64]) -> Option<NumericStats> {
+    if present.is_empty() {
+        return None;
+    }
+    let ca = Float64Chunked::from_slice("x".into(), present);
     let min = ca.min()?;
     let max = ca.max()?;
     let mean = ca.mean()?;
-    let std = ca.std(1).unwrap_or(0.0); // ddof=1 for sample std
-
-    // Quantiles for outlier detection
-    let sorted = ca.sort(false);
-    let n = sorted.len();
-    if n == 0 {
-        return None;
-    }
-
-    let q1_idx = n / 4;
-    let median_idx = n / 2;
-    let q3_idx = (3 * n) / 4;
-
-    let q1 = sorted.get(q1_idx).unwrap_or(min);
-    let median = sorted.get(median_idx).unwrap_or(mean);
-    let q3 = sorted.get(q3_idx).unwrap_or(max);
+    let std = ca.std(1).unwrap_or(0.0); // ddof=1 for sample std; one value gives 0
+    let quantile = |p: f64| {
+        ca.quantile(p, QuantileMethod::Linear)
+            .ok()
+            .flatten()
+            .unwrap_or(f64::NAN)
+    };
+    let (q1, median, q3) = (quantile(0.25), quantile(0.5), quantile(0.75));
 
     // IQR-based outlier bounds
     let iqr = q3 - q1;
@@ -459,7 +488,7 @@ fn compute_numeric_stats(col: &Column, _name: &str) -> Option<NumericStats> {
     let mut zero_count = 0;
     let mut negative_count = 0;
 
-    for val in ca.into_iter().flatten() {
+    for &val in present {
         if val < outlier_lower_bound || val > outlier_upper_bound {
             outlier_count += 1;
         }
@@ -659,6 +688,7 @@ fn get_first_non_null_value(col: &Column) -> String {
             }
         }
         DataType::Float64 => {
+            // na-ok: label text for the constant-column message
             if let Ok(ca) = col.f64() {
                 if let Some(val) = ca.into_iter().flatten().next() {
                     return val.to_string();
@@ -916,5 +946,127 @@ mod tests {
 
         assert!(summary.contains("Rows: 3"));
         assert!(summary.contains("Columns: 2"));
+    }
+
+    fn column<'a>(p: &'a DataQualityProfile, name: &str) -> &'a ColumnProfile {
+        p.columns.iter().find(|c| c.name == name).unwrap()
+    }
+
+    #[test]
+    fn test_validate_quality_profile_na() {
+        use p2a_validation::{Check, Tol};
+        // validation/r/cases/data_quality.R, case data_quality_profile_na
+        let (case, ds) = crate::test_support::load_case("data_quality_profile_na");
+        let p = generate_quality_profile(&Dataset::new(ds.df().select(["x", "z"]).unwrap()));
+        let (x, z) = (column(&p, "x"), column(&p, "z"));
+        let (s, zs) = (
+            x.numeric_stats.as_ref().unwrap(),
+            z.numeric_stats.as_ref().unwrap(),
+        );
+        // Deterministic order statistics and moments: polars' linear quantile is R's type 7
+        // (identical here: every quartile falls on an order statistic), and mean and sd
+        // differ from R's by at most a few ulp.
+        let tol = Tol::new(1e-12, 0.0);
+        Check::new(&case)
+            .scalar("x_q1", s.q1, tol)
+            .scalar("x_median", s.median, tol)
+            .scalar("x_q3", s.q3, tol)
+            .scalar("x_mean", s.mean, tol)
+            .scalar("x_sd", s.std, tol)
+            .scalar("x_min", s.min, tol)
+            .scalar("x_max", s.max, tol)
+            .scalar("x_n_missing", x.null_count as f64, Tol::exact())
+            .scalar("x_n_outliers_iqr", s.outlier_count as f64, Tol::exact())
+            .scalar("z_n_missing", z.null_count as f64, Tol::exact())
+            .scalar("z_median", zs.median, tol)
+            .scalar("completeness", p.completeness_score, tol)
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_quality_profile_nan_cells() {
+        use p2a_validation::{Check, Tol};
+        // WT-9: the case data with z's three missing cells written as NaN. The harness
+        // cannot write NaN (design 2.2), so the NaN fixture is built here from the case
+        // dataset.
+        let (case, ds) = crate::test_support::load_case("data_quality_profile_na");
+        let z_nan: Float64Chunked = ds
+            .df()
+            .column("z")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .map(|v| Some(v.unwrap_or(f64::NAN)))
+            .collect();
+        let df = DataFrame::new(vec![
+            ds.df().column("x").unwrap().clone(),
+            z_nan.with_name("z".into()).into_column(),
+        ])
+        .unwrap();
+        let p = generate_quality_profile(&Dataset::new(df));
+        let z = column(&p, "z");
+        assert_eq!((z.null_count, z.nan_count), (3, 3));
+        Check::new(&case)
+            .scalar("z_n_missing", z.null_count as f64, Tol::exact())
+            .scalar(
+                "z_median",
+                z.numeric_stats.as_ref().unwrap().median,
+                Tol::new(1e-12, 0.0),
+            )
+            .scalar("completeness", p.completeness_score, Tol::new(1e-12, 0.0))
+            .finish();
+    }
+
+    #[test]
+    fn test_quality_profile_counts_nan_as_missing() {
+        // R: y <- c(1, NaN, NaN, 4, NaN); sum(is.na(y)) = 3;
+        // quantile(y, c(.25, .5, .75), na.rm = TRUE) = 1.75 2.5 3.25; mean(y, na.rm = TRUE) = 2.5
+        let p = generate_quality_profile(&Dataset::new(
+            df!("y" => [1.0, f64::NAN, f64::NAN, 4.0, f64::NAN]).unwrap(),
+        ));
+        let y = &p.columns[0];
+        assert_eq!((y.null_count, y.nan_count), (3, 3));
+        assert!((y.null_pct - 0.6).abs() < 1e-15 && (p.completeness_score - 0.4).abs() < 1e-15);
+        assert!(
+            y.issues
+                .iter()
+                .any(|i| matches!(i, DataIssue::HighNullRate { .. }))
+        );
+        let s = y.numeric_stats.as_ref().unwrap();
+        assert_eq!(
+            (s.q1, s.median, s.q3, s.mean, s.min, s.max),
+            (1.75, 2.5, 3.25, 2.5, 1.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn test_na_quality_profile_fixtures() {
+        // Design 2.4: an Int64 column with a null gives the statistics of the same values as
+        // Float64 (R: quantile(c(1, 2, 4), c(.25, .5, .75)) = 1.5 2 3); unsigned integers get
+        // statistics too; a text column has none.
+        let i = generate_quality_profile(&Dataset::new(
+            df!("v" => [Some(1i64), Some(2), None, Some(4)]).unwrap(),
+        ));
+        let f = generate_quality_profile(&Dataset::new(
+            df!("v" => [Some(1.0), Some(2.0), None, Some(4.0)]).unwrap(),
+        ));
+        let u = generate_quality_profile(&Dataset::new(
+            df!("v" => [Some(1u32), Some(2), None, Some(4)]).unwrap(),
+        ));
+        let (si, sf) = (
+            i.columns[0].numeric_stats.as_ref().unwrap(),
+            f.columns[0].numeric_stats.as_ref().unwrap(),
+        );
+        assert_eq!(
+            (si.q1, si.median, si.q3, si.mean),
+            (sf.q1, sf.median, sf.q3, sf.mean)
+        );
+        assert_eq!((si.q1, si.median, si.q3), (1.5, 2.0, 3.0));
+        let su = u.columns[0].numeric_stats.as_ref().unwrap();
+        assert_eq!((su.q1, su.median, su.q3), (1.5, 2.0, 3.0));
+        assert_eq!((i.columns[0].null_count, i.columns[0].nan_count), (1, 0));
+        let t = generate_quality_profile(&Dataset::new(df!("v" => ["1", "2"]).unwrap()));
+        assert!(t.columns[0].numeric_stats.is_none());
     }
 }

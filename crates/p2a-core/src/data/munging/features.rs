@@ -30,6 +30,7 @@ use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
 use polars_ops::prelude::RankOptions;
+use serde::{Deserialize, Serialize};
 
 /// Create a lagged version of a column.
 ///
@@ -341,34 +342,44 @@ pub enum BinStrategy {
     Custom(Vec<f64>),
 }
 
-/// Discretize a continuous column into bins.
+/// Discretize a numeric column into bins, as R's `cut()` does.
 ///
 /// Adds the string column `{column}_binned`: `bin_0`, `bin_1`, ... or the
-/// given `labels`. A value `v` goes to the bin `j` with
-/// `edges[j] < v <= edges[j + 1]`; a value at or below the first edge, above
-/// the last one, NaN or null goes to the first bin. Quantile edges are taken
-/// over the values that are neither null nor NaN, as R's
-/// `quantile(type = 7, na.rm = TRUE)` does. An edge that interpolates from a
-/// `-inf` lower neighbour is `-inf` (R's value next to a finite neighbour),
-/// so a column with `-inf` values, from `log(0)` say, is binned whatever
-/// their count and the number of bins.
+/// given `labels`, and null (NA) for a missing value (null or NaN) or a value
+/// outside the edges. Intervals are right-closed, `(a, b]`, and a value equal
+/// to the lowest edge is NA: [`bin_with`] takes R's `right` and
+/// `include.lowest` options and reports the edges and counts.
+///
+/// Edges: `EqualWidth(n)` are `cut(x, n)`'s, the range of the present values
+/// cut into `n` equal parts and widened by 0.1% of it at both ends, so that the
+/// minimum and the maximum are in the first and last bin. `Quantile(n)` are
+/// `-inf`, the type-7 quantiles `i / n` of the present values (R's
+/// `quantile(type = 7, na.rm = TRUE)`) and `+inf`; an edge that interpolates
+/// from a `-inf` lower neighbour is `-inf` (R's value next to a finite
+/// neighbour), and a present `-inf` (`+inf`) that no interval holds goes into
+/// the first (last) bin, so a column with `-inf` values, from `log(0)` say, is
+/// binned whatever their count. `Custom(edges)` are used as given.
 ///
 /// # Arguments
 ///
 /// * `dataset` - Dataset containing the column
-/// * `column` - Column to bin
+/// * `column` - Numeric column to bin (integers, floats, decimals; text is
+///   refused, as `cut()` refuses it)
 /// * `strategy` - Binning strategy
 /// * `labels` - Optional labels for the bins
 ///
 /// # Errors
 ///
-/// Returns an error when the column is missing or cannot be cast to
-/// `Float64`; when the number of bins is zero or its edges cannot be
-/// allocated; when custom edges are fewer than two, contain NaN or decrease;
-/// when the minimum or maximum of an equal-width column is not finite or its
-/// range overflows; when the finite values of a quantile column span a range
-/// that overflows; when `labels` does not have one label per bin; and when
-/// the computation is cancelled.
+/// Returns an error when the column is missing or not numeric; when the
+/// number of bins is zero or its edges cannot be allocated; when custom edges
+/// are fewer than two, contain NaN or are not strictly increasing (R refuses
+/// duplicated breaks; R sorts unsorted ones, but labels follow the given order
+/// here, so they are refused); when an equal-width or quantile column has no
+/// observed value; when the minimum or maximum of an equal-width column is not
+/// finite or its range overflows; when the finite values of a quantile column
+/// span a range that overflows or two interior quantile edges are equal; when
+/// `labels` does not have one label per bin; and when the computation is
+/// cancelled.
 ///
 /// # Example
 ///
@@ -383,50 +394,198 @@ pub fn bin(
     strategy: BinStrategy,
     labels: Option<&[&str]>,
 ) -> MungeResult<Dataset> {
+    bin_with(dataset, column, strategy, labels, &BinOptions::default()).map(|o| o.dataset)
+}
+
+/// How [`bin_with`] closes the intervals (R's `cut(right =, include.lowest =)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinOptions {
+    /// `(a, b]` when true (R's default), `[a, b)` when false.
+    pub right: bool,
+    /// A value equal to the lowest edge goes into the first bin (the highest
+    /// edge into the last bin when `right` is false). R's default is false.
+    pub include_lowest: bool,
+}
+
+impl Default for BinOptions {
+    /// R's defaults: `right = TRUE`, `include.lowest = FALSE`.
+    fn default() -> Self {
+        BinOptions {
+            right: true,
+            include_lowest: false,
+        }
+    }
+}
+
+/// Result of [`bin_with`].
+#[derive(Clone)]
+pub struct BinOutcome {
+    /// Input dataset plus the new String column (null = NA).
+    pub dataset: Dataset,
+    /// Name of the new column, `{column}_binned`.
+    pub column: String,
+    /// Edges used, non-decreasing (strictly increasing except for repeated
+    /// infinite quantile ends; EqualWidth: R `cut(x, n)` edges, the range
+    /// widened by 0.1%).
+    pub edges: Vec<f64>,
+    /// (label, rows) per bin, in edge order.
+    pub counts: Vec<(String, usize)>,
+    /// Rows whose input was missing (null or NaN).
+    pub n_missing: usize,
+    /// Rows with a present value outside the edges.
+    pub n_out_of_range: usize,
+    /// The interval options used.
+    pub options: BinOptions,
+}
+
+impl std::fmt::Debug for BinOutcome {
+    /// Everything but the dataset, which is not `Debug`; its shape instead.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BinOutcome")
+            .field("dataset", &(self.dataset.nrows(), self.dataset.ncols()))
+            .field("column", &self.column)
+            .field("edges", &self.edges)
+            .field("counts", &self.counts)
+            .field("n_missing", &self.n_missing)
+            .field("n_out_of_range", &self.n_out_of_range)
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+impl BinOutcome {
+    /// Two lines, e.g.
+    /// `Edges: 0, 1, 3, 5; intervals (a, b]` and
+    /// `Counts: bin_0: 2, bin_1: 3, bin_2: 2; NA: 5 (2 missing, 3 outside the edges)`.
+    ///
+    /// The interval text is `(a, b]` or `[a, b)`, followed by `, lowest edge
+    /// included` / `, highest edge included` when `include_lowest`; the `; NA:
+    /// ...` part is left out when no row is NA. Edges print in Rust's shortest
+    /// round-trip form (`0`, `1.5`, `-inf`).
+    pub fn summary(&self) -> String {
+        let edges: Vec<String> = self.edges.iter().map(|e| e.to_string()).collect();
+        let intervals = match (self.options.right, self.options.include_lowest) {
+            (true, false) => "(a, b]",
+            (true, true) => "(a, b], lowest edge included",
+            (false, false) => "[a, b)",
+            (false, true) => "[a, b), highest edge included",
+        };
+        let counts: Vec<String> = self
+            .counts
+            .iter()
+            .map(|(label, n)| format!("{label}: {n}"))
+            .collect();
+        let mut text = format!(
+            "Edges: {}; intervals {intervals}\nCounts: {}",
+            edges.join(", "),
+            counts.join(", ")
+        );
+        let na = self.n_missing + self.n_out_of_range;
+        if na > 0 {
+            text.push_str(&format!(
+                "; NA: {na} ({} missing, {} outside the edges)",
+                self.n_missing, self.n_out_of_range
+            ));
+        }
+        text
+    }
+}
+
+/// [`bin`] with R's interval options, reporting the edges used, the rows per
+/// bin and the NA rows (missing inputs and values outside the edges).
+///
+/// A value `v` goes to bin `j` when `edges[j] < v <= edges[j + 1]` (`right`)
+/// or `edges[j] <= v < edges[j + 1]` (not `right`); `include_lowest` closes the
+/// first interval at the lowest edge (the last at the highest edge when not
+/// `right`). This is R's `.bincode`. See [`bin`] for the edges and the errors.
+pub fn bin_with(
+    dataset: &Dataset,
+    column: &str,
+    strategy: BinStrategy,
+    labels: Option<&[&str]>,
+    options: &BinOptions,
+) -> MungeResult<BinOutcome> {
     let df = dataset.df();
-
-    // Validate column exists
-    let col_data = df
-        .column(column)
-        .map_err(|_| MungeError::ColumnNotFound(column.to_string()))?;
-
-    let float_col = col_data
-        .cast(&DataType::Float64)
-        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
-    let float_ca = float_col
-        .f64()
-        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
+    // Booleans are refused, as R's cut(TRUE, 2) refuses them.
+    let cells = super::numeric_cells(df, column, false)?;
+    let no_values = || {
+        MungeError::FeatureError(format!(
+            "column '{column}' has no observed values; cannot compute bins"
+        ))
+    };
 
     // Calculate bin edges based on strategy
     let edges = match &strategy {
         BinStrategy::EqualWidth(n) => {
             let n = *n;
             check_bin_count(n)?;
-            let min = float_ca.min().unwrap_or(0.0);
-            let max = float_ca.max().unwrap_or(1.0);
+            let (min, max) = cells
+                .iter()
+                .flatten()
+                .fold(None, |acc: Option<(f64, f64)>, &v| {
+                    Some(match acc {
+                        None => (v, v),
+                        Some((lo, hi)) => (lo.min(v), hi.max(v)),
+                    })
+                })
+                .ok_or_else(no_values)?;
             if !min.is_finite() || !max.is_finite() {
                 return Err(MungeError::FeatureError(format!(
                     "cannot compute equal-width bins: column `{column}` contains non-finite values"
                 )));
             }
-            if !(max - min).is_finite() {
+            let dx = max - min;
+            if !dx.is_finite() {
                 return Err(MungeError::FeatureError(format!(
                     "the range of `{column}` is too wide to divide into equal-width bins"
                 )));
             }
-            let step = (max - min) / (n as f64);
+            // R's cut.default: seq.int(min, max, length.out = n + 1) with the
+            // ends moved out by dx / 1000; a constant column spans
+            // min -/+ |min| / 1000 (1 / 1000 around 0) instead.
+            let (from, to, step) = if dx == 0.0 {
+                let d = if min != 0.0 { min.abs() } else { 1.0 };
+                let (from, to) = (min - d / 1000.0, max + d / 1000.0);
+                (from, to, (to - from) / (n as f64))
+            } else {
+                (min - dx / 1000.0, max + dx / 1000.0, dx / (n as f64))
+            };
+            let origin = if dx == 0.0 { from } else { min };
             let mut edges = edge_buffer(n)?;
-            for i in 0..=n {
+            edges.push(from);
+            for i in 1..n {
                 if i.is_multiple_of(CHECKPOINT_EVERY) {
                     crate::resource::checkpoint().map_err(feature_err)?;
                 }
-                edges.push(min + (i as f64) * step);
+                edges.push(origin + (i as f64) * step);
             }
+            edges.push(to);
             edges
         }
         BinStrategy::Quantile(n) => {
-            check_bin_count(*n)?;
-            quantile_edges(float_ca, column, *n)?
+            let n = *n;
+            check_bin_count(n)?;
+            let n_present = cells.iter().filter(|v| v.is_some()).count();
+            if n_present == 0 {
+                return Err(no_values());
+            }
+            let mut present = crate::resource::try_with_capacity::<f64>(n_present, "bin values")
+                .map_err(feature_err)?;
+            present.extend(cells.iter().flatten());
+            let ca = Float64Chunked::from_slice(column.into(), &present);
+            drop(present);
+            let edges = quantile_edges(&ca, column, n)?;
+            // R's cut refuses duplicated breaks. The outer edges are -inf and
+            // +inf, and an interior edge may equal one of them when the data
+            // hold infinite values (see `bin`); interior edges must differ.
+            if let Some(w) = edges[1..n].windows(2).find(|w| w[0] == w[1]) {
+                return Err(MungeError::FeatureError(format!(
+                    "quantile edges of '{column}' are not unique ({} appears more than once); \
+                     use fewer bins or custom edges",
+                    w[0]
+                )));
+            }
+            edges
         }
         BinStrategy::Custom(edges) => {
             if edges.len() < 2 {
@@ -440,9 +599,10 @@ pub fn bin(
                     "custom bin edges must not contain NaN".to_string(),
                 ));
             }
-            if !edges.windows(2).all(|w| w[0] <= w[1]) {
+            if !edges.windows(2).all(|w| w[0] < w[1]) {
                 return Err(MungeError::FeatureError(
-                    "custom bin edges must be in non-decreasing order".to_string(),
+                    "custom bin edges must be strictly increasing (R: 'breaks' are not unique)"
+                        .to_string(),
                 ));
             }
             edges.clone()
@@ -466,7 +626,7 @@ pub fn bin(
     }
 
     // Validate labels match number of bins
-    let n_bins = edges.len().saturating_sub(1);
+    let n_bins = edges.len() - 1;
     if let Some(lbls) = labels {
         if lbls.len() != n_bins {
             return Err(MungeError::FeatureError(format!(
@@ -478,30 +638,64 @@ pub fn bin(
         }
     }
 
+    // R's .bincode: the bin of a present value, None outside the edges.
+    let k = n_bins;
+    let quantile = matches!(strategy, BinStrategy::Quantile(_));
+    let bin_of = |v: f64| -> Option<usize> {
+        let j = if options.right {
+            edges.partition_point(|e| *e < v)
+        } else {
+            edges.partition_point(|e| *e <= v)
+        };
+        let found = match j {
+            0 => (options.right && options.include_lowest && v == edges[0]).then_some(0),
+            j if j <= k => Some(j - 1),
+            _ => (!options.right && options.include_lowest && v == edges[k]).then_some(k - 1),
+        };
+        // The quantile bins are open at both ends: an infinite value no
+        // interval holds goes to the outer bin on its side.
+        found.or(if !quantile {
+            None
+        } else if v == f64::NEG_INFINITY {
+            Some(0)
+        } else if v == f64::INFINITY {
+            Some(k - 1)
+        } else {
+            None
+        })
+    };
+
     // Create bin assignments. Each row's label goes straight into the
     // column's builder (an auto label through one reused buffer), so the
     // labels take no allocation per row beyond the column itself.
     let bin_name = format!("{}_binned", column);
-    let mut builder = StringChunkedBuilder::new(bin_name.into(), df.height());
+    let mut builder = StringChunkedBuilder::new(bin_name.as_str().into(), df.height());
     let mut auto_label = String::new();
+    let mut counts = crate::resource::try_vec(k, 0usize, "bin counts").map_err(feature_err)?;
+    let (mut n_missing, mut n_out_of_range) = (0usize, 0usize);
 
-    for (i, val) in float_ca.into_iter().enumerate() {
+    for (i, val) in cells.iter().enumerate() {
         if i.is_multiple_of(CHECKPOINT_EVERY) {
             crate::resource::checkpoint().map_err(feature_err)?;
         }
-        let bin_idx = match val {
-            // The edges are sorted (checked above), so `partition_point` is
-            // the unique j with edges[j-1] < v <= edges[j]; values at or below
-            // the first edge, above the last one, or NaN go to the first bin.
-            Some(v) => match edges.partition_point(|e| *e < v) {
-                j if j >= 1 && j < edges.len() => j - 1,
-                _ => 0,
+        let bin_idx = match *val {
+            None => {
+                n_missing += 1;
+                builder.append_null();
+                continue;
+            }
+            Some(v) => match bin_of(v) {
+                Some(b) => b,
+                None => {
+                    n_out_of_range += 1;
+                    builder.append_null();
+                    continue;
+                }
             },
-            None => 0, // Assign nulls to first bin
         };
-
+        counts[bin_idx] += 1;
         if let Some(lbls) = labels {
-            builder.append_value(lbls.get(bin_idx).copied().unwrap_or("unknown"));
+            builder.append_value(lbls[bin_idx]);
         } else {
             // Use auto-generated labels
             auto_label.clear();
@@ -510,6 +704,7 @@ pub fn bin(
             builder.append_value(auto_label.as_str());
         }
     }
+    drop(cells);
 
     let bin_col = builder.finish().into_column();
     let mut result = df.clone();
@@ -517,7 +712,27 @@ pub fn bin(
         .with_column(bin_col)
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
-    Ok(Dataset::new(result))
+    let counts = counts
+        .into_iter()
+        .enumerate()
+        .map(|(j, n)| {
+            let label = match labels {
+                Some(lbls) => lbls[j].to_string(),
+                None => format!("bin_{j}"),
+            };
+            (label, n)
+        })
+        .collect();
+
+    Ok(BinOutcome {
+        dataset: Dataset::new(result),
+        column: bin_name,
+        edges,
+        counts,
+        n_missing,
+        n_out_of_range,
+        options: *options,
+    })
 }
 
 fn feature_err(e: crate::errors::EconError) -> MungeError {
@@ -832,14 +1047,27 @@ mod tests {
         Dataset::new(df!("x" => [2.3, 1.1, 5.7, 3.3, 4.8, 0.4, 9.1, 6.6, 7.2, 3.9]).unwrap())
     }
 
-    fn labels_of(ds: &Dataset, col: &str) -> Vec<String> {
+    /// The labels of a binned column; `None` is NA.
+    fn labels_of(ds: &Dataset, col: &str) -> Vec<Option<String>> {
         ds.df()
             .column(col)
             .unwrap()
             .str()
             .unwrap()
             .into_iter()
-            .map(|v| v.unwrap_or("").to_string())
+            .map(|v| v.map(str::to_string))
+            .collect()
+    }
+
+    /// The bin index of each row of a `bin_<k>` column, -1 for NA: the coding of the R
+    /// case `data_bin_cut`.
+    fn codes_of(ds: &Dataset, col: &str) -> Vec<f64> {
+        labels_of(ds, col)
+            .into_iter()
+            .map(|l| match l {
+                None => -1.0,
+                Some(l) => l["bin_".len()..].parse().unwrap(),
+            })
             .collect()
     }
 
@@ -851,29 +1079,36 @@ mod tests {
         }
     }
 
-    fn idx(v: &[usize]) -> Vec<String> {
-        v.iter().map(|i| format!("bin_{i}")).collect()
+    fn idx(v: &[usize]) -> Vec<Option<String>> {
+        v.iter().map(|i| Some(format!("bin_{i}"))).collect()
     }
 
-    /// The pre-fix assignment: first j with edges[j-1] < v <= edges[j], else 0 (nulls 0).
-    fn bin_reference(values: &[Option<f64>], edges: &[f64]) -> Vec<String> {
+    /// R's right-closed `cut` by a linear scan: `bin_{j-1}` for the j with
+    /// `edges[j-1] < v <= edges[j]`; NA (`None`) for null, NaN and values outside the edges.
+    fn cut_reference(values: &[Option<f64>], edges: &[f64]) -> Vec<Option<String>> {
         values
             .iter()
             .map(|val| {
-                let bin_idx = match val {
-                    Some(v) => {
-                        let mut idx = 0;
-                        for j in 1..edges.len() {
-                            if *v > edges[j - 1] && *v <= edges[j] {
-                                idx = j - 1;
-                                break;
-                            }
-                        }
-                        idx
-                    }
-                    None => 0,
-                };
-                format!("bin_{bin_idx}")
+                let v = (*val)?;
+                (1..edges.len())
+                    .find(|&j| v > edges[j - 1] && v <= edges[j])
+                    .map(|j| format!("bin_{}", j - 1))
+            })
+            .collect()
+    }
+
+    /// [`cut_reference`] with the Quantile strategy's rule for infinite values: a present
+    /// `-inf` that no interval holds is in the first bin, a present `+inf` in the last.
+    fn quantile_reference(values: &[Option<f64>], edges: &[f64]) -> Vec<Option<String>> {
+        cut_reference(values, edges)
+            .into_iter()
+            .zip(values)
+            .map(|(label, v)| {
+                label.or_else(|| match v {
+                    Some(v) if *v == f64::NEG_INFINITY => Some("bin_0".to_string()),
+                    Some(v) if *v == f64::INFINITY => Some(format!("bin_{}", edges.len() - 2)),
+                    _ => None,
+                })
             })
             .collect()
     }
@@ -882,8 +1117,7 @@ mod tests {
     fn bin_matches_r_cut_for_equal_width_and_type7_quantiles() {
         // R 4.x:
         // x <- c(2.3, 1.1, 5.7, 3.3, 4.8, 0.4, 9.1, 6.6, 7.2, 3.9)
-        // e <- min(x) + (0:4) * ((max(x) - min(x)) / 4)
-        // cut(x, e, right = TRUE, include.lowest = TRUE, labels = FALSE) - 1     # 0 0 2 1 2 0 3 2 3 1
+        // cut(x, 4, labels = FALSE) - 1                                           # 0 0 2 1 2 0 3 2 3 1
         // q <- quantile(x, c(.25, .5, .75), type = 7)   # 2.5499999999999998 4.3499999999999996 6.3749999999999991
         // cut(x, c(-Inf, q, Inf), labels = FALSE) - 1                             # 0 0 2 1 2 0 3 3 3 1
         // cut(x, c(-Inf, quantile(x, (1:4)/5, type = 7), Inf), labels = FALSE) - 1 # 1 0 3 1 2 0 4 3 4 2
@@ -961,7 +1195,9 @@ mod tests {
                 assert_eq!(&got[1..n], &want[..], "n = {n}");
             }
         }
-        // Labels equal the old linear scan for every strategy.
+        // Labels equal R's cut by a linear scan for every strategy: the quantile bins
+        // hold every present value (open outer bins), custom edges leave values outside
+        // them NA, and the equal-width edges are cut(x, 7)'s.
         let ds = Dataset::new(df!("x" => tied.clone()).unwrap());
         let ca = ds.df().column("x").unwrap().f64().unwrap().clone();
         for (s, edges) in [
@@ -970,23 +1206,25 @@ mod tests {
                 quantile_edges(&ca, "x", 7).unwrap(),
             ),
             (
-                BinStrategy::Custom(vec![-20.0, -5.0, -5.0, 0.0, 12.5, 30.0]),
-                vec![-20.0, -5.0, -5.0, 0.0, 12.5, 30.0],
+                BinStrategy::Custom(vec![-20.0, -5.0, 0.0, 12.5, 30.0]),
+                vec![-20.0, -5.0, 0.0, 12.5, 30.0],
             ),
         ] {
             let out = bin(&ds, "x", s, None).unwrap();
-            assert_eq!(labels_of(&out, "x_binned"), bin_reference(&tied, &edges));
+            assert_eq!(labels_of(&out, "x_binned"), cut_reference(&tied, &edges));
         }
         let (mn, mx) = (ca.min().unwrap(), ca.max().unwrap());
-        let step = (mx - mn) / 7.0;
-        let ew: Vec<f64> = (0..=7).map(|i| mn + i as f64 * step).collect();
+        let dx = mx - mn;
+        let mut ew: Vec<f64> = (0..=7).map(|i| mn + i as f64 * (dx / 7.0)).collect();
+        ew[0] = mn - dx / 1000.0;
+        ew[7] = mx + dx / 1000.0;
         let out = bin(&ds, "x", BinStrategy::EqualWidth(7), None).unwrap();
-        assert_eq!(labels_of(&out, "x_binned"), bin_reference(&tied, &ew));
+        assert_eq!(labels_of(&out, "x_binned"), cut_reference(&tied, &ew));
     }
 
     /// The binned column is the String column of one label per row that
-    /// the per-row assignment gives (auto labels, given labels, nulls in the
-    /// first bin), from a column of several chunks.
+    /// the per-row assignment gives (auto labels, given labels, null for a
+    /// null input), from a column of several chunks.
     #[test]
     fn bin_column_holds_each_rows_label() {
         let values: Vec<Option<f64>> = (0..300)
@@ -1003,16 +1241,19 @@ mod tests {
         let edges = vec![-10.0, -3.0, 0.0, 4.5, 10.0];
         let long = "a label longer than a view holds inline";
         let given = ["neg", long, "", "pos"];
-        let want_auto = bin_reference(&values, &edges);
-        let want_given: Vec<String> = want_auto
+        let want_auto = cut_reference(&values, &edges);
+        let want_given: Vec<Option<String>> = want_auto
             .iter()
-            .map(|l| given[l["bin_".len()..].parse::<usize>().unwrap()].to_string())
+            .map(|l| {
+                l.as_ref()
+                    .map(|l| given[l["bin_".len()..].parse::<usize>().unwrap()].to_string())
+            })
             .collect();
         for (labels, want) in [(None, &want_auto), (Some(&given[..]), &want_given)] {
             let out = bin(&ds, "x", BinStrategy::Custom(edges.clone()), labels).unwrap();
             let got = out.df().column("x_binned").unwrap();
             assert_eq!(got.dtype(), &DataType::String);
-            assert_eq!(got.null_count(), 0);
+            assert_eq!(got.null_count(), 43);
             let expected = Column::new("x_binned".into(), want.clone());
             assert!(
                 got.as_materialized_series()
@@ -1026,11 +1267,11 @@ mod tests {
                     .equals_missing(ds.df().column("x").unwrap())
             );
         }
-        // Equal-width and quantile bins name their bins as before, too.
+        // Quantile bins name their bins by the same rule.
         let ca = ds.df().column("x").unwrap().f64().unwrap().clone();
         let q = quantile_edges(&ca, "x", 6).unwrap();
         let out = bin(&ds, "x", BinStrategy::Quantile(6), None).unwrap();
-        assert_eq!(labels_of(&out, "x_binned"), bin_reference(&values, &q));
+        assert_eq!(labels_of(&out, "x_binned"), quantile_reference(&values, &q));
     }
 
     #[test]
@@ -1040,11 +1281,13 @@ mod tests {
             let e = err_text(bin(&ds, "x", s, None));
             assert!(e.contains("at least 1"), "{e}");
         }
+        // R: cut(1:5, c(0, 2, 2, 5)) is an error ("'breaks' are not unique").
         for edges in [
             vec![],
             vec![1.0],
             vec![0.0, f64::NAN, 2.0],
             vec![3.0, 1.0, 2.0],
+            vec![0.0, 2.0, 2.0, 5.0],
         ] {
             assert!(
                 bin(&ds, "x", BinStrategy::Custom(edges.clone()), None).is_err(),
@@ -1064,10 +1307,12 @@ mod tests {
         // R 4.x:
         // x <- c(1, 2, 3, NaN)
         // q <- quantile(x, c(.25, .5, .75), type = 7, na.rm = TRUE)   # 1.5 2 2.5
-        // cut(x, c(-Inf, q, Inf), labels = FALSE) - 1                 # 0 1 3 NA (bin_0 here, as for a null)
+        // cut(x, c(-Inf, q, Inf), labels = FALSE) - 1                 # 0 1 3 NA
         let ds = Dataset::new(df!("x" => [1.0, 2.0, 3.0, f64::NAN]).unwrap());
         let out = bin(&ds, "x", BinStrategy::Quantile(4), None).unwrap();
-        assert_eq!(labels_of(&out, "x_binned"), idx(&[0, 1, 3, 0]));
+        let mut want = idx(&[0, 1, 3]);
+        want.push(None);
+        assert_eq!(labels_of(&out, "x_binned"), want);
 
         // A NaN anywhere gives the edges of the same column with that NaN made null.
         let with_nan = Float64Chunked::from_iter_options(
@@ -1159,9 +1404,17 @@ mod tests {
                 &bin(&ds, "x", BinStrategy::Quantile(10), None).unwrap(),
                 "x_binned",
             );
-            assert_eq!(labels, bin_reference(&x, &edges), "n_neg = {n_neg}");
-            assert!(labels[..n_neg].iter().all(|l| l == "bin_0"));
-            assert!(labels[n_neg..].iter().all(|l| l != "bin_0"));
+            assert_eq!(labels, quantile_reference(&x, &edges), "n_neg = {n_neg}");
+            assert!(
+                labels[..n_neg]
+                    .iter()
+                    .all(|l| l.as_deref() == Some("bin_0"))
+            );
+            assert!(
+                labels[n_neg..]
+                    .iter()
+                    .all(|l| l.is_some() && l.as_deref() != Some("bin_0"))
+            );
         }
     }
 
@@ -1220,6 +1473,249 @@ mod tests {
             bin(&ds, "x", BinStrategy::EqualWidth(1_000_000), None)
         }));
         assert!(e.contains("limit"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_bin_cut_right_closed() {
+        use p2a_validation::{Check, Tol};
+        // validation/r/cases/data_quality.R, case data_bin_cut: cut(x, breaks = c(0, 1, 3, 5))
+        let (case, ds) = crate::test_support::load_case("data_bin_cut");
+        let out = bin(
+            &ds,
+            "x",
+            BinStrategy::Custom(vec![0.0, 1.0, 3.0, 5.0]),
+            None,
+        )
+        .unwrap();
+        let c = codes_of(&out, "x_binned");
+        Check::new(&case)
+            .vector("right_codes", &c, Tol::exact())
+            .scalar(
+                "n_na_right",
+                c.iter().filter(|v| **v < 0.0).count() as f64,
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_bin_cut_options() {
+        use p2a_validation::{Check, Tol};
+        // Same case: include.lowest = TRUE closes [0, 1]; right = FALSE gives [0,1) [1,3) [3,5).
+        let (case, ds) = crate::test_support::load_case("data_bin_cut");
+        let edges = || BinStrategy::Custom(vec![0.0, 1.0, 3.0, 5.0]);
+        let right = bin_with(&ds, "x", edges(), None, &BinOptions::default()).unwrap();
+        let low = bin_with(
+            &ds,
+            "x",
+            edges(),
+            None,
+            &BinOptions {
+                right: true,
+                include_lowest: true,
+            },
+        )
+        .unwrap();
+        let left = bin_with(
+            &ds,
+            "x",
+            edges(),
+            None,
+            &BinOptions {
+                right: false,
+                include_lowest: false,
+            },
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector(
+                "right_codes",
+                &codes_of(&right.dataset, "x_binned"),
+                Tol::exact(),
+            )
+            .vector(
+                "include_lowest_codes",
+                &codes_of(&low.dataset, "x_binned"),
+                Tol::exact(),
+            )
+            .vector(
+                "left_closed_codes",
+                &codes_of(&left.dataset, "x_binned"),
+                Tol::exact(),
+            )
+            .scalar(
+                "n_na_right",
+                (right.n_missing + right.n_out_of_range) as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert_eq!(
+            (right.n_missing, right.n_out_of_range, low.n_out_of_range),
+            (2, 3, 2)
+        );
+        assert_eq!(right.edges, vec![0.0, 1.0, 3.0, 5.0]);
+        assert_eq!(right.column, "x_binned");
+        assert_eq!(
+            right.summary(),
+            "Edges: 0, 1, 3, 5; intervals (a, b]\n\
+             Counts: bin_0: 2, bin_1: 3, bin_2: 2; NA: 5 (2 missing, 3 outside the edges)"
+        );
+        assert_eq!(
+            low.summary(),
+            "Edges: 0, 1, 3, 5; intervals (a, b], lowest edge included\n\
+             Counts: bin_0: 3, bin_1: 3, bin_2: 2; NA: 4 (2 missing, 2 outside the edges)"
+        );
+        let left_low = bin_with(
+            &ds,
+            "x",
+            edges(),
+            Some(&["lo", "mid", "hi"]),
+            &BinOptions {
+                right: false,
+                include_lowest: true,
+            },
+        )
+        .unwrap();
+        // R: cut(x, c(0, 1, 3, 5), right = FALSE, include.lowest = TRUE) puts 5 in [3, 5].
+        assert_eq!(
+            left_low.summary(),
+            "Edges: 0, 1, 3, 5; intervals [a, b), highest edge included\n\
+             Counts: lo: 2, mid: 3, hi: 3; NA: 4 (2 missing, 2 outside the edges)"
+        );
+    }
+
+    #[test]
+    fn test_bin_missing_nan_and_out_of_range_values_are_na() {
+        // DATA-12 repro. R:
+        // cut(c(-5, 0, 5, 15, 25, NA, NaN), c(0, 10, 20), labels = c("low", "high"))
+        // <NA> <NA> low high <NA> <NA> <NA>
+        let ds = Dataset::new(
+            df!("x" => [Some(-5.0), Some(0.0), Some(5.0), Some(15.0), Some(25.0), None,
+                        Some(f64::NAN)])
+            .unwrap(),
+        );
+        let out = bin(
+            &ds,
+            "x",
+            BinStrategy::Custom(vec![0.0, 10.0, 20.0]),
+            Some(&["low", "high"]),
+        )
+        .unwrap();
+        assert_eq!(
+            labels_of(&out, "x_binned"),
+            vec![
+                None,
+                None,
+                Some("low".into()),
+                Some("high".into()),
+                None,
+                None,
+                None
+            ]
+        );
+        let o = bin_with(
+            &ds,
+            "x",
+            BinStrategy::Custom(vec![0.0, 10.0, 20.0]),
+            None,
+            &BinOptions::default(),
+        )
+        .unwrap();
+        assert_eq!((o.n_missing, o.n_out_of_range), (2, 3));
+        assert_eq!(
+            o.counts,
+            vec![("bin_0".to_string(), 1), ("bin_1".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn test_bin_equal_width_follows_cut_n() {
+        // R: x10 <- c(2.3, 1.1, 5.7, 3.3, 4.8, 0.4, 9.1, 6.6, 7.2, 3.9); cut(x10, 7)
+        // breaks 0.39130000000000004 ... 9.1086999999999989, codes - 1: 1 0 4 2 3 0 6 4 5 2
+        let o = bin_with(
+            &ten_values(),
+            "x",
+            BinStrategy::EqualWidth(7),
+            None,
+            &BinOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            codes_of(&o.dataset, "x_binned"),
+            vec![1., 0., 4., 2., 3., 0., 6., 4., 5., 2.]
+        );
+        assert_eq!(
+            o.edges,
+            [
+                0.39130000000000004,
+                1.6428571428571428,
+                2.8857142857142852,
+                4.1285714285714281,
+                5.371428571428571,
+                6.6142857142857139,
+                7.8571428571428559,
+                9.1086999999999989
+            ]
+        );
+        // R: cut(c(3, 3, 3), 2) has breaks 2.997 3 3.003, codes 0 0 0.
+        let c = bin_with(
+            &Dataset::new(df!("x" => [3.0, 3.0, 3.0]).unwrap()),
+            "x",
+            BinStrategy::EqualWidth(2),
+            None,
+            &BinOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (codes_of(&c.dataset, "x_binned"), c.edges.clone()),
+            (
+                vec![0., 0., 0.],
+                vec![2.9969999999999999, 3.0, 3.0030000000000001]
+            )
+        );
+        // R: cut(c(0, 0), 3) codes 1 1.
+        let z = bin(
+            &Dataset::new(df!("x" => [0.0, 0.0]).unwrap()),
+            "x",
+            BinStrategy::EqualWidth(3),
+            None,
+        )
+        .unwrap();
+        assert_eq!(codes_of(&z, "x_binned"), vec![1., 1.]);
+    }
+
+    #[test]
+    fn test_na_bin_fixtures() {
+        // Design 2.4: Int64 accepted (R cut(1:4, 2): 0 0 1 1); text refused (R: cut("1.5", 2)
+        // is an error, "'x' must be numeric"); an absent column is named; a column without an
+        // observed value has no equal-width or quantile edges.
+        let i = bin(
+            &Dataset::new(df!("x" => [1i64, 2, 3, 4]).unwrap()),
+            "x",
+            BinStrategy::EqualWidth(2),
+            None,
+        )
+        .unwrap();
+        assert_eq!(codes_of(&i, "x_binned"), vec![0., 0., 1., 1.]);
+        let e = err_text(bin(
+            &Dataset::new(df!("x" => ["1.5", "2.5"]).unwrap()),
+            "x",
+            BinStrategy::EqualWidth(2),
+            None,
+        ));
+        assert!(e.contains("'x'") && e.contains("numeric"), "{e}");
+        assert!(matches!(
+            bin(&ten_values(), "nope", BinStrategy::EqualWidth(2), None),
+            Err(MungeError::ColumnNotFound(_))
+        ));
+        let empty = Dataset::new(df!("x" => [None::<f64>, None]).unwrap());
+        for s in [BinStrategy::EqualWidth(2), BinStrategy::Quantile(2)] {
+            let e = err_text(bin(&empty, "x", s, None));
+            assert!(e.contains("no observed values"), "{e}");
+        }
+        // Custom edges need no observed value: every row is NA.
+        let all_na = bin(&empty, "x", BinStrategy::Custom(vec![0.0, 1.0]), None).unwrap();
+        assert_eq!(codes_of(&all_na, "x_binned"), vec![-1., -1.]);
     }
 
     /// The pre-fix algorithm, verbatim, as the reference (formats every cell

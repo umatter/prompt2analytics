@@ -3,10 +3,11 @@
 use clap::{Subcommand, ValueEnum};
 use p2a_core::Dataset;
 use p2a_core::data::munging::{
-    AggFn, AggSpec, ArithOp, BinStrategy, FillStrategy, MungeError, MutateExpr, bin, concat,
-    deduplicate, diff, drop_columns, drop_na, fill_na, filter, full_join, group_by, inner_join,
-    lag, lead, left_join, melt, mutate, normalize, one_hot_encode, pct_change, pivot, rename,
-    right_join, sample, select, sort, standardize, value_counts,
+    AggFn, AggSpec, ArithOp, BinOptions, BinStrategy, CastOptions, FillStrategy, MungeError,
+    MutateExpr, bin_with, cast_with, concat, deduplicate, diff, drop_columns, drop_na, fill_na,
+    filter, full_join, group_by, inner_join, lag, lead, left_join, melt, mutate, normalize,
+    one_hot_encode, pct_change, pivot, rename, right_join, sample, select, sort, standardize,
+    value_counts,
 };
 
 use crate::output::{OutputFormat, print_error, print_message};
@@ -34,6 +35,7 @@ pub enum FillMethod {
 pub enum BinMethod {
     EqualWidth,
     Quantile,
+    Custom,
 }
 
 #[derive(Subcommand)]
@@ -554,14 +556,22 @@ EXAMPLES:
         name: Option<String>,
     },
 
-    /// Bin a continuous column
+    /// Bin a numeric column into intervals, as R's cut()
     #[command(after_help = "\
+Missing values and values outside the edges get NA (null). Intervals are
+(a, b] unless --left-closed gives [a, b); --include-lowest closes the outer
+edge. Equal-width edges widen the range by 0.1% as cut(x, n) does. Negative
+custom edges are written --edges=-5,0,5.
+
 EXAMPLES:
     # Equal-width bins
     p2a --session s.json munge bin mydata --column age --method equal-width -n 5
 
     # Quantile bins
     p2a --session s.json munge bin mydata --column income --method quantile -n 10
+
+    # Custom break points, [0, 1] (1, 3] (3, 5]
+    p2a --session s.json munge bin mydata --column x --method custom --edges 0,1,3,5 --include-lowest
 ")]
     Bin {
         /// Dataset name
@@ -578,6 +588,50 @@ EXAMPLES:
         /// Number of bins
         #[arg(short, long, default_value = "10")]
         n_bins: usize,
+
+        /// Strictly increasing break points for --method custom, comma-separated
+        #[arg(long, value_delimiter = ',', allow_negative_numbers = true)]
+        edges: Option<Vec<f64>>,
+
+        /// Intervals closed on the left, [a, b) (R's cut(right = FALSE))
+        #[arg(long)]
+        left_closed: bool,
+
+        /// Include a value equal to the lowest edge in the first bin (the highest edge in the
+        /// last bin with --left-closed), as R's cut(include.lowest = TRUE)
+        #[arg(long)]
+        include_lowest: bool,
+
+        /// Name for the resulting dataset
+        #[arg(short = 'o', long)]
+        name: Option<String>,
+    },
+
+    /// Convert a column to another type (reports values that fail to convert)
+    #[command(after_help = "\
+Text is trimmed and parsed as R's as.numeric/as.integer/as.logical do ('3.7' to
+int is 3); a value that cannot be converted becomes missing and a warning says
+how many (--strict refuses the cast instead).
+
+EXAMPLES:
+    p2a --session s.json munge cast mydata --column price --dtype float
+    p2a --session s.json munge cast mydata --column n --dtype int --strict
+")]
+    Cast {
+        /// Dataset name
+        dataset: String,
+
+        /// Column to cast
+        #[arg(short, long)]
+        column: String,
+
+        /// Target type: int, float, string or bool
+        #[arg(long)]
+        dtype: String,
+
+        /// Refuse the cast when any value cannot be converted
+        #[arg(long)]
+        strict: bool,
 
         /// Name for the resulting dataset
         #[arg(short = 'o', long)]
@@ -828,12 +882,35 @@ pub fn execute(
             column,
             method,
             n_bins,
+            edges,
+            left_closed,
+            include_lowest,
             name,
         } => execute_bin(
             dataset,
             column,
             method,
             *n_bins,
+            edges.as_deref(),
+            BinOptions {
+                right: !*left_closed,
+                include_lowest: *include_lowest,
+            },
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::Cast {
+            dataset,
+            column,
+            dtype,
+            strict,
+            name,
+        } => execute_cast(
+            dataset,
+            column,
+            dtype,
+            CastOptions { strict: *strict },
             name.as_deref(),
             format,
             session,
@@ -1556,21 +1633,72 @@ fn execute_bin(
     column: &str,
     method: &BinMethod,
     n_bins: usize,
+    edges: Option<&[f64]>,
+    options: BinOptions,
+    output_name: Option<&str>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let strategy = match (method, edges) {
+        (BinMethod::Custom, Some(edges)) => BinStrategy::Custom(edges.to_vec()),
+        (BinMethod::Custom, None) => {
+            print_error(
+                "--method custom needs --edges (e.g. --edges 0,1,3,5)",
+                format,
+            );
+            return Ok(());
+        }
+        (_, Some(_)) => {
+            print_error("--edges needs --method custom", format);
+            return Ok(());
+        }
+        (BinMethod::EqualWidth, None) => BinStrategy::EqualWidth(n_bins),
+        (BinMethod::Quantile, None) => BinStrategy::Quantile(n_bins),
+    };
+    let ds = get_dataset_clone!(dataset, session, format);
+
+    match bin_with(&ds, column, strategy, None, &options) {
+        Ok(outcome) => {
+            let summary = outcome.summary();
+            store_result(
+                outcome.dataset,
+                output_name,
+                dataset,
+                "binned",
+                session,
+                format,
+            )?;
+            print_message(&summary, format);
+            Ok(())
+        }
+        Err(e) => {
+            print_error(&format!("Bin failed: {}", e), format);
+            Ok(())
+        }
+    }
+}
+
+fn execute_cast(
+    dataset: &str,
+    column: &str,
+    dtype: &str,
+    options: CastOptions,
     output_name: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     let ds = get_dataset_clone!(dataset, session, format);
 
-    let strategy = match method {
-        BinMethod::EqualWidth => BinStrategy::EqualWidth(n_bins),
-        BinMethod::Quantile => BinStrategy::Quantile(n_bins),
-    };
-
-    match bin(&ds, column, strategy, None) {
-        Ok(result) => store_result(result, output_name, dataset, "binned", session, format),
+    match cast_with(&ds, column, dtype, &options) {
+        Ok((result, report)) => {
+            store_result(result, output_name, dataset, "cast", session, format)?;
+            if let Some(note) = report.note() {
+                print_message(&format!("Warning: {note}"), format);
+            }
+            Ok(())
+        }
         Err(e) => {
-            print_error(&format!("Bin failed: {}", e), format);
+            print_error(&format!("Cast failed: {}", e), format);
             Ok(())
         }
     }

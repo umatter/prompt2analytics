@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
+use crate::data::columns::is_numeric_dtype;
 
 /// Comparison operators for filtering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +157,9 @@ pub fn filter(dataset: &Dataset, column: &str, op: &str, value: &str) -> MungeRe
                 value: value.to_string(),
                 reason: "Cannot parse as float".to_string(),
             })?;
-            apply_numeric_filter_f64(col_series, op, val)?
+            // Float32 compares as Float64 (`f64()` refused a Float32 column).
+            let as_f64 = col_series.cast(&DataType::Float64)?;
+            apply_numeric_filter_f64(&as_f64, op, val)?
         }
         DataType::String => apply_string_filter(col_series, op, value)?,
         DataType::Boolean => {
@@ -249,6 +252,7 @@ fn apply_numeric_filter_f64(
     op: FilterOp,
     value: f64,
 ) -> MungeResult<BooleanChunked> {
+    // na-ok: comparison mask, not extraction; null rows get a null mask and DataFrame::filter drops them
     let ca = series.f64()?;
     Ok(match op {
         FilterOp::Eq => ca.equal(value),
@@ -455,7 +459,28 @@ pub enum MutateExpr {
     Function(String, String),
 }
 
+/// A mutate operand: the column `name` as Float64. Numbers and booleans are
+/// numeric, as in R arithmetic (`TRUE + 1` is 2); text is refused (R:
+/// "non-numeric argument to binary operator") instead of cast to nulls. A
+/// column whose cells are all null passes, since no value is lost.
+fn numeric_operand(df: &DataFrame, name: &str) -> MungeResult<Column> {
+    let col = df
+        .column(name)
+        .map_err(|_| MungeError::ColumnNotFound(name.to_string()))?;
+    if !is_numeric_dtype(col.dtype(), true) && col.null_count() != col.len() {
+        return Err(MungeError::TypeMismatch {
+            column: name.to_string(),
+            expected: "numeric or boolean (convert text with munge_cast first)".to_string(),
+            found: col.dtype().to_string(),
+        });
+    }
+    Ok(col.cast(&DataType::Float64)?)
+}
+
 /// Create or update a column with computed values.
+///
+/// Arithmetic and function operands must be numeric or boolean columns: a
+/// text column is an error (convert it with `cast` first).
 ///
 /// # Arguments
 /// * `dataset` - Source dataset
@@ -492,9 +517,11 @@ pub fn mutate(dataset: &Dataset, new_col: &str, expr: MutateExpr) -> MungeResult
             col.clone().with_name(new_col.into())
         }
         MutateExpr::Arithmetic(col1, op, col2) => {
-            let s1 = df.column(&col1)?.cast(&DataType::Float64)?;
-            let s2 = df.column(&col2)?.cast(&DataType::Float64)?;
+            let s1 = numeric_operand(df, &col1)?;
+            let s2 = numeric_operand(df, &col2)?;
+            // na-ok: numeric dtype checked above; the cast creates no nulls
             let ca1 = s1.f64()?;
+            // na-ok: numeric dtype checked above; the cast creates no nulls
             let ca2 = s2.f64()?;
 
             let result: Float64Chunked = match op {
@@ -506,7 +533,8 @@ pub fn mutate(dataset: &Dataset, new_col: &str, expr: MutateExpr) -> MungeResult
             result.into_column().with_name(new_col.into())
         }
         MutateExpr::ArithmeticConst(col_name, op, constant) => {
-            let s = df.column(&col_name)?.cast(&DataType::Float64)?;
+            let s = numeric_operand(df, &col_name)?;
+            // na-ok: numeric dtype checked above; the cast creates no nulls
             let ca = s.f64()?;
 
             let result: Float64Chunked = match op {
@@ -518,7 +546,8 @@ pub fn mutate(dataset: &Dataset, new_col: &str, expr: MutateExpr) -> MungeResult
             result.into_column().with_name(new_col.into())
         }
         MutateExpr::Function(func_name, col_name) => {
-            let s = df.column(&col_name)?.cast(&DataType::Float64)?;
+            let s = numeric_operand(df, &col_name)?;
+            // na-ok: numeric dtype checked above; the cast creates no nulls
             let ca = s.f64()?;
 
             let result: Float64Chunked = match func_name.to_lowercase().as_str() {
@@ -890,5 +919,76 @@ mod tests {
 
         let sampled = sample(&ds, None, Some(0.4), false, Some(42)).unwrap();
         assert_eq!(sampled.nrows(), 2);
+    }
+
+    /// The error text of a call that must fail (`Dataset` is not `Debug`).
+    fn err_text(r: MungeResult<Dataset>) -> String {
+        match r {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_mutate_refuses_text_operands() {
+        // DATA-37. R: c("$5", "10", "2,000") * 2 is an error ("non-numeric argument to
+        // binary operator"), as is log(c("1", "2")) ("non-numeric argument to mathematical
+        // function"); the non-strict cast made the text null instead.
+        let ds = Dataset::new(df!("p" => ["$5", "10", "2,000"], "q" => [6.0, 3.0, 1.5]).unwrap());
+        let e = err_text(mutate(
+            &ds,
+            "pq",
+            MutateExpr::Arithmetic("p".into(), ArithOp::Mul, "q".into()),
+        ));
+        assert!(e.contains("'p'") && e.contains("numeric"), "{e}");
+        let e = err_text(mutate(
+            &ds,
+            "qp",
+            MutateExpr::Arithmetic("q".into(), ArithOp::Mul, "p".into()),
+        ));
+        assert!(e.contains("'p'") && e.contains("numeric"), "{e}");
+        assert!(
+            mutate(
+                &ds,
+                "p2",
+                MutateExpr::ArithmeticConst("p".into(), ArithOp::Mul, 2.0)
+            )
+            .is_err()
+        );
+        assert!(mutate(&ds, "lp", MutateExpr::Function("log".into(), "p".into())).is_err());
+        assert!(matches!(
+            mutate(&ds, "z", MutateExpr::Function("log".into(), "nope".into())),
+            Err(MungeError::ColumnNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_mutate_accepts_integer_and_boolean_operands() {
+        // Regression guard (passes before and after): R c(TRUE, FALSE, NA) + 1 = 2 1 NA.
+        let ds =
+            Dataset::new(df!("b" => [Some(true), Some(false), None], "k" => [1i64, 1, 1]).unwrap());
+        let out = mutate(
+            &ds,
+            "s",
+            MutateExpr::Arithmetic("b".into(), ArithOp::Add, "k".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            out.df()
+                .column("s")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![Some(2.0), Some(1.0), None]
+        );
+    }
+
+    #[test]
+    fn test_filter_float32_column() {
+        // Incidental: the Float32 arm called .f64() on a Float32 column and errored.
+        let ds = Dataset::new(df!("v" => [1.5f32, 2.5, 3.5]).unwrap());
+        assert_eq!(filter(&ds, "v", "gt", "2.0").unwrap().nrows(), 2);
     }
 }

@@ -6,6 +6,7 @@ use super::VisualizationError;
 use super::colors::PLOTLY_PALETTE;
 use plotlars::{Histogram, LinePlot, Plot, Rgb, ScatterPlot};
 use polars::prelude::*;
+use std::borrow::Cow;
 
 /// Configuration for interactive charts.
 #[derive(Debug, Clone, Default)]
@@ -52,6 +53,32 @@ fn validate_column(df: &DataFrame, col: &str) -> Result<(), VisualizationError> 
     Ok(())
 }
 
+/// The frame plotlars sees for a chart grouped by `gc`: the group column as
+/// text, a missing label shown as the group "NA" (ggplot2's convention).
+/// plotlars unwraps every group label, so a null label would panic. A String
+/// column without nulls is used as it is.
+fn with_group_labels<'a>(
+    df: &'a DataFrame,
+    gc: &str,
+) -> Result<Cow<'a, DataFrame>, VisualizationError> {
+    let invalid = |e: PolarsError| VisualizationError::InvalidData(e.to_string());
+    let col = df.column(gc).map_err(invalid)?;
+    if col.dtype() == &DataType::String && col.null_count() == 0 {
+        return Ok(Cow::Borrowed(df));
+    }
+    let text = col.cast(&DataType::String).map_err(invalid)?;
+    let labels: StringChunked = text
+        .str()
+        .map_err(invalid)?
+        .into_iter()
+        .map(|v| Some(v.unwrap_or("NA")))
+        .collect();
+    let mut out = df.clone();
+    out.with_column(labels.with_name(col.name().clone()).into_column())
+        .map_err(invalid)?;
+    Ok(Cow::Owned(out))
+}
+
 // Helper to convert color tuples to Rgb
 fn to_rgb_colors(colors: &[(u8, u8, u8)]) -> Vec<Rgb> {
     colors.iter().map(|(r, g, b)| Rgb(*r, *g, *b)).collect()
@@ -72,7 +99,8 @@ fn get_colors(custom_colors: &Option<Vec<(u8, u8, u8)>>) -> Vec<Rgb> {
 /// * `df` - Polars DataFrame containing the data
 /// * `x_col` - Column name for x-axis values
 /// * `y_col` - Column name for y-axis values
-/// * `group_col` - Optional column name for grouping (creates separate traces)
+/// * `group_col` - Optional column name for grouping (creates separate traces;
+///   a missing label is the group "NA")
 /// * `config` - Chart configuration
 pub fn scatter_interactive(
     df: &DataFrame,
@@ -86,6 +114,11 @@ pub fn scatter_interactive(
     if let Some(gc) = group_col {
         validate_column(df, gc)?;
     }
+    let grouped = match group_col {
+        Some(gc) => with_group_labels(df, gc)?,
+        None => Cow::Borrowed(df),
+    };
+    let df: &DataFrame = &grouped;
 
     let n_points = df.height();
     let colors = get_colors(&config.colors);
@@ -156,7 +189,8 @@ pub fn scatter_interactive(
 ///
 /// * `df` - Polars DataFrame containing the data
 /// * `col` - Column name for histogram values
-/// * `group_col` - Optional column name for grouping
+/// * `group_col` - Optional column name for grouping (a missing label is the
+///   group "NA")
 /// * `config` - Chart configuration
 pub fn histogram_interactive(
     df: &DataFrame,
@@ -168,6 +202,11 @@ pub fn histogram_interactive(
     if let Some(gc) = group_col {
         validate_column(df, gc)?;
     }
+    let grouped = match group_col {
+        Some(gc) => with_group_labels(df, gc)?,
+        None => Cow::Borrowed(df),
+    };
+    let df: &DataFrame = &grouped;
 
     let n_points = df.height();
 
@@ -325,5 +364,38 @@ mod tests {
 
         let result = scatter_interactive(&df, "nonexistent", "y", None, config);
         assert!(result.is_err());
+    }
+
+    /// The HTML without whitespace, so trace names compare as `"name":"<label>"`.
+    fn squeezed(html: &str) -> String {
+        html.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn test_interactive_charts_label_a_missing_group_na() {
+        // DATA-27: plotlars 0.11.4 (common/polar.rs:24) unwraps every unique group label, so a
+        // null group panicked. ggplot2 shows a missing discrete value as "NA"; p2a does the same.
+        let df = df!(
+            "x" => [1.0, 2.0, 3.0, 4.0],
+            "y" => [2.1, 3.9, 6.2, 7.8],
+            "g" => [Some("a"), None, Some("b"), Some("a")],
+            "k" => [Some(1i64), Some(2), None, Some(1)]
+        )
+        .unwrap();
+        for gc in ["g", "k"] {
+            let s =
+                scatter_interactive(&df, "x", "y", Some(gc), InteractiveConfig::default()).unwrap();
+            assert!(squeezed(&s.html).contains("\"name\":\"NA\""), "{gc}");
+            assert_eq!(s.n_points, 4);
+            let h =
+                histogram_interactive(&df, "x", Some(gc), InteractiveConfig::default()).unwrap();
+            assert!(squeezed(&h.html).contains("\"name\":\"NA\""), "{gc}");
+        }
+        let s =
+            scatter_interactive(&df, "x", "y", Some("g"), InteractiveConfig::default()).unwrap();
+        assert!(squeezed(&s.html).contains("\"name\":\"a\""));
+        let k =
+            scatter_interactive(&df, "x", "y", Some("k"), InteractiveConfig::default()).unwrap();
+        assert!(squeezed(&k.html).contains("\"name\":\"1\""));
     }
 }
