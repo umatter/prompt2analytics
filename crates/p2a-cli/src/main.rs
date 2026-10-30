@@ -613,7 +613,11 @@ mod cli_definition_tests {
             help,
             "Memory limit in MB (0 = unlimited); parsed, not yet enforced"
         );
-        let reference = include_str!("../../../docs/guides/CLI_REFERENCE.md");
+        // Read at run time: a compile-time include_str! would tie the build to a file
+        // outside the crate.
+        let path = p2a_validation::repo_path("docs/guides/CLI_REFERENCE.md");
+        let reference =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert!(
             reference
                 .lines()

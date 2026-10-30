@@ -1,10 +1,11 @@
 //! Data loading and inspection commands
 
 use clap::Subcommand;
+use p2a_core::data::LoadError;
 use p2a_core::simulation::{ColumnSpec, Distribution, generate_random_data};
 use p2a_core::{DataLoader, Dataset};
 use polars::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::output::{OutputFormat, format_dataset_summary, print_error, print_message};
 use crate::progress::Progress;
@@ -155,6 +156,22 @@ pub fn execute(
     }
 }
 
+/// Read a CSV file with the `--na-strings` markers of a load (`None`: the loader's
+/// default, `NA` and the empty field). `data load` and the session's reload share it, so
+/// a reload reads the file as the load did.
+pub(crate) fn load_csv_with_markers(
+    path: &Path,
+    na: Option<&[String]>,
+) -> Result<DataFrame, LoadError> {
+    match na {
+        Some(na) => {
+            let na: Vec<&str> = na.iter().map(String::as_str).collect();
+            DataLoader::load_csv_with_na(path, &na)
+        }
+        None => DataLoader::load_csv(path),
+    }
+}
+
 fn execute_load(
     path: &PathBuf,
     name: Option<&str>,
@@ -195,25 +212,27 @@ fn execute_load(
         quiet,
     );
 
+    // --na-strings is a CSV option: refused for every other extension
+    if na_strings.is_some() && extension != "csv" {
+        progress.finish_and_clear();
+        let file = if extension.is_empty() {
+            "a file without an extension".to_string()
+        } else {
+            format!("a '{extension}' file")
+        };
+        print_error(
+            &format!(
+                "--na-strings applies to CSV files only, not to {file}; \
+                 parquet, Excel, Stata and SAS files store missing values natively"
+            ),
+            format,
+        );
+        return Ok(());
+    }
+
     // Load the dataset
     let df = match extension.as_str() {
-        "csv" => match na_strings {
-            Some(na) => {
-                let na: Vec<&str> = na.iter().map(String::as_str).collect();
-                DataLoader::load_csv_with_na(path, &na)?
-            }
-            None => DataLoader::load_csv(path)?,
-        },
-        "parquet" | "xlsx" | "xls" | "xlsb" | "dta" | "sas7bdat" if na_strings.is_some() => {
-            progress.finish_and_clear();
-            print_error(
-                &format!(
-                    "--na-strings applies to CSV files only; '{extension}' files store missing values natively"
-                ),
-                format,
-            );
-            return Ok(());
-        }
+        "csv" => load_csv_with_markers(path, na_strings)?,
         "parquet" => DataLoader::load_parquet(path)?,
         "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(path, None)?,
         "dta" => DataLoader::load_stata(path)?,

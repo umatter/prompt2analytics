@@ -129,7 +129,7 @@ fn test_cli_data_save_file_format() {
         String::from_utf8_lossy(&out.stderr)
     );
     let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    // R: nrow(read.csv("grunfeld.csv")) = 200, ncol = 5
+    // grunfeld.csv has 200 rows and 5 columns
     assert_eq!(
         (
             j["format"].as_str(),
@@ -217,7 +217,7 @@ fn test_cli_session_replays_subcommand_flags() {
     let filt = s.json(&[
         "munge", "filter", "gdp", "-c", "year", "-o", "ge", "-v", "2000", "-n", "recent",
     ]);
-    // R: sum(read.csv("gdp_quarterly.csv")$year >= 2000) = 96, ncol = 4
+    // 96 rows of gdp_quarterly.csv have year >= 2000; it has 4 columns
     assert_eq!(
         filt["message"],
         "Created dataset 'recent' (96 rows x 4 columns)"
@@ -311,6 +311,29 @@ fn r_class_code(dtype: &str) -> f64 {
 /// DATA-32 (CLI): "NA" is missing by default (R write.csv), --na-strings replaces the marker list,
 /// and the markers persist: every call below is a new process that reloads the session's datasets.
 /// The case `cli_na_strings` reads the same "NA"- and "."-coded copies of the case file in R.
+#[test]
+fn test_cli_na_strings_refused_for_any_non_csv_file() {
+    // The --na-strings guard covers every extension but csv, also one the loader does not
+    // read, so the refusal names the flag rather than the format.
+    let s = temp_session();
+    let txt = s.dir().join("t.txt");
+    std::fs::write(&txt, "x\n1\n.\n").unwrap();
+    let e = s.err(&[
+        "data",
+        "load",
+        txt.to_str().unwrap(),
+        "--name",
+        "t",
+        "--na-strings",
+        ".",
+    ]);
+    assert!(e.contains("--na-strings") && e.contains("CSV"), "{e}");
+    assert!(e.contains("'txt'"), "{e}");
+    // without the flag the format itself is refused
+    let e = s.err(&["data", "load", txt.to_str().unwrap(), "--name", "t"]);
+    assert!(e.contains("Unsupported file format: txt"), "{e}");
+}
+
 #[test]
 fn test_validate_cli_data_load_na_strings() {
     let case = Case::load("columns_conventions");
@@ -430,18 +453,13 @@ fn test_validate_cli_data_load_na_strings() {
         }
         c.finish();
     }
-    // the missing rows of n, s and flag are the R NA positions of the case
-    let r_rows = |key: &str, missing: fn(f64) -> bool| -> Vec<usize> {
-        case.vector(key)
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| missing(**v))
-            .map(|(i, _)| i)
-            .collect()
-    };
-    assert_eq!(nulls(rows, "n"), r_rows("n_codes", |v| v == -1.0));
-    assert_eq!(nulls(rows, "s"), r_rows("s_codes", |v| v == -1.0));
-    assert_eq!(nulls(rows, "flag"), r_rows("flag_numeric", f64::is_nan));
+    // R: the 0-based rows of the missing cells of each column of the case file
+    let mut c = Check::new(&read);
+    for col in ["y", "n", "s", "flag"] {
+        let positions: Vec<f64> = nulls(rows, col).into_iter().map(|i| i as f64).collect();
+        c.vector(&format!("canon_na_rows_{col}"), &positions, Tol::exact());
+    }
+    c.finish();
 
     // the recorded command keeps the flag for script export
     let dot_s = dot.to_str().unwrap();

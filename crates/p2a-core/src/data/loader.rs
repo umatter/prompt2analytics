@@ -973,6 +973,13 @@ mod tests {
         let kept = DataLoader::from_csv_string_with_na("c\nNA\nx\n", &[]).unwrap();
         assert_eq!(kept.column("c").unwrap().dtype(), &DataType::String);
         assert_eq!(kept.column("c").unwrap().null_count(), 0);
+        // Only an unquoted empty field is always missing: without markers a quoted
+        // empty text cell stays the empty string.
+        let quoted = DataLoader::from_csv_string_with_na("s\n\"\"\nx\n", &[]).unwrap();
+        let s = quoted.column("s").unwrap();
+        assert_eq!(s.dtype(), &DataType::String);
+        assert_eq!(s.null_count(), 0);
+        assert_eq!(s.str().unwrap().get(0), Some(""));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("m.csv");
         std::fs::write(&path, "a,b\n1,-99\n2,3.5\n").unwrap();

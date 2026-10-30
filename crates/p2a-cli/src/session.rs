@@ -45,8 +45,9 @@ pub struct CommandRecord {
     /// Structured arguments for reconstruction
     pub arguments: serde_json::Value,
     /// The command-portion argv (category, subcommand, and args) as actually
-    /// invoked, without the program name or global flags. Preferred over
-    /// `arguments` for faithful, injection-safe script export.
+    /// invoked: without the program name, without the global flags typed before
+    /// the category and without `--session`; global flags typed later are kept.
+    /// Preferred over `arguments` for faithful, injection-safe script export.
     #[serde(default)]
     pub argv: Vec<String>,
     /// Referenced datasets by name
@@ -134,13 +135,10 @@ impl Default for Session {
 /// loaded with
 fn reload_dataset(meta: &DatasetMeta) -> anyhow::Result<Dataset> {
     let df = match meta.format.as_str() {
-        "csv" => match &meta.na_strings {
-            Some(na) => {
-                let na: Vec<&str> = na.iter().map(String::as_str).collect();
-                DataLoader::load_csv_with_na(&meta.source_path, &na)?
-            }
-            None => DataLoader::load_csv(&meta.source_path)?,
-        },
+        "csv" => crate::commands::data::load_csv_with_markers(
+            &meta.source_path,
+            meta.na_strings.as_deref(),
+        )?,
         "parquet" => DataLoader::load_parquet(&meta.source_path)?,
         "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(&meta.source_path, None)?,
         "dta" => DataLoader::load_stata(&meta.source_path)?,
@@ -235,7 +233,10 @@ impl SessionManager {
     }
 
     /// Record a command invocation from its command-portion argv (category,
-    /// subcommand, and arguments — no program name or global flags).
+    /// subcommand, and arguments), recorded without the program name, without the
+    /// global flags typed before the category and without `--session`; global
+    /// flags typed later are kept. The recorded subcommand is the first token
+    /// after the category that is not a global flag or a global flag's value.
     ///
     /// This is the central recording path used by `main` for every analytics
     /// command, so reproducibility does not depend on each of the ~150 handlers
@@ -249,7 +250,11 @@ impl SessionManager {
             .map(|start| start.elapsed().as_millis() as u64)
             .unwrap_or(0);
         let category = argv.first().cloned().unwrap_or_default();
-        let subcommand = argv.get(1).cloned().unwrap_or_default();
+        let mut i = 1;
+        while let Some(width) = argv.get(i).and_then(|tok| crate::global_flag_width(tok)) {
+            i += width;
+        }
+        let subcommand = argv.get(i).cloned().unwrap_or_default();
         let command_line = crate::output::shell_join(&argv);
 
         let record = CommandRecord {
@@ -357,6 +362,36 @@ impl DatasetStore {
 impl Default for DatasetStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod record_invocation_tests {
+    use super::SessionManager;
+
+    fn recorded_subcommand(argv: &[&str]) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::new(dir.path().join("s.json")).unwrap();
+        manager.start_command();
+        manager.record_invocation(argv.iter().map(|s| s.to_string()).collect(), true, None);
+        let record = &manager.session().commands[0];
+        assert_eq!(record.category, argv[0]);
+        record.subcommand.clone()
+    }
+
+    #[test]
+    fn subcommand_skips_globals_typed_after_the_category() {
+        assert_eq!(recorded_subcommand(&["data", "load", "f.csv"]), "load");
+        assert_eq!(
+            recorded_subcommand(&["data", "-F", "json", "load", "f.csv"]),
+            "load"
+        );
+        assert_eq!(
+            recorded_subcommand(&["data", "--format=json", "--quiet", "load"]),
+            "load"
+        );
+        assert_eq!(recorded_subcommand(&["reg", "-Fjson", "ols", "d"]), "ols");
+        assert_eq!(recorded_subcommand(&["smoke-test"]), "");
     }
 }
 
