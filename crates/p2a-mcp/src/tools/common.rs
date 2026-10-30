@@ -475,8 +475,8 @@ mod tests {
         let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
         let cols = numeric_columns(&ds, &["y", "n"], NaPolicy::Omit).unwrap();
         assert_eq!(cols.rows(), [0, 2, 4, 5, 7, 8, 9]);
-        // R (complete.cases(d$y, d$n)): mean y 6.2857142857142856 (17 digits; the literal
-        // is the same double, shortest form), sum n 94
+        // Derived from the fixture, not case values (the case's complete rows are those of
+        // complete.cases(y, n, s)): over these 7 rows mean y is 44/7, sum n is 94.
         let y = cols.numeric("y");
         let mean = y.iter().sum::<f64>() / y.len() as f64;
         assert!(
@@ -486,7 +486,13 @@ mod tests {
         assert_eq!(cols.numeric("n").iter().sum::<f64>(), 94.0);
         let e = numeric_columns(&ds, &["s"], NaPolicy::Omit).unwrap_err();
         assert!(e.contains("Column 's' contains non-numeric values"), "{e}");
-        assert_eq!(case.id, "columns_conventions");
+        // The per-column missing counts are the case's.
+        let by = &cols.missing().by_column;
+        assert_eq!((by[0].0.as_str(), by[1].0.as_str()), ("y", "n"));
+        p2a_validation::Check::new(&case)
+            .scalar("missing_y", by[0].1 as f64, p2a_validation::Tol::exact())
+            .scalar("missing_n", by[1].1 as f64, p2a_validation::Tol::exact())
+            .finish();
     }
 
     #[test]
@@ -500,7 +506,8 @@ mod tests {
             NaPolicy::Omit,
         )
         .unwrap();
-        // R: complete.cases(d$y, d$flag) keeps rows 0 2 3 4 7 8 9; sum(flag) there is 4
+        // Derived from the fixture, not case values: y and flag are complete in rows
+        // 0 2 3 4 7 8 9, and flag sums to 4 there.
         assert_eq!(m.dim(), (7, 3));
         assert_eq!(m.column(0), m.column(2));
         assert_eq!(m.column(1).sum(), 4.0);
@@ -517,7 +524,14 @@ mod tests {
         })
         .unwrap_err();
         assert!(e.contains("Resource limit"), "{e}");
-        assert_eq!(case.id, "columns_conventions");
+        // y's missing count is the case's (flag's is not a case value).
+        p2a_validation::Check::new(&case)
+            .scalar(
+                "missing_y",
+                missing.by_column[0].1 as f64,
+                p2a_validation::Tol::exact(),
+            )
+            .finish();
     }
 
     #[test]

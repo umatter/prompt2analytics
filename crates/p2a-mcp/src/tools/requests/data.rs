@@ -59,10 +59,10 @@ pub struct CreateDatasetRequest {
     #[schemars(description = "CSV content with headers in first row (e.g., 'x,y\\n1,2\\n3,4')")]
     pub csv_content: String,
 
-    /// Strings read as missing values (CSV only).
+    /// Strings read as missing values in `csv_content`.
     #[serde(default)]
     #[schemars(
-        description = "Strings read as missing values when the data is CSV; default [\"NA\", \"\"] (R's read.csv). Empty fields are always missing. Pass [] to keep the text NA as a value. Not allowed for non-CSV files."
+        description = "Strings read as missing values; default [\"NA\", \"\"] (R's read.csv). Empty fields are always missing. Pass [] to keep the text NA as a value."
     )]
     pub na_strings: Option<Vec<String>>,
 }
