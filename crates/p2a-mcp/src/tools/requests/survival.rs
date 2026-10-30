@@ -16,9 +16,9 @@ pub struct KaplanMeierRequest {
     )]
     pub time: String,
 
-    /// Event indicator column name
+    /// Status column, coded as R's Surv()
     #[schemars(
-        description = "Name of the column indicating event occurrence (1=event, 0=censored)."
+        description = "Status column, coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event, e.g. R's lung) or TRUE/FALSE. Other codes are an error."
     )]
     pub event: String,
 
@@ -29,8 +29,17 @@ pub struct KaplanMeierRequest {
     pub group: Option<String>,
 
     /// Confidence level
-    #[schemars(description = "Confidence level for survival estimates. Default is 0.95.")]
+    #[schemars(
+        description = "Confidence level for survival estimates. Default is 0.95. Must be between 0 and 1."
+    )]
     pub confidence_level: Option<f64>,
+
+    /// Confidence interval type for the survival curve.
+    #[serde(default)]
+    #[schemars(
+        description = "Confidence interval type, as R survfit's conf.type: 'log' (default, R's default), 'log-log' or 'plain'."
+    )]
+    pub conf_type: Option<String>,
 }
 
 /// Request for Log-Rank test comparing survival curves.
@@ -46,9 +55,9 @@ pub struct LogRankRequest {
     )]
     pub time: String,
 
-    /// Event indicator column name
+    /// Status column, coded as R's Surv()
     #[schemars(
-        description = "Name of the column indicating event occurrence (1=event, 0=censored)."
+        description = "Status column, coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event, e.g. R's lung) or TRUE/FALSE. Other codes are an error."
     )]
     pub event: String,
 
@@ -72,9 +81,9 @@ pub struct CoxPhRequest {
     )]
     pub time: String,
 
-    /// Event indicator column name
+    /// Status column, coded as R's Surv()
     #[schemars(
-        description = "Name of the column indicating event occurrence (1=event, 0=censored)."
+        description = "Status column, coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event, e.g. R's lung) or TRUE/FALSE. Other codes are an error."
     )]
     pub event: String,
 
@@ -114,9 +123,9 @@ pub struct AftRequest {
     )]
     pub time: String,
 
-    /// Event indicator column name
+    /// Status column, coded as R's Surv()
     #[schemars(
-        description = "Name of the column indicating event occurrence (1=event, 0=censored)."
+        description = "Status column, coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event, e.g. R's lung) or TRUE/FALSE. Other codes are an error."
     )]
     pub event: String,
 
@@ -154,13 +163,13 @@ pub struct CompetingRisksRequest {
 
     /// Event type column name
     #[schemars(
-        description = "Name of the column indicating event type (0=censored, 1=event of interest, 2=competing event, etc.)."
+        description = "Event type column: 0 = censored, 1, 2, ... = event types (whole numbers up to 255)."
     )]
     pub event: String,
 
     /// Confidence level
     #[schemars(
-        description = "Confidence level for cumulative incidence estimates. Default is 0.95."
+        description = "Confidence level for cumulative incidence estimates. Default is 0.95. Must be between 0 and 1."
     )]
     pub confidence_level: Option<f64>,
 }

@@ -18,7 +18,9 @@
         "p2a-core::econometrics::survival::tests::test_validate_km_lung_by_sex",
         "p2a-core::econometrics::survival::tests::test_validate_km_small",
         "p2a-core::econometrics::survival::tests::test_validate_km_median_rules",
-        "p2a-core::econometrics::survival::tests::test_validate_km_conf_level_and_type_validation"
+        "p2a-core::econometrics::survival::tests::test_validate_km_conf_level_and_type_validation",
+        "p2a-mcp::tools::handlers::survival::tests::test_validate_mcp_kaplan_meier_lung",
+        "p2a-mcp::tools::handlers::survival::tests::test_validate_mcp_kaplan_meier_rejects_unknown_conf_type"
       ],
       "quantities": [
         "S(t)",
@@ -52,7 +54,8 @@
         "p2a-core::econometrics::survival::tests::test_validate_surv_status_coding_lung",
         "p2a-core::econometrics::survival::tests::test_validate_surv_status_invalid_codes_are_errors",
         "p2a-core::econometrics::survival::tests::test_validate_na_survival_missing_rows_are_dropped_and_reported",
-        "p2a-core::econometrics::survival::tests::test_validate_na_survival_bad_columns_name_the_column"
+        "p2a-core::econometrics::survival::tests::test_validate_na_survival_bad_columns_name_the_column",
+        "p2a-mcp::tools::handlers::survival::tests::test_validate_mcp_survival_tools_accept_integer_columns"
       ],
       "quantities": [
         "n, events under 1/2, 0/1 and logical coding",
@@ -77,7 +80,8 @@
       "tests": [
         "p2a-core::econometrics::survival::tests::test_validate_logrank_lung",
         "p2a-core::econometrics::survival::tests::test_validate_logrank_small",
-        "p2a-core::econometrics::survival::tests::test_validate_logrank_zero_expected_group"
+        "p2a-core::econometrics::survival::tests::test_validate_logrank_zero_expected_group",
+        "p2a-mcp::tools::handlers::survival::tests::test_validate_mcp_log_rank_lung"
       ],
       "quantities": [
         "chi-square",
