@@ -2338,6 +2338,17 @@ mod session_state_tests {
         json!({"dataset": "sp", "variable": "v", "weights": name})
     }
 
+    // R's Moran figures (`session::test_fixtures`), each the f64 nearest
+    // R's 17-digit output, written in its shortest form.
+    /// k = 4: I (R 0.68715919057620856), variance (R 0.0095894910636934762), z.
+    const MORAN_K4: (f64, f64, f64) =
+        (0.6871591905762086, 0.009589491063693476, 7.2789719093779635);
+    /// k = 5: I (R 0.65697404814893101), variance (R 0.0074262267610125639),
+    /// z (R 7.9212144518526779).
+    const MORAN_K5: (f64, f64, f64) = (0.656974048148931, 0.007426226761012564, 7.921214451852678);
+    /// E[I] = -1 / (n - 1), n = 40.
+    const MORAN_EXPECTED: f64 = -0.02564102564102564;
+
     #[tokio::test]
     async fn test_mcp_moran_test_finds_weights_from_an_earlier_call() {
         let s = session_with("sp", spatial_fixture()).await;
@@ -2345,20 +2356,7 @@ mod session_state_tests {
             let r = call(&s, "spatial_neighbors", neighbors(k, w)).await;
             assert!(r.success, "{}", text(&r));
         }
-        for (w, i, var, z) in [
-            (
-                "w4",
-                0.68715919057620856,
-                0.0095894910636934762,
-                7.2789719093779635,
-            ),
-            (
-                "w5",
-                0.65697404814893101,
-                0.0074262267610125639,
-                7.9212144518526779,
-            ),
-        ] {
+        for (w, (i, var, z)) in [("w4", MORAN_K4), ("w5", MORAN_K5)] {
             let r = call(&s, "moran_test", moran(w)).await;
             // Pre-fix: "Spatial weights 'w4' not found. Use 'spatial_neighbors' first ..."
             assert!(r.success, "moran_test {w}: {}", text(&r));
@@ -2367,7 +2365,7 @@ mod session_state_tests {
                 "{w}"
             );
             assert!(
-                Tol::printed(6).allows(num(&r, "Expected I:"), -0.02564102564102564),
+                Tol::printed(6).allows(num(&r, "Expected I:"), MORAN_EXPECTED),
                 "{w}"
             );
             assert!(Tol::printed(6).allows(num(&r, "Variance:"), var), "{w}");
@@ -2461,7 +2459,7 @@ mod session_state_tests {
         // Pre-fix this fails too: the weights were gone after the first call.
         let mine = call(&s1, "moran_test", moran("w4")).await;
         assert!(mine.success, "{}", text(&mine));
-        assert!(Tol::printed(6).allows(num(&mine, "Moran I statistic:"), 0.68715919057620856));
+        assert!(Tol::printed(6).allows(num(&mine, "Moran I statistic:"), MORAN_K4.0));
     }
 
     #[tokio::test]
@@ -2485,17 +2483,10 @@ mod session_state_tests {
         )
         .unwrap();
         let tol = Tol::stat(40);
-        assert!(
-            tol.allows(m.statistic, 0.68715919057620856),
-            "{}",
-            m.statistic
-        );
-        assert!(
-            tol.allows(m.variance, 0.0095894910636934762),
-            "{}",
-            m.variance
-        );
-        assert!(tol.allows(m.z_score, 7.2789719093779635), "{}", m.z_score);
+        let (i, var, z) = MORAN_K4;
+        assert!(tol.allows(m.statistic, i), "{}", m.statistic);
+        assert!(tol.allows(m.variance, var), "{}", m.variance);
+        assert!(tol.allows(m.z_score, z), "{}", m.z_score);
         assert!(tol.allows(m.expectation, -1.0 / 39.0), "{}", m.expectation);
     }
 
