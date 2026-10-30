@@ -58,8 +58,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
@@ -489,21 +490,14 @@ pub fn ctmle(
     // Extract Data
     // ═══════════════════════════════════════════════════════════════════════
 
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract outcome variable Y
-    let y = DesignMatrix::extract_column(dataset.df(), outcome_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let y = DesignMatrix::extract_column(dataset.df(), outcome_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     // Extract treatment variable A
-    let a = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let a = DesignMatrix::extract_column(dataset.df(), treatment_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = y.len();
     validate_ctmle_config(&config, n)?;
@@ -537,17 +531,14 @@ pub fn ctmle(
     let covariate_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
 
     for col in covariate_cols {
-        let col_data = DesignMatrix::extract_column(dataset.df(), col).map_err(|e| {
-            EconError::ColumnNotFound {
-                column: col.to_string(),
-                available: get_column_names(dataset.df()),
-            }
-        })?;
+        let col_data = DesignMatrix::extract_column(dataset.df(), col)
+            .map_err(|e| econ_error_from_design(e, dataset.df()))?;
         covariate_data.push(col_data);
     }
 
     // Build full design matrix W for covariates (with intercept)
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, true)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, true)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let w_full = design.data;
     let k_full = w_full.ncols();
 
@@ -2583,5 +2574,28 @@ mod tests {
             "Should have some control observations"
         );
         assert_eq!(result.n_treated + result.n_control, result.n_obs);
+    }
+
+    // ── T2-WP13: missing values and column types (R case causal_mediation_na) ──
+
+    #[test]
+    fn test_validate_na_ctmle_columns() {
+        use crate::econometrics::treatment::na_fixtures as nf;
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, y: &str, d: &str, x: &[&str]| {
+            ctmle(
+                ds,
+                y,
+                d,
+                x,
+                CTmleConfig {
+                    q_model: CTmleQModel::Linear,
+                    ..Default::default()
+                },
+            )
+        };
+        // step 3 reaches the per-covariate extraction as well as the W matrix
+        nf::assert_refusals(&case, &ds, true, run);
+        nf::assert_treatment_dtypes_agree(&case, &ds, run, |r| vec![r.ate, r.se]);
     }
 }

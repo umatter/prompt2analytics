@@ -159,6 +159,21 @@ cat("ATE (Risk Difference):", result$estimates$ATE$psi, "\n")
 
 Default truncation at [0.01, 0.99] to avoid extreme weights. This matches R tmle defaults.
 
+## Missing values and column types
+
+Missing values (null or NaN) in the outcome, treatment or covariates are refused, with
+"Column 'x' contains k missing value(s) (null or NaN). Drop or impute them first."
+(`EconError::NullValues`, naming the column and the count). A text column gives
+`NonNumericColumn`, infinite values `NonFiniteValues`, an absent column `ColumnNotFound`; a
+column that exists is never reported as not found. Int64 and Boolean 0/1 treatments are
+read as numbers and give the same result as Float64. Results on complete data are
+unchanged.
+
+R: tmle 2.1.1 refuses a missing treatment or covariate ("No missing values allowed in 'A' or 'W'") and treats a missing outcome as censored (`Delta`); p2a refuses a missing outcome as well (checked for T2-WP13).
+
+Tests: `test_validate_na_tmle_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
+`weighting_na_refusal`).
+
 ## References
 
 1. van der Laan, M.J. & Rose, S. (2011). *Targeted Learning: Causal Inference for Observational and Experimental Data*. Springer. https://doi.org/10.1007/978-1-4419-9782-1

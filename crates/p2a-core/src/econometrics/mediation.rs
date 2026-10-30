@@ -15,6 +15,12 @@
 //! - **Natural Indirect Effect (NIE)**: Effect through the mediator
 //! - **Decomposition**: ATE = NDE + NIE
 //!
+//! # Missing values and column types
+//!
+//! Rows with a missing value (null or NaN) in the outcome, treatment, mediator or a
+//! covariate are dropped before estimation and reported in `MediationResult::missing`;
+//! integer and boolean columns are read as numbers.
+//!
 //! # References
 //!
 //! - Huber, M. (2014). "Identifying causal mechanisms (primarily) based on
@@ -28,6 +34,7 @@ use rand::prelude::*;
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::traits::estimator::{logistic_cdf, normal_cdf};
@@ -86,8 +93,10 @@ pub struct MediationResult {
     pub p_indirect: f64,
     /// Number of observations used
     pub n_obs: usize,
-    /// Number of observations trimmed
+    /// Number of complete rows trimmed for extreme propensity scores
     pub n_trimmed: usize,
+    /// Rows dropped because of missing values before the propensity models were fitted.
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for MediationResult {
@@ -172,6 +181,9 @@ impl fmt::Display for MediationResult {
         writeln!(f, "N = {} (trimmed: {})", self.n_obs, self.n_trimmed)?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: *** p<0.01, ** p<0.05, * p<0.10")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -212,6 +224,12 @@ impl fmt::Display for MediationResult {
 ///    given observed covariates
 /// 2. **No treatment-mediator interaction** (for simple decomposition)
 /// 3. **Positivity**: All units have positive probability of treatment and mediator values
+///
+/// # Missing values and column types
+///
+/// Rows with a missing value (null or NaN) in the outcome, treatment, mediator or a
+/// covariate are dropped before estimation and reported in `missing`; integer and boolean
+/// columns are read as numbers. `n_obs + n_trimmed` is the number of complete rows.
 pub fn run_mediation_analysis(
     dataset: &Dataset,
     outcome: &str,
@@ -229,82 +247,23 @@ pub fn run_mediation_analysis(
         });
     }
 
-    let df = dataset.df();
-    let n = df.height();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Extract outcome variable
-    let y_col = df.column(outcome).map_err(|_| EconError::ColumnNotFound {
-        column: outcome.to_string(),
-        available: available_cols.clone(),
-    })?;
-    let y: Vec<f64> = y_col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: outcome.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract treatment variable
-    let d_col = df
-        .column(treatment)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: treatment.to_string(),
-            available: available_cols.clone(),
-        })?;
-    let d: Vec<f64> = d_col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: treatment.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract mediator variable
-    let m_col = df.column(mediator).map_err(|_| EconError::ColumnNotFound {
-        column: mediator.to_string(),
-        available: available_cols.clone(),
-    })?;
-    let m: Vec<f64> = m_col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: mediator.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Build covariate matrix
-    let mut x_data: Vec<f64> = Vec::with_capacity(n * (covariates.len() + 1));
-
-    // Add intercept
-    for _ in 0..n {
-        x_data.push(1.0);
-    }
-
-    // Add covariates
-    for cov_name in covariates {
-        let col = df.column(cov_name).map_err(|_| EconError::ColumnNotFound {
-            column: cov_name.to_string(),
-            available: available_cols.clone(),
-        })?;
-        let vals: Vec<f64> = col
-            .f64()
-            .map_err(|_| EconError::NonNumericColumn {
-                column: cov_name.to_string(),
-            })?
-            .into_no_null_iter()
-            .collect();
-        x_data.extend(vals);
-    }
-
-    let k = covariates.len() + 1;
-    let x = Array2::from_shape_vec((n, k), x_data)
-        .map_err(|e| EconError::Internal(format!("Failed to create design matrix: {}", e)))?;
+    // One request over every model variable: R fits both propensity models on the
+    // rows complete in all of them (lm/glm na.omit; mediation::mediate refuses models
+    // fitted on different rows). Integer and boolean columns are read as numbers.
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(outcome)
+        .numeric(treatment)
+        .numeric(mediator)
+        .numerics(covariates)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let n = cols.n();
+    let y = cols.numeric(outcome).to_vec();
+    let d = cols.numeric(treatment).to_vec();
+    let m = cols.numeric(mediator).to_vec();
+    // "(Intercept)" then the covariates, built row by row (CAUS-25)
+    let x = cols.matrix(covariates, true).data;
+    let k = x.ncols();
 
     // Compute point estimates
     let (total, direct, indirect, keep_idx) =
@@ -390,6 +349,7 @@ pub fn run_mediation_analysis(
         p_indirect,
         n_obs,
         n_trimmed,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -677,7 +637,9 @@ fn compute_p_value(estimate: f64, se: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::econometrics::treatment::na_fixtures as nf;
     use crate::resource::{self, Budget, CancelToken};
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
     fn expect_invalid_spec(err: EconError, needle: &str) {
@@ -700,11 +662,12 @@ mod tests {
 
     #[test]
     fn test_mediation_bootstrap_count_is_an_error_not_an_abort() {
+        // the LCG data keep 296 rows at trim 0.01, so the bootstrap buffers are reached
         let err = run_mediation_analysis(
-            &create_mediation_dataset(),
+            &create_mediation_validation_dataset(),
             "y",
-            "d",
-            "m",
+            "treatment",
+            "mediator",
             &["x"],
             MediationConfig {
                 bootstrap: usize::MAX,
@@ -740,12 +703,13 @@ mod tests {
 
     #[test]
     fn test_mediation_honours_cancellation() {
+        // the LCG data reach the bootstrap loop's checkpoint (296 rows kept at trim 0.01)
         let r = resource::with_budget(cancelled_budget(), || {
             run_mediation_analysis(
-                &create_mediation_dataset(),
+                &create_mediation_validation_dataset(),
                 "y",
-                "d",
-                "m",
+                "treatment",
+                "mediator",
                 &["x"],
                 MediationConfig {
                     bootstrap: 20,
@@ -757,6 +721,9 @@ mod tests {
         assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
     }
 
+    /// Used for column errors and the bootstrap-count check only: its mediator separates
+    /// the treatment (treated m in [0.9, 1.3], control m in [0.3, 0.7]), so p(D | M, X)
+    /// goes to 0 or 1 and every row is trimmed once the covariate matrix is correct.
     fn create_mediation_dataset() -> Dataset {
         // Create synthetic data with known mediation structure.
         // Key: Treatment assignment must NOT be perfectly predictable by X.
@@ -819,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_mediation_basic() {
-        let ds = create_mediation_dataset();
+        let ds = create_mediation_validation_dataset();
 
         let config = MediationConfig {
             bootstrap: 199, // Fewer for faster test
@@ -827,7 +794,8 @@ mod tests {
             seed: Some(42),
         };
 
-        let result = run_mediation_analysis(&ds, "y", "d", "m", &["x"], config).unwrap();
+        let result =
+            run_mediation_analysis(&ds, "y", "treatment", "mediator", &["x"], config).unwrap();
 
         // Check that we get reasonable results
         // Total effect should be positive (around 0.7-1.0)
@@ -868,7 +836,7 @@ mod tests {
 
     #[test]
     fn test_mediation_display() {
-        let ds = create_mediation_dataset();
+        let ds = create_mediation_validation_dataset();
 
         let config = MediationConfig {
             bootstrap: 99,
@@ -876,7 +844,8 @@ mod tests {
             seed: Some(42),
         };
 
-        let result = run_mediation_analysis(&ds, "y", "d", "m", &["x"], config).unwrap();
+        let result =
+            run_mediation_analysis(&ds, "y", "treatment", "mediator", &["x"], config).unwrap();
 
         let display = result.to_string();
         assert!(display.contains("Causal Mediation Analysis"));
@@ -1194,5 +1163,181 @@ mod tests {
 
         // SEs may have small differences due to bootstrap
         assert!((result1.se_total - result2.se_total).abs() < 0.01);
+    }
+
+    // =========================================================================
+    // T2-WP13: missing values and column types (R case causal_mediation_na)
+    // =========================================================================
+
+    fn na_cfg(trim: f64) -> MediationConfig {
+        MediationConfig {
+            bootstrap: 20,
+            trim,
+            seed: Some(11),
+        }
+    }
+
+    fn estimates(r: &MediationResult) -> Vec<u64> {
+        nf::bits(&[
+            r.total_effect,
+            r.direct_effect,
+            r.indirect_effect,
+            r.se_total,
+            r.se_direct,
+            r.se_indirect,
+        ])
+    }
+
+    #[test]
+    fn test_validate_mediation_na_omit_causal_na() {
+        // CAUS-24, the null rule: Float64 d isolates it from the Int64 rule.
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let full = nf::with_cast(&ds, "d", DataType::Float64);
+        let cc = nf::complete_rows(&case, &full);
+        let a = run_mediation_analysis(&full, "y", "d", "m", &["x1", "x2"], na_cfg(0.05)).unwrap();
+        let b = run_mediation_analysis(&cc, "y", "d", "m", &["x1", "x2"], na_cfg(0.05)).unwrap();
+        // same rows in the same order and the same seed: bit-identical, bootstrap included
+        assert_eq!(estimates(&a), estimates(&b));
+        Check::new(&case)
+            .scalar("n_complete", (a.n_obs + a.n_trimmed) as f64, Tol::exact())
+            .scalar("ipw_kept_trim05", a.n_obs as f64, Tol::exact())
+            // logit Newton-Raphson to |step| < 1e-8
+            .scalar("ipw_total_trim05", a.total_effect, Tol::iterative(1e-8))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_mediation_total_effect_causal_na() {
+        // CAUS-25: the covariate matrix is built row by row.
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let cc = nf::complete_rows(&case, &nf::with_cast(&ds, "d", DataType::Float64));
+        let r05 = run_mediation_analysis(&cc, "y", "d", "m", &["x1", "x2"], na_cfg(0.05)).unwrap();
+        let r0 = run_mediation_analysis(&cc, "y", "d", "m", &["x1", "x2"], na_cfg(0.0)).unwrap();
+        Check::new(&case)
+            .scalar("ipw_total_trim05", r05.total_effect, Tol::iterative(1e-8))
+            .scalar("ipw_kept_trim05", r05.n_obs as f64, Tol::exact())
+            .scalar("ipw_total_trim0", r0.total_effect, Tol::iterative(1e-8))
+            .scalar("ipw_kept_trim0", r0.n_obs as f64, Tol::exact())
+            .finish();
+        // the point estimates do not depend on row or covariate order
+        let rev = run_mediation_analysis(
+            &nf::reversed(&cc),
+            "y",
+            "d",
+            "m",
+            &["x1", "x2"],
+            na_cfg(0.05),
+        )
+        .unwrap();
+        let swp = run_mediation_analysis(&cc, "y", "d", "m", &["x2", "x1"], na_cfg(0.05)).unwrap();
+        let t = Tol::new(1e-12, 1e-14);
+        for (label, o) in [("reversed rows", &rev), ("swapped covariates", &swp)] {
+            assert!(
+                t.allows(o.total_effect, r05.total_effect)
+                    && t.allows(o.direct_effect, r05.direct_effect),
+                "{label}: total {} direct {} vs {} {}",
+                o.total_effect,
+                o.direct_effect,
+                r05.total_effect,
+                r05.direct_effect
+            );
+            assert_eq!(o.n_obs, r05.n_obs, "{label}");
+        }
+    }
+
+    #[test]
+    fn test_validate_na_mediation_int64_treatment() {
+        // CAUS-24, X-8: an Int64 or Boolean 0/1 treatment is read as numbers.
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let cc = nf::complete_rows(&case, &ds);
+        assert_eq!(cc.df().column("d").unwrap().dtype(), &DataType::Int64);
+        let run = |data: &Dataset| {
+            run_mediation_analysis(data, "y", "d", "m", &["x1", "x2"], na_cfg(0.05)).unwrap()
+        };
+        let base = run(&cc);
+        for dtype in [DataType::Float64, DataType::Boolean] {
+            let other = run(&nf::with_cast(&cc, "d", dtype.clone()));
+            assert_eq!(estimates(&other), estimates(&base), "{dtype}");
+            assert_eq!(
+                (other.n_obs, other.n_trimmed),
+                (base.n_obs, base.n_trimmed),
+                "{dtype}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_na_mediation_reports_missing() {
+        // T2 design 1.5: the dropped rows are reported.
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let r = run_mediation_analysis(&ds, "y", "d", "m", &["x1", "x2"], na_cfg(0.05)).unwrap();
+        Check::new(&case)
+            .scalar("n_dropped", r.missing.n_dropped as f64, Tol::exact())
+            .scalar("missing_y", nf::by_column(&r.missing, "y"), Tol::exact())
+            .scalar("missing_m", nf::by_column(&r.missing, "m"), Tol::exact())
+            .scalar("missing_x1", nf::by_column(&r.missing, "x1"), Tol::exact())
+            .scalar("n_complete", r.missing.n_used as f64, Tol::exact())
+            .finish();
+        assert_eq!(r.missing.n_total, 400);
+        // request order
+        assert_eq!(
+            r.missing
+                .by_column
+                .iter()
+                .map(|(c, _)| c.as_str())
+                .collect::<Vec<_>>(),
+            ["y", "m", "x1"]
+        );
+        let text = r.to_string();
+        assert!(text.contains("N = 280 (trimmed: 70)"), "{text}");
+        assert!(
+            text.trim_end().ends_with(
+                "Missing values: 50 of 400 rows dropped because of missing values \
+                 (y: 15, m: 25, x1: 10)"
+            ),
+            "{text}"
+        );
+        let cc = run_mediation_analysis(
+            &nf::complete_rows(&case, &ds),
+            "y",
+            "d",
+            "m",
+            &["x1", "x2"],
+            na_cfg(0.05),
+        )
+        .unwrap();
+        assert!(cc.missing.is_empty() && !cc.to_string().contains("Missing values"));
+    }
+
+    #[test]
+    fn test_validate_na_mediation_errors_name_the_column() {
+        // T2 design 2.4 (c) and (d).
+        let (_case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |data: &Dataset, d: &str, m: &str, x: &[&str]| {
+            run_mediation_analysis(data, "y", d, m, x, na_cfg(0.05))
+        };
+        match run(&ds, "d_txt", "m", &["x1", "x2"]) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "d_txt"),
+            other => panic!("text treatment: {other:?}"),
+        }
+        match run(&ds, "d", "mm", &["x1", "x2"]) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "mm"),
+            other => panic!("absent mediator: {other:?}"),
+        }
+        match run(&ds, "d", "m", &["x1", "x9"]) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "x9"),
+            other => panic!("absent covariate: {other:?}"),
+        }
+        let mut df = ds.df().clone();
+        df.with_column(Series::full_null("m".into(), 400, &DataType::Float64))
+            .unwrap();
+        match run(&Dataset::new(df), "d", "m", &["x1", "x2"]) {
+            Err(EconError::InsufficientData {
+                required: 1,
+                provided: 0,
+                ..
+            }) => {}
+            other => panic!("all-missing mediator: {other:?}"),
+        }
     }
 }

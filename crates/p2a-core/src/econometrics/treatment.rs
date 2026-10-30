@@ -23,8 +23,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
@@ -435,21 +436,14 @@ pub fn run_ipw_treatment(
         });
     }
 
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract outcome variable
-    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let y = DesignMatrix::extract_column(dataset.df(), outcome)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     // Extract treatment variable
-    let d = DesignMatrix::extract_column(dataset.df(), treatment).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let d = DesignMatrix::extract_column(dataset.df(), treatment)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = y.len();
 
@@ -466,7 +460,8 @@ pub fn run_ipw_treatment(
     }
 
     // Build design matrix for propensity score model
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariates, true)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariates, true)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
 
     // Estimate propensity scores using logit
@@ -1066,20 +1061,13 @@ pub fn run_doubly_robust(
         });
     }
 
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract variables
-    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let y = DesignMatrix::extract_column(dataset.df(), outcome)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
-    let d = DesignMatrix::extract_column(dataset.df(), treatment).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let d = DesignMatrix::extract_column(dataset.df(), treatment)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = y.len();
 
@@ -1096,7 +1084,8 @@ pub fn run_doubly_robust(
     }
 
     // Build design matrix
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariates, true)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariates, true)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
 
     // Estimate propensity scores
@@ -2394,6 +2383,257 @@ mod tests {
                 "With strong effect, p-value {:.4} should be small",
                 result.p_value
             );
+        }
+    }
+
+    // ── T2-WP13: the R case causal_mediation_na and the shared fixtures ──
+
+    #[test]
+    fn test_validate_causal_na_fixture() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let df = ds.df();
+        // T2 design 2.2: the dtypes the WP13 tests rely on
+        assert_eq!(df.column("d").unwrap().dtype(), &DataType::Int64);
+        assert_eq!(df.column("d_na").unwrap().dtype(), &DataType::Int64);
+        assert_eq!(df.column("d_txt").unwrap().dtype(), &DataType::String);
+        assert_eq!(df.column("x1").unwrap().dtype(), &DataType::Float64);
+        let cc = na_fixtures::complete_rows(&case, &ds);
+        Check::new(&case)
+            .scalar("n_complete", cc.df().height() as f64, Tol::exact())
+            .scalar(
+                "missing_y",
+                df.column("y").unwrap().null_count() as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "missing_m",
+                df.column("m").unwrap().null_count() as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "missing_x1",
+                df.column("x1").unwrap().null_count() as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "missing_d_na",
+                df.column("d_na").unwrap().null_count() as f64,
+                Tol::exact(),
+            )
+            .finish();
+        for c in ["y", "d", "m", "x1", "x2"] {
+            assert_eq!(cc.df().column(c).unwrap().null_count(), 0, "{c}");
+        }
+    }
+
+    #[test]
+    fn test_validate_na_ipw_columns() {
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, y: &str, d: &str, x: &[&str]| {
+            run_ipw_treatment(ds, y, d, x, IpwConfig::default())
+        };
+        na_fixtures::assert_refusals(&case, &ds, true, run);
+        na_fixtures::assert_treatment_dtypes_agree(&case, &ds, run, |r| {
+            vec![r.effect, r.std_error]
+        });
+    }
+
+    #[test]
+    fn test_validate_na_doubly_robust_columns() {
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, y: &str, d: &str, x: &[&str]| {
+            run_doubly_robust(ds, y, d, x, DoublyRobustConfig::default())
+        };
+        na_fixtures::assert_refusals(&case, &ds, true, run);
+        na_fixtures::assert_treatment_dtypes_agree(&case, &ds, run, |r| {
+            vec![r.effect, r.std_error]
+        });
+    }
+
+    #[test]
+    fn test_validate_na_ipw_nan_outcome_is_missing() {
+        // T2 design 2.2: a NaN cell is missing, like a null.
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let data = na_fixtures::with_nan(&na_fixtures::complete_rows(&case, &ds), "y", 0);
+        match run_ipw_treatment(&data, "y", "d", &["x1", "x2"], IpwConfig::default()) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("y", 1));
+            }
+            other => panic!("NaN outcome: expected NullValues {{ y, 1 }}, got {other:?}"),
+        }
+    }
+}
+
+/// Test-only fixtures shared by the T2-WP13 tests of the mediation, weighting, matching,
+/// TMLE and standardisation modules. They read the R case `causal_mediation_na`
+/// (`validation/r/cases/causal_mediation_na.R`): 400 rows with missing `y`, `m` and `x1`
+/// cells, an Int64 0/1 treatment `d`, a treatment with missing values `d_na` and a text
+/// treatment `d_txt`.
+#[cfg(test)]
+pub(super) mod na_fixtures {
+    use crate::data::Dataset;
+    use crate::data::columns::MissingSummary;
+    use crate::errors::{EconError, EconResult};
+    use p2a_validation::{Case, Tol};
+    use polars::prelude::*;
+
+    /// The rows of case value `complete_rows` (R's `complete.cases` over y, d, m, x1, x2),
+    /// in order.
+    pub(crate) fn complete_rows(case: &Case, ds: &Dataset) -> Dataset {
+        let idx = IdxCa::from_vec(
+            "rows".into(),
+            case.vector("complete_rows")
+                .iter()
+                .map(|&r| r as IdxSize)
+                .collect(),
+        );
+        Dataset::new(ds.df().take(&idx).expect("complete_rows are row indices"))
+    }
+
+    /// `ds` with column `col` cast to `dtype`.
+    pub(crate) fn with_cast(ds: &Dataset, col: &str, dtype: DataType) -> Dataset {
+        let mut df = ds.df().clone();
+        let cast = df
+            .column(col)
+            .expect("fixture column")
+            .cast(&dtype)
+            .expect("fixture cast");
+        df.with_column(cast).expect("same height");
+        Dataset::new(df)
+    }
+
+    /// `ds` with column `col` as Float64 and a NaN at `row` (the one Rust-built NaN fixture
+    /// of T2 design 2.2: the harness cannot write a NaN).
+    pub(crate) fn with_nan(ds: &Dataset, col: &str, row: usize) -> Dataset {
+        let mut df = ds.df().clone();
+        let values: Vec<Option<f64>> = df
+            .column(col)
+            .expect("fixture column")
+            .cast(&DataType::Float64)
+            .expect("numeric fixture column")
+            .f64()
+            .expect("Float64 after the cast")
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i == row { Some(f64::NAN) } else { v })
+            .collect();
+        df.with_column(Column::new(col.into(), values))
+            .expect("same height");
+        Dataset::new(df)
+    }
+
+    /// `ds` with its rows in reverse order.
+    pub(crate) fn reversed(ds: &Dataset) -> Dataset {
+        Dataset::new(ds.df().reverse())
+    }
+
+    /// The missing-cell count of `col` in `m`; 0 when the column has none.
+    pub(crate) fn by_column(m: &MissingSummary, col: &str) -> f64 {
+        m.by_column
+            .iter()
+            .find(|(c, _)| c == col)
+            .map_or(0.0, |(_, k)| *k as f64)
+    }
+
+    /// The bit patterns of `v`, for bit-identity assertions.
+    pub(crate) fn bits(v: &[f64]) -> Vec<u64> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    fn count(case: &Case, key: &str) -> usize {
+        case.scalar(key) as usize
+    }
+
+    fn expect_null<T: std::fmt::Debug>(step: &str, r: EconResult<T>, col: &str, k: usize) {
+        match r {
+            Err(EconError::NullValues { column, count }) if column == col && count == k => {}
+            other => panic!(
+                "{step}: expected NullValues {{ column: {col:?}, count: {k} }}, got {other:?}"
+            ),
+        }
+    }
+
+    /// The refusals every Fail-policy estimator of T2-WP13 must give on the case data,
+    /// in this order (each fails at extraction, so no estimation runs):
+    /// 1. if `has_outcome`: outcome `y` -> `NullValues { "y", missing_y }`;
+    /// 2. treatment `d_na` -> `NullValues { "d_na", missing_d_na }`;
+    /// 3. covariates `x1, x2` -> `NullValues { "x1", missing_x1 }`;
+    /// 4. treatment `d_txt` -> `NonNumericColumn { "d_txt" }`;
+    /// 5. treatment `dd` -> `ColumnNotFound { "dd", available }` with `d` available.
+    ///
+    /// `run(ds, outcome, treatment, covariates)`; estimators without an outcome ignore it.
+    pub(crate) fn assert_refusals<T: std::fmt::Debug>(
+        case: &Case,
+        ds: &Dataset,
+        has_outcome: bool,
+        run: impl Fn(&Dataset, &str, &str, &[&str]) -> EconResult<T>,
+    ) {
+        if has_outcome {
+            expect_null(
+                "step 1 (outcome y)",
+                run(ds, "y", "d", &["x2"]),
+                "y",
+                count(case, "missing_y"),
+            );
+        }
+        expect_null(
+            "step 2 (treatment d_na)",
+            run(ds, "x2", "d_na", &["x2"]),
+            "d_na",
+            count(case, "missing_d_na"),
+        );
+        expect_null(
+            "step 3 (covariate x1)",
+            run(ds, "x2", "d", &["x1", "x2"]),
+            "x1",
+            count(case, "missing_x1"),
+        );
+        match run(ds, "x2", "d_txt", &["x2"]) {
+            Err(EconError::NonNumericColumn { column }) if column == "d_txt" => {}
+            other => panic!(
+                "step 4 (text treatment d_txt): expected NonNumericColumn {{ d_txt }}, \
+                 got {other:?}"
+            ),
+        }
+        match run(ds, "x2", "dd", &["x2"]) {
+            Err(EconError::ColumnNotFound { column, available })
+                if column == "dd" && available.iter().any(|c| c == "d") => {}
+            other => panic!(
+                "step 5 (absent treatment dd): expected ColumnNotFound {{ dd }} listing d, \
+                 got {other:?}"
+            ),
+        }
+    }
+
+    /// On the complete rows, `run(.., "y", "d", ["x1", "x2"])` with `d` as loaded (Int64),
+    /// cast to Float64 and cast to Boolean gives the same `key` within
+    /// `Tol::new(1e-12, 1e-14)` (not bit equality: matching and the bootstraps use rayon).
+    pub(crate) fn assert_treatment_dtypes_agree<T>(
+        case: &Case,
+        ds: &Dataset,
+        run: impl Fn(&Dataset, &str, &str, &[&str]) -> EconResult<T>,
+        key: impl Fn(&T) -> Vec<f64>,
+    ) {
+        let cc = complete_rows(case, ds);
+        assert_eq!(cc.df().column("d").unwrap().dtype(), &DataType::Int64);
+        let fit = |data: &Dataset, label: &str| match run(data, "y", "d", &["x1", "x2"]) {
+            Ok(r) => key(&r),
+            Err(e) => panic!("treatment d as {label}: {e:?}"),
+        };
+        let base = fit(&cc, "Int64");
+        assert!(!base.is_empty(), "key gave no values");
+        let tol = Tol::new(1e-12, 1e-14);
+        for dtype in [DataType::Float64, DataType::Boolean] {
+            let label = format!("{dtype}");
+            let other = fit(&with_cast(&cc, "d", dtype), &label);
+            assert_eq!(other.len(), base.len(), "{label}: key length");
+            for (i, (&a, &b)) in other.iter().zip(&base).enumerate() {
+                assert!(
+                    tol.allows(a, b),
+                    "{label}: key[{i}] = {a:?}, Int64 gave {b:?}"
+                );
+            }
         }
     }
 }

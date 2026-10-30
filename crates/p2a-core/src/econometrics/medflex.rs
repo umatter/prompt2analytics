@@ -71,6 +71,7 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::{safe_inverse, xtx, xty};
 use crate::resource;
@@ -226,6 +227,11 @@ pub struct MedflexResult {
     pub scale: EffectScale,
     /// Confidence level
     pub confidence_level: f64,
+
+    /// Rows dropped because of missing values (`run_medflex_dataset`); empty for
+    /// `run_medflex`, whose arrays are used as given.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for MedflexResult {
@@ -356,6 +362,9 @@ impl fmt::Display for MedflexResult {
             f,
             "Signif. codes: *** p<0.001, ** p<0.01, * p<0.05, . p<0.10"
         )?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -587,6 +596,7 @@ pub fn run_medflex(
         interaction_included: config.allow_interaction,
         scale: config.scale,
         confidence_level: config.confidence_level,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -999,6 +1009,12 @@ use crate::data::Dataset;
 /// * `confounders` - Names of confounder columns (can be empty)
 /// * `config` - Configuration options
 ///
+/// # Missing values and column types
+///
+/// Rows with a missing value (null or NaN) in the outcome, treatment, mediator or a
+/// confounder are dropped before estimation and reported in `missing`; integer and
+/// boolean columns are read as numbers.
+///
 /// # Example
 ///
 /// ```ignore
@@ -1024,92 +1040,38 @@ pub fn run_medflex_dataset(
     confounders: &[&str],
     config: MedflexConfig,
 ) -> EconResult<MedflexResult> {
-    let df = dataset.df();
-    let n = df.height();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Extract outcome
-    let y_col = df.column(outcome).map_err(|_| EconError::ColumnNotFound {
-        column: outcome.to_string(),
-        available: available_cols.clone(),
-    })?;
-    let y: Array1<f64> = y_col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: outcome.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract treatment
-    let t_col = df
-        .column(treatment)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: treatment.to_string(),
-            available: available_cols.clone(),
-        })?;
-    let t: Array1<f64> = t_col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: treatment.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract mediator
-    let m_col = df.column(mediator).map_err(|_| EconError::ColumnNotFound {
-        column: mediator.to_string(),
-        available: available_cols.clone(),
-    })?;
-    let m: Array1<f64> = m_col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: mediator.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Extract confounders
-    let mut c_data: Vec<f64> = Vec::with_capacity(n * confounders.len());
-    for conf_name in confounders {
-        let col = df
-            .column(conf_name)
-            .map_err(|_| EconError::ColumnNotFound {
-                column: conf_name.to_string(),
-                available: available_cols.clone(),
-            })?;
-        let vals: Vec<f64> = col
-            .f64()
-            .map_err(|_| EconError::NonNumericColumn {
-                column: conf_name.to_string(),
-            })?
-            .into_no_null_iter()
-            .collect();
-        c_data.extend(vals);
-    }
-
+    // One request over every model variable, so the mediator and outcome models are
+    // fitted on the same complete rows (R lm na.omit). Integer and boolean columns are
+    // read as numbers.
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(outcome)
+        .numeric(treatment)
+        .numeric(mediator)
+        .numerics(confounders)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let (y, t, m) = (
+        cols.numeric_array(outcome),
+        cols.numeric_array(treatment),
+        cols.numeric_array(mediator),
+    );
     let c = if confounders.is_empty() {
-        Array2::zeros((n, 0))
+        Array2::zeros((cols.n(), 0))
     } else {
-        // Data is column-major from extraction, reshape accordingly
-        Array2::from_shape_vec((confounders.len(), n), c_data)
-            .map_err(|e| EconError::Internal(format!("Failed to create confounder matrix: {}", e)))?
-            .t()
-            .to_owned()
+        cols.matrix(confounders, false).data
     };
-
-    run_medflex(&y.view(), &t.view(), &m.view(), &c.view(), config)
+    let mut result = run_medflex(&y.view(), &t.view(), &m.view(), &c.view(), config)?;
+    result.missing = cols.missing().clone();
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::econometrics::treatment::na_fixtures as nf;
     use crate::resource::{self, Budget, CancelToken};
     use ndarray::array;
+    use p2a_validation::{Case, Check, Tol};
     use polars::prelude::*;
 
     fn expect_invalid_spec(err: EconError, needle: &str) {
@@ -1504,5 +1466,182 @@ mod tests {
             "Proportion mediated {} out of bounds",
             result.proportion_mediated
         );
+    }
+
+    // =========================================================================
+    // T2-WP13: missing values and column types (R case causal_mediation_na)
+    // =========================================================================
+
+    /// Delta-method SEs, so the bootstrap count rule does not apply.
+    fn na_cfg(allow_interaction: bool) -> MedflexConfig {
+        MedflexConfig {
+            allow_interaction,
+            bootstrap_ci: false,
+            ..Default::default()
+        }
+    }
+
+    /// The mediator model, group counts and means: the same with and without interaction.
+    fn check_mediator_side(check: &mut Check<'_>, r: &MedflexResult) {
+        let n = r.n_obs;
+        check
+            .scalar("n_complete", n as f64, Tol::exact())
+            .scalar("n_treated", r.n_treated as f64, Tol::exact())
+            .scalar("n_control", r.n_control as f64, Tol::exact())
+            .scalar("mean_m_control", r.mediator_mean_control, Tol::coef(n))
+            .scalar("mean_m_treated", r.mediator_mean_treated, Tol::coef(n))
+            .named_subset("med_coef", &["d"], &["d"], &[r.mediator_coef], Tol::coef(n))
+            .named_subset("med_se", &["d"], &["d"], &[r.mediator_coef_se], Tol::se(n))
+            .scalar("med_r2", r.mediator_r_squared, Tol::stat(n));
+    }
+
+    fn check_no_interaction(case: &Case, r: &MedflexResult) {
+        let n = r.n_obs;
+        let mut check = Check::new(case);
+        check_mediator_side(&mut check, r);
+        check
+            .named_subset(
+                "out_coef",
+                &["d", "m"],
+                &["d", "m"],
+                &[r.direct_coef, r.mediator_outcome_coef],
+                Tol::coef(n),
+            )
+            .named_subset(
+                "out_se",
+                &["d", "m"],
+                &["d", "m"],
+                &[r.direct_coef_se, r.mediator_outcome_coef_se],
+                Tol::se(n),
+            )
+            .scalar("out_r2", r.outcome_r_squared, Tol::stat(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_medflex_causal_na() {
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |data: &Dataset| {
+            run_medflex_dataset(data, "y", "d", "m", &["x1", "x2"], na_cfg(false)).unwrap()
+        };
+        // the null rule alone (Float64 d), then the Int64 column as loaded
+        check_no_interaction(&case, &run(&nf::with_cast(&ds, "d", DataType::Float64)));
+        check_no_interaction(&case, &run(&ds));
+    }
+
+    #[test]
+    fn test_validate_medflex_interaction_causal_na() {
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let r = run_medflex_dataset(&ds, "y", "d", "m", &["x1", "x2"], na_cfg(true)).unwrap();
+        let n = r.n_obs;
+        let names = ["d", "m", "d:m"];
+        let mut check = Check::new(&case);
+        check_mediator_side(&mut check, &r);
+        check
+            .named_subset(
+                "outi_coef",
+                &names,
+                &names,
+                &[
+                    r.direct_coef,
+                    r.mediator_outcome_coef,
+                    r.interaction_coef.unwrap(),
+                ],
+                Tol::coef(n),
+            )
+            .named_subset(
+                "outi_se",
+                &names,
+                &names,
+                &[
+                    r.direct_coef_se,
+                    r.mediator_outcome_coef_se,
+                    r.interaction_coef_se.unwrap(),
+                ],
+                Tol::se(n),
+            )
+            .scalar("outi_r2", r.outcome_r_squared, Tol::stat(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_na_medflex_reports_missing() {
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let r = run_medflex_dataset(&ds, "y", "d", "m", &["x1", "x2"], na_cfg(false)).unwrap();
+        assert_eq!(
+            (r.missing.n_total, r.missing.n_used, r.missing.n_dropped),
+            (400, 350, 50)
+        );
+        assert_eq!(
+            r.missing.by_column,
+            [
+                ("y".to_string(), 15),
+                ("m".to_string(), 25),
+                ("x1".to_string(), 10)
+            ]
+        );
+        Check::new(&case)
+            .scalar("n_dropped", r.missing.n_dropped as f64, Tol::exact())
+            .scalar("missing_y", nf::by_column(&r.missing, "y"), Tol::exact())
+            .scalar("missing_m", nf::by_column(&r.missing, "m"), Tol::exact())
+            .scalar("missing_x1", nf::by_column(&r.missing, "x1"), Tol::exact())
+            .finish();
+        let text = r.to_string();
+        assert!(
+            text.contains("N = 350 (treated: 197, control: 153)"),
+            "{text}"
+        );
+        assert!(
+            text.trim_end().ends_with(
+                "Missing values: 50 of 400 rows dropped because of missing values \
+                 (y: 15, m: 25, x1: 10)"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::to_value(&r).unwrap()["missing"]["n_dropped"],
+            50
+        );
+        // complete rows: nothing dropped, no key, no line
+        let cc = run_medflex_dataset(
+            &nf::complete_rows(&case, &ds),
+            "y",
+            "d",
+            "m",
+            &["x1", "x2"],
+            na_cfg(false),
+        )
+        .unwrap();
+        let old = serde_json::to_value(&cc).unwrap();
+        assert!(old.get("missing").is_none(), "{old}");
+        assert!(!cc.to_string().contains("Missing values"));
+        // a result serialised before the field existed reads back as "nothing dropped"
+        let back: MedflexResult = serde_json::from_value(old).unwrap();
+        assert!(back.missing.is_empty());
+    }
+
+    #[test]
+    fn test_validate_na_medflex_errors_name_the_column() {
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        match run_medflex_dataset(&ds, "y", "d_txt", "m", &["x1", "x2"], na_cfg(false)) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "d_txt"),
+            other => panic!("text treatment: {other:?}"),
+        }
+        match run_medflex_dataset(&ds, "y", "d", "m", &["x1", "x9"], na_cfg(false)) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "x9"),
+            other => panic!("absent confounder: {other:?}"),
+        }
+        let cc = nf::complete_rows(&case, &ds);
+        let r = run_medflex_dataset(
+            &nf::with_nan(&cc, "m", 0),
+            "y",
+            "d",
+            "m",
+            &["x1", "x2"],
+            na_cfg(false),
+        )
+        .unwrap();
+        assert_eq!(r.missing.by_column, [("m".to_string(), 1)]);
+        assert_eq!((r.missing.n_dropped, r.n_obs), (1, 349));
     }
 }

@@ -256,6 +256,50 @@ println!("NDE: {}", result.direct_effect);
 println!("NIE: {}", result.indirect_effect);
 ```
 
+## Missing values and column types
+
+Rows with a missing value (null or NaN) in the outcome, treatment, mediator or a covariate
+are dropped jointly before either propensity model is fitted, and the drop is reported in
+`MediationResult.missing` and in a last Display line (also in the MCP text of
+`mediation_analysis`):
+`Missing values: 50 of 400 rows dropped because of missing values (y: 15, m: 25, x1: 10)`.
+`N` counts the complete rows kept after trimming; `n_obs + n_trimmed` is the number of
+complete rows. Int64 and Boolean columns are read as numbers (a 0/1 Int64 treatment used to
+be refused as non-numeric); a text column gives `NonNumericColumn`, an absent one
+`ColumnNotFound`.
+
+R: `mediation::mediate` (mediation 4.5.1) refuses a mediator and an outcome model fitted on
+different rows ("number of observations do not match between mediator and outcome
+models"); with both models fitted on the complete rows it runs. p2a therefore fits both
+propensity models on the same complete rows.
+
+### R reference (T2-WP13)
+
+Case `causal_mediation_na` (`validation/r/cases/causal_mediation_na.R`, generated dataset
+`validation/datasets/generated/causal_na.csv`, registry `validation/methods/causal_na.json`,
+id `mediation_na`): 400 simulated rows with a confounded 0/1 treatment `d` (Int64), 15
+missing outcomes, 25 missing mediators and 10 missing `x1` values; 350 rows are complete.
+
+| Quantity | R | Tolerance |
+|---|---|---|
+| complete rows, rows dropped | 350, 50 | exact |
+| missing cells `y`, `m`, `x1` | 15, 25, 10 | exact |
+| total effect, trim 0.05 (rows kept) | 0.7351820850179664 (280) | `Tol::iterative(1e-8)` (logit Newton-Raphson to a step below 1e-8); rows exact |
+| total effect, trim 0 (rows kept) | 1.0005110336992182 (350) | `Tol::iterative(1e-8)`; rows exact |
+| total effect in the MCP text | 0.7352 | `Tol::printed(4)` |
+
+The total effect is the Hajek IPW formula on `glm(binomial, epsilon = 1e-14)` propensity
+scores of `d` on `(x1, x2)` and `(x1, x2, m)`, with p2a's trimming rule; it is a formula
+cross-check, because causalweight is not installed. Tests (p2a-core,
+`econometrics::mediation`): `test_validate_mediation_na_omit_causal_na`,
+`test_validate_mediation_total_effect_causal_na`, `test_validate_na_mediation_int64_treatment`,
+`test_validate_na_mediation_reports_missing`, `test_validate_na_mediation_errors_name_the_column`;
+MCP (`crates/p2a-mcp/tests/tier2/wp13_causal.rs`): `test_validate_mcp_mediation_analysis_causal_na`.
+
+Until T2-WP13 the covariate matrix was scrambled (CAUS-25): it was filled column by column
+and reshaped row-major, so the estimates depended on the row and covariate order (total
+effect 1.3683 on this case). The direct and indirect effects are not pinned (CAUS-26).
+
 ## References
 
 - Huber, M. (2014). "Identifying Causal Mechanisms (Primarily) Based on Inverse Probability Weighting." *Journal of Applied Econometrics*, 29, 920-943.

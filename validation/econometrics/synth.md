@@ -245,6 +245,30 @@ cargo test -p p2a-core -- synth --nocapture
 Rscript synth_comparison.R
 ```
 
+## Missing values and column types
+
+Data requirements of `run_synthetic_control` (MCP `synthetic_control`, CLI `causal synth`):
+
+- one row per (unit, time): a duplicate row is "synthetic control needs one row per (unit,
+  time): {k} duplicate row(s) (first: unit '{u}', time {t}). Remove the duplicates first.";
+- unit and time labels are never missing: a null label is `NullValues` naming the column;
+- the outcome is present in every optimisation-window and post-treatment cell of the treated
+  unit and the donors: a missing value there is "Outcome '{outcome}' is missing (null or NaN)
+  for unit '{u}' at time {t}.", an absent cell "No data for unit '{u}' at time {t}";
+- predictors are aggregated (mean, first, last or sum) over the values present in their
+  window;
+- integer outcomes and predictors are read as numbers; unit ids may be text, integers or
+  floats (`treated_unit` is matched against the label, e.g. "3"); times are integers,
+  whole-number floats or dates.
+
+Donors are in sorted order (R `factor()` order); they followed a hash-set order. The panel is
+indexed once, so building the matrices is O(n) instead of one frame scan per cell. Weights
+and effects on valid data are unchanged.
+
+Tests (p2a-core, `econometrics::synth::tests`): `test_na_synth_integer_outcome_and_unit_ids`,
+`test_na_synth_duplicate_cell`, `test_na_synth_missing_outcome_cell`,
+`test_na_synth_null_unit_label`. Not R-pinned (Synth is not installed here).
+
 ## References
 
 - Abadie, A. & Gardeazabal, J. (2003). "The Economic Costs of Conflict: A Case Study of the Basque Country." *American Economic Review*, 93(1), 112-132.

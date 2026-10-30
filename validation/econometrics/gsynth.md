@@ -27,7 +27,7 @@ The method uses control units in the pre-treatment period to estimate factors an
 
 | Package | Language | Function | Version Tested |
 |---------|----------|----------|----------------|
-| gsynth | R | `gsynth()` | 1.2.1 |
+| gsynth | R | `gsynth()` | 1.2.1 (numbers); 1.4.0 (missing-value behaviour) |
 
 ## Test Cases
 
@@ -179,6 +179,42 @@ The Rust implementation achieves significant speedups due to:
 - Pre-allocated matrices for factor computation
 - Regularized matrix inversions for numerical stability
 - Minimal memory allocations during counterfactual construction
+
+## Missing values and column types
+
+Data requirements: one row per (unit, time) of a balanced panel, with no missing value (null
+or NaN) in the outcome, treatment, unit, time or covariate columns. Times are whole numbers
+or dates; units may be text, integers, floats, booleans or dates; integer and boolean
+treatments are read as numbers. The panel is checked before any units x periods matrix is
+built:
+
+- a missing value: `NullValues` naming the column, e.g. "Column 'outcome' contains 1 missing
+  value(s) (null or NaN). Drop or impute them first.";
+- a duplicate (unit, time) row: "gsynth needs one row per (unit, time): {k} duplicate row(s)
+  (first: unit '{u}', time {t}). Remove the duplicates first.";
+- a missing (unit, time) cell: "gsynth needs a balanced panel: {k} (unit, time) cell(s) are
+  missing (first: unit '{u}', time {t}). p2a's gsynth has no estimator for unbalanced panels
+  (R's gsynth imputes missing cells); fill or drop them first.";
+- a fractional time: "Time column 'time' must hold whole numbers; row {i} (0-based) is {v}.
+  Round or recode it first."
+
+Before T2-WP13 a missing outcome was read as 0, a missing cell stayed NaN until the factor
+step failed with a linear-algebra error, a duplicate row silently overwrote its twin and a
+fractional time was truncated.
+
+R gsynth 1.4.0 (checked for T2-WP13) behaves differently: it imputes missing cells and missing
+outcomes (EM), refuses duplicates ("Observations are not uniquely defined by unit and time
+indicators."), and accepts decimal times. p2a does not implement the EM step, so it refuses
+those inputs with the messages above.
+
+Units are in sorted order (R `factor()` order), so `unit_effects` and the cross-validation
+folds are deterministic; they followed a hash-set order that changed between processes.
+
+Tests (p2a-core, `econometrics::synth::gsynth_tests`): `test_na_gsynth_missing_cell`,
+`test_na_gsynth_duplicate_cell`, `test_na_gsynth_null_outcome`,
+`test_na_gsynth_fractional_time`, `test_na_gsynth_boolean_treatment`,
+`test_gsynth_unit_order_is_deterministic`; MCP (`crates/p2a-mcp/tests/tier2/wp13_causal.rs`):
+`test_mcp_gsynth_unbalanced_panel_is_explained`. Not R-pinned.
 
 ## References
 

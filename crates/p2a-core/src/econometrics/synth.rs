@@ -24,11 +24,13 @@
 use ndarray::{Array1, Array2};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy, numeric_options};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::get_column_names;
 use crate::traits::estimator::SignificanceLevel;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -392,6 +394,17 @@ struct SynthData {
 /// - Abadie, Diamond, Hainmueller (2010), JASA 105(490), 493-505.
 /// - Equation numbers reference that paper.
 ///
+/// # Data requirements
+///
+/// One row per (unit, time): a duplicate (unit, time) row is an error, and so is a
+/// missing (null) unit or time label. The outcome must be present in every
+/// optimisation-window and post-treatment cell of the treated unit and the donors; a
+/// missing value there is named ("Outcome 'y' is missing (null or NaN) for unit 'B' at
+/// time 2."). Predictors are aggregated over the values present in their window. Integer
+/// outcomes and predictors are read as numbers; unit ids may be text, integers or floats
+/// (`treated_unit` is matched against their label, e.g. "3"), times integers,
+/// whole-number floats or dates. Donors are in sorted order (R `factor()` order).
+///
 /// # Example
 /// ```ignore
 /// let predictors = vec![
@@ -605,52 +618,21 @@ fn prepare_synth_data(
 ) -> EconResult<SynthData> {
     let df = dataset.df();
 
-    // Get unique units and times
-    let units: Vec<String> = df
-        .column(unit_col)
-        .map_err(|e| EconError::ColumnNotFound {
-            column: unit_col.to_string(),
-            available: get_column_names(dataset.df()),
-        })?
-        .str()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Unit column '{}' must be string type", unit_col),
-        })?
-        .into_iter()
-        .filter_map(|s: Option<&str>| s.map(|s| s.to_string()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    let times: Vec<i64> = df
-        .column(time_col)
-        .map_err(|e| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: get_column_names(dataset.df()),
-        })?
-        .i64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Time column '{}' must be integer type", time_col),
-        })?
-        .into_iter()
-        .flatten()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    let mut times = times;
-    times.sort();
+    // The (unit, time) index, read once: units in R factor() order, missing unit or
+    // time labels and duplicate cells refused.
+    let panel = read_synth_panel(df, unit_col, time_col)?;
+    let times = &panel.times;
 
     // Validate treated unit exists
-    if !units.contains(&treated_unit.to_string()) {
+    let Some(treated) = panel.units.iter().position(|u| u == treated_unit) else {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Treated unit '{}' not found in data. Available units: {:?}",
                 treated_unit,
-                units.iter().take(10).collect::<Vec<_>>()
+                panel.units.iter().take(10).collect::<Vec<_>>()
             ),
         });
-    }
+    };
 
     // Split into pre and post treatment periods
     let pre_times: Vec<i64> = times
@@ -674,8 +656,9 @@ fn prepare_synth_data(
         });
     }
 
-    // Get donor units (all except treated)
-    let donor_units: Vec<String> = units.into_iter().filter(|u| u != treated_unit).collect();
+    // Donor units: every unit but the treated one, in level order
+    let donors: Vec<usize> = (0..panel.units.len()).filter(|&u| u != treated).collect();
+    let donor_units: Vec<String> = donors.iter().map(|&u| panel.units[u].clone()).collect();
 
     // Determine optimization window
     let opt_times: Vec<i64> = match optimization_window {
@@ -693,6 +676,17 @@ fn prepare_synth_data(
         });
     }
 
+    // The outcome and each distinct predictor column, read once (strict numeric:
+    // integers and booleans accepted, null or NaN as a missing value, infinite values
+    // refused).
+    let mut values: HashMap<&str, Vec<Option<f64>>> = HashMap::new();
+    values.insert(outcome, numeric_options(df, outcome)?);
+    for spec in predictors {
+        if !values.contains_key(spec.column.as_str()) {
+            values.insert(spec.column.as_str(), numeric_options(df, &spec.column)?);
+        }
+    }
+
     // Build predictor matrices
     let k = predictors.len();
     let j = donor_units.len();
@@ -705,8 +699,8 @@ fn prepare_synth_data(
     )?;
     let mut predictor_names = Vec::with_capacity(k);
 
-    // Each get_outcome call filters the whole frame, so building these matrices
-    // is O(cells x n); the budget checks let a deadline stop it.
+    // Each cell is a lookup in the panel index, so building these matrices is
+    // O(cells); the budget checks let a deadline stop it.
     for (p_idx, pred_spec) in predictors.iter().enumerate() {
         crate::resource::checkpoint()?;
 
@@ -729,25 +723,25 @@ fn prepare_synth_data(
         );
         predictor_names.push(pred_name);
 
+        let column = &values[pred_spec.column.as_str()];
+
         // Get treated unit predictor value
         x1[p_idx] = aggregate_predictor(
-            df,
+            &panel,
+            column,
             &pred_spec.column,
-            unit_col,
-            time_col,
-            treated_unit,
+            treated,
             &pred_times,
             &pred_spec.aggregation,
         )?;
 
         // Get donor unit predictor values
-        for (d_idx, donor) in donor_units.iter().enumerate() {
+        for (d_idx, &donor) in donors.iter().enumerate() {
             crate::resource::checkpoint()?;
             x0[[p_idx, d_idx]] = aggregate_predictor(
-                df,
+                &panel,
+                column,
                 &pred_spec.column,
-                unit_col,
-                time_col,
                 donor,
                 &pred_times,
                 &pred_spec.aggregation,
@@ -772,25 +766,27 @@ fn prepare_synth_data(
         "synthetic-control outcome matrix (post-treatment periods x donors)",
     )?;
 
+    let y = &values[outcome];
+
     // Pre-treatment outcomes
     for (t_idx, &time) in opt_times.iter().enumerate() {
         crate::resource::checkpoint()?;
-        z1[t_idx] = get_outcome(df, outcome, unit_col, time_col, treated_unit, time)?;
+        z1[t_idx] = get_outcome(&panel, y, outcome, treated, time)?;
 
-        for (d_idx, donor) in donor_units.iter().enumerate() {
+        for (d_idx, &donor) in donors.iter().enumerate() {
             crate::resource::checkpoint()?;
-            z0[[t_idx, d_idx]] = get_outcome(df, outcome, unit_col, time_col, donor, time)?;
+            z0[[t_idx, d_idx]] = get_outcome(&panel, y, outcome, donor, time)?;
         }
     }
 
     // Post-treatment outcomes
     for (t_idx, &time) in post_times.iter().enumerate() {
         crate::resource::checkpoint()?;
-        y1_post[t_idx] = get_outcome(df, outcome, unit_col, time_col, treated_unit, time)?;
+        y1_post[t_idx] = get_outcome(&panel, y, outcome, treated, time)?;
 
-        for (d_idx, donor) in donor_units.iter().enumerate() {
+        for (d_idx, &donor) in donors.iter().enumerate() {
             crate::resource::checkpoint()?;
-            y0_post[[t_idx, d_idx]] = get_outcome(df, outcome, unit_col, time_col, donor, time)?;
+            y0_post[[t_idx, d_idx]] = get_outcome(&panel, y, outcome, donor, time)?;
         }
     }
 
@@ -808,109 +804,135 @@ fn prepare_synth_data(
     })
 }
 
-/// Aggregate predictor values over time for a specific unit.
-fn aggregate_predictor(
-    df: &DataFrame,
-    column: &str,
-    unit_col: &str,
-    time_col: &str,
-    unit: &str,
-    times: &[i64],
-    aggregation: &TimeAggregation,
-) -> EconResult<f64> {
-    let mut values = Vec::new();
+/// The (unit, time) index of a synthetic-control panel.
+struct SynthPanel {
+    /// Unit labels in R `factor()` order.
+    units: Vec<String>,
+    /// The distinct time periods, ascending.
+    times: Vec<i64>,
+    /// The frame row of each (unit level, time) cell.
+    cell: HashMap<(usize, i64), usize>,
+}
 
-    for &time in times {
-        if let Ok(val) = get_outcome(df, column, unit_col, time_col, unit, time) {
-            if val.is_finite() {
-                values.push(val);
+/// Index a synthetic-control panel in one pass over the rows: the unit as a factor, the
+/// time as a whole-number index (or date), a missing unit or time label refused with
+/// `NullValues`, and a duplicate (unit, time) row an `InvalidSpecification` naming the
+/// first repeated cell.
+fn read_synth_panel(df: &DataFrame, unit_col: &str, time_col: &str) -> EconResult<SynthPanel> {
+    let cols = ColumnRequest::new(df)
+        .factor(unit_col)
+        .time_index(time_col)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let unit = cols.factor(unit_col);
+    let time = cols.time_index(time_col);
+    let n = cols.n();
+
+    let what = "synthetic-control panel index";
+    let mut cell: HashMap<(usize, i64), usize> = HashMap::new();
+    cell.try_reserve(n).map_err(|_| {
+        crate::resource::reserve_failed(what, n, std::mem::size_of::<((usize, i64), usize)>())
+    })?;
+    let mut duplicates = 0usize;
+    let mut first_duplicate = None;
+    for (i, (&code, &t)) in unit.codes.iter().zip(time).enumerate() {
+        match cell.entry((code as usize, t)) {
+            Entry::Occupied(_) => {
+                duplicates += 1;
+                first_duplicate.get_or_insert(i);
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(cols.rows()[i]);
             }
         }
     }
+    if let Some(i) = first_duplicate {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "synthetic control needs one row per (unit, time): {duplicates} duplicate \
+                 row(s) (first: unit '{}', time {}). Remove the duplicates first.",
+                unit.label(i),
+                time[i]
+            ),
+        });
+    }
 
-    if values.is_empty() {
+    let mut times: Vec<i64> =
+        crate::resource::try_with_capacity(n, "synthetic-control time periods")?;
+    times.extend_from_slice(time);
+    times.sort_unstable();
+    times.dedup();
+
+    Ok(SynthPanel {
+        units: unit.levels.clone(),
+        times,
+        cell,
+    })
+}
+
+/// Aggregate a predictor over `times` for unit level `unit`. Absent cells and missing
+/// values are skipped (the aggregate is over the present values).
+fn aggregate_predictor(
+    panel: &SynthPanel,
+    values: &[Option<f64>],
+    column: &str,
+    unit: usize,
+    times: &[i64],
+    aggregation: &TimeAggregation,
+) -> EconResult<f64> {
+    let (mut count, mut sum, mut first, mut last) = (0usize, 0.0, f64::NAN, f64::NAN);
+    for &time in times {
+        if let Some(&row) = panel.cell.get(&(unit, time))
+            && let Some(v) = values[row]
+        {
+            if count == 0 {
+                first = v;
+            }
+            last = v;
+            sum += v;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "No valid values for predictor '{}' for unit '{}' in specified time window",
-                column, unit
+                column, panel.units[unit]
             ),
         });
     }
 
     let result = match aggregation {
-        TimeAggregation::Mean => values.iter().sum::<f64>() / values.len() as f64,
-        TimeAggregation::First => values[0],
-        TimeAggregation::Last => *values.last().unwrap(),
-        TimeAggregation::Sum => values.iter().sum(),
+        TimeAggregation::Mean => sum / count as f64,
+        TimeAggregation::First => first,
+        TimeAggregation::Last => last,
+        TimeAggregation::Sum => sum,
     };
 
     Ok(result)
 }
 
-/// Get outcome value for a specific unit at a specific time.
+/// The outcome of unit level `unit` at `time`: `values` holds one entry per frame row.
 fn get_outcome(
-    df: &DataFrame,
+    panel: &SynthPanel,
+    values: &[Option<f64>],
     outcome: &str,
-    unit_col: &str,
-    time_col: &str,
-    unit: &str,
+    unit: usize,
     time: i64,
 ) -> EconResult<f64> {
-    // Filter to the specific unit and time
-    let mask = df
-        .column(unit_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: unit_col.to_string(),
-            available: vec![],
-        })?
-        .str()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: "Unit column must be string".to_string(),
-        })?
-        .equal(unit);
-
-    let time_mask = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: vec![],
-        })?
-        .i64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: "Time column must be integer".to_string(),
-        })?
-        .equal(time);
-
-    let combined_mask = &mask & &time_mask;
-
-    let filtered = df
-        .filter(&combined_mask)
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Filter error: {:?}", e),
-        })?;
-
-    if filtered.height() == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: format!("No data for unit '{}' at time {}", unit, time),
-        });
-    }
-
-    let val = filtered
-        .column(outcome)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: vec![],
-        })?
-        .f64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Outcome '{}' must be numeric", outcome),
-        })?
-        .get(0)
+    let label = &panel.units[unit];
+    let row = *panel
+        .cell
+        .get(&(unit, time))
         .ok_or_else(|| EconError::InvalidSpecification {
-            message: "Missing outcome value".to_string(),
+            message: format!("No data for unit '{label}' at time {time}"),
         })?;
-
-    Ok(val)
+    values[row].ok_or_else(|| EconError::InvalidSpecification {
+        message: format!(
+            "Outcome '{outcome}' is missing (null or NaN) for unit '{label}' at time {time}."
+        ),
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1853,23 +1875,8 @@ fn run_placebo_inference(
     config: &SynthConfig,
     treated_rmspe_pre: f64,
 ) -> EconResult<PlaceboResults> {
-    // Get all units
-    let df = dataset.df();
-    let units: Vec<String> = df
-        .column(unit_col)
-        .map_err(|e| EconError::ColumnNotFound {
-            column: unit_col.to_string(),
-            available: get_column_names(dataset.df()),
-        })?
-        .str()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: "Unit column must be string".to_string(),
-        })?
-        .into_iter()
-        .filter_map(|s: Option<&str>| s.map(|s| s.to_string()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Get all units, in level order
+    let units = read_synth_panel(dataset.df(), unit_col, time_col)?.units;
 
     // Calculate RMSPE ratio for treated unit
     // We need the post-treatment RMSPE too
@@ -1980,679 +1987,6 @@ fn rmspe_ratio(pre_rmspe: f64, effects: &[TimeEffect]) -> f64 {
         post_rmspe / pre_rmspe
     } else {
         f64::INFINITY
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Tests
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Create a simple panel dataset for testing.
-    fn create_test_panel() -> Dataset {
-        // Create a panel with:
-        // - 1 treated unit (A)
-        // - 2 donor units (B, C)
-        // - 6 time periods (1-6), treatment at time 4
-        // - Treatment effect of ~5 units
-
-        // Pre-treatment: A is 0.5*B + 0.5*C
-        // Post-treatment: A diverges by +5
-
-        let df = df! {
-            "unit" => ["A", "A", "A", "A", "A", "A",
-                       "B", "B", "B", "B", "B", "B",
-                       "C", "C", "C", "C", "C", "C"],
-            "time" => [1i64, 2, 3, 4, 5, 6,
-                       1, 2, 3, 4, 5, 6,
-                       1, 2, 3, 4, 5, 6],
-            "outcome" => [
-                // Unit A: pre = 0.5*B + 0.5*C, post = pre + 5
-                10.0, 11.0, 12.0, 18.0, 19.0, 20.0,  // A (treatment effect = 5 starting at t=4)
-                // Unit B
-                8.0, 10.0, 12.0, 14.0, 16.0, 18.0,   // B
-                // Unit C
-                12.0, 12.0, 12.0, 12.0, 12.0, 12.0,  // C
-            ],
-            "x1" => [
-                // Predictor that matches A = 0.5*B + 0.5*C
-                5.0, 5.0, 5.0, 5.0, 5.0, 5.0,  // A: mean = 5
-                4.0, 4.0, 4.0, 4.0, 4.0, 4.0,  // B: mean = 4
-                6.0, 6.0, 6.0, 6.0, 6.0, 6.0,  // C: mean = 6
-            ],
-        }
-        .unwrap();
-
-        Dataset::new(df)
-    }
-
-    #[test]
-    fn test_basic_synth() {
-        let dataset = create_test_panel();
-
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Check basic structure
-        assert_eq!(result.treated_unit, "A");
-        assert_eq!(result.treatment_time, 4);
-        assert_eq!(result.n_donors, 2);
-        assert_eq!(result.n_pre_periods, 3); // times 1, 2, 3
-        assert_eq!(result.n_post_periods, 3); // times 4, 5, 6
-
-        // Weights should sum to 1
-        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
-        assert!(
-            (weight_sum - 1.0).abs() < 0.01,
-            "Weights should sum to 1, got {}",
-            weight_sum
-        );
-
-        // With equal V weights and predictor x1, optimal weights should be ~0.5 each
-        // since A's x1 = 5 = 0.5 * 4 + 0.5 * 6
-        for (unit, weight) in &result.all_unit_weights {
-            assert!(
-                (*weight - 0.5).abs() < 0.2,
-                "Unit {} weight should be ~0.5, got {}",
-                unit,
-                weight
-            );
-        }
-
-        // Treatment effect should be positive (around 5)
-        assert!(
-            result.average_effect > 0.0,
-            "Average effect should be positive, got {}",
-            result.average_effect
-        );
-
-        println!("{}", result);
-    }
-
-    #[test]
-    fn test_synth_with_data_driven_v() {
-        let dataset = create_test_panel();
-
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::DataDriven,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Should still produce valid results
-        assert_eq!(result.n_donors, 2);
-
-        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
-        assert!((weight_sum - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_synth_predictor_balance() {
-        let dataset = create_test_panel();
-
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Check predictor balance
-        assert!(!result.predictor_balance.is_empty());
-
-        let balance = &result.predictor_balance[0];
-        assert!((balance.treated_value - 5.0).abs() < 0.1);
-        // Synthetic should be close to 5.0 too (since weights ≈ 0.5, 0.5 and values are 4, 6)
-        assert!(
-            (balance.synthetic_value - 5.0).abs() < 0.5,
-            "Synthetic x1 should be ~5.0, got {}",
-            balance.synthetic_value
-        );
-    }
-
-    #[test]
-    fn test_synth_invalid_unit() {
-        let dataset = create_test_panel();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "NonexistentUnit".to_string(),
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_synth_no_pre_periods() {
-        let dataset = create_test_panel();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        // Treatment time before any data
-        let config = SynthConfig {
-            treatment_time: 0,
-            treated_unit: "A".to_string(),
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_predictor_spec() {
-        let spec = PredictorSpec::new("gdp");
-        assert_eq!(spec.column, "gdp");
-        assert!(spec.time_window.is_none());
-
-        let spec_window = PredictorSpec::with_window("population", 1980, 1990);
-        assert_eq!(spec_window.column, "population");
-        assert_eq!(spec_window.time_window, Some((1980, 1990)));
-    }
-
-    #[test]
-    fn test_qp_solver() {
-        // Simple test: minimize ||x||² subject to Σx = 1, x ≥ 0
-        // Solution should be uniform: x = [0.5, 0.5]
-        let h = Array2::from_shape_vec((2, 2), vec![2.0, 0.0, 0.0, 2.0]).unwrap();
-        let c = Array1::from(vec![0.0, 0.0]);
-
-        let w = solve_simplex_constrained_qp(&h, &c, 2).unwrap();
-
-        assert!((w[0] - 0.5).abs() < 0.01);
-        assert!((w[1] - 0.5).abs() < 0.01);
-        assert!((w.sum() - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_display() {
-        let dataset = create_test_panel();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Test Display trait
-        let output = format!("{}", result);
-        assert!(output.contains("Synthetic Control"));
-        assert!(output.contains("Treated Unit: A"));
-        assert!(output.contains("PREDICTOR BALANCE"));
-    }
-
-    // =========================================================================
-    // Tolerance, iteration bounds and cancellation (T0-WP11)
-    // =========================================================================
-
-    /// Runs `f` under a budget whose token is already cancelled. Shared with
-    /// `gsynth_tests`.
-    pub(super) fn cancelled<R>(f: impl FnOnce() -> R) -> R {
-        use crate::resource::{Budget, CancelToken, with_budget};
-        let token = CancelToken::new();
-        token.cancel();
-        with_budget(Budget::new(None, token), f)
-    }
-
-    #[test]
-    fn test_rmspe_ratio_rule() {
-        // The treated unit and the placebos share this rule: post-RMSPE over
-        // pre-RMSPE, 0 for no effects, infinite for a pre-RMSPE that is not
-        // above 1e-10 (NaN included)
-        let effect = |time, effect| TimeEffect {
-            time,
-            effect,
-            actual: 10.0 + effect,
-            synthetic: 10.0,
-        };
-        let effects = [effect(5, 3.1), effect(6, -3.9), effect(7, 0.4)];
-        let post = ((3.1f64 * 3.1 + 3.9 * 3.9 + 0.4 * 0.4) / 3.0).sqrt();
-        assert!((rmspe_ratio(0.7, &effects) - post / 0.7).abs() < 1e-12);
-        assert_eq!(rmspe_ratio(0.7, &[]), 0.0);
-        assert_eq!(rmspe_ratio(1e-10, &effects), f64::INFINITY);
-        assert_eq!(rmspe_ratio(0.0, &[]), f64::INFINITY);
-        assert_eq!(rmspe_ratio(f64::NAN, &effects), f64::INFINITY);
-    }
-
-    fn synth_cfg() -> SynthConfig {
-        SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::DataDriven,
-            max_iter: 50,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_synth_rejects_non_positive_tolerance_and_zero_max_iter() {
-        let ds = create_test_panel();
-        let preds = vec![PredictorSpec::new("x1")];
-        for tol in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
-            let r = run_synthetic_control(
-                &ds,
-                "outcome",
-                "unit",
-                "time",
-                &preds,
-                SynthConfig {
-                    tolerance: tol,
-                    ..synth_cfg()
-                },
-            );
-            assert!(
-                matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("tolerance")),
-                "tol={tol}: ok={}",
-                r.is_ok()
-            );
-        }
-        let r = run_synthetic_control(
-            &ds,
-            "outcome",
-            "unit",
-            "time",
-            &preds,
-            SynthConfig {
-                max_iter: 0,
-                ..synth_cfg()
-            },
-        );
-        assert!(
-            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("max_iter"))
-        );
-    }
-
-    #[test]
-    fn test_synth_stops_when_cancelled() {
-        let ds = create_test_panel();
-        let preds = vec![PredictorSpec::new("x1")];
-        let r = cancelled(|| {
-            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
-        });
-        assert!(matches!(r, Err(EconError::Cancelled(_))));
-        let r = cancelled(|| {
-            run_synthetic_control(
-                &ds,
-                "outcome",
-                "unit",
-                "time",
-                &preds,
-                SynthConfig {
-                    run_placebos: true,
-                    ..synth_cfg()
-                },
-            )
-        });
-        assert!(matches!(r, Err(EconError::Cancelled(_))));
-    }
-
-    #[test]
-    fn test_synth_placebos_propagate_cancellation() {
-        // The placebo inference as a whole stops with Cancelled under a
-        // cancelled budget. The treated unit's own fit, which runs first, is the
-        // one that sees it here; how a placebo fit's Cancelled is handled is
-        // tested by test_placebo_fit_passes_on_cancellation_and_skips_failures.
-        let ds = create_test_panel();
-        let preds = vec![PredictorSpec::new("x1")];
-        let r = cancelled(|| {
-            run_placebo_inference(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), 1.0)
-        });
-        assert!(matches!(r, Err(EconError::Cancelled(_))));
-    }
-
-    #[test]
-    fn test_placebo_fit_passes_on_cancellation_and_skips_failures() {
-        // A placebo fit stopped by the budget must end the inference, not be
-        // skipped like a fit that fails
-        let ds = create_test_panel();
-        let preds = vec![PredictorSpec::new("x1")];
-        let fit = |donor: &str| {
-            placebo_rmspe_ratio(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), donor)
-        };
-        assert!(matches!(
-            cancelled(|| fit("B")),
-            Err(EconError::Cancelled(_))
-        ));
-        assert!(fit("B").unwrap().is_some_and(|ratio| ratio > 0.0));
-        // a unit that is not in the data cannot be fitted: that placebo is skipped
-        assert_eq!(fit("Z").unwrap(), None);
-    }
-
-    #[test]
-    fn test_nelder_mead_stops_when_cancelled() {
-        let objective = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>(), Array1::zeros(1));
-        let r = cancelled(|| nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000));
-        assert!(matches!(r, Err(EconError::Cancelled(_))));
-        let (best, val, iters) =
-            nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000).unwrap();
-        assert!(val < 1e-6 && iters >= 1 && best.len() == 2);
-    }
-
-    /// Unit "A" treated from t = 3 plus `n_donors` donors over t = 1..=3.
-    fn wide_panel(n_donors: usize) -> Dataset {
-        let (mut u, mut t, mut y, mut x) = (vec![], vec![], vec![], vec![]);
-        for d in 0..=n_donors {
-            let name = if d == 0 {
-                "A".to_string()
-            } else {
-                format!("D{d}")
-            };
-            for time in 1..=3i64 {
-                u.push(name.clone());
-                t.push(time);
-                let noise = 0.3 * ((d * 7 + time as usize * 3) as f64).sin();
-                y.push(10.0 + d as f64 * 0.1 + time as f64 + noise);
-                x.push(5.0 + d as f64 * 0.05 + noise);
-            }
-        }
-        Dataset::new(df! { "unit" => u, "time" => t, "outcome" => y, "x1" => x }.unwrap())
-    }
-
-    #[test]
-    fn test_synth_matrices_respect_allocation_ceiling() {
-        let preds = vec![PredictorSpec::new("x1")];
-        // the 3 x 2 pre-period outcome matrix (48 bytes) is over a 16-byte ceiling
-        let ds = create_test_panel();
-        let r = crate::resource::with_alloc_ceiling(Some(16), || {
-            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
-        });
-        assert!(
-            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("outcome matrix")),
-            "ok={}",
-            r.is_ok()
-        );
-        // 20 donors: the outcome matrices (320 bytes) fit under 1000 bytes, the
-        // donor-by-donor QP matrices (20 x 20 each) do not
-        let ds = wide_panel(20);
-        let cfg = SynthConfig {
-            treatment_time: 3,
-            ..synth_cfg()
-        };
-        let r = crate::resource::with_alloc_ceiling(Some(1000), || {
-            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg.clone())
-        });
-        assert!(
-            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("donor-by-donor")),
-            "ok={}",
-            r.is_ok()
-        );
-        assert!(run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).is_ok());
-    }
-
-    // =========================================================================
-    // Validation tests (test_validate_* prefix)
-    // =========================================================================
-
-    /// Create a larger synthetic control dataset with a known treatment effect.
-    ///
-    /// DGP:
-    /// - 1 treated unit (T), 4 donors (D1-D4)
-    /// - 10 pre-treatment periods, 5 post-treatment periods
-    /// - T = 0.4*D1 + 0.6*D2 in pre-treatment (known weights)
-    /// - Treatment effect = 10 in post-treatment
-    fn create_validate_synth_dataset() -> Dataset {
-        let mut units = Vec::new();
-        let mut times = Vec::new();
-        let mut outcomes = Vec::new();
-        let mut x1_vals = Vec::new();
-
-        let n_pre = 10;
-        let n_post = 5;
-        let treatment_time = (n_pre + 1) as i64;
-        let true_effect = 10.0;
-
-        // Donor D1: linear trend
-        for t in 1..=(n_pre + n_post) {
-            units.push("D1");
-            times.push(t as i64);
-            outcomes.push(20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin());
-            x1_vals.push(3.0);
-        }
-
-        // Donor D2: different slope
-        for t in 1..=(n_pre + n_post) {
-            units.push("D2");
-            times.push(t as i64);
-            outcomes.push(25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin());
-            x1_vals.push(7.0);
-        }
-
-        // Donor D3: unrelated
-        for t in 1..=(n_pre + n_post) {
-            units.push("D3");
-            times.push(t as i64);
-            outcomes.push(30.0 + 0.5 * t as f64);
-            x1_vals.push(1.0);
-        }
-
-        // Donor D4: unrelated
-        for t in 1..=(n_pre + n_post) {
-            units.push("D4");
-            times.push(t as i64);
-            outcomes.push(15.0 + 2.0 * t as f64);
-            x1_vals.push(9.0);
-        }
-
-        // Treated unit T: in pre-treatment = 0.4*D1 + 0.6*D2
-        // In post-treatment, add true_effect
-        for t in 1..=(n_pre + n_post) {
-            units.push("T");
-            times.push(t as i64);
-            let d1_val = 20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin();
-            let d2_val = 25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin();
-            let synth_val = 0.4 * d1_val + 0.6 * d2_val;
-            let effect = if t > n_pre { true_effect } else { 0.0 };
-            outcomes.push(synth_val + effect);
-            x1_vals.push(0.4 * 3.0 + 0.6 * 7.0); // 5.4
-        }
-
-        let df = df! {
-            "unit" => units,
-            "time" => times,
-            "outcome" => outcomes,
-            "x1" => x1_vals,
-        }
-        .unwrap();
-
-        Dataset::new(df)
-    }
-
-    #[test]
-    fn test_synth_placebo_inference_ranks_every_unit() {
-        // every donor gets a placebo fit next to the treated unit's own; T fits
-        // its donors almost exactly before t = 11 and gains 10 after, so its
-        // post/pre RMSPE ratio ranks first
-        let ds = create_validate_synth_dataset();
-        let preds = vec![PredictorSpec::new("x1")];
-        let cfg = SynthConfig {
-            treatment_time: 11,
-            treated_unit: "T".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: true,
-            ..Default::default()
-        };
-        let res = run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).unwrap();
-        let p = res.placebo_results.expect("placebo results");
-        let mut units: Vec<&str> = p.rmspe_ratios.iter().map(|(u, _)| u.as_str()).collect();
-        units.sort_unstable();
-        assert_eq!(units, ["D1", "D2", "D3", "D4", "T"]);
-        assert_eq!(p.n_units, 5);
-        assert_eq!(p.treated_rank, 1);
-        assert_eq!(p.p_value, 0.2);
-        assert!(p.rmspe_ratios.windows(2).all(|w| w[0].1 >= w[1].1));
-    }
-
-    /// Validate synthetic control recovers known weights and treatment effect.
-    #[test]
-    fn test_validate_synth_weight_recovery() {
-        let dataset = create_validate_synth_dataset();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 11,
-            treated_unit: "T".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Weights should be non-negative
-        for (unit, weight) in &result.all_unit_weights {
-            assert!(
-                *weight >= -1e-6,
-                "Weight for {} = {:.4} should be non-negative",
-                unit,
-                weight
-            );
-        }
-
-        // Weights should sum to ~1
-        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
-        assert!(
-            (weight_sum - 1.0).abs() < 0.02,
-            "Weights should sum to 1, got {:.6}",
-            weight_sum
-        );
-
-        // Pre-treatment RMSPE should be small (good fit)
-        assert!(
-            result.pre_treatment_rmspe < 2.0,
-            "Pre-treatment RMSPE = {:.4} should be small",
-            result.pre_treatment_rmspe
-        );
-    }
-
-    /// Validate synthetic control detects treatment effect direction and magnitude.
-    #[test]
-    fn test_validate_synth_treatment_effect() {
-        let dataset = create_validate_synth_dataset();
-        let predictors = vec![PredictorSpec::new("x1")];
-        let true_effect = 10.0;
-
-        let config = SynthConfig {
-            treatment_time: 11,
-            treated_unit: "T".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Average effect should be close to true effect (within 3 for this DGP)
-        assert!(
-            (result.average_effect - true_effect).abs() < 3.0,
-            "Average effect = {:.4} should be close to true effect = {}",
-            result.average_effect,
-            true_effect
-        );
-
-        // All post-treatment effects should be positive
-        for te in &result.treatment_effects {
-            assert!(
-                te.effect > 0.0,
-                "Treatment effect at time {} = {:.4} should be positive",
-                te.time,
-                te.effect
-            );
-        }
-
-        // Cumulative effect should be positive and substantial
-        assert!(
-            result.cumulative_effect > 0.0,
-            "Cumulative effect should be positive"
-        );
-
-        // Structural checks
-        assert_eq!(result.n_pre_periods, 10);
-        assert_eq!(result.n_post_periods, 5);
-        assert_eq!(result.n_donors, 4);
-    }
-
-    /// Validate synthetic control time series outputs are correctly aligned.
-    #[test]
-    fn test_validate_synth_time_series_alignment() {
-        let dataset = create_validate_synth_dataset();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 11,
-            treated_unit: "T".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Actual and synthetic outcomes should have the same length
-        assert_eq!(result.actual_outcome.len(), result.synthetic_outcome.len());
-
-        // In pre-treatment period, actual and synthetic should be close
-        for i in 0..result.n_pre_periods {
-            if i < result.actual_outcome.len() && i < result.synthetic_outcome.len() {
-                let (_, actual) = result.actual_outcome[i];
-                let (_, synth) = result.synthetic_outcome[i];
-                let diff = (actual - synth).abs();
-                // Pre-treatment fit should be reasonable (within 5 units)
-                assert!(
-                    diff < 5.0,
-                    "Pre-treatment period {}: actual={:.2}, synth={:.2}, diff={:.2}",
-                    i,
-                    actual,
-                    synth,
-                    diff
-                );
-            }
-        }
     }
 }
 
@@ -2881,6 +2215,18 @@ impl fmt::Display for GsynthResult {
 ///
 /// `GsynthResult` with estimated treatment effects and diagnostics.
 ///
+/// # Data requirements
+///
+/// One row per (unit, time) of a balanced panel, with no missing value (null or NaN) in
+/// the outcome, treatment, unit, time or covariate columns: a missing value is
+/// `EconError::NullValues` naming the column, and a duplicate (unit, time) row or a
+/// missing cell an `InvalidSpecification` naming the first one. Times are whole numbers
+/// or dates (a fractional time is refused, naming the row); units may be of any
+/// categorical dtype (text, integers, floats, booleans, dates) and are ordered as R's
+/// `factor()` sorts them, which fixes the order of `unit_effects` and of the
+/// cross-validation folds. Integer and boolean treatments are read as numbers. R's
+/// gsynth imputes missing cells by EM, which p2a does not implement.
+///
 /// # References
 ///
 /// - Xu, Y. (2017). "Generalized Synthetic Control Method: Causal Inference with
@@ -2896,59 +2242,22 @@ pub fn run_gsynth(
     x_cols: &[&str],
     config: GsynthConfig,
 ) -> EconResult<GsynthResult> {
-    let df = dataset.df();
+    // One balanced panel, units in R factor() order (T2 design 1.6: missing values,
+    // missing cells and duplicate cells are refused).
+    let GsynthPanel {
+        units: unique_units,
+        times: unique_times,
+        y: y_mat,
+        d: d_mat,
+        x: x_panels,
+    } = read_gsynth_panel(dataset.df(), y_col, d_col, unit_col, time_col, x_cols)?;
 
-    // Extract data
-    let units = extract_id_column(df, unit_col)?;
-    let times = extract_time_column(df, time_col)?;
-    let y = extract_numeric_column(df, y_col)?;
-    let d = extract_numeric_column(df, d_col)?;
-
-    // Build panel structure
-    let unique_units: Vec<String> = units
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    let mut unique_times: Vec<i64> = times
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    unique_times.sort();
-
-    let n_units = unique_units.len();
     let n_times = unique_times.len();
-
-    // Build index mappings
-    let unit_idx: std::collections::HashMap<&str, usize> = unique_units
-        .iter()
-        .enumerate()
-        .map(|(i, u)| (u.as_str(), i))
-        .collect();
     let time_idx: std::collections::HashMap<i64, usize> = unique_times
         .iter()
         .enumerate()
         .map(|(i, &t)| (t, i))
         .collect();
-
-    // Build Y and D matrices (units x times)
-    // n_units x n_times can be quadratic in the number of rows (a panel in
-    // which every row is its own unit and period), so these are fallible.
-    let mut y_mat =
-        crate::resource::try_zeros2(n_units, n_times, "gsynth outcome panel (units x periods)")?;
-    y_mat.fill(f64::NAN);
-    let mut d_mat =
-        crate::resource::try_zeros2(n_units, n_times, "gsynth treatment panel (units x periods)")?;
-
-    for (row_idx, (unit, time)) in units.iter().zip(times.iter()).enumerate() {
-        let ui = unit_idx[unit.as_str()];
-        let ti = time_idx[time];
-        y_mat[[ui, ti]] = y[row_idx];
-        d_mat[[ui, ti]] = d[row_idx];
-    }
 
     // Identify treated and control units
     let mut treated_units: Vec<usize> = Vec::new();
@@ -3041,25 +2350,12 @@ pub fn run_gsynth(
         config.cv_folds
     };
 
-    // Extract covariates if specified
+    // Covariate panels, read with the outcome
     let (x_mat, covariate_names) = if !x_cols.is_empty() {
-        let mut x_data: Vec<Array2<f64>> = Vec::new();
-        for col in x_cols {
-            let x_vec = extract_numeric_column(df, col)?;
-            let mut x_panel = crate::resource::try_zeros2(
-                n_units,
-                n_times,
-                "gsynth covariate panel (units x periods)",
-            )?;
-            x_panel.fill(f64::NAN);
-            for (row_idx, (unit, time)) in units.iter().zip(times.iter()).enumerate() {
-                let ui = unit_idx[unit.as_str()];
-                let ti = time_idx[time];
-                x_panel[[ui, ti]] = x_vec[row_idx];
-            }
-            x_data.push(x_panel);
-        }
-        (Some(x_data), x_cols.iter().map(|s| s.to_string()).collect())
+        (
+            Some(x_panels),
+            x_cols.iter().map(|s| s.to_string()).collect(),
+        )
     } else {
         (None, Vec::new())
     };
@@ -3249,76 +2545,141 @@ pub fn run_gsynth(
     })
 }
 
-/// Extract ID column as strings.
-fn extract_id_column(df: &DataFrame, col: &str) -> EconResult<Vec<String>> {
-    let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    if let Ok(ca) = series.str() {
-        Ok(ca.into_no_null_iter().map(|s| s.to_string()).collect())
-    } else if let Ok(ca) = series.i64() {
-        Ok(ca.into_no_null_iter().map(|v| v.to_string()).collect())
-    } else if let Ok(ca) = series.i32() {
-        Ok(ca.into_no_null_iter().map(|v| v.to_string()).collect())
-    } else {
-        Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be string or integer", col),
-        })
-    }
+/// A gsynth panel read through the shared extractor: balanced, one row per (unit, time).
+struct GsynthPanel {
+    /// Unit labels in R `factor()` order.
+    units: Vec<String>,
+    /// The distinct time periods, ascending.
+    times: Vec<i64>,
+    /// Outcome panel (units x periods).
+    y: Array2<f64>,
+    /// Treatment panel (units x periods).
+    d: Array2<f64>,
+    /// One panel (units x periods) per covariate, in `x_cols` order.
+    x: Vec<Array2<f64>>,
 }
 
-/// Extract time column as i64.
-fn extract_time_column(df: &DataFrame, col: &str) -> EconResult<Vec<i64>> {
-    let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
+/// Read a gsynth panel with one `ColumnRequest` (`NaPolicy::Fail`): a missing value in
+/// any column is `NullValues` naming it, a fractional or text time an
+/// `InvalidSpecification`. Duplicate (unit, time) rows and missing cells are refused
+/// before any units x periods buffer is allocated; every step is O(n log n).
+fn read_gsynth_panel(
+    df: &DataFrame,
+    y_col: &str,
+    d_col: &str,
+    unit_col: &str,
+    time_col: &str,
+    x_cols: &[&str],
+) -> EconResult<GsynthPanel> {
+    let cols = ColumnRequest::new(df)
+        .factor(unit_col)
+        .time_index(time_col)
+        .numeric(y_col)
+        .numeric(d_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let n = cols.n();
+    let unit = cols.factor(unit_col);
+    let time = cols.time_index(time_col);
+    let units = unit.levels.clone();
 
-    if let Ok(ca) = series.i64() {
-        Ok(ca.into_no_null_iter().collect())
-    } else if let Ok(ca) = series.i32() {
-        Ok(ca.into_no_null_iter().map(|v| v as i64).collect())
-    } else if let Ok(ca) = series.f64() {
-        Ok(ca.into_no_null_iter().map(|v| v as i64).collect())
-    } else {
-        Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be numeric", col),
-        })
+    let mut times: Vec<i64> = crate::resource::try_with_capacity(n, "gsynth time periods")?;
+    times.extend_from_slice(time);
+    times.sort_unstable();
+    times.dedup();
+
+    // The rows in (unit level, time) order; equal neighbours are duplicates.
+    let key = |r: usize| (unit.codes[r], time[r]);
+    let mut order: Vec<usize> = crate::resource::try_with_capacity(n, "gsynth panel order")?;
+    order.extend(0..n);
+    order.sort_unstable_by_key(|&r| key(r));
+    let mut duplicates = 0usize;
+    let mut first_duplicate = None;
+    for pair in order.windows(2) {
+        if key(pair[0]) == key(pair[1]) {
+            duplicates += 1;
+            first_duplicate.get_or_insert(pair[1]);
+        }
     }
-}
-
-/// Extract numeric column.
-fn extract_numeric_column(df: &DataFrame, col: &str) -> EconResult<Vec<f64>> {
-    let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    if let Ok(ca) = series.f64() {
-        Ok(ca.into_no_null_iter().collect())
-    } else if let Ok(ca) = series.i64() {
-        Ok(ca.into_no_null_iter().map(|v| v as f64).collect())
-    } else if let Ok(ca) = series.i32() {
-        Ok(ca.into_no_null_iter().map(|v| v as f64).collect())
-    } else {
-        Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be numeric", col),
-        })
+    if let Some(r) = first_duplicate {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "gsynth needs one row per (unit, time): {duplicates} duplicate row(s) \
+                 (first: unit '{}', time {}). Remove the duplicates first.",
+                unit.label(r),
+                time[r]
+            ),
+        });
     }
+
+    let n_units = units.len();
+    let n_times = times.len();
+    // Without duplicates every row is its own cell, so n <= units x periods.
+    let missing = (n_units as u128 * n_times as u128).saturating_sub(n as u128);
+    if missing > 0 {
+        // The first absent cell in (unit level, time) order. Every cell before it
+        // consumes one row of `order`, so the walk is O(n).
+        let mut next = order.iter().peekable();
+        let mut first = None;
+        'units: for u in 0..n_units {
+            crate::resource::checkpoint()?;
+            for &t in &times {
+                match next.peek() {
+                    Some(&&r) if unit.codes[r] as usize == u && time[r] == t => {
+                        next.next();
+                    }
+                    _ => {
+                        first = Some((u, t));
+                        break 'units;
+                    }
+                }
+            }
+        }
+        let (u, t) = first.ok_or_else(|| {
+            EconError::Internal("gsynth panel: no missing cell found".to_string())
+        })?;
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "gsynth needs a balanced panel: {missing} (unit, time) cell(s) are missing \
+                 (first: unit '{}', time {t}). p2a's gsynth has no estimator for \
+                 unbalanced panels (R's gsynth imputes missing cells); fill or drop them \
+                 first.",
+                units[u]
+            ),
+        });
+    }
+
+    // Balanced: order[u * n_times + j] is the row of (units[u], times[j]).
+    let panel = |values: &[f64], what: &str| -> EconResult<Array2<f64>> {
+        let mut m = crate::resource::try_zeros2(n_units, n_times, what)?;
+        for (cell, &r) in m.iter_mut().zip(&order) {
+            *cell = values[r];
+        }
+        Ok(m)
+    };
+    let y = panel(
+        cols.numeric(y_col),
+        "gsynth outcome panel (units x periods)",
+    )?;
+    let d = panel(
+        cols.numeric(d_col),
+        "gsynth treatment panel (units x periods)",
+    )?;
+    let mut x = Vec::with_capacity(x_cols.len());
+    for col in x_cols {
+        x.push(panel(
+            cols.numeric(col),
+            "gsynth covariate panel (units x periods)",
+        )?);
+    }
+    Ok(GsynthPanel {
+        units,
+        times,
+        y,
+        d,
+        x,
+    })
 }
 
 /// Select optimal number of factors via k-fold cross-validation.
@@ -3908,6 +3269,816 @@ fn bootstrap_gsynth(
     ))
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a simple panel dataset for testing.
+    fn create_test_panel() -> Dataset {
+        // Create a panel with:
+        // - 1 treated unit (A)
+        // - 2 donor units (B, C)
+        // - 6 time periods (1-6), treatment at time 4
+        // - Treatment effect of ~5 units
+
+        // Pre-treatment: A is 0.5*B + 0.5*C
+        // Post-treatment: A diverges by +5
+
+        let df = df! {
+            "unit" => ["A", "A", "A", "A", "A", "A",
+                       "B", "B", "B", "B", "B", "B",
+                       "C", "C", "C", "C", "C", "C"],
+            "time" => [1i64, 2, 3, 4, 5, 6,
+                       1, 2, 3, 4, 5, 6,
+                       1, 2, 3, 4, 5, 6],
+            "outcome" => [
+                // Unit A: pre = 0.5*B + 0.5*C, post = pre + 5
+                10.0, 11.0, 12.0, 18.0, 19.0, 20.0,  // A (treatment effect = 5 starting at t=4)
+                // Unit B
+                8.0, 10.0, 12.0, 14.0, 16.0, 18.0,   // B
+                // Unit C
+                12.0, 12.0, 12.0, 12.0, 12.0, 12.0,  // C
+            ],
+            "x1" => [
+                // Predictor that matches A = 0.5*B + 0.5*C
+                5.0, 5.0, 5.0, 5.0, 5.0, 5.0,  // A: mean = 5
+                4.0, 4.0, 4.0, 4.0, 4.0, 4.0,  // B: mean = 4
+                6.0, 6.0, 6.0, 6.0, 6.0, 6.0,  // C: mean = 6
+            ],
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_basic_synth() {
+        let dataset = create_test_panel();
+
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Check basic structure
+        assert_eq!(result.treated_unit, "A");
+        assert_eq!(result.treatment_time, 4);
+        assert_eq!(result.n_donors, 2);
+        assert_eq!(result.n_pre_periods, 3); // times 1, 2, 3
+        assert_eq!(result.n_post_periods, 3); // times 4, 5, 6
+
+        // Weights should sum to 1
+        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
+        assert!(
+            (weight_sum - 1.0).abs() < 0.01,
+            "Weights should sum to 1, got {}",
+            weight_sum
+        );
+
+        // With equal V weights and predictor x1, optimal weights should be ~0.5 each
+        // since A's x1 = 5 = 0.5 * 4 + 0.5 * 6
+        for (unit, weight) in &result.all_unit_weights {
+            assert!(
+                (*weight - 0.5).abs() < 0.2,
+                "Unit {} weight should be ~0.5, got {}",
+                unit,
+                weight
+            );
+        }
+
+        // Treatment effect should be positive (around 5)
+        assert!(
+            result.average_effect > 0.0,
+            "Average effect should be positive, got {}",
+            result.average_effect
+        );
+
+        println!("{}", result);
+    }
+
+    #[test]
+    fn test_synth_with_data_driven_v() {
+        let dataset = create_test_panel();
+
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::DataDriven,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Should still produce valid results
+        assert_eq!(result.n_donors, 2);
+
+        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
+        assert!((weight_sum - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_synth_predictor_balance() {
+        let dataset = create_test_panel();
+
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Check predictor balance
+        assert!(!result.predictor_balance.is_empty());
+
+        let balance = &result.predictor_balance[0];
+        assert!((balance.treated_value - 5.0).abs() < 0.1);
+        // Synthetic should be close to 5.0 too (since weights ≈ 0.5, 0.5 and values are 4, 6)
+        assert!(
+            (balance.synthetic_value - 5.0).abs() < 0.5,
+            "Synthetic x1 should be ~5.0, got {}",
+            balance.synthetic_value
+        );
+    }
+
+    #[test]
+    fn test_synth_invalid_unit() {
+        let dataset = create_test_panel();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "NonexistentUnit".to_string(),
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_synth_no_pre_periods() {
+        let dataset = create_test_panel();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        // Treatment time before any data
+        let config = SynthConfig {
+            treatment_time: 0,
+            treated_unit: "A".to_string(),
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_predictor_spec() {
+        let spec = PredictorSpec::new("gdp");
+        assert_eq!(spec.column, "gdp");
+        assert!(spec.time_window.is_none());
+
+        let spec_window = PredictorSpec::with_window("population", 1980, 1990);
+        assert_eq!(spec_window.column, "population");
+        assert_eq!(spec_window.time_window, Some((1980, 1990)));
+    }
+
+    #[test]
+    fn test_qp_solver() {
+        // Simple test: minimize ||x||² subject to Σx = 1, x ≥ 0
+        // Solution should be uniform: x = [0.5, 0.5]
+        let h = Array2::from_shape_vec((2, 2), vec![2.0, 0.0, 0.0, 2.0]).unwrap();
+        let c = Array1::from(vec![0.0, 0.0]);
+
+        let w = solve_simplex_constrained_qp(&h, &c, 2).unwrap();
+
+        assert!((w[0] - 0.5).abs() < 0.01);
+        assert!((w[1] - 0.5).abs() < 0.01);
+        assert!((w.sum() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_display() {
+        let dataset = create_test_panel();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Test Display trait
+        let output = format!("{}", result);
+        assert!(output.contains("Synthetic Control"));
+        assert!(output.contains("Treated Unit: A"));
+        assert!(output.contains("PREDICTOR BALANCE"));
+    }
+
+    // =========================================================================
+    // Tolerance, iteration bounds and cancellation (T0-WP11)
+    // =========================================================================
+
+    /// Runs `f` under a budget whose token is already cancelled. Shared with
+    /// `gsynth_tests`.
+    pub(super) fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        with_budget(Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn test_rmspe_ratio_rule() {
+        // The treated unit and the placebos share this rule: post-RMSPE over
+        // pre-RMSPE, 0 for no effects, infinite for a pre-RMSPE that is not
+        // above 1e-10 (NaN included)
+        let effect = |time, effect| TimeEffect {
+            time,
+            effect,
+            actual: 10.0 + effect,
+            synthetic: 10.0,
+        };
+        let effects = [effect(5, 3.1), effect(6, -3.9), effect(7, 0.4)];
+        let post = ((3.1f64 * 3.1 + 3.9 * 3.9 + 0.4 * 0.4) / 3.0).sqrt();
+        assert!((rmspe_ratio(0.7, &effects) - post / 0.7).abs() < 1e-12);
+        assert_eq!(rmspe_ratio(0.7, &[]), 0.0);
+        assert_eq!(rmspe_ratio(1e-10, &effects), f64::INFINITY);
+        assert_eq!(rmspe_ratio(0.0, &[]), f64::INFINITY);
+        assert_eq!(rmspe_ratio(f64::NAN, &effects), f64::INFINITY);
+    }
+
+    fn synth_cfg() -> SynthConfig {
+        SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::DataDriven,
+            max_iter: 50,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_synth_rejects_non_positive_tolerance_and_zero_max_iter() {
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        for tol in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
+            let r = run_synthetic_control(
+                &ds,
+                "outcome",
+                "unit",
+                "time",
+                &preds,
+                SynthConfig {
+                    tolerance: tol,
+                    ..synth_cfg()
+                },
+            );
+            assert!(
+                matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("tolerance")),
+                "tol={tol}: ok={}",
+                r.is_ok()
+            );
+        }
+        let r = run_synthetic_control(
+            &ds,
+            "outcome",
+            "unit",
+            "time",
+            &preds,
+            SynthConfig {
+                max_iter: 0,
+                ..synth_cfg()
+            },
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("max_iter"))
+        );
+    }
+
+    #[test]
+    fn test_synth_stops_when_cancelled() {
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        let r = cancelled(|| {
+            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+        let r = cancelled(|| {
+            run_synthetic_control(
+                &ds,
+                "outcome",
+                "unit",
+                "time",
+                &preds,
+                SynthConfig {
+                    run_placebos: true,
+                    ..synth_cfg()
+                },
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn test_synth_placebos_propagate_cancellation() {
+        // The placebo inference as a whole stops with Cancelled under a
+        // cancelled budget. The treated unit's own fit, which runs first, is the
+        // one that sees it here; how a placebo fit's Cancelled is handled is
+        // tested by test_placebo_fit_passes_on_cancellation_and_skips_failures.
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        let r = cancelled(|| {
+            run_placebo_inference(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), 1.0)
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn test_placebo_fit_passes_on_cancellation_and_skips_failures() {
+        // A placebo fit stopped by the budget must end the inference, not be
+        // skipped like a fit that fails
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        let fit = |donor: &str| {
+            placebo_rmspe_ratio(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), donor)
+        };
+        assert!(matches!(
+            cancelled(|| fit("B")),
+            Err(EconError::Cancelled(_))
+        ));
+        assert!(fit("B").unwrap().is_some_and(|ratio| ratio > 0.0));
+        // a unit that is not in the data cannot be fitted: that placebo is skipped
+        assert_eq!(fit("Z").unwrap(), None);
+    }
+
+    #[test]
+    fn test_nelder_mead_stops_when_cancelled() {
+        let objective = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>(), Array1::zeros(1));
+        let r = cancelled(|| nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000));
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+        let (best, val, iters) =
+            nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000).unwrap();
+        assert!(val < 1e-6 && iters >= 1 && best.len() == 2);
+    }
+
+    /// Unit "A" treated from t = 3 plus `n_donors` donors over t = 1..=3.
+    fn wide_panel(n_donors: usize) -> Dataset {
+        let (mut u, mut t, mut y, mut x) = (vec![], vec![], vec![], vec![]);
+        for d in 0..=n_donors {
+            let name = if d == 0 {
+                "A".to_string()
+            } else {
+                format!("D{d}")
+            };
+            for time in 1..=3i64 {
+                u.push(name.clone());
+                t.push(time);
+                let noise = 0.3 * ((d * 7 + time as usize * 3) as f64).sin();
+                y.push(10.0 + d as f64 * 0.1 + time as f64 + noise);
+                x.push(5.0 + d as f64 * 0.05 + noise);
+            }
+        }
+        Dataset::new(df! { "unit" => u, "time" => t, "outcome" => y, "x1" => x }.unwrap())
+    }
+
+    #[test]
+    fn test_synth_matrices_respect_allocation_ceiling() {
+        let preds = vec![PredictorSpec::new("x1")];
+        // the extractor's 18-row buffers are over a 16-byte ceiling before the 3 x 2
+        // outcome matrix
+        let ds = create_test_panel();
+        let r = crate::resource::with_alloc_ceiling(Some(16), || {
+            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(_))),
+            "ok={}",
+            r.is_ok()
+        );
+        // 20 donors: the extractor's 63-row buffers (at most 1008 bytes: the time index
+        // and the column values as 16-byte options) and the outcome matrices (320 bytes)
+        // fit under 1100 bytes, the donor-by-donor QP matrices (20 x 20 each) do not
+        let ds = wide_panel(20);
+        let cfg = SynthConfig {
+            treatment_time: 3,
+            ..synth_cfg()
+        };
+        let r = crate::resource::with_alloc_ceiling(Some(1100), || {
+            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg.clone())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("donor-by-donor")),
+            "ok={}",
+            r.is_ok()
+        );
+        assert!(run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).is_ok());
+    }
+
+    // =========================================================================
+    // Validation tests (test_validate_* prefix)
+    // =========================================================================
+
+    /// Create a larger synthetic control dataset with a known treatment effect.
+    ///
+    /// DGP:
+    /// - 1 treated unit (T), 4 donors (D1-D4)
+    /// - 10 pre-treatment periods, 5 post-treatment periods
+    /// - T = 0.4*D1 + 0.6*D2 in pre-treatment (known weights)
+    /// - Treatment effect = 10 in post-treatment
+    fn create_validate_synth_dataset() -> Dataset {
+        let mut units = Vec::new();
+        let mut times = Vec::new();
+        let mut outcomes = Vec::new();
+        let mut x1_vals = Vec::new();
+
+        let n_pre = 10;
+        let n_post = 5;
+        let treatment_time = (n_pre + 1) as i64;
+        let true_effect = 10.0;
+
+        // Donor D1: linear trend
+        for t in 1..=(n_pre + n_post) {
+            units.push("D1");
+            times.push(t as i64);
+            outcomes.push(20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin());
+            x1_vals.push(3.0);
+        }
+
+        // Donor D2: different slope
+        for t in 1..=(n_pre + n_post) {
+            units.push("D2");
+            times.push(t as i64);
+            outcomes.push(25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin());
+            x1_vals.push(7.0);
+        }
+
+        // Donor D3: unrelated
+        for t in 1..=(n_pre + n_post) {
+            units.push("D3");
+            times.push(t as i64);
+            outcomes.push(30.0 + 0.5 * t as f64);
+            x1_vals.push(1.0);
+        }
+
+        // Donor D4: unrelated
+        for t in 1..=(n_pre + n_post) {
+            units.push("D4");
+            times.push(t as i64);
+            outcomes.push(15.0 + 2.0 * t as f64);
+            x1_vals.push(9.0);
+        }
+
+        // Treated unit T: in pre-treatment = 0.4*D1 + 0.6*D2
+        // In post-treatment, add true_effect
+        for t in 1..=(n_pre + n_post) {
+            units.push("T");
+            times.push(t as i64);
+            let d1_val = 20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin();
+            let d2_val = 25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin();
+            let synth_val = 0.4 * d1_val + 0.6 * d2_val;
+            let effect = if t > n_pre { true_effect } else { 0.0 };
+            outcomes.push(synth_val + effect);
+            x1_vals.push(0.4 * 3.0 + 0.6 * 7.0); // 5.4
+        }
+
+        let df = df! {
+            "unit" => units,
+            "time" => times,
+            "outcome" => outcomes,
+            "x1" => x1_vals,
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_synth_placebo_inference_ranks_every_unit() {
+        // every donor gets a placebo fit next to the treated unit's own; T fits
+        // its donors almost exactly before t = 11 and gains 10 after, so its
+        // post/pre RMSPE ratio ranks first
+        let ds = create_validate_synth_dataset();
+        let preds = vec![PredictorSpec::new("x1")];
+        let cfg = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: true,
+            ..Default::default()
+        };
+        let res = run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).unwrap();
+        let p = res.placebo_results.expect("placebo results");
+        let mut units: Vec<&str> = p.rmspe_ratios.iter().map(|(u, _)| u.as_str()).collect();
+        units.sort_unstable();
+        assert_eq!(units, ["D1", "D2", "D3", "D4", "T"]);
+        assert_eq!(p.n_units, 5);
+        assert_eq!(p.treated_rank, 1);
+        assert_eq!(p.p_value, 0.2);
+        assert!(p.rmspe_ratios.windows(2).all(|w| w[0].1 >= w[1].1));
+    }
+
+    /// Validate synthetic control recovers known weights and treatment effect.
+    #[test]
+    fn test_validate_synth_weight_recovery() {
+        let dataset = create_validate_synth_dataset();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Weights should be non-negative
+        for (unit, weight) in &result.all_unit_weights {
+            assert!(
+                *weight >= -1e-6,
+                "Weight for {} = {:.4} should be non-negative",
+                unit,
+                weight
+            );
+        }
+
+        // Weights should sum to ~1
+        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
+        assert!(
+            (weight_sum - 1.0).abs() < 0.02,
+            "Weights should sum to 1, got {:.6}",
+            weight_sum
+        );
+
+        // Pre-treatment RMSPE should be small (good fit)
+        assert!(
+            result.pre_treatment_rmspe < 2.0,
+            "Pre-treatment RMSPE = {:.4} should be small",
+            result.pre_treatment_rmspe
+        );
+    }
+
+    /// Validate synthetic control detects treatment effect direction and magnitude.
+    #[test]
+    fn test_validate_synth_treatment_effect() {
+        let dataset = create_validate_synth_dataset();
+        let predictors = vec![PredictorSpec::new("x1")];
+        let true_effect = 10.0;
+
+        let config = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Average effect should be close to true effect (within 3 for this DGP)
+        assert!(
+            (result.average_effect - true_effect).abs() < 3.0,
+            "Average effect = {:.4} should be close to true effect = {}",
+            result.average_effect,
+            true_effect
+        );
+
+        // All post-treatment effects should be positive
+        for te in &result.treatment_effects {
+            assert!(
+                te.effect > 0.0,
+                "Treatment effect at time {} = {:.4} should be positive",
+                te.time,
+                te.effect
+            );
+        }
+
+        // Cumulative effect should be positive and substantial
+        assert!(
+            result.cumulative_effect > 0.0,
+            "Cumulative effect should be positive"
+        );
+
+        // Structural checks
+        assert_eq!(result.n_pre_periods, 10);
+        assert_eq!(result.n_post_periods, 5);
+        assert_eq!(result.n_donors, 4);
+    }
+
+    /// Validate synthetic control time series outputs are correctly aligned.
+    #[test]
+    fn test_validate_synth_time_series_alignment() {
+        let dataset = create_validate_synth_dataset();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Actual and synthetic outcomes should have the same length
+        assert_eq!(result.actual_outcome.len(), result.synthetic_outcome.len());
+
+        // In pre-treatment period, actual and synthetic should be close
+        for i in 0..result.n_pre_periods {
+            if i < result.actual_outcome.len() && i < result.synthetic_outcome.len() {
+                let (_, actual) = result.actual_outcome[i];
+                let (_, synth) = result.synthetic_outcome[i];
+                let diff = (actual - synth).abs();
+                // Pre-treatment fit should be reasonable (within 5 units)
+                assert!(
+                    diff < 5.0,
+                    "Pre-treatment period {}: actual={:.2}, synth={:.2}, diff={:.2}",
+                    i,
+                    actual,
+                    synth,
+                    diff
+                );
+            }
+        }
+    }
+
+    // =========================================================================
+    // T2-WP13: the panel through the shared extractor (X-2, X-8)
+    // =========================================================================
+
+    /// The test_basic_synth configuration.
+    fn na_cfg() -> SynthConfig {
+        SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        }
+    }
+
+    fn na_synth(ds: &Dataset, unit_col: &str, cfg: SynthConfig) -> EconResult<SynthResult> {
+        let preds = [PredictorSpec::new("x1")];
+        run_synthetic_control(ds, "outcome", unit_col, "time", &preds, cfg)
+    }
+
+    fn weight_names(r: &SynthResult) -> Vec<&str> {
+        r.all_unit_weights.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    fn weight_bits(r: &SynthResult) -> Vec<u64> {
+        r.all_unit_weights
+            .iter()
+            .map(|(_, w)| w.to_bits())
+            .collect()
+    }
+
+    fn with_column(ds: &Dataset, column: Column) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(column).unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_na_synth_integer_outcome_and_unit_ids() {
+        let ds = create_test_panel();
+        let base = na_synth(&ds, "unit", na_cfg()).unwrap();
+        // donors in sorted order
+        assert_eq!(weight_names(&base), ["B", "C"]);
+        // an Int64 outcome is read as numbers
+        let outcome = ds
+            .df()
+            .column("outcome")
+            .unwrap()
+            .cast(&DataType::Int64)
+            .unwrap();
+        let int_outcome = na_synth(&with_column(&ds, outcome), "unit", na_cfg()).unwrap();
+        assert_eq!(weight_names(&int_outcome), weight_names(&base));
+        assert_eq!(weight_bits(&int_outcome), weight_bits(&base));
+        assert_eq!(
+            int_outcome.average_effect.to_bits(),
+            base.average_effect.to_bits()
+        );
+        // integer unit ids: A -> 1, B -> 2, C -> 3
+        let ids: Vec<i64> = (0..ds.nrows()).map(|r| 1 + (r / 6) as i64).collect();
+        let int_ids = with_column(&ds, Column::new("unit_id".into(), ids));
+        let r = na_synth(
+            &int_ids,
+            "unit_id",
+            SynthConfig {
+                treated_unit: "1".to_string(),
+                ..na_cfg()
+            },
+        )
+        .unwrap();
+        assert_eq!(weight_names(&r), ["2", "3"]);
+        assert_eq!(weight_bits(&r), weight_bits(&base));
+    }
+
+    #[test]
+    fn test_na_synth_duplicate_cell() {
+        // (B, 2) is row 7; its copy has another outcome
+        let ds = create_test_panel();
+        let mut extra = ds.df().slice(7, 1);
+        extra
+            .with_column(Column::new("outcome".into(), [99.0]))
+            .unwrap();
+        let mut df = ds.df().clone();
+        df.vstack_mut(&extra).unwrap();
+        match na_synth(&Dataset::new(df), "unit", na_cfg()) {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "synthetic control needs one row per (unit, time): 1 duplicate row(s) \
+                 (first: unit 'B', time 2). Remove the duplicates first."
+            ),
+            other => panic!("duplicate cell: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_na_synth_missing_outcome_cell() {
+        let ds = create_test_panel();
+        let outcome: Vec<Option<f64>> = (0..ds.nrows())
+            .map(|r| {
+                (r != 7).then(|| {
+                    ds.df()
+                        .column("outcome")
+                        .unwrap()
+                        .get(r)
+                        .unwrap()
+                        .try_extract::<f64>()
+                        .unwrap()
+                })
+            })
+            .collect();
+        let data = with_column(&ds, Column::new("outcome".into(), outcome));
+        match na_synth(&data, "unit", na_cfg()) {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "Outcome 'outcome' is missing (null or NaN) for unit 'B' at time 2."
+            ),
+            other => panic!("missing outcome cell: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_na_synth_null_unit_label() {
+        // (A, 6) is row 5
+        let ds = create_test_panel();
+        let units: Vec<Option<&str>> = (0..ds.nrows())
+            .map(|r| (r != 5).then_some(["A", "B", "C"][r / 6]))
+            .collect();
+        let data = with_column(&ds, Column::new("unit".into(), units));
+        match na_synth(&data, "unit", na_cfg()) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("unit", 1));
+            }
+            other => panic!("null unit label: {other:?}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod gsynth_tests {
     use super::tests::cancelled;
@@ -4197,18 +4368,42 @@ mod gsynth_tests {
 
     #[test]
     fn test_gsynth_matrices_respect_allocation_ceiling() {
-        // the 5 x 10 units-by-periods panel (400 bytes) is over a 64-byte ceiling
+        // the extractor's 50-row buffers (400 bytes) are over a 64-byte ceiling; a
+        // balanced panel's units x periods buffers are no larger
         let ds = create_gsynth_dataset();
         let r = crate::resource::with_alloc_ceiling(Some(64), || {
             run_gsynth(&ds, "outcome", "treated", "unit", "time", &[], gs_cfg())
         });
         assert!(
-            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("units x periods")),
+            matches!(r, Err(EconError::ResourceLimit(_))),
             "ok={}",
             r.is_ok()
         );
-        // a long panel: 4 x 40 panels (1280 bytes) fit under 2000 bytes, the
-        // 30 x 30 pre-period factor covariance (7200 bytes) does not
+        // every row its own unit and period: refused as unbalanced before a 40 x 40
+        // units-by-periods panel (12800 bytes) is allocated
+        let n = 40usize;
+        let quad = Dataset::new(
+            df! {
+                "unit" => (0..n).map(|i| format!("u{i:02}")).collect::<Vec<_>>(),
+                "time" => (1..=n as i64).collect::<Vec<_>>(),
+                "outcome" => (0..n).map(|i| i as f64 + 0.5).collect::<Vec<_>>(),
+                "treated" => (0..n).map(|i| f64::from(u8::from(i == n - 1))).collect::<Vec<_>>(),
+            }
+            .unwrap(),
+        );
+        let r = crate::resource::with_alloc_ceiling(Some(4096), || {
+            run_gsynth(&quad, "outcome", "treated", "unit", "time", &[], gs_cfg())
+        });
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.starts_with(
+                "gsynth needs a balanced panel: 1560 (unit, time) cell(s) are missing \
+                 (first: unit 'u00', time 2)."
+            )),
+            "{r:?}"
+        );
+        // a long panel: the extractor's 160-row buffers (at most 2560 bytes, the time
+        // index as Option<i64>) and the 4 x 40 panels (1280 bytes) fit under 3000
+        // bytes, the 30 x 30 pre-period factor covariance (7200 bytes) does not
         let (mut u, mut t, mut y, mut d) = (vec![], vec![], vec![], vec![]);
         for unit in ["C1", "C2", "C3", "T1"] {
             for time in 1..=40i64 {
@@ -4226,7 +4421,7 @@ mod gsynth_tests {
         }
         let long =
             Dataset::new(df! { "unit" => u, "time" => t, "outcome" => y, "treated" => d }.unwrap());
-        let r = crate::resource::with_alloc_ceiling(Some(2000), || {
+        let r = crate::resource::with_alloc_ceiling(Some(3000), || {
             run_gsynth(&long, "outcome", "treated", "unit", "time", &[], gs_cfg())
         });
         assert!(
@@ -4235,5 +4430,171 @@ mod gsynth_tests {
             r.is_ok()
         );
         assert!(run_gsynth(&long, "outcome", "treated", "unit", "time", &[], gs_cfg()).is_ok());
+    }
+
+    // =========================================================================
+    // T2-WP13: missing values, balance, duplicates, time index (CAUS-42)
+    // =========================================================================
+
+    fn drop_row(ds: &Dataset, i: usize) -> Dataset {
+        let keep = BooleanChunked::from_iter_values("keep".into(), (0..ds.nrows()).map(|r| r != i));
+        Dataset::new(ds.df().filter(&keep).unwrap())
+    }
+
+    fn dup_row(ds: &Dataset, i: usize) -> Dataset {
+        let mut df = ds.df().clone();
+        df.vstack_mut(&ds.df().slice(i as i64, 1)).unwrap();
+        Dataset::new(df)
+    }
+
+    fn null_at(ds: &Dataset, col: &str, i: usize) -> Dataset {
+        let mut df = ds.df().clone();
+        let c = df.column(col).unwrap();
+        let replaced = if c.dtype() == &DataType::String {
+            let v: Vec<Option<String>> = c
+                .str()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(r, s)| if r == i { None } else { s.map(str::to_string) })
+                .collect();
+            Column::new(col.into(), v)
+        } else {
+            let v: Vec<Option<f64>> = c
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(r, x)| if r == i { None } else { x })
+                .collect();
+            Column::new(col.into(), v)
+        };
+        df.with_column(replaced).unwrap();
+        Dataset::new(df)
+    }
+
+    fn quarterly_time(ds: &Dataset) -> Dataset {
+        let mut df = ds.df().clone();
+        let t: Vec<Option<f64>> = df
+            .column("time")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|t| t.map(|t| 2000.0 + (t - 1.0) / 4.0))
+            .collect();
+        df.with_column(Column::new("time".into(), t)).unwrap();
+        Dataset::new(df)
+    }
+
+    fn with_dtype(ds: &Dataset, col: &str, dtype: DataType) -> Dataset {
+        let mut df = ds.df().clone();
+        let cast = df.column(col).unwrap().cast(&dtype).unwrap();
+        df.with_column(cast).unwrap();
+        Dataset::new(df)
+    }
+
+    fn gs(ds: &Dataset, config: GsynthConfig) -> EconResult<GsynthResult> {
+        run_gsynth(ds, "outcome", "treated", "unit", "time", &[], config)
+    }
+
+    #[test]
+    fn test_na_gsynth_missing_cell() {
+        // (C2, 5) is row 14
+        let err = gs(&drop_row(&create_gsynth_dataset(), 14), gs_cfg()).unwrap_err();
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.starts_with(
+                "gsynth needs a balanced panel: 1 (unit, time) cell(s) are missing \
+                 (first: unit 'C2', time 5)."
+            )),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_na_gsynth_duplicate_cell() {
+        let err = gs(&dup_row(&create_gsynth_dataset(), 14), gs_cfg()).unwrap_err();
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.starts_with(
+                "gsynth needs one row per (unit, time): 1 duplicate row(s) \
+                 (first: unit 'C2', time 5)."
+            )),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_na_gsynth_null_outcome() {
+        let ds = create_gsynth_dataset();
+        for col in ["outcome", "unit", "treated"] {
+            match gs(&null_at(&ds, col, 14), gs_cfg()) {
+                Err(EconError::NullValues { column, count }) => {
+                    assert_eq!((column.as_str(), count), (col, 1));
+                }
+                other => panic!("null {col}: expected NullValues, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_na_gsynth_fractional_time() {
+        match gs(&quarterly_time(&create_gsynth_dataset()), gs_cfg()) {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "Time column 'time' must hold whole numbers; row 1 (0-based) is 2000.25. \
+                 Round or recode it first."
+            ),
+            other => panic!("fractional time: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_na_gsynth_boolean_treatment() {
+        let ds = create_gsynth_dataset();
+        let key = |r: &GsynthResult| {
+            let mut k = vec![r.att.to_bits()];
+            k.extend(r.unit_effects.iter().map(|u| u.att.to_bits()));
+            k
+        };
+        let base = key(&gs(&ds, gs_cfg()).unwrap());
+        let boolean = gs(&with_dtype(&ds, "treated", DataType::Boolean), gs_cfg()).unwrap();
+        assert_eq!(key(&boolean), base, "Boolean treatment");
+        // regression guards: Int64 and whole-number Float64 times
+        for dtype in [DataType::Int64, DataType::Float64] {
+            let r = gs(&with_dtype(&ds, "time", dtype.clone()), gs_cfg()).unwrap();
+            assert_eq!(key(&r), base, "time as {dtype}");
+        }
+    }
+
+    #[test]
+    fn test_gsynth_unit_order_is_deterministic() {
+        let ds = create_gsynth_dataset();
+        let r = gs(&ds, gs_cfg()).unwrap();
+        let labels: Vec<&str> = r.unit_effects.iter().map(|u| u.unit.as_str()).collect();
+        assert_eq!(labels, ["T1", "T2"]);
+        // the CV folds follow the control-unit order
+        let cv = || GsynthConfig {
+            n_factors: 0,
+            cross_validate: true,
+            max_factors: 3,
+            cv_folds: 2,
+            min_pre_periods: 2,
+            ..Default::default()
+        };
+        let fingerprint = |r: &GsynthResult| {
+            let mut k = vec![r.n_factors as u64, r.cv_mspe.len() as u64, r.att.to_bits()];
+            for (factors, mspe) in &r.cv_mspe {
+                k.push(*factors as u64);
+                k.push(mspe.to_bits());
+            }
+            k
+        };
+        let a = gs(&ds, cv()).unwrap();
+        let b = gs(&ds, cv()).unwrap();
+        assert_eq!(fingerprint(&a), fingerprint(&b));
     }
 }

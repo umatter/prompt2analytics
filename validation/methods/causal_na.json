@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mediation_na",
+      "name": "Causal mediation (IPW, Huber 2014): complete cases, covariate matrix, total effect",
+      "category": "econometrics",
+      "reference": "stats::complete.cases; stats::glm(binomial) propensity scores; Hajek IPW total effect with p2a's trimming rule (formula cross-check: causalweight is not installed)",
+      "doc": "validation/econometrics/mediation.md",
+      "cases": ["causal_mediation_na"],
+      "tests": [
+        "p2a-core::econometrics::treatment::tests::test_validate_causal_na_fixture",
+        "p2a-core::econometrics::mediation::tests::test_validate_mediation_na_omit_causal_na",
+        "p2a-core::econometrics::mediation::tests::test_validate_mediation_total_effect_causal_na",
+        "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_int64_treatment",
+        "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_reports_missing",
+        "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_errors_name_the_column",
+        "p2a-mcp::tier2::wp13_causal::test_validate_mcp_mediation_analysis_causal_na"
+      ],
+      "quantities": ["complete rows and missing counts", "rows kept after trimming", "total effect (trim 0 and 0.05)"],
+      "tolerance": "counts exact; total effect Tol::iterative(1e-8) (logit Newton-Raphson to |step| < 1e-8); MCP text Tol::printed(4)",
+      "deviations": [
+        {"finding": "CAUS-26", "quantity": "direct and indirect effects", "note": "NDE weight and labelling are Tier 4; not pinned"}
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "medflex_na",
+      "name": "Natural effect models (medflex): complete cases and the lm component models",
+      "category": "econometrics",
+      "reference": "stats::complete.cases; stats::lm (the component models; medflex 0.6-11's NDE/NIE are not compared, CAUS-23)",
+      "doc": "validation/econometrics/medflex.md",
+      "cases": ["causal_mediation_na"],
+      "tests": [
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_causal_na",
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_interaction_causal_na",
+        "p2a-core::econometrics::medflex::tests::test_validate_na_medflex_reports_missing",
+        "p2a-core::econometrics::medflex::tests::test_validate_na_medflex_errors_name_the_column",
+        "p2a-mcp::tier2::wp13_causal::test_validate_mcp_natural_effects_mediation_causal_na"
+      ],
+      "quantities": ["complete rows and missing counts", "group counts", "E[M|A=0], E[M|A=1]", "mediator model: coefficient and SE of d, R2", "outcome model with and without d:m: coefficients and SEs of d, m, d:m, R2"],
+      "tolerance": "validation/README.md, n = 350: coefficients 1e-8, SE and R2 1e-6 relative; MCP text Tol::printed(4)",
+      "deviations": [
+        {"finding": "CAUS-23", "quantity": "NDE and NIE with interaction", "note": "NDE uses the raw control mean of M; Tier 4; not pinned"}
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "weighting_na_refusal",
+      "name": "IPW, doubly robust, matching, WeightIt, entropy balancing, CBPS, twang, SBW, TMLE, C-TMLE, stdreg: missing values refused with the real error",
+      "category": "econometrics",
+      "reference": "MatchIt 4.8.0 and tmle 2.1.1 refuse missing treatment or covariates; WeightIt 2.0.0 refuses a missing treatment (R behaviour recorded in the method docs)",
+      "doc": "validation/econometrics/treatment_ipw.md",
+      "cases": ["causal_mediation_na"],
+      "tests": [
+        "p2a-core::econometrics::treatment::tests::test_validate_na_ipw_columns",
+        "p2a-core::econometrics::treatment::tests::test_validate_na_doubly_robust_columns",
+        "p2a-core::econometrics::treatment::tests::test_validate_na_ipw_nan_outcome_is_missing",
+        "p2a-core::econometrics::matching::tests::test_validate_na_match_it_columns",
+        "p2a-core::econometrics::weightit::tests::test_validate_na_weightit_columns",
+        "p2a-core::econometrics::weightit::tests::test_validate_na_entropy_balance_columns",
+        "p2a-core::econometrics::cbps::tests::test_validate_na_cbps_columns",
+        "p2a-core::econometrics::twang::tests::test_validate_na_twang_columns",
+        "p2a-core::econometrics::sbw::tests::test_validate_na_sbw_columns",
+        "p2a-core::econometrics::tmle::tests::test_validate_na_tmle_columns",
+        "p2a-core::econometrics::ctmle::tests::test_validate_na_ctmle_columns",
+        "p2a-core::econometrics::stdreg::tests::test_validate_na_stdreg_columns",
+        "p2a-mcp::tier2::wp13_causal::test_validate_mcp_treatment_ipw_null_outcome_is_named"
+      ],
+      "quantities": ["NullValues column and count (missing_y, missing_d_na, missing_x1)"],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

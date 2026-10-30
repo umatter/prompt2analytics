@@ -148,6 +148,21 @@ ess_uniform <- sum(uniform)^2 / sum(uniform^2)
 
 5. **Stable Balancing**: Gradient descent to minimize weight variance subject to approximate balance.
 
+## Missing values and column types
+
+Missing values (null or NaN) in the treatment or covariates are refused, with
+"Column 'x' contains k missing value(s) (null or NaN). Drop or impute them first."
+(`EconError::NullValues`, naming the column and the count). A text column gives
+`NonNumericColumn`, infinite values `NonFiniteValues`, an absent column `ColumnNotFound`; a
+column that exists is never reported as not found. Int64 and Boolean 0/1 treatments are
+read as numbers and give the same result as Float64. Results on complete data are
+unchanged.
+
+R: WeightIt 2.0.0 refuses a missing treatment ("Missing values are not allowed in the treatment variable.") and, for missing covariates (methods `glm` and `ebal`), warns and adds missingness indicators; p2a refuses missing covariates instead (checked for T2-WP13). The same holds for `entropy_balance`.
+
+Tests: `test_validate_na_weightit_columns`, `test_validate_na_entropy_balance_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
+`weighting_na_refusal`).
+
 ## References
 
 - Horvitz, D.G. & Thompson, D.J. (1952). "A Generalization of Sampling Without Replacement from a Finite Universe". *JASA*, 47(260), 663-685.
