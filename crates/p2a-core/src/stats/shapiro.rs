@@ -54,6 +54,7 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
+use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::traits::SignificanceLevel;
@@ -113,6 +114,10 @@ pub struct ShapiroWilkResult {
 
     /// Whether the null hypothesis (normality) is rejected at α = 0.05
     pub reject_normality: bool,
+
+    /// Rows dropped because of missing values (dataset wrapper; nothing for a slice).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for ShapiroWilkResult {
@@ -149,6 +154,9 @@ impl std::fmt::Display for ShapiroWilkResult {
         }
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
         Ok(())
     }
 }
@@ -235,12 +243,16 @@ pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
         significance: SignificanceLevel::from_p_value(p_value),
         n,
         reject_normality: p_value < 0.05,
+        missing: MissingSummary::none(n),
     })
 }
 
 /// Perform Shapiro-Wilk test using a dataset column.
 ///
-/// Convenience wrapper that extracts data from a Dataset.
+/// Missing values (null or NaN) are dropped, as `shapiro.test` does
+/// (`x[complete.cases(x)]`), and counted in `missing`; integer, decimal and boolean columns
+/// are accepted; infinite values are refused (`EconError::NonFiniteValues`), as is a text
+/// column (`EconError::NonNumericColumn`).
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -254,26 +266,10 @@ pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
 /// }
 /// ```
 pub fn run_shapiro_wilk(dataset: &Dataset, column: &str) -> EconResult<ShapiroWilkResult> {
-    let df = dataset.df();
-
-    let series = df.column(column).map_err(|_| EconError::ColumnNotFound {
-        column: column.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let x: Vec<f64> = series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: column.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    shapiro_wilk_test(&x)
+    let (x, missing) = numeric_column(dataset.df(), column, NaPolicy::Omit)?;
+    let mut result = shapiro_wilk_test(&x)?;
+    result.missing = missing;
+    Ok(result)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -526,6 +522,78 @@ mod tests {
             assert_eq!(r.reject_normality, r.p_value < 0.05, "{col}");
         }
         check.finish();
+    }
+
+    fn generated(name: &str) -> Dataset {
+        let p = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        Dataset::new(crate::data::DataLoader::load_csv(p).unwrap())
+    }
+
+    /// X-2/X-8: NA-padded Float64 columns and Int64 columns, through run_shapiro_wilk.
+    #[test]
+    fn test_validate_shapiro_wilk_columns() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_shapiro_wilk");
+        let rows = ds.df().height(); // 5000
+        // Float64 columns first (pre-fix: the padding was read as 4995 zeros), Int64 columns
+        // last (pre-fix: NonNumericColumn), so a pre-fix run reports the wrong numbers before
+        // it panics.
+        let (int_cols, float_cols): (Vec<&str>, Vec<&str>) = SHAPIRO_COLUMNS
+            .into_iter()
+            .partition(|c| ["n3_124", "n3_123", "n25_int"].contains(c));
+        for group in [float_cols, int_cols] {
+            let mut check = Check::new(&case);
+            for col in group {
+                let r = run_shapiro_wilk(&ds, col).unwrap_or_else(|e| panic!("{col}: {e}"));
+                check
+                    .scalar(&format!("{col}_w"), r.w_statistic, Tol::stat(r.n))
+                    .scalar(&format!("{col}_p"), r.p_value, Tol::p_value(r.n))
+                    .scalar(&format!("{col}_n"), r.n as f64, Tol::exact());
+                assert_eq!(
+                    (r.missing.n_total, r.missing.n_used, r.missing.n_dropped),
+                    (rows, r.n, rows - r.n),
+                    "{col}"
+                );
+                let want = if r.n == rows {
+                    vec![]
+                } else {
+                    vec![(col.to_string(), rows - r.n)]
+                };
+                assert_eq!(r.missing.by_column, want, "{col}");
+            }
+            check.finish();
+        }
+    }
+
+    #[test]
+    fn test_validate_na_shapiro_wilk_columns() {
+        let (case, ds) = crate::test_support::load_case("stat_shapiro_wilk");
+        // a NaN cell counts as missing (the harness cannot write NaN: the one inline fixture)
+        let nan = Dataset::new(df!("x" => [1.2, f64::NAN, 2.3, 3.1, 4.5, 5.2]).unwrap());
+        let r = run_shapiro_wilk(&nan, "x").unwrap();
+        assert_eq!(r.n, 5);
+        assert_eq!(r.missing.by_column, vec![("x".to_string(), 1)]);
+        assert!(p2a_validation::Tol::stat(5).allows(r.w_statistic, case.scalar("n5_w")));
+        let text = r.to_string();
+        assert_eq!(
+            text.lines().last().unwrap(),
+            format!("Missing values: {}", r.missing.note().unwrap())
+        );
+        // complete column: no note
+        assert!(
+            !run_shapiro_wilk(&ds, "n5000_rnorm")
+                .unwrap()
+                .to_string()
+                .contains("Missing values")
+        );
+        // text column and absent column
+        let ts = generated("two_sample_na");
+        assert!(
+            matches!(run_shapiro_wilk(&ts, "g"), Err(EconError::NonNumericColumn { column }) if column == "g")
+        );
+        assert!(
+            matches!(run_shapiro_wilk(&ds, "nope"), Err(EconError::ColumnNotFound { column, .. }) if column == "nope")
+        );
     }
 
     /// shapiro.test rescales a sample whose range is below 1 (PR#1768) and refuses only a
