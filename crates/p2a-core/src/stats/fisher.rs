@@ -1042,8 +1042,8 @@ mod tests {
 
     #[test]
     fn test_fisher_rejects_invalid_counts() {
-        // decision 4: NaN, Inf, fractional, > 2^53 and negative cells are refused, naming the
-        // cell; no panic, no 2^63-point loop.
+        // NaN, Inf, fractional, > 2^53 and negative cells are refused, naming the
+        // cell, before any pass over the support.
         for bad in [f64::NAN, f64::INFINITY, 2.5, 1e16, -1.0, f64::NEG_INFINITY] {
             let e = fisher_exact_test(
                 &[[bad, 1.0], [1.0, 1.0]],

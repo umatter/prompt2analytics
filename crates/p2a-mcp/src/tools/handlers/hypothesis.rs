@@ -2404,9 +2404,8 @@ mod tests {
 
     #[test]
     fn test_mcp_hypothesis_chisq_gof_omits_arrays_above_response_budget() {
-        // decision 8: 200,000 categories x (3 numbers + a label) exceed the hosted 16 MiB
-        // response budget; the statistic is still returned (before: the full arrays, which
-        // the governor would replace by an error).
+        // per-category arrays above the hosted response budget are left out; the statistic is
+        // still returned.
         let ids: Vec<String> = (0..200_000).map(|i| format!("c{i}")).collect();
         let (rt, server) = server_with(vec![("d", df!("id" => ids).unwrap())]);
         let req: ChiSquaredGofRequest =

@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn test_level_counts_matches_many_extras_by_hash() {
-        // decision 11: every observed level and every extra is matched by its canonical key, so
+        // every observed level and every extra is matched by its canonical key, so
         // a long list of extras is linear; the extras keep the order given, after the levels.
         let df = df!("k" => [3i64, 1, 2, 3]).unwrap();
         let extras: Vec<String> = (0..20_000).rev().map(|i| format!("{}.0", i + 1)).collect();
