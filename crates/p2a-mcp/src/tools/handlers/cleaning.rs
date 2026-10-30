@@ -6,6 +6,8 @@
 //! - Cleaning session management (start, status, apply, rollback)
 //! - Smart cleaning suggestions
 
+use std::sync::Arc;
+
 use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
 };
@@ -263,7 +265,7 @@ impl AnalyticsServer {
         let status = session.status();
 
         let mut sessions = self.cleaning_sessions.write().await;
-        sessions.insert(session_id.clone(), session);
+        sessions.insert(session_id.clone(), Arc::new(session));
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Cleaning session started!\n\n\
@@ -345,8 +347,10 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let mut sessions = self.cleaning_sessions.write().await;
 
+        // Copied first when a quota snapshot shares it, so that the snapshot
+        // keeps the state before this call.
         let session = match sessions.get_mut(&request.session_id) {
-            Some(s) => s,
+            Some(s) => Arc::make_mut(s),
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Session '{}' not found. Use 'list_cleaning_sessions' to see active sessions.",
@@ -523,8 +527,10 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let mut sessions = self.cleaning_sessions.write().await;
 
+        // Copied first when a quota snapshot shares it (see
+        // `cleaning_session_apply`).
         let session = match sessions.get_mut(&request.session_id) {
-            Some(s) => s,
+            Some(s) => Arc::make_mut(s),
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Session '{}' not found. Use 'list_cleaning_sessions' to see active sessions.",

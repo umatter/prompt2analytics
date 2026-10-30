@@ -530,8 +530,9 @@ use p2a_core::{
 pub struct AnalyticsServer {
     /// Currently loaded datasets, keyed by a unique ID
     pub(crate) datasets: Arc<RwLock<HashMap<String, Dataset>>>,
-    /// Active cleaning sessions, keyed by session ID
-    pub(crate) cleaning_sessions: Arc<RwLock<HashMap<String, CleaningSession>>>,
+    /// Active cleaning sessions, keyed by session ID; a tool changes one
+    /// through `Arc::make_mut` (see `Session::cleaning_sessions`)
+    pub(crate) cleaning_sessions: Arc<RwLock<HashMap<String, Arc<CleaningSession>>>>,
     /// Spatial weights matrices, keyed by a unique ID
     pub(crate) spatial_weights: Arc<RwLock<HashMap<String, SpatialWeights>>>,
     /// Global random seed for ML reproducibility

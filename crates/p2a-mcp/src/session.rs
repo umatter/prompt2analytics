@@ -38,8 +38,11 @@ pub struct Session {
     /// Global random seed for ML reproducibility
     pub global_seed: Arc<RwLock<Option<u64>>>,
     /// Cleaning sessions started with `cleaning_session_start`, keyed by
-    /// cleaning-session id.
-    pub cleaning_sessions: Arc<RwLock<HashMap<String, CleaningSession>>>,
+    /// cleaning-session id. Each is reference-counted so that a quota
+    /// snapshot ([`Session::snapshot_state`]) shares it; a tool changes one
+    /// through `Arc::make_mut`, which copies it only while a snapshot holds
+    /// it.
+    pub cleaning_sessions: Arc<RwLock<HashMap<String, Arc<CleaningSession>>>>,
     /// Spatial weights stored by `spatial_neighbors`, keyed by weights name.
     pub spatial_weights: Arc<RwLock<HashMap<String, SpatialWeights>>>,
     /// The profile behind `server_stats`' "Recent Memory History"
@@ -214,15 +217,18 @@ impl Session {
 /// before a quota-checked call so that it can be undone
 /// ([`Session::snapshot_state`], [`Session::restore_state`]).
 ///
-/// A snapshot is cheap where it can be: the datasets' columns are
-/// reference-counted and a `SpatialWeights` clone shares its lists (O(1)).
-/// A cleaning session is copied with its checkpoints' quality profiles and
-/// its audit trail, a cost bounded by what the session quota itself counts
-/// for them, and paid only when a quota is configured.
+/// The governor takes one before every call when a quota is configured,
+/// read-only calls included. It copies the three maps' entries, not the
+/// data they hold: each key; each dataset's column handles (the columns
+/// are reference-counted), name and source path; each `SpatialWeights` (a
+/// clone shares its lists); and each cleaning session's `Arc`. A cleaning
+/// tool that then changes a session copies that one session
+/// (`Arc::make_mut`), its checkpoints' quality profiles and audit trail
+/// included, while the snapshot holds the original.
 #[derive(Clone)]
 pub struct SessionStateSnapshot {
     pub datasets: HashMap<String, Dataset>,
-    pub cleaning_sessions: HashMap<String, CleaningSession>,
+    pub cleaning_sessions: HashMap<String, Arc<CleaningSession>>,
     pub spatial_weights: HashMap<String, SpatialWeights>,
 }
 
@@ -694,7 +700,7 @@ impl DataCharge {
     }
 
     /// Charge cleaning sessions stored under their ids.
-    fn add_cleaning_sessions(&mut self, map: &HashMap<String, CleaningSession>) {
+    fn add_cleaning_sessions(&mut self, map: &HashMap<String, Arc<CleaningSession>>) {
         for (id, session) in map {
             self.add(id.len() as u64);
             self.add_cleaning_session(session);
@@ -764,7 +770,7 @@ pub fn cleaning_session_bytes(cs: &CleaningSession) -> u64 {
 
 /// What the session quotas charge for a session's cleaning sessions: each
 /// id and [`cleaning_session_bytes`].
-pub fn cleaning_sessions_bytes(map: &HashMap<String, CleaningSession>) -> u64 {
+pub fn cleaning_sessions_bytes(map: &HashMap<String, Arc<CleaningSession>>) -> u64 {
     let mut charge = DataCharge::default();
     charge.add_cleaning_sessions(map);
     charge.bytes
@@ -2534,7 +2540,7 @@ mod tests {
         );
         assert!(failed.is_err());
         assert_eq!(cleaning_session_bytes(&cs), 2 + 2 * one + 264 + 271);
-        let map = HashMap::from([("c1".to_string(), cs.clone())]);
+        let map = HashMap::from([("c1".to_string(), Arc::new(cs.clone()))]);
         assert_eq!(
             cleaning_sessions_bytes(&map),
             2 + cleaning_session_bytes(&cs)
@@ -2550,7 +2556,10 @@ mod tests {
             .insert("w4".into(), knn_weights(4));
         let cs = CleaningSession::new(test_fixtures::cleaning_fixture(), "cl");
         let cs_bytes = cleaning_session_bytes(&cs);
-        s.cleaning_sessions.write().await.insert("c1".into(), cs);
+        s.cleaning_sessions
+            .write()
+            .await
+            .insert("c1".into(), Arc::new(cs));
         let snap = s.snapshot_state().await;
         let b = snap.bytes();
         let datasets = datasets_bytes(&*s.datasets.read().await);
@@ -2582,6 +2591,34 @@ mod tests {
             ["w4"]
         );
         assert_eq!(s.data_bytes(), b);
+    }
+
+    /// A snapshot shares each cleaning session instead of copying its
+    /// checkpoints' profiles and audit trail. A change made through
+    /// `Arc::make_mut`, as the cleaning tools make it, copies the one
+    /// session it changes and leaves the snapshot's as it was.
+    #[tokio::test]
+    async fn a_snapshot_shares_each_cleaning_session() {
+        let s = Session::new("share".into(), None);
+        s.cleaning_sessions.write().await.insert(
+            "c1".into(),
+            Arc::new(CleaningSession::new(
+                test_fixtures::cleaning_fixture(),
+                "cl",
+            )),
+        );
+        let snap = s.snapshot_state().await;
+        assert!(Arc::ptr_eq(
+            &snap.cleaning_sessions["c1"],
+            &s.cleaning_sessions.read().await["c1"]
+        ));
+        let applied = Arc::make_mut(s.cleaning_sessions.write().await.get_mut("c1").unwrap())
+            .apply_operation("noop", "noop", HashMap::new(), |d| Ok(d.clone()));
+        assert!(applied.is_ok());
+        assert_eq!(snap.cleaning_sessions["c1"].audit_trail.len(), 0);
+        assert_eq!(s.cleaning_sessions.read().await["c1"].audit_trail.len(), 1);
+        s.restore_state(snap).await;
+        assert_eq!(s.cleaning_sessions.read().await["c1"].audit_trail.len(), 0);
     }
 
     #[tokio::test]
@@ -2636,7 +2673,10 @@ mod tests {
         // ...nor next to a cleaning session.
         s.cleaning_sessions.write().await.insert(
             "c1".into(),
-            CleaningSession::new(test_fixtures::cleaning_fixture(), "cl"),
+            Arc::new(CleaningSession::new(
+                test_fixtures::cleaning_fixture(),
+                "cl",
+            )),
         );
         let refusal = admit_dataset("x", dx - 4).await.unwrap_err();
         assert!(refusal.contains("per session"), "{refusal}");

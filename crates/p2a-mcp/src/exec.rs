@@ -2477,10 +2477,10 @@ mod session_state_quota_tests {
             .write()
             .await
             .insert("w4".into(), knn_weights(4));
-        s.cleaning_sessions
-            .write()
-            .await
-            .insert("c1".into(), CleaningSession::new(cleaning_fixture(), "cl"));
+        s.cleaning_sessions.write().await.insert(
+            "c1".into(),
+            Arc::new(CleaningSession::new(cleaning_fixture(), "cl")),
+        );
         let snap = s.snapshot_state().await;
         assert!(state_unchanged(&snap, &s).await);
 
@@ -2508,33 +2508,18 @@ mod session_state_quota_tests {
         // Every cleaning operation, failed ones and rollbacks included,
         // grows the audit trail.
         s.restore_state(snap.clone()).await;
-        let applied = s
-            .cleaning_sessions
-            .write()
-            .await
-            .get_mut("c1")
-            .unwrap()
+        let applied = Arc::make_mut(s.cleaning_sessions.write().await.get_mut("c1").unwrap())
             .apply_operation("noop", "noop", HashMap::new(), |d| Ok(d.clone()));
         assert!(applied.is_ok());
         assert!(!state_unchanged(&snap, &s).await, "applied operation");
         s.restore_state(snap.clone()).await;
-        let failed = s
-            .cleaning_sessions
-            .write()
-            .await
-            .get_mut("c1")
-            .unwrap()
+        let failed = Arc::make_mut(s.cleaning_sessions.write().await.get_mut("c1").unwrap())
             .apply_operation("fail", "fail", HashMap::new(), |_| Err("boom".into()));
         assert!(failed.is_err());
         assert!(!state_unchanged(&snap, &s).await, "failed operation");
         s.restore_state(snap.clone()).await;
-        let rolled = s
-            .cleaning_sessions
-            .write()
-            .await
-            .get_mut("c1")
-            .unwrap()
-            .rollback_to(0);
+        let rolled =
+            Arc::make_mut(s.cleaning_sessions.write().await.get_mut("c1").unwrap()).rollback_to(0);
         assert!(rolled.is_ok());
         assert!(!state_unchanged(&snap, &s).await, "rollback");
         s.restore_state(snap.clone()).await;
