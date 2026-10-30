@@ -444,7 +444,7 @@ pub use evaluation::{
     gbm_partial_dependence, gbm_variable_importance, rf_variable_importance, roc_auc,
 };
 pub use evaluation_fast::{FastRocAucResult, fast_roc_auc, fast_roc_auc_parallel};
-pub use extract::extract_xy;
+pub use extract::{ClassTarget, extract_x_classes, extract_xy};
 pub use gbm::{GbmConfig, GbmFamily, GbmResult, gbm, gbm_predict, run_gbm, run_gbm_default};
 pub use kdtree::{KdNode, KdTree, UnionFind, build_connected_mst, euclidean_distance, kruskal_mst};
 pub use mboost::{

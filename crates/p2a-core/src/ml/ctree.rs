@@ -52,6 +52,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
 
+use super::extract::class_labels_line;
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
 
@@ -156,6 +157,10 @@ pub struct CtreeResult {
     pub n_classes: Option<usize>,
     /// Class labels (for classification)
     pub class_labels: Option<Vec<f64>>,
+    /// Labels of the class codes when the target column was text, categorical or
+    /// boolean; code k is `class_names[k]` ([`run_ctree`] only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_names: Option<Vec<String>>,
     /// Configuration used
     pub config: CtreeConfig,
     /// Feature names (if provided)
@@ -177,6 +182,9 @@ impl std::fmt::Display for CtreeResult {
                 "Regression"
             }
         )?;
+        if let Some(names) = &self.class_names {
+            writeln!(f, "{}", class_labels_line(names))?;
+        }
         writeln!(f, "Nodes: {} ({} terminal)", self.n_nodes, self.n_terminal)?;
         writeln!(f, "Depth: {}", self.depth)?;
         writeln!(
@@ -914,7 +922,7 @@ pub fn ctree(
 
     // Determine if classification or regression
     let unique_y: std::collections::HashSet<i64> = y.iter().map(|&v| (v * 1e10) as i64).collect();
-    let is_classification = unique_y.len() <= 10 && unique_y.len() < n_samples / 2;
+    let is_classification = ctree_classifies(unique_y.len(), n_samples);
 
     let classes: Option<Vec<f64>> = if is_classification {
         let mut cls: Vec<f64> = unique_y.iter().map(|&v| v as f64 / 1e10).collect();
@@ -956,10 +964,17 @@ pub fn ctree(
         is_classification,
         n_classes: classes.as_ref().map(|c| c.len()),
         class_labels: classes,
+        class_names: None,
         config: config.clone(),
         feature_names: None,
         predictions,
     })
+}
+
+/// Whether [`ctree`] fits a classification tree for a target with `n_unique` distinct
+/// values in `n` rows: at most 10 classes, and fewer classes than half the rows.
+fn ctree_classifies(n_unique: usize, n: usize) -> bool {
+    n_unique <= 10 && n_unique < n / 2
 }
 
 /// Predict using a fitted ctree.
@@ -1031,27 +1046,49 @@ fn find_terminal_node<'a>(node: &'a CtreeNode, x: &ArrayView1<f64>) -> &'a Ctree
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
-/// * `y_col` - Numeric target column. Integer and boolean (0/1) columns are accepted;
-///   a missing value (null or NaN) in the target or a feature is an error naming the
-///   column (`EconError::NullValues`)
+/// * `y_col` - Target column: numeric (integer and decimal columns; classification when
+///   it has at most 10 distinct values and fewer than half the rows, as in [`ctree`]),
+///   or a text, categorical or boolean column, whose labels become the class codes 0..K-1
+///   in R `factor()` order (reported in [`CtreeResult::class_names`]). A missing value
+///   (null or NaN) in the target or a feature is an error naming the column
+///   (`EconError::NullValues`)
 /// * `x_cols` - Feature column names
 /// * `config` - Tree configuration
 ///
 /// # Returns
 ///
-/// CtreeResult with fitted tree and diagnostics.
+/// CtreeResult with fitted tree and diagnostics. A text target with more classes than the
+/// classification rule allows is `EconError::InvalidSpecification` (no override yet).
 pub fn run_ctree(
     dataset: &Dataset,
     y_col: &str,
     x_cols: &[&str],
     config: &CtreeConfig,
 ) -> EconResult<CtreeResult> {
-    let (x, y_arr, _missing) =
-        super::extract::extract_xy(dataset, y_col, x_cols, crate::data::columns::NaPolicy::Fail)?;
+    let (x, target, _missing) = super::extract::extract_x_classes(
+        dataset,
+        y_col,
+        x_cols,
+        crate::data::columns::NaPolicy::Fail,
+    )?;
+    if let Some(labels) = &target.labels
+        && !ctree_classifies(labels.len(), x.nrows())
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "ctree fits a classification tree only for at most 10 classes and fewer \
+                 classes than half the rows; the target '{y_col}' has {} classes in {} rows. \
+                 Merge rare classes or use C5.0",
+                labels.len(),
+                x.nrows()
+            ),
+        });
+    }
     let feature_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
-    let mut result = ctree(x.view(), y_arr.view(), config)?;
+    let mut result = ctree(x.view(), target.y.view(), config)?;
     result.feature_names = Some(feature_names);
+    result.class_names = target.labels;
 
     Ok(result)
 }
@@ -1070,6 +1107,15 @@ mod tests {
     use super::*;
     use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    #[test]
+    fn test_ctree_classifies_rule() {
+        // the rule ctree() always used: unique_y.len() <= 10 && unique_y.len() < n_samples / 2
+        // (n / 2 is integer division: 2 classes need at least 6 rows)
+        assert!(ctree_classifies(10, 22) && ctree_classifies(2, 6));
+        assert!(!ctree_classifies(11, 100) && !ctree_classifies(2, 4) && !ctree_classifies(2, 5));
+        assert!(!ctree_classifies(10, 21));
+    }
 
     fn cancelled_budget() -> Budget {
         let t = CancelToken::new();

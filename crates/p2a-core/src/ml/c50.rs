@@ -47,6 +47,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::extract::class_labels_line;
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
 
@@ -236,6 +237,10 @@ pub struct C50Result {
     pub class_labels: Vec<usize>,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
+    /// Labels of the class codes when the target column was text, categorical or
+    /// boolean; code k is `class_names[k]` ([`run_c50`] only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_names: Option<Vec<String>>,
     /// Winnowed features (indices of selected features)
     pub selected_features: Option<Vec<usize>>,
     /// Configuration used
@@ -252,6 +257,9 @@ impl std::fmt::Display for C50Result {
             self.actual_trials, self.config.trials
         )?;
         writeln!(f, "Classes: {}", self.n_classes)?;
+        if let Some(names) = &self.class_names {
+            writeln!(f, "{}", class_labels_line(names))?;
+        }
         writeln!(f, "Accuracy: {:.2}%", self.accuracy * 100.0)?;
 
         if let Some(ref selected) = self.selected_features {
@@ -1260,6 +1268,7 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
         n_classes,
         class_labels,
         feature_names: None,
+        class_names: None,
         selected_features,
         config: config.clone(),
     })
@@ -1348,9 +1357,11 @@ pub fn c50_predict_proba(result: &C50Result, x: ArrayView2<f64>) -> EconResult<V
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
-/// * `y_col` - Target column of non-negative integer class codes (integer, decimal or
-///   boolean); a missing value (null or NaN) in the target or a feature is an error
-///   naming the column (`EconError::NullValues`)
+/// * `y_col` - Target column: non-negative integer class codes (integer or decimal
+///   column), or a text, categorical or boolean column whose labels become the codes
+///   0..K-1 in R `factor()` order (text in byte order, FALSE < TRUE), reported in
+///   [`C50Result::class_names`]. A missing value (null or NaN) in the target or a feature
+///   is an error naming the column (`EconError::NullValues`)
 /// * `x_cols` - Feature column names
 /// * `config` - C5.0 configuration
 ///
@@ -1363,12 +1374,17 @@ pub fn run_c50(
     x_cols: &[&str],
     config: &C50Config,
 ) -> EconResult<C50Result> {
-    let (x, y_arr, _missing) =
-        super::extract::extract_xy(dataset, y_col, x_cols, crate::data::columns::NaPolicy::Fail)?;
+    let (x, target, _missing) = super::extract::extract_x_classes(
+        dataset,
+        y_col,
+        x_cols,
+        crate::data::columns::NaPolicy::Fail,
+    )?;
     let feature_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
-    let mut result = c50(x.view(), y_arr.view(), config)?;
+    let mut result = c50(x.view(), target.y.view(), config)?;
     result.feature_names = Some(feature_names);
+    result.class_names = target.labels;
 
     Ok(result)
 }

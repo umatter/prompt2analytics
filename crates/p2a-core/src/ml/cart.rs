@@ -35,6 +35,7 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
+use super::extract::class_labels_line;
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
 
@@ -161,7 +162,8 @@ pub struct CartResult {
     pub config: CartConfig,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
-    /// Class labels (for classification)
+    /// Labels of the class codes in `predictions` when the target was text, categorical or
+    /// boolean (gini or entropy method, [`run_cart`] only); code k is `class_labels[k]`.
     pub class_labels: Option<Vec<String>>,
     /// Predictions on training data
     pub predictions: Vec<f64>,
@@ -187,6 +189,9 @@ impl std::fmt::Display for CartResult {
         writeln!(f, "CART Decision Tree")?;
         writeln!(f, "==================")?;
         writeln!(f, "Method: {:?}", self.config.method)?;
+        if let Some(labels) = &self.class_labels {
+            writeln!(f, "{}", class_labels_line(labels))?;
+        }
         writeln!(f, "Nodes: {} ({} terminal)", self.n_nodes, self.n_terminal)?;
         writeln!(f, "Depth: {}", self.depth)?;
 
@@ -932,9 +937,11 @@ fn prune_node(node: &CartNode, cp: f64) -> CartNode {
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
-/// * `y_col` - Numeric target column. Integer and boolean (0/1) columns are accepted;
-///   a missing value (null or NaN) in the target or a feature is an error naming the
-///   column (`EconError::NullValues`)
+/// * `y_col` - Target column: numeric (integer, decimal and, for anova, boolean 0/1
+///   columns); with the gini or entropy method also a text, categorical or boolean
+///   column, whose labels become the class codes 0..K-1 in R `factor()` order (reported
+///   in [`CartResult::class_labels`]). A missing value (null or NaN) in the target or a
+///   feature is an error naming the column (`EconError::NullValues`)
 /// * `x_cols` - Feature column names
 /// * `config` - CART configuration
 ///
@@ -947,12 +954,23 @@ pub fn run_cart(
     x_cols: &[&str],
     config: &CartConfig,
 ) -> EconResult<CartResult> {
-    let (x, y_arr, _missing) =
-        super::extract::extract_xy(dataset, y_col, x_cols, crate::data::columns::NaPolicy::Fail)?;
+    let fail = crate::data::columns::NaPolicy::Fail;
+    let (x, target) = match config.method {
+        CartMethod::Gini | CartMethod::Entropy => {
+            let (x, target, _missing) =
+                super::extract::extract_x_classes(dataset, y_col, x_cols, fail)?;
+            (x, target)
+        }
+        CartMethod::Anova => {
+            let (x, y, _missing) = super::extract::extract_xy(dataset, y_col, x_cols, fail)?;
+            (x, super::extract::ClassTarget { y, labels: None })
+        }
+    };
     let feature_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
-    let mut result = cart(x.view(), y_arr.view(), config)?;
+    let mut result = cart(x.view(), target.y.view(), config)?;
     result.feature_names = Some(feature_names);
+    result.class_labels = target.labels;
 
     Ok(result)
 }

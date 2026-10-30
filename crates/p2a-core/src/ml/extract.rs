@@ -7,7 +7,7 @@
 //! have no surrogate splits, and R's randomForest and gbm refuse missing values too.
 
 use crate::Dataset;
-use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::data::columns::{self, ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use ndarray::{Array1, Array2, ArrayView2};
 
@@ -36,6 +36,51 @@ pub fn extract_xy(
     Ok((
         cols.matrix(x, false).data,
         cols.numeric_array(y),
+        cols.missing().clone(),
+    ))
+}
+
+/// Target of a classification wrapper (C5.0, ctree, CART with gini/entropy).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassTarget {
+    /// Estimator input: the stored values of a numeric target, or the 0-based level codes
+    /// of a text, categorical or boolean target.
+    pub y: Array1<f64>,
+    /// The level labels when `y` holds codes (R `factor()` order: text in byte order,
+    /// FALSE < TRUE; the levels observed in the kept rows); `None` for a numeric target.
+    pub labels: Option<Vec<String>>,
+}
+
+/// As [`extract_xy`], but a text, categorical or boolean target becomes level codes
+/// 0..K-1 with their labels ([`ClassTarget::labels`]). A numeric target (integers and
+/// floats; booleans count as classes here) is passed as stored, with `labels: None`.
+pub fn extract_x_classes(
+    dataset: &Dataset,
+    y: &str,
+    x: &[&str],
+    policy: NaPolicy,
+) -> EconResult<(Array2<f64>, ClassTarget, MissingSummary)> {
+    let df = dataset.df();
+    if columns::is_numeric_dtype(columns::column(df, y)?.dtype(), false) {
+        let (x, y, missing) = extract_xy(dataset, y, x, policy)?;
+        return Ok((x, ClassTarget { y, labels: None }, missing));
+    }
+    if x.is_empty() {
+        return Err(no_features());
+    }
+    let cols = ColumnRequest::new(df)
+        .factor(y)
+        .numerics(x)
+        .na(policy)
+        .extract()?;
+    let factor = cols.factor(y);
+    let codes: Array1<f64> = factor.codes.iter().map(|&c| f64::from(c)).collect();
+    Ok((
+        cols.matrix(x, false).data,
+        ClassTarget {
+            y: codes,
+            labels: Some(factor.levels.clone()),
+        },
         cols.missing().clone(),
     ))
 }
@@ -431,5 +476,124 @@ mod tests {
             let a = fit(&d, "cls_b", &X).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(bits(&a), bits(&fit(&d, "cls_f", &X).unwrap()), "{name}");
         }
+    }
+
+    #[test]
+    fn test_na_extract_x_classes_levels() {
+        let d = ml_dataset();
+        let cls: Vec<f64> = extract_xy(&d, "cls", &X, NaPolicy::Fail)
+            .unwrap()
+            .1
+            .to_vec();
+        let (_, t, _) = extract_x_classes(&d, "lab", &X, NaPolicy::Fail).unwrap();
+        // R: levels(factor(lab))
+        assert_eq!(
+            t.labels.as_deref(),
+            Some(&["no".to_string(), "yes".to_string()][..])
+        );
+        assert_eq!(t.y.to_vec(), cls); // "yes" iff cls == 1
+        let (_, t, _) = extract_x_classes(&d, "cls_b", &X, NaPolicy::Fail).unwrap();
+        assert_eq!(
+            t.labels.as_deref(),
+            Some(&["FALSE".to_string(), "TRUE".to_string()][..])
+        );
+        assert_eq!(t.y.to_vec(), cls);
+        let (_, t, _) = extract_x_classes(&d, "cls", &X, NaPolicy::Fail).unwrap();
+        assert_eq!((t.labels, t.y.to_vec()), (None, cls));
+        let e = extract_x_classes(&d, "cls_na", &X, NaPolicy::Fail).unwrap_err();
+        assert!(
+            matches!(&e, EconError::NullValues { column, .. } if column == "cls_na"),
+            "{e}"
+        );
+        // a text target with a missing label is named too, and an empty feature list refused
+        let e = extract_x_classes(&d, "lab", &["x1_na"], NaPolicy::Fail).unwrap_err();
+        assert!(
+            matches!(&e, EconError::NullValues { column, .. } if column == "x1_na"),
+            "{e}"
+        );
+        let e = extract_x_classes(&d, "lab", &[], NaPolicy::Fail).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message == "At least one feature column must be specified"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_na_c50_class_labels() {
+        // WT-2 duplicate: "ml_c50 ... string labels are rejected". Before: "Column 'lab' is
+        // not numeric".
+        let d = ml_dataset();
+        let cfg = C50Config {
+            seed: Some(7),
+            ..Default::default()
+        };
+        let codes = run_c50(&d, "cls", &X, &cfg).unwrap();
+        assert_eq!(codes.class_names, None);
+        assert!(!codes.to_string().contains("Class labels:"));
+        for (col, names) in [("lab", ["no", "yes"]), ("cls_b", ["FALSE", "TRUE"])] {
+            let r = run_c50(&d, col, &X, &cfg).unwrap_or_else(|e| panic!("{col}: {e}"));
+            assert_eq!(r.predictions, codes.predictions, "{col}");
+            assert_eq!(r.class_labels, vec![0, 1]);
+            assert_eq!(r.class_names, Some(names.map(String::from).to_vec()));
+            assert!(
+                r.to_string()
+                    .contains(&format!("Class labels: 0 = {}, 1 = {}", names[0], names[1])),
+                "{r}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_na_ctree_class_labels() {
+        let d = ml_dataset();
+        let cfg = CtreeConfig {
+            minsplit: 6,
+            minbucket: 3,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let codes = run_ctree(&d, "cls", &X, &cfg).unwrap();
+        let r = run_ctree(&d, "lab", &X, &cfg).unwrap();
+        assert!(r.is_classification && codes.is_classification);
+        assert_eq!(bits(&r.predictions), bits(&codes.predictions));
+        assert_eq!(codes.class_names, None);
+        assert_eq!(
+            r.class_names,
+            Some(vec!["no".to_string(), "yes".to_string()])
+        );
+        assert!(r.to_string().contains("Class labels: 0 = no, 1 = yes"));
+        // 12 classes: ctree's heuristic (at most 10 classes, fewer than n/2) would fit a
+        // regression on the codes
+        let e = run_ctree(&d, "lab12", &X, &cfg).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("at most 10 classes")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_na_cart_class_labels() {
+        let d = ml_dataset();
+        let gini = CartConfig {
+            method: CartMethod::Gini,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let r = run_cart(&d, "lab", &X, &gini).unwrap();
+        assert_eq!(
+            r.class_labels,
+            Some(vec!["no".to_string(), "yes".to_string()])
+        );
+        assert!(r.predictions.iter().all(|&p| p == 0.0 || p == 1.0));
+        assert!(r.to_string().contains("Class labels: 0 = no, 1 = yes"));
+        assert_eq!(run_cart(&d, "cls", &X, &gini).unwrap().class_labels, None);
+        // anova needs a numeric target
+        let e = run_cart(&d, "lab", &X, &CartConfig::default()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::NonNumericColumn { column } if column == "lab"),
+            "{e}"
+        );
     }
 }
