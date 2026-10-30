@@ -1828,6 +1828,12 @@ fn main() {
             run_placebos: false,
             ..Default::default()
         };
+        // The outputs agree, but the timings do not compare the same search:
+        // R's synth() divides each predictor by its SD across units and runs
+        // two Nelder-Mead V searches (from equal V and from a regression-based
+        // V) and keeps the better; p2a-core runs one from equal V on the raw
+        // predictors (CAUS-40), which stops after 2 iterations here. The
+        // merge keeps this pair out of the exhibits (exhibit_timing_exclusions).
         let mut result = run_benchmark_tracked("SynthControl", "Nelder-Mead", n, &config, || {
             run_synthetic_control(
                 &dataset,
@@ -1868,6 +1874,9 @@ fn main() {
             capture_vec(&mut outputs, "solution_w", &weights);
             // Mean post-period (7..9) gap, R's mean(Y1plot - Y0plot %*% w) there
             capture(&mut outputs, "average_effect", sc.average_effect);
+            // Rust only (R has no such key, so it is not compared): how long
+            // p2a-core's one V search ran, the record behind the exclusion
+            capture(&mut outputs, "v_iterations", sc.v_iterations as f64);
             result.outputs = outputs;
         }
         result.dgp = "synth".to_string();
@@ -2341,8 +2350,8 @@ fn main() {
     }
 
     // CTMLE
-    // Cap: R also runs n=10000; Rust stops at 1000 (unchanged)
-    for n in sizes_for(&["CTMLE"], [100, 1000]) {
+    // R's sizes: 100, 1000, 10000 (treatment_n<n>.csv)
+    for n in sizes_for(&["CTMLE"], [100, 1000, 10000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         // y is continuous: a linear Q (the default logistic Q returned ATEs of
@@ -2582,7 +2591,7 @@ fn main() {
     }
 
     // DoubleML (PLR)
-    // Cap: R also runs n=10000; Rust stops at 1000 (unchanged)
+    // R's sizes: 100, 1000, 10000 (doubleml_n<n>.csv)
     //
     // R's rows (doubleml_n<n>.csv) and R's folds: R puts row r (0-based) in
     // fold r % 5. p2a-core cannot take folds; it draws them from its seed as
@@ -2612,7 +2621,7 @@ fn main() {
             })
             .collect()
     }
-    for n in sizes_for(&["DoubleML"], [100, 1000]) {
+    for n in sizes_for(&["DoubleML"], [100, 1000, 10000]) {
         let dml_x_cols = ["x1", "x2", "x3", "x4", "x5"];
         let (y0, d0, x0) = match load_csv_dataset(&data_dir, "doubleml", n) {
             Some(ds) => {
@@ -2698,8 +2707,8 @@ fn main() {
     }
 
     // LTMLE (2 time points)
-    // Cap: R also runs n=10000; Rust stops at 1000 (unchanged)
-    for n in sizes_for(&["LTMLE"], [100, 1000]) {
+    // R's sizes: 100, 1000, 10000 (ltmle_n<n>.csv)
+    for n in sizes_for(&["LTMLE"], [100, 1000, 10000]) {
         // R's rows (ltmle_n<n>.csv): L1 = (L1_1, L1_2), A1, L2 = (L2_1, L2_2), A2, Y
         let (l1, l2, a1, a2, y) = match load_csv_dataset(&data_dir, "ltmle", n) {
             Some(ds) => {
