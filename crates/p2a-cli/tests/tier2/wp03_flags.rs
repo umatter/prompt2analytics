@@ -149,3 +149,112 @@ fn test_cli_data_save_file_format() {
         assert!(e.contains("--file-format"), "{bad}: {e}");
     }
 }
+
+/// CLI-12: a recorded command keeps its subcommand flags (-q, -v) and a global typed after the
+/// subcommand (--quiet), and the exported script replays with the real binary.
+#[cfg(unix)]
+#[test]
+fn test_cli_session_replays_subcommand_flags() {
+    let s = temp_session();
+    let gdp_path = repo_path("validation/datasets/gdp_quarterly.csv");
+    let gdp = gdp_path.to_str().unwrap();
+    let copy_path = s.dir().join("gdp_copy.dat");
+    let copy = copy_path.to_str().unwrap();
+    s.ok(&["data", "load", gdp, "--name", "gdp"]);
+    let fit = arima_json(
+        &s,
+        &[
+            "gdp",
+            "--col",
+            "gdp_growth",
+            "-p",
+            "1",
+            "-d",
+            "0",
+            "-q",
+            "2",
+            "--quiet",
+        ],
+    );
+    assert_eq!(fit["model"], "ARIMA(1,0,2)");
+    let filt = s.json(&[
+        "munge", "filter", "gdp", "-c", "year", "-o", "ge", "-v", "2000", "-n", "recent",
+    ]);
+    // R: sum(read.csv("gdp_quarterly.csv")$year >= 2000) = 96, ncol = 4
+    assert_eq!(
+        filt["message"],
+        "Created dataset 'recent' (96 rows x 4 columns)"
+    );
+    s.ok(&[
+        "data",
+        "save",
+        "gdp",
+        "--output",
+        copy,
+        "--file-format",
+        "csv",
+    ]);
+    let want: Vec<Vec<String>> = [
+        vec!["data", "load", gdp, "--name", "gdp"],
+        vec![
+            "ts",
+            "arima",
+            "gdp",
+            "--col",
+            "gdp_growth",
+            "-p",
+            "1",
+            "-d",
+            "0",
+            "-q",
+            "2",
+            "--quiet",
+        ],
+        vec![
+            "munge", "filter", "gdp", "-c", "year", "-o", "ge", "-v", "2000", "-n", "recent",
+        ],
+        vec![
+            "data",
+            "save",
+            "gdp",
+            "--output",
+            copy,
+            "--file-format",
+            "csv",
+        ],
+    ]
+    .iter()
+    .map(|v| v.iter().map(|t| t.to_string()).collect())
+    .collect();
+    assert_eq!(s.recorded_argv(), want);
+    std::fs::remove_file(&copy_path).unwrap();
+    let script = s.dir().join("replay.sh");
+    let out = p2a()
+        .args([
+            "script",
+            "export",
+            s.path().to_str().unwrap(),
+            "-o",
+            script.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = s.replay(&script);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "replay failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("Created dataset 'recent' (96 rows x 4 columns)")
+            && stdout.contains("Script completed successfully"),
+        "{stdout}"
+    );
+    assert_same_csv(&copy_path, &gdp_path); // the replayed `data save` wrote the file again
+}

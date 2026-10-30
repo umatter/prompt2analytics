@@ -128,33 +128,88 @@ pub enum Commands {
     SmokeTest,
 }
 
+/// Global flags of `Cli`: (long name, short, takes a value). Kept in sync by
+/// `global_flag_table_matches_cli`.
+const GLOBAL_FLAGS: &[(&str, Option<char>, bool)] = &[
+    ("format", Some('F'), true),
+    ("session", None, true),
+    ("quiet", None, false),
+    ("verbose", None, false),
+    ("max-memory", None, true),
+];
+
+/// The number of tokens a global flag of [`GLOBAL_FLAGS`] occupies when `tok`
+/// is one, or `None` when `tok` is not a global flag.
+///
+/// `--<long>` takes 2 tokens if the flag takes a value, else 1; `--<long>=<v>`
+/// takes 1 (value-taking flags only); `-F` takes 2; `-F<v>` and `-F=<v>` take 1.
+fn global_flag_width(tok: &str) -> Option<usize> {
+    if let Some(rest) = tok.strip_prefix("--") {
+        let (long, inline_value) = match rest.split_once('=') {
+            Some((long, _)) => (long, true),
+            None => (rest, false),
+        };
+        let &(_, _, takes_value) = GLOBAL_FLAGS.iter().find(|(l, _, _)| *l == long)?;
+        return match (takes_value, inline_value) {
+            (true, false) => Some(2),
+            (true, true) | (false, false) => Some(1),
+            (false, true) => None,
+        };
+    }
+    let rest = tok.strip_prefix('-')?;
+    let mut chars = rest.chars();
+    let short = chars.next()?;
+    let &(_, _, takes_value) = GLOBAL_FLAGS.iter().find(|(_, s, _)| *s == Some(short))?;
+    match (takes_value, chars.as_str().is_empty()) {
+        (true, true) => Some(2),
+        (true, false) | (false, true) => Some(1),
+        (false, false) => None,
+    }
+}
+
 /// Extract the command-portion argv (category, subcommand, and args) from the
-/// raw process arguments, dropping the program name and the global flags
-/// (`--format`/`-F`, `--session`, `--quiet`/`-q`, `--verbose`/`-v…`). These are
-/// `global = true`, so they may appear anywhere, not only before the subcommand.
+/// raw process arguments, as the session records it for script export.
+///
+/// Drops the program name and every global flag before the subcommand token
+/// (all forms of [`GLOBAL_FLAGS`]: `--format x`, `--format=x`, `-F x`, `-Fx`,
+/// `-F=x`, `--session`, `--quiet`, `--verbose`, `--max-memory`). After it,
+/// every token is kept as typed, so a global typed after the subcommand
+/// (`-F json`, `--quiet`) is replayed, except `--session <v>` and
+/// `--session=<v>`, which are dropped anywhere before a `--` token (everything
+/// after `--` is copied verbatim).
+///
+/// - A trailing `--session` goes because clap keeps the deeper value when the
+///   parent and the subcommand both set a global (clap_builder
+///   `parser/arg_matcher.rs:66-71`): a recorded `--session OLD` would override
+///   the replay script's own `--session "$SESSION_FILE"` and redirect the
+///   replay's recording into the original session file.
+/// - No subcommand flag is spelled like a global: `cli_debug_asserts` (clap's
+///   short/long uniqueness asserts) and `no_subcommand_arg_shadows_a_global`
+///   (ids, which the asserts cannot see) guarantee it, so a kept `-q` or `-v`
+///   is always the subcommand's own option.
+/// - No option accepts hyphen values (`allow_hyphen_values`), so a token that
+///   looks like a global flag is never another option's value.
 fn command_argv(raw: &[String]) -> Vec<String> {
-    fn is_verbose_short(tok: &str) -> bool {
-        tok.len() >= 2
-            && tok.starts_with('-')
-            && !tok.starts_with("--")
-            && tok[1..].bytes().all(|b| b == b'v')
+    let mut i = 1; // skip the program name
+    while i < raw.len() {
+        match global_flag_width(&raw[i]) {
+            Some(width) => i += width,
+            None => break,
+        }
     }
 
     let mut out = Vec::new();
-    let mut i = 1; // skip the program name
-    while i < raw.len() {
-        let tok = raw[i].as_str();
-        match tok {
-            // Value-taking globals: skip the flag and its separate value.
-            "--format" | "-F" | "--session" => i += 2,
-            _ if tok.starts_with("--format=") || tok.starts_with("--session=") => i += 1,
-            // Boolean / count globals: skip just the flag.
-            "--quiet" | "-q" | "--verbose" => i += 1,
-            _ if is_verbose_short(tok) => i += 1,
-            _ => {
-                out.push(raw[i].clone());
-                i += 1;
-            }
+    let mut rest = raw.iter().skip(i);
+    while let Some(tok) = rest.next() {
+        if tok == "--" {
+            out.push(tok.clone());
+            out.extend(rest.cloned());
+            break;
+        }
+        if tok == "--session" {
+            rest.next(); // and its value
+        } else if !tok.starts_with("--session=") {
+            out.push(tok.clone());
         }
     }
     out
@@ -559,8 +614,17 @@ mod command_argv_tests {
     }
 
     #[test]
-    fn strips_globals_anywhere() {
-        // Global flags may appear after the subcommand (clap global = true).
+    fn preserves_command_values_that_look_like_flags_values() {
+        // A column literally named after a flag value is kept.
+        let raw = argv(&["p2a", "reg", "ols", "d", "-x", "price"]);
+        assert_eq!(
+            command_argv(&raw),
+            argv(&["reg", "ols", "d", "-x", "price"])
+        );
+    }
+
+    #[test]
+    fn keeps_globals_after_the_subcommand_except_session() {
         let raw = argv(&[
             "p2a",
             "data",
@@ -570,28 +634,139 @@ mod command_argv_tests {
             "s.json",
             "-F",
             "json",
+            "--quiet",
             "--name",
             "d",
         ]);
         assert_eq!(
             command_argv(&raw),
-            argv(&["data", "load", "f.csv", "--name", "d"])
+            argv(&[
+                "data", "load", "f.csv", "-F", "json", "--quiet", "--name", "d"
+            ])
         );
     }
 
     #[test]
-    fn strips_equals_form_and_verbose() {
-        let raw = argv(&["p2a", "--session=s.json", "-vv", "stats", "describe", "d"]);
+    fn strips_every_leading_global_form() {
+        let raw = argv(&[
+            "p2a",
+            "--session=s.json",
+            "--verbose",
+            "--verbose",
+            "--max-memory",
+            "512",
+            "-Fjson",
+            "--format=table",
+            "--quiet",
+            "stats",
+            "describe",
+            "d",
+        ]);
         assert_eq!(command_argv(&raw), argv(&["stats", "describe", "d"]));
+        let raw = argv(&["p2a", "--max-memory=64", "-F=json", "reg", "ols", "d"]);
+        assert_eq!(command_argv(&raw), argv(&["reg", "ols", "d"]));
     }
 
     #[test]
-    fn preserves_command_values_that_look_like_flags_values() {
-        // A column literally named after a flag value is kept.
-        let raw = argv(&["p2a", "reg", "ols", "d", "-x", "price"]);
+    fn strips_session_anywhere_before_double_dash() {
+        let raw = argv(&[
+            "p2a",
+            "reg",
+            "--session",
+            "s.json",
+            "ols",
+            "d",
+            "--session=t.json",
+            "-y",
+            "y",
+        ]);
+        assert_eq!(command_argv(&raw), argv(&["reg", "ols", "d", "-y", "y"]));
+        let raw = argv(&["p2a", "data", "describe", "--", "--session"]);
         assert_eq!(
             command_argv(&raw),
-            argv(&["reg", "ols", "d", "-x", "price"])
+            argv(&["data", "describe", "--", "--session"])
         );
+    }
+
+    #[test]
+    fn keeps_subcommand_short_q_and_v() {
+        let raw = argv(&[
+            "p2a",
+            "--session",
+            "s.json",
+            "ts",
+            "arima",
+            "d",
+            "--col",
+            "y",
+            "-p",
+            "1",
+            "-d",
+            "1",
+            "-q",
+            "2",
+        ]);
+        assert_eq!(
+            command_argv(&raw),
+            argv(&[
+                "ts", "arima", "d", "--col", "y", "-p", "1", "-d", "1", "-q", "2"
+            ])
+        );
+        let raw = argv(&[
+            "p2a",
+            "panel",
+            "unit-root",
+            "d",
+            "-v",
+            "gdp",
+            "--unit",
+            "c",
+            "--time",
+            "t",
+        ]);
+        assert_eq!(command_argv(&raw), raw[1..].to_vec());
+    }
+
+    #[test]
+    fn keeps_data_save_file_format() {
+        let raw = argv(&[
+            "p2a",
+            "--session",
+            "s",
+            "data",
+            "save",
+            "d",
+            "-o",
+            "out.dat",
+            "--file-format",
+            "csv",
+        ]);
+        assert_eq!(
+            command_argv(&raw),
+            argv(&["data", "save", "d", "-o", "out.dat", "--file-format", "csv"])
+        );
+    }
+
+    #[test]
+    fn global_flag_table_matches_cli() {
+        use clap::CommandFactory;
+        let mut from_cli: Vec<(String, Option<char>, bool)> = super::Cli::command()
+            .get_arguments()
+            .filter(|a| a.is_global_set())
+            .map(|a| {
+                (
+                    a.get_long().expect("globals have a long name").to_string(),
+                    a.get_short(),
+                    a.get_action().takes_values(),
+                )
+            })
+            .collect();
+        let mut table: Vec<(String, Option<char>, bool)> = super::GLOBAL_FLAGS
+            .iter()
+            .map(|&(l, s, v)| (l.to_string(), s, v))
+            .collect();
+        from_cli.sort();
+        table.sort();
+        assert_eq!(table, from_cli);
     }
 }
