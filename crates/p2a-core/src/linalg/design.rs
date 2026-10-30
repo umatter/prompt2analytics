@@ -29,7 +29,9 @@ pub enum DesignError {
 
     /// Missing cells (null, or NaN in a float column); `first_rows` holds the
     /// first 5 0-based row indices at most.
-    #[error("Column '{column}' contains {count} missing value(s) (first at rows {first_rows:?})")]
+    #[error(
+        "Column '{column}' contains {count} missing value(s) (first at 0-based rows {first_rows:?})"
+    )]
     NullValues {
         column: String,
         count: usize,
@@ -37,7 +39,9 @@ pub enum DesignError {
     },
 
     /// `±Inf` cells; `first_rows` holds the first 5 0-based row indices at most.
-    #[error("Column '{column}' contains {count} infinite value(s) (first at rows {first_rows:?})")]
+    #[error(
+        "Column '{column}' contains {count} infinite value(s) (first at 0-based rows {first_rows:?})"
+    )]
     NonFinite {
         column: String,
         count: usize,
@@ -229,6 +233,12 @@ fn extract_f64_values(series: &Column, col_name: &str) -> Result<Vec<f64>, Desig
 /// as stored, integers in decimal, booleans "FALSE"/"TRUE", dates "YYYY-MM-DD"). A
 /// missing label is [`DesignError::NullValues`]; a column that cannot be a factor
 /// is a [`DesignError::PolarsError`] naming it.
+///
+/// `DesignError` has no resource variant: an allocation refused under the
+/// [`crate::resource`] ceiling is also returned as [`DesignError::PolarsError`], whose
+/// text carries the "Resource limit" message, and `econ_error_from_design` turns any
+/// `PolarsError` into `EconError::Internal`. A caller that must report a refusal as
+/// `EconError::ResourceLimit` uses `crate::data::columns::factor_options` directly.
 pub fn extract_groups(
     df: &DataFrame,
     group_col: &str,
@@ -423,7 +433,7 @@ mod tests {
             "y" => [1.1, 1.9, 3.2, 3.8, 5.1],
         }
         .unwrap();
-        let expected = "Column 'x1' contains 1 missing value(s) (first at rows [2])";
+        let expected = "Column 'x1' contains 1 missing value(s) (first at 0-based rows [2])";
         let err =
             DesignMatrix::from_dataframe(&df, &["x1"], true).expect_err("NaN must be reported");
         assert_eq!(err.to_string(), expected);
@@ -438,7 +448,7 @@ mod tests {
             DesignMatrix::from_dataframe(&df, &["x1"], false).expect_err("Inf must be reported");
         assert_eq!(
             err.to_string(),
-            "Column 'x1' contains 2 infinite value(s) (first at rows [3, 4])"
+            "Column 'x1' contains 2 infinite value(s) (first at 0-based rows [3, 4])"
         );
     }
 
@@ -450,7 +460,7 @@ mod tests {
             .to_string();
         assert_eq!(
             msg,
-            "Column 'x1' contains 50000 missing value(s) (first at rows [0, 2, 4, 6, 8])"
+            "Column 'x1' contains 50000 missing value(s) (first at 0-based rows [0, 2, 4, 6, 8])"
         );
         assert!(msg.len() < 120, "{} bytes", msg.len());
     }
@@ -464,7 +474,7 @@ mod tests {
         assert_eq!(
             msg,
             "Design matrix error: Column 'x1' contains 50000 missing value(s) \
-             (first at rows [0, 2, 4, 6, 8])"
+             (first at 0-based rows [0, 2, 4, 6, 8])"
         );
     }
 
@@ -506,7 +516,7 @@ mod tests {
         let err = extract_groups(&missing, "group").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Column 'group' contains 1 missing value(s) (first at rows [1])"
+            "Column 'group' contains 1 missing value(s) (first at 0-based rows [1])"
         );
     }
 }

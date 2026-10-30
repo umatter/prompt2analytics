@@ -30,8 +30,12 @@
 //!    whatever its dtype: polars reads an all-empty CSV column as `String`, where R reads
 //!    logical `NA`.
 //!
-//! Every pass over the rows is O(n x k), and buffers sized from the data are allocated
-//! through [`crate::resource`].
+//! Every pass over the rows is O(n x k). The row mask, the kept rows, the column values,
+//! the time index values and the factor codes are allocated through [`crate::resource`].
+//! [`Columns::matrix`] allocates its n x `names.len()` copy infallibly, as
+//! `DesignMatrix::from_dataframe` does (a name repeated in `names` is copied once per
+//! occurrence), and [`Columns::numeric_array`] copies one column infallibly; per-level
+//! buffers (counts, level remaps) are sized by the number of levels.
 //!
 //! ```
 //! use p2a_core::data::columns::{ColumnRequest, NaPolicy};
@@ -83,7 +87,9 @@ pub struct MissingSummary {
     /// Rows dropped (`n_total - n_used`).
     pub n_dropped: usize,
     /// Missing cells per requested column, request order, only columns with at least one.
-    /// A row missing in two columns counts in both.
+    /// A row missing in two columns counts in both. Serialized as an object in request
+    /// order (`{"y": 2, "n": 1}`), the shape MCP's `missing_json` writes.
+    #[serde(with = "by_column_map")]
     pub by_column: Vec<(String, usize)>,
 }
 
@@ -148,6 +154,43 @@ impl fmt::Display for MissingSummary {
             Some(note) => f.write_str(&note),
             None => Ok(()),
         }
+    }
+}
+
+/// `MissingSummary::by_column` as a map from column name to count, in request order.
+mod by_column_map {
+    use std::fmt;
+
+    use serde::de::{MapAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        pairs: &[(String, usize)],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(pairs.iter().map(|(column, count)| (column, count)))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<(String, usize)>, D::Error> {
+        struct Pairs;
+        impl<'de> Visitor<'de> for Pairs {
+            type Value = Vec<(String, usize)>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a map from column name to missing-cell count")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut pairs = Vec::new();
+                while let Some(entry) = map.next_entry::<String, usize>()? {
+                    pairs.push(entry);
+                }
+                Ok(pairs)
+            }
+        }
+        deserializer.deserialize_map(Pairs)
     }
 }
 
@@ -532,7 +575,8 @@ impl Columns {
     }
 
     /// Design matrix over numeric columns in `names` order; "(Intercept)" first when
-    /// `intercept`.
+    /// `intercept`. The n x `names.len()` matrix is allocated infallibly (not through
+    /// [`crate::resource`]), as in `DesignMatrix::from_dataframe`.
     ///
     /// # Panics
     /// If a name was not requested as numeric.
@@ -624,7 +668,9 @@ impl Factor {
 
     /// Re-order levels to `order` (every observed label must appear in `order`; labels in
     /// `order` that are never observed keep a count of 0). The error names the first
-    /// unknown label, or a label `order` repeats.
+    /// unknown label, or a label `order` repeats. For a numeric factor a label that is never
+    /// observed gets its parsed value as its numeric level; one that does not parse as a
+    /// number (or parses as NaN) is refused by name.
     pub fn with_level_order(&self, order: &[String]) -> EconResult<Factor> {
         let mut position: HashMap<&str, u32> = HashMap::with_capacity(order.len());
         for (i, label) in order.iter().enumerate() {
@@ -658,13 +704,25 @@ impl Factor {
                 .map(String::as_str)
                 .zip(self.numeric_levels.iter().copied())
                 .collect();
-            order
-                .iter()
-                .map(|label| match old.get(label.as_str()) {
+            let mut values = Vec::with_capacity(order.len());
+            for label in order {
+                let value = match old.get(label.as_str()) {
                     Some(&v) => v,
-                    None => label.parse::<f64>().unwrap_or(f64::NAN),
-                })
-                .collect()
+                    None => match label.parse::<f64>() {
+                        Ok(v) if !v.is_nan() => v,
+                        _ => {
+                            return Err(EconError::InvalidSpecification {
+                                message: format!(
+                                    "level '{label}' in the level order is not a number, \
+                                     but the column levels are numeric"
+                                ),
+                            });
+                        }
+                    },
+                };
+                values.push(value);
+            }
+            values
         };
         Ok(Factor {
             levels: order.to_vec(),
@@ -1265,7 +1323,7 @@ mod tests {
 
     #[test]
     fn test_validate_columns_matrix_and_summary() {
-        let (_case, ds) = crate::test_support::load_case("columns_conventions");
+        let (case, ds) = crate::test_support::load_case("columns_conventions");
         let df = ds.df();
         let cols = ColumnRequest::new(df)
             .numerics(&["y", "n"])
@@ -1277,10 +1335,24 @@ mod tests {
         assert_eq!(m.n_obs, 7);
         assert_eq!(m.n_features, 3);
         assert!(m.has_intercept);
-        // R: mean y 6.2857142857142856 over 7 rows, sum n 94 (binary-exact sums).
+        // Derived from the fixture, not case values (the case's complete rows are those of
+        // complete.cases(y, n, s)): y sums to 44 and n to 94 over these 7 rows (binary-exact).
         let sums: Vec<f64> = (0..3).map(|j| m.data.column(j).sum()).collect();
         assert_eq!(sums, [7.0, 44.0, 94.0]);
         assert_eq!(cols.numeric_array("n").sum(), 94.0);
+        // The per-column missing counts are the case's.
+        assert_eq!(cols.missing().by_column.len(), 2);
+        let count = |c: &str| {
+            cols.missing()
+                .by_column
+                .iter()
+                .find(|(k, _)| k == c)
+                .map_or(0, |(_, v)| *v) as f64
+        };
+        Check::new(&case)
+            .scalar("missing_y", count("y"), Tol::exact())
+            .scalar("missing_n", count("n"), Tol::exact())
+            .finish();
         let note = "3 of 10 rows dropped because of missing values (y: 2, n: 1)";
         assert_eq!(cols.missing().note().as_deref(), Some(note));
         assert_eq!(cols.missing().to_string(), note);
@@ -1315,10 +1387,15 @@ mod tests {
             missing: cols.missing().clone(),
         })
         .unwrap();
+        // by_column is an object in request order, the shape MCP's missing_json writes.
         assert_eq!(
             full,
-            r#"{"missing":{"n_total":10,"n_used":7,"n_dropped":3,"by_column":[["y",2],["n",1]]}}"#
+            r#"{"missing":{"n_total":10,"n_used":7,"n_dropped":3,"by_column":{"y":2,"n":1}}}"#
         );
+        let summary = r#"{"n_total":10,"n_used":7,"n_dropped":3,"by_column":{"y":2,"n":1}}"#;
+        let back: MissingSummary = serde_json::from_str(summary).unwrap();
+        assert_eq!(&back, cols.missing());
+        assert_eq!(serde_json::to_string(&back).unwrap(), summary);
     }
 
     #[test]
@@ -1352,18 +1429,28 @@ mod tests {
             .unwrap();
         assert_eq!(n.numeric_levels, [33.0, 10.0, 4.0, 2.0, 7.0]);
         assert_eq!(n.label(0), "10");
+        // A new label that is not a number has no numeric level: refused by name.
+        for bad in ["ten", "NaN"] {
+            let message = invalid_message(
+                cols.factor("n")
+                    .with_level_order(&strings(&["33", "10", "4", "2", "7", bad])),
+            );
+            assert!(message.contains(&format!("'{bad}'")), "{message}");
+            assert!(message.contains("not a number"), "{message}");
+        }
     }
 
     #[test]
     fn test_validate_columns_duplicate_names() {
-        let (_case, ds) = crate::test_support::load_case("columns_conventions");
+        let (case, ds) = crate::test_support::load_case("columns_conventions");
         let df = ds.df();
         let cols = ColumnRequest::new(df)
             .numerics(&["y", "y"])
             .numeric("y")
             .extract()
             .unwrap();
-        assert_eq!(cols.missing().by_column, [("y".to_string(), 2)]);
+        assert_eq!(cols.missing().by_column.len(), 1);
+        assert_eq!(cols.missing().by_column[0].0, "y");
         assert_eq!(cols.n(), 8);
         assert_eq!(cols.matrix(&["y", "y"], false).data.dim(), (8, 2));
         // The same name in two roles is extracted in both and counted once.
@@ -1372,9 +1459,23 @@ mod tests {
             .factor("n")
             .extract()
             .unwrap();
-        assert_eq!(both.missing().by_column, [("n".to_string(), 1)]);
+        assert_eq!(both.missing().by_column.len(), 1);
+        assert_eq!(both.missing().by_column[0].0, "n");
         assert_eq!(both.numeric("n").len(), 9);
         assert_eq!(both.factor("n").codes.len(), 9);
+        // A repeated name is counted once: the counts are the case's per-column counts.
+        Check::new(&case)
+            .scalar(
+                "missing_y",
+                cols.missing().by_column[0].1 as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "missing_n",
+                both.missing().by_column[0].1 as f64,
+                Tol::exact(),
+            )
+            .finish();
     }
 
     #[test]
