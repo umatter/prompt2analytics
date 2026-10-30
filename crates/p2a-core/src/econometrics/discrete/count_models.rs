@@ -15,12 +15,15 @@
 
 use ndarray::{Array1, Array2, ArrayView2};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::matrix_ops::{cholesky_inverse, safe_inverse};
+use crate::resource;
 use crate::traits::estimator::{logistic_cdf, normal_cdf};
 
 // ============================================================================
@@ -66,6 +69,12 @@ pub struct NegBinResult {
     pub y_mean: f64,
     /// Variance of y
     pub y_var: f64,
+    /// Rows dropped because of missing values in the outcome or a regressor (R: na.omit).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
+    /// Estimation problems in plain words (non-convergence, no overdispersion).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl fmt::Display for NegBinResult {
@@ -106,8 +115,45 @@ impl fmt::Display for NegBinResult {
             "Converged: {} ({} iterations)",
             self.converged, self.iterations
         )?;
-        Ok(())
+        write_notes(f, &self.warnings, &self.missing)
     }
+}
+
+/// The `Warnings:` block and the `Missing values:` line of a result's Display, each
+/// only when non-empty.
+fn write_notes(
+    f: &mut fmt::Formatter<'_>,
+    warnings: &[String],
+    missing: &MissingSummary,
+) -> fmt::Result {
+    if !warnings.is_empty() {
+        writeln!(f, "Warnings:")?;
+        for w in warnings {
+            writeln!(f, "  - {w}")?;
+        }
+    }
+    if let Some(note) = missing.note() {
+        writeln!(f, "Missing values: {note}")?;
+    }
+    Ok(())
+}
+
+/// Largest theta the NB and ZINB fits use. Without overdispersion the likelihood keeps
+/// rising towards the Poisson limit theta = inf.
+const THETA_MAX: f64 = 1e8;
+
+/// A final theta above this means no overdispersion: the NB2 variance
+/// `mu + mu^2 / theta` is then within `1e-6 mu^2` of the Poisson variance. (The theta
+/// score is at rounding level near [`THETA_MAX`], so where theta stops between the two
+/// depends on rounding; R's glm.nb stops with "iteration limit reached".)
+const THETA_POISSON: f64 = 1e6;
+
+/// The warning for a theta above [`THETA_POISSON`].
+fn no_overdispersion_warning(theta: f64) -> String {
+    format!(
+        "theta = {theta:.3e}: the data show no overdispersion beyond the Poisson model, \
+         which fits as well (R glm.nb warns 'iteration limit reached')"
+    )
 }
 
 /// Digamma function (derivative of log-gamma).
@@ -116,241 +162,404 @@ fn digamma(x: f64) -> f64 {
     statrs_digamma(x)
 }
 
-/// Trigamma function (second derivative of log-gamma).
+/// Trigamma function (second derivative of log-gamma), for `x > 0`: the recurrence
+/// `psi1(x) = psi1(x + 1) + 1/x^2` up to `x >= 10`, then the asymptotic series to the
+/// `x^-11` term (relative error below 1e-12). NaN for `x <= 0` or a non-finite `x`.
 fn trigamma(x: f64) -> f64 {
-    // Use series approximation for trigamma
+    if !(x > 0.0 && x.is_finite()) {
+        return f64::NAN;
+    }
     let mut result = 0.0;
     let mut xx = x;
-
-    // Use recurrence for small x
-    while xx < 6.0 {
+    while xx < 10.0 {
         result += 1.0 / (xx * xx);
         xx += 1.0;
     }
-
-    // Asymptotic expansion for large x
     let inv = 1.0 / xx;
     let inv2 = inv * inv;
-    result += inv + inv2 / 2.0 + inv2 * inv / 6.0 - inv2 * inv2 * inv / 30.0;
-
-    result
+    // 1/x + 1/(2x^2) + 1/(6x^3) - 1/(30x^5) + 1/(42x^7) - 1/(30x^9) + 5/(66x^11)
+    let series = inv2
+        * (1.0 / 6.0
+            + inv2
+                * (-1.0 / 30.0 + inv2 * (1.0 / 42.0 + inv2 * (-1.0 / 30.0 + inv2 * (5.0 / 66.0)))));
+    result + inv + inv2 / 2.0 + inv * series
 }
 
-/// Run negative binomial regression.
+/// `exp(eta)` with `eta` capped at 700 (glm.fit's guard against overflow).
+fn exp_link(eta: f64) -> f64 {
+    eta.min(700.0).exp()
+}
+
+/// `eta = X beta` and `mu = exp(eta)` into the buffers.
+fn linear_predictor(x: &ArrayView2<f64>, beta: &Array1<f64>, eta: &mut [f64], mu: &mut [f64]) {
+    for ((row, e), m) in x.outer_iter().zip(eta.iter_mut()).zip(mu.iter_mut()) {
+        *e = row.dot(beta);
+        *m = exp_link(*e);
+    }
+}
+
+/// `X' W X` and `X' W z` of a weighted least-squares step.
+fn weighted_cross_products(
+    x: &ArrayView2<f64>,
+    w: &[f64],
+    z: &[f64],
+) -> EconResult<(Array2<f64>, Array1<f64>)> {
+    let k = x.ncols();
+    let mut xtwx = resource::try_zeros2(k, k, "IRLS cross-product matrix")?;
+    let mut xtwz = Array1::zeros(k);
+    for (i, row) in x.outer_iter().enumerate() {
+        if i % 4096 == 0 {
+            resource::checkpoint()?;
+        }
+        for a in 0..k {
+            let wa = w[i] * row[a];
+            xtwz[a] += wa * z[i];
+            for b in 0..=a {
+                xtwx[[a, b]] += wa * row[b];
+            }
+        }
+    }
+    for a in 0..k {
+        for b in 0..a {
+            xtwx[[b, a]] = xtwx[[a, b]];
+        }
+    }
+    Ok((xtwx, xtwz))
+}
+
+/// The NB2 IRLS weight `mu theta / (theta + mu)`; the Poisson weight `mu` for an
+/// infinite theta.
+fn nb_weight(mu: f64, theta: f64) -> f64 {
+    if theta.is_infinite() {
+        mu
+    } else {
+        mu * theta / (theta + mu)
+    }
+}
+
+/// Work vectors of the NB fit, one entry per observation.
+struct NbWork {
+    eta: Vec<f64>,
+    mu: Vec<f64>,
+    w: Vec<f64>,
+    z: Vec<f64>,
+}
+
+impl NbWork {
+    fn new(n: usize) -> EconResult<NbWork> {
+        Ok(NbWork {
+            eta: resource::try_vec(n, 0.0, "negative binomial linear predictor")?,
+            mu: resource::try_vec(n, 0.0, "negative binomial fitted means")?,
+            w: resource::try_vec(n, 0.0, "negative binomial IRLS weights")?,
+            z: resource::try_vec(n, 0.0, "negative binomial working response")?,
+        })
+    }
+}
+
+/// The error for an X'WX that is not positive definite.
+fn nb_singular() -> EconError {
+    EconError::SingularMatrix {
+        context: "negative binomial IRLS (X'WX)".to_string(),
+        suggestion: "check for collinear regressors".to_string(),
+    }
+}
+
+/// Fisher scoring for the coefficients of the NB2 log-link model at a fixed `theta`
+/// (`f64::INFINITY`: Poisson), glm.fit's IRLS: weights `W = mu theta / (theta + mu)`,
+/// working response `z = eta + (y - mu) / mu`. Starts from `beta`, or from
+/// `mu = y + 0.1` (glm's Poisson start) when `beta` is `None`. Iterates until
+/// `max |delta beta| < 1e-12 (1 + max |beta|)`, at most 100 times. `work.eta` and
+/// `work.mu` hold the fitted values on return.
+fn irls_beta(
+    x: &ArrayView2<f64>,
+    y: &[f64],
+    beta: Option<&Array1<f64>>,
+    theta: f64,
+    work: &mut NbWork,
+) -> EconResult<Array1<f64>> {
+    let mut beta = match beta {
+        Some(b) => {
+            linear_predictor(x, b, &mut work.eta, &mut work.mu);
+            Some(b.clone())
+        }
+        None => {
+            for ((e, m), &yi) in work.eta.iter_mut().zip(work.mu.iter_mut()).zip(y) {
+                *m = (yi + 0.1).max(0.1);
+                *e = m.ln();
+            }
+            None
+        }
+    };
+    for _ in 0..100 {
+        resource::checkpoint()?;
+        for i in 0..y.len() {
+            let m = work.mu[i].max(f64::MIN_POSITIVE);
+            work.w[i] = nb_weight(m, theta);
+            work.z[i] = work.eta[i] + (y[i] - m) / m;
+        }
+        let (xtwx, xtwz) = weighted_cross_products(x, &work.w, &work.z)?;
+        let inv = cholesky_inverse(&xtwx.view()).map_err(|_| nb_singular())?;
+        let new_beta = inv.dot(&xtwz);
+        if new_beta.iter().any(|b| !b.is_finite()) {
+            return Err(nb_singular());
+        }
+        let scale = 1.0 + new_beta.iter().fold(0.0f64, |m, b| m.max(b.abs()));
+        let change = beta.as_ref().map_or(f64::INFINITY, |old| {
+            new_beta
+                .iter()
+                .zip(old)
+                .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()))
+        });
+        linear_predictor(x, &new_beta, &mut work.eta, &mut work.mu);
+        beta = Some(new_beta);
+        if change < 1e-12 * scale {
+            break;
+        }
+    }
+    Ok(beta.unwrap_or_else(|| Array1::zeros(x.ncols())))
+}
+
+/// `ln Gamma(theta + y) - ln Gamma(theta)`.
+fn ln_gamma_ratio(theta: f64, y: f64) -> f64 {
+    use statrs::function::gamma::ln_gamma;
+    ln_gamma(theta + y) - ln_gamma(theta)
+}
+
+/// The NB2 log-likelihood at `theta` and the fitted means.
+fn nb_loglik(theta: f64, mu: &[f64], y: &[f64]) -> f64 {
+    use statrs::function::gamma::ln_gamma;
+    y.iter()
+        .zip(mu)
+        .map(|(&yi, &mi)| {
+            let log_mu = if yi == 0.0 { 0.0 } else { yi * mi.ln() };
+            ln_gamma_ratio(theta, yi) - ln_gamma(yi + 1.0) + theta * theta.ln() + log_mu
+                - (theta + yi) * (theta + mi).ln()
+        })
+        .sum()
+}
+
+/// MASS `theta.ml`'s score of theta at fixed `mu` (signs as MASS).
+fn theta_score(theta: f64, mu: &[f64], y: &[f64]) -> f64 {
+    y.iter()
+        .zip(mu)
+        .map(|(&yi, &mi)| {
+            digamma(theta + yi) - digamma(theta) + theta.ln() + 1.0
+                - (theta + mi).ln()
+                - (yi + theta) / (mi + theta)
+        })
+        .sum()
+}
+
+/// MASS `theta.ml`'s (observed) information of theta at fixed `mu` (signs as MASS).
+fn theta_information(theta: f64, mu: &[f64], y: &[f64]) -> f64 {
+    y.iter()
+        .zip(mu)
+        .map(|(&yi, &mi)| {
+            -trigamma(theta + yi) + trigamma(theta) - 1.0 / theta + 2.0 / (mi + theta)
+                - (yi + theta) / ((mi + theta) * (mi + theta))
+        })
+        .sum()
+}
+
+/// The ML theta at fixed `mu`: Newton steps on `phi = ln theta` with MASS theta.ml's
+/// score `s` and information `I` (`delta = s / (theta I - s)` where the profile is
+/// concave in `phi`, else `sign(s)`), clamped to +-2 and halved while the profile
+/// log-likelihood falls by more than its rounding (`1e-12 |ll|`). Stops when
+/// `|delta| < 1e-12`, after 100 steps, when no halving helps, or at [`THETA_MAX`].
+fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<f64> {
+    let mut theta = theta.min(THETA_MAX);
+    let mut ll = nb_loglik(theta, mu, y);
+    for _ in 0..100 {
+        resource::checkpoint()?;
+        let s = theta_score(theta, mu, y);
+        let info = theta_information(theta, mu, y);
+        if !(s.is_finite() && info.is_finite() && ll.is_finite()) {
+            break;
+        }
+        let curvature = theta * info - s;
+        let mut delta = if curvature > 0.0 {
+            s / curvature
+        } else {
+            s.signum()
+        };
+        delta = delta.clamp(-2.0, 2.0);
+        if delta.abs() < 1e-12 {
+            break;
+        }
+        let mut accepted = false;
+        for _ in 0..30 {
+            let candidate = (theta.ln() + delta).exp().min(THETA_MAX);
+            let ll_candidate = nb_loglik(candidate, mu, y);
+            // not lower beyond rounding: near the optimum a step changes the
+            // log-likelihood by less than its rounding error
+            if ll_candidate.is_finite() && ll_candidate >= ll - 1e-12 * ll.abs() {
+                theta = candidate;
+                ll = ll_candidate;
+                accepted = true;
+                break;
+            }
+            delta *= 0.5;
+        }
+        if !accepted || theta >= THETA_MAX {
+            break;
+        }
+    }
+    Ok(theta)
+}
+
+/// Run negative binomial regression (NB2, log link).
 ///
-/// R equivalent: `MASS::glm.nb()`
+/// R equivalent: `MASS::glm.nb()`. The coefficients come from Fisher scoring (IRLS)
+/// at fixed theta, theta from Newton steps on MASS `theta.ml`'s score and information
+/// at fixed fitted means, alternating until theta changes by less than 1e-10 relative
+/// and the log-likelihood by less than 1e-12 relative (at most 100 rounds), as glm.nb
+/// does. `initial_theta` is the starting value of theta (glm.nb's `init.theta`); without
+/// it the start is a Poisson fit and MASS's moment estimate `n / sum((y/mu - 1)^2)`.
+/// Standard errors of the coefficients are `(X'WX)^-1` with `W = mu theta/(theta + mu)`
+/// (summary.negbin), `SE(theta) = 1/sqrt(information)` at the optimum (MASS
+/// `SE.theta`).
+///
+/// Rows with a missing outcome or regressor are dropped (R `na.omit`) and reported in
+/// `missing`. Data without overdispersion drive theta towards its bound 1e8; a final
+/// theta above 1e6 gives `converged = false`, `theta_std_error = NaN` and a warning.
+///
+/// # Errors
+///
+/// `InvalidSpecification` for an `initial_theta` that is not positive and finite;
+/// column errors (`ColumnNotFound`, `NonNumericColumn`, `NonFiniteValues`) name the
+/// column; `InsufficientData` below 2 complete rows; `SingularMatrix` for collinear
+/// regressors.
 pub fn run_negbin(
     dataset: &Dataset,
     y_col: &str,
     x_cols: &[&str],
-    _initial_theta: Option<f64>,
+    initial_theta: Option<f64>,
 ) -> EconResult<NegBinResult> {
+    if let Some(t) = initial_theta
+        && !(t.is_finite() && t > 0.0)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!("init_theta must be a positive, finite number (got {t})"),
+        });
+    }
     let df = dataset.df();
-    let n = df.height();
+    let cols = ColumnRequest::new(df)
+        .numeric(y_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .min_rows(2, "negative binomial regression")
+        .extract()?;
+    let y = cols.numeric(y_col);
+    let n = cols.n();
+    let dm = cols.matrix(x_cols, true);
+    let x = dm.view();
+    let k = x.ncols();
 
-    // Extract y
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let y: Vec<f64> = y_series
-        .cast(&polars::prelude::DataType::Float64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Compute y statistics
     let y_mean = y.iter().sum::<f64>() / n as f64;
     let y_var = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n - 1) as f64;
-
-    // Build design matrix
-    let dm = DesignMatrix::from_dataframe(df, x_cols, true)?;
-    let x = dm.view().to_owned();
-    let k = x.ncols();
 
     let mut var_names = vec!["(Intercept)".to_string()];
     var_names.extend(x_cols.iter().map(|s| s.to_string()));
 
-    // Initialize beta (log-linear)
-    let mut beta: Array1<f64> = Array1::zeros(k);
-    beta[0] = y_mean.max(0.1).ln();
+    let mut work = NbWork::new(n)?;
 
-    // Initialize theta (overdispersion)
-    let mut theta = if y_var > y_mean {
-        y_mean.powi(2) / (y_var - y_mean)
-    } else {
-        1.0
+    // Start: Poisson (or NB at init_theta) coefficients, then theta.
+    let start_theta = initial_theta.unwrap_or(f64::INFINITY);
+    let mut beta = irls_beta(&x, y, None, start_theta, &mut work)?;
+    let mut theta = match initial_theta {
+        Some(t) => t,
+        None => {
+            let ss: f64 = y
+                .iter()
+                .zip(&work.mu)
+                .map(|(&yi, &mi)| (yi / mi - 1.0).powi(2))
+                .sum();
+            (n as f64 / ss).min(THETA_MAX)
+        }
     };
-    theta = theta.max(0.1);
+    if !(theta.is_finite() && theta > 0.0) {
+        theta = THETA_MAX;
+    }
 
-    let max_iter = 50;
-    let tol = 1e-6;
+    let mut warnings: Vec<String> = Vec::new();
     let mut converged = false;
     let mut iterations = 0;
-
-    // IRLS for beta, profile likelihood for theta
-    for iter in 0..max_iter {
-        iterations = iter + 1;
-
-        // Compute mu = exp(X*beta)
-        let mu: Vec<f64> = (0..n)
-            .map(|i| {
-                let xb: f64 = (0..k).map(|j| x[[i, j]] * beta[j]).sum();
-                xb.exp().min(1e10)
-            })
-            .collect();
-
-        // IRLS weights: W = mu / (1 + mu/theta)
-        let w: Vec<f64> = mu.iter().map(|&mui| mui / (1.0 + mui / theta)).collect();
-
-        // Working response: z = log(mu) + (y - mu) / mu
-        let z: Vec<f64> = y
-            .iter()
-            .zip(mu.iter())
-            .map(|(&yi, &mui)| mui.ln() + (yi - mui) / mui.max(1e-10))
-            .collect();
-
-        // Weighted least squares: beta = (X'WX)^-1 X'Wz
-        let mut xtwx = Array2::zeros((k, k));
-        let mut xtwz = Array1::zeros(k);
-
-        for i in 0..n {
-            for j in 0..k {
-                xtwz[j] += w[i] * x[[i, j]] * z[i];
-                for l in 0..k {
-                    xtwx[[j, l]] += w[i] * x[[i, j]] * x[[i, l]];
-                }
-            }
-        }
-
-        let beta_new = match safe_inverse(&xtwx.view()) {
-            Ok((inv, _)) => inv.dot(&xtwz),
-            Err(_) => {
-                // Fall back to small gradient step
-                let step = 0.1;
-                let grad: Array1<f64> = y
-                    .iter()
-                    .zip(mu.iter())
-                    .enumerate()
-                    .map(|(i, (&yi, &mui))| {
-                        let r = yi - mui;
-                        Array1::from_iter((0..k).map(|j| x[[i, j]] * r))
-                    })
-                    .fold(Array1::zeros(k), |a, b| a + b);
-                &beta + &(step * &grad)
-            }
-        };
-
-        let max_change: f64 = beta_new
-            .iter()
-            .zip(beta.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f64, f64::max);
-        beta = beta_new;
-
-        // Update theta using profile likelihood
-        let mu: Vec<f64> = (0..n)
-            .map(|i| {
-                let xb: f64 = (0..k).map(|j| x[[i, j]] * beta[j]).sum();
-                xb.exp().min(1e10)
-            })
-            .collect();
-
-        // Score for theta
-        let mut score = 0.0;
-        let mut info = 0.0;
-        for i in 0..n {
-            let yi = y[i];
-            let mui = mu[i];
-
-            score += digamma(yi + theta) - digamma(theta) + (theta / (theta + mui)).ln() + 1.0
-                - (yi + theta) / (theta + mui);
-
-            info += trigamma(theta) - trigamma(yi + theta) + 1.0 / theta - 2.0 / (theta + mui)
-                + (yi + theta) / (theta + mui).powi(2);
-        }
-
-        if info.abs() > 1e-10 {
-            let theta_new = (theta + score / info).max(0.01);
-            theta = theta_new.min(1000.0);
-        }
-
-        if max_change < tol && iter > 0 {
+    let mut ll = nb_loglik(theta, &work.mu, y);
+    for round in 1..=100 {
+        resource::checkpoint()?;
+        iterations = round;
+        beta = irls_beta(&x, y, Some(&beta), theta, &mut work)?;
+        let theta_new = theta_newton(theta, &work.mu, y)?;
+        let ll_new = nb_loglik(theta_new, &work.mu, y);
+        let theta_change = (theta_new - theta).abs() / theta;
+        let ll_change = (ll_new - ll).abs();
+        theta = theta_new;
+        ll = ll_new;
+        if theta_change < 1e-10 && ll_change < 1e-12 * ll.abs() {
             converged = true;
             break;
         }
+        if theta >= THETA_MAX {
+            break;
+        }
     }
+    if !converged && theta < THETA_MAX {
+        warnings.push("the beta/theta alternation did not converge in 100 rounds".to_string());
+    }
+    // The coefficients at the final theta.
+    beta = irls_beta(&x, y, Some(&beta), theta, &mut work)?;
+    let log_likelihood = nb_loglik(theta, &work.mu, y);
 
-    // Final log-likelihood
-    let mu: Vec<f64> = (0..n)
-        .map(|i| {
-            let xb: f64 = (0..k).map(|j| x[[i, j]] * beta[j]).sum();
-            xb.exp()
-        })
-        .collect();
-
-    let log_likelihood: f64 = {
-        use statrs::function::gamma::ln_gamma;
-        y.iter()
-            .zip(mu.iter())
-            .map(|(&yi, &mui)| {
-                ln_gamma(yi + theta) - ln_gamma(theta) - ln_gamma(yi + 1.0)
-                    + theta * (theta / (theta + mui)).ln()
-                    + yi * (mui / (theta + mui)).ln()
-            })
-            .sum()
-    };
-
-    // Null log-likelihood
+    // Null log-likelihood (unchanged; ECON-64, Tier 4)
     let log_likelihood_null = n as f64
         * (theta * (theta / (theta + y_mean)).ln() + y_mean * (y_mean / (theta + y_mean)).ln());
 
-    // Standard errors from information matrix
-    let mut info_matrix = Array2::zeros((k, k));
-    for i in 0..n {
-        let mui = mu[i];
-        let w = mui * theta / (theta + mui);
-        for j in 0..k {
-            for l in 0..k {
-                info_matrix[[j, l]] += w * x[[i, j]] * x[[i, l]];
-            }
-        }
+    // Standard errors from the expected information (X'WX)^-1 (summary.negbin)
+    for (wi, &mi) in work.w.iter_mut().zip(&work.mu) {
+        *wi = nb_weight(mi, theta);
     }
-
-    let vcov = match safe_inverse(&info_matrix.view()) {
-        Ok((inv, _)) => inv,
-        Err(_) => Array2::eye(k) * 1e-6,
+    let (info_matrix, _) = weighted_cross_products(&x, &work.w, &work.z)?;
+    let std_errors: Vec<f64> = match cholesky_inverse(&info_matrix.view()) {
+        Ok(v) => (0..k).map(|i| v[[i, i]].sqrt()).collect(),
+        Err(_) => {
+            warnings.push(
+                "X'WX is not positive definite at the estimate; standard errors are not \
+                 available"
+                    .to_string(),
+            );
+            vec![f64::NAN; k]
+        }
     };
-
-    let std_errors: Vec<f64> = (0..k).map(|i| vcov[[i, i]].max(0.0).sqrt()).collect();
-
     let z_stats: Vec<f64> = beta
         .iter()
         .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 1e-15 { b / se } else { 0.0 })
+        .map(|(&b, &se)| b / se)
         .collect();
-
-    let p_values: Vec<f64> = z_stats
-        .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
-        .collect();
+    let p_values: Vec<f64> = z_stats.iter().map(|&z| two_sided_p(z)).collect();
 
     let pseudo_r_squared = 1.0 - log_likelihood / log_likelihood_null;
     let n_params = k + 1; // beta + theta
     let aic = -2.0 * log_likelihood + 2.0 * n_params as f64;
     let bic = -2.0 * log_likelihood + (n_params as f64) * (n as f64).ln();
 
-    let theta_std_error = 0.1 * theta; // Simplified
+    let mut converged = converged && log_likelihood.is_finite() && theta.is_finite();
+    let theta_std_error = if theta > THETA_POISSON {
+        converged = false;
+        warnings.push(no_overdispersion_warning(theta));
+        f64::NAN
+    } else {
+        let info = theta_information(theta, &work.mu, y);
+        if info > 0.0 {
+            1.0 / info.sqrt()
+        } else {
+            warnings.push(
+                "the information of theta is not positive at the estimate; SE(theta) is not \
+                 available"
+                    .to_string(),
+            );
+            f64::NAN
+        }
+    };
 
     Ok(NegBinResult {
         dep_var: y_col.to_string(),
@@ -371,7 +580,14 @@ pub fn run_negbin(
         converged,
         y_mean,
         y_var,
+        missing: cols.missing().clone(),
+        warnings,
     })
+}
+
+/// `2 P(Z > |z|)` from the upper tail (X-17).
+fn two_sided_p(z: f64) -> f64 {
+    2.0 * Normal::standard().sf(z.abs())
 }
 
 // ============================================================================
@@ -1398,7 +1614,21 @@ fn truncated_negbin_loglik(y: &[f64], mu: &[f64], theta: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    /// Case data for tests that are not R-pinned (not registered).
+    fn negbin_data() -> Dataset {
+        load_case("disc_negbin").1
+    }
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
 
     fn create_count_dataset() -> Dataset {
         let df = df! {
@@ -1409,14 +1639,148 @@ mod tests {
         Dataset::new(df)
     }
 
+    /// Underdispersed data (variance below the mean): the likelihood rises towards the
+    /// Poisson limit. R's glm.nb returns theta 106936.84 with "iteration limit reached"
+    /// (T2-WP10 Appendix B.3); here theta runs to its bound and the fit is flagged.
     #[test]
-    fn test_negbin_basic() {
+    fn test_negbin_without_overdispersion_is_flagged() {
         let dataset = create_count_dataset();
-        let result = run_negbin(&dataset, "y", &["x"], None).unwrap();
+        let r = run_negbin(&dataset, "y", &["x"], None).unwrap();
+        assert_eq!(r.n_obs, 12);
+        assert!(!r.converged, "{r}");
+        assert!(r.theta > 1e6, "theta {}", r.theta);
+        assert!(
+            r.theta_std_error.is_nan(),
+            "SE(theta) {}",
+            r.theta_std_error
+        );
+        assert!(
+            r.warnings.iter().any(|w| w.contains("overdispersion")),
+            "{:?}",
+            r.warnings
+        );
+    }
 
-        assert_eq!(result.n_obs, 12);
-        assert!(result.theta > 0.0);
-        assert!(result.iterations > 0);
+    // ---- negative binomial against MASS::glm.nb (disc_negbin) -----------------------
+
+    #[test]
+    fn test_validate_negbin_theta_disc_negbin() {
+        let (case, ds) = load_case("disc_negbin");
+        let r = run_negbin(&ds, "y", &["x1", "x2"], None).unwrap();
+        assert!(r.converged, "{:?}", r.warnings);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        let n = r.n_obs;
+        // deviation ECON-64 (T4): log_likelihood_null and pseudo_r_squared not pinned
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::iterative(1e-6))
+            .named("se", &r.variables, &r.std_errors, Tol::iterative(1e-5))
+            .named("z", &r.variables, &r.z_stats, Tol::iterative(1e-5))
+            // p of an iterative estimate: d ln p / d ln z ~ z^2 times the z tolerance
+            .named("p", &r.variables, &r.p_values, Tol::iterative(2e-3))
+            .scalar("theta", r.theta, Tol::iterative(1e-6))
+            .scalar("se_theta", r.theta_std_error, Tol::iterative(1e-5))
+            .scalar("loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("aic", r.aic, Tol::stat(n))
+            .scalar("bic", r.bic, Tol::stat(n))
+            .scalar("y_mean", r.y_mean, Tol::coef(n))
+            .scalar("y_var", r.y_var, Tol::coef(n))
+            .scalar("n", n as f64, Tol::exact())
+            // glm.nb's own optimum (cross-check)
+            .named(
+                "coef_pkg",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .scalar("theta_pkg", r.theta, Tol::iterative(1e-6))
+            // glm.nb evaluates SE.theta one theta.ml step early
+            .scalar("se_theta_pkg", r.theta_std_error, Tol::iterative(1e-4))
+            .finish();
+    }
+
+    /// `init_theta` is a starting value (glm.nb's init.theta): the fit is the same MLE.
+    /// It must be positive and finite.
+    #[test]
+    fn test_validate_negbin_init_theta_is_a_starting_value() {
+        let (case, ds) = load_case("disc_negbin");
+        for init in [50.0, 0.2] {
+            let r = run_negbin(&ds, "y", &["x1", "x2"], Some(init)).unwrap();
+            assert!(r.converged, "init {init}: {:?}", r.warnings);
+            Check::new(&case)
+                .scalar("theta", r.theta, Tol::iterative(1e-6))
+                .scalar("theta_init50_pkg", r.theta, Tol::iterative(1e-6))
+                .named("coef", &r.variables, &r.coefficients, Tol::iterative(1e-6))
+                .finish();
+        }
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            match run_negbin(&ds, "y", &["x1", "x2"], Some(bad)) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains("init_theta"), "{message}")
+                }
+                other => panic!("init {bad}: expected InvalidSpecification, got {other:?}"),
+            }
+        }
+    }
+
+    /// Rows with a missing outcome or regressor are dropped jointly (glm.nb: na.omit).
+    #[test]
+    fn test_validate_negbin_missing_rows_dropped() {
+        let (case, ds) = load_case("disc_negbin");
+        let r = run_negbin(&ds, "y_na", &["x1_na", "x2"], None).unwrap();
+        assert!(r.converged, "{:?}", r.warnings);
+        assert_eq!(
+            r.missing.by_column,
+            [("y_na".to_string(), 3), ("x1_na".to_string(), 2)]
+        );
+        let n = r.n_obs;
+        Check::new(&case)
+            .named(
+                "na_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named("na_se", &r.variables, &r.std_errors, Tol::iterative(1e-5))
+            .scalar("na_theta", r.theta, Tol::iterative(1e-6))
+            .scalar("na_se_theta", r.theta_std_error, Tol::iterative(1e-5))
+            .scalar("na_loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("na_n_used", n as f64, Tol::exact())
+            .scalar("na_n_dropped", r.missing.n_dropped as f64, Tol::exact())
+            .scalar(
+                "na_missing_y",
+                r.missing.by_column[0].1 as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "na_missing_x1",
+                r.missing.by_column[1].1 as f64,
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    /// R's trigamma at the points the NB theta information needs. The series is
+    /// accurate to 2.3e-13 relative (T2-WP10 Appendix B.4); the one it replaced was off
+    /// by 4.5e-7 at 6.
+    #[test]
+    fn test_validate_negbin_trigamma_disc_negbin() {
+        let (case, _) = load_case("disc_negbin");
+        let values: Vec<f64> = case
+            .vector("trigamma_x")
+            .iter()
+            .map(|&x| trigamma(x))
+            .collect();
+        Check::new(&case)
+            .vector("trigamma", &values, Tol::new(1e-12, 0.0))
+            .finish();
+    }
+
+    #[test]
+    fn test_negbin_stops_when_cancelled() {
+        let ds = negbin_data();
+        let e = resource::with_budget(cancelled(), || run_negbin(&ds, "y", &["x1", "x2"], None))
+            .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
     }
 
     #[test]
@@ -1480,81 +1844,6 @@ mod tests {
     // ==========================================================================
     // R Validation Tests
     // ==========================================================================
-
-    /// Helper to generate deterministic pseudo-random values for R validation
-    /// Using a simple LCG (Linear Congruential Generator) seeded with 42
-    fn generate_validation_data() -> (Vec<f64>, Vec<f64>) {
-        // Generate n=100 observations matching R's set.seed(42)
-        // For validation, we use pre-generated data that matches R's output
-        let x: Vec<f64> = vec![
-            4.57, 3.23, 2.87, 1.45, 0.23, 4.12, 2.98, 1.67, 3.78, 0.89, 4.45, 3.01, 2.34, 1.78,
-            0.56, 4.89, 3.45, 2.12, 1.23, 0.78, 4.34, 3.67, 2.56, 1.89, 0.34, 4.67, 3.89, 2.78,
-            1.56, 0.12, 4.23, 3.12, 2.01, 1.34, 0.67, 4.56, 3.34, 2.45, 1.67, 0.45, 4.78, 3.56,
-            2.67, 1.78, 0.23, 4.01, 3.78, 2.89, 1.45, 0.56, 4.34, 3.23, 2.12, 1.56, 0.89, 4.67,
-            3.45, 2.34, 1.23, 0.34, 4.12, 3.01, 2.56, 1.89, 0.67, 4.45, 3.67, 2.78, 1.34, 0.12,
-            4.89, 3.89, 2.01, 1.67, 0.45, 4.23, 3.12, 2.45, 1.78, 0.78, 4.56, 3.34, 2.67, 1.45,
-            0.23, 4.01, 3.56, 2.89, 1.23, 0.56, 4.78, 3.78, 2.12, 1.56, 0.34, 4.34, 3.45, 2.34,
-            1.89, 0.89,
-        ];
-
-        // Generate y counts based on negative binomial with mu = exp(0.5 + 0.3*x)
-        let y: Vec<f64> = vec![
-            3.0, 2.0, 1.0, 0.0, 1.0, 4.0, 2.0, 1.0, 3.0, 0.0, 5.0, 2.0, 1.0, 1.0, 0.0, 6.0, 3.0,
-            1.0, 0.0, 1.0, 4.0, 3.0, 2.0, 1.0, 0.0, 5.0, 4.0, 2.0, 1.0, 0.0, 3.0, 2.0, 1.0, 1.0,
-            0.0, 4.0, 3.0, 2.0, 1.0, 0.0, 5.0, 3.0, 2.0, 1.0, 0.0, 3.0, 4.0, 2.0, 1.0, 0.0, 4.0,
-            2.0, 1.0, 1.0, 0.0, 5.0, 3.0, 2.0, 0.0, 0.0, 3.0, 2.0, 2.0, 1.0, 0.0, 4.0, 3.0, 2.0,
-            1.0, 0.0, 6.0, 4.0, 1.0, 1.0, 0.0, 3.0, 2.0, 2.0, 1.0, 0.0, 4.0, 3.0, 2.0, 1.0, 0.0,
-            3.0, 3.0, 2.0, 0.0, 0.0, 5.0, 4.0, 1.0, 1.0, 0.0, 4.0, 3.0, 2.0, 1.0, 0.0,
-        ];
-
-        (x, y)
-    }
-
-    #[test]
-    fn test_validate_negbin_vs_r() {
-        // R reference: MASS::glm.nb()
-        // R coefficients: intercept=0.3694, x=0.2756
-        // R theta: 1.694
-        // Tolerance relaxed because optimization paths may differ
-
-        let (x, y) = generate_validation_data();
-        let df = df! {
-            "y" => y,
-            "x" => x
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_negbin(&dataset, "y", &["x"], None).unwrap();
-
-        // Basic structure checks
-        assert_eq!(result.n_obs, 100);
-        // Note: convergence may not always happen in 50 iterations
-        assert!(result.iterations > 0, "Should have iterated");
-        assert!(result.theta > 0.0, "Theta should be positive");
-
-        // Coefficient signs should match R (positive slope expected given DGP)
-        // The data has increasing counts with x, so slope should be positive
-        // But allow for estimation variability
-        assert!(
-            result.coefficients[1].is_finite(),
-            "Slope coefficient should be finite: {}",
-            result.coefficients[1]
-        );
-
-        // Log-likelihood should be finite and negative
-        assert!(
-            result.log_likelihood.is_finite(),
-            "Log-likelihood should be finite"
-        );
-        assert!(
-            result.log_likelihood < 0.0,
-            "Log-likelihood should be negative"
-        );
-
-        // AIC should be reasonable
-        assert!(result.aic > 0.0, "AIC should be positive");
-    }
 
     #[test]
     fn test_validate_zip_structure() {
@@ -1736,44 +2025,6 @@ mod tests {
         assert!(
             result.log_likelihood.is_finite(),
             "Log-likelihood should be finite"
-        );
-    }
-
-    #[test]
-    fn test_validate_count_model_comparison() {
-        // Compare count models on same data - relative performance check
-        let x: Vec<f64> = (0..100).map(|i| (i as f64 * 0.05) % 5.0).collect();
-        let y: Vec<f64> = x
-            .iter()
-            .map(|&xi| (0.5 + 0.3 * xi).exp().round().min(15.0))
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x" => x
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let nb_result = run_negbin(&dataset, "y", &["x"], None).unwrap();
-
-        // NegBin should produce finite results
-        assert!(nb_result.iterations > 0, "Should have iterated");
-        assert!(
-            nb_result.log_likelihood.is_finite(),
-            "Log-likelihood should be finite"
-        );
-        assert!(nb_result.theta > 0.0, "Theta should be positive");
-
-        // Coefficients should be finite
-        assert!(
-            nb_result.coefficients[0].is_finite() && nb_result.coefficients[1].is_finite(),
-            "Coefficients should be finite"
-        );
-
-        println!(
-            "NegBin coefficients: intercept={:.4}, slope={:.4}, theta={:.4}",
-            nb_result.coefficients[0], nb_result.coefficients[1], nb_result.theta
         );
     }
 }

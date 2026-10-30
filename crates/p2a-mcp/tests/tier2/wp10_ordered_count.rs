@@ -93,3 +93,59 @@ async fn test_mcp_ordered_model_text_outcome_asks_for_levels() {
     assert!(!r.success, "{t}");
     assert!(t.contains("levels"), "{t}");
 }
+
+/// `negbin` prints glm.nb's fit (before: theta stopped below the MLE and SE(theta) was
+/// 0.1 theta).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_validate_mcp_negbin_disc_negbin() {
+    let case = Case::load("disc_negbin");
+    let (session, server) = session_with("disc_negbin");
+    let r = call(
+        &server,
+        &session,
+        "negbin",
+        json!({"dataset": "negbin", "y": "y", "x": ["x1", "x2"]}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    assert!(t.contains("Converged: true"), "{t}");
+    let names = ["(Intercept)", "x1", "x2"];
+    let tol = Tol::printed(4);
+    let theta = numbers(line(&t, "Theta:"));
+    Check::new(&case)
+        .named("coef", &names, &column(&t, &names, 0), tol)
+        .named("se", &names, &column(&t, &names, 1), tol)
+        .named("z", &names, &column(&t, &names, 2), tol)
+        .named("p", &names, &column(&t, &names, 3), tol)
+        .scalar("theta", theta[0], tol)
+        .scalar("se_theta", theta[1], tol)
+        .scalar("loglik", labelled(&t, "Log-Likelihood:").unwrap(), tol)
+        .finish();
+}
+
+/// Rows with missing values are dropped and reported; a bad `init_theta` is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mcp_negbin_reports_dropped_rows_and_rejects_bad_init_theta() {
+    let (session, server) = session_with("disc_negbin");
+    let r = call(
+        &server,
+        &session,
+        "negbin",
+        json!({"dataset": "negbin", "y": "y_na", "x": ["x1_na", "x2"]}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    assert!(t.contains("Missing values: 5 of 400 rows dropped"), "{t}");
+    let r = call(
+        &server,
+        &session,
+        "negbin",
+        json!({"dataset": "negbin", "y": "y", "x": ["x1", "x2"], "init_theta": -1.0}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(!r.success, "{t}");
+    assert!(t.contains("init_theta"), "{t}");
+}

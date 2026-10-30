@@ -36,6 +36,27 @@
       "tolerance": "as discrete_ordered_logit",
       "deviations": [],
       "supersedes_legacy": ["validation/expected/ordered_probit_test.csv"]
+    },
+    {
+      "id": "discrete_negbin",
+      "name": "Negative binomial regression (NB2, log link), MASS::glm.nb",
+      "category": "econometrics",
+      "reference": "MASS::glm.nb(control = glm.control(epsilon = 1e-14)) polished to the joint (beta, theta) MLE; beta SEs (X'WX)^-1 as summary.negbin; SE(theta) = 1/sqrt(theta.ml information) at the optimum; base R trigamma",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": ["disc_negbin"],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_theta_disc_negbin",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_init_theta_is_a_starting_value",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_missing_rows_dropped",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_trigamma_disc_negbin",
+        "p2a-mcp::tier2::wp10_ordered_count::test_validate_mcp_negbin_disc_negbin"
+      ],
+      "quantities": ["coefficients", "SE", "z", "p", "theta", "SE(theta)", "log-likelihood", "AIC", "BIC", "mean and variance of y", "rows used / dropped (na.omit)", "trigamma"],
+      "tolerance": "MLE: coefficients and theta 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 400); mean/variance of y 1e-8; glm.nb's own SE.theta 1e-4 (evaluated one theta.ml step before its theta); trigamma 1e-12 relative",
+      "deviations": [
+        {"finding": "ECON-64", "quantity": "null log-likelihood and McFadden pseudo-R2", "note": "not pinned: the null log-likelihood omits the lnGamma terms and reuses the full model's theta (Tier 4)"}
+      ],
+      "supersedes_legacy": ["validation/expected/negbin_test.csv"]
     }
   ]
 }

@@ -131,3 +131,53 @@ case("disc_ordered", "econometrics/discrete", "Ordered logit and probit (MASS::p
        reference = "MASS::polr(method = 'logistic' | 'probit', control = list(reltol = 1e-15)), polished by Newton steps on the exact log-likelihood; SEs from the observed information (analytic, equal to numDeriv::hessian)",
        call = "polr(factor(y) ~ x1 + x2, data = d, method = ...)", packages = c("MASS", "numDeriv"))
 })
+
+# ---- negative binomial theta ----------------------------------------------------------------
+.nb_info <- function(th, mu, y) sum(-trigamma(th + y) + trigamma(th) - 1 / th + 2 / (mu + th) - (y + th) / (mu + th)^2)
+.nb_grad <- function(par, X, y) {          # (beta, theta)
+  k <- ncol(X); b <- par[1:k]; th <- par[k + 1]; mu <- exp(drop(X %*% b))
+  c(colSums(X * ((y - mu) * th / (th + mu))),
+    sum(digamma(th + y) - digamma(th) + log(th) + 1 - log(th + mu) - (y + th) / (mu + th)))
+}
+.nb_ll <- function(th, mu, y) sum(lgamma(th + y) - lgamma(th) - lgamma(y + 1) + th * log(th) + y * log(mu + (y == 0)) - (th + y) * log(th + mu))
+.nb_values <- function(d, yname, xnames, init_theta = NULL) {
+  frm <- as.formula(paste(yname, "~", paste(xnames, collapse = " + ")))
+  m <- if (is.null(init_theta)) glm.nb(frm, data = d, control = glm.control(epsilon = 1e-14, maxit = 200))
+       else glm.nb(frm, data = d, init.theta = init_theta, control = glm.control(epsilon = 1e-14, maxit = 200))
+  dd <- d[complete.cases(d[, c(yname, xnames)]), ]
+  X <- cbind(1, as.matrix(dd[, xnames, drop = FALSE])); y <- dd[[yname]]
+  par <- .polish(c(coef(m), m$theta), function(p) .nb_grad(p, X, y))
+  k <- ncol(X); b <- par[1:k]; th <- par[k + 1]; mu <- exp(drop(X %*% b)); n <- length(y)
+  W <- mu * th / (th + mu); se <- sqrt(diag(solve(crossprod(X * sqrt(W)))))
+  names(b) <- names(coef(m)); names(se) <- names(coef(m))
+  ll <- .nb_ll(th, mu, y); zp <- .z_p(b, se)
+  list(coef = named(b), se = named(se), z = named(zp$z), p = named(zp$p), theta = th, se_theta = 1 / sqrt(.nb_info(th, mu, y)),
+       loglik = ll, aic = -2 * ll + 2 * (k + 1), bic = -2 * ll + log(n) * (k + 1),
+       y_mean = mean(y), y_var = var(y), n = n,
+       coef_pkg = named(coef(m)), se_pkg = named(sqrt(diag(vcov(m)))), theta_pkg = m$theta, se_theta_pkg = m$SE.theta,
+       loglik_pkg = as.numeric(logLik(m)), twologlik_pkg = m$twologlik)
+}
+case("disc_negbin", "econometrics/discrete", "Negative binomial (MASS::glm.nb): coefficients, theta and SE(theta)", function(ctx) {
+  set.seed(404)
+  n <- 400
+  x1 <- rnorm(n); x2 <- runif(n)
+  mu <- exp(0.4 + 0.5 * x1 - 0.6 * x2)
+  y <- rnbinom(n, size = 1.8, mu = mu)
+  y_na <- y; y_na[c(3, 150, 222)] <- NA
+  x1r <- round(x1, 8); x1_na <- x1r; x1_na[c(10, 399)] <- NA
+  d <- ctx$gen_dataset("negbin", data.frame(y = y, x1 = x1r, x2 = round(x2, 8), y_na = y_na, x1_na = x1_na))
+  stopifnot(is.integer(d$y), is.integer(d$y_na), sum(!complete.cases(d$y_na, d$x1_na, d$x2)) == 5)
+  v <- .nb_values(d, "y", c("x1", "x2"))
+  i50 <- .nb_values(d, "y", c("x1", "x2"), init_theta = 50)
+  stopifnot(abs(i50$theta - v$theta) < 1e-10 * v$theta)
+  na <- .nb_values(d, "y_na", c("x1_na", "x2"))
+  # R's trigamma at the points the NB theta information needs (incl. the polished theta); T2-WP10 plan sync
+  tg_x <- c(0.1, 0.5, 1, v$theta, 3.7, 6, 10, 25.5, 1000)
+  list(values = c(v, list(trigamma_x = vec(tg_x), trigamma = vec(trigamma(tg_x)),
+                          theta_init50_pkg = i50$theta_pkg,
+                          na_coef = na$coef, na_se = na$se, na_theta = na$theta, na_se_theta = na$se_theta,
+                          na_loglik = na$loglik, na_n_used = na$n, na_n_dropped = nrow(d) - na$n,
+                          na_missing_y = sum(is.na(d$y_na)), na_missing_x1 = sum(is.na(d$x1_na)))),
+       reference = "MASS::glm.nb(control = glm.control(epsilon = 1e-14)), polished by Newton steps on the joint (beta, theta) score; beta SEs (X'WX)^-1 with W = mu theta/(theta + mu) (summary.negbin); SE.theta = 1/sqrt(theta.ml information) at the optimum",
+       call = "glm.nb(y ~ x1 + x2, data = d)", packages = "MASS")
+})

@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "id": "disc_negbin",
+  "area": "econometrics/discrete",
+  "method": "Negative binomial (MASS::glm.nb): coefficients, theta and SE(theta)",
+  "reference": "MASS::glm.nb(control = glm.control(epsilon = 1e-14)), polished by Newton steps on the joint (beta, theta) score; beta SEs (X'WX)^-1 with W = mu theta/(theta + mu) (summary.negbin); SE.theta = 1/sqrt(theta.ml information) at the optimum",
+  "call": "glm.nb(y ~ x1 + x2, data = d)",
+  "dataset": "validation/datasets/generated/negbin.csv",
+  "datasets": ["validation/datasets/generated/negbin.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "MASS": "7.3.60.0.1"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.27651573520282519, 0.4789005785872501, -0.52027613982959486]
+    },
+    "se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.12067279681163258, 0.067606273730956484, 0.21578173425256997]
+    },
+    "z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [2.2914504553537429, 7.0836706737168473, -2.4111222464298936]
+    },
+    "p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.021937374252251444, 1.4038530380270747e-12, 0.015903516903478965]
+    },
+    "theta": 1.6025851429909947,
+    "se_theta": 0.32721579365464054,
+    "loglik": -564.30124785891894,
+    "aic": 1136.6024957178379,
+    "bic": 1152.5683539062697,
+    "y_mean": 1.1375,
+    "y_var": 2.2642543859649122,
+    "n": 400,
+    "coef_pkg": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.27651573520354589, 0.4789005785878736, -0.52027613983137178]
+    },
+    "se_pkg": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.12067279681520096, 0.06760627373286969, 0.2157817342587201]
+    },
+    "theta_pkg": 1.6025851427753957,
+    "se_theta_pkg": 0.32721030566007775,
+    "loglik_pkg": -564.30124785891894,
+    "twologlik_pkg": -1128.6024957178379,
+    "trigamma_x": [0.10000000000000001, 0.5, 1, 1.6025851429909947, 3.7000000000000002, 6, 10, 25.5, 1000],
+    "trigamma": [101.43329915079275, 4.934802200544679, 1.6449340668482264, 0.85661676238498119, 0.31003785767003833, 0.18132295573711527, 0.10516633568168572, 0.039994669649562928, 0.0010005001666666335],
+    "theta_init50_pkg": 1.6025851427753954,
+    "na_coef": {
+      "names": ["(Intercept)", "x1_na", "x2"],
+      "values": [0.26944112534137227, 0.47402773297864337, -0.50516895656708793]
+    },
+    "na_se": {
+      "names": ["(Intercept)", "x1_na", "x2"],
+      "values": [0.12176776202503943, 0.068576859458751055, 0.21822757508863119]
+    },
+    "na_theta": 1.5624842841513744,
+    "na_se_theta": 0.3171253193416621,
+    "na_loglik": -557.98076276707116,
+    "na_n_used": 395,
+    "na_n_dropped": 5,
+    "na_missing_y": 3,
+    "na_missing_x1": 2
+  }
+}
