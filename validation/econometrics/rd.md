@@ -62,9 +62,10 @@ Then `tau_cl = beta_p,right[0] - beta_p,left[0]`, `tau_bc = beta_bc,right[0] - b
 | Bias-Corrected | `tau_bc` | `se_cl` | `tau_bc ∓ z se_cl` |
 | Robust | `tau_bc` | `se_rb` | `tau_bc ∓ z se_rb` |
 
-p-values are `2 Φ(-|est / se|)` (upper tail). `bias = tau_cl - tau_bc`. `n_eff_left/right`
-are `N_h`, `n_b_left/right` are `N_b`, and `coef_left/right` are `beta_p` on each side.
-`significance` follows the robust p-value.
+p-values are `2 Φ(-|est / se|)` (upper tail); a zero SE gives p = 0 for a nonzero estimate,
+as R's `2 * pnorm(-Inf)`, and p = 1 for a zero one, and the printed z is `est / se` (`inf`).
+`bias = tau_cl - tau_bc`. `n_eff_left/right` are `N_h`, `n_b_left/right` are `N_b`, and
+`coef_left/right` are `beta_p` on each side. `significance` follows the robust p-value.
 
 The cost per side is O(m log m) for the sort, O(m (q + 1)²) for the fits and O(m + B · nnmatch)
 for the nearest-neighbour residuals (B distinct values of x).
@@ -130,7 +131,9 @@ Not registered (no R value): `test_nn_residuals_follow_rdrobust_rule` holds the 
 nearest-neighbour residuals to a line-by-line transcription of rdrobust's `rdrobust_res` loop
 on continuous, tied, signed-zero and tiny inputs, and
 `test_rd_rejects_q_not_above_p_and_lonely_right_bandwidths` checks the `q > p` rule and the
-right-side bandwidth checks.
+right-side bandwidth checks. `test_rd_zero_se_gives_p_zero_for_a_nonzero_jump` fits a column
+that is 0 left and 1 right of the cutoff (nearest-neighbour residuals and SEs 0, every p-value
+0, `inf` printed as z, and the same for the first stage of a fuzzy fit).
 
 Tolerances (`validation/README.md`, n = 1000): coefficients 1e-8 relative, SEs, statistics
 and CI bounds 1e-6 relative, p-values 1e-6 relative plus 1e-12 absolute, counts exact. The

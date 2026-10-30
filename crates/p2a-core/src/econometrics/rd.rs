@@ -465,7 +465,8 @@ fn write_rd_header(f: &mut fmt::Formatter<'_>, level: f64) -> fmt::Result {
     writeln!(f, "{}", "-".repeat(90))
 }
 
-/// One row of the estimate table: estimate, SE, z, two-sided p and the interval.
+/// One row of the estimate table: estimate, SE, z = est / se (inf when se = 0), two-sided
+/// p and the interval.
 fn write_rd_row(
     f: &mut fmt::Formatter<'_>,
     label: &str,
@@ -475,11 +476,17 @@ fn write_rd_row(
     ci: (f64, f64),
     stars: &str,
 ) -> fmt::Result {
-    let z = if se > 0.0 { est / se } else { 0.0 };
     writeln!(
         f,
         "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.4}  [{:>8.4}, {:>8.4}]{}",
-        label, est, se, z, p, ci.0, ci.1, stars
+        label,
+        est,
+        se,
+        est / se,
+        p,
+        ci.0,
+        ci.1,
+        stars
     )
 }
 
@@ -1588,10 +1595,14 @@ fn normal_and_z(level: f64) -> (Normal, f64) {
     (normal, z)
 }
 
-/// Two-sided normal p-value of `est / se` (upper tail with `sf`, X-17).
+/// Two-sided normal p-value of `est / se` (upper tail with `sf`, X-17). A zero SE gives
+/// p = 0 for a nonzero estimate, as R's `2 * pnorm(-Inf)` (a first stage whose take-up is
+/// constant on each side has nearest-neighbour residuals 0), and p = 1 for a zero one.
 fn two_sided_p(normal: &Normal, est: f64, se: f64) -> f64 {
-    let z = if se > 0.0 { est / se } else { 0.0 };
-    2.0 * normal.sf(z.abs())
+    if se == 0.0 {
+        return if est == 0.0 { 1.0 } else { 0.0 };
+    }
+    2.0 * normal.sf((est / se).abs())
 }
 
 /// The sharp RD result of data column `c` of a fit.
@@ -3045,6 +3056,55 @@ mod tests {
         assert_eq!(bw(&f.outcome_rd), bw(&f.first_stage));
         // the selector runs on the outcome, as rdrobust's fuzzy bandwidth would start from it
         assert_eq!(bw(&f.outcome_rd), bw(&sharp));
+    }
+
+    /// `create_sharp_rd_dataset` plus `t`: 0 left of the cutoff, 1 right of it.
+    fn sharp_with_constant_sides() -> Dataset {
+        let ds = create_sharp_rd_dataset();
+        let x = ds.df().column("running").unwrap().f64().unwrap().clone();
+        let t: Vec<f64> = x
+            .into_no_null_iter()
+            .map(|v| if v >= 0.0 { 1.0 } else { 0.0 })
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Series::new("t".into(), t)).unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_rd_zero_se_gives_p_zero_for_a_nonzero_jump() {
+        // Constant on each side: the nearest-neighbour residuals are 0, so the SEs are 0
+        // and, as R's 2 * pnorm(-Inf), every p-value of the (nonzero) jump is 0.
+        let ds = sharp_with_constant_sides();
+        let cfg = || RdConfig {
+            h: Some(1.0),
+            ..Default::default()
+        };
+        let r = run_rd(&ds, "t", "running", 0.0, cfg()).unwrap();
+        assert!(
+            (r.tau_conventional - 1.0).abs() < 1e-8,
+            "{}",
+            r.tau_conventional
+        );
+        assert_eq!((r.se_conventional, r.se_robust), (0.0, 0.0));
+        assert_eq!((r.p_conventional, r.p_bc, r.p_robust), (0.0, 0.0, 0.0));
+        assert_eq!(r.significance, SignificanceLevel::TenthPercent);
+        let text = r.to_string();
+        let row = text
+            .lines()
+            .find(|l| l.starts_with("Conventional"))
+            .unwrap();
+        assert!(row.contains("inf"), "{row}");
+
+        // the first stage of a fuzzy fit on that column
+        let f = run_fuzzy_rd(&ds, "outcome", "running", "t", 0.0, cfg()).unwrap();
+        assert_eq!(f.first_stage.se_conventional, 0.0);
+        assert_eq!(f.first_stage.p_conventional, 0.0);
+        assert!(f.first_stage_f.is_infinite());
+        assert!(!f.warnings.iter().any(|w| w.starts_with("Weak first stage")));
+
+        // a zero estimate with a zero SE is not significant
+        assert_eq!(two_sided_p(&Normal::standard(), 0.0, 0.0), 1.0);
     }
 
     #[test]
