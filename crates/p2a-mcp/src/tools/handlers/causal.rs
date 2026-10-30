@@ -59,6 +59,21 @@ use p2a_core::{
     run_twang, sargan_test, sbw, tmle, weightit,
 };
 
+/// The RD tools' `vce` (default nearest-neighbour), or the tool error naming the valid ones
+/// (the core message, which names the parameter and the values).
+fn parse_vce(vce: Option<&str>) -> Result<VceType, CallToolResult> {
+    match vce {
+        None => Ok(VceType::Nn),
+        Some(s) => VceType::parse(s).map_err(|e| {
+            let message = match e {
+                p2a_core::EconError::InvalidSpecification { message } => message,
+                other => other.to_string(),
+            };
+            CallToolResult::error(vec![Content::text(message)])
+        }),
+    }
+}
+
 // Helper function for formatting diagnostic warnings
 fn format_diagnostic_warnings(report: &p2a_core::diagnostics::IdentificationReport) -> String {
     let mut output = String::new();
@@ -623,7 +638,7 @@ impl AnalyticsServer {
 
     /// Run Double/Debiased Machine Learning (DoubleML) estimation.
     #[tool(
-        description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information."
+        description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information. Columns must not contain missing values; integer and boolean columns are accepted."
     )]
     pub async fn treatment_double_ml(
         &self,
@@ -635,49 +650,9 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract data columns
-        let df = dataset.df();
-
-        // Extract outcome (Y)
-        let y_col = df.column(&request.outcome).map_err(|_| {
-            McpError::invalid_request(
-                format!("Outcome column '{}' not found", request.outcome),
-                None,
-            )
-        })?;
-        let y_vec: Vec<f64> = y_col
-            .f64()
-            .map_err(|_| {
-                McpError::invalid_request(
-                    format!("Outcome column '{}' must be numeric", request.outcome),
-                    None,
-                )
-            })?
-            .iter()
-            .flatten()
-            .collect();
-
-        // Extract treatment (D)
-        let d_col = df.column(&request.treatment).map_err(|_| {
-            McpError::invalid_request(
-                format!("Treatment column '{}' not found", request.treatment),
-                None,
-            )
-        })?;
-        let d_vec: Vec<f64> = d_col
-            .f64()
-            .map_err(|_| {
-                McpError::invalid_request(
-                    format!("Treatment column '{}' must be numeric", request.treatment),
-                    None,
-                )
-            })?
-            .iter()
-            .flatten()
-            .collect();
-
-        // Extract covariates (X)
-        let n = y_vec.len();
+        // y, d and X are read jointly; DoubleML refuses missing data, so a missing value
+        // in any of them is a tool error naming the column (NaPolicy::Fail).
+        let n = dataset.df().height();
         let p = request.covariates.len();
         if n.checked_mul(p)
             .is_none_or(|total| total > MAX_MATRIX_ELEMENTS)
@@ -687,45 +662,28 @@ impl AnalyticsServer {
                 n, p, MAX_MATRIX_ELEMENTS
             ))]));
         }
-        let mut x_data = Vec::with_capacity(n * p);
-
-        for col_name in &request.covariates {
-            let col = df.column(col_name).map_err(|_| {
-                McpError::invalid_request(
-                    format!("Covariate column '{}' not found", col_name),
-                    None,
-                )
-            })?;
-            let col_f64 = col.f64().map_err(|_| {
-                McpError::invalid_request(
-                    format!("Covariate column '{}' must be numeric", col_name),
-                    None,
-                )
-            })?;
-            for v in col_f64.iter() {
-                x_data.push(v.unwrap_or(0.0));
+        let mut names: Vec<&str> = vec![request.outcome.as_str(), request.treatment.as_str()];
+        names.extend(request.covariates.iter().map(String::as_str));
+        let cols = match crate::tools::common::numeric_columns(
+            dataset,
+            &names,
+            crate::tools::common::NaPolicy::Fail,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Double ML: {e}"
+                ))]));
             }
-        }
-
-        // Convert to ndarray
-        use ndarray::{Array1, Array2};
-        let y = Array1::from(y_vec);
-        let d = Array1::from(d_vec);
-
-        // Reshape X: we collected column-wise, need to transpose
-        let x_col_major = Array2::from_shape_vec((n, p), {
-            // Reorganize from column-major to row-major
-            let mut row_major = vec![0.0; n * p];
-            for j in 0..p {
-                for i in 0..n {
-                    row_major[i * p + j] = x_data[j * n + i];
-                }
-            }
-            row_major
-        })
-        .map_err(|e| {
-            McpError::internal_error(format!("Failed to create covariate matrix: {}", e), None)
-        })?;
+        };
+        let y = cols.numeric_array(&request.outcome);
+        let d = cols.numeric_array(&request.treatment);
+        let cov_names: Vec<&str> = request.covariates.iter().map(String::as_str).collect();
+        let x = if cov_names.is_empty() {
+            ndarray::Array2::zeros((cols.n(), 0))
+        } else {
+            cols.matrix(&cov_names, false).data
+        };
 
         // Parse model type
         let model_type = match request.model_type.as_deref() {
@@ -752,7 +710,7 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        let result = match run_double_ml(&y.view(), &d.view(), &x_col_major.view(), config) {
+        let result = match run_double_ml(&y.view(), &d.view(), &x.view(), config) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1618,77 +1576,51 @@ impl AnalyticsServer {
         through prediction intervals that account for both in-sample and out-of-sample variance. \
         Supports multiple constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (sparse with sum=1). \
         Developed by Cattaneo, Feng & Titiunik (2021) in JASA. \
-        Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics."
+        Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics. \
+        Units may be identified by text or integer ids; the panel must be balanced."
     )]
     pub async fn scpi(
         &self,
         Parameters(request): Parameters<ScpiRequest>,
     ) -> Result<CallToolResult, McpError> {
         use ndarray::{Array1, Array2};
-        use p2a_core::polars::prelude::{ChunkCompareEq, PolarsError};
+        use p2a_core::data::columns::{ColumnRequest, NaPolicy};
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        // Extract unique units and times
-        let units: Vec<String> = match df.column(&request.unit_col) {
-            Ok(col) => match col.str() {
-                Ok(str_col) => str_col
-                    .into_iter()
-                    .filter_map(|s| s.map(|s| s.to_string()))
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect(),
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Unit column '{}' must be string type",
-                        request.unit_col
-                    ))]));
-                }
-            },
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unit column '{}' not found",
-                    request.unit_col
-                ))]));
-            }
+        // Units (text or integer ids, as factor levels), whole-number times and the outcome
+        // in one extractor request; a missing value is a tool error naming the column.
+        let cols = match ColumnRequest::new(dataset.df())
+            .factor(&request.unit_col)
+            .time_index(&request.time_col)
+            .numeric(&request.outcome)
+            .na(NaPolicy::Fail)
+            .extract()
+        {
+            Ok(c) => c,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         };
+        let units = cols.factor(&request.unit_col);
+        let time_of_row = cols.time_index(&request.time_col);
+        let outcome = cols.numeric(&request.outcome);
 
-        let mut times: Vec<i64> = match df.column(&request.time_col) {
-            Ok(col) => match col.i64() {
-                Ok(int_col) => int_col
-                    .into_iter()
-                    .flatten()
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect(),
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Time column '{}' must be integer type",
-                        request.time_col
-                    ))]));
-                }
-            },
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Time column '{}' not found",
-                    request.time_col
-                ))]));
-            }
-        };
-        times.sort();
+        // Units in level order (integer ids numerically, text in byte order), times sorted
+        let mut times: Vec<i64> = time_of_row.to_vec();
+        times.sort_unstable();
+        times.dedup();
 
         // Validate treated unit exists
-        if !units.contains(&request.treated_unit) {
+        let Some(treated) = units.levels.iter().position(|u| u == &request.treated_unit) else {
+            let shown: Vec<&str> = units.levels.iter().take(10).map(String::as_str).collect();
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Treated unit '{}' not found in data. Available units: {:?}",
+                "Treated unit '{}' not found in '{}'. Available units: {}",
                 request.treated_unit,
-                units.iter().take(10).collect::<Vec<_>>()
+                request.unit_col,
+                shown.join(", ")
             ))]));
-        }
+        };
 
         // Find treatment period index
         let treatment_idx = match times.iter().position(|&t| t == request.treatment_time) {
@@ -1702,98 +1634,91 @@ impl AnalyticsServer {
             }
         };
 
-        // Build treated series and donor matrix
+        let n_units = units.n_levels();
         let n_times = times.len();
-        let donor_units: Vec<String> = units
-            .iter()
-            .filter(|u| *u != &request.treated_unit)
-            .cloned()
-            .collect();
-        let n_donors = donor_units.len();
-
-        // Helper function to get value for unit at time
-        let get_value = |df: &p2a_core::polars::frame::DataFrame,
-                         outcome: &str,
-                         unit_col: &str,
-                         time_col: &str,
-                         unit: &str,
-                         time: i64|
-         -> Result<f64, String> {
-            let unit_col_data = df
-                .column(unit_col)
-                .map_err(|e: PolarsError| e.to_string())?;
-            let unit_str = unit_col_data
-                .str()
-                .map_err(|_| "Unit column not string".to_string())?;
-            let unit_mask = unit_str.equal(unit);
-
-            let time_col_data = df
-                .column(time_col)
-                .map_err(|e: PolarsError| e.to_string())?;
-            let time_i64 = time_col_data
-                .i64()
-                .map_err(|_| "Time column not int".to_string())?;
-            let time_mask = time_i64.equal(time);
-
-            let combined = &unit_mask & &time_mask;
-            let filtered = df
-                .filter(&combined)
-                .map_err(|e: PolarsError| e.to_string())?;
-            if filtered.height() == 0 {
-                return Err(format!("No data for unit '{}' at time {}", unit, time));
-            }
-            let outcome_col = filtered
-                .column(outcome)
-                .map_err(|e: PolarsError| e.to_string())?;
-            let val = outcome_col
-                .f64()
-                .map_err(|_| "Outcome not numeric".to_string())?
-                .get(0)
-                .ok_or_else(|| "Missing value".to_string())?;
-            Ok(val)
+        let grid_len = match p2a_core::resource::checked_len(&[n_units, n_times], "scpi panel") {
+            Ok(len) => len,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         };
-
-        // Extract outcome values for treated unit
-        let mut treated_values = Array1::zeros(n_times);
-        for (t_idx, &time) in times.iter().enumerate() {
-            match get_value(
-                df,
-                &request.outcome,
-                &request.unit_col,
-                &request.time_col,
-                &request.treated_unit,
-                time,
-            ) {
-                Ok(v) => treated_values[t_idx] = v,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error extracting treated unit data: {}",
-                        e
-                    ))]));
+        // A balanced panel has exactly one row per cell, so the grid never exceeds the rows.
+        // With fewer rows than cells, name the first empty cell from the sorted cells of the
+        // rows (it is among the first rows + 1 cells), without allocating the grid.
+        let rows = units.codes.len();
+        if grid_len > rows {
+            let mut cells: Vec<usize> =
+                match p2a_core::resource::try_with_capacity(rows, "scpi panel") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+                };
+            for (&code, &time) in units.codes.iter().zip(time_of_row) {
+                if let Ok(t) = times.binary_search(&time) {
+                    cells.push(code as usize * n_times + t);
                 }
             }
+            cells.sort_unstable();
+            cells.dedup();
+            let first = cells
+                .iter()
+                .enumerate()
+                .position(|(i, &c)| i != c)
+                .unwrap_or(cells.len());
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "scpi needs a balanced panel: {n_units} units x {n_times} times = {grid_len} \
+                 cells, but the data has {rows} rows (unit {} has no row for time {}; cells \
+                 without a row: {})",
+                units.levels[first / n_times],
+                times[first % n_times],
+                grid_len - cells.len()
+            ))]));
         }
+        // One pass over the rows fills the units x times grid.
+        let mut grid: Vec<Option<f64>> =
+            match p2a_core::resource::try_vec(grid_len, None, "scpi panel") {
+                Ok(g) => g,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            };
+        for (i, (&code, &time)) in units.codes.iter().zip(time_of_row).enumerate() {
+            let u = code as usize;
+            let Ok(t) = times.binary_search(&time) else {
+                continue; // every time is in `times` by construction
+            };
+            let cell = &mut grid[u * n_times + t];
+            if cell.is_some() {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "scpi needs one row per (unit, time): unit {} appears twice at time {}",
+                    units.levels[u], time
+                ))]));
+            }
+            *cell = Some(outcome[i]);
+        }
+        // A guard: with no second row per cell and no more cells than rows, every cell is set.
+        if let Some(first) = grid.iter().position(Option::is_none) {
+            let k = grid.iter().filter(|c| c.is_none()).count();
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "scpi needs a balanced panel: unit {} has no row for time {} (cells without a \
+                 row: {})",
+                units.levels[first / n_times],
+                times[first % n_times],
+                k
+            ))]));
+        }
+        let value = |u: usize, t: usize| grid[u * n_times + t].unwrap_or(f64::NAN);
 
-        // Extract donor matrix
+        // Treated series and donor matrix; donors are the other units in level order
+        let donor_units: Vec<String> = units
+            .levels
+            .iter()
+            .enumerate()
+            .filter(|(u, _)| *u != treated)
+            .map(|(_, name)| name.clone())
+            .collect();
+        let donor_codes: Vec<usize> = (0..n_units).filter(|&u| u != treated).collect();
+        let n_donors = donor_codes.len();
+        let treated_values = Array1::from_iter((0..n_times).map(|t| value(treated, t)));
         let mut donor_matrix = Array2::zeros((n_times, n_donors));
-        for (d_idx, donor) in donor_units.iter().enumerate() {
-            for (t_idx, &time) in times.iter().enumerate() {
-                match get_value(
-                    df,
-                    &request.outcome,
-                    &request.unit_col,
-                    &request.time_col,
-                    donor,
-                    time,
-                ) {
-                    Ok(v) => donor_matrix[[t_idx, d_idx]] = v,
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Error extracting donor unit '{}' data: {}",
-                            donor, e
-                        ))]));
-                    }
-                }
+        for (d_idx, &u) in donor_codes.iter().enumerate() {
+            for t in 0..n_times {
+                donor_matrix[[t, d_idx]] = value(u, t);
             }
         }
 
@@ -1852,12 +1777,18 @@ impl AnalyticsServer {
 
     /// Run Sharp Regression Discontinuity estimation.
     #[tool(
-        description = "Run Sharp Regression Discontinuity (RD) estimation. Implements local polynomial regression with robust bias-corrected inference following Calonico, Cattaneo & Titiunik (2014). Returns conventional, bias-corrected, and robust treatment effect estimates with confidence intervals."
+        description = "Run Sharp Regression Discontinuity (RD) estimation by local polynomial regression, with the bias-corrected robust inference of Calonico, Cattaneo & Titiunik (2014) as in R's rdrobust: conventional, bias-corrected and robust estimates, standard errors, p-values and confidence intervals. Bandwidths come from p2a's own MSE-type selector unless h (and b) are given; vce selects the variance estimator (nearest-neighbour by default, as rdrobust). Rows with missing values are dropped and reported."
     )]
     pub async fn rd_estimate(
         &self,
         Parameters(request): Parameters<RdEstimateRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // vce is checked before the dataset lookup, so a bad name never costs a data read
+        let vce = match parse_vce(request.vce.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -1886,6 +1817,7 @@ impl AnalyticsServer {
             b: request.b,
             kernel,
             bwselect,
+            vce,
             level: request.level.unwrap_or(0.95),
             ..Default::default()
         };
@@ -1969,12 +1901,18 @@ impl AnalyticsServer {
 
     /// Run Fuzzy Regression Discontinuity estimation.
     #[tool(
-        description = "Run Fuzzy Regression Discontinuity estimation. For cases where treatment probability (not assignment) jumps at the cutoff. Uses a Wald estimator (ratio of reduced-form to first-stage). Returns Local Average Treatment Effect (LATE)."
+        description = "Run Fuzzy Regression Discontinuity estimation, for designs where the treatment probability (not assignment) jumps at the cutoff. Fits the outcome and the treatment on one bandwidth and reports the Wald ratio (LATE) with its joint conventional standard error and the bias-corrected robust estimate and interval, as rdrobust(fuzzy = ), plus the first-stage jump and F statistic (warning below 10). Bandwidths come from p2a's own MSE-type selector (run on the outcome), not rdrobust's rdbwselect, unless h (and b) are given."
     )]
     pub async fn rd_fuzzy(
         &self,
         Parameters(request): Parameters<FuzzyRdRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // vce is checked before the dataset lookup, so a bad name never costs a data read
+        let vce = match parse_vce(request.vce.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -2000,9 +1938,10 @@ impl AnalyticsServer {
             p: request.p.unwrap_or(1),
             q: None,
             h: request.h,
-            b: None,
+            b: request.b,
             kernel,
             bwselect,
+            vce,
             level: request.level.unwrap_or(0.95),
             ..Default::default()
         };
@@ -2034,12 +1973,18 @@ impl AnalyticsServer {
 
     /// Run Multi-Cutoff Regression Discontinuity estimation.
     #[tool(
-        description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020)."
+        description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020). Each cutoff-specific estimate is rdrobust's bias-corrected estimate with its robust standard error; vce selects the variance estimator. Per-cutoff bandwidths come from p2a's own MSE-type selector, not rdrobust's rdbwselect, unless a bandwidth is given."
     )]
     pub async fn rd_multi(
         &self,
         Parameters(request): Parameters<RdMultiRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // vce is checked before the dataset lookup, so a bad name never costs a data read
+        let vce = match parse_vce(request.vce.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -2089,7 +2034,7 @@ impl AnalyticsServer {
             pooled: request.pooled.unwrap_or(true),
             pooling_weights,
             bwselect: BandwidthMethod::MseRd,
-            vce: VceType::default(),
+            vce,
             level: request.level.unwrap_or(0.95),
             test_heterogeneity: request.test_heterogeneity.unwrap_or(true),
         };
@@ -2263,7 +2208,7 @@ impl AnalyticsServer {
 
     /// Run Longitudinal Targeted Maximum Likelihood Estimation (LTMLE) for time-varying treatments.
     #[tool(
-        description = "Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics."
+        description = "Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics. Columns must not contain missing values (p2a has no censoring node); integer and boolean columns are accepted."
     )]
     pub async fn ltmle(
         &self,
@@ -2291,66 +2236,17 @@ impl AnalyticsServer {
             ))]));
         }
 
-        // Extract data from dataset
-        let df = dataset.df();
-        let n = df.height();
-
-        // Extract outcomes at each time point
-        let mut outcomes: Vec<ndarray::Array1<f64>> = Vec::with_capacity(t_max);
-        for col_name in &request.outcomes {
-            let col = match df.column(col_name) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' not found: {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-            let values: Vec<f64> = col
-                .f64()
-                .map_err(|e| {
-                    McpError::invalid_request(
-                        format!("Column '{}' must be numeric: {}", col_name, e),
-                        None,
-                    )
-                })?
-                .into_no_null_iter()
-                .collect();
-            outcomes.push(ndarray::Array1::from_vec(values));
-        }
-
-        // Extract treatments at each time point
-        let mut treatments: Vec<ndarray::Array1<f64>> = Vec::with_capacity(t_max);
-        for col_name in &request.treatments {
-            let col = match df.column(col_name) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' not found: {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-            let values: Vec<f64> = col
-                .f64()
-                .map_err(|e| {
-                    McpError::invalid_request(
-                        format!("Column '{}' must be numeric: {}", col_name, e),
-                        None,
-                    )
-                })?
-                .into_no_null_iter()
-                .collect();
-            treatments.push(ndarray::Array1::from_vec(values));
-        }
-
-        // Extract covariates at each time point
-        let mut covariates: Vec<ndarray::Array2<f64>> = Vec::with_capacity(t_max);
-        for cov_list in &request.covariates {
-            // Parse comma-separated covariate names
-            let cov_names: Vec<&str> = cov_list.split(',').map(|s| s.trim()).collect();
-            let k = cov_names.len();
+        // Every node is read in one extractor request. p2a's LTMLE has no censoring node,
+        // so a missing value is a tool error naming the column (NaPolicy::Fail): dropping
+        // the row would change the sample of every time point.
+        let n = dataset.df().height();
+        let cov_lists: Vec<Vec<&str>> = request
+            .covariates
+            .iter()
+            .map(|list| list.split(',').map(str::trim).collect())
+            .collect();
+        for names_t in &cov_lists {
+            let k = names_t.len();
             if n.checked_mul(k)
                 .is_none_or(|total| total > MAX_MATRIX_ELEMENTS)
             {
@@ -2359,38 +2255,36 @@ impl AnalyticsServer {
                     n, k, MAX_MATRIX_ELEMENTS
                 ))]));
             }
-
-            let mut cov_data = Vec::with_capacity(n * k);
-            for row_idx in 0..n {
-                for col_name in &cov_names {
-                    let col = match df.column(col_name) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            return Ok(CallToolResult::error(vec![Content::text(format!(
-                                "Column '{}' not found: {}",
-                                col_name, e
-                            ))]));
-                        }
-                    };
-                    let value = col
-                        .f64()
-                        .map_err(|e| {
-                            McpError::invalid_request(
-                                format!("Column '{}' must be numeric: {}", col_name, e),
-                                None,
-                            )
-                        })?
-                        .get(row_idx)
-                        .unwrap_or(f64::NAN);
-                    cov_data.push(value);
-                }
-            }
-
-            let cov_array = ndarray::Array2::from_shape_vec((n, k), cov_data).map_err(|e| {
-                McpError::invalid_request(format!("Failed to create covariate matrix: {}", e), None)
-            })?;
-            covariates.push(cov_array);
         }
+        let mut names: Vec<&str> = request.outcomes.iter().map(String::as_str).collect();
+        names.extend(request.treatments.iter().map(String::as_str));
+        names.extend(cov_lists.iter().flatten().copied());
+        let cols = match crate::tools::common::numeric_columns(
+            dataset,
+            &names,
+            crate::tools::common::NaPolicy::Fail,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "LTMLE: {e}"
+                ))]));
+            }
+        };
+        let outcomes: Vec<ndarray::Array1<f64>> = request
+            .outcomes
+            .iter()
+            .map(|c| cols.numeric_array(c))
+            .collect();
+        let treatments: Vec<ndarray::Array1<f64>> = request
+            .treatments
+            .iter()
+            .map(|c| cols.numeric_array(c))
+            .collect();
+        let covariates: Vec<ndarray::Array2<f64>> = cov_lists
+            .iter()
+            .map(|names_t| cols.matrix(names_t, false).data)
+            .collect();
 
         // Create LTMLE data structure
         let data = match LtmleData::new(outcomes, treatments, covariates) {
@@ -2607,5 +2501,385 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(
             result.to_string(),
         )]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::common::test_support::{server_with, text};
+    use p2a_core::polars::prelude::{DataFrame, DataType, NamedFrom, Series};
+    use p2a_validation::Case;
+    use serde_json::{Value, json};
+
+    /// The case and a server holding its dataset as `rd`.
+    fn case_server(id: &str) -> (Case, tokio::runtime::Runtime, AnalyticsServer) {
+        let case = Case::load(id);
+        let df = p2a_core::data::DataLoader::load_csv(case.dataset_path()).unwrap();
+        let (rt, server) = server_with(vec![("rd", df)]);
+        (case, rt, server)
+    }
+
+    /// `rd_sim.csv` as data only (no R value is compared).
+    fn rd_frame() -> DataFrame {
+        p2a_core::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/generated/rd_sim.csv",
+        ))
+        .unwrap()
+    }
+
+    /// `col` cast to Float64 with the listed rows set to null.
+    fn with_nulls(df: &DataFrame, col: &str, rows: &[usize]) -> DataFrame {
+        let mut df = df.clone();
+        let cast = df.column(col).unwrap().cast(&DataType::Float64).unwrap();
+        let mut vals: Vec<Option<f64>> = cast.f64().unwrap().into_iter().collect();
+        for &r in rows {
+            vals[r] = None;
+        }
+        df.with_column(Series::new(col.into(), vals)).unwrap();
+        df
+    }
+
+    /// One row of the RD estimate table (core's `Display` format).
+    fn rd_row(label: &str, est: f64, se: f64, p: f64, ci: &[f64]) -> String {
+        format!(
+            "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.4}  [{:>8.4}, {:>8.4}]",
+            label,
+            est,
+            se,
+            est / se,
+            p,
+            ci[0],
+            ci[1]
+        )
+    }
+
+    /// The Conventional and Robust rows of an rdrobust run `<prefix>_*`.
+    fn rows(case: &Case, prefix: &str) -> [String; 2] {
+        let v = |k: &str| case.scalar(&format!("{prefix}_{k}"));
+        let ci = |k: &str| case.vector(&format!("{prefix}_{k}"));
+        [
+            rd_row(
+                "Conventional",
+                v("coef_conv"),
+                v("se_conv"),
+                v("p_conv"),
+                &ci("ci_conv"),
+            ),
+            rd_row(
+                "Robust",
+                v("coef_bc"),
+                v("se_robust"),
+                v("p_robust"),
+                &ci("ci_robust"),
+            ),
+        ]
+    }
+
+    /// `base` with the keys of `extra` added or replaced.
+    fn merged(base: Value, extra: Value) -> Value {
+        let mut v = base;
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    }
+
+    #[test]
+    fn test_validate_mcp_rd_estimate_vce() {
+        let (case, rt, server) = case_server("rd_sharp_fixed_bw");
+        let base = json!({"dataset": "rd", "outcome": "y", "running_var": "x", "cutoff": 0.0, "h": 0.3, "b": 0.3});
+        for (vce, prefix) in [
+            (None, "tri_nn_hb"),
+            (Some("nn"), "tri_nn_hb"),
+            (Some("hc1"), "tri_hc1_hb"),
+            (Some("HC3"), "tri_hc3_hb"),
+        ] {
+            let args = match vce {
+                Some(v) => merged(base.clone(), json!({ "vce": v })),
+                None => base.clone(),
+            };
+            let req: RdEstimateRequest = serde_json::from_value(args).unwrap();
+            let r = rt.block_on(server.rd_estimate(Parameters(req))).unwrap();
+            let out = text(&r);
+            assert_ne!(r.is_error, Some(true), "{out}");
+            for row in rows(&case, prefix) {
+                assert!(out.contains(&row), "{vce:?}: {row}\n{out}");
+            }
+        }
+        let req: RdEstimateRequest =
+            serde_json::from_value(merged(base, json!({"level": 0.9}))).unwrap();
+        let r = rt.block_on(server.rd_estimate(Parameters(req))).unwrap();
+        let out = text(&r);
+        let ci = case.vector("level90_ci_robust");
+        assert!(out.contains("[90% CI]"), "{out}");
+        assert!(
+            out.contains(&format!("[{:>8.4}, {:>8.4}]", ci[0], ci[1])),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_rd_estimate_rejects_unknown_vce() {
+        // vce is checked before the dataset lookup, so no dataset is loaded
+        let (rt, server) = server_with(vec![]);
+        let base = json!({"dataset": "none", "outcome": "y", "running_var": "x", "vce": "robust"});
+        let check = |r: CallToolResult| {
+            let out = text(&r);
+            assert_eq!(r.is_error, Some(true), "{out}");
+            // the core message alone, without a second prefix
+            assert!(
+                out.starts_with("Unknown vce 'robust'; use \"nn\"") && out.contains("hc1"),
+                "{out}"
+            );
+        };
+        let req: RdEstimateRequest = serde_json::from_value(base.clone()).unwrap();
+        check(rt.block_on(server.rd_estimate(Parameters(req))).unwrap());
+        let req: FuzzyRdRequest =
+            serde_json::from_value(merged(base.clone(), json!({"treatment": "d"}))).unwrap();
+        check(rt.block_on(server.rd_fuzzy(Parameters(req))).unwrap());
+        let req: RdMultiRequest =
+            serde_json::from_value(merged(base, json!({"cutoffs": [0.0]}))).unwrap();
+        check(rt.block_on(server.rd_multi(Parameters(req))).unwrap());
+    }
+
+    #[test]
+    fn test_validate_mcp_rd_fuzzy_b() {
+        let (case, rt, server) = case_server("rd_fuzzy_fixed_bw");
+        let base = json!({"dataset": "rd", "outcome": "yf", "running_var": "x", "treatment": "d"});
+        for (extra, prefix) in [
+            (json!({"h": 0.3, "b": 0.5}), "fuzzy_nn_h03_b05"),
+            (json!({"h": 0.4, "vce": "hc1"}), "fuzzy_hc1"),
+        ] {
+            let req: FuzzyRdRequest = serde_json::from_value(merged(base.clone(), extra)).unwrap();
+            let r = rt.block_on(server.rd_fuzzy(Parameters(req))).unwrap();
+            let out = text(&r);
+            assert_ne!(r.is_error, Some(true), "{out}");
+            for row in rows(&case, prefix) {
+                assert!(out.contains(&row), "{prefix}: {row}\n{out}");
+            }
+            let f = (case.scalar(&format!("{prefix}_first_stage_conv"))
+                / case.scalar(&format!("{prefix}_first_stage_se_conv")))
+            .powi(2);
+            assert!(
+                out.contains(&format!("F = {f:.2}")),
+                "{prefix}: F = {f:.2}\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_mcp_rd_multi_vce() {
+        let (case, rt, server) = case_server("rd_sharp_fixed_bw");
+        let req: RdMultiRequest = serde_json::from_value(json!({
+            "dataset": "rd", "outcome": "y", "running_var": "x",
+            "cutoffs": [0.0], "bandwidth": 0.3, "vce": "hc1"
+        }))
+        .unwrap();
+        let r = rt.block_on(server.rd_multi(Parameters(req))).unwrap();
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        let cell = format!(
+            "{:>10.4} {:>10.4}",
+            case.scalar("tri_hc1_hb_coef_bc"),
+            case.scalar("tri_hc1_hb_se_robust")
+        );
+        assert!(out.contains(&cell), "{cell}\n{out}");
+    }
+
+    #[test]
+    fn test_mcp_rd_estimate_reports_dropped_rows() {
+        let (rt, server) = server_with(vec![("rd", with_nulls(&rd_frame(), "y", &[0]))]);
+        let req: RdEstimateRequest = serde_json::from_value(json!({
+            "dataset": "rd", "outcome": "y", "running_var": "x", "h": 0.3
+        }))
+        .unwrap();
+        let r = rt.block_on(server.rd_estimate(Parameters(req))).unwrap();
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        assert!(
+            out.contains("Missing values: 1 of 1000 rows dropped because of missing values (y: 1)"),
+            "{out}"
+        );
+    }
+
+    // =========================================================================
+    // treatment_double_ml extraction (T2-WP11: TOOL-5 DML site, TOOL-6)
+    // =========================================================================
+
+    /// `col` cast to Float64 (same values).
+    fn as_f64(df: &DataFrame, col: &str) -> DataFrame {
+        with_nulls(df, col, &[])
+    }
+
+    fn dml_request() -> DoubleMLRequest {
+        serde_json::from_value(json!({
+            "dataset": "rd", "outcome": "yf", "treatment": "d",
+            "covariates": ["x", "ym"], "seed": 11
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_mcp_treatment_double_ml_accepts_int64_treatment() {
+        let df = rd_frame();
+        assert_eq!(df.column("d").unwrap().dtype(), &DataType::Int64);
+        let run = |df: DataFrame| {
+            let (rt, server) = server_with(vec![("rd", df)]);
+            rt.block_on(server.treatment_double_ml(Parameters(dml_request())))
+                .expect("data problems are tool errors")
+        };
+        let int = run(df.clone());
+        assert_ne!(int.is_error, Some(true), "{}", text(&int));
+        let float = run(as_f64(&df, "d"));
+        assert_eq!(text(&int), text(&float));
+    }
+
+    #[test]
+    fn test_mcp_treatment_double_ml_refuses_missing_values() {
+        let df = rd_frame();
+        let run = |df: DataFrame, req: DoubleMLRequest| {
+            let (rt, server) = server_with(vec![("rd", df)]);
+            let r = rt
+                .block_on(server.treatment_double_ml(Parameters(req)))
+                .expect("data problems are tool errors");
+            assert_eq!(r.is_error, Some(true), "{}", text(&r));
+            text(&r)
+        };
+        let out = run(with_nulls(&df, "x", &[5]), dml_request());
+        assert!(
+            out.contains("Column 'x' contains 1 missing value(s)"),
+            "{out}"
+        );
+        let out = run(
+            with_nulls(&with_nulls(&df, "yf", &[7]), "d", &[7]),
+            dml_request(),
+        );
+        assert!(out.contains("Column 'yf'"), "{out}");
+        let req: DoubleMLRequest = serde_json::from_value(json!({
+            "dataset": "rd", "outcome": "yf", "treatment": "d", "covariates": ["x", "nope"]
+        }))
+        .unwrap();
+        let out = run(df, req);
+        assert!(out.contains("nope"), "{out}");
+    }
+
+    // =========================================================================
+    // ltmle extraction (T2-WP11: TOOL-7, CAUS-24 handler sites)
+    // =========================================================================
+
+    fn ltmle_request() -> LtmleRequest {
+        serde_json::from_value(json!({
+            "dataset": "rd", "outcomes": ["y", "yf"], "treatments": ["d", "d"],
+            "covariates": ["x", "ym"]
+        }))
+        .unwrap()
+    }
+
+    fn run_ltmle_on(df: DataFrame) -> CallToolResult {
+        let (rt, server) = server_with(vec![("rd", df)]);
+        rt.block_on(server.ltmle(Parameters(ltmle_request())))
+            .expect("data problems are tool errors")
+    }
+
+    #[test]
+    fn test_mcp_ltmle_accepts_int64_treatment() {
+        let df = rd_frame();
+        let int = run_ltmle_on(df.clone());
+        assert_ne!(int.is_error, Some(true), "{}", text(&int));
+        let float = run_ltmle_on(as_f64(&df, "d"));
+        assert_eq!(text(&int), text(&float));
+    }
+
+    #[test]
+    fn test_mcp_ltmle_refuses_missing_values() {
+        let df = rd_frame();
+        for (col, row, needle) in [
+            ("yf", 3, "Column 'yf' contains 1 missing value(s)"),
+            ("ym", 4, "Column 'ym'"),
+            ("d", 2, "Column 'd'"),
+        ] {
+            let r = run_ltmle_on(with_nulls(&df, col, &[row]));
+            let out = text(&r);
+            assert_eq!(r.is_error, Some(true), "{col}: {out}");
+            assert!(out.contains(needle), "{col}: {out}");
+        }
+    }
+
+    // =========================================================================
+    // scpi extraction (T2-WP11: TOOL-5 scpi site)
+    // =========================================================================
+
+    fn grunfeld() -> DataFrame {
+        p2a_core::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/grunfeld.csv",
+        ))
+        .unwrap()
+    }
+
+    fn run_scpi_on(df: DataFrame, extra: Value) -> CallToolResult {
+        let req: ScpiRequest = serde_json::from_value(merged(
+            json!({
+                "dataset": "g", "outcome": "inv", "unit_col": "firm", "time_col": "year",
+                "treated_unit": "1", "treatment_time": 1950
+            }),
+            extra,
+        ))
+        .unwrap();
+        let (rt, server) = server_with(vec![("g", df)]);
+        rt.block_on(server.scpi(Parameters(req)))
+            .expect("data problems are tool errors")
+    }
+
+    #[test]
+    fn test_mcp_scpi_accepts_integer_unit_ids() {
+        let df = grunfeld();
+        assert_eq!(df.column("firm").unwrap().dtype(), &DataType::Int64);
+        let r = run_scpi_on(df, json!({}));
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        for needle in [
+            "Pre-treatment periods: 15",
+            "Post-treatment periods: 5",
+            "Donor pool size: 9",
+            "Donor Unit Names",
+        ] {
+            assert!(out.contains(needle), "{needle}\n{out}");
+        }
+    }
+
+    #[test]
+    fn test_mcp_scpi_reports_unknown_units_and_missing_cells() {
+        let df = grunfeld();
+        let err = |df: DataFrame, extra: Value| {
+            let r = run_scpi_on(df, extra);
+            assert_eq!(r.is_error, Some(true), "{}", text(&r));
+            text(&r)
+        };
+        let out = err(df.clone(), json!({"treated_unit": "11"}));
+        assert!(
+            out.contains("Available units: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"),
+            "{out}"
+        );
+        let out = err(with_nulls(&df, "inv", &[0]), json!({}));
+        assert!(
+            out.contains("Column 'inv' contains 1 missing value(s)"),
+            "{out}"
+        );
+        // row 25 (0-based) is firm 2, year 1940
+        let keep: p2a_core::polars::prelude::BooleanChunked =
+            (0..df.height()).map(|i| i != 25).collect();
+        let out = err(df.filter(&keep).unwrap(), json!({}));
+        assert!(
+            out.contains("10 units x 20 times = 200 cells, but the data has 199 rows")
+                && out.contains("unit 2 has no row for time 1940; cells without a row: 1)"),
+            "{out}"
+        );
+        // row 0 (firm 1, 1935) a second time
+        let out = err(df.vstack(&df.slice(0, 1)).unwrap(), json!({}));
+        assert!(
+            out.contains("one row per (unit, time): unit 1 appears twice at time 1935"),
+            "{out}"
+        );
     }
 }

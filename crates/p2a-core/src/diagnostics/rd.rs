@@ -225,6 +225,8 @@ mod tests {
             n_right: 500,
             n_eff_left: n_left,
             n_eff_right: n_right,
+            n_b_left: n_left,
+            n_b_right: n_right,
             tau_conventional: 2.5,
             tau_bc: 2.45,
             tau_robust: 2.45,
@@ -234,6 +236,7 @@ mod tests {
             ci_conventional: (1.5, 3.5),
             ci_bc: (1.43, 3.47),
             ci_robust: (1.4, 3.6),
+            level: 0.95,
             p_conventional: 0.001,
             p_bc: 0.001,
             p_robust: 0.001,
@@ -243,6 +246,7 @@ mod tests {
             b_left: 0.75,
             b_right: 0.75,
             bwselect: BandwidthMethod::MseTwo,
+            bandwidth_given: false,
             p: 1,
             q: 2,
             kernel: KernelType::Triangular,
@@ -251,6 +255,7 @@ mod tests {
             coef_right: vec![7.5, 0.3],
             bias: 0.05,
             warnings: vec![],
+            missing: crate::data::columns::MissingSummary::default(),
         }
     }
 

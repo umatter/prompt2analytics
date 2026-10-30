@@ -181,3 +181,17 @@ summary(result)
 **Validation Status:** Partial (tests pass, R comparison pending full run)
 
 **Last Updated:** 2026-01-25
+
+## MCP extraction (T2-WP11)
+
+The MCP tool `ltmle` reads every node (the outcomes, the treatments and each time point's
+comma-separated covariates) in one request to the shared extractor with the `Fail` policy. p2a's
+LTMLE has no censoring node, and dropping a row would change the sample of every time point, so
+a missing (null or NaN) value is a tool error naming the column. Integer and boolean columns are
+numeric; no data problem raises a protocol error. Before T2-WP11 outcomes and treatments were read
+with `into_no_null_iter`, so a missing final outcome counted as Y = 0 and a missing treatment as
+untreated, with the full row count reported, and missing covariates became NaN and failed as a
+singular matrix (finding TOOL-7, the handler part of CAUS-24).
+
+Tests (`crates/p2a-mcp/src/tools/handlers/causal.rs`, on `rd_sim.csv` with arbitrary node roles;
+not registered): `test_mcp_ltmle_accepts_int64_treatment` and `test_mcp_ltmle_refuses_missing_values`.

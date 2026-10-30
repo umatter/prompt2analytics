@@ -54,7 +54,9 @@ use p2a_core::{
     tmle,
 };
 
-use crate::output::{OutputFormat, format_regression_results, print_error};
+use crate::output::{
+    OutputFormat, format_regression_results, missing_json, print_error, print_missing_note,
+};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -283,6 +285,9 @@ EXAMPLES:
 
     # With local quadratic polynomial
     p2a causal rd mydata -y test_score -r running_var -c 50 -p 2
+
+    # Given bandwidths (h for the estimate, b for the bias correction) and HC1 variance
+    p2a causal rd mydata -y score -r x -c 0 --h 0.3 --b 0.3 --vce hc1
 ")]
     Rd {
         /// Dataset name
@@ -311,6 +316,18 @@ EXAMPLES:
         /// Bandwidth selection: "mserd" (default), "msetwo", "cerrd"
         #[arg(long, default_value = "mserd")]
         bwselect: String,
+
+        /// Main bandwidth h (both sides); default: p2a's MSE-type selector
+        #[arg(long = "h", visible_alias = "bandwidth")]
+        h: Option<f64>,
+
+        /// Bias bandwidth b; default: h
+        #[arg(long = "b", visible_alias = "bias-bandwidth")]
+        b: Option<f64>,
+
+        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2, hc3
+        #[arg(long, default_value = "nn")]
+        vce: String,
     },
 
     /// Fuzzy Regression Discontinuity
@@ -318,6 +335,9 @@ EXAMPLES:
 EXAMPLES:
     # Fuzzy RD (imperfect compliance at cutoff)
     p2a causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60
+
+    # One given bandwidth for both stages, bias bandwidth 0.5, HC1 variance
+    p2a causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60 --h 0.3 --b 0.5 --vce hc1
 ")]
     FuzzyRd {
         /// Dataset name
@@ -346,6 +366,18 @@ EXAMPLES:
         /// Kernel: "triangular" (default), "uniform", "epanechnikov"
         #[arg(long, default_value = "triangular")]
         kernel: String,
+
+        /// Main bandwidth h (both sides); default: p2a's MSE-type selector
+        #[arg(long = "h", visible_alias = "bandwidth")]
+        h: Option<f64>,
+
+        /// Bias bandwidth b; default: h
+        #[arg(long = "b", visible_alias = "bias-bandwidth")]
+        b: Option<f64>,
+
+        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2, hc3
+        #[arg(long, default_value = "nn")]
+        vce: String,
     },
 
     /// Staggered Difference-in-Differences (Callaway-Sant'Anna)
@@ -672,6 +704,9 @@ pub fn execute(
             poly_order,
             kernel,
             bwselect,
+            h,
+            b,
+            vce,
         } => execute_rd(
             dataset,
             outcome,
@@ -680,6 +715,8 @@ pub fn execute(
             *poly_order,
             kernel,
             bwselect,
+            RdBandwidths { h: *h, b: *b },
+            vce,
             format,
             session,
         ),
@@ -691,6 +728,9 @@ pub fn execute(
             cutoff,
             poly_order,
             kernel,
+            h,
+            b,
+            vce,
         } => execute_fuzzy_rd(
             dataset,
             outcome,
@@ -699,6 +739,8 @@ pub fn execute(
             *cutoff,
             *poly_order,
             kernel,
+            RdBandwidths { h: *h, b: *b },
+            vce,
             format,
             session,
         ),
@@ -1397,6 +1439,62 @@ fn execute_mediation(
     Ok(())
 }
 
+/// The `--h` and `--b` flags of `causal rd` and `causal fuzzy-rd`.
+#[derive(Clone, Copy)]
+struct RdBandwidths {
+    h: Option<f64>,
+    b: Option<f64>,
+}
+
+/// Print the identification warnings of an RD result (caution and above).
+fn print_rd_identification_warnings(result: &p2a_core::RdResult) {
+    let diag_report = rd_diagnostics(result);
+    let warnings: Vec<_> = diag_report
+        .warnings
+        .iter()
+        .filter(|w| w.severity >= WarningSeverity::Caution)
+        .collect();
+    if !warnings.is_empty() {
+        println!("\nIdentification warnings:");
+        for w in warnings {
+            println!(
+                "  [{}] {}: {}",
+                match w.severity {
+                    WarningSeverity::Critical => "CRITICAL",
+                    WarningSeverity::Warning => "WARNING",
+                    WarningSeverity::Caution => "CAUTION",
+                    WarningSeverity::Info => "INFO",
+                },
+                w.title,
+                w.message
+            );
+        }
+    }
+}
+
+/// Print the estimator's warnings, leaving out the missing-value note (printed last).
+fn print_rd_warnings(warnings: &[String], missing: &p2a_core::data::columns::MissingSummary) {
+    let note = missing.note();
+    let shown: Vec<&String> = warnings
+        .iter()
+        .filter(|w| Some(w.as_str()) != note.as_deref())
+        .collect();
+    if !shown.is_empty() {
+        println!("\nWarnings:");
+        for w in shown {
+            println!("  - {w}");
+        }
+    }
+}
+
+/// `--vce` as a `VceType`, or the core message (it names the option and the valid values).
+fn parse_vce_arg(vce: &str) -> Result<VceType, String> {
+    VceType::parse(vce).map_err(|e| match e {
+        p2a_core::EconError::InvalidSpecification { message } => message,
+        other => other.to_string(),
+    })
+}
+
 fn execute_rd(
     dataset_name: &str,
     outcome: &str,
@@ -1405,9 +1503,19 @@ fn execute_rd(
     poly_order: usize,
     kernel: &str,
     bwselect: &str,
+    bandwidths: RdBandwidths,
+    vce: &str,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
+    // --vce is checked before the session and the dataset
+    let vce = match parse_vce_arg(vce) {
+        Ok(v) => v,
+        Err(message) => {
+            print_error(&message, format);
+            return Ok(());
+        }
+    };
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -1430,22 +1538,18 @@ fn execute_rd(
             };
             let config = RdConfig {
                 p: poly_order,
-                q: None,
-                h: None,
-                b: None,
-                rho: 1.0,
+                h: bandwidths.h,
+                b: bandwidths.b,
                 kernel: kern,
                 bwselect: bw,
-                vce: VceType::Nn,
-                nnmatch: 3,
-                level: 0.95,
-                scaleregul: 1.0,
+                vce,
+                ..RdConfig::default()
             };
 
             match run_rd(ds, outcome, running, cutoff, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Sharp RD",
                             "outcome": result.outcome,
                             "running_var": result.running_var,
@@ -1458,7 +1562,28 @@ fn execute_rd(
                             "n_right": result.n_right,
                             "h_left": result.h_left,
                             "h_right": result.h_right,
+                            "tau_conventional": result.tau_conventional,
+                            "se_conventional": result.se_conventional,
+                            "p_conventional": result.p_conventional,
+                            "ci_conventional": result.ci_conventional,
+                            "tau_bc": result.tau_bc,
+                            "bias": result.bias,
+                            "n_eff_left": result.n_eff_left,
+                            "n_eff_right": result.n_eff_right,
+                            "n_b_left": result.n_b_left,
+                            "n_b_right": result.n_b_right,
+                            "b_left": result.b_left,
+                            "b_right": result.b_right,
+                            "kernel": result.kernel.to_string(),
+                            "vce": result.vce.to_string(),
+                            "p": result.p,
+                            "q": result.q,
+                            "level": result.level,
+                            "warnings": result.warnings,
                         });
+                        if let Some(m) = missing_json(&result.missing) {
+                            json["missing"] = m;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1476,35 +1601,36 @@ fn execute_rd(
                             "95% CI: [{:.6}, {:.6}]",
                             result.ci_robust.0, result.ci_robust.1
                         );
+                        println!();
+                        println!("Conventional Estimate: {:.6}", result.tau_conventional);
+                        println!("Conventional Std Error: {:.6}", result.se_conventional);
+                        println!(
+                            "Conventional 95% CI: [{:.6}, {:.6}]",
+                            result.ci_conventional.0, result.ci_conventional.1
+                        );
                         println!("\nN left: {}, N right: {}", result.n_left, result.n_right);
+                        println!(
+                            "Effective N (h): {} left, {} right",
+                            result.n_eff_left, result.n_eff_right
+                        );
+                        println!(
+                            "Effective N (b): {} left, {} right",
+                            result.n_b_left, result.n_b_right
+                        );
                         println!(
                             "Bandwidth h: left={:.4}, right={:.4}",
                             result.h_left, result.h_right
                         );
+                        println!(
+                            "Bandwidth b: left={:.4}, right={:.4}",
+                            result.b_left, result.b_right
+                        );
+                        println!("VCE: {}", result.vce);
+                        print_rd_warnings(&result.warnings, &result.missing);
 
                         // Run identification diagnostics
-                        let diag_report = rd_diagnostics(&result);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_rd_identification_warnings(&result);
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("RD estimation failed: {}", e), format),
@@ -1523,9 +1649,19 @@ fn execute_fuzzy_rd(
     cutoff: f64,
     poly_order: usize,
     kernel: &str,
+    bandwidths: RdBandwidths,
+    vce: &str,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
+    // --vce is checked before the session and the dataset
+    let vce = match parse_vce_arg(vce) {
+        Ok(v) => v,
+        Err(message) => {
+            print_error(&message, format);
+            return Ok(());
+        }
+    };
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -1543,66 +1679,88 @@ fn execute_fuzzy_rd(
             };
             let config = RdConfig {
                 p: poly_order,
-                q: None,
-                h: None,
-                b: None,
-                rho: 1.0,
+                h: bandwidths.h,
+                b: bandwidths.b,
                 kernel: kern,
                 bwselect: BandwidthMethod::MseRd,
-                vce: VceType::Nn,
-                nnmatch: 3,
-                level: 0.95,
-                scaleregul: 1.0,
+                vce,
+                ..RdConfig::default()
             };
 
             match run_fuzzy_rd(ds, outcome, running, treatment, cutoff, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let rd = &result.outcome_rd;
+                        let mut json = serde_json::json!({
                             "method": "Fuzzy RD",
                             "tau_fuzzy": result.tau_fuzzy,
                             "se_fuzzy": result.se_fuzzy,
                             "p_fuzzy": result.p_fuzzy,
                             "ci_fuzzy": result.ci_fuzzy,
                             "treatment": result.treatment,
+                            "tau_fuzzy_bc": result.tau_fuzzy_bc,
+                            "se_fuzzy_robust": result.se_fuzzy_robust,
+                            "p_fuzzy_robust": result.p_fuzzy_robust,
+                            "ci_fuzzy_robust": result.ci_fuzzy_robust,
+                            "first_stage_tau": result.first_stage_tau,
+                            "first_stage_se": result.first_stage.se_conventional,
+                            "first_stage_f": result.first_stage_f,
+                            "reduced_form_tau": rd.tau_conventional,
+                            "h_left": rd.h_left,
+                            "h_right": rd.h_right,
+                            "b_left": rd.b_left,
+                            "b_right": rd.b_right,
+                            "n_eff_left": rd.n_eff_left,
+                            "n_eff_right": rd.n_eff_right,
+                            "vce": rd.vce.to_string(),
+                            "level": result.level,
+                            "warnings": result.warnings,
                         });
+                        if let Some(m) = missing_json(&result.missing) {
+                            json["missing"] = m;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
+                        let rd = &result.outcome_rd;
                         println!("\nFuzzy Regression Discontinuity Estimation");
                         println!("{}", "=".repeat(50));
                         println!("Treatment: {}", result.treatment);
-                        println!("\nFuzzy RD Estimate (LATE): {:.6}", result.tau_fuzzy);
+                        println!(
+                            "\nFuzzy RD Estimate (LATE, conventional): {:.6}",
+                            result.tau_fuzzy
+                        );
                         println!("Std Error: {:.6}", result.se_fuzzy);
                         println!("p-value: {:.4}", result.p_fuzzy);
                         println!(
                             "95% CI: [{:.6}, {:.6}]",
                             result.ci_fuzzy.0, result.ci_fuzzy.1
                         );
+                        println!();
+                        println!("Robust LATE (bias-corrected): {:.6}", result.tau_fuzzy_bc);
+                        println!("Robust Std Error: {:.6}", result.se_fuzzy_robust);
+                        println!("Robust p-value: {:.4}", result.p_fuzzy_robust);
+                        println!(
+                            "Robust 95% CI: [{:.6}, {:.6}]",
+                            result.ci_fuzzy_robust.0, result.ci_fuzzy_robust.1
+                        );
+                        println!(
+                            "\nFirst stage: {:.6} (SE {:.6}), F = {:.2}",
+                            result.first_stage_tau,
+                            result.first_stage.se_conventional,
+                            result.first_stage_f
+                        );
+                        println!(
+                            "Bandwidth h: left={:.4}, right={:.4}; b: left={:.4}, right={:.4} \
+                             (both stages)",
+                            rd.h_left, rd.h_right, rd.b_left, rd.b_right
+                        );
+                        println!("VCE: {}", rd.vce);
+                        print_rd_warnings(&result.warnings, &result.missing);
 
                         // Run identification diagnostics on the outcome RD
-                        let diag_report = rd_diagnostics(&result.outcome_rd);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_rd_identification_warnings(rd);
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Fuzzy RD estimation failed: {}", e), format),

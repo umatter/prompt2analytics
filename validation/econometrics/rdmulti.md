@@ -134,9 +134,35 @@ w2 = 25 / 125 = 0.2
 | Cutoff-specific effects (noisy) | +/- 0.5 |
 | Heterogeneity p-value (significant) | < 0.05 |
 
+## Inference per cutoff and missing values (T2-WP11)
+
+**Status:** R-pinned for a single cutoff (registry `validation/methods/causal_rd.json`, id
+`rd_multi`), with a known deviation: the pooling and the heterogeneity test are not pinned to
+`rdmulti::rdmc` (CAUS-77, Tier 3).
+
+Each cutoff's effect, SE, interval and p-value are the robust row of `run_rd` on the rows
+assigned to that cutoff: rdrobust's bias-corrected estimate with its robust standard error
+(`validation/econometrics/rd.md`). `vce` selects the variance estimator (`nn` by default).
+`test_validate_rd_multi_single_cutoff` runs one cutoff at 0 with a global bandwidth of 0.3 and
+HC1 on `rd_sim.csv` (case `rd_sharp_fixed_bw`) and pins the per-cutoff effect, SE, CI and p,
+and the pooled effect and SE (equal to them with one cutoff), to `rdrobust(y, x, c = 0,
+h = 0.3, b = 0.3, vce = "hc1")` (keys `tri_hc1_hb_coef_bc`, `_se_robust`, `_ci_robust`,
+`_p_robust`) at the n = 1000 tolerances of `validation/README.md`.
+
+`run_rd_multi_dataset` reads the outcome, the running variable and `cutoff_col` (when given)
+through the shared extractor with the `Omit` policy: a row with a missing value in any of them
+is dropped, as rdrobust drops incomplete rows, and reported in `RdMultiResult.missing` and a last
+`Missing values: ...` line of the output. Infinite values and text columns are refused by name.
+`cutoff_col` must hold whole cutoff indices `0..=J-1` for J cutoffs; any other value is an
+error naming the column, the original row and the value (before T2-WP11, 1.7 was read as 1 and
+-1 as 0). `run_rd_multi` takes arrays and refuses non-finite values, pointing to
+`run_rd_multi_dataset` to drop them. `test_na_rd_multi_dataset_drops_rows_and_checks_cutoff_col`
+(not registered; no R value) covers these rules. The pooling and the heterogeneity test are not
+pinned to `rdmulti` (CAUS-77, Tier 3).
+
 ## Known Differences from R Implementation
 
-1. **Bandwidth selection**: Our implementation uses MSE-optimal bandwidth from the base `run_rd` function, which follows CCT (2014). The R `rdmulti` package may use slightly different tuning parameters.
+1. **Bandwidth selection**: without given bandwidths each cutoff uses p2a's own MSE-type selector from `run_rd`, not `rdbwselect` (CAUS-28). The R `rdmulti` package calls `rdrobust`'s selectors. The MCP tool `rd_multi`'s description says so.
 
 2. **Bias correction**: We use the robust bias-corrected estimate from the base RD estimator for pooling, consistent with CCT recommendations.
 

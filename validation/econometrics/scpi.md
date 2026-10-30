@@ -203,3 +203,24 @@ Uses Duchi et al. (2008) algorithm:
 
 ### Software
 - R package `scpi`: Cattaneo, M. D., Feng, Y., Palomba, F., & Titiunik, R. https://cran.r-project.org/package=scpi
+
+## MCP extraction (T2-WP11)
+
+The MCP tool `scpi` reads the unit column as a factor, the time column as a whole-number time
+index and the outcome as a numeric column, in one request to the shared extractor with the
+`Fail` policy. Units may be text or integer ids; they are the factor levels in R `factor()`
+order (integer ids numerically, text in byte order), and the donors are the other units in that
+order (before T2-WP11 it was hash order and changed from run to run). Times are the sorted
+distinct values. With fewer rows than units x times cells the panel cannot be balanced, and the
+tool error names the counts and the first empty cell (`scpi needs a balanced panel: 10 units x
+20 times = 200 cells, but the data has 199 rows (unit 2 has no row for time 1940; cells
+without a row: 1)`), found from the sorted cells of the rows, so the grid is never larger than the data.
+Otherwise the outcome grid is filled in one pass: a second row for a (unit, time) cell
+(`unit 1 appears twice at time 1935`) and a missing outcome are tool errors naming the unit and
+time or the column. Before,
+the handler refused integer unit columns ("must be string type") and looked every cell up with
+a full-table filter (finding TOOL-5, scpi site).
+
+Tests (`crates/p2a-mcp/src/tools/handlers/causal.rs`, on `validation/datasets/grunfeld.csv`;
+not registered, no R value): `test_mcp_scpi_accepts_integer_unit_ids` and
+`test_mcp_scpi_reports_unknown_units_and_missing_cells`.

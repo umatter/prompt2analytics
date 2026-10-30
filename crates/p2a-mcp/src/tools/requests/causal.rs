@@ -1467,6 +1467,13 @@ pub struct RdEstimateRequest {
     /// Confidence level
     #[schemars(description = "Confidence level for intervals. Default is 0.95.")]
     pub level: Option<f64>,
+
+    /// Variance estimator
+    #[schemars(
+        description = "Variance estimator: 'nn' (default; nearest-neighbour residuals with 3 matches, as rdrobust), 'hc0', 'hc1', 'hc2' or 'hc3'."
+    )]
+    #[serde(default)]
+    pub vce: Option<String>,
 }
 
 /// Request for RD bandwidth selection only.
@@ -1552,12 +1559,28 @@ pub struct FuzzyRdRequest {
     pub bwselect: Option<String>,
 
     /// Main bandwidth
-    #[schemars(description = "Main bandwidth h. If not specified, uses automatic selection.")]
+    #[schemars(
+        description = "Main bandwidth h. If not specified, p2a's own MSE-type selector chooses it from the outcome."
+    )]
     pub h: Option<f64>,
+
+    /// Bias bandwidth
+    #[schemars(
+        description = "Bias bandwidth b, used for both stages. Default is h (rho = 1), as rdrobust when only h is given."
+    )]
+    #[serde(default)]
+    pub b: Option<f64>,
 
     /// Confidence level
     #[schemars(description = "Confidence level for intervals. Default is 0.95.")]
     pub level: Option<f64>,
+
+    /// Variance estimator
+    #[schemars(
+        description = "Variance estimator: 'nn' (default; nearest-neighbour residuals with 3 matches, as rdrobust), 'hc0', 'hc1', 'hc2' or 'hc3'."
+    )]
+    #[serde(default)]
+    pub vce: Option<String>,
 }
 
 /// Request for Multi-Cutoff Regression Discontinuity estimation.
@@ -1632,6 +1655,13 @@ pub struct RdMultiRequest {
     /// Confidence level
     #[schemars(description = "Confidence level for intervals. Default is 0.95.")]
     pub level: Option<f64>,
+
+    /// Variance estimator
+    #[schemars(
+        description = "Variance estimator: 'nn' (default; nearest-neighbour residuals with 3 matches, as rdrobust), 'hc0', 'hc1', 'hc2' or 'hc3'."
+    )]
+    #[serde(default)]
+    pub vce: Option<String>,
 }
 
 /// Request for Causal Forest estimation (Wager & Athey 2018).

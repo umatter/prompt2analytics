@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "rd_sharp",
+      "name": "Sharp RD: local polynomial with CCT (2014) bias correction and robust variance, given bandwidths",
+      "category": "econometrics",
+      "reference": "rdrobust::rdrobust(y, x, c, p, h, b, kernel, vce, nnmatch, level) 4.0.0",
+      "doc": "validation/econometrics/rd.md",
+      "cases": [
+        "rd_sharp_fixed_bw",
+        "rd_mass_points_nn"
+      ],
+      "tests": [
+        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_fixed_bw",
+        "p2a-core::econometrics::rd::tests::test_validate_rd_mass_points_nn",
+        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_display_table",
+        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_fixed_bw_missing_rows",
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_estimate_vce",
+        "p2a-cli::tier2::wp11_rd::test_validate_cli_causal_rd_vce"
+      ],
+      "quantities": [
+        "conventional and bias-corrected estimates",
+        "conventional and robust SE (NN with nnmatch 1/3/5 and tie groups, HC0-HC3)",
+        "z",
+        "p",
+        "conventional and robust CI (95%, 90%)",
+        "N_h, N_b",
+        "local polynomial coefficients",
+        "three kernels, h != b, p = 2, unequal sides",
+        "missing-row handling (complete cases)"
+      ],
+      "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute, counts exact; observed agreement <= 1.7e-12",
+      "deviations": [
+        {
+          "finding": "CAUS-28",
+          "quantity": "bandwidths when h and b are not given",
+          "note": "p2a's own MSE-type selector, not rdbwselect; every case passes h and b"
+        }
+      ],
+      "supersedes_legacy": [
+        "validation/expected/rd_sharp.csv"
+      ]
+    },
+    {
+      "id": "rd_fuzzy",
+      "name": "Fuzzy RD: Wald ratio with the joint conventional and robust variance, one bandwidth for both stages",
+      "category": "econometrics",
+      "reference": "rdrobust::rdrobust(y, x, c, fuzzy, p, h, b, vce, level) 4.0.0",
+      "doc": "validation/econometrics/rd.md",
+      "cases": [
+        "rd_fuzzy_fixed_bw"
+      ],
+      "tests": [
+        "p2a-core::econometrics::rd::tests::test_validate_rd_fuzzy_fixed_bw",
+        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_int64_outcome",
+        "p2a-core::econometrics::rd::tests::test_validate_rd_fuzzy_weak_first_stage_warning",
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_fuzzy_b",
+        "p2a-cli::tier2::wp11_rd::test_validate_cli_causal_fuzzy_rd"
+      ],
+      "quantities": [
+        "Wald ratio (conventional, bias-corrected)",
+        "joint conventional and robust SE",
+        "CI at 95% and 90%",
+        "first-stage jump, SE and F",
+        "reduced-form jump"
+      ],
+      "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute, counts exact; observed agreement <= 1.7e-12",
+      "deviations": [
+        {
+          "finding": "CAUS-28",
+          "quantity": "bandwidths when h and b are not given",
+          "note": "p2a's own MSE-type selector, not rdbwselect; every case passes h and b"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "rd_multi",
+      "name": "Multi-cutoff RD: per-cutoff rdrobust inference (single-cutoff pin)",
+      "category": "econometrics",
+      "reference": "rdrobust::rdrobust(y, x, c = 0, h = 0.3, b = 0.3, vce = 'hc1') 4.0.0 for one cutoff",
+      "doc": "validation/econometrics/rdmulti.md",
+      "cases": [
+        "rd_sharp_fixed_bw"
+      ],
+      "tests": [
+        "p2a-core::econometrics::rdmulti::tests::test_validate_rd_multi_single_cutoff",
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_multi_vce"
+      ],
+      "quantities": [
+        "per-cutoff effect, robust SE, CI, p (single cutoff)",
+        "pooled effect and SE (single cutoff)"
+      ],
+      "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute",
+      "deviations": [
+        {
+          "finding": "CAUS-77",
+          "quantity": "multi-cutoff pooling and heterogeneity test",
+          "note": "not pinned to rdmulti::rdmc (Tier 3)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

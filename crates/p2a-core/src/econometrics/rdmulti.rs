@@ -20,12 +20,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::traits::estimator::SignificanceLevel;
 
 use super::rd::{
     BandwidthMethod, KernelType, RdConfig, RdResult, VceType, run_rd, validate_rd_config,
+    write_warnings_and_missing,
 };
 
 /// Bandwidth selection strategy for multiple cutoffs.
@@ -277,6 +278,10 @@ pub struct RdMultiResult {
 
     /// Warnings generated during estimation.
     pub warnings: Vec<String>,
+
+    /// Rows dropped because the outcome, the running variable or `cutoff_col` is missing.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for RdMultiResult {
@@ -352,15 +357,7 @@ impl fmt::Display for RdMultiResult {
             "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '\u{2020}' 0.1"
         )?;
 
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
-        Ok(())
+        write_warnings_and_missing(f, &self.warnings, &self.missing)
     }
 }
 
@@ -433,6 +430,25 @@ pub fn run_rd_multi(
     if x.len() != n || cutoff_assignment.len() != n {
         return Err(EconError::InvalidSpecification {
             message: "y, x, and cutoff_assignment must have the same length".to_string(),
+        });
+    }
+
+    // The arrays are used as they are: a missing value cannot be dropped here.
+    if let Some((i, v)) = y
+        .iter()
+        .zip(x.iter())
+        .enumerate()
+        .find_map(|(i, (&yi, &xi))| {
+            (!yi.is_finite())
+                .then_some((i, yi))
+                .or_else(|| (!xi.is_finite()).then_some((i, xi)))
+        })
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "run_rd_multi needs finite y and x (index {i} is {v}); use \
+                 run_rd_multi_dataset to drop missing rows"
+            ),
         });
     }
 
@@ -610,6 +626,7 @@ pub fn run_rd_multi(
         kernel: config.kernel,
         level: config.level,
         warnings,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -639,34 +656,37 @@ pub fn run_rd_multi_dataset(
     // Validate before the cutoffs are used to assign rows.
     validate_rd_multi_config(&config)?;
 
-    // Extract data
-    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let x = DesignMatrix::extract_column(dataset.df(), running_var).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: running_var.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let _n = y.len();
+    // Complete cases of outcome, running variable and cutoff_col (as rdrobust per
+    // cutoff); infinite values and text columns are refused by name.
+    let mut request = ColumnRequest::new(dataset.df())
+        .numeric(outcome)
+        .numeric(running_var);
+    if let Some(col) = cutoff_col {
+        request = request.numeric(col);
+    }
+    let cols = request.na(NaPolicy::Omit).extract()?;
+    let y = cols.numeric_array(outcome);
+    let x = cols.numeric_array(running_var);
 
     // Determine cutoff assignments
     let cutoff_assignment: Array1<usize> = if let Some(col) = cutoff_col {
-        // Use provided cutoff column
-        let col_data = DesignMatrix::extract_column(dataset.df(), col).map_err(|e| {
-            EconError::ColumnNotFound {
-                column: col.to_string(),
-                available: get_column_names(dataset.df()),
+        // Whole cutoff indices 0..J, one per kept row
+        let j = config.cutoffs.len();
+        let values = cols.numeric(col);
+        let mut assignment = Array1::<usize>::zeros(values.len());
+        for (i, &v) in values.iter().enumerate() {
+            if v.fract() != 0.0 || v < 0.0 || v >= j as f64 {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "cutoff_col '{col}' must hold cutoff indices 0..={}; row {} has {v}",
+                        j - 1,
+                        cols.rows()[i]
+                    ),
+                });
             }
-        })?;
-
-        col_data.mapv(|v| v as usize)
+            assignment[i] = v as usize;
+        }
+        assignment
     } else {
         // Auto-assign based on nearest cutoff
         assign_to_nearest_cutoff(&x, &config.cutoffs)
@@ -677,6 +697,10 @@ pub fn run_rd_multi_dataset(
     // Update variable names
     result.outcome = outcome.to_string();
     result.running_var = running_var.to_string();
+    result.missing = cols.missing().clone();
+    if let Some(note) = result.missing.note() {
+        result.warnings.push(note);
+    }
 
     Ok(result)
 }
@@ -691,14 +715,11 @@ fn per_cutoff_rd_config(config: &RdMultiConfig, h: Option<f64>) -> RdConfig {
         p: config.p,
         q: config.q,
         h,
-        b: None,
-        rho: 1.0,
         kernel: config.kernel,
         bwselect: config.bwselect,
         vce: config.vce,
-        nnmatch: 3,
         level: config.level,
-        scaleregul: 1.0,
+        ..RdConfig::default()
     }
 }
 
@@ -1528,6 +1549,133 @@ mod tests {
             assign_to_nearest_cutoff(&x, &cutoffs).to_vec(),
             naive(&x, &cutoffs)
         );
+    }
+
+    /// One cutoff with a global bandwidth is rdrobust at h = b = 0.3: the per-cutoff
+    /// effect and SE are its bias-corrected estimate and robust SE (T2-WP11).
+    #[test]
+    fn test_validate_rd_multi_single_cutoff() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("rd_sharp_fixed_bw");
+        let r = run_rd_multi_dataset(
+            &ds,
+            "y",
+            "x",
+            None,
+            RdMultiConfig {
+                cutoffs: vec![0.0],
+                bandwidth: RdMultiBandwidth::Global(0.3),
+                vce: VceType::Hc1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let cr = &r.cutoff_results[0];
+        let n = 1000;
+        Check::new(&case)
+            .scalar("tri_hc1_hb_coef_bc", cr.effect, Tol::coef(n))
+            .scalar("tri_hc1_hb_se_robust", cr.se, Tol::se(n))
+            .vector("tri_hc1_hb_ci_robust", &[cr.ci.0, cr.ci.1], Tol::stat(n))
+            .scalar("tri_hc1_hb_p_robust", cr.p_value, Tol::p_value(n))
+            .scalar("tri_hc1_hb_coef_bc", r.pooled_effect.unwrap(), Tol::coef(n))
+            .scalar("tri_hc1_hb_se_robust", r.pooled_se.unwrap(), Tol::se(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_na_rd_multi_dataset_drops_rows_and_checks_cutoff_col() {
+        let (ds, config) = create_multi_cutoff_dataset();
+        let df = ds.df();
+        // two missing outcomes are dropped and reported
+        let mut y: Vec<Option<f64>> = df
+            .column("outcome")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .collect();
+        y[3] = None;
+        y[70] = None;
+        let mut dn = df.clone();
+        dn.with_column(Series::new("outcome".into(), y)).unwrap();
+        let r = run_rd_multi_dataset(
+            &Dataset::new(dn),
+            "outcome",
+            "running",
+            Some("cutoff_group"),
+            config.clone(),
+        )
+        .unwrap();
+        assert_eq!(r.missing.n_dropped, 2);
+        let text = r.to_string();
+        assert!(
+            text.contains("Missing values: 2 of 120 rows dropped because of missing values"),
+            "{text}"
+        );
+        // cutoff_col must hold whole indices 0..J
+        let with_group = |row: usize, v: f64| {
+            let mut g: Vec<f64> = df
+                .column("cutoff_group")
+                .unwrap()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_no_null_iter()
+                .collect();
+            g[row] = v;
+            let mut d = df.clone();
+            d.with_column(Series::new("cutoff_group".into(), g))
+                .unwrap();
+            run_rd_multi_dataset(
+                &Dataset::new(d),
+                "outcome",
+                "running",
+                Some("cutoff_group"),
+                config.clone(),
+            )
+        };
+        let spec = |r: EconResult<RdMultiResult>| match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!(
+                "expected InvalidSpecification, got {:?}",
+                other.map(|r| r.n_cutoffs)
+            ),
+        };
+        let m = spec(with_group(10, 1.5));
+        assert!(
+            m.contains("cutoff_col") && m.contains("1.5") && m.contains("row 10"),
+            "{m}"
+        );
+        let m = spec(with_group(11, 2.0));
+        assert!(m.contains("cutoff_col") && m.contains("0..=1"), "{m}");
+        let m = spec(with_group(12, -1.0));
+        assert!(m.contains("cutoff_col") && m.contains("-1"), "{m}");
+        // the array entry point refuses non-finite input
+        let yv: Vec<f64> = df
+            .column("outcome")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let xv: Vec<f64> = df
+            .column("running")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let assign = assign_to_nearest_cutoff(&Array1::from_vec(xv.clone()), &config.cutoffs);
+        let mut ynan = yv.clone();
+        ynan[7] = f64::NAN;
+        let m = spec(run_rd_multi(
+            &Array1::from_vec(ynan).view(),
+            &Array1::from_vec(xv).view(),
+            &assign.view(),
+            config,
+        ));
+        assert!(m.contains("finite") && m.contains("index 7"), "{m}");
     }
 
     #[test]
