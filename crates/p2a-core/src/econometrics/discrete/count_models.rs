@@ -267,15 +267,15 @@ fn nb_singular() -> EconError {
 /// (`f64::INFINITY`: Poisson), glm.fit's IRLS: weights `W = mu theta / (theta + mu)`,
 /// working response `z = eta + (y - mu) / mu`. Starts from `beta`, or from
 /// `mu = y + 0.1` (glm's Poisson start) when `beta` is `None`. Iterates until
-/// `max |delta beta| < 1e-12 (1 + max |beta|)`, at most 100 times. `work.eta` and
-/// `work.mu` hold the fitted values on return.
+/// `max |delta beta| < 1e-12 (1 + max |beta|)`, at most 100 times; the flag says
+/// whether that happened. `work.eta` and `work.mu` hold the fitted values on return.
 fn irls_beta(
     x: &ArrayView2<f64>,
     y: &[f64],
     beta: Option<&Array1<f64>>,
     theta: f64,
     work: &mut NbWork,
-) -> EconResult<Array1<f64>> {
+) -> EconResult<(Array1<f64>, bool)> {
     let mut beta = match beta {
         Some(b) => {
             linear_predictor(x, b, &mut work.eta, &mut work.mu);
@@ -289,6 +289,7 @@ fn irls_beta(
             None
         }
     };
+    let mut converged = false;
     for _ in 0..100 {
         resource::checkpoint()?;
         for i in 0..y.len() {
@@ -312,10 +313,11 @@ fn irls_beta(
         linear_predictor(x, &new_beta, &mut work.eta, &mut work.mu);
         beta = Some(new_beta);
         if change < 1e-12 * scale {
+            converged = true;
             break;
         }
     }
-    Ok(beta.unwrap_or_else(|| Array1::zeros(x.ncols())))
+    Ok((beta.unwrap_or_else(|| Array1::zeros(x.ncols())), converged))
 }
 
 /// `ln Gamma(theta + y) - ln Gamma(theta)`.
@@ -464,7 +466,7 @@ pub fn run_negbin(
 
     // Start: Poisson (or NB at init_theta) coefficients, then theta.
     let start_theta = initial_theta.unwrap_or(f64::INFINITY);
-    let mut beta = irls_beta(&x, y, None, start_theta, &mut work)?;
+    let (mut beta, _) = irls_beta(&x, y, None, start_theta, &mut work)?;
     let mut theta = match initial_theta {
         Some(t) => t,
         None => {
@@ -487,7 +489,7 @@ pub fn run_negbin(
     for round in 1..=100 {
         resource::checkpoint()?;
         iterations = round;
-        beta = irls_beta(&x, y, Some(&beta), theta, &mut work)?;
+        beta = irls_beta(&x, y, Some(&beta), theta, &mut work)?.0;
         let theta_new = theta_newton(theta, &work.mu, y)?;
         let ll_new = nb_loglik(theta_new, &work.mu, y);
         let theta_change = (theta_new - theta).abs() / theta;
@@ -506,7 +508,14 @@ pub fn run_negbin(
         warnings.push("the beta/theta alternation did not converge in 100 rounds".to_string());
     }
     // The coefficients at the final theta.
-    beta = irls_beta(&x, y, Some(&beta), theta, &mut work)?;
+    let (beta, irls_converged) = irls_beta(&x, y, Some(&beta), theta, &mut work)?;
+    if !irls_converged {
+        warnings.push(
+            "the IRLS for the coefficients did not converge in 100 iterations at the final \
+             theta (fitted means near 0, as for an all-zero outcome, or separation)"
+                .to_string(),
+        );
+    }
     let log_likelihood = nb_loglik(theta, &work.mu, y);
 
     // Null log-likelihood (unchanged; ECON-64, Tier 4)
@@ -541,7 +550,8 @@ pub fn run_negbin(
     let aic = -2.0 * log_likelihood + 2.0 * n_params as f64;
     let bic = -2.0 * log_likelihood + (n_params as f64) * (n as f64).ln();
 
-    let mut converged = converged && log_likelihood.is_finite() && theta.is_finite();
+    let mut converged =
+        converged && irls_converged && log_likelihood.is_finite() && theta.is_finite();
     let theta_std_error = if theta > THETA_POISSON {
         converged = false;
         warnings.push(no_overdispersion_warning(theta));
@@ -2129,6 +2139,24 @@ mod tests {
         );
         assert!(
             r.warnings.iter().any(|w| w.contains("overdispersion")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// An all-zero outcome has no MLE (the coefficients run to -inf): the coefficient
+    /// IRLS does not converge, and the fit must say so instead of reporting
+    /// `converged = true` for whatever theta the alternation stopped at.
+    #[test]
+    fn test_negbin_all_zero_outcome_is_not_converged() {
+        let x: Vec<f64> = (0..30)
+            .map(|i| (i as f64 * 0.37).sin() + 0.01 * i as f64)
+            .collect();
+        let ds = Dataset::new(df! { "y" => vec![0.0; 30], "x" => x }.unwrap());
+        let r = run_negbin(&ds, "y", &["x"], None).unwrap();
+        assert!(!r.converged, "{r}");
+        assert!(
+            r.warnings.iter().any(|w| w.contains("IRLS")),
             "{:?}",
             r.warnings
         );

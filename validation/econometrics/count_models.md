@@ -23,7 +23,9 @@ Algorithm (glm.nb's alternation):
   `n / sum((y / mu - 1)^2)`.
 - Coefficients: Fisher scoring (IRLS) at fixed theta, weights `W = mu theta / (theta + mu)`,
   working response `z = eta + (y - mu) / mu`, until `max |delta beta| < 1e-12 (1 + max
-  |beta|)`. A design whose `X'WX` is not positive definite is `SingularMatrix`.
+  |beta|)`. A design whose `X'WX` is not positive definite is `SingularMatrix`. If the
+  final IRLS does not converge in 100 iterations (fitted means near 0, as for an all-zero
+  outcome), the fit reports `converged = false` with a warning.
 - theta: Newton steps on `ln theta` at fixed `mu` with MASS `theta.ml`'s score
   `s = sum(digamma(theta + y) - digamma(theta) + ln theta + 1 - ln(theta + mu) - (y + theta) / (mu + theta))`
   and information
@@ -195,6 +197,8 @@ Not R-pinned:
 - `econometrics::discrete::count_models::tests::test_negbin_without_overdispersion_is_flagged`:
   the underdispersed 12-row fixture gives theta above 1e6, `converged = false`,
   `SE(theta) = NaN` and the overdispersion warning.
+- `econometrics::discrete::count_models::tests::test_negbin_all_zero_outcome_is_not_converged`:
+  an all-zero outcome (no MLE) gives `converged = false` and the IRLS warning.
 - `econometrics::discrete::count_models::tests::test_negbin_stops_when_cancelled`:
   a cancelled budget stops the fit.
 - `p2a-mcp` `tier2::wp10_ordered_count::test_mcp_negbin_reports_dropped_rows_and_rejects_bad_init_theta`:
