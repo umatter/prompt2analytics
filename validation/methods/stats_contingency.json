@@ -40,6 +40,23 @@
       "tolerance": "p: validation/README.md p-value row (relative 1e-9 for p < 1e-12); MLE and limits 1e-9 relative to the tight re-solve; R's printed limits 1e-2 (uniroot tol eps^0.25)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "chisq_independence",
+      "name": "Chi-squared test of independence (Yates for 2 x 2)",
+      "category": "stats",
+      "reference": "stats::chisq.test(table(x, y), correct =)",
+      "doc": "validation/stats/chisq.md",
+      "cases": ["stat_contingency_na_codes", "stat_chisq_small_expected", "stat_fisher_rows_2000"],
+      "tests": [
+        "p2a-core::stats::chisq::tests::test_validate_chisq_na_codes",
+        "p2a-core::stats::chisq::tests::test_validate_chisq_small_expected",
+        "p2a-core::stats::chisq::tests::test_validate_chisq_rows_2000"
+      ],
+      "quantities": ["X-squared (Yates and uncorrected)", "df", "p", "observed", "expected", "Pearson residuals", "standardized residuals", "small-expected warning", "row/column levels"],
+      "tolerance": "validation/README.md statistic and p-value rows",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

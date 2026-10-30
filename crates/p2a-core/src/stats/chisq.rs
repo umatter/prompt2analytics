@@ -50,11 +50,17 @@
 //! Applied when expected counts are small to improve approximation to chi-squared distribution.
 
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 use crate::data::Dataset;
+use crate::data::columns::MissingSummary;
 use crate::errors::{EconError, EconResult};
 use crate::resource;
-use crate::traits::{SignificanceLevel, chi_squared_p_value};
+use crate::stats::contingency::contingency_table;
+use crate::traits::SignificanceLevel;
+
+/// R's warning when an expected count is below 5.
+const SMALL_EXPECTED_WARNING: &str = "Chi-squared approximation may be incorrect";
 
 /// Result of a chi-squared test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +86,8 @@ pub struct ChiSquaredResult {
     // ═══════════════════════════════════════════════════════════════════════
     // Observed and Expected Counts
     // ═══════════════════════════════════════════════════════════════════════
-    /// Observed counts (flattened for contingency tables)
+    /// Observed counts (flattened row-major, in `row_labels` x `col_labels` order, for
+    /// contingency tables)
     pub observed: Vec<f64>,
     /// Expected counts under the null hypothesis
     pub expected: Vec<f64>,
@@ -106,6 +113,23 @@ pub struct ChiSquaredResult {
     // ═══════════════════════════════════════════════════════════════════════
     /// Whether Yates' continuity correction was applied
     pub yates_correction: bool,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Labels, warnings and missing values
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Goodness-of-fit categories, or the table's row levels (None for array input).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_labels: Option<Vec<String>>,
+    /// Column levels of an independence table (None for goodness of fit and array input).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub col_labels: Option<Vec<String>>,
+    /// "Chi-squared approximation may be incorrect (k of K expected counts are below 5)"
+    /// when any expected count is below 5 (R's warning condition).
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Rows dropped because of a missing value (dataset input).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for ChiSquaredResult {
@@ -133,11 +157,29 @@ impl std::fmt::Display for ChiSquaredResult {
         // For small tables, show observed vs expected
         if self.observed.len() <= 20 {
             writeln!(f, "Observed vs Expected:")?;
+            let label = |i: usize, fallback: String| -> String {
+                self.row_labels
+                    .as_ref()
+                    .and_then(|labels| labels.get(i))
+                    .cloned()
+                    .unwrap_or(fallback)
+            };
 
             if let (Some(n_rows), Some(n_cols)) = (self.n_rows, self.n_cols) {
                 // Contingency table format
-                for i in 0..n_rows {
-                    write!(f, "  Row {}: ", i + 1)?;
+                let rows: Vec<String> = (0..n_rows)
+                    .map(|i| label(i, format!("Row {}", i + 1)))
+                    .collect();
+                let width = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0);
+                if let Some(cols) = &self.col_labels {
+                    write!(f, "  {:width$} ", "")?;
+                    for c in cols {
+                        write!(f, " {c:>17}")?;
+                    }
+                    writeln!(f)?;
+                }
+                for (i, row) in rows.iter().enumerate() {
+                    write!(f, "  {row:width$}:")?;
                     for j in 0..n_cols {
                         let idx = i * n_cols + j;
                         write!(
@@ -151,24 +193,50 @@ impl std::fmt::Display for ChiSquaredResult {
             } else {
                 // One-dimensional (goodness-of-fit)
                 for (i, (o, e)) in self.observed.iter().zip(&self.expected).enumerate() {
-                    writeln!(f, "  [{}]: {:.1} (expected: {:.1})", i + 1, o, e)?;
+                    let name = label(i, format!("[{}]", i + 1));
+                    writeln!(f, "  {name}: {o:.1} (expected: {e:.1})")?;
                 }
             }
         }
 
-        // Warning for small expected counts
-        let small_expected = self.expected.iter().filter(|&&e| e < 5.0).count();
-        if small_expected > 0 {
+        // R's warning for small expected counts, and the dropped rows
+        for warning in &self.warnings {
             writeln!(f)?;
-            writeln!(
-                f,
-                "Warning: {} cell(s) have expected count < 5. Chi-squared approximation may be unreliable.",
-                small_expected
-            )?;
+            writeln!(f, "Warning: {warning}")?;
+        }
+        if let Some(note) = self.missing.note() {
+            writeln!(f)?;
+            writeln!(f, "Missing values: {note}")?;
         }
 
         Ok(())
     }
+}
+
+/// The chi-squared upper tail `P(X > stat)` on `df` degrees of freedom (statrs `sf`, so
+/// small p-values keep their precision): NaN for NaN, 0 for +inf.
+fn chisq_upper_tail(stat: f64, df: usize) -> f64 {
+    if stat.is_nan() {
+        return f64::NAN;
+    }
+    if stat == f64::INFINITY {
+        return 0.0;
+    }
+    ChiSquared::new(df as f64)
+        .map(|d| d.sf(stat))
+        .unwrap_or(f64::NAN)
+}
+
+/// R's "Chi-squared approximation may be incorrect" when any expected count is below 5,
+/// with how many are.
+fn small_expected_warning(expected: &[f64]) -> Option<String> {
+    let small = expected.iter().filter(|&&e| e < 5.0).count();
+    (small > 0).then(|| {
+        format!(
+            "{SMALL_EXPECTED_WARNING} ({small} of {} expected counts are below 5)",
+            expected.len()
+        )
+    })
 }
 
 /// Chi-squared goodness-of-fit test.
@@ -220,10 +288,10 @@ pub fn chisq_test_gof(
         });
     }
 
-    // Validate observed counts
-    if observed.iter().any(|&x| x < 0.0) {
+    // Validate observed counts (R: "all entries of 'x' must be nonnegative and finite")
+    if observed.iter().any(|&x| !(x >= 0.0 && x.is_finite())) {
         return Err(EconError::InvalidSpecification {
-            message: "Observed counts must be non-negative".to_string(),
+            message: "Observed counts must be non-negative and finite".to_string(),
         });
     }
 
@@ -291,7 +359,7 @@ pub fn chisq_test_gof(
     let df = k - 1;
 
     // P-value
-    let p_value = chi_squared_p_value(statistic, df as f64);
+    let p_value = chisq_upper_tail(statistic, df);
     let significance = SignificanceLevel::from_p_value(p_value);
 
     // Pearson residuals: (O - E) / sqrt(E)
@@ -300,6 +368,8 @@ pub fn chisq_test_gof(
         .zip(&expected)
         .map(|(&o, &e)| if e > 0.0 { (o - e) / e.sqrt() } else { 0.0 })
         .collect();
+
+    let warnings: Vec<String> = small_expected_warning(&expected).into_iter().collect();
 
     Ok(ChiSquaredResult {
         test_name: "Chi-squared test for given probabilities".to_string(),
@@ -314,6 +384,10 @@ pub fn chisq_test_gof(
         n_rows: None,
         n_cols: None,
         yates_correction: false,
+        row_labels: None,
+        col_labels: None,
+        warnings,
+        missing: MissingSummary::none(n as usize),
     })
 }
 
@@ -413,10 +487,11 @@ fn independence_from_flat(
 ) -> EconResult<ChiSquaredResult> {
     let cells = resource::checked_len(&[n_rows, n_cols], "contingency table")?;
 
-    // Validate all counts are non-negative
-    if observed.iter().any(|&x| x < 0.0) {
+    // Validate all counts are non-negative and finite (R: "all entries of 'x' must be
+    // nonnegative and finite")
+    if observed.iter().any(|&x| !(x >= 0.0 && x.is_finite())) {
         return Err(EconError::InvalidSpecification {
-            message: "All counts must be non-negative".to_string(),
+            message: "All counts must be non-negative and finite".to_string(),
         });
     }
 
@@ -483,7 +558,7 @@ fn independence_from_flat(
     let df = (n_rows - 1) * (n_cols - 1);
 
     // P-value
-    let p_value = chi_squared_p_value(statistic, df as f64);
+    let p_value = chisq_upper_tail(statistic, df);
     let significance = SignificanceLevel::from_p_value(p_value);
 
     // Pearson residuals: (O - E) / sqrt(E)
@@ -516,6 +591,8 @@ fn independence_from_flat(
         }
     }
 
+    let warnings: Vec<String> = small_expected_warning(&expected).into_iter().collect();
+
     let test_name = if apply_yates {
         "Pearson's Chi-squared test with Yates' continuity correction".to_string()
     } else {
@@ -535,6 +612,10 @@ fn independence_from_flat(
         n_rows: Some(n_rows),
         n_cols: Some(n_cols),
         yates_correction: apply_yates,
+        row_labels: None,
+        col_labels: None,
+        warnings,
+        missing: MissingSummary::none(grand_total as usize),
     })
 }
 
@@ -647,7 +728,11 @@ pub fn run_chisq_gof(
 
 /// Run chi-squared test of independence on two dataset columns.
 ///
-/// Creates a contingency table from two categorical columns and tests independence.
+/// Builds the contingency table with [`contingency_table`] and tests independence. Rows with
+/// a missing value (null, or NaN in a float column) in either column are dropped and
+/// reported in `missing`, as R's `table()` drops them; the levels follow R `factor()` order
+/// (numbers numerically, text in C-locale order) and are reported in `row_labels` and
+/// `col_labels`.
 ///
 /// # Arguments
 ///
@@ -659,15 +744,11 @@ pub fn run_chisq_gof(
 /// # Errors
 ///
 /// - [`EconError::ColumnNotFound`] for a missing column.
-/// - [`EconError::InvalidSpecification`] for a struct, list or array column, when a column's
-///   distinct values cannot be computed (`Failed to get unique ... values`), or when a value
-///   cannot be read (`Failed to read a value`).
-/// - [`EconError::InsufficientData`] for a column with fewer than two distinct values (null
-///   counts as one).
-/// - [`EconError::ResourceLimit`] for a contingency table, or a column's list of levels, too
-///   large to allocate.
-/// - [`EconError::Computation`] when two levels of a column share a row key, or when a row
-///   matches no level of its column, because the table would miscount or miss those rows.
+/// - [`EconError::InvalidSpecification`] for a column whose type cannot be categorical
+///   (datetime, struct, list, array, ...), naming it.
+/// - [`EconError::InsufficientData`] when no row is left after removing missing values, or a
+///   column has fewer than two levels.
+/// - [`EconError::ResourceLimit`] for a contingency table too large to allocate.
 /// - [`EconError::Cancelled`] when the budget installed for the thread is cancelled or its
 ///   deadline passes (checked through [`resource::checkpoint`]).
 ///
@@ -683,198 +764,135 @@ pub fn run_chisq_independence(
     col_col: &str,
     correct: bool,
 ) -> EconResult<ChiSquaredResult> {
-    use polars::prelude::*;
-
-    let df = dataset.df();
-
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Get unique values for both columns
-    let row_series = df.column(row_col).map_err(|_| EconError::ColumnNotFound {
-        column: row_col.to_string(),
-        available: available_cols.clone(),
-    })?;
-
-    let col_series = df.column(col_col).map_err(|_| EconError::ColumnNotFound {
-        column: col_col.to_string(),
-        available: available_cols,
-    })?;
-
-    // Rows are keyed on the text of their value. A struct value's text prints its whole array
-    // (O(n) per row), and struct levels never matched their rows either. A list or array value's
-    // text keeps only its first and last elements once it is longer than POLARS_FMT_MAX_ROWS,
-    // so two distinct values could share a key and their rows be counted under one level.
-    for (name, column) in [(row_col, row_series), (col_col, col_series)] {
-        let kind = match column.dtype() {
-            DataType::Struct(_) => "structs",
-            DataType::List(_) => "lists",
-            DataType::Array(_, _) => "arrays",
-            _ => continue,
-        };
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "column `{name}` holds {kind}; the chi-squared test of independence needs \
-                 columns of scalar values (strings, numbers, categories or dates)"
-            ),
-        });
-    }
-
-    // Get unique values
-    let row_unique = row_series
-        .unique()
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Failed to get unique row values: {}", e),
-        })?;
-    let col_unique = col_series
-        .unique()
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Failed to get unique column values: {}", e),
-        })?;
-
-    let n_rows = row_unique.len();
-    let n_cols = col_unique.len();
-
+    let table = contingency_table(dataset.df(), row_col, col_col)?;
+    let (n_rows, n_cols) = (table.n_rows(), table.n_cols());
     if n_rows < 2 || n_cols < 2 {
         return Err(EconError::InsufficientData {
             required: 2,
             provided: n_rows.min(n_cols),
-            context: "Need at least 2 unique values in each column".to_string(),
+            context: format!(
+                "Need at least 2 levels in each column after removing missing values: \
+                 '{row_col}' has {n_rows}, '{col_col}' has {n_cols}"
+            ),
         });
     }
-
-    // A flat, fallibly allocated r x c table of counts, refused before the rechunks and the level
-    // lists: two ID-like columns would otherwise rechunk both columns and build 4n Strings first
-    let cells = resource::checked_len(&[n_rows, n_cols], "contingency table")?;
-    let mut observed: Vec<f64> = resource::try_vec(cells, 0.0, "contingency table")?;
-
-    // Random access is O(1) only on a single chunk, and a frame built by stacking (munge_concat)
-    // keeps one chunk per part, so rechunk each column once before the per-row reads
-    let row_series = row_series.rechunk();
-    let col_series = col_series.rechunk();
-    let lookup_error = |e: PolarsError| EconError::InvalidSpecification {
-        message: format!("Failed to read a value: {}", e),
-    };
-
-    // Levels in sorted order of their text (the order the table has always had), each with the
-    // key its rows are matched on
-    let row_levels = sorted_levels(&row_unique.rechunk(), row_col, lookup_error)?;
-    let col_levels = sorted_levels(&col_unique.rechunk(), col_col, lookup_error)?;
-    let row_index = level_index(&row_levels, row_col)?;
-    let col_index = level_index(&col_levels, col_col)?;
-
-    // Count the rows in one pass (no lazy engine, so no nested async runtime), reusing one key
-    // buffer per column
-    let mut row_key = String::new();
-    let mut col_key = String::new();
-    let mut unmatched = 0usize;
-    for i in 0..df.height() {
-        if i % 65_536 == 0 {
-            resource::checkpoint()?;
-        }
-        write_level_key(&mut row_key, &row_series.get(i).map_err(lookup_error)?);
-        write_level_key(&mut col_key, &col_series.get(i).map_err(lookup_error)?);
-        match (
-            row_index.get(row_key.as_str()),
-            col_index.get(col_key.as_str()),
-        ) {
-            (Some(&row_idx), Some(&col_idx)) => observed[row_idx * n_cols + col_idx] += 1.0,
-            _ => unmatched += 1,
-        }
-    }
-    // Every value comes from its own column's unique(), so a miss means the keys disagree; a
-    // table that silently lost rows would give a wrong statistic
-    if unmatched > 0 {
-        return Err(EconError::Computation(format!(
-            "{unmatched} rows matched no level of `{row_col}` or `{col_col}`, so the \
-             contingency table would be incomplete"
-        )));
-    }
-
-    independence_from_flat(observed, n_rows, n_cols, correct)
-}
-
-/// The levels of `column` from its single-chunk `unique()` result, as (Debug text, row key)
-/// pairs sorted by the text.
-fn sorted_levels(
-    unique: &polars::prelude::Column,
-    column: &str,
-    lookup_error: impl Fn(polars::prelude::PolarsError) -> EconError,
-) -> EconResult<Vec<(String, String)>> {
-    let mut levels: Vec<(String, String)> =
-        resource::try_with_capacity(unique.len(), &format!("the levels of `{column}`"))?;
-    for i in 0..unique.len() {
-        let v = unique.get(i).map_err(&lookup_error)?;
-        let mut key = String::new();
-        write_level_key(&mut key, &v);
-        levels.push((format!("{v:?}"), key));
-    }
-    levels.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(levels)
-}
-
-/// Maps each level's row key to its position in the sorted level order.
-///
-/// Two levels with one key would be counted as one: the second level's row of the table would
-/// stay empty but still count toward the degrees of freedom, so a shared key is an error.
-fn level_index<'a>(
-    levels: &'a [(String, String)],
-    column: &str,
-) -> EconResult<std::collections::HashMap<&'a str, usize>> {
-    use std::collections::hash_map::Entry;
-
-    let mut index = std::collections::HashMap::with_capacity(levels.len());
-    for (i, (_, key)) in levels.iter().enumerate() {
-        match index.entry(key.as_str()) {
-            Entry::Vacant(slot) => {
-                slot.insert(i);
-            }
-            Entry::Occupied(_) => {
-                return Err(EconError::Computation(format!(
-                    "two levels of `{column}` share the row key `{key}`, so their rows cannot be \
-                     told apart"
-                )));
-            }
-        }
-    }
-    Ok(index)
-}
-
-/// Writes the key a value is counted under into `buf`: its Debug text, with two exceptions.
-///
-/// - A float zero is written as `0.0` whatever its sign, because `unique()` merges `0.0` and
-///   `-0.0` into one level.
-/// - A categorical or enum value is written as its category id alone. Its Debug text also prints
-///   the shared mapping's upper bound, which grows whenever a category is inserted into that
-///   mapping (for the process-wide one, by any other request), so a key built from it could
-///   change between building the levels and counting the rows. The sort text in
-///   [`sorted_levels`] keeps the full Debug text: two distinct ids differ before the mapping is
-///   printed, so the level order does not depend on it.
-fn write_level_key(buf: &mut String, v: &polars::prelude::AnyValue<'_>) {
-    use polars::prelude::AnyValue;
-    use std::fmt::Write as _;
-
-    buf.clear();
-    // Writing into a String cannot fail
-    let _ = match *v {
-        AnyValue::Float64(x) => write!(buf, "{:?}", AnyValue::Float64(x + 0.0)),
-        AnyValue::Float32(x) => write!(buf, "{:?}", AnyValue::Float32(x + 0.0)),
-        AnyValue::Categorical(idx, _) | AnyValue::CategoricalOwned(idx, _) => {
-            write!(buf, "Categorical({idx})")
-        }
-        AnyValue::Enum(idx, _) | AnyValue::EnumOwned(idx, _) => write!(buf, "Enum({idx})"),
-        ref other => write!(buf, "{other:?}"),
-    };
+    let mut result = independence_from_flat(table.counts, n_rows, n_cols, correct)?;
+    result.row_labels = Some(table.row_levels);
+    result.col_labels = Some(table.col_levels);
+    result.missing = table.missing;
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    const R_WARNING: &str = "Chi-squared approximation may be incorrect";
+
+    #[test]
+    fn test_validate_chisq_na_codes() {
+        // R: chisq.test(table(g, h)) after table() drops the 3 NA h cells: 2 x 2 with Yates,
+        // X2 0.9506250000000002, df 1, p 0.3295602599606207; correct = FALSE 2.7225,
+        // p 0.09894293606729652 (case stat_contingency_na_codes). Fails before: the null is a
+        // column "Null": 2 x 3, X2 3.1333333333333333, df 2, no Yates.
+        let (case, ds) = crate::test_support::load_case("stat_contingency_na_codes");
+        let y = run_chisq_independence(&ds, "g", "h", true).unwrap();
+        let u = run_chisq_independence(&ds, "g", "h", false).unwrap();
+        Check::new(&case)
+            .scalar("gh_chisq_yates", y.statistic, Tol::stat(9))
+            .scalar("gh_df", y.df as f64, Tol::exact())
+            .scalar("gh_p_yates", y.p_value, Tol::p_value(9))
+            .scalar("gh_chisq", u.statistic, Tol::stat(9))
+            .scalar("gh_p", u.p_value, Tol::p_value(9))
+            .vector("gh_observed", &u.observed, Tol::exact())
+            .vector("gh_expected", &u.expected, Tol::stat(9))
+            .vector("gh_residuals", &u.residuals, Tol::stat(9))
+            .vector(
+                "gh_stdres",
+                u.std_residuals.as_deref().unwrap(),
+                Tol::stat(9),
+            )
+            .scalar("gh_n", u.missing.n_used as f64, Tol::exact())
+            .finish();
+        assert!(y.yates_correction);
+        assert_eq!(
+            (y.row_labels.clone().unwrap(), y.col_labels.clone().unwrap()),
+            (
+                vec!["a".to_string(), "b".into()],
+                vec!["u".to_string(), "v".into()]
+            )
+        );
+        assert_eq!(y.missing.by_column, vec![("h".to_string(), 3)]);
+        // expected 1.78 .. 2.78 < 5
+        assert!(
+            y.warnings.iter().any(|w| w.starts_with(R_WARNING)),
+            "{:?}",
+            y.warnings
+        );
+        let shown = y.to_string();
+        assert!(
+            shown.contains("Warning: Chi-squared approximation may be incorrect")
+                && shown.contains("Missing values: 3 of 12 rows dropped"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn test_validate_chisq_small_expected() {
+        // R: chisq.test(table(x, y)), 3 x 2, X2 1.9345238095238098, df 2, p
+        // 0.38012242588687084, warns "Chi-squared approximation may be incorrect" (min expected
+        // 1.3846153846153846) (case stat_chisq_small_expected). Fails before: no warnings field
+        // (TOOL-33: the warning lived only in Display).
+        let (case, ds) = crate::test_support::load_case("stat_chisq_small_expected");
+        let r = run_chisq_independence(&ds, "x", "y", true).unwrap();
+        Check::new(&case)
+            .scalar("chisq", r.statistic, Tol::stat(13))
+            .scalar("df", r.df as f64, Tol::exact())
+            .scalar("p", r.p_value, Tol::p_value(13))
+            .scalar(
+                "min_expected",
+                r.expected.iter().cloned().fold(f64::INFINITY, f64::min),
+                Tol::stat(13),
+            )
+            .vector("observed", &r.observed, Tol::exact())
+            .vector("expected", &r.expected, Tol::stat(13))
+            .vector("residuals", &r.residuals, Tol::stat(13))
+            .vector("stdres", r.std_residuals.as_deref().unwrap(), Tol::stat(13))
+            .scalar(
+                "warned",
+                r.warnings
+                    .iter()
+                    .filter(|w| w.starts_with(R_WARNING))
+                    .count() as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert!(!r.yates_correction);
+        assert_eq!(r.row_labels.unwrap(), ["p", "q", "r"]);
+        assert!(r.missing.is_empty());
+    }
+
+    #[test]
+    fn test_validate_chisq_rows_2000() {
+        // R: chisq.test(table(treat, outcome)) with Yates on 2000 rows: 3.042,
+        // p 0.08113589702211416.
+        let (case, ds) = crate::test_support::load_case("stat_fisher_rows_2000");
+        let r = run_chisq_independence(&ds, "treat", "outcome", true).unwrap();
+        Check::new(&case)
+            .scalar("chisq_yates", r.statistic, Tol::stat(2000))
+            .scalar("chisq_yates_p", r.p_value, Tol::p_value(2000))
+            .finish();
+        assert!(r.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_chisq_refuses_non_finite_counts() {
+        assert!(chisq_test_independence(&[vec![1.0, f64::NAN], vec![2.0, 3.0]], false).is_err());
+        assert!(chisq_test_gof(&[1.0, f64::INFINITY], None, false).is_err());
+    }
 
     fn gh_dataset() -> Dataset {
         // table(g, h) = [[7, 5, 8], [4, 9, 7]] (rows a, b; columns x, y, z), 40 rows
@@ -1003,40 +1021,9 @@ mod tests {
             let e = run_chisq_independence(&dataset, name, "h", true).unwrap_err();
             assert!(
                 matches!(&e, EconError::InvalidSpecification { message }
-                    if message.contains(&format!("`{name}`")) && message.contains("scalar")),
+                    if message.contains(&format!("'{name}'"))
+                        && message.contains("cannot be used as a categorical variable")),
                 "{name}: {e}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_categorical_row_keys_survive_inserts_into_the_mapping() {
-        // The Debug text of a categorical value prints its mapping's upper bound, which grows
-        // whenever a category is inserted into that mapping; for the process-wide mapping, any
-        // other request can do that. Pre-fix, rows were keyed on that text, so an insert between
-        // building the levels and counting the rows made the rows miss their levels.
-        let cats = Categories::random("".into(), CategoricalPhysical::U32);
-        let g = gh_dataset()
-            .df()
-            .column("g")
-            .unwrap()
-            .cast(&DataType::from_categories(cats))
-            .unwrap();
-        let levels = sorted_levels(&g.unique().unwrap().rechunk(), "g", |e| {
-            EconError::Computation(e.to_string())
-        })
-        .unwrap();
-        g.dtype()
-            .cat_mapping()
-            .unwrap()
-            .insert_cat("inserted by another request")
-            .unwrap();
-        let mut key = String::new();
-        for i in [0, 39] {
-            write_level_key(&mut key, &g.get(i).unwrap());
-            assert!(
-                levels.iter().any(|(_, k)| *k == key),
-                "row {i} key {key} matches no level of {levels:?}"
             );
         }
     }
@@ -1093,7 +1080,9 @@ mod tests {
     fn test_run_chisq_independence_refuses_the_table_before_building_levels() {
         // Two ID-like columns give an r x c table the ceiling refuses. Pre-fix, both columns were
         // rechunked and their levels built (two Strings per level) first, and the refusal came
-        // from the level list (40 levels x 48 bytes > 1024) instead of the table.
+        // from the level list (40 levels x 48 bytes > 1024) instead of the table. The extractor
+        // builds the factor codes and levels first (each allocation below the ceiling), so the
+        // 40 x 40 table (12,800 bytes) is still the first allocation refused.
         let a: Vec<i64> = (0..40).collect();
         let b: Vec<i64> = (0..40).map(|i| (i * 7) % 40).collect();
         let dataset = Dataset::new(df!("a" => a, "b" => b).unwrap());
@@ -1103,46 +1092,6 @@ mod tests {
         assert!(
             matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("contingency table")),
             "{r:?}"
-        );
-    }
-
-    #[test]
-    fn test_run_chisq_independence_names_the_level_list_it_cannot_allocate() {
-        // An ID-like column against a two-level column: the 30 x 2 table (480 bytes) fits under
-        // the ceiling, but the ID column's 30 levels (30 x 48 bytes) do not. Pre-fix, the error
-        // said only "levels would need ...", without naming the column.
-        let id: Vec<i64> = (0..30).collect();
-        let group: Vec<&str> = (0..30)
-            .map(|i| if i % 3 == 0 { "u" } else { "v" })
-            .collect();
-        let dataset = Dataset::new(df!("id" => id, "group" => group).unwrap());
-        let r = resource::with_alloc_ceiling(Some(1024), || {
-            run_chisq_independence(&dataset, "id", "group", false)
-        });
-        assert!(
-            matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("the levels of `id`")),
-            "{r:?}"
-        );
-    }
-
-    #[test]
-    fn test_level_index_refuses_two_levels_with_one_row_key() {
-        // Pre-fix, the second level was mapped to the first one's position: its row of the table
-        // stayed empty but still counted toward the degrees of freedom, with no error.
-        let level = |text: &str, key: &str| (text.to_string(), key.to_string());
-        let distinct = [level("String(a)", "a"), level("String(b)", "b")];
-        let index = level_index(&distinct, "g").unwrap();
-        assert_eq!((index["a"], index["b"]), (0, 1));
-
-        let shared = [
-            level("String(a)", "a"),
-            level("String(b)", "k"),
-            level("String(c)", "k"),
-        ];
-        let e = level_index(&shared, "g").unwrap_err();
-        assert!(
-            matches!(&e, EconError::Computation(m) if m.contains("`g`") && m.contains("`k`")),
-            "{e}"
         );
     }
 
