@@ -34,7 +34,7 @@ use crate::data::Dataset;
 use crate::data::columns::MissingSummary;
 use crate::errors::{EconError, EconResult};
 use crate::resource;
-use crate::stats::contingency::{level_list, stratified_tables};
+use crate::stats::contingency::stratified_tables_2x2;
 use crate::traits::chi_squared_p_value;
 use serde::{Deserialize, Serialize};
 
@@ -435,12 +435,12 @@ fn compute_or_confidence_interval(tables: &[Table2x2], or_mh: f64, conf_level: f
 
 /// Run CMH test on a Dataset with factor columns.
 ///
-/// Builds the 2 × 2 × K tables with [`stratified_tables`], as R's
-/// `mantelhaen.test(table(row, col, stratum))`: rows with a missing value (null, or NaN in
-/// a float column) in any of the three columns are dropped and reported in `missing`, and
-/// the row, column and stratum levels follow R `factor()` order (numbers numerically, text
-/// in C-locale order), so the first level of each is the first row or column of every
-/// stratum's table.
+/// Builds the 2 × 2 × K tables as [`stratified_tables`](crate::stats::stratified_tables)
+/// does, as R's `mantelhaen.test(table(row, col, stratum))`: rows with a missing value
+/// (null, or NaN in a float column) in any of the three columns are dropped and reported in
+/// `missing`, and the row, column and stratum levels follow R `factor()` order (numbers
+/// numerically, text in C-locale order), so the first level of each is the first row or
+/// column of every stratum's table.
 ///
 /// # Arguments
 ///
@@ -453,9 +453,10 @@ fn compute_or_confidence_interval(tables: &[Table2x2], or_mh: f64, conf_level: f
 ///
 /// # Errors
 ///
-/// [`stratified_tables`]' errors (`ColumnNotFound`, a column that cannot be categorical, no
-/// row left, `ResourceLimit`, `Cancelled`), and `InvalidSpecification` naming the levels
-/// when the row or column variable does not have exactly 2 levels.
+/// [`stratified_tables`](crate::stats::stratified_tables)' errors (`ColumnNotFound`, a column
+/// that cannot be categorical, no row left, `ResourceLimit`, `Cancelled`), and
+/// `InvalidSpecification` naming the levels when the row or column variable does not have
+/// exactly 2 levels, checked before any table is built.
 ///
 /// # Returns
 ///
@@ -468,7 +469,8 @@ pub fn run_mantelhaen_test(
     correct: bool,
     alternative: CmhAlternative,
 ) -> EconResult<MantelHaenszelResult> {
-    let (strata, tables, missing) = stratified_tables(dataset.df(), row_var, col_var, stratum_var)?;
+    let (strata, tables, missing) =
+        stratified_tables_2x2(dataset.df(), row_var, col_var, stratum_var)?;
     let Some(first) = tables.first() else {
         return Err(EconError::InsufficientData {
             required: 1,
@@ -478,19 +480,6 @@ pub fn run_mantelhaen_test(
                 .to_string(),
         });
     };
-    if first.n_rows() != 2 || first.n_cols() != 2 {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Mantel-Haenszel test needs 2 x 2 x K tables, but after removing rows with \
-                 missing values '{row_var}' has {} level(s) [{}] and '{col_var}' has {} \
-                 level(s) [{}]",
-                first.n_rows(),
-                level_list(&first.row_levels),
-                first.n_cols(),
-                level_list(&first.col_levels)
-            ),
-        });
-    }
     let (row_levels, col_levels) = (first.row_levels.clone(), first.col_levels.clone());
     let mut cells: Vec<Table2x2> = resource::try_with_capacity(tables.len(), "stratum tables")?;
     for t in &tables {
@@ -802,6 +791,26 @@ mod tests {
         assert!(
             e.contains("'t' has 3 level(s) [a, b, c]") && e.contains("2 x 2 x K"),
             "{e}"
+        );
+    }
+
+    #[test]
+    fn test_run_mantelhaen_refuses_the_shape_before_building_the_tables() {
+        // Two 40-level columns in 2 strata are refused for their shape before the 2 x 40 x 40
+        // counts are allocated; before, a small allocation ceiling reported a ResourceLimit for
+        // tables that could only be refused.
+        let a: Vec<i64> = (0..40).collect();
+        let s: Vec<&str> = (0..40)
+            .map(|i| if i % 3 == 0 { "s1" } else { "s2" })
+            .collect();
+        let ds = Dataset::new(df!("a" => a.clone(), "b" => a, "s" => s).unwrap());
+        let r = resource::with_alloc_ceiling(Some(1024), || {
+            run_mantelhaen_test(&ds, "a", "b", "s", true, CmhAlternative::TwoSided)
+        });
+        assert!(
+            matches!(&r, Err(EconError::InvalidSpecification { message })
+                if message.contains("2 x 2") && message.contains("'b' has 40 level(s)")),
+            "{r:?}"
         );
     }
 }

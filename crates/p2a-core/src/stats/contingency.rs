@@ -30,7 +30,9 @@ use std::hash::Hash;
 use polars::prelude::DataFrame;
 use serde::{Deserialize, Serialize};
 
-use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, column, is_numeric_dtype};
+use crate::data::columns::{
+    ColumnRequest, Columns, MissingSummary, NaPolicy, column, is_numeric_dtype,
+};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 
@@ -114,11 +116,72 @@ pub fn contingency_table(
     row_col: &str,
     col_col: &str,
 ) -> EconResult<ContingencyTable> {
-    let cols = ColumnRequest::new(df)
-        .factors(&[row_col, col_col])
+    let cols = extract_factors(df, &[row_col, col_col], "contingency table")?;
+    count_table(&cols, row_col, col_col)
+}
+
+/// [`contingency_table`] for Fisher's exact test: the level counts are checked on the
+/// extracted columns, before any table is allocated, so that two columns with many levels
+/// are refused for their shape and not for the size of a table that could only be refused.
+///
+/// # Errors
+///
+/// As [`contingency_table`], and [`EconError::InvalidSpecification`] naming both columns'
+/// levels when either does not have exactly 2.
+pub(crate) fn contingency_table_2x2(
+    df: &DataFrame,
+    row_col: &str,
+    col_col: &str,
+) -> EconResult<ContingencyTable> {
+    let cols = extract_factors(df, &[row_col, col_col], "contingency table")?;
+    require_2x2(
+        &cols,
+        row_col,
+        col_col,
+        "Fisher's exact test needs a 2 x 2 table",
+        "; p2a implements the 2 x 2 case of R's fisher.test (use the chi-squared test for \
+         larger tables)",
+    )?;
+    count_table(&cols, row_col, col_col)
+}
+
+/// The factor columns `names`, rows with a missing value dropped, at least one row left.
+fn extract_factors(df: &DataFrame, names: &[&str], context: &str) -> EconResult<Columns> {
+    ColumnRequest::new(df)
+        .factors(names)
         .na(NaPolicy::Omit)
-        .min_rows(1, "contingency table")
-        .extract()?;
+        .min_rows(1, context)
+        .extract()
+}
+
+/// [`EconError::InvalidSpecification`] unless the extracted factors `row_col` and `col_col`
+/// both have 2 levels: "`needs`, but after removing rows with missing values ... `remedy`",
+/// naming both columns' levels.
+fn require_2x2(
+    cols: &Columns,
+    row_col: &str,
+    col_col: &str,
+    needs: &str,
+    remedy: &str,
+) -> EconResult<()> {
+    let (rows, columns) = (cols.factor(row_col), cols.factor(col_col));
+    if rows.n_levels() == 2 && columns.n_levels() == 2 {
+        return Ok(());
+    }
+    Err(EconError::InvalidSpecification {
+        message: format!(
+            "{needs}, but after removing rows with missing values '{row_col}' has {} level(s) \
+             [{}] and '{col_col}' has {} level(s) [{}]{remedy}",
+            rows.n_levels(),
+            level_list(&rows.levels),
+            columns.n_levels(),
+            level_list(&columns.levels)
+        ),
+    })
+}
+
+/// The r x c table of the extracted factors `row_col` and `col_col`, counted in one pass.
+fn count_table(cols: &Columns, row_col: &str, col_col: &str) -> EconResult<ContingencyTable> {
     let rows = cols.factor(row_col);
     let columns = cols.factor(col_col);
     let n_cols = columns.n_levels();
@@ -211,25 +274,81 @@ pub fn level_counts(
 ///
 /// # Errors
 ///
-/// As [`contingency_table`], for the three columns and the K x r x c buffer.
+/// As [`contingency_table`], for the three columns, the K x r x c counts and the copy of the
+/// level labels each stratum's table holds.
 pub fn stratified_tables(
     df: &DataFrame,
     row_col: &str,
     col_col: &str,
     stratum_col: &str,
 ) -> EconResult<(Vec<String>, Vec<ContingencyTable>, MissingSummary)> {
-    let cols = ColumnRequest::new(df)
-        .factors(&[row_col, col_col, stratum_col])
-        .na(NaPolicy::Omit)
-        .min_rows(1, "stratified tables")
-        .extract()?;
+    let cols = extract_factors(df, &[row_col, col_col, stratum_col], "stratified tables")?;
+    count_strata(&cols, row_col, col_col, stratum_col)
+}
+
+/// [`stratified_tables`] for the Mantel-Haenszel test: the row and column level counts are
+/// checked on the extracted columns, before any table is allocated (see
+/// [`contingency_table_2x2`]).
+///
+/// # Errors
+///
+/// As [`stratified_tables`], and [`EconError::InvalidSpecification`] naming both columns'
+/// levels when either does not have exactly 2.
+pub(crate) fn stratified_tables_2x2(
+    df: &DataFrame,
+    row_col: &str,
+    col_col: &str,
+    stratum_col: &str,
+) -> EconResult<(Vec<String>, Vec<ContingencyTable>, MissingSummary)> {
+    let cols = extract_factors(df, &[row_col, col_col, stratum_col], "stratified tables")?;
+    require_2x2(
+        &cols,
+        row_col,
+        col_col,
+        "Mantel-Haenszel test needs 2 x 2 x K tables",
+        "",
+    )?;
+    count_strata(&cols, row_col, col_col, stratum_col)
+}
+
+/// One r x c table per level of the extracted factor `stratum_col`, each counted in place.
+fn count_strata(
+    cols: &Columns,
+    row_col: &str,
+    col_col: &str,
+    stratum_col: &str,
+) -> EconResult<(Vec<String>, Vec<ContingencyTable>, MissingSummary)> {
+    const WHAT: &str = "stratified tables";
     let rows = cols.factor(row_col);
     let columns = cols.factor(col_col);
     let strata = cols.factor(stratum_col);
     let (r, c, k) = (rows.n_levels(), columns.n_levels(), strata.n_levels());
-    let per = resource::checked_len(&[r, c], "stratified tables")?;
-    let cells = resource::checked_len(&[k, r, c], "stratified tables")?;
-    let mut counts = resource::try_vec(cells, 0.0, "stratified tables")?;
+    let per = resource::checked_len(&[r, c], WHAT)?;
+    // the K x r x c counts, checked as one buffer and held per stratum
+    resource::check_alloc::<f64>(resource::checked_len(&[k, per], WHAT)?, WHAT)?;
+    // and every stratum's table holds its own names and level labels
+    let label_bytes = rows
+        .levels
+        .iter()
+        .chain(&columns.levels)
+        .map(String::len)
+        .chain([row_col.len(), col_col.len()])
+        .try_fold(0usize, |acc, len| {
+            acc.checked_add(len)?
+                .checked_add(std::mem::size_of::<String>())
+        })
+        .ok_or_else(|| resource::overflow("stratified tables' level labels"))?;
+    resource::check_alloc::<u8>(
+        resource::checked_len(&[k, label_bytes], "stratified tables' level labels")?,
+        "stratified tables' level labels",
+    )?;
+    let mut counts: Vec<Vec<f64>> = resource::try_with_capacity(k, WHAT)?;
+    for s in 0..k {
+        if s % CHECK_EVERY == 0 {
+            resource::checkpoint()?;
+        }
+        counts.push(resource::try_vec(per, 0.0, WHAT)?);
+    }
     for (i, ((&ri, &ci), &si)) in rows
         .codes
         .iter()
@@ -240,16 +359,14 @@ pub fn stratified_tables(
         if i % CHECK_EVERY == 0 {
             resource::checkpoint()?;
         }
-        counts[(si as usize * r + ri as usize) * c + ci as usize] += 1.0;
+        counts[si as usize][ri as usize * c + ci as usize] += 1.0;
     }
     let n_by_stratum = strata.counts();
-    let mut tables: Vec<ContingencyTable> = resource::try_with_capacity(k, "stratified tables")?;
-    for (s, &n_k) in n_by_stratum.iter().enumerate() {
+    let mut tables: Vec<ContingencyTable> = resource::try_with_capacity(k, WHAT)?;
+    for (s, (stratum_counts, n_k)) in counts.into_iter().zip(n_by_stratum).enumerate() {
         if s % CHECK_EVERY == 0 {
             resource::checkpoint()?;
         }
-        let mut stratum_counts: Vec<f64> = resource::try_with_capacity(per, "stratified tables")?;
-        stratum_counts.extend_from_slice(&counts[s * per..(s + 1) * per]);
         tables.push(ContingencyTable {
             row_var: row_col.to_string(),
             col_var: col_col.to_string(),
@@ -584,6 +701,66 @@ mod tests {
         assert!(
             matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("contingency table")),
             "{r:?}"
+        );
+    }
+
+    #[test]
+    fn test_stratified_tables_check_the_label_copies_against_the_ceiling() {
+        // 1000 strata of 2 x 2 with 100-byte labels: the counts (32 kB) and the tables
+        // themselves (about 170 kB) fit a 300 kB ceiling, but every stratum's table holds its
+        // own copy of the 4 labels (about 500 kB), which used to be cloned without a check.
+        use crate::resource;
+        let n = 1000;
+        let label = |c: &str| c.repeat(100);
+        let (a, b, u, v) = (label("a"), label("b"), label("u"), label("v"));
+        let df = df!(
+            "t" => (0..n).map(|i| if i % 2 == 0 { a.as_str() } else { b.as_str() }).collect::<Vec<_>>(),
+            "y" => (0..n).map(|i| if i % 3 == 0 { u.as_str() } else { v.as_str() }).collect::<Vec<_>>(),
+            "s" => (0..n).map(|i| format!("s{i:04}")).collect::<Vec<_>>()
+        )
+        .unwrap();
+        let r =
+            resource::with_alloc_ceiling(Some(300_000), || stratified_tables(&df, "t", "y", "s"));
+        assert!(
+            matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("level labels")),
+            "{:?}",
+            r.map(|(s, _, _)| s.len())
+        );
+        let (strata, tables, _) = stratified_tables(&df, "t", "y", "s").unwrap();
+        assert_eq!((strata.len(), tables.len()), (n, n));
+        assert_eq!(tables[0].counts, vec![1.0, 0.0, 0.0, 0.0]); // row 0: t = a, y = u
+        assert_eq!(tables[1].counts, vec![0.0, 0.0, 0.0, 1.0]); // row 1: t = b, y = v
+        assert_eq!(tables[999].row_levels, [a, b]);
+    }
+
+    #[test]
+    fn test_two_by_two_builders_name_both_columns_levels() {
+        // The 2 x 2 builders refuse another shape with both columns' levels (the ceiling tests
+        // of run_fisher_test and run_mantelhaen_test show that this comes before counting),
+        // and otherwise build what the general builders build.
+        let df = df!("x" => ["b", "a", "c", "a"], "y" => ["u", "v", "v", "u"]).unwrap();
+        let r = contingency_table_2x2(&df, "x", "y");
+        assert!(
+            matches!(&r, Err(EconError::InvalidSpecification { message })
+                if message.starts_with("Fisher's exact test needs a 2 x 2 table")
+                    && message.contains("'x' has 3 level(s) [a, b, c]")
+                    && message.contains("'y' has 2 level(s) [u, v]")),
+            "{r:?}"
+        );
+        let r = stratified_tables_2x2(&df, "y", "x", "y");
+        assert!(
+            matches!(&r, Err(EconError::InvalidSpecification { message })
+                if message.contains("2 x 2 x K") && message.contains("'x' has 3 level(s)")),
+            "{:?}",
+            r.map(|(s, _, _)| s.len())
+        );
+        let df2 = df!("x" => ["b", "a", "b", "a", "a"], "y" => ["u", "v", "v", "u", "u"]).unwrap();
+        let t = contingency_table_2x2(&df2, "x", "y").unwrap();
+        assert_eq!(t.as_2x2(), Some([[2.0, 1.0], [1.0, 1.0]]));
+        assert_eq!(t, contingency_table(&df2, "x", "y").unwrap());
+        assert_eq!(
+            stratified_tables_2x2(&df2, "x", "y", "y").unwrap(),
+            stratified_tables(&df2, "x", "y", "y").unwrap()
         );
     }
 

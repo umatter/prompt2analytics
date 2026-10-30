@@ -68,7 +68,7 @@ use crate::data::Dataset;
 use crate::data::columns::MissingSummary;
 use crate::errors::{EconError, EconResult};
 use crate::resource;
-use crate::stats::contingency::{contingency_table, level_list};
+use crate::stats::contingency::contingency_table_2x2;
 use crate::traits::SignificanceLevel;
 
 /// Alternative hypothesis for Fisher's exact test.
@@ -785,11 +785,12 @@ pub fn fisher_exact_test_int(
 
 /// Run Fisher's exact test on two categorical columns from a dataset.
 ///
-/// Builds the 2×2 table with [`contingency_table`]: rows with a missing value (null, or NaN
-/// in a float column) in either column are dropped and reported in `missing`, as R's
-/// `table()` drops them, and the levels follow R `factor()` order (numbers numerically,
-/// text in C-locale order), so the first level is the first row or column. The result
-/// carries the level labels.
+/// Builds the 2×2 table as [`contingency_table`](crate::stats::contingency_table) does: rows
+/// with a missing value (null, or NaN in a float column) in either column are dropped and
+/// reported in `missing`, as R's `table()` drops them, and the levels follow R `factor()`
+/// order (numbers numerically, text in C-locale order), so the first level is the first row
+/// or column. The level counts are checked before the table is built. The result carries
+/// the level labels.
 ///
 /// # Arguments
 ///
@@ -801,8 +802,9 @@ pub fn fisher_exact_test_int(
 ///
 /// # Errors
 ///
-/// [`contingency_table`]'s errors (`ColumnNotFound`, `InvalidSpecification` for a column
-/// that cannot be categorical, `InsufficientData`, `ResourceLimit`, `Cancelled`),
+/// [`contingency_table`](crate::stats::contingency_table)'s errors (`ColumnNotFound`,
+/// `InvalidSpecification` for a column that cannot be categorical, `InsufficientData`,
+/// `ResourceLimit`, `Cancelled`),
 /// `InvalidSpecification` naming the levels when the table is not 2 x 2, and
 /// [`fisher_exact_test`]'s errors.
 ///
@@ -819,21 +821,10 @@ pub fn run_fisher_test(
     alternative: FisherAlternative,
     conf_level: Option<f64>,
 ) -> EconResult<FisherExactResult> {
-    let t = contingency_table(dataset.df(), row_col, col_col)?;
-    let Some(table) = t.as_2x2() else {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Fisher's exact test needs a 2 x 2 table, but after removing rows with missing \
-                 values '{row_col}' has {} level(s) [{}] and '{col_col}' has {} level(s) [{}]; \
-                 p2a implements the 2 x 2 case of R's fisher.test (use the chi-squared test for \
-                 larger tables)",
-                t.n_rows(),
-                level_list(&t.row_levels),
-                t.n_cols(),
-                level_list(&t.col_levels)
-            ),
-        });
-    };
+    let t = contingency_table_2x2(dataset.df(), row_col, col_col)?;
+    let table = t
+        .as_2x2()
+        .ok_or_else(|| EconError::Computation("the 2 x 2 table has another shape".to_string()))?;
     let mut result = fisher_exact_test(&table, alternative, conf_level)?;
     result.row_levels = t.row_levels;
     result.col_levels = t.col_levels;
@@ -1070,6 +1061,23 @@ mod tests {
                 Some(f64::NAN)
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn test_run_fisher_test_refuses_the_shape_before_building_a_table() {
+        // Two 40-level columns are refused for their shape, naming the levels, before a 40 x 40
+        // table is allocated; before, the table came first, and a small allocation ceiling
+        // turned the user's error into a ResourceLimit for a table that could only be refused.
+        let a: Vec<i64> = (0..40).collect();
+        let ds = Dataset::new(polars::prelude::df!("a" => a.clone(), "b" => a).unwrap());
+        let r = resource::with_alloc_ceiling(Some(1024), || {
+            run_fisher_test(&ds, "a", "b", FisherAlternative::TwoSided, Some(0.95))
+        });
+        assert!(
+            matches!(&r, Err(EconError::InvalidSpecification { message })
+                if message.contains("2 x 2") && message.contains("'a' has 40 level(s) [0, 1,")),
+            "{r:?}"
         );
     }
 
