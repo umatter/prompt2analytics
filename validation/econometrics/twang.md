@@ -121,6 +121,21 @@ For production-quality GBM propensity scores with complex interactions, consider
 - Python `causalml` or `econml` packages
 - This implementation is suitable for educational purposes and simple use cases
 
+## Missing values and column types
+
+Missing values (null or NaN) in the treatment or covariates are refused, with
+"Column 'x' contains k missing value(s) (null or NaN). Drop or impute them first."
+(`EconError::NullValues`, naming the column and the count). A text column gives
+`NonNumericColumn`, infinite values `NonFiniteValues`, an absent column `ColumnNotFound`; a
+column that exists is never reported as not found. Int64 and Boolean 0/1 treatments are
+read as numbers and give the same result as Float64. Results on complete data are
+unchanged.
+
+R: twang is not installed here; not verified.
+
+Tests: `test_validate_na_twang_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
+`weighting_na_refusal`).
+
 ## References
 
 - Ridgeway, G., McCaffrey, D., Morral, A., Burgette, L., & Griffin, B.A. (2017).

@@ -163,6 +163,21 @@ Bootstrap standard errors will have inherent randomness (±5-10% variation).
 2. **Propensity score trimming**: Both use symmetric trimming but may handle boundary cases differently
 3. **Normalization**: Both use Hajek (normalized) estimator
 
+## Missing values and column types
+
+Missing values (null or NaN) in the outcome, treatment or covariates are refused, with
+"Column 'x' contains k missing value(s) (null or NaN). Drop or impute them first."
+(`EconError::NullValues`, naming the column and the count). A text column gives
+`NonNumericColumn`, infinite values `NonFiniteValues`, an absent column `ColumnNotFound`; a
+column that exists is never reported as not found. Int64 and Boolean 0/1 treatments are
+read as numbers and give the same result as Float64. Results on complete data are
+unchanged. A NaN cell counts as missing, like a null.
+
+R: MatchIt 4.8.0 and tmle 2.1.1 refuse missing treatment or covariate values, and WeightIt 2.0.0 refuses a missing treatment; p2a refuses missing values in every column the IPW estimator reads (checked for T2-WP13).
+
+Tests: `test_validate_na_ipw_columns`, `test_validate_na_ipw_nan_outcome_is_missing`, `test_validate_mcp_treatment_ipw_null_outcome_is_named` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
+`weighting_na_refusal`).
+
 ## References
 
 - Horvitz, D.G. & Thompson, D.J. (1952). "A Generalization of Sampling Without Replacement from a Finite Universe."

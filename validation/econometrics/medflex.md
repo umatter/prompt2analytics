@@ -171,6 +171,42 @@ cargo test -p p2a-core econometrics::medflex
 - `confidence_level` - CI level (default: 0.95)
 - `scale` - Effect scale: "difference", "ratio", "odds_ratio"
 
+## Missing values and column types
+
+`run_medflex_dataset` (MCP `natural_effects_mediation`) drops the rows with a missing value
+(null or NaN) in the outcome, treatment, mediator or a confounder jointly, so the mediator
+and outcome models are fitted on the same complete rows (R `lm`, `na.omit`). The drop is
+reported in `MedflexResult.missing` (serialized only when rows were dropped) and in a last
+Display line (also in the MCP text):
+`Missing values: 50 of 400 rows dropped because of missing values (y: 15, m: 25, x1: 10)`.
+`run_medflex` takes arrays as given and reports nothing dropped. Int64 and Boolean columns
+are read as numbers; a text column gives `NonNumericColumn`, an absent one
+`ColumnNotFound`.
+
+### R reference (T2-WP13)
+
+Case `causal_mediation_na` (`validation/r/cases/causal_mediation_na.R`, registry
+`validation/methods/causal_na.json`, id `medflex_na`), the 350 complete rows of 400:
+
+| Quantity | R (`lm` on `complete.cases(y, d, m, x1, x2)`) |
+|---|---|
+| treated, control | 197, 153 |
+| E[M\|A=0], E[M\|A=1] | 0.3767530563055379, 1.2007356199594112 |
+| `lm(m ~ d + x1 + x2)`: `d` (SE), R² | 0.6131933908612826 (0.059414385098645314), 0.5943014059209022 |
+| `lm(y ~ d + m + x1 + x2)`: `d` (SE), `m` (SE), R² | 0.5104280327655459 (0.07402655405381642), 0.6554511496553376 (0.0585705531269962), 0.7489960724962549 |
+| `lm(y ~ d + m + d:m + x1 + x2)`: `d` (SE), `m` (SE), `d:m` (SE), R² | 0.29803058555399 (0.09699712509259713), 0.4867447333122127 (0.0768751565077352), 0.29678541513089 (0.08929231721797547), 0.7568060755019845 |
+
+Tolerances: `validation/README.md` for n = 350 (coefficients and means 1e-8, SEs and R² 1e-6
+relative); counts exact; the MCP text at `Tol::printed(4)`. With missing values read as 0,
+as before T2-WP13, the mediator coefficient of `d` was 0.6243 on 400 rows. Tests (p2a-core,
+`econometrics::medflex`): `test_validate_medflex_causal_na`,
+`test_validate_medflex_interaction_causal_na`, `test_validate_na_medflex_reports_missing`,
+`test_validate_na_medflex_errors_name_the_column`; MCP:
+`test_validate_mcp_natural_effects_mediation_causal_na`.
+
+The component models are pinned to `lm`. medflex 0.6-11 is installed, but p2a's NDE/NIE
+differ from it (CAUS-23, Tier 4), so they are not pinned.
+
 ## References
 
 1. Lange, T., Vansteelandt, S., & Bekaert, M. (2012). "Choice of effect measure for mediation analysis." *Epidemiology*, 23(6), 889-897. https://doi.org/10.1097/EDE.0b013e31826c2107

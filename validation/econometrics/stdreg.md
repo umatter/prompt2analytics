@@ -168,6 +168,21 @@ summary(std_fit)
 - `interactions`: Include treatment-covariate interactions (default: false)
 - `confidence_level`: Confidence level for intervals (default: 0.95)
 
+## Missing values and column types
+
+Missing values (null or NaN) in the outcome, treatment or covariates are refused, with
+"Column 'x' contains k missing value(s) (null or NaN). Drop or impute them first."
+(`EconError::NullValues`, naming the column and the count). A text column gives
+`NonNumericColumn`, infinite values `NonFiniteValues`, an absent column `ColumnNotFound`; a
+column that exists is never reported as not found. Int64 and Boolean 0/1 treatments are
+read as numbers and give the same result as Float64. Results on complete data are
+unchanged.
+
+R: stdReg is not installed here; not verified.
+
+Tests: `test_validate_na_stdreg_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
+`weighting_na_refusal`).
+
 ## References
 
 1. Robins, J.M. (1986). "A new approach to causal inference in mortality studies with a sustained exposure period -- application to control of the healthy worker survivor effect." *Mathematical Modelling*, 7(9-12), 1393-1512.
