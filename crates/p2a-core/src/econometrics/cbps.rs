@@ -33,8 +33,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, logistic_cdf, normal_cdf};
 
@@ -407,13 +408,10 @@ pub fn run_cbps(
 ) -> EconResult<CbpsResult> {
     let config = config.unwrap_or_default();
 
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract treatment variable
-    let t = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let t = DesignMatrix::extract_column(dataset.df(), treatment_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = t.len();
 
@@ -431,7 +429,8 @@ pub fn run_cbps(
     }
 
     // Build design matrix with intercept
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, true)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, true)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
     let k = x.ncols(); // Number of parameters (including intercept)
 
@@ -1519,5 +1518,27 @@ mod tests {
             ji_result.j_statistic.is_none(),
             "JustIdentified should not have a J-statistic"
         );
+    }
+
+    // ── T2-WP13: missing values and column types (R case causal_mediation_na) ──
+
+    #[test]
+    fn test_validate_na_cbps_columns() {
+        use crate::econometrics::treatment::na_fixtures as nf;
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        // the over-identified default diverges on this data (CAUS-11)
+        let run = |ds: &Dataset, _y: &str, d: &str, x: &[&str]| {
+            run_cbps(
+                ds,
+                d,
+                x,
+                Some(CbpsConfig {
+                    method: CbpsMethod::JustIdentified,
+                    ..Default::default()
+                }),
+            )
+        };
+        nf::assert_refusals(&case, &ds, false, run);
+        nf::assert_treatment_dtypes_agree(&case, &ds, run, |r| r.coefficients.clone());
     }
 }

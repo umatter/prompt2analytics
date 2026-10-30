@@ -62,8 +62,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::traits::estimator::logistic_cdf;
 
@@ -419,13 +420,10 @@ pub fn weightit(
 ) -> EconResult<WeightItResult> {
     let mut warnings = Vec::new();
 
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract treatment variable
-    let d = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let d = DesignMatrix::extract_column(dataset.df(), treatment_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = d.len();
 
@@ -443,7 +441,8 @@ pub fn weightit(
     }
 
     // Build covariate matrix
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, config.intercept)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, config.intercept)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
 
     // Variable names for balance table
@@ -597,16 +596,14 @@ pub fn entropy_balance(
     covariate_cols: &[&str],
     targets: Option<&[f64]>,
 ) -> EconResult<EntropyBalanceResult> {
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract treatment variable
-    let d = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let d = DesignMatrix::extract_column(dataset.df(), treatment_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     // Build covariate matrix (without intercept for entropy balancing)
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
 
     let n = d.len();
@@ -2106,5 +2103,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── T2-WP13: missing values and column types (R case causal_mediation_na) ──
+
+    #[test]
+    fn test_validate_na_weightit_columns() {
+        use crate::econometrics::treatment::na_fixtures as nf;
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, _y: &str, d: &str, x: &[&str]| {
+            weightit(ds, d, x, WeightItConfig::default())
+        };
+        nf::assert_refusals(&case, &ds, false, run);
+        nf::assert_treatment_dtypes_agree(&case, &ds, run, |r| r.weights.clone());
+    }
+
+    #[test]
+    fn test_validate_na_entropy_balance_columns() {
+        use crate::econometrics::treatment::na_fixtures as nf;
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, _y: &str, d: &str, x: &[&str]| entropy_balance(ds, d, x, None);
+        nf::assert_refusals(&case, &ds, false, run);
+        nf::assert_treatment_dtypes_agree(&case, &ds, run, |r| r.weights.clone());
     }
 }

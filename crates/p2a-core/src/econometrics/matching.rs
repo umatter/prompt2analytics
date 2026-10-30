@@ -54,8 +54,9 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::traits::estimator::logistic_cdf;
 
@@ -418,13 +419,10 @@ pub fn match_it(
 ) -> EconResult<MatchResult> {
     let distance_method = distance.unwrap_or_default();
 
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract treatment indicator
-    let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: treatment_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = treatment.len();
 
@@ -447,7 +445,8 @@ pub fn match_it(
     validate_match_counts(&method, n, n_treated, n_control, covariate_cols.len())?;
 
     // Build covariate matrix
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data.clone();
     let covariate_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
 
@@ -2967,5 +2966,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── T2-WP13: missing values and column types (R case causal_mediation_na) ──
+
+    #[test]
+    fn test_validate_na_match_it_columns() {
+        use crate::econometrics::treatment::na_fixtures as nf;
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, _y: &str, d: &str, x: &[&str]| {
+            match_it(
+                ds,
+                d,
+                x,
+                MatchMethod::default(),
+                Some(DistanceMethod::Logit),
+            )
+        };
+        nf::assert_refusals(&case, &ds, false, run);
+        nf::assert_treatment_dtypes_agree(&case, &ds, run, |r| r.weights.clone());
     }
 }

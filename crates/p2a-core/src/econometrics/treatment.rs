@@ -23,8 +23,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
@@ -435,21 +436,14 @@ pub fn run_ipw_treatment(
         });
     }
 
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract outcome variable
-    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let y = DesignMatrix::extract_column(dataset.df(), outcome)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     // Extract treatment variable
-    let d = DesignMatrix::extract_column(dataset.df(), treatment).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let d = DesignMatrix::extract_column(dataset.df(), treatment)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = y.len();
 
@@ -466,7 +460,8 @@ pub fn run_ipw_treatment(
     }
 
     // Build design matrix for propensity score model
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariates, true)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariates, true)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
 
     // Estimate propensity scores using logit
@@ -1066,20 +1061,13 @@ pub fn run_doubly_robust(
         });
     }
 
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract variables
-    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let y = DesignMatrix::extract_column(dataset.df(), outcome)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
-    let d = DesignMatrix::extract_column(dataset.df(), treatment).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let d = DesignMatrix::extract_column(dataset.df(), treatment)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = y.len();
 
@@ -1096,7 +1084,8 @@ pub fn run_doubly_robust(
     }
 
     // Build design matrix
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariates, true)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariates, true)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
 
     // Estimate propensity scores
@@ -2435,6 +2424,43 @@ mod tests {
             .finish();
         for c in ["y", "d", "m", "x1", "x2"] {
             assert_eq!(cc.df().column(c).unwrap().null_count(), 0, "{c}");
+        }
+    }
+
+    #[test]
+    fn test_validate_na_ipw_columns() {
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, y: &str, d: &str, x: &[&str]| {
+            run_ipw_treatment(ds, y, d, x, IpwConfig::default())
+        };
+        na_fixtures::assert_refusals(&case, &ds, true, run);
+        na_fixtures::assert_treatment_dtypes_agree(&case, &ds, run, |r| {
+            vec![r.effect, r.std_error]
+        });
+    }
+
+    #[test]
+    fn test_validate_na_doubly_robust_columns() {
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, y: &str, d: &str, x: &[&str]| {
+            run_doubly_robust(ds, y, d, x, DoublyRobustConfig::default())
+        };
+        na_fixtures::assert_refusals(&case, &ds, true, run);
+        na_fixtures::assert_treatment_dtypes_agree(&case, &ds, run, |r| {
+            vec![r.effect, r.std_error]
+        });
+    }
+
+    #[test]
+    fn test_validate_na_ipw_nan_outcome_is_missing() {
+        // T2 design 2.2: a NaN cell is missing, like a null.
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let data = na_fixtures::with_nan(&na_fixtures::complete_rows(&case, &ds), "y", 0);
+        match run_ipw_treatment(&data, "y", "d", &["x1", "x2"], IpwConfig::default()) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("y", 1));
+            }
+            other => panic!("NaN outcome: expected NullValues {{ y, 1 }}, got {other:?}"),
         }
     }
 }

@@ -42,6 +42,29 @@
         {"finding": "CAUS-23", "quantity": "NDE and NIE with interaction", "note": "NDE uses the raw control mean of M; Tier 4; not pinned"}
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "weighting_na_refusal",
+      "name": "IPW, doubly robust, matching, WeightIt, entropy balancing, CBPS, twang, SBW, TMLE, C-TMLE, stdreg: missing values refused with the real error",
+      "category": "econometrics",
+      "reference": "MatchIt 4.8.0 and tmle 2.1.1 refuse missing treatment or covariates; WeightIt 2.0.0 refuses a missing treatment (R behaviour recorded in the method docs)",
+      "doc": "validation/econometrics/treatment_ipw.md",
+      "cases": ["causal_mediation_na"],
+      "tests": [
+        "p2a-core::econometrics::treatment::tests::test_validate_na_ipw_columns",
+        "p2a-core::econometrics::treatment::tests::test_validate_na_doubly_robust_columns",
+        "p2a-core::econometrics::treatment::tests::test_validate_na_ipw_nan_outcome_is_missing",
+        "p2a-core::econometrics::matching::tests::test_validate_na_match_it_columns",
+        "p2a-core::econometrics::weightit::tests::test_validate_na_weightit_columns",
+        "p2a-core::econometrics::weightit::tests::test_validate_na_entropy_balance_columns",
+        "p2a-core::econometrics::cbps::tests::test_validate_na_cbps_columns",
+        "p2a-core::econometrics::twang::tests::test_validate_na_twang_columns",
+        "p2a-core::econometrics::sbw::tests::test_validate_na_sbw_columns"
+      ],
+      "quantities": ["NullValues column and count (missing_y, missing_d_na, missing_x1)"],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

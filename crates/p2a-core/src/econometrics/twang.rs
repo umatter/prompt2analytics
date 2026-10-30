@@ -553,6 +553,7 @@ pub fn run_twang(
 ) -> EconResult<TwangResult> {
     let config = config.unwrap_or_default();
 
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract treatment variable
     let t = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
@@ -1914,5 +1915,28 @@ mod tests {
 
         assert_eq!(result.stop_method, StopMethod::ESMax);
         assert_eq!(result.estimand, TwangEstimand::ATT);
+    }
+
+    // ── T2-WP13: missing values and column types (R case causal_mediation_na) ──
+
+    #[test]
+    fn test_validate_na_twang_columns() {
+        // T2-WP01 already maps twang's extraction through econ_error_from_design; this
+        // holds twang to the same refusals and dtype rule as the other weighting methods.
+        use crate::econometrics::treatment::na_fixtures as nf;
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, _y: &str, d: &str, x: &[&str]| {
+            run_twang(
+                ds,
+                d,
+                x,
+                Some(TwangConfig {
+                    n_trees: 300,
+                    ..Default::default()
+                }),
+            )
+        };
+        nf::assert_refusals(&case, &ds, false, run);
+        nf::assert_treatment_dtypes_agree(&case, &ds, run, |r| r.weights.clone());
     }
 }

@@ -115,8 +115,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
 use crate::resource;
 
@@ -711,16 +712,14 @@ pub fn sbw(
     covariate_cols: &[&str],
     config: SBWConfig,
 ) -> EconResult<SBWResult> {
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
     // Extract treatment variable
-    let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     // Build covariate matrix (without intercept)
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let covariates = design.data;
 
     // Run SBW with the real column names
@@ -2146,5 +2145,16 @@ mod tests {
         //              = [0.5 + 0.6 + 0.6, 1.0 + 0.9 + 0.8] = [1.7, 2.7]
         // Violation: max(|1.7-1.5|, |2.7-2.5|) = max(0.2, 0.2) = 0.2
         assert!((violation - 0.2).abs() < 1e-10);
+    }
+
+    // ── T2-WP13: missing values and column types (R case causal_mediation_na) ──
+
+    #[test]
+    fn test_validate_na_sbw_columns() {
+        use crate::econometrics::treatment::na_fixtures as nf;
+        let (case, ds) = crate::test_support::load_case("causal_mediation_na");
+        let run = |ds: &Dataset, _y: &str, d: &str, x: &[&str]| sbw(ds, d, x, SBWConfig::default());
+        nf::assert_refusals(&case, &ds, false, run);
+        nf::assert_treatment_dtypes_agree(&case, &ds, run, |r| r.weights.clone());
     }
 }
