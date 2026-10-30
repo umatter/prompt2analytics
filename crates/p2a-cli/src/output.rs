@@ -2,6 +2,7 @@
 
 use clap::ValueEnum;
 use p2a_core::Dataset;
+use p2a_core::data::columns::MissingSummary;
 use serde::Serialize;
 use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,6 +101,52 @@ pub fn print_error(msg: &str, format: &OutputFormat) {
         }
         _ => eprintln!("Error: {}", msg),
     }
+}
+
+// =============================================================================
+// Rows dropped because of missing values (Tier 2 design 1.5)
+// =============================================================================
+
+/// `Note: <MissingSummary::note()>` for text and table output, e.g.
+/// `Note: 3 of 120 rows dropped because of missing values (y: 2, x1: 1)`;
+/// `None` for JSON or when nothing was dropped.
+pub(crate) fn missing_note_line(missing: &MissingSummary, format: &OutputFormat) -> Option<String> {
+    match format {
+        OutputFormat::Json => None,
+        OutputFormat::Text | OutputFormat::Table => missing.note().map(|n| format!("Note: {n}")),
+    }
+}
+
+/// Print [`missing_note_line`] to stdout. Call it after the command has printed
+/// its result, as the last line of text or table output. Prints nothing for
+/// JSON (insert [`missing_json`] under the key `"missing"` of the JSON object
+/// instead) or when nothing was dropped.
+pub fn print_missing_note(missing: &MissingSummary, format: &OutputFormat) {
+    if let Some(line) = missing_note_line(missing, format) {
+        println!("{line}");
+    }
+}
+
+/// `{"n_total", "n_used", "n_dropped", "by_column": {column: count}}` when rows
+/// were dropped, else `None`. Callers insert it under the key `"missing"` of
+/// their JSON object, after the result's own keys are built. `by_column` is a
+/// JSON object, so its key order is serde_json's (alphabetical unless
+/// `preserve_order` is enabled), the same as p2a-mcp's `common::missing_json`.
+pub fn missing_json(missing: &MissingSummary) -> Option<serde_json::Value> {
+    if missing.is_empty() {
+        return None;
+    }
+    let by_column: serde_json::Map<String, serde_json::Value> = missing
+        .by_column
+        .iter()
+        .map(|(column, count)| (column.clone(), serde_json::json!(count)))
+        .collect();
+    Some(serde_json::json!({
+        "n_total": missing.n_total,
+        "n_used": missing.n_used,
+        "n_dropped": missing.n_dropped,
+        "by_column": by_column,
+    }))
 }
 
 /// Format dataset summary for display
@@ -827,6 +874,54 @@ mod report_tests {
         assert_eq!(
             se_label(CovarianceType::HC3),
             "HC3 (heteroskedasticity-robust)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod missing_note_tests {
+    use super::{OutputFormat, missing_json, missing_note_line};
+    use p2a_core::data::columns::MissingSummary;
+
+    fn dropped() -> MissingSummary {
+        MissingSummary {
+            n_total: 120,
+            n_used: 117,
+            n_dropped: 3,
+            by_column: vec![("y".into(), 2), ("x1".into(), 1)],
+        }
+    }
+
+    #[test]
+    fn note_follows_text_and_table_output() {
+        let want = "Note: 3 of 120 rows dropped because of missing values (y: 2, x1: 1)";
+        assert_eq!(
+            missing_note_line(&dropped(), &OutputFormat::Text).as_deref(),
+            Some(want)
+        );
+        assert_eq!(
+            missing_note_line(&dropped(), &OutputFormat::Table).as_deref(),
+            Some(want)
+        );
+    }
+
+    #[test]
+    fn note_is_silent_for_json_and_when_nothing_was_dropped() {
+        assert_eq!(missing_note_line(&dropped(), &OutputFormat::Json), None);
+        assert_eq!(
+            missing_note_line(&MissingSummary::none(120), &OutputFormat::Text),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_json_only_when_rows_were_dropped() {
+        assert_eq!(missing_json(&MissingSummary::none(5)), None);
+        assert_eq!(
+            missing_json(&dropped()),
+            Some(serde_json::json!({
+                "n_total": 120, "n_used": 117, "n_dropped": 3, "by_column": {"y": 2, "x1": 1}
+            }))
         );
     }
 }
