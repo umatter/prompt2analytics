@@ -548,6 +548,7 @@ mod tests {
             controls: vec![],
             cluster_var: None,
             n_clusters: None,
+            missing: Default::default(),
         };
 
         let report = did_diagnostics(&result);
