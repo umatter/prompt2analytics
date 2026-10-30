@@ -49,9 +49,9 @@ use p2a_core::econometrics::{OrderedConfig, run_ordered_model_with};
 use p2a_core::econometrics::{RdMultiConfig, run_rd_multi};
 use p2a_core::econometrics::{granger_test, run_var, run_vecm};
 use p2a_core::forecasting::{
-    ArConfig, ArMethod, DecomposeConfig, DecomposeType, GarchConfig, HoltWintersConfig,
+    ArConfig, ArMethod, ArimaSpec, DecomposeConfig, DecomposeType, GarchConfig, HoltWintersConfig,
     SeasonalType, StateSpaceModel, StlConfig, StructTsConfig, StructTsType, ar, decompose, garch,
-    holt_winters, kalman_filter, stl, struct_ts,
+    holt_winters, kalman_filter, run_arima_with, stl, struct_ts,
 };
 use p2a_core::ml::{cmdscale_from_data, kmedoids, linear_svm, silhouette, tsne};
 use p2a_core::regression::{
@@ -154,7 +154,6 @@ use p2a_core::{
     match_it,
     pca,
     random_forest,
-    run_arima,
     run_cbps,
     run_changepoint,
     run_cox_ph,
@@ -1280,20 +1279,13 @@ fn main() {
         results.push(result);
     }
 
-    // PVCM (requires string entity column)
+    // PVCM: run_pvcm reads numeric entity ids and orders them by value, as R's factor
+    // of the id does.
     // Cap: no R benchmark at n=10000
     for (n_ent, n_per) in sizes_for(&["PVCM"], [(10, 10), (50, 20)]) {
         let n = n_ent * n_per;
-        let base_dataset = load_csv_dataset(&data_dir, "panel", n)
+        let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
-        let df_str = base_dataset
-            .df()
-            .clone()
-            .lazy()
-            .with_column(col("entity").cast(DataType::String))
-            .collect()
-            .expect("cast entity to string");
-        let dataset = Dataset::new(df_str);
 
         let mut result = run_benchmark_tracked("PVCM", "random", n, &slow_config, || {
             run_pvcm(&dataset, "y", &["x1", "x2"], "entity", PvcmType::Random)
@@ -1309,20 +1301,13 @@ fn main() {
         results.push(result);
     }
 
-    // PMG (requires string entity column)
+    // PMG: run_pmg reads numeric entity ids and orders them by value, as R's factor
+    // of the id does.
     // Cap: no R benchmark at n=10000
     for (n_ent, n_per) in sizes_for(&["PMG"], [(10, 10), (50, 20)]) {
         let n = n_ent * n_per;
-        let base_dataset = load_csv_dataset(&data_dir, "panel", n)
+        let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
-        let df_str = base_dataset
-            .df()
-            .clone()
-            .lazy()
-            .with_column(col("entity").cast(DataType::String))
-            .collect()
-            .expect("cast entity to string");
-        let dataset = Dataset::new(df_str);
 
         let mut result = run_benchmark_tracked("PMG", "pmg", n, &slow_config, || {
             run_pmg(&dataset, "y", &["x1", "x2"], "entity")
@@ -1398,24 +1383,29 @@ fn main() {
             .unwrap_or_else(|| generate_time_series(n, 42));
 
         if wants("ARIMA") {
-            // ARIMA
+            // ARIMA. R fits forecast::Arima(order = c(1, 1, 1), include.drift = TRUE,
+            // method = "CSS"); run_arima fits no drift for d = 1 (R's default), so the
+            // drift is requested.
+            let arima_spec = ArimaSpec {
+                include_drift: true,
+                ..ArimaSpec::new(1, 1, 1)
+            };
             let mut result = run_benchmark_tracked("ARIMA", "(1,1,1)", n, &config, || {
-                run_arima(&dataset, "y", 1, 1, 1)
+                run_arima_with(&dataset, "y", &arima_spec)
             });
-            if let Ok(ref arima) = run_arima(&dataset, "y", 1, 1, 1) {
+            if let Ok(ref arima) = run_arima_with(&dataset, "y", &arima_spec) {
                 let mut outputs = BTreeMap::new();
                 capture_vec(&mut outputs, "ar_coef", &arima.ar_coeffs);
                 capture_vec(&mut outputs, "ma_coef", &arima.ma_coeffs);
-                capture(&mut outputs, "intercept", arima.intercept);
-                // R (forecast::Arima, CSS, include.drift) reports the same fit's
-                // constant as the mean of the differenced series: drift = c / (1 - sum(ar)),
-                // where c is the arima crate's CSS constant (arima.intercept).
-                // T2-WP16 replaces the crate's fit: run_arima then fits no drift for
-                // d = 1 and ArimaResult gets a `drift` field, so at that merge this call
-                // becomes run_arima_with(.., ArimaSpec { include_drift: true, .. }) and
-                // this capture reads arima.drift.
-                let ar_sum: f64 = arima.ar_coeffs.iter().sum();
-                capture(&mut outputs, "drift", arima.intercept / (1.0 - ar_sum));
+                // R's "intercept" key is the constant of the differenced equation,
+                // drift x (1 - sum(ar)), which is ArimaResult::constant for d = 1 with
+                // drift (R has no intercept coefficient for d = 1).
+                if let Some(constant) = arima.constant {
+                    capture(&mut outputs, "intercept", constant);
+                }
+                if let Some(drift) = arima.drift {
+                    capture(&mut outputs, "drift", drift);
+                }
                 capture(&mut outputs, "aic", arima.aic);
                 result.outputs = outputs;
             }
@@ -2166,9 +2156,9 @@ fn main() {
     for n in sizes_for(&["RD"], [100, 1000]) {
         let dataset =
             load_csv_dataset(&data_dir, "rd", n).unwrap_or_else(|| generate_rd_data(n, 42));
-        // Fixed h = b = 0.3 and HC1 variance, as the R side's rdrobust call: p2a-core
-        // has no CCT mserd selector (its closed-form bandwidth is capped at
-        // range/4), and its "nn" variance is an approximation of rdrobust's.
+        // Fixed h = b = 0.3 and HC1 variance, as the R side's rdrobust call: p2a-core's
+        // MSE-type bandwidth selector is not rdbwselect (CAUS-28; its closed form is
+        // capped at range/4).
         let rd_h = 0.3;
         let rd_config = RdConfig {
             h: Some(rd_h),
