@@ -129,24 +129,14 @@ pub fn print_missing_note(missing: &MissingSummary, format: &OutputFormat) {
 
 /// `{"n_total", "n_used", "n_dropped", "by_column": {column: count}}` when rows
 /// were dropped, else `None`. Callers insert it under the key `"missing"` of
-/// their JSON object, after the result's own keys are built. `by_column` is a
-/// JSON object, so its key order is serde_json's (alphabetical unless
-/// `preserve_order` is enabled), the same as p2a-mcp's `common::missing_json`.
+/// their JSON object, after the result's own keys are built. The value is
+/// `MissingSummary`'s own serialization (core writes `by_column` as an object),
+/// so the shape cannot drift from core's or from p2a-mcp's `common::missing_json`.
 pub fn missing_json(missing: &MissingSummary) -> Option<serde_json::Value> {
     if missing.is_empty() {
         return None;
     }
-    let by_column: serde_json::Map<String, serde_json::Value> = missing
-        .by_column
-        .iter()
-        .map(|(column, count)| (column.clone(), serde_json::json!(count)))
-        .collect();
-    Some(serde_json::json!({
-        "n_total": missing.n_total,
-        "n_used": missing.n_used,
-        "n_dropped": missing.n_dropped,
-        "by_column": by_column,
-    }))
+    serde_json::to_value(missing).ok()
 }
 
 /// Format dataset summary for display
