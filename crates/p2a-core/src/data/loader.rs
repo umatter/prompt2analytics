@@ -940,8 +940,9 @@ mod tests {
                 .unwrap();
         assert_eq!(missing.n_dropped, 1);
         let m = x.iter().sum::<f64>() / x.len() as f64;
-        // R: mean(read.csv(f3)$x, na.rm = TRUE) = 550.54549590536851
-        let r = 550.54549590536851;
+        // R: mean(read.csv(f3)$x, na.rm = TRUE) = 550.54549590536851 (17 digits; the
+        // literal below is the same double, shortest form)
+        let r = 550.545_495_905_368_5;
         assert!((m - r).abs() <= 1e-13 * r, "{m}");
     }
 
