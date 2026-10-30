@@ -475,10 +475,14 @@ mod tests {
         let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
         let cols = numeric_columns(&ds, &["y", "n"], NaPolicy::Omit).unwrap();
         assert_eq!(cols.rows(), [0, 2, 4, 5, 7, 8, 9]);
-        // R (complete.cases(d$y, d$n)): mean y 6.2857142857142856, sum n 94
+        // R (complete.cases(d$y, d$n)): mean y 6.2857142857142856 (17 digits; the literal
+        // is the same double, shortest form), sum n 94
         let y = cols.numeric("y");
         let mean = y.iter().sum::<f64>() / y.len() as f64;
-        assert!((mean - 6.2857142857142856).abs() <= 1e-15 * 6.3, "{mean}");
+        assert!(
+            (mean - 6.285_714_285_714_286).abs() <= 1e-15 * 6.3,
+            "{mean}"
+        );
         assert_eq!(cols.numeric("n").iter().sum::<f64>(), 94.0);
         let e = numeric_columns(&ds, &["s"], NaPolicy::Omit).unwrap_err();
         assert!(e.contains("Column 's' contains non-numeric values"), "{e}");
