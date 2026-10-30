@@ -1628,13 +1628,44 @@ impl AnalyticsServer {
             }
         };
 
-        // One pass over the rows fills the units x times grid.
         let n_units = units.n_levels();
         let n_times = times.len();
         let grid_len = match p2a_core::resource::checked_len(&[n_units, n_times], "scpi panel") {
             Ok(len) => len,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         };
+        // A balanced panel has exactly one row per cell, so the grid never exceeds the rows.
+        // With fewer rows than cells, name the first empty cell from the sorted cells of the
+        // rows (it is among the first rows + 1 cells), without allocating the grid.
+        let rows = units.codes.len();
+        if grid_len > rows {
+            let mut cells: Vec<usize> =
+                match p2a_core::resource::try_with_capacity(rows, "scpi panel") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+                };
+            for (&code, &time) in units.codes.iter().zip(time_of_row) {
+                if let Ok(t) = times.binary_search(&time) {
+                    cells.push(code as usize * n_times + t);
+                }
+            }
+            cells.sort_unstable();
+            cells.dedup();
+            let first = cells
+                .iter()
+                .enumerate()
+                .position(|(i, &c)| i != c)
+                .unwrap_or(cells.len());
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "scpi needs a balanced panel: {n_units} units x {n_times} times = {grid_len} \
+                 cells, but the data has {rows} rows (unit {} has no row for time {}; cells \
+                 without a row: {})",
+                units.levels[first / n_times],
+                times[first % n_times],
+                grid_len - cells.len()
+            ))]));
+        }
+        // One pass over the rows fills the units x times grid.
         let mut grid: Vec<Option<f64>> =
             match p2a_core::resource::try_vec(grid_len, None, "scpi panel") {
                 Ok(g) => g,
@@ -1654,10 +1685,12 @@ impl AnalyticsServer {
             }
             *cell = Some(outcome[i]);
         }
+        // A guard: with no second row per cell and no more cells than rows, every cell is set.
         if let Some(first) = grid.iter().position(Option::is_none) {
             let k = grid.iter().filter(|c| c.is_none()).count();
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "scpi needs a balanced panel: unit {} has no row for time {} ({} cells missing)",
+                "scpi needs a balanced panel: unit {} has no row for time {} (cells without a \
+                 row: {})",
                 units.levels[first / n_times],
                 times[first % n_times],
                 k
@@ -2828,7 +2861,14 @@ mod tests {
             (0..df.height()).map(|i| i != 25).collect();
         let out = err(df.filter(&keep).unwrap(), json!({}));
         assert!(
-            out.contains("balanced panel") && out.contains("unit 2") && out.contains("1940"),
+            out.contains("10 units x 20 times = 200 cells, but the data has 199 rows")
+                && out.contains("unit 2 has no row for time 1940; cells without a row: 1)"),
+            "{out}"
+        );
+        // row 0 (firm 1, 1935) a second time
+        let out = err(df.vstack(&df.slice(0, 1)).unwrap(), json!({}));
+        assert!(
+            out.contains("one row per (unit, time): unit 1 appears twice at time 1935"),
             "{out}"
         );
     }
