@@ -163,7 +163,7 @@ before computing, so R and Rust see the same doubles.
   `econometrics::panel::tests::test_validate_panel_fe_grunfeld_unbalanced`,
   `econometrics::panel::tests::test_validate_panel_fe_sim_corr` pin every quantity above,
   the classical and the three Arellano standard errors and F tests.
-- Unit tests: `econometrics::panel::linear_models::tests::test_fixed_effects_refuses_non_finite_data`,
+- Unit tests: `econometrics::panel::linear_models::tests::test_fixed_effects_non_finite_data`,
   `econometrics::panel::linear_models::tests::test_fixed_effects_cluster_f_not_computed_when_k_reaches_g`,
   `econometrics::panel::linear_models::tests::test_wald_statistic_refuses_a_singular_covariance`,
   `econometrics::panel::linear_models::tests::test_wald_statistic_full_rank`,

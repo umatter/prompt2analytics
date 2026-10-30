@@ -10,6 +10,7 @@ use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 use std::str::FromStr;
 
+use crate::data::columns::MissingSummary;
 use crate::errors::EconError;
 use crate::traits::estimator::{LinearEstimator, SignificanceLevel, t_critical};
 
@@ -176,13 +177,19 @@ pub struct PanelResult {
     /// p-value of `wald_chi2`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wald_p_value: Option<f64>,
-    /// Random effects on an unbalanced panel: θ_i for each entity, in order of
-    /// first appearance in the data. Empty for balanced panels and fixed effects.
+    /// Random effects on an unbalanced panel: the N θ_i in entity order (R factor
+    /// order of the ids), only when the panel is unbalanced. Empty for balanced panels
+    /// and fixed effects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub theta_by_group: Vec<f64>,
     /// Estimation warnings (for example, a negative variance component set to 0).
+    /// When rows were dropped, the first warning is `missing.note()`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Rows dropped because of a missing value in y, a regressor or the entity id
+    /// (plm `na.omit`).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 
     // ── Trait-backing storage (LinearEstimator). Kept out of the public
     //    JSON surface to avoid duplicating the Vec-typed fields above; round-
@@ -407,11 +414,21 @@ impl fmt::Display for PanelResult {
 
         writeln!(f, "{}", "-".repeat(70))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-        if !self.warnings.is_empty() {
+        // The missing-value note is printed once, as the last line
+        let note = self.missing.note();
+        let shown: Vec<&String> = self
+            .warnings
+            .iter()
+            .filter(|w| note.as_deref() != Some(w.as_str()))
+            .collect();
+        if !shown.is_empty() {
             writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
+            for w in shown {
                 writeln!(f, "  - {w}")?;
             }
+        }
+        if let Some(note) = note {
+            writeln!(f, "Missing values: {note}")?;
         }
 
         Ok(())

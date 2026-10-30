@@ -55,7 +55,10 @@
       "tests": [
         "p2a-core::econometrics::panel::utils::tests::test_validate_na_extract_time_ids_integer_widths_and_fractions",
         "p2a-core::econometrics::panel::utils::tests::test_validate_na_extract_entity_ids_factor_order_and_nulls",
-        "p2a-core::econometrics::panel::utils::tests::test_validate_na_entity_and_time_codes"
+        "p2a-core::econometrics::panel::utils::tests::test_validate_na_entity_and_time_codes",
+        "p2a-core::econometrics::panel::linear_models::tests::test_validate_panel_fe_re_grunfeld_na",
+        "p2a-core::econometrics::panel::linear_models::tests::test_validate_panel_fe_missing_ids_not_merged",
+        "p2a-core::econometrics::panel::linear_models::tests::test_validate_na_fe_re_errors_and_integer_regressor"
       ],
       "quantities": [
         "FE coefficients and SEs",

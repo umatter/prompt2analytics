@@ -270,7 +270,7 @@ untransformed data, which p2a reported as `r_squared` before Tier 1.
   `econometrics::panel::linear_models::tests::test_random_effects_needs_within_degrees_of_freedom`,
   `econometrics::panel::linear_models::tests::test_random_effects_needs_more_entities_than_coefficients`,
   `econometrics::panel::linear_models::tests::test_random_effects_stops_when_cancelled`,
-  `econometrics::panel::linear_models::tests::test_random_effects_refuses_non_finite_data`,
+  `econometrics::panel::linear_models::tests::test_random_effects_non_finite_data`,
   `econometrics::panel::tests::test_collinear_regressors_are_refused`,
   `econometrics::panel::tests::test_time_invariant_regressor_fe_refuses_re_warns`.
 - `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_panel_random_effects` checks

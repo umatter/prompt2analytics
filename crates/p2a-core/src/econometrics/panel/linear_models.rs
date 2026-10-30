@@ -47,10 +47,8 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
 use crate::data::Dataset;
-use crate::data::columns::econ_error_from_design;
-use crate::econometrics::hdfe::reject_non_finite;
+use crate::data::columns::{ColumnRequest, Columns, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignError, DesignMatrix};
 use crate::linalg::matrix_ops::{eig_symmetric, safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::estimator::{
@@ -61,7 +59,33 @@ use super::types::{
     ClusterAdjustment, PanelConfig, PanelMethod, PanelResult, PanelVcov, TestDistribution,
     f_test_df2,
 };
-use super::utils::{demean_by_entity, demean_matrix_by_entity, extract_entity_ids};
+use super::utils::{demean_by_entity, demean_matrix_by_entity, entity_codes};
+
+/// y, the regressors and the entity id on the rows complete in all of them (plm
+/// `na.omit`), after refusing an empty regressor list.
+fn panel_columns(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    entity_col: &str,
+) -> EconResult<Columns> {
+    if x_cols.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: "At least one regressor is required".to_string(),
+        });
+    }
+    ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
+        .factor(entity_col)
+        .na(NaPolicy::Omit)
+        .extract()
+}
+
+/// The missing-value note as the first warning, when rows were dropped.
+fn warnings_with_note(missing: &MissingSummary) -> Vec<String> {
+    missing.note().into_iter().collect()
+}
 
 /// Run Fixed Effects (within) panel estimation with the default [`PanelConfig`]
 /// (classical covariance, as plm).
@@ -95,9 +119,11 @@ pub fn run_fixed_effects(
 /// or whenever the slope covariance is singular, the F test is not computed:
 /// `f_stat` and `f_p_value` are NaN and a warning says why.
 ///
-/// Refused: a non-finite value in `y` or a regressor, and regressors that are
-/// exactly collinear after removing the entity means (the coefficients are not
-/// identified).
+/// Rows with a missing value (null or NaN) in `y`, a regressor or the entity are
+/// dropped and reported in `missing` (plm `na.omit`); an infinite value is refused
+/// (`NonFiniteValues`). Entities are numbered in R factor order of the ids. Refused:
+/// regressors that are exactly collinear after removing the entity means (the
+/// coefficients are not identified).
 pub fn run_fixed_effects_with(
     dataset: &Dataset,
     y_col: &str,
@@ -105,22 +131,16 @@ pub fn run_fixed_effects_with(
     entity_col: &str,
     config: &PanelConfig,
 ) -> EconResult<PanelResult> {
-    // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-
-    // Build design matrix without intercept for FE
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-
+    // y, X (no intercept for FE) and the entity on the complete rows
+    let cols = panel_columns(dataset, y_col, x_cols, entity_col)?;
+    let missing = cols.missing().clone();
+    let y = cols.numeric_array(y_col);
+    let design = cols.matrix(x_cols, false);
     let x = design.data;
     let var_names = design.column_names;
-    reject_non_finite_data(&y, y_col, &x, &var_names)?;
     let n = y.len();
     let k = x.ncols();
-
-    // Extract entity IDs
-    let (entity_ids, n_groups) = extract_entity_ids(dataset, entity_col)?;
+    let (entity_ids, n_groups) = entity_codes(cols.factor(entity_col));
 
     if n_groups < 2 {
         return Err(EconError::InsufficientData {
@@ -145,7 +165,7 @@ pub fn run_fixed_effects_with(
     }
 
     // OLS on demeaned data: β = (X̃'X̃)^{-1} X̃'ỹ
-    let mut warnings = Vec::new();
+    let mut warnings = warnings_with_note(&missing);
     let xtx_mat = xtx(&x_demeaned.view());
     require_full_rank(
         &xtx_mat,
@@ -287,6 +307,7 @@ pub fn run_fixed_effects_with(
         wald_p_value: None,
         theta_by_group: Vec::new(),
         warnings,
+        missing,
         coef_arr,
         se_arr,
         residuals,
@@ -337,10 +358,12 @@ pub fn run_random_effects(
 /// `(K, G - 1)` under the Arellano covariance (plm's `df2adj` for a cluster
 /// vcov).
 ///
-/// Refused: a non-finite value in `y` or a regressor, regressors that are
-/// exactly collinear with each other or with the intercept (the coefficients are
-/// not identified), `n <= N + K` (no within degrees of freedom for σ²_ν) and
-/// `N <= K + 1` (the between regression is not estimable, as plm).
+/// Rows with a missing value (null or NaN) in `y`, a regressor or the entity are
+/// dropped and reported in `missing` (plm `na.omit`); an infinite value is refused
+/// (`NonFiniteValues`). Entities are numbered in R factor order of the ids. Refused:
+/// regressors that are exactly collinear with each other or with the intercept (the
+/// coefficients are not identified), `n <= N + K` (no within degrees of freedom for
+/// σ²_ν) and `N <= K + 1` (the between regression is not estimable, as plm).
 ///
 /// # References
 /// - Swamy, P.A.V.B. & Arora, S.S. (1972). The exact finite sample properties of
@@ -356,24 +379,19 @@ pub fn run_random_effects_with(
     entity_col: &str,
     config: &PanelConfig,
 ) -> EconResult<PanelResult> {
-    // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-
-    // Design with intercept (column 0, "(Intercept)"); the slopes are 1..
-    if x_cols.is_empty() {
-        return Err(DesignError::NoColumns.into());
-    }
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
+    // y, the design with intercept (column 0, "(Intercept)"; the slopes are 1..)
+    // and the entity on the complete rows
+    let cols = panel_columns(dataset, y_col, x_cols, entity_col)?;
+    let missing = cols.missing().clone();
+    let y = cols.numeric_array(y_col);
+    let design = cols.matrix(x_cols, true);
     let x = design.data;
     let var_names = design.column_names;
-    reject_non_finite_data(&y, y_col, &x, &var_names)?;
     let n = y.len();
     let p = x.ncols(); // K + 1
     let k_s = p - 1; // K
 
-    let (entity_ids, n_groups) = extract_entity_ids(dataset, entity_col)?;
+    let (entity_ids, n_groups) = entity_codes(cols.factor(entity_col));
 
     if n_groups < 2 {
         return Err(EconError::InsufficientData {
@@ -401,7 +419,7 @@ pub fn run_random_effects_with(
         });
     }
 
-    let mut warnings = Vec::new();
+    let mut warnings = warnings_with_note(&missing);
 
     // Step 1: within regression on the entity-demeaned slopes -> sigma^2_nu
     // (the demeaned intercept column is zero and is left out of the view)
@@ -633,25 +651,12 @@ pub fn run_random_effects_with(
         wald_p_value,
         theta_by_group,
         warnings,
+        missing,
         coef_arr,
         se_arr,
         residuals,
         vcov,
     })
-}
-
-/// Refuses a non-finite value in `y` or in a column of `x`, as `run_hdfe` does.
-fn reject_non_finite_data(
-    y: &Array1<f64>,
-    y_col: &str,
-    x: &Array2<f64>,
-    names: &[String],
-) -> EconResult<()> {
-    reject_non_finite(y.iter(), &format!("Dependent variable '{y_col}'"))?;
-    for (j, name) in names.iter().enumerate() {
-        reject_non_finite(x.column(j).iter(), &format!("Regressor '{name}'"))?;
-    }
-    Ok(())
 }
 
 /// Records that `safe_inverse` fell back to a pseudoinverse (`Some(cond)`) for
@@ -1033,51 +1038,215 @@ mod tests {
         Dataset::new(df)
     }
 
-    /// The column and count of a `NullValues` or `NonFiniteValues` error.
-    fn named_refusal(res: EconResult<PanelResult>) -> (&'static str, String, usize) {
+    /// The column and count of a `NonFiniteValues` error.
+    fn non_finite(res: EconResult<PanelResult>) -> (String, usize) {
         match res {
-            Err(EconError::NullValues { column, count }) => ("NullValues", column, count),
-            Err(EconError::NonFiniteValues { column, count }) => ("NonFiniteValues", column, count),
-            other => panic!("expected NullValues or NonFiniteValues, got {other:?}"),
+            Err(EconError::NonFiniteValues { column, count }) => (column, count),
+            other => panic!("expected NonFiniteValues, got {other:?}"),
         }
     }
 
-    /// A NaN in y used to give NaN coefficients with SE 0 and p 1; it is
-    /// refused by the shared extraction rule (DesignMatrix: NaN is missing,
-    /// Inf is refused), as in `run_hdfe`, as is an infinite regressor value.
+    /// `synthetic_panel(10, 4)` without row `row`.
+    fn panel_without(row: usize) -> Dataset {
+        let df = synthetic_panel(10, 4).df().clone();
+        use polars::prelude::{BooleanChunked, NewChunkedArray};
+        let keep: Vec<bool> = (0..df.height()).map(|i| i != row).collect();
+        let mask = BooleanChunked::from_slice("keep".into(), &keep);
+        Dataset::new(df.filter(&mask).unwrap())
+    }
+
+    /// Coefficients and SEs of two fits agree to 1e-12.
+    fn assert_same_fit(a: &PanelResult, b: &PanelResult) {
+        let tol = p2a_validation::Tol::new(1e-12, 1e-12);
+        assert_eq!(a.variables, b.variables);
+        for (x, y) in a
+            .coefficients
+            .iter()
+            .chain(&a.std_errors)
+            .zip(b.coefficients.iter().chain(&b.std_errors))
+        {
+            assert!(tol.allows(*x, *y), "{x} vs {y}");
+        }
+    }
+
+    /// A NaN in y is a missing cell (design 1.1, plm na.omit): the row is dropped and
+    /// reported, and the fit equals the fit without that row; an infinite regressor
+    /// value is refused by name.
     #[test]
-    fn test_fixed_effects_refuses_non_finite_data() {
-        let fe = |ds: &Dataset| run_fixed_effects(ds, "y", &["x"], "entity");
-        assert_eq!(
-            named_refusal(fe(&panel_with("y", 5, f64::NAN))),
-            ("NullValues", "y".to_string(), 1)
-        );
-        assert_eq!(
-            named_refusal(fe(&panel_with("x", 7, f64::INFINITY))),
-            ("NonFiniteValues", "x".to_string(), 1)
-        );
-        let config = PanelConfig {
+    fn test_fixed_effects_non_finite_data() {
+        let classical = PanelConfig::default();
+        let arellano = PanelConfig {
             vcov: PanelVcov::Arellano(ClusterAdjustment::Stata),
         };
-        let ds = panel_with("y", 0, f64::NAN);
+        for config in [classical, arellano] {
+            let fe = |ds: &Dataset| run_fixed_effects_with(ds, "y", &["x"], "entity", &config);
+            let r = fe(&panel_with("y", 5, f64::NAN)).unwrap();
+            assert_same_fit(&r, &fe(&panel_without(5)).unwrap());
+            assert_eq!(r.missing.n_dropped, 1);
+            assert_eq!(r.missing.by_column, [("y".to_string(), 1)]);
+            assert_eq!(r.n_obs, 39);
+        }
         assert_eq!(
-            named_refusal(run_fixed_effects_with(&ds, "y", &["x"], "entity", &config)),
-            ("NullValues", "y".to_string(), 1)
+            non_finite(run_fixed_effects(
+                &panel_with("x", 7, f64::INFINITY),
+                "y",
+                &["x"],
+                "entity"
+            )),
+            ("x".to_string(), 1)
         );
     }
 
-    /// RE with a NaN in y used to return NaN coefficients, SE 0, p 1 and a
-    /// spurious between-rank warning; the shared extraction rule refuses it.
+    /// RE drops a NaN row as FE does; a negative infinity is refused by name.
     #[test]
-    fn test_random_effects_refuses_non_finite_data() {
+    fn test_random_effects_non_finite_data() {
         let re = |ds: &Dataset| run_random_effects(ds, "y", &["x"], "entity");
+        let r = re(&panel_with("y", 5, f64::NAN)).unwrap();
+        assert_same_fit(&r, &re(&panel_without(5)).unwrap());
+        assert_eq!(r.missing.n_dropped, 1);
+        assert_eq!(r.missing.by_column, [("y".to_string(), 1)]);
         assert_eq!(
-            named_refusal(re(&panel_with("y", 5, f64::NAN))),
-            ("NullValues", "y".to_string(), 1)
+            non_finite(re(&panel_with("x", 7, f64::NEG_INFINITY))),
+            ("x".to_string(), 1)
+        );
+    }
+
+    /// FE and RE on Grunfeld with missing cells and two missing ids, pinned to plm on
+    /// the 195 rows complete in (inv, value, capital, id), for a text and a numeric id.
+    #[test]
+    fn test_validate_panel_fe_re_grunfeld_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        for id in ["firm_name", "firm_id"] {
+            let fe = run_fixed_effects(&ds, "inv", &["value", "capital"], id).unwrap();
+            let re = run_random_effects(&ds, "inv", &["value", "capital"], id).unwrap();
+            let n = fe.n_obs;
+            let by = |c: &str| {
+                fe.missing
+                    .by_column
+                    .iter()
+                    .find(|(k, _)| k == c)
+                    .map_or(0, |(_, v)| *v) as f64
+            };
+            Check::new(&case)
+                .named("fe_coef", &fe.variables, &fe.coefficients, Tol::coef(n))
+                .named("fe_se", &fe.variables, &fe.std_errors, Tol::se(n))
+                .scalar("fe_nobs", fe.n_obs as f64, Tol::exact())
+                .named("re_coef", &re.variables, &re.coefficients, Tol::coef(n))
+                .named("re_se", &re.variables, &re.std_errors, Tol::se(n))
+                .scalar("re_nobs", re.n_obs as f64, Tol::exact())
+                .scalar("n_groups", fe.n_groups as f64, Tol::exact())
+                .scalar("missing_inv", by("inv"), Tol::exact())
+                .scalar("missing_value", by("value"), Tol::exact())
+                // firm_id is missing in the same 2 rows as firm_name
+                .scalar("missing_firm_name", by(id), Tol::exact())
+                .finish();
+            let note = format!(
+                "5 of 200 rows dropped because of missing values (inv: 2, value: 1, {id}: 2)"
+            );
+            assert_eq!(fe.missing.note(), Some(note.clone()));
+            assert_eq!(re.missing, fe.missing);
+            assert!(fe.warnings.contains(&note) && re.warnings.contains(&note));
+            let text = fe.to_string();
+            assert_eq!(text.matches(&note).count(), 1, "{text}");
+            assert!(
+                text.trim_end()
+                    .ends_with(&format!("Missing values: {note}")),
+                "{text}"
+            );
+            assert_eq!(re.n_groups, 10);
+        }
+    }
+
+    /// ECON-37: with y and x complete, two missing ids used to become entity 0 (numeric,
+    /// merged into the real firm 0) or the pseudo-entity "" (text, an 11th group). They
+    /// now drop their rows, so both id columns give plm's estimate on 195 rows.
+    #[test]
+    fn test_validate_panel_fe_missing_ids_not_merged() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        let subset = [
+            "inv".to_string(),
+            "value".to_string(),
+            "capital".to_string(),
+        ];
+        let xy = Dataset::new(ds.df().drop_nulls(Some(&subset)).unwrap());
+        assert_eq!(xy.df().height(), 197);
+        for id in ["firm_name", "firm_id"] {
+            let fe = run_fixed_effects(&xy, "inv", &["value", "capital"], id).unwrap();
+            let re = run_random_effects(&xy, "inv", &["value", "capital"], id).unwrap();
+            Check::new(&case)
+                .named("fe_coef", &fe.variables, &fe.coefficients, Tol::coef(195))
+                .named("fe_se", &fe.variables, &fe.std_errors, Tol::se(195))
+                .named("re_coef", &re.variables, &re.coefficients, Tol::coef(195))
+                .named("re_se", &re.variables, &re.std_errors, Tol::se(195))
+                .finish();
+            for r in [&fe, &re] {
+                assert_eq!(
+                    (r.n_groups, r.n_obs, r.missing.n_dropped),
+                    (10, 195, 2),
+                    "{id}"
+                );
+            }
+        }
+    }
+
+    /// The errors name the column and its problem; an Int64 regressor gives the fit of
+    /// the same values in Float64.
+    #[test]
+    fn test_validate_na_fe_re_errors_and_integer_regressor() {
+        let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        let non_numeric = |r: EconResult<PanelResult>| match r {
+            Err(EconError::NonNumericColumn { column }) => column,
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        };
+        assert_eq!(
+            non_numeric(run_fixed_effects(&ds, "firm_name", &["value"], "firm")),
+            "firm_name"
         );
         assert_eq!(
-            named_refusal(re(&panel_with("x", 7, f64::NEG_INFINITY))),
-            ("NonFiniteValues", "x".to_string(), 1)
+            non_numeric(run_random_effects(&ds, "inv", &["firm_name"], "firm")),
+            "firm_name"
+        );
+        match run_fixed_effects(&ds, "inv", &["value"], "nope") {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "nope"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
+        for r in [
+            run_fixed_effects(&ds, "inv", &[], "firm"),
+            run_random_effects(&ds, "inv", &[], "firm"),
+        ] {
+            match r {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert_eq!(message, "At least one regressor is required")
+                }
+                other => panic!("expected InvalidSpecification, got {other:?}"),
+            }
+        }
+
+        // Grunfeld's Int64 year as a regressor equals the same values in Float64
+        let path = p2a_validation::repo_path(&case.datasets[0]);
+        let g = Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        assert_eq!(
+            g.df().column("year").unwrap().dtype(),
+            &polars::prelude::DataType::Int64
+        );
+        let mut df = g.df().clone();
+        let year_f = df
+            .column("year")
+            .unwrap()
+            .cast(&polars::prelude::DataType::Float64)
+            .unwrap();
+        df.with_column(year_f).unwrap();
+        let g_f = Dataset::new(df);
+        let x = ["value", "year"];
+        assert_same_fit(
+            &run_fixed_effects(&g, "inv", &x, "firm").unwrap(),
+            &run_fixed_effects(&g_f, "inv", &x, "firm").unwrap(),
+        );
+        assert_same_fit(
+            &run_random_effects(&g, "inv", &x, "firm").unwrap(),
+            &run_random_effects(&g_f, "inv", &x, "firm").unwrap(),
         );
     }
 
