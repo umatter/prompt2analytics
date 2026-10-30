@@ -86,7 +86,7 @@ use crate::config::{
 use crate::server::AnalyticsServer;
 use crate::session::{
     DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager, SessionStateSnapshot,
-    fmt_bytes,
+    fmt_bytes, same_dataset,
 };
 use crate::tools::limits::{self, LimitViolation};
 use crate::transport::http::{ApiResponse, ToolResult};
@@ -1243,6 +1243,12 @@ impl Quotas {
     /// `ExecConfig::from_config` defaults the session concurrency to 1 when a
     /// quota applies.
     ///
+    /// The charge after the call is computed without pruning the memory
+    /// profiler (`Session::recharge_data_bytes`); the profiler is pruned to
+    /// the held datasets only once the call is kept, and a refused call's
+    /// [`Session::restore_state`] prunes it to the restored ones, so a
+    /// dataset the call removed and the rollback restores keeps its entry.
+    ///
     /// A call that left the state as it found it (most calls only read it)
     /// is passed without charging anything ([`state_unchanged`]): the
     /// session's cached charge is still that of its state, since every
@@ -1260,8 +1266,12 @@ impl Quotas {
             return Ok(());
         }
         let before = snapshot.bytes();
-        let after = session.refresh_data_bytes().await;
+        // Charged without pruning the memory profiler: a refusal restores
+        // the snapshot, and an entry pruned now would be lost for a dataset
+        // the rollback puts back. A kept call prunes it below.
+        let after = session.recharge_data_bytes().await;
         if after <= before {
+            session.prune_profiler().await;
             return Ok(());
         }
         let mut refusal = None;
@@ -1290,7 +1300,10 @@ impl Quotas {
             }
         }
         match refusal {
-            None => Ok(()),
+            None => {
+                session.prune_profiler().await;
+                Ok(())
+            }
             Some(message) => {
                 session.restore_state(snapshot).await;
                 tracing::info!(
@@ -1340,24 +1353,18 @@ async fn state_unchanged(snapshot: &SessionStateSnapshot, session: &Session) -> 
 
 /// Whether `current` holds exactly the datasets of `snapshot`: the same
 /// names, each with the same columns, shared with the snapshot rather than
-/// rebuilt. Only columns backed by a series are compared; any other column
-/// (a scalar or partitioned one) counts as changed, so the caller charges
-/// the datasets in full.
+/// rebuilt ([`same_dataset`]). Only columns backed by a series are
+/// compared; any other column (a scalar or partitioned one) counts as
+/// changed, so the caller charges the datasets in full.
 fn datasets_unchanged(
     snapshot: &HashMap<String, p2a_core::data::Dataset>,
     current: &HashMap<String, p2a_core::data::Dataset>,
 ) -> bool {
-    use p2a_core::polars::prelude::Column;
-    let same_column = |a: &Column, b: &Column| match (a, b) {
-        (Column::Series(a), Column::Series(b)) => Arc::ptr_eq(&a.0, &b.0),
-        _ => false,
-    };
     snapshot.len() == current.len()
         && snapshot.iter().all(|(name, before)| {
-            current.get(name).is_some_and(|now| {
-                let (before, now) = (before.df().get_columns(), now.df().get_columns());
-                before.len() == now.len() && before.iter().zip(now).all(|(a, b)| same_column(a, b))
-            })
+            current
+                .get(name)
+                .is_some_and(|now| same_dataset(before, now))
         })
 }
 
@@ -2765,5 +2772,131 @@ mod session_state_quota_tests {
         assert_eq!(profiler.dataset_memory("a"), None);
         assert!(profiler.dataset_memory("keep").is_some());
         assert_eq!(profiler.dataset_count(), 1);
+    }
+
+    /// A folder under the data root that the load and export tools accept.
+    fn data_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(".p2a-w1f-")
+            .tempdir_in(crate::path_jail::allowed_data_root().unwrap())
+            .unwrap()
+    }
+
+    /// A noisy two-column CSV of `rows` rows in `dir`; its path.
+    fn csv_in(dir: &tempfile::TempDir, file: &str, rows: usize) -> String {
+        let path = dir.path().join(file);
+        let body: String = (0..rows)
+            .map(|i| format!("{},{}\n", i as f64 * 0.5 + 0.13, (i % 7) as f64 * 1.1 - 0.4))
+            .collect();
+        std::fs::write(&path, format!("x,y\n{body}")).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    fn per_session_governor(m: &Arc<SessionManager>, limit: u64) -> ToolGovernor {
+        ToolGovernor::new(
+            ExecConfig {
+                session_data_bytes: Some(limit),
+                ..Default::default()
+            },
+            Arc::clone(m),
+        )
+    }
+
+    async fn new_session(m: &SessionManager) -> Arc<Session> {
+        m.get_session(&m.create_session(None).await.unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn succeeded(r: Result<ToolResult, ToolCallError>) {
+        let r = r.unwrap();
+        assert!(r.success, "{}", text(&r));
+    }
+
+    fn refused(r: Result<ToolResult, ToolCallError>) {
+        match r {
+            Err(ToolCallError::QuotaExceeded(msg)) => assert!(msg.contains("undone"), "{msg}"),
+            other => panic!("expected QuotaExceeded, got {other:?}"),
+        }
+    }
+
+    /// A dataset that a refused call removed keeps its profiler entry when
+    /// the rollback puts it back: pre-fix the quota check pruned the
+    /// profiler before it decided to refuse, so the restored dataset had
+    /// lost its entry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_replacing_import_keeps_the_cleared_datasets_entry() {
+        let dir = data_dir();
+        let (small, big) = (csv_in(&dir, "small.csv", 6), csv_in(&dir, "big.csv", 400));
+        let saved = dir.path().join("big.json").to_str().unwrap().to_string();
+        let m = manager();
+        let roomy = per_session_governor(&m, 1 << 30);
+        let exporter = new_session(&m).await;
+        let load = |path: &str, name: &str| serde_json::json!({"path": path, "name": name});
+        succeeded(run(&roomy, &exporter, "load_dataset", load(&big, "big")).await);
+        succeeded(
+            run(
+                &roomy,
+                &exporter,
+                "export_session",
+                serde_json::json!({"file_path": saved}),
+            )
+            .await,
+        );
+
+        let s = new_session(&m).await;
+        succeeded(run(&roomy, &s, "load_dataset", load(&small, "a")).await);
+        let tracked = s.memory_profiler.read().await.dataset_memory("a");
+        assert!(tracked.is_some());
+        let tight = per_session_governor(&m, s.data_bytes() + 1);
+        let import = serde_json::json!({"file_path": saved, "merge": false});
+        refused(run(&tight, &s, "import_session", import).await);
+        let held: Vec<String> = s.datasets.read().await.keys().cloned().collect();
+        assert_eq!(held, ["a"]);
+        let profiler = s.memory_profiler.read().await;
+        assert_eq!(profiler.dataset_memory("a"), tracked);
+        assert_eq!(profiler.dataset_count(), 1);
+    }
+
+    /// A refused load that replaced a dataset of the same name leaves the
+    /// profiler entry with the original dataset's estimate: pre-fix it kept
+    /// the estimate of the dataset the rollback removed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_replacing_load_keeps_the_original_estimate() {
+        let dir = data_dir();
+        let (small, big) = (csv_in(&dir, "small.csv", 6), csv_in(&dir, "big.csv", 400));
+        let m = manager();
+        let s = new_session(&m).await;
+        let load = |path: &str| serde_json::json!({"path": path, "name": "d"});
+        let roomy = per_session_governor(&m, 1 << 30);
+        succeeded(run(&roomy, &s, "load_dataset", load(&small)).await);
+        let original = s.memory_profiler.read().await.dataset_memory("d");
+        assert!(original.is_some());
+        let tight = per_session_governor(&m, s.data_bytes() + 1);
+        refused(run(&tight, &s, "load_dataset", load(&big)).await);
+        assert_eq!(s.datasets.read().await["d"].nrows(), 6);
+        let profiler = s.memory_profiler.read().await;
+        assert_eq!(profiler.dataset_memory("d"), original);
+        assert_eq!(profiler.dataset_count(), 1);
+    }
+
+    /// A refused call that loads nothing leaves the profiler as it was, its
+    /// history included: the rollback re-tracks only a dataset the call
+    /// replaced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_call_that_loads_nothing_adds_no_history_rows() {
+        let m = manager();
+        let s = session_in(&m, "sp", spatial_fixture()).await;
+        let ds = s.datasets.read().await["sp"].clone();
+        s.memory_profiler.write().await.track_dataset("sp", &ds);
+        let base = s.refresh_data_bytes().await;
+        let rows = s.memory_profiler.read().await.history().len();
+        let estimate = s.memory_profiler.read().await.dataset_memory("sp");
+        let g = per_session_governor(&m, base + 6_722 + 1_000);
+        succeeded(run(&g, &s, "spatial_neighbors", nb(4, "w4")).await);
+        refused(run(&g, &s, "spatial_neighbors", nb(20, "w20")).await);
+        let profiler = s.memory_profiler.read().await;
+        assert_eq!(profiler.history().len(), rows);
+        assert_eq!(profiler.dataset_memory("sp"), estimate);
     }
 }

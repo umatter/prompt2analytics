@@ -47,10 +47,13 @@ pub struct Session {
     pub spatial_weights: Arc<RwLock<HashMap<String, SpatialWeights>>>,
     /// The profile behind `server_stats`' "Recent Memory History"
     /// (`include_history`) for this session. No quota charges it; instead
-    /// its names are pruned to the datasets the session holds at every
-    /// charge refresh ([`refresh_data_bytes`](Self::refresh_data_bytes)),
-    /// which every governed call that changed the state runs when a quota
-    /// applies.
+    /// its names are pruned to the datasets the session holds once a
+    /// governed call that changed the state is kept (`Quotas::enforce`) or
+    /// undone ([`restore_state`](Self::restore_state)) when a quota applies,
+    /// and at every charge refresh
+    /// ([`refresh_data_bytes`](Self::refresh_data_bytes)). Without a quota
+    /// nothing prunes it, so the history can count datasets the session no
+    /// longer holds.
     pub memory_profiler: Arc<RwLock<MemoryProfiler>>,
     /// Optional user ID (when authentication is enabled)
     pub user_id: Option<String>,
@@ -159,10 +162,22 @@ impl Session {
     /// session and no quota charges it, so an entry whose dataset left the
     /// session (a replacing `import_session` clears the datasets) must not
     /// stay. When a quota applies, every governed call that changed the
-    /// session's state refreshes the charge (`Quotas::enforce`, or after a
-    /// call that did not finish), so no entry outlives the call that
-    /// removed its dataset, however the dataset left.
+    /// session's state prunes it once the call is kept (`Quotas::enforce`)
+    /// or undone ([`restore_state`](Self::restore_state)), or refreshes the
+    /// charge after a call that did not finish, so no entry outlives the
+    /// call that removed its dataset, however the dataset left.
     pub async fn refresh_data_bytes(&self) -> u64 {
+        let bytes = self.recharge_data_bytes().await;
+        self.prune_profiler().await;
+        bytes
+    }
+
+    /// Recompute the size of this session's state ([`session_state_bytes`]),
+    /// cache it (its shared labels included) and return it, leaving the
+    /// memory profiler alone: for a quota check that may still undo the call
+    /// (`Quotas::enforce`), which must not prune the entry of a dataset the
+    /// rollback puts back.
+    pub(crate) async fn recharge_data_bytes(&self) -> u64 {
         let charge = self.state_charge().await;
         {
             // Both under the mutex, which the server total reads them under,
@@ -175,7 +190,6 @@ impl Session {
             };
             self.data_bytes.store(charge.bytes, Ordering::SeqCst);
         }
-        self.prune_profiler().await;
         charge.bytes
     }
 
@@ -190,8 +204,9 @@ impl Session {
     /// `load_dataset` tracks its dataset just before inserting it, so a
     /// refresh that runs in between, from another call in the same session,
     /// drops that entry; it is display-only. Under a quota the governor runs
-    /// one call per session at a time.
-    async fn prune_profiler(&self) {
+    /// one call per session at a time by default (`ExecConfig::from_config`);
+    /// an operator who raises the session concurrency accepts this.
+    pub(crate) async fn prune_profiler(&self) {
         let held: HashSet<String> = self.datasets.read().await.keys().cloned().collect();
         let mut profiler = self.memory_profiler.write().await;
         let tracked_and_held = held
@@ -267,20 +282,64 @@ impl Session {
     /// a dataset before inserting it, so a load the quota refuses would
     /// leave its entry behind; the charge refresh at the end prunes the
     /// profiler's names to the restored datasets, as every charge refresh
-    /// does ([`refresh_data_bytes`](Self::refresh_data_bytes)). (An entry
-    /// the undone call re-tracked for a dataset it replaced keeps that
-    /// call's estimate.)
+    /// does ([`refresh_data_bytes`](Self::refresh_data_bytes)). A tracked
+    /// name whose dataset the undone call replaced (its columns are not the
+    /// snapshot's, [`same_dataset`]) is tracked again with the snapshot's
+    /// dataset when its entry holds another estimate, so a load that
+    /// replaced a dataset and was undone leaves the original's estimate. A
+    /// call that replaced no dataset adds no history row here.
     pub async fn restore_state(&self, snapshot: SessionStateSnapshot) {
         let SessionStateSnapshot {
             datasets,
             cleaning_sessions,
             spatial_weights,
         } = snapshot;
+        {
+            // The replaced names are collected under the datasets' read
+            // lock, which is dropped before the profiler's lock is taken.
+            let replaced: Vec<(&String, &Dataset)> = {
+                let current = self.datasets.read().await;
+                datasets
+                    .iter()
+                    .filter(|(name, before)| {
+                        current
+                            .get(name.as_str())
+                            .is_some_and(|now| !same_dataset(before, now))
+                    })
+                    .collect()
+            };
+            if !replaced.is_empty() {
+                let mut profiler = self.memory_profiler.write().await;
+                for (name, before) in replaced {
+                    let estimate = p2a_core::estimate_dataset_memory(before);
+                    if profiler
+                        .dataset_memory(name)
+                        .is_some_and(|tracked| tracked != estimate)
+                    {
+                        profiler.track_dataset(name, before);
+                    }
+                }
+            }
+        }
         *self.datasets.write().await = datasets;
         *self.cleaning_sessions.write().await = cleaning_sessions;
         *self.spatial_weights.write().await = spatial_weights;
         self.refresh_data_bytes().await;
     }
+}
+
+/// Whether `now` is `before` itself, column for column: the same columns,
+/// each shared with `before` rather than rebuilt. Only columns backed by a
+/// series are compared; any other column (a scalar or partitioned one)
+/// counts as changed.
+pub(crate) fn same_dataset(before: &Dataset, now: &Dataset) -> bool {
+    use p2a_core::polars::prelude::Column;
+    let same_column = |a: &Column, b: &Column| match (a, b) {
+        (Column::Series(a), Column::Series(b)) => Arc::ptr_eq(&a.0, &b.0),
+        _ => false,
+    };
+    let (before, now) = (before.df().get_columns(), now.df().get_columns());
+    before.len() == now.len() && before.iter().zip(now).all(|(a, b)| same_column(a, b))
 }
 
 /// A session's datasets, cleaning sessions and spatial weights, copied
