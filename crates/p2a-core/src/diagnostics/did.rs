@@ -356,6 +356,7 @@ mod tests {
             n_treated: 300,
             n_never_treated: 700,
             warnings: vec![],
+            missing: Default::default(),
         }
     }
 
@@ -443,6 +444,7 @@ mod tests {
             n_treated: 100,
             n_never_treated: 200,
             warnings: vec![],
+            missing: Default::default(),
         };
 
         let report = staggered_did_diagnostics(&result);

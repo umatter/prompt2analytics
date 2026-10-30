@@ -52,8 +52,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, normal_cdf};
@@ -256,6 +256,9 @@ pub struct StaggeredDidResult {
     pub n_never_treated: usize,
     /// Warnings generated
     pub warnings: Vec<String>,
+    /// Rows dropped because of missing values (empty when none were).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for StaggeredDidResult {
@@ -336,12 +339,23 @@ impl fmt::Display for StaggeredDidResult {
             }
         }
 
-        if !self.warnings.is_empty() {
+        // The missing-value note is printed once, as the last line.
+        let note = self.missing.note();
+        let warnings: Vec<&String> = self
+            .warnings
+            .iter()
+            .filter(|w| Some(w.as_str()) != note.as_deref())
+            .collect();
+        if !warnings.is_empty() {
             writeln!(f)?;
             writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
+            for w in warnings {
                 writeln!(f, "  - {}", w)?;
             }
+        }
+        if let Some(note) = note {
+            writeln!(f)?;
+            writeln!(f, "Missing values: {note}")?;
         }
 
         Ok(())
@@ -357,13 +371,23 @@ impl fmt::Display for StaggeredDidResult {
 /// # Arguments
 ///
 /// * `dataset` - Panel dataset with repeated observations
-/// * `outcome` - Name of the outcome variable
+/// * `outcome` - Name of the outcome variable (numeric)
 /// * `treatment_time` - Name of the column indicating when each unit was first treated
-///   (use 0 or negative for never-treated units)
-/// * `time_col` - Name of the time period column
-/// * `unit_col` - Name of the unit/individual identifier column
-/// * `covariates` - Optional covariate columns for conditional parallel trends
+///   (whole numbers or dates; 0 or negative for never-treated units). It must be
+///   constant within each unit, as `did::att_gt` requires.
+/// * `time_col` - Name of the time period column (whole numbers or dates)
+/// * `unit_col` - Name of the unit/individual identifier column (any type: integers,
+///   fractional numbers, strings, categoricals, dates)
+/// * `covariates` - Optional covariate columns for conditional parallel trends (numeric)
 /// * `config` - Configuration options
+///
+/// # Missing values
+///
+/// The columns are read through [`crate::data::columns::ColumnRequest`]: a row with a
+/// missing value (null or NaN) in the outcome, the first treatment period, the time, the
+/// unit or a covariate is dropped from every column, and `StaggeredDidResult::missing`,
+/// the warnings and the last Display line report what was dropped. Infinite values,
+/// fractional periods and text outcomes are refused with an error naming the column.
 ///
 /// # Model
 ///
@@ -421,70 +445,73 @@ pub fn run_staggered_did(
 ) -> EconResult<StaggeredDidResult> {
     let mut warnings = Vec::new();
 
-    // Extract data
-    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    // One request over every column the estimator uses: rows with a missing
+    // value in any of them are dropped jointly (reported in `missing`).
+    let covariates = covariates.filter(|c| !c.is_empty());
+    let mut request = ColumnRequest::new(dataset.df())
+        .numeric(outcome)
+        .time_index(treatment_time)
+        .time_index(time_col)
+        .factor(unit_col);
+    if let Some(c) = covariates {
+        request = request.numerics(c);
+    }
+    let cols = request.na(NaPolicy::Omit).extract()?;
+    let n = cols.n();
+    let unit = cols.factor(unit_col);
+    let first_treat = cols.time_index(treatment_time);
+    let period = cols.time_index(time_col);
 
-    let g_col = DesignMatrix::extract_column(dataset.df(), treatment_time).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_time.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    // The arrays the cell and bootstrap helpers take. Time indices are exact as
+    // f64 below 2^53; unit codes are 0..n_units in factor-level order, which is
+    // the numeric order for numeric ids.
+    let y = Array1::from(cols.numeric(outcome).to_vec());
+    let g_col: Array1<f64> = first_treat.iter().map(|&g| g as f64).collect();
+    let t_col: Array1<f64> = period.iter().map(|&t| t as f64).collect();
+    let unit_ids: Array1<f64> = unit.codes.iter().map(|&u| f64::from(u)).collect();
+    // The intercept column stays, as in the design matrix used before.
+    let x_cov: Option<Array2<f64>> = covariates.map(|c| cols.matrix(c, true).data);
 
-    let t_col = DesignMatrix::extract_column(dataset.df(), time_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let unit_ids = DesignMatrix::extract_column(dataset.df(), unit_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: unit_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let n = y.len();
-
-    // Extract covariates if provided
-    let x_cov: Option<Array2<f64>> = if let Some(cov_cols) = covariates {
-        let design = DesignMatrix::from_dataframe(dataset.df(), cov_cols, true)?;
-        Some(design.data)
-    } else {
-        None
-    };
-
-    // Identify cohorts and periods
-    let mut cohort_set: BTreeSet<i64> = BTreeSet::new();
-    let mut period_set: BTreeSet<i64> = BTreeSet::new();
-    let mut never_treated_count = 0;
-    let mut treated_units: BTreeSet<i64> = BTreeSet::new();
-
+    // Each unit's first treatment period, in one pass: did::att_gt requires it
+    // to be constant within a unit.
+    let n_units = unit.n_levels();
+    let mut unit_g: Vec<Option<i64>> =
+        resource::try_vec(n_units, None, "staggered DiD unit cohorts")?;
     for i in 0..n {
-        let g = g_col[i] as i64;
-        let t = t_col[i] as i64;
-        let u = unit_ids[i] as i64;
-
-        period_set.insert(t);
-
-        if g <= 0 {
-            // Never treated (G = 0 or negative indicates never-treated)
-            never_treated_count += 1;
-        } else {
-            cohort_set.insert(g);
-            treated_units.insert(u);
+        let u = unit.codes[i] as usize;
+        match unit_g[u] {
+            None => unit_g[u] = Some(first_treat[i]),
+            Some(g) if g != first_treat[i] => {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "Column '{treatment_time}' must be constant within each unit \
+                         (did::att_gt requires it); unit '{}' has {g} and {}.",
+                        unit.label(i),
+                        first_treat[i]
+                    ),
+                });
+            }
+            Some(_) => {}
         }
     }
 
-    let cohorts: Vec<i64> = cohort_set.into_iter().collect();
-    let periods: Vec<i64> = period_set.into_iter().collect();
-    let n_treated_units = treated_units.len();
+    // Cohorts, periods and unit counts (never treated: first treatment <= 0)
+    let cohorts: Vec<i64> = unit_g
+        .iter()
+        .flatten()
+        .filter(|&&g| g > 0)
+        .copied()
+        .collect::<BTreeSet<i64>>()
+        .into_iter()
+        .collect();
+    let periods: Vec<i64> = period
+        .iter()
+        .copied()
+        .collect::<BTreeSet<i64>>()
+        .into_iter()
+        .collect();
+    let n_treated_units = unit_g.iter().flatten().filter(|&&g| g > 0).count();
+    let never_treated_count = unit_g.iter().flatten().filter(|&&g| g <= 0).count();
 
     if cohorts.is_empty() {
         return Err(EconError::InvalidSpecification {
@@ -607,7 +634,10 @@ pub fn run_staggered_did(
     // Pre-trend test
     let pretrend_test = compute_pretrend_test(&group_time_atts);
 
-    let n_periods = periods.len();
+    let missing = cols.missing().clone();
+    if let Some(note) = missing.note() {
+        warnings.push(note);
+    }
     Ok(StaggeredDidResult {
         group_time_atts,
         event_study,
@@ -619,8 +649,9 @@ pub fn run_staggered_did(
         periods,
         n_obs: n,
         n_treated: n_treated_units,
-        n_never_treated: never_treated_count / n_periods.max(1),
+        n_never_treated: never_treated_count,
         warnings,
+        missing,
     })
 }
 
@@ -1609,6 +1640,7 @@ fn ln_gamma(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linalg::design::DesignMatrix;
     use crate::resource::{Budget, CancelToken, with_budget};
     use polars::prelude::*;
 
@@ -2736,5 +2768,300 @@ mod tests {
         expect_cancelled(with_budget(cancelled(), || {
             run_staggered_did(&ds, "outcome", "first_treat", "year", "unit", None, config)
         }));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // T2-WP12: the R case did_cs_analytic (validation/r/cases/causal_did.R)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    use p2a_validation::{Check, Tol};
+
+    /// The case panel for tests that are not R-pinned (not registered).
+    fn cs_data() -> Dataset {
+        crate::test_support::load_case("did_cs_analytic").1
+    }
+
+    /// `ds` with column `col` replaced by `values` (same height).
+    fn replace_col(ds: &Dataset, col: &str, values: Column) -> Dataset {
+        let mut df = ds.df().clone();
+        assert_eq!(values.len(), df.height(), "column {col}");
+        df.with_column(values.with_name(col.into())).unwrap();
+        Dataset::new(df)
+    }
+
+    /// `ds` without the rows for which `drop` is true.
+    fn drop_rows(ds: &Dataset, drop: impl Fn(usize) -> bool) -> Dataset {
+        let keep =
+            BooleanChunked::from_iter_values("keep".into(), (0..ds.nrows()).map(|i| !drop(i)));
+        Dataset::new(ds.df().filter(&keep).unwrap())
+    }
+
+    /// A null-free Int64 column (test-only read).
+    fn i64s(ds: &Dataset, col: &str) -> Vec<i64> {
+        ds.df()
+            .column(col)
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .map(|v| v.expect("null-free column"))
+            .collect()
+    }
+
+    /// `ds` with nulls in column `col` at `rows` (Int64 or Float64 columns).
+    fn with_nulls(ds: &Dataset, col: &str, rows: &[usize]) -> Dataset {
+        let c = ds.df().column(col).unwrap();
+        let values = match c.dtype() {
+            DataType::Int64 => {
+                let v: Vec<Option<i64>> = c
+                    .i64()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| if rows.contains(&i) { None } else { x })
+                    .collect();
+                Column::new(col.into(), v)
+            }
+            _ => {
+                let v: Vec<Option<f64>> = c
+                    .cast(&DataType::Float64)
+                    .unwrap()
+                    .f64()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| if rows.contains(&i) { None } else { x })
+                    .collect();
+                Column::new(col.into(), v)
+            }
+        };
+        replace_col(ds, col, values)
+    }
+
+    /// The row of `(unit, time)` in the case panel.
+    fn row_of(ds: &Dataset, unit: i64, time: i64) -> usize {
+        let (u, t) = (i64s(ds, "unit"), i64s(ds, "time"));
+        (0..u.len())
+            .find(|&i| u[i] == unit && t[i] == time)
+            .unwrap_or_else(|| panic!("no row ({unit}, {time})"))
+    }
+
+    fn run(ds: &Dataset, unit: &str, cfg: StaggeredDidConfig) -> EconResult<StaggeredDidResult> {
+        run_staggered_did(ds, "y", "first_treat", "time", unit, None, cfg)
+    }
+
+    fn analytic(cg: ComparisonGroup) -> StaggeredDidConfig {
+        StaggeredDidConfig {
+            comparison_group: cg,
+            bootstrap: 0,
+            ..Default::default()
+        }
+    }
+
+    /// Cell ATTs in result order.
+    fn att(r: &StaggeredDidResult) -> Vec<f64> {
+        r.group_time_atts.iter().map(|c| c.att).collect()
+    }
+
+    fn same(a: f64, b: f64) -> bool {
+        a == b || (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12 * a.abs().max(b.abs())
+    }
+
+    /// Every number of two results agrees to 1e-12 relative (cells, aggregates, pre-trend).
+    fn assert_same(a: &StaggeredDidResult, b: &StaggeredDidResult) {
+        assert_eq!(a.n_obs, b.n_obs, "n_obs");
+        assert_eq!(a.n_treated, b.n_treated, "n_treated");
+        assert_eq!(a.n_never_treated, b.n_never_treated, "n_never_treated");
+        assert_eq!(a.cohorts, b.cohorts, "cohorts");
+        assert_eq!(a.periods, b.periods, "periods");
+        assert_eq!(a.group_time_atts.len(), b.group_time_atts.len(), "cells");
+        for (x, y) in a.group_time_atts.iter().zip(&b.group_time_atts) {
+            let cell = (x.group, x.time);
+            assert_eq!(cell, (y.group, y.time));
+            assert_eq!((x.n_treated, x.n_comparison), (y.n_treated, y.n_comparison));
+            for (p, q, what) in [
+                (x.att, y.att, "att"),
+                (x.std_error, y.std_error, "se"),
+                (x.ci_lower, y.ci_lower, "ci_lower"),
+                (x.ci_upper, y.ci_upper, "ci_upper"),
+            ] {
+                assert!(same(p, q), "cell {cell:?} {what}: {p} vs {q}");
+            }
+        }
+        let effects = |r: &StaggeredDidResult| {
+            let mut v: Vec<AggregatedEffect> = r.event_study.clone();
+            v.extend(r.group_effects.iter().cloned());
+            v.push(r.overall_att.clone());
+            v
+        };
+        let (ea, eb) = (effects(a), effects(b));
+        assert_eq!(ea.len(), eb.len(), "aggregates");
+        for (x, y) in ea.iter().zip(&eb) {
+            assert_eq!((x.key, x.n_cells, x.n_obs), (y.key, y.n_cells, y.n_obs));
+            for (p, q, what) in [
+                (x.att, y.att, "att"),
+                (x.std_error, y.std_error, "se"),
+                (x.ci_lower, y.ci_lower, "ci_lower"),
+                (x.ci_upper, y.ci_upper, "ci_upper"),
+                (x.p_value, y.p_value, "p"),
+            ] {
+                assert!(same(p, q), "aggregate {} {what}: {p} vs {q}", x.key);
+            }
+        }
+        match (&a.pretrend_test, &b.pretrend_test) {
+            (None, None) => {}
+            (Some(x), Some(y)) => {
+                assert_eq!(x.df, y.df, "pre-trend df");
+                assert!(same(x.chi2, y.chi2), "chi2 {} vs {}", x.chi2, y.chi2);
+                assert!(
+                    same(x.p_value, y.p_value),
+                    "p {} vs {}",
+                    x.p_value,
+                    y.p_value
+                );
+                assert_eq!(x.pre_atts.len(), y.pre_atts.len());
+                for (p, q) in x.pre_atts.iter().zip(&y.pre_atts) {
+                    assert!(same(*p, *q), "pre att {p} vs {q}");
+                }
+            }
+            _ => panic!("one result has a pre-trend test, the other not"),
+        }
+    }
+
+    #[test]
+    fn test_validate_staggered_did_string_unit_ids() {
+        use ComparisonGroup::NeverTreated;
+        let (case, ds) = crate::test_support::load_case("did_cs_analytic");
+        // C order of the labels: state_1 < state_10 < ... differs from the numeric order
+        let labels: Vec<String> = i64s(&ds, "unit")
+            .iter()
+            .map(|u| format!("state_{u}"))
+            .collect();
+        let s = replace_col(&ds, "unit", Column::new("unit".into(), labels));
+        let mut f = ds.clone();
+        for c in ["unit", "time", "first_treat"] {
+            let cast = f.df().column(c).unwrap().cast(&DataType::Float64).unwrap();
+            f = replace_col(&f, c, cast);
+        }
+        let ri = run(&ds, "unit", analytic(NeverTreated)).unwrap();
+        let rs = run(&s, "unit", analytic(NeverTreated)).unwrap();
+        let rf = run(&f, "unit", analytic(NeverTreated)).unwrap();
+        assert_same(&ri, &rs);
+        assert_same(&ri, &rf);
+        // R: fit <- .cs_attgt(d, "never"); ag <- .cs_aggregate(fit)
+        let n = rs.n_obs;
+        Check::new(&case)
+            .vector("never_cell_att", &att(&rs), Tol::coef(n))
+            .scalar("never_simple_att", rs.overall_att.att, Tol::coef(n))
+            .vector(
+                "never_group_att",
+                &rs.group_effects.iter().map(|e| e.att).collect::<Vec<_>>(),
+                Tol::coef(n),
+            )
+            .vector(
+                "never_event_att",
+                &rs.event_study.iter().map(|e| e.att).collect::<Vec<_>>(),
+                Tol::coef(n),
+            )
+            .finish();
+        assert_eq!(rs.n_obs, 720);
+        assert_eq!(rs.n_treated, 68);
+        assert_eq!(rs.n_never_treated, 22);
+    }
+
+    #[test]
+    fn test_na_staggered_did_omits_missing_rows() {
+        let ds = cs_data();
+        let rows = [
+            row_of(&ds, 4, 2),
+            row_of(&ds, 9, 6),
+            row_of(&ds, 30, 7),
+            row_of(&ds, 50, 8),
+        ];
+        let mut na = with_nulls(&ds, "y", &rows[..1]);
+        na = with_nulls(&na, "first_treat", &rows[1..2]);
+        na = with_nulls(&na, "time", &rows[2..3]);
+        na = with_nulls(&na, "unit", &rows[3..4]);
+        let kept = drop_rows(&ds, |i| rows.contains(&i));
+        let a = run(&na, "unit", analytic(ComparisonGroup::NeverTreated)).unwrap();
+        let b = run(&kept, "unit", analytic(ComparisonGroup::NeverTreated)).unwrap();
+        assert_same(&a, &b);
+        assert_eq!(a.n_obs, 716);
+        assert_eq!(
+            a.missing,
+            MissingSummary {
+                n_total: 720,
+                n_used: 716,
+                n_dropped: 4,
+                by_column: vec![
+                    ("y".into(), 1),
+                    ("first_treat".into(), 1),
+                    ("time".into(), 1),
+                    ("unit".into(), 1)
+                ],
+            }
+        );
+        assert!(b.missing.is_empty());
+        let note = "4 of 720 rows dropped because of missing values (y: 1, first_treat: 1, time: 1, unit: 1)";
+        assert!(a.warnings.iter().any(|w| w == note), "{:?}", a.warnings);
+        let shown = format!("{a}");
+        assert!(
+            shown
+                .trim_end()
+                .ends_with(&format!("Missing values: {note}")),
+            "{shown}"
+        );
+        assert_eq!(shown.matches(note).count(), 1, "{shown}");
+    }
+
+    #[test]
+    fn test_na_staggered_did_errors_name_the_column() {
+        let ds = cs_data();
+        let cfg = || analytic(ComparisonGroup::NeverTreated);
+        // an outcome stored as text
+        let text: Vec<String> = ds
+            .df()
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|v| format!("{}", v.unwrap()))
+            .collect();
+        let s = replace_col(&ds, "y", Column::new("y".into(), text));
+        match run(&s, "unit", cfg()) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "y"),
+            other => panic!("expected NonNumericColumn for y, got {other:?}"),
+        }
+        // an absent unit column
+        match run(&ds, "no_such", cfg()) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "no_such"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
+        // a fractional period
+        let mut time: Vec<f64> = i64s(&ds, "time").iter().map(|&t| t as f64).collect();
+        time[1] = 2.5;
+        let frac = replace_col(&ds, "time", Column::new("time".into(), time));
+        match run(&frac, "unit", cfg()) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("Time column 'time' must hold whole numbers"),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        // a first treatment period that varies within a unit (unit 1 is cohort 3)
+        let mut ft = i64s(&ds, "first_treat");
+        ft[row_of(&ds, 1, 3)] = 5;
+        let varying = replace_col(&ds, "first_treat", Column::new("first_treat".into(), ft));
+        match run(&varying, "unit", cfg()) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains("must be constant within each unit"),
+                    "{message}"
+                );
+                assert!(message.contains("unit '1'"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
     }
 }
