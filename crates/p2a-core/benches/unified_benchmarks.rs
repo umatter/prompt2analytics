@@ -1894,30 +1894,62 @@ fn main() {
 
     for n_side in sizes_for(
         &["SAR", "SEM", "SAC", "Moran_Test", "Local_Moran"],
-        [10, 20, 32],
+        [10, 32],
     ) {
         let n = n_side * n_side;
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let mut coords = Vec::with_capacity(n);
-        for y_coord in 0..n_side {
-            for x_coord in 0..n_side {
-                coords.push((x_coord as f64, y_coord as f64));
+        // R's rows and coordinates (spatial_n<n>.csv: y, x, x_coord, y_coord, written
+        // by generate_spatial_data; x_coord varies fastest, as in the grid below).
+        // R builds W with knearneigh(use_kd_tree = FALSE), whose distance ties go to the
+        // lower index, as in Neighbors::from_knn; both row-standardise (style "W").
+        let csv =
+            load_csv_columns_array2(&data_dir, "spatial", n, &["y", "x", "x_coord", "y_coord"]);
+        let (coords, x_vals, y_vals): (Vec<(f64, f64)>, Vec<f64>, Vec<f64>) = match csv {
+            Some(a) => (
+                a.outer_iter().map(|r| (r[2], r[3])).collect(),
+                a.column(1).to_vec(),
+                a.column(0).to_vec(),
+            ),
+            None => {
+                let mut rng = ChaCha8Rng::seed_from_u64(42);
+                let mut coords = Vec::with_capacity(n);
+                for y_coord in 0..n_side {
+                    for x_coord in 0..n_side {
+                        coords.push((x_coord as f64, y_coord as f64));
+                    }
+                }
+                let x_vals: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                let y_vals: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let (cx, cy) = coords[i];
+                        2.0 + 0.7 * x_vals[i]
+                            + 0.3 * (cx + cy) / (n_side as f64)
+                            + rng.gen_range(-0.25..0.25)
+                    })
+                    .collect();
+                (coords, x_vals, y_vals)
             }
-        }
+        };
         let nb = Neighbors::from_knn(&coords, 4);
-        let mut listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
-        let _ = listw.eigenvalues();
-        let x_vals: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
-        let y_vals: Vec<f64> = (0..n)
-            .map(|i| {
-                let (cx, cy) = coords[i];
-                2.0 + 0.7 * x_vals[i]
-                    + 0.3 * (cx + cy) / (n_side as f64)
-                    + rng.gen_range(-0.25..0.25)
-            })
-            .collect();
+        // No spectrum is computed here: clones share a cached one (`Option<Arc<..>>`), and
+        // R computes W's eigenvalues inside every timed ML call (eigen_setup).
+        let listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
         let df = df! { "y" => &y_vals, "x" => &x_vals }.expect("spatial data");
         let dataset = Dataset::new(df);
+
+        // SAR, SEM and SAC: R's lagsarlm, errorsarlm and sacsarlm (method "eigen") on the
+        // same rows and W. R computes W's eigenvalues inside each timed call, so these
+        // time clones of `listw`, which has no spectrum: each timed call computes it too.
+        // (A spectrum cached on `listw` before the loop would ride along in every clone and
+        // move the O(n^3) step out of the timing.) With an O(n^3) decomposition
+        // in every call, SAR and SEM use slow_config (R: 20 iterations).
+        // Keys as R's: beta, its SEs, rho/lambda, their SEs, the log-likelihood. Expected
+        // to differ: every SE but SEM's beta SEs (SPAT-4: p2a-core's rho/lambda SE is
+        // sqrt(sigma2 / (tr(W^2) + tr(W'W))), the SAR/SAC beta SEs ignore the beta-rho
+        // block; R's are the asymptotic, expected-information ones), and, slightly, the
+        // estimates (SPAT-29: the log-determinant keeps only the real parts of the
+        // complex eigenvalues of this asymmetric kNN W; rho/lambda about 1e-5 to 5e-4
+        // and the log-likelihood about 5e-4 to 2e-2 off). R's search intervals are set to
+        // p2a-core's brackets, +-0.999 (SAR, SEM) and +-0.99 (SAC).
         let sar_config = SarConfig {
             compute_impacts: false,
             ..Default::default()
@@ -1925,10 +1957,9 @@ fn main() {
         let sem_config = SemConfig::default();
 
         // SAR
-        let listw_clone = listw.clone();
         if wants("SAR") {
-            let mut result = run_benchmark_tracked("SAR", "lagsarlm", n, &config, || {
-                let mut lw = listw_clone.clone();
+            let mut result = run_benchmark_tracked("SAR", "lagsarlm", n, &slow_config, || {
+                let mut lw = listw.clone();
                 run_sar_dataset(&dataset, "y", &["x"], &mut lw, sar_config.clone())
             });
             if let Ok(ref sar) = {
@@ -1939,6 +1970,8 @@ fn main() {
                 capture_vec(&mut outputs, "coefficients", &sar.coefficients);
                 capture_vec(&mut outputs, "std_errors", &sar.std_errors);
                 capture(&mut outputs, "rho", sar.rho);
+                capture(&mut outputs, "rho_se", sar.rho_se);
+                capture(&mut outputs, "log_likelihood", sar.log_likelihood);
                 result.outputs = outputs;
             }
             result.dgp = "spatial".to_string();
@@ -1948,10 +1981,9 @@ fn main() {
         }
 
         // SEM
-        let listw_clone = listw.clone();
         if wants("SEM") {
-            let mut result = run_benchmark_tracked("SEM", "errorsarlm", n, &config, || {
-                let mut lw = listw_clone.clone();
+            let mut result = run_benchmark_tracked("SEM", "errorsarlm", n, &slow_config, || {
+                let mut lw = listw.clone();
                 run_sem_dataset(&dataset, "y", &["x"], &mut lw, sem_config.clone())
             });
             if let Ok(ref sem) = {
@@ -1962,6 +1994,8 @@ fn main() {
                 capture_vec(&mut outputs, "coefficients", &sem.coefficients);
                 capture_vec(&mut outputs, "std_errors", &sem.std_errors);
                 capture(&mut outputs, "lambda", sem.lambda);
+                capture(&mut outputs, "lambda_se", sem.lambda_se);
+                capture(&mut outputs, "log_likelihood", sem.log_likelihood);
                 result.outputs = outputs;
             }
             result.dgp = "spatial".to_string();
@@ -1970,12 +2004,12 @@ fn main() {
             results.push(result);
         }
 
-        // SAC (SARAR)
+        // SAC (SARAR), one W for lag and error. R: nlminb from four starts; here a 9 x 9
+        // grid and coordinate descent (the default SacConfig) on the same likelihood.
         let sac_config = SacConfig::default();
-        let listw_clone = listw.clone();
         if wants("SAC") {
             let mut result = run_benchmark_tracked("SAC", "sacsarlm", n, &slow_config, || {
-                let mut lw = listw_clone.clone();
+                let mut lw = listw.clone();
                 run_sac_dataset(&dataset, "y", &["x"], &mut lw, sac_config.clone())
             });
             if let Ok(ref sac) = {
@@ -1984,8 +2018,12 @@ fn main() {
             } {
                 let mut outputs = BTreeMap::new();
                 capture_vec(&mut outputs, "coefficients", &sac.coefficients);
+                capture_vec(&mut outputs, "std_errors", &sac.std_errors);
                 capture(&mut outputs, "rho", sac.rho);
                 capture(&mut outputs, "lambda", sac.lambda);
+                capture(&mut outputs, "rho_se", sac.rho_se);
+                capture(&mut outputs, "lambda_se", sac.lambda_se);
+                capture(&mut outputs, "log_likelihood", sac.log_likelihood);
                 result.outputs = outputs;
             }
             result.dgp = "spatial".to_string();
@@ -1994,7 +2032,9 @@ fn main() {
             results.push(result);
         }
 
-        // Moran's I test
+        // Moran's I test (randomisation variance, as R's moran.test default).
+        // R's `statistic` is the standard deviate z, so that key is z_score here;
+        // moran_i, expectation and variance are moran.test's `estimate`.
         let y_arr = Array1::from(y_vals.clone());
         if wants("Moran_Test") {
             let mut result = run_benchmark_tracked("Moran_Test", "moran.test", n, &config, || {
@@ -2002,8 +2042,11 @@ fn main() {
             });
             if let Ok(ref m) = moran_test(&y_arr, &listw, MoranAlternative::Greater) {
                 let mut outputs = BTreeMap::new();
-                capture(&mut outputs, "statistic", m.statistic);
+                capture(&mut outputs, "statistic", m.z_score);
                 capture(&mut outputs, "p_value", m.p_value);
+                capture(&mut outputs, "moran_i", m.statistic);
+                capture(&mut outputs, "expectation", m.expectation);
+                capture(&mut outputs, "variance", m.variance);
                 result.outputs = outputs;
             }
             result.dgp = "spatial".to_string();
@@ -2012,16 +2055,30 @@ fn main() {
             results.push(result);
         }
 
-        // Local Moran (LISA) - skip n_side=32 (too slow for permutations)
-        if n_side <= 20 && wants("Local_Moran") {
-            let mut result =
-                run_benchmark_tracked("Local_Moran", "localmoran", n, &slow_config, || {
-                    localmoran(&y_arr, &listw, 0.05, 99)
-                });
-            if let Ok(ref lm) = localmoran(&y_arr, &listw, 0.05, 99) {
+        // Local Moran (LISA), analytic: permutations = 0 gives the total-randomisation
+        // moments and two-sided normal p-values, R's localmoran(conditional = FALSE).
+        // (99 permutations timed a permutation test against R's analytic one, and
+        // p2a-core's permutation is not spdep's conditional one: SPAT-22.) Every size R runs.
+        if wants("Local_Moran") {
+            let mut result = run_benchmark_tracked("Local_Moran", "localmoran", n, &config, || {
+                localmoran(&y_arr, &listw, 0.05, 0)
+            });
+            if let Ok(ref lm) = localmoran(&y_arr, &listw, 0.05, 0) {
                 let mut outputs = BTreeMap::new();
-                let n_sig = lm.local_stats.iter().filter(|s| s.p_value < 0.05).count();
+                let stats = &lm.local_stats;
+                let n_sig = stats.iter().filter(|s| s.p_value < 0.05).count();
                 capture(&mut outputs, "n_significant", n_sig as f64);
+                // R's Ii, E.Ii, Var.Ii, Z.Ii and Pr(z != E(Ii)), in observation order
+                let i_local: Vec<f64> = stats.iter().map(|s| s.i_local).collect();
+                let expectation: Vec<f64> = stats.iter().map(|s| s.expectation).collect();
+                let variance: Vec<f64> = stats.iter().map(|s| s.variance).collect();
+                let z_score: Vec<f64> = stats.iter().map(|s| s.z_score).collect();
+                let p_value: Vec<f64> = stats.iter().map(|s| s.p_value).collect();
+                capture_vec(&mut outputs, "i_local", &i_local);
+                capture_vec(&mut outputs, "expectation", &expectation);
+                capture_vec(&mut outputs, "variance", &variance);
+                capture_vec(&mut outputs, "z_score", &z_score);
+                capture_vec(&mut outputs, "p_value", &p_value);
                 result.outputs = outputs;
             }
             result.dgp = "spatial".to_string();
