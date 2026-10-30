@@ -59,7 +59,7 @@ pub struct Cli {
     #[arg(long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Maximum memory usage in MB (warns when exceeded, 0 = unlimited)
+    /// Memory limit in MB (0 = unlimited); parsed, not yet enforced
     #[arg(long = "max-memory", global = true, default_value = "0")]
     pub max_memory_mb: usize,
 
@@ -597,6 +597,28 @@ mod cli_definition_tests {
             e.to_string()
                 .contains("[possible values: csv, parquet, json]"),
             "{e}"
+        );
+    }
+
+    /// `--max-memory` is parsed but nothing reads it yet; --help and CLI_REFERENCE.md say so.
+    #[test]
+    fn max_memory_help_says_it_is_not_enforced() {
+        let help = Cli::command()
+            .get_arguments()
+            .find(|a| a.get_id() == "max_memory_mb")
+            .and_then(|a| a.get_help())
+            .map(|h| h.to_string())
+            .expect("--max-memory has help text");
+        assert_eq!(
+            help,
+            "Memory limit in MB (0 = unlimited); parsed, not yet enforced"
+        );
+        let reference = include_str!("../../../docs/guides/CLI_REFERENCE.md");
+        assert!(
+            reference
+                .lines()
+                .any(|l| l.contains("--max-memory") && l.contains("parsed, not yet enforced")),
+            "CLI_REFERENCE.md: the --max-memory line no longer says it is not enforced"
         );
     }
 
