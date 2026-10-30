@@ -38,27 +38,6 @@
       "supersedes_legacy": []
     },
     {
-      "id": "vcov_bootstrap_columns",
-      "name": "Bootstrap covariance (vcovBS) on an integer outcome",
-      "category": "regression",
-      "reference": "sandwich::vcovBS (property test; R's RNG cannot be reproduced)",
-      "doc": "validation/regression/vcovBS.md",
-      "cases": [
-        "ols_mtcars"
-      ],
-      "tests": [
-        "p2a-core::regression::ols::tests::test_validate_na_vcov_bootstrap_integer_outcome",
-        "p2a-mcp::tools::handlers::regression::tests::test_validate_mcp_regression_bootstrap_cov_integer_outcome"
-      ],
-      "quantities": [
-        "Int64 outcome = Float64 outcome (same seed)",
-        "coefficients = run_ols"
-      ],
-      "tolerance": "exact (same doubles)",
-      "deviations": [],
-      "supersedes_legacy": []
-    },
-    {
       "id": "regression_wrappers_columns",
       "name": "Integer columns and missing values in run_loess, quantreg, run_smooth_spline, glmnet and the MCP GLS y",
       "category": "regression",

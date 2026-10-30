@@ -1529,10 +1529,17 @@ mod tests {
         );
     }
 
-    /// REG-23 through the tool: an Int64 outcome (mtcars hp) is a number.
+    /// REG-23 through the tool: an Int64 outcome (mtcars hp) is a number. A property
+    /// test (no value is compared with R), so it loads the dataset without a case.
     #[test]
-    fn test_validate_mcp_regression_bootstrap_cov_integer_outcome() {
-        let (rt, server) = cases_server(&["ols_mtcars"]);
+    fn test_mcp_regression_bootstrap_cov_integer_outcome() {
+        let (rt, server) = server_with(vec![(
+            "mtcars",
+            DataLoader::load_csv(p2a_validation::repo_path(
+                "validation/datasets/generated/mtcars.csv",
+            ))
+            .unwrap(),
+        )]);
         let req: BootstrapCovRequest = serde_json::from_value(json!({
             "dataset": "mtcars", "y": "hp", "x": ["wt"], "n_boot": 200, "seed": 42
         }))

@@ -4022,11 +4022,18 @@ mod tests {
     }
 
     /// REG-23: the bootstrap reads y as `run_ols` does, so an Int64 outcome (mtcars hp)
-    /// gives exactly the bootstrap of the same values as Float64 (same seed).
+    /// gives exactly the bootstrap of the same values as Float64 (same seed). A property
+    /// test: no value is compared with R (the RNGs differ), so it loads the dataset
+    /// without a case and is not registered as R-pinned.
     #[test]
-    fn test_validate_na_vcov_bootstrap_integer_outcome() {
+    fn test_na_vcov_bootstrap_integer_outcome() {
         use super::na_fixtures::as_float;
-        let (_case, ds) = crate::test_support::load_case("ols_mtcars");
+        let ds = Dataset::new(
+            crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+                "validation/datasets/generated/mtcars.csv",
+            ))
+            .unwrap(),
+        );
         assert_eq!(ds.df().column("hp").unwrap().dtype(), &DataType::Int64);
         let a = run_vcov_bootstrap(&ds, "hp", &["wt"], Some(200), Some("pairs"), Some(42)).unwrap();
         let b = run_vcov_bootstrap(
