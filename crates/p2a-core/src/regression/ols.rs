@@ -61,10 +61,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult, EstimationWarning};
-use crate::linalg::{
-    CONDITION_THRESHOLD, DesignError, DesignMatrix, matmul, safe_inverse, xtx, xty,
-};
+use crate::linalg::{CONDITION_THRESHOLD, DesignMatrix, matmul, safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::{LinearEstimator, SignificanceLevel, f_test_p_value, t_test_p_value};
 
@@ -619,44 +618,11 @@ pub fn run_ols(
     let df = dataset.df();
 
     // Build design matrix X
-    let design = DesignMatrix::from_dataframe(df, x_cols, intercept).map_err(|e| match e {
-        DesignError::ColumnNotFound(c) => EconError::ColumnNotFound {
-            column: c,
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        },
-        DesignError::NonNumericColumn(c) => EconError::NonNumericColumn { column: c },
-        DesignError::NullValues(c, indices) => EconError::NullValues {
-            column: c,
-            count: indices.len(),
-        },
-        DesignError::EmptyDataset => EconError::EmptyDataset,
-        DesignError::NoColumns => EconError::InvalidSpecification {
-            message: "No independent variables specified".to_string(),
-        },
-        DesignError::PolarsError(e) => EconError::Internal(e.to_string()),
-    })?;
+    let design = DesignMatrix::from_dataframe(df, x_cols, intercept)
+        .map_err(|e| econ_error_from_design(e, df))?;
 
     // Extract y vector
-    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| match e {
-        DesignError::ColumnNotFound(c) => EconError::ColumnNotFound {
-            column: c,
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        },
-        DesignError::NonNumericColumn(c) => EconError::NonNumericColumn { column: c },
-        DesignError::NullValues(c, indices) => EconError::NullValues {
-            column: c,
-            count: indices.len(),
-        },
-        _ => EconError::Internal(e.to_string()),
-    })?;
+    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
 
     let x = &design.data;
     let n = design.n_obs;
@@ -3710,5 +3676,72 @@ mod tests {
                 1.0,
             ],
         );
+    }
+
+    /// y and x1 of the REG-32 regressions: noisy, with `x1[2]` replaced by `x1_2`.
+    fn reg32_dataset(x1_2: f64) -> Dataset {
+        Dataset::new(
+            df! {
+                "y" => [1.1, 1.9, 3.2, 3.8, 5.1, 6.3],
+                "x1" => [1.0, 2.0, x1_2, 4.0, 5.0, 6.0],
+            }
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_reg32_ols_nan_regressor_reported_as_missing() {
+        match run_ols(
+            &reg32_dataset(f64::NAN),
+            "y",
+            &["x1"],
+            true,
+            CovarianceType::HC1,
+        ) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!(column, "x1");
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected NullValues for x1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_reg32_ols_infinite_regressor_reported() {
+        let err = run_ols(
+            &reg32_dataset(f64::INFINITY),
+            "y",
+            &["x1"],
+            true,
+            CovarianceType::HC1,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Column 'x1' contains 1 infinite value(s); remove or recode them before estimating."
+        );
+    }
+
+    #[test]
+    fn test_reg32_ols_missing_y_and_text_regressor() {
+        let ds = Dataset::new(
+            df! {
+                "y" => [f64::NAN, 1.9, 3.2, 3.8, 5.1, 6.3],
+                "x1" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "x2" => ["a", "b", "a", "c", "b", "a"],
+            }
+            .unwrap(),
+        );
+        match run_ols(&ds, "y", &["x1"], true, CovarianceType::HC1) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!(column, "y");
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected NullValues for y, got {other:?}"),
+        }
+        match run_ols(&ds, "x1", &["x2"], true, CovarianceType::HC1) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "x2"),
+            other => panic!("expected NonNumericColumn for x2, got {other:?}"),
+        }
     }
 }

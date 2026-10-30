@@ -48,8 +48,9 @@ from urllib.parse import unquote
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]
 CATEGORIES = ("stats", "regression", "econometrics", "forecasting", "ml", "cli", "mcp")
 # Registry categories: the runner's, plus `interfaces` (validation/methods/interfaces.json:
-# the CLI exhibit and MCP pins, whose tests the runner selects as cli and mcp).
-REGISTRY_CATEGORIES = CATEGORIES + ("interfaces",)
+# the CLI exhibit and MCP pins, whose tests the runner selects as cli and mcp) and `data`
+# (validation/methods/data_columns.json: data loading and column extraction conventions).
+REGISTRY_CATEGORIES = CATEGORIES + ("interfaces", "data")
 STATUS_RANK = {"ignored": 0, "ok": 1, "failed": 2}
 SCHEMA = 1
 

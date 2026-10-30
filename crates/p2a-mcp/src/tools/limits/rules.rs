@@ -253,6 +253,8 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("collaborative_tmle", "max_covariates", Max(ListLength)),
         p("collaborative_tmle", "ps_lower", Exempt(TRIM)),
         p("collaborative_tmle", "ps_upper", Exempt(TRIM)),
+        p("create_dataset", "na_strings", UniqueList(ListLength)),
+        p("create_dataset", "na_strings[]", Max(StringBytes)),
         p("descriptive_medpolish", "eps", Tolerance),
         p("evalue", "baseline_risk", Exempt(CLOSED_FORM)),
         p("evalue", "ci_lower", Exempt(CLOSED_FORM)),
@@ -384,6 +386,8 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("linalg_toeplitz", "row", SquareLen),
         p("linalg_toeplitz", "column[]", Exempt(ARRAY_VALUE)),
         p("linalg_toeplitz", "row[]", Exempt(ARRAY_VALUE)),
+        p("load_dataset", "na_strings", UniqueList(ListLength)),
+        p("load_dataset", "na_strings[]", Max(StringBytes)),
         p("ltmle", "covariates", ArrayLen(ListLength)),
         p("ltmle", "ps_lower", Exempt(TRIM)),
         p("ltmle", "ps_upper", Exempt(TRIM)),
@@ -2355,6 +2359,44 @@ mod tests {
             );
         }
         assert_eq!(ROW_RULES.len(), 17);
+    }
+
+    #[test]
+    fn na_strings_lists_are_limited() {
+        assert!(
+            hosted(
+                "load_dataset",
+                json!({"path": "a.csv", "na_strings": ["NA", ""]})
+            )
+            .is_ok()
+        );
+        let dup = hosted(
+            "create_dataset",
+            json!({"name": "d", "csv_content": "a\n1\n", "na_strings": ["NA", "NA"]}),
+        )
+        .unwrap_err();
+        assert!(dup.message.contains("more than once"), "{}", dup.message);
+        let many: Vec<String> = (0..501).map(|i| format!("na{i}")).collect();
+        let long =
+            hosted("load_dataset", json!({"path": "a.csv", "na_strings": many})).unwrap_err();
+        assert!(
+            long.message.contains("has 501 elements"),
+            "{}",
+            long.message
+        );
+        for tool in ["load_dataset", "create_dataset"] {
+            let big = hosted(
+                tool,
+                json!({"path": "a.csv", "name": "d", "csv_content": "a\n1\n",
+                       "na_strings": ["x".repeat(5000)]}),
+            )
+            .unwrap_err();
+            assert!(
+                big.message.contains("bytes long"),
+                "{tool}: {}",
+                big.message
+            );
+        }
     }
 }
 

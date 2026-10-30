@@ -118,9 +118,103 @@ pub use rmcp::{
 pub use schemars::JsonSchema;
 pub use serde::Deserialize;
 
+pub use p2a_core::data::columns::{Columns, MissingSummary, NaPolicy};
+
+use p2a_core::data::columns::{ColumnRequest, is_numeric_dtype};
+
+/// One numeric column under `policy`: the kept values and what was dropped. The error is
+/// the core rule's LLM-readable text ("Column 'x' contains 3 missing value(s) (null or
+/// NaN). Drop or impute them first.").
+pub fn numeric_column(
+    dataset: &p2a_core::data::Dataset,
+    column: &str,
+    policy: NaPolicy,
+) -> Result<(Vec<f64>, MissingSummary), String> {
+    p2a_core::data::columns::numeric_column(dataset.df(), column, policy).map_err(|e| e.to_string())
+}
+
+/// Row-aligned numeric columns under `policy` (rows with a missing value in any of them
+/// are dropped from all with [`NaPolicy::Omit`]).
+pub fn numeric_columns(
+    dataset: &p2a_core::data::Dataset,
+    columns: &[&str],
+    policy: NaPolicy,
+) -> Result<Columns, String> {
+    ColumnRequest::new(dataset.df())
+        .numerics(columns)
+        .na(policy)
+        .extract()
+        .map_err(|e| e.to_string())
+}
+
+/// Numeric columns as an n x k matrix (column order of `columns`, repeated names
+/// allowed) under `policy`, allocated fallibly.
+pub fn numeric_matrix(
+    dataset: &p2a_core::data::Dataset,
+    columns: &[String],
+    policy: NaPolicy,
+) -> Result<(ndarray::Array2<f64>, MissingSummary), String> {
+    if columns.is_empty() {
+        return Err("At least one column must be specified".to_string());
+    }
+    let names: Vec<&str> = columns.iter().map(String::as_str).collect();
+    let cols = numeric_columns(dataset, &names, policy)?;
+    let mut data = p2a_core::resource::try_zeros2(cols.n(), names.len(), "numeric matrix")
+        .map_err(|e| e.to_string())?;
+    for (j, name) in names.iter().enumerate() {
+        for (cell, &v) in data.column_mut(j).iter_mut().zip(cols.numeric(name)) {
+            *cell = v;
+        }
+    }
+    Ok((data, cols.missing().clone()))
+}
+
+/// Append "\nMissing values: <note>" to a text result when rows were dropped.
+pub fn append_missing_note(text: &mut String, missing: &MissingSummary) {
+    if let Some(note) = missing.note() {
+        text.push_str("\nMissing values: ");
+        text.push_str(&note);
+    }
+}
+
+/// `{"n_total", "n_used", "n_dropped", "by_column": {column: count}}` when rows were
+/// dropped, for a JSON result's `"missing"` key; `None` when nothing was dropped.
+pub fn missing_json(missing: &MissingSummary) -> Option<serde_json::Value> {
+    if missing.is_empty() {
+        return None;
+    }
+    let by_column: serde_json::Map<String, serde_json::Value> = missing
+        .by_column
+        .iter()
+        .map(|(column, count)| (column.clone(), serde_json::json!(count)))
+        .collect();
+    Some(serde_json::json!({
+        "n_total": missing.n_total,
+        "n_used": missing.n_used,
+        "n_dropped": missing.n_dropped,
+        "by_column": by_column,
+    }))
+}
+
+/// The legacy helpers' refusal of a column that is not numeric (a text, date or other
+/// column; an entirely null column passes as all-NaN).
+fn legacy_numeric_check(col: &p2a_core::polars::prelude::Column, name: &str) -> Result<(), String> {
+    if col.null_count() == col.len() || is_numeric_dtype(col.dtype(), true) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Column '{name}' is not numeric (type {}). Use a numeric column, or convert it with \
+             munge_cast.",
+            col.dtype()
+        ))
+    }
+}
+
 /// Helper function to extract a single numeric column as a Vec<f64>.
 ///
-/// Used by stats tools that operate on single columns.
+/// Legacy: nulls become NaN. New code uses [`numeric_column`]/[`numeric_matrix`] with an
+/// explicit [`NaPolicy`]; removed by T2-WP22. A text, date or other non-numeric column is
+/// an error naming the column.
 pub fn extract_column_f64(
     dataset: &p2a_core::data::Dataset,
     column: &str,
@@ -131,6 +225,7 @@ pub fn extract_column_f64(
     let col = df
         .column(column)
         .map_err(|e| format!("Column '{}' not found: {}", column, e))?;
+    legacy_numeric_check(col, column)?;
 
     let values: Vec<f64> = col
         .cast(&DataType::Float64)
@@ -146,7 +241,9 @@ pub fn extract_column_f64(
 
 /// Helper function to extract numeric columns into an ndarray matrix.
 ///
-/// Used by ML tools that require numeric matrix input.
+/// Legacy: nulls become NaN. New code uses [`numeric_column`]/[`numeric_matrix`] with an
+/// explicit [`NaPolicy`]; removed by T2-WP22. A text, date or other non-numeric column is
+/// an error naming the column.
 pub fn extract_numeric_matrix(
     dataset: &p2a_core::data::Dataset,
     columns: &[String],
@@ -169,6 +266,7 @@ pub fn extract_numeric_matrix(
         let col = df
             .column(col_name)
             .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
+        legacy_numeric_check(col, col_name)?;
 
         let cast = col
             .cast(&DataType::Float64)
@@ -330,5 +428,135 @@ mod tests {
                 .dim(),
             (200, 2)
         );
+    }
+
+    #[test]
+    fn test_validate_mcp_legacy_helpers_refuse_text() {
+        use p2a_core::data::{DataLoader, Dataset};
+        let case = p2a_validation::Case::load("columns_conventions");
+        let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
+        let e = extract_column_f64(&ds, "s").unwrap_err();
+        assert!(e.contains("Column 's' is not numeric (type str)"), "{e}");
+        let e = extract_numeric_matrix(&ds, &["y".into(), "s".into()]).unwrap_err();
+        assert!(e.contains("Column 's'"), "{e}");
+        // null still becomes NaN in the legacy helpers
+        let n = extract_column_f64(&ds, "n").unwrap();
+        assert!(n[3].is_nan());
+        assert_eq!(
+            n.iter().filter(|v| v.is_nan()).count() as f64,
+            case.scalar("missing_n")
+        );
+        let flag = extract_column_f64(&ds, "flag").unwrap();
+        let r = case.vector("flag_numeric"); // [1, 0, 1, 1, 0, NA, 1, 0, 0, 1]
+        assert_eq!(flag.len(), r.len());
+        for (a, b) in flag.iter().zip(&r) {
+            assert!(a == b || (a.is_nan() && b.is_nan()), "{flag:?} vs {r:?}");
+        }
+    }
+
+    #[test]
+    fn test_validate_mcp_numeric_column_omit_and_fail() {
+        use p2a_core::data::{DataLoader, Dataset};
+        let case = p2a_validation::Case::load("columns_conventions");
+        let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
+        let (y, missing) = numeric_column(&ds, "y", NaPolicy::Omit).unwrap();
+        assert_eq!(y.len(), 8);
+        assert_eq!(missing.n_dropped as f64, case.scalar("missing_y"));
+        assert_eq!(
+            numeric_column(&ds, "y", NaPolicy::Fail).unwrap_err(),
+            "Column 'y' contains 2 missing value(s) (null or NaN). Drop or impute them first."
+        );
+    }
+
+    #[test]
+    fn test_validate_mcp_numeric_columns_int64_and_text() {
+        use p2a_core::data::{DataLoader, Dataset};
+        let case = p2a_validation::Case::load("columns_conventions");
+        let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
+        let cols = numeric_columns(&ds, &["y", "n"], NaPolicy::Omit).unwrap();
+        assert_eq!(cols.rows(), [0, 2, 4, 5, 7, 8, 9]);
+        // Derived from the fixture, not case values (the case's complete rows are those of
+        // complete.cases(y, n, s)): over these 7 rows mean y is 44/7, sum n is 94.
+        let y = cols.numeric("y");
+        let mean = y.iter().sum::<f64>() / y.len() as f64;
+        assert!(
+            (mean - 6.285_714_285_714_286).abs() <= 1e-15 * 6.3,
+            "{mean}"
+        );
+        assert_eq!(cols.numeric("n").iter().sum::<f64>(), 94.0);
+        let e = numeric_columns(&ds, &["s"], NaPolicy::Omit).unwrap_err();
+        assert!(e.contains("Column 's' contains non-numeric values"), "{e}");
+        // The per-column missing counts are the case's.
+        let by = &cols.missing().by_column;
+        assert_eq!((by[0].0.as_str(), by[1].0.as_str()), ("y", "n"));
+        p2a_validation::Check::new(&case)
+            .scalar("missing_y", by[0].1 as f64, p2a_validation::Tol::exact())
+            .scalar("missing_n", by[1].1 as f64, p2a_validation::Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_mcp_numeric_matrix_dims_repeats_and_ceiling() {
+        use p2a_core::data::{DataLoader, Dataset};
+        let case = p2a_validation::Case::load("columns_conventions");
+        let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
+        let (m, missing) = numeric_matrix(
+            &ds,
+            &["y".into(), "flag".into(), "y".into()],
+            NaPolicy::Omit,
+        )
+        .unwrap();
+        // Derived from the fixture, not case values: y and flag are complete in rows
+        // 0 2 3 4 7 8 9, and flag sums to 4 there.
+        assert_eq!(m.dim(), (7, 3));
+        assert_eq!(m.column(0), m.column(2));
+        assert_eq!(m.column(1).sum(), 4.0);
+        assert_eq!(
+            missing.by_column,
+            [("y".to_string(), 2), ("flag".to_string(), 1)]
+        );
+        assert_eq!(
+            numeric_matrix(&ds, &[], NaPolicy::Omit).unwrap_err(),
+            "At least one column must be specified"
+        );
+        let e = p2a_core::resource::with_alloc_ceiling(Some(64), || {
+            numeric_matrix(&ds, &["y".into()], NaPolicy::Omit)
+        })
+        .unwrap_err();
+        assert!(e.contains("Resource limit"), "{e}");
+        // y's missing count is the case's (flag's is not a case value).
+        p2a_validation::Check::new(&case)
+            .scalar(
+                "missing_y",
+                missing.by_column[0].1 as f64,
+                p2a_validation::Tol::exact(),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_mcp_missing_note_and_json() {
+        use p2a_core::data::{DataLoader, Dataset};
+        let case = p2a_validation::Case::load("columns_conventions");
+        let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
+        let cols = numeric_columns(&ds, &["y", "n"], NaPolicy::Omit).unwrap();
+        let mut text = "t".to_string();
+        append_missing_note(&mut text, cols.missing());
+        assert_eq!(
+            text,
+            "t\nMissing values: 3 of 10 rows dropped because of missing values (y: 2, n: 1)"
+        );
+        assert_eq!(
+            missing_json(cols.missing()),
+            Some(serde_json::json!({
+                "n_total": 10, "n_used": 7, "n_dropped": 3, "by_column": {"y": 2, "n": 1}
+            }))
+        );
+        let none = MissingSummary::none(10);
+        let mut text = "t".to_string();
+        append_missing_note(&mut text, &none);
+        assert_eq!(text, "t");
+        assert_eq!(missing_json(&none), None);
+        assert_eq!(case.scalar("missing_y"), 2.0);
     }
 }

@@ -61,6 +61,8 @@ vec <- function(x) { stopifnot(is.numeric(x)); I(unname(as.numeric(x))) }
   }
 }
 
+# R reads every CSV as p2a's loader does: `NA` and empty fields are missing
+# (DataLoader::DEFAULT_NA_STRINGS).
 run_case <- function(c, out_dir, gen_dir, data_root) {
   used <- character(0)
   ctx <- list(
@@ -68,14 +70,14 @@ run_case <- function(c, out_dir, gen_dir, data_root) {
       p <- file.path(data_root, rel)
       if (!file.exists(p)) stop(sprintf("case %s: dataset %s not found", c$id, rel))
       used <<- c(used, file.path("validation", rel))
-      utils::read.csv(p, stringsAsFactors = FALSE)
+      utils::read.csv(p, stringsAsFactors = FALSE, na.strings = c("NA", ""))
     },
     gen_dataset = function(name, df) {
       stopifnot(grepl("^[a-z0-9_]+$", name))
       p <- file.path(gen_dir, paste0(name, ".csv"))
       .write_csv17(df, p)
       used <<- c(used, file.path("validation/datasets/generated", paste0(name, ".csv")))
-      utils::read.csv(p, stringsAsFactors = FALSE)   # compute on what Rust will read
+      utils::read.csv(p, stringsAsFactors = FALSE, na.strings = c("NA", ""))   # compute on what Rust will read
     }
   )
   res <- c$fn(ctx)

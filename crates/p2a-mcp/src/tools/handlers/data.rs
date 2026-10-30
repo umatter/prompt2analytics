@@ -1515,7 +1515,7 @@ impl AnalyticsServer {
 
     /// Load a dataset from a file.
     #[tool(
-        description = "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. Returns dataset information including dimensions and column types."
+        description = "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. CSV text \"NA\" and empty fields are read as missing (set na_strings to change this). Returns dataset information including dimensions and column types."
     )]
     pub async fn load_dataset(
         &self,
@@ -1586,7 +1586,7 @@ impl AnalyticsServer {
         }
 
         // Load the dataset
-        let dataset = match DataLoader::load(&path) {
+        let dataset = match load_with_request_na(&path, request.na_strings.as_deref()) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1824,14 +1824,21 @@ impl AnalyticsServer {
 
     /// Create a dataset from inline CSV content.
     #[tool(
-        description = "Create a dataset directly from CSV content provided as a string. Useful for creating small datasets without file I/O."
+        description = "Create a dataset directly from CSV content provided as a string. Useful for creating small datasets without file I/O. CSV text \"NA\" and empty fields are read as missing (set na_strings to change this)."
     )]
     pub async fn create_dataset(
         &self,
         Parameters(request): Parameters<CreateDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
         // from_csv_string returns DataFrame, wrap in Dataset
-        let df = match DataLoader::from_csv_string(&request.csv_content) {
+        let parsed = match request.na_strings.as_deref() {
+            None => DataLoader::from_csv_string(&request.csv_content),
+            Some(na) => {
+                let na: Vec<&str> = na.iter().map(String::as_str).collect();
+                DataLoader::from_csv_string_with_na(&request.csv_content, &na)
+            }
+        };
+        let df = match parsed {
             Ok(df) => df,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1933,6 +1940,18 @@ impl AnalyticsServer {
         );
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+}
+
+/// Load `path` as `load_dataset` does: [`DataLoader::load`] without `na_strings`, or
+/// [`DataLoader::load_with_na`] with them (a non-CSV file is then refused).
+fn load_with_request_na(path: &Path, na_strings: Option<&[String]>) -> Result<Dataset, LoadError> {
+    match na_strings {
+        None => DataLoader::load(path),
+        Some(na) => {
+            let na: Vec<&str> = na.iter().map(String::as_str).collect();
+            DataLoader::load_with_na(path, &na)
+        }
     }
 }
 
@@ -3377,5 +3396,85 @@ mod tests {
             row_old.as_object_mut().unwrap().remove("s");
             assert_eq!(&row_new, row_old);
         }
+    }
+
+    /// The (dtype, null count) of `column` in the server's dataset `name`.
+    fn column_state(
+        rt: &tokio::runtime::Runtime,
+        server: &AnalyticsServer,
+        name: &str,
+        column: &str,
+    ) -> (DataType, usize) {
+        let datasets = rt.block_on(server.datasets.read());
+        let col = datasets[name].df().column(column).unwrap().clone();
+        (col.dtype().clone(), col.null_count())
+    }
+
+    #[test]
+    fn test_mcp_create_dataset_reads_r_na_as_missing() {
+        use crate::tools::common::test_support::{server_with, text};
+        let (rt, server) = server_with(vec![]);
+        // R: write.csv(data.frame(y = c(1.2, NA, 3.1, 4), x = c(1L, 2L, NA, 4L)))
+        let req: CreateDatasetRequest = serde_json::from_value(json!({
+            "name": "r",
+            "csv_content": "\"y\",\"x\"\n1.2,1\nNA,2\n3.1,NA\n4,4\n"
+        }))
+        .unwrap();
+        let r = rt.block_on(server.create_dataset(Parameters(req))).unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert_eq!(column_state(&rt, &server, "r", "y"), (DataType::Float64, 1));
+        assert_eq!(column_state(&rt, &server, "r", "x"), (DataType::Int64, 1));
+    }
+
+    #[test]
+    fn test_mcp_create_dataset_na_strings_override() {
+        use crate::tools::common::test_support::{server_with, text};
+        let (rt, server) = server_with(vec![]);
+        for args in [
+            json!({"name": "m", "csv_content": "a,b\n1,-99\n2,3.5\n", "na_strings": ["-99"]}),
+            json!({"name": "k", "csv_content": "c\nNA\nx\n", "na_strings": []}),
+        ] {
+            let req: CreateDatasetRequest = serde_json::from_value(args).unwrap();
+            let r = rt.block_on(server.create_dataset(Parameters(req))).unwrap();
+            assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        }
+        assert_eq!(column_state(&rt, &server, "m", "b"), (DataType::Float64, 1));
+        assert_eq!(column_state(&rt, &server, "k", "c"), (DataType::String, 0));
+    }
+
+    #[test]
+    fn test_mcp_load_dataset_na_strings_round_trip() {
+        use crate::tools::common::test_support::{server_with, text};
+        let (rt, server) = server_with(vec![]);
+        let dir = tempfile::Builder::new()
+            .prefix("wp01_na_")
+            .tempdir_in(crate::path_jail::allowed_data_root().unwrap())
+            .unwrap();
+        let csv = dir.path().join("v.csv");
+        std::fs::write(&csv, "id,v\n1,-99\n2,3.5\n").unwrap();
+        let load = |args: serde_json::Value| {
+            let req: LoadDatasetRequest = serde_json::from_value(args).unwrap();
+            rt.block_on(server.load_dataset(Parameters(req))).unwrap()
+        };
+        let path = csv.to_str().unwrap();
+        let r = load(json!({"path": path, "name": "v", "na_strings": ["-99"]}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert_eq!(column_state(&rt, &server, "v", "v"), (DataType::Float64, 1));
+        let r = load(json!({"path": path, "name": "w"}));
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        // -99 is a number unless na_strings says otherwise
+        assert_eq!(column_state(&rt, &server, "w", "v"), (DataType::Float64, 0));
+
+        let parquet = dir.path().join("p.parquet");
+        Dataset::new(df! { "a" => [1.5, 2.5] }.unwrap())
+            .to_parquet(&parquet)
+            .unwrap();
+        let r = load(json!({"path": parquet.to_str().unwrap(), "na_strings": ["NA"]}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("na_strings applies only to CSV files"),
+            "{}",
+            text(&r)
+        );
     }
 }

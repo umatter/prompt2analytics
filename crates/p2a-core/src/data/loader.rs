@@ -315,15 +315,46 @@ fn polars_unwinding<T>(read: impl FnOnce() -> T) -> Result<T, LoadError> {
 }
 
 /// Data loader supporting multiple file formats.
+///
+/// Every CSV reader treats the strings of [`DataLoader::DEFAULT_NA_STRINGS`] (R
+/// `read.csv`'s default `"NA"` plus the empty field, quoted or not) as missing
+/// values, during schema inference too; the `*_with_na` variants take their own
+/// list. An empty unquoted field is missing in every case.
 pub struct DataLoader;
 
+/// The CSV options every reader shares: a header, schema inference over the first
+/// 1000 rows, and `na_strings` read as null (none for an empty list).
+fn csv_options(na_strings: &[&str]) -> CsvReadOptions {
+    let null_values = (!na_strings.is_empty())
+        .then(|| NullValues::AllColumns(na_strings.iter().map(|s| PlSmallStr::from(*s)).collect()));
+    CsvReadOptions::default()
+        .with_has_header(true)
+        .with_infer_schema_length(Some(1000))
+        .map_parse_options(|p| p.with_null_values(null_values.clone()))
+}
+
 impl DataLoader {
+    /// Strings every CSV reader treats as missing unless the caller passes its own list
+    /// (R `read.csv`'s default `"NA"` plus the empty field). Empty unquoted fields are
+    /// missing in every case.
+    pub const DEFAULT_NA_STRINGS: &'static [&'static str] = &["NA", ""];
+
     /// Load a dataset from a file path.
     ///
-    /// The file format is automatically detected from the extension.
+    /// The file format is automatically detected from the extension. CSV files are
+    /// read with [`DataLoader::DEFAULT_NA_STRINGS`] as missing values.
     pub fn load(path: impl AsRef<Path>) -> Result<Dataset, LoadError> {
-        let path = path.as_ref();
+        Self::load_impl(path.as_ref(), None)
+    }
 
+    /// As [`DataLoader::load`], with `na_strings` read as missing values in a CSV file
+    /// (`[]` keeps the text `NA`). Any other format is
+    /// [`LoadError::UnsupportedFormat`]: those files store missing values themselves.
+    pub fn load_with_na(path: impl AsRef<Path>, na_strings: &[&str]) -> Result<Dataset, LoadError> {
+        Self::load_impl(path.as_ref(), Some(na_strings))
+    }
+
+    fn load_impl(path: &Path, na_strings: Option<&[&str]>) -> Result<Dataset, LoadError> {
         if !path.exists() {
             return Err(LoadError::FileNotFound(path.display().to_string()));
         }
@@ -334,8 +365,15 @@ impl DataLoader {
             .unwrap_or("")
             .to_lowercase();
 
+        if na_strings.is_some() && extension != "csv" {
+            return Err(LoadError::UnsupportedFormat(format!(
+                "na_strings applies only to CSV files, not '.{extension}' files (they store \
+                 missing values themselves)"
+            )));
+        }
+
         let df = match extension.as_str() {
-            "csv" => Self::load_csv(path)?,
+            "csv" => Self::load_csv_with_na(path, na_strings.unwrap_or(Self::DEFAULT_NA_STRINGS))?,
             "parquet" | "pq" => Self::load_parquet(path)?,
             #[cfg(feature = "file-formats")]
             "xlsx" | "xls" | "xlsb" | "ods" => Self::load_excel(path, None)?,
@@ -365,11 +403,19 @@ impl DataLoader {
         Ok(dataset)
     }
 
-    /// Load a CSV file eagerly (entire file into memory).
+    /// Load a CSV file eagerly (entire file into memory), with
+    /// [`DataLoader::DEFAULT_NA_STRINGS`] as missing values.
     pub fn load_csv(path: impl AsRef<Path>) -> Result<DataFrame, LoadError> {
-        let df = CsvReadOptions::default()
-            .with_has_header(true)
-            .with_infer_schema_length(Some(1000))
+        Self::load_csv_with_na(path, Self::DEFAULT_NA_STRINGS)
+    }
+
+    /// Load a CSV file eagerly, reading `na_strings` as missing values (`[]` keeps the
+    /// text `NA`; an empty unquoted field is missing in every case).
+    pub fn load_csv_with_na(
+        path: impl AsRef<Path>,
+        na_strings: &[&str],
+    ) -> Result<DataFrame, LoadError> {
+        let df = csv_options(na_strings)
             .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
             .finish()?;
         Ok(df)
@@ -403,7 +449,8 @@ impl DataLoader {
         read_parquet(std::io::Cursor::new(bytes))
     }
 
-    /// Load a CSV file with optional row limit (useful for previewing large files).
+    /// Load a CSV file with optional row limit (useful for previewing large files),
+    /// with [`DataLoader::DEFAULT_NA_STRINGS`] as missing values.
     ///
     /// # Arguments
     /// * `path` - Path to the CSV file
@@ -418,9 +465,7 @@ impl DataLoader {
         path: impl AsRef<Path>,
         n_rows: Option<usize>,
     ) -> Result<DataFrame, LoadError> {
-        let mut options = CsvReadOptions::default()
-            .with_has_header(true)
-            .with_infer_schema_length(Some(1000));
+        let mut options = csv_options(Self::DEFAULT_NA_STRINGS);
 
         if let Some(limit) = n_rows {
             options = options.with_n_rows(Some(limit));
@@ -461,7 +506,8 @@ impl DataLoader {
 
     /// Load CSV in chunks for processing large files.
     ///
-    /// Reads a specific chunk (slice) of a CSV file.
+    /// Reads a specific chunk (slice) of a CSV file, with
+    /// [`DataLoader::DEFAULT_NA_STRINGS`] as missing values.
     /// Use this to process large files in pieces without loading everything.
     ///
     /// # Arguments
@@ -486,9 +532,7 @@ impl DataLoader {
         skip_rows: usize,
         n_rows: usize,
     ) -> Result<DataFrame, LoadError> {
-        let options = CsvReadOptions::default()
-            .with_has_header(true)
-            .with_infer_schema_length(Some(1000))
+        let options = csv_options(Self::DEFAULT_NA_STRINGS)
             .with_skip_rows(skip_rows)
             .with_n_rows(Some(n_rows));
 
@@ -677,12 +721,20 @@ impl DataLoader {
         Ok(df)
     }
 
-    /// Load data from a CSV string.
+    /// Load data from a CSV string, with [`DataLoader::DEFAULT_NA_STRINGS`] as missing
+    /// values.
     pub fn from_csv_string(data: &str) -> Result<DataFrame, LoadError> {
+        Self::from_csv_string_with_na(data, Self::DEFAULT_NA_STRINGS)
+    }
+
+    /// Load data from a CSV string, reading `na_strings` as missing values (`[]` keeps
+    /// the text `NA`; an empty unquoted field is missing in every case).
+    pub fn from_csv_string_with_na(
+        data: &str,
+        na_strings: &[&str],
+    ) -> Result<DataFrame, LoadError> {
         let cursor = std::io::Cursor::new(data);
-        let df = CsvReadOptions::default()
-            .with_has_header(true)
-            .with_infer_schema_length(Some(1000))
+        let df = csv_options(na_strings)
             .into_reader_with_file_handle(cursor)
             .finish()?;
         Ok(df)
@@ -828,6 +880,145 @@ mod tests {
         let df = DataLoader::from_csv_string(csv_data).unwrap();
         assert_eq!(df.height(), 2);
         assert_eq!(df.width(), 3);
+    }
+
+    // DATA-32. The R references below read files as R's write.csv writes them (the literal
+    // text NA), which the R harness cannot produce: it writes every missing cell as an empty
+    // field. The values are R 4.3.3's, with the command quoted at each test.
+
+    /// R: `write.csv(data.frame(y = c(1.2, NA, 3.1, 4), x = c(1L, 2L, NA, 4L)), f,
+    /// row.names = FALSE)`, as text.
+    const R_WRITE_CSV: &str = "\"y\",\"x\"\n1.2,1\nNA,2\n3.1,NA\n4,4\n";
+
+    /// The 1100-row file of R `x3 <- seq_len(1100) + 0.5; x3[1050] <- NA;
+    /// write.csv(data.frame(id = seq_len(1100), x = x3), f3, row.names = FALSE)`.
+    fn r_csv_1100(dir: &Path) -> PathBuf {
+        let mut text = String::from("\"id\",\"x\"\n");
+        for i in 1..=1100 {
+            if i == 1050 {
+                text.push_str("1050,NA\n");
+            } else {
+                text.push_str(&format!("{i},{i}.5\n"));
+            }
+        }
+        let path = dir.join("r1100.csv");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn null_rows(df: &DataFrame, name: &str) -> Vec<usize> {
+        let col = df.column(name).unwrap();
+        (0..col.len())
+            .filter(|&i| col.get(i).unwrap().is_null())
+            .collect()
+    }
+
+    #[test]
+    fn test_data32_r_write_csv_na_is_missing() {
+        let df = DataLoader::from_csv_string(R_WRITE_CSV).unwrap();
+        assert_eq!(df.column("y").unwrap().dtype(), &DataType::Float64);
+        assert_eq!(df.column("x").unwrap().dtype(), &DataType::Int64);
+        assert_eq!(df.column("y").unwrap().null_count(), 1);
+        assert_eq!(df.column("x").unwrap().null_count(), 1);
+        let (y, _) =
+            crate::data::columns::numeric_column(&df, "y", crate::data::columns::NaPolicy::Omit)
+                .unwrap();
+        let m = y.iter().sum::<f64>() / y.len() as f64;
+        // R: mean(y, na.rm = TRUE) = 2.7666666666666666 (three values)
+        assert!((m - 2.7666666666666666).abs() < 1e-15, "{m}");
+    }
+
+    #[test]
+    fn test_data32_na_after_inference_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = r_csv_1100(dir.path());
+        let df = DataLoader::load_csv(&path).unwrap();
+        assert_eq!(df.column("x").unwrap().dtype(), &DataType::Float64);
+        assert_eq!(null_rows(&df, "x"), [1049]);
+        let (x, missing) =
+            crate::data::columns::numeric_column(&df, "x", crate::data::columns::NaPolicy::Omit)
+                .unwrap();
+        assert_eq!(missing.n_dropped, 1);
+        let m = x.iter().sum::<f64>() / x.len() as f64;
+        // R: mean(read.csv(f3)$x, na.rm = TRUE) = 550.54549590536851 (17 digits; the
+        // literal below is the same double, shortest form)
+        let r = 550.545_495_905_368_5;
+        assert!((m - r).abs() <= 1e-13 * r, "{m}");
+    }
+
+    #[test]
+    fn test_data32_quoted_na_and_empty_text_fields() {
+        // R: read.csv(text = txt, stringsAsFactors = FALSE, na.strings = c("NA", ""));
+        // is.na(d2): x F T T F T (NaN counts), s T F T T F, t F T F T F.
+        let txt = "x,s,t\n1,\"NA\",a\nNA,a,\n,\"\",b\n4,NA,\"NA\"\nNaN,b,c\n";
+        let df = DataLoader::from_csv_string(txt).unwrap();
+        let x = df.column("x").unwrap();
+        assert_eq!(x.dtype(), &DataType::Float64);
+        assert_eq!(x.null_count(), 2);
+        assert!(x.f64().unwrap().get(4).unwrap().is_nan());
+        assert_eq!(null_rows(&df, "s"), [0, 2, 3]);
+        assert_eq!(null_rows(&df, "t"), [1, 3]);
+        let (kept, missing) =
+            crate::data::columns::numeric_column(&df, "x", crate::data::columns::NaPolicy::Omit)
+                .unwrap();
+        assert_eq!(kept, [1.0, 4.0]);
+        assert_eq!(missing.n_dropped, 3); // R: sum(is.na(d2$x)) = 3
+    }
+
+    #[test]
+    fn test_data32_custom_na_strings() {
+        let df = DataLoader::from_csv_string_with_na("a,b\n1,-99\n2,3.5\n", &["-99"]).unwrap();
+        assert_eq!(df.column("b").unwrap().dtype(), &DataType::Float64);
+        assert_eq!(null_rows(&df, "b"), [0]);
+        let kept = DataLoader::from_csv_string_with_na("c\nNA\nx\n", &[]).unwrap();
+        assert_eq!(kept.column("c").unwrap().dtype(), &DataType::String);
+        assert_eq!(kept.column("c").unwrap().null_count(), 0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.csv");
+        std::fs::write(&path, "a,b\n1,-99\n2,3.5\n").unwrap();
+        let from_file = DataLoader::load_csv_with_na(&path, &["-99"]).unwrap();
+        assert!(from_file.equals_missing(&df));
+    }
+
+    #[test]
+    fn test_data32_load_dispatch_and_non_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("v.csv");
+        std::fs::write(&csv, "id,v\n1,-99\n2,NA\n3,3.5\n").unwrap();
+        let ds = DataLoader::load(&csv).unwrap();
+        assert_eq!(null_rows(ds.df(), "v"), [1]);
+        let ds = DataLoader::load_with_na(&csv, &["-99"]).unwrap();
+        assert_eq!(ds.df().column("v").unwrap().dtype(), &DataType::String);
+        assert_eq!(null_rows(ds.df(), "v"), [0]);
+        assert_eq!(ds.name(), Some("v"));
+        let parquet = dir.path().join("p.parquet");
+        Dataset::new(df! { "a" => [1.5, 2.5] }.unwrap())
+            .to_parquet(&parquet)
+            .unwrap();
+        match DataLoader::load_with_na(&parquet, &["NA"]) {
+            Err(LoadError::UnsupportedFormat(msg)) => {
+                assert!(
+                    msg.contains("na_strings applies only to CSV files"),
+                    "{msg}"
+                )
+            }
+            other => panic!(
+                "expected UnsupportedFormat, got {:?}",
+                other.map(|d| d.nrows())
+            ),
+        }
+    }
+
+    #[test]
+    fn test_data32_chunk_iterator_reads_na() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = r_csv_1100(dir.path());
+        let first = DataLoader::iter_csv_chunks(&path, 1100)
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.column("x").unwrap().dtype(), &DataType::Float64);
+        assert_eq!(first.column("x").unwrap().null_count(), 1);
     }
 
     #[test]

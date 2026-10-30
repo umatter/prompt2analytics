@@ -106,7 +106,17 @@ pub fn format_suggestions(target: &str, available: &[String]) -> Option<String> 
 }
 
 /// Format the ColumnNotFound error message with typo suggestions.
+///
+/// A column that is among `available` exists: some call sites still map every
+/// `DesignError` (a missing, infinite or text cell) to `ColumnNotFound`, so the
+/// message says the column could not be read instead of claiming it is absent.
 fn format_column_not_found_error(column: &str, available: &[String]) -> String {
+    if available.iter().any(|name| name == column) {
+        return format!(
+            "Column '{column}' exists but could not be read as numbers (it has missing, \
+             infinite or non-numeric values)."
+        );
+    }
     let base = format!("Column '{}' not found in dataset.", column);
 
     if let Some(suggestion) = format_suggestions(column, available) {
@@ -156,8 +166,17 @@ pub enum EconError {
     #[error("Column '{column}' contains non-numeric values. Ensure all values are numeric.")]
     NonNumericColumn { column: String },
 
-    #[error("Column '{column}' contains {count} null values. Consider imputation or filtering.")]
+    /// Missing cells (null, or NaN in a float column) where the method allows none.
+    #[error(
+        "Column '{column}' contains {count} missing value(s) (null or NaN). Drop or impute them first."
+    )]
     NullValues { column: String, count: usize },
+
+    /// `±Inf` cells in a column a method reads as numbers.
+    #[error(
+        "Column '{column}' contains {count} infinite value(s); remove or recode them before estimating."
+    )]
+    NonFiniteValues { column: String, count: usize },
 
     #[error("Empty dataset: no observations to process")]
     EmptyDataset,
@@ -504,5 +523,40 @@ mod tests {
         assert!(msg.contains("xyz"));
         assert!(!msg.contains("Did you mean"));
         assert!(msg.contains("Available columns"));
+    }
+
+    #[test]
+    fn test_column_not_found_for_an_existing_column_says_unreadable() {
+        // Call sites that still map every design error to ColumnNotFound (a NaN, Inf or
+        // text cell in an existing column) must not claim the column is missing.
+        let err = EconError::ColumnNotFound {
+            column: "y".to_string(),
+            available: vec!["t".to_string(), "y".to_string(), "x".to_string()],
+        };
+        assert_eq!(
+            err.to_string(),
+            "Column 'y' exists but could not be read as numbers (it has missing, infinite \
+             or non-numeric values)."
+        );
+    }
+
+    #[test]
+    fn test_null_and_non_finite_messages() {
+        let null = EconError::NullValues {
+            column: "x".into(),
+            count: 3,
+        };
+        assert_eq!(
+            null.to_string(),
+            "Column 'x' contains 3 missing value(s) (null or NaN). Drop or impute them first."
+        );
+        let inf = EconError::NonFiniteValues {
+            column: "x".into(),
+            count: 2,
+        };
+        assert_eq!(
+            inf.to_string(),
+            "Column 'x' contains 2 infinite value(s); remove or recode them before estimating."
+        );
     }
 }

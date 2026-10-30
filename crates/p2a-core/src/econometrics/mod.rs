@@ -173,6 +173,7 @@ pub use discrete::{
     // Negative binomial regression
     NegBinResult,
     // Ordered logit/probit
+    OrderedConfig,
     OrderedModelType,
     OrderedResult,
     // Mixed logit / Random parameters logit (gmnl, mixl)
@@ -191,6 +192,7 @@ pub use discrete::{
     run_multinom,
     run_negbin,
     run_ordered_logit,
+    run_ordered_model_with,
     run_ordered_probit,
     run_probit,
     run_zinb,
@@ -320,8 +322,9 @@ pub use staggered_did::{
 };
 pub use survival::{
     AftConfig, AftDistribution, AftResult, CompetingRisksResult, CoxConfig, CoxResult,
-    CumulativeIncidence, KaplanMeierResult, LogRankResult, TiesMethod, log_rank_test, run_aft,
-    run_competing_risks, run_cox_ph, run_kaplan_meier,
+    CumulativeIncidence, KaplanMeierResult, KmConfType, KmConfig, LogRankResult, TiesMethod,
+    log_rank_test, run_aft, run_competing_risks, run_cox_ph, run_kaplan_meier,
+    run_kaplan_meier_with,
 };
 pub use synth::{
     // Generalized synthetic control (gsynth)

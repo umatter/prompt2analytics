@@ -21,6 +21,13 @@
 //! extensions, no reconfiguration); the `*_with` variants also take
 //! `QueryOptions` bounds on rows, bytes, time, DuckDB memory and threads.
 //!
+//! ## Column extraction ([`columns`])
+//!
+//! Estimators read user columns through [`columns::ColumnRequest`]: null and NaN are
+//! missing (R's `is.na`), and rows with a missing value are dropped (`NaPolicy::Omit`,
+//! reported in a `MissingSummary`) or refused (`NaPolicy::Fail`); see the module docs for
+//! the dtype, factor-level and time-index rules.
+//!
 //! ## Data Manipulation ([`munging`])
 //!
 //! | Operation | Function | Description |
@@ -146,6 +153,7 @@
 //!
 //! ## Submodules
 //!
+//! - [`columns`] - Missing-value-aware column extraction shared by every estimator
 //! - [`munging`] - Data transformation, cleaning, joining, reshaping, and aggregation
 //! - [`quality`] - Data quality profiling for LLM-assisted cleaning
 //! - [`verification`] - Verification and preview for cleaning operations
@@ -153,6 +161,7 @@
 //! - [`suggestion`] - Smart cleaning suggestions with priority ranking
 
 pub mod cleaning_session;
+pub mod columns;
 #[cfg(feature = "database")]
 mod database;
 mod dataset;

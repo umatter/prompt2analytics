@@ -29,6 +29,7 @@
 //! - [`ks_test_one_sample`], [`ks_test_two_sample`] - Kolmogorov-Smirnov
 //!
 //! ### Contingency Tables
+//! - [`contingency_table`] - r x c table from two factor columns
 //! - [`chisq_test_gof`], [`chisq_test_independence`] - Chi-squared tests
 //! - [`fisher_exact_test`] - Exact test for 2×2 tables
 //! - [`mcnemar_test`] - Paired nominal data
@@ -75,6 +76,7 @@ pub mod boxtest;
 pub mod cancor;
 mod chisq;
 pub mod constroptim;
+mod contingency;
 mod correlation;
 pub mod cortest;
 mod descriptive;
@@ -118,8 +120,8 @@ pub use acf::{
     AcfResult, AcfType, CcfResult, CcfType, PacfResult, acf, ccf, pacf, run_acf, run_ccf, run_pacf,
 };
 pub use anova::{
-    AnovaResult, GroupStats, RegressionAnovaResult, TwoWayAnovaResult, anova_from_ols,
-    run_one_way_anova, run_two_way_anova,
+    AnovaResult, GroupStats, RegressionAnovaResult, SsType, TwoWayAnovaConfig, TwoWayAnovaResult,
+    anova_from_ols, run_one_way_anova, run_two_way_anova, run_two_way_anova_with,
 };
 pub use ansari::{AnsariBradleyResult, ansari_test};
 pub use bartlett::{BartlettGroupStats, BartlettResult, bartlett_test, run_bartlett_test};
@@ -127,12 +129,13 @@ pub use binomtest::{BinomTestResult, binom_test};
 pub use boxtest::{BoxTestResult, BoxTestType, box_test, run_box_test};
 pub use cancor::{CancorResult, cancor, run_cancor};
 pub use chisq::{
-    ChiSquaredResult, chisq_test_gof, chisq_test_independence, run_chisq_gof,
-    run_chisq_independence,
+    ChiSquaredResult, GofExpected, chisq_test_gof, chisq_test_independence, run_chisq_gof,
+    run_chisq_gof_with, run_chisq_independence,
 };
 pub use constroptim::{
     ConstrOptimConfig, ConstrOptimResult, OptimMethod, constr_optim, run_constr_optim,
 };
+pub use contingency::{ContingencyTable, contingency_table, level_counts, stratified_tables};
 pub use correlation::{CorrelationMatrix, correlation_matrix};
 pub use cortest::{CorTestResult, CorrelationMethod, cor_test, run_cor_test};
 pub use descriptive::{ColumnStats, DescriptiveStats};

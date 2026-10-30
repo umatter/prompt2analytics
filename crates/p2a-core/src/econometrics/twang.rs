@@ -50,8 +50,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
+use crate::linalg::design::DesignMatrix;
 use crate::resource;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -553,12 +554,8 @@ pub fn run_twang(
     let config = config.unwrap_or_default();
 
     // Extract treatment variable
-    let t = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let t = DesignMatrix::extract_column(dataset.df(), treatment_col)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = t.len();
 
@@ -576,7 +573,8 @@ pub fn run_twang(
     }
 
     // Build covariate matrix (no intercept for tree-based methods)
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)?;
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
     let covariate_names = design.column_names.clone();
 
@@ -1577,8 +1575,38 @@ mod tests {
 
     #[test]
     fn test_twang_rejects_non_finite_covariates() {
-        let err = run_twang(&dataset_with_nan_x1(), "treatment", &["x1", "x2"], None).unwrap_err();
-        expect_invalid_spec(err, "x1");
+        // DesignMatrix refuses the NaN covariate by name before twang's own finite check.
+        match run_twang(&dataset_with_nan_x1(), "treatment", &["x1", "x2"], None) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!(column, "x1");
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected NullValues for x1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_twang_names_a_missing_treatment_value() {
+        // A NaN treatment is a missing value in an existing column, not "Column not found".
+        let ds = create_test_dataset();
+        let mut t: Vec<f64> = ds
+            .df()
+            .column("treatment")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        t[3] = f64::NAN;
+        let mut df = ds.df().clone();
+        df.with_column(Series::new("treatment".into(), t)).unwrap();
+        match run_twang(&Dataset::new(df), "treatment", &["x1", "x2"], None) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!(column, "treatment");
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected NullValues for treatment, got {other:?}"),
+        }
     }
 
     #[test]

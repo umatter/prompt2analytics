@@ -584,9 +584,10 @@ class TestLint(TreeCase):
             self.assert_finding(code, text, "ERROR", "registry", "not valid JSON")
 
     def test_registry_categories(self):
-        # The runner's categories, plus `interfaces` (validation/methods/interfaces.json).
+        # The runner's categories, plus `interfaces` (validation/methods/interfaces.json) and
+        # `data` (validation/methods/data_columns.json).
         original = self.path("validation/methods/demo.json").read_text()
-        for category in vs.CATEGORIES + ("interfaces",):
+        for category in vs.CATEGORIES + ("interfaces", "data"):
             with self.subTest(category):
                 self.path("validation/methods/demo.json").write_text(original)
                 self.edit_json(
@@ -597,6 +598,7 @@ class TestLint(TreeCase):
                 self.assertEqual(code, 0, text)
                 self.assertIn("lint: 0 error(s), 0 warning(s)", text)
         self.assertNotIn("interfaces", vs.CATEGORIES)  # not a runner/select --category
+        self.assertNotIn("data", vs.CATEGORIES)
 
     def test_case_file_errors(self):
         with self.subTest("registry case without JSON"):

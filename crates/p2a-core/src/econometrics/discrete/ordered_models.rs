@@ -73,6 +73,44 @@ impl fmt::Display for OrderedModelType {
     }
 }
 
+/// Options of [`run_ordered_model_with`] (implemented by T2-WP10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderedConfig {
+    /// Link function (default logit).
+    pub link: OrderedModelType,
+    /// ordinal order of a text outcome (required for String outcomes)
+    pub levels: Option<Vec<String>>,
+    /// Maximum Newton iterations (default 100).
+    pub max_iter: usize,
+    /// Convergence tolerance on the relative change of the log-likelihood (default 1e-10).
+    pub tol: f64,
+}
+
+impl Default for OrderedConfig {
+    fn default() -> Self {
+        OrderedConfig {
+            link: OrderedModelType::Logit,
+            levels: None,
+            max_iter: 100,
+            tol: 1e-10,
+        }
+    }
+}
+
+/// Ordered logit or probit with the options of [`OrderedConfig`].
+///
+/// Implemented by T2-WP10; until then returns `EconError::NotImplemented`.
+pub fn run_ordered_model_with(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    config: &OrderedConfig,
+) -> EconResult<OrderedResult> {
+    Err(EconError::NotImplemented(
+        "T2-WP10: run_ordered_model_with".to_string(),
+    ))
+}
+
 /// Result from ordered logit/probit regression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderedResult {
