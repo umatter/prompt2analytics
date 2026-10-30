@@ -773,15 +773,15 @@ impl AnalyticsServer {
                 serde_json::json!({
                     "stratum": s.stratum,
                     "counts": {
-                        "a": s.counts[0],
-                        "b": s.counts[1],
-                        "c": s.counts[2],
-                        "d": s.counts[3]
+                        "a": json_number(s.counts[0]),
+                        "b": json_number(s.counts[1]),
+                        "c": json_number(s.counts[2]),
+                        "d": json_number(s.counts[3])
                     },
-                    "n": s.n,
-                    "expected_a": s.expected_a,
-                    "variance_a": s.variance_a,
-                    "odds_ratio": s.odds_ratio
+                    "n": json_number(s.n),
+                    "expected_a": json_number(s.expected_a),
+                    "variance_a": json_number(s.variance_a),
+                    "odds_ratio": json_number(s.odds_ratio)
                 })
             })
             .collect();
@@ -794,16 +794,16 @@ impl AnalyticsServer {
 
         let mut output = serde_json::json!({
             "method": result.test_name,
-            "statistic": result.statistic,
+            "statistic": json_number(result.statistic),
             "statistic_name": "Mantel-Haenszel X-squared",
             "df": result.df,
-            "p_value": result.p_value,
+            "p_value": json_number(result.p_value),
             "n_strata": result.n_strata,
             "total_n": result.total_n,
-            "common_odds_ratio": result.common_odds_ratio,
+            "common_odds_ratio": json_number(result.common_odds_ratio),
             "odds_ratio_ci": {
-                "lower": result.odds_ratio_ci.0,
-                "upper": result.odds_ratio_ci.1,
+                "lower": json_number(result.odds_ratio_ci.0),
+                "upper": json_number(result.odds_ratio_ci.1),
                 "conf_level": 0.95
             },
             "continuity_correction": result.continuity_correction,
@@ -2406,6 +2406,39 @@ mod tests {
             "{}",
             t.chars().take(400).collect::<String>()
         );
+    }
+
+    #[test]
+    fn test_mcp_hypothesis_mantelhaen_spells_an_infinite_odds_ratio() {
+        // review: every stratum has b * c = 0, so the common odds ratio, the upper limit and
+        // each stratum's odds ratio are +inf; serde_json turned them into null.
+        // s1: a = 3, b = 0, c = 2, d = 4; s2: a = 2, b = 1, c = 0, d = 5
+        let mut t: Vec<&str> = Vec::new();
+        let mut y: Vec<&str> = Vec::new();
+        let mut s: Vec<&str> = Vec::new();
+        for (stratum, cells) in [("s1", [3, 0, 2, 4]), ("s2", [2, 1, 0, 5])] {
+            let kinds = [("ctl", "no"), ("ctl", "yes"), ("trt", "no"), ("trt", "yes")];
+            for ((ti, yi), k) in kinds.into_iter().zip(cells) {
+                t.extend(std::iter::repeat_n(ti, k));
+                y.extend(std::iter::repeat_n(yi, k));
+                s.extend(std::iter::repeat_n(stratum, k));
+            }
+        }
+        let (rt, server) = server_with(vec![("d", df!("t" => t, "y" => y, "s" => s).unwrap())]);
+        let req: MantelhaenTestRequest = serde_json::from_value(serde_json::json!(
+            {"dataset": "d", "row_var": "t", "col_var": "y", "stratum_var": "s"}))
+        .unwrap();
+        let v = json_of(
+            &rt.block_on(server.hypothesis_mantelhaen(Parameters(req)))
+                .unwrap(),
+        );
+        assert_eq!(v["common_odds_ratio"], "Inf");
+        assert_eq!(v["odds_ratio_ci"]["upper"], "Inf");
+        assert_eq!(v["odds_ratio_ci"]["lower"], 0.0);
+        assert_eq!(v["stratum_statistics"][0]["odds_ratio"], "Inf");
+        assert_eq!(v["stratum_statistics"][1]["odds_ratio"], "Inf");
+        assert_eq!(v["stratum_statistics"][0]["counts"]["a"], 3.0);
+        assert!(v["statistic"].as_f64().is_some_and(f64::is_finite), "{v}");
     }
 
     #[test]
