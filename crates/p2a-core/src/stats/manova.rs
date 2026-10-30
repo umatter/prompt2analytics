@@ -254,8 +254,13 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
         });
     }
 
+    // The groups in label order: every sum below runs in this order, so the result does
+    // not depend on HashMap iteration order (which differs between calls).
+    let mut order: Vec<&String> = group_data.keys().collect();
+    order.sort();
+
     // Check minimum observations per group
-    for (group, indices) in &group_data {
+    for (group, indices) in order.iter().map(|g| (*g, &group_data[*g])) {
         if indices.len() < 2 {
             return Err(EconError::InsufficientData {
                 required: 2,
@@ -302,8 +307,9 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
     // Compute SSCP matrices
     // H (hypothesis/between-groups): H = Σ nᵢ (ȳᵢ - ȳ)(ȳᵢ - ȳ)'
     let mut sscp_hypothesis = Array2::<f64>::zeros((n_responses, n_responses));
-    for (group, mean) in &group_means {
-        let n_i = group_sizes[group] as f64;
+    for group in &order {
+        let mean = &group_means[*group];
+        let n_i = group_sizes[*group] as f64;
         let diff: Vec<f64> = mean.iter().zip(&grand_mean).map(|(m, g)| m - g).collect();
         for j in 0..n_responses {
             for k in 0..n_responses {
@@ -314,9 +320,9 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
 
     // E (error/within-groups): E = Σᵢ Σⱼ (yᵢⱼ - ȳᵢ)(yᵢⱼ - ȳᵢ)'
     let mut sscp_error = Array2::<f64>::zeros((n_responses, n_responses));
-    for (group, indices) in &group_data {
-        let group_mean = &group_means[group];
-        for &i in indices {
+    for group in &order {
+        let group_mean = &group_means[*group];
+        for &i in &group_data[*group] {
             let diff: Vec<f64> = (0..n_responses)
                 .map(|j| y_data[[i, j]] - group_mean[j])
                 .collect();
@@ -944,6 +950,45 @@ mod tests {
         let result = manova_one_way(&y, &groups);
         assert!(result.is_err());
     }
+    /// The SSCP sums run over the groups in a fixed order, so repeated calls on the same data
+    /// give bit-identical statistics (they summed in HashMap iteration order, which differs
+    /// between calls).
+    #[test]
+    fn test_manova_statistics_do_not_depend_on_hash_order() {
+        let n = 60;
+        let mut y = Array2::<f64>::zeros((n, 2));
+        let mut groups = Vec::with_capacity(n);
+        for i in 0..n {
+            let g = i % 5;
+            y[[i, 0]] = 1.0 + 0.3 * g as f64 + (i as f64 * 0.7).sin() / 3.0;
+            y[[i, 1]] = 2.0 - 0.2 * g as f64 + (i as f64 * 1.3).cos() / 7.0;
+            groups.push(format!("group{g}"));
+        }
+        let first = manova_one_way(&y, &groups).unwrap();
+        for _ in 0..30 {
+            let again = manova_one_way(&y, &groups).unwrap();
+            for (a, b) in [
+                (&first.pillai, &again.pillai),
+                (&first.wilks, &again.wilks),
+                (&first.hotelling_lawley, &again.hotelling_lawley),
+                (&first.roy, &again.roy),
+            ] {
+                assert_eq!(
+                    a.statistic.to_bits(),
+                    b.statistic.to_bits(),
+                    "{:?}",
+                    a.test_type
+                );
+                assert_eq!(
+                    a.f_value.to_bits(),
+                    b.f_value.to_bits(),
+                    "{:?}",
+                    a.test_type
+                );
+            }
+        }
+    }
+
     // ========================================================================
     // R-pinned: incomplete rows (T2-WP07, case stat_manova_na)
     // ========================================================================
