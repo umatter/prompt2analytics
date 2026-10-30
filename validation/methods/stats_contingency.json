@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "contingency_table",
+      "name": "Contingency tables from factor columns (missing rows dropped, R factor() level order)",
+      "category": "stats",
+      "reference": "base::table (NA excluded); base::factor (numeric levels numerically, LC_COLLATE = C)",
+      "doc": "validation/stats/chisq.md",
+      "cases": ["stat_contingency_na_codes", "stat_chisq_gof", "stat_mantelhaen_na", "stat_fisher_rows_2000"],
+      "tests": [
+        "p2a-core::stats::contingency::tests::test_validate_contingency_table_na_codes",
+        "p2a-core::stats::contingency::tests::test_validate_na_contingency_int64_equals_float64",
+        "p2a-core::stats::contingency::tests::test_validate_na_contingency_rejects_datetime_and_absent_columns",
+        "p2a-core::stats::contingency::tests::test_validate_level_counts_extra_levels",
+        "p2a-core::stats::contingency::tests::test_validate_stratified_tables_mantelhaen_na",
+        "p2a-core::stats::contingency::tests::test_validate_contingency_table_inside_tokio_runtime"
+      ],
+      "quantities": ["cell counts", "level order", "rows dropped per column", "strata"],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "fisher_exact",
+      "name": "Fisher's exact test, 2 x 2 (p-values, conditional MLE, exact CI)",
+      "category": "stats",
+      "reference": "stats::fisher.test (2 x 2: dnhyper, relErr 1 + 1e-7, mle, ncp.U, ncp.L); limits re-solved with uniroot(tol = 1e-15)",
+      "doc": "validation/stats/fisher.md",
+      "cases": ["stat_fisher_tables", "stat_fisher_rows_2000", "stat_contingency_na_codes", "stat_chisq_small_expected"],
+      "tests": [
+        "p2a-core::stats::fisher::tests::test_validate_fisher_tables",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_tables_row_swap",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_rows_2000",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_na_codes_orientation",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_needs_two_levels_per_column",
+        "p2a-core::stats::fisher::tests::test_validate_run_fisher_test_inside_tokio_runtime",
+        "p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_fisher_exact_rows_2000"
+      ],
+      "quantities": ["p two-sided/less/greater", "conditional MLE", "CI two-sided/less/greater", "sample odds ratio", "table orientation"],
+      "tolerance": "p: validation/README.md p-value row (relative 1e-9 for p < 1e-12); MLE and limits 1e-9 relative to the tight re-solve; R's printed limits 1e-2 (uniroot tol eps^0.25)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "chisq_gof",
+      "name": "Chi-squared goodness of fit (sorted, named and rescaled probabilities)",
+      "category": "stats",
+      "reference": "stats::chisq.test(table(x), p =, rescale.p =)",
+      "doc": "validation/stats/chisq.md",
+      "cases": ["stat_chisq_gof", "stat_contingency_na_codes", "stat_fisher_rows_2000"],
+      "tests": [
+        "p2a-core::stats::chisq::tests::test_validate_chisq_gof",
+        "p2a-core::stats::chisq::tests::test_validate_chisq_gof_na_codes",
+        "p2a-core::stats::chisq::tests::test_validate_chisq_gof_errors",
+        "p2a-core::stats::chisq::tests::test_validate_run_chisq_gof_inside_tokio_runtime",
+        "p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_chisq_gof_expected"
+      ],
+      "quantities": ["X-squared", "df", "p", "observed", "expected", "Pearson residuals", "category order", "small-expected warning"],
+      "tolerance": "validation/README.md statistic and p-value rows (n = 9 to 60: 1e-5 relative)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "chisq_independence",
+      "name": "Chi-squared test of independence (Yates for 2 x 2)",
+      "category": "stats",
+      "reference": "stats::chisq.test(table(x, y), correct =)",
+      "doc": "validation/stats/chisq.md",
+      "cases": ["stat_contingency_na_codes", "stat_chisq_small_expected", "stat_fisher_rows_2000"],
+      "tests": [
+        "p2a-core::stats::chisq::tests::test_validate_chisq_na_codes",
+        "p2a-core::stats::chisq::tests::test_validate_chisq_small_expected",
+        "p2a-core::stats::chisq::tests::test_validate_chisq_rows_2000",
+        "p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_chisq_independence_rows_2000",
+        "p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_chisq_independence_small_expected"
+      ],
+      "quantities": ["X-squared (Yates and uncorrected)", "df", "p", "observed", "expected", "Pearson residuals", "standardized residuals", "small-expected warning", "row/column levels"],
+      "tolerance": "validation/README.md statistic and p-value rows",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mantelhaen",
+      "name": "Cochran-Mantel-Haenszel test, 2 x 2 x K",
+      "category": "stats",
+      "reference": "stats::mantelhaen.test(table(x, y, stratum)) (NA strata dropped)",
+      "doc": "validation/stats/mantelhaen_test.md",
+      "cases": ["stat_mantelhaen_na"],
+      "tests": [
+        "p2a-core::stats::mantelhaen::tests::test_validate_mantelhaen_na",
+        "p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_mantelhaen_na"
+      ],
+      "quantities": ["X-squared with and without correction", "p", "common odds ratio", "95% CI", "rows used", "strata"],
+      "tolerance": "validation/README.md, n = 237: statistics 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

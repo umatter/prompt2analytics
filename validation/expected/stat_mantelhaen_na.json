@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "stat_mantelhaen_na",
+  "area": "stats/contingency",
+  "method": "Mantel-Haenszel test with NA strata",
+  "reference": "stats::mantelhaen.test(table(treat, outcome, stratum)) (NA strata dropped)",
+  "call": "mantelhaen.test(table(treat, outcome, stratum))",
+  "dataset": "validation/datasets/generated/mantelhaen_na.csv",
+  "datasets": ["validation/datasets/generated/mantelhaen_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "statistic": 9.4640082996825026,
+    "p": 0.0020954268679205345,
+    "statistic_nocorrect": 10.292389179376896,
+    "p_nocorrect": 0.0013358001984906988,
+    "common_or": 2.3979329487247192,
+    "ci_lower": 1.4029852155370948,
+    "ci_upper": 4.0984625945458477,
+    "n_used": 237
+  }
+}

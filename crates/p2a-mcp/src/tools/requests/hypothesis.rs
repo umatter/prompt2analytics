@@ -83,14 +83,14 @@ pub struct FisherExactRequest {
 
     /// Row variable column name
     #[schemars(
-        description = "Name of the column for rows of the 2×2 table. Must have exactly 2 unique values."
+        description = "Name of the column for rows of the 2×2 table. Must have exactly 2 distinct values after rows with a missing value in either column are dropped (R table()). Levels are sorted (numbers numerically, text in C-locale order); the first level is the first row of the table."
     )]
     #[serde(alias = "x", alias = "row")]
     pub row_var: String,
 
     /// Column variable column name
     #[schemars(
-        description = "Name of the column for columns of the 2×2 table. Must have exactly 2 unique values."
+        description = "Name of the column for columns of the 2×2 table. Must have exactly 2 distinct values after rows with a missing value in either column are dropped (R table()). Levels are sorted (numbers numerically, text in C-locale order); the first level is the first column of the table."
     )]
     #[serde(alias = "y", alias = "col")]
     pub col_var: String,
@@ -103,7 +103,7 @@ pub struct FisherExactRequest {
 
     /// Confidence level
     #[schemars(
-        description = "Confidence level for odds ratio confidence interval (e.g., 0.95). If omitted, CI is not computed."
+        description = "Confidence level for the odds ratio confidence interval (e.g., 0.95): the exact conditional interval as R fisher.test; one-sided for 'less'/'greater'. If omitted, CI is not computed."
     )]
     pub conf_level: Option<f64>,
 }
@@ -243,16 +243,23 @@ pub struct ChiSquaredGofRequest {
 
     /// Column name with categorical values to count
     #[schemars(
-        description = "Name of the categorical column. Counts of each unique value will be tested."
+        description = "Name of the categorical column. Each distinct non-missing value is a category; missing values are dropped (R table())."
     )]
     #[serde(alias = "x", alias = "variable", alias = "value")]
     pub column: String,
 
     /// Expected probabilities (optional)
     #[schemars(
-        description = "Expected probabilities for each category. Must sum to 1.0. If omitted, uniform distribution is assumed."
+        description = "Expected probabilities, one per category in the order of the sorted category labels (numbers numerically, text in byte/C-locale order; see `categories` in the result). Must sum to 1. If omitted (and no `expected`), the uniform distribution is used."
     )]
     pub probs: Option<Vec<f64>>,
+
+    /// Expected probability per category (named form)
+    #[serde(default)]
+    #[schemars(
+        description = "Expected probability per category, e.g. {\"a\": 0.1, \"b\": 0.6, \"c\": 0.3}. Categories that never occur in the data count as 0 (declare every category this way, e.g. all six faces of a die). Every category that occurs must be listed. Give either probs or expected, not both."
+    )]
+    pub expected: Option<std::collections::BTreeMap<String, f64>>,
 }
 
 /// Request for chi-squared test of independence.
@@ -263,12 +270,16 @@ pub struct ChiSquaredIndependenceRequest {
     pub dataset: String,
 
     /// Row variable column name
-    #[schemars(description = "Name of the column for rows of the contingency table.")]
+    #[schemars(
+        description = "Name of the column for rows of the contingency table. Rows with a missing value in either column are dropped (R table()); levels are sorted (numbers numerically, text in C-locale order)."
+    )]
     #[serde(alias = "x", alias = "row")]
     pub row_var: String,
 
     /// Column variable column name
-    #[schemars(description = "Name of the column for columns of the contingency table.")]
+    #[schemars(
+        description = "Name of the column for columns of the contingency table. Rows with a missing value in either column are dropped (R table()); levels are sorted (numbers numerically, text in C-locale order)."
+    )]
     #[serde(alias = "y", alias = "col")]
     pub col_var: String,
 
@@ -360,19 +371,19 @@ pub struct MantelhaenTestRequest {
 
     /// Row variable column name (binary factor)
     #[schemars(
-        description = "Name of the column containing the row variable (must have exactly 2 levels, e.g., 'exposed'/'unexposed')."
+        description = "Name of the column containing the row variable (must have exactly 2 levels after rows with a missing value in any of the three columns are dropped, e.g., 'exposed'/'unexposed'; levels are sorted, numbers numerically, text in C-locale order)."
     )]
     pub row_var: String,
 
     /// Column variable column name (binary factor)
     #[schemars(
-        description = "Name of the column containing the column variable (must have exactly 2 levels, e.g., 'disease'/'healthy')."
+        description = "Name of the column containing the column variable (must have exactly 2 levels after rows with a missing value in any of the three columns are dropped, e.g., 'disease'/'healthy'; levels are sorted, numbers numerically, text in C-locale order)."
     )]
     pub col_var: String,
 
     /// Stratum variable column name
     #[schemars(
-        description = "Name of the column containing stratum identifiers (e.g., 'hospital', 'study_site')."
+        description = "Name of the column containing stratum identifiers (e.g., 'hospital', 'study_site'). Rows with a missing stratum are dropped (R table())."
     )]
     pub stratum_var: String,
 

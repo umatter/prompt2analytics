@@ -10,6 +10,9 @@ The Cochran-Mantel-Haenszel (CMH) test evaluates the null hypothesis that two no
 - Supports Yates' continuity correction
 - Returns 95% confidence interval for the odds ratio
 
+**Functions:** `p2a_core::stats::mantelhaen::{mantelhaen_test, run_mantelhaen_test, Table2x2}`;
+MCP tool `hypothesis_mantelhaen`.
+
 **Mathematical Background:**
 ```
 CMH = (|Σ(a_k - E[a_k])| - 0.5)² / Σ Var(a_k)
@@ -21,15 +24,62 @@ where:
 Common OR (Mantel-Haenszel) = Σ(a_k × d_k / n_k) / Σ(b_k × c_k / n_k)
 ```
 
+## Data, missing values and level order
+
+`run_mantelhaen_test(dataset, row, col, stratum, ..)` builds the 2 × 2 × K tables with
+`p2a_core::stats::stratified_tables` (`crates/p2a-core/src/stats/contingency.rs`), as R's
+`mantelhaen.test(table(row, col, stratum))`:
+
+- Rows with a missing value (null, or NaN in a float column) in any of the three columns are
+  dropped, as `table()` drops `NA`, and reported in `MantelHaenszelResult.missing` (Display:
+  a `Missing values:` line; MCP: `missing`). A missing stratum label is not a stratum.
+- Row, column and stratum levels follow R `factor()` order (numbers by value, text in
+  C-locale order), so the first level of each variable is the first row or column of every
+  stratum's table and the orientation of the common odds ratio is R's. The row and column
+  levels are common to all strata; `row_levels` and `col_levels` carry them, and
+  `stratum_stats` are in stratum order.
+- After dropping missing rows the row and column variables must have exactly 2 levels each;
+  otherwise the error names the levels.
+
 ## Reference Implementations
 
 | Package | Language | Function | Version Tested |
 |---------|----------|----------|----------------|
-| stats | R | mantelhaen.test | R 4.3+ |
+| stats | R | mantelhaen.test | R 4.3.3 |
+
+## R reference
+
+Case `stat_mantelhaen_na`, defined in `validation/r/cases/stats_contingency.R`, dataset
+`validation/datasets/generated/mantelhaen_na.csv` (240 rows of `treat` ctl/trt, `outcome`
+no/yes and `stratum` s1/s2/s3, with 3 missing strata; seed 11):
+
+```r
+m  <- mantelhaen.test(table(d$treat, d$outcome, d$stratum))
+mc <- mantelhaen.test(table(d$treat, d$outcome, d$stratum), correct = FALSE)
+```
+
+| Quantity | R value |
+|---|---|
+| Mantel-Haenszel X² (continuity correction) | 9.464008299682503 |
+| p-value | 0.0020954268679205345 |
+| X² without correction | 10.292389179376896 |
+| p-value without correction | 0.0013358001984906988 |
+| common odds ratio | 2.397932948724719 |
+| 95% CI | 1.4029852155370948, 4.098462594545848 |
+| rows used | 237 |
 
 ## Test Cases
 
-### Test 1: Rabbits Data (R Documentation Example)
+### Test 1: Missing strata (R-pinned)
+
+**Rust Tests:** `p2a-core` `stats::mantelhaen::tests::test_validate_mantelhaen_na` (statistic
+with and without correction, p-values, common odds ratio and CI, rows used, strata s1 s2 s3,
+levels, the missing-value summary) and `p2a-mcp`
+`tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_mantelhaen_na` (the MCP
+JSON). Before the fix a missing stratum formatted as "null" and formed a fourth stratum (240
+rows); its three rows are all "no", so the statistic happened to equal R's.
+
+### Test 2: Rabbits Data (R Documentation Example; values quoted)
 
 **R Code:**
 ```r
@@ -53,52 +103,41 @@ mantelhaen.test(Rabbits)
 # 95 percent confidence interval: 1.026713 47.725133
 ```
 
-**Results Comparison:**
+**Rust Test:** `stats::mantelhaen::tests::test_validate_mantelhaen_against_r` (array input, the
+values above at the printed precision; not registered).
 
-| Metric | R Value | Rust Value | Tolerance |
-|--------|---------|------------|-----------|
-| CMH X² | 3.9286 | 3.9286 | 0.1 |
-| df | 1 | 1 | exact |
-| p-value | 0.04747 | 0.04747 | 0.01 |
-| Common OR | 7.0 | 7.0 | 0.5 |
-| 95% CI lower | 1.027 | 1.027 | 0.1 |
-| 95% CI upper | 47.73 | 47.73 | 1.0 |
+### Test 3: Single Stratum
 
-**Rust Test:** `crates/p2a-core/src/stats/mantelhaen.rs::tests::test_validate_mantelhaen_against_r`
+A single 2×2 table should produce results similar to a standard chi-squared test.
 
-### Test 2: Single Stratum
+**Rust Test:** `stats::mantelhaen::tests::test_mantelhaen_single_stratum`
 
-**Test:** Single 2×2 table should produce results similar to a standard chi-squared test.
+## Tolerance
 
-**Results Comparison:**
-
-| Metric | Rust Value | Notes |
-|--------|------------|-------|
-| CMH statistic | > 0 | Non-zero for associated data |
-| df | 1 | Always 1 for 2×2×K |
-
-**Rust Test:** `crates/p2a-core/src/stats/mantelhaen.rs::tests::test_mantelhaen_single_stratum`
-
-## Numerical Precision Summary
-
-| Component | Tolerance | Notes |
-|-----------|-----------|-------|
-| CMH statistic | 0.1 | Chi-squared with continuity correction |
-| p-value | 0.01 | From chi-squared CDF |
-| Common OR | 0.5 | Ratio of weighted products |
-| CI bounds | 1.0 | Uses Robins et al. variance formula |
+`stat_mantelhaen_na` (n = 237): the statistic and p-value rows of `validation/README.md`
+(`Tol::stat(237)`, `Tol::p_value(237)`: 1e-6 relative), the same for the common odds ratio
+and its CI; rows used and strata exact. Registry: `validation/methods/stats_contingency.json`,
+method `mantelhaen`.
 
 ## Known Differences
 
 1. **Continuity correction**: Both R and Rust apply Yates' correction when |DELTA| >= 0.5 (default: true).
 
-2. **Odds ratio CI**: Both use Robins, Breslow, Greenland (1986) variance formula for the log odds ratio.
+2. **Odds ratio CI**: Both use Robins, Breslow, Greenland (1986) variance formula for the log
+   odds ratio, two-sided at 95%. Open: the one-sided intervals of `alternative = "less"` /
+   `"greater"` and a `conf_level` other than 0.95 (STAT-59), and the method label when
+   |DELTA| < 0.5 (STAT-81).
 
-3. **Array layout**: R fills arrays column-major, so input tables need careful indexing:
+3. **Small strata**: a stratum with one observation contributes nothing, where R refuses the
+   table ("sample size in each stratum must be > 1").
+
+4. **Array layout**: R fills arrays column-major, so input tables need careful indexing:
    - R: c(a, c, b, d) fills to [[a,b], [c,d]]
    - Rust: Table2x2::new(a, b, c, d)
 
 ## Performance Comparison
+
+Measured before Tier 2 (array input; the algorithm is unchanged):
 
 | Number of Strata | Rust (µs) | R (µs) | Speedup |
 |------------------|-----------|--------|---------|
@@ -108,8 +147,6 @@ mantelhaen.test(Rabbits)
 | 100 | 12.9 | 1,620 | ~126x |
 
 **Notes:**
-- Rust consistently outperforms R by 126-404x depending on problem size
-- Speedup is highest for small problems where R overhead dominates
 - Rust benchmarks from Criterion (median); R benchmarks from system.time (mean of 100 iterations)
 
 ## References

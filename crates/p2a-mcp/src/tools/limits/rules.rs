@@ -339,6 +339,15 @@ pub static PARAM_RULES: &[ParamRule] = {
             ),
         ),
         p("hypothesis_chisq_gof", "probs[]", Exempt(ARRAY_VALUE)),
+        p(
+            "hypothesis_chisq_gof",
+            "expected",
+            Exempt(
+                "probability per category, a map no array rule reaches: the handler refuses \
+                 more entries than the array_length budget, and the core matches the e keys \
+                 to the k levels by hash in O(k + e)",
+            ),
+        ),
         p("hypothesis_ks_test", "a", Exempt(DISTRIBUTION)),
         p("hypothesis_ks_test", "b", Exempt(DISTRIBUTION)),
         p("hypothesis_ks_test", "mean", Exempt(DISTRIBUTION)),

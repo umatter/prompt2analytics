@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "stat_fisher_rows_2000",
+  "area": "stats/contingency",
+  "method": "Fisher's exact test from two columns, 2000 rows",
+  "reference": "stats::fisher.test(table(treat, outcome)); stats::chisq.test (Yates)",
+  "call": "fisher.test(table(d$treat, d$outcome))",
+  "dataset": "validation/datasets/generated/fisher_rows_2000.csv",
+  "datasets": ["validation/datasets/generated/fisher_rows_2000.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "p_two_sided": 0.081110060579133378,
+    "ci_lower_two_sided": 0.98088213895341403,
+    "ci_upper_two_sided": 1.4042147807328291,
+    "p_less": 0.96665489183515163,
+    "ci_lower_less": 0,
+    "ci_upper_less": 1.3650615115668392,
+    "p_greater": 0.040555030289566689,
+    "ci_lower_greater": 1.0089274525587495,
+    "ci_upper_greater": null,
+    "estimate_cond_mle": 1.1735121395938986,
+    "sample_odds_ratio": 1.1736111111111112,
+    "n": 2000,
+    "estimate_cond_mle_tight": 1.1735170755267106,
+    "ci_lower_two_sided_tight": 0.98090331902558825,
+    "ci_upper_two_sided_tight": 1.4041857925265708,
+    "ci_upper_less_tight": 1.3650959693841414,
+    "ci_lower_greater_tight": 1.0089283363505859,
+    "chisq_yates": 3.0419999999999998,
+    "chisq_yates_p": 0.081135897022114156
+  }
+}
