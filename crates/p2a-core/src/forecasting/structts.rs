@@ -13,6 +13,7 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/StructTS.html>
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::forecasting::kalman::{
     StateSpaceModel, admit_filter_and_smoother_history, kalman_filter, kalman_loglik,
@@ -233,30 +234,16 @@ pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult
 ///
 /// Errors as [`struct_ts`] does, including [`EconError::Cancelled`] on a
 /// stopped budget.
+///
+/// Integer and Boolean columns are accepted; a missing value (empty cell, NA or NaN) is an
+/// error naming the column.
 pub fn run_struct_ts(
     dataset: &Dataset,
     column: &str,
     model_type: StructTsType,
     period: Option<usize>,
 ) -> EconResult<StructTsResult> {
-    let df = dataset.df();
-    let available: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
-        column: column.to_string(),
-        available: available.clone(),
-    })?;
-
-    let y: Vec<f64> = col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: column.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
+    let (y, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     struct_ts(
         &y,
@@ -725,6 +712,23 @@ fn params_to_coef(config: &StructTsConfig, params: &[f64]) -> StructTsCoefficien
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X-2: an Int64 column fits as its Float64 copy; missing values, text and absent
+    /// columns are refused by name.
+    #[test]
+    fn test_na_struct_ts_int64_and_missing() {
+        use crate::forecasting::test_fixtures::*;
+        let ds = with_float_copy(&arima_series(), "ai");
+        let run = |col: &str| run_struct_ts(&ds, col, StructTsType::Level, None);
+        let int = run("ai").unwrap();
+        let flt = run("ai_f64").unwrap();
+        assert_eq!(int.log_likelihood.to_bits(), flt.log_likelihood.to_bits());
+        assert_same(&int.level, &flt.level);
+        assert_null_values(&run("a_na").unwrap_err(), "a_na", 2);
+        assert_null_values(&run("ai_na").unwrap_err(), "ai_na", 2);
+        assert_non_numeric(&run("lab").unwrap_err(), "lab");
+        assert_not_found(&run("nope").unwrap_err(), "nope");
+    }
 
     fn generate_local_level_data(n: usize, level_var: f64, obs_var: f64, seed: u64) -> Vec<f64> {
         use rand::{Rng, SeedableRng};

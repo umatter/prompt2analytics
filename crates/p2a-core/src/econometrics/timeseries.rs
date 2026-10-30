@@ -60,6 +60,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{cholesky, safe_inverse, xtx, xty};
 use crate::resource;
@@ -303,49 +304,22 @@ impl fmt::Display for VarIrfResult {
 }
 
 /// Convert selected columns from a Polars DataFrame to an ndarray Array2.
+///
+/// One request with `NaPolicy::Fail` (vars::VAR refuses NA too): integer and Boolean
+/// columns are accepted, text is `NonNumericColumn`, and a missing value (null or NaN) is
+/// `NullValues` with the column's count. The matrix is a copy of the k extracted columns.
 fn df_to_array2(df: &DataFrame, columns: &[&str]) -> EconResult<(Array2<f64>, Vec<String>)> {
-    let n_rows = df.height();
-    let n_cols = columns.len();
-
-    if n_cols == 0 {
+    if columns.is_empty() {
         return Err(EconError::InvalidSpecification {
             message: "No columns specified for time series analysis".to_string(),
         });
     }
-
-    let mut data = Array2::<f64>::zeros((n_rows, n_cols));
-    let mut var_names = Vec::with_capacity(n_cols);
-
-    for (col_idx, col_name) in columns.iter().enumerate() {
-        let series = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-        let values = series
-            .cast(&DataType::Float64)
-            .map_err(|_| EconError::NonNumericColumn {
-                column: col_name.to_string(),
-            })?;
-
-        let ca = values.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-
-        for (row_idx, opt_val) in ca.iter().enumerate() {
-            data[[row_idx, col_idx]] = opt_val.ok_or_else(|| EconError::NullValues {
-                column: col_name.to_string(),
-                count: 1,
-            })?;
-        }
-
-        var_names.push(col_name.to_string());
-    }
-
+    let cols = ColumnRequest::new(df)
+        .numerics(columns)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let data = cols.matrix(columns, false).data;
+    let var_names = columns.iter().map(|c| c.to_string()).collect();
     Ok((data, var_names))
 }
 
@@ -363,6 +337,10 @@ fn array2_to_vec(arr: &Array2<f64>) -> Vec<Vec<f64>> {
 ///
 /// # Model
 /// VAR(p) model: y_t = c + A_1 y_{t-1} + ... + A_p y_{t-p} + e_t
+///
+/// Integer and Boolean columns are accepted; a missing value (null or NaN) is
+/// `EconError::NullValues` naming the column, and text is `NonNumericColumn` (as for
+/// VARMA, VECM and the IRF, which read their columns the same way).
 pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<VarResult> {
     if lags == 0 {
         return Err(EconError::InvalidSpecification {
@@ -979,6 +957,10 @@ impl fmt::Display for GrangerResult {
 ///
 /// R equivalent: `lmtest::grangertest()`
 ///
+/// Integer and Boolean columns are accepted; a missing value (null or NaN) in either
+/// series is `EconError::NullValues` naming the column. R's grangertest drops rows instead,
+/// but its formula and default interfaces disagree on which rows; fill the gaps first.
+///
 /// # Example
 ///
 /// ```ignore
@@ -1003,42 +985,13 @@ pub fn granger_test(
         });
     }
 
-    // Extract the two time series
-    let df = dataset.df();
-    let y_series = df
-        .column(dependent)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: dependent.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-    let x_series = df.column(cause).map_err(|_| EconError::ColumnNotFound {
-        column: cause.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let y_vec: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Column '{}' must be numeric", dependent),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    let x_vec: Vec<f64> = x_series
-        .f64()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Column '{}' must be numeric", cause),
-        })?
-        .into_no_null_iter()
-        .collect();
+    // Extract the two time series: Int64 accepted, a missing value refused by name
+    let cols = ColumnRequest::new(dataset.df())
+        .numerics(&[dependent, cause])
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let y_vec = cols.numeric(dependent).to_vec();
+    let x_vec = cols.numeric(cause).to_vec();
 
     let n_total = y_vec.len();
     if n_total != x_vec.len() {
@@ -1217,6 +1170,54 @@ mod tests {
             Err(e) => panic!("expected Cancelled, got: {e}"),
             Ok(_) => panic!("expected Cancelled, got Ok"),
         }
+    }
+
+    /// R: lmtest::grangertest(x = m, y = ai, order = 2 | 3) on the Int64 series ai.
+    #[test]
+    fn test_validate_granger_int_series() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ts_granger_int");
+        assert_eq!(ds.df().column("ai").unwrap().dtype(), &DataType::Int64);
+        let n = 300;
+        let mut check = Check::new(&case);
+        for lags in [2usize, 3] {
+            let r = granger_test(&ds, "ai", "m", lags).unwrap();
+            let k = format!("lag{lags}");
+            check
+                .scalar(&format!("{k}_f"), r.f_statistic, Tol::stat(n))
+                .scalar(&format!("{k}_p"), r.p_value, Tol::p_value(n))
+                .scalar(&format!("{k}_df1"), r.df1 as f64, Tol::exact())
+                .scalar(&format!("{k}_df2"), r.df2 as f64, Tol::exact())
+                .scalar(&format!("{k}_n_used"), r.n_obs as f64, Tol::exact());
+        }
+        check.finish();
+    }
+
+    /// The dataset of case ts_granger_int (Int64 `ai`, `a_na`/`ai_na` with two nulls each,
+    /// text `lab`), for tests that compare no case value.
+    fn granger_series() -> Dataset {
+        crate::test_support::load_case("ts_granger_int").1
+    }
+
+    /// X-2: Granger and the VAR family refuse missing values and text by name; integer
+    /// columns run.
+    #[test]
+    fn test_na_granger_var_missing_and_text() {
+        let ds = granger_series();
+        let is_null = |e: &EconError, column: &str| matches!(e, EconError::NullValues { column: c, count: 2 } if c == column);
+        let is_text =
+            |e: &EconError| matches!(e, EconError::NonNumericColumn { column } if column == "lab");
+        let e = granger_test(&ds, "a_na", "m", 2).unwrap_err();
+        assert!(is_null(&e, "a_na"), "{e:?}");
+        let e = granger_test(&ds, "ai", "ai_na", 2).unwrap_err();
+        assert!(is_null(&e, "ai_na"), "{e:?}");
+        let e = granger_test(&ds, "lab", "m", 2).unwrap_err();
+        assert!(is_text(&e), "{e:?}");
+        let e = run_var(&ds, &["a", "a_na"], 1).unwrap_err();
+        assert!(is_null(&e, "a_na"), "{e:?}");
+        let e = run_var(&ds, &["a", "lab"], 1).unwrap_err();
+        assert!(is_text(&e), "{e:?}");
+        run_var(&ds, &["ai", "m"], 1).unwrap();
     }
 
     #[test]

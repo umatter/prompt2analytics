@@ -191,6 +191,14 @@ The Kalman filter alone (without MLE optimization) is fast:
 
 The Kalman filter shows linear O(n) scaling as expected. The smoother is about 3-4x slower due to the backward pass. Forecasting is O(h) where h is the horizon, independent of input length.
 
+## Input data (column types and missing values)
+
+`run_struct_ts` reads its columns through the shared extractor with `NaPolicy::Fail`. Integer and Boolean columns are accepted (an `Int64` column gives the result of its `Float64` copy); a missing value (empty cell, NA or NaN) is an error naming the column and the count (`EconError::NullValues`); a text column is refused (`NonNumericColumn`) and an absent one is `ColumnNotFound`.
+
+R's `StructTS` Kalman filter skips a missing observation; p2a's does not, and refuses the column instead, so fill the gaps first.
+
+Test: `test_na_struct_ts_int64_and_missing` (on `validation/datasets/generated/arima_series.csv`, the dataset of the ARIMA case `arima_css_forecast`: columns `ai` (Int64), `a_na` and `ai_na` (two missing cells), `lab` (text)).
+
 ## References
 
 - Harvey, A. C. (1989). *Forecasting, Structural Time Series Models and the Kalman Filter*. Cambridge University Press.

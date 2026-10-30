@@ -1,7 +1,9 @@
 //! Time series analysis commands
 
 use clap::Subcommand;
+use p2a_core::data::columns::{NaPolicy, numeric_column};
 use p2a_core::econometrics::granger_test;
+use p2a_core::forecasting::{ArimaSpec, forecast_arima_with, run_arima_with};
 use p2a_core::{
     ArConfig,
     ArMethod,
@@ -12,8 +14,6 @@ use p2a_core::{
     // AR model
     ar,
     detect_changepoints,
-    forecast_arima,
-    run_arima,
     // Causal impact
     run_causal_impact,
     // Classical decomposition
@@ -44,8 +44,11 @@ EXAMPLES:
     # Fit ARIMA(1,1,1)
     p2a ts arima mydata --col sales -p 1 -d 1 -q 1
 
-    # With 12-step forecast
+    # With 12-step forecast (standard errors and 80/95% intervals)
     p2a ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
+
+    # Random walk with drift and an MA(1) term
+    p2a ts arima mydata --col sales -p 0 -d 1 -q 1 --drift --horizon 12
 ")]
     Arima {
         /// Dataset name
@@ -70,6 +73,14 @@ EXAMPLES:
         /// Forecast horizon (optional)
         #[arg(long)]
         horizon: Option<usize>,
+
+        /// Estimate the mean (default: true when d = 0, as R); --include-mean false drops it
+        #[arg(long, value_name = "BOOL")]
+        include_mean: Option<bool>,
+
+        /// Fit a drift (linear trend in the levels), as forecast::Arima(include.drift = TRUE); d = 0 or 1
+        #[arg(long)]
+        drift: bool,
     },
 
     /// MSTL seasonal decomposition
@@ -431,7 +442,18 @@ pub fn execute(
             diff,
             ma,
             horizon,
-        } => execute_arima(dataset, col, *ar, *diff, *ma, *horizon, format, session),
+            include_mean,
+            drift,
+        } => {
+            let spec = ArimaSpec {
+                p: *ar,
+                d: *diff,
+                q: *ma,
+                include_mean: *include_mean,
+                include_drift: *drift,
+            };
+            execute_arima(dataset, col, &spec, *horizon, format, session)
+        }
         TimeseriesCommands::Mstl {
             dataset,
             col,
@@ -563,9 +585,7 @@ pub fn execute(
 fn execute_arima(
     dataset_name: &str,
     col: &str,
-    ar: usize,
-    diff: usize,
-    ma: usize,
+    spec: &ArimaSpec,
     horizon: Option<usize>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -580,82 +600,105 @@ fn execute_arima(
             return Ok(());
         }
     };
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
 
-    match dataset {
-        Some(ds) => {
-            // run_arima takes 5 args (no horizon)
-            match run_arima(ds, col, ar, diff, ma) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "model": format!("ARIMA({},{},{})", ar, diff, ma),
-                            "ar_coeffs": result.ar_coeffs,
-                            "ma_coeffs": result.ma_coeffs,
-                            "intercept": result.intercept,
-                            "ssr": result.ssr,
-                            "aic": result.aic,
-                            "n_obs": result.n_obs,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nARIMA({},{},{}) Results", ar, diff, ma);
-                        println!("{}", "=".repeat(50));
-
-                        if !result.ar_coeffs.is_empty() {
-                            println!("\nAR Coefficients:");
-                            for (i, coef) in result.ar_coeffs.iter().enumerate() {
-                                println!("  AR{}: {:.6}", i + 1, coef);
-                            }
-                        }
-
-                        if !result.ma_coeffs.is_empty() {
-                            println!("\nMA Coefficients:");
-                            for (i, coef) in result.ma_coeffs.iter().enumerate() {
-                                println!("  MA{}: {:.6}", i + 1, coef);
-                            }
-                        }
-
-                        println!("\nIntercept: {:.6}", result.intercept);
-                        println!("SSR: {:.6}", result.ssr);
-                        println!("AIC: {:.4}", result.aic);
-                        println!("Observations: {}", result.n_obs);
-                    }
-                },
-                Err(e) => {
-                    print_error(&format!("ARIMA failed: {}", e), format);
+    // One fit: with a horizon the forecast carries the fit it comes from.
+    let (fit, forecast) = match horizon {
+        Some(h) => match forecast_arima_with(ds, col, spec, h) {
+            Ok(mut fc) => match fc.fit.take() {
+                Some(fit) => (fit, Some(fc)),
+                None => {
+                    print_error("ARIMA failed: the forecast carries no fit", format);
+                    return Ok(());
                 }
+            },
+            Err(e) => {
+                print_error(&ts_error_message("ARIMA failed", &e), format);
+                return Ok(());
             }
+        },
+        None => match run_arima_with(ds, col, spec) {
+            Ok(fit) => (fit, None),
+            Err(e) => {
+                print_error(&ts_error_message("ARIMA failed", &e), format);
+                return Ok(());
+            }
+        },
+    };
 
-            // If horizon is specified, also produce forecasts
-            if let Some(h) = horizon {
-                match forecast_arima(ds, col, ar, diff, ma, h) {
-                    Ok(forecast_result) => match format {
-                        OutputFormat::Json => {
-                            let json = serde_json::json!({
-                                "forecasts": forecast_result.forecast,
-                                "horizon": forecast_result.horizon,
-                            });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
-                        }
-                        _ => {
-                            println!("\nForecasts (horizon = {}):", h);
-                            for (i, forecast) in forecast_result.forecast.iter().enumerate() {
-                                println!("  t+{}: {:.4}", i + 1, forecast);
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        print_error(&format!("Forecasting failed: {}", e), format);
-                    }
-                }
+    match format {
+        OutputFormat::Json => {
+            let coefficients: serde_json::Map<String, serde_json::Value> = fit
+                .coef_names
+                .iter()
+                .zip(&fit.coefficients)
+                .map(|(name, value)| (name.clone(), serde_json::json!(value)))
+                .collect();
+            let mut json = serde_json::json!({
+                // "model" keeps its earlier value; forecast::Arima's label is "label".
+                "model": format!("ARIMA({},{},{})", spec.p, spec.d, spec.q),
+                "label": spec.label(),
+                "method": fit.method,
+                "column": fit.column,
+                "coefficients": coefficients,
+                "ar_coeffs": fit.ar_coeffs,
+                "ma_coeffs": fit.ma_coeffs,
+                "intercept": fit.intercept,
+                "constant": fit.constant,
+                "drift": fit.drift,
+                "include_mean": fit.include_mean,
+                "sigma2": fit.sigma2,
+                "loglik": fit.loglik,
+                "aic": fit.aic,
+                "ssr": fit.ssr,
+                "n_obs": fit.n_obs,
+                "n_cond": fit.n_cond,
+                "converged": fit.converged,
+                "iterations": fit.iterations,
+                "warnings": fit.warnings,
+            });
+            if let Some(fc) = &forecast {
+                let limit =
+                    |rows: &Vec<Vec<f64>>, i: usize| rows.get(i).cloned().unwrap_or_default();
+                json["forecast"] = serde_json::json!({
+                    "horizon": fc.horizon,
+                    "mean": fc.forecast,
+                    "std_errors": fc.std_errors,
+                    "levels": fc.levels,
+                    "lower_80": limit(&fc.lower, 0),
+                    "upper_80": limit(&fc.upper, 0),
+                    "lower_95": limit(&fc.lower, 1),
+                    "upper_95": limit(&fc.upper, 1),
+                    "warnings": fc.warnings,
+                });
             }
+            println!("{}", serde_json::to_string_pretty(&json)?);
         }
-        None => {
-            print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        _ => {
+            println!("\n{fit}");
+            if let Some(mut fc) = forecast {
+                fc.fit = Some(fit);
+                println!("\n{fc}");
+            }
         }
     }
     Ok(())
+}
+
+/// `prefix: err`, plus how to fill the gap when the error is about missing values.
+fn ts_error_message(prefix: &str, err: &dyn std::fmt::Display) -> String {
+    let message = err.to_string();
+    let mut text = format!("{prefix}: {message}");
+    if message.contains("missing value") {
+        text.push_str(
+            " Fill the gaps first (for example: p2a munge fill-na <dataset> --method forward \
+             --columns <column>); dropping a value would splice the series.",
+        );
+    }
+    text
 }
 
 fn execute_mstl(
@@ -705,7 +748,7 @@ fn execute_mstl(
                 }
             },
             Err(e) => {
-                print_error(&format!("MSTL failed: {}", e), format);
+                print_error(&ts_error_message("MSTL failed", &e), format);
             }
         },
         None => {
@@ -766,7 +809,7 @@ fn execute_var(
                     }
                 },
                 Err(e) => {
-                    print_error(&format!("VAR failed: {}", e), format);
+                    print_error(&ts_error_message("VAR failed", &e), format);
                 }
             }
         }
@@ -825,7 +868,7 @@ fn execute_varma(
                         println!("Log-likelihood: {:.4}", result.log_likelihood);
                     }
                 },
-                Err(e) => print_error(&format!("VARMA failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("VARMA failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -893,7 +936,7 @@ fn execute_vecm(
                         println!("\nEigenvalues: {:?}", result.eigenvalues);
                     }
                 },
-                Err(e) => print_error(&format!("VECM failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("VECM failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -974,7 +1017,7 @@ fn execute_irf(
                         }
                     }
                 }
-                Err(e) => print_error(&format!("IRF failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("IRF failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1001,22 +1044,17 @@ fn execute_changepoint(
 
     match dataset {
         Some(ds) => {
-            // Extract column data
-            let column = ds.df().column(col);
-            let data: Vec<f64> = match column {
-                Ok(col) => col
-                    .f64()
-                    .map_or_else(|_| vec![], |ca| ca.into_no_null_iter().collect()),
-                Err(_) => {
-                    print_error(&format!("Column '{}' not found", col), format);
+            // Extract column data: Int64 accepted, missing values and text refused by name
+            let data = match numeric_column(ds.df(), col, NaPolicy::Fail) {
+                Ok((values, _)) => values,
+                Err(e) => {
+                    print_error(
+                        &ts_error_message("Changepoint detection failed", &e),
+                        format,
+                    );
                     return Ok(());
                 }
             };
-
-            if data.is_empty() {
-                print_error(&format!("Column '{}' is empty or not numeric", col), format);
-                return Ok(());
-            }
 
             let cost_fn = match change_type.to_lowercase().as_str() {
                 "variance" => CostFunction::VarianceChange,
@@ -1068,7 +1106,10 @@ fn execute_changepoint(
                         }
                     }
                 },
-                Err(e) => print_error(&format!("Changepoint detection failed: {}", e), format),
+                Err(e) => print_error(
+                    &ts_error_message("Changepoint detection failed", &e),
+                    format,
+                ),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1095,22 +1136,14 @@ fn execute_garch(
 
     match dataset {
         Some(ds) => {
-            // Extract column data
-            let column = ds.df().column(col);
-            let data: Vec<f64> = match column {
-                Ok(c) => c
-                    .f64()
-                    .map_or_else(|_| vec![], |ca| ca.into_no_null_iter().collect()),
-                Err(_) => {
-                    print_error(&format!("Column '{}' not found", col), format);
+            // Extract column data: Int64 accepted, missing values and text refused by name
+            let data = match numeric_column(ds.df(), col, NaPolicy::Fail) {
+                Ok((values, _)) => values,
+                Err(e) => {
+                    print_error(&ts_error_message("GARCH failed", &e), format);
                     return Ok(());
                 }
             };
-
-            if data.is_empty() {
-                print_error(&format!("Column '{}' is empty or not numeric", col), format);
-                return Ok(());
-            }
 
             match run_garch(&data, Some(arch), Some(garch), Some(true)) {
                 Ok(result) => match format {
@@ -1160,7 +1193,7 @@ fn execute_garch(
                         }
                     }
                 },
-                Err(e) => print_error(&format!("GARCH failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("GARCH failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1224,7 +1257,7 @@ fn execute_holt_winters(
                         println!("\nSSE: {:.4}", result.sse);
                     }
                 },
-                Err(e) => print_error(&format!("Holt-Winters failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("Holt-Winters failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1303,7 +1336,7 @@ fn execute_granger(
                         }
                     }
                 }
-                Err(e) => print_error(&format!("Granger test failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("Granger test failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1330,22 +1363,14 @@ fn execute_ar(
 
     match dataset {
         Some(ds) => {
-            // Extract column data
-            let column = ds.df().column(col);
-            let data: Vec<f64> = match column {
-                Ok(c) => c
-                    .f64()
-                    .map_or_else(|_| vec![], |ca| ca.into_no_null_iter().collect()),
-                Err(_) => {
-                    print_error(&format!("Column '{}' not found", col), format);
+            // Extract column data: Int64 accepted, missing values and text refused by name
+            let data = match numeric_column(ds.df(), col, NaPolicy::Fail) {
+                Ok((values, _)) => values,
+                Err(e) => {
+                    print_error(&ts_error_message("AR model failed", &e), format);
                     return Ok(());
                 }
             };
-
-            if data.is_empty() {
-                print_error(&format!("Column '{}' is empty or not numeric", col), format);
-                return Ok(());
-            }
 
             let ar_method = match method.to_lowercase().as_str() {
                 "burg" => ArMethod::Burg,
@@ -1397,7 +1422,7 @@ fn execute_ar(
                         }
                     }
                 },
-                Err(e) => print_error(&format!("AR model failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("AR model failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1461,7 +1486,7 @@ fn execute_stl(
                     );
                 }
             },
-            Err(e) => print_error(&format!("STL decomposition failed: {}", e), format),
+            Err(e) => print_error(&ts_error_message("STL decomposition failed", &e), format),
         },
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
@@ -1522,7 +1547,7 @@ fn execute_decompose(
                         }
                     }
                 },
-                Err(e) => print_error(&format!("Decomposition failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("Decomposition failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1597,7 +1622,7 @@ fn execute_struct_ts(
                         println!("BIC: {:.4}", result.bic);
                     }
                 },
-                Err(e) => print_error(&format!("StructTS failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("StructTS failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1725,7 +1750,7 @@ fn execute_causal_impact(
                         );
                     }
                 },
-                Err(e) => print_error(&format!("CausalImpact failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("CausalImpact failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1818,7 +1843,7 @@ fn execute_spectrum(
                         }
                     }
                 },
-                Err(e) => print_error(&format!("Spectrum estimation failed: {}", e), format),
+                Err(e) => print_error(&ts_error_message("Spectrum estimation failed", &e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),

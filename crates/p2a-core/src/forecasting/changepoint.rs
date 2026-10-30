@@ -7,6 +7,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, numeric_column};
 
 /// Result of changepoint detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,7 +425,8 @@ pub fn binary_segmentation(
 /// and runs the changepoint detection algorithm.
 ///
 /// # Errors
-/// Fails when `column` is missing or not numeric (f64 or i64), on fewer than
+/// Fails when `column` is missing, not numeric (integer, float or Boolean), or has a
+/// missing value (`EconError::NullValues` inside the anyhow error), on fewer than
 /// 4 observations, and with every error of [`detect_changepoints`], including
 /// a cancelled or expired budget installed with
 /// [`crate::resource::with_budget`].
@@ -435,25 +437,8 @@ pub fn run_changepoint(
     min_segment_length: Option<usize>,
     cost_function: CostFunction,
 ) -> Result<ChangepointResult> {
-    // Extract time series data from the dataset
-    let df = dataset.df();
-    let col = df
-        .column(column)
-        .map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
-
-    // Try to get as f64 first, then i64
-    let values: Vec<f64> = match col.f64() {
-        Ok(ca) => ca.into_no_null_iter().collect(),
-        Err(_) => {
-            // Try i64
-            match col.i64() {
-                Ok(ca) => ca.into_no_null_iter().map(|v| v as f64).collect(),
-                Err(_) => {
-                    return Err(anyhow!("Column '{}' must be numeric (f64 or i64)", column));
-                }
-            }
-        }
-    };
+    // Extract time series data (an EconError inside the anyhow error)
+    let (values, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     if values.len() < 4 {
         return Err(anyhow!(
@@ -468,7 +453,8 @@ pub fn run_changepoint(
 /// Run binary segmentation changepoint detection on a dataset column.
 ///
 /// # Errors
-/// Fails when `column` is missing or not numeric (f64 or i64), on fewer than
+/// Fails when `column` is missing, not numeric (integer, float or Boolean), or has a
+/// missing value (`EconError::NullValues` inside the anyhow error), on fewer than
 /// 4 observations, and with every error of [`binary_segmentation`], including
 /// a cancelled or expired budget installed with
 /// [`crate::resource::with_budget`].
@@ -479,25 +465,8 @@ pub fn run_binary_segmentation(
     min_segment_length: Option<usize>,
     significance_threshold: Option<f64>,
 ) -> Result<ChangepointResult> {
-    // Extract time series data from the dataset
-    let df = dataset.df();
-    let col = df
-        .column(column)
-        .map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
-
-    // Try to get as f64 first, then i64
-    let values: Vec<f64> = match col.f64() {
-        Ok(ca) => ca.into_no_null_iter().collect(),
-        Err(_) => {
-            // Try i64
-            match col.i64() {
-                Ok(ca) => ca.into_no_null_iter().map(|v| v as f64).collect(),
-                Err(_) => {
-                    return Err(anyhow!("Column '{}' must be numeric (f64 or i64)", column));
-                }
-            }
-        }
-    };
+    // Extract time series data (an EconError inside the anyhow error)
+    let (values, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     if values.len() < 4 {
         return Err(anyhow!(
@@ -518,6 +487,26 @@ pub fn run_binary_segmentation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X-2: an Int64 column gives the changepoints of its Float64 copy; missing values,
+    /// text and absent columns are refused by name (they were read as 0).
+    #[test]
+    fn test_na_changepoint_int64_and_missing() {
+        use crate::forecasting::test_fixtures::*;
+        let ds = with_float_copy(&arima_series(), "ai");
+        let pelt = |col: &str| run_changepoint(&ds, col, None, None, CostFunction::MeanChange);
+        let binseg = |col: &str| run_binary_segmentation(&ds, col, Some(5), None, None);
+        for run in [&pelt as &dyn Fn(&str) -> Result<ChangepointResult>, &binseg] {
+            let int = run("ai").unwrap();
+            let flt = run("ai_f64").unwrap();
+            assert_eq!(int.changepoints, flt.changepoints);
+            assert_eq!(int.total_cost.to_bits(), flt.total_cost.to_bits());
+            assert_null_values(econ(&run("a_na").unwrap_err()), "a_na", 2);
+            assert_null_values(econ(&run("ai_na").unwrap_err()), "ai_na", 2);
+            assert_non_numeric(econ(&run("lab").unwrap_err()), "lab");
+            assert_not_found(econ(&run("nope").unwrap_err()), "nope");
+        }
+    }
 
     #[test]
     fn test_no_changepoint() {

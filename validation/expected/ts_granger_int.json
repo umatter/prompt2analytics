@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "ts_granger_int",
+  "area": "econometrics/timeseries",
+  "method": "Granger causality F test, integer dependent series (lmtest::grangertest)",
+  "reference": "lmtest::grangertest(x = m, y = ai, order = 2 | 3)",
+  "call": "grangertest(d$m, d$ai, order = 2)",
+  "dataset": "validation/datasets/generated/arima_series.csv",
+  "datasets": ["validation/datasets/generated/arima_series.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "lmtest": "0.9.40"
+  },
+  "values": {
+    "lag2_f": 1.3015337730001175,
+    "lag2_p": 0.27368259598049266,
+    "lag2_df1": 2,
+    "lag2_df2": 293,
+    "lag2_n_used": 298,
+    "lag3_f": 2.4420318454610483,
+    "lag3_p": 0.064413303851786688,
+    "lag3_df1": 3,
+    "lag3_df2": 290,
+    "lag3_n_used": 297
+  }
+}

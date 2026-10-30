@@ -10,22 +10,21 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::limit_refusal;
+use crate::tools::common::{NaPolicy, limit_refusal, missing_json, numeric_column};
 use crate::tools::requests::timeseries::*;
 
+use p2a_core::forecasting::{ArimaSpec, forecast_arima_with, run_arima_with};
 use p2a_core::{
     ArConfig,
     ArMethod,
     CausalImpactConfig,
     CostFunction,
-    DecomposeConfig,
     DecomposeType,
     EndRule,
     FilterMethod,
     FilterSides,
     GarchConfig,
     SeasonalType,
-    StructTsConfig,
     StructTsType,
     acf_to_ar,
     ar,
@@ -35,21 +34,20 @@ use p2a_core::{
     causal_impact,
     // Time series utilities
     cpgram,
-    decompose,
     diffinv,
     embed,
     filter as ts_filter,
-    forecast_arima,
     garch,
     granger_test,
     holt_winters_forecast,
     lag as ts_lag,
-    run_arima,
     run_binary_segmentation,
     run_changepoint,
+    run_decompose,
     run_granger_test,
     run_holt_winters,
     run_mstl,
+    run_struct_ts,
     // Time series modeling
     run_var,
     run_var_irf,
@@ -60,7 +58,6 @@ use p2a_core::{
         AcfType, BoxTestType, CcfType, SpectrumConfig, run_acf, run_box_test, run_ccf, run_pacf,
         run_pp_test, run_spectrum, run_spectrum_ar,
     },
-    struct_ts,
     toeplitz,
     toeplitz_asymmetric,
     toeplitz_to_vec,
@@ -470,10 +467,7 @@ impl AnalyticsServer {
         let result = match run_var(dataset, &columns, request.lags) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "VAR estimation failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("VAR estimation failed", &e));
             }
         };
 
@@ -502,10 +496,7 @@ impl AnalyticsServer {
         let result = match result {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Granger causality test failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("Granger causality test failed", &e));
             }
         };
 
@@ -531,10 +522,7 @@ impl AnalyticsServer {
         let result = match run_varma(dataset, &columns, request.p, request.q) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "VARMA estimation failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("VARMA estimation failed", &e));
             }
         };
 
@@ -560,10 +548,7 @@ impl AnalyticsServer {
         let result = match run_vecm(dataset, &columns, request.lags, request.rank) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "VECM estimation failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("VECM estimation failed", &e));
             }
         };
 
@@ -589,10 +574,7 @@ impl AnalyticsServer {
         let result = match run_var_irf(dataset, &columns, request.lags, request.steps) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "VAR IRF computation failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("VAR IRF computation failed", &e));
             }
         };
 
@@ -601,9 +583,9 @@ impl AnalyticsServer {
         )]))
     }
 
-    /// Fit an ARIMA model.
+    /// Fit an ARIMA model by conditional sum of squares.
     #[tool(
-        description = "Fit an ARIMA(p,d,q) model to a univariate time series. Returns AR/MA coefficients, residuals, AIC, and model diagnostics. If the user does not specify p, d, q, use reasonable defaults like ARIMA(1,0,1) or ARIMA(1,1,1). Do NOT call timeseries_acf first — call this tool directly."
+        description = "Fit an ARIMA(p,d,q) model to a univariate time series by conditional sum of squares (as R arima(method = 'CSS') and forecast::Arima(method = 'CSS')). Returns the AR and MA coefficients, the mean (R's 'intercept', estimated by default when d = 0) or a drift (include_drift, d = 0 or 1), sigma^2, the CSS log-likelihood and AIC, and whether the optimiser converged. The series must have no missing values. If the user does not specify p, d, q, use reasonable defaults like ARIMA(1,0,1) or ARIMA(1,1,1). Do NOT call timeseries_acf first — call this tool directly."
     )]
     pub async fn ts_arima_fit(
         &self,
@@ -616,46 +598,24 @@ impl AnalyticsServer {
         if let Some(refusal) = arima_refusal("ts_arima_fit", dataset, &request.column, orders) {
             return Ok(refusal);
         }
-
-        let result = match run_arima(dataset, &request.column, request.p, request.d, request.q) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "ARIMA fitting failed: {}",
-                    e
-                ))]));
-            }
-        };
-
-        // Format result
-        let output = format!(
-            "ARIMA({},{},{}) Model Results\n\
-             ==============================\n\
-             Column: {}\n\
-             Observations: {}\n\n\
-             AR Coefficients (phi): {:?}\n\
-             MA Coefficients (theta): {:?}\n\
-             Intercept: {:.6}\n\n\
-             Sum of Squared Residuals: {:.4}\n\
-             AIC: {:.4}",
-            result.p,
-            result.d,
-            result.q,
-            result.column,
-            result.n_obs,
-            result.ar_coeffs,
-            result.ma_coeffs,
-            result.intercept,
-            result.ssr,
-            result.aic
+        let spec = arima_spec(
+            request.p,
+            request.d,
+            request.q,
+            request.include_mean,
+            request.include_drift,
         );
-
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        match run_arima_with(dataset, &request.column, &spec) {
+            Ok(fit) => Ok(CallToolResult::success(vec![Content::text(
+                fit.to_string(),
+            )])),
+            Err(e) => Ok(ts_error("ARIMA fitting failed", &e)),
+        }
     }
 
-    /// Forecast using an ARIMA model.
+    /// Forecast with an ARIMA model fitted by conditional sum of squares.
     #[tool(
-        description = "Forecast future values using an ARIMA(p,d,q) model. Fits the model and generates h-step ahead forecasts."
+        description = "Forecast h steps ahead with an ARIMA(p,d,q) model fitted by conditional sum of squares. Returns the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals computed as R's forecast(Arima(x, order, method = 'CSS')). Accepts include_mean and include_drift like ts_arima_fit. The series must have no missing values."
     )]
     pub async fn ts_arima_forecast(
         &self,
@@ -669,39 +629,22 @@ impl AnalyticsServer {
         {
             return Ok(refusal);
         }
-
-        let result = match forecast_arima(
-            dataset,
-            &request.column,
+        let spec = arima_spec(
             request.p,
             request.d,
             request.q,
-            request.horizon,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "ARIMA forecasting failed: {}",
-                    e
-                ))]));
-            }
-        };
-
-        // Format result
-        let mut output = format!(
-            "ARIMA Forecast Results\n\
-             ======================\n\
-             Column: {}\n\
-             Horizon: {} periods\n\n\
-             Forecasted Values:\n",
-            result.column, result.horizon
+            request.include_mean,
+            request.include_drift,
         );
-
-        for (i, val) in result.forecast.iter().enumerate() {
-            output.push_str(&format!("  t+{}: {:.4}\n", i + 1, val));
+        match forecast_arima_with(dataset, &request.column, &spec, request.horizon) {
+            Ok(fc) => {
+                let fit = fc.fit.as_ref().map(|f| f.to_string()).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "{fit}\n\n{fc}"
+                ))]))
+            }
+            Err(e) => Ok(ts_error("ARIMA forecasting failed", &e)),
         }
-
-        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Fit a GARCH model for volatility modeling.
@@ -716,17 +659,10 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract column data
-        let col = dataset
-            .df()
-            .column(&request.column)
-            .map_err(|e| McpError::invalid_request(format!("Column error: {}", e), None))?;
-
-        let data: Vec<f64> = col
-            .f64()
-            .map_err(|e| McpError::invalid_request(format!("Column must be numeric: {}", e), None))?
-            .into_no_null_iter()
-            .collect();
+        let data = match numeric_column(dataset, &request.column, NaPolicy::Fail) {
+            Ok((values, _)) => values,
+            Err(e) => return Ok(ts_error("GARCH fitting failed", &e)),
+        };
 
         let config = GarchConfig {
             p: request.p.unwrap_or(1),
@@ -738,10 +674,7 @@ impl AnalyticsServer {
         let result = match garch(&data, Some(config)) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "GARCH fitting failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("GARCH fitting failed", &e));
             }
         };
 
@@ -765,10 +698,7 @@ impl AnalyticsServer {
         let result = match run_mstl(dataset, &request.column, &request.periods) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "MSTL decomposition failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("MSTL decomposition failed", &e));
             }
         };
 
@@ -855,10 +785,7 @@ impl AnalyticsServer {
                 ) {
                     Ok(r) => r,
                     Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Changepoint detection failed: {}",
-                            e
-                        ))]));
+                        return Ok(ts_error("Changepoint detection failed", &e));
                     }
                 }
             }
@@ -872,10 +799,7 @@ impl AnalyticsServer {
                 ) {
                     Ok(r) => r,
                     Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Changepoint detection failed: {}",
-                            e
-                        ))]));
+                        return Ok(ts_error("Changepoint detection failed", &e));
                     }
                 }
             }
@@ -955,10 +879,7 @@ impl AnalyticsServer {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Holt-Winters fitting failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("Holt-Winters fitting failed", &e));
             }
         };
 
@@ -1070,19 +991,10 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract time series column
-        let column = dataset.df().column(&request.column).map_err(|e| {
-            McpError::invalid_request(
-                format!("Column '{}' not found: {}", request.column, e),
-                None,
-            )
-        })?;
-
-        let x: Vec<f64> = column
-            .f64()
-            .map_err(|e| McpError::invalid_request(format!("Column must be numeric: {}", e), None))?
-            .into_no_null_iter()
-            .collect();
+        let x = match numeric_column(dataset, &request.column, NaPolicy::Fail) {
+            Ok((values, _)) => values,
+            Err(e) => return Ok(ts_error("AR model fitting failed", &e)),
+        };
 
         // Parse method
         let method = match request.method.as_deref() {
@@ -1104,10 +1016,7 @@ impl AnalyticsServer {
         let result = match ar(&x, config) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "AR model fitting failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("AR model fitting failed", &e));
             }
         };
 
@@ -1161,41 +1070,18 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract time series column
-        let column = dataset.df().column(&request.column).map_err(|e| {
-            McpError::invalid_request(
-                format!("Column '{}' not found: {}", request.column, e),
-                None,
-            )
-        })?;
-
-        let x: Vec<f64> = column
-            .f64()
-            .map_err(|e| McpError::invalid_request(format!("Column must be numeric: {}", e), None))?
-            .into_no_null_iter()
-            .collect();
-
         // Parse decomposition type
         let decompose_type = match request.decompose_type.as_deref() {
             Some("multiplicative") | Some("mult") => DecomposeType::Multiplicative,
             _ => DecomposeType::Additive,
         };
 
-        // Run decomposition
-        let result = match decompose(
-            &x,
-            request.period,
-            DecomposeConfig {
-                decompose_type,
-                filter: None,
-            },
-        ) {
+        // Run decomposition (the core wrapper reads the column: Int64 accepted, a missing
+        // value refused by name)
+        let result = match run_decompose(dataset, &request.column, request.period, decompose_type) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Decomposition failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("Decomposition failed", &e));
             }
         };
 
@@ -1285,20 +1171,6 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract time series column
-        let column = dataset.df().column(&request.column).map_err(|e| {
-            McpError::invalid_request(
-                format!("Column '{}' not found: {}", request.column, e),
-                None,
-            )
-        })?;
-
-        let y: Vec<f64> = column
-            .f64()
-            .map_err(|e| McpError::invalid_request(format!("Column must be numeric: {}", e), None))?
-            .into_no_null_iter()
-            .collect();
-
         // Parse model type
         let model_type = match request.model_type.as_deref() {
             Some("trend") | Some("Trend") => StructTsType::Trend,
@@ -1313,21 +1185,12 @@ impl AnalyticsServer {
             )]));
         }
 
-        // Run StructTS
-        let result = match struct_ts(
-            &y,
-            StructTsConfig {
-                model_type,
-                period: request.period,
-                ..Default::default()
-            },
-        ) {
+        // Run StructTS (the core wrapper reads the column: Int64 accepted, a missing value
+        // refused by name)
+        let result = match run_struct_ts(dataset, &request.column, model_type, request.period) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "StructTS fitting failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("StructTS fitting failed", &e));
             }
         };
 
@@ -1421,10 +1284,7 @@ impl AnalyticsServer {
         {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "CausalImpact analysis failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("CausalImpact analysis failed", &e));
             }
         };
 
@@ -1518,39 +1378,16 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<CpgramRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        // Extract time series column
-        let col = match df.column(&request.column) {
-            Ok(c) => c,
+        // R's cpgram drops missing values (x <- x[!is.na(x)]); the drop is reported.
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
+            Ok(extracted) => extracted,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found: {}",
-                    request.column, e
-                ))]));
-            }
-        };
-
-        let values: Vec<f64> = match col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().flatten().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot convert column to numeric: {}",
-                    e
+                    "Cumulative periodogram failed: {e}"
                 ))]));
             }
         };
@@ -1566,7 +1403,7 @@ impl AnalyticsServer {
         };
 
         // Format output
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "n_observations": result.n,
             "taper": result.taper,
             "white_noise_test": {
@@ -1579,6 +1416,9 @@ impl AnalyticsServer {
             "cpgram_sample": &result.cpgram[..result.cpgram.len().min(20)],
             "note": if result.freq.len() > 20 { Some(format!("Showing first 20 of {} frequencies", result.freq.len())) } else { None }
         });
+        if let Some(m) = missing_json(&missing) {
+            output["missing"] = m;
+        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1636,8 +1476,6 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<LagRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = match datasets.get(&request.dataset) {
@@ -1650,28 +1488,9 @@ impl AnalyticsServer {
             }
         };
 
-        let df = dataset.df();
-        let values: Vec<f64> = match df.column(&request.column) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c
-                    .f64()
-                    .unwrap()
-                    .into_iter()
-                    .map(|v| v.unwrap_or(f64::NAN))
-                    .collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column not found: {}",
-                    e
-                ))]));
-            }
+        let values = match series_with_gaps(dataset, &request.column) {
+            Ok(values) => values,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let k = request.k.unwrap_or(1);
@@ -1705,8 +1524,6 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<EmbedRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = match datasets.get(&request.dataset) {
@@ -1719,28 +1536,9 @@ impl AnalyticsServer {
             }
         };
 
-        let df = dataset.df();
-        let values: Vec<f64> = match df.column(&request.column) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c
-                    .f64()
-                    .unwrap()
-                    .into_iter()
-                    .map(|v| v.unwrap_or(f64::NAN))
-                    .collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column not found: {}",
-                    e
-                ))]));
-            }
+        let values = match series_with_gaps(dataset, &request.column) {
+            Ok(values) => values,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         // The response shows the first 10 rows only, so embed only the prefix those rows
@@ -1778,8 +1576,6 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<DiffinvRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = match datasets.get(&request.dataset) {
@@ -1792,28 +1588,9 @@ impl AnalyticsServer {
             }
         };
 
-        let df = dataset.df();
-        let values: Vec<f64> = match df.column(&request.column) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c
-                    .f64()
-                    .unwrap()
-                    .into_iter()
-                    .map(|v| v.unwrap_or(f64::NAN))
-                    .collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column not found: {}",
-                    e
-                ))]));
-            }
+        let values = match series_with_gaps(dataset, &request.column) {
+            Ok(values) => values,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let xi = request.xi.as_deref();
@@ -1850,8 +1627,6 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<FilterRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = match datasets.get(&request.dataset) {
@@ -1864,28 +1639,9 @@ impl AnalyticsServer {
             }
         };
 
-        let df = dataset.df();
-        let values: Vec<f64> = match df.column(&request.column) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c
-                    .f64()
-                    .unwrap()
-                    .into_iter()
-                    .map(|v| v.unwrap_or(f64::NAN))
-                    .collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column not found: {}",
-                    e
-                ))]));
-            }
+        let values = match series_with_gaps(dataset, &request.column) {
+            Ok(values) => values,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let method = match request.method.as_deref() {
@@ -1941,8 +1697,6 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<WindowRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = match datasets.get(&request.dataset) {
@@ -1955,28 +1709,9 @@ impl AnalyticsServer {
             }
         };
 
-        let df = dataset.df();
-        let values: Vec<f64> = match df.column(&request.column) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c
-                    .f64()
-                    .unwrap()
-                    .into_iter()
-                    .map(|v| v.unwrap_or(f64::NAN))
-                    .collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column not found: {}",
-                    e
-                ))]));
-            }
+        let values = match series_with_gaps(dataset, &request.column) {
+            Ok(values) => values,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let result = match ts_window(&values, request.start, request.end) {
@@ -2149,8 +1884,6 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<RunmedRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = match datasets.get(&request.dataset) {
@@ -2163,28 +1896,9 @@ impl AnalyticsServer {
             }
         };
 
-        let df = dataset.df();
-        let values: Vec<f64> = match df.column(&request.column) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c
-                    .f64()
-                    .unwrap()
-                    .into_iter()
-                    .map(|v| v.unwrap_or(f64::NAN))
-                    .collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column not found: {}",
-                    e
-                ))]));
-            }
+        let values = match numeric_column(dataset, &request.column, NaPolicy::Fail) {
+            Ok((values, _)) => values,
+            Err(e) => return Ok(ts_error("runmed failed", &e)),
         };
 
         let endrule = match request.endrule.as_deref() {
@@ -2202,10 +1916,7 @@ impl AnalyticsServer {
         let result = match runmed(&values, request.k, endrule) {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "runmed failed: {}",
-                    e
-                ))]));
+                return Ok(ts_error("runmed failed", &e));
             }
         };
 
@@ -2224,30 +1935,71 @@ impl AnalyticsServer {
 }
 
 /// The refusal of an ARIMA fit of `column` at orders `p`, `d` and `q` that the installed
-/// `arima_fit_work` budget does not allow, checked before anything is fitted:
-/// `arima::estimate::fit` cannot be stopped once it starts, so the call's deadline would not end
-/// it. The budget bounds the fit's work, and while it is set a series that would slow the fit's
-/// arithmetic is refused as well. That check reads the values the fit reads, the column's valid
-/// values: `run_arima` refuses a column with nulls before it fits, so the buffer value behind a
-/// null slot never reaches the fit and is not checked. A missing or non-`f64` column is not
-/// refused here, so that the core reports it.
+/// `arima_fit_work` budget does not allow, checked before anything is fitted. The in-house CSS
+/// fit checks the call's budget on every iteration, so the deadline does stop it; the rule is
+/// kept as an up-front cost bound (defense in depth), so that a call the hosted deadline could
+/// not finish is refused before it starts. While the budget is set a series that would slow
+/// the fit's arithmetic is refused as well. That check reads the values the fit reads, the
+/// column's valid values (`numeric_options`: the strict numeric rule, so integer columns are
+/// bounded too; a missing cell is `None`, and the buffer value behind a null slot is never
+/// read). A missing, text or infinite column is not refused here, so that the core reports it.
 fn arima_refusal(
     tool: &str,
     dataset: &p2a_core::Dataset,
     column: &str,
     (p, d, q): (usize, usize, usize),
 ) -> Option<CallToolResult> {
-    let series = dataset.df().column(column).ok()?.f64().ok()?;
+    let values = p2a_core::data::columns::numeric_options(dataset.df(), column).ok()?;
     let limits = crate::tools::limits::current();
     limits
-        .check_arima_fit(tool, series.len(), p, d, q)
+        .check_arima_fit(tool, values.len(), p, d, q)
         .err()
         .or_else(|| {
             limits
-                .check_arima_series(tool, column, series.iter().flatten())
+                .check_arima_series(tool, column, values.iter().flatten().copied())
                 .err()
         })
         .map(limit_refusal)
+}
+
+/// The ARIMA specification of a request: R's defaults unless the options are given.
+fn arima_spec(
+    p: usize,
+    d: usize,
+    q: usize,
+    include_mean: Option<bool>,
+    include_drift: Option<bool>,
+) -> ArimaSpec {
+    ArimaSpec {
+        p,
+        d,
+        q,
+        include_mean,
+        include_drift: include_drift.unwrap_or(false),
+    }
+}
+
+/// A tool error `prefix: err`; for a missing value, with how to fill the gap.
+fn ts_error(prefix: &str, err: &dyn std::fmt::Display) -> CallToolResult {
+    let message = err.to_string();
+    let mut text = format!("{prefix}: {message}");
+    if message.contains("missing value") {
+        text.push_str(
+            "\nHint: p2a's time-series methods need a complete series. Fill the gaps first \
+             (for example munge_fill_na with strategy \"forward\"); dropping a value would \
+             splice the series.",
+        );
+    }
+    CallToolResult::error(vec![Content::text(text)])
+}
+
+/// The column with missing cells as NaN, for the series utilities: R propagates NA through
+/// lag, embed, diffinv, filter and window, so missing cells stay in place as NaN; text is
+/// refused.
+fn series_with_gaps(dataset: &p2a_core::Dataset, column: &str) -> Result<Vec<f64>, String> {
+    let values = p2a_core::data::columns::numeric_options(dataset.df(), column)
+        .map_err(|e| e.to_string())?;
+    Ok(values.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
 }
 
 #[cfg(test)]
@@ -2390,6 +2142,8 @@ mod tests {
             p: 1,
             d,
             q: 1,
+            include_mean: None,
+            include_drift: None,
         };
         let forecast = ArimaForecastRequest {
             dataset: "a".into(),
@@ -2398,6 +2152,8 @@ mod tests {
             d,
             q: 1,
             horizon: 5,
+            include_mean: None,
+            include_drift: None,
         };
         crate::tools::limits::with_limits(limits.clone(), || {
             [
@@ -2414,8 +2170,8 @@ mod tests {
         })
     }
 
-    /// The `arima` crate's fit cannot be stopped once it starts, so both ARIMA tools check its
-    /// work against `arima_fit_work` before they fit, and fit as before within the budget.
+    /// Both ARIMA tools check the fit's work against `arima_fit_work` before they fit (an
+    /// up-front cost bound, integer columns included), and fit as before within the budget.
     #[test]
     fn ts_arima_tools_refuse_a_fit_over_the_work_budget_before_fitting() {
         use crate::tools::limits::Limits;
@@ -2440,6 +2196,22 @@ mod tests {
                 "{t}"
             );
         }
+        // An integer copy of the series is bounded too.
+        let integer: Vec<i64> = ar1(400).iter().map(|v| (v * 1e6).round() as i64).collect();
+        let int_server = AnalyticsServer::new();
+        rt.block_on(int_server.datasets.write())
+            .insert("a".to_string(), Dataset::new(df!("y" => integer).unwrap()));
+        for (tool, r) in arima_calls(&rt, &int_server, &tight, "y", 1) {
+            let t = text_of(&r);
+            assert_eq!(r.is_error, Some(true), "{tool}: {t}");
+            assert!(
+                t.starts_with(&format!(
+                    "`{tool}` with p = 1, d = 1 and q = 1 on 400 observations needs 10400 \
+                     (arima_fit_work"
+                )),
+                "{t}"
+            );
+        }
         // A missing column keeps the core's error.
         for (_, r) in arima_calls(&rt, &server, &tight, "nope", 1) {
             assert_eq!(r.is_error, Some(true));
@@ -2453,7 +2225,11 @@ mod tests {
         for limits in [Limits::hosted(), Limits::off()] {
             let [(_, fit), (_, forecast)] = arima_calls(&rt, &server, &limits, "y", 1);
             assert_ne!(fit.is_error, Some(true), "{}", text_of(&fit));
-            assert!(text_of(&fit).contains("ARIMA(1,1,1) Model Results"));
+            assert!(
+                text_of(&fit).contains("ARIMA(1,1,1) fitted by conditional sum of squares"),
+                "{}",
+                text_of(&fit)
+            );
             assert_ne!(forecast.is_error, Some(true), "{}", text_of(&forecast));
             assert!(
                 text_of(&forecast).contains("t+5:"),
@@ -2489,7 +2265,8 @@ mod tests {
         }
         let [(_, fit), (_, forecast)] = arima_calls(&rt, &server, &Limits::off(), "y", 0);
         assert!(
-            text_of(&fit).contains("ARIMA(1,0,1) Model Results"),
+            text_of(&fit)
+                .contains("ARIMA(1,0,1) with non-zero mean fitted by conditional sum of squares"),
             "{}",
             text_of(&fit)
         );
@@ -2553,6 +2330,8 @@ mod tests {
             p: 1,
             d: 0,
             q: 1,
+            include_mean: None,
+            include_drift: None,
         };
         let r = crate::tools::limits::with_limits(Limits::hosted(), || {
             rt.block_on(server.ts_arima_fit(Parameters(fit))).unwrap()
@@ -2586,5 +2365,306 @@ mod tests {
             assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
             assert!(text_of(&r).contains(expected), "{}", text_of(&r));
         }
+    }
+
+    /// The case's dataset as "arima_series", and the same with a Float64 copy of `ai`
+    /// ("ai_f64") as "arima_series_f64". Tests pass the case id as a literal.
+    async fn server_with_case(id: &str) -> (p2a_validation::Case, AnalyticsServer) {
+        let case = p2a_validation::Case::load(id);
+        let df = p2a_core::DataLoader::load_csv(case.dataset_path()).unwrap();
+        let copy = df
+            .column("ai")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .with_name("ai_f64".into());
+        let mut with_copy = df.clone();
+        with_copy.with_column(copy).unwrap();
+        let server = AnalyticsServer::new();
+        {
+            let mut datasets = server.datasets.write().await;
+            datasets.insert("arima_series".to_string(), Dataset::new(df));
+            datasets.insert("arima_series_f64".to_string(), Dataset::new(with_copy));
+        }
+        (case, server)
+    }
+
+    /// The six numbers after ':' on every line that starts with "t+".
+    fn forecast_rows(text: &str) -> Vec<Vec<f64>> {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("t+"))
+            .map(|l| {
+                let (_, numbers) = l.split_once(':').unwrap();
+                numbers
+                    .split_whitespace()
+                    .map(|v| v.parse().unwrap())
+                    .collect::<Vec<f64>>()
+            })
+            .filter(|row| row.len() == 6)
+            .collect()
+    }
+
+    /// The second token of the first trimmed line whose first token is `name`.
+    fn coef_value(text: &str, name: &str) -> f64 {
+        text.lines()
+            .find_map(|l| {
+                let mut tokens = l.split_whitespace();
+                (tokens.next() == Some(name)).then(|| tokens.next()?.parse().ok())?
+            })
+            .unwrap_or_else(|| panic!("no coefficient line `{name}` in\n{text}"))
+    }
+
+    /// R: forecast::forecast(Arima(a, c(1, 0, 1), method = "CSS"), h = 5) at the exact CSS
+    /// optimum, through the MCP tool's text.
+    #[tokio::test]
+    async fn test_validate_mcp_ts_arima_forecast_intervals() {
+        use p2a_validation::{Check, Tol};
+        let (case, server) = server_with_case("arima_css_forecast").await;
+        let req = serde_json::from_value(serde_json::json!({
+            "dataset": "arima_series", "column": "a", "p": 1, "d": 0, "q": 1, "horizon": 5
+        }))
+        .unwrap();
+        let r = server.ts_arima_forecast(Parameters(req)).await.unwrap();
+        let t = text_of(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        let rows = forecast_rows(&t);
+        assert_eq!(rows.len(), 5, "{t}");
+        let col = |j: usize| rows.iter().map(|row| row[j]).collect::<Vec<_>>();
+        Check::new(&case)
+            .vector("a_101_mean_tight", &col(0), Tol::printed(4))
+            .vector("a_101_se_tight", &col(1), Tol::printed(4))
+            .vector("a_101_lower80_tight", &col(2), Tol::printed(4))
+            .vector("a_101_upper80_tight", &col(3), Tol::printed(4))
+            .vector("a_101_lower95_tight", &col(4), Tol::printed(4))
+            .vector("a_101_upper95_tight", &col(5), Tol::printed(4))
+            .named(
+                "a_101_coef_tight",
+                &["ar1", "ma1", "intercept"],
+                &[
+                    coef_value(&t, "ar1"),
+                    coef_value(&t, "ma1"),
+                    coef_value(&t, "intercept"),
+                ],
+                Tol::printed(6),
+            )
+            .finish();
+    }
+
+    /// R: forecast::Arima(dr, c(0, 1, 1), include.drift = TRUE, method = "CSS") at the exact
+    /// CSS optimum, through the MCP tool's text.
+    #[tokio::test]
+    async fn test_validate_mcp_ts_arima_fit_drift() {
+        use p2a_validation::text::labelled;
+        use p2a_validation::{Check, Tol};
+        let (case, server) = server_with_case("arima_css_forecast").await;
+        let req = serde_json::from_value(serde_json::json!({
+            "dataset": "arima_series", "column": "dr", "p": 0, "d": 1, "q": 1,
+            "include_drift": true
+        }))
+        .unwrap();
+        let r = server.ts_arima_fit(Parameters(req)).await.unwrap();
+        let t = text_of(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        Check::new(&case)
+            .named(
+                "dr_011_drift_coef_tight",
+                &["ma1", "drift"],
+                &[coef_value(&t, "ma1"), coef_value(&t, "drift")],
+                Tol::printed(6),
+            )
+            .scalar(
+                "dr_011_drift_sigma2_tight",
+                labelled(&t, "sigma^2:").unwrap(),
+                Tol::printed(6),
+            )
+            .scalar(
+                "dr_011_drift_loglik_tight",
+                labelled(&t, "Log-likelihood (CSS):").unwrap(),
+                Tol::printed(4),
+            )
+            .scalar(
+                "dr_011_drift_aic_css_tight",
+                labelled(&t, "AIC (CSS likelihood; R reports NA for CSS fits):").unwrap(),
+                Tol::printed(4),
+            )
+            .finish();
+        assert!(t.contains("Converged: yes"), "{t}");
+    }
+
+    /// The new request options are checked, missing values are a tool error with the fill
+    /// hint, text is refused, and an Int64 column fits as its Float64 copy.
+    #[tokio::test]
+    async fn test_mcp_ts_arima_options_and_missing() {
+        let (_, server) = server_with_case("arima_css_forecast").await;
+        let fit = |v: serde_json::Value| {
+            let req: ArimaRequest = serde_json::from_value(v).unwrap();
+            server.ts_arima_fit(Parameters(req))
+        };
+        let r = fit(serde_json::json!({"dataset": "arima_series", "column": "c",
+            "p": 0, "d": 1, "q": 1, "include_mean": true}))
+        .await
+        .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("include_mean"), "{}", text_of(&r));
+        let r = fit(
+            serde_json::json!({"dataset": "arima_series", "column": "dr",
+            "p": 1, "d": 2, "q": 1, "include_drift": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("include_drift"), "{}", text_of(&r));
+        let req: ArimaForecastRequest = serde_json::from_value(serde_json::json!({
+            "dataset": "arima_series", "column": "a_na", "p": 1, "d": 0, "q": 1, "horizon": 5
+        }))
+        .unwrap();
+        let r = server.ts_arima_forecast(Parameters(req)).await.unwrap();
+        let t = text_of(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains("Column 'a_na' contains 2 missing value(s)") && t.contains("munge_fill_na"),
+            "{t}"
+        );
+        let r = fit(
+            serde_json::json!({"dataset": "arima_series", "column": "lab",
+            "p": 1, "d": 0, "q": 1}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("non-numeric"), "{}", text_of(&r));
+        let int = fit(
+            serde_json::json!({"dataset": "arima_series", "column": "ai",
+            "p": 1, "d": 0, "q": 1}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(int.is_error, Some(true), "{}", text_of(&int));
+        let flt = fit(
+            serde_json::json!({"dataset": "arima_series_f64", "column": "ai_f64",
+            "p": 1, "d": 0, "q": 1}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(text_of(&int), text_of(&flt).replace("ai_f64", "ai"));
+    }
+
+    /// GARCH, AR, decompose and StructTS read Int64 columns as their Float64 copies and refuse
+    /// missing values with the fill hint; cpgram drops them as R and reports the drop; the
+    /// series utilities refuse text and keep NA in place; runmed refuses missing values.
+    #[tokio::test]
+    async fn test_mcp_timeseries_handlers_extraction() {
+        let (_, server) = server_with_case("arima_css_forecast").await;
+        /// Calls `tool` with `args` plus the dataset and column.
+        async fn call(
+            server: &AnalyticsServer,
+            tool: &str,
+            dataset: &str,
+            mut args: serde_json::Value,
+            column: &str,
+        ) -> CallToolResult {
+            args["dataset"] = dataset.into();
+            args["column"] = column.into();
+            let a = args;
+            match tool {
+                "ts_garch_fit" => server
+                    .ts_garch_fit(Parameters(serde_json::from_value(a).unwrap()))
+                    .await
+                    .unwrap(),
+                "timeseries_ar" => server
+                    .timeseries_ar(Parameters(serde_json::from_value(a).unwrap()))
+                    .await
+                    .unwrap(),
+                "timeseries_decompose" => server
+                    .timeseries_decompose(Parameters(serde_json::from_value(a).unwrap()))
+                    .await
+                    .unwrap(),
+                "timeseries_structts" => server
+                    .timeseries_structts(Parameters(serde_json::from_value(a).unwrap()))
+                    .await
+                    .unwrap(),
+                "timeseries_cpgram" => server
+                    .timeseries_cpgram(Parameters(serde_json::from_value(a).unwrap()))
+                    .await
+                    .unwrap(),
+                "timeseries_lag" => server
+                    .timeseries_lag(Parameters(serde_json::from_value(a).unwrap()))
+                    .await
+                    .unwrap(),
+                "timeseries_runmed" => server
+                    .timeseries_runmed(Parameters(serde_json::from_value(a).unwrap()))
+                    .await
+                    .unwrap(),
+                other => panic!("unknown tool {other}"),
+            }
+        }
+        for (tool, args) in [
+            ("ts_garch_fit", serde_json::json!({})),
+            (
+                "timeseries_ar",
+                serde_json::json!({"method": "ols", "order": 2, "aic": false}),
+            ),
+            ("timeseries_decompose", serde_json::json!({"period": 12})),
+            ("timeseries_structts", serde_json::json!({})),
+        ] {
+            let int = call(&server, tool, "arima_series", args.clone(), "ai").await;
+            let flt = call(&server, tool, "arima_series_f64", args.clone(), "ai_f64").await;
+            assert_eq!(int.is_error, flt.is_error, "{tool}: {}", text_of(&int));
+            assert_eq!(
+                text_of(&int),
+                text_of(&flt).replace("ai_f64", "ai"),
+                "{tool}"
+            );
+            let gap = call(&server, tool, "arima_series", args, "a_na").await;
+            let t = text_of(&gap);
+            assert_eq!(gap.is_error, Some(true), "{tool}: {t}");
+            assert!(
+                t.contains("Column 'a_na' contains 2 missing value(s)")
+                    && t.contains("munge_fill_na"),
+                "{tool}: {t}"
+            );
+        }
+        let r = call(
+            &server,
+            "timeseries_cpgram",
+            "arima_series",
+            serde_json::json!({}),
+            "a_na",
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+        let json: serde_json::Value = serde_json::from_str(&text_of(&r)).unwrap();
+        assert_eq!(json["missing"]["n_dropped"], 2, "{json}");
+        assert_eq!(json["missing"]["n_used"], 298, "{json}");
+        let r = call(
+            &server,
+            "timeseries_lag",
+            "arima_series",
+            serde_json::json!({"k": 1}),
+            "lab",
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("non-numeric"), "{}", text_of(&r));
+        let r = call(
+            &server,
+            "timeseries_lag",
+            "arima_series",
+            serde_json::json!({"k": 1}),
+            "ai_na",
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+        let r = call(
+            &server,
+            "timeseries_runmed",
+            "arima_series",
+            serde_json::json!({"k": 3}),
+            "a_na",
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("a_na"), "{}", text_of(&r));
     }
 }

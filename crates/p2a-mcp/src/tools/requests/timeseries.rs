@@ -269,6 +269,20 @@ pub struct ArimaRequest {
     /// MA order (q)
     #[schemars(description = "Number of moving average (MA) terms.")]
     pub q: usize,
+
+    /// Estimate the series mean
+    #[serde(default)]
+    #[schemars(
+        description = "Estimate the series mean (R's 'intercept'). Default: true when d = 0. Must be false or omitted when d > 0 (a mean has no effect after differencing)."
+    )]
+    pub include_mean: Option<bool>,
+
+    /// Estimate a drift
+    #[serde(default)]
+    #[schemars(
+        description = "Estimate a drift (linear trend in the levels), as R forecast::Arima(include.drift = TRUE). Only for d = 0 or d = 1. Default false."
+    )]
+    pub include_drift: Option<bool>,
 }
 
 /// Request for ARIMA forecasting.
@@ -297,6 +311,20 @@ pub struct ArimaForecastRequest {
     /// Forecast horizon
     #[schemars(description = "Number of periods to forecast ahead.")]
     pub horizon: usize,
+
+    /// Estimate the series mean
+    #[serde(default)]
+    #[schemars(
+        description = "Estimate the series mean (R's 'intercept'). Default: true when d = 0. Must be false or omitted when d > 0 (a mean has no effect after differencing)."
+    )]
+    pub include_mean: Option<bool>,
+
+    /// Estimate a drift
+    #[serde(default)]
+    #[schemars(
+        description = "Estimate a drift (linear trend in the levels), as R forecast::Arima(include.drift = TRUE). Only for d = 0 or d = 1. Default false."
+    )]
+    pub include_drift: Option<bool>,
 }
 
 /// Request for GARCH model fitting (volatility modeling).

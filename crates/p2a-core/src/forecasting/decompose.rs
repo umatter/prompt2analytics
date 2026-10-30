@@ -10,6 +10,7 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/decompose.html>
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use serde::{Deserialize, Serialize};
 
@@ -304,30 +305,16 @@ fn compute_seasonal_figure(
 /// # Returns
 ///
 /// `DecomposeResult` with decomposition components.
+///
+/// Integer and Boolean columns are accepted; a missing value (empty cell, NA or NaN) is an
+/// error naming the column.
 pub fn run_decompose(
     dataset: &Dataset,
     column: &str,
     period: usize,
     decompose_type: DecomposeType,
 ) -> EconResult<DecomposeResult> {
-    let df = dataset.df();
-    let available: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
-        column: column.to_string(),
-        available: available.clone(),
-    })?;
-
-    let x: Vec<f64> = col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: column.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
+    let (x, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     decompose(
         &x,
@@ -340,6 +327,9 @@ pub fn run_decompose(
 }
 
 /// Convenience function to run decomposition with a custom filter.
+///
+/// Integer and Boolean columns are accepted; a missing value (empty cell, NA or NaN) is an
+/// error naming the column.
 pub fn run_decompose_with_filter(
     dataset: &Dataset,
     column: &str,
@@ -347,24 +337,7 @@ pub fn run_decompose_with_filter(
     decompose_type: DecomposeType,
     filter: Vec<f64>,
 ) -> EconResult<DecomposeResult> {
-    let df = dataset.df();
-    let available: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
-        column: column.to_string(),
-        available: available.clone(),
-    })?;
-
-    let x: Vec<f64> = col
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: column.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
+    let (x, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     decompose(
         &x,
@@ -379,6 +352,31 @@ pub fn run_decompose_with_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X-2: an Int64 column decomposes as its Float64 copy; missing values, text and
+    /// absent columns are refused by name.
+    #[test]
+    fn test_na_decompose_int64_and_missing() {
+        use crate::forecasting::test_fixtures::*;
+        let ds = with_float_copy(&arima_series(), "ai");
+        let plain = |col: &str| run_decompose(&ds, col, 12, DecomposeType::Additive);
+        let filtered = |col: &str| {
+            run_decompose_with_filter(&ds, col, 12, DecomposeType::Additive, vec![0.25, 0.5, 0.25])
+        };
+        for run in [
+            &plain as &dyn Fn(&str) -> EconResult<DecomposeResult>,
+            &filtered,
+        ] {
+            let int = run("ai").unwrap();
+            let flt = run("ai_f64").unwrap();
+            assert_same(&int.trend, &flt.trend);
+            assert_same(&int.seasonal, &flt.seasonal);
+            assert_null_values(&run("a_na").unwrap_err(), "a_na", 2);
+            assert_null_values(&run("ai_na").unwrap_err(), "ai_na", 2);
+            assert_non_numeric(&run("lab").unwrap_err(), "lab");
+            assert_not_found(&run("nope").unwrap_err(), "nope");
+        }
+    }
 
     fn generate_seasonal_data(
         n: usize,
