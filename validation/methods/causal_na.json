@@ -14,7 +14,8 @@
         "p2a-core::econometrics::mediation::tests::test_validate_mediation_total_effect_causal_na",
         "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_int64_treatment",
         "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_reports_missing",
-        "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_errors_name_the_column"
+        "p2a-core::econometrics::mediation::tests::test_validate_na_mediation_errors_name_the_column",
+        "p2a-mcp::tier2::wp13_causal::test_validate_mcp_mediation_analysis_causal_na"
       ],
       "quantities": ["complete rows and missing counts", "rows kept after trimming", "total effect (trim 0 and 0.05)"],
       "tolerance": "counts exact; total effect Tol::iterative(1e-8) (logit Newton-Raphson to |step| < 1e-8); MCP text Tol::printed(4)",
@@ -34,7 +35,8 @@
         "p2a-core::econometrics::medflex::tests::test_validate_medflex_causal_na",
         "p2a-core::econometrics::medflex::tests::test_validate_medflex_interaction_causal_na",
         "p2a-core::econometrics::medflex::tests::test_validate_na_medflex_reports_missing",
-        "p2a-core::econometrics::medflex::tests::test_validate_na_medflex_errors_name_the_column"
+        "p2a-core::econometrics::medflex::tests::test_validate_na_medflex_errors_name_the_column",
+        "p2a-mcp::tier2::wp13_causal::test_validate_mcp_natural_effects_mediation_causal_na"
       ],
       "quantities": ["complete rows and missing counts", "group counts", "E[M|A=0], E[M|A=1]", "mediator model: coefficient and SE of d, R2", "outcome model with and without d:m: coefficients and SEs of d, m, d:m, R2"],
       "tolerance": "validation/README.md, n = 350: coefficients 1e-8, SE and R2 1e-6 relative; MCP text Tol::printed(4)",
@@ -62,7 +64,8 @@
         "p2a-core::econometrics::sbw::tests::test_validate_na_sbw_columns",
         "p2a-core::econometrics::tmle::tests::test_validate_na_tmle_columns",
         "p2a-core::econometrics::ctmle::tests::test_validate_na_ctmle_columns",
-        "p2a-core::econometrics::stdreg::tests::test_validate_na_stdreg_columns"
+        "p2a-core::econometrics::stdreg::tests::test_validate_na_stdreg_columns",
+        "p2a-mcp::tier2::wp13_causal::test_validate_mcp_treatment_ipw_null_outcome_is_named"
       ],
       "quantities": ["NullValues column and count (missing_y, missing_d_na, missing_x1)"],
       "tolerance": "exact",
