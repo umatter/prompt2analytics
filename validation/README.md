@@ -210,6 +210,39 @@ NaN; ±inf equals only itself. `Tol::iterative(rel)` and `Tol::new` need a comme
 reason. `Tol` (in `crates/p2a-validation/src/check.rs`) and this table must agree; change both
 or neither.
 
+## Missing values, integer and logical columns
+
+R and Rust must compute on the same cells, so the harness and the loader read missing values
+the same way:
+
+- The harness reads every case dataset with `read.csv(stringsAsFactors = FALSE, na.strings =
+  c("NA", ""))`, the rule of the CSV loader (`DataLoader::DEFAULT_NA_STRINGS`): the text `NA`
+  and empty fields, quoted or not, are missing.
+- `NA` and `NaN` are written as empty fields and read as missing by both sides. R's
+  `write.csv` itself writes NaN as `NA`, so a case cannot hold a literal NaN cell: a test that
+  needs one builds that fixture in Rust (`f64::NAN`), the only allowed inline fixture.
+- `read.csv` skips a line whose fields are all empty, so a generated dataset with missing
+  cells keeps a never-missing `id` column.
+- An integer-valued double is written without a decimal point and loads as `Int64` (cases
+  that rely on it assert `is.integer`); `TRUE`/`FALSE` load as `Boolean`.
+- The harness refuses `Inf`: store `NA` and assert the infinity in Rust.
+- R in a UTF-8 locale sorts text case-insensitively (`a A b B`); a case whose result depends
+  on level order sets `LC_COLLATE=C` (`A B a b`), the order p2a uses.
+
+### Column extraction (`p2a_core::data::columns`)
+
+Estimators read user columns through `ColumnRequest`. Null and NaN are missing (R `is.na`);
+`±Inf` is refused unless the request allows it; every numeric dtype (integers, `Float32`,
+`Decimal`) is read as f64 and `Boolean` as 0/1, while text, dates and categoricals are refused
+as numbers. `NaPolicy::Omit` drops the rows with a missing value in any requested column (R
+`na.omit`, `complete.cases`) and reports them in a `MissingSummary` ("3 of 120 rows dropped
+because of missing values (y: 2, x1: 1)"); `NaPolicy::Fail` refuses with the column and count
+(R `na.fail`). Factor levels follow R `factor()`: numbers by value (2 < 10), text in C-locale
+order, booleans `FALSE < TRUE`, dates chronologically, `Enum` in declared order. The reference
+case is `columns_conventions` in [`data_columns.R`](r/cases/data_columns.R), checked by
+`test_validate_columns_conventions` and the other tests registered in
+`validation/methods/data_columns.json`.
+
 ## Method document format
 
 Each method has a Markdown file in its category directory with these sections:
@@ -350,6 +383,11 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Regression Diagnostics (JB, BP, DW, VIF, condition number) | [regression_diagnostics.md](diagnostics/regression_diagnostics.md) | R-pinned |
 | Breusch-Godfrey | [bgtest.md](diagnostics/bgtest.md) | R-pinned |
 | Harvey-Collier | [harvtest.md](diagnostics/harvtest.md) | R-pinned |
+
+### Data handling
+| Method | File | Status |
+|--------|------|--------|
+| Column extraction conventions | [README.md](README.md) | R-pinned |
 
 ### Interfaces (CLI exhibits, MCP)
 | Method | File | Status |
