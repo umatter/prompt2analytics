@@ -691,14 +691,11 @@ fn per_cutoff_rd_config(config: &RdMultiConfig, h: Option<f64>) -> RdConfig {
         p: config.p,
         q: config.q,
         h,
-        b: None,
-        rho: 1.0,
         kernel: config.kernel,
         bwselect: config.bwselect,
         vce: config.vce,
-        nnmatch: 3,
         level: config.level,
-        scaleregul: 1.0,
+        ..RdConfig::default()
     }
 }
 
@@ -1528,6 +1525,37 @@ mod tests {
             assign_to_nearest_cutoff(&x, &cutoffs).to_vec(),
             naive(&x, &cutoffs)
         );
+    }
+
+    /// One cutoff with a global bandwidth is rdrobust at h = b = 0.3: the per-cutoff
+    /// effect and SE are its bias-corrected estimate and robust SE (T2-WP11).
+    #[test]
+    fn test_validate_rd_multi_single_cutoff() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("rd_sharp_fixed_bw");
+        let r = run_rd_multi_dataset(
+            &ds,
+            "y",
+            "x",
+            None,
+            RdMultiConfig {
+                cutoffs: vec![0.0],
+                bandwidth: RdMultiBandwidth::Global(0.3),
+                vce: VceType::Hc1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let cr = &r.cutoff_results[0];
+        let n = 1000;
+        Check::new(&case)
+            .scalar("tri_hc1_hb_coef_bc", cr.effect, Tol::coef(n))
+            .scalar("tri_hc1_hb_se_robust", cr.se, Tol::se(n))
+            .vector("tri_hc1_hb_ci_robust", &[cr.ci.0, cr.ci.1], Tol::stat(n))
+            .scalar("tri_hc1_hb_p_robust", cr.p_value, Tol::p_value(n))
+            .scalar("tri_hc1_hb_coef_bc", r.pooled_effect.unwrap(), Tol::coef(n))
+            .scalar("tri_hc1_hb_se_robust", r.pooled_se.unwrap(), Tol::se(n))
+            .finish();
     }
 
     #[test]

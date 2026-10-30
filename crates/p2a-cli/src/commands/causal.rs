@@ -1430,16 +1430,10 @@ fn execute_rd(
             };
             let config = RdConfig {
                 p: poly_order,
-                q: None,
-                h: None,
-                b: None,
-                rho: 1.0,
                 kernel: kern,
                 bwselect: bw,
                 vce: VceType::Nn,
-                nnmatch: 3,
-                level: 0.95,
-                scaleregul: 1.0,
+                ..RdConfig::default()
             };
 
             match run_rd(ds, outcome, running, cutoff, config) {
@@ -1543,16 +1537,10 @@ fn execute_fuzzy_rd(
             };
             let config = RdConfig {
                 p: poly_order,
-                q: None,
-                h: None,
-                b: None,
-                rho: 1.0,
                 kernel: kern,
                 bwselect: BandwidthMethod::MseRd,
                 vce: VceType::Nn,
-                nnmatch: 3,
-                level: 0.95,
-                scaleregul: 1.0,
+                ..RdConfig::default()
             };
 
             match run_fuzzy_rd(ds, outcome, running, treatment, cutoff, config) {

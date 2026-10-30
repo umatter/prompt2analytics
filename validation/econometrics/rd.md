@@ -1,0 +1,145 @@
+# Regression Discontinuity (rdrobust): sharp RD with CCT bias correction
+
+**Status:** R-pinned at fixed bandwidths (registry `validation/methods/causal_rd.json`, id
+`rd_sharp`), with one known deviation: the bandwidths p2a selects when none are given are
+its own (finding CAUS-28).
+
+## Method and reference
+
+| Package | Function | Version tested |
+|---|---|---|
+| rdrobust | `rdrobust(y, x, c, p, q, h, b, kernel, vce, nnmatch, level)` | 4.0.0 (R 4.3.3) |
+
+Calonico, Cattaneo & Titiunik (2014), "Robust Nonparametric Confidence Intervals for
+Regression-Discontinuity Designs", *Econometrica* 82(6), 2295-2326.
+
+p2a functions: `run_rd` (sharp), `rd_bandwidth` (bandwidths only), and the per-cutoff fits of
+`run_rd_multi` (`validation/econometrics/rdmulti.md`).
+
+## What p2a computes
+
+For given bandwidths, `run_rd` computes what `rdrobust()` 4.0.0 computes. Bandwidths are given
+as `RdConfig.h` and `RdConfig.b`, and `h_right`/`b_right` when the right side differs (rdrobust
+`h = c(h_l, h_r)`). Without `b`, `b = rho * h` with `rho = 1`, as rdrobust does when only `h`
+is given. The order is `p` (default 1), and the bias-correction order `q` (default `p + 1`)
+must exceed `p`, as rdrobust requires.
+
+Per side s (left: x < c; right: x >= c), with bandwidths (h, b):
+
+1. Kernel weights `W_h = K((x - c)/h)/h` and `W_b = K((x - c)/b)/b`, with K triangular
+   `1 - |u|`, Epanechnikov `0.75 (1 - u²)` or uniform `0.5` on `|u| <= 1` (rdrobust's
+   `rdrobust_kweight`; `|u| = 1` has weight 0 except for the uniform kernel).
+2. The rows that enter the fits are those with positive weight under the larger of h and b
+   (rdrobust's `ind`), sorted by x (ties keep their row order). `N_h` and `N_b` count the rows
+   with positive weight under h and under b.
+3. `R_q = [1, (x - c), ..., (x - c)^q]`, `R_p` its first p + 1 columns, `u = (x - c)/h`,
+   `invG_p = (R_p' W_h R_p)^-1`, `invG_q = (R_q' W_b R_q)^-1`, `L = R_p' (W_h u^(p+1))`.
+4. The bias-correction weights (rdrobust's `Q_q`):
+   `Q_i = W_h,i R_p,i - h^(p+1) W_b,i (R_q,i · invG_q[:, p+1]) L`.
+5. `beta_p = invG_p R_p' W_h y`, `beta_q = invG_q R_q' W_b y`, `beta_bc = invG_p Q' y`.
+6. Residuals.
+   - `vce = "nn"` (default): rows with equal x form a block; each row's neighbours are its
+     own block plus whole neighbouring blocks, added on the nearer side (both when equally
+     far), until there are at least `min(nnmatch, m - 1)` others (m rows in the window). With
+     `J_i` neighbours, `res_i = sqrt(J_i / (J_i + 1)) (y_i - mean of the neighbours)`
+     (rdrobust's `rdrobust_res`). The same residuals serve both variances.
+   - `vce = "hc0" .. "hc3"`: `res_h = w_i (y_i - R_p,i beta_p)` and
+     `res_b = w_i (y_i - R_q,i beta_q)`, with `w = 1` (HC0), `sqrt(m / (m - d))` (HC1,
+     `d = p + 1` or `q + 1`, m the rows in the window), `sqrt(1 / max(1 - h_ii, 1e-8))` (HC2)
+     or `1 / max(1 - h_ii, 1e-8)` (HC3), with the leverage `h_ii = W_i R_i' invG R_i` of the
+     order-p fit for `res_h` and of the order-q fit for `res_b`.
+7. Variances of the intercept, with `a` the first row of `invG_p`:
+   `V_cl = sum_i res_h,i² (a · W_h,i R_p,i)²` and `V_rb = sum_i res_b,i² (a · Q_i)²`
+   (rdrobust's `invG_p rdrobust_vce(..) invG_p` at [1, 1]).
+
+Then `tau_cl = beta_p,right[0] - beta_p,left[0]`, `tau_bc = beta_bc,right[0] - beta_bc,left[0]`,
+`se_cl = sqrt(V_cl,left + V_cl,right)`, `se_rb = sqrt(V_rb,left + V_rb,right)` and
+`z = Φ⁻¹(1 - (1 - level)/2)`. The three rows of the result are rdrobust's:
+
+| Row | Estimate | SE | Interval |
+|---|---|---|---|
+| Conventional | `tau_cl` | `se_cl` | `tau_cl ∓ z se_cl` |
+| Bias-Corrected | `tau_bc` | `se_cl` | `tau_bc ∓ z se_cl` |
+| Robust | `tau_bc` | `se_rb` | `tau_bc ∓ z se_rb` |
+
+p-values are `2 Φ(-|est / se|)` (upper tail). `bias = tau_cl - tau_bc`. `n_eff_left/right`
+are `N_h`, `n_b_left/right` are `N_b`, and `coef_left/right` are `beta_p` on each side.
+`significance` follows the robust p-value.
+
+The cost per side is O(m log m) for the sort, O(m (q + 1)²) for the fits and O(m + B · nnmatch)
+for the nearest-neighbour residuals (B distinct values of x).
+
+## Reference cases
+
+`validation/r/cases/causal_rd.R` simulates `validation/datasets/generated/rd_sim.csv` (seed 42,
+n = 1000, cutoff 0): `y` a sharp design with a jump of 0.4, `d` an integer treatment whose
+take-up jumps from 0.2 to 0.8, `yf` an outcome that responds to `d`, and `xm`/`ym` a running
+variable on a 0.01 grid (201 distinct values) with its outcome.
+
+| Case | Calls |
+|---|---|
+| `rd_sharp_fixed_bw` | `rdrobust(y, x, c = 0, p = 1, h = 0.3, b = 0.3, kernel = k, vce = v)` for three kernels × five VCEs (`<k3>_<vce>_hb`); h 0.3 b 0.5 and h 0.5 b 0.3 (nn); p = 2 with h 0.5 b 0.6; `h = c(0.25, 0.35), b = c(0.4, 0.45), vce = "hc1"` (`tri_hc1_asym`); `level = 90` |
+| `rd_mass_points_nn` | `rdrobust(ym, xm, c = 0, h = 0.3, b = 0.4, vce = "nn", nnmatch = m)`, m = 3, 1, 5 |
+
+Each run records `coef_conv`, `coef_bc`, `se_conv`, `se_robust`, `z_*`, `p_*`, `ci_conv`,
+`ci_robust`, `n_h`, `n_b` and the order-p coefficients on each side.
+
+## Decisive values
+
+R 4.3.3, rdrobust 4.0.0; full precision in `validation/expected/*.json`.
+
+| prefix | coef_conv | coef_bc | se_conv | se_robust | ci_robust | p_robust | N_h / N_b |
+|---|---|---|---|---|---|---|---|
+| `tri_nn_hb` | 0.5817841314098199 | 0.5919701612168791 | 0.12379231806549339 | 0.19836524289095045 | 0.2031814293660763, 0.9807588930676818 | 0.0028428055888784203 | [161, 138] / [161, 138] |
+| `tri_hc0_hb` | 0.5817841314098199 | 0.5919701612168791 | 0.11983035927521032 | 0.18417006087364127 | 0.23100347487399292, 0.9529368475597653 | 0.0013078193187529127 | same |
+| `tri_hc1_hb` | 0.5817841314098199 | 0.5919701612168791 | 0.12065335399202394 | 0.18611035248894434 | 0.22720057318849385, 0.9567397492452643 | 0.001468952669997585 | same |
+| `tri_hc2_hb` | 0.5817841314098199 | 0.5919701612168791 | 0.12120484202992325 | 0.18863159916515235 | 0.22225902050698482, 0.9616813019267734 | 0.0016996893310610322 | same |
+| `tri_hc3_hb` | 0.5817841314098199 | 0.5919701612168791 | 0.12260010167716745 | 0.19326435944084766 | 0.21317897721761414, 0.970761345216144 | 0.0021912464836270316 | same |
+| `epa_nn_hb` | 0.5805845466472614 | 0.6249259972600473 | 0.1193314083641351 | 0.189339186769562 | 0.25382801032960317, 0.9960239841904914 | 0.0009649089662596728 | same |
+| `epa_hc1_hb` | 0.5805845466472614 | 0.6249259972600473 | 0.11756630567553424 | 0.17984579111190654 | 0.2724347239095968, 0.9774172706104978 | 0.0005112572215066532 | same |
+| `uni_nn_hb` | 0.5290400723570072 | 0.6728127020375516 | 0.1118504516281861 | 0.17725367422399307 | 0.32540188443112955, 1.0202235196439737 | 0.00014719085271196658 | same |
+| `uni_hc3_hb` | 0.5290400723570072 | 0.6728127020375516 | 0.1123653908338009 | 0.1743305189659708 | 0.3311311634580721, 1.0144942406170312 | 0.00011366176323095737 | same |
+| `tri_nn_h03_b05` | 0.5817841314098199 | 0.6137938269272958 | 0.12379231537314167 | 0.14640367896736542 | 0.32684788894709543, 0.9007397649074962 | 2.759269746236069e-05 | [161, 138] / [259, 227] |
+| `tri_nn_h05_b03` | 0.50788517130959 | 0.533453843207355 | 0.09450716219111888 | 0.3350712798446803 | -0.12327379754196, 1.19018148395667 | 0.11137104837279291 | [259, 227] / [161, 138] |
+| `tri_nn_p2` | 0.5911960428589791 | 0.6399605098112159 | 0.1423006600416738 | 0.17491812752108568 | 0.2971272796267036, 0.9827937399957282 | 0.0002535682356256111 | [259, 227] / [308, 277] |
+| `tri_hc1_asym` | 0.5680738086557416 | 0.6301640237245245 | 0.11791412807110979 | 0.14761279255341475 | 0.3408482666624494, 0.9194797807865996 | 1.9632138393300462e-05 | [139, 157] / [216, 204] |
+| `nn3` | 0.19249811566249087 | 0.16395388908486985 | 0.1302920671764542 | 0.16371764508097778 | -0.15692679890755767, 0.4848345770772974 | 0.3166126858419984 | [153, 140] / [211, 183] |
+| `nn1` | same | same | 0.12994764004208972 | 0.1633561567021435 | -0.15621829470421272, 0.48412607287395243 | 0.3155429696397453 | same |
+| `nn5` | same | same | 0.12966001128452542 | 0.162979271926044 | -0.15547961411673622, 0.4833873922864759 | 0.31442518763179694 | same |
+
+`level90_ci_robust` = [0.2656883719865894, 0.9182519504471687]. `tri_nn_h03_b05_se_conv`
+differs from `tri_nn_hb_se_conv` in the 9th digit: the nearest neighbours are searched in the
+larger (b) window. The `epa`/`uni` HC0 and HC2 rows are in the JSON.
+
+Before T2-WP11 p2a's NN variance was the kernel-weighted mean of a per-observation σ² divided
+by the count in the window (se_conv about 0.0697 on `tri_nn_hb`, half of rdrobust's), the bias
+was replaced by 10% of the estimate whenever it exceeded half of it (tau_bc 0.5048), and the
+robust SE was the conventional one times a constant (findings CAUS-1, CAUS-5, CAUS-29).
+
+## Tests and tolerances
+
+Registered (`rd_sharp`):
+
+- `test_validate_rd_sharp_fixed_bw` (p2a-core, `econometrics::rd::tests`): every run of
+  `rd_sharp_fixed_bw`, every recorded quantity.
+- `test_validate_rd_mass_points_nn`: `rd_mass_points_nn`, nnmatch 3, 1 and 5.
+- `test_validate_rd_sharp_display_table`: the printed table rows (`tri_hc1_hb`), the `[95% CI]`
+  and `[90% CI]` headers and the bias-window counts.
+
+Not registered (no R value): `test_nn_residuals_follow_rdrobust_rule` holds the block-based
+nearest-neighbour residuals to a line-by-line transcription of rdrobust's `rdrobust_res` loop
+on continuous, tied, signed-zero and tiny inputs, and
+`test_rd_rejects_q_not_above_p_and_lonely_right_bandwidths` checks the `q > p` rule and the
+right-side bandwidth checks.
+
+Tolerances (`validation/README.md`, n = 1000): coefficients 1e-8 relative, SEs, statistics
+and CI bounds 1e-6 relative, p-values 1e-6 relative plus 1e-12 absolute, counts exact. The
+observed agreement with rdrobust is at most about 1.7e-12 relative.
+
+## Limits
+
+- Bandwidth selection is p2a's own MSE-type selector, not `rdbwselect` (CAUS-28, a registry
+  deviation); every reference case passes h and b.
+- No covariates, clusters, weights or derivatives (`deriv`).
+- p2a's `rho` is b/h, rdrobust's is h/b; both default to b = h.
+- `q > p` is required, as in rdrobust.

@@ -3,6 +3,15 @@
 //! Pure Rust implementation of local polynomial RD estimation following the methodology
 //! of Calonico, Cattaneo, Titiunik & Farrell (2014-2020).
 //!
+//! For given bandwidths (h and b, optionally different on the two sides), [`run_rd`]
+//! computes what `rdrobust::rdrobust` 4.0.0 computes: the local-polynomial estimate, the
+//! CCT (2014) bias-corrected estimate built from the `Q_q` weights, and the conventional
+//! and robust sandwich variances with nearest-neighbour residuals (whole tie groups,
+//! `nnmatch`) or HC0-HC3 residuals. [`run_fuzzy_rd`] fits the outcome and the treatment
+//! on one bandwidth, as `rdrobust(fuzzy = )`. When no bandwidth is given, p2a's own
+//! MSE-type selector chooses one; it is not `rdbwselect` (finding CAUS-28). Covariates,
+//! clustering, weights and derivatives (`deriv`) are not supported.
+//!
 //! # References
 //!
 //! - Calonico, S., Cattaneo, M. D., & Titiunik, R. (2014). "Robust Nonparametric Confidence
@@ -14,8 +23,9 @@
 //! - Implementation adapted from R package `rdrobust` (Calonico, Cattaneo, Farrell, Titiunik).
 //!   Source: https://cran.r-project.org/package=rdrobust
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
 use crate::data::Dataset;
@@ -162,6 +172,17 @@ impl VceType {
             _ => None,
         }
     }
+
+    /// rdrobust's `vce` names, case-insensitive: "nn" (also "nearest"), "hc0", "hc1",
+    /// "hc2", "hc3". An unknown name is an `InvalidSpecification` listing the valid ones.
+    pub fn parse(s: &str) -> EconResult<VceType> {
+        Self::from_str(s).ok_or_else(|| EconError::InvalidSpecification {
+            message: format!(
+                "Unknown vce '{s}'; use \"nn\" (nearest-neighbour residuals, the default, as \
+                 rdrobust), \"hc0\", \"hc1\", \"hc2\" or \"hc3\""
+            ),
+        })
+    }
 }
 
 impl fmt::Display for VceType {
@@ -201,6 +222,13 @@ pub struct RdConfig {
     pub level: f64,
     /// Regularization scale for bandwidth selection (default: 1.0).
     pub scaleregul: f64,
+    /// Main bandwidth right of the cutoff when it differs from the left one (rdrobust
+    /// `h = c(h_l, h_r)`); requires `h`, which is then the left-side bandwidth.
+    #[serde(default)]
+    pub h_right: Option<f64>,
+    /// Bias bandwidth right of the cutoff (rdrobust `b = c(b_l, b_r)`); requires `b`.
+    #[serde(default)]
+    pub b_right: Option<f64>,
 }
 
 impl Default for RdConfig {
@@ -217,8 +245,15 @@ impl Default for RdConfig {
             nnmatch: 3,
             level: 0.95,
             scaleregul: 1.0,
+            h_right: None,
+            b_right: None,
         }
     }
+}
+
+/// The confidence level of a result deserialized without one.
+fn default_rd_level() -> f64 {
+    0.95
 }
 
 /// Bandwidth estimation result.
@@ -284,34 +319,43 @@ pub struct RdResult {
     pub n_left: usize,
     /// Total observations right of cutoff.
     pub n_right: usize,
-    /// Effective sample size left (within bandwidth).
+    /// Observations left of the cutoff with positive kernel weight under h (rdrobust `N_h`).
     pub n_eff_left: usize,
-    /// Effective sample size right (within bandwidth).
+    /// Observations right of the cutoff with positive kernel weight under h.
     pub n_eff_right: usize,
+    /// Observations left of the cutoff with positive kernel weight under b (rdrobust `N_b`).
+    #[serde(default)]
+    pub n_b_left: usize,
+    /// Observations right of the cutoff with positive kernel weight under b.
+    #[serde(default)]
+    pub n_b_right: usize,
 
     // Point estimates
-    /// Conventional RD estimate (local polynomial at cutoff).
+    /// Conventional RD estimate (local polynomial at cutoff; rdrobust `coef[1]`).
     pub tau_conventional: f64,
-    /// Bias-corrected estimate.
+    /// CCT (2014) bias-corrected estimate (rdrobust `coef[2]`).
     pub tau_bc: f64,
-    /// Robust bias-corrected estimate (same as tau_bc, different SE).
+    /// Robust bias-corrected estimate: equal to `tau_bc`, with the robust SE.
     pub tau_robust: f64,
 
     // Standard errors
-    /// Conventional standard error.
+    /// Conventional standard error (rdrobust `se[1]`).
     pub se_conventional: f64,
-    /// Bias-corrected standard error.
+    /// Standard error of the bias-corrected row: the conventional one (rdrobust `se[2]`).
     pub se_bc: f64,
-    /// Robust standard error (accounts for bias estimation uncertainty).
+    /// Robust standard error, accounting for the estimated bias (rdrobust `se[3]`).
     pub se_robust: f64,
 
     // Confidence intervals
-    /// Conventional CI.
+    /// Conventional CI: `tau_conventional -/+ z se_conventional`.
     pub ci_conventional: (f64, f64),
-    /// Bias-corrected CI.
+    /// Bias-corrected CI: `tau_bc -/+ z se_conventional`.
     pub ci_bc: (f64, f64),
-    /// Robust bias-corrected CI (recommended).
+    /// Robust bias-corrected CI (recommended): `tau_bc -/+ z se_robust`.
     pub ci_robust: (f64, f64),
+    /// Confidence level of every interval (`RdConfig::level`).
+    #[serde(default = "default_rd_level")]
+    pub level: f64,
 
     // P-values
     /// P-value for conventional estimate.
@@ -351,11 +395,54 @@ pub struct RdResult {
     /// Coefficients from right-side polynomial.
     pub coef_right: Vec<f64>,
 
-    /// Estimated bias.
+    /// Estimated bias: `tau_conventional - tau_bc`.
     pub bias: f64,
 
     /// Warnings generated during estimation.
     pub warnings: Vec<String>,
+}
+
+/// "95% CI", "90% CI", "97.5% CI": the interval label for a confidence level.
+fn ci_label(level: f64) -> String {
+    let pct = (level * 100.0 * 1e9).round() / 1e9;
+    if pct.fract() == 0.0 {
+        format!("[{pct:.0}% CI]")
+    } else {
+        format!("[{pct}% CI]")
+    }
+}
+
+/// The estimate table's header, `level` labelling the interval column.
+fn write_rd_header(f: &mut fmt::Formatter<'_>, level: f64) -> fmt::Result {
+    writeln!(
+        f,
+        "{:<20} {:>12} {:>12} {:>10} {:>10}  {}",
+        "Method",
+        "Estimate",
+        "Std. Err.",
+        "z",
+        "P>|z|",
+        ci_label(level)
+    )?;
+    writeln!(f, "{}", "-".repeat(90))
+}
+
+/// One row of the estimate table: estimate, SE, z, two-sided p and the interval.
+fn write_rd_row(
+    f: &mut fmt::Formatter<'_>,
+    label: &str,
+    est: f64,
+    se: f64,
+    p: f64,
+    ci: (f64, f64),
+    stars: &str,
+) -> fmt::Result {
+    let z = if se > 0.0 { est / se } else { 0.0 };
+    writeln!(
+        f,
+        "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.4}  [{:>8.4}, {:>8.4}]{}",
+        label, est, se, z, p, ci.0, ci.1, stars
+    )
 }
 
 impl fmt::Display for RdResult {
@@ -381,6 +468,11 @@ impl fmt::Display for RdResult {
             "  Effective: {} (left), {} (right)",
             self.n_eff_left, self.n_eff_right
         )?;
+        writeln!(
+            f,
+            "  Bias fit:  {} (left), {} (right)",
+            self.n_b_left, self.n_b_right
+        )?;
         writeln!(f)?;
 
         writeln!(
@@ -404,56 +496,35 @@ impl fmt::Display for RdResult {
         writeln!(f, "Kernel: {}, VCE: {}", self.kernel, self.vce)?;
         writeln!(f)?;
 
-        writeln!(
+        write_rd_header(f, self.level)?;
+        write_rd_row(
             f,
-            "{:<20} {:>12} {:>12} {:>12} {:>18}",
-            "Method", "Estimate", "Std. Err.", "z", "95% CI"
-        )?;
-        writeln!(f, "{}", "-".repeat(80))?;
-
-        let z_conv = if self.se_conventional > 0.0 {
-            self.tau_conventional / self.se_conventional
-        } else {
-            0.0
-        };
-        let z_bc = if self.se_bc > 0.0 {
-            self.tau_bc / self.se_bc
-        } else {
-            0.0
-        };
-        let z_robust = if self.se_robust > 0.0 {
-            self.tau_robust / self.se_robust
-        } else {
-            0.0
-        };
-
-        writeln!(
-            f,
-            "{:<20} {:>12.4} {:>12.4} {:>12.2} [{:>7.4}, {:>7.4}]",
             "Conventional",
             self.tau_conventional,
             self.se_conventional,
-            z_conv,
-            self.ci_conventional.0,
-            self.ci_conventional.1
+            self.p_conventional,
+            self.ci_conventional,
+            "",
         )?;
-        writeln!(
+        write_rd_row(
             f,
-            "{:<20} {:>12.4} {:>12.4} {:>12.2} [{:>7.4}, {:>7.4}]",
-            "Bias-Corrected", self.tau_bc, self.se_bc, z_bc, self.ci_bc.0, self.ci_bc.1
+            "Bias-Corrected",
+            self.tau_bc,
+            self.se_bc,
+            self.p_bc,
+            self.ci_bc,
+            "",
         )?;
-        writeln!(
+        write_rd_row(
             f,
-            "{:<20} {:>12.4} {:>12.4} {:>12.2} [{:>7.4}, {:>7.4}]{}",
             "Robust",
             self.tau_robust,
             self.se_robust,
-            z_robust,
-            self.ci_robust.0,
-            self.ci_robust.1,
-            self.significance.stars()
+            self.p_robust,
+            self.ci_robust,
+            self.significance.stars(),
         )?;
-        writeln!(f, "{}", "-".repeat(80))?;
+        writeln!(f, "{}", "-".repeat(90))?;
         writeln!(f)?;
 
         writeln!(
@@ -462,7 +533,9 @@ impl fmt::Display for RdResult {
         )?;
         writeln!(
             f,
-            "Note: Robust is the recommended inference method (CCT 2014)."
+            "Note: Robust = bias-corrected estimate with the CCT (2014) robust standard error, \
+             as rdrobust's 'Robust' row (recommended); Bias-Corrected uses the conventional \
+             standard error."
         )?;
 
         if !self.warnings.is_empty() {
@@ -570,10 +643,12 @@ pub(crate) const MAX_RD_ORDER: usize = 10;
 ///
 /// The checks run in this order: the polynomial order `p`, the bias order `q`
 /// (only after `p`, so `p + 1` cannot overflow), the bandwidths `h` and `b`
-/// when given, `rho`, the confidence `level` and `nnmatch`. `q <= p` is
-/// accepted (it means no bias correction). Every failure is an
-/// `EconError::InvalidSpecification` naming the parameter, the value and the
-/// bound.
+/// when given, `rho`, the confidence `level`, `nnmatch`, the right-side
+/// bandwidths `h_right` and `b_right` when given (each finite and positive,
+/// and only together with `h` or `b`), and last `q > p`: rdrobust requires
+/// the bias-correction order to exceed the estimation order. Every failure is
+/// an `EconError::InvalidSpecification` naming the parameter, the value and
+/// the bound.
 pub(crate) fn validate_rd_config(config: &RdConfig) -> EconResult<()> {
     let spec = |message: String| Err(EconError::InvalidSpecification { message });
     let p = config.p;
@@ -621,6 +696,27 @@ pub(crate) fn validate_rd_config(config: &RdConfig) -> EconResult<()> {
         return spec(
             "nnmatch (nearest neighbours for the variance) must be at least 1 (got 0).".to_string(),
         );
+    }
+    for (name, value) in [("h_right", config.h_right), ("b_right", config.b_right)] {
+        if let Some(v) = value
+            && !(v.is_finite() && v > 0.0)
+        {
+            return spec(format!(
+                "Right-side bandwidth {name} must be a finite number greater than 0 (got {v})."
+            ));
+        }
+    }
+    if config.h_right.is_some() && config.h.is_none() {
+        return spec("h_right needs h, the left-side main bandwidth.".to_string());
+    }
+    if config.b_right.is_some() && config.b.is_none() {
+        return spec("b_right needs b, the left-side bias bandwidth.".to_string());
+    }
+    if q <= p {
+        return spec(format!(
+            "Bias-correction order q = {q} must be greater than the estimation order p = {p} \
+             (rdrobust requires q > p; the default is p + 1)."
+        ));
     }
     Ok(())
 }
@@ -715,273 +811,6 @@ fn weighted_least_squares(
     let residuals = y - &y_hat;
 
     Ok((beta, residuals))
-}
-
-/// Compute nearest-neighbor variance estimator.
-/// For each observation, estimates σ²ᵢ using J nearest neighbors.
-///
-/// The neighbours of an active row i (weight > 0) are the J other active rows
-/// nearest in `|x_k - x_i|`, ties broken by the lower row index, and the
-/// squared differences are summed in (distance, row) order. That is exactly
-/// what sorting every other active row by distance did before; the estimate
-/// is unchanged bit for bit, but it now costs O(m log m + m J) per side
-/// instead of O(m^2 log m), with m the number of active rows:
-///
-/// 1. The active rows are sorted once by (x, row), with -0.0 and 0.0 as one
-///    value, and the bounds of each run of equal x (a mass point) are
-///    precomputed.
-/// 2. For each row, a window around its sorted position grows by J steps,
-///    always taking the nearer side. Distances only grow outwards, so the
-///    J taken rows are J nearest ones, `d_j` (the last distance taken) is
-///    the J-th smallest distance, and every row outside the window is at
-///    least `d_j` away.
-/// 3. If `d_j == 0`, all candidates lie in the row's own mass point, which is
-///    sorted by row: the neighbours are its first J rows other than i, O(J).
-///    Otherwise the neighbours are the window rows closer than `d_j` plus the
-///    lowest-index rows among those exactly `d_j` away, which may extend past
-///    the window. Such a tie run is scanned only by rows within J sorted
-///    positions of it (a row farther away has J nearer rows), so the scans
-///    add O(m J) in total.
-///
-/// CAUS-1 will switch to rdrobust's rule (all ties at the J-th distance are
-/// kept); that changes only step 3.
-///
-/// `run_rd` gives a finite x to every active row whenever the bandwidth is
-/// finite. A non-finite x on an active row (possible only when a missing
-/// outcome makes the automatic bandwidth NaN, and then every estimate is NaN)
-/// still terminates without panicking, with deterministic but unspecified
-/// neighbours.
-fn nn_variance_estimator(
-    y: &Array1<f64>,
-    x: &Array1<f64>,
-    w: &Array1<f64>,
-    j: usize,
-) -> Array1<f64> {
-    let n = y.len();
-    let mut sigma2 = Array1::zeros(n);
-
-    // Get indices of observations with positive weights
-    let active: Vec<usize> = (0..n).filter(|&i| w[i] > 0.0).collect();
-
-    if j == 0 || active.len() <= j {
-        // Not enough observations for NN estimation
-        return sigma2;
-    }
-
-    let m = active.len();
-    let key = |r: usize| if x[r] == 0.0 { 0.0 } else { x[r] };
-    let mut order = active;
-    order.sort_by(|&a, &b| key(a).total_cmp(&key(b)).then(a.cmp(&b)));
-
-    // Bounds of the run of equal x around each sorted position.
-    let mut block_start = vec![0usize; m];
-    let mut block_end = vec![m; m];
-    for p in 1..m {
-        if key(order[p]) == key(order[p - 1]) {
-            block_start[p] = block_start[p - 1];
-        } else {
-            block_start[p] = p;
-        }
-    }
-    for p in (0..m - 1).rev() {
-        if key(order[p]) == key(order[p + 1]) {
-            block_end[p] = block_end[p + 1];
-        } else {
-            block_end[p] = p + 1;
-        }
-    }
-
-    let mut neighbors: Vec<usize> = Vec::with_capacity(j);
-    let mut ties: Vec<usize> = Vec::new();
-
-    for pos in 0..m {
-        let i = order[pos];
-        let xi = x[i];
-        let dist = |r: usize| (x[r] - xi).abs();
-
-        // Grow the window order[lo..hi] (which holds pos) by exactly j rows.
-        let (mut lo, mut hi) = (pos, pos + 1);
-        let mut d_j = 0.0_f64;
-        for _ in 0..j {
-            let take_left = match (lo > 0, hi < m) {
-                (true, true) => dist(order[lo - 1]) <= dist(order[hi]),
-                (true, false) => true,
-                (false, true) => false,
-                (false, false) => break,
-            };
-            if take_left {
-                lo -= 1;
-                d_j = dist(order[lo]);
-            } else {
-                d_j = dist(order[hi]);
-                hi += 1;
-            }
-        }
-
-        neighbors.clear();
-        if d_j == 0.0 {
-            // Every candidate ties at distance 0 inside this mass point.
-            for &r in &order[block_start[pos]..block_end[pos]] {
-                if neighbors.len() == j {
-                    break;
-                }
-                if r != i {
-                    neighbors.push(r);
-                }
-            }
-        } else {
-            ties.clear();
-            for &r in &order[lo..hi] {
-                if r == i {
-                    continue;
-                }
-                let d = dist(r);
-                if d < d_j {
-                    neighbors.push(r);
-                } else if d == d_j {
-                    ties.push(r);
-                }
-            }
-            let mut k = lo;
-            while k > 0 && dist(order[k - 1]) == d_j {
-                ties.push(order[k - 1]);
-                k -= 1;
-            }
-            let mut k = hi;
-            while k < m && dist(order[k]) == d_j {
-                ties.push(order[k]);
-                k += 1;
-            }
-            // Keep the lowest-index ties needed to reach j neighbours.
-            let need = j.saturating_sub(neighbors.len());
-            if ties.len() > need {
-                if need > 0 {
-                    ties.select_nth_unstable(need - 1);
-                }
-                ties.truncate(need);
-            }
-            neighbors.extend_from_slice(&ties);
-        }
-
-        if neighbors.is_empty() {
-            continue;
-        }
-        neighbors.sort_by(|&a, &b| dist(a).total_cmp(&dist(b)).then(a.cmp(&b)));
-
-        // Compute variance estimate: (J/(J+1)) × (1/J) × Σⱼ (yᵢ - yⱼ)²
-        let yi = y[i];
-        let sum_sq: f64 = neighbors.iter().map(|&idx| (yi - y[idx]).powi(2)).sum();
-        let j_actual = neighbors.len() as f64;
-
-        sigma2[i] = (j_actual / (j_actual + 1.0)) * (sum_sq / j_actual);
-    }
-
-    sigma2
-}
-
-/// Compute HC (heteroskedasticity-consistent) variance estimator.
-fn hc_variance_estimator(
-    x: &Array2<f64>,
-    residuals: &Array1<f64>,
-    w: &Array1<f64>,
-    vce: VceType,
-) -> EconResult<Array2<f64>> {
-    let n = x.nrows();
-    let k = x.ncols();
-
-    // Compute X'WX and its inverse
-    let mut xwx = Array2::zeros((k, k));
-    for i in 0..n {
-        let wi = w[i];
-        if wi <= 0.0 {
-            continue;
-        }
-        for j in 0..k {
-            for l in 0..k {
-                xwx[[j, l]] += wi * x[[i, j]] * x[[i, l]];
-            }
-        }
-    }
-
-    let (xwx_inv, _) = safe_inverse(&xwx.view()).map_err(|e| EconError::SingularMatrix {
-        context: "X'WX in HC variance".to_string(),
-        suggestion: format!("{:?}", e),
-    })?;
-
-    // Count effective observations
-    let n_eff: usize = (0..n).filter(|&i| w[i] > 0.0).count();
-    let df = n_eff.saturating_sub(k);
-
-    // Compute leverage if needed (HC2, HC3)
-    let leverage: Option<Array1<f64>> = if matches!(vce, VceType::Hc2 | VceType::Hc3) {
-        let mut h = Array1::zeros(n);
-        for i in 0..n {
-            if w[i] <= 0.0 {
-                continue;
-            }
-            let xi = x.row(i);
-            for j in 0..k {
-                for l in 0..k {
-                    h[i] += xi[j] * xwx_inv[[j, l]] * xi[l];
-                }
-            }
-            h[i] *= w[i];
-        }
-        Some(h)
-    } else {
-        None
-    };
-
-    // Compute meat matrix
-    let mut meat: Array2<f64> = Array2::zeros((k, k));
-    for i in 0..n {
-        let wi = w[i];
-        if wi <= 0.0 {
-            continue;
-        }
-
-        let e2 = residuals[i] * residuals[i];
-        let xi = x.row(i);
-
-        // Adjustment factor based on VCE type
-        let adj = match vce {
-            VceType::Hc0 => 1.0,
-            VceType::Hc1 => (n_eff as f64) / (df as f64),
-            VceType::Hc2 => {
-                let h = leverage.as_ref().unwrap()[i];
-                if h < 1.0 { 1.0 / (1.0 - h) } else { 1.0 }
-            }
-            VceType::Hc3 => {
-                let h = leverage.as_ref().unwrap()[i];
-                if h < 1.0 {
-                    1.0 / ((1.0 - h) * (1.0 - h))
-                } else {
-                    1.0
-                }
-            }
-            VceType::Nn => 1.0, // Should not reach here
-        };
-
-        for j in 0..k {
-            for l in 0..k {
-                meat[[j, l]] += wi * wi * e2 * adj * xi[j] * xi[l];
-            }
-        }
-    }
-
-    // Sandwich estimator: (X'WX)^{-1} Meat (X'WX)^{-1}
-    let mut vcov: Array2<f64> = Array2::zeros((k, k));
-    for i in 0..k {
-        for j in 0..k {
-            for m in 0..k {
-                for l in 0..k {
-                    vcov[[i, j]] += xwx_inv[[i, m]] * meat[[m, l]] * xwx_inv[[l, j]];
-                }
-            }
-        }
-    }
-
-    Ok(vcov)
 }
 
 /// Compute MSE-optimal bandwidth using Imbens-Kalyanaraman (2012) method.
@@ -1119,10 +948,623 @@ fn compute_mse_bandwidth(
 }
 
 // ============================================================================
+// The rdrobust estimator for given bandwidths (rdrobust 4.0.0, `rdrobust()`)
+// ============================================================================
+
+/// The rows of one side of the cutoff that enter the local fits, sorted by the
+/// running variable: rdrobust's `ind` (positive kernel weight under max(h, b)).
+struct SideData {
+    /// "left" or "right", for messages.
+    side: &'static str,
+    /// Running variable, ascending (stable: ties keep their row order).
+    x: Vec<f64>,
+    /// Data columns (outcome, and the treatment of a fuzzy fit), m x k, in `x` order.
+    d: Array2<f64>,
+    /// Kernel weights K((x - c)/h)/h and K((x - c)/b)/b of the kept rows.
+    w_h: Vec<f64>,
+    w_b: Vec<f64>,
+    /// Rows of the side with positive weight under h (rdrobust `N_h`) and under b (`N_b`).
+    n_h: usize,
+    n_b: usize,
+}
+
+/// The local fits of one side, for every data column at once.
+struct SideFit {
+    /// Order-p local-polynomial coefficients, (p + 1) x k.
+    beta_p: Array2<f64>,
+    /// Bias-corrected coefficients invG_p Q_q' D, (p + 1) x k.
+    beta_bc: Array2<f64>,
+    /// First row of invG_p: the intercept's weights.
+    a: Array1<f64>,
+    /// W_h R_p, m x (p + 1).
+    rx: Array2<f64>,
+    /// rdrobust's Q_q, m x (p + 1).
+    qq: Array2<f64>,
+    /// Residuals for the conventional (order p) and the robust (order q) variance, m x k.
+    res_h: Array2<f64>,
+    res_b: Array2<f64>,
+    n_h: usize,
+    n_b: usize,
+    /// Ill-conditioning notes from the matrix inversions.
+    warnings: Vec<String>,
+}
+
+/// Select and sort the rows of one side (`left`: x < c, else x >= c) with positive
+/// kernel weight under max(h, b), and count those under h and under b.
+fn select_side(
+    x: ArrayView1<f64>,
+    cols: &[ArrayView1<f64>],
+    cutoff: f64,
+    left: bool,
+    h: f64,
+    b: f64,
+    kernel: KernelType,
+) -> EconResult<SideData> {
+    crate::resource::checkpoint()?;
+    let side = if left { "left" } else { "right" };
+    // rdrobust keeps the rows with weight under b, or under h when h > b.
+    let by_h = h > b;
+    let (mut n_h, mut n_b) = (0usize, 0usize);
+    let mut kept: Vec<(usize, f64, f64)> =
+        crate::resource::try_with_capacity(x.len(), "RD estimation window")?;
+    for (i, &xi) in x.iter().enumerate() {
+        let on_side = if left { xi < cutoff } else { xi >= cutoff };
+        if !on_side {
+            continue;
+        }
+        let w_h = kernel.evaluate((xi - cutoff) / h) / h;
+        let w_b = kernel.evaluate((xi - cutoff) / b) / b;
+        n_h += usize::from(w_h > 0.0);
+        n_b += usize::from(w_b > 0.0);
+        if (by_h && w_h > 0.0) || (!by_h && w_b > 0.0) {
+            kept.push((i, w_h, w_b));
+        }
+    }
+    // Stable sort by x (R's order()); -0.0 and 0.0 are one value.
+    let key = |v: f64| if v == 0.0 { 0.0 } else { v };
+    kept.sort_by(|a, b| key(x[a.0]).total_cmp(&key(x[b.0])));
+
+    let m = kept.len();
+    let k = cols.len();
+    let mut d = crate::resource::try_zeros2(m, k, "RD side data")?;
+    let mut xs: Vec<f64> = crate::resource::try_with_capacity(m, "RD side data")?;
+    let mut w_h: Vec<f64> = crate::resource::try_with_capacity(m, "RD kernel weights")?;
+    let mut w_b: Vec<f64> = crate::resource::try_with_capacity(m, "RD kernel weights")?;
+    for (r, &(i, wh, wb)) in kept.iter().enumerate() {
+        xs.push(x[i]);
+        w_h.push(wh);
+        w_b.push(wb);
+        for (c, col) in cols.iter().enumerate() {
+            d[[r, c]] = col[i];
+        }
+    }
+    Ok(SideData {
+        side,
+        x: xs,
+        d,
+        w_h,
+        w_b,
+        n_h,
+        n_b,
+    })
+}
+
+/// (R' diag(w) R)^-1 through `safe_inverse`; a failure is `SingularMatrix` naming the
+/// side, an ill-conditioned matrix a warning.
+fn weighted_gram_inverse(
+    r: &Array2<f64>,
+    w: &[f64],
+    cols: usize,
+    what: &str,
+    side: &str,
+    warnings: &mut Vec<String>,
+) -> EconResult<Array2<f64>> {
+    let mut g = Array2::<f64>::zeros((cols, cols));
+    for (i, &wi) in w.iter().enumerate() {
+        for j in 0..cols {
+            let rij = wi * r[[i, j]];
+            for l in 0..cols {
+                g[[j, l]] += rij * r[[i, l]];
+            }
+        }
+    }
+    match safe_inverse(&g.view()) {
+        Ok((inv, None)) => Ok(inv),
+        Ok((inv, Some(cond))) => {
+            warnings.push(format!(
+                "The {what} on the {side} side of the cutoff is ill-conditioned (condition \
+                 number {cond:.2e}); a pseudoinverse was used."
+            ));
+            Ok(inv)
+        }
+        Err(e) => Err(EconError::SingularMatrix {
+            context: format!("{what} on the {side} side of the cutoff"),
+            suggestion: format!(
+                "Use a larger bandwidth or a lower polynomial order; too few distinct values \
+                 of the running variable lie inside the window ({e})."
+            ),
+        }),
+    }
+}
+
+/// Residuals `w_i (D_i - R_i beta)` for the HC0-HC3 variances: HC1 scales by
+/// sqrt(m / (m - dim)) with m the rows in the window, HC2/HC3 by the leverage
+/// h_ii = w_i R_i' invG R_i (floored at 1 - 1e-8, as rdrobust).
+fn hc_residuals(
+    r: &Array2<f64>,
+    w: &[f64],
+    inv_g: &Array2<f64>,
+    beta: &Array2<f64>,
+    d: &Array2<f64>,
+    vce: VceType,
+) -> EconResult<Array2<f64>> {
+    let (m, k) = d.dim();
+    let dim = r.ncols();
+    let mut res = crate::resource::try_zeros2(m, k, "RD residuals")?;
+    for i in 0..m {
+        let row = r.row(i);
+        let scale = match vce {
+            VceType::Hc0 | VceType::Nn => 1.0,
+            VceType::Hc1 => (m as f64 / m.saturating_sub(dim) as f64).sqrt(),
+            VceType::Hc2 | VceType::Hc3 => {
+                let hii = w[i] * row.dot(&inv_g.dot(&row));
+                let one_minus = (1.0 - hii).max(1e-8);
+                if vce == VceType::Hc2 {
+                    (1.0 / one_minus).sqrt()
+                } else {
+                    1.0 / one_minus
+                }
+            }
+        };
+        for c in 0..k {
+            let fitted = row.dot(&beta.column(c));
+            res[[i, c]] = scale * (d[[i, c]] - fitted);
+        }
+    }
+    Ok(res)
+}
+
+/// rdrobust's nearest-neighbour residuals (`rdrobust_res`, `vce = "nn"`) on sorted `x`,
+/// for every column of `d` at once.
+///
+/// Rows with equal x form a block (rdrobust's `rle`), and every row of a block has the
+/// same neighbours: its own block plus whole neighbouring blocks, added on the nearer
+/// side (both sides when equally far) until the window holds at least
+/// `min(nnmatch, m - 1)` other rows. With `J_i` those rows and `S` their sum (own block
+/// included), `res_i = sqrt(J_i / (J_i + 1)) (d_i - (S - d_i) / J_i)`. Block sums are
+/// formed once, so the cost is O(m k) plus O(B min(nnmatch, m) k) for B blocks.
+fn nn_residuals(x: &[f64], d: &Array2<f64>, nnmatch: usize) -> EconResult<Array2<f64>> {
+    let (m, k) = d.dim();
+    let mut res = crate::resource::try_zeros2(m, k, "RD nearest-neighbour residuals")?;
+    if m == 0 {
+        return Ok(res);
+    }
+    let mut starts: Vec<usize> = crate::resource::try_with_capacity(m, "RD tie blocks")?;
+    starts.push(0);
+    for i in 1..m {
+        if x[i] != x[i - 1] {
+            starts.push(i);
+        }
+    }
+    let nb = starts.len();
+    let end = |blk: usize| if blk + 1 < nb { starts[blk + 1] } else { m };
+    let len = |blk: usize| end(blk) - starts[blk];
+    let mut sums = crate::resource::try_zeros2(nb, k, "RD tie blocks")?;
+    for blk in 0..nb {
+        for i in starts[blk]..end(blk) {
+            for c in 0..k {
+                sums[[blk, c]] += d[[i, c]];
+            }
+        }
+    }
+
+    let target = nnmatch.min(m - 1);
+    let mut total = vec![0.0; k];
+    for blk in 0..nb {
+        let v = x[starts[blk]];
+        let (mut lo, mut hi) = (blk, blk);
+        let mut cnt = len(blk) - 1;
+        while cnt < target {
+            // cnt < m - 1, so at least one side still has a block
+            if lo == 0 {
+                hi += 1;
+                cnt += len(hi);
+            } else if hi == nb - 1 {
+                lo -= 1;
+                cnt += len(lo);
+            } else {
+                let dl = v - x[starts[lo - 1]];
+                let dr = x[starts[hi + 1]] - v;
+                if dl > dr {
+                    hi += 1;
+                    cnt += len(hi);
+                } else if dl < dr {
+                    lo -= 1;
+                    cnt += len(lo);
+                } else {
+                    hi += 1;
+                    lo -= 1;
+                    cnt += len(hi) + len(lo);
+                }
+            }
+        }
+        if cnt == 0 {
+            return Err(EconError::InvalidSpecification {
+                message: "Nearest-neighbour residuals need at least two observations inside \
+                          the estimation window on each side of the cutoff."
+                    .to_string(),
+            });
+        }
+        total.iter_mut().for_each(|t| *t = 0.0);
+        for bb in lo..=hi {
+            for (c, t) in total.iter_mut().enumerate() {
+                *t += sums[[bb, c]];
+            }
+        }
+        let ji = cnt as f64;
+        let scale = (ji / (ji + 1.0)).sqrt();
+        for i in starts[blk]..end(blk) {
+            for c in 0..k {
+                res[[i, c]] = scale * (d[[i, c]] - (total[c] - d[[i, c]]) / ji);
+            }
+        }
+    }
+    Ok(res)
+}
+
+/// The local fits of one side (rdrobust `rdrobust()`, lines for `R_q`, `invG`, `Q_q`,
+/// `beta_p`, `beta_bc` and the residuals).
+fn fit_side(
+    side: &SideData,
+    cutoff: f64,
+    h: f64,
+    p: usize,
+    q: usize,
+    vce: VceType,
+    nnmatch: usize,
+) -> EconResult<SideFit> {
+    let (m, k) = side.d.dim();
+    let mut warnings = Vec::new();
+
+    // R_q = [1, (x - c), ..., (x - c)^q]; R_p is its first p + 1 columns.
+    let rq = build_polynomial_matrix(&Array1::from_vec(side.x.clone()), cutoff, q)?;
+    let rp = rq.slice(ndarray::s![.., ..=p]).to_owned();
+    let inv_gp = weighted_gram_inverse(
+        &rp,
+        &side.w_h,
+        p + 1,
+        &format!("order-{p} X'WX (bandwidth h)"),
+        side.side,
+        &mut warnings,
+    )?;
+    let inv_gq = weighted_gram_inverse(
+        &rq,
+        &side.w_b,
+        q + 1,
+        &format!("order-{q} X'WX (bias bandwidth b)"),
+        side.side,
+        &mut warnings,
+    )?;
+
+    // L = R_p' (W_h .* u^(p+1)), u = (x - c)/h
+    let pow = i32::try_from(p + 1).unwrap_or(i32::MAX);
+    let mut l_vec = Array1::<f64>::zeros(p + 1);
+    let mut rx = crate::resource::try_zeros2(m, p + 1, "RD weighted design")?;
+    for i in 0..m {
+        let u = (side.x[i] - cutoff) / h;
+        let wu = side.w_h[i] * u.powi(pow);
+        for j in 0..=p {
+            l_vec[j] += rp[[i, j]] * wu;
+            rx[[i, j]] = rp[[i, j]] * side.w_h[i];
+        }
+    }
+    // Q_q,i = W_h,i R_p,i - h^(p+1) W_b,i (R_q,i . invG_q[:, p+1]) L
+    let hp = h.powi(pow);
+    let col = inv_gq.column(p + 1);
+    let mut qq = crate::resource::try_zeros2(m, p + 1, "RD bias-correction weights")?;
+    for i in 0..m {
+        let ci = rq.row(i).dot(&col);
+        let shift = hp * side.w_b[i] * ci;
+        for j in 0..=p {
+            qq[[i, j]] = rx[[i, j]] - shift * l_vec[j];
+        }
+    }
+
+    // beta_p = invG_p R_p' W_h D, beta_q = invG_q R_q' W_b D, beta_bc = invG_p Q_q' D
+    let mut u_q = Array2::<f64>::zeros((q + 1, k));
+    for i in 0..m {
+        for j in 0..=q {
+            let wr = side.w_b[i] * rq[[i, j]];
+            for c in 0..k {
+                u_q[[j, c]] += wr * side.d[[i, c]];
+            }
+        }
+    }
+    let beta_p = inv_gp.dot(&rx.t().dot(&side.d));
+    let beta_q = inv_gq.dot(&u_q);
+    let beta_bc = inv_gp.dot(&qq.t().dot(&side.d));
+
+    let (res_h, res_b) = match vce {
+        VceType::Nn => {
+            let res = nn_residuals(&side.x, &side.d, nnmatch)?;
+            (res.clone(), res)
+        }
+        _ => (
+            hc_residuals(&rp, &side.w_h, &inv_gp, &beta_p, &side.d, vce)?,
+            hc_residuals(&rq, &side.w_b, &inv_gq, &beta_q, &side.d, vce)?,
+        ),
+    };
+
+    Ok(SideFit {
+        beta_p,
+        beta_bc,
+        a: inv_gp.row(0).to_owned(),
+        rx,
+        qq,
+        res_h,
+        res_b,
+        n_h: side.n_h,
+        n_b: side.n_b,
+        warnings,
+    })
+}
+
+/// Variance of the intercept of a combination `s` of the data columns:
+/// `(invG_p M invG_p)[0, 0]` with `M = sum_i (res_i . s)^2 RX_i RX_i'`, that is
+/// `sum_i (res_i . s)^2 (a . RX_i)^2` (rdrobust `rdrobust_vce` without clusters).
+fn intercept_variance(rx: &Array2<f64>, res: &Array2<f64>, a: &Array1<f64>, s: &[f64]) -> f64 {
+    let mut v = 0.0;
+    for i in 0..rx.nrows() {
+        let r: f64 = s.iter().enumerate().map(|(c, sc)| res[[i, c]] * sc).sum();
+        let g = rx.row(i).dot(a);
+        let t = r * g;
+        v += t * t;
+    }
+    v
+}
+
+/// Both sides of one RD fit, with the bandwidths and counts behind it.
+struct RdFit {
+    left: SideFit,
+    right: SideFit,
+    n_left: usize,
+    n_right: usize,
+    h: (f64, f64),
+    b: (f64, f64),
+    p: usize,
+    q: usize,
+    warnings: Vec<String>,
+}
+
+impl RdFit {
+    /// Conventional and bias-corrected jumps of column `c`.
+    fn jumps(&self, c: usize) -> (f64, f64) {
+        (
+            self.right.beta_p[[0, c]] - self.left.beta_p[[0, c]],
+            self.right.beta_bc[[0, c]] - self.left.beta_bc[[0, c]],
+        )
+    }
+
+    /// Conventional and robust SEs of the jump of the combination `s` of the columns.
+    fn ses(&self, s: &[f64]) -> (f64, f64) {
+        let (l, r) = (&self.left, &self.right);
+        let v_cl = intercept_variance(&l.rx, &l.res_h, &l.a, s)
+            + intercept_variance(&r.rx, &r.res_h, &r.a, s);
+        let v_rb = intercept_variance(&l.qq, &l.res_b, &l.a, s)
+            + intercept_variance(&r.qq, &r.res_b, &r.a, s);
+        (v_cl.sqrt(), v_rb.sqrt())
+    }
+}
+
+/// Fit the local polynomials of every column in `cols` (row-aligned with `x`) on both
+/// sides of `cutoff`. When `config.h` is not given, the bandwidth selector runs on
+/// `cols[0]` (the outcome).
+fn fit_rd(
+    x: ArrayView1<f64>,
+    cols: &[ArrayView1<f64>],
+    cutoff: f64,
+    config: &RdConfig,
+) -> EconResult<RdFit> {
+    let n = x.len();
+    if n < 20 {
+        return Err(EconError::InsufficientData {
+            required: 20,
+            provided: n,
+            context: "RD estimation requires at least 20 observations".to_string(),
+        });
+    }
+
+    // Count observations on each side
+    let n_left = x.iter().filter(|&&xi| xi < cutoff).count();
+    let n_right = x.iter().filter(|&&xi| xi >= cutoff).count();
+    if n_left < 5 || n_right < 5 {
+        return Err(EconError::InsufficientData {
+            required: 5,
+            provided: n_left.min(n_right),
+            context: "Need at least 5 observations on each side of the cutoff".to_string(),
+        });
+    }
+
+    // Polynomial orders (validated: p <= MAX_RD_ORDER, p < q <= MAX_RD_ORDER + 1)
+    let p = config.p;
+    let q = config.q.unwrap_or(p + 1);
+
+    // Bandwidths: given h (and h_right) or p2a's selector; b given or rho * h.
+    let (h_left, h_right) = match config.h {
+        Some(h) => (h, config.h_right.unwrap_or(h)),
+        None => compute_mse_bandwidth(
+            &cols[0].to_owned(),
+            &x.to_owned(),
+            cutoff,
+            p,
+            config.kernel,
+            config.bwselect.is_separate(),
+        )?,
+    };
+    let (b_left, b_right) = match config.b {
+        Some(b) => (b, config.b_right.unwrap_or(b)),
+        None => (h_left * config.rho, h_right * config.rho),
+    };
+
+    let left = select_side(x, cols, cutoff, true, h_left, b_left, config.kernel)?;
+    let right = select_side(x, cols, cutoff, false, h_right, b_right, config.kernel)?;
+
+    // A local polynomial of order p needs at least p + 2 points with positive
+    // kernel weight on each side; fewer gives a degenerate (exact or singular)
+    // fit, so this is an error rather than a warning.
+    for s in [&left, &right] {
+        if s.n_h < p + 2 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Too few observations inside the bandwidth for polynomial order p = {p}: \
+                     {} on the {} side of the cutoff, at least {} are needed. Use a \
+                     larger bandwidth h or a lower order p.",
+                    s.n_h,
+                    s.side,
+                    p + 2
+                ),
+            });
+        }
+    }
+    // The bias fit of order q needs at least q + 1 points inside b on each side.
+    for s in [&left, &right] {
+        if s.n_b < q + 1 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Too few observations inside the bias bandwidth b for the bias-correction \
+                     polynomial of order q = {q}: {} on the {} side, at least {} are \
+                     needed. Use a larger b (or rho).",
+                    s.n_b,
+                    s.side,
+                    q + 1
+                ),
+            });
+        }
+    }
+    // HC1 scales the order-q residuals by sqrt(m / (m - q - 1)).
+    if config.vce == VceType::Hc1 {
+        for s in [&left, &right] {
+            if s.x.len() <= q + 1 {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "Too few observations on the {} side for HC1 with q = {q}: {} inside \
+                         the estimation window, more than {} are needed. Use a larger \
+                         bandwidth or another vce.",
+                        s.side,
+                        s.x.len(),
+                        q + 1
+                    ),
+                });
+            }
+        }
+    }
+
+    crate::resource::checkpoint()?;
+    let left = fit_side(&left, cutoff, h_left, p, q, config.vce, config.nnmatch)?;
+    crate::resource::checkpoint()?;
+    let right = fit_side(&right, cutoff, h_right, p, q, config.vce, config.nnmatch)?;
+    let mut warnings = left.warnings.clone();
+    warnings.extend(right.warnings.iter().cloned());
+
+    Ok(RdFit {
+        left,
+        right,
+        n_left,
+        n_right,
+        h: (h_left, h_right),
+        b: (b_left, b_right),
+        p,
+        q,
+        warnings,
+    })
+}
+
+/// The standard normal and its critical value for a two-sided interval at `level`.
+fn normal_and_z(level: f64) -> (Normal, f64) {
+    // Normal::new(0, 1) cannot fail; level is validated in (0, 1).
+    let normal = Normal::standard();
+    let z = -normal.inverse_cdf((1.0 - level) / 2.0);
+    (normal, z)
+}
+
+/// Two-sided normal p-value of `est / se` (upper tail with `sf`, X-17).
+fn two_sided_p(normal: &Normal, est: f64, se: f64) -> f64 {
+    let z = if se > 0.0 { est / se } else { 0.0 };
+    2.0 * normal.sf(z.abs())
+}
+
+/// The sharp RD result of data column `c` of a fit.
+fn rd_result_from(
+    fit: &RdFit,
+    c: usize,
+    outcome: &str,
+    running_var: &str,
+    cutoff: f64,
+    config: &RdConfig,
+) -> RdResult {
+    let k = fit.left.beta_p.ncols();
+    let mut s = vec![0.0; k];
+    s[c] = 1.0;
+    let (tau_conventional, tau_bc) = fit.jumps(c);
+    let (se_conventional, se_robust) = fit.ses(&s);
+    let (normal, z) = normal_and_z(config.level);
+    let ci = |est: f64, se: f64| (est - z * se, est + z * se);
+    let p_robust = two_sided_p(&normal, tau_bc, se_robust);
+    RdResult {
+        outcome: outcome.to_string(),
+        running_var: running_var.to_string(),
+        cutoff,
+        n_left: fit.n_left,
+        n_right: fit.n_right,
+        n_eff_left: fit.left.n_h,
+        n_eff_right: fit.right.n_h,
+        n_b_left: fit.left.n_b,
+        n_b_right: fit.right.n_b,
+        tau_conventional,
+        tau_bc,
+        tau_robust: tau_bc,
+        se_conventional,
+        se_bc: se_conventional,
+        se_robust,
+        ci_conventional: ci(tau_conventional, se_conventional),
+        ci_bc: ci(tau_bc, se_conventional),
+        ci_robust: ci(tau_bc, se_robust),
+        level: config.level,
+        p_conventional: two_sided_p(&normal, tau_conventional, se_conventional),
+        p_bc: two_sided_p(&normal, tau_bc, se_conventional),
+        p_robust,
+        significance: SignificanceLevel::from_p_value(p_robust),
+        h_left: fit.h.0,
+        h_right: fit.h.1,
+        b_left: fit.b.0,
+        b_right: fit.b.1,
+        bwselect: config.bwselect,
+        p: fit.p,
+        q: fit.q,
+        kernel: config.kernel,
+        vce: config.vce,
+        coef_left: fit.left.beta_p.column(c).to_vec(),
+        coef_right: fit.right.beta_p.column(c).to_vec(),
+        bias: tau_conventional - tau_bc,
+        warnings: fit.warnings.clone(),
+    }
+}
+
+// ============================================================================
 // Main Estimation Functions
 // ============================================================================
 
 /// Run Sharp Regression Discontinuity estimation.
+///
+/// For given bandwidths (`config.h`, `config.b`, and `h_right`/`b_right` for unequal
+/// sides) the result is what `rdrobust::rdrobust` 4.0.0 reports: on each side the rows
+/// with positive kernel weight under max(h, b), sorted by the running variable, are fitted
+/// by weighted local polynomials of order p (bandwidth h) and q (bandwidth b); the
+/// bias-corrected estimate uses the CCT (2014) `Q_q` weights; the conventional and robust
+/// variances are sandwiches of the intercepts with nearest-neighbour residuals (whole tie
+/// groups, `nnmatch` neighbours) or HC0-HC3 residuals. When `h` is not given, p2a's own
+/// MSE-type selector chooses it (not `rdbwselect`; CAUS-28), and `b = rho * h`.
+/// Covariates, clustering, weights and derivatives are not supported.
 ///
 /// # Arguments
 /// * `dataset` - The dataset
@@ -1148,343 +1590,30 @@ pub fn run_rd(
 ) -> EconResult<RdResult> {
     validate_rd_config(&config)?;
 
-    let warnings = Vec::new();
-
     // Extract data
-    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
+    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|_| {
         EconError::ColumnNotFound {
             column: outcome.to_string(),
             available: get_column_names(dataset.df()),
         }
     })?;
 
-    let x = DesignMatrix::extract_column(dataset.df(), running_var).map_err(|e| {
+    let x = DesignMatrix::extract_column(dataset.df(), running_var).map_err(|_| {
         EconError::ColumnNotFound {
             column: running_var.to_string(),
             available: get_column_names(dataset.df()),
         }
     })?;
 
-    let n = y.len();
-    if n < 20 {
-        return Err(EconError::InsufficientData {
-            required: 20,
-            provided: n,
-            context: "RD estimation requires at least 20 observations".to_string(),
-        });
-    }
-
-    // Count observations on each side
-    let n_left = x.iter().filter(|&&xi| xi < cutoff).count();
-    let n_right = x.iter().filter(|&&xi| xi >= cutoff).count();
-
-    if n_left < 5 || n_right < 5 {
-        return Err(EconError::InsufficientData {
-            required: 5,
-            provided: n_left.min(n_right),
-            context: "Need at least 5 observations on each side of the cutoff".to_string(),
-        });
-    }
-
-    // Determine polynomial orders (validated: p <= MAX_RD_ORDER, q <= MAX_RD_ORDER + 1)
-    let p = config.p;
-    let q = config.q.unwrap_or(p + 1);
-
-    // Compute bandwidths
-    let (h_left, h_right) = if let Some(h) = config.h {
-        (h, h)
-    } else {
-        compute_mse_bandwidth(
-            &y,
-            &x,
-            cutoff,
-            p,
-            config.kernel,
-            config.bwselect.is_separate(),
-        )?
-    };
-
-    let (b_left, b_right) = if let Some(b) = config.b {
-        (b, b)
-    } else {
-        (h_left * config.rho, h_right * config.rho)
-    };
-
-    // Compute kernel weights for main estimation (bandwidth h)
-    let weights_left_h: Array1<f64> = x.mapv(|xi| {
-        if xi < cutoff {
-            let u = (xi - cutoff) / h_left;
-            config.kernel.evaluate(u.abs())
-        } else {
-            0.0
-        }
-    });
-
-    let weights_right_h: Array1<f64> = x.mapv(|xi| {
-        if xi >= cutoff {
-            let u = (xi - cutoff) / h_right;
-            config.kernel.evaluate(u.abs())
-        } else {
-            0.0
-        }
-    });
-
-    // Count effective sample sizes
-    let n_eff_left = weights_left_h.iter().filter(|&&w| w > 0.0).count();
-    let n_eff_right = weights_right_h.iter().filter(|&&w| w > 0.0).count();
-
-    // A local polynomial of order p needs at least p + 2 points with positive
-    // kernel weight on each side; fewer gives a degenerate (exact or singular)
-    // fit, so this is an error rather than a warning.
-    for (side, n_eff) in [("left", n_eff_left), ("right", n_eff_right)] {
-        if n_eff < p + 2 {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Too few observations inside the bandwidth for polynomial order p = {p}: \
-                     {n_eff} on the {side} side of the cutoff, at least {} are needed. Use a \
-                     larger bandwidth h or a lower order p.",
-                    p + 2
-                ),
-            });
-        }
-    }
-
-    // Build polynomial design matrices (order p)
-    let x_poly = build_polynomial_matrix(&x, cutoff, p)?;
-
-    // ========================================================================
-    // Step 1: Conventional local polynomial estimation
-    // ========================================================================
-
-    // Left side
-    let (coef_left_p, resid_left) = weighted_least_squares(&x_poly, &y, &weights_left_h)?;
-
-    // Right side
-    let (coef_right_p, resid_right) = weighted_least_squares(&x_poly, &y, &weights_right_h)?;
-
-    // Conventional estimate: difference in intercepts
-    let tau_conventional = coef_right_p[0] - coef_left_p[0];
-
-    // ========================================================================
-    // Step 2: Bias estimation using order-q polynomial with bandwidth b
-    // ========================================================================
-
-    // Compute kernel weights for bias estimation (bandwidth b)
-    let weights_left_b: Array1<f64> = x.mapv(|xi| {
-        if xi < cutoff {
-            let u = (xi - cutoff) / b_left;
-            config.kernel.evaluate(u.abs())
-        } else {
-            0.0
-        }
-    });
-
-    let weights_right_b: Array1<f64> = x.mapv(|xi| {
-        if xi >= cutoff {
-            let u = (xi - cutoff) / b_right;
-            config.kernel.evaluate(u.abs())
-        } else {
-            0.0
-        }
-    });
-
-    // The bias fit of order q needs at least q + 1 points inside b on each side.
-    for (side, w) in [("left", &weights_left_b), ("right", &weights_right_b)] {
-        let n_b = w.iter().filter(|&&wi| wi > 0.0).count();
-        if n_b < q + 1 {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Too few observations inside the bias bandwidth b for the bias-correction \
-                     polynomial of order q = {q}: {n_b} on the {side} side, at least {} are \
-                     needed. Use a larger b (or rho).",
-                    q + 1
-                ),
-            });
-        }
-    }
-
-    // Build polynomial design matrices (order q) for bias estimation
-    let x_poly_q = build_polynomial_matrix(&x, cutoff, q)?;
-
-    // Estimate higher-order polynomial on each side
-    let (coef_left_q, _) = weighted_least_squares(&x_poly_q, &y, &weights_left_b)?;
-    let (coef_right_q, _) = weighted_least_squares(&x_poly_q, &y, &weights_right_b)?;
-
-    // Bias is proportional to (p+1)th coefficient times h^(p+1)
-    // Bias = h^(p+1) * B where B is the (p+1)th derivative term
-    let bias_left = if q > p && coef_left_q.len() > p + 1 {
-        coef_left_q[p + 1] * h_left.powi((p + 1) as i32)
-    } else {
-        0.0
-    };
-
-    let bias_right = if q > p && coef_right_q.len() > p + 1 {
-        coef_right_q[p + 1] * h_right.powi((p + 1) as i32)
-    } else {
-        0.0
-    };
-
-    let raw_bias = bias_right - bias_left;
-
-    // Sanity check: if bias is too large relative to the estimate, something is wrong
-    // This can happen with small samples or linear data where there's no real curvature
-    // In such cases, use a smaller/zero bias correction
-    let bias = if raw_bias.abs() > tau_conventional.abs() * 0.5 {
-        // Bias is implausibly large, likely due to noise in the second derivative estimate
-        // Fall back to a smaller correction
-        raw_bias.signum() * tau_conventional.abs() * 0.1
-    } else {
-        raw_bias
-    };
-
-    // Bias-corrected estimate
-    let tau_bc = tau_conventional - bias;
-    let tau_robust = tau_bc; // Same point estimate, different SE
-
-    // ========================================================================
-    // Step 3: Variance estimation
-    // ========================================================================
-
-    // Variance for left and right intercept estimates
-    let (var_left, var_right) = match config.vce {
-        VceType::Nn => {
-            // Nearest-neighbor variance estimation
-            let sigma2_left = nn_variance_estimator(&y, &x, &weights_left_h, config.nnmatch);
-            let sigma2_right = nn_variance_estimator(&y, &x, &weights_right_h, config.nnmatch);
-
-            // Compute variance of intercept estimate: V(β̂₀) using sandwich formula
-            // For simplicity, use average sigma² weighted by kernel
-            let avg_sigma2_left = {
-                let sum: f64 = sigma2_left
-                    .iter()
-                    .zip(weights_left_h.iter())
-                    .filter(|(_, w)| **w > 0.0)
-                    .map(|(s, w)| s * w)
-                    .sum();
-                let sum_w: f64 = weights_left_h.iter().filter(|w| **w > 0.0).sum();
-                if sum_w > 0.0 { sum / sum_w } else { 1.0 }
-            };
-
-            let avg_sigma2_right = {
-                let sum: f64 = sigma2_right
-                    .iter()
-                    .zip(weights_right_h.iter())
-                    .filter(|(_, w)| **w > 0.0)
-                    .map(|(s, w)| s * w)
-                    .sum();
-                let sum_w: f64 = weights_right_h.iter().filter(|w| **w > 0.0).sum();
-                if sum_w > 0.0 { sum / sum_w } else { 1.0 }
-            };
-
-            // Approximate variance using effective sample sizes
-            let var_l = avg_sigma2_left / (n_eff_left as f64).max(1.0);
-            let var_r = avg_sigma2_right / (n_eff_right as f64).max(1.0);
-
-            (var_l, var_r)
-        }
-        _ => {
-            // HC variance estimation
-            let vcov_left =
-                hc_variance_estimator(&x_poly, &resid_left, &weights_left_h, config.vce)?;
-            let vcov_right =
-                hc_variance_estimator(&x_poly, &resid_right, &weights_right_h, config.vce)?;
-
-            // Variance of intercept is the (0,0) element
-            (vcov_left[[0, 0]], vcov_right[[0, 0]])
-        }
-    };
-
-    // Conventional SE: sqrt(Var(β̂₀_right) + Var(β̂₀_left))
-    let se_conventional = (var_left + var_right).sqrt();
-
-    // Bias-corrected SE: same as conventional (ignores bias estimation variance)
-    let se_bc = se_conventional;
-
-    // Robust SE: accounts for additional variance from bias estimation
-    // CCT (2014) formula: inflates variance by factor related to rho = b/h
-    let rho = if h_left > 0.0 { b_left / h_left } else { 1.0 };
-    let robust_factor = 1.0 + rho.powi(-(2 * (p as i32) + 2)) * 0.5; // Simplified adjustment
-    let se_robust = se_conventional * robust_factor.sqrt();
-
-    // ========================================================================
-    // Step 4: Confidence intervals and p-values
-    // ========================================================================
-
-    // Use normal approximation for large samples
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    let alpha = 1.0 - config.level;
-    let z_crit = normal.inverse_cdf(1.0 - alpha / 2.0);
-
-    // Conventional CI
-    let ci_conventional = (
-        tau_conventional - z_crit * se_conventional,
-        tau_conventional + z_crit * se_conventional,
-    );
-
-    // Bias-corrected CI
-    let ci_bc = (tau_bc - z_crit * se_bc, tau_bc + z_crit * se_bc);
-
-    // Robust CI (recommended)
-    let ci_robust = (
-        tau_robust - z_crit * se_robust,
-        tau_robust + z_crit * se_robust,
-    );
-
-    // P-values (normal approximation)
-    let z_conv = if se_conventional > 0.0 {
-        tau_conventional / se_conventional
-    } else {
-        0.0
-    };
-    let z_bc = if se_bc > 0.0 { tau_bc / se_bc } else { 0.0 };
-    let z_robust = if se_robust > 0.0 {
-        tau_robust / se_robust
-    } else {
-        0.0
-    };
-
-    let p_conventional = 2.0 * (1.0 - normal.cdf(z_conv.abs()));
-    let p_bc = 2.0 * (1.0 - normal.cdf(z_bc.abs()));
-    let p_robust = 2.0 * (1.0 - normal.cdf(z_robust.abs()));
-
-    let significance = SignificanceLevel::from_p_value(p_robust);
-
-    Ok(RdResult {
-        outcome: outcome.to_string(),
-        running_var: running_var.to_string(),
+    let fit = fit_rd(x.view(), &[y.view()], cutoff, &config)?;
+    Ok(rd_result_from(
+        &fit,
+        0,
+        outcome,
+        running_var,
         cutoff,
-        n_left,
-        n_right,
-        n_eff_left,
-        n_eff_right,
-        tau_conventional,
-        tau_bc,
-        tau_robust,
-        se_conventional,
-        se_bc,
-        se_robust,
-        ci_conventional,
-        ci_bc,
-        ci_robust,
-        p_conventional,
-        p_bc,
-        p_robust,
-        significance,
-        h_left,
-        h_right,
-        b_left,
-        b_right,
-        bwselect: config.bwselect,
-        p,
-        q,
-        kernel: config.kernel,
-        vce: config.vce,
-        coef_left: coef_left_p.to_vec(),
-        coef_right: coef_right_p.to_vec(),
-        bias,
-        warnings,
-    })
+        &config,
+    ))
 }
 
 /// Compute optimal bandwidth for RD estimation.
@@ -1628,6 +1757,8 @@ pub fn run_fuzzy_rd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
     fn create_sharp_rd_dataset() -> Dataset {
@@ -1859,37 +1990,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fuzzy_rd() {
-        let dataset = create_fuzzy_rd_dataset();
-        let config = RdConfig::default();
-
-        let result = run_fuzzy_rd(&dataset, "outcome", "running", "treatment", 0.0, config);
-
-        match result {
-            Ok(fuzzy) => {
-                // First stage should show jump in treatment
-                assert!(
-                    fuzzy.first_stage.tau_robust.abs() > 0.1,
-                    "First stage too weak: {}",
-                    fuzzy.first_stage.tau_robust
-                );
-
-                // Fuzzy estimate should be reasonable (true LATE = 3)
-                // Wide tolerance due to small sample and noise
-                assert!(
-                    (fuzzy.tau_fuzzy - 3.0).abs() < 5.0,
-                    "Fuzzy estimate {} too far from 3.0",
-                    fuzzy.tau_fuzzy
-                );
-            }
-            Err(e) => {
-                // May fail if first stage is too weak in this synthetic data
-                eprintln!("Fuzzy RD test note: {:?}", e);
-            }
-        }
-    }
-
-    #[test]
     fn test_rd_insufficient_data() {
         // Create very small dataset
         let df = df! {
@@ -1930,14 +2030,12 @@ mod tests {
     }
 
     // =========================================================================
-    // R Validation Tests (Phase 4)
+    // DGP-recovery tests (no R reference; the rdrobust pins are further below)
     // =========================================================================
 
-    /// Helper to create a dataset matching R's rdrobust example.
-    /// R: set.seed(42); n <- 500; x <- runif(n, -1, 1); treatment <- as.numeric(x >= 0)
-    /// y <- 0.5 + 0.3 * x + 0.5 * treatment + rnorm(n, 0, 0.2)
+    /// A sharp design with a known jump of 0.5: y = 0.5 + 0.3 x + 0.5 1(x >= 0) + noise,
+    /// x uniform on (-1, 1), n = 500, from an LCG (not R's random numbers).
     fn create_rd_validation_dataset() -> Dataset {
-        // Deterministic data matching R's set.seed(42) pattern
         // Using a larger sample to ensure stable estimates
         let n = 500;
         let mut x_vals = Vec::with_capacity(n);
@@ -1982,57 +2080,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rd_vs_r() {
-        // Validates against R rdrobust package
-        // R reference:
-        // library(rdrobust)
-        // set.seed(42)
-        // n <- 500; x <- runif(n, -1, 1); treatment <- as.numeric(x >= 0)
-        // y <- 0.5 + 0.3 * x + 0.5 * treatment + rnorm(n, 0, 0.2)
-        // rd_result <- rdrobust(y, x, c = 0)
-        // Expected tau_conventional ≈ 0.5 (the true treatment effect)
-
-        let dataset = create_rd_validation_dataset();
-        let config = RdConfig::default();
-
-        let result = run_rd(&dataset, "outcome", "running", 0.0, config).unwrap();
-
-        // Structure validation
-        assert_eq!(result.cutoff, 0.0);
-        assert_eq!(result.p, 1); // Local linear
-        assert_eq!(result.q, 2); // Bias correction order
-
-        // The true treatment effect is 0.5
-        // RD estimates should be close to this
-        let tol = 0.25; // Allow reasonable estimation error
-        assert!(
-            (result.tau_conventional - 0.5).abs() < tol,
-            "Conventional estimate {:.4} should be close to 0.5",
-            result.tau_conventional
-        );
-        assert!(
-            (result.tau_robust - 0.5).abs() < tol,
-            "Robust estimate {:.4} should be close to 0.5",
-            result.tau_robust
-        );
-
-        // Standard errors should be reasonable (not too small, not too large)
-        assert!(result.se_conventional > 0.01, "SE too small");
-        assert!(result.se_conventional < 0.3, "SE too large");
-        assert!(result.se_robust > 0.01, "Robust SE too small");
-        assert!(result.se_robust < 0.5, "Robust SE too large");
-
-        // Bandwidths should be positive and reasonable
-        assert!(result.h_left > 0.1 && result.h_left < 2.0);
-        assert!(result.h_right > 0.1 && result.h_right < 2.0);
-
-        // Effective sample sizes should be reasonable
-        assert!(result.n_eff_left > 50);
-        assert!(result.n_eff_right > 50);
-    }
-
-    #[test]
-    fn test_validate_rd_bandwidth_methods() {
+    fn test_rd_bandwidth_methods_run() {
         // Test different bandwidth selection methods
         let dataset = create_rd_validation_dataset();
 
@@ -2067,7 +2115,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rd_polynomial_orders() {
+    fn test_rd_polynomial_orders_recover_dgp() {
         // Test different polynomial orders (p=1, p=2)
         let dataset = create_rd_validation_dataset();
 
@@ -2100,74 +2148,6 @@ mod tests {
         // Higher polynomial order should have higher bias correction order
         assert_eq!(result_p1.q, 2);
         assert_eq!(result_p2.q, 3);
-    }
-
-    #[test]
-    fn test_validate_rd_confidence_intervals() {
-        // Validate that CIs have correct coverage properties
-        let dataset = create_rd_validation_dataset();
-        let config = RdConfig {
-            level: 0.95,
-            ..Default::default()
-        };
-
-        let result = run_rd(&dataset, "outcome", "running", 0.0, config).unwrap();
-
-        // CI should contain the point estimate
-        assert!(result.ci_robust.0 <= result.tau_robust);
-        assert!(result.ci_robust.1 >= result.tau_robust);
-
-        // CI width should be approximately 2 * 1.96 * SE
-        let expected_width = 2.0 * 1.96 * result.se_robust;
-        let actual_width = result.ci_robust.1 - result.ci_robust.0;
-        assert!(
-            (actual_width - expected_width).abs() / expected_width < 0.1,
-            "CI width {:.4} doesn't match expected {:.4}",
-            actual_width,
-            expected_width
-        );
-
-        // The true effect (0.5) should be within the CI (with high probability)
-        // This is a stochastic test, so we allow some margin
-        let ci_lower = result.ci_robust.0;
-        let ci_upper = result.ci_robust.1;
-        // CI should at least overlap with reasonable range around true effect
-        assert!(
-            ci_lower < 0.8 && ci_upper > 0.2,
-            "CI [{:.4}, {:.4}] seems too narrow or biased",
-            ci_lower,
-            ci_upper
-        );
-    }
-
-    #[test]
-    fn test_validate_rd_p_values() {
-        // Validate p-value calculation
-        let dataset = create_rd_validation_dataset();
-        let config = RdConfig::default();
-
-        let result = run_rd(&dataset, "outcome", "running", 0.0, config).unwrap();
-
-        // P-values should be in [0, 1]
-        assert!(result.p_conventional >= 0.0 && result.p_conventional <= 1.0);
-        assert!(result.p_robust >= 0.0 && result.p_robust <= 1.0);
-
-        // With true effect of 0.5 and reasonable SE, p-value for H0: tau=0
-        // should be significant (small)
-        // But we're testing against 0, so if estimate is 0.5 with SE ~0.1,
-        // z ≈ 5, p << 0.001
-        // However, our p-value tests H0: tau = 0, which should reject
-        // since true tau = 0.5
-        if result.se_robust > 0.0 && result.tau_robust.abs() > 0.3 {
-            // If estimate is reasonably far from 0, p-value should be small
-            assert!(
-                result.p_robust < 0.1,
-                "With estimate {:.4} and SE {:.4}, p-value {:.4} should be smaller",
-                result.tau_robust,
-                result.se_robust,
-                result.p_robust
-            );
-        }
     }
 
     // =========================================================================
@@ -2379,56 +2359,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Nearest-neighbour variance: fast path against the previous algorithm
-    // =========================================================================
-
-    /// Verbatim copy of the previous `nn_variance_estimator` (O(m^2 log m)),
-    /// kept as the reference the sorted-window implementation is held to.
-    fn nn_variance_naive(
-        y: &Array1<f64>,
-        x: &Array1<f64>,
-        w: &Array1<f64>,
-        j: usize,
-    ) -> Array1<f64> {
-        let n = y.len();
-        let mut sigma2 = Array1::zeros(n);
-
-        // Get indices of observations with positive weights
-        let active: Vec<usize> = (0..n).filter(|&i| w[i] > 0.0).collect();
-
-        if active.len() < j + 1 {
-            // Not enough observations for NN estimation
-            return sigma2;
-        }
-
-        for &i in &active {
-            // Find J nearest neighbors by x value
-            let mut distances: Vec<(usize, f64)> = active
-                .iter()
-                .filter(|&&idx| idx != i)
-                .map(|&idx| (idx, (x[idx] - x[i]).abs()))
-                .collect();
-
-            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let neighbors: Vec<usize> = distances.iter().take(j).map(|&(idx, _)| idx).collect();
-
-            if neighbors.is_empty() {
-                continue;
-            }
-
-            // Compute variance estimate: (J/(J+1)) × (1/J) × Σⱼ (yᵢ - yⱼ)²
-            let yi = y[i];
-            let sum_sq: f64 = neighbors.iter().map(|&idx| (yi - y[idx]).powi(2)).sum();
-            let j_actual = neighbors.len() as f64;
-
-            sigma2[i] = (j_actual / (j_actual + 1.0)) * (sum_sq / j_actual);
-        }
-
-        sigma2
-    }
-
     fn lcg(s: &mut u64) -> f64 {
         *s = s
             .wrapping_mul(6364136223846793005)
@@ -2436,103 +2366,375 @@ mod tests {
         (*s >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    fn same(a: &Array1<f64>, b: &Array1<f64>) {
-        assert_eq!(a.len(), b.len());
-        for (k, (p, q)) in a.iter().zip(b.iter()).enumerate() {
-            assert!(
-                p.to_bits() == q.to_bits() || (p.is_nan() && q.is_nan()),
-                "row {k}: {p} vs {q}"
-            );
+    // =========================================================================
+    // rdrobust 4.0.0 pins at fixed bandwidths (validation/r/cases/causal_rd.R;
+    // T2-WP11: CAUS-1, CAUS-5, CAUS-29)
+    // =========================================================================
+
+    const TRI: KernelType = KernelType::Triangular;
+
+    fn fixed(kernel: KernelType, vce: VceType, h: f64, b: f64, p: usize) -> RdConfig {
+        RdConfig {
+            p,
+            h: Some(h),
+            b: Some(b),
+            kernel,
+            vce,
+            ..Default::default()
         }
     }
 
+    /// Pins one rdrobust run, `<prefix>_*` keys of the case (`.rd_values` in causal_rd.R).
+    fn check_rd(check: &mut Check<'_>, prefix: &str, r: &RdResult, n: usize) {
+        let k = |s: &str| format!("{prefix}_{s}");
+        check
+            .scalar(&k("coef_conv"), r.tau_conventional, Tol::coef(n))
+            .scalar(&k("coef_bc"), r.tau_bc, Tol::coef(n))
+            .scalar(&k("se_conv"), r.se_conventional, Tol::se(n))
+            .scalar(&k("se_robust"), r.se_robust, Tol::se(n))
+            .scalar(
+                &k("z_conv"),
+                r.tau_conventional / r.se_conventional,
+                Tol::stat(n),
+            )
+            .scalar(&k("z_robust"), r.tau_robust / r.se_robust, Tol::stat(n))
+            .scalar(&k("p_conv"), r.p_conventional, Tol::p_value(n))
+            .scalar(&k("p_robust"), r.p_robust, Tol::p_value(n))
+            .vector(
+                &k("ci_conv"),
+                &[r.ci_conventional.0, r.ci_conventional.1],
+                Tol::stat(n),
+            )
+            .vector(
+                &k("ci_robust"),
+                &[r.ci_robust.0, r.ci_robust.1],
+                Tol::stat(n),
+            )
+            .vector(
+                &k("n_h"),
+                &[r.n_eff_left as f64, r.n_eff_right as f64],
+                Tol::exact(),
+            )
+            .vector(
+                &k("n_b"),
+                &[r.n_b_left as f64, r.n_b_right as f64],
+                Tol::exact(),
+            )
+            .vector(&k("beta_p_left"), &r.coef_left, Tol::coef(n))
+            .vector(&k("beta_p_right"), &r.coef_right, Tol::coef(n));
+        // rdrobust's second row uses the conventional SE; the clamp of CAUS-5 is gone
+        assert_eq!(r.se_bc, r.se_conventional, "{prefix}");
+        assert_eq!(r.tau_robust, r.tau_bc, "{prefix}");
+        assert!(
+            (r.bias - (r.tau_conventional - r.tau_bc)).abs() <= 1e-15 * (1.0 + r.bias.abs()),
+            "{prefix}"
+        );
+    }
+
     #[test]
-    fn test_nn_variance_fast_matches_reference() {
-        let mut s = 2026u64;
-        let n = 600;
-        let tri = |x: &Array1<f64>, h: f64| {
-            x.mapv(|v| {
-                if v < 0.0 {
-                    KernelType::Triangular.evaluate((v / h).abs())
-                } else {
-                    0.0
-                }
-            })
-        };
-        // (a) continuous x, noisy y
-        let x = Array1::from_iter((0..n).map(|_| -1.0 + 2.0 * lcg(&mut s)));
-        let y = x.mapv(|v| 1.0 + 0.5 * v) + Array1::from_iter((0..n).map(|_| lcg(&mut s) - 0.5));
-        let all = Array1::from_elem(n, 1.0);
-        for j in [1, 3, 5] {
-            same(
-                &nn_variance_estimator(&y, &x, &tri(&x, 0.6), j),
-                &nn_variance_naive(&y, &x, &tri(&x, 0.6), j),
-            );
-            same(
-                &nn_variance_estimator(&y, &x, &all, j),
-                &nn_variance_naive(&y, &x, &all, j),
-            );
-        }
-        // (b) heavy mass points (21 distinct values) and symmetric distance ties
-        let xm = x.mapv(|v| (v * 10.0).round() / 10.0);
-        for j in [1, 3, 7, 40] {
-            same(
-                &nn_variance_estimator(&y, &xm, &all, j),
-                &nn_variance_naive(&y, &xm, &all, j),
-            );
-        }
-        // mass points under a kernel window (inactive rows interleaved)
-        same(
-            &nn_variance_estimator(&y, &xm, &tri(&xm, 0.55), 4),
-            &nn_variance_naive(&y, &xm, &tri(&xm, 0.55), 4),
-        );
-        // (c) integer grid with signed zeros
-        let xg = Array1::from_iter((0..n).map(|i| match i % 9 {
-            0 => -0.0,
-            1 => 0.0,
-            k => k as f64 - 4.0,
-        }));
-        for j in [1, 3, 70, 150] {
-            same(
-                &nn_variance_estimator(&y, &xg, &all, j),
-                &nn_variance_naive(&y, &xg, &all, j),
-            );
-        }
-        // (d) tiny active sets: m == j (all zero), m == j + 1, j == 0
-        let mut w = Array1::zeros(n);
-        for k in 0..4 {
-            w[k] = 1.0;
-        }
-        for j in [0, 3, 4] {
-            same(
-                &nn_variance_estimator(&y, &x, &w, j),
-                &nn_variance_naive(&y, &x, &w, j),
-            );
-        }
-        // (e) NaN in y propagates in the same places
-        let mut yn = y.clone();
-        yn[5] = f64::NAN;
-        same(
-            &nn_variance_estimator(&yn, &xm, &all, 3),
-            &nn_variance_naive(&yn, &xm, &all, 3),
-        );
-        // (f) many small random cases: few distinct x values (heavy ties on
-        // both sides), random inactive rows, every j up to the active count
-        for case in 0..300 {
-            let m = 2 + case % 40;
-            let levels = 1 + (case / 7) % 9;
-            let xs = Array1::from_iter(
-                (0..m).map(|_| ((lcg(&mut s) * levels as f64).floor() - 2.0) * 0.5),
-            );
-            let ys = Array1::from_iter((0..m).map(|_| lcg(&mut s)));
-            let ws = Array1::from_iter((0..m).map(|_| if lcg(&mut s) < 0.8 { 1.0 } else { 0.0 }));
-            for j in 1..=m {
-                same(
-                    &nn_variance_estimator(&ys, &xs, &ws, j),
-                    &nn_variance_naive(&ys, &xs, &ws, j),
-                );
+    fn test_validate_rd_sharp_fixed_bw() {
+        let (case, ds) = load_case("rd_sharp_fixed_bw");
+        let n = 1000;
+        let mut check = Check::new(&case);
+        let kernels = [
+            ("tri", KernelType::Triangular),
+            ("epa", KernelType::Epanechnikov),
+            ("uni", KernelType::Uniform),
+        ];
+        let vces = [
+            ("nn", VceType::Nn),
+            ("hc0", VceType::Hc0),
+            ("hc1", VceType::Hc1),
+            ("hc2", VceType::Hc2),
+            ("hc3", VceType::Hc3),
+        ];
+        for (k, kernel) in kernels {
+            for (v, vce) in vces {
+                let r = run_rd(&ds, "y", "x", 0.0, fixed(kernel, vce, 0.3, 0.3, 1)).unwrap();
+                check_rd(&mut check, &format!("{k}_{v}_hb"), &r, n);
             }
         }
+        // h != b both ways (NN neighbours are searched in the larger window), and p = 2
+        for (prefix, h, b, p) in [
+            ("tri_nn_h03_b05", 0.3, 0.5, 1),
+            ("tri_nn_h05_b03", 0.5, 0.3, 1),
+            ("tri_nn_p2", 0.5, 0.6, 2),
+        ] {
+            let r = run_rd(&ds, "y", "x", 0.0, fixed(TRI, VceType::Nn, h, b, p)).unwrap();
+            check_rd(&mut check, prefix, &r, n);
+        }
+        // unequal sides: rdrobust h = c(0.25, 0.35), b = c(0.4, 0.45)
+        let asym = RdConfig {
+            h: Some(0.25),
+            h_right: Some(0.35),
+            b: Some(0.4),
+            b_right: Some(0.45),
+            vce: VceType::Hc1,
+            ..Default::default()
+        };
+        let r = run_rd(&ds, "y", "x", 0.0, asym).unwrap();
+        assert_eq!(
+            (r.h_left, r.h_right, r.b_left, r.b_right),
+            (0.25, 0.35, 0.4, 0.45)
+        );
+        check_rd(&mut check, "tri_hc1_asym", &r, n);
+        let r = run_rd(
+            &ds,
+            "y",
+            "x",
+            0.0,
+            RdConfig {
+                level: 0.90,
+                ..fixed(TRI, VceType::Nn, 0.3, 0.3, 1)
+            },
+        )
+        .unwrap();
+        check.vector(
+            "level90_ci_robust",
+            &[r.ci_robust.0, r.ci_robust.1],
+            Tol::stat(n),
+        );
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_rd_mass_points_nn() {
+        let (case, ds) = load_case("rd_mass_points_nn");
+        let mut check = Check::new(&case);
+        for m in [3usize, 1, 5] {
+            let r = run_rd(
+                &ds,
+                "ym",
+                "xm",
+                0.0,
+                RdConfig {
+                    nnmatch: m,
+                    ..fixed(TRI, VceType::Nn, 0.3, 0.4, 1)
+                },
+            )
+            .unwrap();
+            check_rd(&mut check, &format!("nn{m}"), &r, 1000);
+        }
+        check.finish();
+    }
+
+    /// One row of the estimate table, in the format `Display` uses.
+    fn table_row(label: &str, est: f64, se: f64, p: f64, ci: &[f64]) -> String {
+        format!(
+            "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.4}  [{:>8.4}, {:>8.4}]",
+            label,
+            est,
+            se,
+            est / se,
+            p,
+            ci[0],
+            ci[1]
+        )
+    }
+
+    #[test]
+    fn test_validate_rd_sharp_display_table() {
+        let (case, ds) = load_case("rd_sharp_fixed_bw");
+        let r = run_rd(&ds, "y", "x", 0.0, fixed(TRI, VceType::Hc1, 0.3, 0.3, 1)).unwrap();
+        let text = r.to_string();
+        let v = |s: &str| case.scalar(&format!("tri_hc1_hb_{s}"));
+        let ci = |s: &str| case.vector(&format!("tri_hc1_hb_{s}"));
+        assert!(
+            text.contains(
+                "Method                   Estimate    Std. Err.          z      P>|z|  [95% CI]"
+            ),
+            "{text}"
+        );
+        let conventional = table_row(
+            "Conventional",
+            v("coef_conv"),
+            v("se_conv"),
+            v("p_conv"),
+            &ci("ci_conv"),
+        );
+        assert!(text.contains(&conventional), "{conventional}\n{text}");
+        let stars = SignificanceLevel::from_p_value(v("p_robust")).stars();
+        assert_eq!(stars, "**");
+        let robust = table_row(
+            "Robust",
+            v("coef_bc"),
+            v("se_robust"),
+            v("p_robust"),
+            &ci("ci_robust"),
+        ) + stars;
+        assert!(text.contains(&robust), "{robust}\n{text}");
+        let n_b = ci("n_b");
+        let bias_fit = format!(
+            "  Bias fit:  {} (left), {} (right)",
+            n_b[0] as usize, n_b[1] as usize
+        );
+        assert!(text.contains(&bias_fit), "{bias_fit}\n{text}");
+        assert!(
+            text.contains("Note: Robust = bias-corrected estimate"),
+            "{text}"
+        );
+
+        let r90 = run_rd(
+            &ds,
+            "y",
+            "x",
+            0.0,
+            RdConfig {
+                level: 0.90,
+                ..fixed(TRI, VceType::Hc1, 0.3, 0.3, 1)
+            },
+        )
+        .unwrap();
+        let text90 = r90.to_string();
+        assert!(text90.contains("[90% CI]"), "{text90}");
+        assert!(!text90.contains("[95% CI]"), "{text90}");
+    }
+
+    #[test]
+    fn test_rd_rejects_q_not_above_p_and_lonely_right_bandwidths() {
+        let ds = create_sharp_rd_dataset();
+        let run = |config: RdConfig| spec_msg(run_rd(&ds, "outcome", "running", 0.0, config));
+        let m = run(RdConfig {
+            q: Some(1),
+            ..Default::default()
+        });
+        assert!(m.contains("q = 1") && m.contains("greater than"), "{m}");
+        let m = run(RdConfig {
+            h_right: Some(0.5),
+            ..Default::default()
+        });
+        assert!(m.contains("h_right"), "{m}");
+        let m = run(RdConfig {
+            h: Some(1.0),
+            b_right: Some(0.5),
+            ..Default::default()
+        });
+        assert!(m.contains("b_right"), "{m}");
+        let m = run(RdConfig {
+            h: Some(1.0),
+            h_right: Some(-1.0),
+            ..Default::default()
+        });
+        assert!(m.contains("h_right"), "{m}");
+    }
+
+    /// Direct transcription of rdrobust 4.0.0's `rdrobust_res(vce = "nn")` loop
+    /// (0-based), for one column on sorted `x`.
+    fn rdrobust_res_naive(x: &[f64], y: &[f64], matches: usize) -> Vec<f64> {
+        let n = x.len();
+        // dups / dupsid: length of the run of equal x and the position in it (rle)
+        let (mut dups, mut dupsid) = (vec![0usize; n], vec![0usize; n]);
+        let mut i = 0;
+        while i < n {
+            let mut j = i;
+            while j + 1 < n && x[j + 1] == x[i] {
+                j += 1;
+            }
+            for (t, k) in (i..=j).enumerate() {
+                dups[k] = j - i + 1;
+                dupsid[k] = t + 1;
+            }
+            i = j + 1;
+        }
+        let mut res = vec![0.0; n];
+        for pos in 0..n {
+            let mut rpos = dups[pos] - dupsid[pos];
+            let mut lpos = dupsid[pos] - 1;
+            while lpos + rpos < matches.min(n - 1) {
+                if pos < lpos + 1 {
+                    rpos += dups[pos + rpos + 1];
+                } else if pos + rpos + 1 >= n {
+                    lpos += dups[pos - lpos - 1];
+                } else if x[pos] - x[pos - lpos - 1] > x[pos + rpos + 1] - x[pos] {
+                    rpos += dups[pos + rpos + 1];
+                } else if x[pos] - x[pos - lpos - 1] < x[pos + rpos + 1] - x[pos] {
+                    lpos += dups[pos - lpos - 1];
+                } else {
+                    rpos += dups[pos + rpos + 1];
+                    lpos += dups[pos - lpos - 1];
+                }
+            }
+            let ind_j = (pos - lpos)..=(pos + rpos);
+            let y_j: f64 = y[ind_j.clone()].iter().sum::<f64>() - y[pos];
+            let ji = (ind_j.count() - 1) as f64;
+            res[pos] = (ji / (ji + 1.0)).sqrt() * (y[pos] - y_j / ji);
+        }
+        res
+    }
+
+    #[test]
+    fn test_nn_residuals_follow_rdrobust_rule() {
+        let close = |label: &str, a: &[f64], b: &[f64]| {
+            assert_eq!(a.len(), b.len(), "{label}");
+            for (i, (u, v)) in a.iter().zip(b).enumerate() {
+                assert!(
+                    (u - v).abs() <= 1e-12 * (1.0 + v.abs()),
+                    "{label} row {i}: {u} vs {v}"
+                );
+            }
+        };
+        let one = |x: &[f64], y: &[f64], j: usize| -> Vec<f64> {
+            let d = Array1::from_vec(y.to_vec()).insert_axis(ndarray::Axis(1));
+            nn_residuals(x, &d, j).unwrap().column(0).to_vec()
+        };
+        let key = |v: f64| if v == 0.0 { 0.0 } else { v };
+        let mut s = 2026u64;
+        let n = 600;
+        // (a) continuous x, noisy y
+        let mut x: Vec<f64> = (0..n).map(|_| -1.0 + 2.0 * lcg(&mut s)).collect();
+        x.sort_by(|a, b| key(*a).total_cmp(&key(*b)));
+        let y: Vec<f64> = x
+            .iter()
+            .map(|v| 1.0 + 0.5 * v + lcg(&mut s) - 0.5)
+            .collect();
+        for j in [1, 3, 7, 40, 599, 1000] {
+            close(
+                &format!("continuous j={j}"),
+                &one(&x, &y, j),
+                &rdrobust_res_naive(&x, &y, j),
+            );
+        }
+        // (b) mass points: 21 distinct values, blocks larger than j
+        let xm: Vec<f64> = x.iter().map(|v| (v * 10.0).round() / 10.0).collect();
+        for j in [1, 3, 50] {
+            close(
+                &format!("mass points j={j}"),
+                &one(&xm, &y, j),
+                &rdrobust_res_naive(&xm, &y, j),
+            );
+        }
+        // (c) integer grid with signed zeros: equal left and right distances
+        let mut xg: Vec<f64> = (0..n)
+            .map(|i| match i % 9 {
+                0 => -0.0,
+                1 => 0.0,
+                k => k as f64 - 4.0,
+            })
+            .collect();
+        xg.sort_by(|a, b| key(*a).total_cmp(&key(*b)));
+        close(
+            "grid j=3",
+            &one(&xg, &y, 3),
+            &rdrobust_res_naive(&xg, &y, 3),
+        );
+        // (d) tiny windows: m = 2 and m = 3 with j = 3
+        for m in [2usize, 3] {
+            close(
+                &format!("m={m}"),
+                &one(&x[..m], &y[..m], 3),
+                &rdrobust_res_naive(&x[..m], &y[..m], 3),
+            );
+        }
+        // two columns at once (outcome and treatment) equal the one-column runs
+        let y2: Vec<f64> = y.iter().map(|v| 2.0 * v + 1.0).collect();
+        let mut d = Array2::zeros((n, 2));
+        for i in 0..n {
+            d[[i, 0]] = y[i];
+            d[[i, 1]] = y2[i];
+        }
+        let both = nn_residuals(&xm, &d, 3).unwrap();
+        close("column 0", &both.column(0).to_vec(), &one(&xm, &y, 3));
+        close("column 1", &both.column(1).to_vec(), &one(&xm, &y2, 3));
     }
 
     #[test]
