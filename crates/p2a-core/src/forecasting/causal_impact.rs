@@ -259,8 +259,9 @@ pub fn causal_impact(
     // truncated), the response and the controls, all without missing values.
     let control_names: Vec<&str> = config
         .control_series
+        .as_deref()
+        .unwrap_or_default()
         .iter()
-        .flatten()
         .map(String::as_str)
         .collect();
     let cols = ColumnRequest::new(dataset.df())

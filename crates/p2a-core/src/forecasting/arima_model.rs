@@ -229,17 +229,18 @@ impl ArimaResult {
 
     /// The line that explains the mean, drift and constant, if any.
     fn note(&self) -> Option<String> {
+        let constant = self
+            .constant
+            .map_or_else(|| "NA".to_string(), |c| format!("{c:.6}"));
         match (self.drift.is_some(), self.include_mean) {
             (true, _) if self.d == 0 => {
                 Some("intercept + drift x t is the trend of the series mean".to_string())
             }
             (true, _) => Some(format!(
-                "drift is the mean change per period; constant drift x (1 - sum(ar)) = {:.6}",
-                self.constant.unwrap_or(f64::NAN)
+                "drift is the mean change per period; constant drift x (1 - sum(ar)) = {constant}"
             )),
             (false, true) => Some(format!(
-                "intercept is the series mean (R's \"intercept\"); constant mean x (1 - sum(ar)) = {:.6}",
-                self.constant.unwrap_or(f64::NAN)
+                "intercept is the series mean (R's \"intercept\"); constant mean x (1 - sum(ar)) = {constant}"
             )),
             (false, false) => None,
         }
@@ -342,23 +343,15 @@ impl fmt::Display for ArimaForecastResult {
             "\n{:width$}{:>11} {:>11} {:>11} {:>11} {:>11} {:>11}",
             "", "Forecast", "Std.Err", "Lo 80", "Hi 80", "Lo 95", "Hi 95"
         )?;
-        let at = |rows: &Vec<Vec<f64>>, i: usize, h: usize| {
-            rows.get(i)
-                .and_then(|r| r.get(h))
-                .copied()
-                .unwrap_or(f64::NAN)
-        };
+        // A value or "NA" where the vectors are shorter than the forecast (a stored result).
+        let cell = |v: Option<&f64>| v.map_or_else(|| "NA".to_string(), |x| format!("{x:.4}"));
+        let at = |rows: &[Vec<f64>], i: usize, h: usize| cell(rows.get(i).and_then(|r| r.get(h)));
         for (h, mean) in self.forecast.iter().enumerate() {
-            let se = self
-                .std_errors
-                .as_ref()
-                .and_then(|s| s.get(h))
-                .copied()
-                .unwrap_or(f64::NAN);
+            let se = cell(self.std_errors.as_ref().and_then(|s| s.get(h)));
             let step = format!("  t+{}: ", h + 1);
             write!(
                 f,
-                "\n{step:width$}{mean:>11.4} {se:>11.4} {:>11.4} {:>11.4} {:>11.4} {:>11.4}",
+                "\n{step:width$}{mean:>11.4} {se:>11} {:>11} {:>11} {:>11} {:>11}",
                 at(&self.lower, 0, h),
                 at(&self.upper, 0, h),
                 at(&self.lower, 1, h),
