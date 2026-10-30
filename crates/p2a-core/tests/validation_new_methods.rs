@@ -2,10 +2,7 @@
 //! Focus on discrete choice models which are the most complex new implementations.
 
 use p2a_core::data::Dataset;
-use p2a_core::{
-    granger_test, run_multinom, run_negbin, run_ordered_logit, run_ordered_probit, run_zinb,
-    run_zip,
-};
+use p2a_core::{granger_test, run_multinom, run_negbin, run_zinb, run_zip};
 use polars::prelude::*;
 
 #[test]
@@ -65,100 +62,6 @@ fn test_multinom_vs_r() {
         "  converged: {} (iterations: {})",
         result.converged, result.iterations
     );
-}
-
-#[test]
-fn test_ordered_logit_vs_r() {
-    // Test ordered logit (proportional odds model)
-    // R: MASS::polr with ordered outcome
-    let df = DataFrame::new(vec![
-        Column::new(
-            "y".into(),
-            vec![
-                "Low", "Low", "Low", "Low", "Med", "Med", "Med", "High", "High", "High",
-            ],
-        ),
-        Column::new(
-            "x".into(),
-            vec![1.0, 2.0, 1.5, 2.5, 4.0, 5.0, 4.5, 7.0, 8.0, 9.0],
-        ),
-    ])
-    .unwrap();
-    let dataset = Dataset::new(df);
-
-    let result = run_ordered_logit(&dataset, "y", &["x"]).unwrap();
-
-    // Structure checks
-    assert_eq!(result.n_obs, 10);
-    assert_eq!(result.thresholds.len(), 2); // J-1 = 2 thresholds for 3 categories
-
-    // Coefficient should be positive (higher x -> higher category)
-    assert!(
-        result.coefficients[0] > 0.0,
-        "Ordered logit coefficient should be positive: {}",
-        result.coefficients[0]
-    );
-
-    // Thresholds should be ordered
-    assert!(
-        result.thresholds[1] > result.thresholds[0],
-        "Thresholds should be increasing: {:?}",
-        result.thresholds
-    );
-
-    println!("\nOrdered Logit Validation:");
-    println!("  n_obs: {}", result.n_obs);
-    println!("  categories: {:?}", result.categories);
-    println!("  x coefficient: {:.4}", result.coefficients[0]);
-    println!("  thresholds: {:?}", result.thresholds);
-    println!("  log-likelihood: {:.4}", result.log_likelihood);
-    println!(
-        "  converged: {} (iterations: {})",
-        result.converged, result.iterations
-    );
-}
-
-#[test]
-fn test_ordered_probit_vs_r() {
-    // Compare ordered probit vs ordered logit
-    let df = DataFrame::new(vec![
-        Column::new(
-            "y".into(),
-            vec![
-                "Low", "Low", "Low", "Low", "Med", "Med", "Med", "High", "High", "High",
-            ],
-        ),
-        Column::new(
-            "x".into(),
-            vec![1.0, 2.0, 1.5, 2.5, 4.0, 5.0, 4.5, 7.0, 8.0, 9.0],
-        ),
-    ])
-    .unwrap();
-    let dataset = Dataset::new(df);
-
-    let logit = run_ordered_logit(&dataset, "y", &["x"]).unwrap();
-    let probit = run_ordered_probit(&dataset, "y", &["x"]).unwrap();
-
-    // Signs should match
-    assert_eq!(
-        logit.coefficients[0].signum(),
-        probit.coefficients[0].signum(),
-        "Logit and probit should have same sign"
-    );
-
-    // Logit coefficient is typically ~1.6x larger than probit
-    // Note: For small samples, the ratio can vary more widely
-    let ratio = logit.coefficients[0] / probit.coefficients[0];
-    assert!(
-        ratio > 0.5 && ratio < 5.0,
-        "Logit/probit ratio should be positive, got {:.2}",
-        ratio
-    );
-
-    println!("\nOrdered Probit vs Logit:");
-    println!("  Logit coefficient: {:.4}", logit.coefficients[0]);
-    println!("  Probit coefficient: {:.4}", probit.coefficients[0]);
-    println!("  Ratio (should be ~1.6): {:.2}", ratio);
 }
 
 #[test]

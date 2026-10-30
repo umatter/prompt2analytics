@@ -32,6 +32,7 @@ use p2a_core::econometrics::{
     GsynthConfig, PanelGlsModel, PvcmType, SacConfig, run_arellano_bond, run_gsynth,
     run_hausman_test, run_panel_gls, run_pmg, run_pvcm, run_sac_dataset,
 };
+use p2a_core::econometrics::{OrderedConfig, run_ordered_model_with};
 use p2a_core::econometrics::{RdMultiConfig, run_rd_multi};
 use p2a_core::econometrics::{granger_test, run_var, run_vecm};
 use p2a_core::forecasting::{
@@ -163,7 +164,6 @@ use p2a_core::{
     // Discrete choice models
     run_negbin,
     run_ols,
-    run_ordered_logit,
     run_probit,
     run_random_effects,
     run_rd,
@@ -3279,11 +3279,18 @@ fn main() {
         let multinom_dataset = load_csv_dataset(&data_dir, "multinomial", n)
             .unwrap_or_else(|| generate_multinomial_data(n, 42));
 
-        // Ordered Logit
+        // Ordered Logit. The data store y as quoted text ("1", "2", "3"), so the
+        // order is given (ECON-19).
+        let ordered_cfg = OrderedConfig {
+            levels: Some(vec!["1".into(), "2".into(), "3".into()]),
+            ..OrderedConfig::default()
+        };
         let mut result = run_benchmark_tracked("Ordered_Logit", "MLE", n, &slow_config, || {
-            run_ordered_logit(&ordered_dataset, "y", &["x1", "x2"])
+            run_ordered_model_with(&ordered_dataset, "y", &["x1", "x2"], &ordered_cfg)
         });
-        if let Ok(ref res) = run_ordered_logit(&ordered_dataset, "y", &["x1", "x2"]) {
+        if let Ok(ref res) =
+            run_ordered_model_with(&ordered_dataset, "y", &["x1", "x2"], &ordered_cfg)
+        {
             let mut outputs = BTreeMap::new();
             capture_vec(&mut outputs, "coefficients", &res.coefficients);
             capture_vec(&mut outputs, "thresholds", &res.thresholds);

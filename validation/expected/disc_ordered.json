@@ -1,0 +1,160 @@
+{
+  "schema": 1,
+  "id": "disc_ordered",
+  "area": "econometrics/discrete",
+  "method": "Ordered logit and probit (MASS::polr), y coded 1/2/3 (integer column)",
+  "reference": "MASS::polr(method = 'logistic' | 'probit', control = list(reltol = 1e-15)), polished by Newton steps on the exact log-likelihood; SEs from the observed information (analytic, equal to numDeriv::hessian)",
+  "call": "polr(factor(y) ~ x1 + x2, data = d, method = ...)",
+  "dataset": "validation/datasets/generated/ordered.csv",
+  "datasets": ["validation/datasets/generated/ordered.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "MASS": "7.3.60.0.1",
+    "numDeriv": "2016.8.1.1"
+  },
+  "values": {
+    "logit_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.71761132582945064, -0.53649245302184712]
+    },
+    "logit_zeta": {
+      "names": ["1|2", "2|3"],
+      "values": [-0.31049999894913471, 0.77514824060472676]
+    },
+    "logit_se_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.10909697897328377, 0.10249374102531485]
+    },
+    "logit_se_zeta": {
+      "names": ["1|2", "2|3"],
+      "values": [0.10865205155127043, 0.11398888293711927]
+    },
+    "logit_z": {
+      "names": ["x1", "x2"],
+      "values": [6.5777378308998182, -5.2343923409853801]
+    },
+    "logit_p": {
+      "names": ["x1", "x2"],
+      "values": [4.776594634602565e-11, 1.6552851689641808e-07]
+    },
+    "logit_se_coef_numderiv": {
+      "names": ["x1", "x2"],
+      "values": [0.10909697897230344, 0.1024937410241203]
+    },
+    "logit_coef_pkg": {
+      "names": ["x1", "x2"],
+      "values": [0.71761133940892763, -0.53649246227892089]
+    },
+    "logit_zeta_pkg": {
+      "names": ["1|2", "2|3"],
+      "values": [-0.31050003065115966, 0.77514820467458523]
+    },
+    "logit_se_coef_pkg": {
+      "names": ["x1", "x2"],
+      "values": [0.10909698234585462, 0.10249374445634789]
+    },
+    "logit_loglik": -387.83751698180509,
+    "logit_loglik_pkg": -387.83751698180521,
+    "logit_loglik_null": -425.8062619900378,
+    "logit_loglik_null_pkg": -425.80626201537899,
+    "logit_pseudo_r2": 0.089169062077159023,
+    "logit_aic": 783.67503396361019,
+    "logit_bic": 799.64089215204217,
+    "logit_counts": [174, 90, 136],
+    "logit_max_abs_grad": 2.3753785396984917e-14,
+    "logit_max_abs_grad_pkg": 2.3712264720643361e-06,
+    "logit_n": 400,
+    "probit_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.43188929271687387, -0.32611721432142787]
+    },
+    "probit_zeta": {
+      "names": ["1|2", "2|3"],
+      "values": [-0.1885541185105889, 0.46930809751006763]
+    },
+    "probit_se_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.063829644992966769, 0.060486528156727851]
+    },
+    "probit_se_zeta": {
+      "names": ["1|2", "2|3"],
+      "values": [0.066215046141708298, 0.068168156113565415]
+    },
+    "probit_z": {
+      "names": ["x1", "x2"],
+      "values": [6.7662806641719957, -5.3915677467289749]
+    },
+    "probit_p": {
+      "names": ["x1", "x2"],
+      "values": [1.3213510493701722e-11, 6.9845616962275974e-08]
+    },
+    "probit_se_coef_numderiv": {
+      "names": ["x1", "x2"],
+      "values": [0.063829644992934462, 0.060486528156523146]
+    },
+    "probit_coef_pkg": {
+      "names": ["x1", "x2"],
+      "values": [0.43188929338011223, -0.32611721333299093]
+    },
+    "probit_zeta_pkg": {
+      "names": ["1|2", "2|3"],
+      "values": [-0.18855412516495912, 0.46930808945070085]
+    },
+    "probit_se_coef_pkg": {
+      "names": ["x1", "x2"],
+      "values": [0.063829646037698737, 0.0604865289669144]
+    },
+    "probit_loglik": -387.67661567185417,
+    "probit_loglik_pkg": -387.67661567185417,
+    "probit_loglik_null": -425.8062619900378,
+    "probit_loglik_null_pkg": -425.80626235076949,
+    "probit_pseudo_r2": 0.089546936533957622,
+    "probit_aic": 783.35323134370833,
+    "probit_bic": 799.31908953214031,
+    "probit_counts": [174, 90, 136],
+    "probit_max_abs_grad": 7.7941125775637943e-15,
+    "probit_max_abs_grad_pkg": 1.3500283273515379e-06,
+    "probit_n": 400,
+    "alpha_labels_coef": {
+      "names": ["x1", "x2"],
+      "values": [-0.30080237520093039, 0.19936916875019578]
+    },
+    "alpha_labels_zeta": {
+      "names": ["high|low", "low|mid"],
+      "values": [-0.63257271867870823, 1.3220490783196688]
+    },
+    "alpha_labels_loglik": -418.63635939738327,
+    "wide_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.70406299412070361, -0.53437550583542426]
+    },
+    "wide_zeta": {
+      "names": ["-2|-1", "-1|0", "0|1", "1|2", "2|3", "3|4", "4|5", "5|6", "6|7", "7|8", "8|9", "9|10"],
+      "values": [-2.8197976373084757, -1.9736641609357137, -1.4074084346688904, -0.9597566086467979, -0.5469414783203207, -0.16604561943066304, 0.19357716472045905, 0.57308597589549148, 0.97219529079041278, 1.3995337440195046, 1.9463380688354117, 2.7699406770854762]
+    },
+    "wide_se_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.09438675996201279, 0.091255222369729272]
+    },
+    "wide_loglik": -981.28429448310646,
+    "wide_levels": [-2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    "wide_counts": [31, 31, 31, 30, 31, 31, 30, 31, 31, 30, 31, 31, 31],
+    "na_coef": {
+      "names": ["x1_na", "x2"],
+      "values": [0.7065573458170662, -0.52480969597461413]
+    },
+    "na_zeta": {
+      "names": ["1|2", "2|3"],
+      "values": [-0.29960990502955642, 0.79121713941983207]
+    },
+    "na_se_coef": {
+      "names": ["x1_na", "x2"],
+      "values": [0.10890568760731159, 0.10305826886311184]
+    },
+    "na_loglik": -381.72558129269845,
+    "na_n_used": 393,
+    "na_n_dropped": 7,
+    "na_missing_y": 4,
+    "na_missing_x1": 3
+  }
+}

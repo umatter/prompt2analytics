@@ -15,12 +15,14 @@
 //! R equivalent: `MASS::polr()`
 
 use ndarray::{Array1, Array2};
+use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{self, ColumnRequest, Columns, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::resource;
 use crate::traits::estimator::{logistic_cdf, logistic_pdf, normal_cdf, normal_pdf};
@@ -97,20 +99,6 @@ impl Default for OrderedConfig {
     }
 }
 
-/// Ordered logit or probit with the options of [`OrderedConfig`].
-///
-/// Implemented by T2-WP10; until then returns `EconError::NotImplemented`.
-pub fn run_ordered_model_with(
-    dataset: &Dataset,
-    y_col: &str,
-    x_cols: &[&str],
-    config: &OrderedConfig,
-) -> EconResult<OrderedResult> {
-    Err(EconError::NotImplemented(
-        "T2-WP10: run_ordered_model_with".to_string(),
-    ))
-}
-
 /// Result from ordered logit/probit regression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderedResult {
@@ -152,6 +140,12 @@ pub struct OrderedResult {
     pub n_obs: usize,
     /// Counts by category
     pub category_counts: Vec<usize>,
+    /// Rows dropped because of missing values in the outcome or a regressor (R polr: na.omit).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
+    /// Estimation problems in plain words (non-convergence, singular information).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl fmt::Display for OrderedResult {
@@ -208,6 +202,15 @@ impl fmt::Display for OrderedResult {
             "Converged: {} ({} iterations)",
             self.converged, self.iterations
         )?;
+        if !self.warnings.is_empty() {
+            writeln!(f, "Warnings:")?;
+            for w in &self.warnings {
+                writeln!(f, "  - {w}")?;
+            }
+        }
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
         Ok(())
     }
 }
@@ -236,14 +239,20 @@ impl fmt::Display for OrderedResult {
 ///
 /// # Errors
 ///
-/// An outcome with more than 100 distinct values is refused with
-/// `InvalidSpecification` (a method-level cap on the outcome categories).
+/// As [`run_ordered_model_with`] with its defaults: among others, an outcome with
+/// more than 100 distinct values is refused with `InvalidSpecification` (a
+/// method-level cap on the outcome categories), and so is a text outcome, whose
+/// order needs [`OrderedConfig::levels`]. Rows with missing values are dropped.
 pub fn run_ordered_logit(
     dataset: &Dataset,
     y_col: &str,
     x_cols: &[&str],
 ) -> EconResult<OrderedResult> {
-    run_ordered_model(dataset, y_col, x_cols, OrderedModelType::Logit)
+    let config = OrderedConfig {
+        link: OrderedModelType::Logit,
+        ..OrderedConfig::default()
+    };
+    run_ordered_model_with(dataset, y_col, x_cols, &config)
 }
 
 /// Run ordered probit regression.
@@ -258,57 +267,75 @@ pub fn run_ordered_logit(
 ///
 /// # Errors
 ///
-/// An outcome with more than 100 distinct values is refused with
-/// `InvalidSpecification` (a method-level cap on the outcome categories).
+/// As [`run_ordered_model_with`] with its defaults: among others, an outcome with
+/// more than 100 distinct values is refused with `InvalidSpecification` (a
+/// method-level cap on the outcome categories), and so is a text outcome, whose
+/// order needs [`OrderedConfig::levels`]. Rows with missing values are dropped.
 pub fn run_ordered_probit(
     dataset: &Dataset,
     y_col: &str,
     x_cols: &[&str],
 ) -> EconResult<OrderedResult> {
-    run_ordered_model(dataset, y_col, x_cols, OrderedModelType::Probit)
+    let config = OrderedConfig {
+        link: OrderedModelType::Probit,
+        ..OrderedConfig::default()
+    };
+    run_ordered_model_with(dataset, y_col, x_cols, &config)
 }
 
-fn run_ordered_model(
+/// Ordered logit or probit with the options of [`OrderedConfig`] (R `MASS::polr`).
+///
+/// The outcome and the regressors are read together and rows with a missing value in
+/// any of them are dropped (R `na.omit`), reported in [`OrderedResult::missing`].
+/// The categories follow the outcome's data type: numbers by value (2 < 10,
+/// -2 < -1), an Enum in its declared order, booleans FALSE < TRUE, dates by time.
+/// A text or categorical outcome has no such order and needs
+/// [`OrderedConfig::levels`], lowest category first.
+///
+/// # Errors
+///
+/// `InvalidSpecification` when `max_iter` is 0, `tol` is not positive and finite,
+/// `levels` is empty, repeats a label, misses an observed label or names one without
+/// observations, when no regressor is given, when a text outcome comes without
+/// `levels`, and when the outcome has fewer than 2 or more than 100 categories (a
+/// method-level cap). Column errors (`ColumnNotFound`, `NonNumericColumn`,
+/// `NonFiniteValues`) name the column.
+pub fn run_ordered_model_with(
     dataset: &Dataset,
     y_col: &str,
     x_cols: &[&str],
-    model_type: OrderedModelType,
+    config: &OrderedConfig,
 ) -> EconResult<OrderedResult> {
-    let df = dataset.df();
-
-    // Extract y values and determine categories
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Get values (must be orderable)
-    let y_str: Vec<String> = if let Ok(ca) = y_series.str() {
-        ca.into_no_null_iter().map(|s| s.to_string()).collect()
-    } else if let Ok(ca) = y_series.i64() {
-        ca.into_no_null_iter().map(|v| v.to_string()).collect()
-    } else if let Ok(ca) = y_series.f64() {
-        ca.into_no_null_iter().map(|v| v.to_string()).collect()
-    } else {
+    let model_type = config.link;
+    if config.max_iter == 0 {
         return Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be ordinal", y_col),
+            message: "max_iter must be at least 1".to_string(),
         });
-    };
+    }
+    if !(config.tol.is_finite() && config.tol > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("tol must be a positive, finite number (got {})", config.tol),
+        });
+    }
+    if let Some(levels) = &config.levels {
+        check_levels(levels, y_col)?;
+    }
+    if x_cols.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: "At least one predictor is required".to_string(),
+        });
+    }
 
-    let n = y_str.len();
-
-    // Get sorted unique categories
-    let mut categories: Vec<String> = y_str
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    categories.sort();
+    let df = dataset.df();
+    let cols = ColumnRequest::new(df)
+        .factor(y_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let factor = ordered_factor(&cols, df, y_col, config.levels.as_deref())?;
+    let n = cols.n();
+    let categories = factor.levels.clone();
+    let category_counts = factor.counts();
 
     let j = categories.len();
     if j < 2 {
@@ -327,33 +354,12 @@ fn run_ordered_model(
         });
     }
 
-    // Category counts
-    let category_counts: Vec<usize> = categories
-        .iter()
-        .map(|cat| y_str.iter().filter(|y| *y == cat).count())
-        .collect();
+    let y_idx: Vec<usize> = factor.codes.iter().map(|&c| c as usize).collect();
 
-    // Convert y to category indices (0, 1, ..., J-1)
-    let cat_to_idx: std::collections::HashMap<&str, usize> = categories
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.as_str(), i))
-        .collect();
-    let y_idx: Vec<usize> = y_str
-        .iter()
-        .map(|y| *cat_to_idx.get(y.as_str()).unwrap())
-        .collect();
-
-    // Build design matrix (NO intercept - absorbed into thresholds)
-    let dm = DesignMatrix::from_dataframe(df, x_cols, false)?;
+    // Design matrix (no intercept: it is absorbed into the thresholds)
+    let dm = cols.matrix(x_cols, false);
     let x = dm.view();
     let k = x.ncols();
-
-    if k == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "At least one predictor is required".to_string(),
-        });
-    }
 
     let var_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
@@ -623,7 +629,92 @@ fn run_ordered_model(
         converged,
         n_obs: n,
         category_counts,
+        missing: cols.missing().clone(),
+        warnings: Vec::new(),
     })
+}
+
+/// `levels` must be non-empty and name each label once.
+fn check_levels(levels: &[String], y_col: &str) -> EconResult<()> {
+    if levels.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "`levels` is empty; give every category of '{y_col}' once, lowest first"
+            ),
+        });
+    }
+    let mut seen: HashSet<&str> = HashSet::with_capacity(levels.len());
+    for l in levels {
+        if !seen.insert(l.as_str()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!("`levels` lists '{}' more than once", short_label(l)),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The outcome's categories in model order: the data type's order, or `levels`.
+/// A text or categorical outcome needs `levels`; a level of `levels` without
+/// observations is refused (polr cannot place the cut points next to it).
+fn ordered_factor(
+    cols: &Columns,
+    df: &DataFrame,
+    y_col: &str,
+    levels: Option<&[String]>,
+) -> EconResult<Factor> {
+    let factor = cols.factor(y_col);
+    let Some(levels) = levels else {
+        let dtype = columns::column(df, y_col)?.dtype();
+        if matches!(dtype, DataType::String | DataType::Categorical(..)) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Outcome column '{y_col}' is text with labels {}; ordered logit/probit \
+                     cannot guess their order. Pass the order as `levels`, lowest category \
+                     first, every label once.",
+                    label_list(&factor.levels)
+                ),
+            });
+        }
+        return Ok(factor.clone());
+    };
+    let ordered = factor.with_level_order(levels)?;
+    if let Some((label, _)) = ordered
+        .levels
+        .iter()
+        .zip(ordered.counts())
+        .find(|(_, count)| *count == 0)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "level '{}' in `levels` has no observations in column '{y_col}'; polr \
+                 cannot estimate the cut points next to an empty category. Remove it from \
+                 `levels`.",
+                short_label(label)
+            ),
+        });
+    }
+    Ok(ordered)
+}
+
+/// At most 20 labels, each shortened, comma-separated.
+fn label_list(labels: &[String]) -> String {
+    const SHOWN: usize = 20;
+    let mut parts: Vec<String> = labels.iter().take(SHOWN).map(|l| short_label(l)).collect();
+    if labels.len() > SHOWN {
+        parts.push(format!("... ({} in all)", labels.len()));
+    }
+    parts.join(", ")
+}
+
+/// A label of at most 40 characters (longer ones end in "...").
+fn short_label(label: &str) -> String {
+    const MAX_CHARS: usize = 40;
+    if label.chars().count() <= MAX_CHARS {
+        label.to_string()
+    } else {
+        format!("{}...", label.chars().take(MAX_CHARS).collect::<String>())
+    }
 }
 
 /// Subtract `g g' / p_i` from `hess` for a score `g` that is zero except at the
@@ -643,9 +734,57 @@ fn subtract_scaled_outer(hess: &mut Array2<f64>, idx: &[usize], val: &[f64], p_i
 mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
+    use crate::test_support::load_case;
     use ndarray::array;
-    use p2a_validation::{Check, Tol};
+    use p2a_validation::{Case, Check, Tol};
     use polars::prelude::*;
+
+    /// Case data for tests that are not R-pinned (not registered; see the plan's
+    /// test-placement rule).
+    fn ordered_data() -> Dataset {
+        load_case("disc_ordered").1
+    }
+
+    /// Rows 1-12 of `disc_ordered` (7, 3 and 2 rows of categories 1, 2, 3).
+    fn ordered_head() -> Dataset {
+        Dataset::new(ordered_data().df().head(Some(12)))
+    }
+
+    fn cfg(link: OrderedModelType, levels: Option<&[&str]>) -> OrderedConfig {
+        OrderedConfig {
+            link,
+            levels: levels.map(|l| l.iter().map(|s| s.to_string()).collect()),
+            ..OrderedConfig::default()
+        }
+    }
+
+    fn counts(r: &OrderedResult) -> Vec<f64> {
+        r.category_counts.iter().map(|&c| c as f64).collect()
+    }
+
+    fn with_column(ds: &Dataset, col: Column) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(col).unwrap();
+        Dataset::new(df)
+    }
+
+    fn invalid_message<T: std::fmt::Debug>(r: EconResult<T>) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// The fit with polr's level order (the case's `counts` names, the sorted labels
+    /// c001, c002, ...): the outcome is text, which needs `levels` (ECON-19).
+    fn fit_j(case: &Case, ds: &Dataset, link: OrderedModelType) -> OrderedResult {
+        let config = OrderedConfig {
+            link,
+            levels: Some(case.names("counts").to_vec()),
+            ..OrderedConfig::default()
+        };
+        run_ordered_model_with(ds, "y", &["x"], &config).unwrap()
+    }
 
     /// RF-31: with 16 or more categories the Newton step went through faer 0.22's
     /// full-pivot LU, which returned NaN, and the NaN fit was reported as converged.
@@ -653,10 +792,10 @@ mod tests {
     /// validation/methods/discrete_newton.json), so this pins n, the category counts
     /// and the null log-likelihood, and requires finite estimates and an honest
     /// convergence flag.
-    fn pin_ordered(case: &p2a_validation::Case, ds: &Dataset) {
+    fn pin_ordered(case: &Case, ds: &Dataset) {
         for (link, r) in [
-            ("logit", run_ordered_logit(ds, "y", &["x"]).unwrap()),
-            ("probit", run_ordered_probit(ds, "y", &["x"]).unwrap()),
+            ("logit", fit_j(case, ds, OrderedModelType::Logit)),
+            ("probit", fit_j(case, ds, OrderedModelType::Probit)),
         ] {
             let n = r.n_obs;
             let finite = r
@@ -680,11 +819,10 @@ mod tests {
             // deviation ECON-4: coefficients, thresholds and log-likelihood vs
             // <link>_coef/_zeta/_loglik (T2-WP10)
             // deviation ECON-5: standard errors are the 0.1 placeholder (T2-WP10)
-            let counts: Vec<f64> = r.category_counts.iter().map(|&c| c as f64).collect();
             assert_eq!(r.thresholds.len(), r.categories.len() - 1);
             Check::new(case)
                 .scalar("n", n as f64, Tol::exact())
-                .named("counts", &r.categories, &counts, Tol::exact())
+                .named("counts", &r.categories, &counts(&r), Tol::exact())
                 .scalar("null_loglik", r.log_likelihood_null, Tol::stat(n))
                 .finish();
         }
@@ -731,18 +869,18 @@ mod tests {
     /// counts and the null log-likelihood do not depend on the scale of x.
     #[test]
     fn test_validate_ordered_j5_regressor_scale() {
-        type Fit = fn(&Dataset, &str, &[&str]) -> EconResult<OrderedResult>;
-        let fits: [(&str, Fit); 2] = [("logit", run_ordered_logit), ("probit", run_ordered_probit)];
         let (case, ds) = crate::test_support::load_case("disc_polr_j5");
         let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs();
-        for (link, fit) in fits {
-            let base = fit(&ds, "y", &["x"]).unwrap();
+        for (link, model) in [
+            ("logit", OrderedModelType::Logit),
+            ("probit", OrderedModelType::Probit),
+        ] {
+            let base = fit_j(&case, &ds, model);
             for scale in [1e4, 1e6] {
-                let r = fit(&with_x_scaled(&ds, scale), "y", &["x"]).unwrap();
-                let counts: Vec<f64> = r.category_counts.iter().map(|&c| c as f64).collect();
+                let r = fit_j(&case, &with_x_scaled(&ds, scale), model);
                 Check::new(&case)
                     .scalar("n", r.n_obs as f64, Tol::exact())
-                    .named("counts", &r.categories, &counts, Tol::exact())
+                    .named("counts", &r.categories, &counts(&r), Tol::exact())
                     .scalar("null_loglik", r.log_likelihood_null, Tol::stat(r.n_obs))
                     .finish();
                 let want = base.coefficients[0] / scale;
@@ -780,14 +918,160 @@ mod tests {
         pin_ordered(&case, &ds);
     }
 
-    fn create_ordered_dataset() -> Dataset {
-        let df = df! {
-            "y" => ["Low", "Low", "Low", "Medium", "Medium", "Medium", "High", "High", "High", "High"],
-            "x" => [1.0, 2.0, 1.5, 4.0, 5.0, 4.5, 7.0, 8.0, 9.0, 8.5]
-        }
-        .unwrap();
-        Dataset::new(df)
+    // ---- category order, levels and missing values (ECON-19, ECON-12) ----------------
+
+    /// 13 integer levels -2..10 are ordered by value (R factor()), not as strings
+    /// ("-1" < "-2", "10" < "2").
+    #[test]
+    fn test_validate_ordered_logit_integer_levels_in_numeric_order() {
+        let (case, ds) = load_case("disc_ordered");
+        let r = run_ordered_logit(&ds, "y_wide", &["x1", "x2"]).unwrap();
+        let want: Vec<String> = case
+            .vector("wide_levels")
+            .iter()
+            .map(|&v| format!("{}", v as i64))
+            .collect();
+        assert_eq!(r.categories, want);
+        Check::new(&case)
+            .vector("wide_counts", &counts(&r), Tol::exact())
+            .finish();
     }
+
+    /// An Enum outcome keeps its declared order (low < mid < high), which is not the
+    /// alphabetical one.
+    #[test]
+    fn test_validate_ordered_logit_enum_outcome_uses_declared_order() {
+        let (case, ds) = load_case("disc_ordered");
+        let declared = FrozenCategories::new(["low", "mid", "high"]).unwrap();
+        let y_enum = ds
+            .column("y_label")
+            .unwrap()
+            .as_materialized_series()
+            .strict_cast(&DataType::from_frozen_categories(declared))
+            .unwrap()
+            .with_name("y_enum".into());
+        let ds = with_column(&ds, y_enum.into_column());
+        let r = run_ordered_logit(&ds, "y_enum", &["x1", "x2"]).unwrap();
+        assert_eq!(r.categories, ["low", "mid", "high"]);
+        Check::new(&case)
+            .vector("logit_counts", &counts(&r), Tol::exact())
+            .finish();
+    }
+
+    /// Rows with a missing outcome or regressor are dropped jointly (polr: na.omit)
+    /// and reported; a missing outcome is not a category.
+    #[test]
+    fn test_validate_ordered_logit_missing_rows_dropped() {
+        let (case, ds) = load_case("disc_ordered");
+        let r = run_ordered_logit(&ds, "y_na", &["x1_na", "x2"]).unwrap();
+        assert_eq!(
+            r.missing.by_column,
+            [("y_na".to_string(), 4), ("x1_na".to_string(), 3)]
+        );
+        assert_eq!(r.missing.n_total, 400);
+        assert_eq!(r.categories, ["1", "2", "3"]);
+        let text = r.to_string();
+        assert!(
+            text.contains("Missing values: 7 of 400 rows dropped"),
+            "{text}"
+        );
+        Check::new(&case)
+            .scalar("na_n_used", r.n_obs as f64, Tol::exact())
+            .scalar("na_n_dropped", r.missing.n_dropped as f64, Tol::exact())
+            .scalar(
+                "na_missing_y",
+                r.missing.by_column[0].1 as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "na_missing_x1",
+                r.missing.by_column[1].1 as f64,
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    /// A text outcome has no order the program could know: an error that lists the
+    /// observed labels and asks for `levels`, instead of an alphabetical fit.
+    #[test]
+    fn test_ordered_text_outcome_requires_levels() {
+        let ds = ordered_data();
+        let message = invalid_message(run_ordered_logit(&ds, "y_label", &["x1", "x2"]));
+        for part in ["'y_label'", "high", "low", "mid", "levels"] {
+            assert!(message.contains(part), "{part}: {message}");
+        }
+    }
+
+    #[test]
+    fn test_ordered_levels_are_validated() {
+        let ds = ordered_data();
+        let fit = |levels: &[&str]| {
+            run_ordered_model_with(
+                &ds,
+                "y_label",
+                &["x1", "x2"],
+                &cfg(OrderedModelType::Logit, Some(levels)),
+            )
+        };
+        // An observed label missing from `levels` (the message names the label).
+        let message = invalid_message(fit(&["low", "mid"]));
+        assert!(message.contains("'high'"), "{message}");
+        let message = invalid_message(fit(&["low", "mid", "top", "high"]));
+        assert!(
+            message.contains("'top'") && message.contains("no observations"),
+            "{message}"
+        );
+        let message = invalid_message(fit(&["low", "mid", "mid", "high"]));
+        assert!(
+            message.contains("'mid'") && message.contains("more than once"),
+            "{message}"
+        );
+        let message = invalid_message(fit(&[]));
+        assert!(message.contains("levels"), "{message}");
+
+        let r = fit(&["low", "mid", "high"]).unwrap();
+        assert_eq!(r.categories, ["low", "mid", "high"]);
+        let integer = run_ordered_logit(&ds, "y", &["x1", "x2"]).unwrap();
+        assert_eq!(r.category_counts, integer.category_counts);
+    }
+
+    /// An Int64 outcome and the same values as Float64 are the same model.
+    #[test]
+    fn test_na_ordered_float_outcome_equals_int64() {
+        let ds = ordered_data();
+        let y_f64 = ds
+            .column("y")
+            .unwrap()
+            .as_materialized_series()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .with_name("y_f64".into());
+        let ds = with_column(&ds, y_f64.into_column());
+        let a = run_ordered_logit(&ds, "y", &["x1", "x2"]).unwrap();
+        let b = run_ordered_logit(&ds, "y_f64", &["x1", "x2"]).unwrap();
+        assert_eq!(a.categories, b.categories);
+        assert_eq!(a.category_counts, b.category_counts);
+        assert_eq!(a.coefficients, b.coefficients);
+        assert_eq!(a.thresholds, b.thresholds);
+    }
+
+    #[test]
+    fn test_na_ordered_column_errors() {
+        let ds = ordered_data();
+        match run_ordered_logit(&ds, "y", &["y_label"]) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "y_label"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        for (y, x) in [("nope", "x1"), ("y", "nope")] {
+            match run_ordered_logit(&ds, y, &[x]) {
+                Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "nope"),
+                other => panic!("expected ColumnNotFound, got {other:?}"),
+            }
+        }
+        invalid_message(run_ordered_logit(&ds, "y", &[]));
+    }
+
+    // ---- resource bounds (T0-WP14) ------------------------------------------------------
 
     fn cancelled() -> Budget {
         let t = CancelToken::new();
@@ -864,19 +1148,24 @@ mod tests {
 
     #[test]
     fn test_ordered_stops_when_cancelled() {
-        let ds = create_ordered_dataset();
-        let e =
-            resource::with_budget(cancelled(), || run_ordered_logit(&ds, "y", &["x"])).unwrap_err();
+        let ds = ordered_head();
+        let e = resource::with_budget(cancelled(), || run_ordered_logit(&ds, "y", &["x1", "x2"]))
+            .unwrap_err();
         assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
     }
 
     #[test]
     fn test_ordered_hessian_respects_alloc_ceiling() {
-        // n_params = 1 + 2 = 3; working set 3*3*6*8 = 432 bytes > 256
-        let ds = create_ordered_dataset();
-        let e = resource::with_alloc_ceiling(Some(256), || run_ordered_logit(&ds, "y", &["x"]))
-            .unwrap_err();
-        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+        // n_params = 2 + 2 = 4; working set 4*4*6*8 = 768 bytes > 512, while the
+        // 12-row columns (96 bytes) and design (192 bytes) fit.
+        let ds = ordered_head();
+        let e =
+            resource::with_alloc_ceiling(Some(512), || run_ordered_logit(&ds, "y", &["x1", "x2"]))
+                .unwrap_err();
+        match e {
+            EconError::ResourceLimit(m) => assert!(m.contains("Hessian"), "{m}"),
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
     }
 
     #[test]
@@ -900,406 +1189,5 @@ mod tests {
         }
         subtract_scaled_outer(&mut base, &idx, &val, p_i);
         assert_eq!(base, dense); // bitwise: skipped entries would only subtract +-0.0
-    }
-
-    #[test]
-    fn test_ordered_logit_basic() {
-        let dataset = create_ordered_dataset();
-        let result = run_ordered_logit(&dataset, "y", &["x"]).unwrap();
-
-        assert_eq!(result.n_obs, 10);
-        assert_eq!(result.categories.len(), 3);
-        assert_eq!(result.thresholds.len(), 2);
-        assert_eq!(result.model_type, OrderedModelType::Logit);
-        assert!(result.coefficients[0] > 0.0);
-    }
-
-    #[test]
-    fn test_ordered_probit_basic() {
-        let dataset = create_ordered_dataset();
-        let result = run_ordered_probit(&dataset, "y", &["x"]).unwrap();
-
-        assert_eq!(result.model_type, OrderedModelType::Probit);
-        assert_eq!(result.thresholds.len(), 2);
-        assert!(result.coefficients[0] > 0.0);
-    }
-
-    #[test]
-    fn test_ordered_thresholds_ordered() {
-        let dataset = create_ordered_dataset();
-        let result = run_ordered_logit(&dataset, "y", &["x"]).unwrap();
-
-        for i in 1..result.thresholds.len() {
-            assert!(result.thresholds[i] > result.thresholds[i - 1]);
-        }
-    }
-
-    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
-    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "{what}: pin these values: {actual:?}"
-        );
-        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-            assert!(
-                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
-                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
-            );
-        }
-    }
-
-    /// 60 noisy rows with two regressors and four ordered categories
-    /// (14, 15, 15 and 16 rows).
-    fn create_ordered_dataset_60() -> Dataset {
-        let mut y: Vec<&str> = Vec::with_capacity(60);
-        let mut x1: Vec<f64> = Vec::with_capacity(60);
-        let mut x2: Vec<f64> = Vec::with_capacity(60);
-        for i in 0..60usize {
-            let a = ((i * 37) % 23) as f64 / 4.0;
-            let b = ((i * 11) % 7) as f64 - 3.0 + 0.05 * i as f64;
-            let z = 0.6 * a - 0.4 * b + (((i * 7919) % 101) as f64 / 101.0 - 0.5);
-            y.push(if z < 0.0 {
-                "a"
-            } else if z < 1.0 {
-                "b"
-            } else if z < 2.0 {
-                "c"
-            } else {
-                "d"
-            });
-            x1.push(a);
-            x2.push(b);
-        }
-        for cat in ["a", "b", "c", "d"] {
-            assert!(y.contains(&cat), "category {cat} missing");
-        }
-        Dataset::new(df! { "y" => y, "x1" => x1, "x2" => x2 }.unwrap())
-    }
-
-    fn ordered_outputs(r: &OrderedResult) -> Vec<f64> {
-        let mut v = r.coefficients.clone();
-        v.extend(&r.thresholds);
-        v.push(r.log_likelihood);
-        v.push(r.iterations as f64);
-        v
-    }
-
-    /// Characterisation test recorded from the code before the T0-WP14 resource
-    /// bounds; the refactor must not move these numbers.
-    ///
-    /// None of the three fits converges: each stops at max_iter = 100, so these
-    /// are characterisations of a non-converged, step-clamped Newton iterate,
-    /// not of an MLE. The 10-row `create_ordered_dataset()` is separated by x
-    /// (and its labels sort as High < Low < Medium, ECON-19). The 60-row noisy
-    /// fit has overlapping categories, but does not converge either, because
-    /// the beta score has the wrong sign and the outer-product Hessian divides
-    /// by p_i twice (ECON-4, Tier 2); fixing that will move these numbers. The
-    /// 1e-6 ridge keeps the iterate well conditioned: raising every third x
-    /// value by one ulp (each of the three offsets in turn) moves no pinned
-    /// value by more than 3e-14 relative.
-    #[test]
-    fn test_pinned_ordered_outputs() {
-        let ds = create_ordered_dataset();
-        let mut v = ordered_outputs(&run_ordered_logit(&ds, "y", &["x"]).unwrap());
-        v.extend(ordered_outputs(
-            &run_ordered_probit(&ds, "y", &["x"]).unwrap(),
-        ));
-        let ds60 = create_ordered_dataset_60();
-        v.extend(ordered_outputs(
-            &run_ordered_logit(&ds60, "y", &["x1", "x2"]).unwrap(),
-        ));
-        assert_pinned(
-            "ordered",
-            &v,
-            &[
-                0.3752165575229469,
-                -1.2899202006035233,
-                1.2960992251299421,
-                -20.825411738564778,
-                100.0,
-                0.14718029310181532,
-                -1.6730261733593013,
-                0.4754700045772722,
-                -28.113493958327997,
-                100.0,
-                -0.8444065857208708,
-                0.48623222352263373,
-                -1.4516923297598314,
-                -0.28377059830396983,
-                4.250486294194607,
-                -205.37544947447003,
-                100.0,
-            ],
-        );
-    }
-
-    // ==========================================================================
-    // R Validation Tests
-    // ==========================================================================
-
-    #[test]
-    fn test_validate_ordered_logit_vs_r() {
-        // R reference: MASS::polr(y ~ x, method = "logistic")
-        // R: coef = 1.0576, thresholds = [-1.1299, 0.6361]
-        // R: log-likelihood = -194.18
-
-        // Generate ordered outcome data similar to R's set.seed(42)
-        // Latent: y* = 0.5 + 1.2*x + logistic_error
-        // Cut points: (-Inf, -1], (-1, 1], (1, Inf)
-
-        let n = 200;
-        let mut y_vec: Vec<&str> = Vec::with_capacity(n);
-        let mut x_vec: Vec<f64> = Vec::with_capacity(n);
-
-        // Simulate data with deterministic pattern approximating R's generation
-        for i in 0..n {
-            // Pseudo-normal x using Box-Muller approximation
-            let t = i as f64 / n as f64;
-            let x: f64 = (t * 6.0 - 3.0) * 0.7 + 0.5 * (i as f64 * 0.31415).sin();
-            x_vec.push(x);
-
-            // Latent variable
-            let latent = 0.5 + 1.2 * x + (i as f64 * 0.7).sin() * 2.0;
-
-            // Cut into categories
-            let cat = if latent < -1.0 {
-                "Low"
-            } else if latent < 1.0 {
-                "Medium"
-            } else {
-                "High"
-            };
-            y_vec.push(cat);
-        }
-
-        let df = df! {
-            "y" => y_vec,
-            "x" => x_vec
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_ordered_logit(&dataset, "y", &["x"]).unwrap();
-
-        // Basic structure checks
-        assert_eq!(result.n_obs, n);
-        assert_eq!(result.categories.len(), 3);
-        assert_eq!(result.thresholds.len(), 2);
-        assert_eq!(result.model_type, OrderedModelType::Logit);
-
-        // Coefficient should be positive (higher x -> higher category)
-        assert!(
-            result.coefficients[0] > 0.0,
-            "Coefficient should be positive: {}",
-            result.coefficients[0]
-        );
-
-        // Thresholds should be ordered
-        assert!(
-            result.thresholds[1] > result.thresholds[0],
-            "Thresholds should be ordered: {} < {}",
-            result.thresholds[0],
-            result.thresholds[1]
-        );
-
-        // Log-likelihood should be finite and negative
-        assert!(
-            result.log_likelihood.is_finite(),
-            "Log-likelihood should be finite"
-        );
-        assert!(
-            result.log_likelihood < 0.0,
-            "Log-likelihood should be negative"
-        );
-
-        // AIC should be positive
-        assert!(result.aic > 0.0, "AIC should be positive");
-    }
-
-    #[test]
-    fn test_validate_ordered_probit_vs_r() {
-        // R reference: MASS::polr(y ~ x, method = "probit")
-        // R: coef = 0.6597, thresholds = [-0.7257, 0.2877]
-        // R: log-likelihood = -191.13
-
-        let n = 200;
-        let mut y_vec: Vec<&str> = Vec::with_capacity(n);
-        let mut x_vec: Vec<f64> = Vec::with_capacity(n);
-
-        for i in 0..n {
-            let t = i as f64 / n as f64;
-            let x: f64 = (t * 6.0 - 3.0) * 0.7 + 0.3 * (i as f64 * 0.31415).sin();
-            x_vec.push(x);
-
-            // Latent with normal-like error
-            let latent = 0.3 + 0.8 * x + (i as f64 * 0.5).sin() * 1.5;
-
-            let cat = if latent < -0.5 {
-                "Low"
-            } else if latent < 0.5 {
-                "Medium"
-            } else {
-                "High"
-            };
-            y_vec.push(cat);
-        }
-
-        let df = df! {
-            "y" => y_vec,
-            "x" => x_vec
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_ordered_probit(&dataset, "y", &["x"]).unwrap();
-
-        // Basic structure checks
-        assert_eq!(result.n_obs, n);
-        assert_eq!(result.model_type, OrderedModelType::Probit);
-
-        // Coefficient should be positive
-        assert!(
-            result.coefficients[0] > 0.0,
-            "Probit coefficient should be positive: {}",
-            result.coefficients[0]
-        );
-
-        // Thresholds should be ordered
-        assert!(
-            result.thresholds[1] > result.thresholds[0],
-            "Thresholds should be ordered"
-        );
-
-        // Log-likelihood should be finite
-        assert!(result.log_likelihood.is_finite());
-    }
-
-    #[test]
-    fn test_validate_ordered_logit_multiple_predictors() {
-        // R reference with multiple predictors
-        // R: polr(y ~ x1 + x2, method = "logistic")
-
-        let n = 300;
-        let mut y_vec: Vec<&str> = Vec::with_capacity(n);
-        let mut x1_vec: Vec<f64> = Vec::with_capacity(n);
-        let mut x2_vec: Vec<f64> = Vec::with_capacity(n);
-
-        for i in 0..n {
-            let t = i as f64 / n as f64;
-            let x1: f64 = (t * 6.0 - 3.0) * 0.6 + 0.4 * (i as f64 * 0.217).sin();
-            let x2: f64 = (t * 5.0 - 2.5) * 0.5 + 0.3 * (i as f64 * 0.314).cos();
-            x1_vec.push(x1);
-            x2_vec.push(x2);
-
-            // Latent: y* = 0.5*x1 + 0.8*x2 + error
-            let latent = 0.5 * x1 + 0.8 * x2 + (i as f64 * 0.4).sin() * 2.0;
-
-            let cat = if latent < -1.5 {
-                "Very Low"
-            } else if latent < 0.0 {
-                "Low"
-            } else if latent < 1.5 {
-                "High"
-            } else {
-                "Very High"
-            };
-            y_vec.push(cat);
-        }
-
-        let df = df! {
-            "y" => y_vec,
-            "x1" => x1_vec,
-            "x2" => x2_vec
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_ordered_logit(&dataset, "y", &["x1", "x2"]).unwrap();
-
-        // Structure checks
-        assert_eq!(result.n_obs, n);
-        assert_eq!(result.categories.len(), 4);
-        assert_eq!(result.thresholds.len(), 3);
-        assert_eq!(result.coefficients.len(), 2);
-
-        // Both coefficients should be positive
-        assert!(
-            result.coefficients[0] > 0.0,
-            "x1 coefficient should be positive: {}",
-            result.coefficients[0]
-        );
-        assert!(
-            result.coefficients[1] > 0.0,
-            "x2 coefficient should be positive: {}",
-            result.coefficients[1]
-        );
-
-        // Thresholds should be ordered
-        for i in 1..result.thresholds.len() {
-            assert!(
-                result.thresholds[i] > result.thresholds[i - 1],
-                "Thresholds should be ordered"
-            );
-        }
-    }
-
-    #[test]
-    fn test_validate_ordered_probit_vs_logit_scaling() {
-        // Probit and Logit coefficients should have consistent relationship
-        // Theoretically: Logit coef ≈ Probit coef * 1.7 (or pi/sqrt(3))
-        // In practice this varies significantly based on data
-
-        let n = 200;
-        let mut y_vec: Vec<&str> = Vec::with_capacity(n);
-        let mut x_vec: Vec<f64> = Vec::with_capacity(n);
-
-        for i in 0..n {
-            let x: f64 = (i as f64 / 50.0) - 2.0;
-            x_vec.push(x);
-
-            // Moderate relationship with x and some overlap
-            let latent = x * 1.5 + (i as f64 * 0.5).sin() * 1.0;
-            let cat = if latent < -0.8 {
-                "Low"
-            } else if latent < 0.8 {
-                "Medium"
-            } else {
-                "High"
-            };
-            y_vec.push(cat);
-        }
-
-        let df = df! {
-            "y" => y_vec,
-            "x" => x_vec
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let logit_result = run_ordered_logit(&dataset, "y", &["x"]).unwrap();
-        let probit_result = run_ordered_probit(&dataset, "y", &["x"]).unwrap();
-
-        // Both should have positive coefficients (x increases category)
-        assert!(
-            logit_result.coefficients[0] > 0.0,
-            "Logit coef should be positive: {}",
-            logit_result.coefficients[0]
-        );
-        assert!(
-            probit_result.coefficients[0] > 0.0,
-            "Probit coef should be positive: {}",
-            probit_result.coefficients[0]
-        );
-
-        // Logit coefficient should generally be larger than probit
-        // (logistic has fatter tails than normal)
-        // The exact ratio varies, so just check relative ordering
-        assert!(
-            logit_result.coefficients[0] > probit_result.coefficients[0] * 0.5,
-            "Logit coef ({:.4}) should be at least half of probit ({:.4})",
-            logit_result.coefficients[0],
-            probit_result.coefficients[0]
-        );
     }
 }

@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "discrete_ordered_logit",
+      "name": "Ordered logit (proportional odds), MASS::polr parameterisation",
+      "category": "econometrics",
+      "reference": "MASS::polr(method = 'logistic', control = list(reltol = 1e-15)) polished to the exact MLE; observed-information SEs (analytic Hessian = numDeriv::hessian)",
+      "doc": "validation/econometrics/ordered.md",
+      "cases": ["disc_ordered"],
+      "tests": [
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_integer_levels_in_numeric_order",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_enum_outcome_uses_declared_order",
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_missing_rows_dropped"
+      ],
+      "quantities": ["category order and counts", "rows used / dropped (na.omit)"],
+      "tolerance": "counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
