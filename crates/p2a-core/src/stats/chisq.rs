@@ -1495,10 +1495,11 @@ mod tests {
 
     #[test]
     fn test_chisq_gof_named_matches_numeric_categories_by_value() {
-        // A numeric column: "2.0" names the level "2", a key given twice by value is refused,
-        // and an unobserved face counts 0 (R: chisq.test(table(factor(code, levels = c(2, 10,
-        // 33))), p = c(.5, .4, .1))).
-        let (_case, ds) = crate::test_support::load_case("stat_contingency_na_codes");
+        // A numeric (Int64) column with one missing code: "2.0" names the level "2", a key
+        // given twice by value is refused, and the declared "33" that never occurs counts 0
+        // (R: chisq.test(table(factor(code, levels = c(2, 10, 33))), p = c(.5, .4, .1))).
+        let code = [10, 2, 10, 2, 2, 10, 2, 10, 10, 2, -1, 2].map(|c| (c > 0).then_some(c as i64));
+        let ds = Dataset::new(df!("code" => code).unwrap());
         let r = run_chisq_gof_with(
             &ds,
             "code",
