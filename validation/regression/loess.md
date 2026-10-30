@@ -157,7 +157,7 @@ boolean columns are numbers, a text column is `NonNumericColumn`, an absent one
 
 | Function | Missing x or y | R behaviour followed |
 |---|---|---|
-| `run_loess` | row dropped; `LoessResult::missing`, x then y, and a last `Missing values:` line | `loess(y ~ x)` (`na.omit`) uses the 19 complete of 20 rows |
+| `run_loess` | row dropped; `LoessResult::missing`, x then y, and a last `Missing values:` line | R's `loess(y ~ x)` uses `na.omit` (incomplete rows dropped) |
 | `quantreg` / `run_quantreg` | row dropped; `QuantRegResult::missing`, y then the regressors, and a `Missing values:` line | `quantreg::rq` (`na.omit`) |
 | `run_smooth_spline` | `NullValues` naming the first column (x, then y) | `smooth.spline`: "missing or infinite values in inputs are not allowed" |
 | `run_glmnet`, `run_cv_glmnet`, `run_ridge`, `run_lasso` | `NullValues` naming the column | `glmnet`: "missing value where TRUE/FALSE needed" |
