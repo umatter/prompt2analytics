@@ -179,3 +179,75 @@ async fn test_validate_mcp_hypothesis_wilcoxon_paired_na() {
         .finish();
     assert!(t.contains("Missing values: 2 of 10 rows dropped"), "{t}");
 }
+
+#[tokio::test]
+async fn test_validate_mcp_hypothesis_friedman_na() {
+    use p2a_core::data::{DataLoader, Dataset};
+    use p2a_core::polars::prelude::*;
+
+    let case = Case::load("stat_friedman_quade");
+    let (session, server) = session_with("stat_friedman_quade");
+    let args = |value: &str| {
+        json!({"dataset": "friedman_quade", "value": value, "treatment": "treat",
+               "block": "block"})
+    };
+    let v = json_of(&call(&server, &session, "hypothesis_friedman", args("y")).await);
+    let treatments: Vec<&str> = v["treatment_statistics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["treatment"].as_str().unwrap())
+        .collect();
+    assert_eq!(treatments, ["A", "B", "C"]);
+    let na = json_of(&call(&server, &session, "hypothesis_friedman", args("y_na")).await);
+    Check::new(&case)
+        .scalar("friedman_q", num(&v["statistic"]), Tol::stat(24))
+        .scalar("friedman_df", num(&v["df"]), Tol::exact())
+        .scalar("friedman_p", num(&v["p_value"]), Tol::p_value(24))
+        .scalar("na_friedman_q", num(&na["statistic"]), Tol::stat(24))
+        .scalar("na_n_blocks", num(&na["n_blocks"]), Tol::exact())
+        .finish();
+
+    // A replicated (block, treatment) cell is refused, as friedman.test refuses it.
+    let df = DataLoader::load_csv(case.dataset_path()).unwrap();
+    let extra = df! {
+        "y" => [99i64], "y_na" => [Some(99i64)], "treat" => ["A"], "block" => ["S1"],
+    }
+    .unwrap();
+    let dup = Dataset::new(df.vstack(&extra).unwrap());
+    let (session, server) = session_with_datasets(vec![("friedman_dup", dup)]);
+    let r = call(
+        &server,
+        &session,
+        "hypothesis_friedman",
+        json!({"dataset": "friedman_dup", "value": "y", "treatment": "treat", "block": "block"}),
+    )
+    .await;
+    let t = format!("{}\n{}", text(&r), r.error.clone().unwrap_or_default());
+    assert!(!r.success, "{t}");
+    assert!(
+        t.contains("not an unreplicated complete block design"),
+        "{t}"
+    );
+}
+
+#[tokio::test]
+async fn test_validate_mcp_hypothesis_quade_na() {
+    let case = Case::load("stat_friedman_quade");
+    let (session, server) = session_with("stat_friedman_quade");
+    let args = |value: &str| {
+        json!({"dataset": "friedman_quade", "value": value, "treatment": "treat",
+               "block": "block"})
+    };
+    let v = json_of(&call(&server, &session, "hypothesis_quade", args("y")).await);
+    let na = json_of(&call(&server, &session, "hypothesis_quade", args("y_na")).await);
+    Check::new(&case)
+        .scalar("quade_f", num(&v["statistic"]), Tol::stat(24))
+        .scalar("quade_df1", num(&v["df1"]), Tol::exact())
+        .scalar("quade_df2", num(&v["df2"]), Tol::exact())
+        .scalar("quade_p", num(&v["p_value"]), Tol::p_value(24))
+        .scalar("na_quade_complete_f", num(&na["statistic"]), Tol::stat(24))
+        .scalar("na_quade_complete_df2", num(&na["df2"]), Tol::exact())
+        .scalar("na_quade_complete_p", num(&na["p_value"]), Tol::p_value(24))
+        .finish();
+}

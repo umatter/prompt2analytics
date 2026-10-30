@@ -102,6 +102,53 @@ friedman.test(RoundingTimes)
 | has_ties | TRUE | TRUE | PASS |
 | tie_correction | 0.75 | 0.75 | PASS |
 
+## Missing values, design checks and the R case
+
+`run_friedman_test(dataset, value, treatment, block)` pivots the long-format data through
+`unreplicated_blocks` (`crates/p2a-core/src/stats/friedman.rs`, shared by Friedman and Quade),
+which applies R's rules in R's order:
+
+1. The value column must be numeric: integers are accepted, a text column is
+   `NonNumericColumn`, an absent column `ColumnNotFound`.
+2. A missing treatment or block label is an error, "NA's are not allowed in 'groups' or
+   'blocks'" (the treatment column is checked first, then the block column), whatever the
+   response of that row is.
+3. A (block, treatment) cell with more than one observation, or with none, is "not an
+   unreplicated complete block design" (the message names the block and the treatment).
+4. A block with a missing response is dropped, as R's `complete.cases` on the block x
+   treatment table, and reported in `missing` (all rows of the block count as dropped;
+   `by_column` counts the missing response cells).
+
+Before T2-WP07 a replicated cell kept its last value without notice, a block without some
+treatment was skipped without notice, a missing label became a block or treatment named
+`null`, text labels kept their quotes and an Int64 response was refused.
+
+**R case** `stat_friedman_quade` (`validation/r/cases/stats_anova.R`, dataset
+`validation/datasets/generated/friedman_quade.csv`): 8 blocks x 3 treatments with an integer
+response `y` (Int64 in polars), and `y_na` missing in row 5 (block S2). The case also checks
+with `stopifnot` that R refuses a duplicate (S1, A) row, a missing block label and an absent
+cell, in both tests.
+
+```r
+friedman.test(d$y, d$treat, d$block); friedman.test(d$y_na, d$treat, d$block)
+```
+
+| Quantity | R value |
+|---|---|
+| Friedman chi-squared / df / p | 13.03448275862069 / 2 / 0.0014777400088913251 |
+| with `y_na` (block S2 dropped): chi-squared / p | 11.12 / 0.003848776397610543 |
+| complete blocks with `y_na` | 7 |
+
+**Rust tests** (`crates/p2a-core/src/stats/friedman.rs`):
+- `stats::friedman::tests::test_validate_friedman_quade_friedman` (statistic `Tol::stat(24)`, df
+  exact, p `Tol::p_value(24)`, 7 blocks with `y_na`, 3 of 24 rows dropped)
+- `stats::friedman::tests::test_validate_friedman_refuses_designs_r_refuses` (duplicate cell,
+  missing block label, missing treatment label, absent cell, missing label and response in one row)
+- `stats::friedman::tests::test_validate_na_friedman_dtypes_and_errors` (Int64 equals Float64;
+  text and absent columns)
+- MCP: `test_validate_mcp_hypothesis_friedman_na` (`crates/p2a-mcp/tests/tier2/wp07_anova.rs`;
+  includes the refusal of a replicated cell)
+
 ## Numerical Precision Summary
 
 - Q statistics match R within 0.01

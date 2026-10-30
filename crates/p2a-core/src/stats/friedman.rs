@@ -12,9 +12,15 @@
 //!   New York: John Wiley & Sons. Pages 139-146.
 //! - R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/friedman.test.html
 
-use crate::data::Dataset;
-use crate::errors::{EconError, EconResult};
+use std::collections::HashMap;
+
+use polars::prelude::DataFrame;
 use serde::{Deserialize, Serialize};
+
+use crate::data::Dataset;
+use crate::data::columns::{MissingSummary, factor_options, numeric_options};
+use crate::errors::{EconError, EconResult};
+use crate::resource;
 
 /// Result of the Friedman rank sum test
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +45,10 @@ pub struct FriedmanResult {
     pub has_ties: bool,
     /// Tie correction factor (1.0 if no ties)
     pub tie_correction: f64,
+    /// Rows of the blocks dropped because a response is missing (R drops such blocks);
+    /// empty for the array-level function.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Perform Friedman rank sum test on a matrix of observations.
@@ -182,6 +192,7 @@ pub fn friedman_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResul
         treatment_names: treatment_names.to_vec(),
         has_ties,
         tie_correction,
+        missing: MissingSummary::none(n_blocks * n_treatments),
     })
 }
 
@@ -236,7 +247,140 @@ fn chi_squared_p_value(statistic: f64, df: usize) -> f64 {
     1.0 - chi2.cdf(statistic)
 }
 
-/// Run Friedman test on a Dataset with long-format data.
+/// A long-format block design pivoted to one row per complete block, by R's rules.
+pub(crate) struct UnreplicatedBlocks {
+    /// One row per complete block (block level order), one column per treatment (treatment
+    /// level order).
+    pub rows: Vec<Vec<f64>>,
+    /// Treatment labels, in R `factor()` order.
+    pub treatment_names: Vec<String>,
+    /// Rows of the blocks dropped because a response is missing.
+    pub missing: MissingSummary,
+}
+
+/// At most 40 characters of a label, for error messages.
+fn short_label(label: &str) -> String {
+    let mut shown: String = label.chars().take(40).collect();
+    if label.chars().nth(40).is_some() {
+        shown.push_str("...");
+    }
+    shown
+}
+
+/// Pivot `value ~ group | block` to a block x treatment table with the checks of R's
+/// `friedman.test` and `quade.test`, in R's order:
+///
+/// 1. The value column must be numeric (`NonNumericColumn`; `ColumnNotFound` for an absent
+///    column; `NonFiniteValues` for `±Inf`).
+/// 2. A missing group or block label is an error ("NA's are not allowed in 'groups' or
+///    'blocks'"), checked for the group column first, whatever the response is.
+/// 3. Every (block, treatment) cell must hold exactly one observation: a replicated or an
+///    absent cell is "not an unreplicated complete block design".
+/// 4. A block with a missing response is dropped (R's `complete.cases` on the table) and
+///    reported in `missing`.
+///
+/// `test` ("Friedman test", "Quade test") names the test in the messages. One O(n) pass
+/// builds the cells; the table is allocated only once it is known to be complete, so its
+/// size is the number of rows.
+pub(crate) fn unreplicated_blocks(
+    df: &DataFrame,
+    value_col: &str,
+    group_col: &str,
+    block_col: &str,
+    test: &str,
+) -> EconResult<UnreplicatedBlocks> {
+    let values = numeric_options(df, value_col)?;
+    let (groups, group_levels) = factor_options(df, group_col)?;
+    let (blocks, block_levels) = factor_options(df, block_col)?;
+    for (codes, col) in [(&groups, group_col), (&blocks, block_col)] {
+        let k = codes.iter().filter(|c| c.is_none()).count();
+        if k > 0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "NA's are not allowed in 'groups' or 'blocks' ({test}, as R): column \
+                     '{col}' has {k} missing value(s)"
+                ),
+            });
+        }
+    }
+    let n = values.len();
+    let (n_blocks, n_groups) = (block_levels.len(), group_levels.len());
+    let not_unreplicated = |detail: String| EconError::InvalidSpecification {
+        message: format!("not an unreplicated complete block design ({test}): {detail}"),
+    };
+
+    // (block, treatment) -> row, in one pass.
+    let mut cell_row: HashMap<(u32, u32), usize> = HashMap::new();
+    for (i, (b, g)) in blocks.iter().zip(&groups).enumerate() {
+        let key = (b.unwrap_or(0), g.unwrap_or(0));
+        if cell_row.insert(key, i).is_some() {
+            return Err(not_unreplicated(format!(
+                "block '{}' has more than one observation of treatment '{}'",
+                short_label(&block_levels[key.0 as usize]),
+                short_label(&group_levels[key.1 as usize])
+            )));
+        }
+    }
+    let what = format!("{test} block x treatment table");
+    let cells = resource::checked_len(&[n_blocks, n_groups], &what)?;
+    if cell_row.len() < cells {
+        // The first absent cell in level order: at most n + 1 cells are visited, since every
+        // cell before it is present.
+        for (b, block) in block_levels.iter().enumerate() {
+            for (g, group) in group_levels.iter().enumerate() {
+                if !cell_row.contains_key(&(b as u32, g as u32)) {
+                    return Err(not_unreplicated(format!(
+                        "block '{}' has no observation of treatment '{}'",
+                        short_label(block),
+                        short_label(group)
+                    )));
+                }
+            }
+        }
+    }
+
+    // The table (cells == n here), block-major, then the complete blocks.
+    let mut table: Vec<Option<f64>> = resource::try_vec(cells, None, &what)?;
+    for (&(b, g), &i) in &cell_row {
+        table[b as usize * n_groups + g as usize] = values[i];
+    }
+    let mut rows: Vec<Vec<f64>> = resource::try_with_capacity(n_blocks, &what)?;
+    let mut missing_cells = 0usize;
+    let mut dropped_blocks = 0usize;
+    for block in table.chunks_exact(n_groups.max(1)) {
+        let missing_here = block.iter().filter(|v| v.is_none()).count();
+        if missing_here > 0 {
+            missing_cells += missing_here;
+            dropped_blocks += 1;
+        } else {
+            rows.push(block.iter().map(|v| v.unwrap_or(f64::NAN)).collect());
+        }
+    }
+    let n_dropped = dropped_blocks * n_groups;
+    Ok(UnreplicatedBlocks {
+        rows,
+        treatment_names: group_levels,
+        missing: MissingSummary {
+            n_total: n,
+            n_used: n - n_dropped,
+            n_dropped,
+            by_column: if missing_cells > 0 {
+                vec![(value_col.to_string(), missing_cells)]
+            } else {
+                Vec::new()
+            },
+        },
+    })
+}
+
+/// Run Friedman test on a Dataset with long-format data (R
+/// `friedman.test(value, group, block)`).
+///
+/// The design must be an unreplicated complete block design, as R requires: a missing group
+/// or block label is an error, and so is a (block, treatment) cell with more than one
+/// observation or with none. A block whose response is missing is dropped (as R does) and
+/// reported in `missing`. Integer responses are accepted; treatments follow R `factor()`
+/// order.
 ///
 /// # Arguments
 ///
@@ -254,86 +398,90 @@ pub fn run_friedman_test(
     group_col: &str,
     block_col: &str,
 ) -> EconResult<FriedmanResult> {
-    let df = dataset.df();
-
-    // Extract columns
-    let values = df
-        .column(value_col)
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", value_col, e),
-        })?
-        .f64()
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", value_col, e),
-        })?;
-
-    let groups_col = df
-        .column(group_col)
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", group_col, e),
-        })?;
-
-    let blocks_col = df
-        .column(block_col)
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", block_col, e),
-        })?;
-
-    // Build block -> treatment -> value mapping
-    use std::collections::{BTreeSet, HashMap};
-    let mut block_data: HashMap<String, HashMap<String, f64>> = HashMap::new();
-    let mut treatment_set: BTreeSet<String> = BTreeSet::new();
-
-    let n = df.height();
-    for i in 0..n {
-        let block = blocks_col.get(i).map_err(|e| EconError::NonNumericColumn {
-            column: format!("Error accessing block at row {}: {}", i, e),
-        })?;
-        let block_str = format!("{}", block);
-
-        let group = groups_col.get(i).map_err(|e| EconError::NonNumericColumn {
-            column: format!("Error accessing group at row {}: {}", i, e),
-        })?;
-        let group_str = format!("{}", group);
-
-        if let Some(value) = values.get(i) {
-            treatment_set.insert(group_str.clone());
-            block_data
-                .entry(block_str)
-                .or_default()
-                .insert(group_str, value);
-        }
-    }
-
-    // Convert to matrix format
-    let treatment_names: Vec<String> = treatment_set.into_iter().collect();
-    let mut data: Vec<Vec<f64>> = Vec::new();
-
-    for (_, treatments) in block_data {
-        // Check all treatments are present
-        if treatments.len() != treatment_names.len() {
-            continue; // Skip incomplete blocks
-        }
-
-        let row: Vec<f64> = treatment_names
-            .iter()
-            .filter_map(|t| treatments.get(t).copied())
-            .collect();
-
-        if row.len() == treatment_names.len() {
-            data.push(row);
-        }
-    }
-
-    if data.is_empty() {
+    let blocks = unreplicated_blocks(
+        dataset.df(),
+        value_col,
+        group_col,
+        block_col,
+        "Friedman test",
+    )?;
+    if blocks.rows.is_empty() {
         return Err(EconError::InsufficientData {
             required: 1,
             provided: 0,
             context: "No complete blocks found for Friedman test".to_string(),
         });
     }
+    let mut result = friedman_test(&blocks.rows, &blocks.treatment_names)?;
+    result.missing = blocks.missing;
+    Ok(result)
+}
 
-    friedman_test(&data, &treatment_names)
+/// Frames derived from the case `stat_friedman_quade` (shared by the Friedman and Quade
+/// tests).
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use polars::prelude::*;
+
+    /// The frame with a second (S1, A) row appended: a replicated cell.
+    pub(crate) fn with_duplicate_cell(df: &DataFrame) -> DataFrame {
+        let extra = df! {
+            "y" => [99i64],
+            "y_na" => [Some(99i64)],
+            "treat" => ["A"],
+            "block" => ["S1"],
+        }
+        .unwrap();
+        df.vstack(&extra).unwrap()
+    }
+
+    /// The frame with the text column `col` missing in row `row`.
+    pub(crate) fn with_null_label(df: &DataFrame, col: &str, row: usize) -> DataFrame {
+        let labels: StringChunked = df
+            .column(col)
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i == row { None } else { v })
+            .collect();
+        let mut out = df.clone();
+        out.with_column(labels.with_name(col.into()).into_series())
+            .unwrap();
+        out
+    }
+
+    /// The frame with the Int64 column `col` missing in row `row`.
+    pub(crate) fn with_null_value(df: &DataFrame, col: &str, row: usize) -> DataFrame {
+        let values: Int64Chunked = df
+            .column(col)
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i == row { None } else { v })
+            .collect();
+        let mut out = df.clone();
+        out.with_column(values.with_name(col.into()).into_series())
+            .unwrap();
+        out
+    }
+
+    /// The frame without row `row`: a block without one treatment.
+    pub(crate) fn without_row(df: &DataFrame, row: usize) -> DataFrame {
+        let mask: BooleanChunked = (0..df.height()).map(|i| Some(i != row)).collect();
+        df.filter(&mask).unwrap()
+    }
+
+    /// The frame with `col` cast to Float64.
+    pub(crate) fn as_float(df: &DataFrame, col: &str) -> DataFrame {
+        let cast = df.column(col).unwrap().cast(&DataType::Float64).unwrap();
+        let mut out = df.clone();
+        out.with_column(cast).unwrap();
+        out
+    }
 }
 
 #[cfg(test)]
@@ -577,5 +725,90 @@ mod tests {
 
         assert!(result.has_ties);
         assert!((result.tie_correction - 0.75).abs() < 0.01);
+    }
+
+    // ========================================================================
+    // R-pinned: complete blocks, missing responses and refused designs (T2-WP07)
+    // ========================================================================
+    //
+    // Case stat_friedman_quade: 8 blocks x 3 treatments, an Int64 response y, and y_na with
+    // block S2 incomplete (R drops the block). R refuses a replicated cell, an absent cell
+    // and a missing block or treatment label.
+
+    use super::fixtures::*;
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
+
+    #[test]
+    fn test_validate_friedman_quade_friedman() {
+        let (case, ds) = load_case("stat_friedman_quade");
+        let f = run_friedman_test(&ds, "y", "treat", "block").unwrap();
+        let fna = run_friedman_test(&ds, "y_na", "treat", "block").unwrap();
+        let (s, p, x) = (Tol::stat(24), Tol::p_value(24), Tol::exact());
+        Check::new(&case)
+            .scalar("friedman_q", f.statistic, s)
+            .scalar("friedman_df", f.df as f64, x)
+            .scalar("friedman_p", f.p_value, p)
+            .scalar("na_friedman_q", fna.statistic, s)
+            .scalar("na_friedman_p", fna.p_value, p)
+            .scalar("na_n_blocks", fna.n_blocks as f64, x)
+            .finish();
+        assert_eq!(f.treatment_names, ["A", "B", "C"]);
+        assert_eq!(f.n_blocks, 8);
+        assert!(f.missing.is_empty());
+        assert_eq!(fna.missing.n_dropped, 3);
+        assert_eq!(fna.missing.n_used, 21);
+        assert_eq!(fna.missing.by_column, vec![("y_na".to_string(), 1)]);
+    }
+
+    fn friedman_refusal(df: DataFrame) -> String {
+        match run_friedman_test(&Dataset::new(df), "y", "treat", "block") {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_friedman_refuses_designs_r_refuses() {
+        let (_case, ds) = load_case("stat_friedman_quade");
+        let df = ds.df();
+        let design = "not an unreplicated complete block design";
+        let na = "NA's are not allowed in 'groups' or 'blocks'";
+
+        let m = friedman_refusal(with_duplicate_cell(df));
+        assert!(m.contains(design) && m.contains("'S1'"), "{m}");
+        let m = friedman_refusal(with_null_label(df, "block", 3));
+        assert!(m.contains(na) && m.contains("'block'"), "{m}");
+        let m = friedman_refusal(with_null_label(df, "treat", 3));
+        assert!(m.contains(na) && m.contains("'treat'"), "{m}");
+        let m = friedman_refusal(without_row(df, 4));
+        assert!(m.contains(design), "{m}");
+        // R checks the labels before the response: still the NA-label error.
+        let m = friedman_refusal(with_null_value(&with_null_label(df, "block", 3), "y", 3));
+        assert!(m.contains(na) && m.contains("'block'"), "{m}");
+    }
+
+    /// Design 2.4 fixture: an Int64 response equals its Float64 cast; a text value column and
+    /// an absent column are refused with the variant that names the problem.
+    #[test]
+    fn test_validate_na_friedman_dtypes_and_errors() {
+        let (_case, ds) = load_case("stat_friedman_quade");
+        assert_eq!(ds.df().column("y").unwrap().dtype(), &DataType::Int64);
+        let int = run_friedman_test(&ds, "y", "treat", "block").unwrap();
+        let float = run_friedman_test(&Dataset::new(as_float(ds.df(), "y")), "y", "treat", "block")
+            .unwrap();
+        assert_eq!(int.statistic, float.statistic);
+        assert!(matches!(
+            run_friedman_test(&ds, "treat", "treat", "block"),
+            Err(EconError::NonNumericColumn { ref column }) if column == "treat"
+        ));
+        assert!(matches!(
+            run_friedman_test(&ds, "nope", "treat", "block"),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
+        assert!(matches!(
+            run_friedman_test(&ds, "y", "treat", "nope"),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
     }
 }

@@ -180,6 +180,9 @@ until STAT-72 (Tier 4) changes the reported statistic.
   `Tol::p_value(8)`, z `Tol::stat(8)`; the exact p; the missing-value summary)
 - `stats::wilcoxon::tests::test_validate_wilcoxon_na_rank_sum` (R1 and W exact, p and z at
   n = 18, sample sizes; 2 of 20 values dropped)
+- `stats::wilcoxon::tests::test_validate_na_wilcoxon_dtypes_and_errors` (on the Int64 case
+  `stat_friedman_quade`: the one-sample test on an Int64 column equals the test on its Float64
+  cast; a text column is `NonNumericColumn`, an absent one `ColumnNotFound`)
 - MCP: `test_validate_mcp_hypothesis_wilcoxon_paired_na` (`crates/p2a-mcp/tests/tier2/wp07_anova.rs`)
 
 ## Numerical Precision Summary

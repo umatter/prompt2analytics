@@ -8,14 +8,16 @@
       "reference": "stats::aov (Type I); car::Anova(type = 2); car::Anova(type = 3) with contr.sum",
       "doc": "validation/stats/anova.md",
       "cases": [
-        "stat_anova_two_way_unbalanced"
+        "stat_anova_two_way_unbalanced",
+        "stat_friedman_quade"
       ],
       "tests": [
         "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type1",
         "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type2",
         "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type3",
         "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_empty_cell",
-        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_anova_two_way_unbalanced"
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_anova_two_way_unbalanced",
+        "p2a-core::stats::anova::tests::test_validate_na_two_way_anova_dtypes_and_errors"
       ],
       "quantities": [
         "Type I SS, df, F, p (interaction and additive)",
@@ -23,7 +25,8 @@
         "Type II SS, F, p (interaction and additive; empty cell by model comparison)",
         "Type III SS, F, p (sum contrasts; refusal with aliased coefficients)",
         "interaction df from the rank (empty cells)",
-        "rows used and dropped"
+        "rows used and dropped",
+        "Int64 response equals its Float64 cast (stat_friedman_quade)"
       ],
       "tolerance": "validation/README.md, n = 10-13 (< 100): SS and F 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and counts exact; MCP text at its 4 printed decimals",
       "deviations": [],
@@ -112,19 +115,22 @@
       "reference": "stats::wilcox.test",
       "doc": "validation/stats/wilcoxon.md",
       "cases": [
-        "stat_wilcoxon_na"
+        "stat_wilcoxon_na",
+        "stat_friedman_quade"
       ],
       "tests": [
         "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_na_paired",
         "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_na_rank_sum",
-        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_wilcoxon_paired_na"
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_wilcoxon_paired_na",
+        "p2a-core::stats::wilcoxon::tests::test_validate_na_wilcoxon_dtypes_and_errors"
       ],
       "quantities": [
         "signed-rank V (paired, complete pairs)",
         "p (normal with continuity correction; exact)",
         "z",
         "rank sum R1 and R's W",
-        "sample sizes and values dropped"
+        "sample sizes and values dropped",
+        "Int64 column equals its Float64 cast (stat_friedman_quade)"
       ],
       "tolerance": "validation/README.md, n = 8-18 (< 100): z 1e-5 relative, p 1e-5 relative + 1e-12 absolute, rank statistics and counts exact",
       "deviations": [
@@ -134,6 +140,59 @@
           "note": "p2a's statistic is the rank sum R1 (pinned to ranksum_r1); R prints W = R1 - n_x (n_x + 1) / 2, compared as statistic - n (n + 1) / 2 until STAT-72 (Tier 4) changes the reported statistic"
         }
       ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "friedman",
+      "name": "Friedman rank-sum test",
+      "category": "stats",
+      "reference": "stats::friedman.test",
+      "doc": "validation/stats/friedman.md",
+      "cases": [
+        "stat_friedman_quade"
+      ],
+      "tests": [
+        "p2a-core::stats::friedman::tests::test_validate_friedman_quade_friedman",
+        "p2a-core::stats::friedman::tests::test_validate_friedman_refuses_designs_r_refuses",
+        "p2a-core::stats::friedman::tests::test_validate_na_friedman_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_friedman_na"
+      ],
+      "quantities": [
+        "chi-squared statistic",
+        "df",
+        "p",
+        "complete blocks after dropping a block with a missing response",
+        "treatment labels",
+        "refusal of replicated or absent cells and missing labels"
+      ],
+      "tolerance": "validation/README.md, n = 24 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df, block counts and labels exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "quade",
+      "name": "Quade test",
+      "category": "stats",
+      "reference": "stats::quade.test",
+      "doc": "validation/stats/quade_test.md",
+      "cases": [
+        "stat_friedman_quade"
+      ],
+      "tests": [
+        "p2a-core::stats::quade::tests::test_validate_friedman_quade_quade",
+        "p2a-core::stats::quade::tests::test_validate_quade_refuses_designs_r_refuses",
+        "p2a-core::stats::quade::tests::test_validate_na_quade_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_quade_na"
+      ],
+      "quantities": [
+        "F",
+        "df1, df2",
+        "p",
+        "with a missing response: on the 7 complete blocks (quade.test on those blocks; R's NA path keeps b = 8, see doc)",
+        "refusal of replicated or absent cells and missing labels"
+      ],
+      "tolerance": "validation/README.md, n = 24 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df, block counts and labels exact",
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

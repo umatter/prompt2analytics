@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "stat_friedman_quade",
+  "area": "stats/rank",
+  "method": "Friedman and Quade tests: complete design, NA response, and the designs R refuses",
+  "reference": "stats::friedman.test, stats::quade.test (incomplete blocks from NA responses dropped; replicated cells and NA labels are errors)",
+  "call": "friedman.test(y, treat, block); quade.test(y, treat, block)",
+  "dataset": "validation/datasets/generated/friedman_quade.csv",
+  "datasets": ["validation/datasets/generated/friedman_quade.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "friedman_q": 13.03448275862069,
+    "friedman_df": 2,
+    "friedman_p": 0.0014777400088913251,
+    "quade_f": 14.555694461807725,
+    "quade_df1": 2,
+    "quade_df2": 14,
+    "quade_p": 0.00038084840951921285,
+    "na_friedman_q": 11.119999999999999,
+    "na_friedman_p": 0.0038487763976105429,
+    "na_quade_f": 9.6394930145470266,
+    "na_quade_p": 0.0023318770707155983,
+    "na_n_blocks": 7,
+    "na_quade_df2": 14,
+    "na_quade_complete_f": 11.75532786885246,
+    "na_quade_complete_df1": 2,
+    "na_quade_complete_df2": 12,
+    "na_quade_complete_p": 0.0014891392959195616
+  }
+}

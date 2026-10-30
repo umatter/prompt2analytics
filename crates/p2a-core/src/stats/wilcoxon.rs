@@ -1711,4 +1711,30 @@ mod tests {
             (20, 18, 2)
         );
     }
+
+    /// Design 2.4 fixture of the dataset wrapper, on the Int64 case stat_friedman_quade: the
+    /// one-sample test on the Int64 column equals the test on its Float64 cast; a text column
+    /// and an absent column are refused.
+    #[test]
+    fn test_validate_na_wilcoxon_dtypes_and_errors() {
+        let (_case, ds) = load_case("stat_friedman_quade");
+        assert_eq!(ds.df().column("y").unwrap().dtype(), &DataType::Int64);
+        let config = WilcoxonConfig::default();
+        let tt = Alternative::TwoSided;
+        let int = wilcoxon_test(&ds, "y", None, 10.0, tt, false, &config).unwrap();
+        let mut df = ds.df().clone();
+        let y = df.column("y").unwrap().cast(&DataType::Float64).unwrap();
+        df.with_column(y).unwrap();
+        let float = wilcoxon_test(&Dataset::new(df), "y", None, 10.0, tt, false, &config).unwrap();
+        assert_eq!(int.statistic, float.statistic);
+        assert_eq!(int.p_value, float.p_value);
+        assert!(matches!(
+            wilcoxon_test(&ds, "treat", None, 0.0, tt, false, &config),
+            Err(EconError::NonNumericColumn { ref column }) if column == "treat"
+        ));
+        assert!(matches!(
+            wilcoxon_test(&ds, "y", Some("nope"), 0.0, tt, true, &config),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
+    }
 }

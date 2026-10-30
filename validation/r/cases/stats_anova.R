@@ -131,3 +131,42 @@ case("stat_wilcoxon_na", "stats/rank", "Wilcoxon paired and rank-sum tests with 
        reference = "stats::wilcox.test(paired = TRUE) on complete pairs; rank-sum drops NA per sample",
        call = "wilcox.test(x, y, paired = TRUE); wilcox.test(x, y)", packages = character(0))
 })
+
+# Friedman and Quade on a complete block design with integer responses, plus the cases R
+# rejects (duplicate cell, NA block label) and drops (NA response -> block dropped) (STAT-51).
+case("stat_friedman_quade", "stats/rank", "Friedman and Quade tests: complete design, NA response, and the designs R refuses", function(ctx) {
+  set.seed(23)
+  b <- rep(paste0("S", 1:8), each = 3); tr <- rep(c("A", "B", "C"), 8)
+  y <- round(10 + (tr == "B") * 1.5 + (tr == "C") * 3 + rep(rnorm(8, 0, 2), each = 3) + rnorm(24, 0, 1.5))
+  y_na <- y; y_na[5] <- NA                        # block S2 becomes incomplete -> dropped by R
+  d <- ctx$gen_dataset("friedman_quade", data.frame(y = y, y_na = y_na, treat = tr, block = b))
+  stopifnot(is.integer(d$y))
+  f <- friedman.test(d$y, d$treat, d$block); q <- quade.test(d$y, d$treat, d$block)
+  fn <- friedman.test(d$y_na, d$treat, d$block); qn <- quade.test(d$y_na, d$treat, d$block)
+  dup_err <- tryCatch({ friedman.test(c(d$y, 99), c(d$treat, "A"), c(d$block, "S1")); "no error" }, error = conditionMessage)
+  na_err <- tryCatch({ friedman.test(d$y, d$treat, replace(d$block, 4, NA)); "no error" }, error = conditionMessage)
+  stopifnot(dup_err == "not an unreplicated complete block design", grepl("NA's are not allowed", na_err))
+  # T2-WP07 additions: a block without one treatment (row absent) is refused too, by both tests;
+  # quade.test refuses the duplicate and the NA label like friedman.test. quade.test with an NA
+  # response removes the block (its help page) but keeps b = nlevels(blocks) = 8 in B, (b - 1)
+  # and the denominator df (R 4.3.3 stats:::quade.test.default), so na_quade_* above are R's
+  # NA-path values; the statistic of the 7 complete blocks is quade.test on those blocks.
+  inc_err <- tryCatch({ friedman.test(d$y[-5], d$treat[-5], d$block[-5]); "no error" }, error = conditionMessage)
+  inc_err_q <- tryCatch({ quade.test(d$y[-5], d$treat[-5], d$block[-5]); "no error" }, error = conditionMessage)
+  dup_err_q <- tryCatch({ quade.test(c(d$y, 99), c(d$treat, "A"), c(d$block, "S1")); "no error" }, error = conditionMessage)
+  na_err_q <- tryCatch({ quade.test(d$y, d$treat, replace(d$block, 4, NA)); "no error" }, error = conditionMessage)
+  stopifnot(inc_err == "not an unreplicated complete block design", inc_err_q == inc_err, dup_err_q == dup_err,
+            grepl("NA's are not allowed", na_err_q))
+  keep <- d$block != "S2"
+  qc <- quade.test(d$y_na[keep], d$treat[keep], d$block[keep]); fc <- friedman.test(d$y_na[keep], d$treat[keep], d$block[keep])
+  stopifnot(isTRUE(all.equal(unname(fc$statistic), unname(fn$statistic), tolerance = 1e-14)), unname(qn$parameter[2]) == 14)
+  list(values = list(friedman_q = unname(f$statistic), friedman_df = unname(f$parameter), friedman_p = f$p.value,
+                     quade_f = unname(q$statistic), quade_df1 = unname(q$parameter[1]), quade_df2 = unname(q$parameter[2]), quade_p = q$p.value,
+                     na_friedman_q = unname(fn$statistic), na_friedman_p = fn$p.value,
+                     na_quade_f = unname(qn$statistic), na_quade_p = qn$p.value, na_n_blocks = 7,
+                     na_quade_df2 = unname(qn$parameter[2]),
+                     na_quade_complete_f = unname(qc$statistic), na_quade_complete_df1 = unname(qc$parameter[1]),
+                     na_quade_complete_df2 = unname(qc$parameter[2]), na_quade_complete_p = qc$p.value),
+       reference = "stats::friedman.test, stats::quade.test (incomplete blocks from NA responses dropped; replicated cells and NA labels are errors)",
+       call = "friedman.test(y, treat, block); quade.test(y, treat, block)", packages = character(0))
+})

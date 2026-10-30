@@ -132,6 +132,10 @@ Full precision is in `validation/expected/stat_anova_two_way_unbalanced.json`
 - `stats::anova::tests::test_validate_two_way_anova_unbalanced_type3`
 - `stats::anova::tests::test_validate_two_way_anova_unbalanced_empty_cell` (the 3 x 2 layout
   in Types I and II, the Type III refusal, and the nocell layout without interaction df)
+- `stats::anova::tests::test_validate_na_two_way_anova_dtypes_and_errors` (on the Int64 case
+  `stat_friedman_quade`, `y ~ treat + block`: an Int64 response gives exactly the result of its
+  Float64 cast; a text response is `NonNumericColumn`, an absent factor `ColumnNotFound`, the
+  same factor twice `InvalidSpecification`)
 - `test_two_way_anova_sparse_layout_df_from_rank` (not R-pinned: a 10 x 10 layout with 30
   non-empty cells, df 9 / 9 / 11 / 30 as R `aov` gives them)
 

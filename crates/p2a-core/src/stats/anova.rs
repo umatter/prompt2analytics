@@ -1940,4 +1940,35 @@ mod tests {
             Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
         ));
     }
+
+    /// Design 2.4 fixture of the two-way wrapper, on the Int64 case stat_friedman_quade:
+    /// `y ~ treat + block` on the Int64 response equals the same model on its Float64 cast;
+    /// a text response, an absent factor and a factor given twice are refused.
+    #[test]
+    fn test_validate_na_two_way_anova_dtypes_and_errors() {
+        let (_case, ds) = load_case("stat_friedman_quade");
+        assert_eq!(ds.df().column("y").unwrap().dtype(), &DataType::Int64);
+        let int = run_two_way_anova(&ds, "y", "treat", "block", false).unwrap();
+        let mut df = ds.df().clone();
+        let y = df.column("y").unwrap().cast(&DataType::Float64).unwrap();
+        df.with_column(y).unwrap();
+        let float = run_two_way_anova(&Dataset::new(df), "y", "treat", "block", false).unwrap();
+        assert_eq!(int.ss_a, float.ss_a);
+        assert_eq!(int.ss_b, float.ss_b);
+        assert_eq!(int.ss_error, float.ss_error);
+        assert_eq!(int.f_a, float.f_a);
+        assert_eq!(int.f_b, float.f_b);
+        assert!(matches!(
+            run_two_way_anova(&ds, "treat", "treat", "block", false),
+            Err(EconError::NonNumericColumn { ref column }) if column == "treat"
+        ));
+        assert!(matches!(
+            run_two_way_anova(&ds, "y", "treat", "nope", false),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
+        assert!(matches!(
+            run_two_way_anova(&ds, "y", "block", "block", true),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+    }
 }
