@@ -158,12 +158,17 @@ websocket `tool` messages runs through one governor
   idle server that is above the limit only because of memory it has already
   freed is back under it within about 15 s (the 10 s spacing plus one 5 s
   poll), with no visitor.
-- **Dataset quotas.** After a call, the in-memory size of the session's
-  datasets is checked against `P2A_SESSION_DATA_MB` (hosted 200 MiB) and the
-  total over all sessions against `P2A_TOTAL_DATA_MB` (hosted 500 MiB). A call
-  that grew the session's data past either is rolled back (the datasets are
-  restored) and answered 422 `quota_exceeded`. A call that does not grow the
-  session's data is never refused.
+- **Session data quotas.** After a call, a session's in-memory state is
+  checked against `P2A_SESSION_DATA_MB` (hosted 200 MiB) and the total over
+  all sessions against `P2A_TOTAL_DATA_MB` (hosted 500 MiB). The state is its
+  datasets, every checkpoint of its cleaning sessions (charged as a dataset,
+  plus 1 KiB per column for the checkpoint's quality profile, and the cleaning
+  audit trail) and its spatial weights (24 bytes per neighbour link plus 72
+  per observation). A call that grew it past either is undone in all three
+  and answered 422 `quota_exceeded`; a call that does not grow it is never
+  refused. Columns a checkpoint shares with a dataset are counted for each
+  holder, so the figure is an upper bound: starting a cleaning session on a
+  dataset of D bytes costs at least another D.
 - **Per-allocation ceiling.** p2a-core sizes caller-driven buffers through
   `resource::try_*`. A single allocation above `P2A_MAX_ALLOC_MB` (hosted
   256 MiB), or one whose size overflows, fails as a tool error instead of
@@ -299,6 +304,14 @@ HTTP), and they never depend on the resource profile:
   session's rows are deleted when the session is deleted, expires or is
   evicted, and a periodic sweep removes the rows of sessions that are no
   longer live and older than the TTL.
+- **Session state.** A session keeps its datasets, random seed,
+  spatial weights (`spatial_neighbors`), cleaning sessions
+  (`cleaning_session_*`) and the memory history `server_stats` shows with
+  `include_history` in memory between calls. No other session can see them.
+  All of it goes when the session ends (TTL, idle eviction,
+  `DELETE /api/sessions/{id}`) and none of it survives a restart. Spatial
+  weights and cleaning sessions cannot be removed one by one; start a new
+  session to free them.
 - **Ownership.** Conversations, messages, tool calls and settings answer only
   to the session that owns them. The caller names its session in the
   `X-P2A-Session-Id` header; another session's object answers 404, exactly as a
@@ -506,8 +519,8 @@ profile. For the timeout, watchdog, memory, data, allocation and eviction knobs
 | `--tool-timeout-secs` | `P2A_TOOL_TIMEOUT_SECS` | none | 60 | per-call deadline |
 | `--stuck-exit-secs` | `P2A_STUCK_EXIT_SECS` | off | 300 | watchdog, exit code 70 |
 | `--memory-soft-limit-mb` | `P2A_MEMORY_SOFT_LIMIT_MB` | none | 700 | RSS admission |
-| `--session-data-mb` | `P2A_SESSION_DATA_MB` | none | 200 | dataset MiB per session |
-| `--total-data-mb` | `P2A_TOTAL_DATA_MB` | none | 500 | dataset MiB over all sessions |
+| `--session-data-mb` | `P2A_SESSION_DATA_MB` | none | 200 | session data MiB per session (datasets, cleaning checkpoints, spatial weights) |
+| `--total-data-mb` | `P2A_TOTAL_DATA_MB` | none | 500 | session data MiB over all sessions (datasets, cleaning checkpoints, spatial weights) |
 | `--max-alloc-mb` | `P2A_MAX_ALLOC_MB` | none | 256 | largest single allocation |
 | `--session-evict-idle-minutes` | `P2A_SESSION_EVICT_IDLE_MINUTES` | never | 10 | eviction when the table is full |
 | `--auth-enabled` | `P2A_AUTH_ENABLED` | | | deprecated, no effect (feature `auth`) |

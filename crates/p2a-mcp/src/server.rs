@@ -530,8 +530,9 @@ use p2a_core::{
 pub struct AnalyticsServer {
     /// Currently loaded datasets, keyed by a unique ID
     pub(crate) datasets: Arc<RwLock<HashMap<String, Dataset>>>,
-    /// Active cleaning sessions, keyed by session ID
-    pub(crate) cleaning_sessions: Arc<RwLock<HashMap<String, CleaningSession>>>,
+    /// Active cleaning sessions, keyed by session ID; a tool changes one
+    /// through `Arc::make_mut` (see `Session::cleaning_sessions`)
+    pub(crate) cleaning_sessions: Arc<RwLock<HashMap<String, Arc<CleaningSession>>>>,
     /// Spatial weights matrices, keyed by a unique ID
     pub(crate) spatial_weights: Arc<RwLock<HashMap<String, SpatialWeights>>>,
     /// Global random seed for ML reproducibility
@@ -613,8 +614,10 @@ impl AnalyticsServer {
         }
     }
 
-    /// Create a new AnalyticsServer with existing dataset storage.
-    /// Used for HTTP transport where each session has its own dataset store.
+    /// Create a server scoped to `session`: it shares the session's
+    /// datasets, seed, cleaning sessions, spatial weights and profiler, so
+    /// what one call stores there the session's next call sees. Used for the
+    /// HTTP transport, which builds one per call.
     #[cfg(feature = "http")]
     pub fn with_session(session: &crate::session::Session) -> Self {
         // Compose all routers from handler modules
@@ -640,10 +643,10 @@ impl AnalyticsServer {
 
         Self {
             datasets: session.datasets.clone(),
-            cleaning_sessions: Arc::new(RwLock::new(HashMap::new())),
-            spatial_weights: Arc::new(RwLock::new(HashMap::new())),
+            cleaning_sessions: session.cleaning_sessions.clone(),
+            spatial_weights: session.spatial_weights.clone(),
             global_seed: session.global_seed.clone(),
-            memory_profiler: Arc::new(RwLock::new(p2a_core::MemoryProfiler::new())),
+            memory_profiler: session.memory_profiler.clone(),
             tool_router,
             audit: None,
         }
@@ -790,7 +793,7 @@ impl AnalyticsServer {
             .await
             .map_err(log_and_convert)?;
 
-        // A session-scoped server instance that shares the session's datasets.
+        // A session-scoped server instance that shares the session's state.
         let session_server = Self::with_session(session);
         let result = session_server.dispatch_tool(tool_name, arguments).await?;
         let output_bytes = crate::audit::ResultSummary::of_tool_result(&result).output_bytes();
@@ -1307,66 +1310,6 @@ impl AnalyticsServer {
     // ========================================================================
     // GLS and Smooth Spline Tools
     // ========================================================================
-}
-
-/// Helper function to extract a single column as Vec<f64>.
-fn extract_column_f64(dataset: &Dataset, column: &str) -> Result<Vec<f64>, String> {
-    use p2a_core::polars::prelude::*;
-
-    let df = dataset.df();
-    let col = df
-        .column(column)
-        .map_err(|e| format!("Column '{}' not found: {}", column, e))?;
-
-    let values: Vec<f64> = col
-        .cast(&DataType::Float64)
-        .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", column, e))?
-        .f64()
-        .map_err(|e| format!("Column '{}' is not numeric: {}", column, e))?
-        .into_iter()
-        .map(|v: Option<f64>| v.unwrap_or(f64::NAN))
-        .collect();
-
-    Ok(values)
-}
-
-/// Helper function to extract numeric columns into an ndarray matrix.
-fn extract_numeric_matrix(
-    dataset: &Dataset,
-    columns: &[String],
-) -> Result<ndarray::Array2<f64>, String> {
-    use p2a_core::polars::prelude::*;
-
-    let df = dataset.df();
-    let n_rows = df.height();
-    let n_cols = columns.len();
-
-    if columns.is_empty() {
-        return Err("At least one column must be specified".to_string());
-    }
-
-    let mut data = ndarray::Array2::zeros((n_rows, n_cols));
-
-    for (j, col_name) in columns.iter().enumerate() {
-        let col = df
-            .column(col_name)
-            .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
-
-        let values: Vec<f64> = col
-            .cast(&DataType::Float64)
-            .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", col_name, e))?
-            .f64()
-            .map_err(|e| format!("Column '{}' is not numeric: {}", col_name, e))?
-            .into_iter()
-            .map(|v: Option<f64>| v.unwrap_or(f64::NAN))
-            .collect();
-
-        for (i, &val) in values.iter().enumerate() {
-            data[[i, j]] = val;
-        }
-    }
-
-    Ok(data)
 }
 
 // ============================================================================
@@ -2347,4 +2290,242 @@ mod tests {
     // =========================================================================
     // Phase 6: LLM-Assisted Data Cleaning Tests
     // =========================================================================
+}
+
+/// Spatial weights and cleaning sessions live in the `Session` (MCP-4): a
+/// session-scoped server is built per HTTP call, so state kept anywhere else
+/// was gone by the next call. The Moran figures were computed in R 4.3.3
+/// from spdep's formulas written out (see `session::test_fixtures`); they
+/// are not an R-pinned case. They show that the stored k = 4 and k = 5
+/// weights are the ones a later call uses.
+#[cfg(all(test, feature = "http"))]
+mod session_state_tests {
+    use super::*;
+    use crate::session::Session;
+    use crate::session::test_fixtures::{cleaning_fixture, session_with, spatial_fixture};
+    use crate::transport::http::{ContentItem, ToolResult};
+    use p2a_validation::Tol;
+    use serde_json::json;
+
+    /// One call as the HTTP side makes it: a fresh session-scoped server.
+    async fn call(s: &Session, tool: &str, args: serde_json::Value) -> ToolResult {
+        AnalyticsServer::with_session(s)
+            .call_tool_with_session(tool, args, s)
+            .await
+            .unwrap_or_else(|e| panic!("{tool}: {e:?}"))
+    }
+
+    fn text(r: &ToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| match c {
+                ContentItem::Text { text } => Some(text.as_str()),
+                ContentItem::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn num(r: &ToolResult, label: &str) -> f64 {
+        p2a_validation::text::labelled(&text(r), label)
+            .unwrap_or_else(|| panic!("no number after {label:?} in:\n{}", text(r)))
+    }
+
+    fn neighbors(k: usize, name: &str) -> serde_json::Value {
+        json!({"dataset": "sp", "x_coord": "x", "y_coord": "y", "method": "knn", "k": k,
+               "weights_name": name})
+    }
+
+    fn moran(name: &str) -> serde_json::Value {
+        json!({"dataset": "sp", "variable": "v", "weights": name})
+    }
+
+    // Moran figures computed in R 4.3.3 from spdep's formulas written out
+    // (see `session::test_fixtures`); not an R-pinned case. Each is the f64
+    // nearest the script's 17-digit output, written in its shortest form.
+    /// k = 4: I (script 0.68715919057620856), variance (script
+    /// 0.0095894910636934762), z.
+    const MORAN_K4: (f64, f64, f64) =
+        (0.6871591905762086, 0.009589491063693476, 7.2789719093779635);
+    /// k = 5: I (script 0.65697404814893101), variance (script
+    /// 0.0074262267610125639), z (script 7.9212144518526779).
+    const MORAN_K5: (f64, f64, f64) = (0.656974048148931, 0.007426226761012564, 7.921214451852678);
+    /// E[I] = -1 / (n - 1), n = 40.
+    const MORAN_EXPECTED: f64 = -0.02564102564102564;
+
+    #[tokio::test]
+    async fn test_mcp_moran_test_finds_weights_from_an_earlier_call() {
+        let s = session_with("sp", spatial_fixture()).await;
+        for (k, w) in [(4, "w4"), (5, "w5")] {
+            let r = call(&s, "spatial_neighbors", neighbors(k, w)).await;
+            assert!(r.success, "{}", text(&r));
+        }
+        for (w, (i, var, z)) in [("w4", MORAN_K4), ("w5", MORAN_K5)] {
+            let r = call(&s, "moran_test", moran(w)).await;
+            // Pre-fix: "Spatial weights 'w4' not found. Use 'spatial_neighbors' first ..."
+            assert!(r.success, "moran_test {w}: {}", text(&r));
+            assert!(
+                Tol::printed(6).allows(num(&r, "Moran I statistic:"), i),
+                "{w}"
+            );
+            assert!(
+                Tol::printed(6).allows(num(&r, "Expected I:"), MORAN_EXPECTED),
+                "{w}"
+            );
+            assert!(Tol::printed(6).allows(num(&r, "Variance:"), var), "{w}");
+            assert!(Tol::printed(4).allows(num(&r, "Z-score:"), z), "{w}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mcp_cleaning_session_tools_share_state_across_calls() {
+        let s = session_with("cl", cleaning_fixture()).await;
+        let started = call(&s, "cleaning_session_start", json!({"dataset": "cl"})).await;
+        assert!(started.success, "{}", text(&started));
+        let shown = text(&started);
+        let id = shown
+            .lines()
+            .find_map(|l| l.strip_prefix("Session ID: "))
+            .unwrap_or_else(|| panic!("no session id in:\n{shown}"))
+            .trim()
+            .to_string();
+
+        let listed = text(&call(&s, "list_cleaning_sessions", json!({})).await);
+        // Pre-fix: "No active cleaning sessions."
+        assert!(
+            listed.contains(&id) && listed.contains("Rows: 10"),
+            "{listed}"
+        );
+
+        let applied = call(
+            &s,
+            "cleaning_session_apply",
+            json!({"session_id": id, "operation": "drop_na"}),
+        )
+        .await;
+        assert!(applied.success, "{}", text(&applied));
+        assert!(
+            text(&applied).contains("Operation applied successfully!"),
+            "{}",
+            text(&applied)
+        );
+
+        let status = text(&call(&s, "cleaning_session_status", json!({"session_id": id})).await);
+        assert!(status.contains("Checkpoints: 2 (current: #1)"), "{status}");
+        // R: nrow(na.omit(cl)) = 7
+        assert!(status.contains("Rows: 10 → 7 (-3)"), "{status}");
+
+        let rolled = text(&call(&s, "cleaning_rollback", json!({"session_id": id})).await);
+        for part in ["Rollback successful!", "Current checkpoint: 0", "Rows: 10"] {
+            assert!(rolled.contains(part), "{part}: {rolled}");
+        }
+
+        let checkpoints = text(
+            &call(
+                &s,
+                "cleaning_session_checkpoints",
+                json!({"session_id": id}),
+            )
+            .await,
+        );
+        for part in ["#0: Initial state <-- current", "#1: drop_na (any)"] {
+            assert!(checkpoints.contains(part), "{part}: {checkpoints}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mcp_session_state_is_not_shared_between_sessions() {
+        let s1 = session_with("sp", spatial_fixture()).await;
+        let s2 = session_with("sp", spatial_fixture()).await;
+        assert!(
+            call(&s1, "spatial_neighbors", neighbors(4, "w4"))
+                .await
+                .success
+        );
+        let started = text(&call(&s1, "cleaning_session_start", json!({"dataset": "sp"})).await);
+        let id = started
+            .lines()
+            .find_map(|l| l.strip_prefix("Session ID: "))
+            .unwrap_or_else(|| panic!("no session id in:\n{started}"))
+            .trim()
+            .to_string();
+
+        let theirs = call(&s2, "moran_test", moran("w4")).await;
+        assert!(!theirs.success, "{}", text(&theirs));
+        let error = theirs.error.clone().unwrap_or_default();
+        assert!(error.contains("Spatial weights 'w4' not found"), "{error}");
+        let listed = text(&call(&s2, "list_cleaning_sessions", json!({})).await);
+        assert!(listed.contains("No active cleaning sessions."), "{listed}");
+        let status = call(&s2, "cleaning_session_status", json!({"session_id": id})).await;
+        assert!(!status.success, "{}", text(&status));
+        assert!(text(&status).contains("not found"), "{}", text(&status));
+
+        // Pre-fix this fails too: the weights were gone after the first call.
+        let mine = call(&s1, "moran_test", moran("w4")).await;
+        assert!(mine.success, "{}", text(&mine));
+        assert!(Tol::printed(6).allows(num(&mine, "Moran I statistic:"), MORAN_K4.0));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_spatial_neighbors_stores_weights_in_the_session() {
+        use crate::session::test_fixtures::spatial_v;
+        use p2a_core::{MoranAlternative, WeightStyle};
+        let s = session_with("sp", spatial_fixture()).await;
+        assert!(
+            call(&s, "spatial_neighbors", neighbors(4, "w4"))
+                .await
+                .success
+        );
+        let w = s.spatial_weights.read().await.get("w4").cloned().unwrap();
+        assert_eq!(w.n(), 40);
+        assert_eq!(w.neighbors().n_links(), 160);
+        assert_eq!(w.style(), WeightStyle::RowStd);
+        let m = p2a_core::moran_test(
+            &ndarray::Array1::from(spatial_v()),
+            &w,
+            MoranAlternative::Greater,
+        )
+        .unwrap();
+        let tol = Tol::stat(40);
+        let (i, var, z) = MORAN_K4;
+        assert!(tol.allows(m.statistic, i), "{}", m.statistic);
+        assert!(tol.allows(m.variance, var), "{}", m.variance);
+        assert!(tol.allows(m.z_score, z), "{}", m.z_score);
+        assert!(tol.allows(m.expectation, -1.0 / 39.0), "{}", m.expectation);
+    }
+
+    /// The profiler behind `server_stats`' memory history is the session's
+    /// (process uptime and peak RSS are process-wide since PR-H16), and two
+    /// sessions do not share one.
+    #[tokio::test]
+    async fn test_mcp_server_stats_history_uses_the_session_profiler() {
+        let s = session_with("sp", spatial_fixture()).await;
+        let other = session_with("sp", spatial_fixture()).await;
+        let (a, b) = (
+            AnalyticsServer::with_session(&s),
+            AnalyticsServer::with_session(&s),
+        );
+        assert!(Arc::ptr_eq(&a.memory_profiler, &b.memory_profiler));
+        assert!(Arc::ptr_eq(&a.memory_profiler, &s.memory_profiler));
+        assert!(Arc::ptr_eq(&a.spatial_weights, &s.spatial_weights));
+        assert!(Arc::ptr_eq(&a.cleaning_sessions, &s.cleaning_sessions));
+        assert!(!Arc::ptr_eq(
+            &AnalyticsServer::with_session(&other).memory_profiler,
+            &s.memory_profiler
+        ));
+        let ds = s.datasets.read().await.get("sp").cloned().unwrap();
+        s.memory_profiler.write().await.track_dataset("sp", &ds);
+        let shown = text(&call(&s, "server_stats", json!({"include_history": true})).await);
+        // Pre-fix: no history (a fresh profiler per call).
+        assert!(shown.contains("## Recent Memory History"), "{shown}");
+        // The history row's last two cells: the tracked bytes and one dataset.
+        let row = format!(
+            "{:>15} {:>10}",
+            crate::session::fmt_bytes(p2a_core::estimate_dataset_memory(&ds) as u64),
+            1
+        );
+        assert!(shown.contains(&row), "{shown}");
+        let theirs = text(&call(&other, "server_stats", json!({"include_history": true})).await);
+        assert!(!theirs.contains("Recent Memory History"), "{theirs}");
+    }
 }

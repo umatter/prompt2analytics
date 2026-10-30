@@ -856,11 +856,17 @@ impl DatasetQuotas {
 }
 
 /// Insert a reloaded `dataset` as `name` into `session` unless it would push
-/// the session past `quotas.per_session` (its datasets with this one in
-/// place of any dataset of the same name) or all sessions past
-/// `quotas.total` (their cached dataset bytes). A refusal names the size the
-/// datasets would reach and the limit, as a tool call's quota refusal does;
-/// it holds no server path.
+/// the session past `quotas.per_session` or all sessions past
+/// `quotas.total` (their cached charges). The session is charged its
+/// datasets with this one in place of any dataset of the same name, plus
+/// its cleaning sessions and spatial weights, which both quotas count too
+/// (`Session::other_state_bytes`). A refusal names the size the session
+/// would reach and the limit, as a tool call's quota refusal does; it holds
+/// no server path. Its texts still say "this session's datasets would use
+/// X" and "the server's dataset memory would reach X", but X includes the
+/// session's cleaning sessions and spatial weights (and, for the total,
+/// every other session's charge), so it can exceed what the datasets
+/// alone take.
 ///
 /// Call it while holding the session's governor permit: the quota rollback
 /// of a tool call assumes one change of a session's datasets at a time.
@@ -880,6 +886,10 @@ pub async fn insert_reloaded_dataset(
             .saturating_sub(session.data_bytes()),
         None => 0,
     };
+    // The session's cleaning sessions and spatial weights, read before the
+    // dataset lock too, so that no two of the session's maps are locked at
+    // once.
+    let other_state = session.other_state_bytes().await;
     let mut datasets = session.datasets.write().await;
     // The session's charge with this dataset in place of any of its name.
     let after = crate::session::datasets_bytes_of(
@@ -888,7 +898,8 @@ pub async fn insert_reloaded_dataset(
             .filter(|(held, _)| **held != name)
             .map(|(held, d)| (held.as_str(), d))
             .chain(std::iter::once((name.as_str(), &dataset))),
-    );
+    )
+    .saturating_add(other_state);
     if let Some(limit) = quotas.per_session
         && after > limit
     {
@@ -1745,6 +1756,86 @@ mod tests {
         let open = DatasetQuotas::default();
         let big = insert_reloaded_dataset(&b, &sm, "big".into(), ds(10_000, 0.7), open).await;
         assert_eq!(big, Ok(()));
+    }
+
+    /// A reloaded dataset is checked next to the session's spatial weights
+    /// and cleaning sessions, which both quotas count: a reload that would
+    /// fit next to the datasets alone is refused.
+    #[tokio::test]
+    async fn reloaded_datasets_count_the_sessions_weights_and_cleaning() {
+        use crate::session::test_fixtures::{cleaning_fixture, spatial_coords};
+        use p2a_core::data::CleaningSession;
+        fn ds() -> p2a_core::data::Dataset {
+            use polars::prelude::*;
+            p2a_core::data::Dataset::new(
+                df! {"x" => (0..1000).map(|i| i as f64 * 1.5 + 0.1).collect::<Vec<_>>()}.unwrap(),
+            )
+        }
+        let one = crate::session::datasets_bytes_of([("x", &ds())]);
+        let sm = registry(60);
+        let s = sm
+            .get_session(&sm.create_session(None).await.unwrap())
+            .await
+            .unwrap();
+        // k = 4 weights over 40 points under "w4": 24 x 160 + 72 x 40 + 2.
+        let w4 = p2a_core::SpatialWeights::from_neighbors(
+            &p2a_core::Neighbors::from_knn(&spatial_coords(), 4),
+            p2a_core::WeightStyle::RowStd,
+        );
+        s.spatial_weights.write().await.insert("w4".into(), w4);
+        assert_eq!(s.refresh_data_bytes().await, 6_722);
+        let per_session = DatasetQuotas {
+            per_session: Some(one + 1_000),
+            total: None,
+        };
+        let total = DatasetQuotas {
+            per_session: None,
+            total: Some(one + 1_000),
+        };
+
+        // Pre-fix both went in: the check summed the datasets only.
+        let refused = insert_reloaded_dataset(&s, &sm, "x".into(), ds(), per_session)
+            .await
+            .unwrap_err();
+        let reached = fmt_bytes(one + 6_722);
+        assert!(
+            refused.contains(&format!("would use {reached} (limit ")),
+            "{refused}"
+        );
+        let refused = insert_reloaded_dataset(&s, &sm, "x".into(), ds(), total)
+            .await
+            .unwrap_err();
+        assert!(
+            refused.contains(&format!("would reach {reached} (limit ")),
+            "{refused}"
+        );
+        assert!(s.datasets.read().await.is_empty());
+
+        // A cleaning session counts as the weights do.
+        s.spatial_weights.write().await.clear();
+        s.cleaning_sessions.write().await.insert(
+            "c1".into(),
+            Arc::new(CleaningSession::new(cleaning_fixture(), "cl")),
+        );
+        s.refresh_data_bytes().await;
+        assert!(s.data_bytes() > 1_000, "{}", s.data_bytes());
+        for quotas in [per_session, total] {
+            let refused = insert_reloaded_dataset(&s, &sm, "x".into(), ds(), quotas).await;
+            assert!(refused.is_err(), "{quotas:?}");
+        }
+
+        // With neither, the dataset fits both quotas.
+        s.cleaning_sessions.write().await.clear();
+        s.refresh_data_bytes().await;
+        let both = DatasetQuotas {
+            per_session: Some(one + 1_000),
+            total: Some(one + 1_000),
+        };
+        assert_eq!(
+            insert_reloaded_dataset(&s, &sm, "x".into(), ds(), both).await,
+            Ok(())
+        );
+        assert_eq!(s.data_bytes(), one);
     }
 
     #[test]
