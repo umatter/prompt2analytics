@@ -17,13 +17,14 @@
 use ndarray::{Array1, Array2, ArrayView1};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy, column};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::matrix_ops::{pseudoinverse, safe_inverse};
 use crate::resource::{checkpoint, try_zeros2};
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_cdf};
 
@@ -720,6 +721,9 @@ pub struct LogRankResult {
     pub expected_per_group: Vec<f64>,
     /// Observed - Expected for each group
     pub obs_minus_exp: Vec<f64>,
+    /// Variance of O - E, G x G row-major over all groups (R `survdiff()$var`).
+    #[serde(default)]
+    pub variance: Vec<f64>,
     /// Rows dropped because of a missing time, status or group.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
@@ -750,6 +754,20 @@ impl fmt::Display for LogRankResult {
         }
 
         writeln!(f, "{}", "-".repeat(60))?;
+        let excluded: Vec<&str> = self
+            .groups
+            .iter()
+            .zip(&self.expected_per_group)
+            .filter(|(_, e)| **e <= 0.0)
+            .map(|(g, _)| g.as_str())
+            .collect();
+        if !excluded.is_empty() {
+            writeln!(
+                f,
+                "Groups with no expected events: {} (excluded from the test, as R survdiff)",
+                excluded.join(", ")
+            )?;
+        }
         writeln!(f)?;
         writeln!(
             f,
@@ -764,18 +782,30 @@ impl fmt::Display for LogRankResult {
     }
 }
 
-/// Perform log-rank test to compare survival curves between groups.
+/// Perform log-rank test to compare survival curves between groups, as R
+/// `survival::survdiff` (rho = 0).
+///
+/// Rows are walked in time order in blocks of exactly equal times. At each block with
+/// `d` events among `n` at risk, group g expects `d n_g / n` events, and the
+/// hypergeometric variance `d (n - d) / (n^2 (n - 1))` times `n_g (n - n_g)` (diagonal)
+/// or `-n_g n_h` is added; the block's rows then leave the risk sets. Groups with no
+/// expected events are excluded from the test, as in R, and the chi-square is
+/// `(O - E)' V^- (O - E)` over the remaining groups less one, solved with a
+/// generalized inverse when the variance is singular; `df` is their number minus one.
 ///
 /// # Arguments
 ///
 /// * `dataset` - The dataset containing survival data
-/// * `time_col` - Column name for survival/censoring time
-/// * `event_col` - Column name for event indicator (1 = event, 0 = censored)
-/// * `group_col` - Column name for group assignment
+/// * `time_col` - Column name for survival/censoring time (>= 0)
+/// * `event_col` - Status column, coded as R's `Surv()`: 0/1, 1/2 or logical
+/// * `group_col` - Column name for group assignment (levels in R `factor()` order)
+///
+/// Rows with a missing time, status or group are dropped and reported in `missing`.
 ///
 /// # Returns
 ///
-/// A `LogRankResult` containing the test statistic and p-value.
+/// A `LogRankResult` containing the test statistic and p-value. Fewer than two groups
+/// with expected events is an `InvalidSpecification` error (R reports 0 on 0 df).
 pub fn log_rank_test(
     dataset: &Dataset,
     time_col: &str,
@@ -798,146 +828,125 @@ pub fn log_rank_test(
     };
     let groups = factor.levels;
     let n_groups = groups.len();
-    let mut all_obs: Vec<(f64, bool, usize)> = data
-        .time
-        .iter()
-        .zip(&data.event)
-        .zip(&factor.codes)
-        .map(|((&t, &e), &g)| (t, e, g as usize))
-        .collect();
-
     if n_groups < 2 {
         return Err(EconError::InvalidSpecification {
             message: "Log-rank test requires at least 2 groups".to_string(),
         });
     }
+    let codes: Vec<usize> = factor.codes.iter().map(|&c| c as usize).collect();
+    let n = data.time.len();
 
-    // Sort observations by time
-    all_obs.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // Get distinct event times
-    let event_times: Vec<f64> = {
-        let mut times_set: std::collections::BTreeSet<OrderedF64> =
-            std::collections::BTreeSet::new();
-        for (t, e, _) in &all_obs {
-            if *e {
-                times_set.insert(OrderedF64(*t));
-            }
-        }
-        times_set.into_iter().map(|of| of.0).collect()
-    };
-
-    // Count observations per group
-    let mut n_per_group: Vec<usize> = vec![0; n_groups];
-    let mut events_per_group: Vec<usize> = vec![0; n_groups];
-
-    for &(_, event, g_idx) in &all_obs {
-        n_per_group[g_idx] += 1;
-        if event {
-            events_per_group[g_idx] += 1;
+    let mut n_per_group = vec![0usize; n_groups];
+    let mut events_per_group = vec![0usize; n_groups];
+    for (&g, &e) in codes.iter().zip(&data.event) {
+        n_per_group[g] += 1;
+        if e {
+            events_per_group[g] += 1;
         }
     }
 
-    // Compute log-rank statistic
-    // O_j - E_j where E_j = sum over times of (d_t * n_jt / n_t)
-    let mut expected: Vec<f64> = vec![0.0; n_groups];
-    let mut variance_matrix: Array2<f64> = Array2::zeros((n_groups - 1, n_groups - 1));
+    // Rows in time order; a block is a run of exactly equal times (as survdiff).
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| data.time[a].total_cmp(&data.time[b]));
 
-    // Track at-risk counts
-    let mut at_risk_total = all_obs.len();
-    let mut at_risk_per_group: Vec<usize> = n_per_group.clone();
-    let mut obs_idx = 0;
-
-    for event_time in &event_times {
-        // Skip past observations before this event time
-        while obs_idx < all_obs.len() && all_obs[obs_idx].0 < *event_time {
-            let g_idx = all_obs[obs_idx].2;
-            at_risk_per_group[g_idx] = at_risk_per_group[g_idx].saturating_sub(1);
-            at_risk_total = at_risk_total.saturating_sub(1);
-            obs_idx += 1;
+    let mut expected = vec![0.0f64; n_groups];
+    let mut variance = try_zeros2(n_groups, n_groups, "log-rank variance")?;
+    let mut risk = n_per_group.clone();
+    let mut total = n;
+    let mut i = 0;
+    while i < n {
+        checkpoint()?;
+        let t = data.time[order[i]];
+        let mut j = i;
+        let mut d = 0usize;
+        while j < n && data.time[order[j]] == t {
+            if data.event[order[j]] {
+                d += 1;
+            }
+            j += 1;
         }
 
-        // Count events and risk set at this time
-        let mut d_total = 0;
-        let mut removals_per_group: Vec<usize> = vec![0; n_groups];
-
-        let mut temp_idx = obs_idx;
-        while temp_idx < all_obs.len() && (all_obs[temp_idx].0 - event_time).abs() < 1e-10 {
-            let (_, event, g_idx) = all_obs[temp_idx];
-            removals_per_group[g_idx] += 1;
-            if event {
-                d_total += 1;
+        if d > 0 {
+            let (dt, nt) = (d as f64, total as f64);
+            for (e, &r) in expected.iter_mut().zip(&risk) {
+                *e += dt * r as f64 / nt;
             }
-            temp_idx += 1;
-        }
-
-        if at_risk_total > 0 && d_total > 0 {
-            let n_t = at_risk_total as f64;
-
-            // Expected events: E_j = d * n_j / n
-            for j in 0..n_groups {
-                let n_j = at_risk_per_group[j] as f64;
-                expected[j] += (d_total as f64) * n_j / n_t;
-            }
-
-            // Variance calculation (for first n_groups-1 groups)
-            // Using the hypergeometric variance formula
-            if at_risk_total > 1 {
-                let factor = (d_total as f64) * (n_t - d_total as f64) / (n_t * n_t * (n_t - 1.0));
-                for j in 0..(n_groups - 1) {
-                    let n_j = at_risk_per_group[j] as f64;
-                    for k in 0..(n_groups - 1) {
-                        let n_k = at_risk_per_group[k] as f64;
-                        if j == k {
-                            variance_matrix[[j, k]] += factor * n_j * (n_t - n_j);
+            if total > 1 {
+                let factor = dt * (nt - dt) / (nt * nt * (nt - 1.0));
+                for (g, &rg) in risk.iter().enumerate() {
+                    if rg == 0 {
+                        continue; // row and column g receive only zeros
+                    }
+                    let rg = rg as f64;
+                    for (h, &rh) in risk.iter().enumerate() {
+                        variance[[g, h]] += if g == h {
+                            factor * rg * (nt - rg)
                         } else {
-                            variance_matrix[[j, k]] -= factor * n_j * n_k;
-                        }
+                            -factor * rg * rh as f64
+                        };
                     }
                 }
             }
         }
 
-        // Update risk counts
-        for j in 0..n_groups {
-            at_risk_per_group[j] = at_risk_per_group[j].saturating_sub(removals_per_group[j]);
+        // The block leaves the risk sets once, and the cursor moves past it.
+        for &row in &order[i..j] {
+            let g = codes[row];
+            risk[g] = risk[g].checked_sub(1).ok_or_else(|| {
+                EconError::Internal("log-rank test: risk set below zero".to_string())
+            })?;
         }
-        at_risk_total = at_risk_total.saturating_sub(removals_per_group.iter().sum::<usize>());
+        total = total
+            .checked_sub(j - i)
+            .ok_or_else(|| EconError::Internal("log-rank test: risk set below zero".into()))?;
+        i = j;
     }
 
-    // Compute chi-squared statistic
-    // χ² = (O - E)' V^{-1} (O - E) for first n_groups-1 groups
     let obs_minus_exp: Vec<f64> = events_per_group
         .iter()
-        .zip(expected.iter())
+        .zip(&expected)
         .map(|(&o, &e)| o as f64 - e)
         .collect();
 
-    let u: Array1<f64> = Array1::from_vec(obs_minus_exp[0..(n_groups - 1)].to_vec());
-
-    let chi_squared = if n_groups == 2 {
-        // Simple formula for 2 groups
-        let var = variance_matrix[[0, 0]];
-        if var > 0.0 { (u[0] * u[0]) / var } else { 0.0 }
-    } else {
-        // General formula using matrix inverse
-        match safe_inverse(&variance_matrix.view()) {
-            Ok((v_inv, _)) => u.dot(&v_inv.dot(&u)),
-            Err(_) => {
-                // Fallback: use sum of squared standardized differences
-                let mut chi2 = 0.0;
-                for j in 0..(n_groups - 1) {
-                    if variance_matrix[[j, j]] > 0.0 {
-                        chi2 += obs_minus_exp[j].powi(2) / variance_matrix[[j, j]];
-                    }
+    // survdiff: only groups with expected events enter the test.
+    let keep: Vec<usize> = (0..n_groups).filter(|&g| expected[g] > 0.0).collect();
+    if keep.len() < 2 {
+        let with: Vec<&str> = keep.iter().map(|&g| groups[g].as_str()).collect();
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the log-rank test needs two groups with expected events, i.e. at risk at \
+                 an event time; groups with expected events: {} (R survdiff reports a \
+                 chi-square of 0 on 0 df)",
+                if with.is_empty() {
+                    "none".to_string()
+                } else {
+                    with.join(", ")
                 }
-                chi2
-            }
-        }
-    };
+            ),
+        });
+    }
 
-    let df_val = n_groups - 1;
-    let p_value = chi_squared_p_value(chi_squared, df_val as f64);
+    // (O - E)' V^- (O - E) without the first kept group (the statistic is invariant to
+    // the group dropped).
+    let rest = &keep[1..];
+    let k = rest.len();
+    let u: Array1<f64> = rest.iter().map(|&g| obs_minus_exp[g]).collect();
+    let mut w = try_zeros2(k, k, "log-rank variance")?;
+    for (a, &g) in rest.iter().enumerate() {
+        for (b, &h) in rest.iter().enumerate() {
+            w[[a, b]] = variance[[g, h]];
+        }
+    }
+    let w_inv = match safe_inverse(&w.view()) {
+        Ok((inv, _)) => inv,
+        Err(_) => pseudoinverse(&w.view())?,
+    };
+    let chi_squared = u.dot(&w_inv.dot(&u));
+
+    let df_val = k;
+    let p_value = ChiSquared::new(df_val as f64)
+        .map_err(|e| EconError::Internal(format!("log-rank test: chi-square df: {e}")))?
+        .sf(chi_squared);
     let significance = SignificanceLevel::from_p_value(p_value);
 
     Ok(LogRankResult {
@@ -950,6 +959,7 @@ pub fn log_rank_test(
         events_per_group,
         expected_per_group: expected,
         obs_minus_exp,
+        variance: variance.into_raw_vec_and_offset().0,
         missing: data.missing,
     })
 }
@@ -2846,41 +2856,83 @@ mod tests {
         }
     }
 
-    /// Create dataset matching R's test case for Log-Rank
-    fn create_r_logrank_dataset() -> Dataset {
-        // Matches R code:
-        // time <- c(1, 2, 3, 5, 6, 7, 2, 3, 4, 5, 8, 9)
-        // event <- c(1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1)
-        // group <- c(rep(0, 6), rep(1, 6))
-        let df = df! {
-            "time" => [1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 2.0, 3.0, 4.0, 5.0, 8.0, 9.0],
-            "event" => [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],
-            "group" => ["0", "0", "0", "0", "0", "0", "1", "1", "1", "1", "1", "1"],
-        }
-        .unwrap();
-        Dataset::new(df).with_name("r_logrank_test")
+    /// Counts as f64, for `Check::vector`.
+    fn as_f64(v: &[usize]) -> Vec<f64> {
+        v.iter().map(|&x| x as f64).collect()
     }
 
     #[test]
-    fn test_validate_logrank_against_r() {
-        // R's survdiff() results:
-        // Chi-squared: typically 0.5-2.0 for this data
-        // df: 1
-        // p-value: > 0.05 (groups not significantly different)
-        let dataset = create_r_logrank_dataset();
-        let result = log_rank_test(&dataset, "time", "event", "group").unwrap();
+    fn test_validate_logrank_lung() {
+        let (case, ds) = load_case("surv_logrank_lung");
+        let n = ds.nrows();
+        let sex = log_rank_test(&ds, "time", "status", "sex").unwrap();
+        let ecog = log_rank_test(&ds, "time", "status", "ph.ecog").unwrap();
+        Check::new(&case)
+            .scalar("sex_chisq", sex.chi_squared, Tol::stat(n))
+            .scalar("sex_df", sex.df as f64, Tol::exact())
+            .scalar("sex_p", sex.p_value, Tol::p_value(n))
+            .vector("sex_obs", &as_f64(&sex.events_per_group), Tol::exact())
+            .vector("sex_exp", &sex.expected_per_group, Tol::stat(n))
+            .vector("sex_n", &as_f64(&sex.n_per_group), Tol::exact())
+            .vector("sex_var", &sex.variance, Tol::stat(n))
+            .scalar("ecog_chisq", ecog.chi_squared, Tol::stat(n))
+            .scalar("ecog_df", ecog.df as f64, Tol::exact())
+            .scalar("ecog_p", ecog.p_value, Tol::p_value(n))
+            .vector("ecog_obs", &as_f64(&ecog.events_per_group), Tol::exact())
+            .vector("ecog_exp", &ecog.expected_per_group, Tol::stat(n))
+            .vector("ecog_n", &as_f64(&ecog.n_per_group), Tol::exact())
+            .scalar(
+                "ecog_n_used",
+                ecog.n_per_group.iter().sum::<usize>() as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert_eq!(sex.groups, ["1", "2"]);
+        // sum(O) = sum(E): every event is counted once against the right risk sets.
+        assert!(sex.obs_minus_exp.iter().sum::<f64>().abs() < 1e-9);
+        assert!(ecog.obs_minus_exp.iter().sum::<f64>().abs() < 1e-9);
+    }
 
-        assert_eq!(result.df, 1, "Log-rank df should be 1");
-        assert!(
-            result.chi_squared >= 0.0,
-            "Chi-squared must be non-negative"
+    #[test]
+    fn test_validate_logrank_small() {
+        let (case, ds) = load_case("surv_logrank_small");
+        let n = ds.nrows();
+        let r = log_rank_test(&ds, "time", "event", "group").unwrap();
+        Check::new(&case)
+            .scalar("chisq", r.chi_squared, Tol::stat(n))
+            .scalar("p", r.p_value, Tol::p_value(n))
+            .vector("obs", &as_f64(&r.events_per_group), Tol::exact())
+            .vector("exp", &r.expected_per_group, Tol::stat(n))
+            .finish();
+        assert_eq!(r.groups, ["0", "1"]);
+        assert_eq!(r.df, 1);
+    }
+
+    #[test]
+    fn test_validate_logrank_zero_expected_group() {
+        let (case, ds) = load_case("surv_km_median_rules");
+        let n = ds.nrows();
+        // "never" leaves before the first event: expected 0, excluded from the test (df 1).
+        let r = log_rank_test(&ds, "time_early", "event_early", "group").unwrap();
+        Check::new(&case)
+            .scalar("lr_zero_chisq", r.chi_squared, Tol::stat(n))
+            .scalar("lr_subset_chisq", r.chi_squared, Tol::stat(n))
+            .scalar("lr_zero_df", r.df as f64, Tol::exact())
+            .scalar("lr_zero_p", r.p_value, Tol::p_value(n))
+            .vector("lr_zero_exp", &r.expected_per_group, Tol::stat(n))
+            .vector("lr_zero_obs", &as_f64(&r.events_per_group), Tol::exact())
+            .finish();
+        assert_eq!(r.groups, ["last", "mid", "never"]);
+        let text = r.to_string();
+        assert!(text.contains("no expected events: never"), "{text}");
+
+        // Without "mid" (missing labels dropped) only "last" has expected events: R reports
+        // chi-square 0 on 0 df (lr_one_group_chisq); p2a refuses.
+        let m = invalid_spec(
+            log_rank_test(&ds, "time_early", "event_early", "group_no_mid"),
+            "one group with expected events",
         );
-        // p-value should be reasonable (not extremely small for this data)
-        assert!(
-            result.p_value > 0.001,
-            "p-value should be > 0.001, got {}",
-            result.p_value
-        );
+        assert!(m.contains("two groups"), "{m}");
     }
 
     /// Create dataset for Cox PH with ties
@@ -3263,7 +3315,6 @@ mod tests {
                 by_column: vec![("ph.ecog".to_string(), 1)],
             }
         );
-        let as_f64 = |v: &[usize]| v.iter().map(|&x| x as f64).collect::<Vec<_>>();
         Check::new(&case)
             .vector("ecog_n", &as_f64(&ecog.n_per_group), Tol::exact())
             .vector("ecog_obs", &as_f64(&ecog.events_per_group), Tol::exact())

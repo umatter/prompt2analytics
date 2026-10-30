@@ -30,6 +30,34 @@
       "tolerance": "exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "surv_logrank",
+      "name": "Log-rank test (survdiff, rho = 0)",
+      "category": "econometrics",
+      "reference": "survival::survdiff",
+      "doc": "validation/econometrics/survival.md",
+      "cases": [
+        "surv_logrank_lung",
+        "surv_logrank_small",
+        "surv_km_median_rules"
+      ],
+      "tests": [
+        "p2a-core::econometrics::survival::tests::test_validate_logrank_lung",
+        "p2a-core::econometrics::survival::tests::test_validate_logrank_small",
+        "p2a-core::econometrics::survival::tests::test_validate_logrank_zero_expected_group"
+      ],
+      "quantities": [
+        "chi-square",
+        "df (groups with expected events - 1)",
+        "p",
+        "observed, expected, n per group",
+        "variance matrix",
+        "rows used after NA labels"
+      ],
+      "tolerance": "validation/README.md: n = 10-16 coefficients 1e-6, SE and limits 1e-5; n = 90-228 coefficients 1e-8, SE and limits 1e-6 relative; times, counts and medians exact; CLI text at print precision",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
