@@ -2235,7 +2235,7 @@ impl AnalyticsServer {
 
     /// Run Longitudinal Targeted Maximum Likelihood Estimation (LTMLE) for time-varying treatments.
     #[tool(
-        description = "Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics."
+        description = "Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics. Columns must not contain missing values (p2a has no censoring node); integer and boolean columns are accepted."
     )]
     pub async fn ltmle(
         &self,
@@ -2263,66 +2263,17 @@ impl AnalyticsServer {
             ))]));
         }
 
-        // Extract data from dataset
-        let df = dataset.df();
-        let n = df.height();
-
-        // Extract outcomes at each time point
-        let mut outcomes: Vec<ndarray::Array1<f64>> = Vec::with_capacity(t_max);
-        for col_name in &request.outcomes {
-            let col = match df.column(col_name) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' not found: {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-            let values: Vec<f64> = col
-                .f64()
-                .map_err(|e| {
-                    McpError::invalid_request(
-                        format!("Column '{}' must be numeric: {}", col_name, e),
-                        None,
-                    )
-                })?
-                .into_no_null_iter()
-                .collect();
-            outcomes.push(ndarray::Array1::from_vec(values));
-        }
-
-        // Extract treatments at each time point
-        let mut treatments: Vec<ndarray::Array1<f64>> = Vec::with_capacity(t_max);
-        for col_name in &request.treatments {
-            let col = match df.column(col_name) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' not found: {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-            let values: Vec<f64> = col
-                .f64()
-                .map_err(|e| {
-                    McpError::invalid_request(
-                        format!("Column '{}' must be numeric: {}", col_name, e),
-                        None,
-                    )
-                })?
-                .into_no_null_iter()
-                .collect();
-            treatments.push(ndarray::Array1::from_vec(values));
-        }
-
-        // Extract covariates at each time point
-        let mut covariates: Vec<ndarray::Array2<f64>> = Vec::with_capacity(t_max);
-        for cov_list in &request.covariates {
-            // Parse comma-separated covariate names
-            let cov_names: Vec<&str> = cov_list.split(',').map(|s| s.trim()).collect();
-            let k = cov_names.len();
+        // Every node is read in one extractor request. p2a's LTMLE has no censoring node,
+        // so a missing value is a tool error naming the column (NaPolicy::Fail): dropping
+        // the row would change the sample of every time point.
+        let n = dataset.df().height();
+        let cov_lists: Vec<Vec<&str>> = request
+            .covariates
+            .iter()
+            .map(|list| list.split(',').map(str::trim).collect())
+            .collect();
+        for names_t in &cov_lists {
+            let k = names_t.len();
             if n.checked_mul(k)
                 .is_none_or(|total| total > MAX_MATRIX_ELEMENTS)
             {
@@ -2331,38 +2282,36 @@ impl AnalyticsServer {
                     n, k, MAX_MATRIX_ELEMENTS
                 ))]));
             }
-
-            let mut cov_data = Vec::with_capacity(n * k);
-            for row_idx in 0..n {
-                for col_name in &cov_names {
-                    let col = match df.column(col_name) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            return Ok(CallToolResult::error(vec![Content::text(format!(
-                                "Column '{}' not found: {}",
-                                col_name, e
-                            ))]));
-                        }
-                    };
-                    let value = col
-                        .f64()
-                        .map_err(|e| {
-                            McpError::invalid_request(
-                                format!("Column '{}' must be numeric: {}", col_name, e),
-                                None,
-                            )
-                        })?
-                        .get(row_idx)
-                        .unwrap_or(f64::NAN);
-                    cov_data.push(value);
-                }
-            }
-
-            let cov_array = ndarray::Array2::from_shape_vec((n, k), cov_data).map_err(|e| {
-                McpError::invalid_request(format!("Failed to create covariate matrix: {}", e), None)
-            })?;
-            covariates.push(cov_array);
         }
+        let mut names: Vec<&str> = request.outcomes.iter().map(String::as_str).collect();
+        names.extend(request.treatments.iter().map(String::as_str));
+        names.extend(cov_lists.iter().flatten().copied());
+        let cols = match crate::tools::common::numeric_columns(
+            dataset,
+            &names,
+            crate::tools::common::NaPolicy::Fail,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "LTMLE: {e}"
+                ))]));
+            }
+        };
+        let outcomes: Vec<ndarray::Array1<f64>> = request
+            .outcomes
+            .iter()
+            .map(|c| cols.numeric_array(c))
+            .collect();
+        let treatments: Vec<ndarray::Array1<f64>> = request
+            .treatments
+            .iter()
+            .map(|c| cols.numeric_array(c))
+            .collect();
+        let covariates: Vec<ndarray::Array2<f64>> = cov_lists
+            .iter()
+            .map(|names_t| cols.matrix(names_t, false).data)
+            .collect();
 
         // Create LTMLE data structure
         let data = match LtmleData::new(outcomes, treatments, covariates) {
@@ -2836,5 +2785,47 @@ mod tests {
         .unwrap();
         let out = run(df, req);
         assert!(out.contains("nope"), "{out}");
+    }
+
+    // =========================================================================
+    // ltmle extraction (T2-WP11: TOOL-7, CAUS-24 handler sites)
+    // =========================================================================
+
+    fn ltmle_request() -> LtmleRequest {
+        serde_json::from_value(json!({
+            "dataset": "rd", "outcomes": ["y", "yf"], "treatments": ["d", "d"],
+            "covariates": ["x", "ym"]
+        }))
+        .unwrap()
+    }
+
+    fn run_ltmle_on(df: DataFrame) -> CallToolResult {
+        let (rt, server) = server_with(vec![("rd", df)]);
+        rt.block_on(server.ltmle(Parameters(ltmle_request())))
+            .expect("data problems are tool errors")
+    }
+
+    #[test]
+    fn test_mcp_ltmle_accepts_int64_treatment() {
+        let df = rd_frame();
+        let int = run_ltmle_on(df.clone());
+        assert_ne!(int.is_error, Some(true), "{}", text(&int));
+        let float = run_ltmle_on(as_f64(&df, "d"));
+        assert_eq!(text(&int), text(&float));
+    }
+
+    #[test]
+    fn test_mcp_ltmle_refuses_missing_values() {
+        let df = rd_frame();
+        for (col, row, needle) in [
+            ("yf", 3, "Column 'yf' contains 1 missing value(s)"),
+            ("ym", 4, "Column 'ym'"),
+            ("d", 2, "Column 'd'"),
+        ] {
+            let r = run_ltmle_on(with_nulls(&df, col, &[row]));
+            let out = text(&r);
+            assert_eq!(r.is_error, Some(true), "{col}: {out}");
+            assert!(out.contains(needle), "{col}: {out}");
+        }
     }
 }
