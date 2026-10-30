@@ -162,7 +162,7 @@ pinned to `rdmulti` (CAUS-77, Tier 3).
 
 ## Known Differences from R Implementation
 
-1. **Bandwidth selection**: without given bandwidths each cutoff uses p2a's own MSE-type selector from `run_rd`, not `rdbwselect` (CAUS-28). The R `rdmulti` package calls `rdrobust`'s selectors.
+1. **Bandwidth selection**: without given bandwidths each cutoff uses p2a's own MSE-type selector from `run_rd`, not `rdbwselect` (CAUS-28). The R `rdmulti` package calls `rdrobust`'s selectors. The MCP tool `rd_multi`'s description says so.
 
 2. **Bias correction**: We use the robust bias-corrected estimate from the base RD estimator for pooling, consistent with CCT recommendations.
 

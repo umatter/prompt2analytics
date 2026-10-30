@@ -1559,7 +1559,9 @@ pub struct FuzzyRdRequest {
     pub bwselect: Option<String>,
 
     /// Main bandwidth
-    #[schemars(description = "Main bandwidth h. If not specified, uses automatic selection.")]
+    #[schemars(
+        description = "Main bandwidth h. If not specified, p2a's own MSE-type selector chooses it from the outcome."
+    )]
     pub h: Option<f64>,
 
     /// Bias bandwidth

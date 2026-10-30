@@ -1895,7 +1895,7 @@ impl AnalyticsServer {
 
     /// Run Fuzzy Regression Discontinuity estimation.
     #[tool(
-        description = "Run Fuzzy Regression Discontinuity estimation, for designs where the treatment probability (not assignment) jumps at the cutoff. Fits the outcome and the treatment on one bandwidth and reports the Wald ratio (LATE) with its joint conventional standard error and the bias-corrected robust estimate and interval, as rdrobust(fuzzy = ), plus the first-stage jump and F statistic (warning below 10)."
+        description = "Run Fuzzy Regression Discontinuity estimation, for designs where the treatment probability (not assignment) jumps at the cutoff. Fits the outcome and the treatment on one bandwidth and reports the Wald ratio (LATE) with its joint conventional standard error and the bias-corrected robust estimate and interval, as rdrobust(fuzzy = ), plus the first-stage jump and F statistic (warning below 10). Bandwidths come from p2a's own MSE-type selector (run on the outcome), not rdrobust's rdbwselect, unless h (and b) are given."
     )]
     pub async fn rd_fuzzy(
         &self,
@@ -1967,7 +1967,7 @@ impl AnalyticsServer {
 
     /// Run Multi-Cutoff Regression Discontinuity estimation.
     #[tool(
-        description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020). Each cutoff-specific estimate is rdrobust's bias-corrected estimate with its robust standard error; vce selects the variance estimator."
+        description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020). Each cutoff-specific estimate is rdrobust's bias-corrected estimate with its robust standard error; vce selects the variance estimator. Per-cutoff bandwidths come from p2a's own MSE-type selector, not rdrobust's rdbwselect, unless a bandwidth is given."
     )]
     pub async fn rd_multi(
         &self,
