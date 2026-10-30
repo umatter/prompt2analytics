@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "iv_no_controls",
+  "area": "econometrics/iv",
+  "method": "2SLS without exogenous controls (first-stage F was already correct)",
+  "reference": "AER::summary.ivreg(diagnostics = TRUE)",
+  "call": "ivreg(y ~ x | z1 + z2)",
+  "dataset": "validation/datasets/generated/iv_no_controls.csv",
+  "datasets": ["validation/datasets/generated/iv_no_controls.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "AER": "1.2.17",
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.1021230930489567, 0.65111102795573639]
+    },
+    "se": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.090031267729408934, 0.25414828428477942]
+    },
+    "se_hc1": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.088582608470998456, 0.27060261538386648]
+    },
+    "se_hc0": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.088286839336540038, 0.2696990982859197]
+    },
+    "weak_f": [8.8616789134912786],
+    "weak_df1": [2],
+    "weak_df2": [297],
+    "weak_p": [0.00018275941770054888],
+    "weak_f_hc1": [9.349761011317689],
+    "weak_p_hc1": [0.00011538648832507372],
+    "wu_hausman": 6.1455225326413059,
+    "wu_hausman_p": 0.013729546503857248,
+    "sargan": 0.9401159877792109,
+    "sargan_p": 0.33224801435443996,
+    "overall_first_stage_f": [8.8616789134912892],
+    "n_obs": 300
+  }
+}

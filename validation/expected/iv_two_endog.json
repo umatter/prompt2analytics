@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "iv_two_endog",
+  "area": "econometrics/iv",
+  "method": "2SLS with two endogenous regressors, two controls and three instruments",
+  "reference": "AER::summary.ivreg(diagnostics = TRUE): one weak-instrument F per endogenous regressor",
+  "call": "ivreg(y ~ x1 + x2 + w1 + w2 | w1 + w2 + z1 + z2 + z3)",
+  "dataset": "validation/datasets/generated/iv_two_endog.csv",
+  "datasets": ["validation/datasets/generated/iv_two_endog.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "AER": "1.2.17",
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x1", "x2", "w1", "w2"],
+      "values": [1.9748588721547791, 0.83573137092603222, -0.72366720119861727, 0.36292478602969902, 0.43062617093990935]
+    },
+    "se": {
+      "names": ["(Intercept)", "x1", "x2", "w1", "w2"],
+      "values": [0.1675227125013273, 0.13873884016580354, 0.17786890333819219, 0.10490233853074687, 0.32306430994881624]
+    },
+    "se_hc1": {
+      "names": ["(Intercept)", "x1", "x2", "w1", "w2"],
+      "values": [0.15976900845649245, 0.14629681837485642, 0.17658772209702736, 0.10472849780087351, 0.30952965290045831]
+    },
+    "se_hc0": {
+      "names": ["(Intercept)", "x1", "x2", "w1", "w2"],
+      "values": [0.15876731200842664, 0.14537958790102934, 0.17548057812896026, 0.10407188632614578, 0.30758900898661784]
+    },
+    "weak_f": [30.182002003721841, 24.396733081297839],
+    "weak_df1": [3, 3],
+    "weak_df2": [394, 394],
+    "weak_p": [1.3891011676843923e-17, 1.6837340107205339e-14],
+    "weak_f_hc1": [33.410423394721207, 26.602360737529967],
+    "weak_p_hc1": [2.9295517483564005e-19, 1.0921970131748287e-15],
+    "wu_hausman": 15.398557466286661,
+    "wu_hausman_p": 3.6440972904109125e-07,
+    "sargan": 0.41282025131827993,
+    "sargan_p": 0.52054151700815932,
+    "overall_first_stage_f": [27.923748595861486, 18.237509453630192],
+    "n_obs": 400
+  }
+}

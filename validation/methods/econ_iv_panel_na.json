@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "iv_2sls",
+      "name": "2SLS / IV: coefficients, classical and HC1 SEs, first-stage (weak-instrument) F, Sargan; first-stage diagnostics; missing values",
+      "category": "econometrics",
+      "reference": "AER::ivreg; AER::summary.ivreg(diagnostics = TRUE) (ivdiag: weak-instrument F = partial F of the excluded instruments); vcov. = sandwich::vcovHC(type = 'HC1'); anova(lm(x ~ controls), lm(x ~ controls + instruments))",
+      "doc": "validation/econometrics/iv_2sls.md",
+      "cases": [
+        "iv_weak_controls",
+        "iv_two_endog",
+        "iv_no_controls",
+        "iv_na_rows"
+      ],
+      "tests": [
+        "p2a-core::econometrics::iv::tests::test_validate_iv_weak_controls",
+        "p2a-core::econometrics::iv::tests::test_validate_iv_two_endog",
+        "p2a-core::econometrics::iv::tests::test_validate_iv_no_controls",
+        "p2a-core::econometrics::iv::tests::test_validate_first_stage_diagnostics_weak_controls",
+        "p2a-core::econometrics::iv::tests::test_validate_iv_display_first_stage"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE classical",
+        "SE HC1",
+        "first-stage partial F, df, p",
+        "first-stage HC1 Wald F, p",
+        "first-stage partial R2",
+        "first-stage regression R2, adj. R2, instrument coefficients and SEs",
+        "Sargan J and p",
+        "observations used",
+        "rows dropped per column"
+      ],
+      "tolerance": "validation/README.md, n = 294-500: coefficients 1e-8, SE and statistics 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute; counts and df exact",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/iv_basic.csv",
+        "validation/expected/iv_overidentified.csv"
+      ]
+    }
+  ]
+}

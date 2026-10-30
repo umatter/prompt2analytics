@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "id": "iv_weak_controls",
+  "area": "econometrics/iv",
+  "method": "2SLS with an exogenous control that predicts the endogenous regressor; weak excluded instruments",
+  "reference": "AER::ivreg; summary.ivreg(diagnostics = TRUE) (weak-instrument F = partial F of the excluded instruments); vcov. = sandwich::vcovHC(type = 'HC1') for the robust F",
+  "call": "ivreg(y ~ x + w | w + z1 + z2)",
+  "dataset": "validation/datasets/generated/iv_weak_controls.csv",
+  "datasets": ["validation/datasets/generated/iv_weak_controls.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "AER": "1.2.17",
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [1.0425984384578373, 0.10838033928024544, 1.3271390550714173]
+    },
+    "se": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [0.083341471514729454, 1.8355768531997416, 3.7517822785945838]
+    },
+    "se_hc1": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [0.085334611710189454, 1.8351318071923248, 3.7463531763495266]
+    },
+    "se_hc0": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [0.085078222712951498, 1.8296181288097939, 3.735097207464896]
+    },
+    "weak_f": [0.22671626635951783],
+    "weak_df1": [2],
+    "weak_df2": [496],
+    "weak_p": [0.79722948956125039],
+    "weak_f_hc1": [0.23166413083315232],
+    "weak_p_hc1": [0.79329827271905684],
+    "wu_hausman": 0.58474523392201827,
+    "wu_hausman_p": 0.44482198176037502,
+    "sargan": 1.4718814653242318,
+    "sargan_p": 0.22504907533747728,
+    "overall_first_stage_f": [300.80840699168982],
+    "n_obs": 500,
+    "fs_partial_f": 0.22671626635951783,
+    "fs_partial_p": 0.79722948956125039,
+    "fs_partial_df1": 2,
+    "fs_partial_df2": 496,
+    "fs_r2": 0.64531532143409298,
+    "fs_adj_r2": 0.64317005120083137,
+    "fs_partial_r2": 0.0009133435343690044,
+    "fs_instr_coef": {
+      "names": ["z1", "z2"],
+      "values": [-0.0090167616002719778, 0.044734024592271097]
+    },
+    "fs_instr_se": {
+      "names": ["z1", "z2"],
+      "values": [0.065289478724813818, 0.067078769668775656]
+    }
+  }
+}
