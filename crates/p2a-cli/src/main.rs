@@ -585,6 +585,36 @@ mod cli_definition_tests {
             })
         ));
     }
+
+    #[test]
+    fn data_load_na_strings_parses() {
+        use crate::commands::data::DataCommands;
+        let na = |args: &[&str]| match parse(args).command {
+            Commands::Data(DataCommands::Load { na_strings, .. }) => na_strings,
+            _ => unreachable!(),
+        };
+        assert_eq!(na(&["data", "load", "f.csv"]), None);
+        assert_eq!(
+            na(&["data", "load", "f.csv", "--na-strings", "NA,,."]),
+            Some(vec!["NA".into(), "".into(), ".".into()])
+        );
+        assert_eq!(
+            na(&[
+                "data",
+                "load",
+                "f.csv",
+                "--na-strings",
+                ".",
+                "--na-strings",
+                "NA"
+            ]),
+            Some(vec![".".into(), "NA".into()])
+        );
+        assert_eq!(
+            na(&["data", "load", "f.csv", "--na-strings=-99,."]),
+            Some(vec!["-99".into(), ".".into()])
+        );
+    }
 }
 
 #[cfg(test)]

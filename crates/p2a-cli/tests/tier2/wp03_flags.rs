@@ -258,3 +258,131 @@ fn test_cli_session_replays_subcommand_flags() {
     );
     assert_same_csv(&copy_path, &gdp_path); // the replayed `data save` wrote the file again
 }
+
+/// DATA-32 (CLI): "NA" is missing by default (R write.csv), --na-strings replaces the marker list,
+/// and the markers persist: every call below is a new process that reloads the session's datasets.
+#[test]
+fn test_validate_cli_data_load_na_strings() {
+    use std::collections::BTreeMap;
+    let case = Case::load("columns_conventions");
+    let s = temp_session();
+    let canon = case.dataset_path();
+    let text = std::fs::read_to_string(&canon).unwrap();
+    let derive = |marker: &str, file: &str| {
+        let mut out = String::new();
+        for line in text.lines() {
+            let f: Vec<&str> = line
+                .split(',')
+                .map(|c| if c.is_empty() { marker } else { c })
+                .collect();
+            assert_eq!(f.len(), 5, "case dataset changed shape: {line:?}");
+            out.push_str(&f.join(","));
+            out.push('\n');
+        }
+        let p = s.dir().join(file);
+        std::fs::write(&p, out).unwrap();
+        p
+    };
+    let (na, dot) = (derive("NA", "cc_na.csv"), derive(".", "cc_dot.csv"));
+    s.load_as(&canon, "canon", &[]);
+    s.load_as(&na, "na", &[]);
+    s.load_as(&dot, "dot", &["--na-strings", "."]);
+    s.load_as(&dot, "raw", &[]);
+    let dtypes = |name: &str| -> BTreeMap<String, String> {
+        s.json_docs(&["data", "describe", name])[1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().unwrap().to_string(),
+                    c["dtype"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let map = |pairs: [(&str, &str); 5]| {
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    // R classes integer, numeric, integer, character, logical
+    let typed = map([
+        ("id", "Int64"),
+        ("y", "Float64"),
+        ("n", "Int64"),
+        ("s", "String"),
+        ("flag", "Boolean"),
+    ]);
+    for name in ["canon", "na", "dot"] {
+        assert_eq!(dtypes(name), typed, "{name}");
+    }
+    // R read.csv() without na.strings: "." is text, columns are character
+    assert_eq!(
+        dtypes("raw"),
+        map([
+            ("id", "Int64"),
+            ("y", "String"),
+            ("n", "String"),
+            ("s", "String"),
+            ("flag", "String")
+        ])
+    );
+    let head = |name: &str| s.json(&["data", "head", name, "-n", "10"]);
+    let rows = head("canon");
+    assert_eq!(head("na"), rows); // R: identical(d_na, canon)
+    assert_eq!(head("dot"), rows); // R: identical(d_dot, canon)
+    let nulls = |rows: &serde_json::Value, col: &str| -> Vec<usize> {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r[col] == "null")
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let r_rows = |key: &str, missing: fn(f64) -> bool| -> Vec<usize> {
+        case.vector(key)
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| missing(**v))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    assert_eq!(nulls(&rows, "n"), r_rows("n_codes", |v| v == -1.0));
+    assert_eq!(nulls(&rows, "s"), r_rows("s_codes", |v| v == -1.0));
+    assert_eq!(nulls(&rows, "flag"), r_rows("flag_numeric", f64::is_nan));
+    assert_eq!(nulls(&rows, "y").len() as f64, case.scalar("missing_y"));
+    let complete: Vec<f64> = (0..10)
+        .filter(|&i| ["y", "n", "s"].iter().all(|c| rows[i][*c] != "null"))
+        .map(|i| i as f64)
+        .collect();
+    assert_eq!(complete, case.vector("complete_rows"));
+    let raw = head("raw");
+    for col in ["id", "y", "n", "s", "flag"] {
+        assert!(nulls(&raw, col).is_empty(), "{col}");
+    }
+    // the recorded command keeps the flag for script export
+    let dot_s = dot.to_str().unwrap();
+    assert!(
+        s.recorded_argv().contains(
+            &["data", "load", dot_s, "--name", "dot", "--na-strings", "."]
+                .map(String::from)
+                .to_vec()
+        )
+    );
+    // --na-strings is a CSV option; other formats store missing values natively
+    let pq = s.dir().join("canon.parquet");
+    s.ok(&["data", "save", "canon", "--output", pq.to_str().unwrap()]);
+    let e = s.err(&[
+        "data",
+        "load",
+        pq.to_str().unwrap(),
+        "--name",
+        "pq",
+        "--na-strings",
+        ".",
+    ]);
+    assert!(e.contains("--na-strings") && e.contains("CSV"), "{e}");
+}

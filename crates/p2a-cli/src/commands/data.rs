@@ -20,6 +20,9 @@ EXAMPLES:
 
     # Load with custom name
     p2a --session s.json data load data/monthly.csv --name monthly_sales
+
+    # A CSV export that writes missing values as '.' (Stata, SAS)
+    p2a --session s.json data load stata_export.csv --name s --na-strings .
 ")]
     Load {
         /// Path to the data file (CSV, Parquet, Excel, Stata, SAS)
@@ -28,6 +31,13 @@ EXAMPLES:
         /// Name to assign to the dataset
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Strings read as missing values in a CSV file, comma-separated (e.g. "NA,,." = NA,
+        /// the empty field and "."). Replaces the default list, NA and the empty field (R
+        /// read.csv); an empty unquoted field is missing in every case. Use --na-strings=-99
+        /// for a marker that starts with '-'.
+        #[arg(long = "na-strings", value_delimiter = ',', value_name = "LIST")]
+        na_strings: Option<Vec<String>>,
     },
 
     /// List all loaded datasets
@@ -109,9 +119,18 @@ pub fn execute(
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {
-        DataCommands::Load { path, name } => {
-            execute_load(path, name.as_deref(), format, quiet, session)
-        }
+        DataCommands::Load {
+            path,
+            name,
+            na_strings,
+        } => execute_load(
+            path,
+            name.as_deref(),
+            na_strings.as_deref(),
+            format,
+            quiet,
+            session,
+        ),
         DataCommands::List => execute_list(format, session),
         DataCommands::Describe { dataset } => execute_describe(dataset, format, session),
         DataCommands::Head { dataset, n } => execute_head(dataset, *n, format, session),
@@ -139,6 +158,7 @@ pub fn execute(
 fn execute_load(
     path: &PathBuf,
     name: Option<&str>,
+    na_strings: Option<&[String]>,
     format: &OutputFormat,
     quiet: bool,
     session: Option<&mut SessionManager>,
@@ -177,7 +197,23 @@ fn execute_load(
 
     // Load the dataset
     let df = match extension.as_str() {
-        "csv" => DataLoader::load_csv(path)?,
+        "csv" => match na_strings {
+            Some(na) => {
+                let na: Vec<&str> = na.iter().map(String::as_str).collect();
+                DataLoader::load_csv_with_na(path, &na)?
+            }
+            None => DataLoader::load_csv(path)?,
+        },
+        "parquet" | "xlsx" | "xls" | "xlsb" | "dta" | "sas7bdat" if na_strings.is_some() => {
+            progress.finish_and_clear();
+            print_error(
+                &format!(
+                    "--na-strings applies to CSV files only; '{extension}' files store missing values natively"
+                ),
+                format,
+            );
+            return Ok(());
+        }
         "parquet" => DataLoader::load_parquet(path)?,
         "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(path, None)?,
         "dta" => DataLoader::load_stata(path)?,
@@ -211,7 +247,13 @@ fn execute_load(
 
     // Register with session if available
     if let Some(mgr) = session {
-        mgr.register_dataset(&dataset_name, path.clone(), &extension, &dataset);
+        mgr.register_dataset(
+            &dataset_name,
+            path.clone(),
+            &extension,
+            &dataset,
+            na_strings.map(<[String]>::to_vec),
+        );
         mgr.store_dataset(dataset_name.clone(), dataset);
     }
 
