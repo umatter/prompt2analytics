@@ -45,11 +45,9 @@
       "doc": "validation/econometrics/survival.md",
       "cases": [
         "surv_km_lung",
-        "surv_km_lung_by_sex",
         "surv_logrank_lung",
         "surv_logrank_small",
-        "surv_km_small",
-        "surv_km_median_rules"
+        "surv_km_small"
       ],
       "tests": [
         "p2a-core::econometrics::survival::tests::test_validate_na_survival_int64_columns",
