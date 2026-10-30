@@ -283,12 +283,14 @@ impl AnalyticsServer {
              ====================\n\
              Rows returned: {}\n\
              {}\
-             Columns: {}\n\n\
+             Columns: {}\n\
+             {}\n\
              Dataset stored as: '{}'\n\n\
              Preview (first 5 rows):\n{}",
             result.rows,
             note,
             result.columns.join(", "),
+            warning_lines(&result.warnings),
             name,
             preview
         );
@@ -427,12 +429,14 @@ impl AnalyticsServer {
              ====================\n\
              Rows returned: {}\n\
              {}\
-             Columns: {}\n\n\
+             Columns: {}\n\
+             {}\n\
              Dataset stored as: '{}'\n\n\
              Preview (first 5 rows):\n{}",
             result.rows,
             note,
             result.columns.join(", "),
+            warning_lines(&result.warnings),
             name,
             preview
         );
@@ -568,7 +572,8 @@ impl AnalyticsServer {
              File: {}\n\
              Rows returned: {}\n\
              {}\
-             Columns: {}\n\n\
+             Columns: {}\n\
+             {}\n\
              Dataset stored as: '{}'\n\n\
              Preview (first 5 rows):\n{}",
             // The path as the caller sent it, never the resolved server path.
@@ -576,12 +581,19 @@ impl AnalyticsServer {
             result.rows,
             note,
             result.columns.join(", "),
+            warning_lines(&result.warnings),
             name,
             preview
         );
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
+}
+
+/// One `Warning: ...` line per conversion warning of a query result (each
+/// ending in a newline), or nothing.
+fn warning_lines(warnings: &[String]) -> String {
+    warnings.iter().map(|w| format!("Warning: {w}\n")).collect()
 }
 
 #[cfg(test)]
@@ -836,5 +848,70 @@ mod tests {
         assert!(guard_sql_file_access("SELECT * FROM read_parquet('/tmp/x.parquet')").is_err());
         assert!(guard_sql_file_access("select * from READ_JSON('/secret')").is_err());
         assert!(guard_sql_file_access("SELECT * FROM glob('/**')").is_err());
+    }
+
+    /// `db_duckdb_query` under `Limits::off()` (the hosted profile refuses free-form DuckDB
+    /// SQL) on a fresh server: the reply and the server.
+    fn duckdb_off(query: &str, name: &str) -> (CallToolResult, AnalyticsServer) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = AnalyticsServer::new();
+        let result = limits::with_limits(Limits::off(), || {
+            rt.block_on(server.db_duckdb_query(Parameters(DuckDBQueryRequest {
+                db_path: ":memory:".into(),
+                query: query.into(),
+                name: Some(name.into()),
+            })))
+        })
+        .unwrap();
+        (result, server)
+    }
+
+    #[test]
+    fn duckdb_query_keeps_decimal_date_hugeint_and_unsigned_types() {
+        // DATA-8 repro: these columns were text columns of "" values.
+        use polars::prelude::DataType;
+        let (result, server) = duckdb_off(
+            "SELECT 12.50::DECIMAL(10,2) AS amt, 1.25 AS lit, 7::UINTEGER AS u, \
+             DATE '2024-03-01' AS d, 42::HUGEINT AS h, 3::INTEGER AS i, \
+             9007199254740993::HUGEINT AS big",
+            "typed",
+        );
+        let text = text_of(&result);
+        assert_ne!(result.is_error, Some(true), "{text}");
+        assert!(text.contains("\nWarning: column 'big'"), "{text}");
+        let datasets = server.datasets.try_read().unwrap();
+        let df = datasets.get("typed").unwrap().df();
+        for (c, dt) in [
+            ("amt", DataType::Float64),
+            ("lit", DataType::Float64),
+            ("u", DataType::UInt32),
+            ("d", DataType::Date),
+            ("h", DataType::Float64),
+            ("i", DataType::Int64),
+            ("big", DataType::String),
+        ] {
+            assert_eq!(df.column(c).unwrap().dtype(), &dt, "{c}");
+        }
+        assert_eq!(df.column("amt").unwrap().f64().unwrap().get(0), Some(12.5));
+        assert_eq!(df.column("lit").unwrap().f64().unwrap().get(0), Some(1.25));
+        assert_eq!(
+            df.column("big").unwrap().str().unwrap().get(0),
+            Some("9007199254740993")
+        );
+    }
+
+    #[test]
+    fn duckdb_query_refuses_list_columns_with_a_cast_hint() {
+        let (result, server) = duckdb_off("SELECT [1, 2] AS l", "listed");
+        let text = text_of(&result);
+        assert_eq!(result.is_error, Some(true), "{text}");
+        assert!(
+            text.contains("column 'l' has DuckDB type List") && text.contains("CAST("),
+            "{text}"
+        );
+        assert!(!server.datasets.try_read().unwrap().contains_key("listed"));
     }
 }

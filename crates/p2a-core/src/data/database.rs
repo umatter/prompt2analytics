@@ -1424,7 +1424,8 @@ fn run_duckdb_query(
         }
         let mut row_bytes = 0u64;
         for i in 0..column_count {
-            let (value, bytes) = duckdb_owned_value(row.get_ref(i).map_err(stopped)?);
+            let (value, bytes) =
+                duckdb_owned_value(row.get_ref(i).map_err(stopped)?, &column_names[i])?;
             row_bytes = row_bytes.saturating_add(bytes);
             row_values.push(value);
         }
@@ -1436,134 +1437,409 @@ fn run_duckdb_query(
     drop(stmt);
     drop(watch);
 
-    // Task 9 maps the DuckDB values by type; this converter never warns.
-    finish_outcome(collector, column_names, |name, values, _warnings| {
-        Ok(duckdb_column_to_series(name, values))
-    })
+    finish_outcome(collector, column_names, duckdb_column_to_series)
 }
 
-/// One DuckDB value read *without owning* the container types the converter
-/// discards, plus its estimated byte size: booleans and numbers 8 bytes, text
-/// and binary values their length.
+/// The DuckDB type name of a value p2a cannot load, taken from its variant.
 ///
-/// [`duckdb_column_to_series`] keeps only Null, the signed integers, the two
-/// floats, text and blobs; everything else (LIST, STRUCT, MAP, ARRAY, UNION,
-/// ENUM, DECIMAL, TIMESTAMP, the huge and unsigned integers, …) it renders as
-/// an empty string. Reading those through [`duckdb::types::ValueRef`] and
-/// replacing them with an empty [`Value::Text`] here, instead of
-/// `row.get`-ing an owned [`Value`], means a LIST of millions of elements is
-/// never allocated in Rust (outside DuckDB's `memory_limit`, in a conversion
-/// the watchdog cannot interrupt) only to be thrown away. The output column is
-/// identical. Text is decoded lossily (`from_utf8_lossy`: invalid bytes become
-/// U+FFFD), so a non-UTF-8 byte sequence cannot panic.
-fn duckdb_owned_value(value: duckdb::types::ValueRef<'_>) -> (duckdb::types::Value, u64) {
-    use duckdb::types::{Value, ValueRef};
+/// duckdb-rs' `Value::data_type()` panics for the container types and
+/// `ValueRef::data_type()` for a container whose child is, say, an INTERVAL,
+/// so neither is called.
+fn duckdb_unloadable_type(value: &duckdb::types::ValueRef<'_>) -> &'static str {
+    use duckdb::types::ValueRef;
     match value {
+        ValueRef::List(..) => "List",
+        ValueRef::Struct(..) => "Struct",
+        ValueRef::Array(..) => "Array",
+        ValueRef::Map(..) => "Map",
+        ValueRef::Union(..) => "Union",
+        ValueRef::Interval { .. } => "Interval",
+        ValueRef::Geometry(_) => "Geometry",
+        _ => "unknown",
+    }
+}
+
+/// The refusal of a column whose values p2a cannot load.
+fn duckdb_unloadable(column: &str, type_name: &str) -> DatabaseError {
+    DatabaseError::UnsupportedType(format!(
+        "column '{column}' has DuckDB type {type_name}, which p2a cannot load; cast it in SQL \
+         (e.g. CAST({column} AS VARCHAR))"
+    ))
+}
+
+/// One DuckDB value of the column `column` as an owned value, plus its
+/// estimated byte size: booleans and numbers 8 bytes (HUGEINT, UHUGEINT and
+/// DECIMAL 16), text, enum labels and blobs their length.
+///
+/// Null, booleans, the signed and unsigned integers (huge ones included),
+/// floats, decimals, dates, timestamps, times, text, enums (their label) and
+/// blobs are kept; [`duckdb_column_to_series`] maps them by type. Every other
+/// value (LIST, STRUCT, ARRAY, MAP, UNION, INTERVAL, GEOMETRY, and types newer
+/// than this code) is refused from the borrowed [`duckdb::types::ValueRef`],
+/// so a LIST of millions of elements is never copied into Rust (outside
+/// DuckDB's `memory_limit`, in a conversion the watchdog cannot interrupt).
+/// Text is decoded lossily (`from_utf8_lossy`: invalid bytes become U+FFFD),
+/// so a non-UTF-8 byte sequence cannot panic.
+fn duckdb_owned_value(
+    value: duckdb::types::ValueRef<'_>,
+    column: &str,
+) -> Result<(duckdb::types::Value, u64), DatabaseError> {
+    use duckdb::types::{Value, ValueRef};
+    Ok(match value {
         ValueRef::Null => (Value::Null, 0),
         ValueRef::Boolean(b) => (Value::Boolean(b), 8),
         ValueRef::TinyInt(i) => (Value::TinyInt(i), 8),
         ValueRef::SmallInt(i) => (Value::SmallInt(i), 8),
         ValueRef::Int(i) => (Value::Int(i), 8),
         ValueRef::BigInt(i) => (Value::BigInt(i), 8),
+        ValueRef::HugeInt(i) => (Value::HugeInt(i), 16),
+        ValueRef::UHugeInt(i) => (Value::UHugeInt(i), 16),
+        ValueRef::UTinyInt(i) => (Value::UTinyInt(i), 8),
+        ValueRef::USmallInt(i) => (Value::USmallInt(i), 8),
+        ValueRef::UInt(i) => (Value::UInt(i), 8),
+        ValueRef::UBigInt(i) => (Value::UBigInt(i), 8),
         ValueRef::Float(f) => (Value::Float(f), 8),
         ValueRef::Double(f) => (Value::Double(f), 8),
+        ValueRef::Decimal(d) => (Value::Decimal(d), 16),
+        ValueRef::Timestamp(unit, t) => (Value::Timestamp(unit, t), 8),
+        ValueRef::Date32(d) => (Value::Date32(d), 8),
+        ValueRef::Time64(unit, t) => (Value::Time64(unit, t), 8),
         ValueRef::Text(b) => {
             let s = String::from_utf8_lossy(b).into_owned();
             let n = s.len() as u64;
             (Value::Text(s), n)
         }
+        ValueRef::Enum(..) => {
+            let label = value
+                .as_str()
+                .map_err(|_| duckdb_unloadable(column, "Enum"))?
+                .to_string();
+            let n = label.len() as u64;
+            (Value::Enum(label), n)
+        }
         ValueRef::Blob(b) => (Value::Blob(b.to_vec()), b.len() as u64),
-        // Every other variant renders as "" in the converter; do not
-        // materialise it, and count it as zero bytes.
-        _ => (Value::Text(String::new()), 0),
+        other => return Err(duckdb_unloadable(column, duckdb_unloadable_type(&other))),
+    })
+}
+
+/// The polars type a DuckDB result column is loaded as, from its values.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DuckKind {
+    Bool,
+    Int,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Float,
+    Decimal,
+    HugeInt,
+    Date,
+    Timestamp,
+    Time,
+    Text,
+    Blob,
+}
+
+impl DuckKind {
+    /// The kind of a value: `Ok(None)` for NULL, `Err(())` for a value that
+    /// [`duckdb_owned_value`] never keeps.
+    fn of(value: &duckdb::types::Value) -> Result<Option<DuckKind>, ()> {
+        use duckdb::types::Value;
+        Ok(Some(match value {
+            Value::Null => return Ok(None),
+            Value::Boolean(_) => DuckKind::Bool,
+            Value::TinyInt(_) | Value::SmallInt(_) | Value::Int(_) | Value::BigInt(_) => {
+                DuckKind::Int
+            }
+            Value::UTinyInt(_) => DuckKind::UInt8,
+            Value::USmallInt(_) => DuckKind::UInt16,
+            Value::UInt(_) => DuckKind::UInt32,
+            Value::UBigInt(_) => DuckKind::UInt64,
+            Value::Float(_) | Value::Double(_) => DuckKind::Float,
+            Value::Decimal(_) => DuckKind::Decimal,
+            Value::HugeInt(_) | Value::UHugeInt(_) => DuckKind::HugeInt,
+            Value::Date32(_) => DuckKind::Date,
+            Value::Timestamp(..) => DuckKind::Timestamp,
+            Value::Time64(..) => DuckKind::Time,
+            Value::Text(_) | Value::Enum(_) => DuckKind::Text,
+            Value::Blob(_) => DuckKind::Blob,
+            _ => return Err(()),
+        }))
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            DuckKind::Bool => "BOOLEAN",
+            DuckKind::Int => "INTEGER",
+            DuckKind::UInt8 => "UTINYINT",
+            DuckKind::UInt16 => "USMALLINT",
+            DuckKind::UInt32 => "UINTEGER",
+            DuckKind::UInt64 => "UBIGINT",
+            DuckKind::Float => "DOUBLE",
+            DuckKind::Decimal => "DECIMAL",
+            DuckKind::HugeInt => "HUGEINT",
+            DuckKind::Date => "DATE",
+            DuckKind::Timestamp => "TIMESTAMP",
+            DuckKind::Time => "TIME",
+            DuckKind::Text => "VARCHAR",
+            DuckKind::Blob => "BLOB",
+        }
     }
 }
 
-/// One DuckDB result column as a Series, typed by its first non-null value.
-/// Booleans, the four signed integer types and the two float types keep their
-/// type; everything else becomes text (blobs lossily, other types as "").
-fn duckdb_column_to_series(name: &str, values: Vec<duckdb::types::Value>) -> Series {
-    use duckdb::types::Value;
-    #[derive(Clone, Copy)]
-    enum Kind {
-        Bool,
-        Int,
-        Float,
-        Text,
+/// `v` units of `unit` in `per_second` units per second, or `None` on overflow.
+fn duckdb_rescale(unit: duckdb::types::TimeUnit, v: i64, per_second: i64) -> Option<i64> {
+    use duckdb::types::TimeUnit as Unit;
+    let unit_per_second: i64 = match unit {
+        Unit::Second => 1,
+        Unit::Millisecond => 1_000,
+        Unit::Microsecond => 1_000_000,
+        Unit::Nanosecond => 1_000_000_000,
+    };
+    if unit_per_second <= per_second {
+        v.checked_mul(per_second / unit_per_second)
+    } else {
+        Some(v / (unit_per_second / per_second))
     }
-    let kind = values
-        .iter()
-        .find_map(|v| match v {
-            Value::Null => None,
-            Value::Boolean(_) => Some(Kind::Bool),
-            Value::TinyInt(_) | Value::SmallInt(_) | Value::Int(_) | Value::BigInt(_) => {
-                Some(Kind::Int)
-            }
-            Value::Float(_) | Value::Double(_) => Some(Kind::Float),
-            _ => Some(Kind::Text),
-        })
-        .unwrap_or(Kind::Text);
+}
 
-    match kind {
-        Kind::Bool => {
-            let values: Vec<Option<bool>> = values
-                .into_iter()
-                .map(|v| match v {
+/// One DuckDB result column as a Series, mapped by type: BOOLEAN to Boolean;
+/// the signed integers to Int64; UTINYINT to UBIGINT to UInt8 to UInt64;
+/// FLOAT and DOUBLE to Float64; DECIMAL to Float64 (from its exact decimal
+/// text); HUGEINT and UHUGEINT to Float64 when every value is within 2^53,
+/// else to String with a warning (no digit lost); DATE to Date; TIMESTAMP to
+/// Datetime(us); TIME to Time; VARCHAR and ENUM to String; BLOB to Binary; all
+/// NULL to a String column of nulls. No value but a NULL becomes null.
+///
+/// # Errors
+///
+/// [`DatabaseError::UnsupportedType`] for a column that mixes types, a
+/// TIMESTAMP or TIME out of range, or a value [`duckdb_owned_value`] refuses;
+/// and the errors of a cancelled or over-limit computation.
+fn duckdb_column_to_series(
+    name: &str,
+    values: Vec<duckdb::types::Value>,
+    warnings: &mut Vec<String>,
+) -> Result<Series, DatabaseError> {
+    use duckdb::types::Value;
+    let n = values.len();
+    let unloadable = || {
+        DatabaseError::UnsupportedType(format!(
+            "column '{name}' has a DuckDB type p2a cannot load; cast it in SQL (e.g. \
+             CAST({name} AS VARCHAR))"
+        ))
+    };
+    let mut kind: Option<DuckKind> = None;
+    let mut huge_beyond_f64 = false;
+    for (i, v) in values.iter().enumerate() {
+        if i.is_multiple_of(CHECK_EVERY_VALUES) {
+            checkpoint()?;
+        }
+        let Some(k) = DuckKind::of(v).map_err(|()| unloadable())? else {
+            continue;
+        };
+        match kind {
+            None => kind = Some(k),
+            Some(prev) if prev != k => {
+                return Err(DatabaseError::UnsupportedType(format!(
+                    "column '{name}' mixes DuckDB types {} and {}",
+                    prev.name(),
+                    k.name()
+                )));
+            }
+            Some(_) => {}
+        }
+        match v {
+            Value::HugeInt(x) if x.unsigned_abs() > u128::from(EXACT_F64_INT) => {
+                huge_beyond_f64 = true;
+            }
+            Value::UHugeInt(x) if *x > u128::from(EXACT_F64_INT) => huge_beyond_f64 = true,
+            _ => {}
+        }
+    }
+    let Some(kind) = kind else {
+        // All nulls - default to string
+        return Ok(Series::full_null(name.into(), n, &DataType::String));
+    };
+
+    // `values` converted by `f` (None for NULL), checked every
+    // CHECK_EVERY_VALUES values.
+    fn convert<T>(
+        values: Vec<Value>,
+        mut f: impl FnMut(Value) -> Result<Option<T>, DatabaseError>,
+    ) -> Result<Vec<Option<T>>, DatabaseError> {
+        let mut out = column_buffer(values.len())?;
+        for (i, v) in values.into_iter().enumerate() {
+            if i.is_multiple_of(CHECK_EVERY_VALUES) {
+                checkpoint()?;
+            }
+            out.push(f(v)?);
+        }
+        Ok(out)
+    }
+    let out_of_range = |what: &str| {
+        DatabaseError::UnsupportedType(format!("column '{name}': {what} value out of range"))
+    };
+
+    let series = match kind {
+        DuckKind::Bool => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
                     Value::Boolean(b) => Some(b),
                     _ => None,
                 })
-                .collect();
-            Series::new(name.into(), values)
-        }
-        Kind::Int => {
-            let values: Vec<Option<i64>> = values
-                .into_iter()
-                .map(|v| match v {
+            })?,
+        ),
+        DuckKind::Int => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
                     Value::TinyInt(i) => Some(i64::from(i)),
                     Value::SmallInt(i) => Some(i64::from(i)),
                     Value::Int(i) => Some(i64::from(i)),
                     Value::BigInt(i) => Some(i),
                     _ => None,
                 })
-                .collect();
-            Series::new(name.into(), values)
-        }
-        Kind::Float => {
-            let values: Vec<Option<f64>> = values
-                .into_iter()
-                .map(|v| match v {
-                    Value::Float(f) => Some(f64::from(f)),
-                    Value::Double(f) => Some(f),
-                    Value::TinyInt(i) => Some(f64::from(i)),
-                    Value::SmallInt(i) => Some(f64::from(i)),
-                    Value::Int(i) => Some(f64::from(i)),
-                    Value::BigInt(i) => Some(i as f64),
+            })?,
+        ),
+        DuckKind::UInt8 => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
+                    Value::UTinyInt(i) => Some(i),
                     _ => None,
                 })
-                .collect();
-            Series::new(name.into(), values)
-        }
-        Kind::Text => {
-            // Default to string for text, blob, and unknown types
-            let values: Vec<Option<String>> = values
-                .into_iter()
-                .map(|v| match v {
-                    Value::Text(s) => Some(s),
-                    Value::Blob(b) => Some(String::from_utf8_lossy(&b).into_owned()),
-                    Value::Null => None,
-                    Value::Boolean(b) => Some(b.to_string()),
-                    Value::TinyInt(i) => Some(i.to_string()),
-                    Value::SmallInt(i) => Some(i.to_string()),
-                    Value::Int(i) => Some(i.to_string()),
-                    Value::BigInt(i) => Some(i.to_string()),
-                    Value::Float(f) => Some(f.to_string()),
-                    Value::Double(f) => Some(f.to_string()),
-                    _ => Some(String::new()),
+            })?,
+        ),
+        DuckKind::UInt16 => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
+                    Value::USmallInt(i) => Some(i),
+                    _ => None,
                 })
-                .collect();
-            Series::new(name.into(), values)
+            })?,
+        ),
+        DuckKind::UInt32 => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
+                    Value::UInt(i) => Some(i),
+                    _ => None,
+                })
+            })?,
+        ),
+        DuckKind::UInt64 => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
+                    Value::UBigInt(i) => Some(i),
+                    _ => None,
+                })
+            })?,
+        ),
+        DuckKind::Float => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
+                    Value::Float(f) => Some(f64::from(f)),
+                    Value::Double(f) => Some(f),
+                    _ => None,
+                })
+            })?,
+        ),
+        DuckKind::Decimal => Series::new(
+            name.into(),
+            convert(values, |v| match v {
+                // The exact decimal text, correctly rounded to the nearest f64.
+                Value::Decimal(d) => d
+                    .to_string()
+                    .parse::<f64>()
+                    .map(Some)
+                    .map_err(|_| out_of_range("DECIMAL")),
+                _ => Ok(None),
+            })?,
+        ),
+        DuckKind::HugeInt if huge_beyond_f64 => {
+            warnings.push(format!(
+                "column '{name}' has HUGEINT values beyond ±2^53; loaded as text so no digit is \
+                 lost (CAST(... AS DOUBLE) in SQL for approximate numbers)"
+            ));
+            Series::new(
+                name.into(),
+                convert(values, |v| {
+                    Ok(match v {
+                        Value::HugeInt(i) => Some(i.to_string()),
+                        Value::UHugeInt(i) => Some(i.to_string()),
+                        _ => None,
+                    })
+                })?,
+            )
         }
-    }
+        // Every value is within 2^53, so the conversion is exact.
+        DuckKind::HugeInt => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
+                    Value::HugeInt(i) => Some(i as f64),
+                    Value::UHugeInt(i) => Some(i as f64),
+                    _ => None,
+                })
+            })?,
+        ),
+        DuckKind::Date => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
+                    Value::Date32(d) => Some(d),
+                    _ => None,
+                })
+            })?,
+        )
+        .cast(&DataType::Date)?,
+        DuckKind::Timestamp => Series::new(
+            name.into(),
+            convert(values, |v| match v {
+                Value::Timestamp(unit, t) => duckdb_rescale(unit, t, 1_000_000)
+                    .map(Some)
+                    .ok_or_else(|| out_of_range("TIMESTAMP")),
+                _ => Ok(None),
+            })?,
+        )
+        .cast(&DataType::Datetime(TimeUnit::Microseconds, None))?,
+        DuckKind::Time => Series::new(
+            name.into(),
+            convert(values, |v| match v {
+                Value::Time64(unit, t) => duckdb_rescale(unit, t, 1_000_000_000)
+                    .map(Some)
+                    .ok_or_else(|| out_of_range("TIME")),
+                _ => Ok(None),
+            })?,
+        )
+        .cast(&DataType::Time)?,
+        DuckKind::Text => Series::new(
+            name.into(),
+            convert(values, |v| {
+                Ok(match v {
+                    Value::Text(s) | Value::Enum(s) => Some(s),
+                    _ => None,
+                })
+            })?,
+        ),
+        DuckKind::Blob => {
+            let blobs = convert(values, |v| {
+                Ok(match v {
+                    Value::Blob(b) => Some(b),
+                    _ => None,
+                })
+            })?;
+            let ca: BinaryChunked = blobs.into_iter().collect();
+            ca.with_name(name.into()).into_series()
+        }
+    };
+    Ok(series)
 }
 
 #[cfg(test)]
@@ -2140,12 +2416,12 @@ mod tests {
     }
 
     #[test]
-    fn duckdb_container_values_become_empty_text() {
-        // An output-parity guard: a container value (here a LIST of a million
-        // elements) is rendered as "" and counts 0 bytes, so the row fits the
-        // byte budget. Whether the value is materialised in Rust cannot be
-        // observed deterministically, so this test does not claim to check it.
-        let o = query_duckdb_with(
+    fn duckdb_container_values_are_refused_unmaterialised() {
+        // A container value (here a LIST of a million elements) is refused from the borrowed
+        // value, before any copy into Rust: the row fits no byte budget and is never kept,
+        // and the error names the column and its type. (Whether the value is materialised
+        // cannot be observed deterministically; the refusal is.)
+        let e = query_duckdb_with(
             ":memory:",
             "SELECT list(range) AS l FROM range(1000000)",
             &QueryOptions {
@@ -2153,18 +2429,9 @@ mod tests {
                 ..Default::default()
             },
         )
-        .unwrap();
-        assert_eq!(o.rows_returned, 1);
-        let l = o
-            .result
-            .dataframe
-            .column("l")
-            .unwrap()
-            .as_materialized_series()
-            .str()
-            .unwrap()
-            .get(0);
-        assert_eq!(l, Some(""));
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("column 'l' has DuckDB type List"), "{e}");
     }
 
     #[test]
@@ -2578,6 +2845,19 @@ mod tests {
             .collect()
     }
 
+    /// A column cast to Int64 (Date, Datetime and Time compare by their physical values).
+    fn i64s(df: &DataFrame, c: &str) -> Vec<Option<i64>> {
+        df.column(c)
+            .unwrap()
+            .cast(&DataType::Int64)
+            .unwrap()
+            .as_materialized_series()
+            .i64()
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
     /// `sales` and `b` as sqlite3 3.45.1 stores them: price is INTEGER, REAL, INTEGER,
     /// REAL (DECIMAL affinity stores 10.00 and 7.0 as integers); qty is three integers
     /// and a text; note mixes integers, text and a real; `b` holds blobs, text and nulls.
@@ -2661,6 +2941,140 @@ mod tests {
                 .any(|w| w.contains("column 'v'") && w.contains("2^53")),
             "{:?}",
             r.warnings
+        );
+    }
+
+    #[test]
+    fn test_duckdb_values_keep_their_types() {
+        // DATA-8: every column but i came back as text of "".
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+             CREATE TABLE t (d DATE, ts TIMESTAMP, tm TIME, amt DECIMAL(10,2), h HUGEINT,
+                             ub UBIGINT, ut UTINYINT, e mood, b BLOB, i INTEGER);
+             INSERT INTO t VALUES (DATE '2024-03-01', TIMESTAMP '2024-03-01 12:34:56.789',
+                                   TIME '01:02:03.5', 12.50, 42, 18446744073709551615, 7, 'ok',
+                                   '\\x01\\x02'::BLOB, 3),
+                                  (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);",
+        )
+        .unwrap();
+        let out = run_duckdb_query(&conn, "SELECT * FROM t", &QueryOptions::default()).unwrap();
+        let df = &out.result.dataframe;
+        let dt = |c: &str| df.column(c).unwrap().dtype().clone();
+        assert_eq!(
+            (dt("d"), dt("ts"), dt("tm")),
+            (
+                DataType::Date,
+                DataType::Datetime(TimeUnit::Microseconds, None),
+                DataType::Time
+            )
+        );
+        assert_eq!(
+            (i64s(df, "d"), i64s(df, "ts"), i64s(df, "tm")),
+            (
+                vec![Some(19783), None],
+                vec![Some(1_709_296_496_789_000), None],
+                vec![Some(3_723_500_000_000), None]
+            )
+        );
+        assert_eq!(
+            (f64s(df, "amt"), f64s(df, "h")),
+            (vec![Some(12.5), None], vec![Some(42.0), None])
+        );
+        assert_eq!(
+            (dt("ub"), dt("ut"), dt("e"), dt("b"), dt("i")),
+            (
+                DataType::UInt64,
+                DataType::UInt8,
+                DataType::String,
+                DataType::Binary,
+                DataType::Int64
+            )
+        );
+        assert_eq!(
+            df.column("ub")
+                .unwrap()
+                .as_materialized_series()
+                .u64()
+                .unwrap()
+                .get(0),
+            Some(u64::MAX)
+        );
+        assert_eq!(strs(df, "e"), vec![Some("ok"), None]);
+        assert_eq!(
+            df.column("b")
+                .unwrap()
+                .as_materialized_series()
+                .binary()
+                .unwrap()
+                .get(0),
+            Some(&[1u8, 2][..])
+        );
+        assert!(out.result.warnings.is_empty(), "{:?}", out.result.warnings);
+    }
+
+    #[test]
+    fn test_duckdb_hugeint_sums_and_out_of_range_hugeints() {
+        let r = query_duckdb(
+            ":memory:",
+            "SELECT SUM(i) AS total, 9007199254740993::HUGEINT AS big FROM range(5) t(i)",
+        )
+        .unwrap();
+        assert_eq!(f64s(&r.dataframe, "total"), vec![Some(10.0)]);
+        assert_eq!(strs(&r.dataframe, "big"), vec![Some("9007199254740993")]);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("column 'big'") && w.contains("2^53")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_duckdb_nested_and_interval_columns_are_refused_with_a_cast_hint() {
+        for (sql, col, ty) in [
+            ("SELECT [1, 2] AS l", "l", "List"),
+            ("SELECT {'a': 1} AS s", "s", "Struct"),
+            ("SELECT MAP {'k': 1} AS m", "m", "Map"),
+            ("SELECT INTERVAL 1 DAY AS iv", "iv", "Interval"),
+        ] {
+            let e = query_duckdb(":memory:", sql).unwrap_err().to_string();
+            assert!(
+                e.contains(&format!("column '{col}' has DuckDB type {ty}")) && e.contains("CAST("),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_duckdb_file_query_keeps_dates_and_sums() {
+        // DATA-8 failure scenario: both columns came back as "".
+        let dir = tempfile::tempdir().unwrap();
+        let csv = write_file(
+            dir.path(),
+            "sales.csv",
+            "order_date,qty,price\n2024-03-01,3,19.99\n2024-03-01,4,5.5\n2024-03-02,5,2.25\n",
+        );
+        let r = query_file_with_duckdb(
+            &csv,
+            "SELECT order_date, SUM(qty) AS total, SUM(price) AS rev \
+             FROM read_csv_auto({file}) GROUP BY order_date ORDER BY order_date",
+        )
+        .unwrap();
+        assert_eq!(
+            r.dataframe.column("order_date").unwrap().dtype(),
+            &DataType::Date
+        );
+        assert_eq!(
+            i64s(&r.dataframe, "order_date"),
+            vec![Some(19783), Some(19784)]
+        );
+        assert_eq!(f64s(&r.dataframe, "total"), vec![Some(7.0), Some(5.0)]);
+        let rev = f64s(&r.dataframe, "rev");
+        assert!(
+            (rev[0].unwrap() - 25.49).abs() < 1e-12 && (rev[1].unwrap() - 2.25).abs() < 1e-12,
+            "{rev:?}"
         );
     }
 }
