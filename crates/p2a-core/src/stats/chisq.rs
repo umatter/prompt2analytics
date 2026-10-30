@@ -324,9 +324,11 @@ pub fn chisq_test_gof(
         }
         let sum: f64 = p.iter().sum();
         if rescale_p {
-            if !(sum > 0.0) {
+            // the entries are finite and non-negative, but their sum can still overflow
+            if sum <= 0.0 || !sum.is_finite() {
                 return Err(EconError::InvalidSpecification {
-                    message: "Probabilities to rescale must have a positive sum".to_string(),
+                    message: "Probabilities to rescale must have a positive, finite sum"
+                        .to_string(),
                 });
             }
             p.iter().map(|&x| x / sum).collect()

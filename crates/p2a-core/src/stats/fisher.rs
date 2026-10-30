@@ -1027,13 +1027,13 @@ mod tests {
         let greater = fisher_exact_test(&t, FisherAlternative::Greater, Some(0.95)).unwrap();
         assert!(rel(two.p_value, 1.3022734448002492e-26), "{}", two.p_value);
         assert!(
-            rel(greater.p_value, 6.5113672240012631e-27),
+            rel(greater.p_value, 6.511367224001263e-27),
             "{}",
             greater.p_value
         );
         assert_eq!(less.p_value, 1.0);
         assert!(
-            rel(two.conditional_mle, 1512.5074333693019),
+            rel(two.conditional_mle, 1512.507433369302),
             "{}",
             two.conditional_mle
         );
