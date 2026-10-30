@@ -22,12 +22,13 @@ use p2a_core::{
             AggFn,
             AggSpec,
             ArithOp,
+            BinOptions,
             BinStrategy,
             FillStrategy,
             JoinType,
             MungeError,
             MutateExpr,
-            bin,
+            bin_with,
             concat,
             deduplicate,
             diff,
@@ -2294,9 +2295,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-    /// Bin a continuous variable into discrete categories.
+    /// Bin a numeric column into intervals, as R's cut().
     #[tool(
-        description = "Bin a continuous variable into discrete categories. Strategies: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom' (specify break points)."
+        description = "Bin a numeric column into intervals as R's cut(): missing values and values outside the edges get NA (null), intervals are (a, b] unless right = false, include_lowest closes the outer edge. Strategies: 'uniform' (equal width; the range is widened by 0.1% as cut(x, n)), 'quantile' (type-7 quantile edges, open outer bins), 'custom' (strictly increasing break points). The reply lists the edges, the rows per bin and the NA rows."
     )]
     pub async fn munge_bin(
         &self,
@@ -2393,8 +2394,18 @@ impl AnalyticsServer {
             }
         }
 
-        let result = match bin(&dataset, &request.column, strategy, labels.as_deref()) {
-            Ok(ds) => ds,
+        let options = BinOptions {
+            right: request.right.unwrap_or(true),
+            include_lowest: request.include_lowest.unwrap_or(false),
+        };
+        let outcome = match bin_with(
+            &dataset,
+            &request.column,
+            strategy,
+            labels.as_deref(),
+            &options,
+        ) {
+            Ok(outcome) => outcome,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Bin failed: {}",
@@ -2402,14 +2413,20 @@ impl AnalyticsServer {
                 ))]));
             }
         };
+        let text = format!(
+            "Binned '{}' with the {} strategy into {} bins, saved as '{}' (new column '{}').\n{}",
+            request.column,
+            request.strategy,
+            outcome.counts.len(),
+            result_name,
+            outcome.column,
+            outcome.summary()
+        );
 
         let mut datasets = self.datasets.write().await;
-        datasets.insert(result_name.clone(), result);
+        datasets.insert(result_name.clone(), outcome.dataset);
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Binned '{}' using {} strategy, saved as '{}'",
-            request.column, request.strategy, result_name
-        ))]))
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// One-hot encode a categorical column.
@@ -2995,6 +3012,7 @@ mod tests {
     use crate::config::SessionConfig;
     use crate::session::{DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager};
     use crate::tools::limits::{self, Limits};
+    use p2a_core::data::munging::bin;
     use p2a_core::data::munging::{JoinShape, JoinType, MungeResult, cast_columns, concat};
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
@@ -3048,6 +3066,8 @@ mod tests {
             strategy: "uniform".into(),
             bins,
             labels: None,
+            right: None,
+            include_lowest: None,
             result_name: Some("b".into()),
         };
         let r = run(
@@ -3643,6 +3663,8 @@ mod tests {
                 strategy: strategy.into(),
                 bins,
                 labels,
+                right: None,
+                include_lowest: None,
                 result_name: Some(result.into()),
             }
         };
@@ -4125,6 +4147,8 @@ mod tests {
             strategy: strategy.into(),
             bins,
             labels,
+            right: None,
+            include_lowest: None,
             result_name: Some("b".into()),
         };
         let auto = refused_before_building(

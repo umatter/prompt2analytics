@@ -690,13 +690,25 @@ pub struct BinColumnRequest {
 
     /// Number of bins or custom breaks
     #[schemars(
-        description = "Number of bins (for uniform/quantile) or list of break points (for custom)."
+        description = "Number of bins (uniform/quantile) or strictly increasing break points (custom)."
     )]
     pub bins: Vec<f64>,
 
     /// Optional labels for bins
     #[schemars(description = "Optional labels for the bins.")]
     pub labels: Option<Vec<String>>,
+
+    /// Right-closed intervals (R's cut `right`)
+    #[schemars(
+        description = "Intervals closed on the right, (a, b] (default true, as R's cut); false gives [a, b)."
+    )]
+    pub right: Option<bool>,
+
+    /// Close the outer interval at the lowest edge (R's cut `include.lowest`)
+    #[schemars(
+        description = "Include a value equal to the lowest edge in the first bin (the highest edge in the last bin when right = false); default false, as R's cut."
+    )]
+    pub include_lowest: Option<bool>,
 
     /// Optional name for the resulting dataset
     #[schemars(description = "Optional name for the result.")]

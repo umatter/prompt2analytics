@@ -105,6 +105,11 @@ first (last) bin, so a column with `log(0)` values bins whatever their count.
   right-closed codes and the NA count through `bin`.
 - `p2a-core::data::munging::features::tests::test_validate_bin_cut_options`: the three code
   vectors through `bin_with`, the missing and out-of-range counts and the summary text.
+- `p2a-mcp::tier2::wp04_data::test_validate_mcp_munge_bin_cut`: the three code vectors through
+  `munge_bin` (`right`, `include_lowest`) and the NA line of the reply.
+- `p2a-cli::tier2::wp04_data::test_validate_cli_munge_bin_cut`: the `Counts:` line of
+  `p2a munge bin --method custom --edges 0,1,3,5` with no flag, `--include-lowest` and
+  `--left-closed`.
 
 ## Tolerance
 

@@ -41,7 +41,9 @@
       ],
       "tests": [
         "p2a-core::data::munging::features::tests::test_validate_bin_cut_right_closed",
-        "p2a-core::data::munging::features::tests::test_validate_bin_cut_options"
+        "p2a-core::data::munging::features::tests::test_validate_bin_cut_options",
+        "p2a-mcp::tier2::wp04_data::test_validate_mcp_munge_bin_cut",
+        "p2a-cli::tier2::wp04_data::test_validate_cli_munge_bin_cut"
       ],
       "quantities": [
         "bin index per row (right-closed, include.lowest, left-closed)",
