@@ -42,6 +42,39 @@
         "validation/expected/iv_basic.csv",
         "validation/expected/iv_overidentified.csv"
       ]
+    },
+    {
+      "id": "panel_missing_values",
+      "name": "Panel estimators on data with missing cells and missing string/numeric entity ids: FE, RE, two-way HDFE, mean group; FEGLM, panel GLS, PVCM extraction",
+      "category": "econometrics",
+      "reference": "plm::plm(model = 'within' | 'random'), plm::pmg(model = 'mg') and fixest::feols on the complete rows of the columns each estimator uses",
+      "doc": "validation/econometrics/panel_fe.md",
+      "cases": [
+        "panel_grunfeld_na"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::utils::tests::test_validate_na_extract_time_ids_integer_widths_and_fractions",
+        "p2a-core::econometrics::panel::utils::tests::test_validate_na_extract_entity_ids_factor_order_and_nulls",
+        "p2a-core::econometrics::panel::utils::tests::test_validate_na_entity_and_time_codes"
+      ],
+      "quantities": [
+        "FE coefficients and SEs",
+        "RE coefficients and classical SEs",
+        "two-way HDFE coefficients and iid SEs",
+        "mean-group coefficients",
+        "observations used",
+        "groups and periods",
+        "rows dropped per column"
+      ],
+      "tolerance": "validation/README.md, n = 193-195: coefficients 1e-8, SE 1e-6 relative; counts exact. HDFE: MAP converges to rounding on this panel (R replica of hdfe.rs: 3e-15), so the deterministic tolerance applies",
+      "deviations": [
+        {
+          "finding": "ECON-34",
+          "quantity": "mean-group SEs (mg_se)",
+          "note": "p2a reports the cross-entity standard deviation, not its standard error; only the mean-group coefficients are pinned (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

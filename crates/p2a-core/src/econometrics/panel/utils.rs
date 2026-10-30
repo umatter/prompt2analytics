@@ -5,77 +5,24 @@
 
 use ndarray::{Array1, Array2};
 use statrs::distribution::{ContinuousCDF, Normal};
-use std::collections::HashMap;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, Factor, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 
-/// Extract entity IDs from a DataFrame column and return as Vec<usize>.
+/// Entity codes of every row of the dataset (one per row) and the number of entities.
+///
+/// Codes follow R `factor()` order of the ids (numeric ids numerically, text ids in C
+/// order). A missing id is an error here (`EconError::NullValues`), because this
+/// function returns one value per dataset row; estimators that drop incomplete rows
+/// use [`entity_codes`] on their own [`ColumnRequest`] instead.
 pub fn extract_entity_ids(dataset: &Dataset, entity_var: &str) -> EconResult<(Vec<usize>, usize)> {
-    let df = dataset.df();
-    let col = df
-        .column(entity_var)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: entity_var.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    // Create a mapping from unique values to integer IDs
-    let mut id_map: HashMap<String, usize> = HashMap::new();
-    let mut next_id = 0usize;
-
-    let ids: Vec<usize> = if let Ok(int_col) = col.i64() {
-        int_col
-            .into_iter()
-            .map(|v| {
-                let key = v.unwrap_or(0).to_string();
-                *id_map.entry(key).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                })
-            })
-            .collect()
-    } else if let Ok(str_col) = col.str() {
-        str_col
-            .into_iter()
-            .map(|v| {
-                let key = v.unwrap_or("").to_string();
-                *id_map.entry(key).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                })
-            })
-            .collect()
-    } else {
-        // Try to cast to string
-        let casted = col.cast(&polars::prelude::DataType::String).map_err(|e| {
-            EconError::Internal(format!("Cannot convert entity column to IDs: {}", e))
-        })?;
-        let str_col = casted.str().map_err(|e| {
-            EconError::Internal(format!("Cannot read entity column as string: {}", e))
-        })?;
-        str_col
-            .into_iter()
-            .map(|v| {
-                let key = v.unwrap_or("").to_string();
-                *id_map.entry(key).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                })
-            })
-            .collect()
-    };
-
-    let n_groups = id_map.len();
-    Ok((ids, n_groups))
+    let cols = ColumnRequest::new(dataset.df())
+        .factor(entity_var)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    Ok(entity_codes(cols.factor(entity_var)))
 }
 
 /// Compute entity-level means for demeaning.
@@ -132,45 +79,40 @@ pub fn demean_matrix_by_entity(
     x_demeaned
 }
 
-/// Extract time period IDs from a DataFrame column.
+/// Period index of every row of the dataset (0 = earliest) and the sorted distinct
+/// times.
+///
+/// Times are integers of any width, whole-number floats or dates (days since
+/// 1970-01-01); a fractional time is `InvalidSpecification` ("must hold whole
+/// numbers"). A missing time is an error here (`EconError::NullValues`), because this
+/// function returns one value per dataset row; estimators that drop incomplete rows
+/// use [`time_codes`] on their own [`ColumnRequest`] instead.
 pub fn extract_time_ids(dataset: &Dataset, time_var: &str) -> EconResult<(Vec<usize>, Vec<i64>)> {
-    let df = dataset.df();
-    let col = df.column(time_var).map_err(|_| EconError::ColumnNotFound {
-        column: time_var.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
+    let cols = ColumnRequest::new(dataset.df())
+        .time_index(time_var)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    Ok(time_codes(cols.time_index(time_var)))
+}
 
-    // Extract unique time values and map to indices
-    let mut time_values: Vec<i64> = Vec::new();
-    let mut time_map: HashMap<i64, usize> = HashMap::new();
+/// Entity codes of the kept rows (0-based, in `factor.levels` order: R factor() order,
+/// numeric ids numerically, text ids in C order) and the number of entities present.
+pub(crate) fn entity_codes(factor: &Factor) -> (Vec<usize>, usize) {
+    let codes = factor.codes.iter().map(|&c| c as usize).collect();
+    (codes, factor.n_levels())
+}
 
-    let times: Vec<i64> = if let Ok(int_col) = col.i64() {
-        int_col.into_iter().map(|v| v.unwrap_or(0)).collect()
-    } else if let Ok(f_col) = col.f64() {
-        f_col.into_iter().map(|v| v.unwrap_or(0.0) as i64).collect()
-    } else {
-        return Err(EconError::InvalidSpecification {
-            message: "Time variable must be numeric".to_string(),
-        });
-    };
-
-    // Get unique sorted times
-    let mut unique_times: Vec<i64> = times.to_vec();
-    unique_times.sort_unstable();
-    unique_times.dedup();
-
-    for (idx, &t) in unique_times.iter().enumerate() {
-        time_map.insert(t, idx);
-        time_values.push(t);
-    }
-
-    let time_ids: Vec<usize> = times.iter().map(|t| *time_map.get(t).unwrap()).collect();
-
-    Ok((time_ids, time_values))
+/// Dense period index (0 = earliest) of each time value, and the sorted distinct values.
+/// O(n log n): a sorted, de-duplicated copy and a binary search per value.
+pub(crate) fn time_codes(times: &[i64]) -> (Vec<usize>, Vec<i64>) {
+    let mut distinct = times.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let codes = times
+        .iter()
+        .map(|t| distinct.binary_search(t).unwrap_or_default())
+        .collect();
+    (codes, distinct)
 }
 
 /// Build the instrument matrix for difference GMM.
@@ -319,4 +261,129 @@ pub fn compute_ab_ar_test(
                 .unwrap_or(0.5));
 
     (z_stat, p_value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::DataLoader;
+    use crate::data::columns::{ColumnRequest, NaPolicy, numeric_column};
+    use polars::prelude::{Column, DataType};
+
+    /// `panel_grunfeld_na` and the complete Grunfeld panel it was built from.
+    fn fixtures() -> (Dataset, Dataset) {
+        let (case, na) = crate::test_support::load_case("panel_grunfeld_na");
+        let path = p2a_validation::repo_path(&case.datasets[0]);
+        assert!(
+            path.ends_with("validation/datasets/grunfeld.csv"),
+            "{path:?}"
+        );
+        (na, Dataset::new(DataLoader::load_csv(&path).unwrap()))
+    }
+
+    /// `ds` with column `name` replaced by `column`.
+    fn with(ds: &Dataset, column: Column) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(column).unwrap();
+        Dataset::new(df)
+    }
+
+    /// Integer times of any width and whole floats give the same periods; a fractional
+    /// time is an error; a missing time is `NullValues` (the legacy shape has one value
+    /// per row) instead of period 0.
+    #[test]
+    fn test_validate_na_extract_time_ids_integer_widths_and_fractions() {
+        let (na, g) = fixtures();
+        let expected = extract_time_ids(&g, "year").unwrap();
+        assert_eq!(expected.1, (1935..=1954).collect::<Vec<i64>>());
+        let year = g.df().column("year").unwrap().clone();
+        for dtype in [
+            DataType::Int32,
+            DataType::Int16,
+            DataType::UInt16,
+            DataType::Float64,
+        ] {
+            let cast = year.cast(&dtype).unwrap();
+            let got = extract_time_ids(&with(&g, cast), "year")
+                .unwrap_or_else(|e| panic!("{dtype:?}: {e}"));
+            assert_eq!(got, expected, "{dtype:?}");
+        }
+        let (mut years, _) = numeric_column(g.df(), "year", NaPolicy::Fail).unwrap();
+        years[0] = 1935.25;
+        match extract_time_ids(&with(&g, Column::new("year".into(), years)), "year") {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("must hold whole numbers"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        match extract_time_ids(&na, "year") {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("year", 2))
+            }
+            other => panic!("expected NullValues for year, got {other:?}"),
+        }
+    }
+
+    /// Entity codes follow R factor order (numeric ids numerically); a missing id is
+    /// `NullValues` instead of id 0 or the pseudo-entity "".
+    #[test]
+    fn test_validate_na_extract_entity_ids_factor_order_and_nulls() {
+        let (na, g) = fixtures();
+        let firm: Vec<usize> = numeric_column(g.df(), "firm", NaPolicy::Fail)
+            .unwrap()
+            .0
+            .iter()
+            .map(|&f| f as usize - 1)
+            .collect();
+        let (ids, n_groups) = extract_entity_ids(&g, "firm").unwrap();
+        assert_eq!((ids.as_slice(), n_groups), (firm.as_slice(), 10));
+        let cast = g
+            .df()
+            .column("firm")
+            .unwrap()
+            .cast(&DataType::UInt32)
+            .unwrap();
+        assert_eq!(
+            extract_entity_ids(&with(&g, cast), "firm").unwrap(),
+            (firm.clone(), 10)
+        );
+        for column in ["firm_id", "firm_name"] {
+            match extract_entity_ids(&na, column) {
+                Err(EconError::NullValues { column: c, count }) => {
+                    assert_eq!((c.as_str(), count), (column, 2))
+                }
+                other => panic!("{column}: expected NullValues, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(
+                extract_entity_ids(&na, "nope"),
+                Err(EconError::ColumnNotFound { .. })
+            ),
+            "unknown column"
+        );
+    }
+
+    /// The crate-internal codes: dense period indexes and factor codes as `usize`.
+    #[test]
+    fn test_validate_na_entity_and_time_codes() {
+        assert_eq!(
+            time_codes(&[2001, 1999, 2001, 2000]),
+            (vec![2, 0, 2, 1], vec![1999, 2000, 2001])
+        );
+        let (na, _) = fixtures();
+        let cols = ColumnRequest::new(na.df())
+            .factor("firm_id")
+            .extract()
+            .unwrap();
+        let (codes, n_groups) = entity_codes(cols.factor("firm_id"));
+        assert_eq!((codes.len(), n_groups), (198, 10));
+        let ids = numeric_column(na.df(), "firm_id", NaPolicy::Omit)
+            .unwrap()
+            .0;
+        assert_eq!(ids.len(), 198);
+        for (code, id) in codes.iter().zip(&ids) {
+            assert_eq!(*code, *id as usize, "firm_id {id} has code {code}");
+        }
+    }
 }
