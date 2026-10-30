@@ -334,7 +334,9 @@ pub fn fisher_exact_test(
         for (j, &v) in row.iter().enumerate() {
             if v < 0.0 {
                 return Err(EconError::InvalidSpecification {
-                    message: "All table entries must be non-negative".to_string(),
+                    message: format!(
+                        "Fisher's exact test needs non-negative counts; cell [{i}][{j}] is {v}"
+                    ),
                 });
             }
             if !v.is_finite() || v.fract() != 0.0 || v > MAX_COUNT {
@@ -1039,9 +1041,9 @@ mod tests {
 
     #[test]
     fn test_fisher_rejects_invalid_counts() {
-        // decision 4: NaN, Inf, fractional and > 2^53 cells are refused, naming the cell; no
-        // panic, no 2^63-point loop.
-        for bad in [f64::NAN, f64::INFINITY, 2.5, 1e16] {
+        // decision 4: NaN, Inf, fractional, > 2^53 and negative cells are refused, naming the
+        // cell; no panic, no 2^63-point loop.
+        for bad in [f64::NAN, f64::INFINITY, 2.5, 1e16, -1.0, f64::NEG_INFINITY] {
             let e = fisher_exact_test(
                 &[[bad, 1.0], [1.0, 1.0]],
                 FisherAlternative::TwoSided,
