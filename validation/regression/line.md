@@ -85,7 +85,7 @@ cat("lm():   slope =", coef(fit_lm)[2], "\n")
 reports them in `LineResult::missing` (`by_column` names `x` and `y`); `x`, `y`, `fitted`
 and `residuals` hold the kept pairs in input order. With fewer than 3 complete pairs it is
 an error. Sorting and medians use `f64::total_cmp`. Before, a NaN made the sort comparator
-inconsistent, which can panic since Rust 1.81, or gave meaningless coefficients. MCP
+inconsistent and the coefficients meaningless. MCP
 `regression_line` and `p2a reg line` read x and y with the
 incomplete pairs dropped and report them (`missing` in JSON, a `Note:` line in the CLI
 text); the dataset paths refuse `±Inf` (`NonFiniteValues`) before `line()` is reached.
