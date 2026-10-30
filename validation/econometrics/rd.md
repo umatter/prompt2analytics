@@ -221,8 +221,12 @@ Tests (registered under `rd_fuzzy`):
   (9.90) match, and the result carries the warning `Weak first stage: F = 9.90 (< 10); ...`;
   at h = b = 0.4 it does not.
 
-Not registered: `test_fuzzy_rd_one_bandwidth_for_both_stages` (no R value) checks that the
-selector runs once, on the outcome, and that both stages use its bandwidths.
+Not registered (no R value): `test_fuzzy_rd_one_bandwidth_for_both_stages` checks that the
+selector runs once, on the outcome, and that both stages use its bandwidths, on a curved design
+(n = 2000, x uniform on [-1, 1], take-up 0.2 / 0.8, `y = 0.5 + 10 x² + d + N(0, 0.3²)`) where
+the selector run on each column alone picks h = 0.4241 for the outcome and 0.4996 (the cap, a
+quarter of the range) for the treatment; the test first asserts that the two differ, so two
+separate selector runs fail it.
 
 ## MCP and CLI
 

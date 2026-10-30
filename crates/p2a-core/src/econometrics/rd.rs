@@ -2978,9 +2978,37 @@ mod tests {
             .finish();
     }
 
+    /// Fuzzy design on which p2a's selector picks different bandwidths for the outcome
+    /// (curved: 0.5 + 10 x^2 + d + N(0, 0.3^2)) and the treatment (take-up 0.2 left of
+    /// the cutoff, 0.8 right); n = 2000, x uniform on [-1, 1].
+    fn create_fuzzy_rd_curved_dataset() -> Dataset {
+        let mut s: u64 = 20261030;
+        let n = 2000;
+        let (mut xs, mut ys, mut ds) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..n {
+            let x = 2.0 * lcg(&mut s) - 1.0;
+            let take_up = if x >= 0.0 { 0.8 } else { 0.2 };
+            let d = if lcg(&mut s) < take_up { 1.0 } else { 0.0 };
+            // Box-Muller; 1 - u lies in (0, 1], so the log is finite
+            let (u1, u2) = (1.0 - lcg(&mut s), lcg(&mut s));
+            let noise = 0.3 * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            xs.push(x);
+            ys.push(0.5 + 10.0 * x * x + d + noise);
+            ds.push(d);
+        }
+        Dataset::new(df! { "outcome" => ys, "running" => xs, "treatment" => ds }.unwrap())
+    }
+
     #[test]
     fn test_fuzzy_rd_one_bandwidth_for_both_stages() {
-        let ds = create_fuzzy_rd_dataset();
+        let ds = create_fuzzy_rd_curved_dataset();
+        // Precondition: run on its own, the selector picks another h for the treatment, so
+        // two separate sharp fits (the old code) would give the stages different bandwidths.
+        let sharp = run_rd(&ds, "outcome", "running", 0.0, RdConfig::default()).unwrap();
+        let sharp_t = run_rd(&ds, "treatment", "running", 0.0, RdConfig::default()).unwrap();
+        assert_ne!(sharp_t.h_left, sharp.h_left);
+        assert_ne!(sharp_t.h_right, sharp.h_right);
+
         let f = run_fuzzy_rd(
             &ds,
             "outcome",
@@ -2993,9 +3021,7 @@ mod tests {
         let bw = |r: &RdResult| (r.h_left, r.h_right, r.b_left, r.b_right);
         assert_eq!(bw(&f.outcome_rd), bw(&f.first_stage));
         // the selector runs on the outcome, as rdrobust's fuzzy bandwidth would start from it
-        let sharp = run_rd(&ds, "outcome", "running", 0.0, RdConfig::default()).unwrap();
-        assert_eq!(f.outcome_rd.h_left, sharp.h_left);
-        assert_eq!(f.outcome_rd.h_right, sharp.h_right);
+        assert_eq!(bw(&f.outcome_rd), bw(&sharp));
     }
 
     #[test]
