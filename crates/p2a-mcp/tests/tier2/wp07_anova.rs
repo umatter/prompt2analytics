@@ -153,3 +153,29 @@ async fn test_validate_mcp_hypothesis_oneway_na_labels() {
         .scalar("welch_p", num(&v["p_value"]), Tol::p_value(6))
         .finish();
 }
+
+#[tokio::test]
+async fn test_validate_mcp_hypothesis_wilcoxon_paired_na() {
+    let case = Case::load("stat_wilcoxon_na");
+    let (session, server) = session_with("stat_wilcoxon_na");
+    let r = call(
+        &server,
+        &session,
+        "hypothesis_wilcoxon",
+        json!({"dataset": "wilcoxon_na", "x": "x", "y": "y", "paired": true, "exact": false}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    // The Display text, a blank line, then the JSON object.
+    let start = t.find("\n{").unwrap_or_else(|| panic!("no JSON in:\n{t}"));
+    let v: serde_json::Value =
+        serde_json::from_str(&t[start + 1..]).unwrap_or_else(|e| panic!("{e}: {t}"));
+    Check::new(&case)
+        .scalar("paired_v", num(&v["statistic"]), Tol::exact())
+        .scalar("paired_p_normal", num(&v["p_value"]), Tol::p_value(8))
+        .scalar("paired_z", num(&v["z_score"]), Tol::stat(8))
+        .scalar("n_pairs", num(&v["n1"]), Tol::exact())
+        .finish();
+    assert!(t.contains("Missing values: 2 of 10 rows dropped"), "{t}");
+}

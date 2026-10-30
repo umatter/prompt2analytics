@@ -104,6 +104,37 @@
       "tolerance": "validation/README.md, n = 6 (< 100): F 1e-5 relative, Welch df 1e-5 relative (real-valued), classical df exact, p 1e-5 relative + 1e-12 absolute",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "wilcoxon",
+      "name": "Wilcoxon signed-rank and rank-sum tests",
+      "category": "stats",
+      "reference": "stats::wilcox.test",
+      "doc": "validation/stats/wilcoxon.md",
+      "cases": [
+        "stat_wilcoxon_na"
+      ],
+      "tests": [
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_na_paired",
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_na_rank_sum",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_wilcoxon_paired_na"
+      ],
+      "quantities": [
+        "signed-rank V (paired, complete pairs)",
+        "p (normal with continuity correction; exact)",
+        "z",
+        "rank sum R1 and R's W",
+        "sample sizes and values dropped"
+      ],
+      "tolerance": "validation/README.md, n = 8-18 (< 100): z 1e-5 relative, p 1e-5 relative + 1e-12 absolute, rank statistics and counts exact",
+      "deviations": [
+        {
+          "finding": "STAT-72",
+          "quantity": "rank-sum statistic",
+          "note": "p2a's statistic is the rank sum R1 (pinned to ranksum_r1); R prints W = R1 - n_x (n_x + 1) / 2, compared as statistic - n (n + 1) / 2 until STAT-72 (Tier 4) changes the reported statistic"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -108,3 +108,26 @@ case("stat_oneway_na_labels", "stats/anova", "One-way ANOVA, Kruskal-Wallis and 
     reference = "stats::aov, kruskal.test, oneway.test (rows with NA response or label dropped)",
     call = "aov(y ~ g); kruskal.test(v9 ~ g9); oneway.test(v9 ~ g9)", packages = character(0))
 })
+
+# Wilcoxon signed-rank (paired) and rank-sum with missing cells (STAT-11).
+case("stat_wilcoxon_na", "stats/rank", "Wilcoxon paired and rank-sum tests with NA cells", function(ctx) {
+  set.seed(17)
+  x <- round(rnorm(10, 5, 1), 2); yy <- round(x - 0.6 + rnorm(10, 0, 0.4), 2)
+  x[3] <- NA; yy[8] <- NA
+  d <- ctx$gen_dataset("wilcoxon_na", data.frame(id = 1:10, x = x, y = yy))
+  p <- wilcox.test(d$x, d$y, paired = TRUE, exact = FALSE, correct = TRUE)
+  pe <- wilcox.test(d$x, d$y, paired = TRUE)
+  r <- wilcox.test(d$x, d$y, exact = FALSE, correct = TRUE)
+  # T2-WP07 additions: the rank sum of x (p2a's `statistic` for the rank-sum test; R reports
+  # W = R1 - n_x (n_x + 1) / 2, STAT-72) and the normal z of both tests, recovered from R's p
+  xx <- d$x[!is.na(d$x)]; yy2 <- d$y[!is.na(d$y)]; np <- sum(complete.cases(d$x, d$y))
+  stopifnot(!anyDuplicated(c(xx, yy2)), !anyDuplicated(abs((d$x - d$y)[complete.cases(d$x, d$y)])))   # no ties (STAT-42 not involved)
+  list(values = list(paired_v = unname(p$statistic), paired_p_normal = p$p.value, paired_p_exact = pe$p.value,
+                     ranksum_w = unname(r$statistic), ranksum_p_normal = r$p.value,
+                     n_pairs = sum(complete.cases(d$x, d$y)), n_x = sum(!is.na(d$x)), n_y = sum(!is.na(d$y)),
+                     ranksum_r1 = sum(rank(c(xx, yy2))[seq_along(xx)]),
+                     paired_z = -qnorm(p$p.value / 2) * sign(unname(p$statistic) - np * (np + 1) / 4),
+                     ranksum_z = -qnorm(r$p.value / 2) * sign(unname(r$statistic) - length(xx) * length(yy2) / 2)),
+       reference = "stats::wilcox.test(paired = TRUE) on complete pairs; rank-sum drops NA per sample",
+       call = "wilcox.test(x, y, paired = TRUE); wilcox.test(x, y)", packages = character(0))
+})

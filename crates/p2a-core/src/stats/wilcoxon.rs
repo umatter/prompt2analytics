@@ -58,6 +58,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
@@ -124,6 +125,10 @@ pub struct WilcoxonResult {
     pub n_ties: usize,
     /// Warning message (if ties present with exact test)
     pub warning: Option<String>,
+    /// Values dropped because they are missing (R's NA handling of `wilcox.test`); empty
+    /// for the array-level functions.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for WilcoxonResult {
@@ -208,6 +213,9 @@ impl std::fmt::Display for WilcoxonResult {
         }
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -271,6 +279,7 @@ pub fn wilcoxon_rank_sum(
     alternative: Alternative,
     config: &WilcoxonConfig,
 ) -> EconResult<WilcoxonResult> {
+    let n_input = x.len() + y.len();
     // Filter out non-finite values
     let x: Vec<f64> = x.iter().copied().filter(|v| v.is_finite()).collect();
     let y: Vec<f64> = y.iter().copied().filter(|v| v.is_finite()).collect();
@@ -365,6 +374,7 @@ pub fn wilcoxon_rank_sum(
         n_2: Some(n2),
         n_ties,
         warning,
+        missing: MissingSummary::none(n_input),
     })
 }
 
@@ -533,6 +543,7 @@ pub fn wilcoxon_signed_rank(
         n_2: y.map(|v| v.len()),
         n_ties,
         warning,
+        missing: MissingSummary::none(x.len()),
     })
 }
 
@@ -541,6 +552,11 @@ pub fn wilcoxon_signed_rank(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Perform Wilcoxon test using dataset columns.
+///
+/// Missing values (null or NaN) are dropped as `wilcox.test` drops them and reported in
+/// `missing`: the paired test keeps the complete pairs, the rank-sum test drops each
+/// sample's missing values, the one-sample test drops them from the column. Integer
+/// columns are accepted; a text column is `NonNumericColumn`.
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -572,51 +588,38 @@ pub fn wilcoxon_test(
     config: &WilcoxonConfig,
 ) -> EconResult<WilcoxonResult> {
     let df = dataset.df();
-
-    // Extract x values
-    let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
-        column: x_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let x: Vec<f64> = x_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: x_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
     match y_col {
+        Some(y_name) if paired => {
+            // Incomplete pairs are dropped jointly (R: complete.cases(x, y)).
+            let cols = ColumnRequest::new(df)
+                .numeric(x_col)
+                .numeric(y_name)
+                .na(NaPolicy::Omit)
+                .extract()?;
+            let mut result = wilcoxon_signed_rank(
+                cols.numeric(x_col),
+                Some(cols.numeric(y_name)),
+                mu,
+                alternative,
+                config,
+            )?;
+            result.missing = cols.missing().clone();
+            Ok(result)
+        }
         Some(y_name) => {
-            let y_series = df.column(y_name).map_err(|_| EconError::ColumnNotFound {
-                column: y_name.to_string(),
-                available: df
-                    .get_column_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            })?;
-            let y: Vec<f64> = y_series
-                .f64()
-                .map_err(|_| EconError::NonNumericColumn {
-                    column: y_name.to_string(),
-                })?
-                .into_no_null_iter()
-                .collect();
-
-            if paired {
-                wilcoxon_signed_rank(&x, Some(&y), mu, alternative, config)
-            } else {
-                wilcoxon_rank_sum(&x, &y, mu, alternative, config)
-            }
+            // Two independent samples: each drops its own missing values (R).
+            let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
+            let (y, missing_y) = numeric_column(df, y_name, NaPolicy::Omit)?;
+            let mut result = wilcoxon_rank_sum(&x, &y, mu, alternative, config)?;
+            result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
+            Ok(result)
         }
         None => {
             // One-sample signed rank test
-            wilcoxon_signed_rank(&x, None, mu, alternative, config)
+            let (x, missing) = numeric_column(df, x_col, NaPolicy::Omit)?;
+            let mut result = wilcoxon_signed_rank(&x, None, mu, alternative, config)?;
+            result.missing = missing;
+            Ok(result)
         }
     }
 }
@@ -1620,5 +1623,92 @@ mod tests {
         assert!(display.contains("W ="));
         assert!(display.contains("p-value"));
         assert!(display.contains("confidence interval"));
+    }
+
+    // ========================================================================
+    // R-pinned: missing values (T2-WP07, case stat_wilcoxon_na)
+    // ========================================================================
+    //
+    // x is missing in row 3 and y in row 8 (10 rows): the paired test keeps the 8 complete
+    // pairs, the rank-sum test drops each sample's missing value (9 and 9). No ties (the
+    // case checks it), so STAT-42 does not enter.
+
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
+
+    fn normal_approx() -> WilcoxonConfig {
+        WilcoxonConfig {
+            exact: Some(false),
+            correct: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_wilcoxon_na_paired() {
+        let (case, ds) = load_case("stat_wilcoxon_na");
+        let tt = Alternative::TwoSided;
+        let p = wilcoxon_test(&ds, "x", Some("y"), 0.0, tt, true, &normal_approx()).unwrap();
+        let e = wilcoxon_test(
+            &ds,
+            "x",
+            Some("y"),
+            0.0,
+            tt,
+            true,
+            &WilcoxonConfig::default(),
+        )
+        .unwrap();
+        Check::new(&case)
+            .scalar("paired_v", p.statistic, Tol::exact())
+            .scalar("paired_p_normal", p.p_value, Tol::p_value(8))
+            .scalar("paired_z", p.z_score.unwrap(), Tol::stat(8))
+            .scalar("paired_p_exact", e.p_value, Tol::p_value(8))
+            .scalar("n_pairs", p.n as f64, Tol::exact())
+            .finish();
+        assert!(e.exact);
+        assert_eq!(p.missing.n_dropped, 2);
+        assert_eq!(
+            p.missing.by_column,
+            vec![("x".to_string(), 1), ("y".to_string(), 1)]
+        );
+        assert!(
+            p.to_string()
+                .contains("Missing values: 2 of 10 rows dropped because of missing values"),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn test_validate_wilcoxon_na_rank_sum() {
+        let (case, ds) = load_case("stat_wilcoxon_na");
+        let r = wilcoxon_test(
+            &ds,
+            "x",
+            Some("y"),
+            0.0,
+            Alternative::TwoSided,
+            false,
+            &normal_approx(),
+        )
+        .unwrap();
+        let n_x = r.n as f64;
+        Check::new(&case)
+            .scalar("ranksum_r1", r.statistic, Tol::exact())
+            // deviation STAT-72: p2a reports R1, R reports W
+            .scalar(
+                "ranksum_w",
+                r.statistic - n_x * (n_x + 1.0) / 2.0,
+                Tol::exact(),
+            )
+            .scalar("ranksum_p_normal", r.p_value, Tol::p_value(18))
+            .scalar("ranksum_z", r.z_score.unwrap(), Tol::stat(18))
+            .scalar("n_x", n_x, Tol::exact())
+            .scalar("n_y", r.n_2.unwrap() as f64, Tol::exact())
+            .finish();
+        assert_eq!(
+            (r.missing.n_total, r.missing.n_used, r.missing.n_dropped),
+            (20, 18, 2)
+        );
     }
 }
