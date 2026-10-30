@@ -152,6 +152,14 @@ Located in `crates/p2a-core/src/forecasting/causal_impact.rs`:
 - `test_causal_impact_model_info`
 - `test_causal_impact_inference`
 
+## Input data (column types and missing values)
+
+`run_causal_impact` reads its columns through the shared extractor with `NaPolicy::Fail`. Integer and Boolean columns are accepted (an `Int64` column gives the result of its `Float64` copy); a missing value (empty cell, NA or NaN) is an error naming the column and the count (`EconError::NullValues`); a text column is refused (`NonNumericColumn`) and an absent one is `ColumnNotFound`.
+
+R's CausalImpact models a missing response in the pre-period; p2a refuses it, and a missing value in the time column or a control series too. The time column must hold whole numbers (or dates): a fractional time value is an error naming the row, where it used to be truncated by a cast.
+
+Test: `test_na_causal_impact_int64_and_missing` (on `validation/datasets/generated/arima_series.csv`, the dataset of the ARIMA case `arima_css_forecast`: columns `ai` (Int64), `a_na` and `ai_na` (two missing cells), `lab` (text)).
+
 ## References
 
 1. Brodersen, K. H., Gallusser, F., Koehler, J., Remy, N., & Scott, S. L. (2015).

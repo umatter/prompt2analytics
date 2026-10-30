@@ -74,6 +74,14 @@ Trend and seasonal components should match R within 1e-4.
 cargo test -p p2a-core -- mstl
 ```
 
+## Input data (column types and missing values)
+
+`run_mstl` reads its columns through the shared extractor with `NaPolicy::Fail`. Integer and Boolean columns are accepted (an `Int64` column gives the result of its `Float64` copy); a missing value (empty cell, NA or NaN) is an error naming the column and the count (`EconError::NullValues`); a text column is refused (`NonNumericColumn`) and an absent one is `ColumnNotFound`.
+
+`forecast::mstl` interpolates missing values (`na.interp`) before it decomposes; p2a does not interpolate and refuses them, so fill the gaps first (for example `munge_fill_na`).
+
+Test: `test_na_mstl_int64_and_missing` (on `validation/datasets/generated/arima_series.csv`, the dataset of the ARIMA case `arima_css_forecast`: columns `ai` (Int64), `a_na` and `ai_na` (two missing cells), `lab` (text)).
+
 ## References
 
 - Cleveland, R.B., Cleveland, W.S., McRae, J.E., & Terpenning, I. (1990). "STL: A Seasonal-Trend Decomposition Procedure Based on Loess". *Journal of Official Statistics*, 6(1), 3-73.

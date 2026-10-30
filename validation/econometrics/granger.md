@@ -27,3 +27,28 @@ whole numbers, so polars reads it as `Int64`; the cause `m` is an ARMA(1,1) seri
 |---|---|---|---|---|---|
 | 2 | 1.3015337730001175 | 0.27368259598049266 | 2 | 293 | 298 |
 | 3 | 2.4420318454610483 | 0.064413303851786688 | 3 | 290 | 297 |
+
+## Tests and tolerances
+
+`test_validate_granger_int_series` (`crates/p2a-core/src/econometrics/timeseries.rs`)
+pins F at `Tol::stat(300)` (1e-6 relative), the p-value at `Tol::p_value(300)`, and the
+degrees of freedom and the rows used exactly, for both lag orders.
+
+```bash
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::timeseries::tests::test_validate_granger
+```
+
+## Input data and missing values
+
+Both series are read through the shared extractor with `NaPolicy::Fail`: integer and
+Boolean columns are accepted, text is `NonNumericColumn`, and a missing value (empty cell,
+NA or NaN) in either series is `EconError::NullValues` naming the column and the count.
+
+R's `grangertest` drops rows instead, but its two interfaces disagree on which: on a
+120-row series with three NA cells, the formula method (`grangertest(y ~ x, data)`) lets
+`model.frame` drop the NA rows and then lags the spliced series (115 rows, F 4.99915905),
+while the default method (`grangertest(x, y)`) lags first and drops every lagged row that
+touches an NA (111 rows, F 4.35551641). There is no single R behaviour to copy, so p2a
+refuses the gap and the MCP and CLI messages say how to fill it. The VAR family (`run_var`,
+`run_varma`, `run_vecm`, `run_var_irf`) follows the same rule, as `vars::VAR` refuses NA.
+Test: `test_na_granger_var_missing_and_text`.

@@ -139,6 +139,14 @@ hw_mult <- HoltWinters(ts(y, frequency = 12), seasonal = "multiplicative")
 *R version: 4.x with stats package*
 *Rust: release build with Nelder-Mead optimization*
 
+## Input data (column types and missing values)
+
+`run_holt_winters` reads its columns through the shared extractor with `NaPolicy::Fail`. Integer and Boolean columns are accepted (an `Int64` column gives the result of its `Float64` copy); a missing value (empty cell, NA or NaN) is an error naming the column and the count (`EconError::NullValues`); a text column is refused (`NonNumericColumn`) and an absent one is `ColumnNotFound`.
+
+R's `HoltWinters` errors on a missing value ("NA/NaN/Inf in foreign function call"), so p2a refusing it matches R.
+
+Test: `test_na_holt_winters_int64_and_missing` (on `validation/datasets/generated/arima_series.csv`, the dataset of the ARIMA case `arima_css_forecast`: columns `ai` (Int64), `a_na` and `ai_na` (two missing cells), `lab` (text)).
+
 ## References
 
 - Holt, C. C. (1957). "Forecasting Trends and Seasonal by Exponentially Weighted Averages". ONR Memorandum 52/1957, Carnegie Institute of Technology.
