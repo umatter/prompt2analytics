@@ -87,8 +87,9 @@ pub struct MissingSummary {
     /// Rows dropped (`n_total - n_used`).
     pub n_dropped: usize,
     /// Missing cells per requested column, request order, only columns with at least one.
-    /// A row missing in two columns counts in both. Serialized as an object in request
-    /// order (`{"y": 2, "n": 1}`), the shape MCP's `missing_json` writes.
+    /// A row missing in two columns counts in both. Serialized as an object
+    /// {column: count}; a streaming serializer keeps request order, `serde_json::Value`
+    /// sorts the keys.
     #[serde(with = "by_column_map")]
     pub by_column: Vec<(String, usize)>,
 }
@@ -1409,7 +1410,7 @@ mod tests {
             missing: cols.missing().clone(),
         })
         .unwrap();
-        // by_column is an object in request order, the shape MCP's missing_json writes.
+        // A streaming serializer writes by_column as an object in request order.
         assert_eq!(
             full,
             r#"{"missing":{"n_total":10,"n_used":7,"n_dropped":3,"by_column":{"y":2,"n":1}}}"#

@@ -178,22 +178,13 @@ pub fn append_missing_note(text: &mut String, missing: &MissingSummary) {
 }
 
 /// `{"n_total", "n_used", "n_dropped", "by_column": {column: count}}` when rows were
-/// dropped, for a JSON result's `"missing"` key; `None` when nothing was dropped.
+/// dropped, for a JSON result's `"missing"` key; `None` when nothing was dropped. The
+/// shape is `MissingSummary`'s own `Serialize`; as a `serde_json::Value`, the keys of
+/// `by_column` are sorted.
 pub fn missing_json(missing: &MissingSummary) -> Option<serde_json::Value> {
-    if missing.is_empty() {
-        return None;
-    }
-    let by_column: serde_json::Map<String, serde_json::Value> = missing
-        .by_column
-        .iter()
-        .map(|(column, count)| (column.clone(), serde_json::json!(count)))
-        .collect();
-    Some(serde_json::json!({
-        "n_total": missing.n_total,
-        "n_used": missing.n_used,
-        "n_dropped": missing.n_dropped,
-        "by_column": by_column,
-    }))
+    (!missing.is_empty())
+        .then(|| serde_json::to_value(missing))
+        .and_then(Result::ok)
 }
 
 /// The legacy helpers' refusal of a column that is not numeric (a text, date or other
