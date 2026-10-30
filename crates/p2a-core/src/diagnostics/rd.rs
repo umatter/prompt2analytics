@@ -254,6 +254,7 @@ mod tests {
             coef_right: vec![7.5, 0.3],
             bias: 0.05,
             warnings: vec![],
+            missing: crate::data::columns::MissingSummary::default(),
         }
     }
 

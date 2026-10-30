@@ -136,6 +136,35 @@ Tolerances (`validation/README.md`, n = 1000): coefficients 1e-8 relative, SEs, 
 and CI bounds 1e-6 relative, p-values 1e-6 relative plus 1e-12 absolute, counts exact. The
 observed agreement with rdrobust is at most about 1.7e-12 relative.
 
+## Missing values and column types
+
+`run_rd`, `run_fuzzy_rd` and `rd_bandwidth` read their columns through the shared extractor
+(`p2a_core::data::columns`) with the `Omit` policy. A row with a missing outcome, running
+variable or (fuzzy) treatment is dropped from every column, as rdrobust does
+(`na.ok <- complete.cases(x, y)`, plus the `fuzzy` column). Null and NaN both count as missing.
+The result reports the drop in `missing` (`n_total`, `n_used`, `n_dropped`, `by_column`), and
+the printed output ends with one line such as
+`Missing values: 4 of 1000 rows dropped because of missing values (y: 2, x: 2)`. Infinite
+values are refused with `NonFiniteValues` and text columns with `NonNumericColumn`, both
+naming the column; an absent column is `ColumnNotFound`. Integer and boolean columns are
+numeric. Before T2-WP11 every extraction problem was reported as "column not found", and a NaN
+surfaced as a singular matrix (finding CAUS-76).
+
+The case `rd_sharp_fixed_bw` records an rdrobust run on a copy of `rd_sim` with two `y` cells
+and two `x` cells inside h = 0.3 set to NA (0-based rows `na_rows_y` = [10, 32] and
+`na_rows_x` = [73, 123]): `na_tri_nn_hb` (996 rows; coef_conv 0.5689702543258852, coef_bc
+0.5714073393211437, se_conv 0.1248633251364192, se_robust 0.19907535854441885, ci_robust
+[0.18122680636468474, 0.9615878722776028], p_robust 0.004100738107604092, N_h [158, 137]).
+
+- `test_validate_rd_sharp_fixed_bw_missing_rows` (registered) nulls, and in a second pass sets
+  to NaN, the same cells of the committed CSV and pins every `na_tri_nn_hb` quantity (n = 996
+  tolerances), the `MissingSummary` and the last output line.
+- `test_na_rd_refuses_infinite_text_and_absent_columns` (not registered) checks the three
+  refusals through `run_rd`, `rd_bandwidth` and `run_fuzzy_rd`.
+- `test_na_rd_bandwidth_and_fuzzy_drop_missing_rows` (not registered) checks that
+  `rd_bandwidth` with missing outcomes and `run_fuzzy_rd` with missing treatments equal the
+  runs on the filtered rows and report what was dropped.
+
 ## Fuzzy RD
 
 **Status:** R-pinned at fixed bandwidths (registry id `rd_fuzzy`, deviation CAUS-28 for the

@@ -29,8 +29,8 @@ use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::traits::estimator::SignificanceLevel;
 
@@ -277,6 +277,9 @@ pub struct RdBandwidth {
     pub n_left: usize,
     /// Sample size right of cutoff.
     pub n_right: usize,
+    /// Rows dropped because the outcome or the running variable is missing.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for RdBandwidth {
@@ -300,6 +303,10 @@ impl fmt::Display for RdBandwidth {
             "Sample sizes: {} (left), {} (right)",
             self.n_left, self.n_right
         )?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f)?;
+            writeln!(f, "Missing values: {note}")?;
+        }
         Ok(())
     }
 }
@@ -400,6 +407,37 @@ pub struct RdResult {
 
     /// Warnings generated during estimation.
     pub warnings: Vec<String>,
+
+    /// Rows dropped because the outcome or the running variable is missing (as rdrobust's
+    /// `complete.cases`).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
+}
+
+/// The warnings (without the missing-value note, printed last on its own line) and the
+/// `Missing values:` line of a result.
+fn write_warnings_and_missing(
+    f: &mut fmt::Formatter<'_>,
+    warnings: &[String],
+    missing: &MissingSummary,
+) -> fmt::Result {
+    let note = missing.note();
+    let shown: Vec<&String> = warnings
+        .iter()
+        .filter(|w| Some(w.as_str()) != note.as_deref())
+        .collect();
+    if !shown.is_empty() {
+        writeln!(f)?;
+        writeln!(f, "Warnings:")?;
+        for w in shown {
+            writeln!(f, "  - {}", w)?;
+        }
+    }
+    if let Some(note) = note {
+        writeln!(f)?;
+        writeln!(f, "Missing values: {note}")?;
+    }
+    Ok(())
 }
 
 /// "95% CI", "90% CI", "97.5% CI": the interval label for a confidence level.
@@ -538,15 +576,7 @@ impl fmt::Display for RdResult {
              standard error."
         )?;
 
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
-        Ok(())
+        write_warnings_and_missing(f, &self.warnings, &self.missing)
     }
 }
 
@@ -595,6 +625,9 @@ pub struct FuzzyRdResult {
     /// Confidence level of every interval.
     #[serde(default = "default_rd_level")]
     pub level: f64,
+    /// Rows dropped because the outcome, the running variable or the treatment is missing.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for FuzzyRdResult {
@@ -666,15 +699,7 @@ impl fmt::Display for FuzzyRdResult {
              the joint delta-method standard error."
         )?;
 
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
-        Ok(())
+        write_warnings_and_missing(f, &self.warnings, &self.missing)
     }
 }
 
@@ -1600,6 +1625,7 @@ fn rd_result_from(
         coef_right: fit.right.beta_p.column(c).to_vec(),
         bias: tau_conventional - tau_bc,
         warnings: fit.warnings.clone(),
+        missing: MissingSummary::none(fit.n_left + fit.n_right),
     }
 }
 
@@ -1643,30 +1669,29 @@ pub fn run_rd(
 ) -> EconResult<RdResult> {
     validate_rd_config(&config)?;
 
-    // Extract data
-    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    // Rows with a missing outcome or running variable are dropped, as rdrobust does
+    // (complete.cases); infinite values and text columns are refused by name.
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(outcome)
+        .numeric(running_var)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y = ArrayView1::from(cols.numeric(outcome));
+    let x = ArrayView1::from(cols.numeric(running_var));
 
-    let x = DesignMatrix::extract_column(dataset.df(), running_var).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: running_var.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    let fit = fit_rd(x, &[y], cutoff, &config)?;
+    let mut result = rd_result_from(&fit, 0, outcome, running_var, cutoff, &config);
+    attach_missing(&mut result.warnings, &mut result.missing, cols.missing());
+    Ok(result)
+}
 
-    let fit = fit_rd(x.view(), &[y.view()], cutoff, &config)?;
-    Ok(rd_result_from(
-        &fit,
-        0,
-        outcome,
-        running_var,
-        cutoff,
-        &config,
-    ))
+/// Record the rows the extraction dropped: the summary, and its note among the warnings
+/// (so printing paths that only show warnings report it too).
+fn attach_missing(warnings: &mut Vec<String>, slot: &mut MissingSummary, missing: &MissingSummary) {
+    *slot = missing.clone();
+    if let Some(note) = missing.note() {
+        warnings.push(note);
+    }
 }
 
 /// Compute optimal bandwidth for RD estimation.
@@ -1686,20 +1711,14 @@ pub fn rd_bandwidth(
         ..Default::default()
     })?;
 
-    // Extract data
-    let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let x = DesignMatrix::extract_column(dataset.df(), running_var).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: running_var.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
+    // The same rows as run_rd: complete cases of the outcome and the running variable.
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(outcome)
+        .numeric(running_var)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y = cols.numeric_array(outcome);
+    let x = cols.numeric_array(running_var);
 
     let n_left = x.iter().filter(|&&xi| xi < cutoff).count();
     let n_right = x.iter().filter(|&&xi| xi >= cutoff).count();
@@ -1722,6 +1741,7 @@ pub fn rd_bandwidth(
         p,
         n_left,
         n_right,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -1756,19 +1776,18 @@ pub fn run_fuzzy_rd(
 ) -> EconResult<FuzzyRdResult> {
     validate_rd_config(&config)?;
 
-    // Extract data
-    let df = dataset.df();
-    let read = |name: &str| {
-        DesignMatrix::extract_column(df, name).map_err(|_| EconError::ColumnNotFound {
-            column: name.to_string(),
-            available: get_column_names(df),
-        })
-    };
-    let y = read(outcome)?;
-    let x = read(running_var)?;
-    let t = read(treatment)?;
+    // Complete cases of outcome, running variable and treatment (rdrobust's na.ok).
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(outcome)
+        .numeric(running_var)
+        .numeric(treatment)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y = ArrayView1::from(cols.numeric(outcome));
+    let x = ArrayView1::from(cols.numeric(running_var));
+    let t = ArrayView1::from(cols.numeric(treatment));
 
-    let fit = fit_rd(x.view(), &[y.view(), t.view()], cutoff, &config)?;
+    let fit = fit_rd(x, &[y, t], cutoff, &config)?;
     let (tau_y, tau_y_bc) = fit.jumps(0);
     let (tau_t, tau_t_bc) = fit.jumps(1);
     if tau_t.abs() < 1e-10 {
@@ -1777,8 +1796,11 @@ pub fn run_fuzzy_rd(
                 .to_string(),
         });
     }
-    let outcome_rd = rd_result_from(&fit, 0, outcome, running_var, cutoff, &config);
-    let first_stage = rd_result_from(&fit, 1, treatment, running_var, cutoff, &config);
+    let mut outcome_rd = rd_result_from(&fit, 0, outcome, running_var, cutoff, &config);
+    let mut first_stage = rd_result_from(&fit, 1, treatment, running_var, cutoff, &config);
+    for r in [&mut outcome_rd, &mut first_stage] {
+        attach_missing(&mut r.warnings, &mut r.missing, cols.missing());
+    }
 
     // Wald ratio and its bias correction (rdrobust's s_Y and B_F)
     let tau_fuzzy = tau_y / tau_t;
@@ -1793,6 +1815,8 @@ pub fn run_fuzzy_rd(
 
     let first_stage_f = (tau_t / first_stage.se_conventional).powi(2);
     let mut warnings = fit.warnings.clone();
+    let mut missing = MissingSummary::default();
+    attach_missing(&mut warnings, &mut missing, cols.missing());
     if first_stage_f < 10.0 {
         warnings.push(format!(
             "Weak first stage: F = {first_stage_f:.2} (< 10); the fuzzy RD estimate and its \
@@ -1817,6 +1841,7 @@ pub fn run_fuzzy_rd(
         first_stage_f,
         warnings,
         level: config.level,
+        missing,
     })
 }
 
@@ -3030,6 +3055,151 @@ mod tests {
                 .any(|w| w.starts_with("Weak first stage")),
             "{:?}",
             strong.warnings
+        );
+    }
+
+    // =========================================================================
+    // Missing values and column types (T2-WP11: CAUS-76)
+    // =========================================================================
+
+    /// `rd_sim.csv` as data only (no R value is compared).
+    fn rd_data() -> Dataset {
+        load_case("rd_sharp_fixed_bw").1
+    }
+
+    /// `col` cast to Float64 with the listed rows set to `fill` (null when `None`).
+    fn with_cells(ds: &Dataset, col: &str, rows: &[usize], fill: Option<f64>) -> Dataset {
+        let mut df = ds.df().clone();
+        let cast = df.column(col).unwrap().cast(&DataType::Float64).unwrap();
+        let mut vals: Vec<Option<f64>> = cast.f64().unwrap().into_iter().collect();
+        for &r in rows {
+            vals[r] = fill;
+        }
+        df.with_column(Series::new(col.into(), vals)).unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_validate_rd_sharp_fixed_bw_missing_rows() {
+        let (case, ds) = load_case("rd_sharp_fixed_bw");
+        let rows = |k: &str| -> Vec<usize> { case.vector(k).iter().map(|&v| v as usize).collect() };
+        let (na_y, na_x) = (rows("na_rows_y"), rows("na_rows_x"));
+        let mut check = Check::new(&case);
+        for fill in [None, Some(f64::NAN)] {
+            let dn = with_cells(&with_cells(&ds, "y", &na_y, fill), "x", &na_x, fill);
+            let r = run_rd(&dn, "y", "x", 0.0, fixed(TRI, VceType::Nn, 0.3, 0.3, 1)).unwrap();
+            check_rd(&mut check, "na_tri_nn_hb", &r, 996);
+            assert_eq!(
+                r.missing,
+                MissingSummary {
+                    n_total: 1000,
+                    n_used: 996,
+                    n_dropped: 4,
+                    by_column: vec![("y".into(), 2), ("x".into(), 2)],
+                },
+                "{fill:?}"
+            );
+            let text = r.to_string();
+            let line =
+                "Missing values: 4 of 1000 rows dropped because of missing values (y: 2, x: 2)";
+            assert_eq!(text.trim_end().lines().last(), Some(line), "{text}");
+            assert_eq!(text.matches("4 of 1000 rows dropped").count(), 1, "{text}");
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_na_rd_refuses_infinite_text_and_absent_columns() {
+        let ds = rd_data();
+        let mut df = ds.df().clone();
+        let text = df.column("y").unwrap().cast(&DataType::String).unwrap();
+        df.with_column(
+            text.as_materialized_series()
+                .clone()
+                .with_name("y_text".into()),
+        )
+        .unwrap();
+        let ds_text = Dataset::new(df);
+        let ds_inf = with_cells(&ds, "x", &[0], Some(f64::INFINITY));
+        let cfg = || fixed(TRI, VceType::Nn, 0.3, 0.3, 1);
+
+        let inf = |r: EconResult<()>| {
+            assert!(
+                matches!(r, Err(EconError::NonFiniteValues { ref column, count: 1 }) if column == "x"),
+                "{r:?}"
+            )
+        };
+        let text_col = |r: EconResult<()>| {
+            assert!(
+                matches!(r, Err(EconError::NonNumericColumn { ref column }) if column == "y_text"),
+                "{r:?}"
+            )
+        };
+        let absent = |r: EconResult<()>| {
+            assert!(
+                matches!(r, Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"),
+                "{r:?}"
+            )
+        };
+        // run_rd
+        inf(run_rd(&ds_inf, "y", "x", 0.0, cfg()).map(|_| ()));
+        text_col(run_rd(&ds_text, "y_text", "x", 0.0, cfg()).map(|_| ()));
+        absent(run_rd(&ds, "nope", "x", 0.0, cfg()).map(|_| ()));
+        // rd_bandwidth
+        let bw = |d: &Dataset, y: &str| {
+            rd_bandwidth(d, y, "x", 0.0, 1, TRI, BandwidthMethod::MseRd).map(|_| ())
+        };
+        inf(bw(&ds_inf, "y"));
+        text_col(bw(&ds_text, "y_text"));
+        absent(bw(&ds, "nope"));
+        // run_fuzzy_rd (treatment column)
+        let fz = |d: &Dataset, t: &str| run_fuzzy_rd(d, "yf", "x", t, 0.0, cfg()).map(|_| ());
+        inf(fz(&ds_inf, "d"));
+        text_col(fz(&ds_text, "y_text"));
+        absent(fz(&ds, "nope"));
+    }
+
+    #[test]
+    fn test_na_rd_bandwidth_and_fuzzy_drop_missing_rows() {
+        let ds = rd_data();
+        let n = ds.df().height();
+        let keep = |dropped: &[usize]| -> Dataset {
+            let mask: BooleanChunked = (0..n).map(|i| !dropped.contains(&i)).collect();
+            Dataset::new(ds.df().filter(&mask).unwrap())
+        };
+        // rd_bandwidth: two missing outcomes
+        let dn = with_cells(&ds, "y", &[3, 400], None);
+        let bw =
+            |d: &Dataset| rd_bandwidth(d, "y", "x", 0.0, 1, TRI, BandwidthMethod::MseRd).unwrap();
+        let (a, b) = (bw(&dn), bw(&keep(&[3, 400])));
+        assert_eq!(
+            (
+                a.h_left, a.h_right, a.b_left, a.b_right, a.n_left, a.n_right
+            ),
+            (
+                b.h_left, b.h_right, b.b_left, b.b_right, b.n_left, b.n_right
+            )
+        );
+        assert_eq!(a.missing.n_dropped, 2);
+        assert!(
+            a.to_string()
+                .contains("Missing values: 2 of 1000 rows dropped"),
+            "{a}"
+        );
+        // run_fuzzy_rd: two missing treatments
+        let dn = with_cells(&ds, "d", &[5, 700], None);
+        let cfg = || fixed(TRI, VceType::Nn, 0.4, 0.4, 1);
+        let f = run_fuzzy_rd(&dn, "yf", "x", "d", 0.0, cfg()).unwrap();
+        let g = run_fuzzy_rd(&keep(&[5, 700]), "yf", "x", "d", 0.0, cfg()).unwrap();
+        assert_eq!(
+            (f.tau_fuzzy, f.se_fuzzy, f.tau_fuzzy_bc, f.se_fuzzy_robust),
+            (g.tau_fuzzy, g.se_fuzzy, g.tau_fuzzy_bc, g.se_fuzzy_robust)
+        );
+        assert_eq!(f.missing.by_column, vec![("d".to_string(), 2)]);
+        assert!(
+            f.to_string()
+                .contains("Missing values: 2 of 1000 rows dropped"),
+            "{f}"
         );
     }
 }

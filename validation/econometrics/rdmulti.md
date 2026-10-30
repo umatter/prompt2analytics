@@ -149,6 +149,17 @@ and the pooled effect and SE (equal to them with one cutoff), to `rdrobust(y, x,
 h = 0.3, b = 0.3, vce = "hc1")` (keys `tri_hc1_hb_coef_bc`, `_se_robust`, `_ci_robust`,
 `_p_robust`) at the n = 1000 tolerances of `validation/README.md`.
 
+`run_rd_multi_dataset` reads the outcome, the running variable and `cutoff_col` (when given)
+through the shared extractor with the `Omit` policy: a row with a missing value in any of them
+is dropped, as rdrobust drops incomplete rows, and reported in `RdMultiResult.missing` and a last
+`Missing values: ...` line of the output. Infinite values and text columns are refused by name.
+`cutoff_col` must hold whole cutoff indices `0..=J-1` for J cutoffs; any other value is an
+error naming the column, the original row and the value (before T2-WP11, 1.7 was read as 1 and
+-1 as 0). `run_rd_multi` takes arrays and refuses non-finite values, pointing to
+`run_rd_multi_dataset` to drop them. `test_na_rd_multi_dataset_drops_rows_and_checks_cutoff_col`
+(not registered; no R value) covers these rules. The pooling and the heterogeneity test are not
+pinned to `rdmulti` (CAUS-77, Tier 3).
+
 ## Known Differences from R Implementation
 
 1. **Bandwidth selection**: without given bandwidths each cutoff uses p2a's own MSE-type selector from `run_rd`, not `rdbwselect` (CAUS-28). The R `rdmulti` package calls `rdrobust`'s selectors.

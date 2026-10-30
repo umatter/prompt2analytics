@@ -14,7 +14,8 @@
       "tests": [
         "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_fixed_bw",
         "p2a-core::econometrics::rd::tests::test_validate_rd_mass_points_nn",
-        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_display_table"
+        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_display_table",
+        "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_fixed_bw_missing_rows"
       ],
       "quantities": [
         "conventional and bias-corrected estimates",
@@ -24,7 +25,8 @@
         "conventional and robust CI (95%, 90%)",
         "N_h, N_b",
         "local polynomial coefficients",
-        "three kernels, h != b, p = 2, unequal sides"
+        "three kernels, h != b, p = 2, unequal sides",
+        "missing-row handling (complete cases)"
       ],
       "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute, counts exact; observed agreement <= 1.7e-12",
       "deviations": [
