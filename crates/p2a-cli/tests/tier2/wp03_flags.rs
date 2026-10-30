@@ -129,7 +129,7 @@ fn test_cli_data_save_file_format() {
         String::from_utf8_lossy(&out.stderr)
     );
     let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    // R: nrow(read.csv("grunfeld.csv")) = 200, ncol = 5
+    // grunfeld.csv has 200 rows and 5 columns
     assert_eq!(
         (
             j["format"].as_str(),
@@ -217,7 +217,7 @@ fn test_cli_session_replays_subcommand_flags() {
     let filt = s.json(&[
         "munge", "filter", "gdp", "-c", "year", "-o", "ge", "-v", "2000", "-n", "recent",
     ]);
-    // R: sum(read.csv("gdp_quarterly.csv")$year >= 2000) = 96, ncol = 4
+    // 96 rows of gdp_quarterly.csv have year >= 2000; it has 4 columns
     assert_eq!(
         filt["message"],
         "Created dataset 'recent' (96 rows x 4 columns)"
