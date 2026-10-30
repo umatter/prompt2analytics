@@ -18,7 +18,9 @@
         "p2a-core::econometrics::iv::tests::test_validate_iv_two_endog",
         "p2a-core::econometrics::iv::tests::test_validate_iv_no_controls",
         "p2a-core::econometrics::iv::tests::test_validate_first_stage_diagnostics_weak_controls",
-        "p2a-core::econometrics::iv::tests::test_validate_iv_display_first_stage"
+        "p2a-core::econometrics::iv::tests::test_validate_iv_display_first_stage",
+        "p2a-core::diagnostics::iv::tests::test_validate_iv_diagnostics_weak_controls",
+        "p2a-core::diagnostics::iv::tests::test_validate_iv_diagnostics_two_endog"
       ],
       "quantities": [
         "coefficients",
