@@ -15,30 +15,175 @@
 //! - R package `survival` (Therneau & Grambsch). https://cran.r-project.org/package=survival
 
 use ndarray::{Array1, Array2, ArrayView1};
+use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use polars::prelude::Float64Chunked;
-
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy, column};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::resource::{checkpoint, try_zeros2};
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_cdf};
+
+// =============================================================================
+// Column extraction shared by every survival entry point
+// =============================================================================
+
+/// The rows of a survival call after R's `na.omit`: times, event flags, group codes and
+/// covariates aligned on the kept rows, plus what was dropped.
+struct SurvivalData {
+    time: Vec<f64>,
+    event: Vec<bool>,
+    /// Group labels in R `factor()` order and one code per kept row.
+    group: Option<Factor>,
+    /// One vector per covariate, in `x_cols` order.
+    x: Vec<Vec<f64>>,
+    missing: MissingSummary,
+}
+
+/// The survival times a method accepts.
+#[derive(Clone, Copy)]
+enum TimeRule {
+    /// t >= 0 (Kaplan-Meier, log-rank, Cox, competing risks).
+    NonNegative,
+    /// t > 0 (AFT models, which model log T; R `survreg` refuses t <= 0 too).
+    Positive,
+}
+
+/// A Boolean time column is refused, as R `Surv()` does ("Time variable is not numeric");
+/// the extractor would otherwise read it as 0/1.
+fn refuse_boolean_time(df: &DataFrame, time_col: &str) -> EconResult<()> {
+    if column(df, time_col)?.dtype() == &DataType::Boolean {
+        return Err(EconError::NonNumericColumn {
+            column: time_col.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The kept times, checked against `rule`, with -0.0 written as 0.0. `rows` are the
+/// original 0-based rows of the kept values (for the message).
+fn checked_times(
+    values: &[f64],
+    rows: &[usize],
+    time_col: &str,
+    rule: TimeRule,
+) -> EconResult<Vec<f64>> {
+    let bad = |t: f64| match rule {
+        TimeRule::NonNegative => t < 0.0,
+        TimeRule::Positive => t <= 0.0,
+    };
+    let count = values.iter().filter(|&&t| bad(t)).count();
+    if let Some(i) = values.iter().position(|&t| bad(t)) {
+        let (row, value) = (rows[i], values[i]);
+        let message = match rule {
+            TimeRule::NonNegative => format!(
+                "Column '{time_col}' has {count} negative value(s) (first at row {row}: \
+                 {value}); survival times must be >= 0"
+            ),
+            TimeRule::Positive => format!(
+                "Column '{time_col}' has {count} value(s) <= 0 (first at row {row}: {value}); \
+                 AFT models need positive survival times (R survreg: \"Invalid survival \
+                 times for this distribution\")"
+            ),
+        };
+        return Err(EconError::InvalidSpecification { message });
+    }
+    Ok(values
+        .iter()
+        .map(|&t| if t == 0.0 { 0.0 } else { t })
+        .collect())
+}
+
+/// Event flags from a status column coded as R's `Surv()` codes it: all values in {0, 1}
+/// (1 = event), all in {1, 2} (2 = event, as R's `lung`), or logical (0/1 here). Any other
+/// code is an error naming the column and the values; R turns such codes into NA with a
+/// warning, which would drop rows silently.
+fn surv_status(values: &[f64], rows: &[usize], column: &str) -> EconResult<Vec<bool>> {
+    if values.iter().all(|&v| v == 0.0 || v == 1.0) {
+        return Ok(values.iter().map(|&v| v == 1.0).collect());
+    }
+    if values.iter().all(|&v| v == 1.0 || v == 2.0) {
+        return Ok(values.iter().map(|&v| v == 2.0).collect());
+    }
+    // As Surv(): a maximum of 2 means 1/2 coding, anything else 0/1 coding; the first
+    // value outside that coding is reported.
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let coding: [f64; 2] = if max == 2.0 { [1.0, 2.0] } else { [0.0, 1.0] };
+    let first = values.iter().position(|v| !coding.contains(v)).unwrap_or(0);
+    let mut distinct = values.to_vec();
+    distinct.sort_by(f64::total_cmp);
+    distinct.dedup();
+    let mut list: Vec<String> = distinct.iter().take(5).map(|v| v.to_string()).collect();
+    if distinct.len() > 5 {
+        list.push("...".to_string());
+    }
+    Err(EconError::InvalidSpecification {
+        message: format!(
+            "Column '{column}' holds status value(s) {} (first unexpected at row {}); code \
+             it as 0/1 (1 = event), 1/2 (2 = event) or TRUE/FALSE, as R's Surv() does",
+            list.join(", "),
+            rows.get(first).copied().unwrap_or(first)
+        ),
+    })
+}
+
+/// Time, status, an optional group and covariates of one survival call, read with the
+/// shared extractor: integer, float and Boolean columns, rows with a missing value in
+/// any of them dropped (R `na.omit`) and reported in `missing`.
+fn extract_survival(
+    df: &DataFrame,
+    time_col: &str,
+    status_col: &str,
+    group_col: Option<&str>,
+    x_cols: &[&str],
+    rule: TimeRule,
+    context: &str,
+) -> EconResult<SurvivalData> {
+    refuse_boolean_time(df, time_col)?;
+    let mut request = ColumnRequest::new(df).numeric(time_col).numeric(status_col);
+    if let Some(g) = group_col {
+        request = request.factor(g);
+    }
+    let cols = request
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .min_rows(1, context)
+        .extract()?;
+    let time = checked_times(cols.numeric(time_col), cols.rows(), time_col, rule)?;
+    let event = surv_status(cols.numeric(status_col), cols.rows(), status_col)?;
+    Ok(SurvivalData {
+        time,
+        event,
+        group: group_col.map(|g| cols.factor(g).clone()),
+        x: x_cols.iter().map(|c| cols.numeric(c).to_vec()).collect(),
+        missing: cols.missing().clone(),
+    })
+}
+
+/// `conf_level` strictly between 0 and 1 (NaN refused).
+fn check_conf_level(conf_level: f64) -> EconResult<()> {
+    if !(conf_level > 0.0 && conf_level < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: "Confidence level must be between 0 and 1".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The last line of a result's Display when rows were dropped.
+fn write_missing(f: &mut fmt::Formatter<'_>, missing: &MissingSummary) -> fmt::Result {
+    match missing.note() {
+        Some(note) => writeln!(f, "Missing values: {note}"),
+        None => Ok(()),
+    }
+}
 
 // =============================================================================
 // Core Types
 // =============================================================================
-
-/// A survival observation with time and event status.
-#[derive(Debug, Clone)]
-struct SurvivalObs {
-    time: f64,
-    event: bool,    // true = event observed, false = censored
-    event_type: u8, // For competing risks: 0 = censored, 1,2,... = event types
-    covariates: Option<Array1<f64>>,
-    group: Option<String>,
-}
 
 /// Wrapper for f64 to use as BTreeMap key.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -222,6 +367,9 @@ pub struct KaplanMeierResult {
     pub total_censored: usize,
     /// Confidence level used
     pub conf_level: f64,
+    /// Rows dropped from the whole call (all groups) because of missing values.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for KaplanMeierResult {
@@ -296,7 +444,7 @@ impl fmt::Display for KaplanMeierResult {
             }
         }
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -332,125 +480,64 @@ pub fn run_kaplan_meier(
     group_col: Option<&str>,
     conf_level: f64,
 ) -> EconResult<Vec<KaplanMeierResult>> {
-    // Validate confidence level
-    if conf_level <= 0.0 || conf_level >= 1.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Confidence level must be between 0 and 1".to_string(),
-        });
-    }
+    check_conf_level(conf_level)?;
+    let data = extract_survival(
+        dataset.df(),
+        time_col,
+        event_col,
+        group_col,
+        &[],
+        TimeRule::NonNegative,
+        "Kaplan-Meier",
+    )?;
 
-    // Extract data
-    let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let events = df
-        .column(event_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_col.to_string(),
-        })?;
-
-    // Group data
-    let groups: Vec<Option<String>> = if let Some(g_col) = group_col {
-        let g = df.column(g_col).map_err(|_| EconError::ColumnNotFound {
-            column: g_col.to_string(),
-            available: available_cols.clone(),
-        })?;
-        (0..df.height())
-            .map(|i| {
-                g.get(i)
-                    .ok()
-                    .map(|v| v.to_string().trim_matches('"').to_string())
-            })
-            .collect()
-    } else {
-        vec![None; df.height()]
+    let z = normal_quantile(1.0 - (1.0 - conf_level) / 2.0);
+    let Some(factor) = &data.group else {
+        let km = compute_kaplan_meier(&data.time, &data.event, conf_level, z, None, &data.missing)?;
+        return Ok(vec![km]);
     };
 
-    // Build observations by group
-    let mut obs_by_group: HashMap<Option<String>, Vec<SurvivalObs>> = HashMap::new();
-
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v,
-            _ => continue,
-        };
-        let e = match events.get(i) {
-            Some(v) if !v.is_nan() => v != 0.0,
-            _ => continue,
-        };
-
-        let obs = SurvivalObs {
-            time: t,
-            event: e,
-            event_type: if e { 1 } else { 0 },
-            covariates: None,
-            group: groups[i].clone(),
-        };
-
-        obs_by_group.entry(groups[i].clone()).or_default().push(obs);
+    // One curve per group, in R factor order.
+    let mut rows_by_level: Vec<Vec<usize>> = vec![Vec::new(); factor.n_levels()];
+    for (i, &code) in factor.codes.iter().enumerate() {
+        rows_by_level[code as usize].push(i);
     }
-
-    if obs_by_group.is_empty() {
-        return Err(EconError::EmptyDataset);
+    let mut results = Vec::with_capacity(factor.n_levels());
+    for (label, rows) in factor.levels.iter().zip(&rows_by_level) {
+        checkpoint()?;
+        let time: Vec<f64> = rows.iter().map(|&i| data.time[i]).collect();
+        let event: Vec<bool> = rows.iter().map(|&i| data.event[i]).collect();
+        results.push(compute_kaplan_meier(
+            &time,
+            &event,
+            conf_level,
+            z,
+            Some(label.clone()),
+            &data.missing,
+        )?);
     }
-
-    // Compute KM for each group
-    let z = normal_quantile(1.0 - (1.0 - conf_level) / 2.0);
-    let mut results = Vec::new();
-
-    for (group, observations) in obs_by_group {
-        let km = compute_kaplan_meier(&observations, conf_level, z, group)?;
-        results.push(km);
-    }
-
-    // Sort by group name for consistent output
-    results.sort_by(|a, b| a.group.cmp(&b.group));
-
     Ok(results)
 }
 
 /// Compute Kaplan-Meier estimate for a single group.
 fn compute_kaplan_meier(
-    observations: &[SurvivalObs],
+    time: &[f64],
+    event: &[bool],
     conf_level: f64,
     z: f64,
     group: Option<String>,
+    missing: &MissingSummary,
 ) -> EconResult<KaplanMeierResult> {
-    let n_obs = observations.len();
+    let n_obs = time.len();
     if n_obs == 0 {
         return Err(EconError::EmptyDataset);
     }
 
-    // Sort by time (ascending)
-    let mut sorted: Vec<_> = observations.iter().collect();
-    sorted.sort_by(|a, b| a.time.total_cmp(&b.time));
-
     // Count events and censored at each distinct time using BTreeMap for ordered keys
     let mut time_data: BTreeMap<OrderedF64, (usize, usize)> = BTreeMap::new();
-    for obs in &sorted {
-        let key = OrderedF64(obs.time);
-        let entry = time_data.entry(key).or_insert((0, 0));
-        if obs.event {
+    for (&t, &e) in time.iter().zip(event) {
+        let entry = time_data.entry(OrderedF64(t)).or_insert((0, 0));
+        if e {
             entry.0 += 1; // events
         } else {
             entry.1 += 1; // censored
@@ -546,6 +633,7 @@ fn compute_kaplan_meier(
         total_events,
         total_censored: n_obs - total_events,
         conf_level,
+        missing: missing.clone(),
     })
 }
 
@@ -632,6 +720,9 @@ pub struct LogRankResult {
     pub expected_per_group: Vec<f64>,
     /// Observed - Expected for each group
     pub obs_minus_exp: Vec<f64>,
+    /// Rows dropped because of a missing time, status or group.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for LogRankResult {
@@ -669,7 +760,7 @@ impl fmt::Display for LogRankResult {
             self.significance.stars()
         )?;
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -691,67 +782,29 @@ pub fn log_rank_test(
     event_col: &str,
     group_col: &str,
 ) -> EconResult<LogRankResult> {
-    let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Extract columns
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let events = df
-        .column(event_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_col.to_string(),
-        })?;
-
-    let groups_col = df
-        .column(group_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: group_col.to_string(),
-            available: available_cols,
-        })?;
-
-    // Build observations
-    let mut all_obs: Vec<(f64, bool, String)> = Vec::new();
-    let mut group_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v,
-            _ => continue,
-        };
-        let e = match events.get(i) {
-            Some(v) if !v.is_nan() => v != 0.0,
-            _ => continue,
-        };
-        let g = match groups_col.get(i) {
-            Ok(v) => v.to_string().trim_matches('"').to_string(),
-            Err(_) => continue,
-        };
-
-        all_obs.push((t, e, g.clone()));
-        group_set.insert(g);
-    }
-
-    let groups: Vec<String> = group_set.into_iter().collect();
+    let data = extract_survival(
+        dataset.df(),
+        time_col,
+        event_col,
+        Some(group_col),
+        &[],
+        TimeRule::NonNegative,
+        "log-rank test",
+    )?;
+    let Some(factor) = data.group else {
+        return Err(EconError::Internal(
+            "log-rank test: the group column was not extracted".to_string(),
+        ));
+    };
+    let groups = factor.levels;
     let n_groups = groups.len();
+    let mut all_obs: Vec<(f64, bool, usize)> = data
+        .time
+        .iter()
+        .zip(&data.event)
+        .zip(&factor.codes)
+        .map(|((&t, &e), &g)| (t, e, g as usize))
+        .collect();
 
     if n_groups < 2 {
         return Err(EconError::InvalidSpecification {
@@ -778,10 +831,9 @@ pub fn log_rank_test(
     let mut n_per_group: Vec<usize> = vec![0; n_groups];
     let mut events_per_group: Vec<usize> = vec![0; n_groups];
 
-    for (_, event, group) in &all_obs {
-        let g_idx = groups.iter().position(|g| g == group).unwrap();
+    for &(_, event, g_idx) in &all_obs {
         n_per_group[g_idx] += 1;
-        if *event {
+        if event {
             events_per_group[g_idx] += 1;
         }
     }
@@ -799,8 +851,7 @@ pub fn log_rank_test(
     for event_time in &event_times {
         // Skip past observations before this event time
         while obs_idx < all_obs.len() && all_obs[obs_idx].0 < *event_time {
-            let (_, _, ref g) = all_obs[obs_idx];
-            let g_idx = groups.iter().position(|grp| grp == g).unwrap();
+            let g_idx = all_obs[obs_idx].2;
             at_risk_per_group[g_idx] = at_risk_per_group[g_idx].saturating_sub(1);
             at_risk_total = at_risk_total.saturating_sub(1);
             obs_idx += 1;
@@ -812,8 +863,7 @@ pub fn log_rank_test(
 
         let mut temp_idx = obs_idx;
         while temp_idx < all_obs.len() && (all_obs[temp_idx].0 - event_time).abs() < 1e-10 {
-            let (_, event, ref g) = all_obs[temp_idx];
-            let g_idx = groups.iter().position(|grp| grp == g).unwrap();
+            let (_, event, g_idx) = all_obs[temp_idx];
             removals_per_group[g_idx] += 1;
             if event {
                 d_total += 1;
@@ -900,6 +950,7 @@ pub fn log_rank_test(
         events_per_group,
         expected_per_group: expected,
         obs_minus_exp,
+        missing: data.missing,
     })
 }
 
@@ -990,6 +1041,9 @@ pub struct CoxResult {
     pub converged: bool,
     /// Number of iterations
     pub iterations: usize,
+    /// Rows dropped because of a missing time, status or covariate.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for CoxResult {
@@ -1054,7 +1108,7 @@ impl fmt::Display for CoxResult {
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -1093,12 +1147,6 @@ pub fn run_cox_ph(
     config: Option<CoxConfig>,
 ) -> EconResult<CoxResult> {
     let config = config.unwrap_or_default();
-    let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
 
     if x_cols.is_empty() {
         return Err(EconError::InvalidSpecification {
@@ -1106,82 +1154,26 @@ pub fn run_cox_ph(
         });
     }
 
-    // Extract data
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let events = df
-        .column(event_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_col.to_string(),
-        })?;
-
-    // Build covariate matrix
+    let data = extract_survival(
+        dataset.df(),
+        time_col,
+        event_col,
+        None,
+        x_cols,
+        TimeRule::NonNegative,
+        "Cox regression",
+    )?;
     let p = x_cols.len();
-    let mut x_data: Vec<f64> = Vec::new();
-    let mut obs_data: Vec<(f64, bool, usize)> = Vec::new(); // (time, event, row_index)
-    let mut valid_rows = 0;
-
-    // Extract covariate columns ONCE upfront (avoids repeated column lookups in inner loop)
-    let covariate_cols: Vec<&Float64Chunked> = x_cols
+    let n = data.time.len();
+    // (time, event, row index), kept rows in their original order
+    let obs_data: Vec<(f64, bool, usize)> = data
+        .time
         .iter()
-        .map(|col| {
-            df.column(col)
-                .map_err(|_| EconError::ColumnNotFound {
-                    column: col.to_string(),
-                    available: available_cols.clone(),
-                })?
-                .f64()
-                .map_err(|_| EconError::NonNumericColumn {
-                    column: col.to_string(),
-                })
-        })
-        .collect::<EconResult<Vec<_>>>()?;
+        .zip(&data.event)
+        .enumerate()
+        .map(|(i, (&t, &e))| (t, e, i))
+        .collect();
 
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v,
-            _ => continue,
-        };
-        let e = match events.get(i) {
-            Some(v) if !v.is_nan() => v != 0.0,
-            _ => continue,
-        };
-
-        // Extract covariates from pre-fetched columns
-        let mut row_valid = true;
-        let mut row_x: Vec<f64> = Vec::with_capacity(p);
-        for ca in &covariate_cols {
-            match ca.get(i) {
-                Some(v) if !v.is_nan() => row_x.push(v),
-                _ => {
-                    row_valid = false;
-                    break;
-                }
-            }
-        }
-
-        if row_valid {
-            obs_data.push((t, e, valid_rows));
-            x_data.extend(row_x);
-            valid_rows += 1;
-        }
-    }
-
-    let n = valid_rows;
     if n < p + 1 {
         return Err(EconError::InsufficientData {
             required: p + 1,
@@ -1197,8 +1189,12 @@ pub fn run_cox_ph(
         });
     }
 
-    let x = Array2::from_shape_vec((n, p), x_data)
-        .map_err(|e| EconError::Internal(format!("Matrix construction failed: {}", e)))?;
+    let mut x = try_zeros2(n, p, "Cox covariate matrix")?;
+    for (mut col, values) in x.columns_mut().into_iter().zip(&data.x) {
+        for (cell, &v) in col.iter_mut().zip(values) {
+            *cell = v;
+        }
+    }
 
     // Sort by time (descending for efficient risk set computation)
     let mut sorted_indices: Vec<usize> = (0..n).collect();
@@ -1336,6 +1332,7 @@ pub fn run_cox_ph(
         ties_method: config.ties,
         converged,
         iterations,
+        missing: data.missing,
     })
 }
 
@@ -1783,6 +1780,9 @@ pub struct AftResult {
     pub converged: bool,
     /// Number of iterations
     pub iterations: usize,
+    /// Rows dropped because of a missing time, status or covariate.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for AftResult {
@@ -1826,7 +1826,7 @@ impl fmt::Display for AftResult {
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -1856,87 +1856,22 @@ pub fn run_aft(
     config: Option<AftConfig>,
 ) -> EconResult<AftResult> {
     let config = config.unwrap_or_default();
-    let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let data = extract_survival(
+        dataset.df(),
+        time_col,
+        event_col,
+        None,
+        x_cols,
+        TimeRule::Positive,
+        "AFT model",
+    )?;
 
-    // Extract data
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let events = df
-        .column(event_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_col.to_string(),
-        })?;
-
-    // Build design matrix with intercept
+    // Design matrix with intercept, kept rows in their original order
     let p = x_cols.len() + 1; // +1 for intercept
-    let mut x_data: Vec<f64> = Vec::new();
-    let mut log_times: Vec<f64> = Vec::new();
-    let mut deltas: Vec<bool> = Vec::new();
-    let mut valid_rows = 0;
+    let n = data.time.len();
+    let log_times: Vec<f64> = data.time.iter().map(|t| t.ln()).collect();
+    let deltas = data.event;
 
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v > 0.0 => v,
-            _ => continue,
-        };
-        let e = match events.get(i) {
-            Some(v) if !v.is_nan() => v != 0.0,
-            _ => continue,
-        };
-
-        // Intercept
-        let mut row_x: Vec<f64> = vec![1.0];
-        let mut row_valid = true;
-
-        // Extract covariates
-        for col in x_cols {
-            let col_data = df
-                .column(col)
-                .map_err(|_| EconError::ColumnNotFound {
-                    column: col.to_string(),
-                    available: available_cols.clone(),
-                })?
-                .f64()
-                .map_err(|_| EconError::NonNumericColumn {
-                    column: col.to_string(),
-                })?;
-            match col_data.get(i) {
-                Some(v) if !v.is_nan() => row_x.push(v),
-                _ => {
-                    row_valid = false;
-                    break;
-                }
-            }
-        }
-
-        if row_valid {
-            x_data.extend(row_x);
-            log_times.push(t.ln());
-            deltas.push(e);
-            valid_rows += 1;
-        }
-    }
-
-    let n = valid_rows;
     if n < p + 1 {
         return Err(EconError::InsufficientData {
             required: p + 1,
@@ -1952,8 +1887,13 @@ pub fn run_aft(
         });
     }
 
-    let x = Array2::from_shape_vec((n, p), x_data)
-        .map_err(|e| EconError::Internal(format!("Matrix construction failed: {}", e)))?;
+    let mut x = try_zeros2(n, p, "AFT design matrix")?;
+    x.column_mut(0).fill(1.0);
+    for (j, values) in data.x.iter().enumerate() {
+        for (cell, &v) in x.column_mut(j + 1).iter_mut().zip(values) {
+            *cell = v;
+        }
+    }
     let y: Array1<f64> = Array1::from_vec(log_times);
 
     // Initialize parameters: OLS estimates for location, reasonable scale
@@ -2148,6 +2088,7 @@ pub fn run_aft(
         n_events,
         converged,
         iterations,
+        missing: data.missing,
     })
 }
 
@@ -2469,6 +2410,9 @@ pub struct CompetingRisksResult {
     pub n_censored: usize,
     /// Confidence level
     pub conf_level: f64,
+    /// Rows dropped because of a missing time or event code.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for CompetingRisksResult {
@@ -2522,7 +2466,7 @@ impl fmt::Display for CompetingRisksResult {
             writeln!(f)?;
         }
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -2549,55 +2493,37 @@ pub fn run_competing_risks(
     event_type_col: &str,
     conf_level: f64,
 ) -> EconResult<CompetingRisksResult> {
-    if conf_level <= 0.0 || conf_level >= 1.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Confidence level must be between 0 and 1".to_string(),
-        });
-    }
+    check_conf_level(conf_level)?;
 
     let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    refuse_boolean_time(df, time_col)?;
+    let cols = ColumnRequest::new(df)
+        .numeric(time_col)
+        .numeric(event_type_col)
+        .na(NaPolicy::Omit)
+        .min_rows(1, "competing risks")
+        .extract()?;
+    let times = checked_times(
+        cols.numeric(time_col),
+        cols.rows(),
+        time_col,
+        TimeRule::NonNegative,
+    )?;
 
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let event_types = df
-        .column(event_type_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_type_col.to_string(),
-            available: available_cols,
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_type_col.to_string(),
-        })?;
-
-    // Build observations
-    let mut observations: Vec<(f64, u8)> = Vec::new();
+    // Build observations; codes are whole numbers 0 (censored), 1, 2, ... up to 255
+    let mut observations: Vec<(f64, u8)> = Vec::with_capacity(times.len());
     let mut event_type_set: std::collections::BTreeSet<u8> = std::collections::BTreeSet::new();
-
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v,
-            _ => continue,
-        };
-        let e = match event_types.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v as u8,
-            _ => continue,
-        };
-
+    for (i, (&t, &v)) in times.iter().zip(cols.numeric(event_type_col)).enumerate() {
+        if !((0.0..=255.0).contains(&v) && v.fract() == 0.0) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Column '{event_type_col}' must hold event codes 0 (censored), 1, 2, ... \
+                     (whole numbers up to 255); row {} is {v}",
+                    cols.rows()[i]
+                ),
+            });
+        }
+        let e = v as u8;
         observations.push((t, e));
         if e > 0 {
             event_type_set.insert(e);
@@ -2605,9 +2531,6 @@ pub fn run_competing_risks(
     }
 
     let n_obs = observations.len();
-    if n_obs == 0 {
-        return Err(EconError::EmptyDataset);
-    }
 
     let event_types_vec: Vec<u8> = event_type_set.into_iter().collect();
     if event_types_vec.is_empty() {
@@ -2717,6 +2640,7 @@ pub fn run_competing_risks(
         n_events_by_type,
         n_censored,
         conf_level,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -2727,6 +2651,9 @@ pub fn run_competing_risks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::MissingSummary;
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
     fn create_test_dataset() -> Dataset {
@@ -3119,6 +3046,346 @@ mod tests {
             "Sum of CIFs at final time should be <= 1, got {}",
             final_cif_sum
         );
+    }
+
+    // =========================================================================
+    // R-pinned: column extraction, missing values and Surv() status coding
+    // (cases in validation/r/cases/survival.R; registry validation/methods/survival.json)
+    // =========================================================================
+
+    /// Copy of `ds` with `cols` cast to Float64 (identical values).
+    fn cast_f64(ds: &Dataset, cols: &[&str]) -> Dataset {
+        let mut df = ds.df().clone();
+        for &c in cols {
+            let cast = df.column(c).unwrap().cast(&DataType::Float64).unwrap();
+            df.with_column(cast).unwrap();
+        }
+        Dataset::new(df)
+    }
+
+    /// Bit patterns, so that equality also holds for NaN (the AFT optimiser can diverge:
+    /// ECON-47, Tier 3).
+    fn bits(v: &[f64]) -> Vec<u64> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    /// The values of the Int64 column `from`, which has no nulls.
+    fn i64_values(ds: &Dataset, from: &str) -> Vec<i64> {
+        ds.df()
+            .column(from)
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .map(|v| v.expect("no nulls in the source column"))
+            .collect()
+    }
+
+    /// Copy of `ds` with `series` added (or replaced, by name).
+    fn with_series(ds: &Dataset, series: Series) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(series).unwrap();
+        Dataset::new(df)
+    }
+
+    /// Copy of `ds` with a new column `name` computed row by row from the Int64 column `from`.
+    fn derive_i64(ds: &Dataset, from: &str, name: &str, f: impl Fn(i64) -> i64) -> Dataset {
+        let v: Vec<i64> = i64_values(ds, from).into_iter().map(f).collect();
+        with_series(ds, Series::new(name.into(), v))
+    }
+
+    /// Same, Float64, with the 0-based row index.
+    fn derive_f64(ds: &Dataset, from: &str, name: &str, f: impl Fn(usize, i64) -> f64) -> Dataset {
+        let v: Vec<f64> = i64_values(ds, from)
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| f(i, x))
+            .collect();
+        with_series(ds, Series::new(name.into(), v))
+    }
+
+    /// Same, Boolean.
+    fn derive_bool(ds: &Dataset, from: &str, name: &str, f: impl Fn(i64) -> bool) -> Dataset {
+        let v: Vec<bool> = i64_values(ds, from).into_iter().map(f).collect();
+        with_series(ds, Series::new(name.into(), v))
+    }
+
+    /// The message of an `InvalidSpecification`, or a panic naming what came instead.
+    fn invalid_spec<T: std::fmt::Debug>(r: EconResult<T>, what: &str) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("{what}: expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_na_survival_int64_columns() {
+        let (case, ds) = load_case("surv_km_lung");
+        for c in ["time", "status", "age", "sex"] {
+            assert_eq!(ds.df().column(c).unwrap().dtype(), &DataType::Int64, "{c}");
+        }
+        let f = cast_f64(&ds, &["time", "status", "age", "sex"]);
+
+        let km = run_kaplan_meier(&ds, "time", "status", Some("sex"), 0.95).unwrap();
+        let km_f = run_kaplan_meier(&f, "time", "status", Some("sex"), 0.95).unwrap();
+        assert_eq!(km.len(), 2);
+        assert_eq!(km[0].group.as_deref(), Some("1"));
+        assert_eq!(km[1].group.as_deref(), Some("2"));
+        assert_eq!(km_f.len(), 2);
+        for (a, b) in km.iter().zip(&km_f) {
+            assert_eq!(a.group, b.group);
+            assert_eq!(bits(&a.times), bits(&b.times));
+            assert_eq!(bits(&a.survival), bits(&b.survival));
+            assert_eq!(a.n_at_risk, b.n_at_risk);
+        }
+
+        let lr = log_rank_test(&ds, "time", "status", "sex").unwrap();
+        let lr_f = log_rank_test(&f, "time", "status", "sex").unwrap();
+        assert_eq!(bits(&[lr.chi_squared]), bits(&[lr_f.chi_squared]));
+        let cox = run_cox_ph(&ds, "time", "status", &["age", "sex"], None).unwrap();
+        let cox_f = run_cox_ph(&f, "time", "status", &["age", "sex"], None).unwrap();
+        assert_eq!(bits(&cox.coefficients), bits(&cox_f.coefficients));
+        let aft = run_aft(&ds, "time", "status", &["age", "sex"], None).unwrap();
+        let aft_f = run_aft(&f, "time", "status", &["age", "sex"], None).unwrap();
+        assert_eq!(bits(&aft.coefficients), bits(&aft_f.coefficients));
+
+        Check::new(&case)
+            .scalar(
+                "n",
+                km.iter().map(|k| k.n_obs).sum::<usize>() as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "n_event",
+                km.iter().map(|k| k.total_events).sum::<usize>() as f64,
+                Tol::exact(),
+            )
+            .finish();
+
+        // Competing risks on Int64 time and event columns.
+        let (_, small) = load_case("surv_km_small");
+        assert_eq!(
+            small.df().column("event").unwrap().dtype(),
+            &DataType::Int64
+        );
+        let cr = run_competing_risks(&small, "time", "event", 0.95).unwrap();
+        assert_eq!(cr.event_types, vec![1]);
+        assert_eq!(cr.n_obs, 10);
+    }
+
+    #[test]
+    fn test_validate_surv_status_coding_lung() {
+        let (case, ds) = load_case("surv_km_lung");
+        let ds = derive_i64(&ds, "status", "status01", |s| s - 1);
+        let ds = derive_bool(&ds, "status", "dead", |s| s == 2);
+
+        let mut check = Check::new(&case);
+        let (mut surv, mut chisq, mut cox, mut aft) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for status in ["status", "status01", "dead"] {
+            let km = &run_kaplan_meier(&ds, "time", status, None, 0.95).unwrap()[0];
+            check
+                .scalar("n_event", km.total_events as f64, Tol::exact())
+                .scalar("n", km.n_obs as f64, Tol::exact());
+            surv.push(bits(&km.survival));
+            chisq.push(bits(&[log_rank_test(&ds, "time", status, "sex")
+                .unwrap()
+                .chi_squared]));
+            cox.push(bits(
+                &run_cox_ph(&ds, "time", status, &["age", "sex"], None)
+                    .unwrap()
+                    .coefficients,
+            ));
+            aft.push(bits(
+                &run_aft(&ds, "time", status, &["age", "sex"], None)
+                    .unwrap()
+                    .coefficients,
+            ));
+        }
+        check.finish();
+        for (what, v) in [
+            ("KM", &surv),
+            ("log-rank", &chisq),
+            ("Cox", &cox),
+            ("AFT", &aft),
+        ] {
+            assert_eq!(v[0], v[1], "{what}: 1/2 vs 0/1 coding");
+            assert_eq!(v[0], v[2], "{what}: 1/2 vs logical coding");
+        }
+    }
+
+    #[test]
+    fn test_validate_surv_status_invalid_codes_are_errors() {
+        let (case, ds) = load_case("surv_km_lung");
+        // R codes these as NA with a warning ("Invalid status value, converted to NA").
+        let ds = derive_i64(&ds, "status", "status23", |s| s + 1);
+        let ds = derive_f64(&ds, "status", "status012", |i, s| {
+            if i == 0 { 0.0 } else { s as f64 }
+        });
+        let ds = derive_f64(&ds, "status", "status_half", |i, s| {
+            if i == 0 { 1.5 } else { s as f64 }
+        });
+        let mut check = Check::new(&case);
+        for status in ["status23", "status012", "status_half"] {
+            let messages = [
+                invalid_spec(run_kaplan_meier(&ds, "time", status, None, 0.95), "KM"),
+                invalid_spec(log_rank_test(&ds, "time", status, "sex"), "log-rank"),
+                invalid_spec(run_cox_ph(&ds, "time", status, &["age"], None), "Cox"),
+                invalid_spec(run_aft(&ds, "time", status, &["age"], None), "AFT"),
+            ];
+            for m in &messages {
+                for part in [status, "0/1", "1/2", "Surv"] {
+                    assert!(m.contains(part), "{status}: {part:?} not in {m}");
+                }
+                if status == "status23" {
+                    assert!(m.contains('3'), "{m}");
+                }
+            }
+        }
+        // The valid 1/2 column of the same dataset still gives R's counts.
+        let km = &run_kaplan_meier(&ds, "time", "status", None, 0.95).unwrap()[0];
+        check
+            .scalar("n_event", km.total_events as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_na_survival_missing_rows_are_dropped_and_reported() {
+        let (case, ds) = load_case("surv_logrank_lung");
+        let ecog = log_rank_test(&ds, "time", "status", "ph.ecog").unwrap();
+        assert_eq!(ecog.groups, ["0", "1", "2", "3"]);
+        assert_eq!(
+            ecog.missing,
+            MissingSummary {
+                n_total: 228,
+                n_used: 227,
+                n_dropped: 1,
+                by_column: vec![("ph.ecog".to_string(), 1)],
+            }
+        );
+        let as_f64 = |v: &[usize]| v.iter().map(|&x| x as f64).collect::<Vec<_>>();
+        Check::new(&case)
+            .vector("ecog_n", &as_f64(&ecog.n_per_group), Tol::exact())
+            .vector("ecog_obs", &as_f64(&ecog.events_per_group), Tol::exact())
+            .scalar(
+                "ecog_n_used",
+                ecog.n_per_group.iter().sum::<usize>() as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert!(
+            ecog.to_string().trim_end().ends_with(
+                "Missing values: 1 of 228 rows dropped because of missing values (ph.ecog: 1)"
+            ),
+            "{ecog}"
+        );
+
+        let km = run_kaplan_meier(&ds, "time", "status", Some("ph.ecog"), 0.95).unwrap();
+        assert_eq!(km.len(), 4);
+        for k in &km {
+            assert_eq!(k.missing.n_dropped, 1, "{:?}", k.group);
+        }
+
+        // R coxph: n = 227, nevent = 164 (the row with a missing ph.karno is dropped).
+        let status = ds.df().column("status").unwrap().i64().unwrap().clone();
+        let karno = ds.df().column("ph.karno").unwrap();
+        let events_with_karno = (0..ds.nrows())
+            .filter(|&i| status.get(i) == Some(2) && !karno.get(i).unwrap().is_null())
+            .count();
+        let cox = run_cox_ph(&ds, "time", "status", &["age", "sex", "ph.karno"], None).unwrap();
+        assert_eq!(cox.n_obs, 227);
+        assert_eq!(cox.n_events, events_with_karno);
+        assert_eq!(cox.missing.by_column, vec![("ph.karno".to_string(), 1)]);
+        assert!(
+            cox.to_string().trim_end().ends_with(
+                "Missing values: 1 of 228 rows dropped because of missing values (ph.karno: 1)"
+            ),
+            "{cox}"
+        );
+        // R survreg: n = 227.
+        let aft = run_aft(&ds, "time", "status", &["age", "ph.karno"], None).unwrap();
+        assert_eq!(aft.n_obs, 227);
+        assert_eq!(aft.missing.n_dropped, 1);
+    }
+
+    #[test]
+    fn test_validate_na_survival_bad_columns_name_the_column() {
+        let (case, ds) = load_case("surv_logrank_small");
+        assert_eq!(ds.df().column("time").unwrap().dtype(), &DataType::Int64);
+        // The loader reads the quoted "0"/"1" labels as Int64; a text copy of them:
+        let labels: Vec<String> = i64_values(&ds, "group")
+            .into_iter()
+            .map(|g| format!("arm{g}"))
+            .collect();
+        let ds = with_series(&ds, Series::new("arm".into(), labels));
+
+        match run_kaplan_meier(&ds, "tme", "event", None, 0.95) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "tme"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
+        match run_kaplan_meier(&ds, "arm", "event", None, 0.95) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "arm"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        match log_rank_test(&ds, "time", "arm", "group") {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "arm"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        // A text group column is a factor: the same test as on the Int64 labels.
+        let by_text = log_rank_test(&ds, "time", "event", "arm").unwrap();
+        let by_int = log_rank_test(&ds, "time", "event", "group").unwrap();
+        assert_eq!(by_text.groups, ["arm0", "arm1"]);
+        assert_eq!(bits(&[by_text.chi_squared]), bits(&[by_int.chi_squared]));
+        let ds = derive_bool(&ds, "time", "late", |t| t > 4);
+        match run_kaplan_meier(&ds, "late", "event", None, 0.95) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "late"),
+            other => panic!("expected NonNumericColumn for a Boolean time, got {other:?}"),
+        }
+
+        let ds = derive_i64(&ds, "time", "shifted", |t| t - 2);
+        let negative = [
+            invalid_spec(run_kaplan_meier(&ds, "shifted", "event", None, 0.95), "KM"),
+            invalid_spec(log_rank_test(&ds, "shifted", "event", "group"), "log-rank"),
+            invalid_spec(run_cox_ph(&ds, "shifted", "event", &["time"], None), "Cox"),
+            invalid_spec(run_competing_risks(&ds, "shifted", "event", 0.95), "CR"),
+        ];
+        for m in &negative {
+            assert!(m.contains("'shifted'") && m.contains("negative"), "{m}");
+        }
+
+        let ds = derive_i64(&ds, "time", "t0", |t| t - 1);
+        let km = run_kaplan_meier(&ds, "t0", "event", None, 0.95).unwrap();
+        let m = invalid_spec(run_aft(&ds, "t0", "event", &["time"], None), "AFT");
+        assert!(m.contains("'t0'") && m.contains("positive"), "{m}");
+
+        let ds = derive_f64(&ds, "event", "code_half", |i, e| {
+            if i == 0 { 1.5 } else { e as f64 }
+        });
+        let ds = derive_f64(&ds, "event", "code_neg", |i, e| {
+            if i == 0 { -1.0 } else { e as f64 }
+        });
+        for code in ["code_half", "code_neg"] {
+            let m = invalid_spec(run_competing_risks(&ds, "time", code, 0.95), code);
+            assert!(m.contains("whole number") && m.contains(code), "{m}");
+        }
+
+        // conf_level NaN: the old `<= 0.0 || >= 1.0` check let it through.
+        invalid_spec(
+            run_kaplan_meier(&ds, "time", "event", None, f64::NAN),
+            "KM NaN",
+        );
+        invalid_spec(
+            run_competing_risks(&ds, "time", "event", f64::NAN),
+            "CR NaN",
+        );
+
+        // The valid columns still give R's counts: 12 rows, events per group (survdiff obs).
+        assert_eq!(km[0].n_obs, 12);
+        let by_group = run_kaplan_meier(&ds, "time", "event", Some("group"), 0.95).unwrap();
+        let events: Vec<f64> = by_group.iter().map(|k| k.total_events as f64).collect();
+        Check::new(&case)
+            .vector("obs", &events, Tol::exact())
+            .finish();
     }
 
     #[test]

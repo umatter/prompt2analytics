@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "surv_data_handling",
+      "name": "Survival column extraction: Int64 columns, na.omit with a report, Surv() status coding (KM, log-rank, Cox, AFT, competing risks)",
+      "category": "econometrics",
+      "reference": "survival::Surv; na.omit in survfit/survdiff/coxph/survreg",
+      "doc": "validation/econometrics/survival.md",
+      "cases": [
+        "surv_km_lung",
+        "surv_km_lung_by_sex",
+        "surv_logrank_lung",
+        "surv_logrank_small",
+        "surv_km_small",
+        "surv_km_median_rules"
+      ],
+      "tests": [
+        "p2a-core::econometrics::survival::tests::test_validate_na_survival_int64_columns",
+        "p2a-core::econometrics::survival::tests::test_validate_surv_status_coding_lung",
+        "p2a-core::econometrics::survival::tests::test_validate_surv_status_invalid_codes_are_errors",
+        "p2a-core::econometrics::survival::tests::test_validate_na_survival_missing_rows_are_dropped_and_reported",
+        "p2a-core::econometrics::survival::tests::test_validate_na_survival_bad_columns_name_the_column"
+      ],
+      "quantities": [
+        "n, events under 1/2, 0/1 and logical coding",
+        "rows used (227 with an NA ph.ecog / ph.karno)",
+        "error types"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
