@@ -85,3 +85,56 @@ async fn test_validate_mcp_hypothesis_bartlett_test() {
         .scalar("n_xi_g", f(&v["n_obs"]), Tol::exact())
         .finish();
 }
+
+#[tokio::test]
+async fn test_validate_mcp_hypothesis_pairwise_t_test() {
+    let case = Case::load("stat_pairwise_mahalanobis_na");
+    let (session, server) = session_with("stat_pairwise_mahalanobis_na");
+    // the tool's default is pool_sd: false; R's default is pooled
+    let v = json_of(
+        &call(
+            &server,
+            &session,
+            "hypothesis_pairwise_t_test",
+            json!({"dataset": "pairwise_mahalanobis_na", "response": "y", "factor": "g", "pool_sd": true}),
+        )
+        .await,
+    );
+    let adj = &v["p_values_adjusted"];
+    let lower: Vec<f64> = [(1, 0), (2, 0), (2, 1)]
+        .iter()
+        .map(|&(i, j)| f(&adj[i][j]))
+        .collect();
+    let nums = |key: &str| -> Vec<f64> {
+        v[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} is not an array: {v}"))
+            .iter()
+            .map(f)
+            .collect()
+    };
+    let names: Vec<&str> = v["group_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    Check::new(&case)
+        .vector("pairwise_p", &lower, Tol::p_value(28))
+        .vector("pairwise_p_raw", &nums("p_values_raw"), Tol::p_value(28))
+        .vector("pairwise_t", &nums("t_statistics"), Tol::stat(28))
+        .scalar("pairwise_pooled_sd", f(&v["pooled_sd"]), Tol::stat(28))
+        .named(
+            "pairwise_group_n",
+            &names,
+            &nums("group_sizes"),
+            Tol::exact(),
+        )
+        .named(
+            "pairwise_group_mean",
+            &names,
+            &nums("group_means"),
+            Tol::coef(28),
+        )
+        .finish();
+}
