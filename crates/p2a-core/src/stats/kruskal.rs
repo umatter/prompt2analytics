@@ -12,7 +12,9 @@
 //! - R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/kruskal.test.html
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::stats::anova::values_by_level;
 use serde::{Deserialize, Serialize};
 
 /// Result of the Kruskal-Wallis rank sum test
@@ -40,6 +42,10 @@ pub struct KruskalWallisResult {
     pub has_ties: bool,
     /// Tie correction factor (1.0 if no ties)
     pub tie_correction: f64,
+    /// Rows dropped because the value or the group label is missing (R's na.omit);
+    /// empty for the array-level function.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Compute the Kruskal-Wallis rank sum test for grouped data.
@@ -176,6 +182,7 @@ pub fn kruskal_test(groups: &[(String, Vec<f64>)]) -> EconResult<KruskalWallisRe
         mean_ranks,
         has_ties,
         tie_correction,
+        missing: MissingSummary::none(n_total),
     })
 }
 
@@ -221,7 +228,11 @@ fn chi_squared_p_value(statistic: f64, df: usize) -> f64 {
     1.0 - chi2.cdf(statistic)
 }
 
-/// Run Kruskal-Wallis test on a Dataset with grouping variable.
+/// Run Kruskal-Wallis test on a Dataset with grouping variable (R `kruskal.test(value ~ group)`).
+///
+/// Rows with a missing value or group label are dropped, as R's `na.omit`, and reported in
+/// `missing`; a missing label is never a group of its own. Integer values are accepted, and
+/// the groups follow R `factor()` order (numeric labels numerically: 2 before 10).
 ///
 /// # Arguments
 ///
@@ -237,49 +248,15 @@ pub fn run_kruskal_test(
     value_col: &str,
     group_col: &str,
 ) -> EconResult<KruskalWallisResult> {
-    let df = dataset.df();
-
-    // Extract value column
-    let values = df
-        .column(value_col)
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", value_col, e),
-        })?
-        .f64()
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", value_col, e),
-        })?;
-
-    // Extract group column as strings
-    let groups_col = df
-        .column(group_col)
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", group_col, e),
-        })?;
-
-    // Build group data
-    use std::collections::HashMap;
-    let mut group_data: HashMap<String, Vec<f64>> = HashMap::new();
-
-    let n = df.height();
-    for i in 0..n {
-        let group_name = groups_col.get(i).map_err(|e| EconError::NonNumericColumn {
-            column: format!("Error accessing group at row {}: {}", i, e),
-        })?;
-        let group_str = format!("{}", group_name);
-
-        let value = values.get(i);
-        if let Some(v) = value {
-            group_data.entry(group_str).or_default().push(v);
-        }
-    }
-
-    // Convert to vector of tuples
-    let mut groups: Vec<(String, Vec<f64>)> = group_data.into_iter().collect();
-    // Sort by group name for consistent ordering
-    groups.sort_by(|a, b| a.0.cmp(&b.0));
-
-    kruskal_test(&groups)
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(value_col)
+        .factor(group_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let groups = values_by_level(cols.numeric(value_col), cols.factor(group_col));
+    let mut result = kruskal_test(&groups)?;
+    result.missing = cols.missing().clone();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -502,5 +479,75 @@ mod tests {
         // With ties, correction should be < 1.0
         assert!(result.tie_correction < 1.0);
         assert!(result.tie_correction > 0.0);
+    }
+
+    // ========================================================================
+    // R-pinned: missing values and labels (T2-WP07, case stat_oneway_na_labels)
+    // ========================================================================
+    //
+    // kruskal.test(v9 ~ g9): g9 is missing in 3 of 9 rows, which R drops; the labels are
+    // "a" and "b" (never a level named null, never quoted).
+
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
+
+    /// The case frame plus `gnum` (Int64): 10 where g9 is "a", 2 where it is "b", else null.
+    fn with_numeric_groups(ds: &Dataset) -> Dataset {
+        let mut df = ds.df().clone();
+        let gnum: Vec<Option<i64>> = df
+            .column("g9")
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .map(|g| match g {
+                Some("a") => Some(10),
+                Some("b") => Some(2),
+                _ => None,
+            })
+            .collect();
+        df.with_column(Series::new("gnum".into(), gnum)).unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_validate_oneway_na_labels_kruskal() {
+        let (case, ds) = load_case("stat_oneway_na_labels");
+        let r = run_kruskal_test(&ds, "v9", "g9").unwrap();
+        let sizes: Vec<f64> = r.group_sizes.iter().map(|&n| n as f64).collect();
+        Check::new(&case)
+            .scalar("kw_chisq", r.statistic, Tol::stat(6))
+            .scalar("kw_df", r.df as f64, Tol::exact())
+            .scalar("kw_p", r.p_value, Tol::p_value(6))
+            .named("kw_group_n", &r.group_names, &sizes, Tol::exact())
+            .finish();
+        assert_eq!(r.group_names, ["a", "b"]);
+        assert_eq!(r.missing.n_dropped, 3);
+        assert_eq!(r.missing.by_column, vec![("g9".to_string(), 3)]);
+    }
+
+    /// Design 2.4 fixture: integer labels in numeric order (2 < 10), a text value column and
+    /// an absent column refused with the variant that names the problem.
+    #[test]
+    fn test_validate_na_kruskal_dtypes_and_errors() {
+        let (_case, ds) = load_case("stat_oneway_na_labels");
+        let by_label = run_kruskal_test(&ds, "v9", "g9").unwrap();
+        let ds = with_numeric_groups(&ds);
+        let by_number = run_kruskal_test(&ds, "v9", "gnum").unwrap();
+        assert_eq!(by_number.group_names, ["2", "10"]);
+        assert_eq!(by_number.group_sizes, [3, 3]);
+        assert!((by_number.statistic - by_label.statistic).abs() <= 1e-12 * by_label.statistic);
+        assert!(matches!(
+            run_kruskal_test(&ds, "g9", "gnum"),
+            Err(EconError::NonNumericColumn { ref column }) if column == "g9"
+        ));
+        assert!(matches!(
+            run_kruskal_test(&ds, "v9", "nope"),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
+        assert!(matches!(
+            run_kruskal_test(&ds, "nope", "g9"),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
     }
 }

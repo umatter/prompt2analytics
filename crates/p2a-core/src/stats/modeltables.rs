@@ -287,7 +287,10 @@ pub fn model_tables_two_way(
     }
 
     let grand_mean = total_sum / total_n as f64;
-    let df_within = total_n.saturating_sub(a_levels * b_levels);
+    // The residual df of aov(y ~ a * b): n minus the number of non-empty cells (the rank of
+    // the full model). Each non-empty cell holds at least one row, so this cannot underflow.
+    let n_nonempty = cell_n.iter().flatten().filter(|&&n| n > 0).count();
+    let df_within = total_n - n_nonempty;
     let mse = if df_within > 0 {
         ss_within / df_within as f64
     } else {
@@ -638,5 +641,58 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+    // ========================================================================
+    // R-pinned: residual df of aov and the one-way case (T2-WP07)
+    // ========================================================================
+
+    use crate::data::columns::{ColumnRequest, NaPolicy};
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
+
+    /// The 3 x 2 layout y3 ~ fa3 * fb3 of stat_anova_two_way_unbalanced, whose (C, L) cell is
+    /// empty: the residual df is n minus the 5 non-empty cells (aov), not n - 3 * 2.
+    #[test]
+    fn test_validate_model_tables_two_way_empty_cell() {
+        let (case, ds) = load_case("stat_anova_two_way_unbalanced");
+        let cols = ColumnRequest::new(ds.df())
+            .numeric("y3")
+            .factor("fa3")
+            .factor("fb3")
+            .na(NaPolicy::Omit)
+            .extract()
+            .unwrap();
+        let (fa, fb) = (cols.factor("fa3"), cols.factor("fb3"));
+        let mut data = vec![vec![Vec::new(); fb.n_levels()]; fa.n_levels()];
+        for (i, &y) in cols.numeric("y3").iter().enumerate() {
+            data[fa.codes[i] as usize][fb.codes[i] as usize].push(y);
+        }
+        assert!(data[2][1].is_empty(), "the (C, L) cell is empty");
+        let r =
+            model_tables_two_way(&data, &fa.levels, &fb.levels, TableType::Means, true).unwrap();
+        // deviation STAT-75: the standard errors are not compared (p2a's are SEs of single
+        // means, R's model.tables SEs are for differences and R refuses unbalanced designs).
+        Check::new(&case)
+            .scalar("empty_resid_df", r.df_mse, Tol::exact())
+            .scalar("empty_resid_ss", r.mse * r.df_mse, Tol::stat(13))
+            .finish();
+    }
+
+    /// Model tables of the one-way ANOVA on stat_oneway_na_labels (5 of 9 rows used).
+    #[test]
+    fn test_validate_model_tables_one_way_na_labels() {
+        let (case, ds) = load_case("stat_oneway_na_labels");
+        let anova = run_one_way_anova(&ds, "y", "g").unwrap();
+        let r = model_tables(&anova, TableType::Means, true).unwrap();
+        let sizes: Vec<f64> = r.n.iter().map(|&n| n as f64).collect();
+        // deviation STAT-75: the standard errors are not compared (see above).
+        Check::new(&case)
+            .named("aov_group_means", &r.group_names, &r.values, Tol::stat(5))
+            .named("aov_group_n", &r.group_names, &sizes, Tol::exact())
+            .scalar("aov_grand_mean", r.grand_mean, Tol::stat(5))
+            .scalar("aov_ss_within", r.mse * r.df_mse, Tol::stat(5))
+            .scalar("aov_df_within", r.df_mse, Tol::exact())
+            .finish();
+        assert_eq!(r.group_names, ["a", "b", "c"]);
     }
 }

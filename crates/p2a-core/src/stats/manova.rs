@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{eig_symmetric, faer_to_ndarray, matrix_inverse, ndarray_to_faer};
 use crate::traits::f_test_p_value;
@@ -162,6 +163,10 @@ pub struct ManovaResult {
     pub group_sizes: HashMap<String, usize>,
     /// Grand mean vector
     pub grand_mean: Vec<f64>,
+    /// Rows dropped because a response or the group label is missing (R manova's
+    /// na.omit); empty for the matrix-level function.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl ManovaResult {
@@ -249,8 +254,13 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
         });
     }
 
+    // The groups in label order: every sum below runs in this order, so the result does
+    // not depend on HashMap iteration order (which differs between calls).
+    let mut order: Vec<&String> = group_data.keys().collect();
+    order.sort();
+
     // Check minimum observations per group
-    for (group, indices) in &group_data {
+    for (group, indices) in order.iter().map(|g| (*g, &group_data[*g])) {
         if indices.len() < 2 {
             return Err(EconError::InsufficientData {
                 required: 2,
@@ -297,8 +307,9 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
     // Compute SSCP matrices
     // H (hypothesis/between-groups): H = Σ nᵢ (ȳᵢ - ȳ)(ȳᵢ - ȳ)'
     let mut sscp_hypothesis = Array2::<f64>::zeros((n_responses, n_responses));
-    for (group, mean) in &group_means {
-        let n_i = group_sizes[group] as f64;
+    for group in &order {
+        let mean = &group_means[*group];
+        let n_i = group_sizes[*group] as f64;
         let diff: Vec<f64> = mean.iter().zip(&grand_mean).map(|(m, g)| m - g).collect();
         for j in 0..n_responses {
             for k in 0..n_responses {
@@ -309,9 +320,9 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
 
     // E (error/within-groups): E = Σᵢ Σⱼ (yᵢⱼ - ȳᵢ)(yᵢⱼ - ȳᵢ)'
     let mut sscp_error = Array2::<f64>::zeros((n_responses, n_responses));
-    for (group, indices) in &group_data {
-        let group_mean = &group_means[group];
-        for &i in indices {
+    for group in &order {
+        let group_mean = &group_means[*group];
+        for &i in &group_data[*group] {
             let diff: Vec<f64> = (0..n_responses)
                 .map(|j| y_data[[i, j]] - group_mean[j])
                 .collect();
@@ -386,6 +397,7 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
         group_means,
         group_sizes,
         grand_mean,
+        missing: MissingSummary::none(n_obs),
     })
 }
 
@@ -678,7 +690,11 @@ fn compute_roy_largest_root(
 // Dataset Interface
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Run MANOVA from a Dataset.
+/// Run MANOVA from a Dataset (R `manova(cbind(y1, y2, ...) ~ group)`).
+///
+/// Rows with a missing response or group label are dropped jointly, as `manova` (an `lm`)
+/// drops them, and reported in `missing`. Integer responses are accepted; group labels are
+/// R `factor()` labels (text as stored, without quotes).
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -691,75 +707,19 @@ fn compute_roy_largest_root(
 /// println!("Pillai's Trace: {:.4}, p = {:.4}", result.pillai.statistic, result.pillai.p_value);
 /// ```
 pub fn run_manova(dataset: &Dataset, y_cols: &[&str], group_col: &str) -> EconResult<ManovaResult> {
-    let df = dataset.df();
-    let n = df.height();
+    let cols = ColumnRequest::new(dataset.df())
+        .numerics(y_cols)
+        .factor(group_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y_data = cols.matrix(y_cols, false).data;
+    let factor = cols.factor(group_col);
+    let groups: Vec<&str> = (0..cols.n()).map(|i| factor.label(i)).collect();
 
-    // Get available columns for error messages
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Validate columns exist
-    for col in y_cols {
-        if df.column(col).is_err() {
-            return Err(EconError::ColumnNotFound {
-                column: col.to_string(),
-                available: available_cols.clone(),
-            });
-        }
-    }
-
-    if df.column(group_col).is_err() {
-        return Err(EconError::ColumnNotFound {
-            column: group_col.to_string(),
-            available: available_cols.clone(),
-        });
-    }
-
-    // Extract response data as matrix
-    let n_responses = y_cols.len();
-    let mut y_data = Array2::<f64>::zeros((n, n_responses));
-
-    for (j, col_name) in y_cols.iter().enumerate() {
-        let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: available_cols.clone(),
-        })?;
-        let values = col.f64().map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-
-        for i in 0..n {
-            y_data[[i, j]] = values.get(i).unwrap_or(f64::NAN);
-        }
-    }
-
-    // Extract group labels
-    let group_col_data = df
-        .column(group_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: group_col.to_string(),
-            available: available_cols.clone(),
-        })?;
-
-    let groups: Vec<String> = (0..n)
-        .map(|i| {
-            group_col_data
-                .get(i)
-                .map(|v| v.to_string().trim_matches('"').to_string())
-                .unwrap_or_else(|_| "NA".to_string())
-        })
-        .collect();
-
-    // Run MANOVA
     let mut result = manova_one_way(&y_data, &groups)?;
-
-    // Update variable names
     result.response_vars = y_cols.iter().map(|s| s.to_string()).collect();
     result.factor_var = group_col.to_string();
-
+    result.missing = cols.missing().clone();
     Ok(result)
 }
 
@@ -989,5 +949,116 @@ mod tests {
 
         let result = manova_one_way(&y, &groups);
         assert!(result.is_err());
+    }
+    /// The SSCP sums run over the groups in a fixed order, so repeated calls on the same data
+    /// give bit-identical statistics (they summed in HashMap iteration order, which differs
+    /// between calls).
+    #[test]
+    fn test_manova_statistics_do_not_depend_on_hash_order() {
+        let n = 60;
+        let mut y = Array2::<f64>::zeros((n, 2));
+        let mut groups = Vec::with_capacity(n);
+        for i in 0..n {
+            let g = i % 5;
+            y[[i, 0]] = 1.0 + 0.3 * g as f64 + (i as f64 * 0.7).sin() / 3.0;
+            y[[i, 1]] = 2.0 - 0.2 * g as f64 + (i as f64 * 1.3).cos() / 7.0;
+            groups.push(format!("group{g}"));
+        }
+        let first = manova_one_way(&y, &groups).unwrap();
+        for _ in 0..30 {
+            let again = manova_one_way(&y, &groups).unwrap();
+            for (a, b) in [
+                (&first.pillai, &again.pillai),
+                (&first.wilks, &again.wilks),
+                (&first.hotelling_lawley, &again.hotelling_lawley),
+                (&first.roy, &again.roy),
+            ] {
+                assert_eq!(
+                    a.statistic.to_bits(),
+                    b.statistic.to_bits(),
+                    "{:?}",
+                    a.test_type
+                );
+                assert_eq!(
+                    a.f_value.to_bits(),
+                    b.f_value.to_bits(),
+                    "{:?}",
+                    a.test_type
+                );
+            }
+        }
+    }
+
+    // ========================================================================
+    // R-pinned: incomplete rows (T2-WP07, case stat_manova_na)
+    // ========================================================================
+    //
+    // y1 is missing in rows 3 and 20 and y2 in row 30 (36 rows, 3 groups): manova (lm)
+    // drops the 3 incomplete rows. summary.manova's F approximations are p2a's formulas.
+
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
+    use polars::prelude::DataType;
+
+    #[test]
+    fn test_validate_manova_na() {
+        let (case, ds) = load_case("stat_manova_na");
+        let r = run_manova(&ds, &["y1", "y2"], "g").unwrap();
+        let (s, p, x) = (Tol::stat(33), Tol::p_value(33), Tol::exact());
+        let mut check = Check::new(&case);
+        for (key, t) in [
+            ("pillai", &r.pillai),
+            ("wilks", &r.wilks),
+            ("hotelling_lawley", &r.hotelling_lawley),
+            ("roy", &r.roy),
+        ] {
+            // Rao's df2 for Wilks is real-valued in general.
+            let df2_tol = if key == "wilks" { s } else { x };
+            check
+                .scalar(&format!("{key}_stat"), t.statistic, s)
+                .scalar(&format!("{key}_approx_f"), t.f_value, s)
+                .scalar(&format!("{key}_df1"), t.df1, x)
+                .scalar(&format!("{key}_df2"), t.df2, df2_tol)
+                .scalar(&format!("{key}_p"), t.p_value, p);
+        }
+        let mut names: Vec<&String> = r.group_sizes.keys().collect();
+        names.sort();
+        let sizes: Vec<f64> = names.iter().map(|g| r.group_sizes[*g] as f64).collect();
+        check
+            .scalar("n_used", r.n_obs as f64, x)
+            .named("group_n", &names, &sizes, x)
+            .finish();
+        assert_eq!(
+            r.missing.by_column,
+            vec![("y1".to_string(), 2), ("y2".to_string(), 1)]
+        );
+        assert_eq!(r.missing.n_dropped, 3);
+    }
+
+    /// Design 2.4 fixture: an Int64 response (the case's `id`) equals its Float64 cast, with
+    /// the rows of y1's missing cells dropped; a text response and an absent response are
+    /// refused. (`y` and `y_na` of stat_friedman_quade cannot serve: they agree on every
+    /// complete row, so their error SSCP matrix is singular.)
+    #[test]
+    fn test_validate_na_manova_dtypes_and_errors() {
+        let (_case, ds) = load_case("stat_manova_na");
+        assert_eq!(ds.df().column("id").unwrap().dtype(), &DataType::Int64);
+        let int = run_manova(&ds, &["y1", "id"], "g").unwrap();
+        let mut df = ds.df().clone();
+        let cast = df.column("id").unwrap().cast(&DataType::Float64).unwrap();
+        df.with_column(cast).unwrap();
+        let float = run_manova(&Dataset::new(df), &["y1", "id"], "g").unwrap();
+        assert_eq!(int.pillai.statistic, float.pillai.statistic);
+        assert_eq!(int.wilks.statistic, float.wilks.statistic);
+        assert_eq!(int.n_obs, 34);
+        assert_eq!(int.missing.n_dropped, 2);
+        assert!(matches!(
+            run_manova(&ds, &["y1", "g"], "g"),
+            Err(EconError::NonNumericColumn { ref column }) if column == "g"
+        ));
+        assert!(matches!(
+            run_manova(&ds, &["y1", "nope"], "g"),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
     }
 }

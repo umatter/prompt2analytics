@@ -155,6 +155,45 @@ Direct verification of test statistic computations with known eigenvalues [3, 1]
 - `crates/p2a-core/src/stats/manova.rs::tests::test_hotelling_lawley_formula`
 - `crates/p2a-core/src/stats/manova.rs::tests::test_roy_largest_root_formula`
 
+## Missing values and the R case
+
+`run_manova(dataset, responses, group)` reads the responses and the group in one request through
+the shared extractor (`p2a_core::data::columns`): a row with a missing response or group label is
+dropped from all of them (joint deletion, as `manova`, an `lm`, does with `na.omit`) and reported
+in `missing`. Integer responses are accepted, and group labels are R `factor()` labels (text as
+stored, without quotes). Before T2-WP07 a missing response was written into the data matrix as
+NaN, and the call failed with an internal error ("Failed to invert error SSCP matrix: Matrix
+contains non-finite values (NaN or Inf)").
+
+**R case** `stat_manova_na` (`validation/r/cases/stats_anova.R`, dataset
+`validation/datasets/generated/manova_na.csv`, 36 rows in 3 groups; `y1` is missing in rows 3
+and 20 and `y2` in row 30, so 33 rows are used):
+
+```r
+m <- manova(cbind(y1, y2) ~ g, data = d)
+summary(m, test = "Pillai" | "Wilks" | "Hotelling-Lawley" | "Roy")$stats
+```
+
+| Statistic | value | approx F | df1 / df2 | p |
+|---|---|---|---|---|
+| Pillai | 0.8666827691016671 | 11.470964335572894 | 4 / 60 | 5.569040967348833e-07 |
+| Wilks | 0.3033643446479518 | 11.826051982166383 | 4 / 58 | 4.319740428530747e-07 |
+| Hotelling-Lawley | 1.7358287184788463 | 12.150801029351925 | 4 / 56 | 3.5354429854995737e-07 |
+| Roy | 1.3069334489125344 | 19.604001733688015 | 2 / 30 | 3.584874936452156e-06 |
+
+Rows used: 33; group sizes g1 11, g2 11, g3 11. The F approximations are those of
+`summary.manova`, term by term.
+
+**Rust tests** (`crates/p2a-core/src/stats/manova.rs`):
+- `stats::manova::tests::test_validate_manova_na` (all four statistics, approximate F and p at
+  n = 33, df exact except Wilks' df2 at `Tol::stat(33)` since Rao's df is real-valued in
+  general; rows used and group sizes; `missing.by_column` y1: 2, y2: 1)
+- `stats::manova::tests::test_validate_na_manova_dtypes_and_errors` (the Int64 column `id` as a
+  response equals its Float64 cast; a text response is `NonNumericColumn`, an absent response
+  `ColumnNotFound`)
+- MCP: `test_validate_mcp_anova_manova_na` (`crates/p2a-mcp/tests/tier2/wp07_anova.rs`; Pillai
+  and Wilks, rows used, group labels g1, g2, g3)
+
 ## Numerical Precision Summary
 
 | Test Case | Statistic Match | P-value Match |

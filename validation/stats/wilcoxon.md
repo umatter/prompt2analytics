@@ -136,6 +136,55 @@ wilcox.test(x, y, paired = TRUE, exact = FALSE, correct = TRUE)
 
 **Rust Test:** `crates/p2a-core/src/stats/wilcoxon.rs::tests::test_validate_paired_against_r`
 
+## Missing values and the R case
+
+`wilcoxon_test(dataset, x, y, mu, alternative, paired, config)` reads its columns through the
+shared extractor (`p2a_core::data::columns`), with `wilcox.test`'s NA handling:
+
+- **Paired test:** a pair with a missing `x` or `y` is dropped (`complete.cases(x, y)`).
+- **Rank-sum test:** each sample drops its own missing values (two independent columns); the
+  two summaries are merged (`MissingSummary::merge_samples`).
+- **One-sample test:** the column's missing values are dropped.
+
+The drop is reported in `missing` and in a last Display line `Missing values: ...`. Integer
+columns are accepted; a text column is `NonNumericColumn`, an absent one `ColumnNotFound`. Before
+T2-WP07 a missing cell was read as 0 and entered the statistic.
+
+**R case** `stat_wilcoxon_na` (`validation/r/cases/stats_anova.R`, dataset
+`validation/datasets/generated/wilcoxon_na.csv`, 10 rows; `x` is missing in row 3 and `y` in
+row 8, so 8 complete pairs and 9 values per sample; the case checks that there are no ties):
+
+```r
+wilcox.test(d$x, d$y, paired = TRUE, exact = FALSE, correct = TRUE)
+wilcox.test(d$x, d$y, paired = TRUE)                       # exact
+wilcox.test(d$x, d$y, exact = FALSE, correct = TRUE)       # rank sum
+```
+
+| Quantity | R value | Quantity | R value |
+|---|---|---|---|
+| paired V | 35 | rank sum of x (R1) | 100 |
+| paired p (normal, corrected) | 0.020862582332765507 | R's W = R1 - 45 | 55 |
+| paired z | 2.310462138646216 | rank-sum p (normal, corrected) | 0.21637300805763746 |
+| paired p (exact) | 0.015625000000000003 | rank-sum z | 1.236230199927374 |
+| pairs used | 8 | n_x / n_y | 9 / 9 |
+
+The z values are recovered from R's p (`-qnorm(p / 2)` with the sign of the statistic minus its
+mean).
+
+**STAT-72 (registry deviation):** p2a's rank-sum `statistic` is the rank sum R1 of `x`; R reports
+W = R1 - n_x (n_x + 1) / 2. The test pins R1 and compares `statistic - n (n + 1) / 2` with R's W
+until STAT-72 (Tier 4) changes the reported statistic.
+
+**Rust tests** (`crates/p2a-core/src/stats/wilcoxon.rs`):
+- `stats::wilcoxon::tests::test_validate_wilcoxon_na_paired` (V and the pair count exact; p
+  `Tol::p_value(8)`, z `Tol::stat(8)`; the exact p; the missing-value summary)
+- `stats::wilcoxon::tests::test_validate_wilcoxon_na_rank_sum` (R1 and W exact, p and z at
+  n = 18, sample sizes; 2 of 20 values dropped)
+- `stats::wilcoxon::tests::test_validate_na_wilcoxon_dtypes_and_errors` (on the Int64 case
+  `stat_friedman_quade`: the one-sample test on an Int64 column equals the test on its Float64
+  cast; a text column is `NonNumericColumn`, an absent one `ColumnNotFound`)
+- MCP: `test_validate_mcp_hypothesis_wilcoxon_paired_na` (`crates/p2a-mcp/tests/tier2/wp07_anova.rs`)
+
 ## Numerical Precision Summary
 
 | Statistic | Typical Tolerance | Notes |

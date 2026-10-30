@@ -10,7 +10,9 @@
 //! - R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/oneway.test.html
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::stats::anova::values_by_level;
 use serde::{Deserialize, Serialize};
 
 /// Result of Welch's one-way ANOVA test
@@ -38,6 +40,10 @@ pub struct OnewayTestResult {
     pub group_variances: Vec<f64>,
     /// Whether equal variances were assumed
     pub var_equal: bool,
+    /// Rows dropped because the value or the group label is missing (R's na.omit);
+    /// empty for the array-level function.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 /// Perform Welch's one-way ANOVA test (or standard ANOVA if var.equal = true).
@@ -215,6 +221,7 @@ pub fn oneway_test(groups: &[(String, Vec<f64>)], var_equal: bool) -> EconResult
         group_means,
         group_variances,
         var_equal,
+        missing: MissingSummary::none(n_total),
     })
 }
 
@@ -234,7 +241,12 @@ fn f_test_p_value(statistic: f64, df1: f64, df2: f64) -> f64 {
     1.0 - f_dist.cdf(statistic)
 }
 
-/// Run Welch's one-way ANOVA test on a Dataset with grouping variable.
+/// Run Welch's one-way ANOVA test on a Dataset with grouping variable (R
+/// `oneway.test(value ~ group)`).
+///
+/// Rows with a missing value or group label are dropped, as R's `na.omit`, and reported in
+/// `missing`; a missing label is never a group of its own. Integer values are accepted, and
+/// the groups follow R `factor()` order (numeric labels numerically: 2 before 10).
 ///
 /// # Arguments
 ///
@@ -252,49 +264,15 @@ pub fn run_oneway_test(
     group_col: &str,
     var_equal: bool,
 ) -> EconResult<OnewayTestResult> {
-    let df = dataset.df();
-
-    // Extract value column
-    let values = df
-        .column(value_col)
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", value_col, e),
-        })?
-        .f64()
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", value_col, e),
-        })?;
-
-    // Extract group column as strings
-    let groups_col = df
-        .column(group_col)
-        .map_err(|e| EconError::NonNumericColumn {
-            column: format!("{}: {}", group_col, e),
-        })?;
-
-    // Build group data
-    use std::collections::HashMap;
-    let mut group_data: HashMap<String, Vec<f64>> = HashMap::new();
-
-    let n = df.height();
-    for i in 0..n {
-        let group_name = groups_col.get(i).map_err(|e| EconError::NonNumericColumn {
-            column: format!("Error accessing group at row {}: {}", i, e),
-        })?;
-        let group_str = format!("{}", group_name);
-
-        let value = values.get(i);
-        if let Some(v) = value {
-            group_data.entry(group_str).or_default().push(v);
-        }
-    }
-
-    // Convert to vector of tuples
-    let mut groups: Vec<(String, Vec<f64>)> = group_data.into_iter().collect();
-    // Sort by group name for consistent ordering
-    groups.sort_by(|a, b| a.0.cmp(&b.0));
-
-    oneway_test(&groups, var_equal)
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(value_col)
+        .factor(group_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let groups = values_by_level(cols.numeric(value_col), cols.factor(group_col));
+    let mut result = oneway_test(&groups, var_equal)?;
+    result.missing = cols.missing().clone();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -513,5 +491,73 @@ mod tests {
 
         // Welch should have different df_denom than standard
         assert!(result_welch.df_denom != result_standard.df_denom);
+    }
+
+    // ========================================================================
+    // R-pinned: missing values and labels (T2-WP07, case stat_oneway_na_labels)
+    // ========================================================================
+    //
+    // oneway.test(v9 ~ g9) and oneway.test(v9 ~ g9, var.equal = TRUE): g9 is missing in 3 of
+    // 9 rows, which R drops; the groups are "a" and "b".
+
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
+
+    #[test]
+    fn test_validate_oneway_na_labels_welch() {
+        let (case, ds) = load_case("stat_oneway_na_labels");
+        let welch = run_oneway_test(&ds, "v9", "g9", false).unwrap();
+        let classic = run_oneway_test(&ds, "v9", "g9", true).unwrap();
+        let (s, p, x) = (Tol::stat(6), Tol::p_value(6), Tol::exact());
+        Check::new(&case)
+            .scalar("welch_f", welch.statistic, s)
+            .scalar("welch_df1", welch.df_num, s)
+            // Satterthwaite's df is real-valued in general.
+            .scalar("welch_df2", welch.df_denom, s)
+            .scalar("welch_p", welch.p_value, p)
+            .scalar("classic_f", classic.statistic, s)
+            .scalar("classic_df1", classic.df_num, x)
+            .scalar("classic_df2", classic.df_denom, x)
+            .scalar("classic_p", classic.p_value, p)
+            .finish();
+        for r in [&welch, &classic] {
+            assert_eq!(r.group_names, ["a", "b"]);
+            assert_eq!(r.missing.n_dropped, 3);
+        }
+    }
+
+    /// Design 2.4 fixture: integer labels in numeric order (2 < 10), a text value column and
+    /// an absent column refused with the variant that names the problem.
+    #[test]
+    fn test_validate_na_oneway_dtypes_and_errors() {
+        let (_case, ds) = load_case("stat_oneway_na_labels");
+        let by_label = run_oneway_test(&ds, "v9", "g9", false).unwrap();
+        let mut df = ds.df().clone();
+        let gnum: Vec<Option<i64>> = df
+            .column("g9")
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .map(|g| match g {
+                Some("a") => Some(10),
+                Some("b") => Some(2),
+                _ => None,
+            })
+            .collect();
+        df.with_column(Series::new("gnum".into(), gnum)).unwrap();
+        let ds = Dataset::new(df);
+        let by_number = run_oneway_test(&ds, "v9", "gnum", false).unwrap();
+        assert_eq!(by_number.group_names, ["2", "10"]);
+        assert_eq!(by_number.group_sizes, [3, 3]);
+        assert!((by_number.statistic - by_label.statistic).abs() <= 1e-12 * by_label.statistic);
+        assert!(matches!(
+            run_oneway_test(&ds, "g9", "gnum", false),
+            Err(EconError::NonNumericColumn { ref column }) if column == "g9"
+        ));
+        assert!(matches!(
+            run_oneway_test(&ds, "v9", "nope", false),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
     }
 }

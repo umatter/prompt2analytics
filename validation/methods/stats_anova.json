@@ -1,0 +1,252 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "anova_two_way",
+      "name": "Two-way ANOVA (Type I, II and III sums of squares)",
+      "category": "stats",
+      "reference": "stats::aov (Type I); car::Anova(type = 2); car::Anova(type = 3) with contr.sum",
+      "doc": "validation/stats/anova.md",
+      "cases": [
+        "stat_anova_two_way_unbalanced",
+        "stat_friedman_quade"
+      ],
+      "tests": [
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type1",
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type2",
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_type3",
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_unbalanced_empty_cell",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_anova_two_way_unbalanced",
+        "p2a-core::stats::anova::tests::test_validate_na_two_way_anova_dtypes_and_errors"
+      ],
+      "quantities": [
+        "Type I SS, df, F, p (interaction and additive)",
+        "residual SS and df",
+        "Type II SS, F, p (interaction and additive; empty cell by model comparison)",
+        "Type III SS, F, p (sum contrasts; refusal with aliased coefficients)",
+        "interaction df from the rank (empty cells)",
+        "rows used and dropped",
+        "Int64 response equals its Float64 cast (stat_friedman_quade)"
+      ],
+      "tolerance": "validation/README.md, n = 10-13 (< 100): SS and F 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and counts exact; MCP text at its 4 printed decimals",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "anova_one_way",
+      "name": "One-way ANOVA",
+      "category": "stats",
+      "reference": "stats::aov",
+      "doc": "validation/stats/anova.md",
+      "cases": [
+        "stat_oneway_na_labels"
+      ],
+      "tests": [
+        "p2a-core::stats::anova::tests::test_validate_oneway_na_labels_aov",
+        "p2a-core::stats::anova::tests::test_validate_na_one_way_anova_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_anova_one_way_na_labels"
+      ],
+      "quantities": [
+        "F, p",
+        "df between and within",
+        "SS between and within",
+        "grand mean",
+        "group labels, sizes and means",
+        "rows used and dropped"
+      ],
+      "tolerance": "validation/README.md, n = 5 (< 100): SS, F, grand and group means 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df, counts and labels exact; MCP text at its 4 printed decimals",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "kruskal_wallis",
+      "name": "Kruskal-Wallis rank-sum test",
+      "category": "stats",
+      "reference": "stats::kruskal.test",
+      "doc": "validation/stats/kruskal.md",
+      "cases": [
+        "stat_oneway_na_labels"
+      ],
+      "tests": [
+        "p2a-core::stats::kruskal::tests::test_validate_oneway_na_labels_kruskal",
+        "p2a-core::stats::kruskal::tests::test_validate_na_kruskal_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_kruskal_wallis_na_labels"
+      ],
+      "quantities": [
+        "chi-squared statistic",
+        "df",
+        "p",
+        "group labels and sizes",
+        "rows used and dropped"
+      ],
+      "tolerance": "validation/README.md, n = 6 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df, group sizes and labels exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "oneway_test",
+      "name": "Welch and classical one-way test (oneway.test)",
+      "category": "stats",
+      "reference": "stats::oneway.test",
+      "doc": "validation/stats/oneway.md",
+      "cases": [
+        "stat_oneway_na_labels"
+      ],
+      "tests": [
+        "p2a-core::stats::oneway::tests::test_validate_oneway_na_labels_welch",
+        "p2a-core::stats::oneway::tests::test_validate_na_oneway_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_oneway_na_labels"
+      ],
+      "quantities": [
+        "F (Welch and classical)",
+        "df1, df2 (Welch df real-valued)",
+        "p",
+        "group labels",
+        "rows used and dropped"
+      ],
+      "tolerance": "validation/README.md, n = 6 (< 100): F 1e-5 relative, Welch df 1e-5 relative (real-valued), classical df exact, p 1e-5 relative + 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "wilcoxon",
+      "name": "Wilcoxon signed-rank and rank-sum tests",
+      "category": "stats",
+      "reference": "stats::wilcox.test",
+      "doc": "validation/stats/wilcoxon.md",
+      "cases": [
+        "stat_wilcoxon_na",
+        "stat_friedman_quade"
+      ],
+      "tests": [
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_na_paired",
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_na_rank_sum",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_wilcoxon_paired_na",
+        "p2a-core::stats::wilcoxon::tests::test_validate_na_wilcoxon_dtypes_and_errors"
+      ],
+      "quantities": [
+        "signed-rank V (paired, complete pairs)",
+        "p (normal with continuity correction; exact)",
+        "z",
+        "rank sum R1 and R's W",
+        "sample sizes and values dropped",
+        "Int64 column equals its Float64 cast (stat_friedman_quade)"
+      ],
+      "tolerance": "validation/README.md, n = 8-18 (< 100): z 1e-5 relative, p 1e-5 relative + 1e-12 absolute, rank statistics and counts exact",
+      "deviations": [
+        {
+          "finding": "STAT-72",
+          "quantity": "rank-sum statistic",
+          "note": "p2a's statistic is the rank sum R1 (pinned to ranksum_r1); R prints W = R1 - n_x (n_x + 1) / 2, compared as statistic - n (n + 1) / 2 until STAT-72 (Tier 4) changes the reported statistic"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "friedman",
+      "name": "Friedman rank-sum test",
+      "category": "stats",
+      "reference": "stats::friedman.test",
+      "doc": "validation/stats/friedman.md",
+      "cases": [
+        "stat_friedman_quade"
+      ],
+      "tests": [
+        "p2a-core::stats::friedman::tests::test_validate_friedman_quade_friedman",
+        "p2a-core::stats::friedman::tests::test_validate_friedman_refuses_designs_r_refuses",
+        "p2a-core::stats::friedman::tests::test_validate_na_friedman_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_friedman_na"
+      ],
+      "quantities": [
+        "chi-squared statistic",
+        "df",
+        "p",
+        "complete blocks after dropping a block with a missing response",
+        "treatment labels",
+        "refusal of replicated or absent cells and missing labels"
+      ],
+      "tolerance": "validation/README.md, n = 24 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df, block counts and labels exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "quade",
+      "name": "Quade test",
+      "category": "stats",
+      "reference": "stats::quade.test",
+      "doc": "validation/stats/quade_test.md",
+      "cases": [
+        "stat_friedman_quade"
+      ],
+      "tests": [
+        "p2a-core::stats::quade::tests::test_validate_friedman_quade_quade",
+        "p2a-core::stats::quade::tests::test_validate_quade_refuses_designs_r_refuses",
+        "p2a-core::stats::quade::tests::test_validate_na_quade_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_hypothesis_quade_na"
+      ],
+      "quantities": [
+        "F",
+        "df1, df2",
+        "p",
+        "with a missing response: on the 7 complete blocks (quade.test on those blocks; R's NA path keeps b = 8, see doc)",
+        "refusal of replicated or absent cells and missing labels"
+      ],
+      "tolerance": "validation/README.md, n = 24 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df, block counts and labels exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "manova",
+      "name": "One-way MANOVA (Pillai, Wilks, Hotelling-Lawley, Roy)",
+      "category": "stats",
+      "reference": "stats::manova; summary.manova",
+      "doc": "validation/stats/manova.md",
+      "cases": [
+        "stat_manova_na"
+      ],
+      "tests": [
+        "p2a-core::stats::manova::tests::test_validate_manova_na",
+        "p2a-core::stats::manova::tests::test_validate_na_manova_dtypes_and_errors",
+        "p2a-mcp::tier2::wp07_anova::test_validate_mcp_anova_manova_na"
+      ],
+      "quantities": [
+        "Pillai, Wilks, Hotelling-Lawley and Roy statistics",
+        "approximate F, df1, df2, p",
+        "rows used and dropped (joint deletion)",
+        "group labels and sizes"
+      ],
+      "tolerance": "validation/README.md, n = 33 (< 100): statistics, F and Wilks' (Rao) df2 1e-5 relative, p 1e-5 relative + 1e-12 absolute, other df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "model_tables",
+      "name": "Model tables (means and effects)",
+      "category": "stats",
+      "reference": "stats::model.tables (residual df of aov)",
+      "doc": "validation/stats/modeltables.md",
+      "cases": [
+        "stat_anova_two_way_unbalanced",
+        "stat_oneway_na_labels"
+      ],
+      "tests": [
+        "p2a-core::stats::modeltables::tests::test_validate_model_tables_two_way_empty_cell",
+        "p2a-core::stats::modeltables::tests::test_validate_model_tables_one_way_na_labels"
+      ],
+      "quantities": [
+        "residual df and MSE (aov)",
+        "group means and sizes",
+        "grand mean"
+      ],
+      "tolerance": "validation/README.md, n = 5-13 (< 100): means and SS 1e-5 relative, df and sizes exact",
+      "deviations": [
+        {
+          "finding": "STAT-75",
+          "quantity": "standard errors",
+          "note": "p2a's model-tables SEs are SEs of individual means, R's model.tables SEs are for differences of means (and R refuses unbalanced designs); not compared until STAT-75 (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

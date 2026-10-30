@@ -27,7 +27,9 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/quade.test.html>
 
 use crate::data::Dataset;
+use crate::data::columns::MissingSummary;
 use crate::errors::{EconError, EconResult};
+use crate::stats::friedman::unreplicated_blocks;
 use serde::{Deserialize, Serialize};
 
 /// Result of the Quade test.
@@ -57,6 +59,10 @@ pub struct QuadeResult {
     pub a_statistic: f64,
     /// B statistic (sum of squared S_j / b)
     pub b_statistic: f64,
+    /// Rows of the blocks dropped because a response is missing (R drops such blocks);
+    /// empty for the array-level function.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for QuadeResult {
@@ -86,6 +92,9 @@ impl std::fmt::Display for QuadeResult {
             "A = {:.4}, B = {:.4}",
             self.a_statistic, self.b_statistic
         )?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
         Ok(())
     }
 }
@@ -251,6 +260,7 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
         block_ranges,
         a_statistic: a,
         b_statistic: b_stat,
+        missing: MissingSummary::none(b * k),
     })
 }
 
@@ -307,7 +317,14 @@ fn f_test_p_value(f_stat: f64, df1: usize, df2: usize) -> f64 {
     1.0 - f_dist.cdf(f_stat)
 }
 
-/// Run Quade test on a Dataset with long-format data.
+/// Run Quade test on a Dataset with long-format data (R `quade.test(value, group, block)`).
+///
+/// The design must be an unreplicated complete block design, as R requires: a missing group
+/// or block label is an error, and so is a (block, treatment) cell with more than one
+/// observation or with none. A block whose response is missing is dropped and reported in
+/// `missing`; the test then runs on the complete blocks (b = their number). R 4.3.3 keeps
+/// b = the number of block levels after dropping (validation/stats/quade_test.md). Integer
+/// responses are accepted; treatments follow R `factor()` order.
 ///
 /// # Arguments
 ///
@@ -325,105 +342,17 @@ pub fn run_quade_test(
     group_col: &str,
     block_col: &str,
 ) -> EconResult<QuadeResult> {
-    let df = dataset.df();
-
-    // Extract columns
-    let values = df
-        .column(value_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: value_col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: value_col.to_string(),
-        })?;
-
-    let groups_col = df
-        .column(group_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: group_col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    let blocks_col = df
-        .column(block_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: block_col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    // Build block -> treatment -> value mapping
-    use std::collections::{BTreeSet, HashMap};
-    let mut block_data: HashMap<String, HashMap<String, f64>> = HashMap::new();
-    let mut treatment_set: BTreeSet<String> = BTreeSet::new();
-
-    let n = df.height();
-    for i in 0..n {
-        let block = blocks_col
-            .get(i)
-            .map_err(|e| EconError::InvalidSpecification {
-                message: format!("Error accessing block at row {}: {}", i, e),
-            })?;
-        let block_str = format!("{}", block);
-
-        let group = groups_col
-            .get(i)
-            .map_err(|e| EconError::InvalidSpecification {
-                message: format!("Error accessing group at row {}: {}", i, e),
-            })?;
-        let group_str = format!("{}", group);
-
-        if let Some(value) = values.get(i) {
-            treatment_set.insert(group_str.clone());
-            block_data
-                .entry(block_str)
-                .or_default()
-                .insert(group_str, value);
-        }
-    }
-
-    // Convert to matrix format
-    let treatment_names: Vec<String> = treatment_set.into_iter().collect();
-    let mut data: Vec<Vec<f64>> = Vec::new();
-
-    for (_, treatments) in block_data {
-        // Check all treatments are present
-        if treatments.len() != treatment_names.len() {
-            continue; // Skip incomplete blocks
-        }
-
-        let row: Vec<f64> = treatment_names
-            .iter()
-            .filter_map(|t| treatments.get(t).copied())
-            .collect();
-
-        if row.len() == treatment_names.len() {
-            data.push(row);
-        }
-    }
-
-    if data.len() < 2 {
+    let blocks = unreplicated_blocks(dataset.df(), value_col, group_col, block_col, "Quade test")?;
+    if blocks.rows.len() < 2 {
         return Err(EconError::InsufficientData {
             required: 2,
-            provided: data.len(),
+            provided: blocks.rows.len(),
             context: "Need at least 2 complete blocks for Quade test".to_string(),
         });
     }
-
-    quade_test(&data, &treatment_names)
+    let mut result = quade_test(&blocks.rows, &blocks.treatment_names)?;
+    result.missing = blocks.missing;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -649,5 +578,89 @@ mod tests {
         assert!(display.contains("Quade"));
         assert!(display.contains("F ="));
         assert!(display.contains("p-value"));
+    }
+
+    // ========================================================================
+    // R-pinned: complete blocks, missing responses and refused designs (T2-WP07)
+    // ========================================================================
+
+    use crate::stats::friedman::fixtures::*;
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
+
+    #[test]
+    fn test_validate_friedman_quade_quade() {
+        let (case, ds) = load_case("stat_friedman_quade");
+        let q = run_quade_test(&ds, "y", "treat", "block").unwrap();
+        let qna = run_quade_test(&ds, "y_na", "treat", "block").unwrap();
+        let (s, p, x) = (Tol::stat(24), Tol::p_value(24), Tol::exact());
+        // na_quade_f / na_quade_df2 / na_quade_p are R's NA-path values, which keep
+        // b = nlevels(blocks) = 8 after dropping block S2; they are deliberately not pinned
+        // (validation/stats/quade_test.md). p2a computes Quade on the 7 complete blocks,
+        // which equals quade.test on those blocks (na_quade_complete_*).
+        Check::new(&case)
+            .scalar("quade_f", q.statistic, s)
+            .scalar("quade_df1", q.df1 as f64, x)
+            .scalar("quade_df2", q.df2 as f64, x)
+            .scalar("quade_p", q.p_value, p)
+            .scalar("na_quade_complete_f", qna.statistic, s)
+            .scalar("na_quade_complete_df1", qna.df1 as f64, x)
+            .scalar("na_quade_complete_df2", qna.df2 as f64, x)
+            .scalar("na_quade_complete_p", qna.p_value, p)
+            .scalar("na_n_blocks", qna.n_blocks as f64, x)
+            .finish();
+        assert_eq!(q.treatment_names, ["A", "B", "C"]);
+        assert!(q.missing.is_empty());
+        assert_eq!(qna.missing.n_dropped, 3);
+        assert!(
+            qna.to_string()
+                .contains("Missing values: 3 of 24 rows dropped"),
+            "{qna}"
+        );
+    }
+
+    fn quade_refusal(df: DataFrame) -> String {
+        match run_quade_test(&Dataset::new(df), "y", "treat", "block") {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_quade_refuses_designs_r_refuses() {
+        let (_case, ds) = load_case("stat_friedman_quade");
+        let df = ds.df();
+        let design = "not an unreplicated complete block design";
+        let m = quade_refusal(with_duplicate_cell(df));
+        assert!(
+            m.contains(design) && m.contains("'S1'") && m.contains("Quade"),
+            "{m}"
+        );
+        let m = quade_refusal(with_null_label(df, "block", 3));
+        assert!(
+            m.contains("NA's are not allowed in 'groups' or 'blocks'") && m.contains("'block'"),
+            "{m}"
+        );
+        let m = quade_refusal(without_row(df, 4));
+        assert!(m.contains(design), "{m}");
+    }
+
+    /// Design 2.4 fixture: an Int64 response equals its Float64 cast; a text value column and
+    /// an absent column are refused with the variant that names the problem.
+    #[test]
+    fn test_validate_na_quade_dtypes_and_errors() {
+        let (_case, ds) = load_case("stat_friedman_quade");
+        let int = run_quade_test(&ds, "y", "treat", "block").unwrap();
+        let float =
+            run_quade_test(&Dataset::new(as_float(ds.df(), "y")), "y", "treat", "block").unwrap();
+        assert_eq!(int.statistic, float.statistic);
+        assert!(matches!(
+            run_quade_test(&ds, "treat", "treat", "block"),
+            Err(EconError::NonNumericColumn { ref column }) if column == "treat"
+        ));
+        assert!(matches!(
+            run_quade_test(&ds, "nope", "treat", "block"),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
+        ));
     }
 }

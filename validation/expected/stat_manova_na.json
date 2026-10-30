@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "stat_manova_na",
+  "area": "stats/anova",
+  "method": "One-way MANOVA with incomplete rows",
+  "reference": "stats::manova; summary.manova(test = Pillai | Wilks | Hotelling-Lawley | Roy)",
+  "call": "manova(cbind(y1, y2) ~ g)",
+  "dataset": "validation/datasets/generated/manova_na.csv",
+  "datasets": ["validation/datasets/generated/manova_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "pillai_stat": 0.86668276910166708,
+    "pillai_approx_f": 11.470964335572894,
+    "pillai_df1": 4,
+    "pillai_df2": 60,
+    "pillai_p": 5.569040967348833e-07,
+    "wilks_stat": 0.30336434464795181,
+    "wilks_approx_f": 11.826051982166383,
+    "wilks_df1": 4,
+    "wilks_df2": 58,
+    "wilks_p": 4.319740428530747e-07,
+    "hotelling_lawley_stat": 1.7358287184788463,
+    "hotelling_lawley_approx_f": 12.150801029351925,
+    "hotelling_lawley_df1": 4,
+    "hotelling_lawley_df2": 56,
+    "hotelling_lawley_p": 3.5354429854995737e-07,
+    "roy_stat": 1.3069334489125344,
+    "roy_approx_f": 19.604001733688015,
+    "roy_df1": 2,
+    "roy_df2": 30,
+    "roy_p": 3.5848749364521558e-06,
+    "n_used": 33,
+    "group_n": {
+      "names": ["g1", "g2", "g3"],
+      "values": [11, 11, 11]
+    }
+  }
+}

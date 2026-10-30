@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "stat_wilcoxon_na",
+  "area": "stats/rank",
+  "method": "Wilcoxon paired and rank-sum tests with NA cells",
+  "reference": "stats::wilcox.test(paired = TRUE) on complete pairs; rank-sum drops NA per sample",
+  "call": "wilcox.test(x, y, paired = TRUE); wilcox.test(x, y)",
+  "dataset": "validation/datasets/generated/wilcoxon_na.csv",
+  "datasets": ["validation/datasets/generated/wilcoxon_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "paired_v": 35,
+    "paired_p_normal": 0.020862582332765507,
+    "paired_p_exact": 0.015625000000000003,
+    "ranksum_w": 55,
+    "ranksum_p_normal": 0.21637300805763746,
+    "n_pairs": 8,
+    "n_x": 9,
+    "n_y": 9,
+    "ranksum_r1": 100,
+    "paired_z": 2.3104621386462161,
+    "ranksum_z": 1.2362301999273739
+  }
+}
