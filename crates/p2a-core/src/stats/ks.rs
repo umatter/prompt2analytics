@@ -45,6 +45,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
@@ -82,6 +83,10 @@ pub struct KsTestResult {
 
     /// Whether the null hypothesis is rejected at α = 0.05
     pub reject_null: bool,
+    /// Rows dropped because of missing values (dataset wrapper; nothing for slices). Each
+    /// sample drops its own missing values; the summary sums the two columns.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for KsTestResult {
@@ -135,6 +140,9 @@ impl std::fmt::Display for KsTestResult {
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -267,6 +275,7 @@ pub fn ks_test_one_sample(
         n,
         n_2: None,
         reject_null: p_value < 0.05,
+        missing: MissingSummary::none(n),
     })
 }
 
@@ -362,6 +371,7 @@ pub fn ks_test_two_sample(
         n,
         n_2: Some(m),
         reject_null: p_value < 0.05,
+        missing: MissingSummary::none(n + m),
     })
 }
 
@@ -433,6 +443,11 @@ fn compute_two_sample_d(x: &[f64], y: &[f64]) -> (f64, f64) {
 
 /// Perform Kolmogorov-Smirnov test using dataset columns.
 ///
+/// Each column drops its own missing values (null or NaN), as `ks.test` does, and the drop is
+/// reported in `missing` (summed over both columns for the two-sample test). Integer, decimal
+/// and boolean columns are accepted; a text column is refused (`EconError::NonNumericColumn`),
+/// as are infinite values (`EconError::NonFiniteValues`).
+///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
 /// * `x_col` - Name of first variable column
@@ -456,49 +471,22 @@ pub fn ks_test(
     alternative: Alternative,
 ) -> EconResult<KsTestResult> {
     let df = dataset.df();
-
-    // Extract x values
-    let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
-        column: x_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-    let x: Vec<f64> = x_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: x_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
+    let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
 
     match y_col {
         Some(y_name) => {
             // Two-sample test
-            let y_series = df.column(y_name).map_err(|_| EconError::ColumnNotFound {
-                column: y_name.to_string(),
-                available: df
-                    .get_column_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            })?;
-            let y: Vec<f64> = y_series
-                .f64()
-                .map_err(|_| EconError::NonNumericColumn {
-                    column: y_name.to_string(),
-                })?
-                .into_no_null_iter()
-                .collect();
-
-            ks_test_two_sample(&x, &y, alternative)
+            let (y, missing_y) = numeric_column(df, y_name, NaPolicy::Omit)?;
+            let mut result = ks_test_two_sample(&x, &y, alternative)?;
+            result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
+            Ok(result)
         }
         None => {
             // One-sample test
             let dist = distribution.unwrap_or(TheoreticalDistribution::Normal);
-            ks_test_one_sample(&x, dist, alternative)
+            let mut result = ks_test_one_sample(&x, dist, alternative)?;
+            result.missing = missing_x;
+            Ok(result)
         }
     }
 }
@@ -916,5 +904,64 @@ mod tests {
         // Approximate inverse error function
         let t = (2.0 / std::f64::consts::PI).sqrt() * (a + a.powi(3) / 3.0);
         sign * t * 1.4
+    }
+
+    // ========================================================================
+    // Missing values and integer columns (case stat_two_sample_na,
+    // validation/r/cases/stats_onesample.R)
+    // ========================================================================
+
+    /// X-2/X-8: two-sample KS on Int64 columns with nulls, each sample dropping its own.
+    #[test]
+    fn test_validate_ks_test_two_sample_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_ks_test(&ds, "xi", "yi", Alternative::TwoSided).unwrap();
+        Check::new(&case)
+            .scalar("ks_d", r.statistic, Tol::stat(38))
+            .scalar("n_xi", r.n as f64, Tol::exact())
+            .scalar("n_yi", r.n_2.unwrap() as f64, Tol::exact())
+            .finish();
+        // deviation STAT-27: ks_p (R's exact p conditional on ties 0.15653867760174539;
+        // p2a's asymptotic p with Stephens' correction 0.19563779265722031) is not pinned.
+    }
+
+    #[test]
+    fn test_validate_na_ks_test_missing_rows_and_errors() {
+        let (_case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let two = run_ks_test(&ds, "x", "y", Alternative::TwoSided).unwrap();
+        assert_eq!((two.n, two.n_2), (7, Some(7)));
+        assert_eq!(
+            two.missing.by_column,
+            vec![("x".to_string(), 15), ("y".to_string(), 15)]
+        );
+        assert_eq!(
+            two.to_string().lines().last().unwrap(),
+            format!("Missing values: {}", two.missing.note().unwrap())
+        );
+        let one = ks_test(
+            &ds,
+            "x",
+            None,
+            Some(TheoreticalDistribution::Normal),
+            Alternative::TwoSided,
+        )
+        .unwrap();
+        assert_eq!(one.n, 7);
+        assert_eq!(one.missing.by_column, vec![("x".to_string(), 15)]);
+        assert_eq!(
+            one.to_string().lines().last().unwrap(),
+            format!("Missing values: {}", one.missing.note().unwrap())
+        );
+        for (x, y) in [("g", "y"), ("x", "g")] {
+            assert!(
+                matches!(run_ks_test(&ds, x, y, Alternative::TwoSided), Err(EconError::NonNumericColumn { column }) if column == "g"),
+                "{x} {y}"
+            );
+        }
+        assert!(matches!(
+            run_ks_test(&ds, "x", "nope", Alternative::TwoSided),
+            Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
+        ));
     }
 }

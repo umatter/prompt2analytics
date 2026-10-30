@@ -46,6 +46,7 @@
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 
+use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
@@ -73,6 +74,10 @@ pub struct MoodTestResult {
     pub n_total: usize,
     /// Whether ties were present in the data
     pub has_ties: bool,
+    /// Rows dropped because of missing values (dataset wrapper; nothing for slices). Each
+    /// sample drops its own missing values; the summary sums the two columns.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for MoodTestResult {
@@ -114,6 +119,9 @@ impl std::fmt::Display for MoodTestResult {
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -255,10 +263,16 @@ pub fn mood_test(x: &[f64], y: &[f64], alternative: Alternative) -> EconResult<M
         n_y: n,
         n_total: total_n,
         has_ties,
+        missing: MissingSummary::none(total_n),
     })
 }
 
 /// Wrapper function for running Mood test on a Dataset.
+///
+/// Each column drops its own missing values (null or NaN), as `mood.test(x, y)` does, and the
+/// drop is reported in `missing`. Integer, decimal and boolean columns are accepted; a text
+/// column is refused (`EconError::NonNumericColumn`), as are infinite values
+/// (`EconError::NonFiniteValues`).
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing the data
@@ -274,45 +288,12 @@ pub fn run_mood_test(
     y_col: &str,
     alternative: Option<Alternative>,
 ) -> EconResult<MoodTestResult> {
-    use polars::prelude::*;
-
     let df = dataset.df();
-
-    let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
-        column: x_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let x: Vec<f64> = x_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: x_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    let y: Vec<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    mood_test(&x, &y, alternative.unwrap_or(Alternative::TwoSided))
+    let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
+    let (y, missing_y) = numeric_column(df, y_col, NaPolicy::Omit)?;
+    let mut result = mood_test(&x, &y, alternative.unwrap_or(Alternative::TwoSided))?;
+    result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
+    Ok(result)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -580,5 +561,53 @@ mod tests {
             result.z_score.abs() < 0.5,
             "z-score should be close to 0 when T = E[T]"
         );
+    }
+
+    // ========================================================================
+    // Missing values and integer columns (case stat_two_sample_na,
+    // validation/r/cases/stats_onesample.R)
+    // ========================================================================
+
+    /// X-2/X-8: mood.test on a tie-free Int64 pair with nulls, each sample dropping its own.
+    #[test]
+    fn test_validate_mood_test_two_sample_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_mood_test(&ds, "mi", "mj", None).unwrap();
+        Check::new(&case)
+            .scalar("mood_nt_z", r.z_score, Tol::stat(27))
+            .scalar("mood_nt_p", r.p_value, Tol::p_value(27))
+            .scalar("mood_nt_T", r.statistic, Tol::stat(27))
+            .scalar("n_mi", r.n_x as f64, Tol::exact())
+            .scalar("n_mj", r.n_y as f64, Tol::exact())
+            .finish();
+        assert!(!r.has_ties);
+        // deviation STAT-29: mood_z/mood_p on the tied xi/yi (R -2.667468897704627, Mielke's
+        // scores; p2a's midrank scores give -2.6983447236552882) are not pinned.
+    }
+
+    #[test]
+    fn test_validate_na_mood_test_missing_rows_and_errors() {
+        let (_case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_mood_test(&ds, "x", "y", None).unwrap();
+        assert_eq!((r.n_x, r.n_y), (7, 7));
+        assert_eq!(
+            r.missing.by_column,
+            vec![("x".to_string(), 15), ("y".to_string(), 15)]
+        );
+        assert_eq!(
+            r.to_string().lines().last().unwrap(),
+            format!("Missing values: {}", r.missing.note().unwrap())
+        );
+        for (x, y) in [("g", "y"), ("x", "g")] {
+            assert!(
+                matches!(run_mood_test(&ds, x, y, None), Err(EconError::NonNumericColumn { column }) if column == "g"),
+                "{x} {y}"
+            );
+        }
+        assert!(matches!(
+            run_mood_test(&ds, "x", "nope", None),
+            Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
+        ));
     }
 }
