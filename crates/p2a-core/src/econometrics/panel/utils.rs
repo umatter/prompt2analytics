@@ -270,9 +270,10 @@ mod tests {
     use crate::data::columns::{ColumnRequest, NaPolicy, numeric_column};
     use polars::prelude::{Column, DataType};
 
-    /// `panel_grunfeld_na` and the complete Grunfeld panel it was built from.
-    fn fixtures() -> (Dataset, Dataset) {
-        let (case, na) = crate::test_support::load_case("panel_grunfeld_na");
+    /// The case's dataset (`panel_grunfeld_na`) and the complete Grunfeld panel it was
+    /// built from.
+    fn fixtures(case_id: &str) -> (Dataset, Dataset) {
+        let (case, na) = crate::test_support::load_case(case_id);
         let path = p2a_validation::repo_path(&case.datasets[0]);
         assert!(
             path.ends_with("validation/datasets/grunfeld.csv"),
@@ -293,7 +294,7 @@ mod tests {
     /// per row) instead of period 0.
     #[test]
     fn test_validate_na_extract_time_ids_integer_widths_and_fractions() {
-        let (na, g) = fixtures();
+        let (na, g) = fixtures("panel_grunfeld_na");
         let expected = extract_time_ids(&g, "year").unwrap();
         assert_eq!(expected.1, (1935..=1954).collect::<Vec<i64>>());
         let year = g.df().column("year").unwrap().clone();
@@ -328,7 +329,7 @@ mod tests {
     /// `NullValues` instead of id 0 or the pseudo-entity "".
     #[test]
     fn test_validate_na_extract_entity_ids_factor_order_and_nulls() {
-        let (na, g) = fixtures();
+        let (na, g) = fixtures("panel_grunfeld_na");
         let firm: Vec<usize> = numeric_column(g.df(), "firm", NaPolicy::Fail)
             .unwrap()
             .0
@@ -371,7 +372,7 @@ mod tests {
             time_codes(&[2001, 1999, 2001, 2000]),
             (vec![2, 0, 2, 1], vec![1999, 2000, 2001])
         );
-        let (na, _) = fixtures();
+        let (na, _) = fixtures("panel_grunfeld_na");
         let cols = ColumnRequest::new(na.df())
             .factor("firm_id")
             .extract()
