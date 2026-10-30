@@ -485,12 +485,13 @@ fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
 /// Rows with a missing outcome or regressor are dropped (R `na.omit`) and reported in
 /// `missing`. Data without overdispersion drive theta towards its bound 1e8; a final
 /// theta above 1e6 gives `converged = false`, `theta_std_error = NaN` and a warning.
-/// Fitted means numerically 0 (below `10 eps`, glm.fit's test) that the last step of
-/// the final IRLS still lowered by more than 1% (the row's linear predictor by more
-/// than 0.01; without a finite MLE each step lowers it by about 1) mean an outcome
-/// without a finite MLE, such as all zeros or zero counts a regressor separates:
-/// `converged = false` and a warning. At a converged fit (a zero count at an extreme
-/// regressor value, which adds nothing to the likelihood) they are a note in
+/// An outcome without a finite MLE, such as all zeros or zero counts a regressor
+/// separates, gives `converged = false` and a warning that counts the zero counts whose
+/// linear predictor the last step of the final IRLS still lowered by more than 0.01
+/// (their fitted means by more than 1%): without a finite MLE each step lowers it by
+/// about 1, at any n, while the means themselves need not reach glm.fit's `10 eps`
+/// before the IRLS stops. Fitted means below `10 eps` at a converged fit (a zero count
+/// at an extreme regressor value, which adds nothing to the likelihood) are a note in
 /// `warnings` that counts the rows, and `converged` is unchanged. A theta that cannot
 /// be updated and a coefficient IRLS that does not settle also give
 /// `converged = false` and a warning.
@@ -599,27 +600,31 @@ pub fn run_negbin(
     }
     // The coefficients at the final theta.
     let (beta, irls) = irls_beta(&x, y, Some(&beta), theta, &mut work)?;
-    // glm.fit's test: fitted means numerically 0. They mean an outcome without a finite
-    // MLE (all counts 0, or zero counts that a regressor separates) only while the IRLS
-    // still drives them to 0: the working response of such a row is eta - 1, so each
-    // step lowers its linear predictor by about 1. A converged fit moves it by rounding
-    // and theta's last change (a zero count at an extreme regressor value, which adds
-    // nothing to the likelihood); its tiny means are a note.
+    // An outcome without a finite MLE (all counts 0, or zero counts that a regressor
+    // separates): the IRLS drives the fitted means of those zero counts to 0. The working
+    // response of such a row is eta - 1, so each step lowers its linear predictor by
+    // about 1, at any n. Their means are no test: the IRLS stops on its log-likelihood
+    // test, whose threshold grows with |ll|, so on larger data they are still above
+    // glm.fit's 10 eps when it stops. At a regular fit the last step moves every row by
+    // rounding and theta's last change, also a zero count at an extreme regressor value
+    // (which adds nothing to the likelihood); its tiny means are a note.
+    let n_falling = y
+        .iter()
+        .zip(x.outer_iter())
+        .filter(|&(&yi, xi)| yi == 0.0 && irls.lowered(xi))
+        .count();
+    let no_mle = n_falling > 0;
     let tiny = 10.0 * f64::EPSILON;
     let n_tiny = work.mu.iter().filter(|&&m| m < tiny).count();
-    let rows = if n_tiny == 1 { "row" } else { "rows" };
-    let no_mle = n_tiny > 0
-        && work
-            .mu
-            .iter()
-            .zip(x.outer_iter())
-            .any(|(&m, xi)| m < tiny && irls.lowered(xi));
+    let rows = |k: usize| if k == 1 { "row" } else { "rows" };
     if no_mle {
         warnings.push(format!(
-            "fitted means numerically 0 occurred for {n_tiny} {rows} (glm.fit: 'fitted \
-             rates numerically 0') and the coefficient IRLS was still driving them to 0: \
-             the outcome has no finite maximum-likelihood estimate (all counts 0, or zero \
-             counts that a regressor separates); the estimates are not reliable"
+            "the coefficient IRLS was still driving the fitted means of {n_falling} \
+             zero-count {} to 0 (its last step lowered their linear predictor by more \
+             than {ETA_FALLING}): the outcome has no finite maximum-likelihood estimate \
+             (all counts 0, or zero counts that a regressor separates); the estimates are \
+             not reliable",
+            rows(n_falling)
         ));
     } else if !irls.converged {
         warnings.push(
@@ -629,9 +634,10 @@ pub fn run_negbin(
         );
     } else if n_tiny > 0 {
         warnings.push(format!(
-            "fitted means numerically 0 occurred for {n_tiny} {rows} (glm.fit: 'fitted \
-             rates numerically 0') at converged coefficients; check those rows for extreme \
-             regressor values"
+            "fitted means numerically 0 occurred for {n_tiny} {} (glm.fit: 'fitted rates \
+             numerically 0') at converged coefficients; check those rows for extreme \
+             regressor values",
+            rows(n_tiny)
         ));
     }
     let log_likelihood = nb_loglik(theta, &work.mu, y);
@@ -2400,10 +2406,12 @@ mod tests {
             let ds = Dataset::new(df! { "y" => vec![0.0; n], "x" => x }.unwrap());
             let r = run_negbin(&ds, "y", &["x"], None).unwrap();
             assert!(!r.converged, "n = {n}: {r}");
+            // every row is a zero count the IRLS still drives to 0
+            let all_rows = format!("of {n} zero-count rows");
             assert!(
-                r.warnings
-                    .iter()
-                    .any(|w| w.contains("IRLS") && w.contains("numerically 0")),
+                r.warnings.iter().any(|w| w.contains("IRLS")
+                    && w.contains("maximum-likelihood")
+                    && w.contains(&all_rows)),
                 "n = {n}: {:?}",
                 r.warnings
             );
@@ -2436,10 +2444,52 @@ mod tests {
         let r = run_negbin(&ds, "y", &["d", "x"], None).unwrap();
         assert!(!r.converged, "{r}");
         assert!(r.coefficients[1] < -10.0, "{r}");
+        // the 30 rows with d = 1, not the zero counts among the others
         assert!(
             r.warnings
                 .iter()
-                .any(|w| w.contains("numerically 0") && w.contains("maximum-likelihood")),
+                .any(|w| w.contains("maximum-likelihood") && w.contains("of 30 zero-count rows")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// Separated zero counts on more rows. The coefficient IRLS stops on its
+    /// log-likelihood test, whose threshold grows with |ll|, so on 5000 rows it stops
+    /// while the separated rows' fitted means are still above glm.fit's 10 eps (here
+    /// 5e-14 to 1e-13): a verdict that needed such means reported this fit as
+    /// converged (3 rounds), without a warning. The last IRLS step still lowers the
+    /// linear predictor of each separated zero count by about 1, at any n. NB counts of
+    /// size 2 (seeded), `mu = exp(0.5 + 0.1 x)`; a dummy on every 50th row, whose 100
+    /// rows all have y = 0.
+    #[test]
+    fn test_negbin_separation_is_flagged_on_large_data() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use rand_distr::{Distribution, Gamma, Normal as NormalDist, Poisson};
+        let mut rng = ChaCha8Rng::seed_from_u64(2);
+        let normal = NormalDist::new(0.0, 1.0).unwrap();
+        let (mut y, mut d, mut x) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..5000 {
+            let di = f64::from(u8::from(i % 50 == 0));
+            let xi: f64 = normal.sample(&mut rng);
+            let lambda = Gamma::new(2.0, (0.5 + 0.1 * xi).exp() / 2.0)
+                .unwrap()
+                .sample(&mut rng);
+            let count: f64 = Poisson::new(lambda.max(1e-300)).unwrap().sample(&mut rng);
+            y.push(if di == 1.0 { 0.0 } else { count });
+            d.push(di);
+            x.push(xi);
+        }
+        let ds = Dataset::new(df! { "y" => y, "d" => d, "x" => x }.unwrap());
+        let r = run_negbin(&ds, "y", &["d", "x"], None).unwrap();
+        assert_eq!(r.n_obs, 5000);
+        assert!(!r.converged, "{r}");
+        assert!(r.coefficients[1] < -10.0, "{r}");
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("maximum-likelihood") && w.contains("of 100 zero-count rows")),
             "{:?}",
             r.warnings
         );
@@ -2474,15 +2524,12 @@ mod tests {
         let r = run_negbin(&lev, "y", &["x1", "x2"], None).unwrap();
         assert_eq!(r.n_obs, 401);
         assert!(r.converged, "{r}");
+        // the note, and nothing else
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
         assert!(
-            !r.warnings.iter().any(|w| w.contains("maximum-likelihood")),
-            "{:?}",
-            r.warnings
-        );
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("numerically 0") && w.contains("1 row")),
+            r.warnings[0].contains("numerically 0")
+                && r.warnings[0].contains("occurred for 1 row (")
+                && r.warnings[0].contains("at converged coefficients"),
             "{:?}",
             r.warnings
         );

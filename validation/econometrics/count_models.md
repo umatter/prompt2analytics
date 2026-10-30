@@ -33,23 +33,28 @@ Algorithm (glm.nb's alternation):
   regressors): there the solve moves the coefficients by rounding noise in the directions
   the data determine poorly, which does not change the likelihood. A design whose `X'WX`
   is not positive definite is `SingularMatrix`.
-- No finite MLE: fitted means below `10 eps` after the final IRLS (glm.fit's "fitted rates
-  numerically 0" test) mean an outcome without a finite MLE (an all-zero outcome, or zero
-  counts a regressor separates) only while the IRLS still drives them to 0. The working
-  response of such a row is `eta - 1`, so each step lowers its linear predictor by about
-  1 (measured: 1.0 on the all-zero and the separated fixtures). When the last step of the
-  final IRLS lowered the linear predictor of a row with a tiny mean by more than 0.01 (the
-  mean by more than 1%), the fit gives `converged = false` and a warning that says so.
-  Otherwise the fit has converged and the tiny means are a note in `warnings` that counts
-  the rows ("fitted means numerically 0 occurred for k rows ... at converged
-  coefficients"), with `converged` unchanged: one zero count at an extreme regressor
-  value adds nothing to the likelihood (`disc_negbin` plus the row `y = 0, x1 = -80,
-  x2 = 0.1`: the last step moves that row's linear predictor by 5e-11, and the fit is the
-  400-row one; R's glm.nb converges there with theta 1.602585 and glm.fit's warning from
-  its Poisson start). A test on the coefficient change alone cannot tell the two apart:
-  theta's last change moves the coefficients of a regular fit by more than
-  `1e-12 (1 + max |beta|)` too. A final IRLS that settles on neither test also gives
-  `converged = false`, with its own warning.
+- No finite MLE: an outcome without a finite MLE (an all-zero outcome, or zero counts a
+  regressor separates) is recognised by the zero counts the final IRLS is still driving to
+  0. The working response of such a row is `eta - 1`, so each step lowers its linear
+  predictor by about 1, at any n (measured: 1.0 on the all-zero and the separated
+  fixtures). When the last step of the final IRLS lowered the linear predictor of a zero
+  count by more than 0.01 (its fitted mean by more than 1%), the fit gives
+  `converged = false` and a warning that counts those rows. The fitted means are not the
+  test: the IRLS stops on its log-likelihood test, whose threshold grows with `|ll|`, so on
+  larger data it stops while they are still above glm.fit's `10 eps` (5000 rows with a
+  dummy on every 50th row, whose rows all have y = 0). An earlier verdict that needed such
+  means reported that fit as converged, without a warning. At a regular fit the last step
+  moves every row by rounding, also a zero count at an extreme regressor value, which adds
+  nothing to the likelihood. Fitted means below `10 eps` (glm.fit's "fitted rates
+  numerically 0" test) are then a note in `warnings` that counts the rows ("fitted means
+  numerically 0 occurred for k rows ... at converged coefficients"), with `converged`
+  unchanged (`disc_negbin` plus the row `y = 0, x1 = -80, x2 = 0.1`: the last step moves
+  that row's linear predictor by 5e-11, and the fit is the 400-row one; R's glm.nb
+  converges there with theta 1.602585 and glm.fit's warning from its Poisson start). A
+  test on the coefficient change alone cannot tell the two apart: theta's last change
+  moves the coefficients of a regular fit by more than `1e-12 (1 + max |beta|)` too. A
+  final IRLS that settles on neither test also gives `converged = false`, with its own
+  warning.
 - theta: Newton steps on `ln theta` at fixed `mu` with MASS `theta.ml`'s score
   `s = sum(digamma(theta + y) - digamma(theta) + ln theta + 1 - ln(theta + mu) - (y + theta) / (mu + theta))`
   and information
@@ -250,13 +255,19 @@ Not R-pinned:
   `SE(theta) = NaN` and the overdispersion warning.
 - `econometrics::discrete::count_models::tests::test_negbin_all_zero_outcome_is_not_converged`:
   an all-zero outcome (no MLE), with 30 and with 5 rows, gives `converged = false` and the
-  "fitted means numerically 0" warning.
+  no-MLE warning, which counts every row.
 - `econometrics::discrete::count_models::tests::test_negbin_separating_regressor_is_not_converged`:
   seeded NB counts with a dummy whose rows all have y = 0 (no MLE): `converged = false`,
-  the dummy's coefficient below -10 and the no-MLE warning.
+  the dummy's coefficient below -10 and the no-MLE warning, which counts the dummy's 30
+  rows.
+- `econometrics::discrete::count_models::tests::test_negbin_separation_is_flagged_on_large_data`:
+  seeded NB counts on 5000 rows with a dummy on every 50th row whose rows all have y = 0,
+  where the IRLS stops with the separated means at 5e-14 to 1e-13, above 10 eps (a
+  verdict that needed such means reported the fit as converged): `converged = false`, the
+  dummy's coefficient below -10 and the no-MLE warning for its 100 rows.
 - `econometrics::discrete::count_models::tests::test_negbin_high_leverage_zero_row_converges`:
   `disc_negbin`'s data plus the row `y = 0, x1 = -80, x2 = 0.1` (fitted mean far below
-  10 eps): converged, no no-MLE warning, a note counting 1 row, and the coefficients and
+  10 eps): converged, a single warning, the note counting 1 row, and the coefficients and
   theta of the 400-row fit to 1e-6 relative (R's glm.nb: converged, theta 1.602585).
 - `econometrics::discrete::count_models::tests::test_negbin_ill_conditioned_designs_converge`:
   seeded NB counts on two ill-conditioned designs, `y ~ x + x^2 + x^3` with
