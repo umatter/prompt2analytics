@@ -174,7 +174,8 @@ Tests (registry entry `regression_wrappers_columns` in
 
 - `test_validate_na_loess_columns`, `test_validate_na_quantreg_columns`: Int64 equals the
   same values as Float64 exactly; the fit on the data with missing cells equals the fit on
-  the 56 complete rows, with the reported counts; text and absent columns refused;
+  the 56 complete rows, with the reported counts; text and absent columns refused; with
+  no complete row the error is `InsufficientData` naming the method;
 - `test_validate_na_smooth_spline_columns`, `test_validate_na_glmnet_columns`: Int64 equals
   Float64; a missing x or y is `NullValues` naming the column;
 - MCP: `test_validate_mcp_regression_loess_missing_and_integer`,

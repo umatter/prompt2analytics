@@ -262,6 +262,7 @@ pub fn quantreg(
         .numeric(y_col)
         .numerics(x_cols)
         .na(NaPolicy::Omit)
+        .min_rows(1, &format!("quantile regression of '{y_col}'"))
         .extract()?;
     let y_arr = cols.numeric_array(y_col);
 
@@ -835,5 +836,12 @@ mod tests {
             run_quantreg(&mt, "hp", &["nope"], 0.5),
             Err(EconError::ColumnNotFound { .. })
         ));
+        // No complete row: the error names the method and the outcome.
+        use crate::regression::ols::na_fixtures::{insufficient_context, with_all_null};
+        let none = with_all_null(&sm, "no_x", polars::prelude::DataType::Float64);
+        assert_eq!(
+            insufficient_context(run_quantreg(&none, "y", &["no_x"], 0.5)),
+            "quantile regression of 'y': 0 of 60 rows have no missing value"
+        );
     }
 }

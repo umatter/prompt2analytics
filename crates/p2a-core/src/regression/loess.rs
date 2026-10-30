@@ -844,7 +844,8 @@ pub fn loess_predict(model: &LoessModel, new_x: &[f64]) -> EconResult<Vec<f64>> 
 /// * `robust` - Use robust fitting (default: false)
 ///
 /// Rows with a missing x or y are dropped first, as R's `loess` does (`na.omit`), and
-/// reported in `LoessResult::missing`; integer columns are numbers.
+/// reported in `LoessResult::missing` (no complete row is `InsufficientData`); integer
+/// columns are numbers.
 ///
 /// # Returns
 /// `LoessResult` containing fitted values, residuals, and model diagnostics.
@@ -860,6 +861,7 @@ pub fn run_loess(
         .numeric(x_col)
         .numeric(y_col)
         .na(NaPolicy::Omit)
+        .min_rows(1, &format!("LOESS of '{y_col}' on '{x_col}'"))
         .extract()?;
 
     let config = LoessConfig {
@@ -1260,5 +1262,12 @@ mod tests {
             run_loess(&mt, "mpg", "nope", 0.75, 2, false),
             Err(EconError::ColumnNotFound { .. })
         ));
+        // No complete row: the error names the method and the columns.
+        use crate::regression::ols::na_fixtures::{insufficient_context, with_all_null};
+        let none = with_all_null(&sm, "no_x", polars::prelude::DataType::Float64);
+        assert_eq!(
+            insufficient_context(run_loess(&none, "y", "no_x", 0.75, 2, false)),
+            "LOESS of 'y' on 'no_x': 0 of 60 rows have no missing value"
+        );
     }
 }

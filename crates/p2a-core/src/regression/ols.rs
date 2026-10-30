@@ -1003,7 +1003,8 @@ impl std::fmt::Display for OlsClusteredResult {
 /// whose id is missing, in either dimension of a two-way clustering, is dropped and the
 /// model is re-estimated on the remaining rows, as `fixest::feols(cluster = )` does
 /// (`sandwich::vcovCL` refuses missing clusters). The drop is reported in
-/// `OlsResult::missing` and as the first warning. A missing value of `y_col` or of an
+/// `OlsResult::missing` and as the first warning; when no row has an id the error is
+/// `InsufficientData` naming the id column(s). A missing value of `y_col` or of an
 /// `x_cols` column in a kept row is an error, as in [`run_ols`].
 ///
 /// # Arguments
@@ -1024,10 +1025,14 @@ pub fn run_ols_clustered(
 ) -> EconResult<OlsClusteredResult> {
     // Cluster ids, with the rows whose id is missing left out.
     let mut request = ColumnRequest::new(dataset.df()).factor(cluster1);
-    if let Some(c2) = cluster2 {
-        request = request.factor(c2);
-    }
-    let ids = request.na(NaPolicy::Omit).extract()?;
+    let context = match cluster2 {
+        Some(c2) => {
+            request = request.factor(c2);
+            format!("clustered OLS (rows with ids in '{cluster1}' and '{c2}')")
+        }
+        None => format!("clustered OLS (rows with an id in '{cluster1}')"),
+    };
+    let ids = request.na(NaPolicy::Omit).min_rows(1, &context).extract()?;
 
     let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 3);
     names.push(y_col);
@@ -2432,7 +2437,8 @@ pub fn vcov_driscoll_kraay(
 /// * `time_col` - Name of the time period identifier column: whole numbers (integers or
 ///   integral floats) or dates. A fractional or text id is an `InvalidSpecification`; a row
 ///   whose id is missing is dropped, the model is re-estimated on the other rows, and the
-///   drop is reported in `DriscollKraayResult::missing` and as the first warning.
+///   drop is reported in `DriscollKraayResult::missing` and as the first warning (no row
+///   with an id is `InsufficientData` naming the column).
 /// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than the number of
 ///   time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
 /// * `kernel` - Kernel type string ("bartlett", "parzen", "qs", etc.)
@@ -2462,6 +2468,10 @@ pub fn run_vcov_driscoll_kraay(
     let ids = ColumnRequest::new(dataset.df())
         .time_index(time_col)
         .na(NaPolicy::Omit)
+        .min_rows(
+            1,
+            &format!("Driscoll-Kraay (rows with a time id in '{time_col}')"),
+        )
         .extract()?;
     let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 2);
     names.push(y_col);
@@ -2531,6 +2541,29 @@ pub(crate) mod na_fixtures {
             .into_iter()
             .map(|v| v.unwrap_or(f64::NAN))
             .collect()
+    }
+
+    /// `ds` plus a column `name` of type `dtype` whose every cell is missing.
+    pub(crate) fn with_all_null(ds: &Dataset, name: &str, dtype: DataType) -> Dataset {
+        let mut df = ds.df().clone();
+        let n = df.height();
+        df.with_column(Series::full_null(name.into(), n, &dtype))
+            .unwrap();
+        Dataset::new(df)
+    }
+
+    /// The context of an `InsufficientData` error (panics on any other result).
+    pub(crate) fn insufficient_context<T: std::fmt::Debug>(
+        r: crate::errors::EconResult<T>,
+    ) -> String {
+        match r {
+            Err(crate::errors::EconError::InsufficientData {
+                required: 1,
+                provided: 0,
+                context,
+            }) => context,
+            other => panic!("expected InsufficientData (1 required, 0 provided), got {other:?}"),
+        }
     }
 
     /// `ds` plus a Float64 column `name` holding `f(source)` row by row.
@@ -3946,6 +3979,18 @@ mod tests {
             }
             e => panic!("{e:?}"),
         }
+        // No row has an id: the error names the method and the id column(s).
+        use super::na_fixtures::{insufficient_context, with_all_null};
+        let none = with_all_null(&ds, "no_id", DataType::String);
+        assert_eq!(
+            insufficient_context(run_ols_clustered(&none, "inv", &x, "no_id", None)),
+            "clustered OLS (rows with an id in 'no_id'): 0 of 200 rows have no missing value"
+        );
+        assert_eq!(
+            insufficient_context(run_ols_clustered(&none, "inv", &x, "firm", Some("no_id"))),
+            "clustered OLS (rows with ids in 'firm' and 'no_id'): \
+             0 of 200 rows have no missing value"
+        );
     }
 
     /// REG-21 (Driscoll-Kraay): a missing time id drops its row and the model is
@@ -4019,6 +4064,15 @@ mod tests {
             run_vcov_driscoll_kraay(&ds, "inv", &x, "nope", None, None),
             Err(EconError::ColumnNotFound { .. })
         ));
+        // No row has a time id: the error names the method and the time column.
+        use super::na_fixtures::{insufficient_context, with_all_null};
+        let none = with_all_null(&ds, "no_t", DataType::Int64);
+        assert_eq!(
+            insufficient_context(run_vcov_driscoll_kraay(
+                &none, "inv", &x, "no_t", None, None
+            )),
+            "Driscoll-Kraay (rows with a time id in 'no_t'): 0 of 200 rows have no missing value"
+        );
     }
 
     /// REG-23: the bootstrap reads y as `run_ols` does, so an Int64 outcome (mtcars hp)

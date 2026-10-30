@@ -102,7 +102,7 @@ Tests (registry entry `ols_clustered_missing_ids` in `validation/methods/regress
 | Test | Path | Pins |
 |---|---|---|
 | `test_validate_reg_cluster_na_fixture` | `p2a-core` `regression/ols.rs` | the dtypes and missing cells polars reads; R's row counts |
-| `test_validate_ols_cluster_na` | `run_ols_clustered` | coefficients and SEs one- and two-way, rows used and dropped, cluster counts, the warning (printed once), no `missing` key without missing ids, `ColumnNotFound` for an absent id |
+| `test_validate_ols_cluster_na` | `run_ols_clustered` | coefficients and SEs one- and two-way, rows used and dropped, cluster counts, the warning (printed once), no `missing` key without missing ids, `ColumnNotFound` for an absent id, `InsufficientData` naming the method and the id columns when no row has an id |
 | `test_validate_mcp_regression_clustered_na` | MCP `regression_clustered` | the printed table, observations, clusters and the warning line |
 | `test_validate_cli_reg_clustered_na` | `p2a reg clustered` | the printed table, and with `-F json` coefficients, SEs, `n_observations`, `n_clusters` and `missing` |
 
@@ -122,7 +122,8 @@ is scaled differently from `sandwich::vcovPL`); the tests pin the estimation sam
 
 - `test_validate_na_driscoll_kraay_time_ids`: the result on the data with missing years
   equals the estimator on the complete rows (coefficients, SEs, bandwidth); integral float
-  ids give the Int64 result; fractional and text ids are refused;
+  ids give the Int64 result; fractional and text ids are refused; with no time id in any
+  row the error is `InsufficientData` naming the method and the time column;
 - `test_validate_mcp_regression_driscoll_kraay_missing_time`: the same through MCP
   `regression_driscoll_kraay`.
 
