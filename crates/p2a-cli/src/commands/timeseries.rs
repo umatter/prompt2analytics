@@ -638,7 +638,9 @@ fn execute_arima(
                 .map(|(name, value)| (name.clone(), serde_json::json!(value)))
                 .collect();
             let mut json = serde_json::json!({
-                "model": spec.label(),
+                // "model" keeps its earlier value; forecast::Arima's label is "label".
+                "model": format!("ARIMA({},{},{})", spec.p, spec.d, spec.q),
+                "label": spec.label(),
                 "method": fit.method,
                 "column": fit.column,
                 "coefficients": coefficients,
