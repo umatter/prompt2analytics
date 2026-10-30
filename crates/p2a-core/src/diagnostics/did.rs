@@ -332,6 +332,7 @@ mod tests {
             df: 2,
             p_value: p,
             pre_atts: vec![0.1, 0.2],
+            method: String::new(),
         });
 
         StaggeredDidResult {

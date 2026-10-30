@@ -33,10 +33,26 @@
 //!
 //! ## Aggregation Schemes
 //!
-//! Group-time ATTs can be aggregated into:
-//! - **Event Study**: Effects by time since treatment (dynamic effects)
-//! - **Group Average**: Average effect for each cohort
-//! - **Overall ATT**: Single summary measure across all cohorts
+//! Group-time ATTs are aggregated as `did::aggte` does, with the weights
+//! P(G = g), the share of units in cohort g:
+//! - **Event Study** (`type = "dynamic"`): for each e = t - g, the average of the
+//!   cells at e weighted by P(G = g)
+//! - **Group Average** (`type = "group"`): for each cohort, the mean of its
+//!   post-treatment cells
+//! - **Overall ATT** (`type = "simple"`): the average of all post-treatment cells
+//!   weighted by P(G = g)
+//!
+//! ## Standard errors
+//!
+//! - `bootstrap = 0`: analytic standard errors from unit-level influence functions,
+//!   as `did::att_gt` with `bstrap = FALSE` (the unconditional estimator; refused
+//!   with covariates). The event-study and overall influence functions include the
+//!   term for the estimated weights (did's `wif`), and the pre-trend test is the
+//!   Wald statistic `a' V^+ a` with the influence-function covariance of the
+//!   pre-treatment cells (generalized inverse, df = rank, if V is singular). The
+//!   joint test is computed for at most 2000 pre-treatment cells (its cost is cubic
+//!   in their number); above that it is reported as not computed.
+//! - `bootstrap >= 50`: a unit bootstrap; values 1 to 49 are refused.
 //!
 //! # References
 //!
@@ -58,9 +74,13 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::matrix_ops::{eig_symmetric, safe_inverse};
 use crate::resource;
-use crate::traits::estimator::{SignificanceLevel, normal_cdf};
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
+use statrs::distribution::{ContinuousCDF, Normal};
+
+/// Fewest bootstrap replicates accepted (`bootstrap = 0` is the analytic path).
+const MIN_BOOTSTRAP: usize = 50;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -122,9 +142,13 @@ pub struct StaggeredDidConfig {
     pub base_period: i32,
     /// Whether to compute pre-treatment effects (for parallel trends testing)
     pub anticipation: usize,
-    /// Bootstrap replications for standard errors
+    /// Standard errors: 0 = analytic influence-function standard errors (did's
+    /// `bstrap = FALSE`; the unconditional estimator, so no covariates); otherwise
+    /// the number of unit-bootstrap replicates, at least 50 (1..=49 is an
+    /// `InvalidSpecification` error).
     pub bootstrap: usize,
-    /// Confidence level for intervals
+    /// Confidence level of every interval (cells and aggregates); must lie in
+    /// (0, 1). The normal quantile comes from statrs.
     pub confidence_level: f64,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
@@ -232,6 +256,10 @@ pub struct PreTrendTest {
     pub p_value: f64,
     /// Pre-treatment ATT estimates (should be ~0 under parallel trends)
     pub pre_atts: Vec<f64>,
+    /// How the covariance of the pre-treatment ATT(g,t) was obtained, e.g.
+    /// "Wald, influence-function covariance of 9 pre-treatment ATT(g,t)".
+    #[serde(default)]
+    pub method: String,
 }
 
 /// Result from Callaway-Sant'Anna staggered DiD estimation.
@@ -275,7 +303,19 @@ impl fmt::Display for StaggeredDidResult {
         writeln!(f, "  Comparison Group:   {}", self.config.comparison_group)?;
         writeln!(f, "  Estimation Method:  {}", self.config.estimation_method)?;
         writeln!(f, "  Base Period:        {}", self.config.base_period)?;
-        writeln!(f, "  Bootstrap Reps:     {}", self.config.bootstrap)?;
+        if self.config.bootstrap == 0 {
+            writeln!(
+                f,
+                "  Standard Errors:    analytic (influence functions, as did with bstrap = FALSE)"
+            )?;
+        } else {
+            writeln!(
+                f,
+                "  Standard Errors:    unit bootstrap, {} replicates",
+                self.config.bootstrap
+            )?;
+        }
+        let level = level_label(self.config.confidence_level);
         writeln!(f)?;
         writeln!(f, "Sample:")?;
         writeln!(f, "  Total observations: {}", self.n_obs)?;
@@ -288,7 +328,7 @@ impl fmt::Display for StaggeredDidResult {
         writeln!(f, "OVERALL ATT:")?;
         writeln!(
             f,
-            "  ATT = {:.4} (SE = {:.4}, 95% CI [{:.4}, {:.4}])",
+            "  ATT = {:.4} (SE = {:.4}, {level}% CI [{:.4}, {:.4}])",
             self.overall_att.att,
             self.overall_att.std_error,
             self.overall_att.ci_lower,
@@ -308,7 +348,10 @@ impl fmt::Display for StaggeredDidResult {
         writeln!(
             f,
             "{:>8} {:>12} {:>12} {:>20}",
-            "e", "ATT", "Std.Err", "95% CI"
+            "e",
+            "ATT",
+            "Std.Err",
+            format!("{level}% CI")
         )?;
         writeln!(f, "{}", "-".repeat(60))?;
         for eff in &self.event_study {
@@ -332,15 +375,20 @@ impl fmt::Display for StaggeredDidResult {
                 f,
                 "PRE-TREND TEST (joint test that pre-treatment ATTs = 0):"
             )?;
-            writeln!(
-                f,
-                "  Chi-squared({}) = {:.2}, p-value = {:.4}",
-                pretrend.df, pretrend.chi2, pretrend.p_value
-            )?;
-            if pretrend.p_value < 0.05 {
-                writeln!(f, "  WARNING: Pre-trends may be violated")?;
+            if pretrend.p_value.is_finite() {
+                writeln!(f, "  Method: {}", pretrend.method)?;
+                writeln!(
+                    f,
+                    "  Chi-squared({}) = {:.2}, p-value = {:.4}",
+                    pretrend.df, pretrend.chi2, pretrend.p_value
+                )?;
+                if pretrend.p_value < 0.05 {
+                    writeln!(f, "  WARNING: Pre-trends may be violated")?;
+                } else {
+                    writeln!(f, "  Parallel trends assumption not rejected")?;
+                }
             } else {
-                writeln!(f, "  Parallel trends assumption not rejected")?;
+                writeln!(f, "  Not computed: {}", pretrend.method)?;
             }
         }
 
@@ -365,6 +413,11 @@ impl fmt::Display for StaggeredDidResult {
 
         Ok(())
     }
+}
+
+/// A confidence level as a percentage without trailing zeros: 95, 90, 97.5.
+fn level_label(level: f64) -> String {
+    format!("{}", (level * 100.0 * 1e6).round() / 1e6)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -407,9 +460,14 @@ impl fmt::Display for StaggeredDidResult {
 /// - NotYetTreated: never-treated units and units with G > max(t, g - 1) and G != g
 ///   (not yet treated by time t nor by the base period; `did::att_gt`'s rule)
 ///
-/// # Bootstrap
+/// # Standard errors
 ///
-/// With `bootstrap > 0`, standard errors come from a nonparametric bootstrap
+/// With `bootstrap = 0`, standard errors are analytic: did's influence functions
+/// of every cell, aggregated with the weight-estimation term, and the pre-trend
+/// test uses their joint covariance (module docs). Covariates have no analytic
+/// path yet (`NotImplemented`).
+///
+/// With `bootstrap >= 50`, standard errors come from a nonparametric bootstrap
 /// that resamples units. Each cell's outcome changes are tabulated once (at
 /// most `n_cohorts x n` entries), so the bootstrap costs
 /// O(bootstrap x (units + entries)) and its replicate-by-cell draws are one
@@ -450,10 +508,35 @@ pub fn run_staggered_did(
     config: StaggeredDidConfig,
 ) -> EconResult<StaggeredDidResult> {
     let mut warnings = Vec::new();
+    let covariates = covariates.filter(|c| !c.is_empty());
+
+    if (1..MIN_BOOTSTRAP).contains(&config.bootstrap) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "bootstrap must be 0 for analytic influence-function standard errors or at \
+                 least {MIN_BOOTSTRAP} replicates; got {}",
+                config.bootstrap
+            ),
+        });
+    }
+    if !(config.confidence_level > 0.0 && config.confidence_level < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "confidence_level must lie strictly between 0 and 1; got {}",
+                config.confidence_level
+            ),
+        });
+    }
+    if config.bootstrap == 0 && covariates.is_some() {
+        return Err(EconError::NotImplemented(
+            "analytic standard errors exist for the unconditional estimator; set bootstrap \
+             >= 50 to use covariates"
+                .to_string(),
+        ));
+    }
 
     // One request over every column the estimator uses: rows with a missing
     // value in any of them are dropped jointly (reported in `missing`).
-    let covariates = covariates.filter(|c| !c.is_empty());
     let mut request = ColumnRequest::new(dataset.df())
         .numeric(outcome)
         .time_index(treatment_time)
@@ -533,6 +616,7 @@ pub fn run_staggered_did(
 
     // Build panel structure: map (unit, time) -> observation index
     let panel_map = build_panel_map(&t_col, &unit_ids);
+    let z = std_normal().inverse_cdf(1.0 - (1.0 - config.confidence_level) / 2.0);
 
     // Compute group-time ATTs
     let mut group_time_atts = Vec::new();
@@ -551,7 +635,7 @@ pub fn run_staggered_did(
 
             // Compute ATT(g, t)
             let att_result = compute_group_time_att(
-                &y, &g_col, &t_col, &unit_ids, &x_cov, &panel_map, g, t, base_t, &config,
+                &y, &g_col, &t_col, &unit_ids, &x_cov, &panel_map, g, t, base_t, &config, z,
             );
 
             match att_result {
@@ -582,31 +666,54 @@ pub fn run_staggered_did(
         });
     }
 
-    // Bootstrap for standard errors
-    let rng_seed = config.seed.unwrap_or_else(|| {
-        use rand::RngCore;
-        rand::thread_rng().next_u64()
-    });
-    let mut rng = StdRng::seed_from_u64(rng_seed);
+    // Each cell's outcome changes are tabulated once: the influence functions
+    // and every bootstrap replicate are computed from this table.
+    let cells: Vec<(i64, i64, i64)> = group_time_atts
+        .iter()
+        .map(|gta| (gta.group, gta.time, gta.group + config.base_period as i64))
+        .collect();
+    let table = build_boot_table(
+        &y,
+        &g_col,
+        &t_col,
+        &unit_ids,
+        &panel_map,
+        &cells,
+        config.comparison_group,
+    )?;
 
-    let z = quantile_normal(1.0 - (1.0 - config.confidence_level) / 2.0);
-
-    // Unit-resampling bootstrap: each cell's outcome changes are tabulated once,
-    // and every replicate weights them by how often it drew each unit.
-    if config.bootstrap > 0 {
-        let cells: Vec<(i64, i64, i64)> = group_time_atts
-            .iter()
-            .map(|gta| (gta.group, gta.time, gta.group + config.base_period as i64))
-            .collect();
-        let table = build_boot_table(
-            &y,
-            &g_col,
-            &t_col,
-            &unit_ids,
-            &panel_map,
-            &cells,
-            config.comparison_group,
-        )?;
+    let (event_study, group_effects, overall_att, pretrend_test) = if config.bootstrap == 0 {
+        // Analytic standard errors: did's influence functions (bstrap = FALSE).
+        let inf = cell_influence(&table)?;
+        let n_cohort = table.cohort_sizes();
+        let joint = Joint::Influence {
+            inf: &inf,
+            unit_cohort: &table.unit_cohort,
+        };
+        let aggregator = Aggregator {
+            cohorts: &table.cohorts,
+            n_cohort: &n_cohort,
+            joint: &joint,
+            z,
+        };
+        let cell_stats = aggregator.cells(&group_time_atts)?;
+        for (gta, stat) in group_time_atts.iter_mut().zip(&cell_stats) {
+            gta.std_error = stat.se;
+            gta.ci_lower = gta.att - z * stat.se;
+            gta.ci_upper = gta.att + z * stat.se;
+        }
+        let (event_study, group_effects, overall) = aggregator.aggregates(&group_time_atts)?;
+        let pre = pretrend_cells(&group_time_atts, config.base_period);
+        let pretrend = pretrend_wald(&group_time_atts, &pre, &joint, &mut warnings)?;
+        (event_study, group_effects, overall, pretrend)
+    } else {
+        // Unit-resampling bootstrap: every replicate weights the table's
+        // outcome changes by how often it drew each unit.
+        let rng_seed = config.seed.unwrap_or_else(|| {
+            use rand::RngCore;
+            rand::thread_rng().next_u64()
+        });
+        let mut rng = StdRng::seed_from_u64(rng_seed);
         let draws = bootstrap_draws(&table, config.bootstrap, &mut rng)?;
 
         // Update standard errors from the finite draws of each cell, in replicate order
@@ -626,19 +733,13 @@ pub fn run_staggered_did(
                 gta.ci_upper = gta.att + z * gta.std_error;
             }
         }
-    }
-
-    // Aggregate: Event Study
-    let event_study = aggregate_event_study(&group_time_atts, z);
-
-    // Aggregate: Group averages
-    let group_effects = aggregate_by_group(&group_time_atts, z);
-
-    // Aggregate: Overall ATT
-    let overall_att = aggregate_overall(&group_time_atts, z);
-
-    // Pre-trend test
-    let pretrend_test = compute_pretrend_test(&group_time_atts);
+        (
+            aggregate_event_study(&group_time_atts, z),
+            aggregate_by_group(&group_time_atts, z),
+            aggregate_overall(&group_time_atts, z),
+            compute_pretrend_test(&group_time_atts),
+        )
+    };
 
     let missing = cols.missing().clone();
     if let Some(note) = missing.note() {
@@ -692,6 +793,7 @@ fn compute_group_time_att(
     t: i64,
     base_t: i64,
     config: &StaggeredDidConfig,
+    z: f64,
 ) -> EconResult<GroupTimeATT> {
     let n = y.len();
 
@@ -810,8 +912,8 @@ fn compute_group_time_att(
         time: t,
         att,
         std_error: se,
-        ci_lower: att - 1.96 * se,
-        ci_upper: att + 1.96 * se,
+        ci_lower: att - z * se,
+        ci_upper: att + z * se,
         n_treated,
         n_comparison,
         post_treatment,
@@ -858,11 +960,26 @@ struct BootTable {
     starts: Vec<usize>,
     blockers: Vec<usize>,
     blocker_starts: Vec<usize>,
+    /// The sorted distinct cohorts `g` of the cells.
+    cohorts: Vec<i64>,
+    /// Per unit, the index into `cohorts` of its first treatment period (from its
+    /// first row); `None` for never-treated units and cohorts without a cell.
+    unit_cohort: Vec<Option<usize>>,
 }
 
 impl BootTable {
     fn n_cells(&self) -> usize {
         self.starts.len().saturating_sub(1)
+    }
+
+    /// Number of units in each cohort of `cohorts` (the weights P(G = g) of
+    /// `did::aggte`, up to the common factor n).
+    fn cohort_sizes(&self) -> Vec<usize> {
+        let mut sizes = vec![0usize; self.cohorts.len()];
+        for j in self.unit_cohort.iter().flatten() {
+            sizes[*j] += 1;
+        }
+        sizes
     }
 }
 
@@ -942,12 +1059,28 @@ fn build_boot_table(
         blocker_starts.push(blockers.len());
     }
 
+    let mut cohorts: Vec<i64> = cells.iter().map(|&(g, _, _)| g).collect();
+    cohorts.sort_unstable();
+    cohorts.dedup();
+    let mut unit_cohort: Vec<Option<usize>> =
+        resource::try_vec(unit_list.len(), None, "staggered DiD unit cohorts")?;
+    let mut seen = resource::try_vec(unit_list.len(), false, "staggered DiD unit cohorts")?;
+    for i in 0..n {
+        let u = unit_of_row[i];
+        if !seen[u] {
+            seen[u] = true;
+            unit_cohort[u] = cohorts.binary_search(&(g_col[i] as i64)).ok();
+        }
+    }
+
     Ok(BootTable {
         n_units: unit_list.len(),
         entries,
         starts,
         blockers,
         blocker_starts,
+        cohorts,
+        unit_cohort,
     })
 }
 
@@ -1270,6 +1403,377 @@ fn estimate_propensity_logit(x: &Array2<f64>, d: &Array1<f64>) -> EconResult<Arr
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Influence functions, aggregation and the pre-trend test
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Unit-level influence functions of every cell (rows: units of the table,
+/// columns: cells), as `did::att_gt` with `est_method = "reg"` and no covariates
+/// (`DRDID::reg_did_panel`, rescaled by n / n_cell).
+///
+/// For a cell with `n1` treated entries of mean change `mu1` and `n0` comparison
+/// entries of mean change `mu0`, a treated entry adds `n (dy - mu1) / n1` to its
+/// unit's influence function and a comparison entry adds `-n (dy - mu0) / n0`,
+/// with `n` the number of units. The cell's SE is then `sqrt(sum_u IF_u^2) / n`,
+/// which is did's `sqrt(mean(IF^2) / n)`. A base-period cell `(g, g - 1)` has
+/// `dy = 0` and an influence function of exactly zero.
+fn cell_influence(table: &BootTable) -> EconResult<Array2<f64>> {
+    let n_units = table.n_units;
+    let n_cells = table.n_cells();
+    let mut inf = resource::try_zeros2(n_units, n_cells, "staggered DiD influence functions")?;
+    let n = n_units as f64;
+    for c in 0..n_cells {
+        resource::checkpoint()?;
+        let entries = &table.entries[table.starts[c]..table.starts[c + 1]];
+        let (mut sum1, mut n1, mut sum0, mut n0) = (0.0, 0usize, 0.0, 0usize);
+        for e in entries {
+            if e.treated {
+                sum1 += e.dy;
+                n1 += 1;
+            } else {
+                sum0 += e.dy;
+                n0 += 1;
+            }
+        }
+        if n1 == 0 || n0 == 0 {
+            inf.column_mut(c).fill(f64::NAN);
+            continue;
+        }
+        let (mu1, mu0) = (sum1 / n1 as f64, sum0 / n0 as f64);
+        for e in entries {
+            inf[[e.unit, c]] += if e.treated {
+                n * (e.dy - mu1) / n1 as f64
+            } else {
+                -n * (e.dy - mu0) / n0 as f64
+            };
+        }
+    }
+    Ok(inf)
+}
+
+/// How the cells of one aggregate are weighted (`did::aggte`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Weighting {
+    /// Weights P(G = g) of each cell's cohort: the "simple" (overall) and
+    /// "dynamic" (event-study) aggregations, with the weight-estimation term.
+    CohortShare,
+    /// Equal weights: a cohort's average over its post-treatment cells ("group").
+    Equal,
+}
+
+/// The joint sampling information of the kept cells; columns of `inf` follow
+/// `group_time_atts`.
+enum Joint<'a> {
+    /// Unit-level influence functions (n_units x n_cells) and each unit's cohort
+    /// index (`BootTable::unit_cohort`).
+    Influence {
+        inf: &'a Array2<f64>,
+        unit_cohort: &'a [Option<usize>],
+    },
+}
+
+/// An aggregate estimate, its SE, and how many units (influence functions) the
+/// SE used.
+#[derive(Debug, Clone, Copy)]
+struct CellStat {
+    att: f64,
+    se: f64,
+    used: usize,
+}
+
+/// The estimate and SE of a weighted average of the cells `keep`.
+///
+/// `cohorts` are the sorted cohorts of the cells and `n_cohort` their unit
+/// counts. With `CohortShare` the estimate is `sum_K pg_k att_k / S` with
+/// `S = sum_K pg_k`, and the influence function of unit u is
+/// `sum_K (pg_k / S) IF_uk + wif_u`, where the weight term
+/// `wif_u = (1/S) sum_{k in K, g_k = G_u} (att_k - theta)` is did's
+/// `wif(..) %*% att` simplified (its `pg` terms cancel because the weights sum to
+/// S). With `Equal` it is the mean of the cells' influence functions.
+fn aggregate_cells(
+    atts: &[GroupTimeATT],
+    keep: &[usize],
+    w: Weighting,
+    cohorts: &[i64],
+    n_cohort: &[usize],
+    joint: &Joint,
+) -> EconResult<CellStat> {
+    resource::checkpoint()?;
+    let cohort_of = |k: usize| cohorts.binary_search(&atts[k].group).ok();
+    let weights: Vec<f64> = keep
+        .iter()
+        .map(|&k| match w {
+            Weighting::Equal => 1.0,
+            Weighting::CohortShare => cohort_of(k).map_or(0.0, |j| n_cohort[j] as f64),
+        })
+        .collect();
+    let sum_w: f64 = weights.iter().sum();
+    let theta = keep
+        .iter()
+        .zip(&weights)
+        .map(|(&k, &wk)| wk * atts[k].att)
+        .sum::<f64>()
+        / sum_w;
+    match joint {
+        Joint::Influence { inf, unit_cohort } => {
+            let n_units = inf.nrows();
+            let mut agg = resource::try_zeros1(n_units, "staggered DiD aggregate influence")?;
+            for (&k, &wk) in keep.iter().zip(&weights) {
+                agg.scaled_add(wk / sum_w, &inf.column(k));
+            }
+            if w == Weighting::CohortShare {
+                let mut wif = resource::try_vec(cohorts.len(), 0.0, "staggered DiD weight term")?;
+                for &k in keep {
+                    if let Some(j) = cohort_of(k) {
+                        wif[j] += atts[k].att - theta;
+                    }
+                }
+                // 1/S with S = sum_K pg_k = sum_w / n
+                let scale = n_units as f64 / sum_w;
+                for (a, cohort) in agg.iter_mut().zip(unit_cohort.iter()) {
+                    if let Some(j) = cohort {
+                        *a += scale * wif[*j];
+                    }
+                }
+            }
+            let se = agg.iter().map(|v| v * v).sum::<f64>().sqrt() / n_units as f64;
+            Ok(CellStat {
+                att: theta,
+                se,
+                used: n_units,
+            })
+        }
+    }
+}
+
+/// The cohorts and the joint sampling information that the aggregates of one
+/// result share.
+struct Aggregator<'a> {
+    cohorts: &'a [i64],
+    n_cohort: &'a [usize],
+    joint: &'a Joint<'a>,
+    z: f64,
+}
+
+impl Aggregator<'_> {
+    fn stat(&self, atts: &[GroupTimeATT], keep: &[usize], w: Weighting) -> EconResult<CellStat> {
+        aggregate_cells(atts, keep, w, self.cohorts, self.n_cohort, self.joint)
+    }
+
+    /// Each cell's estimate and SE.
+    fn cells(&self, atts: &[GroupTimeATT]) -> EconResult<Vec<CellStat>> {
+        (0..atts.len())
+            .map(|c| self.stat(atts, &[c], Weighting::Equal))
+            .collect()
+    }
+
+    fn effect(
+        &self,
+        atts: &[GroupTimeATT],
+        key: i64,
+        keep: &[usize],
+        w: Weighting,
+    ) -> EconResult<AggregatedEffect> {
+        let stat = self.stat(atts, keep, w)?;
+        Ok(AggregatedEffect {
+            key,
+            att: stat.att,
+            std_error: stat.se,
+            ci_lower: stat.att - self.z * stat.se,
+            ci_upper: stat.att + self.z * stat.se,
+            p_value: normal_p_value(stat.att, stat.se),
+            n_cells: keep.len(),
+            n_obs: keep.iter().map(|&k| atts[k].n_treated).sum(),
+        })
+    }
+
+    /// The event-study ("dynamic"), group and overall ("simple") aggregates of
+    /// `did::aggte`.
+    fn aggregates(
+        &self,
+        atts: &[GroupTimeATT],
+    ) -> EconResult<(
+        Vec<AggregatedEffect>,
+        Vec<AggregatedEffect>,
+        AggregatedEffect,
+    )> {
+        let mut by_e: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        let mut by_g: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        let mut post = Vec::new();
+        for (k, c) in atts.iter().enumerate() {
+            by_e.entry(c.relative_time).or_default().push(k);
+            if c.post_treatment {
+                by_g.entry(c.group).or_default().push(k);
+                post.push(k);
+            }
+        }
+        let event_study = by_e
+            .iter()
+            .map(|(&e, keep)| self.effect(atts, e, keep, Weighting::CohortShare))
+            .collect::<EconResult<Vec<_>>>()?;
+        let group_effects = by_g
+            .iter()
+            .map(|(&g, keep)| self.effect(atts, g, keep, Weighting::Equal))
+            .collect::<EconResult<Vec<_>>>()?;
+        let overall = if post.is_empty() {
+            AggregatedEffect {
+                key: 0,
+                att: 0.0,
+                std_error: 0.0,
+                ci_lower: 0.0,
+                ci_upper: 0.0,
+                p_value: 1.0,
+                n_cells: 0,
+                n_obs: 0,
+            }
+        } else {
+            self.effect(atts, 0, &post, Weighting::CohortShare)?
+        };
+        Ok((event_study, group_effects, overall))
+    }
+}
+
+/// The cells of the pre-trend test: pre-treatment cells other than the base
+/// period with a positive, finite SE (did drops zero-variance cells).
+fn pretrend_cells(atts: &[GroupTimeATT], base_period: i32) -> Vec<usize> {
+    atts.iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            !c.post_treatment
+                && c.time != c.group + i64::from(base_period)
+                && c.std_error > 0.0
+                && c.std_error.is_finite()
+        })
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// The joint pre-trend test is computed for at most this many pre-treatment cells:
+/// its covariance is k x k and its eigendecomposition costs O(k^3).
+const MAX_PRETREND_CELLS: usize = 2000;
+
+/// The Wald test that the pre-treatment ATT(g,t) `pre` are jointly zero,
+/// `a' V^+ a` with the joint covariance of the cells (`None` without pre cells).
+fn pretrend_wald(
+    atts: &[GroupTimeATT],
+    pre: &[usize],
+    joint: &Joint,
+    warnings: &mut Vec<String>,
+) -> EconResult<Option<PreTrendTest>> {
+    let k = pre.len();
+    if k == 0 {
+        return Ok(None);
+    }
+    let a: Vec<f64> = pre.iter().map(|&c| atts[c].att).collect();
+    let not_computed = |method: String| PreTrendTest {
+        chi2: f64::NAN,
+        df: 0,
+        p_value: f64::NAN,
+        pre_atts: a.clone(),
+        method,
+    };
+    if k > MAX_PRETREND_CELLS {
+        return Ok(Some(not_computed(format!(
+            "{k} pre-treatment ATT(g,t) exceed the {MAX_PRETREND_CELLS} the joint test is \
+             computed for"
+        ))));
+    }
+    let (v, method) = match joint {
+        Joint::Influence { inf, .. } => {
+            let n_units = inf.nrows();
+            let mut sub = resource::try_zeros2(n_units, k, "pre-trend influence functions")?;
+            for (j, &c) in pre.iter().enumerate() {
+                sub.column_mut(j).assign(&inf.column(c));
+            }
+            resource::checkpoint()?;
+            let mut v = resource::try_zeros2(k, k, "pre-trend covariance")?;
+            let n = n_units as f64;
+            ndarray::linalg::general_mat_mul(1.0 / (n * n), &sub.t(), &sub, 0.0, &mut v);
+            (
+                v,
+                format!("Wald, influence-function covariance of {k} pre-treatment ATT(g,t)"),
+            )
+        }
+    };
+    resource::checkpoint()?;
+    let (chi2, rank) = wald_ginv(&a, &v)?;
+    if rank == 0 {
+        return Ok(Some(not_computed(format!(
+            "{method} (the covariance has rank 0)"
+        ))));
+    }
+    if rank < k {
+        warnings.push(format!(
+            "the covariance of the {k} pre-treatment ATT(g,t) is singular (rank {rank}); a \
+             generalized inverse was used and df = {rank}"
+        ));
+    }
+    Ok(Some(PreTrendTest {
+        chi2,
+        df: rank,
+        p_value: chi_squared_p_value(chi2, rank as f64),
+        pre_atts: a,
+        method,
+    }))
+}
+
+/// `a' V^+ a` and the rank of `V`, through the eigendecomposition of the
+/// correlation-scaled `S V S` (`s_j = V_jj^-1/2`): eigenvalues at most
+/// `max |lambda| * k * eps * 100` count as zero. A component with `V_jj = 0` gets
+/// `s_j = 0` and drops out of the rank.
+fn wald_ginv(a: &[f64], v: &Array2<f64>) -> EconResult<(f64, usize)> {
+    let k = a.len();
+    if v.iter().chain(a).any(|x| !x.is_finite()) {
+        return Ok((f64::NAN, 0));
+    }
+    let s: Vec<f64> = (0..k)
+        .map(|j| {
+            let d = v[[j, j]];
+            if d > 0.0 { 1.0 / d.sqrt() } else { 0.0 }
+        })
+        .collect();
+    let mut vs = resource::try_zeros2(k, k, "pre-trend covariance")?;
+    for i in 0..k {
+        for j in 0..k {
+            vs[[i, j]] = 0.5 * (v[[i, j]] + v[[j, i]]) * s[i] * s[j];
+        }
+    }
+    let (_, u) = eig_symmetric(&vs.view()).map_err(|e| {
+        EconError::Computation(format!("pre-trend covariance eigendecomposition: {e}"))
+    })?;
+    // eigenvalues as Rayleigh quotients of the eigenvectors (pairing-safe)
+    let vu = vs.dot(&u);
+    let lambda: Vec<f64> = (0..k).map(|j| u.column(j).dot(&vu.column(j))).collect();
+    let sa: Array1<f64> = a.iter().zip(&s).map(|(x, sj)| x * sj).collect();
+    let lmax = lambda.iter().fold(0.0f64, |m, l| m.max(l.abs()));
+    let tol = lmax * k as f64 * f64::EPSILON * 100.0;
+    let (mut w, mut rank) = (0.0, 0usize);
+    for (j, &l) in lambda.iter().enumerate() {
+        if l > tol {
+            let proj = u.column(j).dot(&sa);
+            w += proj * proj / l;
+            rank += 1;
+        }
+    }
+    Ok((w, rank))
+}
+
+/// The standard normal distribution.
+fn std_normal() -> Normal {
+    Normal::standard()
+}
+
+/// Two-sided normal p-value of `est / se`: 1 when `se == 0`, NaN when either is NaN.
+fn normal_p_value(est: f64, se: f64) -> f64 {
+    if est.is_nan() || se.is_nan() {
+        f64::NAN
+    } else if se == 0.0 {
+        1.0
+    } else {
+        2.0 * std_normal().sf((est / se).abs())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Aggregation Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1307,11 +1811,7 @@ fn aggregate_event_study(atts: &[GroupTimeATT], z: f64) -> Vec<AggregatedEffect>
         }
         let se = var_sum.sqrt();
 
-        let p_value = if se > 0.0 {
-            2.0 * (1.0 - normal_cdf((weighted_att / se).abs()))
-        } else {
-            1.0
-        };
+        let p_value = normal_p_value(weighted_att, se);
 
         effects.push(AggregatedEffect {
             key: e,
@@ -1359,11 +1859,7 @@ fn aggregate_by_group(atts: &[GroupTimeATT], z: f64) -> Vec<AggregatedEffect> {
 
         let total_obs: usize = group.iter().map(|a| a.n_treated).sum();
 
-        let p_value = if se > 0.0 {
-            2.0 * (1.0 - normal_cdf((avg_att / se).abs()))
-        } else {
-            1.0
-        };
+        let p_value = normal_p_value(avg_att, se);
 
         effects.push(AggregatedEffect {
             key: g,
@@ -1416,11 +1912,7 @@ fn aggregate_overall(atts: &[GroupTimeATT], z: f64) -> AggregatedEffect {
     }
     let se = var_sum.sqrt();
 
-    let p_value = if se > 0.0 {
-        2.0 * (1.0 - normal_cdf((weighted_att / se).abs()))
-    } else {
-        1.0
-    };
+    let p_value = normal_p_value(weighted_att, se);
 
     AggregatedEffect {
         key: 0,
@@ -1464,184 +1956,15 @@ fn compute_pretrend_test(atts: &[GroupTimeATT]) -> Option<PreTrendTest> {
 
     // Chi-squared p-value
     let df = valid_count;
-    let p_value = chi_squared_p_value(chi2, df);
+    let p_value = chi_squared_p_value(chi2, df as f64);
 
     Some(PreTrendTest {
         chi2,
         df,
         p_value,
         pre_atts: pre_effects,
+        method: "Wald, diagonal covariance (cells treated as independent)".to_string(),
     })
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Helper Functions
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Standard normal quantile.
-fn quantile_normal(p: f64) -> f64 {
-    // Approximation using Abramowitz & Stegun
-    if p <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if p >= 1.0 {
-        return f64::INFINITY;
-    }
-
-    let t = if p < 0.5 {
-        (-2.0 * p.ln()).sqrt()
-    } else {
-        (-2.0 * (1.0 - p).ln()).sqrt()
-    };
-
-    let c0 = 2.515517;
-    let c1 = 0.802853;
-    let c2 = 0.010328;
-    let d1 = 1.432788;
-    let d2 = 0.189269;
-    let d3 = 0.001308;
-
-    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
-
-    if p < 0.5 { -z } else { z }
-}
-
-/// Chi-squared p-value (upper tail) using statrs if available.
-fn chi_squared_p_value(x: f64, df: usize) -> f64 {
-    if df == 0 || x < 0.0 {
-        return 1.0;
-    }
-    if x == 0.0 {
-        return 1.0;
-    }
-
-    // Use the regularized incomplete gamma function: P(chi2 > x) = 1 - P(a, x/2)
-    // where a = df/2 and P(a, x) is the lower regularized incomplete gamma function
-    let a = df as f64 / 2.0;
-    let x_half = x / 2.0;
-
-    // Upper tail: Q(a, x) = 1 - P(a, x)
-    regularized_gamma_q(a, x_half)
-}
-
-/// Upper regularized incomplete gamma function Q(a, x) = 1 - P(a, x).
-/// Uses series expansion for small x, continued fraction for large x.
-fn regularized_gamma_q(a: f64, x: f64) -> f64 {
-    if x < 0.0 {
-        return 1.0;
-    }
-    if x == 0.0 {
-        return 1.0;
-    }
-    if a <= 0.0 {
-        return 0.0;
-    }
-
-    if x < a + 1.0 {
-        // Use series expansion for P(a, x), then Q = 1 - P
-        1.0 - regularized_gamma_p_series(a, x)
-    } else {
-        // Use continued fraction for Q(a, x) directly
-        regularized_gamma_q_cf(a, x)
-    }
-}
-
-/// Lower incomplete gamma P(a, x) via series expansion.
-fn regularized_gamma_p_series(a: f64, x: f64) -> f64 {
-    let max_iter = 200;
-    let eps = 1e-14;
-
-    let ln_gamma_a = ln_gamma(a);
-
-    let mut sum = 1.0 / a;
-    let mut term = 1.0 / a;
-
-    for n in 1..max_iter {
-        term *= x / (a + n as f64);
-        sum += term;
-        if term.abs() < eps * sum.abs() {
-            break;
-        }
-    }
-
-    sum * (-x + a * x.ln() - ln_gamma_a).exp()
-}
-
-/// Upper incomplete gamma Q(a, x) via continued fraction (Lentz's algorithm).
-fn regularized_gamma_q_cf(a: f64, x: f64) -> f64 {
-    let max_iter = 200;
-    let eps = 1e-14;
-    let tiny = 1e-30;
-
-    let ln_gamma_a = ln_gamma(a);
-
-    // Lentz's algorithm for continued fraction
-    let mut b = x + 1.0 - a;
-    let mut c = 1.0 / tiny;
-    let mut d = 1.0 / b;
-    let mut h = d;
-
-    for n in 1..max_iter {
-        let an = -(n as f64) * (n as f64 - a);
-        b += 2.0;
-
-        d = an * d + b;
-        if d.abs() < tiny {
-            d = tiny;
-        }
-
-        c = b + an / c;
-        if c.abs() < tiny {
-            c = tiny;
-        }
-
-        d = 1.0 / d;
-        let delta = d * c;
-        h *= delta;
-
-        if (delta - 1.0).abs() < eps {
-            break;
-        }
-    }
-
-    h * (-x + a * x.ln() - ln_gamma_a).exp()
-}
-
-/// Natural log of gamma function using Lanczos approximation.
-fn ln_gamma(x: f64) -> f64 {
-    if x <= 0.0 {
-        return f64::INFINITY;
-    }
-
-    // Lanczos coefficients for g=7, n=9
-    let c = [
-        0.999_999_999_999_809_9,
-        676.5203681218851,
-        -1259.1392167224028,
-        771.323_428_777_653_1,
-        -176.615_029_162_140_6,
-        12.507343278686905,
-        -0.13857109526572012,
-        9.984_369_578_019_572e-6,
-        1.5056327351493116e-7,
-    ];
-
-    let g = 7.0;
-
-    if x < 0.5 {
-        // Reflection formula: Gamma(1-x) * Gamma(x) = pi / sin(pi * x)
-        let pi = std::f64::consts::PI;
-        pi.ln() - (pi * x).sin().ln() - ln_gamma(1.0 - x)
-    } else {
-        let x = x - 1.0;
-        let mut sum = c[0];
-        for (i, &ci) in c.iter().enumerate().skip(1) {
-            sum += ci / (x + i as f64);
-        }
-
-        let t = x + g + 0.5;
-        0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + sum.ln()
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1674,6 +1997,14 @@ mod tests {
             Err(EconError::ResourceLimit(_)) => {}
             Err(e) => panic!("expected ResourceLimit, got: {e}"),
             Ok(_) => panic!("expected ResourceLimit, got Ok"),
+        }
+    }
+
+    fn expect_invalid<T>(res: EconResult<T>, needle: &str) -> String {
+        match res {
+            Err(EconError::InvalidSpecification { message }) if message.contains(needle) => message,
+            Err(e) => panic!("expected InvalidSpecification naming {needle:?}, got: {e}"),
+            Ok(_) => panic!("expected InvalidSpecification naming {needle:?}, got Ok"),
         }
     }
 
@@ -2005,9 +2336,11 @@ mod tests {
 
     #[test]
     fn test_pretrend_test() {
+        // Analytic covariance: W = 16.55370047, df 9, p = 0.05618128981 (did formulas).
+        // A 9 x 9 covariance from 50 bootstrap replicates would inflate the statistic.
         let dataset = create_staggered_dataset();
         let config = StaggeredDidConfig {
-            bootstrap: 50,
+            bootstrap: 0,
             seed: Some(42),
             min_obs_per_cell: 3,
             ..Default::default()
@@ -2040,7 +2373,7 @@ mod tests {
     fn test_display() {
         let dataset = create_staggered_dataset();
         let config = StaggeredDidConfig {
-            bootstrap: 20,
+            bootstrap: 0,
             seed: Some(42),
             min_obs_per_cell: 3,
             ..Default::default()
@@ -2061,25 +2394,7 @@ mod tests {
         assert!(output.contains("Callaway-Sant'Anna"));
         assert!(output.contains("OVERALL ATT"));
         assert!(output.contains("EVENT STUDY"));
-    }
-
-    #[test]
-    fn test_quantile_normal() {
-        // Test standard normal quantiles
-        assert!((quantile_normal(0.5) - 0.0).abs() < 0.01);
-        assert!((quantile_normal(0.975) - 1.96).abs() < 0.05);
-        assert!((quantile_normal(0.025) - (-1.96)).abs() < 0.05);
-    }
-
-    #[test]
-    fn test_chi_squared_p_value() {
-        // Chi-squared(1) = 3.84 should give p ≈ 0.05
-        let p = chi_squared_p_value(3.84, 1);
-        assert!(
-            (p - 0.05).abs() < 0.02,
-            "Chi-squared(1) = 3.84 should give p ≈ 0.05, got {}",
-            p
-        );
+        assert!(output.contains("Standard Errors:"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -3103,5 +3418,377 @@ mod tests {
         Check::new(&case)
             .vector("notyet_cell_att", &att(&r), Tol::coef(n))
             .finish();
+    }
+
+    /// R: qnorm(0.975)
+    const Z95: f64 = 1.9599639845400536;
+
+    /// CI bounds and p-values computed in R from the case (z95 <- qnorm(0.975)):
+    ///   c(ag$simple_att - z95 * ag$simple_se, ag$simple_att + z95 * ag$simple_se)
+    ///   2 * pnorm(-abs(ag$simple_att / ag$simple_se)); 2 * pnorm(-abs(ag$group_att / ag$group_se))
+    ///   ifelse(ag$event_se > 0, 2 * pnorm(-abs(ag$event_att / ag$event_se)), 1)
+    struct RInference {
+        overall: [f64; 3],
+        group_lo: [f64; 3],
+        group_hi: [f64; 3],
+        group_p: [f64; 3],
+        event_lo: [f64; 12],
+        event_hi: [f64; 12],
+        event_p: [f64; 12],
+    }
+
+    fn assert_tol(actual: f64, expected: f64, tol: Tol, what: &str) {
+        assert!(
+            tol.allows(actual, expected),
+            "{what}: rust={actual:?} R={expected:?}"
+        );
+    }
+
+    /// Pin the analytic result `r` to the case values with prefix `p` ("never" or
+    /// "notyet") and to the R inference literals.
+    fn check_analytic(
+        case: &p2a_validation::Case,
+        p: &str,
+        r: &StaggeredDidResult,
+        lit: &RInference,
+    ) {
+        let n = r.n_obs;
+        let f = |g: fn(&GroupTimeATT) -> f64| r.group_time_atts.iter().map(g).collect::<Vec<_>>();
+        let ge =
+            |g: fn(&AggregatedEffect) -> f64| r.group_effects.iter().map(g).collect::<Vec<_>>();
+        let es = |g: fn(&AggregatedEffect) -> f64| r.event_study.iter().map(g).collect::<Vec<_>>();
+        let pt = r.pretrend_test.as_ref().expect("pre-trend test");
+        let k = |s: &str| format!("{p}_{s}");
+        Check::new(case)
+            .vector(&k("cell_group"), &f(|c| c.group as f64), Tol::exact())
+            .vector(&k("cell_time"), &f(|c| c.time as f64), Tol::exact())
+            .vector(&k("cell_att"), &f(|c| c.att), Tol::coef(n))
+            .vector(&k("cell_se"), &f(|c| c.std_error), Tol::se(n))
+            .scalar(&k("simple_att"), r.overall_att.att, Tol::coef(n))
+            .scalar(&k("simple_se"), r.overall_att.std_error, Tol::se(n))
+            .vector(&k("group_att"), &ge(|e| e.att), Tol::coef(n))
+            .vector(&k("group_se"), &ge(|e| e.std_error), Tol::se(n))
+            .vector(&k("event_e"), &es(|e| e.key as f64), Tol::exact())
+            .vector(&k("event_att"), &es(|e| e.att), Tol::coef(n))
+            .vector(&k("event_se"), &es(|e| e.std_error), Tol::se(n))
+            .scalar(&k("pretrend_w"), pt.chi2, Tol::stat(n))
+            .scalar(&k("pretrend_df"), pt.df as f64, Tol::exact())
+            .scalar(&k("pretrend_p"), pt.p_value, Tol::p_value(n))
+            .finish();
+
+        // cell CIs: the case's att -/+ qnorm(0.975) se
+        let (catt, cse) = (case.vector(&k("cell_att")), case.vector(&k("cell_se")));
+        for (i, c) in r.group_time_atts.iter().enumerate() {
+            assert_tol(
+                c.ci_lower,
+                catt[i] - Z95 * cse[i],
+                Tol::stat(n),
+                "cell ci_lower",
+            );
+            assert_tol(
+                c.ci_upper,
+                catt[i] + Z95 * cse[i],
+                Tol::stat(n),
+                "cell ci_upper",
+            );
+        }
+        let o = &r.overall_att;
+        assert_tol(o.ci_lower, lit.overall[0], Tol::stat(n), "overall ci_lower");
+        assert_tol(o.ci_upper, lit.overall[1], Tol::stat(n), "overall ci_upper");
+        assert_tol(o.p_value, lit.overall[2], Tol::p_value(n), "overall p");
+        for (i, e) in r.group_effects.iter().enumerate() {
+            assert_tol(e.ci_lower, lit.group_lo[i], Tol::stat(n), "group ci_lower");
+            assert_tol(e.ci_upper, lit.group_hi[i], Tol::stat(n), "group ci_upper");
+            assert_tol(e.p_value, lit.group_p[i], Tol::p_value(n), "group p");
+        }
+        assert_eq!(r.event_study.len(), 12);
+        for (i, e) in r.event_study.iter().enumerate() {
+            assert_tol(e.ci_lower, lit.event_lo[i], Tol::stat(n), "event ci_lower");
+            assert_tol(e.ci_upper, lit.event_hi[i], Tol::stat(n), "event ci_upper");
+            assert_tol(e.p_value, lit.event_p[i], Tol::p_value(n), "event p");
+        }
+
+        // the pre-trend vector: the 9 pre cells (t < g, t != g - 1)
+        let (cg, ct) = (case.vector(&k("cell_group")), case.vector(&k("cell_time")));
+        let want: Vec<f64> = (0..cg.len())
+            .filter(|&i| ct[i] < cg[i] && ct[i] != cg[i] - 1.0)
+            .map(|i| catt[i])
+            .collect();
+        assert_eq!(pt.pre_atts.len(), 9);
+        for (a, b) in pt.pre_atts.iter().zip(&want) {
+            assert_tol(*a, *b, Tol::coef(n), "pre att");
+        }
+        assert_eq!(
+            pt.method,
+            "Wald, influence-function covariance of 9 pre-treatment ATT(g,t)"
+        );
+        assert_eq!(
+            r.group_time_atts
+                .iter()
+                .map(|c| c.n_treated)
+                .collect::<Vec<_>>(),
+            [vec![23; 16], vec![22; 8]].concat()
+        );
+    }
+
+    #[test]
+    fn test_validate_staggered_did_analytic_never() {
+        let (case, ds) = crate::test_support::load_case("did_cs_analytic");
+        let r = run(&ds, "unit", analytic(ComparisonGroup::NeverTreated)).unwrap();
+        check_analytic(
+            &case,
+            "never",
+            &r,
+            &RInference {
+                overall: [2.1349147382930185, 2.932089075962024, 1.266087571375279e-35],
+                group_lo: [2.307971699916159, 1.390528178312571, 1.8192665650244195],
+                group_hi: [3.4293224273606526, 2.7778848084665793, 3.0243348158392167],
+                group_p: [
+                    1.148345076036387e-23,
+                    3.888850310316624e-9,
+                    3.3320079464744728e-15,
+                ],
+                event_lo: [
+                    -0.42008613329171285,
+                    -0.05530863020039245,
+                    -0.574033871318034,
+                    -0.6220950272841064,
+                    -0.3723490114988929,
+                    0.0,
+                    1.433280378525943,
+                    2.1643359105209194,
+                    1.9318514813537235,
+                    2.1910176646242636,
+                    2.469185460443568,
+                    2.8522233955292493,
+                ],
+                event_hi: [
+                    1.1785525250008035,
+                    1.485343499054938,
+                    0.6181163690505591,
+                    0.41965228093764173,
+                    0.33033273091841153,
+                    0.0,
+                    2.082068412290233,
+                    2.909839780934294,
+                    3.0977159129852097,
+                    3.3762731154947083,
+                    4.03822832952402,
+                    4.414967348692885,
+                ],
+                event_p: [
+                    0.3524252201154725,
+                    0.06887473761654846,
+                    0.9422245549355032,
+                    0.7032924524534246,
+                    0.9067059689605106,
+                    1.0,
+                    2.4124486336216627e-26,
+                    1.3502157488096779e-40,
+                    2.782941440768191e-17,
+                    3.378993069389494e-20,
+                    4.338779192564776e-16,
+                    7.912628431054361e-20,
+                ],
+            },
+        );
+        assert!(r.group_time_atts.iter().all(|c| c.n_comparison == 22));
+    }
+
+    #[test]
+    fn test_validate_staggered_did_analytic_notyet() {
+        let (case, ds) = crate::test_support::load_case("did_cs_analytic");
+        let r = run(&ds, "unit", analytic(ComparisonGroup::NotYetTreated)).unwrap();
+        check_analytic(
+            &case,
+            "notyet",
+            &r,
+            &RInference {
+                overall: [2.2060687985688765, 2.980298506458476, 2.237186220112448e-39],
+                group_lo: [2.430040665610496, 1.4865028369326752, 1.8192665650244195],
+                group_hi: [3.469549343544538, 2.7939619408510206, 3.0243348158392167],
+                group_p: [
+                    9.64043830025874e-29,
+                    1.3927117449031205e-10,
+                    3.3320079464744728e-15,
+                ],
+                event_lo: [
+                    -0.42008613329171285,
+                    -0.05530863020039245,
+                    -0.56155407646327,
+                    -0.7322408807428932,
+                    -0.38378642476540636,
+                    0.0,
+                    1.441287662531535,
+                    2.1617069452922903,
+                    2.0834596279422626,
+                    2.3914960590560606,
+                    2.469185460443568,
+                    2.8522233955292493,
+                ],
+                event_hi: [
+                    1.1785525250008035,
+                    1.485343499054938,
+                    0.59284280522428,
+                    0.3453813101544084,
+                    0.35047894447195616,
+                    0.0,
+                    2.0840620928181175,
+                    2.9877518627678716,
+                    3.1735181568830337,
+                    3.5333034382765476,
+                    4.03822832952402,
+                    4.414967348692885,
+                ],
+                event_p: [
+                    0.3524252201154725,
+                    0.06887473761654846,
+                    0.9576340744181483,
+                    0.48167274802730536,
+                    0.9291556790255424,
+                    1.0,
+                    5.952866395633425e-27,
+                    2.486309632503913e-34,
+                    3.3167833283499864e-21,
+                    2.6939324338815217e-24,
+                    4.338779192564776e-16,
+                    7.912628431054361e-20,
+                ],
+            },
+        );
+        let cmp: Vec<usize> = r.group_time_atts.iter().map(|c| c.n_comparison).collect();
+        assert_eq!(
+            cmp,
+            [
+                67, 67, 67, 67, 44, 44, 22, 22, 44, 44, 44, 44, 44, 44, 22, 22, 22, 22, 22, 22, 22,
+                22, 22, 22
+            ]
+        );
+    }
+
+    #[test]
+    fn test_validate_staggered_did_confidence_level_90() {
+        let (case, ds) = crate::test_support::load_case("did_cs_analytic");
+        let cfg = StaggeredDidConfig {
+            confidence_level: 0.90,
+            ..analytic(ComparisonGroup::NeverTreated)
+        };
+        let r = run(&ds, "unit", cfg).unwrap();
+        let n = r.n_obs;
+        // R: qnorm(0.95)
+        const Z90: f64 = 1.6448536269514715;
+        assert_tol(
+            r.overall_att.ci_lower,
+            2.1989970103614693,
+            Tol::stat(n),
+            "ci_lower",
+        );
+        assert_tol(
+            r.overall_att.ci_upper,
+            2.8680068038935733,
+            Tol::stat(n),
+            "ci_upper",
+        );
+        // cell (3, 3), the third cell
+        let (att, se) = (
+            case.vector("never_cell_att")[2],
+            case.vector("never_cell_se")[2],
+        );
+        let c = &r.group_time_atts[2];
+        assert_eq!((c.group, c.time), (3, 3));
+        assert_tol(c.ci_lower, att - Z90 * se, Tol::stat(n), "cell ci_lower");
+        assert_tol(c.ci_upper, att + Z90 * se, Tol::stat(n), "cell ci_upper");
+        Check::new(&case)
+            .scalar("never_simple_se", r.overall_att.std_error, Tol::se(n))
+            .finish();
+        let shown = format!("{r}");
+        assert!(
+            shown.contains("(SE = 0.2034, 90% CI [2.1990, 2.8680])"),
+            "{shown}"
+        );
+        assert!(shown.contains("90% CI"), "{shown}");
+    }
+
+    #[test]
+    fn test_staggered_did_bootstrap_below_50_is_error() {
+        let ds = create_staggered_dataset();
+        for b in [1, 20, 49] {
+            let cfg = StaggeredDidConfig {
+                bootstrap: b,
+                seed: Some(1),
+                min_obs_per_cell: 3,
+                ..Default::default()
+            };
+            let m = expect_invalid(
+                run_staggered_did(&ds, "outcome", "first_treat", "year", "unit", None, cfg),
+                "bootstrap",
+            );
+            assert!(m.contains("at least 50"), "{m}");
+            assert!(m.contains("0 for analytic"), "{m}");
+        }
+    }
+
+    #[test]
+    fn test_staggered_did_analytic_with_covariates_not_implemented() {
+        let ds = create_staggered_dataset();
+        let x: Vec<f64> = {
+            let unit = ds.df().column("unit").unwrap().f64().unwrap().clone();
+            let year = ds.df().column("year").unwrap().f64().unwrap().clone();
+            unit.iter()
+                .zip(year.iter())
+                .map(|(u, y)| ((u.unwrap() as i64 * y.unwrap() as i64) % 7) as f64)
+                .collect()
+        };
+        let mut df = ds.df().clone();
+        df.with_column(Column::new("x".into(), x)).unwrap();
+        let ds = Dataset::new(df);
+        for method in [
+            AttEstimationMethod::OutcomeRegression,
+            AttEstimationMethod::IPW,
+            AttEstimationMethod::DoublyRobust,
+        ] {
+            let cfg = StaggeredDidConfig {
+                estimation_method: method,
+                bootstrap: 0,
+                min_obs_per_cell: 3,
+                ..Default::default()
+            };
+            match run_staggered_did(
+                &ds,
+                "outcome",
+                "first_treat",
+                "year",
+                "unit",
+                Some(&["x"]),
+                cfg,
+            ) {
+                Err(EconError::NotImplemented(m)) => assert!(
+                    m.contains(
+                        "analytic standard errors exist for the unconditional estimator; \
+                         set bootstrap >= 50"
+                    ),
+                    "{m}"
+                ),
+                Err(e) => panic!("{method}: expected NotImplemented, got {e}"),
+                Ok(_) => panic!("{method}: expected NotImplemented, got Ok"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_staggered_did_rejects_bad_confidence_level() {
+        let ds = create_staggered_dataset();
+        for level in [1.0, 0.0, f64::NAN] {
+            let cfg = StaggeredDidConfig {
+                confidence_level: level,
+                bootstrap: 0,
+                min_obs_per_cell: 3,
+                ..Default::default()
+            };
+            expect_invalid(
+                run_staggered_did(&ds, "outcome", "first_treat", "year", "unit", None, cfg),
+                "confidence_level",
+            );
+        }
     }
 }
