@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "surv_km",
+      "name": "Kaplan-Meier survival curve, Greenwood SE, log / log-log / plain confidence intervals, median and its limits",
+      "category": "econometrics",
+      "reference": "survival::survfit(conf.type = 'log' | 'log-log' | 'plain'); survival:::quantile.survfit",
+      "doc": "validation/econometrics/survival.md",
+      "cases": [
+        "surv_km_lung",
+        "surv_km_lung_by_sex",
+        "surv_km_small",
+        "surv_km_median_rules"
+      ],
+      "tests": [
+        "p2a-core::econometrics::survival::tests::test_validate_km_lung",
+        "p2a-core::econometrics::survival::tests::test_validate_km_lung_by_sex",
+        "p2a-core::econometrics::survival::tests::test_validate_km_small",
+        "p2a-core::econometrics::survival::tests::test_validate_km_median_rules",
+        "p2a-core::econometrics::survival::tests::test_validate_km_conf_level_and_type_validation",
+        "p2a-mcp::tools::handlers::survival::tests::test_validate_mcp_kaplan_meier_lung",
+        "p2a-mcp::tools::handlers::survival::tests::test_validate_mcp_kaplan_meier_rejects_unknown_conf_type",
+        "p2a-cli::tier2::wp09_survival::test_validate_cli_survival_km_lung",
+        "p2a-cli::tier2::wp09_survival::test_validate_cli_survival_km_rejects_unknown_conf_type"
+      ],
+      "quantities": [
+        "S(t)",
+        "std.err (Greenwood, S scale) and se(log S)",
+        "lower/upper limits (log, log-log, plain)",
+        "n.risk",
+        "median and its lower/upper limits (midpoint, last-point, unreached)",
+        "n, events, distinct times",
+        "stratified order"
+      ],
+      "tolerance": "validation/README.md: n = 10-16 coefficients 1e-6, SE and limits 1e-5; n = 90-228 coefficients 1e-8, SE and limits 1e-6 relative; times, counts and medians exact; CLI text at print precision",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "surv_data_handling",
+      "name": "Survival column extraction: Int64 columns, na.omit with a report, Surv() status coding (KM, log-rank, Cox, AFT, competing risks)",
+      "category": "econometrics",
+      "reference": "survival::Surv; na.omit in survfit/survdiff/coxph/survreg",
+      "doc": "validation/econometrics/survival.md",
+      "cases": [
+        "surv_km_lung",
+        "surv_logrank_lung",
+        "surv_logrank_small",
+        "surv_km_small"
+      ],
+      "tests": [
+        "p2a-core::econometrics::survival::tests::test_validate_na_survival_int64_columns",
+        "p2a-core::econometrics::survival::tests::test_validate_surv_status_coding_lung",
+        "p2a-core::econometrics::survival::tests::test_validate_surv_status_invalid_codes_are_errors",
+        "p2a-core::econometrics::survival::tests::test_validate_na_survival_missing_rows_are_dropped_and_reported",
+        "p2a-core::econometrics::survival::tests::test_validate_na_survival_bad_columns_name_the_column",
+        "p2a-mcp::tools::handlers::survival::tests::test_validate_mcp_survival_tools_accept_integer_columns",
+        "p2a-cli::tier2::wp09_survival::test_validate_cli_survival_cox_aft_integer_columns"
+      ],
+      "quantities": [
+        "n, events under 1/2, 0/1 and logical coding",
+        "rows used (227 with an NA ph.ecog / ph.karno)",
+        "error types"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "surv_logrank",
+      "name": "Log-rank test (survdiff, rho = 0)",
+      "category": "econometrics",
+      "reference": "survival::survdiff",
+      "doc": "validation/econometrics/survival.md",
+      "cases": [
+        "surv_logrank_lung",
+        "surv_logrank_small",
+        "surv_km_median_rules"
+      ],
+      "tests": [
+        "p2a-core::econometrics::survival::tests::test_validate_logrank_lung",
+        "p2a-core::econometrics::survival::tests::test_validate_logrank_small",
+        "p2a-core::econometrics::survival::tests::test_validate_logrank_zero_expected_group",
+        "p2a-mcp::tools::handlers::survival::tests::test_validate_mcp_log_rank_lung",
+        "p2a-cli::tier2::wp09_survival::test_validate_cli_survival_log_rank_lung",
+        "p2a-cli::tier2::wp09_survival::test_validate_cli_survival_km_groups_missing_note"
+      ],
+      "quantities": [
+        "chi-square",
+        "df (groups with expected events - 1)",
+        "p",
+        "observed, expected, n per group",
+        "variance matrix",
+        "rows used after NA labels"
+      ],
+      "tolerance": "validation/README.md: n = 10-16 coefficients 1e-6, SE and limits 1e-5; n = 90-228 coefficients 1e-8, SE and limits 1e-6 relative; times, counts and medians exact; CLI text at print precision",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

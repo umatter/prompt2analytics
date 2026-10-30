@@ -15,30 +15,176 @@
 //! - R package `survival` (Therneau & Grambsch). https://cran.r-project.org/package=survival
 
 use ndarray::{Array1, Array2, ArrayView1};
+use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use polars::prelude::Float64Chunked;
-
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy, column};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::matrix_ops::{pseudoinverse, safe_inverse};
+use crate::resource::{checkpoint, try_zeros2};
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_cdf};
+
+// =============================================================================
+// Column extraction shared by every survival entry point
+// =============================================================================
+
+/// The rows of a survival call after R's `na.omit`: times, event flags, group codes and
+/// covariates aligned on the kept rows, plus what was dropped.
+struct SurvivalData {
+    time: Vec<f64>,
+    event: Vec<bool>,
+    /// Group labels in R `factor()` order and one code per kept row.
+    group: Option<Factor>,
+    /// One vector per covariate, in `x_cols` order.
+    x: Vec<Vec<f64>>,
+    missing: MissingSummary,
+}
+
+/// The survival times a method accepts.
+#[derive(Clone, Copy)]
+enum TimeRule {
+    /// t >= 0 (Kaplan-Meier, log-rank, Cox, competing risks).
+    NonNegative,
+    /// t > 0 (AFT models, which model log T; R `survreg` refuses t <= 0 too).
+    Positive,
+}
+
+/// A Boolean time column is refused, as R `Surv()` does ("Time variable is not numeric");
+/// the extractor would otherwise read it as 0/1.
+fn refuse_boolean_time(df: &DataFrame, time_col: &str) -> EconResult<()> {
+    if column(df, time_col)?.dtype() == &DataType::Boolean {
+        return Err(EconError::NonNumericColumn {
+            column: time_col.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The kept times, checked against `rule`, with -0.0 written as 0.0. `rows` are the
+/// original 0-based rows of the kept values (for the message).
+fn checked_times(
+    values: &[f64],
+    rows: &[usize],
+    time_col: &str,
+    rule: TimeRule,
+) -> EconResult<Vec<f64>> {
+    let bad = |t: f64| match rule {
+        TimeRule::NonNegative => t < 0.0,
+        TimeRule::Positive => t <= 0.0,
+    };
+    let count = values.iter().filter(|&&t| bad(t)).count();
+    if let Some(i) = values.iter().position(|&t| bad(t)) {
+        let (row, value) = (rows[i], values[i]);
+        let message = match rule {
+            TimeRule::NonNegative => format!(
+                "Column '{time_col}' has {count} negative value(s) (first at row {row}: \
+                 {value}); survival times must be >= 0"
+            ),
+            TimeRule::Positive => format!(
+                "Column '{time_col}' has {count} value(s) <= 0 (first at row {row}: {value}); \
+                 AFT models need positive survival times (R survreg: \"Invalid survival \
+                 times for this distribution\")"
+            ),
+        };
+        return Err(EconError::InvalidSpecification { message });
+    }
+    Ok(values
+        .iter()
+        .map(|&t| if t == 0.0 { 0.0 } else { t })
+        .collect())
+}
+
+/// Event flags from a status column coded as R's `Surv()` codes it: all values in {0, 1}
+/// (1 = event), all in {1, 2} (2 = event, as R's `lung`), or logical (0/1 here). Any other
+/// code is an error naming the column and the values; R turns such codes into NA with a
+/// warning, which would drop rows silently.
+fn surv_status(values: &[f64], rows: &[usize], column: &str) -> EconResult<Vec<bool>> {
+    if values.iter().all(|&v| v == 0.0 || v == 1.0) {
+        return Ok(values.iter().map(|&v| v == 1.0).collect());
+    }
+    if values.iter().all(|&v| v == 1.0 || v == 2.0) {
+        return Ok(values.iter().map(|&v| v == 2.0).collect());
+    }
+    // As Surv(): a maximum of 2 means 1/2 coding, anything else 0/1 coding; the first
+    // value outside that coding is reported.
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let coding: [f64; 2] = if max == 2.0 { [1.0, 2.0] } else { [0.0, 1.0] };
+    let first = values.iter().position(|v| !coding.contains(v)).unwrap_or(0);
+    let mut distinct = values.to_vec();
+    distinct.sort_by(f64::total_cmp);
+    distinct.dedup();
+    let mut list: Vec<String> = distinct.iter().take(5).map(|v| v.to_string()).collect();
+    if distinct.len() > 5 {
+        list.push("...".to_string());
+    }
+    Err(EconError::InvalidSpecification {
+        message: format!(
+            "Column '{column}' holds status value(s) {} (first unexpected at row {}); code \
+             it as 0/1 (1 = event), 1/2 (2 = event) or TRUE/FALSE, as R's Surv() does",
+            list.join(", "),
+            rows.get(first).copied().unwrap_or(first)
+        ),
+    })
+}
+
+/// Time, status, an optional group and covariates of one survival call, read with the
+/// shared extractor: integer, float and Boolean columns, rows with a missing value in
+/// any of them dropped (R `na.omit`) and reported in `missing`.
+fn extract_survival(
+    df: &DataFrame,
+    time_col: &str,
+    status_col: &str,
+    group_col: Option<&str>,
+    x_cols: &[&str],
+    rule: TimeRule,
+    context: &str,
+) -> EconResult<SurvivalData> {
+    refuse_boolean_time(df, time_col)?;
+    let mut request = ColumnRequest::new(df).numeric(time_col).numeric(status_col);
+    if let Some(g) = group_col {
+        request = request.factor(g);
+    }
+    let cols = request
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .min_rows(1, context)
+        .extract()?;
+    let time = checked_times(cols.numeric(time_col), cols.rows(), time_col, rule)?;
+    let event = surv_status(cols.numeric(status_col), cols.rows(), status_col)?;
+    Ok(SurvivalData {
+        time,
+        event,
+        group: group_col.map(|g| cols.factor(g).clone()),
+        x: x_cols.iter().map(|c| cols.numeric(c).to_vec()).collect(),
+        missing: cols.missing().clone(),
+    })
+}
+
+/// `conf_level` strictly between 0 and 1 (NaN refused).
+fn check_conf_level(conf_level: f64) -> EconResult<()> {
+    if !(conf_level > 0.0 && conf_level < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: "Confidence level must be between 0 and 1".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The last line of a result's Display when rows were dropped.
+fn write_missing(f: &mut fmt::Formatter<'_>, missing: &MissingSummary) -> fmt::Result {
+    match missing.note() {
+        Some(note) => writeln!(f, "Missing values: {note}"),
+        None => Ok(()),
+    }
+}
 
 // =============================================================================
 // Core Types
 // =============================================================================
-
-/// A survival observation with time and event status.
-#[derive(Debug, Clone)]
-struct SurvivalObs {
-    time: f64,
-    event: bool,    // true = event observed, false = censored
-    event_type: u8, // For competing risks: 0 = censored, 1,2,... = event types
-    covariates: Option<Array1<f64>>,
-    group: Option<String>,
-}
 
 /// Wrapper for f64 to use as BTreeMap key.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -103,7 +249,7 @@ impl fmt::Display for AftDistribution {
 // =============================================================================
 
 /// Confidence-interval transformation of a Kaplan-Meier curve (R `survfit`'s
-/// `conf.type`). Used by [`run_kaplan_meier_with`], implemented by T2-WP09.
+/// `conf.type`). Used by [`run_kaplan_meier_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum KmConfType {
     /// Interval on log S(t), R's default `"log"`.
@@ -146,7 +292,7 @@ impl fmt::Display for KmConfType {
     }
 }
 
-/// Options of [`run_kaplan_meier_with`] (implemented by T2-WP09).
+/// Options of [`run_kaplan_meier_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct KmConfig {
     /// Confidence level of the pointwise intervals (default 0.95).
@@ -164,9 +310,19 @@ impl Default for KmConfig {
     }
 }
 
-/// Kaplan-Meier estimation with the options of [`KmConfig`].
+/// Kaplan-Meier estimation with the options of [`KmConfig`], as R
+/// `survival::survfit(Surv(time, status) ~ group, conf.type = ...)`.
 ///
-/// Implemented by T2-WP09; until then returns `EconError::NotImplemented`.
+/// One result per group, in R `factor()` order of the group labels (one result without a
+/// group). Every distinct time (events and censorings) is a row, as `survfit()$time`.
+/// Standard errors are Greenwood's on the S scale (`summary(fit)$std.err`), NaN where
+/// S(t) = 0. The pointwise limits are `survival:::survfit_confint` for `conf_type`
+/// "log" (R's default), "log-log" or "plain", NaN where R reports NA. The median and
+/// its limits are `quantile.survfit(probs = 0.5)`, `None` where one is never reached.
+///
+/// The status column is coded as R's `Surv()` codes it (0/1, 1/2 or logical); rows with
+/// a missing time, status or group are dropped and reported in `missing`; times must be
+/// >= 0.
 pub fn run_kaplan_meier_with(
     dataset: &Dataset,
     time_col: &str,
@@ -174,9 +330,50 @@ pub fn run_kaplan_meier_with(
     group_col: Option<&str>,
     config: &KmConfig,
 ) -> EconResult<Vec<KaplanMeierResult>> {
-    Err(EconError::NotImplemented(
-        "T2-WP09: run_kaplan_meier_with".to_string(),
-    ))
+    check_conf_level(config.conf_level)?;
+    let data = extract_survival(
+        dataset.df(),
+        time_col,
+        event_col,
+        group_col,
+        &[],
+        TimeRule::NonNegative,
+        "Kaplan-Meier",
+    )?;
+    let z = two_sided_z(config.conf_level)?;
+
+    let Some(factor) = &data.group else {
+        let km = compute_kaplan_meier(&data.time, &data.event, z, config, None, &data.missing)?;
+        return Ok(vec![km]);
+    };
+
+    // One curve per group, in R factor order.
+    let mut rows_by_level: Vec<Vec<usize>> = vec![Vec::new(); factor.n_levels()];
+    for (i, &code) in factor.codes.iter().enumerate() {
+        rows_by_level[code as usize].push(i);
+    }
+    let mut results = Vec::with_capacity(factor.n_levels());
+    for (label, rows) in factor.levels.iter().zip(&rows_by_level) {
+        checkpoint()?;
+        let time: Vec<f64> = rows.iter().map(|&i| data.time[i]).collect();
+        let event: Vec<bool> = rows.iter().map(|&i| data.event[i]).collect();
+        results.push(compute_kaplan_meier(
+            &time,
+            &event,
+            z,
+            config,
+            Some(label.clone()),
+            &data.missing,
+        )?);
+    }
+    Ok(results)
+}
+
+/// z = qnorm(1 - (1 - conf_level) / 2), from statrs.
+fn two_sided_z(conf_level: f64) -> EconResult<f64> {
+    let normal = Normal::new(0.0, 1.0)
+        .map_err(|e| EconError::Internal(format!("standard normal distribution: {e}")))?;
+    Ok(normal.inverse_cdf(1.0 - (1.0 - conf_level) / 2.0))
 }
 
 /// Result from Kaplan-Meier survival estimation.
@@ -192,17 +389,18 @@ pub fn run_kaplan_meier_with(
 ///   Health and Medical Subjects, 33:1-26.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KaplanMeierResult {
-    /// Group name (if stratified analysis)
+    /// Group label (stratified analysis), as the group column's factor level
     pub group: Option<String>,
-    /// Distinct event times
+    /// Every distinct time (events and censorings), as `survfit()$time`
     pub times: Vec<f64>,
     /// Survival probability S(t) at each time
     pub survival: Vec<f64>,
-    /// Standard errors (Greenwood's formula)
+    /// Standard error of S(t) (Greenwood), as `summary(survfit)$std.err`; NaN where
+    /// S(t) = 0
     pub std_errors: Vec<f64>,
-    /// Lower confidence interval bound
+    /// Lower pointwise limit for `conf_type` (survfit `$lower`); NaN where R reports NA
     pub ci_lower: Vec<f64>,
-    /// Upper confidence interval bound
+    /// Upper pointwise limit for `conf_type` (survfit `$upper`); NaN where R reports NA
     pub ci_upper: Vec<f64>,
     /// Number at risk at each time
     pub n_at_risk: Vec<usize>,
@@ -210,10 +408,12 @@ pub struct KaplanMeierResult {
     pub n_events: Vec<usize>,
     /// Number censored at each time
     pub n_censored: Vec<usize>,
-    /// Median survival time (if estimable)
+    /// Median survival time, as `quantile.survfit(probs = 0.5)`; `None` when S(t) stays
+    /// above 0.5
     pub median_survival: Option<f64>,
-    /// Confidence interval for median survival
-    pub median_ci: Option<(f64, f64)>,
+    /// Lower and upper limit of the median (`quantile.survfit` `$lower`, `$upper`);
+    /// `None` for a limit that is not reached (R NA). A limit can exist without a median.
+    pub median_ci: (Option<f64>, Option<f64>),
     /// Total number of observations
     pub n_obs: usize,
     /// Total number of events
@@ -222,6 +422,36 @@ pub struct KaplanMeierResult {
     pub total_censored: usize,
     /// Confidence level used
     pub conf_level: f64,
+    /// Interval transformation used (R `conf.type`)
+    #[serde(default)]
+    pub conf_type: KmConfType,
+    /// Rows dropped from the whole call (all groups) because of missing values.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
+}
+
+/// Event times listed in full by the Kaplan-Meier Display; beyond, the first
+/// [`KM_TABLE_HEAD`] and the last [`KM_TABLE_TAIL`].
+const KM_TABLE_MAX_ROWS: usize = 200;
+const KM_TABLE_HEAD: usize = 100;
+const KM_TABLE_TAIL: usize = 50;
+
+/// A confidence level as a percentage: "95" for 0.95, "97.5" for 0.975.
+fn conf_percent(conf_level: f64) -> String {
+    let pct = conf_level * 100.0;
+    if (pct - pct.round()).abs() < 1e-9 {
+        format!("{pct:.0}")
+    } else {
+        format!("{pct}")
+    }
+}
+
+/// `{:.<decimals>}` of a value, or "NA" for NaN / `None` (R's NA).
+fn fmt_or_na(v: Option<f64>, decimals: usize) -> String {
+    match v {
+        Some(x) if !x.is_nan() => format!("{x:.decimals$}"),
+        _ => "NA".to_string(),
+    }
 }
 
 impl fmt::Display for KaplanMeierResult {
@@ -239,80 +469,102 @@ impl fmt::Display for KaplanMeierResult {
             self.total_censored,
             100.0 * self.total_censored as f64 / self.n_obs as f64
         )?;
+        let pct = conf_percent(self.conf_level);
+        let default_note = if self.conf_type == KmConfType::Log {
+            " (R survfit default)"
+        } else {
+            ""
+        };
+        writeln!(
+            f,
+            "Confidence intervals: {pct}%, conf.type = {}{default_note}",
+            self.conf_type
+        )?;
         writeln!(f)?;
 
-        if let Some(median) = self.median_survival {
-            write!(f, "Median Survival: {:.3}", median)?;
-            if let Some((lo, hi)) = self.median_ci {
-                write!(
-                    f,
-                    " ({:.0}% CI: {:.3} - {:.3})",
-                    self.conf_level * 100.0,
-                    lo,
-                    hi
-                )?;
-            }
-            writeln!(f)?;
-        } else {
-            writeln!(
+        let limits = format!(
+            "({pct}% CI: {} - {})",
+            fmt_or_na(self.median_ci.0, 3),
+            fmt_or_na(self.median_ci.1, 3)
+        );
+        match self.median_survival {
+            Some(median) => writeln!(f, "Median Survival: {median:.3} {limits}")?,
+            None => writeln!(
                 f,
-                "Median Survival: NA (survival > 50% at end of follow-up)"
-            )?;
+                "Median Survival: NA, survival > 50% at end of follow-up {limits}"
+            )?,
         }
         writeln!(f)?;
 
         writeln!(
             f,
-            "{:>10} {:>10} {:>10} {:>10} {:>12}",
-            "Time", "At Risk", "Events", "S(t)", "Std.Err"
+            "{:>10} {:>10} {:>10} {:>10} {:>12} {:>11} {:>11}",
+            "Time",
+            "At Risk",
+            "Events",
+            "S(t)",
+            "Std.Err",
+            format!("Lower {pct}%"),
+            format!("Upper {pct}%")
         )?;
-        writeln!(f, "{}", "-".repeat(55))?;
+        writeln!(f, "{}", "-".repeat(80))?;
 
-        // Show first 10 and last 5 time points if many
-        let n = self.times.len();
-        let show_all = n <= 20;
-        let show_indices: Vec<usize> = if show_all {
-            (0..n).collect()
-        } else {
-            let mut idx: Vec<usize> = (0..10).collect();
-            idx.push(usize::MAX); // marker for "..."
-            idx.extend((n.saturating_sub(5))..n);
-            idx
+        // The event times, as R's summary(fit).
+        let rows: Vec<usize> = (0..self.times.len())
+            .filter(|&i| self.n_events[i] > 0)
+            .collect();
+        let row = |f: &mut fmt::Formatter<'_>, i: usize| {
+            writeln!(
+                f,
+                "{:>10.3} {:>10} {:>10} {:>10.4} {:>12} {:>11} {:>11}",
+                self.times[i],
+                self.n_at_risk[i],
+                self.n_events[i],
+                self.survival[i],
+                fmt_or_na(Some(self.std_errors[i]), 4),
+                fmt_or_na(Some(self.ci_lower[i]), 4),
+                fmt_or_na(Some(self.ci_upper[i]), 4)
+            )
         };
-
-        for &i in &show_indices {
-            if i == usize::MAX {
-                writeln!(f, "{:>10}", "...")?;
-            } else {
-                writeln!(
-                    f,
-                    "{:>10.3} {:>10} {:>10} {:>10.4} {:>12.4}",
-                    self.times[i],
-                    self.n_at_risk[i],
-                    self.n_events[i],
-                    self.survival[i],
-                    self.std_errors[i]
-                )?;
+        if rows.is_empty() {
+            writeln!(f, "(no events)")?;
+        } else if rows.len() <= KM_TABLE_MAX_ROWS {
+            for &i in &rows {
+                row(f, i)?;
+            }
+        } else {
+            for &i in &rows[..KM_TABLE_HEAD] {
+                row(f, i)?;
+            }
+            writeln!(
+                f,
+                "... ({} event times not shown)",
+                rows.len() - KM_TABLE_HEAD - KM_TABLE_TAIL
+            )?;
+            for &i in &rows[rows.len() - KM_TABLE_TAIL..] {
+                row(f, i)?;
             }
         }
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
-/// Run Kaplan-Meier survival analysis.
+/// Run Kaplan-Meier survival analysis with R `survfit`'s default confidence interval
+/// type, conf.type "log"; use [`run_kaplan_meier_with`] for "log-log" or "plain".
 ///
 /// # Arguments
 ///
 /// * `dataset` - The dataset containing survival data
-/// * `time_col` - Column name for survival/censoring time
-/// * `event_col` - Column name for event indicator (1 = event, 0 = censored)
+/// * `time_col` - Column name for survival/censoring time (>= 0)
+/// * `event_col` - Status column, coded as R's `Surv()`: 0/1, 1/2 or logical
 /// * `group_col` - Optional column for stratified analysis
 /// * `conf_level` - Confidence level (default: 0.95)
 ///
 /// # Returns
 ///
-/// A vector of `KaplanMeierResult`, one per group (or single element if unstratified).
+/// A vector of `KaplanMeierResult`, one per group in R `factor()` order (or a single
+/// element if unstratified).
 ///
 /// # Example
 ///
@@ -332,132 +584,37 @@ pub fn run_kaplan_meier(
     group_col: Option<&str>,
     conf_level: f64,
 ) -> EconResult<Vec<KaplanMeierResult>> {
-    // Validate confidence level
-    if conf_level <= 0.0 || conf_level >= 1.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Confidence level must be between 0 and 1".to_string(),
-        });
-    }
-
-    // Extract data
-    let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let events = df
-        .column(event_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_col.to_string(),
-        })?;
-
-    // Group data
-    let groups: Vec<Option<String>> = if let Some(g_col) = group_col {
-        let g = df.column(g_col).map_err(|_| EconError::ColumnNotFound {
-            column: g_col.to_string(),
-            available: available_cols.clone(),
-        })?;
-        (0..df.height())
-            .map(|i| {
-                g.get(i)
-                    .ok()
-                    .map(|v| v.to_string().trim_matches('"').to_string())
-            })
-            .collect()
-    } else {
-        vec![None; df.height()]
-    };
-
-    // Build observations by group
-    let mut obs_by_group: HashMap<Option<String>, Vec<SurvivalObs>> = HashMap::new();
-
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v,
-            _ => continue,
-        };
-        let e = match events.get(i) {
-            Some(v) if !v.is_nan() => v != 0.0,
-            _ => continue,
-        };
-
-        let obs = SurvivalObs {
-            time: t,
-            event: e,
-            event_type: if e { 1 } else { 0 },
-            covariates: None,
-            group: groups[i].clone(),
-        };
-
-        obs_by_group.entry(groups[i].clone()).or_default().push(obs);
-    }
-
-    if obs_by_group.is_empty() {
-        return Err(EconError::EmptyDataset);
-    }
-
-    // Compute KM for each group
-    let z = normal_quantile(1.0 - (1.0 - conf_level) / 2.0);
-    let mut results = Vec::new();
-
-    for (group, observations) in obs_by_group {
-        let km = compute_kaplan_meier(&observations, conf_level, z, group)?;
-        results.push(km);
-    }
-
-    // Sort by group name for consistent output
-    results.sort_by(|a, b| a.group.cmp(&b.group));
-
-    Ok(results)
+    run_kaplan_meier_with(
+        dataset,
+        time_col,
+        event_col,
+        group_col,
+        &KmConfig {
+            conf_level,
+            conf_type: KmConfType::Log,
+        },
+    )
 }
 
-/// Compute Kaplan-Meier estimate for a single group.
+/// One Kaplan-Meier curve: the product-limit estimate over blocks of exactly equal
+/// times, Greenwood's variance of log S(t) (`sum d / (n (n - d))`, infinite once every
+/// subject at risk has the event, as R), the limits of [`km_confint`] and the median of
+/// [`km_quantile`].
 fn compute_kaplan_meier(
-    observations: &[SurvivalObs],
-    conf_level: f64,
+    time: &[f64],
+    event: &[bool],
     z: f64,
+    config: &KmConfig,
     group: Option<String>,
+    missing: &MissingSummary,
 ) -> EconResult<KaplanMeierResult> {
-    let n_obs = observations.len();
+    let n_obs = time.len();
     if n_obs == 0 {
         return Err(EconError::EmptyDataset);
     }
+    let mut order: Vec<usize> = (0..n_obs).collect();
+    order.sort_by(|&a, &b| time[a].total_cmp(&time[b]));
 
-    // Sort by time (ascending)
-    let mut sorted: Vec<_> = observations.iter().collect();
-    sorted.sort_by(|a, b| a.time.total_cmp(&b.time));
-
-    // Count events and censored at each distinct time using BTreeMap for ordered keys
-    let mut time_data: BTreeMap<OrderedF64, (usize, usize)> = BTreeMap::new();
-    for obs in &sorted {
-        let key = OrderedF64(obs.time);
-        let entry = time_data.entry(key).or_insert((0, 0));
-        if obs.event {
-            entry.0 += 1; // events
-        } else {
-            entry.1 += 1; // censored
-        }
-    }
-
-    // Compute KM estimates
     let mut times = Vec::new();
     let mut survival = Vec::new();
     let mut std_errors = Vec::new();
@@ -467,68 +624,54 @@ fn compute_kaplan_meier(
     let mut n_events = Vec::new();
     let mut n_censored = Vec::new();
 
-    let mut current_risk = n_obs;
-    let mut current_surv = 1.0;
-    let mut greenwood_sum = 0.0;
+    let mut at_risk = n_obs;
+    let mut surv = 1.0_f64;
+    let mut greenwood = 0.0_f64;
     let mut total_events = 0;
-
-    for (time, (events, censored)) in time_data {
-        let t = time.0;
-        let d = events;
-        let c = censored;
-
-        n_at_risk.push(current_risk);
-        n_events.push(d);
-        n_censored.push(c);
-        times.push(t);
-
-        if d > 0 && current_risk > 0 {
-            // Kaplan-Meier product-limit estimator
-            current_surv *= 1.0 - (d as f64 / current_risk as f64);
-
-            // Greenwood's formula for variance
-            if current_risk > d {
-                greenwood_sum += d as f64 / (current_risk as f64 * (current_risk - d) as f64);
+    let mut i = 0;
+    while i < n_obs {
+        let t = time[order[i]];
+        let mut j = i;
+        let mut d = 0usize;
+        while j < n_obs && time[order[j]] == t {
+            if event[order[j]] {
+                d += 1;
             }
+            j += 1;
         }
 
-        survival.push(current_surv);
+        if d > 0 {
+            surv *= 1.0 - d as f64 / at_risk as f64;
+            greenwood = if at_risk > d {
+                greenwood + d as f64 / (at_risk as f64 * (at_risk - d) as f64)
+            } else {
+                f64::INFINITY
+            };
+        }
+        let se_log = greenwood.sqrt();
+        let (lo, hi) = km_confint(surv, se_log, z, config.conf_type);
 
-        // Standard error via Greenwood's formula
-        let se = current_surv * greenwood_sum.sqrt();
-        std_errors.push(se);
-
-        // Confidence interval using log-log transformation for better coverage
-        // log(-log(S(t))) is approximately normal
-        let (lo, hi) = if current_surv > 0.0 && current_surv < 1.0 {
-            let log_log_s = (-current_surv.ln()).ln();
-            let se_log_log = se / (current_surv * (-current_surv.ln()).abs());
-            let lo_log_log = log_log_s - z * se_log_log;
-            let hi_log_log = log_log_s + z * se_log_log;
-            ((-(-lo_log_log).exp()).exp(), (-(-hi_log_log).exp()).exp())
-        } else if current_surv >= 1.0 {
-            (1.0, 1.0)
-        } else {
-            (0.0, 0.0)
-        };
-        ci_lower.push(lo.max(0.0).min(1.0));
-        ci_upper.push(hi.max(0.0).min(1.0));
+        times.push(t);
+        survival.push(surv);
+        std_errors.push(if surv > 0.0 { surv * se_log } else { f64::NAN });
+        ci_lower.push(lo);
+        ci_upper.push(hi);
+        n_at_risk.push(at_risk);
+        n_events.push(d);
+        n_censored.push(j - i - d);
 
         total_events += d;
-        current_risk -= d + c;
+        at_risk -= j - i;
+        i = j;
     }
 
-    // Find median survival (time when S(t) first drops to 0.5 or below)
-    let median_survival = find_quantile(&times, &survival, 0.5);
-    let median_ci = median_survival.map(|_| {
-        // Simple CI for median using CI of S(t)
-        let lo = find_quantile_from_bound(&times, &ci_upper, 0.5);
-        let hi = find_quantile_from_bound(&times, &ci_lower, 0.5);
-        (
-            lo.unwrap_or(times[0]),
-            hi.unwrap_or(*times.last().unwrap_or(&0.0)),
-        )
-    });
+    // quantile.survfit: the median from 1 - S, its lower limit from 1 - lower and its
+    // upper limit from 1 - upper, each whether or not the median itself exists.
+    let median_survival = km_quantile(&times, &survival, 0.5);
+    let median_ci = (
+        km_quantile(&times, &ci_lower, 0.5),
+        km_quantile(&times, &ci_upper, 0.5),
+    );
 
     Ok(KaplanMeierResult {
         group,
@@ -545,56 +688,135 @@ fn compute_kaplan_meier(
         n_obs,
         total_events,
         total_censored: n_obs - total_events,
-        conf_level,
+        conf_level: config.conf_level,
+        conf_type: config.conf_type,
+        missing: missing.clone(),
     })
 }
 
-/// Find time when survival curve crosses a given probability.
-fn find_quantile(times: &[f64], survival: &[f64], prob: f64) -> Option<f64> {
-    for i in 0..survival.len() {
-        if survival[i] <= prob {
-            return Some(times[i]);
+/// The pointwise limits of `survival:::survfit_confint` (survival 3.5.8) with `logse =
+/// TRUE` (`se_log` is the standard error of log S) and `ulimit = TRUE`, NaN where R
+/// gives NA:
+/// - log: `exp(log S -/+ z se)`, the upper capped at 1; NA at S = 0;
+/// - log-log: `exp(-exp(log(-log S) -/+ z se / log S))`; NA at S = 0 and S = 1;
+/// - plain: `S -/+ z S se` clipped to [0, 1]; NA at S = 0 (where se is infinite).
+fn km_confint(s: f64, se_log: f64, z: f64, conf_type: KmConfType) -> (f64, f64) {
+    match conf_type {
+        KmConfType::Log => {
+            if s == 0.0 {
+                return (f64::NAN, f64::NAN);
+            }
+            let w = z * se_log;
+            ((s.ln() - w).exp(), (s.ln() + w).exp().min(1.0))
+        }
+        KmConfType::LogLog => {
+            if s == 0.0 || s == 1.0 {
+                return (f64::NAN, f64::NAN);
+            }
+            let w = z * se_log / s.ln();
+            let l = (-s.ln()).ln();
+            ((-(l - w).exp()).exp(), (-(l + w).exp()).exp())
+        }
+        KmConfType::Plain => {
+            let h = se_log * s * z;
+            // R's pmax(NaN, 0) is NaN; f64::max(NaN, 0.0) would be 0.
+            if h.is_nan() {
+                return (f64::NAN, f64::NAN);
+            }
+            ((s - h).max(0.0), (s + h).min(1.0))
         }
     }
-    None
 }
 
-/// Find quantile from CI bound.
-fn find_quantile_from_bound(times: &[f64], bound: &[f64], prob: f64) -> Option<f64> {
-    for i in 0..bound.len() {
-        if bound[i] <= prob {
-            return Some(times[i]);
+/// `survival:::doquant` for one probability: the time at which `1 - curve` reaches `p`,
+/// with the curve starting at time 0 (`firstx`, R's default for a fit without a start
+/// time). NaN entries of `curve` (R NA) are skipped as R's `approx` skips them.
+fn km_quantile(times: &[f64], curve: &[f64], p: f64) -> Option<f64> {
+    let mut x = Vec::with_capacity(times.len() + 1);
+    x.push(0.0);
+    x.extend_from_slice(times);
+    let mut y = Vec::with_capacity(curve.len() + 1);
+    y.push(0.0);
+    y.extend(curve.iter().map(|c| 1.0 - c));
+    findq(&x, &y, p, f64::EPSILON.sqrt())
+}
+
+/// A port of `survival:::findq` (survival 3.5.8) for one probability `p`, with NaN for
+/// R's NA:
+///
+/// ```text
+/// if (max(y, na.rm = TRUE) < p) return(NA)
+/// xmax <- x[length(x)]
+/// drop duplicated(y) from x and y
+/// indx1 <- approx(y + tol, 1:n, p, method = "constant", f = 1)$y
+/// indx2 <- approx(y - tol, 1:n, p, method = "constant", f = 1)$y
+/// quant <- (x[indx1] + x[indx2]) / 2;  quant[p == 0] <- x[1]
+/// if (!is.na(y[n]) && abs(p - y[n]) < tol) quant <- (x[indx1] + xmax) / 2
+/// ```
+///
+/// `approx(..., method = "constant", f = 1)` at `p` is the first knot (sorted, NA
+/// removed) whose value is at least `p`, and NA outside the knots' range. So the
+/// quantile is the first time the curve reaches `p`, the midpoint of the interval over
+/// which it equals `p` (within `tol`), and, when it ends at `p`, the midpoint of that
+/// time and the last time.
+fn findq(x: &[f64], y: &[f64], p: f64, tol: f64) -> Option<f64> {
+    let max = y
+        .iter()
+        .filter(|v| !v.is_nan())
+        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    if max < p {
+        return None;
+    }
+    let xmax = *x.last()?;
+
+    // duplicated(y): keep the first occurrence of each value (NaN is one value).
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut seen_nan = false;
+    let (mut kx, mut ky) = (Vec::new(), Vec::new());
+    for (&xi, &yi) in x.iter().zip(y) {
+        let first = if yi.is_nan() {
+            !std::mem::replace(&mut seen_nan, true)
+        } else {
+            seen.insert((yi + 0.0).to_bits()) // -0.0 and 0.0 are one value
+        };
+        if first {
+            kx.push(xi);
+            ky.push(yi);
         }
     }
-    None
-}
 
-/// Compute normal quantile (inverse CDF).
-fn normal_quantile(p: f64) -> f64 {
-    // Rational approximation (Abramowitz and Stegun 26.2.23)
-    if p <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if p >= 1.0 {
-        return f64::INFINITY;
-    }
-
-    let t = if p < 0.5 {
-        (-2.0 * p.ln()).sqrt()
-    } else {
-        (-2.0 * (1.0 - p).ln()).sqrt()
+    // approx(): the knots without NA, sorted by value.
+    let mut knots: Vec<(f64, usize)> = ky
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_nan())
+        .map(|(k, &v)| (v, k))
+        .collect();
+    knots.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let index = |shift: f64| -> Option<usize> {
+        let (lo, hi) = (knots.first()?.0 + shift, knots.last()?.0 + shift);
+        if p < lo || p > hi {
+            return None;
+        }
+        let at = knots.partition_point(|&(v, _)| v + shift < p);
+        knots.get(at).map(|&(_, k)| k)
     };
+    let (i1, i2) = (index(tol), index(-tol));
 
-    let c0 = 2.515517;
-    let c1 = 0.802853;
-    let c2 = 0.010328;
-    let d1 = 1.432788;
-    let d2 = 0.189269;
-    let d3 = 0.001308;
-
-    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
-
-    if p < 0.5 { -z } else { z }
+    let mut quant = match (i1, i2) {
+        (Some(a), Some(b)) => Some((kx[a] + kx[b]) / 2.0),
+        _ => None,
+    };
+    if p == 0.0 {
+        quant = kx.first().copied();
+    }
+    if let Some(&y_last) = ky.last()
+        && !y_last.is_nan()
+        && (p - y_last).abs() < tol
+    {
+        quant = i1.map(|a| (kx[a] + xmax) / 2.0);
+    }
+    quant
 }
 
 // =============================================================================
@@ -632,6 +854,12 @@ pub struct LogRankResult {
     pub expected_per_group: Vec<f64>,
     /// Observed - Expected for each group
     pub obs_minus_exp: Vec<f64>,
+    /// Variance of O - E, G x G row-major over all groups (R `survdiff()$var`).
+    #[serde(default)]
+    pub variance: Vec<f64>,
+    /// Rows dropped because of a missing time, status or group.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for LogRankResult {
@@ -659,6 +887,20 @@ impl fmt::Display for LogRankResult {
         }
 
         writeln!(f, "{}", "-".repeat(60))?;
+        let excluded: Vec<&str> = self
+            .groups
+            .iter()
+            .zip(&self.expected_per_group)
+            .filter(|(_, e)| **e <= 0.0)
+            .map(|(g, _)| g.as_str())
+            .collect();
+        if !excluded.is_empty() {
+            writeln!(
+                f,
+                "Groups with no expected events: {} (excluded from the test, as R survdiff)",
+                excluded.join(", ")
+            )?;
+        }
         writeln!(f)?;
         writeln!(
             f,
@@ -669,225 +911,175 @@ impl fmt::Display for LogRankResult {
             self.significance.stars()
         )?;
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
-/// Perform log-rank test to compare survival curves between groups.
+/// Perform log-rank test to compare survival curves between groups, as R
+/// `survival::survdiff` (rho = 0).
+///
+/// Rows are walked in time order in blocks of exactly equal times. At each block with
+/// `d` events among `n` at risk, group g expects `d n_g / n` events, and the
+/// hypergeometric variance `d (n - d) / (n^2 (n - 1))` times `n_g (n - n_g)` (diagonal)
+/// or `-n_g n_h` is added; the block's rows then leave the risk sets. Groups with no
+/// expected events are excluded from the test, as in R, and the chi-square is
+/// `(O - E)' V^- (O - E)` over the remaining groups less one, solved with a
+/// generalized inverse when the variance is singular; `df` is their number minus one.
 ///
 /// # Arguments
 ///
 /// * `dataset` - The dataset containing survival data
-/// * `time_col` - Column name for survival/censoring time
-/// * `event_col` - Column name for event indicator (1 = event, 0 = censored)
-/// * `group_col` - Column name for group assignment
+/// * `time_col` - Column name for survival/censoring time (>= 0)
+/// * `event_col` - Status column, coded as R's `Surv()`: 0/1, 1/2 or logical
+/// * `group_col` - Column name for group assignment (levels in R `factor()` order)
+///
+/// Rows with a missing time, status or group are dropped and reported in `missing`.
 ///
 /// # Returns
 ///
-/// A `LogRankResult` containing the test statistic and p-value.
+/// A `LogRankResult` containing the test statistic and p-value. Fewer than two groups
+/// with expected events is an `InvalidSpecification` error (R reports 0 on 0 df).
 pub fn log_rank_test(
     dataset: &Dataset,
     time_col: &str,
     event_col: &str,
     group_col: &str,
 ) -> EconResult<LogRankResult> {
-    let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Extract columns
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let events = df
-        .column(event_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_col.to_string(),
-        })?;
-
-    let groups_col = df
-        .column(group_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: group_col.to_string(),
-            available: available_cols,
-        })?;
-
-    // Build observations
-    let mut all_obs: Vec<(f64, bool, String)> = Vec::new();
-    let mut group_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v,
-            _ => continue,
-        };
-        let e = match events.get(i) {
-            Some(v) if !v.is_nan() => v != 0.0,
-            _ => continue,
-        };
-        let g = match groups_col.get(i) {
-            Ok(v) => v.to_string().trim_matches('"').to_string(),
-            Err(_) => continue,
-        };
-
-        all_obs.push((t, e, g.clone()));
-        group_set.insert(g);
-    }
-
-    let groups: Vec<String> = group_set.into_iter().collect();
+    let data = extract_survival(
+        dataset.df(),
+        time_col,
+        event_col,
+        Some(group_col),
+        &[],
+        TimeRule::NonNegative,
+        "log-rank test",
+    )?;
+    let Some(factor) = data.group else {
+        return Err(EconError::Internal(
+            "log-rank test: the group column was not extracted".to_string(),
+        ));
+    };
+    let groups = factor.levels;
     let n_groups = groups.len();
-
     if n_groups < 2 {
         return Err(EconError::InvalidSpecification {
             message: "Log-rank test requires at least 2 groups".to_string(),
         });
     }
+    let codes: Vec<usize> = factor.codes.iter().map(|&c| c as usize).collect();
+    let n = data.time.len();
 
-    // Sort observations by time
-    all_obs.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // Get distinct event times
-    let event_times: Vec<f64> = {
-        let mut times_set: std::collections::BTreeSet<OrderedF64> =
-            std::collections::BTreeSet::new();
-        for (t, e, _) in &all_obs {
-            if *e {
-                times_set.insert(OrderedF64(*t));
-            }
-        }
-        times_set.into_iter().map(|of| of.0).collect()
-    };
-
-    // Count observations per group
-    let mut n_per_group: Vec<usize> = vec![0; n_groups];
-    let mut events_per_group: Vec<usize> = vec![0; n_groups];
-
-    for (_, event, group) in &all_obs {
-        let g_idx = groups.iter().position(|g| g == group).unwrap();
-        n_per_group[g_idx] += 1;
-        if *event {
-            events_per_group[g_idx] += 1;
+    let mut n_per_group = vec![0usize; n_groups];
+    let mut events_per_group = vec![0usize; n_groups];
+    for (&g, &e) in codes.iter().zip(&data.event) {
+        n_per_group[g] += 1;
+        if e {
+            events_per_group[g] += 1;
         }
     }
 
-    // Compute log-rank statistic
-    // O_j - E_j where E_j = sum over times of (d_t * n_jt / n_t)
-    let mut expected: Vec<f64> = vec![0.0; n_groups];
-    let mut variance_matrix: Array2<f64> = Array2::zeros((n_groups - 1, n_groups - 1));
+    // Rows in time order; a block is a run of exactly equal times (as survdiff).
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| data.time[a].total_cmp(&data.time[b]));
 
-    // Track at-risk counts
-    let mut at_risk_total = all_obs.len();
-    let mut at_risk_per_group: Vec<usize> = n_per_group.clone();
-    let mut obs_idx = 0;
-
-    for event_time in &event_times {
-        // Skip past observations before this event time
-        while obs_idx < all_obs.len() && all_obs[obs_idx].0 < *event_time {
-            let (_, _, ref g) = all_obs[obs_idx];
-            let g_idx = groups.iter().position(|grp| grp == g).unwrap();
-            at_risk_per_group[g_idx] = at_risk_per_group[g_idx].saturating_sub(1);
-            at_risk_total = at_risk_total.saturating_sub(1);
-            obs_idx += 1;
+    let mut expected = vec![0.0f64; n_groups];
+    let mut variance = try_zeros2(n_groups, n_groups, "log-rank variance")?;
+    let mut risk = n_per_group.clone();
+    let mut total = n;
+    let mut i = 0;
+    while i < n {
+        checkpoint()?;
+        let t = data.time[order[i]];
+        let mut j = i;
+        let mut d = 0usize;
+        while j < n && data.time[order[j]] == t {
+            if data.event[order[j]] {
+                d += 1;
+            }
+            j += 1;
         }
 
-        // Count events and risk set at this time
-        let mut d_total = 0;
-        let mut removals_per_group: Vec<usize> = vec![0; n_groups];
-
-        let mut temp_idx = obs_idx;
-        while temp_idx < all_obs.len() && (all_obs[temp_idx].0 - event_time).abs() < 1e-10 {
-            let (_, event, ref g) = all_obs[temp_idx];
-            let g_idx = groups.iter().position(|grp| grp == g).unwrap();
-            removals_per_group[g_idx] += 1;
-            if event {
-                d_total += 1;
+        if d > 0 {
+            let (dt, nt) = (d as f64, total as f64);
+            for (e, &r) in expected.iter_mut().zip(&risk) {
+                *e += dt * r as f64 / nt;
             }
-            temp_idx += 1;
-        }
-
-        if at_risk_total > 0 && d_total > 0 {
-            let n_t = at_risk_total as f64;
-
-            // Expected events: E_j = d * n_j / n
-            for j in 0..n_groups {
-                let n_j = at_risk_per_group[j] as f64;
-                expected[j] += (d_total as f64) * n_j / n_t;
-            }
-
-            // Variance calculation (for first n_groups-1 groups)
-            // Using the hypergeometric variance formula
-            if at_risk_total > 1 {
-                let factor = (d_total as f64) * (n_t - d_total as f64) / (n_t * n_t * (n_t - 1.0));
-                for j in 0..(n_groups - 1) {
-                    let n_j = at_risk_per_group[j] as f64;
-                    for k in 0..(n_groups - 1) {
-                        let n_k = at_risk_per_group[k] as f64;
-                        if j == k {
-                            variance_matrix[[j, k]] += factor * n_j * (n_t - n_j);
+            if total > 1 {
+                let factor = dt * (nt - dt) / (nt * nt * (nt - 1.0));
+                for (g, &rg) in risk.iter().enumerate() {
+                    if rg == 0 {
+                        continue; // row and column g receive only zeros
+                    }
+                    let rg = rg as f64;
+                    for (h, &rh) in risk.iter().enumerate() {
+                        variance[[g, h]] += if g == h {
+                            factor * rg * (nt - rg)
                         } else {
-                            variance_matrix[[j, k]] -= factor * n_j * n_k;
-                        }
+                            -factor * rg * rh as f64
+                        };
                     }
                 }
             }
         }
 
-        // Update risk counts
-        for j in 0..n_groups {
-            at_risk_per_group[j] = at_risk_per_group[j].saturating_sub(removals_per_group[j]);
+        // The block leaves the risk sets once, and the cursor moves past it.
+        for &row in &order[i..j] {
+            let g = codes[row];
+            risk[g] = risk[g].checked_sub(1).ok_or_else(|| {
+                EconError::Internal("log-rank test: risk set below zero".to_string())
+            })?;
         }
-        at_risk_total = at_risk_total.saturating_sub(removals_per_group.iter().sum::<usize>());
+        total = total
+            .checked_sub(j - i)
+            .ok_or_else(|| EconError::Internal("log-rank test: risk set below zero".into()))?;
+        i = j;
     }
 
-    // Compute chi-squared statistic
-    // χ² = (O - E)' V^{-1} (O - E) for first n_groups-1 groups
     let obs_minus_exp: Vec<f64> = events_per_group
         .iter()
-        .zip(expected.iter())
+        .zip(&expected)
         .map(|(&o, &e)| o as f64 - e)
         .collect();
 
-    let u: Array1<f64> = Array1::from_vec(obs_minus_exp[0..(n_groups - 1)].to_vec());
-
-    let chi_squared = if n_groups == 2 {
-        // Simple formula for 2 groups
-        let var = variance_matrix[[0, 0]];
-        if var > 0.0 { (u[0] * u[0]) / var } else { 0.0 }
-    } else {
-        // General formula using matrix inverse
-        match safe_inverse(&variance_matrix.view()) {
-            Ok((v_inv, _)) => u.dot(&v_inv.dot(&u)),
-            Err(_) => {
-                // Fallback: use sum of squared standardized differences
-                let mut chi2 = 0.0;
-                for j in 0..(n_groups - 1) {
-                    if variance_matrix[[j, j]] > 0.0 {
-                        chi2 += obs_minus_exp[j].powi(2) / variance_matrix[[j, j]];
-                    }
+    // survdiff: only groups with expected events enter the test.
+    let keep: Vec<usize> = (0..n_groups).filter(|&g| expected[g] > 0.0).collect();
+    if keep.len() < 2 {
+        let with: Vec<&str> = keep.iter().map(|&g| groups[g].as_str()).collect();
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the log-rank test needs two groups with expected events, i.e. at risk at \
+                 an event time; groups with expected events: {} (R survdiff reports a \
+                 chi-square of 0 on 0 df)",
+                if with.is_empty() {
+                    "none".to_string()
+                } else {
+                    with.join(", ")
                 }
-                chi2
-            }
-        }
-    };
+            ),
+        });
+    }
 
-    let df_val = n_groups - 1;
-    let p_value = chi_squared_p_value(chi_squared, df_val as f64);
+    // (O - E)' V^- (O - E) without the first kept group (the statistic is invariant to
+    // the group dropped).
+    let rest = &keep[1..];
+    let k = rest.len();
+    let u: Array1<f64> = rest.iter().map(|&g| obs_minus_exp[g]).collect();
+    let mut w = try_zeros2(k, k, "log-rank variance")?;
+    for (a, &g) in rest.iter().enumerate() {
+        for (b, &h) in rest.iter().enumerate() {
+            w[[a, b]] = variance[[g, h]];
+        }
+    }
+    let w_inv = match safe_inverse(&w.view()) {
+        Ok((inv, _)) => inv,
+        Err(_) => pseudoinverse(&w.view())?,
+    };
+    let chi_squared = u.dot(&w_inv.dot(&u));
+
+    let df_val = k;
+    let p_value = ChiSquared::new(df_val as f64)
+        .map_err(|e| EconError::Internal(format!("log-rank test: chi-square df: {e}")))?
+        .sf(chi_squared);
     let significance = SignificanceLevel::from_p_value(p_value);
 
     Ok(LogRankResult {
@@ -900,6 +1092,8 @@ pub fn log_rank_test(
         events_per_group,
         expected_per_group: expected,
         obs_minus_exp,
+        variance: variance.into_raw_vec_and_offset().0,
+        missing: data.missing,
     })
 }
 
@@ -990,6 +1184,9 @@ pub struct CoxResult {
     pub converged: bool,
     /// Number of iterations
     pub iterations: usize,
+    /// Rows dropped because of a missing time, status or covariate.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for CoxResult {
@@ -1054,7 +1251,7 @@ impl fmt::Display for CoxResult {
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -1093,12 +1290,6 @@ pub fn run_cox_ph(
     config: Option<CoxConfig>,
 ) -> EconResult<CoxResult> {
     let config = config.unwrap_or_default();
-    let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
 
     if x_cols.is_empty() {
         return Err(EconError::InvalidSpecification {
@@ -1106,82 +1297,26 @@ pub fn run_cox_ph(
         });
     }
 
-    // Extract data
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let events = df
-        .column(event_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_col.to_string(),
-        })?;
-
-    // Build covariate matrix
+    let data = extract_survival(
+        dataset.df(),
+        time_col,
+        event_col,
+        None,
+        x_cols,
+        TimeRule::NonNegative,
+        "Cox regression",
+    )?;
     let p = x_cols.len();
-    let mut x_data: Vec<f64> = Vec::new();
-    let mut obs_data: Vec<(f64, bool, usize)> = Vec::new(); // (time, event, row_index)
-    let mut valid_rows = 0;
-
-    // Extract covariate columns ONCE upfront (avoids repeated column lookups in inner loop)
-    let covariate_cols: Vec<&Float64Chunked> = x_cols
+    let n = data.time.len();
+    // (time, event, row index), kept rows in their original order
+    let obs_data: Vec<(f64, bool, usize)> = data
+        .time
         .iter()
-        .map(|col| {
-            df.column(col)
-                .map_err(|_| EconError::ColumnNotFound {
-                    column: col.to_string(),
-                    available: available_cols.clone(),
-                })?
-                .f64()
-                .map_err(|_| EconError::NonNumericColumn {
-                    column: col.to_string(),
-                })
-        })
-        .collect::<EconResult<Vec<_>>>()?;
+        .zip(&data.event)
+        .enumerate()
+        .map(|(i, (&t, &e))| (t, e, i))
+        .collect();
 
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v,
-            _ => continue,
-        };
-        let e = match events.get(i) {
-            Some(v) if !v.is_nan() => v != 0.0,
-            _ => continue,
-        };
-
-        // Extract covariates from pre-fetched columns
-        let mut row_valid = true;
-        let mut row_x: Vec<f64> = Vec::with_capacity(p);
-        for ca in &covariate_cols {
-            match ca.get(i) {
-                Some(v) if !v.is_nan() => row_x.push(v),
-                _ => {
-                    row_valid = false;
-                    break;
-                }
-            }
-        }
-
-        if row_valid {
-            obs_data.push((t, e, valid_rows));
-            x_data.extend(row_x);
-            valid_rows += 1;
-        }
-    }
-
-    let n = valid_rows;
     if n < p + 1 {
         return Err(EconError::InsufficientData {
             required: p + 1,
@@ -1197,8 +1332,12 @@ pub fn run_cox_ph(
         });
     }
 
-    let x = Array2::from_shape_vec((n, p), x_data)
-        .map_err(|e| EconError::Internal(format!("Matrix construction failed: {}", e)))?;
+    let mut x = try_zeros2(n, p, "Cox covariate matrix")?;
+    for (mut col, values) in x.columns_mut().into_iter().zip(&data.x) {
+        for (cell, &v) in col.iter_mut().zip(values) {
+            *cell = v;
+        }
+    }
 
     // Sort by time (descending for efficient risk set computation)
     let mut sorted_indices: Vec<usize> = (0..n).collect();
@@ -1336,6 +1475,7 @@ pub fn run_cox_ph(
         ties_method: config.ties,
         converged,
         iterations,
+        missing: data.missing,
     })
 }
 
@@ -1783,6 +1923,9 @@ pub struct AftResult {
     pub converged: bool,
     /// Number of iterations
     pub iterations: usize,
+    /// Rows dropped because of a missing time, status or covariate.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for AftResult {
@@ -1826,7 +1969,7 @@ impl fmt::Display for AftResult {
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -1856,87 +1999,22 @@ pub fn run_aft(
     config: Option<AftConfig>,
 ) -> EconResult<AftResult> {
     let config = config.unwrap_or_default();
-    let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let data = extract_survival(
+        dataset.df(),
+        time_col,
+        event_col,
+        None,
+        x_cols,
+        TimeRule::Positive,
+        "AFT model",
+    )?;
 
-    // Extract data
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let events = df
-        .column(event_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_col.to_string(),
-        })?;
-
-    // Build design matrix with intercept
+    // Design matrix with intercept, kept rows in their original order
     let p = x_cols.len() + 1; // +1 for intercept
-    let mut x_data: Vec<f64> = Vec::new();
-    let mut log_times: Vec<f64> = Vec::new();
-    let mut deltas: Vec<bool> = Vec::new();
-    let mut valid_rows = 0;
+    let n = data.time.len();
+    let log_times: Vec<f64> = data.time.iter().map(|t| t.ln()).collect();
+    let deltas = data.event;
 
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v > 0.0 => v,
-            _ => continue,
-        };
-        let e = match events.get(i) {
-            Some(v) if !v.is_nan() => v != 0.0,
-            _ => continue,
-        };
-
-        // Intercept
-        let mut row_x: Vec<f64> = vec![1.0];
-        let mut row_valid = true;
-
-        // Extract covariates
-        for col in x_cols {
-            let col_data = df
-                .column(col)
-                .map_err(|_| EconError::ColumnNotFound {
-                    column: col.to_string(),
-                    available: available_cols.clone(),
-                })?
-                .f64()
-                .map_err(|_| EconError::NonNumericColumn {
-                    column: col.to_string(),
-                })?;
-            match col_data.get(i) {
-                Some(v) if !v.is_nan() => row_x.push(v),
-                _ => {
-                    row_valid = false;
-                    break;
-                }
-            }
-        }
-
-        if row_valid {
-            x_data.extend(row_x);
-            log_times.push(t.ln());
-            deltas.push(e);
-            valid_rows += 1;
-        }
-    }
-
-    let n = valid_rows;
     if n < p + 1 {
         return Err(EconError::InsufficientData {
             required: p + 1,
@@ -1952,8 +2030,13 @@ pub fn run_aft(
         });
     }
 
-    let x = Array2::from_shape_vec((n, p), x_data)
-        .map_err(|e| EconError::Internal(format!("Matrix construction failed: {}", e)))?;
+    let mut x = try_zeros2(n, p, "AFT design matrix")?;
+    x.column_mut(0).fill(1.0);
+    for (j, values) in data.x.iter().enumerate() {
+        for (cell, &v) in x.column_mut(j + 1).iter_mut().zip(values) {
+            *cell = v;
+        }
+    }
     let y: Array1<f64> = Array1::from_vec(log_times);
 
     // Initialize parameters: OLS estimates for location, reasonable scale
@@ -2148,6 +2231,7 @@ pub fn run_aft(
         n_events,
         converged,
         iterations,
+        missing: data.missing,
     })
 }
 
@@ -2469,6 +2553,9 @@ pub struct CompetingRisksResult {
     pub n_censored: usize,
     /// Confidence level
     pub conf_level: f64,
+    /// Rows dropped because of a missing time or event code.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for CompetingRisksResult {
@@ -2500,7 +2587,7 @@ impl fmt::Display for CompetingRisksResult {
             } else {
                 let mut idx: Vec<usize> = (0..5).collect();
                 idx.push(usize::MAX);
-                idx.extend((n.saturating_sub(3))..n);
+                idx.extend((n - 3)..n); // n > 10 here
                 idx
             };
 
@@ -2522,7 +2609,7 @@ impl fmt::Display for CompetingRisksResult {
             writeln!(f)?;
         }
 
-        Ok(())
+        write_missing(f, &self.missing)
     }
 }
 
@@ -2549,55 +2636,37 @@ pub fn run_competing_risks(
     event_type_col: &str,
     conf_level: f64,
 ) -> EconResult<CompetingRisksResult> {
-    if conf_level <= 0.0 || conf_level >= 1.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Confidence level must be between 0 and 1".to_string(),
-        });
-    }
+    check_conf_level(conf_level)?;
 
     let df = dataset.df();
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    refuse_boolean_time(df, time_col)?;
+    let cols = ColumnRequest::new(df)
+        .numeric(time_col)
+        .numeric(event_type_col)
+        .na(NaPolicy::Omit)
+        .min_rows(1, "competing risks")
+        .extract()?;
+    let times = checked_times(
+        cols.numeric(time_col),
+        cols.rows(),
+        time_col,
+        TimeRule::NonNegative,
+    )?;
 
-    let times = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available_cols.clone(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?;
-
-    let event_types = df
-        .column(event_type_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: event_type_col.to_string(),
-            available: available_cols,
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: event_type_col.to_string(),
-        })?;
-
-    // Build observations
-    let mut observations: Vec<(f64, u8)> = Vec::new();
+    // Build observations; codes are whole numbers 0 (censored), 1, 2, ... up to 255
+    let mut observations: Vec<(f64, u8)> = Vec::with_capacity(times.len());
     let mut event_type_set: std::collections::BTreeSet<u8> = std::collections::BTreeSet::new();
-
-    for i in 0..df.height() {
-        let t = match times.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v,
-            _ => continue,
-        };
-        let e = match event_types.get(i) {
-            Some(v) if !v.is_nan() && v >= 0.0 => v as u8,
-            _ => continue,
-        };
-
+    for (i, (&t, &v)) in times.iter().zip(cols.numeric(event_type_col)).enumerate() {
+        if !((0.0..=255.0).contains(&v) && v.fract() == 0.0) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Column '{event_type_col}' must hold event codes 0 (censored), 1, 2, ... \
+                     (whole numbers up to 255); row {} is {v}",
+                    cols.rows()[i]
+                ),
+            });
+        }
+        let e = v as u8;
         observations.push((t, e));
         if e > 0 {
             event_type_set.insert(e);
@@ -2605,9 +2674,6 @@ pub fn run_competing_risks(
     }
 
     let n_obs = observations.len();
-    if n_obs == 0 {
-        return Err(EconError::EmptyDataset);
-    }
 
     let event_types_vec: Vec<u8> = event_type_set.into_iter().collect();
     if event_types_vec.is_empty() {
@@ -2638,7 +2704,7 @@ pub fn run_competing_risks(
     }
 
     // Compute Aalen-Johansen estimator
-    let z = normal_quantile(1.0 - (1.0 - conf_level) / 2.0);
+    let z = two_sided_z(conf_level)?;
     let mut cifs: Vec<CumulativeIncidence> = event_types_vec
         .iter()
         .map(|&et| CumulativeIncidence {
@@ -2717,6 +2783,7 @@ pub fn run_competing_risks(
         n_events_by_type,
         n_censored,
         conf_level,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -2727,6 +2794,9 @@ pub fn run_competing_risks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::MissingSummary;
+    use crate::test_support::load_case;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
     fn create_test_dataset() -> Dataset {
@@ -2848,112 +2918,364 @@ mod tests {
         // This is the Aalen-Johansen property
     }
 
-    #[test]
-    fn test_normal_quantile() {
-        // Test standard normal quantiles
-        assert!((normal_quantile(0.5) - 0.0).abs() < 0.01);
-        assert!((normal_quantile(0.975) - 1.96).abs() < 0.01);
-        assert!((normal_quantile(0.025) - (-1.96)).abs() < 0.01);
-    }
-
     // =========================================================================
     // Validation Tests: Compare against R's survival package
-    // Reference: validation/r_comparison/survival_comparison.R
+    // Kaplan-Meier and the log-rank test are R-pinned below (validation/r/cases/
+    // survival.R); the Cox, AFT and competing-risk checks are property checks,
+    // not R-pinned (validation/econometrics/survival_models.md).
     // =========================================================================
 
-    /// Create dataset matching R's test case for Kaplan-Meier
-    fn create_r_km_dataset() -> Dataset {
-        // Matches R code:
-        // time <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-        // event <- c(1, 1, 0, 1, 1, 0, 1, 0, 1, 1)
-        let df = df! {
-            "time" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
-            "event" => [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+    /// summary(fit, times = t): the row of the last time <= t, and the number at risk at t
+    /// (at the first time >= t; 0 past the end).
+    fn km_at(km: &KaplanMeierResult, t: f64) -> (usize, usize) {
+        let row = km
+            .times
+            .iter()
+            .rposition(|&x| x <= t)
+            .unwrap_or_else(|| panic!("t = {t} is before the first time"));
+        let n_risk = km
+            .times
+            .iter()
+            .position(|&x| x >= t)
+            .map_or(0, |i| km.n_at_risk[i]);
+        (row, n_risk)
+    }
+
+    /// R NA is null in the case JSON and NaN after `Check`.
+    fn opt(v: Option<f64>) -> f64 {
+        v.unwrap_or(f64::NAN)
+    }
+
+    fn cfg(conf_type: KmConfType) -> KmConfig {
+        KmConfig {
+            conf_level: 0.95,
+            conf_type,
         }
-        .unwrap();
-        Dataset::new(df).with_name("r_km_test")
+    }
+
+    /// The `.km_values` keys of survival.R: summary(fit, times) and quantile(fit, 0.5).
+    fn check_km_summary(
+        check: &mut Check<'_>,
+        km: &KaplanMeierResult,
+        prefix: &str,
+        times: &[f64],
+        n: usize,
+    ) {
+        let rows: Vec<(usize, usize)> = times.iter().map(|&t| km_at(km, t)).collect();
+        let pick = |v: &[f64]| rows.iter().map(|&(r, _)| v[r]).collect::<Vec<f64>>();
+        let n_risk: Vec<f64> = rows.iter().map(|&(_, k)| k as f64).collect();
+        check
+            .vector(&format!("{prefix}_surv"), &pick(&km.survival), Tol::coef(n))
+            .vector(
+                &format!("{prefix}_std_err"),
+                &pick(&km.std_errors),
+                Tol::se(n),
+            )
+            .vector(
+                &format!("{prefix}_lower"),
+                &pick(&km.ci_lower),
+                Tol::stat(n),
+            )
+            .vector(
+                &format!("{prefix}_upper"),
+                &pick(&km.ci_upper),
+                Tol::stat(n),
+            )
+            .vector(&format!("{prefix}_n_risk"), &n_risk, Tol::exact())
+            .scalar(
+                &format!("{prefix}_median"),
+                opt(km.median_survival),
+                Tol::exact(),
+            )
+            .scalar(
+                &format!("{prefix}_median_lower"),
+                opt(km.median_ci.0),
+                Tol::exact(),
+            )
+            .scalar(
+                &format!("{prefix}_median_upper"),
+                opt(km.median_ci.1),
+                Tol::exact(),
+            );
     }
 
     #[test]
-    fn test_validate_km_against_r() {
-        // R's survfit() results for this data (conf.type = "log-log"):
-        // Time  N.risk  N.event  Survival   SE
-        //   1      10        1    0.9000   0.0949
-        //   2       9        1    0.8000   0.1265
-        //   4       7        1    0.6857   0.1533
-        //   5       6        1    0.5714   0.1664
-        //   7       4        1    0.4286   0.1813
-        //   9       2        1    0.2143   0.1712
-        //  10       1        1    0.0000   NA
-        let dataset = create_r_km_dataset();
-        let results = run_kaplan_meier(&dataset, "time", "event", None, 0.95).unwrap();
-
-        assert_eq!(results.len(), 1);
-        let km = &results[0];
-
-        // Validate survival estimates at key times
-        // Allow tolerance of 0.001 as specified in validation doc
-        let r_survival = [0.9, 0.8, 0.6857, 0.5714, 0.4286, 0.2143, 0.0];
-        let r_times = [1.0, 2.0, 4.0, 5.0, 7.0, 9.0, 10.0];
-
-        for (r_time, r_surv) in r_times.iter().zip(r_survival.iter()) {
-            // Find the corresponding survival estimate
-            if let Some(idx) = km.times.iter().position(|t| (t - r_time).abs() < 0.01) {
-                assert!(
-                    (km.survival[idx] - r_surv).abs() < 0.01,
-                    "Survival at t={} should be ~{}, got {}",
-                    r_time,
-                    r_surv,
-                    km.survival[idx]
-                );
-            }
+    fn test_validate_km_lung() {
+        let (case, ds) = load_case("surv_km_lung");
+        let n = ds.nrows();
+        let times = [5.0, 11.0, 100.0, 310.0, 500.0, 765.0];
+        let mut check = Check::new(&case);
+        for (conf_type, tag) in [
+            (KmConfType::Log, "log"),
+            (KmConfType::LogLog, "loglog"),
+            (KmConfType::Plain, "plain"),
+        ] {
+            let km =
+                &run_kaplan_meier_with(&ds, "time", "status", None, &cfg(conf_type)).unwrap()[0];
+            assert_eq!(km.conf_type, conf_type);
+            check_km_summary(&mut check, km, tag, &times, n);
         }
 
-        // Median survival should be ~5-6 (between t=5 and t=7 where S crosses 0.5)
-        if let Some(med) = km.median_survival {
-            assert!(
-                (4.0..=8.0).contains(&med),
-                "Median survival should be ~5-6, got {}",
-                med
+        // The default path is R's default conf.type, over the whole curve.
+        let km = &run_kaplan_meier(&ds, "time", "status", None, 0.95).unwrap()[0];
+        assert_eq!(km.conf_type, KmConfType::Log);
+        let se_log: Vec<f64> = km
+            .std_errors
+            .iter()
+            .zip(&km.survival)
+            .map(|(se, s)| se / s)
+            .collect();
+        check
+            .vector("curve_time", &km.times, Tol::exact())
+            .vector("curve_surv", &km.survival, Tol::coef(n))
+            .vector("curve_std_err_log", &se_log, Tol::se(n))
+            .vector("curve_lower", &km.ci_lower, Tol::stat(n))
+            .vector("curve_upper", &km.ci_upper, Tol::stat(n))
+            .scalar("n", km.n_obs as f64, Tol::exact())
+            .scalar("n_event", km.total_events as f64, Tol::exact())
+            .scalar("unique_times", km.times.len() as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_km_lung_by_sex() {
+        let (case, ds) = load_case("surv_km_lung_by_sex");
+        let km =
+            run_kaplan_meier_with(&ds, "time", "status", Some("sex"), &cfg(KmConfType::LogLog))
+                .unwrap();
+        assert_eq!(km.len(), 2);
+        let mut check = Check::new(&case);
+        for (k, label) in km.iter().zip(["1", "2"]) {
+            assert_eq!(k.group.as_deref(), Some(label));
+            check_km_summary(
+                &mut check,
+                k,
+                &format!("sex{label}"),
+                &[100.0, 300.0, 500.0],
+                k.n_obs,
             );
         }
-    }
-
-    /// Create dataset matching R's test case for Log-Rank
-    fn create_r_logrank_dataset() -> Dataset {
-        // Matches R code:
-        // time <- c(1, 2, 3, 5, 6, 7, 2, 3, 4, 5, 8, 9)
-        // event <- c(1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1)
-        // group <- c(rep(0, 6), rep(1, 6))
-        let df = df! {
-            "time" => [1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 2.0, 3.0, 4.0, 5.0, 8.0, 9.0],
-            "event" => [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],
-            "group" => ["0", "0", "0", "0", "0", "0", "1", "1", "1", "1", "1", "1"],
-        }
-        .unwrap();
-        Dataset::new(df).with_name("r_logrank_test")
+        check.finish();
     }
 
     #[test]
-    fn test_validate_logrank_against_r() {
-        // R's survdiff() results:
-        // Chi-squared: typically 0.5-2.0 for this data
-        // df: 1
-        // p-value: > 0.05 (groups not significantly different)
-        let dataset = create_r_logrank_dataset();
-        let result = log_rank_test(&dataset, "time", "event", "group").unwrap();
+    fn test_validate_km_small() {
+        let (case, ds) = load_case("surv_km_small");
+        let n = ds.nrows();
+        let mut check = Check::new(&case);
+        for (conf_type, tag) in [(KmConfType::Log, "log"), (KmConfType::LogLog, "loglog")] {
+            let km =
+                &run_kaplan_meier_with(&ds, "time", "event", None, &cfg(conf_type)).unwrap()[0];
+            check
+                .vector(&format!("{tag}_time"), &km.times, Tol::exact())
+                .vector(&format!("{tag}_surv"), &km.survival, Tol::coef(n))
+                .vector(&format!("{tag}_std_err_surv"), &km.std_errors, Tol::se(n))
+                .vector(&format!("{tag}_lower"), &km.ci_lower, Tol::stat(n))
+                .vector(&format!("{tag}_upper"), &km.ci_upper, Tol::stat(n))
+                .scalar(
+                    &format!("{tag}_median"),
+                    opt(km.median_survival),
+                    Tol::exact(),
+                )
+                .scalar(
+                    &format!("{tag}_median_lower"),
+                    opt(km.median_ci.0),
+                    Tol::exact(),
+                )
+                .scalar(
+                    &format!("{tag}_median_upper"),
+                    opt(km.median_ci.1),
+                    Tol::exact(),
+                );
+            // S = 0 at the last time: SE and both limits are NA in R.
+            assert_eq!(km.survival[9], 0.0, "{tag}");
+            assert!(
+                km.std_errors[9].is_nan() && km.ci_lower[9].is_nan() && km.ci_upper[9].is_nan(),
+                "{tag}"
+            );
+            assert_eq!(km.median_ci.1, None, "{tag}");
+        }
+        check.finish();
+    }
 
-        assert_eq!(result.df, 1, "Log-rank df should be 1");
-        assert!(
-            result.chi_squared >= 0.0,
-            "Chi-squared must be non-negative"
+    #[test]
+    fn test_validate_km_median_rules() {
+        let (case, ds) = load_case("surv_km_median_rules");
+        let mut check = Check::new(&case);
+        for (conf_type, tag) in [
+            (KmConfType::Log, "log"),
+            (KmConfType::LogLog, "loglog"),
+            (KmConfType::Plain, "plain"),
+        ] {
+            let km = run_kaplan_meier_with(&ds, "time", "event", Some("group"), &cfg(conf_type))
+                .unwrap();
+            let labels: Vec<&str> = km.iter().filter_map(|k| k.group.as_deref()).collect();
+            assert_eq!(labels, ["last", "mid", "never"]);
+            for k in &km {
+                let (g, n) = (k.group.as_deref().unwrap_or(""), k.n_obs);
+                if conf_type == KmConfType::Log {
+                    check
+                        .vector(&format!("{g}_time"), &k.times, Tol::exact())
+                        .vector(&format!("{g}_surv"), &k.survival, Tol::coef(n))
+                        .vector(&format!("{g}_n_risk"), &as_f64(&k.n_at_risk), Tol::exact());
+                }
+                check
+                    .vector(&format!("{g}_{tag}_lower"), &k.ci_lower, Tol::stat(n))
+                    .vector(&format!("{g}_{tag}_upper"), &k.ci_upper, Tol::stat(n))
+                    .scalar(
+                        &format!("{g}_{tag}_median"),
+                        opt(k.median_survival),
+                        Tol::exact(),
+                    )
+                    .scalar(
+                        &format!("{g}_{tag}_median_lower"),
+                        opt(k.median_ci.0),
+                        Tol::exact(),
+                    )
+                    .scalar(
+                        &format!("{g}_{tag}_median_upper"),
+                        opt(k.median_ci.1),
+                        Tol::exact(),
+                    );
+            }
+            if conf_type == KmConfType::Log {
+                let strata_n: Vec<f64> = km.iter().map(|k| k.n_obs as f64).collect();
+                let strata_median: Vec<f64> = km.iter().map(|k| opt(k.median_survival)).collect();
+                check.vector("strata_n", &strata_n, Tol::exact()).vector(
+                    "strata_median",
+                    &strata_median,
+                    Tol::exact(),
+                );
+            }
+            if conf_type == KmConfType::LogLog {
+                // A lower limit although the median is never reached.
+                let never = &km[2];
+                assert_eq!(never.median_survival, None);
+                assert_eq!(never.median_ci, (Some(1.0), None));
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_km_conf_level_and_type_validation() {
+        let (case, ds) = load_case("surv_km_small");
+        for conf_level in [1.0, 0.0, f64::NAN] {
+            let config = KmConfig {
+                conf_level,
+                conf_type: KmConfType::Log,
+            };
+            invalid_spec(
+                run_kaplan_meier_with(&ds, "time", "event", None, &config),
+                "conf_level",
+            );
+        }
+        let km95 =
+            &run_kaplan_meier_with(&ds, "time", "event", None, &cfg(KmConfType::Log)).unwrap()[0];
+        let config90 = KmConfig {
+            conf_level: 0.9,
+            conf_type: KmConfType::Log,
+        };
+        let km90 = &run_kaplan_meier_with(&ds, "time", "event", None, &config90).unwrap()[0];
+        assert_eq!(km90.conf_level, 0.9);
+        for i in 0..km95.times.len() {
+            let (l95, u95, l90, u90) = (
+                km95.ci_lower[i],
+                km95.ci_upper[i],
+                km90.ci_lower[i],
+                km90.ci_upper[i],
+            );
+            if l95.is_finite() && l90.is_finite() {
+                assert!(l90 >= l95, "t[{i}]: lower {l90} < {l95}");
+            }
+            if u95.is_finite() && u90.is_finite() {
+                assert!(u90 <= u95, "t[{i}]: upper {u90} > {u95}");
+            }
+        }
+        // The curve itself does not depend on the confidence level.
+        Check::new(&case)
+            .vector("log_time", &km90.times, Tol::exact())
+            .vector("log_surv", &km90.survival, Tol::coef(km90.n_obs))
+            .finish();
+    }
+
+    /// Counts as f64, for `Check::vector`.
+    fn as_f64(v: &[usize]) -> Vec<f64> {
+        v.iter().map(|&x| x as f64).collect()
+    }
+
+    #[test]
+    fn test_validate_logrank_lung() {
+        let (case, ds) = load_case("surv_logrank_lung");
+        let n = ds.nrows();
+        let sex = log_rank_test(&ds, "time", "status", "sex").unwrap();
+        let ecog = log_rank_test(&ds, "time", "status", "ph.ecog").unwrap();
+        Check::new(&case)
+            .scalar("sex_chisq", sex.chi_squared, Tol::stat(n))
+            .scalar("sex_df", sex.df as f64, Tol::exact())
+            .scalar("sex_p", sex.p_value, Tol::p_value(n))
+            .vector("sex_obs", &as_f64(&sex.events_per_group), Tol::exact())
+            .vector("sex_exp", &sex.expected_per_group, Tol::stat(n))
+            .vector("sex_n", &as_f64(&sex.n_per_group), Tol::exact())
+            .vector("sex_var", &sex.variance, Tol::stat(n))
+            .scalar("ecog_chisq", ecog.chi_squared, Tol::stat(n))
+            .scalar("ecog_df", ecog.df as f64, Tol::exact())
+            .scalar("ecog_p", ecog.p_value, Tol::p_value(n))
+            .vector("ecog_obs", &as_f64(&ecog.events_per_group), Tol::exact())
+            .vector("ecog_exp", &ecog.expected_per_group, Tol::stat(n))
+            .vector("ecog_n", &as_f64(&ecog.n_per_group), Tol::exact())
+            .scalar(
+                "ecog_n_used",
+                ecog.n_per_group.iter().sum::<usize>() as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert_eq!(sex.groups, ["1", "2"]);
+        // sum(O) = sum(E): every event is counted once against the right risk sets.
+        assert!(sex.obs_minus_exp.iter().sum::<f64>().abs() < 1e-9);
+        assert!(ecog.obs_minus_exp.iter().sum::<f64>().abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_validate_logrank_small() {
+        let (case, ds) = load_case("surv_logrank_small");
+        let n = ds.nrows();
+        let r = log_rank_test(&ds, "time", "event", "group").unwrap();
+        Check::new(&case)
+            .scalar("chisq", r.chi_squared, Tol::stat(n))
+            .scalar("p", r.p_value, Tol::p_value(n))
+            .vector("obs", &as_f64(&r.events_per_group), Tol::exact())
+            .vector("exp", &r.expected_per_group, Tol::stat(n))
+            .finish();
+        assert_eq!(r.groups, ["0", "1"]);
+        assert_eq!(r.df, 1);
+    }
+
+    #[test]
+    fn test_validate_logrank_zero_expected_group() {
+        let (case, ds) = load_case("surv_km_median_rules");
+        let n = ds.nrows();
+        // "never" leaves before the first event: expected 0, excluded from the test (df 1).
+        let r = log_rank_test(&ds, "time_early", "event_early", "group").unwrap();
+        Check::new(&case)
+            .scalar("lr_zero_chisq", r.chi_squared, Tol::stat(n))
+            .scalar("lr_subset_chisq", r.chi_squared, Tol::stat(n))
+            .scalar("lr_zero_df", r.df as f64, Tol::exact())
+            .scalar("lr_zero_p", r.p_value, Tol::p_value(n))
+            .vector("lr_zero_exp", &r.expected_per_group, Tol::stat(n))
+            .vector("lr_zero_obs", &as_f64(&r.events_per_group), Tol::exact())
+            .finish();
+        assert_eq!(r.groups, ["last", "mid", "never"]);
+        let text = r.to_string();
+        assert!(text.contains("no expected events: never"), "{text}");
+
+        // Without "mid" (missing labels dropped) only "last" has expected events: R reports
+        // chi-square 0 on 0 df (lr_one_group_chisq); p2a refuses.
+        let m = invalid_spec(
+            log_rank_test(&ds, "time_early", "event_early", "group_no_mid"),
+            "one group with expected events",
         );
-        // p-value should be reasonable (not extremely small for this data)
-        assert!(
-            result.p_value > 0.001,
-            "p-value should be > 0.001, got {}",
-            result.p_value
-        );
+        assert!(m.contains("two groups"), "{m}");
     }
 
     /// Create dataset for Cox PH with ties
@@ -3119,6 +3441,345 @@ mod tests {
             "Sum of CIFs at final time should be <= 1, got {}",
             final_cif_sum
         );
+    }
+
+    // =========================================================================
+    // R-pinned: column extraction, missing values and Surv() status coding
+    // (cases in validation/r/cases/survival.R; registry validation/methods/survival.json)
+    // =========================================================================
+
+    /// Copy of `ds` with `cols` cast to Float64 (identical values).
+    fn cast_f64(ds: &Dataset, cols: &[&str]) -> Dataset {
+        let mut df = ds.df().clone();
+        for &c in cols {
+            let cast = df.column(c).unwrap().cast(&DataType::Float64).unwrap();
+            df.with_column(cast).unwrap();
+        }
+        Dataset::new(df)
+    }
+
+    /// Bit patterns, so that equality also holds for NaN (the AFT optimiser can diverge:
+    /// ECON-47, Tier 3).
+    fn bits(v: &[f64]) -> Vec<u64> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    /// The values of the Int64 column `from`, which has no nulls.
+    fn i64_values(ds: &Dataset, from: &str) -> Vec<i64> {
+        ds.df()
+            .column(from)
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .map(|v| v.expect("no nulls in the source column"))
+            .collect()
+    }
+
+    /// Copy of `ds` with `series` added (or replaced, by name).
+    fn with_series(ds: &Dataset, series: Series) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(series).unwrap();
+        Dataset::new(df)
+    }
+
+    /// Copy of `ds` with a new column `name` computed row by row from the Int64 column `from`.
+    fn derive_i64(ds: &Dataset, from: &str, name: &str, f: impl Fn(i64) -> i64) -> Dataset {
+        let v: Vec<i64> = i64_values(ds, from).into_iter().map(f).collect();
+        with_series(ds, Series::new(name.into(), v))
+    }
+
+    /// Same, Float64, with the 0-based row index.
+    fn derive_f64(ds: &Dataset, from: &str, name: &str, f: impl Fn(usize, i64) -> f64) -> Dataset {
+        let v: Vec<f64> = i64_values(ds, from)
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| f(i, x))
+            .collect();
+        with_series(ds, Series::new(name.into(), v))
+    }
+
+    /// Same, Boolean.
+    fn derive_bool(ds: &Dataset, from: &str, name: &str, f: impl Fn(i64) -> bool) -> Dataset {
+        let v: Vec<bool> = i64_values(ds, from).into_iter().map(f).collect();
+        with_series(ds, Series::new(name.into(), v))
+    }
+
+    /// The message of an `InvalidSpecification`, or a panic naming what came instead.
+    fn invalid_spec<T: std::fmt::Debug>(r: EconResult<T>, what: &str) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("{what}: expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_na_survival_int64_columns() {
+        let (case, ds) = load_case("surv_km_lung");
+        for c in ["time", "status", "age", "sex"] {
+            assert_eq!(ds.df().column(c).unwrap().dtype(), &DataType::Int64, "{c}");
+        }
+        let f = cast_f64(&ds, &["time", "status", "age", "sex"]);
+
+        let km = run_kaplan_meier(&ds, "time", "status", Some("sex"), 0.95).unwrap();
+        let km_f = run_kaplan_meier(&f, "time", "status", Some("sex"), 0.95).unwrap();
+        assert_eq!(km.len(), 2);
+        assert_eq!(km[0].group.as_deref(), Some("1"));
+        assert_eq!(km[1].group.as_deref(), Some("2"));
+        assert_eq!(km_f.len(), 2);
+        for (a, b) in km.iter().zip(&km_f) {
+            assert_eq!(a.group, b.group);
+            assert_eq!(bits(&a.times), bits(&b.times));
+            assert_eq!(bits(&a.survival), bits(&b.survival));
+            assert_eq!(a.n_at_risk, b.n_at_risk);
+        }
+
+        let lr = log_rank_test(&ds, "time", "status", "sex").unwrap();
+        let lr_f = log_rank_test(&f, "time", "status", "sex").unwrap();
+        assert_eq!(bits(&[lr.chi_squared]), bits(&[lr_f.chi_squared]));
+        let cox = run_cox_ph(&ds, "time", "status", &["age", "sex"], None).unwrap();
+        let cox_f = run_cox_ph(&f, "time", "status", &["age", "sex"], None).unwrap();
+        assert_eq!(bits(&cox.coefficients), bits(&cox_f.coefficients));
+        let aft = run_aft(&ds, "time", "status", &["age", "sex"], None).unwrap();
+        let aft_f = run_aft(&f, "time", "status", &["age", "sex"], None).unwrap();
+        assert_eq!(bits(&aft.coefficients), bits(&aft_f.coefficients));
+
+        Check::new(&case)
+            .scalar(
+                "n",
+                km.iter().map(|k| k.n_obs).sum::<usize>() as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "n_event",
+                km.iter().map(|k| k.total_events).sum::<usize>() as f64,
+                Tol::exact(),
+            )
+            .finish();
+
+        // Competing risks on Int64 time and event columns.
+        let (_, small) = load_case("surv_km_small");
+        assert_eq!(
+            small.df().column("event").unwrap().dtype(),
+            &DataType::Int64
+        );
+        let cr = run_competing_risks(&small, "time", "event", 0.95).unwrap();
+        assert_eq!(cr.event_types, vec![1]);
+        assert_eq!(cr.n_obs, 10);
+    }
+
+    #[test]
+    fn test_validate_surv_status_coding_lung() {
+        let (case, ds) = load_case("surv_km_lung");
+        let ds = derive_i64(&ds, "status", "status01", |s| s - 1);
+        let ds = derive_bool(&ds, "status", "dead", |s| s == 2);
+
+        let mut check = Check::new(&case);
+        let (mut surv, mut chisq, mut cox, mut aft) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for status in ["status", "status01", "dead"] {
+            let km = &run_kaplan_meier(&ds, "time", status, None, 0.95).unwrap()[0];
+            check
+                .scalar("n_event", km.total_events as f64, Tol::exact())
+                .scalar("n", km.n_obs as f64, Tol::exact());
+            surv.push(bits(&km.survival));
+            chisq.push(bits(&[log_rank_test(&ds, "time", status, "sex")
+                .unwrap()
+                .chi_squared]));
+            cox.push(bits(
+                &run_cox_ph(&ds, "time", status, &["age", "sex"], None)
+                    .unwrap()
+                    .coefficients,
+            ));
+            aft.push(bits(
+                &run_aft(&ds, "time", status, &["age", "sex"], None)
+                    .unwrap()
+                    .coefficients,
+            ));
+        }
+        check.finish();
+        for (what, v) in [
+            ("KM", &surv),
+            ("log-rank", &chisq),
+            ("Cox", &cox),
+            ("AFT", &aft),
+        ] {
+            assert_eq!(v[0], v[1], "{what}: 1/2 vs 0/1 coding");
+            assert_eq!(v[0], v[2], "{what}: 1/2 vs logical coding");
+        }
+    }
+
+    #[test]
+    fn test_validate_surv_status_invalid_codes_are_errors() {
+        let (case, ds) = load_case("surv_km_lung");
+        // R codes these as NA with a warning ("Invalid status value, converted to NA").
+        let ds = derive_i64(&ds, "status", "status23", |s| s + 1);
+        let ds = derive_f64(&ds, "status", "status012", |i, s| {
+            if i == 0 { 0.0 } else { s as f64 }
+        });
+        let ds = derive_f64(&ds, "status", "status_half", |i, s| {
+            if i == 0 { 1.5 } else { s as f64 }
+        });
+        let mut check = Check::new(&case);
+        for status in ["status23", "status012", "status_half"] {
+            let messages = [
+                invalid_spec(run_kaplan_meier(&ds, "time", status, None, 0.95), "KM"),
+                invalid_spec(log_rank_test(&ds, "time", status, "sex"), "log-rank"),
+                invalid_spec(run_cox_ph(&ds, "time", status, &["age"], None), "Cox"),
+                invalid_spec(run_aft(&ds, "time", status, &["age"], None), "AFT"),
+            ];
+            for m in &messages {
+                for part in [status, "0/1", "1/2", "Surv"] {
+                    assert!(m.contains(part), "{status}: {part:?} not in {m}");
+                }
+                if status == "status23" {
+                    assert!(m.contains('3'), "{m}");
+                }
+            }
+        }
+        // The valid 1/2 column of the same dataset still gives R's counts.
+        let km = &run_kaplan_meier(&ds, "time", "status", None, 0.95).unwrap()[0];
+        check
+            .scalar("n_event", km.total_events as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_na_survival_missing_rows_are_dropped_and_reported() {
+        let (case, ds) = load_case("surv_logrank_lung");
+        let ecog = log_rank_test(&ds, "time", "status", "ph.ecog").unwrap();
+        assert_eq!(ecog.groups, ["0", "1", "2", "3"]);
+        assert_eq!(
+            ecog.missing,
+            MissingSummary {
+                n_total: 228,
+                n_used: 227,
+                n_dropped: 1,
+                by_column: vec![("ph.ecog".to_string(), 1)],
+            }
+        );
+        Check::new(&case)
+            .vector("ecog_n", &as_f64(&ecog.n_per_group), Tol::exact())
+            .vector("ecog_obs", &as_f64(&ecog.events_per_group), Tol::exact())
+            .scalar(
+                "ecog_n_used",
+                ecog.n_per_group.iter().sum::<usize>() as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert!(
+            ecog.to_string().trim_end().ends_with(
+                "Missing values: 1 of 228 rows dropped because of missing values (ph.ecog: 1)"
+            ),
+            "{ecog}"
+        );
+
+        let km = run_kaplan_meier(&ds, "time", "status", Some("ph.ecog"), 0.95).unwrap();
+        assert_eq!(km.len(), 4);
+        for k in &km {
+            assert_eq!(k.missing.n_dropped, 1, "{:?}", k.group);
+        }
+
+        // R coxph: n = 227, nevent = 164 (the row with a missing ph.karno is dropped).
+        let status = ds.df().column("status").unwrap().i64().unwrap().clone();
+        let karno = ds.df().column("ph.karno").unwrap();
+        let events_with_karno = (0..ds.nrows())
+            .filter(|&i| status.get(i) == Some(2) && !karno.get(i).unwrap().is_null())
+            .count();
+        let cox = run_cox_ph(&ds, "time", "status", &["age", "sex", "ph.karno"], None).unwrap();
+        assert_eq!(cox.n_obs, 227);
+        assert_eq!(cox.n_events, events_with_karno);
+        assert_eq!(cox.missing.by_column, vec![("ph.karno".to_string(), 1)]);
+        assert!(
+            cox.to_string().trim_end().ends_with(
+                "Missing values: 1 of 228 rows dropped because of missing values (ph.karno: 1)"
+            ),
+            "{cox}"
+        );
+        // R survreg: n = 227.
+        let aft = run_aft(&ds, "time", "status", &["age", "ph.karno"], None).unwrap();
+        assert_eq!(aft.n_obs, 227);
+        assert_eq!(aft.missing.n_dropped, 1);
+    }
+
+    #[test]
+    fn test_validate_na_survival_bad_columns_name_the_column() {
+        let (case, ds) = load_case("surv_logrank_small");
+        assert_eq!(ds.df().column("time").unwrap().dtype(), &DataType::Int64);
+        // The loader reads the quoted "0"/"1" labels as Int64; a text copy of them:
+        let labels: Vec<String> = i64_values(&ds, "group")
+            .into_iter()
+            .map(|g| format!("arm{g}"))
+            .collect();
+        let ds = with_series(&ds, Series::new("arm".into(), labels));
+
+        match run_kaplan_meier(&ds, "tme", "event", None, 0.95) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "tme"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
+        match run_kaplan_meier(&ds, "arm", "event", None, 0.95) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "arm"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        match log_rank_test(&ds, "time", "arm", "group") {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "arm"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        // A text group column is a factor: the same test as on the Int64 labels.
+        let by_text = log_rank_test(&ds, "time", "event", "arm").unwrap();
+        let by_int = log_rank_test(&ds, "time", "event", "group").unwrap();
+        assert_eq!(by_text.groups, ["arm0", "arm1"]);
+        assert_eq!(bits(&[by_text.chi_squared]), bits(&[by_int.chi_squared]));
+        let ds = derive_bool(&ds, "time", "late", |t| t > 4);
+        match run_kaplan_meier(&ds, "late", "event", None, 0.95) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "late"),
+            other => panic!("expected NonNumericColumn for a Boolean time, got {other:?}"),
+        }
+
+        let ds = derive_i64(&ds, "time", "shifted", |t| t - 2);
+        let negative = [
+            invalid_spec(run_kaplan_meier(&ds, "shifted", "event", None, 0.95), "KM"),
+            invalid_spec(log_rank_test(&ds, "shifted", "event", "group"), "log-rank"),
+            invalid_spec(run_cox_ph(&ds, "shifted", "event", &["time"], None), "Cox"),
+            invalid_spec(run_competing_risks(&ds, "shifted", "event", 0.95), "CR"),
+        ];
+        for m in &negative {
+            assert!(m.contains("'shifted'") && m.contains("negative"), "{m}");
+        }
+
+        let ds = derive_i64(&ds, "time", "t0", |t| t - 1);
+        let km = run_kaplan_meier(&ds, "t0", "event", None, 0.95).unwrap();
+        let m = invalid_spec(run_aft(&ds, "t0", "event", &["time"], None), "AFT");
+        assert!(m.contains("'t0'") && m.contains("positive"), "{m}");
+
+        let ds = derive_f64(&ds, "event", "code_half", |i, e| {
+            if i == 0 { 1.5 } else { e as f64 }
+        });
+        let ds = derive_f64(&ds, "event", "code_neg", |i, e| {
+            if i == 0 { -1.0 } else { e as f64 }
+        });
+        for code in ["code_half", "code_neg"] {
+            let m = invalid_spec(run_competing_risks(&ds, "time", code, 0.95), code);
+            assert!(m.contains("whole number") && m.contains(code), "{m}");
+        }
+
+        // conf_level NaN: the old `<= 0.0 || >= 1.0` check let it through.
+        invalid_spec(
+            run_kaplan_meier(&ds, "time", "event", None, f64::NAN),
+            "KM NaN",
+        );
+        invalid_spec(
+            run_competing_risks(&ds, "time", "event", f64::NAN),
+            "CR NaN",
+        );
+
+        // The valid columns still give R's counts: 12 rows, events per group (survdiff obs).
+        assert_eq!(km[0].n_obs, 12);
+        let by_group = run_kaplan_meier(&ds, "time", "event", Some("group"), 0.95).unwrap();
+        let events: Vec<f64> = by_group.iter().map(|k| k.total_events as f64).collect();
+        Check::new(&case)
+            .vector("obs", &events, Tol::exact())
+            .finish();
     }
 
     #[test]

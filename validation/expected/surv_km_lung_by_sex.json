@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "surv_km_lung_by_sex",
+  "area": "econometrics/survival",
+  "method": "Kaplan-Meier by group (sex), log-log CI and median CI",
+  "reference": "survival::survfit(Surv(time, status) ~ sex, conf.type = 'log-log')",
+  "call": "survfit(Surv(time, status) ~ sex, data = lung, conf.type = 'log-log')",
+  "dataset": "validation/datasets/generated/lung.csv",
+  "datasets": ["validation/datasets/generated/lung.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "survival": "3.5.8"
+  },
+  "values": {
+    "sex1_surv": [0.82608695652173947, 0.4410888930886176, 0.22321168933434127],
+    "sex1_std_err": [0.032265575587881824, 0.043938587013012086, 0.040167296252285024],
+    "sex1_lower": [0.75185172298593084, 0.35380789573243415, 0.14997886219876438],
+    "sex1_upper": [0.87987054312855528, 0.52476305065561879, 0.30564145134198589],
+    "sex1_n_risk": [114, 49, 20],
+    "sex1_median": 270,
+    "sex1_median_lower": 210,
+    "sex1_median_upper": 306,
+    "sex2_surv": [0.92208835341365458, 0.67420258604892414, 0.41104613510668786],
+    "sex2_std_err": [0.028279413652742329, 0.052288081852221654, 0.062584368916401553],
+    "sex2_lower": [0.84350520559535402, 0.5600689403056085, 0.28832787501480128],
+    "sex2_upper": [0.96207773766558902, 0.76483560623934033, 0.52964266389804138],
+    "sex2_n_risk": [82, 43, 21],
+    "sex2_median": 426,
+    "sex2_median_lower": 345,
+    "sex2_median_upper": 524
+  }
+}

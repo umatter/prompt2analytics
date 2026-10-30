@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "surv_logrank_small",
+  "area": "econometrics/survival",
+  "method": "Log-rank test, 12 rows with ties and 0/1 status",
+  "reference": "survival::survdiff",
+  "call": "survdiff(Surv(time, event) ~ group)",
+  "dataset": "validation/datasets/generated/logrank_small.csv",
+  "datasets": ["validation/datasets/generated/logrank_small.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "survival": "3.5.8"
+  },
+  "values": {
+    "chisq": 0.30529764380929009,
+    "p": 0.58058017726554001,
+    "obs": [4, 5],
+    "exp": [3.2821067821067822, 5.7178932178932174]
+  }
+}

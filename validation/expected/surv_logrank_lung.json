@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "surv_logrank_lung",
+  "area": "econometrics/survival",
+  "method": "Log-rank test, lung by sex and by ph.ecog (one NA group label)",
+  "reference": "survival::survdiff(Surv(time, status) ~ group) (rho = 0); rows with NA group dropped",
+  "call": "survdiff(Surv(time, status) ~ sex, data = lung); survdiff(Surv(time, status) ~ ph.ecog, data = lung)",
+  "dataset": "validation/datasets/generated/lung.csv",
+  "datasets": ["validation/datasets/generated/lung.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "survival": "3.5.8"
+  },
+  "values": {
+    "sex_chisq": 10.326741954885632,
+    "sex_df": 1,
+    "sex_p": 0.0013111645203554882,
+    "sex_obs": [112, 53],
+    "sex_exp": [91.581739029572802, 73.418260970427212],
+    "sex_n": [138, 90],
+    "sex_var": [40.37143397964261, -40.371433979642632, -40.371433979642632, 40.371433979642653],
+    "ecog_chisq": 21.962131682476006,
+    "ecog_df": 3,
+    "ecog_p": 6.6425353558001711e-05,
+    "ecog_obs": [37, 82, 44, 1],
+    "ecog_exp": [54.152697018922929, 83.527564575081882, 26.147353065330211, 0.1723853406649615],
+    "ecog_n": [63, 113, 50, 1],
+    "ecog_n_used": 227
+  }
+}
