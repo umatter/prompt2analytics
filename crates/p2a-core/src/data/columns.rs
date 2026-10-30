@@ -668,7 +668,8 @@ impl Factor {
 
     /// Re-order levels to `order` (every observed label must appear in `order`; labels in
     /// `order` that are never observed keep a count of 0). The error names the first
-    /// unknown label, or a label `order` repeats. For a numeric factor a label that is never
+    /// unknown label with the order's length and at most its first five labels, or a label
+    /// `order` repeats. For a numeric factor a label that is never
     /// observed gets its parsed value as its numeric level; one that does not parse as a
     /// number (or parses as NaN) is refused by name.
     pub fn with_level_order(&self, order: &[String]) -> EconResult<Factor> {
@@ -688,7 +689,8 @@ impl Factor {
                 None => {
                     return Err(EconError::InvalidSpecification {
                         message: format!(
-                            "level '{label}' is not in the given level order {order:?}"
+                            "level '{label}' is not in the given level order ({})",
+                            order_preview(order)
                         ),
                     });
                 }
@@ -729,6 +731,26 @@ impl Factor {
             codes,
             numeric_levels,
         })
+    }
+}
+
+/// "3 labels: 'a', 'b', 'c'" for a refusal: the length and at most the first five labels,
+/// so the message stays bounded however long the caller's order is.
+fn order_preview(order: &[String]) -> String {
+    const SHOWN: usize = 5;
+    let mut labels: Vec<String> = order
+        .iter()
+        .take(SHOWN)
+        .map(|label| format!("'{label}'"))
+        .collect();
+    if order.len() > SHOWN {
+        labels.push("...".to_string());
+    }
+    let noun = if order.len() == 1 { "label" } else { "labels" };
+    if labels.is_empty() {
+        format!("{} {noun}", order.len())
+    } else {
+        format!("{} {noun}: {}", order.len(), labels.join(", "))
     }
 }
 
@@ -1438,6 +1460,20 @@ mod tests {
             assert!(message.contains(&format!("'{bad}'")), "{message}");
             assert!(message.contains("not a number"), "{message}");
         }
+    }
+
+    #[test]
+    fn level_order_refusal_is_bounded() {
+        // A caller-supplied level order can be long; the refusal names the unknown label
+        // and the order's length, not every label of the order.
+        let df = frame(Series::new("s".into(), &["a", "b", "a"]));
+        let cols = ColumnRequest::new(&df).factor("s").extract().unwrap();
+        let order: Vec<String> = (0..1000).map(|i| format!("L{i}")).collect();
+        let message = invalid_message(cols.factor("s").with_level_order(&order));
+        assert!(message.contains("'a'"), "{message}");
+        assert!(message.contains("1000"), "{message}");
+        assert!(!message.contains("L999"), "{message}");
+        assert!(message.len() < 300, "{} bytes: {message}", message.len());
     }
 
     #[test]
