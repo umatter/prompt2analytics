@@ -183,6 +183,18 @@ impl Session {
         charge.add_spatial_weights(&*self.spatial_weights.read().await);
     }
 
+    /// What the session quotas charge for this session's state besides its
+    /// datasets: its cleaning sessions and spatial weights, each map
+    /// read-locked in turn. A check of a dataset against the quotas adds
+    /// this to the datasets' charge; call it without holding the datasets'
+    /// lock. A category mapping that a checkpoint shares with a dataset is
+    /// then counted on both sides, so the sum errs high.
+    pub(crate) async fn other_state_bytes(&self) -> u64 {
+        let mut charge = DataCharge::default();
+        self.charge_other_state(&mut charge).await;
+        charge.bytes
+    }
+
     /// Copy the session's datasets, cleaning sessions and spatial weights,
     /// read-locking each map in turn (never two at once), so that a call can
     /// be undone ([`restore_state`](Self::restore_state)).
@@ -1419,11 +1431,7 @@ async fn check_charge(name: &str, bytes: u64, reserve: bool) -> Result<(), Quota
     };
     // The session's cleaning sessions and spatial weights count against its
     // quota too (each map read-locked in turn, the datasets' lock dropped).
-    let held = {
-        let mut other = DataCharge::default();
-        admission.session.charge_other_state(&mut other).await;
-        held.saturating_add(other.bytes)
-    };
+    let held = held.saturating_add(admission.session.other_state_bytes().await);
     let after = held.saturating_add(added);
     if let Some(limit) = admission.per_session
         && after > limit
