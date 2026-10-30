@@ -596,7 +596,7 @@ fn run_mcmc_spatial_probit(
 
         // Store draws after burn-in, with thinning
         if iter >= config.burn_in
-            && (iter - config.burn_in) % config.thin == 0
+            && (iter - config.burn_in).is_multiple_of(config.thin)
             && draw_idx < keep_draws
         {
             for j in 0..k {

@@ -2359,7 +2359,7 @@ mod tests {
         let (a, w) = grid_panel();
         // The fixture reproduces R's first row of A.
         let (y0, x0) = (f64_values(&a, "y")[0], f64_values(&a, "x")[0]);
-        assert!((y0 - 2.313_251_294_567_376_9).abs() < 1e-13, "{y0:.17}");
+        assert!((y0 - 2.313_251_294_567_377).abs() < 1e-13, "{y0:.17}");
         assert!((x0 - 1.009_297_426_825_681_8).abs() < 1e-15, "{x0:.17}");
         for df in [a.clone(), shuffled(&a), with_labels(&shuffled(&a))] {
             let r = spml(&df, &w, lag_cfg()).unwrap();
@@ -2376,7 +2376,7 @@ mod tests {
             );
             let ll = r.log_likelihood;
             assert!(
-                Tol::iterative(1e-9).allows(ll, 13.520_649_774_963_919),
+                Tol::iterative(1e-9).allows(ll, 13.520_649_774_963_92),
                 "{ll}"
             );
             let sigma2 = r.variance.sigma_epsilon.powi(2);
