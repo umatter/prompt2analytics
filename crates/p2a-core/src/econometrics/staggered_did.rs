@@ -27,6 +27,10 @@
 //! - G=g: units first treated in period g (cohort g)
 //! - C=1: never-treated units (comparison group)
 //!
+//! Under not-yet-treated parallel trends the comparison group of ATT(g,t) is the
+//! never-treated units plus the units first treated after both t and the base
+//! period g - 1, excluding cohort g (the rule of `did::att_gt`).
+//!
 //! ## Aggregation Schemes
 //!
 //! Group-time ATTs can be aggregated into:
@@ -69,7 +73,8 @@ pub enum ComparisonGroup {
     /// More restrictive but cleaner identification
     #[default]
     NeverTreated,
-    /// Use not-yet-treated units (G_i > t)
+    /// Use never-treated units and units first treated after both t and the base
+    /// period, other than cohort g (`did`'s `control_group = "notyettreated"`).
     /// Larger comparison group but requires no anticipation
     NotYetTreated,
 }
@@ -399,7 +404,8 @@ impl fmt::Display for StaggeredDidResult {
 ///
 /// The comparison group depends on the configuration:
 /// - NeverTreated: Units with G = ∞ (never treated)
-/// - NotYetTreated: Units with G > t (not yet treated by time t)
+/// - NotYetTreated: never-treated units and units with G > max(t, g - 1) and G != g
+///   (not yet treated by time t nor by the base period; `did::att_gt`'s rule)
 ///
 /// # Bootstrap
 ///
@@ -659,6 +665,20 @@ pub fn run_staggered_did(
 // ATT Computation
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Whether a unit first treated at `gi` (`<= 0`: never treated) is a comparison
+/// unit for the cell `(g, t)` with base period `base_t`.
+///
+/// The rule of `did::compute.att_gt`: never treated units under `NeverTreated`;
+/// under `NotYetTreated` also the units first treated after both `t` and the base
+/// period, excluding cohort `g` itself (a cohort treated by the base period has
+/// treatment effects in its outcome change).
+fn is_comparison(gi: i64, g: i64, t: i64, base_t: i64, group: ComparisonGroup) -> bool {
+    match group {
+        ComparisonGroup::NeverTreated => gi <= 0,
+        ComparisonGroup::NotYetTreated => gi <= 0 || (gi > t.max(base_t) && gi != g),
+    }
+}
+
 /// Compute a single group-time ATT.
 #[allow(clippy::too_many_arguments)]
 fn compute_group_time_att(
@@ -702,12 +722,7 @@ fn compute_group_time_att(
         let ti = t_col[i] as i64;
         let ui = unit_ids[i] as i64;
 
-        let is_comparison = match config.comparison_group {
-            ComparisonGroup::NeverTreated => gi <= 0,
-            ComparisonGroup::NotYetTreated => gi > t || gi <= 0,
-        };
-
-        if is_comparison && ti == t {
+        if ti == t && is_comparison(gi, g, t, base_t, config.comparison_group) {
             if let Some(&base_idx) = panel_map.get(&(ui, base_t)) {
                 comp_indices_t.push(i);
                 comp_indices_base.push(base_idx);
@@ -914,11 +929,7 @@ fn build_boot_table(
                 let gi = g_col[i] as i64;
                 let dy = y[i] - y[base_idx];
                 let treated = gi == g;
-                let is_comparison = match comparison_group {
-                    ComparisonGroup::NeverTreated => gi <= 0,
-                    ComparisonGroup::NotYetTreated => gi > t || gi <= 0,
-                };
-                if treated || is_comparison {
+                if treated || is_comparison(gi, g, t, base_t, comparison_group) {
                     entries.push(BootEntry {
                         unit: unit_of_row[i],
                         dy,
@@ -2597,10 +2608,11 @@ mod tests {
                 sum_dy_treated += weight * dy;
                 n_treated_weighted += weight;
             } else {
-                // Check if comparison
+                // Check if comparison (did's rule, inlined so that the reference
+                // stays independent of the production helper)
                 let is_comparison = match config.comparison_group {
                     ComparisonGroup::NeverTreated => gi <= 0,
-                    ComparisonGroup::NotYetTreated => gi > t || gi <= 0,
+                    ComparisonGroup::NotYetTreated => gi <= 0 || (gi > t.max(base_t) && gi != g),
                 };
 
                 if is_comparison {
@@ -3063,5 +3075,33 @@ mod tests {
             }
             other => panic!("expected InvalidSpecification, got {other:?}"),
         }
+    }
+
+    /// did::compute.att_gt: under "notyettreated" a unit is a comparison when never
+    /// treated, or first treated after max(t, g - 1) and not in cohort g.
+    /// R: ctrl <- G == 0 | (G > max(t, g - 1) & G != g); sum(ctrl) per cell.
+    #[test]
+    fn test_validate_staggered_did_notyet_comparison_sets() {
+        let (case, ds) = crate::test_support::load_case("did_cs_analytic");
+        let r = run(&ds, "unit", analytic(ComparisonGroup::NotYetTreated)).unwrap();
+        let n = r.n_obs;
+        let cmp: Vec<usize> = r.group_time_atts.iter().map(|c| c.n_comparison).collect();
+        assert_eq!(
+            cmp,
+            [
+                67, 67, 67, 67, 44, 44, 22, 22, 44, 44, 44, 44, 44, 44, 22, 22, 22, 22, 22, 22, 22,
+                22, 22, 22
+            ]
+        );
+        assert_eq!(
+            r.group_time_atts
+                .iter()
+                .map(|c| c.n_treated)
+                .collect::<Vec<_>>(),
+            [vec![23; 16], vec![22; 8]].concat()
+        );
+        Check::new(&case)
+            .vector("notyet_cell_att", &att(&r), Tol::coef(n))
+            .finish();
     }
 }
