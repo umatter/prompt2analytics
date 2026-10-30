@@ -296,15 +296,30 @@ fn test_cli_session_replays_subcommand_flags() {
     assert_same_csv(&copy_path, &gdp_path); // the replayed `data save` wrote the file again
 }
 
+/// R's class of a column, coded as the case `cli_na_strings` codes it (integer 0, numeric 1,
+/// character 2, logical 3), for the polars dtype p2a reports; NaN for any other dtype.
+fn r_class_code(dtype: &str) -> f64 {
+    match dtype {
+        "Int64" => 0.0,
+        "Float64" => 1.0,
+        "String" => 2.0,
+        "Boolean" => 3.0,
+        _ => f64::NAN,
+    }
+}
+
 /// DATA-32 (CLI): "NA" is missing by default (R write.csv), --na-strings replaces the marker list,
 /// and the markers persist: every call below is a new process that reloads the session's datasets.
+/// The case `cli_na_strings` reads the same "NA"- and "."-coded copies of the case file in R.
 #[test]
 fn test_validate_cli_data_load_na_strings() {
-    use std::collections::BTreeMap;
     let case = Case::load("columns_conventions");
+    let read = Case::load("cli_na_strings");
+    let n = case.vector("n_codes").len();
     let s = temp_session();
     let canon = case.dataset_path();
     let text = std::fs::read_to_string(&canon).unwrap();
+    // The case file with every empty field replaced by `marker`, as the R case derives it.
     let derive = |marker: &str, file: &str| {
         let mut out = String::new();
         for line in text.lines() {
@@ -324,8 +339,9 @@ fn test_validate_cli_data_load_na_strings() {
     s.load_as(&canon, "canon", &[]);
     s.load_as(&na, "na", &[]);
     s.load_as(&dot, "dot", &["--na-strings", "."]);
-    s.load_as(&dot, "raw", &[]);
-    let dtypes = |name: &str| -> BTreeMap<String, String> {
+    s.load_as(&dot, "raw", &[]); // default markers: "." is text
+    // (column name, dtype) in column order, and the first n rows, of a loaded dataset
+    let dtypes = |name: &str| -> Vec<(String, String)> {
         s.json_docs(&["data", "describe", name])[1]
             .as_array()
             .unwrap()
@@ -338,38 +354,11 @@ fn test_validate_cli_data_load_na_strings() {
             })
             .collect()
     };
-    let map = |pairs: [(&str, &str); 5]| {
-        pairs
-            .iter()
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-            .collect::<BTreeMap<_, _>>()
+    let head = |name: &str| {
+        let rows = s.json(&["data", "head", name, "-n", &n.to_string()]);
+        assert_eq!(rows.as_array().unwrap().len(), n, "{name}: {rows}");
+        rows
     };
-    // R classes integer, numeric, integer, character, logical
-    let typed = map([
-        ("id", "Int64"),
-        ("y", "Float64"),
-        ("n", "Int64"),
-        ("s", "String"),
-        ("flag", "Boolean"),
-    ]);
-    for name in ["canon", "na", "dot"] {
-        assert_eq!(dtypes(name), typed, "{name}");
-    }
-    // R read.csv() without na.strings: "." is text, columns are character
-    assert_eq!(
-        dtypes("raw"),
-        map([
-            ("id", "Int64"),
-            ("y", "String"),
-            ("n", "String"),
-            ("s", "String"),
-            ("flag", "String")
-        ])
-    );
-    let head = |name: &str| s.json(&["data", "head", name, "-n", "10"]);
-    let rows = head("canon");
-    assert_eq!(head("na"), rows); // R: identical(d_na, canon)
-    assert_eq!(head("dot"), rows); // R: identical(d_dot, canon)
     let nulls = |rows: &serde_json::Value, col: &str| -> Vec<usize> {
         rows.as_array()
             .unwrap()
@@ -379,6 +368,69 @@ fn test_validate_cli_data_load_na_strings() {
             .map(|(i, _)| i)
             .collect()
     };
+    let loads: Vec<(&str, Vec<(String, String)>, serde_json::Value)> =
+        ["canon", "na", "dot", "raw"]
+            .into_iter()
+            .map(|name| (name, dtypes(name), head(name)))
+            .collect();
+    let (_, canon_types, rows) = &loads[0];
+
+    // R: column classes and missing cells per column of each read, and identical() to the case
+    // file for the coded copies (p2a: the same dtypes and the same cells as `canon`).
+    let mut c = Check::new(&read);
+    for (name, types, head_rows) in &loads {
+        let cols: Vec<&str> = types.iter().map(|(col, _)| col.as_str()).collect();
+        let classes: Vec<f64> = types.iter().map(|(_, t)| r_class_code(t)).collect();
+        let missing: Vec<f64> = cols
+            .iter()
+            .map(|col| nulls(head_rows, col).len() as f64)
+            .collect();
+        c.named(&format!("{name}_class"), &cols, &classes, Tol::exact())
+            .named(&format!("{name}_missing"), &cols, &missing, Tol::exact());
+        if matches!(*name, "na" | "dot") {
+            let same = types == canon_types && head_rows == rows;
+            if !same {
+                eprintln!(
+                    "{name} differs from canon:\n{types:?}\n{head_rows}\ncanon:\n{canon_types:?}\n{rows}"
+                );
+            }
+            c.scalar(
+                &format!("{name}_identical"),
+                f64::from(u8::from(same)),
+                Tol::exact(),
+            );
+        }
+    }
+    c.finish();
+
+    // R: the rows complete.cases(y, n, s) keeps and the missing cells of y, n and s, for the
+    // case file and both coded copies.
+    for (name, _, head_rows) in &loads[..3] {
+        let complete: Vec<f64> = (0..n)
+            .filter(|&i| {
+                ["y", "n", "s"]
+                    .iter()
+                    .all(|col| head_rows[i][*col] != "null")
+            })
+            .map(|i| i as f64)
+            .collect();
+        eprintln!("columns_conventions on the load `{name}`:");
+        let mut c = Check::new(&case);
+        c.vector("complete_rows", &complete, Tol::exact()).scalar(
+            "n_dropped",
+            (n - complete.len()) as f64,
+            Tol::exact(),
+        );
+        for col in ["y", "n", "s"] {
+            c.scalar(
+                &format!("missing_{col}"),
+                nulls(head_rows, col).len() as f64,
+                Tol::exact(),
+            );
+        }
+        c.finish();
+    }
+    // the missing rows of n, s and flag are the R NA positions of the case
     let r_rows = |key: &str, missing: fn(f64) -> bool| -> Vec<usize> {
         case.vector(key)
             .iter()
@@ -387,19 +439,10 @@ fn test_validate_cli_data_load_na_strings() {
             .map(|(i, _)| i)
             .collect()
     };
-    assert_eq!(nulls(&rows, "n"), r_rows("n_codes", |v| v == -1.0));
-    assert_eq!(nulls(&rows, "s"), r_rows("s_codes", |v| v == -1.0));
-    assert_eq!(nulls(&rows, "flag"), r_rows("flag_numeric", f64::is_nan));
-    assert_eq!(nulls(&rows, "y").len() as f64, case.scalar("missing_y"));
-    let complete: Vec<f64> = (0..10)
-        .filter(|&i| ["y", "n", "s"].iter().all(|c| rows[i][*c] != "null"))
-        .map(|i| i as f64)
-        .collect();
-    assert_eq!(complete, case.vector("complete_rows"));
-    let raw = head("raw");
-    for col in ["id", "y", "n", "s", "flag"] {
-        assert!(nulls(&raw, col).is_empty(), "{col}");
-    }
+    assert_eq!(nulls(rows, "n"), r_rows("n_codes", |v| v == -1.0));
+    assert_eq!(nulls(rows, "s"), r_rows("s_codes", |v| v == -1.0));
+    assert_eq!(nulls(rows, "flag"), r_rows("flag_numeric", f64::is_nan));
+
     // the recorded command keeps the flag for script export
     let dot_s = dot.to_str().unwrap();
     assert!(
