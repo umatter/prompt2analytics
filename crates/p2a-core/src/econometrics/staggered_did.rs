@@ -52,7 +52,16 @@
 //!   pre-treatment cells (generalized inverse, df = rank, if V is singular). The
 //!   joint test is computed for at most 2000 pre-treatment cells (its cost is cubic
 //!   in their number); above that it is reported as not computed.
-//! - `bootstrap >= 50`: a unit bootstrap; values 1 to 49 are refused.
+//! - `bootstrap >= 50`: a unit bootstrap; values 1 to 49 are refused. Every
+//!   replicate resamples units, computes all cells, the aggregates (with the
+//!   replicate's own cohort shares) and the pre-trend vector; the reported SEs are
+//!   the SDs of those replicate statistics, and the pre-trend Wald test uses their
+//!   covariance. A replicate in which a needed cell cannot be computed (no treated
+//!   or comparison unit drawn, or a drawn unit without its base period) is dropped
+//!   for that statistic, and one warning says how many replicates were affected
+//!   and the fewest any SE used. The replicate cell estimator is the unconditional
+//!   difference in mean changes, also under IPW/DR with covariates (CAUS-36). The
+//!   cost is O(B (units + table entries + cells)) plus the aggregates.
 //!
 //! # References
 //!
@@ -473,9 +482,14 @@ fn level_label(level: f64) -> String {
 /// O(bootstrap x (units + entries)) and its replicate-by-cell draws are one
 /// fallibly allocated matrix: an impossible replication count is a
 /// `ResourceLimit` error. Every (g, t) cell and every replicate honours the
-/// cooperative cancellation budget (`p2a_core::resource`). A replicate that
-/// draws a unit without a base-period row has no estimate for that cell
-/// (unbalanced panels, CAUS-85), and replicates ignore covariates (CAUS-36).
+/// cooperative cancellation budget (`p2a_core::resource`). The SE of every cell
+/// and aggregate is the SD of its replicate statistics, each aggregate recomputed
+/// with the replicate's cohort counts, and the pre-trend test uses the replicate
+/// covariance. A replicate that draws a unit without a base-period row has no
+/// estimate for that cell (unbalanced panels, CAUS-85) and is dropped for the
+/// statistics that need the cell; a warning counts them and, when a statistic
+/// keeps fewer than 50 replicates, recommends `bootstrap = 0`. Replicates ignore
+/// covariates (CAUS-36).
 ///
 /// # Example
 ///
@@ -635,7 +649,7 @@ pub fn run_staggered_did(
 
             // Compute ATT(g, t)
             let att_result = compute_group_time_att(
-                &y, &g_col, &t_col, &unit_ids, &x_cov, &panel_map, g, t, base_t, &config, z,
+                &y, &g_col, &t_col, &unit_ids, &x_cov, &panel_map, g, t, base_t, &config,
             );
 
             match att_result {
@@ -682,10 +696,10 @@ pub fn run_staggered_did(
         config.comparison_group,
     )?;
 
-    let (event_study, group_effects, overall_att, pretrend_test) = if config.bootstrap == 0 {
+    let n_cohort = table.cohort_sizes();
+    let (aggregates, pretrend_test) = if config.bootstrap == 0 {
         // Analytic standard errors: did's influence functions (bstrap = FALSE).
         let inf = cell_influence(&table)?;
-        let n_cohort = table.cohort_sizes();
         let joint = Joint::Influence {
             inf: &inf,
             unit_cohort: &table.unit_cohort,
@@ -696,50 +710,67 @@ pub fn run_staggered_did(
             joint: &joint,
             z,
         };
-        let cell_stats = aggregator.cells(&group_time_atts)?;
-        for (gta, stat) in group_time_atts.iter_mut().zip(&cell_stats) {
-            gta.std_error = stat.se;
-            gta.ci_lower = gta.att - z * stat.se;
-            gta.ci_upper = gta.att + z * stat.se;
-        }
-        let (event_study, group_effects, overall) = aggregator.aggregates(&group_time_atts)?;
-        let pre = pretrend_cells(&group_time_atts, config.base_period);
-        let pretrend = pretrend_wald(&group_time_atts, &pre, &joint, &mut warnings)?;
-        (event_study, group_effects, overall, pretrend)
+        inference(
+            &mut group_time_atts,
+            &aggregator,
+            config.base_period,
+            &mut warnings,
+        )?
     } else {
-        // Unit-resampling bootstrap: every replicate weights the table's
-        // outcome changes by how often it drew each unit.
+        // Unit-resampling bootstrap: every replicate weights the table's outcome
+        // changes by how often it drew each unit, and the cells, aggregates and
+        // pre-trend vector are recomputed in every replicate.
         let rng_seed = config.seed.unwrap_or_else(|| {
             use rand::RngCore;
             rand::thread_rng().next_u64()
         });
         let mut rng = StdRng::seed_from_u64(rng_seed);
         let draws = bootstrap_draws(&table, config.bootstrap, &mut rng)?;
-
-        // Update standard errors from the finite draws of each cell, in replicate order
-        for (idx, gta) in group_time_atts.iter_mut().enumerate() {
-            let boot_atts: Vec<f64> = draws
-                .column(idx)
-                .iter()
-                .copied()
-                .filter(|v| v.is_finite())
-                .collect();
-            if boot_atts.len() >= 50 {
-                let mean: f64 = boot_atts.iter().sum::<f64>() / boot_atts.len() as f64;
-                let var: f64 = boot_atts.iter().map(|&x| (x - mean).powi(2)).sum::<f64>()
-                    / (boot_atts.len() - 1) as f64;
-                gta.std_error = var.sqrt();
-                gta.ci_lower = gta.att - z * gta.std_error;
-                gta.ci_upper = gta.att + z * gta.std_error;
+        let joint = Joint::Replicates { draws: &draws };
+        let aggregator = Aggregator {
+            cohorts: &table.cohorts,
+            n_cohort: &n_cohort,
+            joint: &joint,
+            z,
+        };
+        let (aggregates, pretrend) = inference(
+            &mut group_time_atts,
+            &aggregator,
+            config.base_period,
+            &mut warnings,
+        )?;
+        let incomplete = draws
+            .cells
+            .rows()
+            .into_iter()
+            .filter(|row| row.iter().any(|v| !v.is_finite()))
+            .count();
+        if incomplete > 0
+            && let Some((used, label)) = &aggregates.fewest.0
+        {
+            let mut w = format!(
+                "bootstrap: {incomplete} of {} replicates could not compute every ATT(g,t) \
+                 (a resample without treated or comparison units, or a unit without its base \
+                 period); each standard error uses the replicates in which its cells were \
+                 computed (fewest: {used}, for {label})",
+                config.bootstrap
+            );
+            if *used < MIN_BOOTSTRAP {
+                w.push_str(&format!(
+                    "; with fewer than {MIN_BOOTSTRAP} replicates that standard error is \
+                     imprecise; bootstrap = 0 gives analytic standard errors"
+                ));
             }
+            warnings.push(w);
         }
-        (
-            aggregate_event_study(&group_time_atts, z),
-            aggregate_by_group(&group_time_atts, z),
-            aggregate_overall(&group_time_atts, z),
-            compute_pretrend_test(&group_time_atts),
-        )
+        (aggregates, pretrend)
     };
+    let Aggregates {
+        event_study,
+        group_effects,
+        overall: overall_att,
+        ..
+    } = aggregates;
 
     let missing = cols.missing().clone();
     if let Some(note) = missing.note() {
@@ -780,7 +811,8 @@ fn is_comparison(gi: i64, g: i64, t: i64, base_t: i64, group: ComparisonGroup) -
     }
 }
 
-/// Compute a single group-time ATT.
+/// Compute a single group-time ATT and its cell counts. The standard error and
+/// the CI are set later, from the influence functions or the bootstrap.
 #[allow(clippy::too_many_arguments)]
 fn compute_group_time_att(
     y: &Array1<f64>,
@@ -793,7 +825,6 @@ fn compute_group_time_att(
     t: i64,
     base_t: i64,
     config: &StaggeredDidConfig,
-    z: f64,
 ) -> EconResult<GroupTimeATT> {
     let n = y.len();
 
@@ -887,23 +918,6 @@ fn compute_group_time_att(
         }
     };
 
-    // Simple standard error estimate (will be updated by bootstrap)
-    let var_treated: f64 = if n_treated > 1 {
-        let mean = dy_treated.iter().sum::<f64>() / n_treated as f64;
-        dy_treated.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n_treated - 1) as f64
-    } else {
-        0.0
-    };
-
-    let var_comp: f64 = if n_comparison > 1 {
-        let mean = dy_comp.iter().sum::<f64>() / n_comparison as f64;
-        dy_comp.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n_comparison - 1) as f64
-    } else {
-        0.0
-    };
-
-    let se = (var_treated / n_treated as f64 + var_comp / n_comparison as f64).sqrt();
-
     let relative_time = t - g;
     let post_treatment = t >= g;
 
@@ -911,9 +925,10 @@ fn compute_group_time_att(
         group: g,
         time: t,
         att,
-        std_error: se,
-        ci_lower: att - z * se,
-        ci_upper: att + z * se,
+        // set from the influence functions or the bootstrap replicates
+        std_error: f64::NAN,
+        ci_lower: f64::NAN,
+        ci_upper: f64::NAN,
         n_treated,
         n_comparison,
         post_treatment,
@@ -1084,22 +1099,30 @@ fn build_boot_table(
     })
 }
 
+/// The joint bootstrap draws: replicate x cell ATTs (`NaN` where a replicate
+/// could not compute a cell) and replicate x cohort counts of drawn units (the
+/// replicate's own cohort sizes; columns follow `BootTable::cohorts`).
+struct BootDraws {
+    cells: Array2<f64>,
+    cohort_counts: Array2<f64>,
+}
+
 /// Draw `bootstrap` unit-resampling replicates of every cell's ATT.
 ///
 /// Each replicate draws `n_units` units with replacement from the one `rng`
 /// (the same stream as before) and turns the draws into multiplicity weights,
-/// so it costs O(units + table entries). Rows of the result are replicates and
-/// columns are cells, which keeps the joint draws available for aggregate
-/// standard errors (CAUS-2). A cell without an estimate in a replicate (a drawn
-/// unit lacks the base period, or one side has no weight) is `NaN`.
-fn bootstrap_draws(
-    table: &BootTable,
-    bootstrap: usize,
-    rng: &mut StdRng,
-) -> EconResult<Array2<f64>> {
+/// so it costs O(units + table entries). Rows of `cells` are replicates and
+/// columns are cells, which keeps the joint draws available for the aggregates
+/// and the pre-trend covariance (CAUS-2, CAUS-86). A cell without an estimate in
+/// a replicate (a drawn unit lacks the base period, or one side has no weight)
+/// is `NaN`. `cohort_counts` holds how many drawn units each cohort has.
+fn bootstrap_draws(table: &BootTable, bootstrap: usize, rng: &mut StdRng) -> EconResult<BootDraws> {
     let n_cells = table.n_cells();
     let n_units = table.n_units;
+    let n_cohorts = table.cohorts.len();
     let mut draws = resource::try_zeros2(bootstrap, n_cells, "bootstrap replicate draws")?;
+    resource::checked_len(&[bootstrap, n_cohorts], "bootstrap cohort counts")?;
+    let mut cohort_counts = resource::try_zeros2(bootstrap, n_cohorts, "bootstrap cohort counts")?;
     let mut counts = vec![0usize; n_units];
 
     for b in 0..bootstrap {
@@ -1112,6 +1135,11 @@ fn bootstrap_draws(
         counts.fill(0);
         for _ in 0..n_units {
             counts[rng.gen_range(0..n_units)] += 1;
+        }
+        for (u, &count) in counts.iter().enumerate() {
+            if let Some(j) = table.unit_cohort[u] {
+                cohort_counts[[b, j]] += count as f64;
+            }
         }
 
         for c in 0..n_cells {
@@ -1150,7 +1178,10 @@ fn bootstrap_draws(
         }
     }
 
-    Ok(draws)
+    Ok(BootDraws {
+        cells: draws,
+        cohort_counts,
+    })
 }
 
 /// Estimate ATT with covariates using IPW or doubly robust (AIPW).
@@ -1460,8 +1491,8 @@ enum Weighting {
     Equal,
 }
 
-/// The joint sampling information of the kept cells; columns of `inf` follow
-/// `group_time_atts`.
+/// The joint sampling information of the kept cells; columns of `inf` and
+/// `draws.cells` follow `group_time_atts`.
 enum Joint<'a> {
     /// Unit-level influence functions (n_units x n_cells) and each unit's cohort
     /// index (`BootTable::unit_cohort`).
@@ -1469,10 +1500,12 @@ enum Joint<'a> {
         inf: &'a Array2<f64>,
         unit_cohort: &'a [Option<usize>],
     },
+    /// Unit-bootstrap replicates of every cell and the replicates' cohort counts.
+    Replicates { draws: &'a BootDraws },
 }
 
-/// An aggregate estimate, its SE, and how many units (influence functions) the
-/// SE used.
+/// An aggregate estimate, its SE, and how many units (influence functions) or
+/// bootstrap replicates the SE used.
 #[derive(Debug, Clone, Copy)]
 struct CellStat {
     att: f64,
@@ -1489,6 +1522,12 @@ struct CellStat {
 /// `wif_u = (1/S) sum_{k in K, g_k = G_u} (att_k - theta)` is did's
 /// `wif(..) %*% att` simplified (its `pg` terms cancel because the weights sum to
 /// S). With `Equal` it is the mean of the cells' influence functions.
+///
+/// With replicates, each replicate b recomputes the statistic with its own
+/// cohort counts `c_bk` (`sum_K c_bk att_bk / sum_K c_bk`, or the mean with
+/// `Equal`); a replicate counts when every `att_bk` is finite (and, with
+/// `CohortShare`, `sum_K c_bk > 0`). The SE is the SD of the used replicate
+/// statistics (denominator `used - 1`; NaN with fewer than 2).
 fn aggregate_cells(
     atts: &[GroupTimeATT],
     keep: &[usize],
@@ -1542,7 +1581,48 @@ fn aggregate_cells(
                 used: n_units,
             })
         }
+        Joint::Replicates { draws } => {
+            let n_reps = draws.cells.nrows();
+            let mut stats: Vec<f64> =
+                resource::try_with_capacity(n_reps, "bootstrap replicate statistics")?;
+            for b in 0..n_reps {
+                let (mut num, mut den, mut complete) = (0.0, 0.0, true);
+                for &k in keep {
+                    let a = draws.cells[[b, k]];
+                    if !a.is_finite() {
+                        complete = false;
+                        break;
+                    }
+                    let c = match w {
+                        Weighting::Equal => 1.0,
+                        Weighting::CohortShare => {
+                            cohort_of(k).map_or(0.0, |j| draws.cohort_counts[[b, j]])
+                        }
+                    };
+                    num += c * a;
+                    den += c;
+                }
+                if complete && den > 0.0 {
+                    stats.push(num / den);
+                }
+            }
+            Ok(CellStat {
+                att: theta,
+                se: sample_sd(&stats),
+                used: stats.len(),
+            })
+        }
     }
+}
+
+/// Sample SD (denominator `len - 1`); NaN with fewer than 2 values.
+fn sample_sd(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return f64::NAN;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let var = values.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+    var.sqrt()
 }
 
 /// The cohorts and the joint sampling information that the aggregates of one
@@ -1552,6 +1632,28 @@ struct Aggregator<'a> {
     n_cohort: &'a [usize],
     joint: &'a Joint<'a>,
     z: f64,
+}
+
+/// The aggregates of one result, and the statistic whose SE used the fewest
+/// replicates (or units).
+struct Aggregates {
+    event_study: Vec<AggregatedEffect>,
+    group_effects: Vec<AggregatedEffect>,
+    overall: AggregatedEffect,
+    fewest: Fewest,
+}
+
+/// The fewest replicates (or units) any SE used, and that statistic's label;
+/// the first statistic wins a tie.
+#[derive(Debug, Default)]
+struct Fewest(Option<(usize, String)>);
+
+impl Fewest {
+    fn note(&mut self, used: usize, label: impl FnOnce() -> String) {
+        if self.0.as_ref().is_none_or(|(n, _)| used < *n) {
+            self.0 = Some((used, label()));
+        }
+    }
 }
 
 impl Aggregator<'_> {
@@ -1572,8 +1674,11 @@ impl Aggregator<'_> {
         key: i64,
         keep: &[usize],
         w: Weighting,
+        fewest: &mut Fewest,
+        label: impl FnOnce() -> String,
     ) -> EconResult<AggregatedEffect> {
         let stat = self.stat(atts, keep, w)?;
+        fewest.note(stat.used, label);
         Ok(AggregatedEffect {
             key,
             att: stat.att,
@@ -1588,14 +1693,8 @@ impl Aggregator<'_> {
 
     /// The event-study ("dynamic"), group and overall ("simple") aggregates of
     /// `did::aggte`.
-    fn aggregates(
-        &self,
-        atts: &[GroupTimeATT],
-    ) -> EconResult<(
-        Vec<AggregatedEffect>,
-        Vec<AggregatedEffect>,
-        AggregatedEffect,
-    )> {
+    fn aggregates(&self, atts: &[GroupTimeATT]) -> EconResult<Aggregates> {
+        let mut fewest = Fewest::default();
         let mut by_e: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
         let mut by_g: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
         let mut post = Vec::new();
@@ -1606,14 +1705,23 @@ impl Aggregator<'_> {
                 post.push(k);
             }
         }
-        let event_study = by_e
-            .iter()
-            .map(|(&e, keep)| self.effect(atts, e, keep, Weighting::CohortShare))
-            .collect::<EconResult<Vec<_>>>()?;
-        let group_effects = by_g
-            .iter()
-            .map(|(&g, keep)| self.effect(atts, g, keep, Weighting::Equal))
-            .collect::<EconResult<Vec<_>>>()?;
+        let mut event_study = Vec::with_capacity(by_e.len());
+        for (&e, keep) in &by_e {
+            let label = || format!("event time {e}");
+            event_study.push(self.effect(
+                atts,
+                e,
+                keep,
+                Weighting::CohortShare,
+                &mut fewest,
+                label,
+            )?);
+        }
+        let mut group_effects = Vec::with_capacity(by_g.len());
+        for (&g, keep) in &by_g {
+            let label = || format!("group {g}");
+            group_effects.push(self.effect(atts, g, keep, Weighting::Equal, &mut fewest, label)?);
+        }
         let overall = if post.is_empty() {
             AggregatedEffect {
                 key: 0,
@@ -1626,10 +1734,45 @@ impl Aggregator<'_> {
                 n_obs: 0,
             }
         } else {
-            self.effect(atts, 0, &post, Weighting::CohortShare)?
+            self.effect(atts, 0, &post, Weighting::CohortShare, &mut fewest, || {
+                "the overall ATT".to_string()
+            })?
         };
-        Ok((event_study, group_effects, overall))
+        Ok(Aggregates {
+            event_study,
+            group_effects,
+            overall,
+            fewest,
+        })
     }
+}
+
+/// Cell SEs and CIs, the aggregates and the pre-trend test from one joint
+/// sampling distribution. Returns the aggregates (with the statistic whose SE
+/// used the fewest replicates or units) and the pre-trend test.
+fn inference(
+    atts: &mut [GroupTimeATT],
+    aggregator: &Aggregator,
+    base_period: i32,
+    warnings: &mut Vec<String>,
+) -> EconResult<(Aggregates, Option<PreTrendTest>)> {
+    let z = aggregator.z;
+    let cell_stats = aggregator.cells(atts)?;
+    let mut fewest = Fewest::default();
+    for (gta, stat) in atts.iter_mut().zip(&cell_stats) {
+        gta.std_error = stat.se;
+        gta.ci_lower = gta.att - z * stat.se;
+        gta.ci_upper = gta.att + z * stat.se;
+        fewest.note(stat.used, || format!("ATT({},{})", gta.group, gta.time));
+    }
+    let mut aggregates = aggregator.aggregates(atts)?;
+    if let Some((used, label)) = aggregates.fewest.0.take() {
+        fewest.note(used, || label);
+    }
+    aggregates.fewest = fewest;
+    let pre = pretrend_cells(atts, base_period);
+    let pretrend = pretrend_wald(atts, &pre, aggregator.joint, warnings)?;
+    Ok((aggregates, pretrend))
 }
 
 /// The cells of the pre-trend test: pre-treatment cells other than the base
@@ -1691,6 +1834,40 @@ fn pretrend_wald(
             (
                 v,
                 format!("Wald, influence-function covariance of {k} pre-treatment ATT(g,t)"),
+            )
+        }
+        Joint::Replicates { draws } => {
+            // the replicates in which every pre-treatment cell was computed
+            let n_reps = draws.cells.nrows();
+            let complete: Vec<usize> = (0..n_reps)
+                .filter(|&b| pre.iter().all(|&c| draws.cells[[b, c]].is_finite()))
+                .collect();
+            let used = complete.len();
+            if used < 2 {
+                return Ok(Some(not_computed(
+                    "fewer than 2 bootstrap replicates computed every pre-treatment ATT(g,t)"
+                        .to_string(),
+                )));
+            }
+            let mut x = resource::try_zeros2(used, k, "pre-trend bootstrap draws")?;
+            for (i, &b) in complete.iter().enumerate() {
+                for (j, &c) in pre.iter().enumerate() {
+                    x[[i, j]] = draws.cells[[b, c]];
+                }
+            }
+            for mut col in x.columns_mut() {
+                let mean = col.sum() / used as f64;
+                col.mapv_inplace(|v| v - mean);
+            }
+            resource::checkpoint()?;
+            let mut v = resource::try_zeros2(k, k, "pre-trend covariance")?;
+            ndarray::linalg::general_mat_mul(1.0 / (used - 1) as f64, &x.t(), &x, 0.0, &mut v);
+            (
+                v,
+                format!(
+                    "Wald, bootstrap covariance of {k} pre-treatment ATT(g,t) ({used} of \
+                     {n_reps} replicates)"
+                ),
             )
         }
     };
@@ -1771,200 +1948,6 @@ fn normal_p_value(est: f64, se: f64) -> f64 {
     } else {
         2.0 * std_normal().sf((est / se).abs())
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Aggregation Functions
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Aggregate group-time ATTs to event study (by relative time).
-fn aggregate_event_study(atts: &[GroupTimeATT], z: f64) -> Vec<AggregatedEffect> {
-    // Group by relative time
-    let mut by_e: BTreeMap<i64, Vec<&GroupTimeATT>> = BTreeMap::new();
-
-    for att in atts {
-        by_e.entry(att.relative_time).or_default().push(att);
-    }
-
-    let mut effects = Vec::new();
-
-    for (&e, group) in &by_e {
-        let n_cells = group.len();
-        if n_cells == 0 {
-            continue;
-        }
-
-        // Weight by number of observations
-        let total_obs: usize = group.iter().map(|a| a.n_treated).sum();
-
-        let mut weighted_att = 0.0;
-        for att in group {
-            let w = att.n_treated as f64 / total_obs as f64;
-            weighted_att += w * att.att;
-        }
-
-        // Pooled SE (simplified)
-        let mut var_sum = 0.0;
-        for att in group {
-            let w = att.n_treated as f64 / total_obs as f64;
-            var_sum += w * w * att.std_error * att.std_error;
-        }
-        let se = var_sum.sqrt();
-
-        let p_value = normal_p_value(weighted_att, se);
-
-        effects.push(AggregatedEffect {
-            key: e,
-            att: weighted_att,
-            std_error: se,
-            ci_lower: weighted_att - z * se,
-            ci_upper: weighted_att + z * se,
-            p_value,
-            n_cells,
-            n_obs: total_obs,
-        });
-    }
-
-    effects.sort_by_key(|e| e.key);
-    effects
-}
-
-/// Aggregate by treatment cohort.
-fn aggregate_by_group(atts: &[GroupTimeATT], z: f64) -> Vec<AggregatedEffect> {
-    // Group by cohort, only post-treatment
-    let mut by_g: BTreeMap<i64, Vec<&GroupTimeATT>> = BTreeMap::new();
-
-    for att in atts {
-        if att.post_treatment {
-            by_g.entry(att.group).or_default().push(att);
-        }
-    }
-
-    let mut effects = Vec::new();
-
-    for (&g, group) in &by_g {
-        let n_cells = group.len();
-        if n_cells == 0 {
-            continue;
-        }
-
-        // Simple average
-        let avg_att: f64 = group.iter().map(|a| a.att).sum::<f64>() / n_cells as f64;
-
-        let mut var_sum = 0.0;
-        for att in group {
-            var_sum += att.std_error * att.std_error;
-        }
-        let se = (var_sum / n_cells as f64).sqrt() / (n_cells as f64).sqrt();
-
-        let total_obs: usize = group.iter().map(|a| a.n_treated).sum();
-
-        let p_value = normal_p_value(avg_att, se);
-
-        effects.push(AggregatedEffect {
-            key: g,
-            att: avg_att,
-            std_error: se,
-            ci_lower: avg_att - z * se,
-            ci_upper: avg_att + z * se,
-            p_value,
-            n_cells,
-            n_obs: total_obs,
-        });
-    }
-
-    effects.sort_by_key(|e| e.key);
-    effects
-}
-
-/// Aggregate to overall ATT.
-fn aggregate_overall(atts: &[GroupTimeATT], z: f64) -> AggregatedEffect {
-    // Filter to post-treatment only
-    let post_atts: Vec<&GroupTimeATT> = atts.iter().filter(|a| a.post_treatment).collect();
-
-    if post_atts.is_empty() {
-        return AggregatedEffect {
-            key: 0,
-            att: 0.0,
-            std_error: 0.0,
-            ci_lower: 0.0,
-            ci_upper: 0.0,
-            p_value: 1.0,
-            n_cells: 0,
-            n_obs: 0,
-        };
-    }
-
-    // Weight by number of treated observations
-    let total_obs: usize = post_atts.iter().map(|a| a.n_treated).sum();
-
-    let mut weighted_att = 0.0;
-    for att in &post_atts {
-        let w = att.n_treated as f64 / total_obs as f64;
-        weighted_att += w * att.att;
-    }
-
-    // Pooled SE
-    let mut var_sum = 0.0;
-    for att in &post_atts {
-        let w = att.n_treated as f64 / total_obs as f64;
-        var_sum += w * w * att.std_error * att.std_error;
-    }
-    let se = var_sum.sqrt();
-
-    let p_value = normal_p_value(weighted_att, se);
-
-    AggregatedEffect {
-        key: 0,
-        att: weighted_att,
-        std_error: se,
-        ci_lower: weighted_att - z * se,
-        ci_upper: weighted_att + z * se,
-        p_value,
-        n_cells: post_atts.len(),
-        n_obs: total_obs,
-    }
-}
-
-/// Compute pre-trend test (joint test that all pre-treatment ATTs = 0).
-fn compute_pretrend_test(atts: &[GroupTimeATT]) -> Option<PreTrendTest> {
-    // Collect pre-treatment ATTs
-    let pre_atts: Vec<&GroupTimeATT> = atts.iter().filter(|a| !a.post_treatment).collect();
-
-    if pre_atts.is_empty() {
-        return None;
-    }
-
-    let _n_pre = pre_atts.len();
-    let pre_effects: Vec<f64> = pre_atts.iter().map(|a| a.att).collect();
-
-    // Wald test: sum of (ATT/SE)^2 ~ chi-squared(n_pre)
-    let mut chi2 = 0.0;
-    let mut valid_count = 0;
-
-    for att in &pre_atts {
-        if att.std_error > 0.0 && att.std_error.is_finite() {
-            let t = att.att / att.std_error;
-            chi2 += t * t;
-            valid_count += 1;
-        }
-    }
-
-    if valid_count == 0 {
-        return None;
-    }
-
-    // Chi-squared p-value
-    let df = valid_count;
-    let p_value = chi_squared_p_value(chi2, df as f64);
-
-    Some(PreTrendTest {
-        chi2,
-        df,
-        p_value,
-        pre_atts: pre_effects,
-        method: "Wald, diagonal covariance (cells treated as independent)".to_string(),
-    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2125,7 +2108,7 @@ mod tests {
         Dataset::new(df)
     }
 
-    fn pinned_bootstrap_ses(dataset: &Dataset) -> (Vec<f64>, f64) {
+    fn pinned_bootstrap_ses(dataset: &Dataset) -> Vec<f64> {
         let config = StaggeredDidConfig {
             comparison_group: ComparisonGroup::NeverTreated,
             estimation_method: AttEstimationMethod::OutcomeRegression,
@@ -2144,10 +2127,7 @@ mod tests {
             config,
         )
         .unwrap();
-        (
-            result.group_time_atts.iter().map(|g| g.std_error).collect(),
-            result.overall_att.std_error,
-        )
+        result.group_time_atts.iter().map(|g| g.std_error).collect()
     }
 
     /// Seeded bootstrap SEs captured from the per-replicate implementation.
@@ -2212,23 +2192,17 @@ mod tests {
             0.2594670200444654,
         ];
         let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs().max(1.0);
-        for (ds, want, want_overall) in [
-            (create_staggered_dataset(), &balanced, 0.06304150304892771),
-            (
-                create_unbalanced_staggered_dataset(),
-                &unbalanced,
-                0.06328624510379224,
-            ),
+        // The overall SE is the SD of the replicate aggregates now; the test
+        // test_staggered_did_bootstrap_aggregates_are_replicate_sds recomputes it.
+        for (ds, want) in [
+            (create_staggered_dataset(), &balanced),
+            (create_unbalanced_staggered_dataset(), &unbalanced),
         ] {
-            let (ses, overall) = pinned_bootstrap_ses(&ds);
+            let ses = pinned_bootstrap_ses(&ds);
             assert_eq!(ses.len(), want.len());
             for (i, (&a, &b)) in ses.iter().zip(want.iter()).enumerate() {
                 assert!(close(a, b), "cell {i}: {a} vs pinned {b}");
             }
-            assert!(
-                close(overall, want_overall),
-                "overall {overall} vs pinned {want_overall}"
-            );
         }
     }
 
@@ -3039,9 +3013,10 @@ mod tests {
                 build_boot_table(&y, &g, &t, &u, &panel_map, &cells, comparison_group)
             }));
             let draws = bootstrap_draws(&table, 200, &mut StdRng::seed_from_u64(42)).unwrap();
-            assert_eq!(draws.dim(), (200, cells.len()));
+            assert_eq!(draws.cells.dim(), (200, cells.len()));
             for (c, want) in expected.iter().enumerate() {
                 let got: Vec<f64> = draws
+                    .cells
                     .column(c)
                     .iter()
                     .copied()
@@ -3060,6 +3035,293 @@ mod tests {
             expect_cancelled(with_budget(cancelled(), || {
                 bootstrap_draws(&table, 10, &mut StdRng::seed_from_u64(1))
             }));
+        }
+    }
+
+    /// The replicates of `reference_draws` (same extraction, unit list, seed and
+    /// per-replicate `boot_units`), kept aligned across cells: per replicate, every
+    /// cell's ATT (`None` when it cannot be computed) and the drawn cohort counts
+    /// (`count[G_u] += 1` per drawn unit with `G_u > 0`, `G_u` from the unit's first row).
+    fn reference_replicates(
+        ds: &Dataset,
+        config: &StaggeredDidConfig,
+        cells: &[(i64, i64, i64)],
+    ) -> Vec<(Vec<Option<f64>>, BTreeMap<i64, usize>)> {
+        let col = |c: &str| DesignMatrix::extract_column(ds.df(), c).unwrap();
+        let (y, g_col, t_col, unit_ids) =
+            (col("outcome"), col("first_treat"), col("year"), col("unit"));
+        let n = y.len();
+        let panel_map = build_panel_map(&t_col, &unit_ids);
+        let unit_list: Vec<i64> = (0..n)
+            .map(|i| unit_ids[i] as i64)
+            .collect::<BTreeSet<i64>>()
+            .into_iter()
+            .collect();
+        let mut unit_g: BTreeMap<i64, i64> = BTreeMap::new();
+        for i in 0..n {
+            unit_g.entry(unit_ids[i] as i64).or_insert(g_col[i] as i64);
+        }
+        let n_units = unit_list.len();
+        let mut rng = StdRng::seed_from_u64(config.seed.unwrap());
+        let mut out = Vec::new();
+        for _ in 0..config.bootstrap {
+            let boot_units: Vec<i64> = (0..n_units)
+                .map(|_| unit_list[rng.gen_range(0..n_units)])
+                .collect();
+            let atts = cells
+                .iter()
+                .map(|&(g, t, base_t)| {
+                    reference_bootstrap_att(
+                        &y,
+                        &g_col,
+                        &t_col,
+                        &unit_ids,
+                        &None,
+                        &panel_map,
+                        &boot_units,
+                        g,
+                        t,
+                        base_t,
+                        config,
+                    )
+                    .filter(|a| a.is_finite())
+                })
+                .collect();
+            let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
+            for u in &boot_units {
+                let g = unit_g[u];
+                if g > 0 {
+                    *counts.entry(g).or_insert(0) += 1;
+                }
+            }
+            out.push((atts, counts));
+        }
+        out
+    }
+
+    /// The SD (denominator `len - 1`) of the replicate statistic over the replicates
+    /// in which every cell of `keep` is computed; `weight` gives a cell's weight in a
+    /// replicate. Also returns the number of replicates used.
+    fn reference_sd(
+        reps: &[(Vec<Option<f64>>, BTreeMap<i64, usize>)],
+        keep: &[usize],
+        weight: impl Fn(usize, &BTreeMap<i64, usize>) -> f64,
+    ) -> (f64, usize) {
+        let mut stats = Vec::new();
+        for (atts, counts) in reps {
+            let Some(vals) = keep.iter().map(|&k| atts[k]).collect::<Option<Vec<f64>>>() else {
+                continue;
+            };
+            let w: Vec<f64> = keep.iter().map(|&k| weight(k, counts)).collect();
+            let den: f64 = w.iter().sum();
+            if den > 0.0 {
+                stats.push(vals.iter().zip(&w).map(|(a, w)| a * w).sum::<f64>() / den);
+            }
+        }
+        let m = stats.len();
+        let mean = stats.iter().sum::<f64>() / m as f64;
+        let var = stats.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (m - 1) as f64;
+        (var.sqrt(), m)
+    }
+
+    fn rel_close(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol * b.abs().max(1e-300)
+    }
+
+    /// Every bootstrap SE is the SD of the replicate statistic recomputed from the
+    /// reference replicates (same seed): cells, overall (cohort-count weights of the
+    /// replicate), groups (mean of the cohort's post cells), event times, and the
+    /// pre-trend Wald statistic with the replicate covariance.
+    #[test]
+    fn test_staggered_did_bootstrap_aggregates_are_replicate_sds() {
+        for (ds, comparison_group) in [
+            (create_staggered_dataset(), ComparisonGroup::NeverTreated),
+            (create_staggered_dataset(), ComparisonGroup::NotYetTreated),
+            (
+                create_unbalanced_staggered_dataset(),
+                ComparisonGroup::NeverTreated,
+            ),
+        ] {
+            let config = StaggeredDidConfig {
+                comparison_group,
+                bootstrap: 200,
+                seed: Some(42),
+                min_obs_per_cell: 3,
+                ..Default::default()
+            };
+            let r = run_staggered_did(
+                &ds,
+                "outcome",
+                "first_treat",
+                "year",
+                "unit",
+                None,
+                config.clone(),
+            )
+            .unwrap();
+            let atts = &r.group_time_atts;
+            let cells: Vec<(i64, i64, i64)> = atts
+                .iter()
+                .map(|c| (c.group, c.time, c.group + config.base_period as i64))
+                .collect();
+            let reps = reference_replicates(&ds, &config, &cells);
+            let cohort_w = |k: usize, counts: &BTreeMap<i64, usize>| {
+                counts.get(&atts[k].group).copied().unwrap_or(0) as f64
+            };
+            let equal_w = |_: usize, _: &BTreeMap<i64, usize>| 1.0;
+            let what = format!("{comparison_group:?}, {} rows", ds.nrows());
+
+            for (k, c) in atts.iter().enumerate() {
+                let (sd, _) = reference_sd(&reps, &[k], equal_w);
+                assert!(
+                    rel_close(c.std_error, sd, 1e-10),
+                    "{what}: cell ({}, {}) {} vs {sd}",
+                    c.group,
+                    c.time,
+                    c.std_error
+                );
+            }
+            let post: Vec<usize> = (0..atts.len())
+                .filter(|&k| atts[k].post_treatment)
+                .collect();
+            let (sd, _) = reference_sd(&reps, &post, cohort_w);
+            assert!(
+                rel_close(r.overall_att.std_error, sd, 1e-10),
+                "{what}: overall {} vs {sd}",
+                r.overall_att.std_error
+            );
+            for e in &r.group_effects {
+                let keep: Vec<usize> = post
+                    .iter()
+                    .copied()
+                    .filter(|&k| atts[k].group == e.key)
+                    .collect();
+                let (sd, _) = reference_sd(&reps, &keep, equal_w);
+                assert!(
+                    rel_close(e.std_error, sd, 1e-10),
+                    "{what}: group {} {} vs {sd}",
+                    e.key,
+                    e.std_error
+                );
+            }
+            for e in &r.event_study {
+                let keep: Vec<usize> = (0..atts.len())
+                    .filter(|&k| atts[k].relative_time == e.key)
+                    .collect();
+                let (sd, _) = reference_sd(&reps, &keep, cohort_w);
+                assert!(
+                    rel_close(e.std_error, sd, 1e-10),
+                    "{what}: event {} {} vs {sd}",
+                    e.key,
+                    e.std_error
+                );
+            }
+
+            // pre-trend: sample covariance of the complete pre-cell replicates
+            let pre: Vec<usize> = (0..atts.len())
+                .filter(|&k| {
+                    let c = &atts[k];
+                    !c.post_treatment && c.time != c.group - 1 && c.std_error > 0.0
+                })
+                .collect();
+            let rows: Vec<Vec<f64>> = reps
+                .iter()
+                .filter_map(|(a, _)| pre.iter().map(|&k| a[k]).collect::<Option<Vec<f64>>>())
+                .collect();
+            let (m, kp) = (rows.len(), pre.len());
+            let mean: Vec<f64> = (0..kp)
+                .map(|j| rows.iter().map(|r| r[j]).sum::<f64>() / m as f64)
+                .collect();
+            let mut v = Array2::<f64>::zeros((kp, kp));
+            for r in &rows {
+                for i in 0..kp {
+                    for j in 0..kp {
+                        v[[i, j]] += (r[i] - mean[i]) * (r[j] - mean[j]) / (m - 1) as f64;
+                    }
+                }
+            }
+            let vinv = crate::linalg::matrix_ops::matrix_inverse(&v.view()).unwrap();
+            let a = Array1::from(pre.iter().map(|&k| atts[k].att).collect::<Vec<_>>());
+            let w = a.dot(&vinv.dot(&a));
+            let pt = r.pretrend_test.as_ref().unwrap();
+            assert!(rel_close(pt.chi2, w, 1e-8), "{what}: W {} vs {w}", pt.chi2);
+            assert_eq!(pt.df, 9, "{what}");
+            assert!(
+                pt.method
+                    .starts_with("Wald, bootstrap covariance of 9 pre-treatment ATT(g,t)"),
+                "{what}: {}",
+                pt.method
+            );
+        }
+    }
+
+    /// Units 3 and 17 of the unbalanced panel lack the base periods of cohorts 2002 and
+    /// 2004 (CAUS-85), so only replicates that draw neither unit compute every post cell
+    /// (about (18/20)^20 x 200 = 24): one warning says so and points to bootstrap = 0.
+    #[test]
+    fn test_staggered_did_bootstrap_reports_dropped_replicates() {
+        let ds = create_unbalanced_staggered_dataset();
+        let config = StaggeredDidConfig {
+            bootstrap: 200,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+        let r = run_staggered_did(
+            &ds,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config.clone(),
+        )
+        .unwrap();
+        let cells: Vec<(i64, i64, i64)> = r
+            .group_time_atts
+            .iter()
+            .map(|c| (c.group, c.time, c.group - 1))
+            .collect();
+        let reps = reference_replicates(&ds, &config, &cells);
+        let post: Vec<usize> = (0..cells.len())
+            .filter(|&k| r.group_time_atts[k].post_treatment)
+            .collect();
+        let (_, fewest) = reference_sd(&reps, &post, |_, _| 1.0);
+        assert!(fewest < 50, "{fewest}");
+        let hits: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|w| w.contains("replicates could not compute every ATT(g,t)"))
+            .collect();
+        assert_eq!(hits.len(), 1, "{:?}", r.warnings);
+        let w = hits[0];
+        assert!(w.contains(&format!("fewest: {fewest},")), "{w}");
+        assert!(w.contains("imprecise"), "{w}");
+        assert!(w.contains("bootstrap = 0"), "{w}");
+        assert!(r.overall_att.std_error.is_finite());
+        let g2006 = r.group_effects.iter().find(|e| e.key == 2006).unwrap();
+        assert!(g2006.std_error.is_finite() && g2006.std_error > 0.0);
+    }
+
+    /// With B = 999 the replicate SEs of the overall and group aggregates are within
+    /// 15% of did's analytic SEs (R emulation of the same replicate scheme: ratios
+    /// 1.011 for the overall SE with B = 20000; [0.950, 1.076] over 200 seeds, B = 999).
+    #[test]
+    fn test_validate_staggered_did_bootstrap_close_to_analytic() {
+        let (case, ds) = crate::test_support::load_case("did_cs_analytic");
+        let cfg = StaggeredDidConfig {
+            bootstrap: 999,
+            seed: Some(42),
+            ..analytic(ComparisonGroup::NeverTreated)
+        };
+        let r = run(&ds, "unit", cfg).unwrap();
+        let ratio = r.overall_att.std_error / case.scalar("never_simple_se");
+        assert!((ratio - 1.0).abs() < 0.15, "overall ratio {ratio}");
+        let want = case.vector("never_group_se");
+        assert_eq!(r.group_effects.len(), want.len());
+        for (e, w) in r.group_effects.iter().zip(&want) {
+            let ratio = e.std_error / w;
+            assert!((ratio - 1.0).abs() < 0.15, "group {} ratio {ratio}", e.key);
         }
     }
 

@@ -128,6 +128,30 @@ pub fn staggered_did_diagnostics(result: &StaggeredDidResult) -> IdentificationR
 /// Check parallel trends assumption using pre-trend test.
 fn check_parallel_trends(result: &StaggeredDidResult, report: &mut IdentificationReport) {
     match &result.pretrend_test {
+        Some(test) if !test.p_value.is_finite() => {
+            // The test could not be computed (e.g. too few complete bootstrap
+            // replicates): untestable, not a violation.
+            report.add_assumption(Assumption::untestable(
+                "Parallel trends",
+                format!("The pre-trend test could not be computed: {}", test.method),
+            ));
+            report.add_warning(
+                IdentificationWarning::new(
+                    "PRETREND_TEST_UNAVAILABLE",
+                    WarningSeverity::Info,
+                    "Pre-Trend Test Not Computed",
+                    format!(
+                        "The joint test of the pre-treatment effects could not be computed: \
+                         {}. Parallel trends is not assessed from the data.",
+                        test.method
+                    ),
+                    "Parallel trends",
+                )
+                .with_remediation(vec![
+                    "Use bootstrap = 0 for analytic standard errors".to_string(),
+                ]),
+            );
+        }
         Some(test) => {
             // Determine status based on p-value
             let status = if test.p_value >= 0.10 {
@@ -456,6 +480,40 @@ mod tests {
             .iter()
             .find(|w| w.code == "NO_PRETREND_PERIODS");
         assert!(warning.is_some());
+    }
+
+    /// A pre-trend test that could not be computed (NaN p-value) is untestable,
+    /// not a likely violation.
+    #[test]
+    fn test_pretrend_unavailable_is_not_a_violation() {
+        let mut result = create_mock_staggered_result(Some(f64::NAN), false);
+        if let Some(t) = result.pretrend_test.as_mut() {
+            t.chi2 = f64::NAN;
+            t.df = 0;
+            t.method = "fewer than 2 bootstrap replicates computed every pre-treatment \
+                        ATT(g,t)"
+                .to_string();
+        }
+        let report = staggered_did_diagnostics(&result);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.code == "PARALLEL_TRENDS_VIOLATED")
+        );
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "PRETREND_TEST_UNAVAILABLE")
+            .expect("PRETREND_TEST_UNAVAILABLE");
+        assert_eq!(w.severity, WarningSeverity::Info);
+        let a = report
+            .assumptions
+            .iter()
+            .find(|a| a.name.contains("arallel"))
+            .expect("parallel trends assumption");
+        assert_ne!(a.status, AssumptionStatus::LikelyViolation);
+        assert!(!a.testable);
     }
 
     #[test]
