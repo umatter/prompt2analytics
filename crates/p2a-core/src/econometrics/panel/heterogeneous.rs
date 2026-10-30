@@ -26,9 +26,10 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, t_test_p_value};
 
 /// Result from a variable coefficients model (pvcm).
@@ -81,6 +82,11 @@ pub struct PvcmResult {
     pub residuals: ndarray::Array1<f64>,
     #[serde(skip, default)]
     pub vcov: ndarray::Array2<f64>,
+
+    /// Rows dropped because of a missing value in y, a regressor or the entity id
+    /// (plm `na.omit`).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl crate::traits::estimator::LinearEstimator for PvcmResult {
@@ -161,8 +167,11 @@ impl fmt::Display for PvcmResult {
         writeln!(f)?;
 
         writeln!(f, "Individual Coefficients (first 5 entities shown):")?;
+        let mut entities: Vec<&String> = self.individual_coefficients.keys().collect();
+        entities.sort();
         let mut count = 0;
-        for (entity, coeffs) in &self.individual_coefficients {
+        for entity in entities {
+            let coeffs = &self.individual_coefficients[entity];
             if count >= 5 {
                 break;
             }
@@ -180,6 +189,9 @@ impl fmt::Display for PvcmResult {
         }
         if self.n_entities > 5 {
             writeln!(f, "  ... ({} more entities)", self.n_entities - 5)?;
+        }
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
         }
 
         Ok(())
@@ -206,6 +218,11 @@ pub enum PvcmType {
 /// - **Random** (Swamy 1970): Assumes coefficients are drawn from a distribution.
 ///   Returns GLS weighted average with weights inversely proportional to
 ///   variance-covariance matrices.
+///
+/// The entity id may be text or numeric; entities are fitted in R factor order of
+/// the ids, so the Swamy sums are deterministic. Rows with a missing value (null or
+/// NaN) in `y`, a regressor or the entity are dropped and reported in `missing` (plm
+/// `na.omit`).
 pub fn run_pvcm(
     dataset: &Dataset,
     y_col: &str,
@@ -213,61 +230,39 @@ pub fn run_pvcm(
     entity_col: &str,
     model: PvcmType,
 ) -> EconResult<PvcmResult> {
-    // Extract full data
-    let y_full = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: get_column_names(dataset.df()),
-        }
-    })?;
-
-    let entity_col_data =
-        dataset
-            .df()
-            .column(entity_col)
-            .map_err(|_| EconError::ColumnNotFound {
-                column: entity_col.to_string(),
-                available: dataset
-                    .df()
-                    .get_column_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            })?;
-
-    let entities: Vec<String> = entity_col_data
-        .str()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: "Entity column must be string type".to_string(),
-        })?
-        .into_iter()
-        .map(|opt: Option<&str>| opt.unwrap_or("").to_string())
-        .collect();
-
+    // y, X (with intercept) and the entity on the rows complete in all of them
+    // (plm na.omit); numeric and text ids alike
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(y_col)
+        .numerics(x_cols)
+        .factor(entity_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y_full = cols.numeric_array(y_col);
+    let entity = cols.factor(entity_col);
     let n = y_full.len();
 
-    // Build X matrix (with intercept)
-    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
+    let design = cols.matrix(x_cols, true);
     let x_full = design.data;
     let var_names = design.column_names;
     let k = x_full.ncols();
 
-    // Group data by entity
-    let mut entity_map: HashMap<String, Vec<usize>> = HashMap::new();
-    for (idx, ent) in entities.iter().enumerate() {
-        entity_map.entry(ent.clone()).or_default().push(idx);
+    // Rows of each entity in one pass, entities in level order (R factor order)
+    let n_entities = entity.n_levels();
+    let mut rows_by_entity: Vec<Vec<usize>> = vec![Vec::new(); n_entities];
+    for (row, &code) in entity.codes.iter().enumerate() {
+        rows_by_entity[code as usize].push(row);
     }
-
-    let n_entities = entity_map.len();
 
     // Run separate OLS for each entity
     let mut individual_coefficients: HashMap<String, Vec<f64>> = HashMap::new();
     let mut individual_std_errors: HashMap<String, Vec<f64>> = HashMap::new();
-    let mut individual_vcov: HashMap<String, Array2<f64>> = HashMap::new();
     let mut all_betas: Vec<Array1<f64>> = Vec::new();
     let mut all_vcovs: Vec<Array2<f64>> = Vec::new();
 
-    for (entity, indices) in &entity_map {
+    for (level, indices) in rows_by_entity.iter().enumerate() {
+        resource::checkpoint()?;
+        let entity_label = &entity.levels[level];
         let n_i = indices.len();
         if n_i <= k {
             // Not enough observations for this entity
@@ -309,9 +304,8 @@ pub fn run_pvcm(
         let vcov_i = &xtx_inv_i * sigma2_i;
         let std_err_i: Vec<f64> = vcov_i.diag().mapv(|v| v.max(0.0).sqrt()).to_vec();
 
-        individual_coefficients.insert(entity.clone(), beta_i.to_vec());
-        individual_std_errors.insert(entity.clone(), std_err_i);
-        individual_vcov.insert(entity.clone(), vcov_i.clone());
+        individual_coefficients.insert(entity_label.clone(), beta_i.to_vec());
+        individual_std_errors.insert(entity_label.clone(), std_err_i);
         all_betas.push(beta_i);
         all_vcovs.push(vcov_i);
     }
@@ -480,6 +474,7 @@ pub fn run_pvcm(
         se_arr,
         residuals,
         vcov,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -495,4 +490,89 @@ pub fn run_pmg(
 ) -> EconResult<PvcmResult> {
     // pmg is essentially pvcm with "within" model
     run_pvcm(dataset, y_col, x_cols, entity_col, PvcmType::Within)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2a_validation::{Check, Tol};
+
+    /// The mean-group estimator on Grunfeld with missing cells and two missing ids,
+    /// pinned to `plm::pmg(model = "mg")` on the 195 complete rows, for a numeric and
+    /// a text id. Not compared: `mg_se` (p2a reports the cross-entity standard
+    /// deviation, not its standard error; registry deviation ECON-34).
+    #[test]
+    fn test_validate_pmg_grunfeld_na() {
+        let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        for id in ["firm_id", "firm_name"] {
+            let r = run_pmg(&ds, "inv", &["value", "capital"], id).unwrap();
+            Check::new(&case)
+                .named("mg_coef", &r.variables, &r.coefficients, Tol::coef(195))
+                .scalar("n_complete_fe", r.n_obs as f64, Tol::exact())
+                .scalar("n_groups", r.n_entities as f64, Tol::exact())
+                .finish();
+            assert_eq!(r.missing.n_dropped, 5, "{id}");
+            let text = r.to_string();
+            let last = text.trim_end().lines().last().unwrap_or("");
+            assert_eq!(
+                last,
+                format!(
+                    "Missing values: 5 of 200 rows dropped because of missing values \
+                     (inv: 2, value: 1, {id}: 2)"
+                ),
+                "{text}"
+            );
+        }
+    }
+
+    /// Numeric and text ids give the same Swamy fit and the same per-entity fits (in
+    /// the same entity order), deterministically; the errors name the column.
+    #[test]
+    fn test_validate_na_pvcm_numeric_and_string_ids_agree() {
+        let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        assert_eq!(
+            case.dataset,
+            "validation/datasets/generated/grunfeld_na.csv"
+        );
+        let fit = |id: &str| {
+            run_pvcm(&ds, "inv", &["value", "capital"], id, PvcmType::Random)
+                .unwrap_or_else(|e| panic!("{id}: {e}"))
+        };
+        let (a, b) = (fit("firm_id"), fit("firm_name"));
+        let tol = Tol::new(1e-12, 1e-12);
+        for (x, y) in a
+            .coefficients
+            .iter()
+            .chain(&a.std_errors)
+            .zip(b.coefficients.iter().chain(&b.std_errors))
+        {
+            assert!(tol.allows(*x, *y), "{x} vs {y}");
+        }
+        let sorted = |r: &PvcmResult| {
+            let mut keys: Vec<&String> = r.individual_coefficients.keys().collect();
+            keys.sort();
+            keys.into_iter()
+                .map(|k| (k.clone(), r.individual_coefficients[k].clone()))
+                .collect::<Vec<_>>()
+        };
+        let (ka, kb) = (sorted(&a), sorted(&b));
+        assert_eq!(ka.len(), 10);
+        assert_eq!(ka[0].0, "0");
+        assert_eq!(kb[0].0, "F01");
+        for ((_, ca), (_, cb)) in ka.iter().zip(&kb) {
+            assert_eq!(ca, cb);
+        }
+        let again = fit("firm_id");
+        assert_eq!(again.coefficients, a.coefficients);
+        assert_eq!(again.std_errors, a.std_errors);
+
+        match run_pvcm(&ds, "firm_name", &["value"], "firm_id", PvcmType::Within) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "firm_name"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+        match run_pvcm(&ds, "inv", &["value"], "nope", PvcmType::Within) {
+            Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "nope"),
+            other => panic!("expected ColumnNotFound, got {other:?}"),
+        }
+    }
 }

@@ -62,7 +62,9 @@
         "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_grunfeld_na",
         "p2a-core::econometrics::feglm::tests::test_validate_na_feglm_omit_and_missing_fe_ids",
         "p2a-core::econometrics::panel::gls_models::tests::test_validate_na_panel_gls_omit_equals_complete_rows",
-        "p2a-core::econometrics::panel::gls_models::tests::test_validate_na_panel_gls_integer_outcome_and_time"
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_na_panel_gls_integer_outcome_and_time",
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pmg_grunfeld_na",
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_na_pvcm_numeric_and_string_ids_agree"
       ],
       "quantities": [
         "FE coefficients and SEs",
