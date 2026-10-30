@@ -30,7 +30,11 @@
       "cases": ["stat_fisher_tables", "stat_fisher_rows_2000", "stat_contingency_na_codes", "stat_chisq_small_expected"],
       "tests": [
         "p2a-core::stats::fisher::tests::test_validate_fisher_tables",
-        "p2a-core::stats::fisher::tests::test_validate_fisher_tables_row_swap"
+        "p2a-core::stats::fisher::tests::test_validate_fisher_tables_row_swap",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_rows_2000",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_na_codes_orientation",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_needs_two_levels_per_column",
+        "p2a-core::stats::fisher::tests::test_validate_run_fisher_test_inside_tokio_runtime"
       ],
       "quantities": ["p two-sided/less/greater", "conditional MLE", "CI two-sided/less/greater", "sample odds ratio", "table orientation"],
       "tolerance": "p: validation/README.md p-value row (relative 1e-9 for p < 1e-12); MLE and limits 1e-9 relative to the tight re-solve; R's printed limits 1e-2 (uniroot tol eps^0.25)",

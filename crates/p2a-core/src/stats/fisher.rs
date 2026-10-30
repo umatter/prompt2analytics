@@ -68,6 +68,7 @@ use crate::data::Dataset;
 use crate::data::columns::MissingSummary;
 use crate::errors::{EconError, EconResult};
 use crate::resource;
+use crate::stats::contingency::{contingency_table, level_list};
 use crate::traits::SignificanceLevel;
 
 /// Alternative hypothesis for Fisher's exact test.
@@ -784,15 +785,26 @@ pub fn fisher_exact_test_int(
 
 /// Run Fisher's exact test on two categorical columns from a dataset.
 ///
-/// Creates a 2×2 contingency table from two binary categorical columns.
+/// Builds the 2×2 table with [`contingency_table`]: rows with a missing value (null, or NaN
+/// in a float column) in either column are dropped and reported in `missing`, as R's
+/// `table()` drops them, and the levels follow R `factor()` order (numbers numerically,
+/// text in C-locale order), so the first level is the first row or column. The result
+/// carries the level labels.
 ///
 /// # Arguments
 ///
 /// * `dataset` - Input dataset
-/// * `row_col` - Column name for rows (must have exactly 2 unique values)
-/// * `col_col` - Column name for columns (must have exactly 2 unique values)
+/// * `row_col` - Column name for rows (exactly 2 levels after dropping missing rows)
+/// * `col_col` - Column name for columns (exactly 2 levels after dropping missing rows)
 /// * `alternative` - Alternative hypothesis
 /// * `conf_level` - Confidence level for odds ratio CI
+///
+/// # Errors
+///
+/// [`contingency_table`]'s errors (`ColumnNotFound`, `InvalidSpecification` for a column
+/// that cannot be categorical, `InsufficientData`, `ResourceLimit`, `Cancelled`),
+/// `InvalidSpecification` naming the levels when the table is not 2 x 2, and
+/// [`fisher_exact_test`]'s errors.
 ///
 /// # Example
 ///
@@ -807,105 +819,26 @@ pub fn run_fisher_test(
     alternative: FisherAlternative,
     conf_level: Option<f64>,
 ) -> EconResult<FisherExactResult> {
-    use polars::prelude::*;
-
-    let df = dataset.df();
-
-    let available_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Validate columns exist
-    let row_series = df.column(row_col).map_err(|_| EconError::ColumnNotFound {
-        column: row_col.to_string(),
-        available: available_cols.clone(),
-    })?;
-
-    let col_series = df.column(col_col).map_err(|_| EconError::ColumnNotFound {
-        column: col_col.to_string(),
-        available: available_cols,
-    })?;
-
-    // Get unique values
-    let row_unique = row_series
-        .unique()
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Failed to get unique row values: {}", e),
-        })?;
-
-    let col_unique = col_series
-        .unique()
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Failed to get unique column values: {}", e),
-        })?;
-
-    if row_unique.len() != 2 {
+    let t = contingency_table(dataset.df(), row_col, col_col)?;
+    let Some(table) = t.as_2x2() else {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "Fisher's exact test requires exactly 2 unique values in row column, got {}",
-                row_unique.len()
+                "Fisher's exact test needs a 2 x 2 table, but after removing rows with missing \
+                 values '{row_col}' has {} level(s) [{}] and '{col_col}' has {} level(s) [{}]; \
+                 p2a implements the 2 x 2 case of R's fisher.test (use the chi-squared test for \
+                 larger tables)",
+                t.n_rows(),
+                level_list(&t.row_levels),
+                t.n_cols(),
+                level_list(&t.col_levels)
             ),
         });
-    }
-
-    if col_unique.len() != 2 {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Fisher's exact test requires exactly 2 unique values in column column, got {}",
-                col_unique.len()
-            ),
-        });
-    }
-
-    // Build 2×2 contingency table using group_by
-    let grouped = df
-        .clone()
-        .lazy()
-        .group_by([col(row_col), col(col_col)])
-        .agg([len().alias("count")])
-        .collect()
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Failed to group data: {}", e),
-        })?;
-
-    // Get sorted unique values for consistent ordering
-    let mut row_values: Vec<String> = Vec::new();
-    let mut col_values: Vec<String> = Vec::new();
-
-    for i in 0..row_unique.len() {
-        row_values.push(format!("{:?}", row_unique.get(i).unwrap()));
-    }
-    for i in 0..col_unique.len() {
-        col_values.push(format!("{:?}", col_unique.get(i).unwrap()));
-    }
-
-    row_values.sort();
-    col_values.sort();
-
-    // Initialize 2×2 table
-    let mut table = [[0.0; 2]; 2];
-
-    // Fill in counts
-    let row_data = grouped.column(row_col).unwrap();
-    let col_data = grouped.column(col_col).unwrap();
-    let count_data = grouped.column("count").unwrap();
-
-    for i in 0..grouped.height() {
-        let row_val = format!("{:?}", row_data.get(i).unwrap());
-        let col_val = format!("{:?}", col_data.get(i).unwrap());
-        let count = count_data.get(i).unwrap().try_extract::<u64>().unwrap_or(0) as f64;
-
-        if let (Some(row_idx), Some(col_idx)) = (
-            row_values.iter().position(|v| v == &row_val),
-            col_values.iter().position(|v| v == &col_val),
-        ) {
-            table[row_idx][col_idx] = count;
-        }
-    }
-
-    fisher_exact_test(&table, alternative, conf_level)
+    };
+    let mut result = fisher_exact_test(&table, alternative, conf_level)?;
+    result.row_levels = t.row_levels;
+    result.col_levels = t.col_levels;
+    result.missing = t.missing;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1367,5 +1300,124 @@ mod tests {
         assert!(display.contains("Fisher's Exact Test"));
         assert!(display.contains("p-value"));
         assert!(display.contains("odds ratio"));
+    }
+
+    #[test]
+    fn test_validate_fisher_rows_2000() {
+        // R: fisher.test(table(treat, outcome)) on 2000 rows (case stat_fisher_rows_2000): p
+        // 0.08111006057913338, MLE 1.1735170755267106, CI 0.9809033190255882,
+        // 1.4041857925265708 (tight). Fails before: p = 0 (STAT-2).
+        let (case, ds) = crate::test_support::load_case("stat_fisher_rows_2000");
+        let mut check = Check::new(&case);
+        for (alt, tag) in [
+            (FisherAlternative::TwoSided, "two_sided"),
+            (FisherAlternative::Less, "less"),
+            (FisherAlternative::Greater, "greater"),
+        ] {
+            let r = run_fisher_test(&ds, "treat", "outcome", alt, Some(0.95)).unwrap();
+            assert_eq!(r.table, [520.0, 480.0, 480.0, 520.0]);
+            assert_eq!(
+                (r.row_levels.clone(), r.col_levels.clone()),
+                (
+                    vec!["control".to_string(), "treated".into()],
+                    vec!["no".to_string(), "yes".into()]
+                )
+            );
+            assert!(r.missing.is_empty());
+            check
+                .scalar(&format!("p_{tag}"), r.p_value, Tol::p_value(2000))
+                .scalar("estimate_cond_mle_tight", r.conditional_mle, TIGHT)
+                .scalar("sample_odds_ratio", r.odds_ratio, Tol::new(1e-15, 0.0));
+            let (lo, hi) = r.odds_ratio_ci.unwrap();
+            match alt {
+                FisherAlternative::TwoSided => {
+                    check.scalar("ci_lower_two_sided_tight", lo, TIGHT).scalar(
+                        "ci_upper_two_sided_tight",
+                        hi,
+                        TIGHT,
+                    );
+                }
+                FisherAlternative::Less => {
+                    check.scalar("ci_lower_less", lo, Tol::exact()).scalar(
+                        "ci_upper_less_tight",
+                        hi,
+                        TIGHT,
+                    );
+                }
+                FisherAlternative::Greater => {
+                    check.scalar("ci_lower_greater_tight", lo, TIGHT);
+                    assert_eq!(hi, f64::INFINITY);
+                }
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_fisher_na_codes_orientation() {
+        // R: fisher.test(table(code, out)), rows "2" then "10" (STAT-50), the NA code row
+        // dropped (STAT-17): table [4, 2, 1, 4], p 0.2424242424242425, sample OR 8, MLE
+        // 6.439146409959153 (tight). Fails before: unique() counts the null, "requires exactly
+        // 2 unique values ... got 3"; on complete rows the Debug order "Int64(10)" < "Int64(2)"
+        // swaps the rows (sample OR 0.125).
+        let (case, ds) = crate::test_support::load_case("stat_contingency_na_codes");
+        let r =
+            run_fisher_test(&ds, "code", "out", FisherAlternative::TwoSided, Some(0.95)).unwrap();
+        let (lo, hi) = r.odds_ratio_ci.unwrap();
+        Check::new(&case)
+            .vector("code_out_table", &r.table, Tol::exact())
+            .scalar("code_out_fisher_p", r.p_value, Tol::p_value(11))
+            .scalar("code_out_sample_or", r.odds_ratio, Tol::exact())
+            .scalar("code_out_fisher_estimate_tight", r.conditional_mle, TIGHT)
+            .scalar("code_out_fisher_ci_lower_tight", lo, TIGHT)
+            .scalar("code_out_fisher_ci_upper_tight", hi, TIGHT)
+            .scalar("code_out_fisher_estimate", r.conditional_mle, PRINTED)
+            .scalar("code_out_fisher_ci_lower", lo, PRINTED)
+            .scalar("code_out_fisher_ci_upper", hi, PRINTED)
+            .finish();
+        assert_eq!(r.row_levels, ["2", "10"]);
+        assert_eq!(
+            (r.missing.n_dropped, r.missing.by_column.clone()),
+            (1, vec![("code".to_string(), 1)])
+        );
+        let shown = r.to_string();
+        assert!(
+            shown.contains("conditional MLE") && shown.contains("Missing values: 1 of 12 rows"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn test_validate_fisher_needs_two_levels_per_column() {
+        // x has 3 levels (p, q, r): Fisher's 2 x 2 test refuses it and names the levels
+        let (_case, ds) = crate::test_support::load_case("stat_chisq_small_expected");
+        let e = run_fisher_test(&ds, "x", "y", FisherAlternative::TwoSided, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("'x' has 3 level(s) [p, q, r]") && e.contains("2 x 2"),
+            "{e}"
+        );
+        assert!(matches!(
+            run_fisher_test(&ds, "x", "nope", FisherAlternative::TwoSided, None),
+            Err(EconError::ColumnNotFound { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_run_fisher_test_inside_tokio_runtime() {
+        // STAT-10: the lazy group_by in run_fisher_test went to polars' streaming engine,
+        // whose block_on panicked with "Cannot start a runtime from within a runtime" inside
+        // this runtime.
+        let (_case, ds) = crate::test_support::load_case("stat_fisher_rows_2000");
+        let r = run_fisher_test(
+            &ds,
+            "treat",
+            "outcome",
+            FisherAlternative::TwoSided,
+            Some(0.95),
+        )
+        .unwrap();
+        assert!((r.p_value - 0.08111006057913338).abs() < 1e-12);
     }
 }
