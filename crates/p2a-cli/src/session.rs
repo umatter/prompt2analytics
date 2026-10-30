@@ -135,13 +135,10 @@ impl Default for Session {
 /// loaded with
 fn reload_dataset(meta: &DatasetMeta) -> anyhow::Result<Dataset> {
     let df = match meta.format.as_str() {
-        "csv" => match &meta.na_strings {
-            Some(na) => {
-                let na: Vec<&str> = na.iter().map(String::as_str).collect();
-                DataLoader::load_csv_with_na(&meta.source_path, &na)?
-            }
-            None => DataLoader::load_csv(&meta.source_path)?,
-        },
+        "csv" => crate::commands::data::load_csv_with_markers(
+            &meta.source_path,
+            meta.na_strings.as_deref(),
+        )?,
         "parquet" => DataLoader::load_parquet(&meta.source_path)?,
         "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(&meta.source_path, None)?,
         "dta" => DataLoader::load_stata(&meta.source_path)?,

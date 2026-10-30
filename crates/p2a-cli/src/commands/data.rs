@@ -1,10 +1,11 @@
 //! Data loading and inspection commands
 
 use clap::Subcommand;
+use p2a_core::data::LoadError;
 use p2a_core::simulation::{ColumnSpec, Distribution, generate_random_data};
 use p2a_core::{DataLoader, Dataset};
 use polars::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::output::{OutputFormat, format_dataset_summary, print_error, print_message};
 use crate::progress::Progress;
@@ -155,6 +156,22 @@ pub fn execute(
     }
 }
 
+/// Read a CSV file with the `--na-strings` markers of a load (`None`: the loader's
+/// default, `NA` and the empty field). `data load` and the session's reload share it, so
+/// a reload reads the file as the load did.
+pub(crate) fn load_csv_with_markers(
+    path: &Path,
+    na: Option<&[String]>,
+) -> Result<DataFrame, LoadError> {
+    match na {
+        Some(na) => {
+            let na: Vec<&str> = na.iter().map(String::as_str).collect();
+            DataLoader::load_csv_with_na(path, &na)
+        }
+        None => DataLoader::load_csv(path),
+    }
+}
+
 fn execute_load(
     path: &PathBuf,
     name: Option<&str>,
@@ -215,13 +232,7 @@ fn execute_load(
 
     // Load the dataset
     let df = match extension.as_str() {
-        "csv" => match na_strings {
-            Some(na) => {
-                let na: Vec<&str> = na.iter().map(String::as_str).collect();
-                DataLoader::load_csv_with_na(path, &na)?
-            }
-            None => DataLoader::load_csv(path)?,
-        },
+        "csv" => load_csv_with_markers(path, na_strings)?,
         "parquet" => DataLoader::load_parquet(path)?,
         "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(path, None)?,
         "dta" => DataLoader::load_stata(path)?,
