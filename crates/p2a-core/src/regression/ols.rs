@@ -2078,25 +2078,13 @@ pub fn run_vcov_bootstrap(
     // First run OLS
     let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
 
-    // Build design matrix
-    let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
-    let x = dm.view().to_owned();
-
-    // Extract y
-    let y_series = dataset
-        .df()
-        .column(y_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: vec![],
-        })?;
-    let y: Array1<f64> = y_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
+    // X and y as run_ols reads them (integer and boolean columns are numbers; run_ols
+    // has already refused missing values)
+    let df = dataset.df();
+    let dm = DesignMatrix::from_dataframe(df, x_cols, true)
+        .map_err(|e| econ_error_from_design(e, df))?;
+    let x = dm.data;
+    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
 
     // Parse bootstrap type
     let boot_type = bootstrap_type
@@ -4029,6 +4017,45 @@ mod tests {
         // An absent time column (design 2.4 (d)).
         assert!(matches!(
             run_vcov_driscoll_kraay(&ds, "inv", &x, "nope", None, None),
+            Err(EconError::ColumnNotFound { .. })
+        ));
+    }
+
+    /// REG-23: the bootstrap reads y as `run_ols` does, so an Int64 outcome (mtcars hp)
+    /// gives exactly the bootstrap of the same values as Float64 (same seed).
+    #[test]
+    fn test_validate_na_vcov_bootstrap_integer_outcome() {
+        use super::na_fixtures::as_float;
+        let (_case, ds) = crate::test_support::load_case("ols_mtcars");
+        assert_eq!(ds.df().column("hp").unwrap().dtype(), &DataType::Int64);
+        let a = run_vcov_bootstrap(&ds, "hp", &["wt"], Some(200), Some("pairs"), Some(42)).unwrap();
+        let b = run_vcov_bootstrap(
+            &as_float(&ds, "hp"),
+            "hp",
+            &["wt"],
+            Some(200),
+            Some("pairs"),
+            Some(42),
+        )
+        .unwrap();
+        assert_eq!(
+            (a.n_obs, &a.std_errors, &a.coefficients),
+            (32, &b.std_errors, &b.coefficients)
+        );
+        let ols = run_ols(&ds, "hp", &["wt"], true, CovarianceType::Standard).unwrap();
+        assert_eq!(
+            a.coefficients,
+            ols.coefficients
+                .iter()
+                .map(|c| c.estimate)
+                .collect::<Vec<_>>()
+        );
+        match run_vcov_bootstrap(&ds, "model", &["wt"], Some(200), None, Some(1)).unwrap_err() {
+            EconError::NonNumericColumn { column } => assert_eq!(column, "model"),
+            e => panic!("{e:?}"),
+        }
+        assert!(matches!(
+            run_vcov_bootstrap(&ds, "nope", &["wt"], Some(200), None, Some(1)),
             Err(EconError::ColumnNotFound { .. })
         ));
     }

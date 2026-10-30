@@ -35,6 +35,26 @@
       "supersedes_legacy": []
     },
     {
+      "id": "vcov_bootstrap_columns",
+      "name": "Bootstrap covariance (vcovBS) on an integer outcome",
+      "category": "regression",
+      "reference": "sandwich::vcovBS (property test; R's RNG cannot be reproduced)",
+      "doc": "validation/regression/vcovBS.md",
+      "cases": [
+        "ols_mtcars"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_na_vcov_bootstrap_integer_outcome"
+      ],
+      "quantities": [
+        "Int64 outcome = Float64 outcome (same seed)",
+        "coefficients = run_ols"
+      ],
+      "tolerance": "exact (same doubles)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "line_missing",
       "name": "Tukey's resistant line on data with missing values (incomplete pairs deleted)",
       "category": "regression",
