@@ -40,7 +40,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::stats::bartlett::values_by_level;
 use crate::traits::SignificanceLevel;
 
 /// Result of Fligner-Killeen test.
@@ -62,6 +64,10 @@ pub struct FlignerResult {
     pub group_sizes: Vec<usize>,
     /// Group names (if available)
     pub group_names: Vec<String>,
+    /// Rows dropped because of a missing value or a missing group label (dataset wrapper;
+    /// nothing for slices).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl std::fmt::Display for FlignerResult {
@@ -98,6 +104,9 @@ impl std::fmt::Display for FlignerResult {
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -219,10 +228,18 @@ pub fn fligner_test(groups: &[(String, Vec<f64>)]) -> EconResult<FlignerResult> 
         n_groups: k,
         group_sizes,
         group_names,
+        missing: MissingSummary::none(total_n),
     })
 }
 
 /// Perform Fligner-Killeen test using dataset columns.
+///
+/// The value and group columns are read in one request: a row with a missing value (null or
+/// NaN) or a missing label is dropped from both, as `fligner.test(x ~ g)` does
+/// (`model.frame`, `na.omit`), and the drop is reported in `missing`. Groups come in R's
+/// factor order (numeric labels numerically, text in byte order) and may have any label
+/// type. Integer, decimal and boolean values are accepted; a text value column is refused
+/// (`EconError::NonNumericColumn`), as are infinite values (`EconError::NonFiniteValues`).
 ///
 /// # Arguments
 /// * `dataset` - The dataset
@@ -233,68 +250,15 @@ pub fn run_fligner_test(
     value_col: &str,
     group_col: &str,
 ) -> EconResult<FlignerResult> {
-    let df = dataset.df();
-
-    // Extract values
-    let value_series = df
-        .column(value_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: value_col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    // Extract groups
-    let group_series = df
-        .column(group_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: group_col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    // Get unique groups and build data structure
-    let mut groups_map: std::collections::HashMap<String, Vec<f64>> =
-        std::collections::HashMap::new();
-
-    let values: Vec<f64> = value_series
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: value_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    let group_labels: Vec<String> = group_series
-        .str()
-        .map_err(|_| EconError::InvalidSpecification {
-            message: format!("Column '{}' must be a string/categorical type", group_col),
-        })?
-        .into_no_null_iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    if values.len() != group_labels.len() {
-        return Err(EconError::InvalidSpecification {
-            message: "Value and group columns have different lengths".to_string(),
-        });
-    }
-
-    for (value, group) in values.iter().zip(group_labels.iter()) {
-        groups_map.entry(group.clone()).or_default().push(*value);
-    }
-
-    // Convert to vector of tuples
-    let mut groups: Vec<(String, Vec<f64>)> = groups_map.into_iter().collect();
-    groups.sort_by(|a, b| a.0.cmp(&b.0)); // Sort by group name for consistency
-
-    fligner_test(&groups)
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(value_col)
+        .factor(group_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let groups = values_by_level(cols.numeric(value_col), cols.factor(group_col))?;
+    let mut result = fligner_test(&groups)?;
+    result.missing = cols.missing().clone();
+    Ok(result)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -463,5 +427,55 @@ mod tests {
             "p-value mismatch: Rust={}, R=0.068",
             result.p_value
         );
+    }
+
+    // ========================================================================
+    // Missing values and integer columns (case stat_two_sample_na,
+    // validation/r/cases/stats_onesample.R)
+    // ========================================================================
+
+    /// X-2/X-8: fligner.test(xi ~ g) on an Int64 response; xi and g are missing in rows
+    /// 21-22 (model.frame drops both).
+    #[test]
+    fn test_validate_fligner_test_two_sample_na() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_fligner_test(&ds, "xi", "g").unwrap();
+        let sizes: Vec<f64> = r.group_sizes.iter().map(|&n| n as f64).collect();
+        Check::new(&case)
+            .scalar("fligner_chisq", r.chi_squared, Tol::stat(20))
+            .scalar("fligner_df", r.df as f64, Tol::exact())
+            .scalar("fligner_p", r.p_value, Tol::p_value(20))
+            .named("group_n", &r.group_names, &sizes, Tol::exact())
+            .scalar("n_xi_g", sizes.iter().sum::<f64>(), Tol::exact())
+            .finish();
+        assert_eq!(r.group_names, ["a", "b", "c"]);
+        assert_eq!(
+            r.missing.by_column,
+            vec![("xi".to_string(), 2), ("g".to_string(), 1)]
+        );
+        assert_eq!(r.missing.n_dropped, 2);
+    }
+
+    #[test]
+    fn test_validate_na_fligner_test_errors() {
+        let (_case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let r = run_fligner_test(&ds, "xi", "g").unwrap();
+        assert_eq!(
+            r.to_string().lines().last().unwrap(),
+            format!("Missing values: {}", r.missing.note().unwrap())
+        );
+        assert!(matches!(
+            run_fligner_test(&ds, "g", "id"),
+            Err(EconError::NonNumericColumn { column }) if column == "g"
+        ));
+        assert!(matches!(
+            run_fligner_test(&ds, "nope", "g"),
+            Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
+        ));
+        assert!(matches!(
+            run_fligner_test(&ds, "xi", "nope"),
+            Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
+        ));
     }
 }

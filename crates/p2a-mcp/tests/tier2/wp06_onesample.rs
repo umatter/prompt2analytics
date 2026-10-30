@@ -52,3 +52,36 @@ async fn test_validate_mcp_hypothesis_shapiro_wilk() {
     }
     check.finish();
 }
+
+#[tokio::test]
+async fn test_validate_mcp_hypothesis_bartlett_test() {
+    let case = Case::load("stat_two_sample_na");
+    let (session, server) = session_with("stat_two_sample_na");
+    let v = json_of(
+        &call(
+            &server,
+            &session,
+            "hypothesis_bartlett_test",
+            json!({"dataset": "two_sample_na", "response": "xi", "factor": "g"}),
+        )
+        .await,
+    );
+    let groups = v["group_statistics"].as_array().unwrap();
+    let names: Vec<&str> = groups
+        .iter()
+        .map(|g| g["group"].as_str().unwrap())
+        .collect();
+    let vars: Vec<f64> = groups.iter().map(|g| f(&g["variance"])).collect();
+    Check::new(&case)
+        .scalar("bartlett_k2", f(&v["statistic"]), Tol::stat(20))
+        .scalar("bartlett_df", f(&v["df"]), Tol::exact())
+        .scalar("bartlett_p", f(&v["p_value"]), Tol::p_value(20))
+        .scalar(
+            "bartlett_pooled_var",
+            f(&v["pooled_variance"]),
+            Tol::stat(20),
+        )
+        .named("bartlett_group_var", &names, &vars, Tol::stat(20))
+        .scalar("n_xi_g", f(&v["n_obs"]), Tol::exact())
+        .finish();
+}
