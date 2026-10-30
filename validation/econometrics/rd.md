@@ -242,6 +242,26 @@ the bias bandwidth `b` (default `h`). The text they return is the core `Display`
   for the three tools) and `test_mcp_rd_estimate_reports_dropped_rows` (a missing outcome is
   dropped and the `Missing values:` line printed).
 
+CLI (`crates/p2a-cli/src/commands/causal.rs`): `p2a causal rd` and `p2a causal fuzzy-rd` take
+`--h` (alias `--bandwidth`), `--b` (alias `--bias-bandwidth`) and `--vce` (default `nn`; an
+unknown value is an error before the dataset is read). `causal rd` prints the robust estimate,
+SE, p-value and CI, then the conventional estimate, SE and CI, the counts inside h and b, both
+bandwidths and the VCE, and `-F json` adds the conventional and bias-corrected fields, the
+counts, `b_left`/`b_right`, `kernel`, `vce`, `p`, `q`, `level`, `warnings` and `missing`.
+`causal fuzzy-rd` prints the conventional LATE (as before, now labelled conventional), the
+robust bias-corrected LATE with its SE, p-value and CI, and the first stage with its SE and F;
+its JSON adds the robust fields, `first_stage_tau`, `first_stage_se`, `first_stage_f`,
+`reduced_form_tau`, the bandwidths, counts, `vce`, `level`, `warnings` and `missing`. A drop of
+rows with missing values ends the text output with a `Note:` line.
+
+- `test_validate_cli_causal_rd_vce` (registered under `rd_sharp`): `-F json` at full tolerance
+  and the printed lines at print precision, for `tri_nn_hb` (default `--vce`) and `tri_hc1_hb`.
+- `test_validate_cli_causal_fuzzy_rd` (registered under `rd_fuzzy`): `--h 0.3 --b 0.5` against
+  `fuzzy_nn_h03_b05`, first-stage F included.
+- Not registered: `test_cli_causal_rd_rejects_unknown_vce` and
+  `test_cli_causal_rd_missing_value_note` (one blank `y` field gives
+  `Note: 1 of 1000 rows dropped because of missing values (y: 1)` and `missing.n_dropped = 1`).
+
 ## Limits
 
 - Bandwidth selection is p2a's own MSE-type selector, not `rdbwselect` (CAUS-28, a registry

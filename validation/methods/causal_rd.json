@@ -16,7 +16,8 @@
         "p2a-core::econometrics::rd::tests::test_validate_rd_mass_points_nn",
         "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_display_table",
         "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_fixed_bw_missing_rows",
-        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_estimate_vce"
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_estimate_vce",
+        "p2a-cli::tier2::wp11_rd::test_validate_cli_causal_rd_vce"
       ],
       "quantities": [
         "conventional and bias-corrected estimates",
@@ -54,7 +55,8 @@
         "p2a-core::econometrics::rd::tests::test_validate_rd_fuzzy_fixed_bw",
         "p2a-core::econometrics::rd::tests::test_validate_rd_sharp_int64_outcome",
         "p2a-core::econometrics::rd::tests::test_validate_rd_fuzzy_weak_first_stage_warning",
-        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_fuzzy_b"
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_rd_fuzzy_b",
+        "p2a-cli::tier2::wp11_rd::test_validate_cli_causal_fuzzy_rd"
       ],
       "quantities": [
         "Wald ratio (conventional, bias-corrected)",
